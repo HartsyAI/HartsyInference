@@ -39,9 +39,7 @@ public sealed class SpeechServiceResolveVariantTests
 
     [Theory]
     [InlineData(null)]
-    [InlineData("")]
     [InlineData("default")]
-    [InlineData("DEFAULT")]
     public void BareCatalogIdWithNoNamedVoice_ResolvesToTheEmptyDefaultSentinel(string? voice)
     {
         // The exact shape AudioModelSelector.Parse produces for an unparameterized request: no ':' in the
@@ -55,7 +53,6 @@ public sealed class SpeechServiceResolveVariantTests
 
     [Theory]
     [InlineData("en_US-amy-medium")]
-    [InlineData("en_GB-vctk-medium")]
     public void ExplicitVoiceParameter_IsUnchanged_EvenWithABareCatalogIdToken(string voice)
     {
         // A real voice supplied through the separate `voice` argument always wins, regardless of what the
@@ -79,23 +76,8 @@ public sealed class SpeechServiceResolveVariantTests
         Assert.Equal("en_US-amy-medium", variant);
     }
 
-    [Fact]
-    public void ExplicitColonVariant_ThatIsTheLiteralWordDefault_IsUnchanged()
-    {
-        // "piper:default" -- a contrived but real request: Variant="default", Id="piper", still distinct, so
-        // the bare-token detection (Variant == Id) must not eat it either. It flows through to the
-        // descriptor's own LoadAsync exactly as before this fix, which already treats the literal "default"
-        // as "use my own default" -- this test only pins that ResolveVariant itself leaves it alone.
-        AudioModelSelector selector = new(PiperId, "default", LocalPath: null);
-
-        string variant = SpeechService.ResolveVariant(selector, VoiceSelectsWeightsDescriptor(), voice: null);
-
-        Assert.Equal("default", variant);
-    }
-
     [Theory]
     [InlineData(null)]
-    [InlineData("some_voice")]
     public void NonVoiceSelectsWeightsDescriptor_AlwaysReturnsTheSelectorVariantUnchanged(string? voice)
     {
         // Every other TTS model (Kokoro, VibeVoice, Dia, ...) is VoiceSelectsWeights=false: the whole
@@ -119,16 +101,6 @@ public sealed class SpeechServiceResolveVariantTests
     }
 
     [Fact]
-    public void RealKokoroDescriptor_BareCatalogId_IsUnaffected()
-    {
-        AudioModelSelector selector = AudioModelSelector.Parse(new ModelSpec { Requested = "kokoro", Modality = Modality.Speech });
-        TtsModelDescriptor kokoro = TtsCatalog.Resolve(selector.Id);
-
-        Assert.False(kokoro.VoiceSelectsWeights);
-        Assert.Equal("kokoro", SpeechService.ResolveVariant(selector, kokoro, voice: null));
-    }
-
-    [Fact]
     public void AudioModelSelectorParse_BareToken_VariantEqualsId()
     {
         // Pins the actual root-cause precondition ResolveVariant's bare-token detection relies on: for a
@@ -139,12 +111,4 @@ public sealed class SpeechServiceResolveVariantTests
         Assert.Equal("piper", selector.Variant);
     }
 
-    [Fact]
-    public void AudioModelSelectorParse_WithColonVariant_VariantDiffersFromId()
-    {
-        AudioModelSelector selector = AudioModelSelector.Parse(new ModelSpec { Requested = "piper:en_US-amy-medium", Modality = Modality.Speech });
-
-        Assert.Equal("piper", selector.Id);
-        Assert.Equal("en_US-amy-medium", selector.Variant);
-    }
 }

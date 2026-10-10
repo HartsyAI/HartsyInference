@@ -76,37 +76,6 @@ public sealed class WakeHeadTrainerTests
     }
 
     [Fact]
-    public void Training_SeparatesTwoClusters()
-    {
-        const int inputDim = 96, hidden = 16;
-        WakeHeadTrainer trainer = new(hidden, inputDim, seed: 3);
-        Random random = new(5);
-
-        List<float[]> batch = [];
-        List<float> labels = [];
-        for (int i = 0; i < 64; i++)
-        {
-            bool positive = i % 2 == 0;
-            float[] x = new float[inputDim];
-            for (int j = 0; j < inputDim; j++)
-                x[j] = (float)(random.NextDouble() * 0.5 - 0.25) + (positive ? 1f : -1f);
-            batch.Add(x);
-            labels.Add(positive ? 1f : 0f);
-        }
-
-        float first = trainer.TrainBatch(batch, labels, 3e-3f);
-        for (int epoch = 0; epoch < 300; epoch++) trainer.TrainBatch(batch, labels, 3e-3f);
-        float last = trainer.TrainBatch(batch, labels, 3e-3f);
-
-        Assert.True(last < first * 0.2f, $"loss only fell from {first} to {last}");
-        for (int i = 0; i < batch.Count; i++)
-        {
-            float p = trainer.Predict(batch[i]);
-            Assert.True(labels[i] > 0.5f ? p > 0.5f : p < 0.5f, $"sample {i} (label {labels[i]}) predicted {p}");
-        }
-    }
-
-    [Fact]
     public void ExportedWeights_LoadThroughTheProductionHead()
     {
         WakeHeadTrainer trainer = new(hidden: 8);

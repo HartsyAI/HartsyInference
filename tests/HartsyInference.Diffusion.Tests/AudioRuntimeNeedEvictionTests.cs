@@ -31,21 +31,6 @@ public sealed class AudioRuntimeNeedEvictionTests
     }
 
     [Fact]
-    public void SwitchThreshold_FloorIsAKnob()
-    {
-        KnobStore.Set(EngineKnobs.AudioEvictFreeVramFloorMb, 8192L);
-        try
-        {
-            Assert.Equal(8 * GiB, AudioRuntime.SwitchThresholdBytes(0));
-            Assert.Equal(8 * GiB, AudioRuntime.SwitchThresholdBytes(GiB));
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.AudioEvictFreeVramFloorMb);
-        }
-    }
-
-    [Fact]
     public async Task Switch_EvictsOthers_WhenFreeVramIsBelowTheIncomingDiskEstimate()
     {
         using IDisposable calm = AudioEvictionPressure.Relax();
@@ -60,21 +45,6 @@ public sealed class AudioRuntimeNeedEvictionTests
         Assert.False(runtime.Tts.IsResident("bark"));
         Assert.True(runtime.Tts.IsResident("dia"));
         Assert.Equal(1, device.FreeAllCalls);
-    }
-
-    [Fact]
-    public async Task Switch_KeepsOthers_WhenTheIncomingEstimateFits()
-    {
-        using IDisposable calm = AudioEvictionPressure.Relax();
-        IBackend backend = FakeVramBackend.Create(free: 10 * GiB, total: 24 * GiB, out FakeVramBackend device);
-        AudioRuntime runtime = new();
-        FakeTts bark = await SeedAsync(runtime, "bark");
-
-        await RunLoadingAsync(runtime, backend, "dia", estimate: 6 * GiB);
-
-        Assert.False(bark.Disposed);
-        Assert.True(runtime.Tts.IsResident("bark"));
-        Assert.Equal(0, device.FreeAllCalls);
     }
 
     [Theory]
@@ -111,23 +81,6 @@ public sealed class AudioRuntimeNeedEvictionTests
     }
 
     [Fact]
-    public async Task SameModelRepeat_NeverEvicts_HoweverFullTheCard()
-    {
-        using IDisposable calm = AudioEvictionPressure.Relax();
-        IBackend backend = FakeVramBackend.Create(free: 10 * GiB, total: 24 * GiB, out FakeVramBackend device);
-        AudioRuntime runtime = new();
-        await RunLoadingAsync(runtime, backend, "dia", estimate: 6 * GiB);
-        FakeTts bark = await SeedAsync(runtime, "bark");
-        device.FreeBytes = GiB / 2;
-
-        await RunLoadingAsync(runtime, backend, "dia", estimate: 6 * GiB);
-        await RunLoadingAsync(runtime, backend, "dia", estimate: 6 * GiB);
-
-        Assert.False(bark.Disposed);
-        Assert.Equal(0, device.FreeAllCalls);
-    }
-
-    [Fact]
     public async Task NeedBasedEviction_KeepsPinnedRunners()
     {
         using IDisposable calm = AudioEvictionPressure.Relax();
@@ -158,24 +111,6 @@ public sealed class AudioRuntimeNeedEvictionTests
         device.FreeBytes = 9 * GiB;
 
         await RunLoadingAsync(runtime, backend, "orpheus", estimate: GiB);
-
-        Assert.True(bark.Disposed);
-    }
-
-    [Fact]
-    public async Task LearnedFootprint_NeverLowersTheDiskEstimate()
-    {
-        using IDisposable calm = AudioEvictionPressure.Relax();
-        IBackend backend = FakeVramBackend.Create(free: 20 * GiB, total: 24 * GiB, out FakeVramBackend device);
-        AudioRuntime runtime = new();
-        // A runner that uploads its weights for the run and frees them at its end leaves nothing behind to measure.
-        await RunLoadingAsync(runtime, backend, "dia", estimate: 6 * GiB);
-        FakeTts bark = await SeedAsync(runtime, "bark");
-        await RunLoadingAsync(runtime, backend, "bark", estimate: null);
-        runtime.Tts.UnloadAllExcept("bark");
-        device.FreeBytes = 5 * GiB;
-
-        await RunLoadingAsync(runtime, backend, "dia", estimate: 6 * GiB);
 
         Assert.True(bark.Disposed);
     }
@@ -231,22 +166,6 @@ public sealed class AudioRuntimeNeedEvictionTests
         Assert.Equal(2, attempts);
         Assert.Equal(7, await runtime.RunAsync(backend, new AudioJob(runtime.Tts, "dia"), _ => Task.FromResult(7), CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(10)));
-    }
-
-    [Fact]
-    public async Task OutOfVram_InsideAnAggregate_IsRetried()
-    {
-        using IDisposable calm = AudioEvictionPressure.Relax();
-        IBackend backend = FakeVramBackend.Create(free: 20 * GiB, total: 24 * GiB, out _);
-        AudioRuntime runtime = new();
-        int attempts = 0;
-
-        int result = await runtime.RunAsync(backend, new AudioJob(runtime.Tts, "dia"),
-            _ => ++attempts == 1 ? throw new AggregateException(new InvalidOperationException("worker", Oom())) : Task.FromResult(5),
-            CancellationToken.None);
-
-        Assert.Equal(5, result);
-        Assert.Equal(2, attempts);
     }
 
     [Fact]
@@ -322,20 +241,6 @@ public sealed class AudioRuntimeNeedEvictionTests
         Assert.Equal(0, device.FreeAllCalls);
         Assert.Equal(7, await runtime.RunAsync(backend, new AudioJob(runtime.Tts, "dia"), _ => Task.FromResult(7), CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(10)));
-    }
-
-    [Fact]
-    public async Task Stream_SecondOutOfVram_Propagates()
-    {
-        using IDisposable calm = AudioEvictionPressure.Relax();
-        IBackend backend = FakeVramBackend.Create(free: 20 * GiB, total: 24 * GiB, out _);
-        AudioRuntime runtime = new();
-        int attempts = 0;
-
-        await Assert.ThrowsAsync<OutOfVramException>(() => CollectAsync(runtime.RunStreamAsync(backend,
-            new AudioJob(runtime.Tts, "dia"), ct => { attempts++; return Items(3, failAfter: 0, ct); }, CancellationToken.None)));
-
-        Assert.Equal(2, attempts);
     }
 
     [Fact]

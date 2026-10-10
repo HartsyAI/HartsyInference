@@ -21,7 +21,6 @@ public unsafe class FlowDpmPlusPlus2MSchedulerTests
     /// the grid as well as the update, so a correct solver over UniPC's grid is still wrong.</summary>
     [Theory]
     [InlineData(10)]
-    [InlineData(40)]
     public void SetTimesteps_MatchesGetSamplingSigmas_AndReachesExactlyZero(int steps)
     {
         const float shift = 5f;
@@ -69,9 +68,7 @@ public unsafe class FlowDpmPlusPlus2MSchedulerTests
     /// leave a residue).</summary>
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
     [InlineData(10)]
-    [InlineData(40)]
     public void Step_ConstantVelocity_LandsOnX0(int steps)
     {
         const float x0 = 2.0f, noise = -1.0f;

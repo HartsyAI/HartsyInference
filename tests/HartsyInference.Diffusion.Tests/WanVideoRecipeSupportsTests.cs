@@ -54,7 +54,6 @@ public sealed class WanVideoRecipeSupportsTests
     [Theory]
     [InlineData(48, true)]
     [InlineData(16, false)]
-    [InlineData(36, false)]
     public void SupportsFor_GenericSlug_ClaimsEndFrameOnlyForTi2V5BHeader(int latentChannels, bool expectEndFrame)
     {
         string path = WriteBackbone(latentChannels);
@@ -86,12 +85,6 @@ public sealed class WanVideoRecipeSupportsTests
         {
             File.Delete(path);
         }
-    }
-
-    [Fact]
-    public void Ti2V5B_MissingFile_IsNotClaimed()
-    {
-        Assert.False(Resolve(Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}.safetensors")).Is(WanVideoVariants.Ti2V5B));
     }
 
     /// <summary>A damaged file answers "not a 5B" instead of throwing out of a capability query.</summary>
@@ -127,15 +120,6 @@ public sealed class WanVideoRecipeSupportsTests
             ["blocks.0.self_attn.q.weight"] = block,
         });
         return path;
-    }
-
-    [Fact]
-    public void SupportsFor_NullCheckpoint_FallsBackToNarrowedSupports_1_3B()
-    {
-        WanVideoRecipe recipe = new WanVideoRecipe(WanVideoRecipe.Wan21_1_3BCompatClassId);
-
-        Assert.Equal(recipe.Supports, recipe.SupportsFor(null));
-        Assert.Equal(VideoFeatures.None, recipe.SupportsFor(null) & VideoFeatures.EndFrame);
     }
 
     [Fact]

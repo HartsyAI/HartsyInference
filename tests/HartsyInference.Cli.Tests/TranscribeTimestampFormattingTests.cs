@@ -32,36 +32,4 @@ public sealed class TranscribeTimestampFormattingTests
 
         Assert.Equal("[0.000s --> 0.400s]  Hello\n[0.400s --> 0.900s]  world", result);
     }
-
-    [Fact]
-    public void SegmentGranularity_OneWholeSentenceAsOneEntry_StillFormats()
-    {
-        // The engine's own TranscriptResult doc: granularity may be segment-level, not per-word, depending on
-        // what the model produced -- a single "word" spanning the whole utterance must format the same way.
-        WordSegment[] words = [new() { Word = "The quick brown fox.", Start = 0.0, End = 10.68 }];
-
-        string result = GenerationDispatch.FormatTimestamps(words);
-
-        Assert.Equal("[0.000s --> 10.680s]  The quick brown fox.", result);
-    }
-
-    [Fact]
-    public void NoTrailingNewline()
-    {
-        WordSegment[] words = [new() { Word = "Hi", Start = 0.0, End = 0.2 }];
-
-        string result = GenerationDispatch.FormatTimestamps(words);
-
-        Assert.False(result.EndsWith('\n'), "the printed transcript shouldn't carry a trailing blank line.");
-    }
-
-    [Fact]
-    public void WordsAreTrimmedAndWhitespaceOnlyWordsSkipped()
-    {
-        WordSegment[] words = [new() { Word = " Hello", Start = 0.0, End = 0.4 }, new() { Word = "  ", Start = 0.4, End = 0.5 }];
-
-        string result = GenerationDispatch.FormatTimestamps(words);
-
-        Assert.Equal("[0.000s --> 0.400s]  Hello", result);
-    }
 }

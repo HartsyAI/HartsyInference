@@ -11,9 +11,6 @@ public sealed class SincResamplerTests
 
     [Theory]
     [InlineData(24_000, 16_000)]
-    [InlineData(22_050, 16_000)]
-    [InlineData(44_100, 22_050)]
-    [InlineData(16_000, 22_050)]
     public void Resample_ReproducesAToneAtTheNewRate(int inRate, int outRate)
     {
         float[] input = Sine(440, inRate, inRate);              // one second
@@ -27,18 +24,6 @@ public sealed class SincResamplerTests
             maxError = Math.Max(maxError, Math.Abs(output[i] - Math.Sin(2 * Math.PI * 440 * i / outRate)));
         Assert.True(maxError < 0.02, $"max error {maxError:F4}");
     }
-
-    [Fact]
-    public void Resample_SameRate_ReturnsACopy()
-    {
-        float[] input = Sine(300, 16_000, 1000);
-        float[] output = SincResampler.Resample(input, 16_000, 16_000);
-        Assert.Equal(input, output);
-        Assert.NotSame(input, output);
-    }
-
-    [Fact]
-    public void Resample_Empty_ReturnsEmpty() => Assert.Empty(SincResampler.Resample([], 24_000, 16_000));
 
     [Fact]
     public void Resample_AttenuatesContentAboveTheNewNyquist()

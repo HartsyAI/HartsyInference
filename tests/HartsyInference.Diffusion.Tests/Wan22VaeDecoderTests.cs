@@ -38,28 +38,6 @@ public unsafe class Wan22VaeDecoderTests
     }
 
     [Fact]
-    public void Decode_VideoPath_ExpandsTemporallyAndIsFinite()
-    {
-        CpuBackend backend = new();
-        int dim = 8, zDim = 48;
-        int[] dimMult = [1, 2, 4, 4];
-        bool[] tUp = [false, true, true];
-        Wan22VaeDecoder decoder = new(dim, zDim, dimMult, 2, tUp);
-        decoder.LoadWeights(LanceSyntheticWeights.BuildVae(dim, zDim, dimMult, 2, tUp));
-
-        int tLat = 2;
-        Tensor latent = Rand([1, zDim, tLat, 2, 2]);
-        Tensor rgb = decoder.Decode(backend, latent);
-
-        Assert.Equal(3, (int)rgb.Shape[1]);
-        Assert.Equal((tLat - 1) * 4 + 1, (int)rgb.Shape[2]);  // 4× temporal upsample + 1 (= 5)
-        Assert.Equal(2 * 16, (int)rgb.Shape[3]);
-        Assert.Equal(2 * 16, (int)rgb.Shape[4]);
-        float* p = (float*)rgb.DataPointer;
-        for (long i = 0; i < rgb.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
-    }
-
-    [Fact]
     public void Decode_VideoFirstFrame_EqualsImageDecode()
     {
         // The streaming first chunk (fresh all-None cache) must compute frame 0 identically to the

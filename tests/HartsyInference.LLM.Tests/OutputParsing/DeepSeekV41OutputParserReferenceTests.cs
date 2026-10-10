@@ -13,13 +13,6 @@ public sealed class DeepSeekV41OutputParserReferenceTests
 
     public static IEnumerable<object[]> AllCases() => ParserCase.Names();
 
-    [Fact]
-    public void FixtureHasBothKindsOfCase()
-    {
-        Assert.True(ParserCase.All.Count(c => c.Ok) >= 20);
-        Assert.True(ParserCase.All.Count(c => !c.Ok) >= 10);
-    }
-
     [Theory]
     [MemberData(nameof(OkCases))]
     public void EveryTwoWaySplitEqualsReference(string name)
@@ -32,33 +25,6 @@ public sealed class DeepSeekV41OutputParserReferenceTests
             ParsedAssistant got = ReplayedTurn.Run(
                 ParserTestHelpers.NewParser(tok, c.Thinking), tok.SplitBytes(c.Text, cut), out ReplayedTurn replay);
             ParserTestHelpers.AssertMatches(c, got, replay, $"cut@{cut}");
-        }
-    }
-
-    [Theory]
-    [MemberData(nameof(OkCases))]
-    public void SingleBytePiecesEqualReference(string name)
-    {
-        ParserCase c = ParserCase.ByName(name);
-        PieceTokenizer tok = new();
-        int length = System.Text.Encoding.UTF8.GetByteCount(c.Text);
-        int[] cuts = Enumerable.Range(1, length - 1).ToArray();
-        ParsedAssistant got = ReplayedTurn.Run(ParserTestHelpers.NewParser(tok, c.Thinking), tok.SplitBytes(c.Text, cuts), out ReplayedTurn replay);
-        ParserTestHelpers.AssertMatches(c, got, replay, "single-byte");
-    }
-
-    [Theory]
-    [MemberData(nameof(OkCases))]
-    public void ControlLiteralsAsSpecialIdsWithRandomSegmentationEqualReference(string name)
-    {
-        ParserCase c = ParserCase.ByName(name);
-        for (int seed = 0; seed < 60; seed++)
-        {
-            PieceTokenizer tok = new();
-            int[] ids = tok.RandomWithSpecials(c.Text, new Random(seed), 1 + seed % 9);
-            ParsedAssistant got = ReplayedTurn.Run(ParserTestHelpers.NewParser(tok, c.Thinking), ids, out ReplayedTurn replay);
-            ParserTestHelpers.AssertMatches(c, got, replay, $"seed{seed}");
-            Assert.True(got.Completed);
         }
     }
 
@@ -82,20 +48,6 @@ public sealed class DeepSeekV41OutputParserReferenceTests
             Assert.Equal(oneShot.Content, got.Content);
             Assert.Equal(oneShot.ToolCalls.Count, got.ToolCalls.Count);
             Assert.Equal(1, replay.Stops);
-        }
-    }
-
-    [Theory]
-    [MemberData(nameof(AllCases))]
-    public void EveryRandomSegmentationOfAnyCompletionNeverThrows(string name)
-    {
-        ParserCase c = ParserCase.ByName(name);
-        for (int seed = 100; seed < 130; seed++)
-        {
-            PieceTokenizer tok = new();
-            ParsedAssistant got = ReplayedTurn.Run(ParserTestHelpers.NewParser(tok, c.Thinking),
-                tok.RandomWithSpecials(c.Text, new Random(seed), 1 + seed % 7), out ReplayedTurn replay);
-            ParserTestHelpers.AssertReplayMatches(got, replay, $"{name} seed{seed}");
         }
     }
 

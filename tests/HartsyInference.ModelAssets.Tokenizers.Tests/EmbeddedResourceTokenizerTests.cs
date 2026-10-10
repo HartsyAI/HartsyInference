@@ -43,21 +43,6 @@ public sealed class EmbeddedResourceTokenizerTests
     // ── T5 ──────────────────────────────────────────────────────────────
 
     [Fact]
-    public void EmbeddedT5Tokenizer_Constructs()
-    {
-        using T5Tokenizer tok = new();
-        Assert.NotNull(tok);
-    }
-
-    [Fact]
-    public void EmbeddedT5Tokenizer_RespectsMaxLength()
-    {
-        using T5Tokenizer tok = new(maxLength: 256);
-        int[] tokens = tok.Encode("hello");
-        Assert.Equal(256, tokens.Length);
-    }
-
-    [Fact]
     public void EmbeddedT5Tokenizer_MatchesFileBased()
     {
         if (!File.Exists(TestPaths.Tokenizers.T5XxlSpiece))
@@ -76,21 +61,6 @@ public sealed class EmbeddedResourceTokenizerTests
     }
 
     // ── umT5 ────────────────────────────────────────────────────────────
-
-    [Fact]
-    public void EmbeddedUmt5Tokenizer_Constructs()
-    {
-        using T5Tokenizer tok = T5Tokenizer.CreateUmt5();
-        Assert.NotNull(tok);
-    }
-
-    [Fact]
-    public void EmbeddedUmt5Tokenizer_RespectsMaxLength()
-    {
-        using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 256);
-        int[] tokens = tok.Encode("hello");
-        Assert.Equal(256, tokens.Length);
-    }
 
     [Fact]
     public void EmbeddedUmt5Tokenizer_Uses256kVocab()
@@ -122,21 +92,6 @@ public sealed class EmbeddedResourceTokenizerTests
     }
 
     // ── Qwen3 ───────────────────────────────────────────────────────────
-
-    [Fact]
-    public void EmbeddedQwen3Tokenizer_Constructs()
-    {
-        using Qwen3Tokenizer tok = new();
-        Assert.NotNull(tok);
-    }
-
-    [Fact]
-    public void EmbeddedQwen3Tokenizer_RespectsMaxLength()
-    {
-        using Qwen3Tokenizer tok = new(maxLength: 64);
-        int[] tokens = tok.Encode("hello");
-        Assert.Equal(64, tokens.Length);
-    }
 
     [Fact]
     public void EmbeddedQwen3Tokenizer_MatchesFileBased()

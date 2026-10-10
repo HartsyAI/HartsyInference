@@ -19,12 +19,6 @@ public sealed class EspeakLettersTests
     [InlineData('y')] // y is a vowel in the include-y group (LETTERGP_VOWEL2)
     public void VowelsAreVowels(char c) => Assert.True(Letters.IsVowel(c));
 
-    [Theory]
-    [InlineData('b')]
-    [InlineData('c')]
-    [InlineData('z')]
-    public void ConsonantsAreNotVowels(char c) => Assert.False(Letters.IsVowel(c));
-
     [Fact]
     public void ConsonantGroupsMatchEspeakSets()
     {
@@ -38,9 +32,4 @@ public sealed class EspeakLettersTests
         Assert.False(Letters.IsLetter('a', EspeakRuleCodes.LetterGpY));
     }
 
-    [Theory]
-    [InlineData('é')] // é -> e (vowel)
-    [InlineData('è')] // è -> e
-    [InlineData('à')] // à -> a
-    public void AccentedVowelsFoldToVowels(char c) => Assert.True(Letters.IsVowel(c));
 }

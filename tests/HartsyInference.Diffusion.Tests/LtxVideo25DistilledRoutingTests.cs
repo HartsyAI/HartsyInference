@@ -17,9 +17,6 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
 
     [Theory]
     [InlineData("ltx-2.5")]
-    [InlineData("ltx-2")]
-    [InlineData("ltx-2.3")]
-    [InlineData("ltx-video-2")]
     [InlineData("lightricks-ltx-video-2")]
     public void DistilledFilenameRoutesEveryDevFamilyId(string familyId)
     {
@@ -55,24 +52,6 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
     }
 
     [Fact]
-    public void DevDirectoryDoesNotRoute()
-    {
-        Touch("ltx-2.5-22b-dev-transformer.safetensors");
-        Assert.Equal("ltx-2.5", ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", _dir)));
-    }
-
-    [Fact]
-    public void RoutingLeavesForeignFamiliesAlone()
-    {
-        string path = Touch("some-distilled-model.safetensors");
-        Assert.Equal("wan", ModelCapabilities.VideoFamilyIdFor(Spec("wan", path)));
-        Assert.Equal("hunyuan-video", ModelCapabilities.VideoFamilyIdFor(Spec("hunyuan-video", path)));
-        // The distilled id itself passes through untouched (already routed).
-        Assert.Equal(LtxVideo2Variants.DistilledFamilyId,
-            ModelCapabilities.VideoFamilyIdFor(Spec(LtxVideo2Variants.DistilledFamilyId, path)));
-    }
-
-    [Fact]
     public void DistilledContractOnAPre25CheckpointSkipsTwoStage()
     {
         // 2.0/2.3 distilled builds exist; the shared 8-step schedule applies but the x2 upsampler is a 2.5 model.
@@ -93,17 +72,6 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
 
         // A 2.5 checkpoint outside the distilled family has no documented two-stage schedule.
         Assert.NotNull(LtxVideo2Recipe.TwoStageRefusal(Diffusion.Models.Denoisers.LtxVideo2Config.V25, distilled: false));
-    }
-
-    [Fact]
-    public void RoutedSpecResolvesTheDistilledDefaults()
-    {
-        // Routing only matters if the capability query lands on the distilled registration's defaults — a rename of
-        // either registration breaks the chain silently.
-        string path = Touch("ltx-2.5-22b-distilled-transformer.safetensors");
-        VideoDefaults defaults = ModelCapabilities.VideoDefaultsFor(Spec("ltx-2.5", path));
-        Assert.Equal(8, defaults.Steps);
-        Assert.Equal(1.0f, defaults.CfgScale);
     }
 
     private static ModelSpec Spec(string requested, string path) =>

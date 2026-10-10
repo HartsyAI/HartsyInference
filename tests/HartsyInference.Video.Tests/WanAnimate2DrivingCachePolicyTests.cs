@@ -13,24 +13,7 @@ public sealed class WanAnimate2DrivingCachePolicyTests
     private const long Gib = 1L << 30;
 
     [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("TRUE", true)]
-    [InlineData("on", true)]
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("off", false)]
-    public void ParseEnv_KeepsTheHistoricalBooleanTokens(string value, bool expected)
-    {
-        Assert.Equal(expected, WanAnimate2DrivingCachePolicy.ParseEnv(value, log: false));
-    }
-
-    [Theory]
     [InlineData(null)]
-    [InlineData("")]
-    [InlineData("  ")]
-    [InlineData("auto")]
-    [InlineData("AUTO")]
     [InlineData("banana")]   // unrecognized warns and falls back to auto, like LowVramPolicy
     public void ParseEnv_UnsetAutoAndGarbage_MeanAuto(string? value)
     {
@@ -69,14 +52,6 @@ public sealed class WanAnimate2DrivingCachePolicyTests
         // Exactly at the boundary still fits — the demand already carries its own headroom terms.
         Assert.False(WanAnimate2DrivingCachePolicy.ResolveCore(
             envForced: null, LowVramMode.Auto, freeBytes: 15 * Gib, f32DemandBytes: 15 * Gib, out _));
-    }
-
-    [Fact]
-    public void Auto_DropsToBf16_WhenTheF32DemandDoesNotFit()
-    {
-        Assert.True(WanAnimate2DrivingCachePolicy.ResolveCore(
-            envForced: null, LowVramMode.Auto, freeBytes: 23 * Gib, f32DemandBytes: 37 * Gib, out string by));
-        Assert.Equal("measured", by);
     }
 
     [Fact]

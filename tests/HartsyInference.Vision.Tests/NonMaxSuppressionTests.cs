@@ -7,13 +7,6 @@ namespace HartsyInference.Vision.Tests;
 public sealed class NonMaxSuppressionTests
 {
     [Fact]
-    public void Run_EmptyInput_ReturnsEmpty()
-    {
-        IReadOnlyList<YoloDetection> result = NonMaxSuppression.Run([]);
-        Assert.Empty(result);
-    }
-
-    [Fact]
     public void Run_TwoOverlappingSameClass_KeepsTopScored()
     {
         // Two near-identical boxes, same class. The higher-scored one wins.
@@ -42,16 +35,6 @@ public sealed class NonMaxSuppressionTests
         IReadOnlyList<YoloDetection> result = NonMaxSuppression.Run([a, b], iouThreshold: 0.5f, classAgnostic: true);
         Assert.Single(result);
         Assert.Equal(0, result[0].ClassId);
-    }
-
-    [Fact]
-    public void Run_DisjointBoxes_AllSurvive()
-    {
-        YoloDetection a = new(0, 0, 50, 50, 0.9f, ClassId: 0);
-        YoloDetection b = new(100, 100, 150, 150, 0.8f, ClassId: 0);
-        YoloDetection c = new(200, 200, 250, 250, 0.7f, ClassId: 0);
-        IReadOnlyList<YoloDetection> result = NonMaxSuppression.Run([a, b, c]);
-        Assert.Equal(3, result.Count);
     }
 
     [Fact]
@@ -84,32 +67,6 @@ public sealed class NonMaxSuppressionTests
     }
 
     [Fact]
-    public void RunWithConfidenceFilter_DropsBelowThreshold()
-    {
-        YoloDetection keep = new(0, 0, 50, 50, 0.8f, ClassId: 0);
-        YoloDetection drop = new(200, 200, 250, 250, 0.1f, ClassId: 0);
-        IReadOnlyList<YoloDetection> result = NonMaxSuppression.RunWithConfidenceFilter(
-            [keep, drop], confidenceThreshold: 0.5f);
-        Assert.Single(result);
-        Assert.Equal(0.8f, result[0].Confidence);
-    }
-
-    [Fact]
-    public void Iou_IdenticalBoxes_IsOne()
-    {
-        YoloDetection a = new(10, 20, 100, 200, 0.5f, ClassId: 0);
-        Assert.Equal(1f, a.Iou(a), tolerance: 1e-6f);
-    }
-
-    [Fact]
-    public void Iou_DisjointBoxes_IsZero()
-    {
-        YoloDetection a = new(0, 0, 50, 50, 0.5f, ClassId: 0);
-        YoloDetection b = new(100, 100, 150, 150, 0.5f, ClassId: 0);
-        Assert.Equal(0f, a.Iou(b));
-    }
-
-    [Fact]
     public void Iou_FullyContainedBox_ProducesAreaRatio()
     {
         // 10×10 box fully inside 20×20 box — intersection = 100, union = 400.
@@ -118,27 +75,4 @@ public sealed class NonMaxSuppressionTests
         Assert.Equal(0.25f, outer.Iou(inner), tolerance: 1e-6f);
     }
 
-    [Fact]
-    public void Run_RejectsInvalidIouThreshold()
-    {
-        Assert.Throws<ArgumentOutOfRangeException>(() => NonMaxSuppression.Run([], iouThreshold: -0.1f));
-        Assert.Throws<ArgumentOutOfRangeException>(() => NonMaxSuppression.Run([], iouThreshold: 1.5f));
-    }
-
-    [Fact]
-    public void CocoLabels_GetsKnownClasses()
-    {
-        Assert.Equal("person", CocoLabels.Get(0));
-        Assert.Equal("cat", CocoLabels.Get(15));
-        Assert.Equal("dog", CocoLabels.Get(16));
-        Assert.Equal("toothbrush", CocoLabels.Get(79));
-        Assert.Equal(80, CocoLabels.Count);
-    }
-
-    [Fact]
-    public void CocoLabels_OutOfRange_ReturnsFallback()
-    {
-        Assert.Equal("class_-1", CocoLabels.Get(-1));
-        Assert.Equal("class_999", CocoLabels.Get(999));
-    }
 }

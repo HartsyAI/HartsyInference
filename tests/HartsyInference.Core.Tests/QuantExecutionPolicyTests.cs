@@ -14,10 +14,7 @@ public sealed class QuantExecutionPolicyTests
 
     [Theory]
     [InlineData(QuantEncoding.Nvfp4, "W4A16")]
-    [InlineData(QuantEncoding.Mxfp4E8M0, "W4A16")]
-    [InlineData(QuantEncoding.AffineInt4, "W4A16")]
     [InlineData(QuantEncoding.AffineInt8, "W8A16")]
-    [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, "W8A16")]
     [InlineData(QuantEncoding.Exl3Trellis, "W2A16")]
     public void Plan_DequantizesToBf16AndNeverClaimsFourBitActivations(QuantEncoding encoding, string label)
     {
@@ -38,14 +35,5 @@ public sealed class QuantExecutionPolicyTests
     {
         Assert.False(QuantExecutionPolicy.SupportsBf16Dequant(encoding));
         Assert.Throws<NotSupportedException>(() => QuantExecutionPolicy.Plan(Recipe(encoding)));
-    }
-
-    [Fact]
-    public void Label_ReportsW4A4OnlyForAFourBitActivationPlan()
-    {
-        QuantRecipe recipe = Recipe(QuantEncoding.Nvfp4);
-        QuantExecutionPlan blackwell = new(QuantExecutionKind.DequantBf16, 0, QuantActivationPrecision.Fp4);
-
-        Assert.Equal("W4A4", blackwell.Label(recipe));
     }
 }

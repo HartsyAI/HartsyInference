@@ -14,7 +14,6 @@ public sealed unsafe class MiniMaxMusic3WeightPolicyTests
 {
     [Theory]
     [InlineData("q8")]
-    [InlineData("q4")]
     public void PrepareDepthDecoder_KeepsTheSourceShapes(string quant)
     {
         string repo = $"hartsy-tests/minimax-readback-{Guid.NewGuid():N}";

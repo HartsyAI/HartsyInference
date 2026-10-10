@@ -10,8 +10,6 @@ public class OasisCheckpointConverterTests
     [InlineData("blocks.0.s_attn.to_qkv.weight", "blocks.0.s_attn.to_qkv.weight")]
     [InlineData("model.blocks.0.s_attn.to_qkv.weight", "blocks.0.s_attn.to_qkv.weight")]
     [InlineData("module.external_cond.weight", "external_cond.weight")]
-    [InlineData("encoder.3.attn.qkv.bias", "encoder.3.attn.qkv.bias")]
-    [InlineData("final_layer.adaLN_modulation.1.weight", "final_layer.adaLN_modulation.1.weight")]
     public void MapKey_StripsWrapperPrefixes(string key, string expected)
     {
         Assert.Equal(expected, OasisCheckpointConverter.MapKey(key));

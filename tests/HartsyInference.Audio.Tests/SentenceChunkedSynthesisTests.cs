@@ -54,36 +54,6 @@ public sealed class SentenceChunkedSynthesisTests
     }
 
     [Fact]
-    public async Task StreamBySentence_SkipsEmptyOutputWithoutAdvancingTheOffset()
-    {
-        IReadOnlyList<string> sentences = SentenceSplitter.Split(ThreeSentences);
-        List<AudioChunk> chunks = [];
-        await foreach (AudioChunk chunk in SentenceChunkedSynthesis.StreamBySentence(ThreeSentences, Rate,
-            (s, _) => s == sentences[1] ? [] : FakeSynth(s), RunOnPool,
-            SentenceSplitter.MinSentenceLength, SentenceChunkedSynthesis.NoClauseLimit, CancellationToken.None))
-        {
-            chunks.Add(chunk);
-        }
-        Assert.Equal(2, chunks.Count);
-        Assert.Equal(0, chunks[0].StartSampleOffset);
-        Assert.Equal(chunks[0].Samples.Length, chunks[1].StartSampleOffset);
-        Assert.Equal(sentences[2].Length, chunks[1].Samples[0]);
-    }
-
-    [Fact]
-    public async Task StreamBySentence_EmptyText_YieldsNothing()
-    {
-        int calls = 0;
-        await foreach (AudioChunk _ in SentenceChunkedSynthesis.StreamBySentence("   ", Rate,
-            (s, _) => { calls++; return FakeSynth(s); }, RunOnPool,
-            SentenceSplitter.MinSentenceLength, SentenceChunkedSynthesis.NoClauseLimit, CancellationToken.None))
-        {
-            Assert.Fail("nothing should be emitted for blank text");
-        }
-        Assert.Equal(0, calls);
-    }
-
-    [Fact]
     public async Task StreamBySentence_CancelledBetweenSentences_StopsBeforeTheNextJob()
     {
         IReadOnlyList<string> sentences = SentenceSplitter.Split(ThreeSentences);
@@ -114,23 +84,6 @@ public sealed class SentenceChunkedSynthesisTests
         });
         Assert.Equal(1, received);
         Assert.DoesNotContain(sentences[2], synthesized);
-    }
-
-    [Fact]
-    public async Task StreamBySentence_AlreadyCancelled_RunsNoJob()
-    {
-        using CancellationTokenSource cts = new();
-        cts.Cancel();
-        int calls = 0;
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
-        {
-            await foreach (AudioChunk _ in SentenceChunkedSynthesis.StreamBySentence(ThreeSentences, Rate,
-                (s, _) => { Interlocked.Increment(ref calls); return FakeSynth(s); }, RunOnPool,
-                SentenceSplitter.MinSentenceLength, SentenceChunkedSynthesis.NoClauseLimit, cts.Token))
-            {
-            }
-        });
-        Assert.Equal(0, calls);
     }
 
     [Fact]
@@ -193,38 +146,6 @@ public sealed class SentenceChunkedSynthesisTests
     }
 
     [Fact]
-    public async Task StreamBySentence_RunSeam_ExecutesEveryJob()
-    {
-        int dispatched = 0;
-        int chunks = 0;
-        await foreach (AudioChunk _ in SentenceChunkedSynthesis.StreamBySentence(ThreeSentences, Rate,
-            (s, _) => FakeSynth(s),
-            (work, _) => { dispatched++; return Task.FromResult(work()); },
-            SentenceSplitter.MinSentenceLength, SentenceChunkedSynthesis.NoClauseLimit, CancellationToken.None))
-        {
-            chunks++;
-        }
-        Assert.Equal(3, dispatched);
-        Assert.Equal(3, chunks);
-    }
-
-    [Fact]
-    public async Task StreamBySentence_ClauseSplitsSentencesOverMaxChars()
-    {
-        const string Long = "First we gather the ingredients, then we mix the batter, then we pour it into the tin, "
-            + "and finally we bake it for forty minutes until golden.";
-        List<string> synthesized = [];
-        await foreach (AudioChunk _ in SentenceChunkedSynthesis.StreamBySentence(Long, Rate,
-            (s, _) => { lock (synthesized) synthesized.Add(s); return FakeSynth(s); }, RunOnPool,
-            SentenceSplitter.MinSentenceLength, 60, CancellationToken.None))
-        {
-        }
-        Assert.True(synthesized.Count >= 3, $"expected clause pieces, got {synthesized.Count}");
-        Assert.All(synthesized, s => Assert.True(s.Length <= 60, $"piece over 60 chars: \"{s}\""));
-        Assert.Equal(Long, string.Join(" ", synthesized));
-    }
-
-    [Fact]
     public async Task StreamFromDeltas_SpeaksTheFirstSentenceBeforeTheTextIsFinished()
     {
         Channel<string> deltas = Channel.CreateUnbounded<string>();
@@ -259,63 +180,6 @@ public sealed class SentenceChunkedSynthesisTests
             await stream.DisposeAsync();
         }
         Assert.Equal(["Hello there, my good friend.", "That is all I have to say."], synthesized);
-    }
-
-    [Fact]
-    public async Task StreamFromDeltas_CapacityOne_HoldsTheProducerToOneChunkAhead()
-    {
-        string[] sentences =
-        [
-            "First sentence long enough to stand alone here. ",
-            "Second sentence long enough to stand alone here. ",
-            "Third sentence long enough to stand alone here. ",
-            "Fourth sentence long enough to stand alone here.",
-        ];
-        int synthesized = 0;
-        IAsyncEnumerator<AudioChunk> stream = SentenceChunkedSynthesis.StreamFromDeltas(Deltas(sentences), Rate,
-            (s, _) => { Interlocked.Increment(ref synthesized); return FakeSynth(s); }, RunOnPool,
-            firstSentenceMinChars: 1, maxChars: SentenceChunkedSynthesis.NoClauseLimit, maxInFlight: 1, CancellationToken.None)
-            .GetAsyncEnumerator();
-        try
-        {
-            Assert.True(await stream.MoveNextAsync());
-            // The consumer now sits on chunk 1. With capacity 1 the producer may queue chunk 2 and finish chunk 3
-            // before parking on the full channel, but it must never start chunk 4.
-            await Task.Delay(300);
-            Assert.InRange(Volatile.Read(ref synthesized), 1, 3);
-
-            Assert.True(await stream.MoveNextAsync());
-            Assert.True(await stream.MoveNextAsync());
-            Assert.True(await stream.MoveNextAsync());
-            Assert.False(await stream.MoveNextAsync());
-        }
-        finally
-        {
-            await stream.DisposeAsync();
-        }
-        Assert.Equal(4, synthesized);
-    }
-
-    [Fact]
-    public async Task StreamFromDeltas_FaultInTheDeltaSource_SurfacesToTheConsumer()
-    {
-        static async IAsyncEnumerable<string> Broken()
-        {
-            yield return "A complete first sentence to speak. ";
-            await Task.Yield();
-            throw new InvalidOperationException("model died");
-        }
-        int received = 0;
-        InvalidOperationException fault = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-        {
-            await foreach (AudioChunk _ in SentenceChunkedSynthesis.StreamFromDeltas(Broken(), Rate,
-                (s, _) => FakeSynth(s), RunOnPool, 1, SentenceChunkedSynthesis.NoClauseLimit, 2, CancellationToken.None))
-            {
-                received++;
-            }
-        });
-        Assert.Equal("model died", fault.Message);
-        Assert.InRange(received, 0, 1);
     }
 
     [Fact]

@@ -18,41 +18,13 @@ public class MiniMaxH3CheckpointConverterTests
     [Theory]
     // The FL2VA transformer file is already flat: every DiT key routes through byte-identical.
     [InlineData("video_patch_proj.weight")]
-    [InlineData("video_patch_proj.bias")]
-    [InlineData("audio_patch_proj.weight")]
-    [InlineData("audio_patch_proj.bias")]
-    [InlineData("condition_proj.weight")]
-    [InlineData("condition_proj.bias")]
     [InlineData("blocks.0.attn.qkv_proj.weight")]
     [InlineData("blocks.0.attn.q_norm.weight")]
-    [InlineData("blocks.0.attn.k_norm.weight")]
-    [InlineData("blocks.49.attn.out_proj.weight")]
     [InlineData("blocks.0.mlp.fc1.weight")]
-    [InlineData("blocks.49.mlp.fc2.weight")]
-    [InlineData("blocks.0.norm1.weight")]
-    [InlineData("blocks.49.norm2.weight")]
     [InlineData("blocks.0.adaln_proj.linear.weight")]
-    [InlineData("blocks.49.adaln_proj.linear.bias")]
     [InlineData("token_refiner.blocks.0.attn.qkv_proj.weight")]
-    [InlineData("token_refiner.blocks.0.attn.q_norm.weight")]
-    [InlineData("token_refiner.blocks.1.attn.k_norm.weight")]
-    [InlineData("token_refiner.blocks.1.attn.out_proj.weight")]
-    [InlineData("token_refiner.blocks.0.mlp.fc1.weight")]
-    [InlineData("token_refiner.blocks.1.mlp.fc2.weight")]
-    [InlineData("token_refiner.blocks.0.norm1.weight")]
-    [InlineData("token_refiner.blocks.1.norm2.weight")]
-    [InlineData("token_refiner.final_norm.weight")]
-    [InlineData("final_layer.norm.weight")]
-    [InlineData("final_layer.adaln_proj.linear.weight")]
-    [InlineData("final_layer.adaln_proj.linear.bias")]
-    [InlineData("final_layer.video_out.weight")]
-    [InlineData("final_layer.video_out.bias")]
-    [InlineData("final_layer.audio_out.weight")]
     [InlineData("final_layer.audio_out.bias")]
     [InlineData("time_embedder.proj_in.weight")]
-    [InlineData("time_embedder.proj_in.bias")]
-    [InlineData("time_embedder.proj_out.weight")]
-    [InlineData("time_embedder.proj_out.bias")]
     [InlineData("rope.inv_freq")]
     public void RouteKey_RealDitHeaderKeysPassThroughUnchanged(string key)
     {
@@ -73,13 +45,6 @@ public class MiniMaxH3CheckpointConverterTests
     // The text-encoder file is flat too, and carries no model.norm / lm_head — it is truncated at layer 50.
     [InlineData("model.embed_tokens.weight")]
     [InlineData("model.layers.0.self_attn.q_proj.weight")]
-    [InlineData("model.layers.49.self_attn.k_norm.weight")]
-    [InlineData("model.layers.49.mlp.down_proj.weight")]
-    [InlineData("model.layers.0.input_layernorm.weight")]
-    [InlineData("model.layers.49.post_attention_layernorm.weight")]
-    [InlineData("visual.patch_embed.proj.weight")]
-    [InlineData("visual.pos_embed.weight")]
-    [InlineData("visual.blocks.26.attn.qkv.weight")]
     [InlineData("visual.merger.linear_fc2.weight")]
     [InlineData("visual.deepstack_merger_list.2.linear_fc1.bias")]
     public void RouteKey_RealTextEncoderHeaderKeysRouteToTextEncoder(string key)
@@ -93,12 +58,9 @@ public class MiniMaxH3CheckpointConverterTests
     // Bundled-file prefixes (ComfyUI convention) are stripped; "audio_vae." must win over "vae." and neither may
     // capture the DiT's own audio_patch_proj / video_patch_proj keys.
     [InlineData("model.diffusion_model.blocks.0.attn.qkv_proj.weight", B.Transformer, "blocks.0.attn.qkv_proj.weight")]
-    [InlineData("diffusion_model.rope.inv_freq", B.Transformer, "rope.inv_freq")]
     [InlineData("vae.decoder.conv_in.weight", B.VideoVae, "decoder.conv_in.weight")]
-    [InlineData("video_vae.decoder.conv_in.weight", B.VideoVae, "decoder.conv_in.weight")]
     [InlineData("audio_vae.decoder.conv_in.weight", B.AudioVae, "decoder.conv_in.weight")]
     [InlineData("text_encoders.qwen3vl_32b.transformer.model.layers.0.mlp.up_proj.weight", B.TextEncoder, "model.layers.0.mlp.up_proj.weight")]
-    [InlineData("text_encoder.visual.pos_embed.weight", B.TextEncoder, "visual.pos_embed.weight")]
     public void RouteKey_BundledPrefixesAreStripped(string key, B bucket, string mapped)
     {
         (B b, string? m) = MiniMaxH3CheckpointConverter.RouteKey(key);

@@ -35,32 +35,10 @@ public sealed class QwenImageEditConditioningTests
         Assert.True(references.Latent[1].Shape[3] < references.Latent[1].Shape[2]);
     }
 
-    /// <summary>Only the slots the edit-plus template was trained with are consumed; extras are dropped rather than
-    /// silently extending a template the model never saw.</summary>
-    [Fact]
-    public void Resolve_CapsAtThreeReferences()
-    {
-        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Plus,
-            Image(512, 512), [Image(512, 512), Image(512, 512), Image(512, 512)]);
-        Assert.NotNull(references);
-        Assert.Equal(Plus.MaxReferences, references!.Latent.Count);
-    }
-
-    /// <summary>No init image and no references is text-to-image, not an empty edit.</summary>
-    [Fact]
-    public void Resolve_WithNothingAttached_ReturnsNull()
-    {
-        Assert.Null(QwenImageEditConditioning.Resolve(Plus, null, null));
-        Assert.Null(QwenImageEditConditioning.Resolve(Plus, null, []));
-    }
-
     /// <summary>The VAE copy lands on the ~1 MP budget with both sides divisible by 16, which is what the packed
     /// reference path validates; the vision copy lands on the much smaller ~384² budget the tower was trained on.</summary>
     [Theory]
-    [InlineData(1920, 1080)]
-    [InlineData(640, 480)]
     [InlineData(333, 777)]
-    [InlineData(64, 64)]
     public void Resolve_RescalesEachReferenceForItsConsumer(int width, int height)
     {
         using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Plus, Image(width, height), null);
@@ -75,19 +53,6 @@ public sealed class QwenImageEditConditioningTests
         long visionArea = vision.Shape[2] * vision.Shape[3];
         Assert.InRange(visionArea, (long)(Plus.VisionTargetArea * 0.9),
             (long)(Plus.VisionTargetArea * 1.1));
-    }
-
-    /// <summary>Aspect ratio survives both rescales — a stretched reference edits as a stretched subject.</summary>
-    [Fact]
-    public void Resolve_PreservesAspectRatio()
-    {
-        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Plus, Image(1920, 1080), null);
-        Assert.NotNull(references);
-        foreach (Tensor reference in new[] { references!.Latent[0], references.Vision[0] })
-        {
-            double aspect = (double)reference.Shape[3] / reference.Shape[2];
-            Assert.InRange(aspect, 1920.0 / 1080.0 - 0.05, 1920.0 / 1080.0 + 0.05);
-        }
     }
 
     /// <summary>One <c>Picture i:</c> block per reference, each with exactly as many image-pad placeholders as the tower

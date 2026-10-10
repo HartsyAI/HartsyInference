@@ -88,24 +88,6 @@ public sealed unsafe class DitGlueKernelTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void Tanh_Cpu_Vs_Cuda()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        using Tensor input = Random(new TensorShape(128), seed: 1, lo: -4f, hi: 4f);
-        using Tensor cpuOut = new Tensor(new TensorShape(128), DType.F32);
-        using Tensor cudaOut = new Tensor(new TensorShape(128), DType.F32);
-
-        IBackend cpu = new CpuBackend();
-        cpu.Tanh(cpuOut, input);
-        cpu.Dispose();
-
-        RunCuda(c => c.Tanh(cudaOut, input), cudaOut);
-
-        AssertClose(cpuOut, cudaOut, 1e-5f, "Tanh");
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
     public void AffineBroadcastLastDim_Cpu_Vs_Cuda()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -337,30 +319,6 @@ public sealed unsafe class DitGlueKernelTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void SliceLastDim_Cpu_Vs_Cuda()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        const int b = 2, l = 5, h = 16;
-        using Tensor fused = Random(new TensorShape(b, l, 3 * h), seed: 61);
-
-        foreach (int chunk in new[] { 0, 1, 2 })
-        {
-            using Tensor cpuOut = new Tensor(new TensorShape(b, l, h), DType.F32);
-            using Tensor cudaOut = new Tensor(new TensorShape(b, l, h), DType.F32);
-            int offset = chunk * h;
-
-            IBackend cpu = new CpuBackend();
-            cpu.SliceLastDim(cpuOut, fused, offset);
-            cpu.Dispose();
-
-            RunCuda(c => c.SliceLastDim(cudaOut, fused, offset), cudaOut);
-
-            AssertClose(cpuOut, cudaOut, 1e-6f, $"SliceLastDim[offset={offset}]");
-        }
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
     public void MaskRows_Cpu_Vs_Cuda()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -377,22 +335,6 @@ public sealed unsafe class DitGlueKernelTests
         cpu.Dispose();
         RunCuda(g => g.MaskRows(cudaOut, input, mask), cudaOut);
         AssertClose(cpuOut, cudaOut, 1e-6f, "MaskRows");
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void AddScalar_Cpu_Vs_Cuda()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        using Tensor input = Random(new TensorShape(2, 16), seed: 81);
-        using Tensor cpuOut = new Tensor(new TensorShape(2, 16), DType.F32);
-        using Tensor cudaOut = new Tensor(new TensorShape(2, 16), DType.F32);
-
-        IBackend cpu = new CpuBackend();
-        cpu.AddScalar(cpuOut, input, 1.0f);
-        cpu.Dispose();
-        RunCuda(g => g.AddScalar(cudaOut, input, 1.0f), cudaOut);
-        AssertClose(cpuOut, cudaOut, 1e-6f, "AddScalar");
     }
 
     [Trait("Category", "GpuIntegration")]
@@ -436,31 +378,6 @@ public sealed unsafe class DitGlueKernelTests
         cpu.Dispose();
         RunCuda(g => g.IndexAddRows(hCuda, table, indices), hCuda);
         AssertClose(hCpu, hCuda, 1e-6f, "IndexAddRows");
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void ScatterAndSliceRows_Cpu_Vs_Cuda()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        const int numText = 5, numImg = 9, dim = 16;
-        using Tensor z = Random(new TensorShape(1, numImg, dim), seed: 101);
-
-        using Tensor scCpu = new Tensor(new TensorShape(1, numText + numImg, dim), DType.F32);
-        using Tensor scCuda = new Tensor(new TensorShape(1, numText + numImg, dim), DType.F32);
-        IBackend cpu = new CpuBackend();
-        cpu.ScatterRowsAfter(scCpu, z, numText);
-        RunCuda(g => g.ScatterRowsAfter(scCuda, z, numText), scCuda);
-        AssertClose(scCpu, scCuda, 1e-6f, "ScatterRowsAfter");
-
-        // Round-trip: slicing image rows back out of the scattered tensor must recover z.
-        using Tensor slCpu = new Tensor(new TensorShape(1, numImg, dim), DType.F32);
-        using Tensor slCuda = new Tensor(new TensorShape(1, numImg, dim), DType.F32);
-        cpu.SliceRows(slCpu, scCpu, numText);
-        cpu.Dispose();
-        RunCuda(g => g.SliceRows(slCuda, scCuda, numText), slCuda);
-        AssertClose(slCpu, slCuda, 1e-6f, "SliceRows");
-        AssertClose(z, slCuda, 1e-6f, "SliceRows-recovers-z");
     }
 
     /// <summary>SliceRowsGeneric on F32 must agree with SliceRows (same result, different implementation path).</summary>

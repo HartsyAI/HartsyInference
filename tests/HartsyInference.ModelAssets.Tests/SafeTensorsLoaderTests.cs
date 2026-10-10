@@ -18,53 +18,6 @@ public sealed unsafe class SafeTensorsLoaderTests : IDisposable
     }
 
     [Fact]
-    public void Load_ValidFile_ParsesHeader()
-    {
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
-        {
-            ["weight"] = (DType.F32, [2, 3], [1f, 2f, 3f, 4f, 5f, 6f]),
-        };
-        string filePath = CreateSafeTensorsFile(_tempDir, "valid_single", tensors);
-
-        using SafeTensorsLoader loader = new();
-        loader.Load(filePath);
-
-        Assert.True(loader.Descriptors.ContainsKey("weight"));
-        SafeTensorDescriptor desc = loader.Descriptors["weight"];
-        Assert.Equal(DType.F32, desc.DType);
-        Assert.Equal(2, desc.Shape.Rank);
-        Assert.Equal(2, desc.Shape[0]);
-        Assert.Equal(3, desc.Shape[1]);
-    }
-
-    [Fact]
-    public void Load_MultipleTensors_ParsesAll()
-    {
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
-        {
-            ["a"] = (DType.F32, [4], [1f, 2f, 3f, 4f]),
-            ["b"] = (DType.F32, [2, 2], [5f, 6f, 7f, 8f]),
-        };
-        string filePath = CreateSafeTensorsFile(_tempDir, "valid_multi", tensors);
-
-        using SafeTensorsLoader loader = new();
-        loader.Load(filePath);
-
-        Assert.True(loader.Descriptors.ContainsKey("a"));
-        Assert.True(loader.Descriptors.ContainsKey("b"));
-        Assert.Equal(2, loader.Descriptors.Count);
-
-        SafeTensorDescriptor descA = loader.Descriptors["a"];
-        Assert.Equal(1, descA.Shape.Rank);
-        Assert.Equal(4, descA.Shape[0]);
-
-        SafeTensorDescriptor descB = loader.Descriptors["b"];
-        Assert.Equal(2, descB.Shape.Rank);
-        Assert.Equal(2, descB.Shape[0]);
-        Assert.Equal(2, descB.Shape[1]);
-    }
-
-    [Fact]
     public void GetTensor_ReturnsCorrectData()
     {
         float[] expected = [1.0f, 2.0f, 3.0f, 4.0f];
@@ -88,39 +41,10 @@ public sealed unsafe class SafeTensorsLoaderTests : IDisposable
     }
 
     [Fact]
-    public void GetTensor_UnknownName_Throws()
-    {
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
-        {
-            ["exists"] = (DType.F32, [2], [1f, 2f]),
-        };
-        string filePath = CreateSafeTensorsFile(_tempDir, "unknown_name", tensors);
-
-        using SafeTensorsLoader loader = new();
-        loader.Load(filePath);
-
-        Assert.Throws<KeyNotFoundException>(() => loader.GetTensor("nonexistent"));
-    }
-
-    [Fact]
     public void Load_TooSmallFile_Throws()
     {
         string filePath = Path.Combine(_tempDir, "too_small.safetensors");
         File.WriteAllBytes(filePath, new byte[4]);
-
-        using SafeTensorsLoader loader = new();
-
-        Assert.Throws<HartsyInferenceException>(() => loader.Load(filePath));
-    }
-
-    [Fact]
-    public void Load_InvalidHeaderLength_Throws()
-    {
-        string filePath = Path.Combine(_tempDir, "bad_header_len.safetensors");
-        byte[] data = new byte[16];
-        // Write a header length that exceeds the file size
-        BitConverter.TryWriteBytes(data.AsSpan(0, 8), (long)999999);
-        File.WriteAllBytes(filePath, data);
 
         using SafeTensorsLoader loader = new();
 

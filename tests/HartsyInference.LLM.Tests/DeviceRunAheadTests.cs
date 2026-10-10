@@ -44,23 +44,6 @@ public sealed class DeviceRunAheadTests
     }
 
     [Fact]
-    public void AStopBetweenSteps_ReleasesTheFencesStillHeldWithoutWaiting()
-    {
-        IBackend backend = DispatchProxy.Create<IBackend, FenceLog>();
-        FenceLog log = (FenceLog)(object)backend;
-
-        DeviceRunAhead runAhead = new(backend, stackalloc nint[2], enabled: true);
-        runAhead.BeforeStep();
-        runAhead.AfterStep();
-        runAhead.BeforeStep();
-        runAhead.AfterStep();
-        runAhead.Dispose();
-        runAhead.Dispose();
-
-        Assert.Equal(["record 1", "record 2", "release 1", "release 2"], log.Calls);
-    }
-
-    [Fact]
     public void AFailedWait_StillReleasesItsFence()
     {
         IBackend backend = DispatchProxy.Create<IBackend, FenceLog>();

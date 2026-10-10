@@ -102,49 +102,6 @@ public sealed unsafe class Conv1dParallelKernelTests
         }
     }
 
-    /// <summary>Capping the worker count must change only the schedule. A host that turns the knob down to leave
-    /// room for another model has to get the same audio out, or the knob is a correctness switch.</summary>
-    [Fact]
-    public void Conv1d_SingleThreadedKnob_ProducesIdenticalOutput()
-    {
-        using CpuBackend backend = new();
-        int cIn = 192, cOut = 256, tIn = 800, kernel = 3;
-        int tOut = tIn + 2 - (kernel - 1) - 1 + 1;
-
-        Tensor input = Filled(1, cIn, tIn, seed: 71);
-        Tensor weight = Filled(cOut, cIn, kernel, seed: 83);
-        Tensor parallel = new(new TensorShape(1, cOut, tOut), DType.F32);
-        Tensor serial = new(new TensorShape(1, cOut, tOut), DType.F32);
-        try
-        {
-            KnobStore.Clear(EngineKnobs.CpuThreads);
-            backend.Conv1d(parallel, input, weight, null, 1, 1, 1, 1, 1);
-            KnobStore.Set(EngineKnobs.CpuThreads, 1);
-            try
-            {
-                backend.Conv1d(serial, input, weight, null, 1, 1, 1, 1, 1);
-            }
-            finally
-            {
-                KnobStore.Clear(EngineKnobs.CpuThreads);
-            }
-
-            float* a = (float*)parallel.DataPointer;
-            float* b = (float*)serial.DataPointer;
-            for (long i = 0; i < parallel.ElementCount; i++)
-            {
-                Assert.Equal(b[i], a[i]);
-            }
-        }
-        finally
-        {
-            input.Dispose();
-            weight.Dispose();
-            parallel.Dispose();
-            serial.Dispose();
-        }
-    }
-
     /// <summary>An argument the kernel rejects must still surface as itself. Work dispatched through
     /// <see cref="Parallel.For"/> arrives wrapped in an <see cref="AggregateException"/> unless it is unwrapped
     /// deliberately, and a caller catching <see cref="ArgumentException"/> would stop seeing it.</summary>

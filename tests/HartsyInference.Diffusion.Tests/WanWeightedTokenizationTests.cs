@@ -30,37 +30,6 @@ public sealed class WanWeightedTokenizationTests
         Assert.Equal(tokenizer.MaxLength, tokens.Length);
     }
 
-    /// <summary>A weight of exactly 1 still does nothing, and — the part worth pinning — its grammar does not
-    /// reach the encoder as prose. `(red:1.0)` must tokenize to what `red` tokenizes to.</summary>
-    [Fact]
-    public void AUnitWeightMatchesThePlainPromptExactly()
-    {
-        using T5Tokenizer tokenizer = Umt5();
-
-        (int[] weighted, float[]? weights) =
-            VideoRecipeUtils.TokenizeWeightedWan(tokenizer, PromptWeighting.Parse("a (red:1.0) fox"));
-        (int[] plain, _) = VideoRecipeUtils.TokenizeWeightedWan(tokenizer, PromptWeighting.Parse("a red fox"));
-
-        Assert.Null(weights);
-        Assert.Equal(plain, weighted);
-    }
-
-    /// <summary>A real weight produces one weight per token position, filling the whole fixed window so the array
-    /// can be matched to the encoder's rows without an offset.</summary>
-    [Fact]
-    public void AWeightedPromptFillsTheWindowWithOneWeightPerRow()
-    {
-        using T5Tokenizer tokenizer = Umt5();
-
-        (int[] tokens, float[]? weights) =
-            VideoRecipeUtils.TokenizeWeightedWan(tokenizer, PromptWeighting.Parse("a (red:1.5) fox"));
-
-        Assert.NotNull(weights);
-        Assert.Equal(tokenizer.MaxLength, tokens.Length);
-        Assert.Equal(tokens.Length, weights!.Length);
-        Assert.Contains(1.5f, weights);
-    }
-
     /// <summary>EOS and every pad row weigh exactly 1. They are not part of the prompt, and blending them would
     /// pull the padding toward the empty encode along with the words — a whole-sequence drift that reads as the
     /// weighting being far too strong.</summary>

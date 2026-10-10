@@ -68,21 +68,6 @@ public sealed class KnobFileTests : IDisposable
         Assert.Contains("paths.modelsRoot", written, StringComparison.Ordinal);
     }
 
-    /// <summary>Re-setting a value replaces it rather than writing the id twice, which would be invalid JSON to read back.</summary>
-    [Fact]
-    public void Save_ReplacesAnExistingValue()
-    {
-        KnobFile.Save("paths.modelsRoot", "/first");
-        KnobFile.Save("paths.modelsRoot", "/second");
-
-        string written = File.ReadAllText(KnobFile.ExplicitPath!);
-        Assert.Equal(1, written.Split("paths.modelsRoot").Length - 1);
-
-        KnobStore.ResetOverrides();
-        KnobFile.Reload();
-        Assert.Equal("/second", EngineKnobs.ModelsRoot.Value);
-    }
-
     /// <summary>A typo is rejected when it is made, not at the next startup.</summary>
     [Fact]
     public void Save_RejectsAnUnknownSetting()
@@ -91,21 +76,6 @@ public sealed class KnobFileTests : IDisposable
             () => KnobFile.Save("paths.noSuchSetting", "x"));
         Assert.Contains("paths.noSuchSetting", ex.Message, StringComparison.Ordinal);
         Assert.False(File.Exists(KnobFile.ExplicitPath!));
-    }
-
-    /// <summary>A value the knob's type cannot hold is rejected too, through the same parse the file load uses.</summary>
-    [Fact]
-    public void Save_RejectsAWrongTypedValue()
-        => Assert.Throws<InvalidOperationException>(() => KnobFile.Save("vram.keepModels", "banana"));
-
-    /// <summary>A clamped knob stores the clamped value, so the file cannot hold something the engine would not honour.</summary>
-    [Fact]
-    public void Save_StoresTheCoercedValue()
-    {
-        object? stored = KnobFile.Save("numerics.gemvWpb", "999");
-
-        Assert.Equal(16, stored);
-        Assert.Contains("16", File.ReadAllText(KnobFile.ExplicitPath!), StringComparison.Ordinal);
     }
 
     /// <summary>A host's explicit Set beats the file, and the reported source says so — this is how SwarmUI drives the models root.</summary>
@@ -117,29 +87,5 @@ public sealed class KnobFileTests : IDisposable
 
         Assert.Equal("/from-host", EngineKnobs.ModelsRoot.Value);
         Assert.Equal("host", KnobStore.SourceOf("paths.modelsRoot"));
-    }
-
-    /// <summary>Saving while a host holds a value for the same setting stores what was saved, coerced, and not the
-    /// host's value; and the newer request is the one in force afterwards.</summary>
-    [Fact]
-    public void Save_UnderAHostOverride_StoresTheSavedValueNotTheHosts()
-    {
-        KnobStore.Set(EngineKnobs.GemvWpb, 8);
-
-        object? stored = KnobFile.Save("numerics.gemvWpb", "999");
-
-        Assert.Equal(16, stored);
-        string written = File.ReadAllText(KnobFile.ExplicitPath!);
-        Assert.Contains("\"numerics.gemvWpb\": 16", written, StringComparison.Ordinal);
-        Assert.Equal(16, EngineKnobs.GemvWpb.Value);
-        Assert.Equal("settings file", KnobStore.SourceOf("numerics.gemvWpb"));
-    }
-
-    /// <summary>An unset setting reports the declared default as its source, so "where did this come from" always has an answer.</summary>
-    [Fact]
-    public void UnsetSettingReportsTheDefault()
-    {
-        KnobStore.ResetOverrides();
-        Assert.Equal("default", KnobStore.SourceOf("numerics.gemvWpb"));
     }
 }

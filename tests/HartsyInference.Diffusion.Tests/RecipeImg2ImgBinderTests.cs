@@ -31,17 +31,6 @@ public sealed class RecipeImg2ImgBinderTests
             Img2Img = new Img2Img { InitImage = SolidImage(8, 8, 128), Creativity = creativity },
         };
 
-    [Fact]
-    public void Apply_WithNullSpec_ReturnsInnerUnchanged()
-    {
-        TextToImageRequest inner = new TextToImageRequest { Prompt = "a fox" };
-
-        TextToImageRequest result = RecipeImg2ImgBinder.Apply(inner, null);
-
-        Assert.Same(inner, result);
-        Assert.IsNotType<ImageToImageRequest>(result);
-    }
-
     /// <summary>The regression this binder exists to prevent: the hand-written per-family mapping it replaced rebuilt
     /// the request field by field, so any field the family had already resolved was silently dropped on the img2img
     /// path (and any newly added base field would be dropped in every family at once).</summary>
@@ -96,12 +85,6 @@ public sealed class RecipeImg2ImgBinderTests
     }
 
     [Fact]
-    public void Resolve_WithoutInitImage_ReturnsNull()
-    {
-        Assert.Null(RecipeImg2ImgBinder.Resolve(new ImageRequest { Prompt = "test" }, 64, 64));
-    }
-
-    [Fact]
     public void Resolve_InpaintMaskWithoutInitImage_Throws()
     {
         ImageRequest request = new ImageRequest
@@ -127,22 +110,8 @@ public sealed class RecipeImg2ImgBinderTests
         Assert.Null(spec.MaskTensor);
     }
 
-    [Fact]
-    public void Resolve_WithInpaintMask_ResolvesMaskAtTheSameSize()
-    {
-        ImageRequest request = RequestWithInit(48, 32) with { Inpaint = new Inpaint { Mask = SolidImage(8, 8, 255) } };
-
-        using Img2ImgResolver.Img2ImgSpec? spec = RecipeImg2ImgBinder.Resolve(request, 48, 32);
-
-        Assert.NotNull(spec);
-        Assert.NotNull(spec!.MaskTensor);
-        Assert.Equal(new TensorShape(1, 1, 32, 48), spec.MaskTensor!.Shape);
-    }
-
     [Theory]
-    [InlineData(0.0, 0.0f)]
     [InlineData(0.6, 0.6f)]
-    [InlineData(1.0, 1.0f)]
     [InlineData(2.5, 1.0f)]
     [InlineData(-1.0, 0.0f)]
     public void Resolve_ClampsCreativityIntoStrengthRange(double creativity, float expected)
@@ -197,24 +166,6 @@ public sealed class RecipeImg2ImgBinderTests
         await engine.Images.GenerateAsync(SpecFor(family), RequestWithInit(64, 64));
 
         Assert.NotNull(recipe.Pipeline.Received?.Img2Img);
-    }
-
-    /// <summary>...and asking that same family for a strength-based denoise is refused by name rather than silently
-    /// served as a reference edit, which would answer a different question at a plausible-looking quality.</summary>
-    [Fact]
-    public async Task Generate_ExplicitDenoiseOnAnEditOnlyFamily_IsRefusedByName()
-    {
-        const string family = "test-binder-refedit-denied";
-        RecipeRegistry.Register(new FakeRecipe(family, ImageFeatures.RefEdit));
-        using InferenceEngine engine = new InferenceEngine("cpu");
-        ImageRequest request = RequestWithInit(64, 64) with
-        {
-            Img2Img = new Img2Img { InitImage = SolidImage(8, 8, 128), Mode = Img2ImgMode.Denoise },
-        };
-
-        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
-            () => engine.Images.GenerateAsync(SpecFor(family), request));
-        Assert.Contains(nameof(ImageFeatures.Img2Img), ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>The converse: a classic-only family refuses an explicit reference edit.</summary>

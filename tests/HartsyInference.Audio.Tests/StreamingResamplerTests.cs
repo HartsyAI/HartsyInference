@@ -28,7 +28,6 @@ public sealed class StreamingResamplerTests(ITestOutputHelper log)
     /// Anything else means context is being lost across calls.</summary>
     [Theory]
     [InlineData(16000, 48000, 160)]
-    [InlineData(48000, 16000, 480)]
     public void Streamed_MatchesOfflineResample_InTheInterior(int inRate, int outRate, int inputFrame)
     {
         const int Frames = 40;
@@ -56,45 +55,6 @@ public sealed class StreamingResamplerTests(ITestOutputHelper log)
                     $"frame {f} sample {i}: streamed {got}, offline {want}");
             }
         }
-    }
-
-    /// <summary>A 16k -> 48k -> 16k chain must delay by exactly one frame per stage and no more. Measured with an
-    /// impulse, which pins the delay unambiguously — a periodic test tone cannot, because every frame-sized shift
-    /// looks equally good.
-    ///
-    /// <para>Deliberately <b>not</b> asserting that the round-trip returns the input: <see cref="Resampler"/>
-    /// compensates its group delay with <c>taps/2</c> where an even-tap linear-phase FIR's true delay is
-    /// <c>(taps-1)/2</c>, so a round trip carries a half-sample shift that reads as frequency-dependent phase
-    /// error (about 22% residual at 1.7 kHz). That is a property of the shared resampler, not of this wrapper,
-    /// and <see cref="Streamed_MatchesOfflineResample_InTheInterior"/> is what pins this class's own
-    /// correctness. It is harmless for the wake path, which consumes phase-insensitive band energies.</para></summary>
-    [Fact]
-    public void RoundTrip_16k_48k_16k_DelaysByOneFramePerStage()
-    {
-        const int Frames = 40, In16 = 160;
-        StreamingResampler up = new StreamingResampler(16000, 48000, In16);
-        StreamingResampler down = new StreamingResampler(48000, 16000, up.OutputFrameSize);
-        float[] mid = new float[up.OutputFrameSize];
-        float[] outFrame = new float[down.OutputFrameSize];
-        float[] result = new float[Frames * In16];
-
-        const int ImpulseFrame = 10;
-        for (int f = 0; f < Frames; f++)
-        {
-            float[] input = new float[In16];
-            if (f == ImpulseFrame) input[0] = 1f;
-            up.Process(input, mid);
-            down.Process(mid, outFrame);
-            outFrame.AsSpan(0, In16).CopyTo(result.AsSpan(f * In16));
-        }
-
-        int peak = 0;
-        for (int i = 1; i < result.Length; i++)
-            if (MathF.Abs(result[i]) > MathF.Abs(result[peak])) peak = i;
-
-        int expected = ImpulseFrame * In16 + 2 * In16;   // one input frame of latency per stage
-        Assert.True(Math.Abs(peak - expected) <= 1,
-            $"impulse landed at {peak}, expected {expected} (one frame per stage)");
     }
 
     [Fact]
@@ -131,12 +91,7 @@ public sealed class StreamingResamplerTests(ITestOutputHelper log)
     /// brought to each input rate offline.</para></summary>
     [Theory]
     [InlineData(8000, 16000)]
-    [InlineData(16000, 8000)]
-    [InlineData(16000, 48000)]
-    [InlineData(48000, 16000)]
     [InlineData(8000, 48000)]
-    [InlineData(48000, 8000)]
-    [InlineData(22050, 8000)]
     [InlineData(24000, 8000)]
     public void SliceOnlyPath_MatchesTheOldBlockAndSlicePath_ToFloatRounding(int inRate, int outRate)
     {

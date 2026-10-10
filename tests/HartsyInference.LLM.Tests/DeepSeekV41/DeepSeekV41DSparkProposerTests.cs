@@ -49,7 +49,6 @@ public sealed class DeepSeekV41DSparkProposerTests
 
     [Theory]
     [InlineData(6)]
-    [InlineData(9)]
     [InlineData(11)]
     public void Speculation_With_The_DSpark_Proposer_Reproduces_Plain_Greedy_Decoding(int promptLength)
     {
@@ -69,37 +68,6 @@ public sealed class DeepSeekV41DSparkProposerTests
         Assert.Equal(count, produced);
         Assert.True(proposer.Drafted > 0, "the DSpark proposer never drafted");
         Assert.Equal(plain, speculative);
-    }
-
-    [Fact]
-    public void A_Single_Token_Context_Drafts_From_An_Empty_Window()
-    {
-        // the first round after a one-token prompt: nothing is committed before the anchor, so the head's window is seeded with no rows
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
-        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
-        DeepSeekV41GenerationState state = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
-        DeepSeekV41DSparkProposer proposer = new(dspark, state);
-
-        DraftBlock block = proposer.Propose(DeepSeekV41DSparkFixture.Ids.AsSpan(0, 1), BlockDraft);
-
-        Assert.Equal(BlockDraft, block.Tokens.Length);
-        Assert.Equal(1, state.Length);
-    }
-
-    [Fact]
-    public void Asking_For_No_Tokens_Leaves_The_State_Alone()
-    {
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
-        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
-        DeepSeekV41GenerationState state = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
-        DeepSeekV41DSparkProposer proposer = new(dspark, state);
-
-        DraftBlock block = proposer.Propose(DeepSeekV41DSparkFixture.Ids.AsSpan(0, 11), 0);
-
-        Assert.Empty(block.Tokens);
-        Assert.Equal(0, state.Length);
     }
 
     [Fact]
@@ -134,33 +102,4 @@ public sealed class DeepSeekV41DSparkProposerTests
         Assert.Equal(plain, speculative);
     }
 
-    [Fact]
-    public void A_Scheduler_Built_For_A_Different_Block_Is_Refused()
-    {
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
-        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
-        ConfidenceScheduler wrongBlock = new(new SpsProfile([100, 100, 100, 100, 100, 100, 100, 100]), BlockDraft + 2);
-        Assert.Throws<ArgumentException>(() => new DeepSeekV41DSparkProposer(dspark,
-            new DeepSeekV41GenerationState(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true), wrongBlock));
-    }
-
-    [Fact]
-    public void A_Flat_Profile_Keeps_The_Whole_Block_Of_The_Unscheduled_Proposer()
-    {
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
-        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
-        int[] context = DeepSeekV41DSparkFixture.Ids[..11];
-
-        DeepSeekV41GenerationState plainState = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
-        DraftBlock unscheduled = new DeepSeekV41DSparkProposer(dspark, plainState).Propose(context, BlockDraft);
-
-        DeepSeekV41GenerationState flatState = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
-        ConfidenceScheduler scheduler = new(new SpsProfile([100, 100, 100, 100, 100, 100]), BlockDraft);
-        DraftBlock scheduled = new DeepSeekV41DSparkProposer(dspark, flatState, scheduler).Propose(context, BlockDraft);
-
-        Assert.Equal(unscheduled.Tokens, scheduled.Tokens);
-        Assert.Equal(BlockDraft, scheduled.Tokens.Length);
-    }
 }

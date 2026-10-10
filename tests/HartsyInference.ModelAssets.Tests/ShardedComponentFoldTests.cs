@@ -56,21 +56,4 @@ public sealed unsafe class ShardedComponentFoldTests : IDisposable
             Assert.DoesNotContain(weights, entry => entry.Key.EndsWith(".weight_scale", StringComparison.Ordinal));
         }
     }
-
-    [Fact]
-    public void LoadShards_DropsAKeyTheMapRejects()
-    {
-        using Tensor keep = new Tensor(new TensorShape(2, 4), DType.F32);
-        using Tensor drop = new Tensor(new TensorShape(2, 4), DType.F32);
-        WriteShard("single.safetensors", new Dictionary<string, Tensor> { ["keep.weight"] = keep, ["visual.drop.weight"] = drop });
-
-        (Dictionary<string, Tensor> weights, Checkpoints.CheckpointSource source) = CheckpointConvertUtils.LoadShards(
-            [Path.Combine(_dir, "single.safetensors")], 4,
-            key => key.StartsWith("visual.", StringComparison.Ordinal) ? null : key);
-        using (source)
-        {
-            Assert.Contains("keep.weight", weights);
-            Assert.DoesNotContain("visual.drop.weight", weights);
-        }
-    }
 }

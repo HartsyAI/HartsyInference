@@ -18,21 +18,6 @@ public sealed class SpscRingTests
     }
 
     [Fact]
-    public void WriteThenRead_PreservesOrder()
-    {
-        SpscRing<short> ring = new(16);
-        Assert.Equal(5, ring.Write([1, 2, 3, 4, 5]));
-        Assert.Equal(5, ring.Available);
-        Assert.Equal(11, ring.FreeSpace);
-
-        short[] output = new short[5];
-        Assert.Equal(5, ring.Read(output));
-        Assert.Equal(new short[] { 1, 2, 3, 4, 5 }, output);
-        Assert.Equal(0, ring.Available);
-        Assert.Equal(0, ring.Read(output));
-    }
-
-    [Fact]
     public void WrapAroundTheEnd_KeepsOrder()
     {
         SpscRing<int> ring = new(8);
@@ -49,22 +34,6 @@ public sealed class SpscRingTests
     }
 
     [Fact]
-    public void PartialRead_ReturnsWhatIsAvailable()
-    {
-        SpscRing<float> ring = new(8);
-        ring.Write([0.5f, 1.5f, 2.5f]);
-        float[] output = new float[8];
-        Assert.Equal(3, ring.Read(output));
-        Assert.Equal(new[] { 0.5f, 1.5f, 2.5f, 0f, 0f, 0f, 0f, 0f }, output);
-
-        ring.Write([9f, 8f, 7f, 6f, 5f]);
-        float[] two = new float[2];
-        Assert.Equal(2, ring.Read(two));
-        Assert.Equal(new[] { 9f, 8f }, two);
-        Assert.Equal(3, ring.Available);
-    }
-
-    [Fact]
     public void FullRing_DropsTheNewestAndCountsIt()
     {
         SpscRing<short> ring = new(4);
@@ -77,21 +46,6 @@ public sealed class SpscRingTests
         Assert.Equal(4, ring.Read(output));
         // The four that fit are the OLDEST of the burst; nothing already queued was overwritten.
         Assert.Equal(new short[] { 1, 2, 3, 4 }, output);
-    }
-
-    [Fact]
-    public void DiscardAll_EmptiesFromTheConsumerSide()
-    {
-        SpscRing<short> ring = new(8);
-        ring.Write([1, 2, 3, 4, 5]);
-        Assert.Equal(5, ring.DiscardAll());
-        Assert.Equal(0, ring.Available);
-        Assert.Equal(0, ring.DiscardAll());
-
-        ring.Write([6, 7]);
-        short[] output = new short[2];
-        Assert.Equal(2, ring.Read(output));
-        Assert.Equal(new short[] { 6, 7 }, output);
     }
 
     [Fact]

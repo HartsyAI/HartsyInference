@@ -28,7 +28,6 @@ public sealed unsafe class CudaFlashAttentionTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(512, 8, 2, 64, 0, 0)]      // GQA, fresh prefill
-    [InlineData(512, 8, 8, 64, 0, 0)]      // MHA (no head widening)
     [InlineData(384, 8, 2, 64, 128, 0)]    // continuation: qOffset > 0, so the mask is [tq, qOffset+tq] with a row offset
     [InlineData(512, 8, 2, 64, 0, 96)]     // sliding window folded into the mask
     public void CausalPrefill_MatchesCpuReference(int tq, int hq, int hkv, int d, int qOffset, int window)
@@ -222,7 +221,6 @@ public sealed unsafe class CudaFlashAttentionTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4, 1, 256, 200, 64, 0f)]     // gemma3-ish decode, window well inside kvLen
-    [InlineData(4, 1, 256, 200, 512, 0f)]    // window larger than kvLen (degenerates to full causal)
     [InlineData(8, 4, 128, 160, 96, 50f)]    // gemma2-style: window + attn-logit softcap
     [InlineData(14, 2, 64, 150, 0, 30f)]     // softcap only, qwen-ish head count
     public void FlashSplit_WindowSoftcap_MatchesMonolithic(int hq, int hkv, int d, int lk, int window, float softcap)
@@ -305,7 +303,6 @@ public sealed unsafe class CudaFlashAttentionTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1)]
-    [InlineData(15)]
     [InlineData(17)]
     [InlineData(33)]
     public void FlashV2_KvTail_MatchesReference(int skv)

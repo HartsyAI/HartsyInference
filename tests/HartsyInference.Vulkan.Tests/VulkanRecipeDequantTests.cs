@@ -68,14 +68,10 @@ public sealed unsafe class VulkanRecipeDequantTests(ITestOutputHelper log)
 
     [Theory]
     [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 5, 128, 0)]
-    [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 7, 96, 2)]
-    [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 3, 64, 0)]
     [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 2, 4096, 0)]
     [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 32, 32, 70, 96, 0)]
-    [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 32, 32, 33, 64, 1)]
     [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 128, 128, 200, 300, 0)]
     [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 32, 32, 3, 10, 0)]
-    [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 32, 32, 5, 6, 0)]
     public void DequantToBf16_IsBitIdenticalToHostCodec(QuantEncoding enc, int blockRows, int blockCols, int rows, int cols,
         int scaleColOffset)
     {

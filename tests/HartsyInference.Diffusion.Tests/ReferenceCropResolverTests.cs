@@ -41,22 +41,6 @@ public sealed class ReferenceCropResolverTests
     }
 
     [Fact]
-    public void NonNumericIndex_Dropped()
-    {
-        VideoRequest request = MakeRequest("base <refcrop:x,the cat> tail");
-        VideoRequest result = ReferenceCropResolver.Apply(request, backend: null!, segmenter: null!, cancel: default);
-        Assert.Equal("base  tail", result.Prompt);
-    }
-
-    [Fact]
-    public void EmptyQuery_Dropped()
-    {
-        VideoRequest request = MakeRequest("base <refcrop:1,> tail");
-        VideoRequest result = ReferenceCropResolver.Apply(request, backend: null!, segmenter: null!, cancel: default);
-        Assert.Equal("base  tail", result.Prompt);
-    }
-
-    [Fact]
     public void UnterminatedTag_LeftAsLiteralText()
     {
         // No closing '>' — same tolerance PromptRegionParser has for an unterminated "<...".

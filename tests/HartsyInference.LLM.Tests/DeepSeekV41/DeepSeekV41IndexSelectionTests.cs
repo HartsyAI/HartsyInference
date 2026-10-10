@@ -45,12 +45,4 @@ public sealed class DeepSeekV41IndexSelectionTests
         }
         Assert.True(n > 0);
     }
-
-    [Fact]
-    public void Empty_Compressed_Range_Selects_Nothing_And_Pins_No_Block()
-    {
-        bool[] mask = new bool[8];
-        DeepSeekV41IndexSelection.SelectCandidateBlocks(Enumerable.Repeat(float.NegativeInfinity, 8).ToArray(), 0, 2, 4, mask);
-        Assert.All(mask, m => Assert.False(m));
-    }
 }

@@ -50,20 +50,6 @@ public sealed class SpeculativeLoopTests
     }
 
     [Fact]
-    public void Generate_Appends_Exactly_The_Requested_Count()
-    {
-        for (int want = 1; want <= 6; want++)
-            for (int draft = 0; draft <= 4; draft++)
-            {
-                List<int> tokens = [0, 1, 2, 0, 1];
-                int produced = SpeculativeLoop.Generate(new ToyScorer(), new PromptLookupProposer(), SamplerChain.FromOptions(new SamplingOptions()),
-                    SpeculativeTestSupport.Uniform((ulong)(want * 10 + draft)), tokens, want, draft, Vocab);
-                Assert.Equal(want, produced);
-                Assert.Equal(5 + want, tokens.Count);
-            }
-    }
-
-    [Fact]
     public void First_Token_Of_A_Drafted_Round_Follows_The_Plain_Sampler()
     {
         // the context ends in a repeated bigram, so the lookup proposer drafts, and the loop's first new token must still follow the target

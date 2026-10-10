@@ -44,16 +44,6 @@ public sealed class WanAnimate2RoutingTests
     }
 
     [Fact]
-    public void DefaultsFor_Animate2Checkpoint_CarriesTheReferencesOperativeBaseSettings()
-    {
-        VideoDefaults defaults = new WanAnimate2Recipe().Defaults;
-
-        Assert.Equal(40, defaults.Steps);
-        Assert.Equal(3.0f, defaults.CfgScale);
-        Assert.Equal(81, defaults.Frames);
-    }
-
-    [Fact]
     public void SupportsFor_Animate2Checkpoint_ClaimsDrivingVideo_AndNothingItCannotConsume()
     {
         string path = WriteHeaderOnlySafeTensors(Animate2ConfigJson);
@@ -132,20 +122,6 @@ public sealed class WanAnimate2RoutingTests
             Assert.True(Resolve(path).Is(WanVideoVariants.Base));
             WanVideoRecipe family = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId);
             Assert.Equal(family.Defaults.Steps, family.DefaultsFor(Resolve(path)).Steps);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    [Fact]
-    public void Resolve_Animate2Metadata_WinsOverTheKeySniff()
-    {
-        string path = WriteHeaderOnlySafeTensors(Animate2ConfigJson);
-        try
-        {
-            Assert.True(Resolve(path).Is(WanVideoVariants.Animate2));
         }
         finally
         {

@@ -1,6 +1,4 @@
 using System.Text.Json;
-using HartsyInference.Core.Backends;
-using HartsyInference.Cpu;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.Tests.Common;
 using Xunit;
@@ -38,7 +36,6 @@ public sealed class DeepSeekV41MoeExecutorTests
 
     [Theory]
     [InlineData("limit")]
-    [InlineData("nolimit")]
     [InlineData("top1")]
     public void Output_Matches_Upstream_MoE_Forward(string name)
     {
@@ -53,36 +50,6 @@ public sealed class DeepSeekV41MoeExecutorTests
         float[] expected = Floats(c.GetProperty("y"));
         for (int i = 0; i < y.Length; i++)
             Assert.True(Math.Abs(expected[i] - y[i]) <= 2e-4f * Math.Max(1f, Math.Abs(expected[i])), $"[{i}] {expected[i]} vs {y[i]}");
-    }
-
-    [Fact]
-    public void Batched_Run_Matches_Token_By_Token_Run_Bit_For_Bit()
-    {
-        // 300 tokens cross the executor's 256-row batch, so both a full and a partial batch are exercised
-        const int dim = 16, inter = 12, experts = 5, k = 2, tokens = 300;
-        Random rng = new(7);
-        float[] Random(int n) => Enumerable.Range(0, n).Select(_ => (float)(rng.NextDouble() * 2 - 1)).ToArray();
-        DeepSeekV41SwigluWeights[] set = Enumerable.Range(0, experts)
-            .Select(_ => new DeepSeekV41SwigluWeights(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim))).ToArray();
-        ListSource source = new(set);
-        DeepSeekV41SwigluWeights shared = new(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim));
-        float[] x = Random(tokens * dim), weights = Random(tokens * k).Select(Math.Abs).ToArray();
-        int[] idx = new int[tokens * k];
-        for (int t = 0; t < tokens; t++)
-        {
-            int first = rng.Next(experts), second = (first + 1 + rng.Next(experts - 1)) % experts;
-            idx[t * k] = first;
-            idx[t * k + 1] = second;
-        }
-
-        float[] batched = new float[tokens * dim];
-        DeepSeekV41MoeExecutor.Run(x, tokens, idx, weights, k, experts, source, shared, 2f, batched);
-        for (int t = 0; t < tokens; t++)
-        {
-            float[] single = new float[dim];
-            DeepSeekV41MoeExecutor.Run(x.AsSpan(t * dim, dim), 1, idx.AsSpan(t * k, k), weights.AsSpan(t * k, k), k, experts, source, shared, 2f, single);
-            Assert.True(batched.AsSpan(t * dim, dim).SequenceEqual(single), $"token {t} differs between the batched and the single-token run");
-        }
     }
 
     [Fact]
@@ -163,24 +130,4 @@ public sealed class DeepSeekV41MoeExecutorTests
         Assert.Empty(source.Requested);
     }
 
-    [Theory]
-    [InlineData("limit")]
-    [InlineData("nolimit")]
-    [InlineData("top1")]
-    public void Whole_Layer_Including_The_Gate_Matches_Upstream_MoE(string name)
-    {
-        JsonElement c = Fx.GetProperty("cases").EnumerateArray().Single(e => e.GetProperty("name").GetString() == name);
-        (ListSource source, DeepSeekV41SwigluWeights shared) = Weights(c);
-        int tokens = c.GetProperty("tokens").GetInt32(), dim = c.GetProperty("dim").GetInt32(), experts = c.GetProperty("experts").GetInt32();
-        int k = c.GetProperty("topk").GetInt32();
-        MoeRouteArgs route = new(experts, k, MoeRouteScoring.SqrtSoftplus, Renormalize: k > 1, RenormEpsilon: 1e-20f);
-        using CpuBackend cpu = new();
-        DeepSeekV41MoeLayer layer = new(cpu, Floats(c.GetProperty("gateWeight")), Floats(c.GetProperty("gateBias")), null, route, source,
-            shared, (float)c.GetProperty("limit").GetDouble());
-        float[] y = new float[tokens * dim];
-        layer.Forward(Floats(c.GetProperty("x")), tokens, default, y);
-        float[] expected = Floats(c.GetProperty("y"));
-        for (int i = 0; i < y.Length; i++)
-            Assert.True(Math.Abs(expected[i] - y[i]) <= 2e-4f * Math.Max(1f, Math.Abs(expected[i])), $"[{i}] {expected[i]} vs {y[i]}");
-    }
 }

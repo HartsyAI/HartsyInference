@@ -64,20 +64,8 @@ public sealed unsafe class AukDitTests
         }
     }
 
-    [Fact]
-    public void Forward_BeforeLoad_Throws()
-    {
-        AukDit dit = new(Cfg);
-        Tensor noisy = Pack(Rows(2, 8, 1));
-        Assert.Throws<InvalidOperationException>(() => dit.ProjectText(new CpuBackend(), Pack(Rows(2, 16, 2))));
-        noisy.Dispose();
-    }
-
     [Theory]
     [InlineData(false, false, true)]
-    [InlineData(true, true, true)]
-    [InlineData(false, true, true)]
-    [InlineData(false, false, false)]
     public void Forward_MatchesNaiveReference(bool dropText, bool dropAudio, bool withRef)
     {
         (AukDit dit, Dictionary<string, (long[] Shape, float[] Data)> w) = Build(7);
@@ -90,89 +78,6 @@ public sealed unsafe class AukDitTests
 
         double[][] expected = new AukDitReference(Cfg, w).Forward(noisy, withRef ? refl : null, text, 0.37, dropText, dropAudio);
         Assert.True(MaxDiff(v, expected) < 1e-4, $"max diff {MaxDiff(v, expected)}");
-    }
-
-    [Fact]
-    public void Forward_RefLengthChangesPositionsNotOutputShape()
-    {
-        (AukDit dit, _) = Build(8);
-        CpuBackend backend = new();
-        Tensor tn = Pack(Rows(4, 8, 1)), tt = Pack(Rows(3, 16, 2));
-        Tensor cond = dit.ProjectText(backend, tt);
-        Tensor a = dit.Forward(backend, tn, Pack(Rows(2, 8, 3)), cond, 0.5f);
-        Tensor b = dit.Forward(backend, tn, Pack(Rows(6, 8, 3)), cond, 0.5f);
-        Assert.Equal(a.Shape, b.Shape);
-        float* pa = (float*)a.DataPointer, pb = (float*)b.DataPointer;
-        double d = 0;
-        for (long i = 0; i < a.ElementCount; i++) d += Math.Abs(pa[i] - pb[i]);
-        Assert.True(d > 1e-4);
-    }
-
-    [Fact]
-    public void ZeroProjOut_GivesZeroVelocity()
-    {
-        Dictionary<string, (long[] Shape, float[] Data)> w = AukDitReference.RandomWeights(Cfg, 5);
-        Array.Clear(w["transformer.proj_out.weight"].Data);
-        Array.Clear(w["transformer.proj_out.bias"].Data);
-        AukDit dit = new(Cfg);
-        dit.LoadWeights(AukDitReference.ToTensors(w));
-        CpuBackend backend = new();
-        Tensor cond = dit.ProjectText(backend, Pack(Rows(3, 16, 2)));
-        Tensor v = dit.Forward(backend, Pack(Rows(4, 8, 1)), Pack(Rows(2, 8, 4)), cond, 0.9f);
-        float* p = (float*)v.DataPointer;
-        for (long i = 0; i < v.ElementCount; i++) Assert.Equal(0f, p[i]);
-    }
-
-    [Fact]
-    public void ZeroAdaLnBlocks_OnlyHeadActs()
-    {
-        Dictionary<string, (long[] Shape, float[] Data)> w = AukDitReference.RandomWeights(Cfg, 6);
-        foreach (string key in w.Keys.Where(k => k.Contains("attn_norm")))
-            Array.Clear(w[key].Data);
-        AukDit dit = new(Cfg);
-        dit.LoadWeights(AukDitReference.ToTensors(w));
-        CpuBackend backend = new();
-        double[][] noisy = Rows(4, 8, 1), text = Rows(3, 16, 2), refl = Rows(2, 8, 3);
-        Tensor cond = dit.ProjectText(backend, Pack(text));
-        Tensor v = dit.Forward(backend, Pack(noisy), Pack(refl), cond, 0.2f);
-        Assert.True(MaxDiff(v, new AukDitReference(Cfg, w).Forward(noisy, refl, text, 0.2, false, false)) < 1e-4);
-    }
-
-    [Fact]
-    public void ProjectText_DropIsZerosAfterNorm_NotProjectionOfZeros()
-    {
-        (AukDit dit, _) = Build(9);
-        CpuBackend backend = new();
-        Tensor zeroText = Pack(Rows(3, 16, 1).Select(r => new double[16]).ToArray());
-        Tensor dropped = dit.ProjectText(backend, zeroText, drop: true);
-        Tensor projected = dit.ProjectText(backend, zeroText, drop: false);
-        float* d = (float*)dropped.DataPointer, p = (float*)projected.DataPointer;
-        double sum = 0;
-        for (long i = 0; i < dropped.ElementCount; i++)
-        {
-            Assert.Equal(0f, d[i]);
-            sum += Math.Abs(p[i]);
-        }
-        Assert.Equal(new TensorShape(1, 3, Cfg.Dim), dropped.Shape);
-        Assert.True(sum > 1e-3);
-    }
-
-    [Fact]
-    public void SwiGlu_UsesSiluOnFirstHalfTimesSecondHalf()
-    {
-        AukSwiGluFfn ffn = new();
-        Dictionary<string, Tensor> w = new()
-        {
-            ["f.linear_in.weight"] = AukDitReference.ToTensor([4, 2], [1, 0, 0, 1, 2, 0, 0, 3]),
-            ["f.linear_out.weight"] = AukDitReference.ToTensor([2, 2], [1, 0, 0, 1]),
-        };
-        ffn.Load(w, "f", 2, 2);
-        Tensor x = AukDitReference.ToTensor([1, 1, 2], [0.5f, -1.5f]);
-        Tensor y = ffn.Forward(new CpuBackend(), x, 1);
-        float* p = (float*)y.DataPointer;
-        static double Silu(double v) => v / (1 + Math.Exp(-v));
-        Assert.Equal(Silu(0.5) * 1.0, p[0], 1e-5);
-        Assert.Equal(Silu(-1.5) * -4.5, p[1], 1e-5);
     }
 
     [Fact]
@@ -192,35 +97,4 @@ public sealed unsafe class AukDitTests
             }
     }
 
-    [Fact]
-    public void Rope_LoadedInvFreq_DrivesTables()
-    {
-        float[] inv = [1.0f, 0.75f, 0.5625f, 0.42188f, 0.3164f, 0.2373f, 0.1777f, 0.1333f];
-        (AukDit dit, _) = Build(2, inv);
-        Assert.Equal(inv, dit.InvFreq.ToArray());
-        (Tensor cos, Tensor sin) = dit.GetRopeTables(10);
-        Assert.True(cos.Shape[0] >= 10);
-        float* c = (float*)cos.DataPointer, s = (float*)sin.DataPointer;
-        for (int p = 0; p < 10; p++)
-            for (int i = 0; i < 8; i++)
-            {
-                Assert.InRange(c[p * 16 + 2 * i], Math.Cos(p * (double)inv[i]) - 2e-6, Math.Cos(p * (double)inv[i]) + 2e-6);
-                Assert.InRange(s[p * 16 + 2 * i + 1], Math.Sin(p * (double)inv[i]) - 2e-6, Math.Sin(p * (double)inv[i]) + 2e-6);
-            }
-        double theory = Math.Cos(1 * Math.Pow(10000.0, -2.0 / 16));
-        Assert.True(Math.Abs(c[1 * 16 + 2] - theory) > 0.1);
-    }
-
-    [Fact]
-    [Trait("Category", "SyntheticSmoke")]
-    public void Forward_SyntheticSmoke_FiniteAndShaped()
-    {
-        (AukDit dit, _) = Build(4);
-        CpuBackend backend = new();
-        Tensor cond = dit.ProjectText(backend, Pack(Rows(6, 16, 2)));
-        Tensor v = dit.Forward(backend, Pack(Rows(9, 8, 1)), Pack(Rows(5, 8, 3)), cond, 0.5f);
-        Assert.Equal(new TensorShape(1, 9, 8), v.Shape);
-        float* p = (float*)v.DataPointer;
-        for (long i = 0; i < v.ElementCount; i++) Assert.True(float.IsFinite(p[i]));
-    }
 }

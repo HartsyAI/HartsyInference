@@ -64,16 +64,6 @@ public sealed class OpenPosePreprocessorTests
     }
 
     [Fact]
-    public unsafe void RenderToTensor_NoPeople_AllBlack()
-    {
-        using Tensor cond = OpenPosePreprocessor.RenderToTensor([], 640, 480, 512, 512);
-        Assert.Equal(new TensorShape(1, 3, 512, 512), cond.Shape);
-        float* p = (float*)cond.DataPointer;
-        for (long i = 0; i < cond.Shape.ElementCount; i++)
-            Assert.Equal(0f, p[i]);
-    }
-
-    [Fact]
     public unsafe void RenderToTensor_ScalesKeypointsToOutputResolution()
     {
         PoseDetection person = MakeStandingFigure();

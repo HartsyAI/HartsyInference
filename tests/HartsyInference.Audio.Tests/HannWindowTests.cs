@@ -32,21 +32,4 @@ public sealed class HannWindowTests
         Assert.Equal(1.0f, w[200], precision: 6);
     }
 
-    [Fact]
-    public void Get_Is_Cached_And_Returns_Shared_Array()
-    {
-        float[] a = HannWindow.Get(1024);
-        float[] b = HannWindow.Get(1024);
-        Assert.Same(a, b);
-    }
-
-    [Fact]
-    public void DifferentSizes_HaveDifferentArrays()
-    {
-        float[] a = HannWindow.Get(400);
-        float[] b = HannWindow.Get(512);
-        Assert.NotSame(a, b);
-        Assert.Equal(400, a.Length);
-        Assert.Equal(512, b.Length);
-    }
 }

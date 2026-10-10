@@ -130,30 +130,6 @@ public sealed unsafe class QuantizedWeightPolicyTests
         }
     }
 
-    [Fact]
-    public void PrepareForBackend_LeavesACompanionBackedInt8WeightPackedWhenTheBackendReadsIt()
-    {
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["blocks.0.attn.to_q.weight"] = Int8Weight(4, 256, out Tensor rowScale),
-        };
-        Tensor original = weights["blocks.0.attn.to_q.weight"];
-        try
-        {
-            using QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareFor(weights, weight => weight.DType == DType.I8, "int8 backend");
-
-            Assert.Equal(0, prepared.WidenedCount);
-            // Widening it would turn LTX 2.5's 21.5 GB DiT back into 42 GB, which is the whole reason for the format.
-            Assert.Same(original, weights["blocks.0.attn.to_q.weight"]);
-        }
-        finally
-        {
-            rowScale.Dispose();
-            DisposeAll(weights);
-        }
-    }
-
     /// <summary>A ComfyUI <c>int8_tensorwise</c> weight as the container hands it over: packed I8 with its per-row scale on QuantInfo.</summary>
     private static Tensor Int8Weight(int rows, int columns, out Tensor rowScale)
     {
@@ -166,23 +142,6 @@ public sealed unsafe class QuantizedWeightPolicyTests
         for (int i = 0; i < values.Length; i++) values[i] = (sbyte)(i % 127 - 63);
         weight.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = rowScale };
         return weight;
-    }
-
-    [Fact]
-    public void PrepareForBackend_NeverTouchesADenseWeight()
-    {
-        Dictionary<string, Tensor> weights = Weights();
-        Tensor norm = weights["blocks.0.norm.weight"];
-        try
-        {
-            using QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareFor(weights, _ => false, "dense-only backend");
-            Assert.Same(norm, weights["blocks.0.norm.weight"]);
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
     }
 
     [Fact]

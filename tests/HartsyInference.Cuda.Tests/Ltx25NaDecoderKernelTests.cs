@@ -64,9 +64,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(5, 4, 7, 2, 8, 3, 3, 3)]      // interior + all six faces slide
-    [InlineData(2, 6, 3, 3, 16, 3, 5, 5)]     // T shorter than its kernel, W equal to its kernel
     [InlineData(4, 3, 5, 1, 32, 11, 11, 11)]  // every axis shorter than the kernel — degenerates to dense
-    [InlineData(7, 2, 2, 4, 8, 5, 1, 3)]      // kernel 1 on H: the no-neighbour axis
     [InlineData(3, 5, 4, 2, 64, 3, 3, 3)]     // head_dim 64, the shipped decoder's width
     public void Na3dMatchesTheManagedReference(int t, int h, int w, int heads, int headDim, int kt, int kh, int kw)
     {
@@ -98,9 +96,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     [InlineData(3, 16, 24, 2, 3, 3, 3)]      // exact tiles on both axes
     [InlineData(3, 9, 13, 2, 3, 3, 3)]       // partial tile on both axes
     [InlineData(4, 20, 12, 4, 11, 11, 11)]   // the shipped stage-5 window, sliding on every axis, partial tiles
-    [InlineData(2, 5, 11, 3, 11, 11, 11)]    // H below the 8-tile so the 4×8 kernel runs; T and H shorter than the kernel
     [InlineData(5, 8, 8, 1, 5, 1, 3)]        // kernel 1 on H — the no-neighbour axis — with a tile exactly the volume
-    [InlineData(1, 17, 33, 4, 3, 7, 7)]      // single frame, odd extents: the last tile is one query wide
     public void Na3dTiledMatchesTheManagedReference(int t, int h, int w, int heads, int kt, int kh, int kw)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }

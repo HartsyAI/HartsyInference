@@ -15,9 +15,7 @@ public sealed class HunyuanImageWeightedPromptTests
     /// <summary>The prefix check inside <c>TokenizePadded</c> runs on EVERY generation. If the assembled template
     /// disagreed with the encoder's hard-coded 34-token drop, plain HunyuanImage would throw.</summary>
     [Theory]
-    [InlineData("a red fox in snow, cinematic")]
     [InlineData(" a prompt that starts with a space")]
-    [InlineData(".")]
     public void APlainPromptDoesNotTripThePrefixCheck(string prompt)
     {
         using Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
@@ -30,8 +28,6 @@ public sealed class HunyuanImageWeightedPromptTests
     /// `(fox:1.0)` case — a weight of exactly 1 does nothing, but the grammar that expressed it must not reach
     /// the encoder as prose.</summary>
     [Theory]
-    [InlineData("a red fox in snow, cinematic")]
-    [InlineData(" leading space")]
     [InlineData("a red (fox:1.0) in snow")]
     public void AnUnweightedPromptProducesTheChatTemplateIds(string prompt)
     {

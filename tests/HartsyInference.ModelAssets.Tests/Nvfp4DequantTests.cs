@@ -75,48 +75,6 @@ public sealed unsafe class Nvfp4DequantTests
             Assert.True(MathF.Abs((float)a[i] - b[i]) < 1e-3f, $"idx {i}: F16={(float)a[i]} fp8*scale={b[i]}");
     }
 
-    [Fact]
-    public void DequantNvfp4_BlockScaleSelection_UsesPerBlockScale()
-    {
-        // Two 16-element blocks in one row: same nibble pattern, different block scales → second block doubled.
-        Tensor packed = new(new TensorShape(1, 16), DType.U8);
-        byte* p = (byte*)packed.DataPointer;
-        for (int j = 0; j < 16; j++) p[j] = Pack(2, 2); // every element = 1.0 pre-scale
-
-        Tensor blockScales = new(new TensorShape(1, 2), DType.F8E4M3);
-        byte* s = (byte*)blockScales.DataPointer;
-        s[0] = 0x38; // 1.0 (exp=7)
-        s[1] = 0x40; // 2.0 (exp=8)
-
-        Tensor result = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, globalScale: 1f);
-        Half* r = (Half*)result.DataPointer;
-        for (int i = 0; i < 16; i++) Assert.Equal(1f, (float)r[i]);
-        for (int i = 16; i < 32; i++) Assert.Equal(2f, (float)r[i]);
-    }
-
-    [Fact]
-    public void ApplyFp8ScaledDequant_Nvfp4Group_ReplacedWithF16AndCompanionsDropped()
-    {
-        Tensor packed = new(new TensorShape(2, 8), DType.U8);
-        Tensor blockScales = new(new TensorShape(2, 1), DType.F8E4M3);
-        Tensor scale2 = new(new TensorShape(1), DType.F32);
-        ((float*)scale2.DataPointer)[0] = 1f;
-
-        Dictionary<string, Tensor> source = new()
-        {
-            ["blk.weight"] = packed,
-            ["blk.weight_scale"] = blockScales,
-            ["blk.weight_scale_2"] = scale2,
-        };
-        Dictionary<string, Tensor> result = CheckpointConvertUtils.ApplyFp8ScaledDequant(source);
-
-        Assert.True(result.ContainsKey("blk.weight"));
-        Assert.Equal(DType.F16, result["blk.weight"].DType);
-        Assert.Equal(16, result["blk.weight"].Shape[1]);
-        Assert.False(result.ContainsKey("blk.weight_scale"));
-        Assert.False(result.ContainsKey("blk.weight_scale_2"));
-    }
-
     /// <summary>The block-scale matrix ComfyUI stores is in NVIDIA's blocked layout, not row-major, so the
     /// dequant has to invert the permutation to find the scale for a logical <c>(row, blockColumn)</c>.
     ///

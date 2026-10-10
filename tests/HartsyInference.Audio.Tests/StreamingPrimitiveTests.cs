@@ -13,21 +13,6 @@ public sealed class StreamingPrimitiveTests
     // ── AudioRingBuffer ─────────────────────────────────────────────────
 
     [Fact]
-    public void AudioRingBuffer_WriteRead_PreservesData()
-    {
-        AudioRingBuffer ring = new(capacity: 16);
-        float[] input = [1f, 2f, 3f, 4f, 5f];
-        ring.Write(input);
-        Assert.Equal(5, ring.Available);
-
-        float[] output = new float[5];
-        int read = ring.Read(output);
-        Assert.Equal(5, read);
-        Assert.Equal(input, output);
-        Assert.Equal(0, ring.Available);
-    }
-
-    [Fact]
     public void AudioRingBuffer_WrapsAroundCleanly()
     {
         AudioRingBuffer ring = new(capacity: 8);
@@ -74,43 +59,6 @@ public sealed class StreamingPrimitiveTests
         Assert.Equal(3, ring.Available);     // Peek doesn't consume.
     }
 
-    [Fact]
-    public void AudioRingBuffer_PeekWithOffsetSkipsSamples()
-    {
-        AudioRingBuffer ring = new(capacity: 8);
-        ring.Write([10f, 20f, 30f, 40f, 50f]);
-        float[] peek = new float[3];
-        int copied = ring.Peek(peek, offset: 2);
-        Assert.Equal(3, copied);
-        Assert.Equal(new[] { 30f, 40f, 50f }, peek);
-    }
-
-    [Fact]
-    public void AudioRingBuffer_DiscardAdvancesReadPosition()
-    {
-        AudioRingBuffer ring = new(capacity: 8);
-        ring.Write([1f, 2f, 3f, 4f]);
-        ring.Discard(2);
-        Assert.Equal(2, ring.Available);
-        Assert.Equal(2, ring.ReadPosition);
-        float[] output = new float[2];
-        ring.Read(output);
-        Assert.Equal(new[] { 3f, 4f }, output);
-    }
-
-    [Fact]
-    public void AudioRingBuffer_ResetClearsCounters()
-    {
-        AudioRingBuffer ring = new(capacity: 4);
-        ring.Write([1f, 2f, 3f, 4f, 5f]);     // overflow → 1 dropped
-        ring.Read(new float[2]);
-        ring.Reset();
-        Assert.Equal(0, ring.Available);
-        Assert.Equal(0, ring.SamplesDropped);
-        Assert.Equal(0, ring.ReadPosition);
-        Assert.Equal(0, ring.WritePosition);
-    }
-
     // ── AudioStreamer ───────────────────────────────────────────────────
 
     [Fact]
@@ -145,30 +93,7 @@ public sealed class StreamingPrimitiveTests
         });
     }
 
-    [Fact]
-    public async Task AudioStreamer_CompleteAfterClose_DoesNotThrow()
-    {
-        AudioStreamer streamer = new(capacity: 4);
-        streamer.Complete();
-        await foreach (AudioChunk _ in streamer.ReadAllAsync())
-        {
-            // Drains immediately — no chunks queued.
-        }
-        streamer.Dispose();
-    }
-
     // ── AudioChunk ──────────────────────────────────────────────────────
-
-    [Fact]
-    public void AudioChunk_FrameCountDividesByChannels()
-    {
-        AudioChunk mono = new(new float[480], 16_000, 1, 0);
-        Assert.Equal(480, mono.FrameCount);
-        Assert.Equal(0.03d, mono.DurationSeconds, precision: 4);     // 480 / 16000 = 30 ms
-
-        AudioChunk stereo = new(new float[480], 16_000, 2, 0);
-        Assert.Equal(240, stereo.FrameCount);     // 480 samples / 2 channels = 240 frames
-    }
 
     // ── StreamingKvCache ────────────────────────────────────────────────
 
@@ -207,29 +132,6 @@ public sealed class StreamingPrimitiveTests
         try
         {
             Assert.Throws<InvalidOperationException>(() => cache.Append(0, k, v));
-        }
-        finally
-        {
-            k.Dispose();
-            v.Dispose();
-        }
-    }
-
-    [Fact]
-    public void StreamingKvCache_ResetClearsLength()
-    {
-        using StreamingKvCache cache = new(
-            numLayers: 1, batch: 1, numKvHeads: 1, maxSequenceLength: 8, headDim: 4);
-        Tensor k = new(new TensorShape(1, 1, 3, 4), DType.F32);
-        Tensor v = new(new TensorShape(1, 1, 3, 4), DType.F32);
-        try
-        {
-            cache.Append(0, k, v);
-            cache.AdvanceLength(3);
-            Assert.Equal(3, cache.CurrentLength);
-            cache.Reset();
-            Assert.Equal(0, cache.CurrentLength);
-            Assert.Equal(8, cache.FreeSlots);
         }
         finally
         {

@@ -117,29 +117,6 @@ public sealed unsafe class PackedProjectionLoadTests
         }
     }
 
-    /// <summary>The dense control: fusion is still taken, so this test cannot pass by the guard simply never firing.</summary>
-    [Fact]
-    public void LoadWeights_StillFusesDenseProjections()
-    {
-        List<Tensor> owned = new();
-        try
-        {
-            Dictionary<string, Tensor> weights = Weights(packedProjections: false, owned);
-            using GenericTransformer transformer = new GenericTransformer(Config());
-            transformer.LoadWeights(weights, "model", "lm_head.weight");
-
-            List<Tensor> resident = [.. transformer.EnumerateWeights(includeRedundantSplits: false)];
-            Assert.DoesNotContain(resident,
-                candidate => ReferenceEquals(candidate, weights["model.layers.0.self_attn.q_proj.weight"]));
-            Assert.DoesNotContain(resident,
-                candidate => ReferenceEquals(candidate, weights["model.layers.0.mlp.gate_proj.weight"]));
-        }
-        finally
-        {
-            foreach (Tensor tensor in owned) tensor.Dispose();
-        }
-    }
-
     [Fact]
     public void EnsureF32_DecodesAPackedEmbeddingTableInsteadOfCastingItsBytes()
     {

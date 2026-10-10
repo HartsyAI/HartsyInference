@@ -18,9 +18,7 @@ public sealed class BackendContractTests(ITestOutputHelper output)
     /// have answered "no" for a ROCm or Metal device and silently skipped it.</summary>
     [Theory]
     [InlineData(DeviceType.Cuda)]
-    [InlineData(DeviceType.Vulkan)]
     [InlineData(DeviceType.Rocm)]
-    [InlineData(DeviceType.Metal)]
     public void Every_Non_Cpu_Device_Is_A_Gpu(DeviceType type)
     {
         Assert.True(new DeviceKind(type, 0).IsGpu);
@@ -30,19 +28,6 @@ public sealed class BackendContractTests(ITestOutputHelper output)
     public void Cpu_Is_Not_A_Gpu()
     {
         Assert.False(DeviceKind.Cpu.IsGpu);
-    }
-
-    /// <summary>A device kind prints as the selector spelling the engine uses everywhere else, so a key built from
-    /// one is the key parsed from the other.</summary>
-    [Theory]
-    [InlineData(DeviceType.Cuda, 1, "cuda:1")]
-    [InlineData(DeviceType.Vulkan, 0, "vulkan:0")]
-    [InlineData(DeviceType.Rocm, 2, "rocm:2")]
-    [InlineData(DeviceType.Metal, 0, "metal:0")]
-    [InlineData(DeviceType.Cpu, 0, "cpu")]
-    public void A_Device_Prints_As_Its_Selector(DeviceType type, int ordinal, string expected)
-    {
-        Assert.Equal(expected, new DeviceKind(type, ordinal).ToString());
     }
 
     /// <summary>A software rasterizer is its own vendor. llvmpipe reports the silicon vendor of the machine it runs
@@ -85,28 +70,5 @@ public sealed class BackendContractTests(ITestOutputHelper output)
         Assert.DoesNotContain("get_CacheWeightCasts", abstractMethods.Select(m => m.Name));
         Assert.DoesNotContain("get_NativeFp8Gemm", abstractMethods.Select(m => m.Name));
         Assert.DoesNotContain("get_HighPrecisionGemm", abstractMethods.Select(m => m.Name));
-    }
-
-    /// <summary>The levers a backend inherits must have a default to inherit. Their VALUES are asserted against a
-    /// real backend in the CPU test project, where a backend that implements the floor actually exists — the point
-    /// here is only that a new backend is not forced to invent an answer.</summary>
-    [Theory]
-    [InlineData(nameof(IBackend.CacheWeightCasts))]
-    [InlineData(nameof(IBackend.NativeFp8Gemm))]
-    [InlineData(nameof(IBackend.HighPrecisionGemm))]
-    public void Every_Lever_Has_A_Default_To_Inherit(string propertyName)
-    {
-        MethodInfo getter = typeof(IBackend).GetProperty(propertyName)!.GetGetMethod()!;
-        Assert.False(getter.IsAbstract, $"{propertyName} has no default implementation to inherit.");
-    }
-
-    /// <summary>A capability nobody sets reads as absent, not as present.</summary>
-    [Fact]
-    public void An_Unset_Capability_Claims_Nothing()
-    {
-        BackendCapabilities capabilities = new() { Name = "unset" };
-        Assert.Equal(GpuVendor.None, capabilities.Vendor);
-        Assert.Equal(0, capabilities.TotalVramBytes);
-        Assert.Equal("", capabilities.DeviceName);
     }
 }

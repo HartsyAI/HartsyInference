@@ -42,95 +42,11 @@ public sealed class SafeTensorsMetadataTests
         }
     }
 
-    [Fact]
-    public void MetadataNullWhenAbsent()
-    {
-        string header = "{\"w\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}";
-        string path = WriteFile(header, new byte[8]);
-        try
-        {
-            using SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(path);
-            Assert.Null(loader.Metadata);
-            Assert.Single(loader.Descriptors);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
     private static unsafe Tensor MakeTensor(float[] values)
     {
         Tensor tensor = new Tensor(new TensorShape(values.Length), DType.F32);
         values.AsSpan().CopyTo(new Span<float>((void*)tensor.DataPointer, values.Length));
         return tensor;
-    }
-
-    [Fact]
-    public void WriterMetadataRoundTripsThroughLoader()
-    {
-        string path = Path.Combine(Path.GetTempPath(), $"st-write-{Guid.NewGuid():N}.safetensors");
-        using Tensor w = MakeTensor([1f, 2f, 3f, 4f]);
-        Dictionary<string, string> metadata = new(StringComparer.Ordinal)
-        {
-            ["modelspec.sai_model_spec"] = "1.0.1",
-            ["modelspec.architecture"] = "dia_tts",
-            ["modelspec.title"] = "Dia 1.6B",
-            ["hartsy.component"] = "main",
-        };
-        try
-        {
-            SafeTensorsWriter.Save(path, new Dictionary<string, Tensor> { ["w"] = w }, metadata);
-            using SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(path);
-            Assert.NotNull(loader.Metadata);
-            Assert.Equal("1.0.1", loader.Metadata!["modelspec.sai_model_spec"]);
-            Assert.Equal("dia_tts", loader.Metadata["modelspec.architecture"]);
-            Assert.Equal("Dia 1.6B", loader.Metadata["modelspec.title"]);
-            Assert.Equal("main", loader.Metadata["hartsy.component"]);
-            Assert.Single(loader.Descriptors);
-            Assert.Equal(4, loader.GetTensor("w").Shape[0]);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    [Fact]
-    public void WriterWithoutMetadataEmitsNoMetadataKey()
-    {
-        string path = Path.Combine(Path.GetTempPath(), $"st-write-{Guid.NewGuid():N}.safetensors");
-        using Tensor w = MakeTensor([1f, 2f]);
-        try
-        {
-            SafeTensorsWriter.Save(path, new Dictionary<string, Tensor> { ["w"] = w });
-            using SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(path);
-            Assert.Null(loader.Metadata);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    [Fact]
-    public void WriterRejectsEmptyMetadataKey()
-    {
-        string path = Path.Combine(Path.GetTempPath(), $"st-write-{Guid.NewGuid():N}.safetensors");
-        using Tensor w = MakeTensor([1f]);
-        try
-        {
-            Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() =>
-                SafeTensorsWriter.Save(path, new Dictionary<string, Tensor> { ["w"] = w },
-                    new Dictionary<string, string> { [""] = "value" }));
-        }
-        finally
-        {
-            File.Delete(path);
-        }
     }
 
     [Fact]

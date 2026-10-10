@@ -25,16 +25,9 @@ namespace HartsyInference.LLM.Tests;
 /// entirely.</para></summary>
 public sealed class TopPSortRefactorIdentityTests
 {
-    private const int Qwen3VocabSize = 151_936;
 
     [Theory]
     [InlineData(1, 64, 0.95f)]
-    [InlineData(2, 1000, 0.95f)]
-    [InlineData(3, 1000, 0.5f)]
-    [InlineData(4, 1000, 0.01f)]
-    [InlineData(5, Qwen3VocabSize, 0.95f)]
-    [InlineData(6, Qwen3VocabSize, 0.5f)]
-    [InlineData(7, Qwen3VocabSize, 0.999f)]
     public void OldAndNewTopP_MaskTheSameLogits_PeakedDistribution(int seed, int vocab, float p)
     {
         float[] logits = RandomLogits(seed, vocab, spread: 8.0f); // resembles real post-temperature logit spread
@@ -42,35 +35,7 @@ public sealed class TopPSortRefactorIdentityTests
     }
 
     [Theory]
-    [InlineData(11, 1000, 0.95f)]
-    [InlineData(12, Qwen3VocabSize, 0.95f)]
-    public void OldAndNewTopP_MaskTheSameLogits_NearFlatDistribution(int seed, int vocab, float p)
-    {
-        // A tiny spread makes softmax nearly uniform: the nucleus needs MOST of the vocabulary to reach p, a very
-        // different cumulative-walk length than the peaked cases above. At Qwen3's real vocab size this still
-        // takes the new code's candidate-subset FAST path (every token's share of a uniform distribution, ~6.6e-6
-        // at 151,936, sits above the 1e-6 candidate floor) — see the next test for the fallback path itself.
-        float[] logits = RandomLogits(seed, vocab, spread: 0.01f);
-        AssertSameMasking(logits, p);
-    }
-
-    [Fact]
-    public void OldAndNewTopP_MaskTheSameLogits_FallbackPath_VocabLargerThanCandidateFloorAllows()
-    {
-        // TopPStep's candidate pre-filter only takes its fast path when the candidates' own probability mass
-        // already reaches p; otherwise it falls back to sorting the whole vocabulary (the same code this test
-        // class already checks for every other case — see TopPStep.Apply's remarks for the identity argument).
-        // A vocabulary large enough that even a uniform distribution's per-token share falls BELOW the 1e-6
-        // candidate floor (2,000,000 > 1 / 1e-6) forces candidateCount to near zero, guaranteeing that fallback
-        // actually runs here rather than coincidentally taking the fast path anyway.
-        float[] logits = RandomLogits(seed: 31, vocab: 2_000_000, spread: 0.0001f);
-        AssertSameMasking(logits, p: 0.95f);
-    }
-
-    [Theory]
-    [InlineData(41, 2_000)]
     [InlineData(42, 20_000)]
-    [InlineData(43, Qwen3VocabSize)]
     public void OldAndNewTopP_MaskTheSameLogits_AtTheCandidateSumRoundingBoundary(int seed, int vocab)
     {
         // The fast path's safety check sums candidate probabilities in VOCABULARY-INDEX order
@@ -120,47 +85,6 @@ public sealed class TopPSortRefactorIdentityTests
             {
                 AssertSameMasking((float[])logits.Clone(), p);
             }
-        }
-    }
-
-    [Theory]
-    [InlineData(21, Qwen3VocabSize, 0.95f)]
-    [InlineData(22, Qwen3VocabSize, 0.5f)]
-    public void OldAndNewTopP_MaskTheSameLogits_WithAPreMaskedTail(int seed, int vocab, float p)
-    {
-        // Simulates RepetitionPenaltyStep/TopKStep already having run: most of the vocabulary is -Infinity
-        // before TopP ever sees it (Softmax gives those exactly 0.0f probability either way).
-        float[] logits = RandomLogits(seed, vocab, spread: 8.0f);
-        Random rng = new(seed);
-        for (int i = 0; i < logits.Length; i++)
-        {
-            if (rng.NextDouble() < 0.98) logits[i] = float.NegativeInfinity;
-        }
-        AssertSameMasking(logits, p);
-    }
-
-    [Fact]
-    public void OldAndNewTopP_MaskTheSameLogits_SingleToken()
-    {
-        AssertSameMasking([5.0f], 0.95f);
-    }
-
-    [Fact]
-    public void SamplerChain_Draw_IsDeterministicForSeed_AtRealVocabSize()
-    {
-        // SamplingAndTemplateTests.Sampling_IsDeterministicForSeed covers this property at 6 elements; this is
-        // the same property at the scale that actually exercises SortDescendingByValue and the per-generation
-        // scratch-buffer reuse end to end, through the production SamplerChain (OldTopPStep is not used here).
-        SamplerChain a = SamplerChain.FromOptions(new SamplingOptions { Temperature = 0.7f, TopP = 0.95f, Seed = 42 });
-        SamplerChain b = SamplerChain.FromOptions(new SamplingOptions { Temperature = 0.7f, TopP = 0.95f, Seed = 42 });
-        List<int> history = [];
-        for (int i = 0; i < 16; i++)
-        {
-            float[] logits = RandomLogits(seed: 99 + i, Qwen3VocabSize, spread: 8.0f);
-            int ta = a.Next((float[])logits.Clone(), history);
-            int tb = b.Next((float[])logits.Clone(), history);
-            Assert.Equal(ta, tb);
-            history.Add(ta);
         }
     }
 

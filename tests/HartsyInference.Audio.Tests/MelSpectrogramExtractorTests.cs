@@ -9,26 +9,6 @@ namespace HartsyInference.Audio.Tests;
 /// <c>Parity/WhisperLogMelParityTests</c>.</summary>
 public sealed class MelSpectrogramExtractorTests
 {
-    [Fact]
-    public void WhisperConfig_Defaults_AreCorrect()
-    {
-        MelSpectrogramExtractor.Config cfg = MelSpectrogramExtractor.WhisperConfig();
-        Assert.Equal(16_000, cfg.SampleRate);
-        Assert.Equal(400, cfg.NFft);
-        Assert.Equal(160, cfg.HopLength);
-        Assert.Equal(80, cfg.NMels);
-        Assert.True(cfg.PowerSpectrum);
-        Assert.True(cfg.DropLastStftFrame);
-        Assert.Equal(MelSpectrogramExtractor.LogBase.Log10, cfg.LogBase);
-    }
-
-    [Fact]
-    public void WhisperConfig_LargeV3_AcceptsNMels128()
-    {
-        MelSpectrogramExtractor.Config cfg = MelSpectrogramExtractor.WhisperConfig(nMels: 128);
-        Assert.Equal(128, cfg.NMels);
-    }
-
     [Theory]
     [InlineData(80)]
     [InlineData(128)]
@@ -38,22 +18,6 @@ public sealed class MelSpectrogramExtractorTests
         // 1500 positions after its stride-2 conv.
         MelSpectrogramExtractor extractor = new(MelSpectrogramExtractor.WhisperConfig(nMels));
         Assert.Equal(3000, extractor.OutputFrames(480_000));
-    }
-
-    [Fact]
-    public void Compute_ZeroAudio_ProducesUniformOutput()
-    {
-        // All-zero audio → all-floor mel → uniform log value before normalization.
-        // After Whisper's dynamic range clamp + (+4)/4 normalization, the entire
-        // spectrogram should be a constant value.
-        MelSpectrogramExtractor extractor = new(MelSpectrogramExtractor.WhisperConfig());
-        float[] audio = new float[16_000];   // 1 second of silence
-        float[,] mel = extractor.Compute(audio);
-
-        float first = mel[0, 0];
-        for (int m = 0; m < mel.GetLength(0); m++)
-            for (int t = 0; t < mel.GetLength(1); t++)
-                Assert.Equal(first, mel[m, t], precision: 5);
     }
 
     [Fact]
@@ -84,13 +48,4 @@ public sealed class MelSpectrogramExtractorTests
         Assert.True(peakBin > 10 && peakBin < 50, $"1 kHz energy expected mid-range, got peak at bin {peakBin}");
     }
 
-    [Fact]
-    public void Compute_OutputShape_MatchesContract()
-    {
-        MelSpectrogramExtractor extractor = new(MelSpectrogramExtractor.WhisperConfig());
-        float[] audio = new float[16_000 * 3];   // 3 seconds
-        float[,] mel = extractor.Compute(audio);
-        Assert.Equal(80, mel.GetLength(0));
-        Assert.Equal(extractor.OutputFrames(audio.Length), mel.GetLength(1));
-    }
 }

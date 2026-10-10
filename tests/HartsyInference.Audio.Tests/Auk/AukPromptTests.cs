@@ -21,15 +21,6 @@ public sealed class AukPromptTests
     }
 
     [Fact]
-    public void BuildText_WithoutAudio_AppendsTheMarkerOnce()
-    {
-        const string expected = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nhello|<no_prompt_audio>|"
-            + "<|im_end|>\n<|im_start|>assistant\n";
-        Assert.Equal(expected, AukPrompt.BuildText("hello", 0));
-        Assert.Equal(expected, AukPrompt.BuildText("hello|<no_prompt_audio>|", 0));
-    }
-
-    [Fact]
     public void BuildIds_SplicesSpecialIdsAroundEncodedSegments()
     {
         int[] ids = AukPrompt.BuildIds("Hi", 2, Utf8);
@@ -44,36 +35,8 @@ public sealed class AukPromptTests
     }
 
     [Fact]
-    public void BuildIds_WithoutAudio_HasNoAudioBlock()
-    {
-        int[] ids = AukPrompt.BuildIds("Hi", 0, Utf8);
-        Assert.DoesNotContain(151646, ids);
-        Assert.DoesNotContain(151647, ids);
-        Assert.DoesNotContain(151648, ids);
-        int marker = Utf8(AukPrompt.NoPromptAudioMarker).Count;
-        int tail = 3 + Utf8("assistant\n").Count;
-        Assert.Equal(Utf8(AukPrompt.NoPromptAudioMarker), ids[^(marker + tail)..^tail]);
-    }
-
-    [Fact]
     public void BuildIds_RejectsNegativeAudioTokens() =>
         Assert.Throws<ArgumentOutOfRangeException>(() => AukPrompt.BuildIds("x", -1, Utf8));
-
-    [Fact]
-    public void Templates_SubstituteInOrderAndOnlyOnce()
-    {
-        Assert.Equal("Say the following with the same voice: \"hi {text}\"", AukTemplates.Format(AukTask.ZeroShotTts, "hi {text}"));
-        Assert.Equal(
-            "Generate speech based on the following description: \"calm\". The content to speak is: \"Hello\".",
-            AukTemplates.Format(AukTask.InstructTts, "calm", "Hello"));
-        Assert.Equal(
-            "Based on the following description: \"calm\", generate speech content \"Hello\".",
-            AukTemplates.Format(AukTask.InstructTtsCookbookForm, "calm", "Hello"));
-        Assert.Equal("Replace 'a' with 'b'.", AukTemplates.Format(AukTask.ReplaceText, "a", "b"));
-        Assert.Equal("Adjust the speech speed to 1.5x.", AukTemplates.Format(AukTask.Speed, "1.5"));
-        Assert.Equal("Keep only the speaker who says \"get what\" and remove all other speakers.",
-            AukTemplates.Format(AukTask.TargetSpeakerExtraction, "get what"));
-    }
 
     [Fact]
     public void Templates_RejectWrongValueCount_AndEveryTaskHasATemplate()

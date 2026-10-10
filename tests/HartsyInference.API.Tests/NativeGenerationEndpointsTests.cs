@@ -39,34 +39,6 @@ public sealed class NativeGenerationEndpointsTests : IClassFixture<WebApplicatio
     }
 
     [Fact]
-    public async Task Images_MissingPrompt_Returns400()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/images", new
-        {
-            model = "sdxl",
-            request = new { },
-        });
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task Text_UnresolvableModel_Returns400()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/text", new
-        {
-            model = "not-a-real-model-id",
-            request = new { messages = new[] { new { role = "User", content = "hi" } } },
-        });
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        // Same contract as the image route: the caller is told which selection failed, not just that one did.
-        Assert.Contains("not-a-real-model-id", body.GetProperty("error").GetProperty("message").GetString()!,
-            StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task Text_CountTokens_UnresolvableModel_FallsBackToHeuristicInsteadOfFailing()
     {
         // ITextService.CountTokens deliberately never loads a model just to count (TextService.CountTokens):

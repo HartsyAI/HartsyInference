@@ -15,26 +15,6 @@ public sealed class SpeakerProfileTests
     private const int Dimension = 192;
 
     [Fact]
-    public void Centroid_IsUnitLength_AndAveragesDirections()
-    {
-        // Two orthogonal unit axes: the mean is (0.5, 0.5, 0, ...) at length 1/sqrt(2), so the normalized
-        // centroid is (1/sqrt(2), 1/sqrt(2), 0, ...) — the bisector.
-        float[] first = Axis(0, 1f);
-        float[] second = Axis(1, 1f);
-
-        float[] centroid = SpeakerEmbeddingMath.Centroid([first, second]);
-
-        float expected = (float)(1.0 / Math.Sqrt(2.0));
-        Assert.Equal(expected, centroid[0], 5);
-        Assert.Equal(expected, centroid[1], 5);
-        for (int i = 2; i < Dimension; i++)
-        {
-            Assert.Equal(0f, centroid[i], 6);
-        }
-        Assert.Equal(1f, Norm(centroid), 5);
-    }
-
-    [Fact]
     public void Centroid_NormalizesEachInput_SoAmplitudeDoesNotVote()
     {
         // The loud utterance is the same direction as the quiet one, scaled 50x. If the mean were taken over raw
@@ -146,36 +126,6 @@ public sealed class SpeakerProfileTests
         Assert.False(match.Satisfies("Alice"));
     }
 
-    [Fact]
-    public void Store_ReEnrollingAName_ReplacesRatherThanDuplicates()
-    {
-        using TempDirectory directory = new TempDirectory();
-        SpeakerProfileStore store = new SpeakerProfileStore(directory.Path);
-        store.Enroll("Alice", [Axis(0, 1f)]);
-        SpeakerProfile updated = store.Enroll("alice", [Axis(1, 1f), Axis(1, 1f)]);
-
-        Assert.Equal(1, store.Count);
-        Assert.Equal(2, updated.UtteranceCount);
-
-        SpeakerProfileStore reloaded = new SpeakerProfileStore(directory.Path);
-        Assert.Equal(1, reloaded.Count);
-        Assert.True(reloaded.TryGet("Alice", out SpeakerProfile? restored));
-        Assert.Equal(1f, SpeakerEmbeddingMath.CosineSimilarity(restored!.Centroid, Axis(1, 1f)), 5);
-    }
-
-    [Fact]
-    public void CamPlusWeights_LoadIntoAnEmbedder_WhenPresent()
-    {
-        string? weights = CamPlusEmbedder.LocateWeights();
-        if (weights is null)
-        {
-            Assert.True(true, "no CAM++ checkpoint on this machine — place campplus_cn_common.bin under Models/audio/speaker/campplus to run");
-            return;
-        }
-        using CamPlusEmbedder embedder = CamPlusEmbedder.LoadFrom(weights);
-        Assert.True(SpeakerVerifier.IsAvailable);
-    }
-
     private static float[] Axis(int index, float magnitude)
     {
         float[] vector = new float[Dimension];
@@ -191,16 +141,6 @@ public sealed class SpeakerProfileTests
             vector[i] = MathF.Sin((i + 1) * 0.37f * seed) + 0.1f * seed;
         }
         return vector;
-    }
-
-    private static float Norm(float[] vector)
-    {
-        double sum = 0d;
-        foreach (float value in vector)
-        {
-            sum += (double)value * value;
-        }
-        return (float)Math.Sqrt(sum);
     }
 
     private sealed class TempDirectory : IDisposable

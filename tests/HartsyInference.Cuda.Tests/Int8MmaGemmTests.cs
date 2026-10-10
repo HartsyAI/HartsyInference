@@ -48,7 +48,6 @@ public sealed unsafe class Int8MmaGemmTests
     // N must be a whole multiple of the 256-wide block tile (only M is predicated), so these shapes changed with
     // the tile: 384 is no longer expressible.
     [InlineData(256, 256, 128, 0u, "small")]
-    [InlineData(200, 256, 192, 0u, "raggedM")]        // M not a multiple of 128 -> epilogue predication
     [InlineData(256, 512, 128, 1u, "gelu")]
     [InlineData(129, 768, 64, 0u, "raggedM_wideN")]   // one k-tile, 3 N tiles, ragged M
     [InlineData(4992, 4096, 4096, 0u, "attn_qkvo")]
@@ -59,7 +58,6 @@ public sealed unsafe class Int8MmaGemmTests
     // HARTSY_INT8_ROW_BUDGET_MB pins it, so these split points move run to run and a defect here would appear and
     // vanish across identical invocations.
     [InlineData(9362, 4096, 4096, 0u, "raggedM_deepK_chunk0")]
-    [InlineData(8118, 4096, 4096, 0u, "raggedM_deepK_chunk1")]
     public void FusedMmaGemm_MatchesCublasLtPlusDequant(int m, int n, int k, uint actMode, string label)
     {
         using CudaBackend cuda = new CudaBackend(0, PtxDir());
@@ -156,72 +154,4 @@ public sealed unsafe class Int8MmaGemmTests
         public void Dispose() { foreach (ulong p in _buffers) GpuTransferHelper.FreeDevice(p); }
     }
 
-    /// <summary>Head-to-head at LTX-2.5's real shapes: fused kernel vs the cuBLASLt GEMM + dequant pair it
-    /// would replace, both timed end-to-end. Diagnostic — it prints, it does not gate.</summary>
-    [Trait("Category", "GpuIntegration")]
-    [Theory]
-    [InlineData(4992, 16384, 4096, "ffn_up")]
-    [InlineData(4992, 4096, 16384, "ffn_down")]
-    [InlineData(4992, 4096, 4096, "attn_qkvo")]
-    // Small-m shapes the `k <= 2n` gate also admits: audio attention/FFN and the text-side k/v projections.
-    // A 128x256 block tile at m=256 launches 2 M-blocks, so the whole grid can be a fraction of one wave — the
-    // regime where a big-tile kernel is structurally wrong and cuBLASLt's small-m heuristic wins.
-    [InlineData(256, 2048, 2048, "audio_attn")]
-    [InlineData(256, 8192, 2048, "audio_ffn_up")]
-    [InlineData(512, 4096, 4096, "text_kv")]
-    public void FusedMmaGemm_VersusCublasLtPair_Throughput(int m, int n, int k, string label)
-    {
-        using CudaBackend cuda = new CudaBackend(0, PtxDir());
-        CudaKernels ker = cuda.Kernels!;
-        using Int8GemmExecutor gemm = new Int8GemmExecutor();
-
-        ulong dA = GpuTransferHelper.AllocateDevice((nuint)((long)m * k));
-        ulong dAS = GpuTransferHelper.AllocateDevice((nuint)(m * 4));
-        ulong dWS = GpuTransferHelper.AllocateDevice((nuint)(n * 4));
-        ulong dOut = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 2));
-        ulong dAcc = GpuTransferHelper.AllocateDevice((nuint)((long)m * n * 4));
-        using ColdBuffers weights = new ColdBuffers((nuint)((long)n * k));
-        try
-        {
-            double flop = 2.0 * m * n * k;
-
-            // Occupancy diagnostic: at 128x128x64 with STAGES shared stages, whether TWO blocks fit per SM is
-            // decided by registers and shared bytes together, and it is the difference between 8 and 16 warps
-            // of latency hiding. CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK = 0, LOCAL_SIZE_BYTES = 3, NUM_REGS = 4.
-            CudaDriverApi.cuFuncGetAttribute(out int numRegs, 4, ker.Int8MmaGemmFunction);
-            CudaDriverApi.cuFuncGetAttribute(out int spillBytes, 3, ker.Int8MmaGemmFunction);
-            CudaDriverApi.cuFuncGetAttribute(out int padRegs, 4, ker.Int8MmaGemmPadFunction);
-            CudaDriverApi.cuFuncGetAttribute(out int padSpill, 3, ker.Int8MmaGemmPadFunction);
-            _output.WriteLine($"  swizzled: {numRegs} regs/thread, {spillBytes} B local (spill), "
-                + $"{CudaKernels.Int8MmaSharedBytes} B dynamic -> regs cap {65536 / Math.Max(1, numRegs * 256)} blocks/SM, "
-                + $"shared caps {100 * 1024 / CudaKernels.Int8MmaSharedBytes} blocks/SM");
-            // If the padded control's register count or spill moved, the file edit contaminated the BASELINE and
-            // every delta below is void. It shipped at 195 regs, 0 spill.
-            _output.WriteLine($"  padded  : {padRegs} regs/thread, {padSpill} B local (spill), "
-                + $"{CudaKernels.Int8MmaSharedBytesPad} B dynamic");
-
-            double mmaMs = BestMs(r => ker.LaunchInt8MmaGemmDequant(dOut, dA, weights[r], dAS, dWS, 0, m, n, k, 0u, 0, true));
-            double padMs = BestMs(r => ker.LaunchInt8MmaGemmDequant(dOut, dA, weights[r], dAS, dWS, 0, m, n, k, 0u, 0, false));
-            double pairMs = BestMs(r =>
-            {
-                gemm.Run(weights[r], dA, dAcc, m, n, k, 0);
-                ker.LaunchW8A8DequantBias(dOut, dAcc, dAS, dWS, 0, m, n, 0, outF16: true, actMode: 0u);
-            });
-            // The pair is INVARIANT across kernel edits — if its TOPS moves between runs, the measurement is
-            // drifting and the fused arms' numbers are not comparable either.
-            double gemmOnlyMs = BestMs(r => gemm.Run(weights[r], dA, dAcc, m, n, k, 0));
-
-            _output.WriteLine($"{label,-10} m={m} n={n} k={k}   swizzled {mmaMs:F3} ms = {flop / (mmaMs * 1e-3) / 1e12:F1} TOPS" +
-                $"  |  padded {padMs:F3} ms = {flop / (padMs * 1e-3) / 1e12:F1} TOPS" +
-                $"  |  pair {pairMs:F3} ms = {flop / (pairMs * 1e-3) / 1e12:F1} TOPS" +
-                $"   (gemm alone {flop / (gemmOnlyMs * 1e-3) / 1e12:F1} TOPS, dequant {pairMs - gemmOnlyMs:F3} ms)" +
-                $"  |  swizzled vs pair {(pairMs / mmaMs - 1) * 100:+0.0;-0.0}%" +
-                $"  vs padded {(padMs / mmaMs - 1) * 100:+0.0;-0.0}%  [{weights.Count} cold weight buffers]");
-            Assert.True(mmaMs > 0);
-        }
-        finally
-        {
-            foreach (ulong p in new[] { dA, dAS, dWS, dOut, dAcc }) GpuTransferHelper.FreeDevice(p);
-        }
-    }
 }

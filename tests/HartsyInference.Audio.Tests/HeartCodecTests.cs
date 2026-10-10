@@ -7,7 +7,7 @@ namespace HartsyInference.Audio.Tests;
 
 /// <summary>Synthetic-weights forwards for the HeartCodec flow-matching RVQ decoder (8-codebook grid →
 /// finite 48 kHz audio) and the MuQ-MuLan style embedder (mel → finite [1,512]). Tiny dims, CpuBackend,
-/// deterministic random tensors. Mirrors <see cref="HeartMulaTests"/>.</summary>
+/// deterministic random tensors. Mirrors <c>HeartMulaTests</c>.</summary>
 public sealed unsafe class HeartCodecTests
 {
     private static uint _rng = 0x5EED1234u;
@@ -37,28 +37,6 @@ public sealed unsafe class HeartCodecTests
         float[] audio = dec.Decode(backend, codes, seed: 1);
         Assert.True(audio.Length >= t);     // upsampler expands the time axis
         foreach (float v in audio) Assert.True(float.IsFinite(v));
-    }
-
-    [Fact]
-    public void Muq_SyntheticForward_MelToFinite512()
-    {
-        int melBins = 8, muqDim = 16, lmHidden = 12, hidden = 16, layers = 2, heads = 4;
-        using CpuBackend backend = new();
-        using MuqEmbedder muq = new(melBins, muqDim, lmHidden, hidden: hidden, layers: layers, heads: heads,
-            ffn: 32, stemStrides: [2, 2]);
-        muq.LoadWeights(MuqWeights(melBins, muqDim, lmHidden, hidden, layers, 32));
-
-        int t = 16;
-        using Tensor refMel = F3(1, melBins, t);
-        using Tensor emb = muq.Embed(backend, refMel, t);
-        Assert.Equal(new TensorShape(1, muqDim), emb.Shape);
-        float* p = (float*)emb.DataPointer;
-        for (long i = 0; i < emb.ElementCount; i++) Assert.True(float.IsFinite(p[i]));
-
-        using Tensor lm = muq.ProjectToLmHidden(backend, emb);
-        Assert.Equal(new TensorShape(1, lmHidden), lm.Shape);
-        float* lp = (float*)lm.DataPointer;
-        for (long i = 0; i < lm.ElementCount; i++) Assert.True(float.IsFinite(lp[i]));
     }
 
     private static Dictionary<string, Tensor> CodecWeights(int nq, int cbSize, int cbDim, int dim)

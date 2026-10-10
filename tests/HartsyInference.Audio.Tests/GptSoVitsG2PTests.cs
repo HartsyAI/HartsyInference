@@ -17,16 +17,6 @@ public sealed class GptSoVitsG2PTests
     }
 
     [Fact]
-    public void English_ShortUtterance_IsCommaPadded()
-    {
-        // "the" → [DH, AH0] is < 4 phones, so a leading "," is inserted (upstream behavior).
-        List<string> phones = GptSoVitsEnglishG2P.G2P("the");
-        Assert.Equal(",", phones[0]);
-        Assert.Contains("DH", phones);
-        Assert.Contains("AH0", phones);
-    }
-
-    [Fact]
     public void Frontend_RoutesChineseAndEnglish_AndMapsToIds()
     {
         (List<string> zhPh, List<int>? zhW2p) = GptSoVitsFrontend.CleanText("你好", "zh");

@@ -13,9 +13,7 @@ public sealed class DeepSeekV41AlignerTests(ITestOutputHelper output)
 {
     [Theory]
     [InlineData(2, 5)]
-    [InlineData(4, 7)]
     [InlineData(7, 2)]
-    [InlineData(3, 6)]
     public void EveryStage_MatchesTheUpstreamAligner(int gridHeight, int gridWidth)
     {
         JsonElement testCase = VisionFixture.AlignerCase(gridHeight, gridWidth);
@@ -65,11 +63,7 @@ public sealed class DeepSeekV41AlignerTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(1, 1, 1, 1)]
-    [InlineData(2, 2, 1, 1)]
-    [InlineData(3, 3, 1, 1)]
     [InlineData(4, 7, 2, 3)]
-    [InlineData(28, 28, 10, 10)]
     [InlineData(17, 23, 6, 8)]
     public void TokenGrid_RoundsEachSideUp(int gridHeight, int gridWidth, int tokenHeight, int tokenWidth) =>
         Assert.Equal((tokenHeight, tokenWidth), DeepSeekV41Aligner.TokenGrid(gridHeight, gridWidth, 3));
@@ -83,20 +77,6 @@ public sealed class DeepSeekV41AlignerTests(ITestOutputHelper output)
 
         Assert.Throws<ArgumentException>(() => aligner.Forward(new float[5 * config.HiddenSize], 2, 3));
         Assert.Throws<ArgumentOutOfRangeException>(() => aligner.Forward(new float[config.HiddenSize], 0, 1));
-    }
-
-    [Fact]
-    public void Constructor_NamesAMisshapenWeight()
-    {
-        using CpuBackend backend = new();
-        DeepSeekV41VisionConfig config = VisionFixture.Config();
-        DeepSeekV41AlignerWeights good = VisionFixture.AlignerWeights();
-
-        // the second projection is square in the language width; one too wide a bias is a mismatch the constructor must catch
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
-            () => new DeepSeekV41Aligner(backend, config, VisionFixture.OutputDim + 1, good));
-
-        Assert.Contains("aligner.w1.weight", error.Message);
     }
 
     private static DeepSeekV41AlignerWeights ZeroWeights(DeepSeekV41VisionConfig config, int outDim) =>

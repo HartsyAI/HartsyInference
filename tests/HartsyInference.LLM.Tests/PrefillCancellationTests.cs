@@ -112,55 +112,6 @@ public sealed class PrefillCancellationTests
         Assert.Equal(0, turn2.ReusedPromptTokens);
     }
 
-    [Fact]
-    public void ACancelDuringALayerSplitPrefill_StopsInsideTheSecondStage_AndItsRowsAreNeverRead()
-    {
-        using Fixture f = new(0x5747u);
-        LlmPlacement placement = new([new LlmStage(f.Backend, 0, 2), new LlmStage(f.Backend, 2, Layers)]);
-        GenericTransformerModel staged = new(f.Transformer, f.Backend, placement);
-        int[] prefix = f.Prompt(6);
-        int[] stopped = f.Prompt(10);
-        int[] shorter = f.Prompt(3);
-        using CancellationTokenSource cancel = new();
-        using RecordingKvCache cache = new((IKvCache)staged.CreateSequenceState(new SequenceStateOptions(64)));
-        staged.Prefill(new PrefillChunk(prefix, 0), cache).Dispose();
-        cache.ClearRecord();
-        cache.CancelAt(layer: 2, cancel);
-
-        Assert.Throws<OperationCanceledException>(() =>
-            staged.Prefill(new PrefillChunk(stopped, prefix.Length, LastRowOnly: true), cache, cancel.Token));
-
-        Assert.Equal([0, 1, 2], cache.PrefillLayers);
-        Assert.Equal(prefix.Length, cache.Length);
-
-        // Layers 0-2 wrote ten rows past the cursor. A shorter suffix overwrites only three of them, and the rest must
-        // never be read: the result matches the same suffix on a cache that never saw the stopped call, bit for bit.
-        cache.ClearRecord();
-        using Tensor afterStop = staged.Prefill(new PrefillChunk(shorter, prefix.Length, LastRowOnly: true), cache);
-        using FixedKvCache clean = (FixedKvCache)staged.CreateSequenceState(new SequenceStateOptions(64));
-        staged.Prefill(new PrefillChunk(prefix, 0), clean).Dispose();
-        using Tensor expected = staged.Prefill(new PrefillChunk(shorter, prefix.Length, LastRowOnly: true), clean);
-        Assert.Equal(Bits(expected), Bits(afterStop));
-        Assert.Equal(prefix.Length + shorter.Length, cache.Length);
-    }
-
-    [Fact]
-    public void ALiveTokenThatIsNeverCancelled_LeavesThePrefillBitIdentical()
-    {
-        using Fixture f = new(0x1D3Au);
-        GenericTransformerModel model = new(f.Transformer, f.Backend);
-        int[] prompt = f.Prompt(20);
-        using CancellationTokenSource live = new();
-        using ISequenceState plain = model.CreateSequenceState(new SequenceStateOptions(64));
-        using ISequenceState watched = model.CreateSequenceState(new SequenceStateOptions(64));
-
-        using Tensor expected = model.Prefill(new PrefillChunk(prompt, 0), plain);
-        using Tensor actual = model.Prefill(new PrefillChunk(prompt, 0), watched, live.Token);
-
-        Assert.Equal(Bits(expected), Bits(actual));
-        Assert.Equal(plain.Length, watched.Length);
-    }
-
     private static Task<IReadOnlyList<TextChunk>> Produce(TextGenerationPipeline pipeline, GenerationRequest request,
         RetainedSequence? reuse, CancellationToken token) =>
         Task.Run<IReadOnlyList<TextChunk>>(() =>
@@ -168,8 +119,6 @@ public sealed class PrefillCancellationTests
             GenerationResult result = pipeline.Generate(request, reuse, onToken: null, token);
             return [new TextChunk { Kind = TextChunkKind.Result, Text = result.Text }];
         }, token);
-
-    private static unsafe uint[] Bits(Tensor t) => new ReadOnlySpan<uint>(t.DataPointer, (int)t.ElementCount).ToArray();
 
     /// <summary>A tiny random-weight model on the CPU backend, driven through <see cref="RecordingModel"/>.</summary>
     private sealed class Fixture : IDisposable

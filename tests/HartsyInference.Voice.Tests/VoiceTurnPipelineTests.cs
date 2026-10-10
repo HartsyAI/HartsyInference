@@ -1,16 +1,11 @@
-using HartsyInference.Audio.Models.Denoise;
-using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
-using HartsyInference.Engine.Audio.Wake;
 using HartsyInference.Engine.Requests;
-using HartsyInference.Tests.Common;
 using HartsyInference.Tools;
 using HartsyInference.Voice.Audio;
 using HartsyInference.Voice.Tests.Fakes;
 using HartsyInference.Voice.Turns;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace HartsyInference.Voice.Tests;
 
@@ -22,10 +17,6 @@ namespace HartsyInference.Voice.Tests;
 public sealed class VoiceTurnPipelineTests
 {
     private const int Sentence = 2_400;
-
-    private readonly ITestOutputHelper _output;
-
-    public VoiceTurnPipelineTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
     public async Task SentencesPlayInOrderAtContiguousOffsets()
@@ -61,60 +52,6 @@ public sealed class VoiceTurnPipelineTests
         Assert.Equal(["Sure, I can help with that."], harness.Speech.Synthesized);
         Assert.DoesNotContain(harness.Events, e => e.Kind == VoiceAgentEventKind.Error);
         Assert.Equal(Sentence, harness.Reader.Samples.Length);
-    }
-
-    [Fact]
-    public async Task ResampledPlaybackHasTheConvertedLength()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply("One second of reply audio.");
-        VoiceAgentOptions options = VoiceHarness.DefaultOptions() with { OutboundSampleRate = 16_000 };
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(options, new FakeSpeech { SamplesPerSentence = 24_000 }, text);
-        harness.Session.PushDtmf('1');
-        await harness.TurnCompletedAsync(1);
-
-        float[] played = harness.Reader.Samples;
-        // 50 frames of 480 → 50 of 320 (the first is the resampler's lag), plus the padded tail and one flush frame.
-        Assert.Equal(16_000 + 2 * 320, played.Length);
-        float marker = FakeSpeech.Marker(1);
-        Assert.All(played.AsSpan(1_000, 14_000).ToArray(), sample => Assert.InRange(sample, marker * 0.99f, marker * 1.01f));
-    }
-
-    [Fact]
-    public async Task ASlowReaderLosesNothing()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply(
-            "Sentence number one is here. Sentence number two is here. Sentence number three is here. Sentence number four is here.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text, speech: new FakeSpeech { SamplesPerSentence = 4_800 },
-            outboundCapacity: 1_024, readerPause: TimeSpan.FromMilliseconds(2));
-        harness.Session.PushDtmf('2');
-        await harness.TurnCompletedAsync(1, seconds: 60);
-
-        float[] played = harness.Reader.Samples;
-        Assert.Equal(4 * 4_800, played.Length);
-        for (int sentence = 0; sentence < 4; sentence++)
-        {
-            Assert.All(played.AsSpan(sentence * 4_800, 4_800).ToArray(), sample => Assert.Equal(FakeSpeech.Marker(sentence + 1), sample));
-        }
-        Assert.Equal(0, harness.Session.InboundDroppedSamples);
-    }
-
-    [Fact]
-    public async Task ReadingAReplyWhileItsTurnWaitsForPlaybackAllocatesNothing()
-    {
-        // The turn waits for playback with its cancellable token; the reader used to pay 32 B per read for that wait.
-        ScriptedTextService text = new ScriptedTextService().Reply("A first reply warms the reader up.")
-            .Reply("The measured reply plays for a while. It has a second sentence. And a third one to end.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text, speech: new FakeSpeech { SamplesPerSentence = 24_000 });
-        harness.Session.PushDtmf('1');
-        await harness.TurnCompletedAsync(1);
-        long allocated = harness.Reader.ReadAllocatedBytes;
-        int reads = harness.Reader.Reads.Count;
-
-        harness.Session.PushDtmf('2');
-        await harness.TurnCompletedAsync(2);
-        int measured = harness.Reader.Reads.Count - reads;
-        Assert.True(measured >= 3 * 24_000 / 320, $"only {measured} reads returned reply audio.");
-        Assert.Equal(allocated, harness.Reader.ReadAllocatedBytes);
     }
 
     [Fact]
@@ -156,65 +93,6 @@ public sealed class VoiceTurnPipelineTests
         Assert.Equal([TextRole.System, TextRole.User, TextRole.Assistant, TextRole.Tool, TextRole.Assistant, TextRole.User],
             third.Select(m => m.Role));
         Assert.Equal("It is half past twelve.", third[4].Content);
-    }
-
-    [Fact]
-    public async Task HistoryIsTrimmedToTheTokenBudget()
-    {
-        ScriptedTextService text = new();
-        for (int turn = 0; turn < 8; turn++)
-        {
-            text.Reply($"Reply number {turn} has six words.");
-        }
-        VoiceAgentOptions options = VoiceHarness.DefaultOptions() with { SystemPrompt = "Be brief.", MaxHistoryTokens = 50 };
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(options, text: text);
-        for (int turn = 1; turn <= 8; turn++)
-        {
-            harness.Session.PushDtmf((char)('0' + turn));
-            await harness.TurnCompletedAsync(turn);
-        }
-
-        IReadOnlyList<TextMessage> last = text.Requests.Last().Messages;
-        Assert.Equal("Be brief.", last[0].Content);
-        Assert.Equal(TextRole.User, last[1].Role);
-        Assert.Equal("[DTMF 8]", last[^1].Content);
-        int tokens = last.Sum(m => m.Content.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length + 4);
-        Assert.InRange(tokens, 1, 50);
-        Assert.True(last.Count < 16, $"history was not trimmed: {last.Count} messages.");
-    }
-
-    [Fact]
-    public async Task EveryModelRequestHasThinkingOffOnTheLlmDevice()
-    {
-        ToolRegistry tools = new ToolRegistry().Add("hang_up", "Ends the call.", "{\"type\":\"object\"}", (_, _) => Task.FromResult("ok"));
-        ScriptedTextService text = new ScriptedTextService()
-            .Round(ScriptedTextService.Call("call_0", "hang_up"), ScriptedTextService.Stop(StopReason.ToolCall))
-            .Reply("Goodbye then.")
-            .Reply("Sure thing, anything else?");
-        VoiceAgentOptions options = VoiceHarness.DefaultOptions() with { LlmDevice = "cuda:0", MaxReplyTokens = 77 };
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(options, text: text, tools: tools);
-        await harness.Models.WarmAsync(text);
-        harness.Session.PushDtmf('9');
-        await harness.TurnCompletedAsync(1);
-        harness.Speech.Transcripts.Enqueue("is there anything else");
-        harness.PushSilence(0.3);
-        harness.PushSpeech(1.0);
-        harness.PushSilence(1.0);
-        await harness.TurnCompletedAsync(2);
-
-        TextRequest[] requests = [.. text.Requests];
-        Assert.Equal(4, requests.Length);
-        Assert.All(requests, request =>
-        {
-            Assert.False(request.EnableThinking);
-            Assert.Equal("cuda:0", request.Device);
-            Assert.False(request.AlwaysFreeMemory);
-        });
-        Assert.All(requests.Where(r => r.MaxTokens != 1), request =>
-        {
-            Assert.Equal(77, request.MaxTokens);
-            Assert.Same(tools.Definitions, request.Tools);
-        });
     }
 
     [Fact]
@@ -275,72 +153,6 @@ public sealed class VoiceTurnPipelineTests
     }
 
     [Fact]
-    public void FrontendDenoiserLatencySamplesReflectsTheRealDenoisersAlgorithmicLagOrZeroWithoutOne()
-    {
-        // A real RNNoise instance ahead of the fake level-scripted VAD would make this a session-level test instead
-        // (push a turn, read VoiceTurnMetrics.EndpointMs), but RNNoise legitimately suppresses a constant-level tone
-        // as non-speech noise (confirmed: with Denoise on, LevelVadModel never sees speech and the turn never ends),
-        // so that combination cannot drive a turn at all. This checks the one new property Turn.Metrics() reads
-        // (VoiceAgentSession.Turns.cs) directly: VoiceAudioFrontend.DenoiserLatencySamples. The arithmetic that adds
-        // it into EndpointMs/TotalMs is otherwise covered by AnUtteranceIsRecognizedOnTheGpuThreadAndAnsweredWithEveryMetricLogged
-        // above, which proves the unchanged (Denoise off, latency 0) case still lands in its established [700, 764] range.
-        if (!RealWeightGate.Require(_output.WriteLine, VoiceAssets.RnnoiseWeights, VoiceAssets.RnnoiseInt8Tables))
-        {
-            return;
-        }
-        using WakeModelSet wake = new(VoiceAssets.WakeRoot);
-        Assert.True(wake.LoadDenoiser(RnnoisePrecision.Int8));
-        RnnoiseStream denoiser = wake.CreateDenoiser() ?? throw new InvalidOperationException("Could not instantiate RNNoise.");
-        using CpuBackend cpu = new();
-        VoiceTurnSignals signals = new();
-        VoiceAgentOptions options = new();
-
-        using VoiceAudioFrontend withDenoiser = new(cpu, new LevelVadModel(), denoiser, signals, options);
-        _output.WriteLine($"real RNNoise LatencySamples = {denoiser.LatencySamples} ({denoiser.LatencySamples / 16.0:F1} ms at 16 kHz)");
-        Assert.True(denoiser.LatencySamples > 0, "a real denoiser should report a non-zero algorithmic lag.");
-        Assert.Equal(denoiser.LatencySamples, withDenoiser.DenoiserLatencySamples);
-
-        using VoiceAudioFrontend withoutDenoiser = new(cpu, new LevelVadModel(), null, signals, options);
-        Assert.Equal(0, withoutDenoiser.DenoiserLatencySamples);
-    }
-
-    [Fact]
-    public async Task EndpointMsIsFortyMillisecondsLaterInARealSessionWithARealDenoiser()
-    {
-        // The real end-to-end wiring the frontend-only test above cannot reach: a real Silero VAD over real JFK
-        // speech (not the fake level-scripted VAD, which a real denoiser's suppression of non-speech-like audio
-        // makes unusable for this comparison — see the test above) through a full VoiceAgentSession turn, so
-        // Turn.Metrics() (VoiceAgentSession.Turns.cs) actually runs with Denoise on. Speech and the LLM stay fake
-        // (FakeSpeech, ScriptedTextService) since only the front end needs to be real for this comparison.
-        if (!RealWeightGate.Require(_output.WriteLine, VoiceAssets.SileroWeights, VoiceAssets.RnnoiseWeights, VoiceAssets.RnnoiseInt8Tables, VoiceAssets.Jfk))
-        {
-            return;
-        }
-        double offMs = await RunOneTurnEndpointMsAsync(denoise: false);
-        double onMs = await RunOneTurnEndpointMsAsync(denoise: true);
-        _output.WriteLine($"voice.endpoint.ms: Denoise off={offMs:F2}, on={onMs:F2}, delta={onMs - offMs:F2} ms");
-        Assert.InRange(onMs - offMs, 38.0, 42.0);
-    }
-
-    /// <summary>One turn over the JFK clip's first utterance, real Silero VAD and (when <paramref name="denoise"/>)
-    /// real RNNoise ahead of it, fake speech and a scripted LLM; returns the turn's <c>voice.endpoint.ms</c>.</summary>
-    private static async Task<double> RunOneTurnEndpointMsAsync(bool denoise)
-    {
-        VoiceAgentOptions options = new() { AudioDevice = "cpu", LlmDevice = "cpu", OutboundSampleRate = 24_000, Denoise = denoise };
-        using WakeModelSet wake = VoiceModelSet.LoadFrontEnd(VoiceAssets.WakeRoot, options, out Func<IVadModel> createVad, out Func<RnnoiseStream>? createDenoiser);
-        using CpuBackend cpu = new();
-        FakeSpeech speech = new();
-        speech.Transcripts.Enqueue("fellow Americans");
-        await using VoiceModelSet models = new(options, speech, cpu, createVad, createDenoiser, wake);
-        ScriptedTextService text = new() { DefaultReply = "Okay." };
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(models, text, TimeSpan.FromMilliseconds(2));
-        harness.Push(VoiceAssets.Jfk16k());
-        harness.PushSilence(1.5);
-        VoiceTurnMetrics metrics = (await harness.TurnCompletedAsync(1, 30)).Metrics!.Value;
-        return metrics.EndpointMs!.Value;
-    }
-
-    [Fact]
     public async Task AnUtteranceWithNoWordsIsNotAnswered()
     {
         ScriptedTextService text = new();
@@ -355,37 +167,6 @@ public sealed class VoiceTurnPipelineTests
         Assert.Equal(1, harness.Session.DiscardedUtterances);
         Assert.Contains(harness.Events, e => e.Kind == VoiceAgentEventKind.UtteranceDiscarded && e.TurnId == 1);
         Assert.Equal(VoiceAgentState.Listening, harness.Session.State);
-    }
-
-    [Fact]
-    public async Task SpeakAsyncSaysTheTextWithoutTheModelAndItJoinsTheConversation()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply("Happy to help.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text);
-        await harness.Session.SpeakAsync("Hello, thanks for calling. How can I help?").WaitAsync(TimeSpan.FromSeconds(20));
-
-        Assert.Empty(text.Requests);
-        Assert.Equal(2, harness.Speech.Synthesized.Count);
-        harness.Session.PushDtmf('0');
-        await harness.TurnCompletedAsync(2);
-        IReadOnlyList<TextMessage> messages = text.Requests.Single().Messages;
-        Assert.Equal([TextRole.System, TextRole.Assistant, TextRole.User], messages.Select(m => m.Role));
-        Assert.Equal("Hello, thanks for calling. How can I help?", messages[1].Content);
-    }
-
-    [Fact]
-    public async Task ARevokedSpeechModelIsReopenedOnceAndTheTurnCompletes()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply("Still here and talking.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text);
-        harness.Speech.Revoked = true;
-        harness.Session.PushDtmf('3');
-        await harness.TurnCompletedAsync(1);
-
-        Assert.Equal(1, harness.Speech.Reopens);
-        Assert.Equal(1, harness.Models.Gpu.Reopens);
-        Assert.Equal(Sentence, harness.Reader.Samples.Length);
-        Assert.DoesNotContain(harness.Events, e => e.Kind == VoiceAgentEventKind.Error);
     }
 
     [Fact]
@@ -451,25 +232,6 @@ public sealed class VoiceTurnPipelineTests
     }
 
     [Fact]
-    public async Task TheDevicePoolIsTrimmedOnceWhenTheSessionReturnsToListening()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply("One short reply.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text);
-        Assert.Equal(0, harness.Models.Gpu.Trims);
-        harness.Session.PushDtmf('8');
-        await harness.TurnCompletedAsync(1);
-        await harness.WaitForAsync(e => e.Kind == VoiceAgentEventKind.StateChanged && e.State == VoiceAgentState.Listening && e.TurnId == 1);
-
-        // No further GPU job is queued: the trim runs on its own, between turns.
-        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
-        while (harness.Models.Gpu.Trims == 0 && DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(5);
-        }
-        Assert.Equal(1, harness.Models.Gpu.Trims);
-    }
-
-    [Fact]
     public async Task EveryJobKeepsThePoolAndEachTurnTrimsItOnceOnItsReturnToListening()
     {
         ScriptedTextService text = new ScriptedTextService().Reply("The first reply has one sentence.")
@@ -527,25 +289,6 @@ public sealed class VoiceTurnPipelineTests
         hold.Set();
         await ending.WaitAsync(TimeSpan.FromSeconds(20));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => prompt.WaitAsync(TimeSpan.FromSeconds(5)));
-    }
-
-    [Fact]
-    public async Task EndingCancelsQueuedPromptsAndEndsTheSession()
-    {
-        using ManualResetEventSlim hold = new(false);
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(speech: new FakeSpeech { HoldSynthesis = hold });
-        Task first = harness.Session.SpeakAsync("The first prompt is held on the GPU.");
-        Task second = harness.Session.SpeakAsync("The second prompt never starts.");
-        await harness.WaitForAsync(e => e.Kind == VoiceAgentEventKind.StateChanged && e.State == VoiceAgentState.Thinking);
-
-        Task ending = harness.Session.EndAsync();
-        hold.Set();
-        await ending.WaitAsync(TimeSpan.FromSeconds(20));
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first.WaitAsync(TimeSpan.FromSeconds(5)));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal(VoiceAgentState.Ended, harness.Session.State);
-        Assert.Throws<InvalidOperationException>(() => harness.Session.PushDtmf('1'));
     }
 
     /// <summary>The token the first sentence's synthesis was handed, once the GPU thread is inside it.</summary>

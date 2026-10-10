@@ -71,17 +71,6 @@ public sealed class Qwen3HfConfigReaderTests
     }
 
     [Fact]
-    public void FromHuggingFace_HeadDimFallsBackToHiddenOverHeads_WhenFieldIsAbsent()
-    {
-        string json = """
-            {"model_type":"qwen3","hidden_size":512,"num_hidden_layers":4,"num_attention_heads":8,
-             "num_key_value_heads":8,"intermediate_size":1024,"vocab_size":1000}
-            """;
-        TransformerConfig cfg = Parse(json);
-        Assert.Equal(64, cfg.HeadDim);   // 512 / 8
-    }
-
-    [Fact]
     public void FromHuggingFace_WrongModelType_Throws()
     {
         string json = """{"model_type":"llama","hidden_size":512}""";

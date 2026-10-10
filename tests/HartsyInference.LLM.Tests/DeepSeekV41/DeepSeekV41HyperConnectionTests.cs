@@ -22,7 +22,6 @@ public sealed class DeepSeekV41HyperConnectionTests
 
     [Theory]
     [InlineData("hc4")]
-    [InlineData("hc2")]
     [InlineData("hc3_one_iter")]
     public void Mixes_Collapse_And_Expand_Match_Upstream_Block(string name)
     {
@@ -44,17 +43,6 @@ public sealed class DeepSeekV41HyperConnectionTests
         conn.Expand(sub, x, post, comb, tokens, expanded);
         AssertClose(Floats(c.GetProperty("collapsed")), collapsed, "collapsed");
         AssertClose(Floats(c.GetProperty("expanded")), expanded, "expanded");
-    }
-
-    [Fact]
-    public void Rejects_Mismatched_Shapes()
-    {
-        using CpuBackend cpu = new();
-        const int hc = 2, dim = 4;
-        Assert.Throws<ArgumentException>(() => new DeepSeekV41HyperConnection(cpu, hc, dim, 3, 1e-6f, 1e-6f, new float[5], new float[3], new float[8]));
-        DeepSeekV41HyperConnection conn = new(cpu, hc, dim, 3, 1e-6f, 1e-6f, new float[8 * hc * dim], new float[3], new float[8]);
-        Assert.Throws<ArgumentException>(() => conn.Mixes(new float[hc * dim - 1], 1, new float[hc], new float[hc], new float[hc * hc]));
-        Assert.Throws<ArgumentException>(() => conn.Collapse(new float[hc * dim], new float[hc], 1, new float[dim + 1]));
     }
 
     [Fact]

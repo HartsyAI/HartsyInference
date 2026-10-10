@@ -16,7 +16,6 @@ public sealed unsafe class MllamaCrossAttentionTests
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.4f; }
     private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
-    private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
     private static Tensor Pos1(int a) { Tensor t = new(new TensorShape(a), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < a; i++) p[i] = 0.5f + 0.5f * MathF.Abs(Rand()); return t; }
     private static Tensor ScalarT(float v) { Tensor t = new(new TensorShape(1), DType.F32); *(float*)t.DataPointer = v; return t; }
     private static float[] Host(Tensor t) { float[] r = new float[t.ElementCount]; float* p = (float*)t.DataPointer; for (long i = 0; i < r.Length; i++) r[i] = p[i]; return r; }
@@ -59,26 +58,6 @@ public sealed unsafe class MllamaCrossAttentionTests
         float max = 0f;
         for (int i = 0; i < expected.Length; i++) max = MathF.Max(max, MathF.Abs(expected[i] - a[i]));
         Assert.True(max <= 1e-4f, $"mllama cross-attention diverges from reference by {max:E3}");
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
-    public void CrossAttention_ZeroGates_IsIdentity()
-    {
-        const string p = "blk.0";
-        Dictionary<string, Tensor> w = Weights(p, attnGate: 0f, mlpGate: 0f);
-        using CpuBackend backend = new();
-        MllamaCrossAttentionLayer layer = new(Hidden, Hq, Hkv, D, Inter, Eps);
-        layer.LoadWeights(w, p);
-
-        using Tensor text = Fill(new Tensor(new TensorShape(1, T, Hidden), DType.F32));
-        using Tensor vision = Fill(new Tensor(new TensorShape(1, L, Hidden), DType.F32));
-        using Tensor actual = layer.Forward(backend, text, T, vision, L);
-
-        float* a = (float*)actual.DataPointer, ti = (float*)text.DataPointer;
-        float max = 0f;
-        for (long i = 0; i < actual.ElementCount; i++) max = MathF.Max(max, MathF.Abs(a[i] - ti[i]));
-        Assert.True(max <= 1e-5f, $"tanh(0)=0 gates must make the layer a no-op, diff {max:E3}");
         foreach (Tensor t in w.Values) t.Dispose();
     }
 

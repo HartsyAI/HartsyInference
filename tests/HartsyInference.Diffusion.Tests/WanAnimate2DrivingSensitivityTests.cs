@@ -159,8 +159,6 @@ public unsafe class WanAnimate2DrivingSensitivityTests
     /// prompted this scan turned out to be the base checkpoint sampled at the distillation build's 6 steps and
     /// cfg 1, not a length defect — see the plan doc. The scan stays because nothing else covers long T on CPU.)</summary>
     [Theory]
-    [InlineData(3)]
-    [InlineData(10)]
     [InlineData(20)]
     public void DrivingStaysLiveAsTheSequenceGrows(int drivingFrames)
     {

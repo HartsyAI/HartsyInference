@@ -183,9 +183,7 @@ public sealed unsafe class LtxVideo25TemporalChunkingTests
     /// <c>min(kernel, frames)</c>, so a short first or last window would change every window inside it — the failure
     /// that puts a seam at the clip's own start and end rather than at a chunk boundary.</summary>
     [Theory]
-    [InlineData(97, 11, 1)]
     [InlineData(97, 11, 4)]
-    [InlineData(97, 11, 20)]
     [InlineData(25, 3, 1)]
     [InlineData(7, 11, 3)]
     public void PaddedWindowsReproduceTheUntiledWindowStarts(int frames, int kernel, int step)

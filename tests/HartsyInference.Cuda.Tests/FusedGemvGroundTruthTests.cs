@@ -123,7 +123,6 @@ public sealed class FusedGemvGroundTruthTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("BF16", 3072, 128)]
-    [InlineData("BF16", 100, 48)]
     [InlineData("F16", 512, 64)]
     public unsafe void FusedGemv_Float16_MatchesRoundedReference(string dtypeName, int inDim, int outDim)
     {

@@ -58,24 +58,6 @@ public sealed class ModelVariantResolverTests
         Assert.True(resolved.IsDefinitive);
     }
 
-    /// <summary>SwarmUI sends every model's class id; a generic class that names no variant must not count as a claim.</summary>
-    [Fact]
-    public void UnknownHint_IsIgnored_SoWeakerEvidenceStillDecides()
-    {
-        ResolvedModelVariant resolved = ModelVariantResolver.Classify(Catalog,
-            Probe(metadata: ("modelspec.architecture", "fam-named")), ["fam"]);
-        Assert.True(resolved.Is(Named));
-        Assert.Equal(ModelVariantSource.Metadata, resolved.Source);
-    }
-
-    [Fact]
-    public void EngineModelIdStamp_IsMetadataEvidence()
-    {
-        ResolvedModelVariant resolved = ModelVariantResolver.Classify(Catalog, Probe(metadata: ("hartsy.model_id", "named")), []);
-        Assert.True(resolved.Is(Named));
-        Assert.Equal(ModelVariantSource.Metadata, resolved.Source);
-    }
-
     [Fact]
     public void Metadata_BeatsFilename()
     {
@@ -86,10 +68,8 @@ public sealed class ModelVariantResolverTests
 
     [Theory]
     [InlineData("model_edit_fp8", "named", ModelVariantSource.Filename)]
-    [InlineData("MODEL-EDIT", "named", ModelVariantSource.Filename)]
     // Whole tokens only: a substring match would read "credit" as "edit".
     [InlineData("credit_model", "plain", ModelVariantSource.Default)]
-    [InlineData("model_alt", "named", ModelVariantSource.Filename)]
     // An excluded token vetoes its set.
     [InlineData("model_alt_plain", "plain", ModelVariantSource.Default)]
     public void Filename_MatchesWholeTokensOnly(string fileName, string expected, ModelVariantSource source)

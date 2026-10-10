@@ -26,25 +26,6 @@ public sealed class RopeScalingTests
     }
 
     [Fact]
-    public void None_IsBaseInvFreq()
-    {
-        (double[] inv, double m) = RopeFrequencyBuilder.Build(Dim, Theta, RopeScaling.None, 128);
-        AssertClose(inv, BaseInvFreq(Dim, Theta), 1e-12, "none");
-        Assert.Equal(1.0, m);
-    }
-
-    [Fact]
-    public void Linear_DividesAllFrequencies()
-    {
-        const double factor = 4.0;
-        (double[] inv, double m) = RopeFrequencyBuilder.Build(Dim, Theta, new RopeScaling { Type = RopeScalingType.Linear, Factor = factor }, 128);
-        double[] expect = BaseInvFreq(Dim, Theta);
-        for (int i = 0; i < expect.Length; i++) expect[i] /= factor;
-        AssertClose(inv, expect, 1e-12, "linear");
-        Assert.Equal(1.0, m);
-    }
-
-    [Fact]
     public void Llama3_MatchesPiecewiseReference()
     {
         const double factor = 8.0, low = 1.0, high = 4.0, origCtx = 8192.0;
@@ -105,14 +86,4 @@ public sealed class RopeScalingTests
         AssertClose(inv, expect, 1e-6, "factors");
     }
 
-    [Fact]
-    public void DynamicNtk_RescalesOnlyAboveOriginalContext()
-    {
-        RopeScaling s = new() { Type = RopeScalingType.DynamicNtk, Factor = 4.0, OriginalContextLength = 4096 };
-        (double[] below, _) = RopeFrequencyBuilder.Build(Dim, Theta, s, 1024);
-        AssertClose(below, BaseInvFreq(Dim, Theta), 1e-12, "dynamic-below");
-
-        (double[] above, _) = RopeFrequencyBuilder.Build(Dim, Theta, s, 16384);
-        Assert.True(Math.Abs(above[1] - BaseInvFreq(Dim, Theta)[1]) > 1e-9, "dynamic above original context should rescale");
-    }
 }

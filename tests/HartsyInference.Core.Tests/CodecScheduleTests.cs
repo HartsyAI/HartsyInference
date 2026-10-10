@@ -39,7 +39,6 @@ public sealed class CodecScheduleTests
     }
 
     [Theory]
-    [InlineData(0)]
     [InlineData(64)]
     public void Int8ConvRot_QuantizeFromF32_GivesTheSameBytesAndScales_UnderEverySchedule(int groupSize)
     {

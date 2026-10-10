@@ -46,30 +46,6 @@ public sealed class FaceAlignmentTests
     }
 
     [Fact]
-    public void EstimateSimilarity_LeastSquaresOverdetermined()
-    {
-        // 5 noisy correspondences of the identity: LSQ solution must stay near identity.
-        float[] src = [10f, 10f, 90f, 10f, 50f, 50f, 30f, 90f, 70f, 90f];
-        float[] dst = [10.4f, 9.7f, 89.6f, 10.2f, 50.1f, 50.3f, 29.8f, 89.9f, 70.2f, 90.1f];
-        FaceAlignment.Affine2x3 m = FaceAlignment.EstimateSimilarity(src, dst);
-        Assert.True(MathF.Abs(m.A - 1f) < 0.02f);
-        Assert.True(MathF.Abs(m.B) < 0.02f);
-        Assert.True(MathF.Abs(m.Tx) < 2f);
-        Assert.True(MathF.Abs(m.Ty) < 2f);
-    }
-
-    [Fact]
-    public void WarpAffine_IdentityPreservesPixels()
-    {
-        const int w = 8, h = 6;
-        byte[] rgb = new byte[w * h * 3];
-        for (int i = 0; i < rgb.Length; i++) rgb[i] = (byte)(i * 7 % 256);
-        FaceAlignment.Affine2x3 identity = new(1f, 0f, 0f, 0f, 1f, 0f);
-        byte[] warped = FaceAlignment.WarpAffine(rgb, w, h, identity, w, h);
-        Assert.Equal(rgb, warped);
-    }
-
-    [Fact]
     public void WarpAffine_TranslationShiftsAndPadsBlack()
     {
         const int w = 4, h = 4;

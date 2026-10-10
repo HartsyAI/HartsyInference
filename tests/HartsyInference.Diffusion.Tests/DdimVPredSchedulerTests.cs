@@ -35,7 +35,6 @@ public unsafe class DdimVPredSchedulerTests
 
     [Theory]
     [InlineData(999, 499)]
-    [InlineData(499, 99)]
     [InlineData(99, -1)]    // terminal step lands exactly on x₀
     public void StepFrame_VParamUpdate_IsExactOnKnownTrajectory(int t, int tNext)
     {

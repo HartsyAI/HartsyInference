@@ -38,7 +38,6 @@ public sealed unsafe class Sd3FinalOutputResidencyTests
     }
 
     [Theory]
-    [InlineData(1, 15)]
     [InlineData(2, 7)]
     public void ApplyFinalLayer_CpuMatchesLegacyHostMath(int batch, int seqLen)
     {

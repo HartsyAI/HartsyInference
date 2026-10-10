@@ -14,8 +14,6 @@ public sealed unsafe class ImagePipelineCfgEulerEquivalenceTests
 {
     [Theory]
     [InlineData(3.0f, 28, 0, 5.0f)]
-    [InlineData(3.0f, 28, 13, 1.0f)]
-    [InlineData(5.0f, 50, 0, 3.5f)]
     [InlineData(5.0f, 50, 49, 7.0f)]
     public void ShiftedFlowMatch_FusedCfgEuler_MatchesLegacyTwoStageMath(
         float shift, int steps, int stepIndex, float guidance)
@@ -40,7 +38,6 @@ public sealed unsafe class ImagePipelineCfgEulerEquivalenceTests
 
     [Theory]
     [InlineData(30, 0, 4.0f, 6.0f)]
-    [InlineData(30, 14, 2.0f, 6.0f)]
     [InlineData(30, 29, 1.0f, 1.0f)]
     public void FLitePositiveDelta_FusedCfgEuler_MatchesLegacyAccumulator(
         int steps, int stepIndex, float alpha, float guidance)

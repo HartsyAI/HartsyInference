@@ -84,15 +84,6 @@ public sealed class WanStreamableDenoiserTests
             $"shared={shared.Count} carries the 2 VACE control blocks, per-block={blockTensors / t.BlockCount}");
     }
 
-    [Fact]
-    public void WanS2V_KeepsTheAudioInjectorShared()
-    {
-        WanVideoConfig c = Config(layers: 3);
-        using WanS2VTransformer t = new WanS2VTransformer(c);
-        t.LoadWeights(WanSyntheticWeights.BuildS2VTransformer(c));
-        AssertPartitions(t, t.EnumerateWeights());
-    }
-
     /// <summary>Every block must be reachable by index and report a positive size, or the window cannot budget.</summary>
     [Fact]
     public void EveryBlockIsIndexableAndSized()

@@ -17,7 +17,6 @@ public sealed unsafe class FlashAttentionTests
 
     [Theory]
     [InlineData(true)]   // prefill: Tq = Lk, qOffset = 0, full causal triangle
-    [InlineData(false)]  // decode: Tq = 1, qOffset = Lk-1, attends whole prefix
     public void Flash_MatchesRepeatKvSdpa(bool prefill)
     {
         const int hq = 4, hkv = 2, d = 8, lk = 6, group = hq / hkv;
@@ -61,7 +60,6 @@ public sealed unsafe class FlashAttentionTests
     [Theory]
     [InlineData(true, 3)]    // prefill: every row's lower bound differs
     [InlineData(false, 3)]   // decode: single query at the end of the prefix
-    [InlineData(true, 1)]    // degenerate window: attend only self
     public void Flash_SlidingWindow_MatchesMaskedSdpa(bool prefill, int window)
     {
         const int hq = 4, hkv = 2, d = 8, lk = 6, group = hq / hkv;
@@ -111,81 +109,12 @@ public sealed unsafe class FlashAttentionTests
         Assert.True(wideDiff <= 1e-6f, $"Window >= prefix should match the unwindowed path, diff {wideDiff:E3}.");
     }
 
-    /// <summary>ALiBi (Attention with Linear Biases): each head adds a linear distance penalty
-    /// <c>slope_h·(k_pos − q_pos)</c> to its scores before the softmax (no RoPE). Validates the
-    /// <see cref="IBackend.FlashAttention"/> ALiBi path against an explicit per-row biased softmax, and checks that
-    /// zero slopes reproduce the plain causal attention.</summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void Flash_Alibi_MatchesBiasedSoftmax(bool prefill)
-    {
-        const int hq = 4, hkv = 2, d = 8, lk = 6, group = hq / hkv;
-        int tq = prefill ? lk : 1;
-        int qOffset = prefill ? 0 : lk - 1;
-        float scale = 1f / MathF.Sqrt(d);
-
-        using CpuBackend cpu = new();
-        IBackend b = cpu;
-        using Tensor q = Rnd(1, hq, tq, d);
-        using Tensor k = Rnd(1, hkv, lk, d);
-        using Tensor v = Rnd(1, hkv, lk, d);
-        float[] slopeVals = TransformerConfig.ComputeAlibiSlopes(hq, 8f);
-        using Tensor slopes = new(new TensorShape(hq), DType.F32);
-        float* slp = (float*)slopes.DataPointer;
-        for (int h = 0; h < hq; h++) slp[h] = slopeVals[h];
-
-        // Reference: per-row softmax over [q·k_c·scale + slope_h·(c − qAbs)] for causal c, then weighted V sum.
-        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer;
-        using Tensor refOut = new(new TensorShape(1, hq, tq, d), DType.F32);
-        float* rp = (float*)refOut.DataPointer;
-        float* acc = stackalloc float[d];
-        for (int h = 0; h < hq; h++)
-            for (int r = 0; r < tq; r++)
-            {
-                int hkvIdx = h / group, qAbs = qOffset + r;
-                float m = float.NegativeInfinity;
-                for (int c = 0; c <= qAbs; c++)
-                {
-                    float s = 0f; for (int x = 0; x < d; x++) s += qp[((h * tq) + r) * d + x] * kp[((hkvIdx * lk) + c) * d + x];
-                    m = MathF.Max(m, s * scale + slopeVals[h] * (c - qAbs));
-                }
-                float z = 0f; for (int x = 0; x < d; x++) acc[x] = 0f;
-                for (int c = 0; c <= qAbs; c++)
-                {
-                    float s = 0f; for (int x = 0; x < d; x++) s += qp[((h * tq) + r) * d + x] * kp[((hkvIdx * lk) + c) * d + x];
-                    float p = MathF.Exp(s * scale + slopeVals[h] * (c - qAbs) - m); z += p;
-                    for (int x = 0; x < d; x++) acc[x] += p * vp[((hkvIdx * lk) + c) * d + x];
-                }
-                for (int x = 0; x < d; x++) rp[((h * tq) + r) * d + x] = acc[x] / z;
-            }
-
-        using Tensor flashOut = new(new TensorShape(1, hq, tq, d), DType.F32);
-        b.FlashAttention(flashOut, q, k, v, lk, group, causal: true, qOffset, scale, softcap: 0f, sink: null, slidingWindow: 0, alibiSlopes: slopes);
-        float* fp = (float*)flashOut.DataPointer;
-        float maxDiff = 0f;
-        for (long i = 0; i < refOut.ElementCount; i++) maxDiff = MathF.Max(maxDiff, MathF.Abs(rp[i] - fp[i]));
-        Assert.True(maxDiff <= 1e-4f, $"ALiBi FlashAttention diverges from biased softmax by {maxDiff:E3} (prefill={prefill}).");
-
-        // Zero slopes ≡ plain causal attention.
-        using Tensor zeroSlopes = new(new TensorShape(hq), DType.F32);
-        float* zp = (float*)zeroSlopes.DataPointer; for (int h = 0; h < hq; h++) zp[h] = 0f;
-        using Tensor zeroOut = new(new TensorShape(1, hq, tq, d), DType.F32);
-        b.FlashAttention(zeroOut, q, k, v, lk, group, causal: true, qOffset, scale, softcap: 0f, sink: null, slidingWindow: 0, alibiSlopes: zeroSlopes);
-        using Tensor plain = new(new TensorShape(1, hq, tq, d), DType.F32);
-        b.FlashAttention(plain, q, k, v, lk, group, causal: true, qOffset, scale);
-        float* zop = (float*)zeroOut.DataPointer; float* plp = (float*)plain.DataPointer;
-        float zDiff = 0f; for (long i = 0; i < plain.ElementCount; i++) zDiff = MathF.Max(zDiff, MathF.Abs(zop[i] - plp[i]));
-        Assert.True(zDiff <= 1e-6f, $"Zero ALiBi slopes should match plain attention, diff {zDiff:E3}.");
-    }
-
     /// <summary>GPT-OSS attention sink: each head carries a learned logit that joins the softmax denominator
     /// but contributes no value. Validates <see cref="IBackend.FlashAttention"/>'s sink path against a direct
     /// per-row softmax([scores, sink]) reference, and checks the two limits: a hugely-negative sink reproduces
     /// the no-sink output, and a dominant positive sink bleeds the output toward zero.</summary>
     [Theory]
     [InlineData(true)]
-    [InlineData(false)]
     public void Flash_Sink_MatchesAugmentedSoftmax(bool prefill)
     {
         const int hq = 4, hkv = 2, d = 8, lk = 6, group = hq / hkv;

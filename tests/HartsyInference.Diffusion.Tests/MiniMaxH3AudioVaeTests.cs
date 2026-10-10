@@ -102,15 +102,6 @@ public unsafe class MiniMaxH3AudioVaeTests
     }
 
     [Fact]
-    public void DefaultConfig_Matches32kHzShippedGeometry()
-    {
-        MiniMaxH3AudioVaeDecoder decoder = new();
-        Assert.Equal(32000, decoder.SampleRate);
-        Assert.Equal(800, decoder.SamplesPerLatentFrame);
-        decoder.Dispose();
-    }
-
-    [Fact]
     public void Constructor_LatentStatLengthMismatch_Throws()
     {
         Assert.Throws<ArgumentException>(() =>

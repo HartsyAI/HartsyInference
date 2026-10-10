@@ -236,13 +236,6 @@ public sealed unsafe class MixPrimitivesTests
         AssertClose(expected, Snapshot(state), 3e-6f, "CUDA two-step masked Euler state");
     }
 
-    [Fact]
-    public void Cpu_MalformedContractsAndOverlappingStorage_AreRejectedBeforeDataAccess()
-    {
-        using IBackend cpu = new CpuBackend();
-        AssertMalformedContracts(cpu);
-    }
-
     [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]

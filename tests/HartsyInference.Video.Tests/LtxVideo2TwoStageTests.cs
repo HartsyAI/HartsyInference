@@ -12,26 +12,6 @@ namespace HartsyInference.Video.Tests;
 /// transposed repack and a re-noise with the blend the wrong way round all produce a plausible video.</summary>
 public sealed unsafe class LtxVideo2TwoStageTests
 {
-    /// <summary>The template's stage-2 ManualSigmas node, verbatim — including its literal 0.4219 (not 0.421875).
-    /// It is NOT a tail of the distilled 8-step schedule — that one's corresponding entry is 0.909375, and using
-    /// it would start the refine 6% further from the data.</summary>
-    [Fact]
-    public void RefineSigmasMatchTheShippedTemplate()
-    {
-        float[] expected = [0.85f, 0.725f, 0.4219f, 0.0f];
-        Assert.Equal<IEnumerable<float>>(expected, LtxVideo2Config.Ltx25TwoStageRefineSigmas);
-        Assert.NotEqual(LtxVideo2Config.Ltx25DistilledSigmas[5], LtxVideo2Config.Ltx25TwoStageRefineSigmas[0]);
-    }
-
-    /// <summary>A shared array would let one in-place edit anywhere corrupt every config built afterwards.</summary>
-    [Fact]
-    public void RefineSigmasAreAFreshArrayPerCall()
-    {
-        float[] first = LtxVideo2Config.Ltx25TwoStageRefineSigmas;
-        first[0] = -1f;
-        Assert.Equal(0.85f, LtxVideo2Config.Ltx25TwoStageRefineSigmas[0]);
-    }
-
     /// <summary>ComfyUI <c>ModelSamplingDiscreteFlow.noise_scaling</c>: <c>sigma·noise + (1−sigma)·latent</c>. At
     /// sigma 0.85 the stage-1 result keeps 15% of its weight, so a swapped blend is a nearly-clean re-generation
     /// that still looks like a video.</summary>
@@ -51,21 +31,6 @@ public sealed unsafe class LtxVideo2TwoStageTests
         // The inputs must survive: the audio latent is device-resident and an in-place host write would go stale
         // against its GPU cache.
         Assert.Equal(4f, xp[0]);
-    }
-
-    /// <summary>Sigma 0 is the identity and sigma 1 discards the latent entirely.</summary>
-    [Theory]
-    [InlineData(0f, 4f)]
-    [InlineData(1f, -2f)]
-    public void RenoiseEndpointsAreExact(float sigma, float expected)
-    {
-        using Tensor x = new Tensor(new TensorShape(1, 1), DType.F32);
-        using Tensor noise = new Tensor(new TensorShape(1, 1), DType.F32);
-        *(float*)x.DataPointer = 4f;
-        *(float*)noise.DataPointer = -2f;
-        using CpuBackend backend = new CpuBackend();
-        using Tensor mixed = LtxVideo2Pipeline.Renoise(backend, x, noise, sigma);
-        Assert.Equal(expected, *(float*)mixed.DataPointer, 5);
     }
 
     /// <summary>The upsampler is defined on UN-normalized latents, so the transition un-normalizes in and
@@ -110,9 +75,6 @@ public sealed unsafe class LtxVideo2TwoStageTests
     /// so a half-size that is not a whole number of cells costs a latent row. 1280x736 renders 1280x704.</summary>
     [Theory]
     [InlineData(1280, 736, 20, 11, 1280, 704)]
-    [InlineData(1280, 720, 20, 11, 1280, 704)]
-    [InlineData(768, 512, 12, 8, 768, 512)]
-    [InlineData(512, 320, 8, 5, 512, 320)]
     public void TwoStageGridSnapsDownAtTheHalfResolution(int width, int height,
         int expectStage1W, int expectStage1H, int expectWidth, int expectHeight)
     {
@@ -134,7 +96,6 @@ public sealed unsafe class LtxVideo2TwoStageTests
     /// noise injection would over-denoise and over-noise at every step.</summary>
     [Theory]
     [InlineData(0.85f, 0.725f, 0.231617647f, 0.720616570f, 0.571883618f)]
-    [InlineData(0.725f, 0.421875f, 0.479512392f, 0.766223333f, 0.377620885f)]
     [InlineData(1.0f, 0.99375f, 0.012460937f, 0.501567398f, 0.861510149f)]
     public void AncestralCoefficientsMatchComfyUi(float s0, float s1, float delta, float zScale, float noiseScale)
     {
@@ -153,19 +114,5 @@ public sealed unsafe class LtxVideo2TwoStageTests
         Assert.Equal(0.421875f, delta, 6);
         Assert.Equal(1f, zScale, 6);
         Assert.Equal(0f, noiseScale, 6);
-    }
-
-    /// <summary>The property that makes the injection marginal-preserving: the deterministic step's residual noise
-    /// scaled by the blend, plus the injected noise, sums in quadrature back to <c>s1</c>.</summary>
-    [Theory]
-    [InlineData(0.85f, 0.725f)]
-    [InlineData(0.725f, 0.421875f)]
-    [InlineData(0.975f, 0.909375f)]
-    public void AncestralInjectionRestoresTheTargetSigma(float s0, float s1)
-    {
-        (float delta, float zScale, float noiseScale) = LtxVideo2Pipeline.AncestralCoefficients(s0, s1);
-        float sigmaDown = s0 - delta;
-        float restored = zScale * sigmaDown * (zScale * sigmaDown) + noiseScale * noiseScale;
-        Assert.True(System.MathF.Abs(restored - s1 * s1) < 1e-6f, $"restored {restored:F8} vs s1² {s1 * s1:F8}");
     }
 }

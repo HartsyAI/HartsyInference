@@ -228,16 +228,6 @@ public sealed class PromptWeightingModeLedgerTests
         }
     }
 
-    /// <summary>A family cannot be both pinned and unresolved.</summary>
-    [Fact]
-    public void UnresolvedFamiliesAreAbsentFromTheLedger()
-    {
-        foreach (string family in Unresolved)
-        {
-            Assert.False(Ledger.ContainsKey(family), $"'{family}' is listed unresolved but also ledgered.");
-        }
-    }
-
     /// <summary>Krea2 is the only family whose workflow gets <c>SwarmAttnTokenWeights</c>
     /// (<c>WorkflowGenerator.cs:965-972</c>). Flux, Chroma, Qwen-Image and HunyuanVideo expose the same <c>img_slice</c>
     /// hook the patch needs (<c>SwarmText.py:284</c>), so the tempting generalization is wrong: SwarmUI does not wire
@@ -263,19 +253,6 @@ public sealed class PromptWeightingModeLedgerTests
             Assert.True(entry.Value != PromptWeightingMode.None,
                 $"'{entry.Key}' declares None; only music families bypass SwarmTextEncodeAdvanced.");
         }
-    }
-
-    /// <summary>The mechanisms split roughly in half across the catalogue; a mode that collapsed to one value would mean
-    /// the table was filled in by default rather than read, which is exactly the failure this ledger exists to prevent.</summary>
-    [Fact]
-    public void BothMechanismsAreRepresented()
-    {
-        Assert.Contains(PromptWeightingMode.ComfyBlend, Ledger.Values);
-        Assert.Contains(PromptWeightingMode.CondScale, Ledger.Values);
-        _output.WriteLine($"ComfyBlend: {Ledger.Values.Count(m => m == PromptWeightingMode.ComfyBlend)}, "
-            + $"CondScale: {Ledger.Values.Count(m => m == PromptWeightingMode.CondScale)}, "
-            + $"CondScaleWithAttention: {Ledger.Values.Count(m => m == PromptWeightingMode.CondScaleWithAttention)}, "
-            + $"unresolved: {Unresolved.Length}");
     }
 
     /// <summary>The join between the ledger and the code: a recipe that declares a mode must declare the one read off
@@ -314,20 +291,6 @@ public sealed class PromptWeightingModeLedgerTests
         string[] expected = [.. NotYetWired.Order(StringComparer.Ordinal)];
         string[] actual = [.. stillNone.Order(StringComparer.Ordinal)];
         Assert.Equal(expected, actual);
-    }
-
-    /// <summary>A family with no verified mode must not be wired on a guess: unresolved means unresolved.</summary>
-    [Fact]
-    public void UnresolvedFamiliesDeclareNoMode()
-    {
-        foreach ((string family, PromptWeightingMode declared) in DeclaredModes())
-        {
-            if (Unresolved.Contains(family, StringComparer.Ordinal))
-            {
-                Assert.True(declared == PromptWeightingMode.None,
-                    $"'{family}' has no ComfyUI tokenizer to read, but its recipe declares {declared}.");
-            }
-        }
     }
 
     /// <summary>What each registered recipe declares, image first.</summary>

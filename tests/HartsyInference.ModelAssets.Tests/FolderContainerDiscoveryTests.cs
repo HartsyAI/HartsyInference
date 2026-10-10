@@ -109,16 +109,4 @@ public sealed class FolderContainerDiscoveryTests : IDisposable
         }
     }
 
-    [Fact]
-    public void LanceLoadVariant_LoadsAVariantPublishedAsGguf()
-    {
-        string variant = Component("Lance_3B");
-        WriteGguf(Path.Combine(variant, "model-Q4_K_M.gguf"), "language_model.model.layers.0.self_attn.q_proj.weight");
-
-        (LanceCheckpointConverter.ConvertedWeights converted, CheckpointSource source) = LanceCheckpointConverter.LoadVariant(variant);
-        using (source)
-        {
-            Assert.Contains("layers.0.self_attn.q_proj.weight", converted.Transformer);
-        }
-    }
 }

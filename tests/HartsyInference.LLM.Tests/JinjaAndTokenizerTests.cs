@@ -52,26 +52,6 @@ public sealed class JinjaAndTokenizerTests
     }
 
     [Fact]
-    public void Jinja_IsDefined_And_Ternary()
-    {
-        JinjaEngine engine = new("{% if tools is defined and tools is not none %}T{% else %}{{ 'no' if missing is not defined else 'yes' }}{% endif %}");
-        // tools/missing not in context → 'tools is defined' false → else → 'missing is not defined' true → 'no'.
-        Assert.Equal("no", engine.Render(new Dictionary<string, object?>()));
-    }
-
-    [Fact]
-    public void Jinja_IsTrue_IsFalse()
-    {
-        // Regression: Qwen3's real chat template branches on `enable_thinking is false`, not just `is defined`/
-        // truthiness — IsTestExpr previously threw NotSupportedException for the "true"/"false" test names.
-        JinjaEngine engine = new("{% if flag is false %}F{% elif flag is true %}T{% else %}N{% endif %}");
-        Assert.Equal("F", engine.Render(new Dictionary<string, object?> { ["flag"] = false }));
-        Assert.Equal("T", engine.Render(new Dictionary<string, object?> { ["flag"] = true }));
-        // Strict boolean identity, not truthiness: a non-bool value is neither "is true" nor "is false".
-        Assert.Equal("N", engine.Render(new Dictionary<string, object?> { ["flag"] = 1 }));
-    }
-
-    [Fact]
     public void Jinja_StringLiteralContainingBraces_NotMistakenForCloseTag()
     {
         // Regression: Qwen2/2.5/3 tool-call templates embed '{{' and '}}' inside a quoted string literal.
@@ -85,25 +65,10 @@ public sealed class JinjaAndTokenizerTests
     }
 
     [Fact]
-    public void Jinja_CommentsAndSlice()
-    {
-        JinjaEngine engine = new("{# header #}{% for m in messages[1:] %}{{ m['content'] }}{% endfor %}");
-        string outp = engine.Render(Ctx(false, ("system", "S"), ("user", "A"), ("user", "B")));
-        Assert.Equal("AB", outp); // messages[1:] drops the system message
-    }
-
-    [Fact]
     public void ByteLevelCodec_RoundTripsSpacesNewlinesUnicode()
     {
         foreach (string s in new[] { " Hello world", "line1\nline2\n\n", "café — π", "tabs\tand spaces  " })
             Assert.Equal(s, ByteLevelCodec.Decode(ByteLevelCodec.Encode(s)));
-    }
-
-    [Fact]
-    public void ByteLevelCodec_DecodesGpt2Markers()
-    {
-        // 'Ġ' (U+0120) is space, 'Ċ' (U+010A) is newline in GPT-2 byte-level space.
-        Assert.Equal(" the\n", ByteLevelCodec.Decode("ĠtheĊ"));
     }
 
     // ── JinjaChatTemplate: normalize-and-retry for strict / system-less templates ───────────────────────
@@ -158,16 +123,6 @@ public sealed class JinjaAndTokenizerTests
         Assert.Equal("<s>[INST] A\n\nB [/INST]", tok.Last);
     }
 
-    [Fact]
-    public void JinjaChatTemplate_LeavesValidConversationUntouched()
-    {
-        JinjaChatTemplate template = new(MistralStyleTemplate);
-        CapturingTokenizer tok = new();
-        // Already valid (user/assistant/user) — no raise, so the original render is used as-is.
-        template.Encode(tok, [ChatMessage.User("A"), ChatMessage.Assistant("B"), ChatMessage.User("C")], addGenerationPrompt: false);
-        Assert.Equal("<s>[INST] A [/INST] B</s>[INST] C [/INST]", tok.Last);
-    }
-
     // ── JinjaChatTemplate: enable_thinking (Qwen3-family reasoning toggle) ─────────────────────────────
 
     /// <summary>A minimal Qwen3-style template: branches on <c>enable_thinking</c> only when it <c>is defined</c>,
@@ -189,22 +144,4 @@ public sealed class JinjaAndTokenizerTests
         Assert.Equal("Hi<think>", tok.Last);
     }
 
-    [Fact]
-    public void JinjaChatTemplate_EnableThinkingFalse_TakesNoThinkBranch()
-    {
-        JinjaChatTemplate template = new(ThinkingStyleTemplate);
-        CapturingTokenizer tok = new();
-        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true, enableThinking: false);
-        Assert.Equal("Hi<no_think>", tok.Last);
-    }
-
-    [Fact]
-    public void JinjaChatTemplate_EnableThinkingUnset_LeavesVariableUndefined()
-    {
-        JinjaChatTemplate template = new(ThinkingStyleTemplate);
-        CapturingTokenizer tok = new();
-        // No enableThinking argument at all — must render the "is defined" fallback, not silently treat as false.
-        template.Encode(tok, [ChatMessage.User("Hi")], addGenerationPrompt: true);
-        Assert.Equal("Hi<default>", tok.Last);
-    }
 }

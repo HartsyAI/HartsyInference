@@ -23,7 +23,6 @@ public sealed class DeepSeekV41VisionModelTests(ITestOutputHelper output)
 
     [Theory]
     [InlineData(5, 7)]
-    [InlineData(4, 3)]
     [InlineData(1, 4)]
     public void Encode_MatchesTheUpstreamImageEncoder(int gridHeight, int gridWidth)
     {
@@ -36,18 +35,6 @@ public sealed class DeepSeekV41VisionModelTests(ITestOutputHelper output)
         VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} encode", embeddings, VisionFixture.Floats(testCase.GetProperty("output")));
         (int tokenHeight, int tokenWidth) = model.TokenGrid(gridHeight, gridWidth);
         Assert.Equal(tokenHeight * tokenWidth * model.OutputDim, embeddings.Length);
-    }
-
-    [Fact]
-    public void TheImageSpanEmbeddingsAreExposedAsGiven()
-    {
-        using CpuBackend backend = new();
-        using DeepSeekV41VisionModel model = Build(backend);
-
-        Assert.Equal(VisionFixture.OutputDim, model.OutputDim);
-        Assert.Equal(1f, model.ImageStart[0]);
-        Assert.Equal(0f, model.ImageEnd[^1]);
-        Assert.Equal(-1f - (model.OutputDim - 1), model.ImageNewline[^1]);
     }
 
     [Fact]

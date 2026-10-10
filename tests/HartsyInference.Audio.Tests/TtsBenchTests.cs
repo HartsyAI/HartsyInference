@@ -12,6 +12,7 @@ namespace HartsyInference.Audio.Tests;
 /// <summary>Pure generation-time benchmarks (exclude model load; warmup + 3 timed runs) for the SOTA TTS
 /// models we support, to compare against Python reference timings. CPU by default (small models);
 /// gated on cached weights.</summary>
+[Trait("Category", "Integration")]
 public sealed class TtsBenchTests
 {
     private readonly ITestOutputHelper _out;

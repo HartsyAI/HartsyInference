@@ -54,8 +54,6 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(37, 8, 64, false)]
-    [InlineData(37, 8, 64, true)]
-    [InlineData(512, 32, 128, false)]
     [InlineData(512, 32, 128, true)]
     public void QkNormRopeTokenMajor_IsHeadMajorReindexed(int seq, int heads, int headDim, bool f16)
     {

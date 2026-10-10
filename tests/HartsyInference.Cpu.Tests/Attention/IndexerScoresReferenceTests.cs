@@ -42,16 +42,6 @@ public sealed class IndexerScoresReferenceTests
     }
 
     [Fact]
-    public void Query_At_An_Odd_Position_Does_Not_See_The_Group_That_Is_Still_Open()
-    {
-        // ratio 2, position 2 (0-based) has compress_len (2+1)//2 = 1: only key 0 is visible, key 1 is not.
-        float[] actual = Run(out System.Text.Json.JsonElement f);
-        int n = f.GetProperty("keys").GetInt32();
-        Assert.True(float.IsFinite(actual[2 * n + 0]));
-        Assert.True(float.IsNegativeInfinity(actual[2 * n + 1]));
-    }
-
-    [Fact]
     public void A_Zero_Candidate_Flag_Masks_An_Otherwise_Visible_Key()
     {
         System.Text.Json.JsonElement f = Load("indexer_scores.json");

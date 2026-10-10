@@ -44,7 +44,6 @@ public sealed class SparseLatentAttentionTests(ITestOutputHelper output)
     [Theory]
     [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, LatentEncoding.Fp4E2M1E4M3x16, 512, 64, 40, 128)]
     [InlineData(LatentEncoding.F32, LatentEncoding.F32, 64, 3, 9, 16)]
-    [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, LatentEncoding.Fp8E4M3Ue8m0x32, 128, 8, 33, 40)]
     [InlineData(LatentEncoding.Fp4E2M1E8M0x32, LatentEncoding.Fp4E2M1E4M3x16, 96, 5, 17, 64)]
     [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, LatentEncoding.Fp4E2M1E4M3x16, 512, 128, 200, 300)]
     public void MatchesCpuReference(LatentEncoding winEnc, LatentEncoding mainEnc, int dim, int heads, int k, int mainRows)

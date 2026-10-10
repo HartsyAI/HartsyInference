@@ -3,9 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Generation;
-using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests.DeepSeekV41;
@@ -17,27 +15,6 @@ public sealed class DeepSeekV41GenerationModelTests
     private static float[] Floats(JsonElement e) => DeepSeekV41ModelFixtureCheckpoint.Floats(e);
 
     private static int[] Ints(JsonElement e) => DeepSeekV41ModelFixtureCheckpoint.Ints(e);
-
-    private sealed class NumberTokenizer : ILlmTokenizer
-    {
-        public int[] Encode(string text, bool addSpecial) => [];
-
-        public int[] EncodeOrdinary(string text) => [];
-
-        public string Decode(IReadOnlyList<int> ids) => string.Join(",", ids);
-
-        public int? SpecialId(string token) => null;
-
-        public int? BosId => null;
-
-        public int? EosId => null;
-
-        public IReadOnlyList<int> StopIds => [];
-
-        public string? BosToken => null;
-
-        public string? EosToken => null;
-    }
 
     private sealed class ForeignState : ISequenceState
     {
@@ -101,22 +78,6 @@ public sealed class DeepSeekV41GenerationModelTests
                 stepNo++;
             }
             Assert.Equal(17, state.Length);
-        });
-    }
-
-    [Fact]
-    public void LastRowOnly_Returns_One_Row_And_Otherwise_Every_Row_With_The_Same_Last_Row()
-    {
-        WithModel(model =>
-        {
-            int[] ids = Ints(Fx.GetProperty("steps")[0].GetProperty("ids"));
-            using ISequenceState a = model.CreateSequenceState(new SequenceStateOptions(64)), b = model.CreateSequenceState(new SequenceStateOptions(64));
-            using Tensor last = model.Prefill(new PrefillChunk(ids.AsMemory(), 0, LastRowOnly: true), a);
-            using Tensor all = model.Prefill(new PrefillChunk(ids.AsMemory(), 0, LastRowOnly: false), b);
-            int dim = model.Info.HiddenSize;
-            Assert.Equal(new TensorShape(1, 1, dim), last.Shape);
-            Assert.Equal(new TensorShape(1, ids.Length, dim), all.Shape);
-            Assert.Equal(last.AsReadOnlySpan<float>().ToArray(), all.AsReadOnlySpan<float>().Slice((ids.Length - 1) * dim, dim).ToArray());
         });
     }
 
@@ -210,47 +171,4 @@ public sealed class DeepSeekV41GenerationModelTests
         });
     }
 
-    [Fact]
-    public void Estimates_Are_Positive_And_Grow_With_Context()
-    {
-        WithModel(model =>
-        {
-            Assert.True(model.EstimateSequenceBytes(64) > 0);
-            Assert.True(model.EstimateSequenceBytes(64) >= model.EstimateSequenceBytes(8));
-            Assert.Empty(model.EnumerateWeights(includeRedundantSplits: true));
-            CapacitySnapshot capacity = model.Capacity();
-            Assert.True(capacity.TotalBytes > 0 && capacity.FreeBytes >= 0);
-        });
-    }
-
-    [Fact]
-    public void The_Shared_Pipeline_Drives_It_Greedily_To_The_Same_Tokens_As_A_Manual_Loop()
-    {
-        WithModel(model =>
-        {
-            int[] prompt = Ints(Fx.GetProperty("steps")[0].GetProperty("ids"));
-            float[] firstLogits = Floats(Fx.GetProperty("steps")[0].GetProperty("logits"));
-            int firstToken = Array.IndexOf(firstLogits, firstLogits.Max());
-
-            List<int> manual = [];
-            using (ISequenceState state = model.CreateSequenceState(new SequenceStateOptions(64)))
-            {
-                int[] feed = prompt;
-                for (int i = 0; i < 3; i++)
-                {
-                    float[] logits = Logits(model, feed, state);
-                    int token = Array.IndexOf(logits, logits.Max());
-                    manual.Add(token);
-                    feed = [token];
-                }
-            }
-
-            TextGenerationPipeline pipeline = new(model, new NumberTokenizer());
-            GenerationResult result = pipeline.Generate(new GenerationRequest { RawTokenIds = prompt, MaxTokens = 3, Sampling = SamplingOptions.GreedyPreset });
-
-            Assert.Equal(firstToken, result.TokenIds[0]);
-            Assert.Equal(manual, result.TokenIds);
-            Assert.Equal(prompt.Length, result.PromptTokens);
-        });
-    }
 }

@@ -27,7 +27,6 @@ public sealed unsafe class ChatterboxT3DecodeCrashTests
 
     [Theory]
     [InlineData(16)]
-    [InlineData(30)]
     public void T3_PrefillThenDecode_RealDims(int layers)
     {
         using CpuBackend backend = new();

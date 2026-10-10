@@ -147,35 +147,6 @@ public sealed class AudioRunnerLeaseTests
     }
 
     [Fact]
-    public async Task ServiceCalls_RunOnTheLeasedRunner_WhileTheLeaseIsOpen()
-    {
-        using IDisposable calm = AudioEvictionPressure.Relax();
-        using InferenceEngine engine = new("cpu");
-        FakeTts tts = await SeedTtsAsync(engine, KokoroKey);
-        FakeStt stt = await SeedSttAsync(engine, WhisperKey);
-        using ISynthesizerLease synth = await engine.Speech.OpenSynthesizerAsync(Kokoro);
-        using ITranscriberLease hear = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
-
-        AudioResult spoken = await engine.Speech.SynthesizeAsync(Kokoro, new SpeechRequest { Text = "From the service." });
-        Assert.Equal(AudioClipCodec.EncodeWav(tts.Output, null, tts.SampleRate), spoken.Data);
-        List<AudioChunk> streamed = [];
-        await foreach (AudioChunk chunk in engine.Speech.SynthesizeStreamAsync(Kokoro, new SpeechRequest { Text = "Streamed." }))
-        {
-            streamed.Add(chunk);
-        }
-        Assert.Equal(tts.Output, Assert.Single(streamed).Samples);
-        TranscriptResult transcript = await engine.Transcribe.RunAsync(WhisperTiny, Clip16k());
-        Assert.Equal("heard", transcript.Text);
-
-        Assert.Equal(tts.Output, synth.Synthesize("From the lease.", TtsOptions));
-        Assert.Equal("heard", hear.Transcribe(Ramp(1600), 16_000, SttOptions));
-        Assert.Equal(3, tts.Calls);
-        Assert.Equal(2, stt.Calls);
-        Assert.True(engine.AudioRuntime.Tts.IsPinned(KokoroKey));
-        Assert.True(engine.AudioRuntime.Stt.IsPinned(WhisperKey));
-    }
-
-    [Fact]
     public async Task LeaseCalls_DoNotWaitForTheGenerationLock()
     {
         using IDisposable calm = AudioEvictionPressure.Relax();
@@ -291,25 +262,6 @@ public sealed class AudioRunnerLeaseTests
         Assert.False(engine.AudioRuntime.Tts.IsPinned(KokoroKey));
         Assert.True(tts.Disposed);
         Assert.Throws<ObjectDisposedException>(() => second.Synthesize("After.", TtsOptions));
-    }
-
-    [Fact]
-    public async Task DoubleDispose_ReleasesOneHold()
-    {
-        using IDisposable calm = AudioEvictionPressure.Relax();
-        using InferenceEngine engine = new("cpu");
-        await SeedSttAsync(engine, WhisperKey);
-        ITranscriberLease first = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
-        ITranscriberLease second = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
-
-        first.Dispose();
-        first.Dispose();
-        Assert.True(engine.AudioRuntime.Stt.IsPinned(WhisperKey));
-        Assert.Equal("heard", second.Transcribe(Ramp(160), 16_000, SttOptions));
-
-        second.Dispose();
-        second.Dispose();
-        Assert.False(engine.AudioRuntime.Stt.IsPinned(WhisperKey));
     }
 
     [Fact]

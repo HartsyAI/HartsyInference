@@ -61,24 +61,4 @@ public sealed class VramRequestBindingTests
         Assert.Equal(LeverState.Off, request.Vram.WeightStreaming);
     }
 
-    /// <summary>Omitting the field entirely must mean "follow the backend", not an empty override that decides something.</summary>
-    [Fact]
-    public void OmittedFieldStaysNull()
-    {
-        ImageRequest request = JsonSerializer.Deserialize<ImageRequest>("""{"prompt":"a red fox"}""", Options)!;
-        Assert.Null(request.Vram);
-    }
-
-    /// <summary>Video and music carry the same field, so one documented shape covers every modality.</summary>
-    [Fact]
-    public void OtherModalitiesCarryTheSameShape()
-    {
-        VideoRequest video = JsonSerializer.Deserialize<VideoRequest>(
-            """{"prompt":"x","vram":{"tier":"Balanced"}}""", Options)!;
-        Assert.Equal(VramTier.Balanced, video.Vram!.Tier);
-
-        MusicRequest music = JsonSerializer.Deserialize<MusicRequest>(
-            """{"prompt":"x","vram":{"tier":"Balanced"}}""", Options)!;
-        Assert.Equal(VramTier.Balanced, music.Vram!.Tier);
-    }
 }

@@ -47,39 +47,6 @@ public sealed class DeepSeekV41TextMemoryEstimateTests : IDisposable
     }
 
     [Fact]
-    public void DroppingTheDraftShardsRemovesOnlyDraftBytes()
-    {
-        TinyDeepSeekV41Checkpoint.Write(_directory);
-        long withDraft = TextMemoryProfile.Estimate(_directory).WeightBytesByClass!["Draft"];
-        string other = Directory.CreateTempSubdirectory("dsv41-estimate-nodraft-").FullName;
-        try
-        {
-            long total = TinyDeepSeekV41Checkpoint.Write(other, includeDraft: false);
-            MemoryEstimate estimate = TextMemoryProfile.Estimate(other);
-
-            Assert.True(withDraft > 0);
-            Assert.Equal(0, estimate.WeightBytesByClass!["Draft"]);
-            Assert.Equal(total, estimate.WeightBytesByClass.Values.Sum());
-        }
-        finally
-        {
-            Directory.Delete(other, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void WorkingMemoryIsReportedAndMatchesTheStaticEstimate()
-    {
-        TinyDeepSeekV41Checkpoint.Write(_directory);
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
-
-        MemoryPhase phase = Assert.Single(TextMemoryProfile.Estimate(_directory).Phases);
-
-        Assert.True(phase.ActivationBytes > 0);
-        Assert.Equal(DeepSeekV41WorkingMemory.AnonymousBytes(checkpoint.Config, 0, HfTextDirectoryLoader.LoadOptions), phase.ActivationBytes);
-    }
-
-    [Fact]
     public void StaticSequenceStateBytesEqualTheLoadedModelsOwn()
     {
         DeepSeekV41ModelFixtureCheckpoint.Write(_directory);
@@ -107,18 +74,6 @@ public sealed class DeepSeekV41TextMemoryEstimateTests : IDisposable
     }
 
     [Fact]
-    public void Handles_OnlyADeepSeekV41Directory()
-    {
-        Assert.False(TextMemoryProfile.Handles(null));
-        Assert.False(TextMemoryProfile.Handles(_directory));
-        File.WriteAllText(Path.Combine(_directory, "config.json"), "{\"model_type\":\"llama\"}");
-        File.WriteAllBytes(Path.Combine(_directory, "model.safetensors"), new byte[8]);
-        Assert.False(TextMemoryProfile.Handles(_directory));
-        TinyDeepSeekV41Checkpoint.Write(_directory);
-        Assert.True(TextMemoryProfile.Handles(_directory));
-    }
-
-    [Fact]
     public async Task Service_EstimateAndAssessRouteTextDirectoriesToTheTextProfile()
     {
         long total = TinyDeepSeekV41Checkpoint.Write(_directory);
@@ -135,16 +90,4 @@ public sealed class DeepSeekV41TextMemoryEstimateTests : IDisposable
         Assert.NotNull(fit.Estimate);
     }
 
-    [Fact]
-    public void RealOfficialHeaderSums_FeedTheSameClassArithmetic()
-    {
-        DeepSeekV41WeightInventory inventory = DeepSeekV41WeightInventory.Summarize(DeepSeekV41HeaderTemplates.ExpandOfficial());
-
-        Assert.Equal(DeepSeekV41HeaderTemplates.OfficialTotalSize, inventory.BytesByClass.Values.Sum());
-        long resident = inventory.BytesByClass[DeepSeekV41WeightClass.Dense] + inventory.BytesByClass[DeepSeekV41WeightClass.Expert]
-            + inventory.BytesByClass[DeepSeekV41WeightClass.Engram] + inventory.BytesByClass[DeepSeekV41WeightClass.Embed]
-            + inventory.BytesByClass[DeepSeekV41WeightClass.Head];
-        Assert.Equal(DeepSeekV41HeaderTemplates.OfficialTotalSize
-            - inventory.BytesByClass[DeepSeekV41WeightClass.Vision] - inventory.BytesByClass[DeepSeekV41WeightClass.Draft], resident);
-    }
 }

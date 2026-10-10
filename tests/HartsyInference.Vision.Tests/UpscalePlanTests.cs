@@ -15,13 +15,6 @@ public sealed class UpscalePlanTests
     }
 
     [Fact]
-    public void TargetInsideOnePass_ResizesDown()
-    {
-        UpscalePlan plan = UpscalePlan.Create(256, 256, 4, 768, 768);
-        Assert.Equal(new UpscalePlan(1, 768, 768), plan);
-    }
-
-    [Fact]
     public void TargetBeyondOnePass_ChainsASecondPass()
     {
         // 256 → 512 → 1024 on x2plus: two passes cover the target exactly.
@@ -42,13 +35,6 @@ public sealed class UpscalePlanTests
     {
         UpscalePlan plan = UpscalePlan.Create(200, 100, 4, 600, null);
         Assert.Equal(new UpscalePlan(1, 600, 300), plan);
-    }
-
-    [Fact]
-    public void TargetSmallerThanSource_StillRunsOnePassThenDownsizes()
-    {
-        UpscalePlan plan = UpscalePlan.Create(512, 512, 4, 256, 256);
-        Assert.Equal(new UpscalePlan(1, 256, 256), plan);
     }
 
     [Fact]

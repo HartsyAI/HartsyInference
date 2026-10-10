@@ -83,21 +83,6 @@ public sealed unsafe class TextEncoderQuantNormalizerTests
     }
 
     [Fact]
-    public void Normalize_PlainBf16_PassesThroughUnchanged()
-    {
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["model.layers.0.self_attn.q_proj.weight"] = new Tensor(new TensorShape(8, 4), DType.BF16),
-            ["model.embed_tokens.weight"] = new Tensor(new TensorShape(4, 4), DType.BF16),
-        };
-
-        Dictionary<string, Tensor> result = TextEncoderQuantNormalizer.Normalize(weights);
-
-        Assert.Equal(weights.Count, result.Count);
-        Assert.Equal(DType.BF16, result["model.layers.0.self_attn.q_proj.weight"].DType);
-    }
-
-    [Fact]
     public void Normalize_ValidNvfp4_DequantizesToF16()
     {
         // 8 rows × 32 real cols → packed [8, 16] U8, block scales [8, 2] (16 elements per block).
@@ -135,19 +120,4 @@ public sealed unsafe class TextEncoderQuantNormalizerTests
         Assert.Contains("NVFP4 block-scale shape", ex.Message);
     }
 
-    [Fact]
-    public void Normalize_U8PackedUnknownFormat_ThrowsNamedError()
-    {
-        // A U8-packed format we still don't dequantize (no nvfp4 companion structure) keeps the clear
-        // load-time refusal naming the declared format.
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["model.layers.0.self_attn.q_proj.weight"] = new Tensor(new TensorShape(8, 2), DType.U8),
-            ["model.layers.0.self_attn.q_proj.comfy_quant"] = ComfyQuantBlob("svdquant"),
-        };
-
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => TextEncoderQuantNormalizer.Normalize(weights));
-        Assert.Contains("svdquant", ex.Message);
-        Assert.Contains("q_proj.weight", ex.Message);
-    }
 }

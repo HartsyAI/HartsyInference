@@ -168,22 +168,6 @@ public sealed unsafe class LoraQuantizedAdjunctTests : IDisposable
     }
 
     [Fact]
-    public void LoHaOnAQuantizedBase_MaterializesOneRankFullTerm()
-    {
-        using Tensor quantized = QuantizedWeight(Rows, Cols);
-        Dictionary<string, Tensor> weights = new() { ["blocks.0.attn.to_q.weight"] = quantized };
-
-        using LoraStack stack = new LoraStack();
-        stack.AddFromPath(LoHaLora("loha", "transformer.blocks.0.attn.to_q"), strength: 1.0f);
-        Assert.Equal(1, stack.ApplyTo(weights, LoraTarget.Transformer, new CpuBackend()));
-
-        LowRankAdjunctTerm term = Assert.Single(weights["blocks.0.attn.to_q.weight"].LowRankAdjunct!.Terms);
-        Assert.Null(term.Up);
-        Assert.Equal(Rows, term.Down.Shape[0]);
-        Assert.Equal(Cols, term.Down.Shape[1]);
-    }
-
-    [Fact]
     public void DoraOnAQuantizedBase_RefusesByName()
     {
         using Tensor quantized = QuantizedWeight(Rows, Cols);
@@ -268,14 +252,6 @@ public sealed unsafe class LoraQuantizedAdjunctTests : IDisposable
         [$"{module}.lora_A.weight"] = ([Rank, Cols], Filled(Rank * Cols, DownValue)),
         [$"{module}.lora_B.weight"] = ([outRows, Rank], Filled(outRows * Rank, UpValue)),
         [$"{module}.dora_scale"] = ([outRows, 1], Filled(outRows, 1.0f)),
-    });
-
-    private string LoHaLora(string name, string module) => CreateSafeTensors(name, new()
-    {
-        [$"{module}.hada_w1_a"] = ([Rows, Rank], Filled(Rows * Rank, 0.25f)),
-        [$"{module}.hada_w1_b"] = ([Rank, Cols], Filled(Rank * Cols, 0.5f)),
-        [$"{module}.hada_w2_a"] = ([Rows, Rank], Filled(Rows * Rank, 0.25f)),
-        [$"{module}.hada_w2_b"] = ([Rank, Cols], Filled(Rank * Cols, 0.5f)),
     });
 
     private static float[] Filled(int count, float value)

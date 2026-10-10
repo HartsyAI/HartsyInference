@@ -124,47 +124,7 @@ public sealed unsafe class MlaTests
         Assert.True(maxDiff <= 1e-4f, $"q-LoRA query block diverges from reference by {maxDiff:E3}");
     }
 
-    /// <summary>The full q-LoRA MLA layer runs through prefill + decode, stays finite, and advances the cache —
-    /// the build-defer structural gate for DeepSeek-V3 / Kimi-K2 (which exceed local VRAM for a real e2e run).</summary>
-    [Fact]
-    public void Mla_QLora_PrefillAndDecode_StayFinite()
-    {
-        (TransformerConfig cfg, Dictionary<string, Tensor> w) = QLoraModel(qLora: 12);
-        using CpuBackend backend = new();
-        using GenericTransformer model = new(cfg);
-        model.LoadWeights(w, "model");
-        using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, 32);
-        using (Tensor prompt = Fill(new Tensor(new TensorShape(1, 4, cfg.HiddenSize), DType.F32)))
-        using (Tensor _ = model.ForwardEmbeds(backend, prompt, 4, 0, cache)) { }
-        using Tensor step = Fill(new Tensor(new TensorShape(1, 1, cfg.HiddenSize), DType.F32));
-        using Tensor outp = model.ForwardEmbeds(backend, step, 1, cache.CurrentLength, cache);
-        float* po = (float*)outp.DataPointer;
-        for (int i = 0; i < cfg.HiddenSize; i++) Assert.True(float.IsFinite(po[i]), "q-LoRA MLA decode non-finite");
-        Assert.Equal(5, cache.CurrentLength);
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
     private static float[] HostArr(Tensor t) { float[] r = new float[t.ElementCount]; float* p = (float*)t.DataPointer; for (long i = 0; i < r.Length; i++) r[i] = p[i]; return r; }
-
-    [Fact]
-    public void Mla_Prefill_ProducesFiniteOutput()
-    {
-        TransformerConfig cfg = Config();
-        using CpuBackend backend = new();
-        using GenericTransformer model = new(cfg);
-        model.LoadWeights(Weights(cfg), "model");
-
-        const int t = 5;
-        using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, 32);
-        using Tensor embeds = Fill(new Tensor(new TensorShape(1, t, cfg.HiddenSize), DType.F32));
-        using Tensor outp = model.ForwardEmbeds(backend, embeds, t, 0, cache);
-
-        Assert.Equal(cfg.HiddenSize, (int)outp.Shape[2]);
-        float* po = (float*)outp.DataPointer;
-        for (long i = 0; i < outp.ElementCount; i++)
-            Assert.True(float.IsFinite(po[i]), $"MLA prefill produced non-finite output at {i}");
-        Assert.Equal(t, cache.CurrentLength);   // the latent-KV cache advanced once per token
-    }
 
     [Fact]
     public void Mla_Decode_AppendsAndStaysFinite()

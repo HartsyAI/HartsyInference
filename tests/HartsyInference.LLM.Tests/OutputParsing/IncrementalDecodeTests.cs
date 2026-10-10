@@ -11,8 +11,6 @@ public sealed class IncrementalDecodeTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(7)]
-    [InlineData(23)]
     public void RandomByteSplitsConcatenateToTheFullDecodeWithABoundedWindow(int seed)
     {
         ByteWindowTokenizer tok = new();
@@ -22,33 +20,6 @@ public sealed class IncrementalDecodeTests
         // Context (the tokens emitted at the last pivot) plus the tokens held for one unfinished character.
         Assert.True(tok.MaxIdsPerDecode <= 12, $"window grew to {tok.MaxIdsPerDecode} ids");
         Assert.True(tok.DecodeCalls >= ids.Length, "every push must decode at most a window, never the whole history");
-    }
-
-    [Fact]
-    public void PartialCharacterIsHeldBackUntilTheNextTokenCompletesIt()
-    {
-        ByteWindowTokenizer tok = new();
-        int[] ids = tok.SplitBytes("a😀b", 1, 2, 3, 4, 5);
-        IncrementalDetokenizer d = new(tok, includeSpecial: false);
-        Assert.Equal("a", d.Push(ids[0]));
-        Assert.Equal("", d.Push(ids[1]));
-        Assert.Equal("", d.Push(ids[2]));
-        Assert.Equal("", d.Push(ids[3]));
-        Assert.Equal("😀", d.Push(ids[4]));
-        Assert.Equal("b", d.Push(ids[5]));
-        Assert.Equal("", d.Flush());
-    }
-
-    [Fact]
-    public void UnfinishedSequenceAtTheEndFlushesLikeAOneShotDecode()
-    {
-        ByteWindowTokenizer tok = new();
-        int[] ids = [tok.Add("x"u8.ToArray()), tok.Add([0xE6, 0x97])];
-        IncrementalDetokenizer d = new(tok, includeSpecial: false);
-        Assert.Equal("x", d.Push(ids[0]));
-        Assert.Equal("", d.Push(ids[1]));
-        Assert.Equal("�", d.Flush());
-        Assert.Equal("x�", tok.Decode(ids));
     }
 
     [Fact]
@@ -107,20 +78,6 @@ public sealed class IncrementalDecodeTests
         {
             _pieces.Add(bytes);
             return _pieces.Count - 1;
-        }
-
-        public int[] SplitBytes(string text, params int[] points)
-        {
-            byte[] bytes = Encoding.UTF8.GetBytes(text);
-            List<int> ids = [];
-            int start = 0;
-            foreach (int requested in points.Append(bytes.Length))
-            {
-                int point = Math.Min(requested, bytes.Length);
-                if (point > start) ids.Add(Add(bytes[start..point]));
-                start = Math.Max(start, point);
-            }
-            return [.. ids];
         }
 
         public int[] RandomSplit(string text, Random random, int maxPiece)

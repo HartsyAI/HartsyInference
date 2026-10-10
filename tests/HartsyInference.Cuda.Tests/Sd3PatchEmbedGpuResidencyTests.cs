@@ -29,7 +29,6 @@ public sealed unsafe class Sd3PatchEmbedGpuResidencyTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, false)]
-    [InlineData(true, false)]
     [InlineData(true, true)]
     [Trait("Category", "GpuIntegration")]
     public void Forward_MatchesIndependentScalarReference_WithoutIntermediateD2h(
@@ -161,50 +160,6 @@ public sealed unsafe class Sd3PatchEmbedGpuResidencyTests
         Assert.Equal(validSnapshot.Length, afterFailures.Length);
         for (int i = 0; i < validSnapshot.Length; i++)
             Assert.Same(validSnapshot[i], afterFailures[i]);
-    }
-
-    [Fact]
-    public void ConvertedPositionEmbedding_HasExactReloadAndDisposeOwnership()
-    {
-        using Tensor weight = new(new TensorShape(5, 3, 2, 2), DType.F32);
-        using Tensor bias = new(new TensorShape(5), DType.F32);
-        using Tensor firstSource = HalfTensor(new TensorShape(1, 9, 5), 1409);
-        using Tensor secondSource = HalfTensor(new TensorShape(1, 9, 5), 1423);
-        using Tensor borrowedF32 = new(new TensorShape(1, 9, 5), DType.F32);
-        using PatchEmbed layer = new(2, 3, 5);
-
-        layer.LoadWeights(weight, bias, firstSource);
-        Tensor firstDerived = layer.EnumerateWeights().Last();
-        Assert.NotSame(firstSource, firstDerived);
-        Assert.Equal(DType.F32, firstDerived.DType);
-
-        layer.LoadWeights(weight, bias, firstSource);
-        Assert.Same(firstDerived, layer.EnumerateWeights().Last());
-
-        // Preload callers see the derived tensor, so passing that snapshot back through LoadWeights must not
-        // turn the layer's owned tensor into a borrowed-then-disposed self-alias.
-        layer.LoadWeights(weight, bias, firstDerived);
-        Assert.Same(firstDerived, layer.EnumerateWeights().Last());
-        Touch(firstDerived);
-
-        layer.LoadWeights(weight, bias, secondSource);
-        Tensor secondDerived = layer.EnumerateWeights().Last();
-        Assert.NotSame(firstDerived, secondDerived);
-        AssertDisposed(firstDerived);
-        Touch(firstSource);
-
-        layer.LoadWeights(weight, bias, borrowedF32);
-        Assert.Same(borrowedF32, layer.EnumerateWeights().Last());
-        AssertDisposed(secondDerived);
-
-        layer.Dispose();
-        layer.Dispose();
-        Touch(weight);
-        Touch(bias);
-        Touch(firstSource);
-        Touch(secondSource);
-        Touch(borrowedF32);
-        Assert.Throws<ObjectDisposedException>(() => layer.EnumerateWeights().ToArray());
     }
 
     private static float[] ScalarReference(

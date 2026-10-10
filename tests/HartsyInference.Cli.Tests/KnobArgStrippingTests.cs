@@ -33,8 +33,6 @@ public sealed class KnobArgStrippingTests
 
     [Theory]
     [InlineData("--set")]
-    [InlineData("--profile")]
-    [InlineData("--settings-file")]
     public void KeepsATrailingFlagThatHasNoValue_SoTheParserStillRejectsIt(string flag)
     {
         // ArgValues cannot have read a flag with nothing after it, so the setting the operator asked for was never

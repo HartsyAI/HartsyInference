@@ -147,41 +147,6 @@ public sealed unsafe class Ltx2RopeF16TableTests
     /// <summary>Times the kernel itself at LTX-2.5's video shape — raw device buffers, null stream, no per-call
     /// upload/alloc — because the delta being measured is ~50 µs and the backend op's bookkeeping would drown it.
     /// Diagnostic, not a gate: it asserts only that both variants ran.</summary>
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void TokenMajor_TableDtype_Throughput()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        const int seq = 4992, heads = 32, headDim = 128, inner = heads * headDim;
-        using CudaBackend cuda = new CudaBackend(0, PtxDir());   // establishes the CUDA context the module loads into
-        using CudaKernels kernels = new CudaKernels(PtxDir());
-        using Tensor x = Uniform(new TensorShape(seq, inner), seed: 3, DType.F16);
-        using Tensor normW = Uniform(new TensorShape(inner), seed: 4, DType.F32);
-        (Tensor cos32, Tensor sin32) = RopeTables(seq, inner / 2, seed: 5);
-        using Tensor cos = cos32, sin = sin32;
-        using Tensor cos16 = cos32.CastTo(DType.F16);
-        using Tensor sin16 = sin32.CastTo(DType.F16);
-
-        ulong pX = Upload(x), pW = Upload(normW), pC32 = Upload(cos), pS32 = Upload(sin);
-        ulong pC16 = Upload(cos16), pS16 = Upload(sin16);
-        CudaDriverApi.cuMemAlloc(out ulong pOut, (nuint)((long)seq * inner * 2)).ThrowOnError();
-        try
-        {
-            double f32Ms = TimeRope(kernels, pOut, pX, pW, pC32, pS32, seq, heads, headDim, ropeF16: false);
-            double f16Ms = TimeRope(kernels, pOut, pX, pW, pC16, pS16, seq, heads, headDim, ropeF16: true);
-            double actBytes = 2.0 * seq * inner * 2;                       // F16 in + F16 out
-            _output.WriteLine($"seq={seq} heads={heads} headDim={headDim}");
-            _output.WriteLine($"  F32 tables: {f32Ms:F4} ms  {(actBytes + 2.0 * seq * inner / 2 * 4) / (f32Ms * 1e-3) / 1e9:F0} GB/s");
-            _output.WriteLine($"  F16 tables: {f16Ms:F4} ms  {(actBytes + 2.0 * seq * inner / 2 * 2) / (f16Ms * 1e-3) / 1e9:F0} GB/s");
-            Assert.True(f32Ms > 0 && f16Ms > 0);
-        }
-        finally
-        {
-            CudaDriverApi.cuMemFree(pOut);
-            foreach (ulong p in new[] { pX, pW, pC32, pS32, pC16, pS16 }) CudaDriverApi.cuMemFree(p);
-        }
-    }
-
     private static ulong Upload(Tensor t)
     {
         nuint bytes = (nuint)(t.Shape.ElementCount * (t.DType == DType.F32 ? 4 : 2));

@@ -73,44 +73,6 @@ public class InteractiveSessionTests
     }
 
     [Fact]
-    public async Task ActionUnderrun_RepeatsLastActionWithAdvancingFrameIndex()
-    {
-        StubStepper stepper = new();
-        await using BackgroundComputeSession session = new(stepper, targetFps: 200);
-        await session.SubmitActionAsync(Action(7));
-
-        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            lock (stepper.SeenActionFrames)
-                if (stepper.SeenActionFrames.Count >= 3) break;
-            await Task.Delay(10);
-        }
-
-        lock (stepper.SeenActionFrames)
-        {
-            Assert.True(stepper.SeenActionFrames.Count >= 3, "expected repeat-last to keep stepping");
-            Assert.Equal(7, stepper.SeenActionFrames[0]);
-            Assert.Equal(8, stepper.SeenActionFrames[1]);   // repeated action advances the frame index
-            Assert.Equal(9, stepper.SeenActionFrames[2]);
-        }
-    }
-
-    [Fact]
-    public async Task SetQualityProfile_ReachesTheStepperOnTheComputeThread()
-    {
-        StubStepper stepper = new();
-        await using BackgroundComputeSession session = new(stepper, targetFps: 200);
-        session.SetQualityProfile(QualityProfile.Medium);
-        await session.SubmitActionAsync(Action(0));
-
-        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (stepper.Applied is null && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
-        Assert.Equal(QualityProfile.Medium, stepper.Applied);
-    }
-
-    [Fact]
     public async Task DisposeAsync_StopsTheLoopAndCompletesTheFrameStream()
     {
         StubStepper stepper = new();

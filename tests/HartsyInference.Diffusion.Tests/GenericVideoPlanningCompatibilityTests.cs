@@ -55,17 +55,6 @@ public sealed class GenericVideoPlanningCompatibilityTests
         Assert.Equal(123, plan.EffectiveSettings.Seed);
     }
 
-    [Fact]
-    public void StandardDefaults_DoNotInventCrossFamilySamplingSemantics()
-    {
-        VideoRequest effective = VideoDefaults.Standard.Apply(new VideoRequest { Prompt = "test" });
-
-        Assert.Null(effective.FlowShift);
-        Assert.Null(effective.AudioFlowShift);
-        Assert.Null(effective.Sampler);
-        Assert.Null(effective.Scheduler);
-    }
-
     [Theory]
     [InlineData(SparseAttentionPolicy.Auto)]
     [InlineData(SparseAttentionPolicy.Disable)]

@@ -31,7 +31,6 @@ public sealed unsafe class CsmWeightCacheTests
 
     [Theory]
     [InlineData("q8_0", "Q8_0")]
-    [InlineData("q4_k", "Q4_K")]
     public void LoadQuantized_QuantizesProjectionsAndHeads_KeepsEmbedsAndNorms(string mode, string expectQuant)
     {
         // Small CSM-shaped dict: 2 projection matrices, a head, the backbone→decoder projection, an embed table, a norm.

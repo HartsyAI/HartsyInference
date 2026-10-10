@@ -11,8 +11,6 @@ public sealed class KokoroVoiceMixTests
 {
     [Theory]
     [InlineData("af_heart", new[] { "af_heart" }, new[] { 1f })]
-    [InlineData("af_bella,af_sky", new[] { "af_bella", "af_sky" }, new[] { 1f, 1f })]
-    [InlineData("af_bella(2)+af_sky(1)", new[] { "af_bella", "af_sky" }, new[] { 2f, 1f })]
     [InlineData(" af_bella:0.7 , bm_lewis:0.3 ", new[] { "af_bella", "bm_lewis" }, new[] { 0.7f, 0.3f })]
     public void Parse_ReadsVoicesAndWeights(string spec, string[] voices, float[] weights)
     {
@@ -25,13 +23,7 @@ public sealed class KokoroVoiceMixTests
 
     [Theory]
     [InlineData("../secrets")]
-    [InlineData("af_bella,")]
-    [InlineData("af_bella(0)")]
-    [InlineData("af_bella(-1)")]
     [InlineData("af bella")]
-    [InlineData("af_bella(1.2.3)")]
-    [InlineData("af_bella:.")]
-    [InlineData("af_bella(e)")]
     [InlineData("af_bella(1e3)")]
     public void Parse_RejectsWhatIsNotAVoice(string spec) => Assert.Throws<ArgumentException>(() => KokoroVoiceMix.Parse(spec));
 

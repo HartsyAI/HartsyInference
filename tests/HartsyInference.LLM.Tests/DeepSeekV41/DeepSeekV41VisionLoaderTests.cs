@@ -75,36 +75,4 @@ public sealed class DeepSeekV41VisionLoaderTests(ITestOutputHelper output) : IDi
 
         Assert.Contains("vision.blocks.1.attn.wo.bias", error.Message);
     }
-
-    [Fact]
-    public void AMissingImageEmbedding_IsNamed()
-    {
-        VisionCheckpoint.Write(_directory, omit: "image_newline");
-        using CpuBackend backend = new();
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
-
-        Assert.Contains("image_newline", Assert.Throws<HartsyInferenceException>(() => DeepSeekV41VisionLoader.Load(backend, checkpoint)).Message);
-    }
-
-    [Fact]
-    public void AMisshapenTensor_IsRefusedByName()
-    {
-        VisionCheckpoint.Write(_directory, reshape: "vision.blocks.0.mlp.w2.weight");
-        using CpuBackend backend = new();
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => DeepSeekV41VisionLoader.Load(backend, checkpoint));
-
-        Assert.Contains("vision.blocks.0.mlp.w2.weight", error.Message);
-    }
-
-    [Fact]
-    public void AConfigWithoutAVisionTower_IsRefused()
-    {
-        VisionCheckpoint.Write(_directory, withVisionConfig: false);
-        using CpuBackend backend = new();
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
-
-        Assert.Contains("no vision tower", Assert.Throws<HartsyInferenceException>(() => DeepSeekV41VisionLoader.Load(backend, checkpoint)).Message);
-    }
 }

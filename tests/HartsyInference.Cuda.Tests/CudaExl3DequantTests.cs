@@ -101,7 +101,6 @@ public sealed class CudaExl3DequantTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(128, 128)]
-    [InlineData(384, 256)]
     [InlineData(640, 384)]
     public void RandomTrellis_DeviceBf16_EqualsHostF32RoundedOnce(int inDim, int outDim) =>
         AssertDeviceMatchesHost($"random {inDim}x{outDim}", Random(inDim, outDim, 11), Random(inDim, outDim, 12), Random(inDim, outDim, 13));

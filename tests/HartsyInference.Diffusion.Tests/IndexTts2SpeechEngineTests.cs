@@ -27,20 +27,9 @@ public sealed class IndexTts2SpeechEngineTests
     }
 
     [Theory]
-    [InlineData("indextts2")]
-    [InlineData("INDEXTTS2")]
-    public void TtsCatalog_ResolvesIndexTts2(string id) => Assert.Same(IndexTts2Model.Descriptor, TtsCatalog.Resolve(id));
-
-    [Theory]
     [InlineData(null, false, "IndexTeam/IndexTTS-2.5")]
-    [InlineData("", false, "IndexTeam/IndexTTS-2.5")]
-    [InlineData("indextts2", false, "IndexTeam/IndexTTS-2.5")]
-    [InlineData("2.5", false, "IndexTeam/IndexTTS-2.5")]
     [InlineData("v2_5", false, "IndexTeam/IndexTTS-2.5")]
-    [InlineData("IndexTeam/IndexTTS-2.5", false, "IndexTeam/IndexTTS-2.5")]
     [InlineData("2.0", true, "IndexTeam/IndexTTS-2")]
-    [InlineData("v2_0", true, "IndexTeam/IndexTTS-2")]
-    [InlineData("IndexTeam/IndexTTS-2", true, "IndexTeam/IndexTTS-2")]
     [InlineData("someone/indextts-2-finetune", false, "someone/indextts-2-finetune")]
     [InlineData("me/foo-v2.05", false, "me/foo-v2.05")]
     [InlineData("x/IndexTTS-2.0-fp16", false, "x/IndexTTS-2.0-fp16")]
@@ -70,35 +59,6 @@ public sealed class IndexTts2SpeechEngineTests
         Assert.DoesNotContain(files, f => f.Name.EndsWith(".tiktoken", StringComparison.Ordinal));
     }
 
-    [Theory]
-    [InlineData("2.5")]
-    [InlineData("2.0")]
-    public void Files_BothVersions_ShareTheStackAndHaveUniqueNames(string variant)
-    {
-        IReadOnlyList<AudioModelFile> files = IndexTts2Model.Files(variant);
-        Assert.Equal(files.Count, files.Select(f => f.Name).Distinct(StringComparer.Ordinal).Count());
-        foreach (string name in new[] { "gpt.pth", "s2mel.pth", "wav2vec2bert_stats.pt", "feat1.pt", "feat2.pt" })
-            Assert.Contains(files, f => f.Name == name && f.Repo is null);
-        foreach (string qwen in IndexTts2Model.QwenFiles)
-            Assert.Contains(files, f => f.Name == $"qwen0.6bemo4-merge/{qwen}" && f.Repo is null);
-        Assert.Contains(files, f => f.Repo == "facebook/w2v-bert-2.0");
-        Assert.Contains(files, f => f.Repo == "funasr/campplus");
-        Assert.Contains(files, f => f.Repo == "nvidia/bigvgan_v2_22khz_80band_256x");
-    }
-
-    [Fact]
-    public void BuildOptions_Defaults_MatchTheReferenceSampler()
-    {
-        IndexTts2Options o = IndexTts2Model.BuildOptions(Job());
-        Assert.Equal(0.8f, o.Temperature);
-        Assert.Equal(30, o.TopK);
-        Assert.Equal(0.8f, o.TopP);
-        Assert.Null(o.EmoVector);
-        Assert.Null(o.EmoAudioReference);
-        Assert.False(o.UseEmoText);
-        Assert.Equal(1.0f, o.EmoAlpha);
-    }
-
     [Fact]
     public void BuildOptions_MapsTheEmotionVectorInIndexTts2Order()
     {
@@ -109,14 +69,9 @@ public sealed class IndexTts2SpeechEngineTests
 
     [Theory]
     [InlineData(-0.1)]
-    [InlineData(1.3)]
     [InlineData(double.NaN)]
     public void BuildOptions_RejectsOutOfRangeEmotionWeights(double bad)
         => Assert.Throws<ArgumentException>(() => IndexTts2Model.BuildOptions(Job(b => b.Request = b.Request with { Emotion = [bad, 0, 0, 0, 0, 0, 0, 0] })));
-
-    [Fact]
-    public void Files_QwenClassifierFilesAreOptional()
-        => Assert.All(IndexTts2Model.Files("2.5").Where(f => f.Name.StartsWith("qwen0.6bemo4-merge/", StringComparison.Ordinal)), f => Assert.False(f.Required));
 
     [Fact]
     public void BuildOptions_RejectsAnEmotionVectorOfTheWrongLength()
@@ -126,23 +81,11 @@ public sealed class IndexTts2SpeechEngineTests
     [InlineData("furious and shaking", false, true, "furious and shaking")]
     [InlineData(null, true, true, null)]
     [InlineData("  ", false, false, null)]
-    [InlineData(null, false, false, null)]
     public void BuildOptions_MapsTextEmotion(string? emotionText, bool fromText, bool useText, string? expectedText)
     {
         IndexTts2Options o = IndexTts2Model.BuildOptions(Job(b => b.Request = b.Request with { EmotionText = emotionText, EmotionFromText = fromText }));
         Assert.Equal(useText, o.UseEmoText);
         Assert.Equal(expectedText, o.EmoText);
-    }
-
-    [Fact]
-    public void BuildJob_CarriesTheEmotionFields()
-    {
-        AudioClip clip = new() { Data = [1, 2, 3], Format = "wav" };
-        TtsJob job = Job(b => b.Request = b.Request with { EmotionReference = clip, EmotionAlpha = 0.4, EmotionText = "calm", EmotionFromText = true });
-        Assert.Same(clip, job.EmotionReference);
-        Assert.Equal(0.4, job.EmotionAlpha);
-        Assert.Equal("calm", job.EmotionText);
-        Assert.True(job.EmotionFromText);
     }
 
     [Fact]

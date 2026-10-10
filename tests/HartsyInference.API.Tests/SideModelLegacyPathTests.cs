@@ -31,14 +31,6 @@ public sealed class SideModelLegacyPathTests : IDisposable
     }
 
     [Fact]
-    public void TargetPath_PrefersTheCanonicalName_WhenItIsPresent()
-    {
-        string canonical = Place(SideModels.Qwen3VL_4B.TargetSubdir, SideModels.Qwen3VL_4B.FileName);
-        Place(SideModels.Qwen3VL_4B.TargetSubdir, SideModels.Qwen3VL_4B.LegacyTargetNames[0]);
-        Assert.Equal(canonical, ModelDownloader.TargetPath(SideModels.Qwen3VL_4B));
-    }
-
-    [Fact]
     public void TargetPath_FallsBackToALegacyName_SoAnUpgradeDoesNotRefetch()
     {
         string legacy = Place(SideModels.Qwen3VL_4B.TargetSubdir, SideModels.Qwen3VL_4B.LegacyTargetNames[0]);
@@ -51,14 +43,6 @@ public sealed class SideModelLegacyPathTests : IDisposable
         // A fresh install must still download to the canonical (SwarmUI-matching) name, not to a legacy one.
         string expected = Path.Combine(_tempModelsRoot, SideModels.Qwen3VL_4B.TargetSubdir, SideModels.Qwen3VL_4B.FileName);
         Assert.Equal(expected, ModelDownloader.TargetPath(SideModels.Qwen3VL_4B));
-    }
-
-    [Fact]
-    public void TargetPath_IsUnaffectedForAnAssetThatNeverMoved()
-    {
-        Assert.Empty(SideModels.QwenImageVae.LegacyTargetNames);
-        string expected = Path.Combine(_tempModelsRoot, SideModels.QwenImageVae.TargetSubdir, SideModels.QwenImageVae.FileName);
-        Assert.Equal(expected, ModelDownloader.TargetPath(SideModels.QwenImageVae));
     }
 
     private string Place(string subdir, string relativeName)

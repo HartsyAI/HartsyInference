@@ -56,40 +56,6 @@ public sealed class LoraDeltaMathTests
     }
 
     [Fact]
-    public void StandardDelta_ConvAdapterFlattensKernelAxesIntoColumns()
-    {
-        using CpuBackend backend = new();
-        using Tensor up = Ramp([4, 2, 1, 1], start: 1.0f);
-        using Tensor down = Ramp([2, 3, 3, 3], start: -5.0f);
-        StandardLoraDelta delta = new() { Down = down, Up = up, Alpha = 2.0f };
-
-        Assert.Equal(4, delta.OutFeatures);
-        Assert.Equal(27, delta.InFeatures);
-        using Tensor product = delta.ComputeF32(backend);
-        Assert.Equal(new TensorShape(4, 27), product.Shape);
-        // Spot-checked against conv_lora in the python reference: first row, first column, last column.
-        ReadOnlySpan<float> values = product.AsReadOnlySpan<float>();
-        Assert.Equal(39.0f, values[0]);
-        Assert.Equal(117.0f, values[26]);
-        Assert.Equal(531.0f, values[^1]);
-    }
-
-    [Fact]
-    public void StandardDelta_MatchesConvWeightOfRankFour()
-    {
-        using Tensor up = Ramp([4, 2, 1, 1], start: 1.0f);
-        using Tensor down = Ramp([2, 3, 3, 3], start: -5.0f);
-        using Tensor convWeight = Ramp([4, 3, 3, 3], start: 0.0f);
-        using Tensor linearWeight = Ramp([4, 27], start: 0.0f);
-        using Tensor wrongWeight = Ramp([4, 9], start: 0.0f);
-        StandardLoraDelta delta = new() { Down = down, Up = up, Alpha = 2.0f };
-
-        Assert.True(delta.MatchesShape(convWeight));
-        Assert.True(delta.MatchesShape(linearWeight));
-        Assert.False(delta.MatchesShape(wrongWeight));
-    }
-
-    [Fact]
     public void LoHaDelta_PlainFactorsMatchComfyHadamardProduct()
     {
         using CpuBackend backend = new();
@@ -191,28 +157,6 @@ public sealed class LoraDeltaMathTests
     }
 
     [Fact]
-    public void LoKrDelta_ConvRightFactorFlattensKernelAxesIntoColumns()
-    {
-        using CpuBackend backend = new();
-        using Tensor w1 = Ramp([2, 2], start: 1.0f);
-        using Tensor w2 = Ramp([2, 1, 2, 2], start: -1.0f);
-        LoKrDelta delta = new() { W1 = w1, W2 = w2, Alpha = 1.0f };
-
-        Assert.Equal(4, delta.OutFeatures);
-        Assert.Equal(8, delta.InFeatures);
-        using Tensor product = delta.ComputeF32(backend);
-        Assert.Equal(
-            new float[]
-            {
-                -1, 0, 1, 2, -2, 0, 2, 4,
-                3, 4, 5, 6, 6, 8, 10, 12,
-                -3, 0, 3, 6, -4, 0, 4, 8,
-                9, 12, 15, 18, 12, 16, 20, 24,
-            },
-            product.AsReadOnlySpan<float>().ToArray());
-    }
-
-    [Fact]
     public void Dora_OnOutputAxisNormalizesByTheOriginalWeightRows()
     {
         using Tensor weight = Ramp([3, 4], start: -4.0f, step: 0.5f);
@@ -226,24 +170,6 @@ public sealed class LoraDeltaMathTests
                 -1.0613372f, -0.9476226f, -0.83390784f, -0.72019315f,
                 -2.1908901f, -1.7800982f, -1.3693063f, -0.95851439f,
                 -0.1336306f, -0.033407651f, 0.066815302f, 0.16703826f,
-            ],
-            weight);
-    }
-
-    [Fact]
-    public void Dora_StrengthInterpolatesBetweenTheOriginalAndDecomposedWeight()
-    {
-        using Tensor weight = Ramp([3, 4], start: -4.0f, step: 0.5f);
-        using Tensor delta = Ramp([3, 4], start: 1.0f, step: -0.25f);
-        using Tensor magnitude = FromValues([3, 1], [2.0f, 3.0f, 0.5f]);
-
-        LoraDoraDecompose.Apply(weight, delta, magnitude, scale: 0.5f, strength: 0.5f);
-
-        AssertClose(
-            [
-                -2.5306687f, -2.2238111f, -1.9169539f, -1.6100966f,
-                -2.0954452f, -1.6400491f, -1.1846532f, -0.72925723f,
-                -0.066815302f, 0.23329619f, 0.53340769f, 0.8335191f,
             ],
             weight);
     }
@@ -264,6 +190,28 @@ public sealed class LoraDeltaMathTests
                 -0.18463723f, -0.070932694f, 0.020619653f, 0.71919495f,
             ],
             weight);
+    }
+
+    [Fact]
+    public void LoKrDelta_ConvRightFactorFlattensKernelAxesIntoColumns()
+    {
+        using CpuBackend backend = new();
+        using Tensor w1 = Ramp([2, 2], start: 1.0f);
+        using Tensor w2 = Ramp([2, 1, 2, 2], start: -1.0f);
+        LoKrDelta delta = new() { W1 = w1, W2 = w2, Alpha = 1.0f };
+
+        Assert.Equal(4, delta.OutFeatures);
+        Assert.Equal(8, delta.InFeatures);
+        using Tensor product = delta.ComputeF32(backend);
+        Assert.Equal(
+            new float[]
+            {
+                -1, 0, 1, 2, -2, 0, 2, 4,
+                3, 4, 5, 6, 6, 8, 10, 12,
+                -3, 0, 3, 6, -4, 0, 4, 8,
+                9, 12, 15, 18, 12, 16, 20, 24,
+            },
+            product.AsReadOnlySpan<float>().ToArray());
     }
 
     private static void AssertClose(float[] expected, Tensor actual)

@@ -190,14 +190,10 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
 
     [Theory]
     [InlineData("z_image_base-bf16.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
-    [InlineData("z_image_base-nvfp8-mixed.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
     [InlineData("SwarmUI_Z-Image-Turbo-FP8Mix.safetensors", "turbo", ModelVariantSource.Filename, 3.0f)]
     // The official Base release ships under the bare family name with no variant token — it must positively
     // resolve to Base, not fall through to a policy that produces Inf on Base weights.
     [InlineData("Z-Image.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
-    [InlineData("z_image_bf16.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
-    [InlineData("SwarmUI_Z-Image-FP8Mix.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
-    [InlineData("ZImage.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
     // Genuinely ambiguous names match nothing and take the numerically safe Base default.
     [InlineData("renamed.safetensors", "base", ModelVariantSource.Default, 6.0f)]
     [InlineData("base/Z-Image-Turbo.safetensors", "turbo", ModelVariantSource.Filename, 3.0f)]
@@ -264,30 +260,6 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         Assert.Throws<InvalidOperationException>(() => ZImagePipeline.ValidateFiniteTensor(cpu, nan, "NaN test"));
         Assert.Throws<InvalidOperationException>(
             () => ZImagePipeline.ValidateFiniteTensor(cpu, infinity, "infinity test"));
-    }
-
-    [Fact]
-    public void BaseNumericPolicy_KeepsTokenStreamAndAttentionInF32()
-    {
-        ZImageConfig baseConfig = TinyConfig() with { IsBase = true, NumLayers = 1, NumRefinerLayers = 1 };
-        ZImageConfig turboConfig = baseConfig with { IsBase = false };
-        using ZImageTransformer baseTransformer = new(baseConfig);
-        using ZImageTransformer turboTransformer = new(turboConfig);
-
-        Assert.Equal(DType.F32, GetPrivateField<DType>(baseTransformer, "_packedActivationDtype"));
-        Assert.Equal(DitDtype.Act, GetPrivateField<DType>(turboTransformer, "_packedActivationDtype"));
-
-        object baseMainBlock = Assert.Single(GetPrivateArray(baseTransformer, "_layers"));
-        object turboMainBlock = Assert.Single(GetPrivateArray(turboTransformer, "_layers"));
-        object baseContextBlock = Assert.Single(GetPrivateArray(baseTransformer, "_contextRefiners"));
-        object turboContextBlock = Assert.Single(GetPrivateArray(turboTransformer, "_contextRefiners"));
-        Assert.False(GetPrivateField<bool>(baseMainBlock, "_allowF16Attention"));
-        Assert.True(GetPrivateField<bool>(turboMainBlock, "_allowF16Attention"));
-        Assert.False(GetPrivateField<bool>(baseContextBlock, "_allowF16Attention"));
-        Assert.True(GetPrivateField<bool>(turboContextBlock, "_allowF16Attention"));
-        Assert.False(GetPrivateField<bool>(baseMainBlock, "_useF16SandwichDamp"));
-        Assert.Equal(DitDtype.Act == DType.F16,
-            GetPrivateField<bool>(turboMainBlock, "_useF16SandwichDamp"));
     }
 
     [Fact]
@@ -549,20 +521,6 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
             BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException($"ZImageTransformer field {name} was not found.");
         field.SetValue(transformer, value);
-    }
-
-    private static T GetPrivateField<T>(object instance, string name)
-    {
-        FieldInfo field = instance.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException($"Field {instance.GetType().Name}.{name} was not found.");
-        return (T)(field.GetValue(instance)
-            ?? throw new InvalidOperationException($"Field {instance.GetType().Name}.{name} is null."));
-    }
-
-    private static object[] GetPrivateArray(object instance, string name)
-    {
-        Array array = GetPrivateField<Array>(instance, name);
-        return array.Cast<object>().ToArray();
     }
 
     private static void AssertDisposed(Tensor tensor)

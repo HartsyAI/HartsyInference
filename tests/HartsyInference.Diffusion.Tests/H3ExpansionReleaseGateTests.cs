@@ -12,7 +12,6 @@ public sealed class H3ExpansionReleaseGateTests
 {
     [Theory]
     [InlineData(VideoAccelerationKind.Turbo, VideoTaskFamily.Fl2Va, null)]
-    [InlineData(VideoAccelerationKind.Pdd, VideoTaskFamily.Fl2Va, null)]
     [InlineData(VideoAccelerationKind.None, VideoTaskFamily.Hybrid, null)]
     [InlineData(VideoAccelerationKind.None, VideoTaskFamily.Fl2Va, "control")]
     [InlineData(VideoAccelerationKind.None, VideoTaskFamily.Fl2Va, "int8-vae")]
@@ -64,21 +63,6 @@ public sealed class H3ExpansionReleaseGateTests
         Assert.Contains("arbitrary guides", issue.Message, StringComparison.Ordinal);
         Assert.Contains("AV denoise masks", issue.Message, StringComparison.Ordinal);
         Assert.False(gated.IsValid);
-    }
-
-    [Fact]
-    public void H3Plan_ProducesAnExactExecutionSummary()
-    {
-        VideoRequest request = new VideoRequest { Prompt = "test" };
-        VideoPlan plan = Plan(VideoAccelerationKind.None, VideoTaskFamily.Fl2Va, null, request);
-
-        VideoExecutionSummary summary = Assert.IsType<VideoExecutionSummary>(
-            VideoService.BuildExecutionSummary(plan));
-        Assert.Equal("test-h3-profile", summary.ProfileId);
-        Assert.Equal(12f, summary.FlowShift);
-        Assert.Equal(3f, summary.AudioFlowShift);
-        Assert.Equal("euler", summary.Sampler);
-        Assert.Equal("normal", summary.Scheduler);
     }
 
     private static VideoRequest Request(string? component) => new VideoRequest

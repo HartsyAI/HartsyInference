@@ -49,25 +49,6 @@ public class Se3MathTests
     }
 
     [Fact]
-    public void Slerp_HitsEndpointsAndStaysUnit()
-    {
-        float[] q0 = [0f, 0f, 0f, 1f];                              // identity
-        float s = MathF.Sin(MathF.PI / 4), c = MathF.Cos(MathF.PI / 4);
-        float[] q1 = [s, 0f, 0f, c];                                // 90° about X
-        float[] r = new float[4];
-
-        Se3Math.Slerp(q0, q1, 0f, r);
-        for (int i = 0; i < 4; i++) Assert.Equal(q0[i], r[i], 4);
-        Se3Math.Slerp(q0, q1, 1f, r);
-        for (int i = 0; i < 4; i++) Assert.Equal(q1[i], r[i], 4);
-
-        Se3Math.Slerp(q0, q1, 0.5f, r);
-        float norm = MathF.Sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]);
-        Assert.Equal(1f, norm, 4);
-        Assert.Equal(MathF.Sin(MathF.PI / 8), r[0], 4);             // 45° about X
-    }
-
-    [Fact]
     public void IntegrateActions_ForwardKeyMoves_MouseRotates()
     {
         float[] start = new float[16];

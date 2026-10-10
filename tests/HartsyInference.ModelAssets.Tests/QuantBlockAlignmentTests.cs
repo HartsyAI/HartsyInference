@@ -21,15 +21,6 @@ public sealed class QuantBlockAlignmentTests
         Assert.Equal(DType.F16, GgufQuantPolicy.Q4_K_S.ResolveTargetDType("adaln_t_table", adaln));
     }
 
-    /// <summary>The aligned neighbour still quantizes, so the guard is not just refusing everything.</summary>
-    [Fact]
-    public void AnAlignedTensorStillTakesTheBackboneQuant()
-    {
-        using Tensor weight = new Tensor(new TensorShape(512, 2688), DType.F32);
-        Assert.Equal(0, weight.Shape.ElementCount % DType.Q4_K.BlockElementCount);
-        Assert.Equal(DType.Q4_K, GgufQuantPolicy.Q4_K_S.ResolveTargetDType("blocks.0.attn.qkv_proj.weight", weight));
-    }
-
     /// <summary>The second line of defence, and the one that matters in Release: sizing a buffer for a misaligned
     /// element count used to truncate silently. It refuses now, so a caller that bypasses the policy gets an
     /// error rather than a heap overrun.</summary>

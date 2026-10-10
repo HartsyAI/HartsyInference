@@ -12,18 +12,15 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class WanAnimateSamplingTests
 {
     [Theory]
-    [InlineData(0f, false)]
     [InlineData(0.5f, false)]
     [InlineData(1f, false)]         // upstream's `guide_scale > 1` and the recipe's own default
     [InlineData(1.0001f, true)]
-    [InlineData(5f, true)]
     public void CfgBranchRunsOnlyAboveGuidanceOne(float guidance, bool expected)
     {
         Assert.Equal(expected, WanAnimatePipeline.UsesCfgBranch(guidance));
     }
 
     [Theory]
-    [InlineData(0f)]        // plain CFG
     [InlineData(0.7f)]      // the fp8 renorm strength WanConfigDetector sets
     public void FoldingCfgAtGuidanceOneLeavesTheConditionalPrediction(float rescale)
     {

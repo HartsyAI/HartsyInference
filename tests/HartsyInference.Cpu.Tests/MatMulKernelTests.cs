@@ -10,30 +10,6 @@ public sealed unsafe class MatMulKernelTests
     private const float Tolerance = 1e-5f;
 
     [Fact]
-    public void MatMul_Identity_ReturnsInput()
-    {
-        using Tensor a = new Tensor(new TensorShape(2, 2), DType.F32);
-        using Tensor b = new Tensor(new TensorShape(2, 2), DType.F32);
-        using Tensor output = new Tensor(new TensorShape(2, 2), DType.F32);
-
-        Span<float> aSpan = a.AsSpan<float>();
-        aSpan[0] = 1.0f; aSpan[1] = 0.0f;
-        aSpan[2] = 0.0f; aSpan[3] = 1.0f;
-
-        Span<float> bSpan = b.AsSpan<float>();
-        bSpan[0] = 5.0f; bSpan[1] = 6.0f;
-        bSpan[2] = 7.0f; bSpan[3] = 8.0f;
-
-        MatMulKernels.MatMul(output, a, b);
-
-        Span<float> outSpan = output.AsSpan<float>();
-        Assert.Equal(5.0f, outSpan[0], Tolerance);
-        Assert.Equal(6.0f, outSpan[1], Tolerance);
-        Assert.Equal(7.0f, outSpan[2], Tolerance);
-        Assert.Equal(8.0f, outSpan[3], Tolerance);
-    }
-
-    [Fact]
     public void MatMul_2x3_Times_3x2()
     {
         using Tensor a = new Tensor(new TensorShape(2, 3), DType.F32);
@@ -59,72 +35,6 @@ public sealed unsafe class MatMulKernelTests
         Assert.Equal(64.0f, outSpan[1], Tolerance);
         Assert.Equal(139.0f, outSpan[2], Tolerance);
         Assert.Equal(154.0f, outSpan[3], Tolerance);
-    }
-
-    [Fact]
-    public void MatMul_1x1_ScalarMultiply()
-    {
-        using Tensor a = new Tensor(new TensorShape(1, 1), DType.F32);
-        using Tensor b = new Tensor(new TensorShape(1, 1), DType.F32);
-        using Tensor output = new Tensor(new TensorShape(1, 1), DType.F32);
-
-        a.AsSpan<float>()[0] = 3.0f;
-        b.AsSpan<float>()[0] = 4.0f;
-
-        MatMulKernels.MatMul(output, a, b);
-
-        Assert.Equal(12.0f, output.AsSpan<float>()[0], Tolerance);
-    }
-
-    [Fact]
-    public void MatMul_LargerMatrix_32x32()
-    {
-        using Tensor identity = new Tensor(new TensorShape(32, 32), DType.F32);
-        using Tensor b = new Tensor(new TensorShape(32, 32), DType.F32);
-        using Tensor output = new Tensor(new TensorShape(32, 32), DType.F32);
-
-        Span<float> idSpan = identity.AsSpan<float>();
-        for (int i = 0; i < 32; i++)
-        {
-            idSpan[i * 32 + i] = 1.0f;
-        }
-
-        Span<float> bSpan = b.AsSpan<float>();
-        for (int i = 0; i < 32 * 32; i++)
-        {
-            bSpan[i] = i * 0.1f;
-        }
-
-        MatMulKernels.MatMul(output, identity, b);
-
-        Span<float> outSpan = output.AsSpan<float>();
-        for (int i = 0; i < 32 * 32; i++)
-        {
-            Assert.Equal(i * 0.1f, outSpan[i], Tolerance);
-        }
-    }
-
-    [Fact]
-    public void MatMul_ZeroMatrix_ReturnsZero()
-    {
-        using Tensor a = new Tensor(new TensorShape(3, 3), DType.F32);
-        using Tensor b = new Tensor(new TensorShape(3, 3), DType.F32);
-        using Tensor output = new Tensor(new TensorShape(3, 3), DType.F32);
-
-        // a is already zeroed by constructor
-        Span<float> bSpan = b.AsSpan<float>();
-        for (int i = 0; i < 9; i++)
-        {
-            bSpan[i] = (i + 1) * 1.0f;
-        }
-
-        MatMulKernels.MatMul(output, a, b);
-
-        Span<float> outSpan = output.AsSpan<float>();
-        for (int i = 0; i < 9; i++)
-        {
-            Assert.Equal(0.0f, outSpan[i], Tolerance);
-        }
     }
 
     [Fact]

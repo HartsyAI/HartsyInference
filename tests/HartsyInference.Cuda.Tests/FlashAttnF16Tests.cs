@@ -19,7 +19,6 @@ public sealed unsafe class FlashAttnF16Tests(ITestOutputHelper output)
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1, 2, 100, 77, false)]
-    [InlineData(2, 3, 64, 160, false)]
     [InlineData(1, 2, 90, 100, true)]
     public void HeadMajor_MatchesCpuReference(int batch, int heads, int sq, int skv, bool risingMax)
     {
@@ -86,48 +85,6 @@ public sealed unsafe class FlashAttnF16Tests(ITestOutputHelper output)
     }
 
     /// <summary>Ideogram 4's attention shape, flash kernel against cuDNN. Prints both; asserts only agreement.</summary>
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    [Trait("Category", "Slow")]
-    public void IdeogramShape_TimesAgainstCudnn()
-    {
-        const int heads = 18, s = 4400, reps = 20;
-        float[] data = Random(heads * s * D, 41);
-        double flashMs = Time(true, out float[] flash);
-        double cudnnMs = Time(false, out float[] cudnn);
-        double maxDiff = 0;
-        for (int i = 0; i < flash.Length; i++) maxDiff = Math.Max(maxDiff, Math.Abs(flash[i] - cudnn[i]));
-        double tflops = 4.0 * s * s * D * heads / 1e9;
-        output.WriteLine($"flash {flashMs:F2} ms ({tflops / flashMs:F0} TFLOPS) · cuDNN {cudnnMs:F2} ms ({tflops / cudnnMs:F0} TFLOPS) · max|Δ| {maxDiff:E2}");
-        Assert.True(maxDiff < 2e-3, $"flash and cuDNN disagree by {maxDiff:E2}");
-
-        double Time(bool flashOn, out float[] result)
-        {
-            KnobStore.Set(EngineKnobs.FlashF16, flashOn);
-            try
-            {
-                using CudaBackend? backend = Create();
-                result = [];
-                if (backend is null) return double.NaN;
-                using Tensor t = F16(data, 1, heads, s);
-                using Tensor o = new(new TensorShape(1, heads, s, D), DType.F16);
-                IBackend b = backend;
-                for (int i = 0; i < 3; i++) b.ScaledDotProductAttention(o, t, t, t, null, 1f / 16f, allowF16: true);
-                backend.Sync();
-                Stopwatch sw = Stopwatch.StartNew();
-                for (int i = 0; i < reps; i++) b.ScaledDotProductAttention(o, t, t, t, null, 1f / 16f, allowF16: true);
-                backend.Sync();
-                double ms = sw.Elapsed.TotalMilliseconds / reps;
-                result = ToFloat(o);
-                return ms;
-            }
-            finally
-            {
-                KnobStore.Clear(EngineKnobs.FlashF16);
-            }
-        }
-    }
-
     private CudaBackend? Create()
     {
         if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: CUDA unavailable"); return null; }

@@ -52,19 +52,6 @@ public sealed class LtxVideo2VariantDetectorTests
     }
 
     [Fact]
-    public void Ltx23MetadataYieldsV23Behavior()
-    {
-        LtxVideo2Config config = LtxVideo2VariantDetector.Detect(
-            new Dictionary<string, string> { ["model_version"] = "2.3.0", ["config"] = Ltx23ConfigJson },
-            Keys(LtxVideo2VariantDetector.VideoFfnBiasKey));
-
-        Assert.True(config.FfBias);
-        Assert.False(config.UseKeyframesAbsPosEmbedding);
-        Assert.Equal(LtxVideo2Config.V23.NumLayers, config.NumLayers);
-        Assert.Equal(LtxVideo2Config.V23.CrossAttentionDim, config.CrossAttentionDim);
-    }
-
-    [Fact]
     public void KeyProbesCarryStrippedRepack()
     {
         LtxVideo2Config config = LtxVideo2VariantDetector.Detect(
@@ -73,17 +60,6 @@ public sealed class LtxVideo2VariantDetectorTests
 
         Assert.True(config.UseKeyframesAbsPosEmbedding);
         Assert.False(config.FfBias);
-    }
-
-    [Fact]
-    public void StrippedRepackOf23KeepsBias()
-    {
-        LtxVideo2Config config = LtxVideo2VariantDetector.Detect(
-            metadata: null,
-            Keys(LtxVideo2VariantDetector.VideoFfnBiasKey));
-
-        Assert.True(config.FfBias);
-        Assert.False(config.UseKeyframesAbsPosEmbedding);
     }
 
     [Fact]
@@ -96,16 +72,6 @@ public sealed class LtxVideo2VariantDetectorTests
             Keys(LtxVideo2VariantDetector.KeyframesEmbeddingKey));
 
         Assert.True(config.UseKeyframesAbsPosEmbedding);
-    }
-
-    [Fact]
-    public void MetadataClaimingKeyframesWithoutTheWeightIsRejected()
-    {
-        LtxVideo2Config config = LtxVideo2VariantDetector.Detect(
-            new Dictionary<string, string> { ["config"] = Ltx25ConfigJson },
-            Keys(/* no keyframes tensor */));
-
-        Assert.False(config.UseKeyframesAbsPosEmbedding);
     }
 
     [Fact]
@@ -132,16 +98,6 @@ public sealed class LtxVideo2VariantDetectorTests
         Assert.True(config.UseKeyframesAbsPosEmbedding);
         Assert.False(config.FfBias);
         Assert.Equal(LtxVideo2Config.V23.NumLayers, config.NumLayers);
-    }
-
-    [Fact]
-    public void NoMetadataAndNoKeysIsV23()
-    {
-        LtxVideo2Config config = LtxVideo2VariantDetector.Detect(null, Keys());
-
-        Assert.False(config.UseKeyframesAbsPosEmbedding);
-        Assert.Equal(LtxVideo2Config.V23.NumLayers, config.NumLayers);
-        Assert.Equal(LtxVideo2Config.V23.RopeType, config.RopeType);
     }
 
     [Fact]

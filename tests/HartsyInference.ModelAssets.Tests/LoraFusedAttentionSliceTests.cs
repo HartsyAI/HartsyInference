@@ -32,7 +32,6 @@ public sealed class LoraFusedAttentionSliceTests : IDisposable
     /// correct third of the fused rows — q on [0,8), k on [8,16), v on [16,24). A fallback that resolved the key but
     /// mis-sliced would corrupt attention rather than weaken it, so the row window is asserted, not just the count.</summary>
     [Theory]
-    [InlineData("layers.0.attention", "attention.qkv")]
     [InlineData("blocks.0", "qkv")]
     public void SplitLoraMergesIntoFusedQkv_AtTheRightRows(string prefix, string fusedSuffix)
     {

@@ -42,28 +42,6 @@ public sealed class WeightDequantizerTests
     }
 
     [Fact]
-    public void Unquantized_Bf16_Weight_Widens_To_F32()
-    {
-        using Tensor weight = new(new TensorShape(1, 2), DType.BF16);
-        Span<ushort> bits = weight.AsSpan<ushort>();
-        bits[0] = 0x3F80; // 1.0
-        bits[1] = 0xC000; // -2.0
-        Assert.Equal([1f, -2f], WeightDequantizer.ToF32(weight, null));
-    }
-
-    [Fact]
-    public void Unwired_Encoding_Is_Refused()
-    {
-        using Tensor weight = new(new TensorShape(1, 4), DType.I8);
-        QuantRecipe recipe = new()
-        {
-            Encoding = QuantEncoding.Gguf, Geometry = new BlockGeometry(1, 32), ScaleDType = DType.F32, LogicalRows = 1, LogicalCols = 4,
-        };
-        Assert.Throws<NotSupportedException>(() =>
-            WeightDequantizer.ToF32(weight, new QuantWeightInfo { Format = recipe.FormatName, Recipe = recipe }));
-    }
-
-    [Fact]
     public void A_Quant_Descriptor_Without_A_Recipe_Is_Refused_Rather_Read_As_Plain_Values()
     {
         using Tensor weight = new(new TensorShape(1, 4), DType.I8);

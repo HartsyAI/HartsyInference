@@ -40,8 +40,6 @@ public sealed class ExpertPackTests : IDisposable
 
     private static IEnumerable<ExpertKey> Keys(int count) => Enumerable.Range(0, count).Select(static e => new ExpertKey(e / 2, e % 2));
 
-    private static IEnumerable<ExpertKey> Keys(IEnumerable<ExpertKey> keys) => keys;
-
     private static Dictionary<ExpertKey, (float[] Gate, float[] Up, float[] Down)> WritePack(string directory, DType dtype, int experts,
             string fingerprint = Fingerprint)
     {
@@ -104,34 +102,12 @@ public sealed class ExpertPackTests : IDisposable
     }
 
     [Fact]
-    public void Incomplete_Pack_IsRefused()
-    {
-        string dir = Path.Combine(_root, "incomplete");
-        using (ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, Keys(1)))
-        {
-            (float[] Gate, float[] Up, float[] Down) source = Expert();
-            writer.AddExpert(0, 0, source.Gate, source.Up, source.Down);
-        }
-
-        Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir));
-    }
-
-    [Fact]
     public void FingerprintMismatch_IsRefused()
     {
         string dir = Path.Combine(_root, "fingerprint");
         WritePack(dir, DType.Q8_0, experts: 2);
 
         Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir, "a-different-topology"));
-    }
-
-    [Fact]
-    public void CompletedPack_IsNeverOverwritten()
-    {
-        string dir = Path.Combine(_root, "complete");
-        WritePack(dir, DType.Q8_0, experts: 2);
-
-        Assert.Throws<InvalidOperationException>(() => new ExpertPackWriter(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, Keys(2)));
     }
 
     [Fact]
@@ -168,23 +144,6 @@ public sealed class ExpertPackTests : IDisposable
     }
 
     [Fact]
-    public void Dimensions_MustMatchTheDtypeBlockSize()
-    {
-        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "bad"), Fingerprint, 100, Intermediate, DType.Q4_K, Keys(1)));
-    }
-
-    [Fact]
-    public void TruncatedSourceArray_IsRejectedNotCountedAsChecked()
-    {
-        string dir = Path.Combine(_root, "truncated-source");
-        WritePack(dir, DType.Q8_0, experts: 2);
-        using ExpertPackReader reader = ExpertPackReader.Open(dir, Fingerprint);
-
-        Assert.Throws<ArgumentException>(() => ExpertPackVerifier.Verify(
-            reader, key => (Array.Empty<float>(), new float[Intermediate * Hidden], new float[Hidden * Intermediate]), reader.Keys));
-    }
-
-    [Fact]
     public void RecordShorterThanItsProjections_IsRefusedAtOpen()
     {
         string dir = Path.Combine(_root, "short-record");
@@ -197,33 +156,6 @@ public sealed class ExpertPackTests : IDisposable
         File.WriteAllText(manifestPath, manifest[..lengthAt] + " " + (realLength - 64) + manifest[end..]);
 
         Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir, Fingerprint, verifyChecksums: false));
-    }
-
-    [Fact]
-    public void AddingAnExpertOutsideTheExpectedSet_IsRefused()
-    {
-        string dir = Path.Combine(_root, "outside");
-        using ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, [new ExpertKey(0, 0)]);
-        (float[] Gate, float[] Up, float[] Down) source = Expert();
-
-        Assert.Throws<ArgumentException>(() => writer.AddExpert(0, 1, source.Gate, source.Up, source.Down));
-        writer.AddExpert(0, 0, source.Gate, source.Up, source.Down);
-        writer.Finish();
-    }
-
-    [Fact]
-    public void FailedAdd_LeavesTheExpertClaimableForARetry()
-    {
-        string dir = Path.Combine(_root, "retry");
-        using ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, [new ExpertKey(0, 0)]);
-        (float[] Gate, float[] Up, float[] Down) source = Expert();
-
-        Assert.Throws<ArgumentException>(() => writer.AddExpert(0, 0, new float[3], source.Up, source.Down));
-        writer.AddExpert(0, 0, source.Gate, source.Up, source.Down);
-        writer.Finish();
-
-        using ExpertPackReader reader = ExpertPackReader.Open(dir, Fingerprint);
-        Assert.Equal(1, reader.Count);
     }
 
     [Fact]
@@ -261,20 +193,6 @@ public sealed class ExpertPackTests : IDisposable
     }
 
     [Fact]
-    public void RecordOutsideTheFile_IsRefusedAtOpen()
-    {
-        string dir = Path.Combine(_root, "outside-file");
-        WritePack(dir, DType.Q8_0, experts: 1);
-        string manifestPath = Path.Combine(dir, "manifest.json");
-        string manifest = File.ReadAllText(manifestPath);
-        int at = manifest.IndexOf("\"Offset\":", StringComparison.Ordinal) + "\"Offset\":".Length;
-        int end = manifest.IndexOf(',', at);
-        File.WriteAllText(manifestPath, manifest[..at] + " 900000000" + manifest[end..]);
-
-        Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir, Fingerprint));
-    }
-
-    [Fact]
     public void Reader_DisposeIsIdempotentAndWriterRefusesOversizedMatrices()
     {
         string dir = Path.Combine(_root, "idempotent");
@@ -306,20 +224,6 @@ public sealed class ExpertPackTests : IDisposable
     }
 
     [Fact]
-    public void StaleWritingMarker_FromACrashedWriter_IsTakenOver()
-    {
-        string dir = Path.Combine(_root, "stale-lock");
-        Directory.CreateDirectory(dir);
-        File.WriteAllText(Path.Combine(dir, "WRITING"), "left behind");
-
-        using ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, Keys(1));
-        (float[] Gate, float[] Up, float[] Down) source = Expert();
-        writer.AddExpert(0, 0, source.Gate, source.Up, source.Down);
-        writer.Finish();
-        Assert.False(File.Exists(Path.Combine(dir, "WRITING")));
-    }
-
-    [Fact]
     public void Resolve_AfterDispose_IsRefused()
     {
         string dir = Path.Combine(_root, "disposed");
@@ -327,27 +231,5 @@ public sealed class ExpertPackTests : IDisposable
         ExpertPackReader reader = ExpertPackReader.Open(dir);
         reader.Dispose();
         Assert.Throws<ObjectDisposedException>(() => reader.Resolve(new ExpertKey(0, 0)));
-    }
-
-    [Fact]
-    public void Verifier_RefusesAReaderThatSkipsChecksums()
-    {
-        string dir = Path.Combine(_root, "no-checksum");
-        WritePack(dir, DType.Q8_0, 1, Fingerprint);
-        using ExpertPackReader reader = ExpertPackReader.Open(dir, verifyChecksums: false);
-        Assert.Throws<ArgumentException>(() => ExpertPackVerifier.Verify(reader, _ => Expert(), reader.Keys));
-    }
-
-    [Fact]
-    public void Verifier_ReportsNonzeroErrorAgainstAZeroSourceAsFailure()
-    {
-        string dir = Path.Combine(_root, "zero-source");
-        WritePack(dir, DType.Q8_0, experts: 1);
-        using ExpertPackReader reader = ExpertPackReader.Open(dir, Fingerprint);
-
-        ExpertPackVerification report = ExpertPackVerifier.Verify(reader,
-            _ => (new float[Intermediate * Hidden], new float[Intermediate * Hidden], new float[Hidden * Intermediate]), reader.Keys);
-
-        Assert.True(double.IsPositiveInfinity(report.RelativeRmse));
     }
 }

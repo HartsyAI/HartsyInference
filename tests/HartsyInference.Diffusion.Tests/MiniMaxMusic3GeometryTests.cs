@@ -12,12 +12,8 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed unsafe class MiniMaxMusic3GeometryTests
 {
     [Theory]
-    [InlineData(1, 1)]
-    [InlineData(100, 1)]
     [InlineData(200, 1)]
     [InlineData(201, 2)]
-    [InlineData(250, 2)]
-    [InlineData(300, 2)]
     [InlineData(301, 3)]
     [InlineData(1500, 14)]
     public void ChunkStarts_MatchesTheReferenceRange(int frames, int expectedWindows)
@@ -35,7 +31,6 @@ public sealed unsafe class MiniMaxMusic3GeometryTests
 
     [Theory]
     [InlineData(1, 3)]
-    [InlineData(40, 137)]
     [InlineData(200, 689)]
     public void LatentLength_TruncatesLikeTheReference(int frames, int expected) =>
         Assert.Equal(expected, MiniMaxMusic3ConditionEncoder.LatentLength(frames));

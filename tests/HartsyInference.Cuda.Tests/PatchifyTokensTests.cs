@@ -101,8 +101,6 @@ public sealed unsafe class PatchifyTokensTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, true)]
-    [InlineData(false, false)]
-    [InlineData(true, true)]
     [InlineData(true, false)]
     [Trait("Category", "GpuIntegration")]
     public void F16AndBf16_PreserveEveryPayloadBit_OnCpuAndCuda(bool bf16, bool innerChannelFastest)

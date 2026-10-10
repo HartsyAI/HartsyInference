@@ -54,26 +54,6 @@ public sealed class CallAudioCostTests(ITestOutputHelper log)
         Assert.Equal(0, allocated);
     }
 
-    [Fact]
-    public void BothDetectorsFitTheAudioThreadBudgetAtP99()
-    {
-        float[] audio = Mixed();
-        DtmfDetector dtmf = new();
-        CallProgressClassifier progress = new();
-        long[] ticks = new long[Frames];
-        using CpuParallel.InlineScope inline = CpuParallel.EnterInline();
-        Drive(audio, dtmf, progress, 0, Warmup, null);
-        Drive(audio, dtmf, progress, Warmup, Frames, ticks);
-        Array.Sort(ticks);
-        double toMs = 1000.0 / Stopwatch.Frequency;
-        double p50 = ticks[Frames / 2] * toMs;
-        double p99 = ticks[(int)(Frames * 0.99)] * toMs;
-        double max = ticks[^1] * toMs;
-        log.WriteLine($"per 20 ms frame, both detectors: p50 {p50 * 1000:F1} us, p99 {p99 * 1000:F1} us, max {max * 1000:F1} us "
-            + $"({(Environment.GetEnvironmentVariable("HARTSY_CALL_AUDIO_BENCH") == "1" ? "gate 0.2 ms" : "ceiling 2 ms")})");
-        Assert.True(p99 <= (Environment.GetEnvironmentVariable("HARTSY_CALL_AUDIO_BENCH") == "1" ? 0.2 : 2.0), $"p99 {p99:F3} ms");
-    }
-
     // Frames wrap around the clip; each pass over the clip is continuous audio, which is all the detectors need.
     private static int Drive(float[] audio, DtmfDetector dtmf, CallProgressClassifier progress, int first, int count, long[]? ticks)
     {

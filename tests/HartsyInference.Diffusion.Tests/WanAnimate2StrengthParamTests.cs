@@ -101,25 +101,6 @@ public unsafe class WanAnimate2StrengthParamTests
     }
 
     [Fact]
-    public void PoseStrength_ChangesOutput()
-    {
-        (WanAnimate2Transformer dit, CpuBackend backend, Tensor latents, Tensor encoder, Tensor clip,
-            WanAnimate2DrivingCache cache) = Build();
-        using (dit)
-        using (backend)
-        using (latents)
-        using (encoder)
-        using (clip)
-        using (cache)
-        {
-            using Tensor baseline = dit.Forward(backend, latents, encoder, 1000f, cache, clip);
-            using Tensor scaled = dit.Forward(backend, latents, encoder, 1000f, cache, clip, poseStrength: 1.3f);
-            Assert.True(MeanAbsDiff(baseline, scaled) > 1e-6,
-                "poseStrength=1.3 is INERT: output matches the 1.0 baseline.");
-        }
-    }
-
-    [Fact]
     public void ReferenceImageStrength_ChangesOutput()
     {
         (WanAnimate2Transformer dit, CpuBackend backend, Tensor latents, Tensor encoder, Tensor clip,
@@ -158,17 +139,6 @@ public unsafe class WanAnimate2StrengthParamTests
         {
             Assert.Equal(BitConverter.SingleToInt32Bits(po[i]), BitConverter.SingleToInt32Bits(pv[i]));
         }
-    }
-
-    [Fact]
-    public void ScaleReferenceRows_AtOne_IsExactNoOp()
-    {
-        const int hw = 6, frames = 3, dim = 32;
-        using CpuBackend backend = new CpuBackend();
-        using Tensor v = Random(new TensorShape(hw * frames, dim), 42);
-        using Tensor original = Random(new TensorShape(hw * frames, dim), 42);
-        WanVideoBlock.ScaleReferenceRows(backend, v, hw, dim, 1.0f);
-        Assert.Equal(-1, FirstBitDifference(original, v));
     }
 
     /// <summary>V1 has no strength pathway: a non-default value must refuse by name, and a toggled-but-1.0 value

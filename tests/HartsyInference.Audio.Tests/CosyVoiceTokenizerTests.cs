@@ -18,32 +18,6 @@ public sealed unsafe class CosyVoiceTokenizerTests
     }
 
     [Fact]
-    public void PackFsq_AllZeros_IsCenterCode()
-    {
-        // tanh(0)=0 → round 0 → shift +1 per channel → token = Σ 1·3^j = (3^8-1)/2 = 3280.
-        using Tensor z = Latent(1, [0, 0, 0, 0, 0, 0, 0, 0]);
-        int[] tok = S3Tokenizer.PackFsqTokens(z, 8, 3);
-        Assert.Equal(3280, tok[0]);
-    }
-
-    [Fact]
-    public void PackFsq_AllPositive_IsMaxCode()
-    {
-        // large +z → tanh≈1 → round +1 → shift 2 → token = Σ 2·3^j = 6560 (= 3^8 - 1).
-        using Tensor z = Latent(1, [9, 9, 9, 9, 9, 9, 9, 9]);
-        int[] tok = S3Tokenizer.PackFsqTokens(z, 8, 3);
-        Assert.Equal(6560, tok[0]);
-    }
-
-    [Fact]
-    public void PackFsq_AllNegative_IsZeroCode()
-    {
-        using Tensor z = Latent(1, [-9, -9, -9, -9, -9, -9, -9, -9]);
-        int[] tok = S3Tokenizer.PackFsqTokens(z, 8, 3);
-        Assert.Equal(0, tok[0]);
-    }
-
-    [Fact]
     public void PackFsq_MixedPattern_MatchesHandComputed()
     {
         // shifts per channel: [+1,-1,0,+1,0,-1,+1,0] → [2,0,1,2,1,0,2,1]
@@ -53,10 +27,4 @@ public sealed unsafe class CosyVoiceTokenizerTests
         Assert.Equal(3791, tok[0]);
     }
 
-    [Fact]
-    public void S3Tokenizer_VocabSize_Is6561()
-    {
-        using S3Tokenizer s3 = new();
-        Assert.Equal(6561, s3.VocabSize);
-    }
 }

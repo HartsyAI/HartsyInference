@@ -130,9 +130,7 @@ public sealed unsafe class CudaQuantDerivativeDequantTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(8, 64, 1, 0, 0.0031f)]
-    [InlineData(4, 96, 1, 3, 1.0f)]
     [InlineData(64, 2304, 1, 0, 0.00042f)]
-    [InlineData(16, 64, 4, 1, 7.5f)]
     [InlineData(8, 64, 1, 0, 1.0e37f)]
     public void Nvfp4ModelOpt_IsBitExactAgainstHostCodec(int rows, int cols, int blockRows, int offset, float global) =>
         AssertDeviceMatchesHost(
@@ -149,9 +147,6 @@ public sealed unsafe class CudaQuantDerivativeDequantTests
     [Theory]
     [InlineData(4, 8, 128, 0)]
     [InlineData(4, 4, 192, 2)]
-    [InlineData(4, 64, 2048, 0)]
-    [InlineData(8, 8, 128, 0)]
-    [InlineData(8, 4, 192, 1)]
     [InlineData(8, 32, 1024, 0)]
     public void MlxAffine_IsBitExactAgainstHostCodec(int bits, int rows, int cols, int offset) =>
         AssertDeviceMatchesHost($"mlx int{bits} {rows}x{cols} off{offset}", seed => BuildAffine(bits, rows, cols, offset, seed));

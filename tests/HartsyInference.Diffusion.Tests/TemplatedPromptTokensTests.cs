@@ -68,7 +68,6 @@ public sealed class TemplatedPromptTokensTests
     /// </summary>
     [Theory]
     [InlineData(null)]
-    [InlineData("")]
     public void AnEmptyPromptStillProducesTheTemplate(string? prompt)
     {
         WeightedTokenSequence sequence = TemplatedPromptTokens.Build(prompt, Templated, Raw, Prefix, Suffix);

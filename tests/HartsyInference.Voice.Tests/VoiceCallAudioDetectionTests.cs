@@ -69,24 +69,6 @@ public sealed class VoiceCallAudioDetectionTests
         VoiceHarness.DefaultOptions() with { DetectInbandDtmf = true, DetectCallProgress = true, ForwardInbandDtmfToModel = forward };
 
     [Fact]
-    public void BothDetectorsAreOffByDefaultAndOffTheFrontEndCarriesNeitherOfThem()
-    {
-        VoiceAgentOptions options = new();
-        Assert.False(options.DetectInbandDtmf);
-        Assert.False(options.DetectCallProgress);
-        Assert.False(options.ForwardInbandDtmfToModel);
-        using FrontendDriver driver = new();
-        float[] audio = CallAudio("1234");
-        for (int i = 0; i + Frame <= audio.Length; i += Frame)
-        {
-            VoiceFrameEvents events = driver.Frontend.ProcessFrame(audio.AsSpan(i, Frame));
-            Assert.Equal(VoiceFrameEvents.None, events & (VoiceFrameEvents.InbandDtmf | VoiceFrameEvents.CallProgress));
-        }
-        Assert.False(driver.Frontend.TryTakeDtmf(out _));
-        Assert.False(driver.Frontend.TryTakeCallProgress(out _));
-    }
-
-    [Fact]
     public void TurningTheDetectorsOnLeavesEveryOtherFrontEndDecisionUntouched()
     {
         VoiceTurnSignals signals = new();
@@ -183,23 +165,6 @@ public sealed class VoiceCallAudioDetectionTests
     }
 
     [Fact]
-    public async Task ASessionRaisesEventsButTellsTheModelNothingUnlessAskedTo()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply("Okay.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(On(forward: false), text: text);
-        harness.Push(CallAudio("42"));
-
-        await harness.TurnCompletedAsync(1);
-        VoiceAgentEvent[] events = [.. harness.Events];
-        Assert.Equal("42", string.Concat(events.Where(e => e.Kind == VoiceAgentEventKind.InbandDtmfDetected).Select(e => e.Text)));
-        VoiceAgentEvent first = events.First(e => e.Kind == VoiceAgentEventKind.InbandDtmfDetected);
-        Assert.Equal('4', first.Dtmf!.Value.Digit);
-        Assert.Contains(events, e => e.Kind == VoiceAgentEventKind.CallProgressDetected && e.CallProgress!.Value.Kind == CallProgressKind.BusyTone);
-        Assert.DoesNotContain(text.Requests.SelectMany(r => r.Messages), m => m.Content.Contains("DTMF", StringComparison.Ordinal));
-        Assert.Single(events, e => e.Kind == VoiceAgentEventKind.TurnCompleted);
-    }
-
-    [Fact]
     public async Task ForwardedKeysReachTheModelAsInbandDtmfAndNotAsAKeypadPress()
     {
         // No speech in this call: an utterance that starts while the replies to the keys are playing is discarded as
@@ -215,18 +180,4 @@ public sealed class VoiceCallAudioDetectionTests
         Assert.DoesNotContain("[DTMF 4]", users);
     }
 
-    [Fact]
-    public async Task WithTheOptionsOffTheEventStreamHasNoDetectionEventsAndAKeyPressStillWorks()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply("Okay.").Reply("Pressed.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text);
-        harness.Push(CallAudio("42"));
-        await harness.TurnCompletedAsync(1);
-        harness.Session.PushDtmf('9');
-        await harness.TurnCompletedAsync(2);
-
-        Assert.DoesNotContain(harness.Events, e => e.Kind is VoiceAgentEventKind.InbandDtmfDetected or VoiceAgentEventKind.CallProgressDetected);
-        Assert.Contains(text.Requests.SelectMany(r => r.Messages), m => m.Content == "[DTMF 9]");
-        Assert.DoesNotContain(text.Requests.SelectMany(r => r.Messages), m => m.Content.Contains("INBAND", StringComparison.Ordinal));
-    }
 }

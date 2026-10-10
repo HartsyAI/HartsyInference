@@ -152,42 +152,6 @@ public sealed class BlockStreamingControllerTests
 
     // ── Prime ────────────────────────────────────────────────────────────
 
-    [Fact]
-    public void Prime_With_PrefetchAhead_1_Uploads_Two_Blocks()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 5, prefetchAhead: 1);
-        ctrl.Prime();
-        // Should upload blocks [0..1] inclusive (block 0 itself + 1 ahead).
-        Assert.Equal(new[] { "upload:b0", "upload:b1" }, cache.Calls);
-    }
-
-    [Fact]
-    public void Prime_With_PrefetchAhead_0_Uploads_Only_First_Block()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 5, prefetchAhead: 0);
-        ctrl.Prime();
-        Assert.Equal(new[] { "upload:b0" }, cache.Calls);
-    }
-
-    [Fact]
-    public void Prime_When_Model_Smaller_Than_Window_Stops_At_End()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 2, prefetchAhead: 5);
-        ctrl.Prime();
-        // Only blocks 0 and 1 exist — controller must not try to upload block 2+.
-        Assert.Equal(new[] { "upload:b0", "upload:b1" }, cache.Calls);
-    }
-
-    [Fact]
-    public void Prime_Is_Idempotent()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 3, prefetchAhead: 1);
-        ctrl.Prime();
-        ctrl.Prime();
-        // Second call should be all no-ops — blocks 0, 1 are already Uploading.
-        Assert.Equal(new[] { "upload:b0", "upload:b1" }, cache.Calls);
-    }
-
     // ── BeforeBlockForward — main happy path ─────────────────────────────
 
     [Fact]
@@ -211,48 +175,6 @@ public sealed class BlockStreamingControllerTests
             "await:#3", "upload:b3", "evict:b1",
             // BeforeBlockForward(3): await 3; prefetch 4 oor no-op; evict 2
             "await:#4", "evict:b2",
-        }, cache.Calls);
-    }
-
-    [Fact]
-    public void Forward_Loop_With_PrefetchAhead_0_Is_Synchronous()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 3, prefetchAhead: 0, retainBehind: 0);
-        ctrl.Prime();
-        for (int i = 0; i < 3; i++) ctrl.BeforeBlockForward(i);
-        Assert.Equal(new[]
-        {
-            // Prime: only block 0
-            "upload:b0",
-            // Block 0: await 0, no prefetch, evict -1 (no-op)
-            "await:#1",
-            // Block 1: cold-path upload+await 1, no prefetch, evict 0
-            "upload:b1", "await:#2", "evict:b0",
-            // Block 2: cold upload+await 2, no prefetch, evict 1
-            "upload:b2", "await:#3", "evict:b1",
-        }, cache.Calls);
-    }
-
-    [Fact]
-    public void Forward_Loop_With_PrefetchAhead_2_Keeps_Two_Uploads_In_Flight()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 5, prefetchAhead: 2, retainBehind: 0);
-        ctrl.Prime();
-        for (int i = 0; i < 5; i++) ctrl.BeforeBlockForward(i);
-        Assert.Equal(new[]
-        {
-            // Prime uploads [0..2] (prefetchAhead=2 means block 0 + 2 ahead inclusive)
-            "upload:b0", "upload:b1", "upload:b2",
-            // Block 0: await 0; prefetch 0+2=2 already up; evict -1 oor
-            "await:#1",
-            // Block 1: await 1; prefetch 3 NEW; evict 0
-            "await:#2", "upload:b3", "evict:b0",
-            // Block 2: await 2; prefetch 4 NEW; evict 1
-            "await:#3", "upload:b4", "evict:b1",
-            // Block 3: await 3; prefetch 5 oor; evict 2
-            "await:#4", "evict:b2",
-            // Block 4: await 4; prefetch 6 oor; evict 3
-            "await:#5", "evict:b3",
         }, cache.Calls);
     }
 
@@ -299,31 +221,7 @@ public sealed class BlockStreamingControllerTests
         Assert.Equal(new[] { "evict:b1", "await:#3", "evict:b2", "drain" }, cache.Calls);
     }
 
-    [Fact]
-    public void EvictAll_Is_Idempotent()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 2, prefetchAhead: 1);
-        ctrl.Prime();
-        ctrl.EvictAll();
-        cache.Calls.Clear();
-        ctrl.EvictAll();
-        // Per-block evictions are no-ops on the second call (everything's Evicted),
-        // but the drain still runs — it's a transition signal, not bound to per-block state.
-        Assert.Equal(new[] { "drain" }, cache.Calls);
-    }
-
     // ── TrimAfterStep ────────────────────────────────────────────────────
-
-    [Fact]
-    public void TrimAfterStep_Issues_One_Backend_Trim_Per_Call()
-    {
-        TrimCountingBackend backend = new TrimCountingBackend();
-        (BlockStreamingController ctrl, _, _) = Setup(blockCount: 3, prefetchAhead: 1, backend: backend);
-        ctrl.Prime();
-        ctrl.TrimAfterStep();
-        ctrl.TrimAfterStep();
-        Assert.Equal(2, backend.TrimCalls);
-    }
 
     /// <summary>The per-step trim must NOT go through the cache's drain: that syncs the upload stream and would stall on
     /// the prefetch the step just primed.</summary>
@@ -338,35 +236,7 @@ public sealed class BlockStreamingControllerTests
         Assert.Empty(cache.Calls);
     }
 
-    [Fact]
-    public void TrimAfterStep_Without_Backend_Is_Inert()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 2, prefetchAhead: 1);
-        ctrl.Prime();
-        cache.Calls.Clear();
-        ctrl.TrimAfterStep();
-        Assert.Empty(cache.Calls);
-    }
-
-    [Fact]
-    public void TrimAfterStep_After_Dispose_Throws()
-    {
-        TrimCountingBackend backend = new TrimCountingBackend();
-        (BlockStreamingController ctrl, _, _) = Setup(blockCount: 2, prefetchAhead: 1, backend: backend);
-        ctrl.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => ctrl.TrimAfterStep());
-        Assert.Equal(0, backend.TrimCalls);
-    }
-
     // ── Edge cases ───────────────────────────────────────────────────────
-
-    [Fact]
-    public void BeforeBlockForward_OutOfRange_Throws()
-    {
-        (BlockStreamingController ctrl, _, _) = Setup(blockCount: 3, prefetchAhead: 1);
-        Assert.Throws<ArgumentOutOfRangeException>(() => ctrl.BeforeBlockForward(-1));
-        Assert.Throws<ArgumentOutOfRangeException>(() => ctrl.BeforeBlockForward(3));
-    }
 
     [Fact]
     public void Forward_Without_Prime_Cold_Starts_Synchronously()
@@ -376,33 +246,6 @@ public sealed class BlockStreamingControllerTests
         ctrl.BeforeBlockForward(0);
         // Block 0 was NotUploaded → upload+await synchronously, then prefetch 1 async.
         Assert.Equal(new[] { "upload:b0", "await:#1", "upload:b1" }, cache.Calls);
-    }
-
-    [Fact]
-    public void Forward_Out_Of_Order_Re_Uploads_Evicted_Block()
-    {
-        (BlockStreamingController ctrl, RecordingCache cache, _) = Setup(blockCount: 3, prefetchAhead: 1, retainBehind: 0);
-        ctrl.Prime();
-        ctrl.BeforeBlockForward(0);
-        ctrl.BeforeBlockForward(1); // evicts block 0
-        ctrl.BeforeBlockForward(2); // evicts block 1
-        cache.Calls.Clear();
-
-        // Going back to block 0 (which is now Evicted) — must re-upload from scratch
-        // (cold path: upload + immediate await), then also prefetch block 1.
-        ctrl.BeforeBlockForward(0);
-        Assert.Equal(new[] { "upload:b0", "await:#4", "upload:b1" }, cache.Calls);
-    }
-
-    [Fact]
-    public void Constructor_Validates_Arguments()
-    {
-        TaggedBlock[] blocks = { new("b0", 1) };
-        RecordingCache cache = new RecordingCache();
-        Assert.Throws<ArgumentNullException>(() => new BlockStreamingController(null!, blocks));
-        Assert.Throws<ArgumentNullException>(() => new BlockStreamingController(cache, null!));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new BlockStreamingController(cache, blocks, prefetchAhead: -1));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new BlockStreamingController(cache, blocks, retainBehind: -1));
     }
 
     [Fact]

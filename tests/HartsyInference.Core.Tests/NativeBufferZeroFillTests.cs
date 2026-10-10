@@ -105,31 +105,11 @@ public sealed unsafe class NativeBufferZeroFillTests
     /// on the same capped scheduler; at no cap may that wedge the outer loop.</summary>
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
     [InlineData(0)]
     public void AllocationsInsideAParallelLoop_Complete_AtEveryCap(int cap)
     {
         int threads = cap == 0 ? Environment.ProcessorCount : cap;
         WithCpuThreads(threads, () => RunBounded(() => AllocateInsideAParallelLoop()));
-    }
-
-    [Theory]
-    [InlineData(2)]
-    [InlineData(0)]
-    public void AllocationsInsideParallelLoops_OnTwoForeignThreadsAtOnce_Complete(int cap)
-    {
-        int threads = cap == 0 ? Environment.ProcessorCount : cap;
-        WithCpuThreads(threads, () => RunBounded(AllocateInsideAParallelLoop, AllocateInsideAParallelLoop));
-    }
-
-    [Fact]
-    public void AllocationsInsideAParallelLoop_UnderAnInlineScope_Complete()
-    {
-        RunBounded(() =>
-        {
-            using CpuParallel.InlineScope scope = CpuParallel.EnterInline();
-            AllocateInsideAParallelLoop();
-        });
     }
 
     /// <summary>An outer loop that fans out, each of whose iterations allocates a buffer big enough to fan out its

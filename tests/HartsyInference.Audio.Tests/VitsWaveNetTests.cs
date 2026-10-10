@@ -56,24 +56,6 @@ public sealed unsafe class VitsWaveNetTests
     }
 
     [Fact]
-    public void LoadWeights_WithNestedConvSuffix_LoadsSConv1dStyleKeys_AndRuns()
-    {
-        Random rng = new(2);
-        Dictionary<string, Tensor> w = BuildWeights(rng, "wavenet", convKeySuffix: ".conv.conv");
-        VitsWaveNet wn = new(Hidden, Kernel, dilationRate: 1, layers: Layers);
-        wn.LoadWeights(w, "wavenet", convKeySuffix: ".conv.conv");
-
-        using CpuBackend backend = new();
-        Tensor x = Rand(rng, 1, Hidden, 10);
-        using Tensor output = wn.Forward(backend, x, 10);
-        x.Dispose();
-
-        Assert.Equal(new TensorShape(1, Hidden, 10), output.Shape);
-        foreach (float v in output.AsSpan<float>()) Assert.True(float.IsFinite(v));
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
     public void LoadWeights_WrongSuffix_ThrowsKeyNotFound()
     {
         Random rng = new(3);

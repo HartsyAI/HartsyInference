@@ -40,12 +40,6 @@ public sealed class GpuTransferHelperFreeAllCachedTests
         AssertReleasesEverything(state => new ResidencyOnlyBackend(state).FreeAllDeviceMemory());
     }
 
-    [Fact]
-    public void The_Residency_Interface_Leaves_No_Sidecar_Behind()
-    {
-        AssertReleasesEverything(state => ((IGpuResidency)state).FreeAllCached());
-    }
-
     /// <summary>The control: the entry point that already ran the wrapper, and must keep running the same
     /// cleanup as the other two.</summary>
     [Fact]

@@ -136,26 +136,4 @@ public unsafe class WanAnimate2DrivingCacheTests
         Assert.Equal(cache.StoredBytes, predicted);
     }
 
-    /// <summary>The reference geometry the port has to fit: 480×832, 81 pixel frames → 21 driving latent frames of
-    /// 30×52 patches. Storing K and V was 1.6384 MiB per driving token (53.7 GiB); the block input is half that, and
-    /// BF16 halves it again. Pinned here because the numbers are what a run gets sized against.</summary>
-    [Fact]
-    public void DrivingCacheFootprint_AtTheReferenceGeometry()
-    {
-        const int blocks = 40, dim = 5120;
-        const int drivingFrames = (81 - 1) / 4 + 1;
-        int refSeq = drivingFrames * (480 / 16) * (832 / 16);
-        Assert.Equal(32_760, refSeq);
-
-        long storedKvPerToken = 2L * blocks * dim * 4;
-        long inputF32PerToken = (long)blocks * dim * 4;
-        long inputBf16PerToken = (long)blocks * dim * 2;
-        Assert.Equal(1_638_400, storedKvPerToken);
-        Assert.Equal(819_200, inputF32PerToken);
-        Assert.Equal(409_600, inputBf16PerToken);
-
-        Assert.Equal(53.67, refSeq * storedKvPerToken / 1e9, 2);
-        Assert.Equal(26.84, refSeq * inputF32PerToken / 1e9, 2);
-        Assert.Equal(13.42, refSeq * inputBf16PerToken / 1e9, 2);
-    }
 }

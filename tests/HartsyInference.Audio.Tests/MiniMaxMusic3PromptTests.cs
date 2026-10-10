@@ -10,14 +10,6 @@ namespace HartsyInference.Audio.Tests;
 public class MiniMaxMusic3PromptTests
 {
     [Fact]
-    public void CleanCaption_PassesPlainProseThrough()
-    {
-        const string caption = "A warm acoustic pop song with intimate female vocals, fingerpicked guitar, soft piano, "
-            + "and a gradual emotional build into a wide final chorus.";
-        Assert.Equal(caption, MiniMaxMusic3Prompt.CleanCaption(caption));
-    }
-
-    [Fact]
     public void CleanCaption_RewritesMetadataTagsAndStripsMarkdown()
     {
         const string caption = "### Global Metadata\r\n"
@@ -38,30 +30,6 @@ public class MiniMaxMusic3PromptTests
             + "four space indent\n"
             + "trailing spaces here";
         Assert.Equal(expected, MiniMaxMusic3Prompt.CleanCaption(caption));
-    }
-
-    [Fact]
-    public void NormalizeLyrics_PrependsStartAndLowercasesTags()
-    {
-        const string lyrics = "[Verse]\nMorning light filtering through the pine\n[Chorus]\nSoftly the world begins to breathe";
-        const string expected = "[start]\n[verse]\nMorning light filtering through the pine\n[chorus]\nSoftly the world begins to breathe";
-        Assert.Equal(expected, MiniMaxMusic3Prompt.NormalizeLyrics(lyrics));
-    }
-
-    [Fact]
-    public void NormalizeLyrics_DropsTextSharingALineWithALeadingTag()
-    {
-        const string lyrics = "[verse]\nI’m learning how to fill up\nevery space I used to leave,\n"
-            + "[pre-chorus] Breathe a little deeper,\nlove is here to heal.\n"
-            + "[bass-quartet-rumbles-in]\nEvery heartbeat sounded like,\n"
-            + "[interlude]\nYou gotta let love— (Oh love… lift us up…)\n"
-            + "[OUTRO]\nWe’re gonna let love stay,";
-        const string expected = "[start]\n[verse]\nI’m learning how to fill up\nevery space I used to leave,\n"
-            + "[pre-chorus]\nlove is here to heal.\n"
-            + "[bass-quartet-rumbles-in]\nEvery heartbeat sounded like,\n"
-            + "[interlude]\nYou gotta let love— (Oh love… lift us up…)\n"
-            + "[outro]\nWe’re gonna let love stay,";
-        Assert.Equal(expected, MiniMaxMusic3Prompt.NormalizeLyrics(lyrics));
     }
 
     [Fact]

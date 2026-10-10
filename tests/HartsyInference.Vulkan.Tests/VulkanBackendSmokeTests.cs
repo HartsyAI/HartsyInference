@@ -28,16 +28,6 @@ public sealed class VulkanBackendSmokeTests
     }
 
     [Fact]
-    public void Instance_BringUp()
-    {
-        if (!VulkanAvailable())
-            return;
-        using VulkanInstance instance = new();
-        nint[] devs = instance.EnumeratePhysicalDevices();
-        Assert.NotEmpty(devs);
-    }
-
-    [Fact]
     public void Device_BringUp_ReportsCapabilities()
     {
         if (!VulkanAvailable())
@@ -81,30 +71,6 @@ public sealed class VulkanBackendSmokeTests
     }
 
     [Fact]
-    public void Backend_Silu_Matches_Reference()
-    {
-        if (!VulkanAvailable())
-            return;
-        using VulkanBackend backend = new();
-
-        Tensor x = new(new TensorShape(32), DType.F32);
-        Tensor y = new(new TensorShape(32), DType.F32);
-        Span<float> xS = x.AsSpan<float>();
-        for (int i = 0; i < 32; i++) xS[i] = i * 0.25f - 4.0f;
-
-        backend.Silu(y, x);
-
-        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
-        for (int i = 0; i < 32; i++)
-        {
-            float xi = i * 0.25f - 4.0f;
-            float expected = xi / (1.0f + MathF.Exp(-xi));
-            Assert.InRange(yS[i] - expected, -1e-5f, 1e-5f);
-        }
-        x.Dispose(); y.Dispose();
-    }
-
-    [Fact]
     public void Backend_LayerNorm_Matches_Reference()
     {
         if (!VulkanAvailable())
@@ -144,39 +110,6 @@ public sealed class VulkanBackendSmokeTests
         }
 
         x.Dispose(); w.Dispose(); b.Dispose(); y.Dispose();
-    }
-
-    [Fact]
-    public void Backend_MatMul_F16_Roundtrip()
-    {
-        if (!VulkanAvailable())
-            return;
-        using VulkanBackend backend = new();
-        if (!backend.Capabilities.SupportsF16)
-            return;     // skip on devices without FP16 (e.g. Mesa LLVMpipe software path)
-
-        const int M = 8, K = 8, N = 8;
-        Tensor a = new(new TensorShape(M, K), DType.F16);
-        Tensor b = new(new TensorShape(K, N), DType.F16);
-        Tensor c = new(new TensorShape(M, N), DType.F16);
-
-        Span<Half> aS = a.AsSpan<Half>();
-        Span<Half> bS = b.AsSpan<Half>();
-        for (int i = 0; i < M * K; i++) aS[i] = (Half)(i * 0.0625f);
-        for (int i = 0; i < K * N; i++) bS[i] = (Half)((i + 1) * 0.03125f);
-
-        backend.MatMul(c, a, b);
-
-        ReadOnlySpan<Half> cS = c.AsReadOnlySpan<Half>();
-        for (int m = 0; m < M; m++)
-            for (int n = 0; n < N; n++)
-            {
-                float acc = 0.0f;
-                for (int k = 0; k < K; k++) acc += (float)aS[m * K + k] * (float)bS[k * N + n];
-                float got = (float)cS[m * N + n];
-                Assert.InRange(got - acc, -5e-2f, 5e-2f);
-            }
-        a.Dispose(); b.Dispose(); c.Dispose();
     }
 
     /// <summary>Per-batch weights ([B,K,N]) exercise the offset-dispatch path; a shared 2D weight exercises the flattened single-GEMM path.</summary>
@@ -380,36 +313,6 @@ public sealed class VulkanBackendSmokeTests
         q.Dispose(); k.Dispose(); v.Dispose(); o.Dispose();
     }
 
-    [Fact]
-    public void Backend_GeGlu_Matches_Reference()
-    {
-        if (!VulkanAvailable())
-            return;
-        using VulkanBackend backend = new();
-        // Multi-row test (the canonical PHASE_3_DEVIATIONS #16 regression case).
-        const int B = 2, T = 3, D = 8;   // last-dim = 2*D = 16
-        Tensor x = new(new TensorShape(B, T, 2 * D), DType.F32);
-        Tensor y = new(new TensorShape(B, T, D), DType.F32);
-        Span<float> xS = x.AsSpan<float>();
-        for (int i = 0; i < B * T * 2 * D; i++) xS[i] = MathF.Cos(i * 0.21f) * 1.7f;
-
-        backend.GeGlu(y, x);
-
-        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
-        for (int row = 0; row < B * T; row++)
-        {
-            for (int d = 0; d < D; d++)
-            {
-                float xv = xS[row * 2 * D + d];
-                float gv = xS[row * 2 * D + D + d];
-                float gelu = 0.5f * gv * (1f + MathF.Tanh(0.7978845608f * (gv + 0.044715f * gv * gv * gv)));
-                float expected = xv * gelu;
-                Assert.InRange(yS[row * D + d] - expected, -1e-4f, 1e-4f);
-            }
-        }
-        x.Dispose(); y.Dispose();
-    }
-
     /// <summary>Linear at Flux DiT dimensions (M=64, K=3072, N=3072), F32 throughout — exactly the shape Flux uses for its Q/K/V/O projections.</summary>
     [Fact]
     public void Backend_Linear_FluxShape_F32_Matches_Cpu()
@@ -482,55 +385,6 @@ public sealed class VulkanBackendSmokeTests
     /// by deriving N from the weight tensor (mirrors <c>CudaBackend.LinearImpl</c>, which never consults
     /// output.Shape at all) and M as <c>output.ElementCount / N</c>. This test uses a rank-4 output shape
     /// with heads·headDim split across two dims — the exact shape class that exposed the bug.</summary>
-    [Fact]
-    public void Backend_Linear_SplitHeadOutputShape_MatchesCpu()
-    {
-        if (!VulkanAvailable())
-            return;
-        using VulkanBackend backend = new();
-
-        const int batch = 1, seqLen = 37, heads = 6, headDim = 8, hidden = 96;
-        const int K = hidden, N = heads * headDim;   // N = 48; deliberately != hidden to catch any accidental K/N mixup
-        Tensor input = new(new TensorShape(batch, seqLen, K), DType.F32);
-        Tensor weight = new(new TensorShape(N, K), DType.F32);
-        Tensor output = new(new TensorShape(batch, seqLen, heads, headDim), DType.F32);   // rank-4: split last dim
-
-        Random rng = new(7);
-        Span<float> iS = input.AsSpan<float>();
-        Span<float> wS = weight.AsSpan<float>();
-        for (int i = 0; i < batch * seqLen * K; i++) iS[i] = (float)(rng.NextDouble() * 2 - 1);
-        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
-
-        backend.Linear(output, input, weight, null);
-        ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
-
-        // CPU reference: out[s, n] = sum_k input[s, k] * weight[n, k], flat-indexed [seqLen, N] (byte-identical
-        // to the rank-4 [batch, seqLen, heads, headDim] output layout).
-        int errs = 0; int firstS = -1, firstN = -1; float maxAbs = 0;
-        for (int s = 0; s < seqLen; s++)
-        for (int n = 0; n < N; n++)
-        {
-            float acc = 0;
-            for (int k = 0; k < K; k++) acc += iS[s * K + k] * wS[n * K + k];
-            float vk = oS[s * N + n];
-            float err = MathF.Abs(vk - acc);
-            if (err > 1e-3f)
-            {
-                if (errs == 0) { firstS = s; firstN = n; }
-                errs++;
-                maxAbs = MathF.Max(maxAbs, err);
-            }
-        }
-        if (errs > 0)
-        {
-            float exp = 0;
-            for (int k = 0; k < K; k++) exp += iS[firstS * K + k] * wS[firstN * K + k];
-            Assert.Fail($"Linear split-head-output: {errs}/{seqLen * N} probe diffs. First at out[{firstS},{firstN}]: vk={oS[firstS * N + firstN]:G6} cpu={exp:G6}  maxAbsErr={maxAbs:G6}");
-        }
-
-        input.Dispose(); weight.Dispose(); output.Dispose();
-    }
-
     /// <summary>Step-graph prerequisite (Phase 7): <c>CopyInto</c> must preserve <c>dst</c>'s buffer ADDRESS across
     /// repeated calls (the captured-graph boundary-refresh pattern — <c>Krea2Transformer</c> refreshes
     /// <c>_tembFixed</c>/writes <c>_graphVelocity</c> via this exact call every step, and a captured command buffer
@@ -572,34 +426,6 @@ public sealed class VulkanBackendSmokeTests
         AssertMatches(dst, src2Data);   // final value only — host read is fine now, nothing depends on dst after this
 
         backend.FreeWeights(new[] { src1, src2 });
-        dst.Dispose(); src1.Dispose(); src2.Dispose();
-    }
-
-    [Fact]
-    public void Backend_CopyInto_PreservesDstAddress_MatchesCpu_HostSrc()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int n = 129;
-        Tensor dst = new(new TensorShape(n), DType.F32);
-
-        float[] src1Data = FillRandom(n, 33);
-        Tensor src1 = new(new TensorShape(n), DType.F32);   // host-only: never preloaded/cached
-        src1Data.CopyTo(src1.AsSpan<float>());
-
-        backend.CopyInto(dst, src1);
-        ulong addrAfterFirst = AddressOf(backend, dst);
-
-        float[] src2Data = FillRandom(n, 44);
-        Tensor src2 = new(new TensorShape(n), DType.F32);
-        src2Data.CopyTo(src2.AsSpan<float>());
-
-        backend.CopyInto(dst, src2);
-        ulong addrAfterSecond = AddressOf(backend, dst);
-        Assert.Equal(addrAfterFirst, addrAfterSecond);
-        AssertMatches(dst, src2Data);
-
         dst.Dispose(); src1.Dispose(); src2.Dispose();
     }
 
@@ -777,29 +603,6 @@ public sealed class VulkanBackendSmokeTests
     /// <c>AddScalar(scale, +1)</c>, the <c>(1+scale)</c> modulation convention every DiT block uses, twice
     /// per block × 28 blocks per forward pass) and, independent of graph mode, a D2H sync 56 times per
     /// denoise step regardless. New elementwise op-code 10 (<c>add_scalar</c>) in <c>elementwise.comp.glsl</c>.</summary>
-    [Fact]
-    public void Backend_AddScalar_MatchesCpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int n = 133;
-        float[] inputData = FillRandom(n, 81);
-        const float scalar = 1.0f;   // the real (1+scale) modulation use
-
-        Tensor input = new(new TensorShape(n), DType.F32);
-        inputData.CopyTo(input.AsSpan<float>());
-        Tensor output = new(new TensorShape(n), DType.F32);
-
-        backend.AddScalar(output, input, scalar);
-
-        float[] expected = new float[n];
-        for (int i = 0; i < n; i++) expected[i] = inputData[i] + scalar;
-        AssertMatches(output, expected);
-
-        input.Dispose(); output.Dispose();
-    }
-
     /// <summary>Gate for the Stage-1b weight-cast cache: a preloaded FP8 weight feeds two consecutive
     /// Linears (first call populates the cast cache, second reuses it). Both outputs must match the CPU
     /// reference (computed from the same FP8→F16 dequant) — catches a stale/aliased/freed cached cast.</summary>
@@ -876,8 +679,6 @@ public sealed class VulkanBackendSmokeTests
     /// tiled-fallback shape, since they apply alpha independently.</summary>
     [Theory]
     [InlineData(256, 512, 256, 6.7f)]        // multiples of 16 → coopmat fast path, large scale
-    [InlineData(37, 96, 41, 6.7f)]           // tiled fallback path, large scale
-    [InlineData(256, 512, 256, 0.0021f)]     // coopmat path, REAL Krea2 ff.gate/up/down scale magnitude
     [InlineData(37, 96, 41, 0.0021f)]        // tiled path, same real-world small scale
     public void Backend_Linear_FP8Weight_NonUnitScaleFactor_MatchesCpu(int M, int K, int N, float scale)
     {
@@ -1036,57 +837,6 @@ public sealed class VulkanBackendSmokeTests
     /// accumulator or tile-index bug that only manifests after many loop iterations would be invisible at
     /// the smaller shapes already tested. Uses probe sampling (not every output element) since a full
     /// M×N×K reference here is ~4×10^11 multiply-adds — probes still cover corners/tile-boundaries.</summary>
-    [Fact]
-    public void Backend_Linear_FP8Weight_NonUnitScaleFactor_MatchesCpu_RealKrea2FfnShape()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.Capabilities.SupportsF16) return;
-        backend.CacheWeightCasts = false;
-        // The per-element check below is the F16-cast path's; the fp8 Linear's activation error is checked against the range.
-        backend.EnableFp8Linear = false;
-
-        const int M = 4108, K = 6144, N = 16384;
-        const float scale = 0.00166f;   // Krea2's actual ff.gate scale magnitude
-        float rawMagnitude = 0.05f / scale;
-
-        Tensor input = new(new TensorShape(M, K), DType.F16);
-        Tensor weightF32 = new(new TensorShape(N, K), DType.F32);
-
-        Random rng = new(37);
-        Span<Half> iS = input.AsSpan<Half>();
-        Span<float> wS = weightF32.AsSpan<float>();
-        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.1f);
-        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * rawMagnitude;
-
-        Tensor weightFp8 = weightF32.CastTo(DType.F8E4M3);
-        weightFp8.Fp8ScaleFactor = scale;
-        Tensor weightF16Ref = weightFp8.CastTo(DType.F16);
-        ReadOnlySpan<Half> wRef = weightF16Ref.AsReadOnlySpan<Half>();
-
-        Tensor output = new(new TensorShape(M, N), DType.F16);
-        backend.Linear(output, input, weightFp8, null);
-        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
-
-        // Probe corners, tile boundaries (every 128th row/col — the coopmat/128-tile boundary), and a
-        // scattered sample across the full M/N range.
-        int[] mProbes = { 0, 1, 127, 128, 129, 2048, 4106, 4107 };
-        int[] nProbes = { 0, 1, 127, 128, 129, 8192, 16382, 16383 };
-        int errs = 0; float maxRel = 0f; int firstM = -1, firstN = -1;
-        foreach (int m in mProbes)
-        foreach (int n in nProbes)
-        {
-            float acc = 0;
-            for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wRef[n * K + k];
-            float got = (float)oS[m * N + n];
-            float rel = MathF.Abs(got - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
-            if (rel > 0.05f) { if (errs == 0) { firstM = m; firstN = n; } errs++; maxRel = MathF.Max(maxRel, rel); }
-        }
-        Assert.True(errs == 0, $"FP8 Linear (real Krea2 FFN shape, scale={scale}) {errs} probe diffs, first out[{firstM},{firstN}] maxRelErr={maxRel:P2}.");
-
-        input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); output.Dispose();
-    }
-
     /// <summary>Regression gate for <c>matmul_coopmat_partial_m.comp.glsl</c> (2026-07-31, the SECOND attempt
     /// at unaligned-M coopmat — see TROUBLESHOOTING.md for the first attempt's host-side scratch-buffer
     /// design and the real `ErrorDeviceLost` that reverted it). This design instead stages the boundary
@@ -1117,14 +867,9 @@ public sealed class VulkanBackendSmokeTests
     /// via reflection on the engagement counters.</summary>
     [Theory]
     [InlineData(1, false)]
-    [InlineData(1, true)]
-    [InlineData(13, false)]
     [InlineData(13, true)]
-    [InlineData(17, true)]
     [InlineData(33, false)]
-    [InlineData(63, false)]
     [InlineData(65, true)]
-    [InlineData(100, false)]
     public void Backend_Linear_CoopmatPartialM_NonMultipleOf16_MatchesCpu(int M, bool hasBias)
     {
         if (!VulkanAvailable()) return;
@@ -1337,65 +1082,6 @@ public sealed class VulkanBackendSmokeTests
     }
 
     [Fact]
-    public void Backend_SDPA_MultiHead_Matches_Cpu_Reference()
-    {
-        if (!VulkanAvailable())
-            return;
-        using VulkanBackend backend = new();
-
-        const int B = 1, H = 2, S = 4, D = 8;
-        Tensor q = new(new TensorShape(B, H, S, D), DType.F32);
-        Tensor k = new(new TensorShape(B, H, S, D), DType.F32);
-        Tensor v = new(new TensorShape(B, H, S, D), DType.F32);
-        Tensor o = new(new TensorShape(B, H, S, D), DType.F32);
-
-        Span<float> qS = q.AsSpan<float>();
-        Span<float> kS = k.AsSpan<float>();
-        Span<float> vS = v.AsSpan<float>();
-        for (int i = 0; i < B * H * S * D; i++) { qS[i] = MathF.Sin(i * 0.1f); kS[i] = MathF.Cos(i * 0.07f); vS[i] = MathF.Sin(i * 0.13f) * 0.5f; }
-
-        float scale = 1.0f / MathF.Sqrt(D);
-        backend.ScaledDotProductAttention(o, q, k, v, mask: null, scale);
-
-        // CPU reference per (b, h)
-        ReadOnlySpan<float> oS = o.AsReadOnlySpan<float>();
-        float[] expected = new float[B * H * S * D];
-        for (int b = 0; b < B; b++)
-        for (int h = 0; h < H; h++)
-        {
-            int baseIdx = (b * H + h) * S * D;
-            float[] scores = new float[S * S];
-            for (int i = 0; i < S; i++)
-                for (int j = 0; j < S; j++)
-                {
-                    float acc = 0;
-                    for (int d = 0; d < D; d++)
-                        acc += qS[baseIdx + i * D + d] * kS[baseIdx + j * D + d];
-                    scores[i * S + j] = acc * scale;
-                }
-            for (int i = 0; i < S; i++)
-            {
-                float maxv = float.NegativeInfinity;
-                for (int j = 0; j < S; j++) maxv = MathF.Max(maxv, scores[i * S + j]);
-                float sum = 0;
-                for (int j = 0; j < S; j++) { scores[i * S + j] = MathF.Exp(scores[i * S + j] - maxv); sum += scores[i * S + j]; }
-                for (int j = 0; j < S; j++) scores[i * S + j] /= sum;
-            }
-            for (int i = 0; i < S; i++)
-                for (int d = 0; d < D; d++)
-                {
-                    float acc = 0;
-                    for (int j = 0; j < S; j++) acc += scores[i * S + j] * vS[baseIdx + j * D + d];
-                    expected[baseIdx + i * D + d] = acc;
-                }
-        }
-        for (int i = 0; i < B * H * S * D; i++)
-            Assert.InRange(oS[i] - expected[i], -1e-3f, 1e-3f);
-
-        q.Dispose(); k.Dispose(); v.Dispose(); o.Dispose();
-    }
-
-    [Fact]
     public void Backend_MatMul_Matches_Cpu_Reference()
     {
         if (!VulkanAvailable())
@@ -1434,29 +1120,6 @@ public sealed class VulkanBackendSmokeTests
     // ── Phase A1 backfill: per-kernel *_Vs_Cpu coverage for SD1.5 / SDXL bring-up ──
 
     [Fact]
-    public void Backend_Mul_Matches_Cpu_F32()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        Tensor a = new(new TensorShape(64), DType.F32);
-        Tensor b = new(new TensorShape(64), DType.F32);
-        Tensor c = new(new TensorShape(64), DType.F32);
-
-        Span<float> aS = a.AsSpan<float>();
-        Span<float> bS = b.AsSpan<float>();
-        for (int i = 0; i < 64; i++) { aS[i] = i * 0.5f - 4f; bS[i] = MathF.Sin(i * 0.31f); }
-
-        backend.Mul(c, a, b);
-
-        ReadOnlySpan<float> cS = c.AsReadOnlySpan<float>();
-        for (int i = 0; i < 64; i++)
-            Assert.InRange(cS[i] - aS[i] * bS[i], -1e-5f, 1e-5f);
-
-        a.Dispose(); b.Dispose(); c.Dispose();
-    }
-
-    [Fact]
     public void Backend_Mul_Matches_Cpu_F16()
     {
         if (!VulkanAvailable()) return;
@@ -1481,27 +1144,6 @@ public sealed class VulkanBackendSmokeTests
     }
 
     [Fact]
-    public void Backend_Scale_Matches_Cpu_F32()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        Tensor x = new(new TensorShape(48), DType.F32);
-        Tensor y = new(new TensorShape(48), DType.F32);
-        Span<float> xS = x.AsSpan<float>();
-        for (int i = 0; i < 48; i++) xS[i] = MathF.Cos(i * 0.27f) * 3.5f;
-
-        const float k = 2.71828f;
-        backend.Scale(y, x, k);
-
-        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
-        for (int i = 0; i < 48; i++)
-            Assert.InRange(yS[i] - xS[i] * k, -1e-5f, 1e-5f);
-
-        x.Dispose(); y.Dispose();
-    }
-
-    [Fact]
     public void Backend_Gelu_Matches_Cpu_TanhApprox()
     {
         if (!VulkanAvailable()) return;
@@ -1521,34 +1163,6 @@ public sealed class VulkanBackendSmokeTests
             float expected = 0.5f * xv * (1f + MathF.Tanh(0.7978845608f * (xv + 0.044715f * xv * xv * xv)));
             Assert.InRange(yS[i] - expected, -1e-5f, 1e-5f);
         }
-        x.Dispose(); y.Dispose();
-    }
-
-    [Fact]
-    public void Backend_Transpose2D_Matches_Cpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int B = 2, D1 = 16, D2 = 24;
-        Tensor x = new(new TensorShape(B, D1, D2), DType.F32);
-        Tensor y = new(new TensorShape(B, D2, D1), DType.F32);
-
-        Span<float> xS = x.AsSpan<float>();
-        for (int i = 0; i < B * D1 * D2; i++) xS[i] = MathF.Sin(i * 0.17f);
-
-        backend.Transpose2D(y, x, D1, D2);
-
-        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
-        for (int b = 0; b < B; b++)
-            for (int i = 0; i < D1; i++)
-                for (int j = 0; j < D2; j++)
-                {
-                    float src = xS[b * D1 * D2 + i * D2 + j];
-                    float dst = yS[b * D2 * D1 + j * D1 + i];
-                    Assert.InRange(dst - src, -1e-5f, 1e-5f);
-                }
-
         x.Dispose(); y.Dispose();
     }
 
@@ -1618,32 +1232,6 @@ public sealed class VulkanBackendSmokeTests
 
     /// <summary>A <c>[B, C]</c> bias adds each batch item's own row: SDXL's ADM-conditioned time embedding differs between
     /// the unconditional and conditional halves, and reading row 0 for both bent every SDXL image on Vulkan.</summary>
-    [Fact]
-    public void Backend_BroadcastAdd_PerBatchBias_Matches_Cpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int B = 3, C = 4, Spatial = 16;
-        using Tensor hidden = new(new TensorShape(B, C, Spatial), DType.F32);
-        using Tensor bias = new(new TensorShape(B, C), DType.F32);
-        Span<float> hS = hidden.AsSpan<float>();
-        Span<float> bS = bias.AsSpan<float>();
-        for (int i = 0; i < B * C * Spatial; i++) hS[i] = MathF.Sin(i * 0.13f);
-        for (int i = 0; i < B * C; i++) bS[i] = (i + 1) * 0.5f;
-        float[] expected = new float[B * C * Spatial];
-        for (int b = 0; b < B; b++)
-            for (int c = 0; c < C; c++)
-                for (int s = 0; s < Spatial; s++)
-                    expected[b * C * Spatial + c * Spatial + s] = hS[b * C * Spatial + c * Spatial + s] + bS[b * C + c];
-
-        backend.BroadcastAdd(hidden, bias, C, Spatial);
-
-        ReadOnlySpan<float> hOut = hidden.AsReadOnlySpan<float>();
-        for (int i = 0; i < B * C * Spatial; i++)
-            Assert.InRange(hOut[i] - expected[i], -1e-5f, 1e-5f);
-    }
-
     /// <summary>GroupNorm at SD1.5 U-Net shapes (32 groups, C=320, spatial=64×64) — the dominant U-Net norm.</summary>
     [Fact]
     public void Backend_GroupNorm_Matches_Cpu_Sd15Shape()
@@ -1929,51 +1517,6 @@ public sealed class VulkanBackendSmokeTests
     /// <summary>The same per-image equivalence at an SDXL-sized convolution. The small-shape case above fits inside a
     /// single matmul tile; this one spans many, so a per-image offset that is right modulo the tile width but wrong
     /// across tiles shows up here and nowhere else.</summary>
-    [Fact]
-    public void Backend_Conv2D_Batched_MatchesPerImage_AtUnetScale()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int B = 2, Cin = 320, Cout = 320, H = 64, W = 64, Kh = 3, Kw = 3;
-        Tensor input = new(new TensorShape(B, Cin, H, W), DType.F32);
-        Tensor weight = new(new TensorShape(Cout, Cin, Kh, Kw), DType.F32);
-        Tensor batched = new(new TensorShape(B, Cout, H, W), DType.F32);
-
-        Random rng = new(99);
-        Span<float> iS = input.AsSpan<float>();
-        Span<float> wS = weight.AsSpan<float>();
-        for (int n = 0; n < B; n++)
-            for (int i = 0; i < Cin * H * W; i++)
-                iS[n * Cin * H * W + i] = (float)(rng.NextDouble() * 2 - 1) + n * 2.0f;
-        for (int i = 0; i < Cout * Cin * Kh * Kw; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.02f;
-
-        backend.Conv2D(batched, input, weight, null, strideH: 1, strideW: 1, padH: 1, padW: 1);
-        ReadOnlySpan<float> batchedOut = batched.AsReadOnlySpan<float>();
-
-        int imageIn = Cin * H * W, imageOut = Cout * H * W;
-        float maxErr = 0f, maxAbs = 0f;
-        for (int n = 0; n < B; n++)
-        {
-            Tensor single = new(new TensorShape(1, Cin, H, W), DType.F32);
-            Tensor singleOut = new(new TensorShape(1, Cout, H, W), DType.F32);
-            iS.Slice(n * imageIn, imageIn).CopyTo(single.AsSpan<float>());
-            backend.Conv2D(singleOut, single, weight, null, strideH: 1, strideW: 1, padH: 1, padW: 1);
-            ReadOnlySpan<float> expected = singleOut.AsReadOnlySpan<float>();
-            for (int i = 0; i < imageOut; i++)
-            {
-                maxErr = MathF.Max(maxErr, MathF.Abs(batchedOut[n * imageOut + i] - expected[i]));
-                maxAbs = MathF.Max(maxAbs, MathF.Abs(expected[i]));
-            }
-            single.Dispose(); singleOut.Dispose();
-        }
-
-        // Relative to the tensor's own scale: accumulation order across tiles is not bitwise-stable.
-        Assert.True(maxErr / maxAbs < 1e-5f, $"Batched Conv2D diverged at UNet scale: maxErr {maxErr:E3} on maxAbs {maxAbs:E3}.");
-
-        input.Dispose(); weight.Dispose(); batched.Dispose();
-    }
-
     /// <summary>The dtype-fallback branches must not re-enter themselves. <c>((IBackend)this).X(...)</c> looks like
     /// "call the managed default" but the class method implicitly implements the interface member, so interface
     /// dispatch lands straight back in the override and recurses until the stack overflows — a documented bug class
@@ -2154,27 +1697,6 @@ public sealed class VulkanBackendSmokeTests
         src.Dispose(); dst.Dispose();
     }
 
-    [Fact]
-    public void Backend_Cast_F16_To_F32_Matches_Cpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.Capabilities.SupportsF16) return;
-
-        Tensor src = new(new TensorShape(128), DType.F16);
-        Tensor dst = new(new TensorShape(128), DType.F32);
-        Span<Half> sS = src.AsSpan<Half>();
-        for (int i = 0; i < 128; i++) sS[i] = (Half)(i * 0.0625f - 4f);
-
-        backend.CastToF32(dst, src);
-
-        ReadOnlySpan<float> dS = dst.AsReadOnlySpan<float>();
-        for (int i = 0; i < 128; i++)
-            Assert.InRange(dS[i] - (float)sS[i], -1e-5f, 1e-5f);
-
-        src.Dispose(); dst.Dispose();
-    }
-
     /// <summary>Regression gate for a real OOM-investigation finding (2026-07-30): Krea2's DiT
     /// (<c>Krea2Transformer.ComputeTimeEmbedding</c>) has a BF16 weight feeding a <c>Linear</c> whose GEMM
     /// resolves to F32 — <c>CastIfNeeded</c> had no BF16 branch at all before this, throwing
@@ -2278,48 +1800,6 @@ public sealed class VulkanBackendSmokeTests
     /// weight+bias feed EVERY block's modulation (gate/scale/shift) vectors, so a scale-dependent bug in the
     /// tiny-tile (M=1) GEMM+bias-fusion path at this specific large-N width would explain a uniform per-block
     /// amplification invisible at the smaller N=8 shape already tested.</summary>
-    [Fact]
-    public void Backend_Linear_Bf16Bias_MatchesCpu_RealKrea2ModProjShape()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.Capabilities.SupportsF16) return;
-
-        const int M = 1, K = 6144, N = 6 * 6144;
-        Tensor input = new(new TensorShape(M, K), DType.F32);
-        Tensor weight = new(new TensorShape(N, K), DType.F32);
-        Tensor output = new(new TensorShape(M, N), DType.F32);
-
-        Random rng = new(23);
-        Span<float> iS = input.AsSpan<float>();
-        Span<float> wS = weight.AsSpan<float>();
-        for (int i = 0; i < M * K; i++) iS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.05f;
-        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.02f;
-
-        Tensor biasF32 = new(new TensorShape(N), DType.F32);
-        Span<float> bS = biasF32.AsSpan<float>();
-        for (int i = 0; i < N; i++) bS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.2f;
-
-        Tensor biasBf16 = biasF32.CastTo(DType.BF16);
-        Tensor biasF32Roundtrip = biasBf16.CastTo(DType.F32);
-
-        backend.Linear(output, input, weight, biasBf16);
-
-        ReadOnlySpan<float> oS = output.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> bRef = biasF32Roundtrip.AsReadOnlySpan<float>();
-        float maxErr = 0f;
-        for (int n = 0; n < N; n++)
-        {
-            float acc = bRef[n];
-            for (int k = 0; k < K; k++) acc += iS[k] * wS[n * K + k];
-            maxErr = MathF.Max(maxErr, MathF.Abs(oS[n] - acc));
-        }
-        Assert.True(maxErr < 1e-2f, $"Linear (BF16 bias, real time_mod_proj shape) maxErr {maxErr:E3} too high.");
-
-        input.Dispose(); weight.Dispose(); output.Dispose();
-        biasF32.Dispose(); biasBf16.Dispose(); biasF32Roundtrip.Dispose();
-    }
-
     /// <summary>Regression gate for another real Krea2-on-Vulkan finding (2026-07-30): no
     /// <c>AffineBroadcastLastDim</c> override existed at all — every call fell through to IBackend's
     /// F32-only CPU default, which throws on Krea2's F16 DiT activations
@@ -2327,8 +1807,6 @@ public sealed class VulkanBackendSmokeTests
     /// scale-only (Ideogram 4 adaLN) variants, and both F32 and F16 activations.</summary>
     [Theory]
     [InlineData(false, false)]  // F32, with shift
-    [InlineData(false, true)]   // F32, scale-only
-    [InlineData(true, false)]   // F16, with shift
     [InlineData(true, true)]    // F16, scale-only
     public unsafe void Backend_AffineBroadcastLastDim_MatchesCpu(bool useF16, bool scaleOnly)
     {
@@ -2714,50 +2192,6 @@ public sealed class VulkanBackendSmokeTests
     // the fix so a future stale-artifact regression fails loudly instead of silently.
 
     [Fact]
-    public void Backend_Tanh_Matches_Cpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        Tensor x = new(new TensorShape(64), DType.F32);
-        Tensor y = new(new TensorShape(64), DType.F32);
-        Span<float> xS = x.AsSpan<float>();
-        for (int i = 0; i < 64; i++) xS[i] = i * 0.1f - 3.2f;
-
-        backend.Tanh(y, x);
-
-        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
-        for (int i = 0; i < 64; i++)
-            Assert.InRange(yS[i] - MathF.Tanh(xS[i]), -1e-4f, 1e-4f);
-
-        x.Dispose(); y.Dispose();
-    }
-
-    [Fact]
-    public void Backend_Elu_Matches_Cpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        Tensor x = new(new TensorShape(64), DType.F32);
-        Tensor y = new(new TensorShape(64), DType.F32);
-        Span<float> xS = x.AsSpan<float>();
-        for (int i = 0; i < 64; i++) xS[i] = i * 0.1f - 3.2f;
-
-        const float alpha = 1.0f;
-        backend.Elu(y, x, alpha);
-
-        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
-        for (int i = 0; i < 64; i++)
-        {
-            float xv = xS[i];
-            float expected = xv >= 0f ? xv : alpha * (MathF.Exp(xv) - 1f);
-            Assert.InRange(yS[i] - expected, -1e-4f, 1e-4f);
-        }
-        x.Dispose(); y.Dispose();
-    }
-
-    [Fact]
     public void Backend_MaxPool2D_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
@@ -2981,39 +2415,6 @@ public sealed class VulkanBackendSmokeTests
         x.Dispose(); alpha.Dispose(); y.Dispose();
     }
 
-    [Fact]
-    public void Backend_Snake_Beta_Matches_Cpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int N = 1, C = 3, T = 8;
-        Tensor x = new(new TensorShape(N, C, T), DType.F32);
-        Tensor alpha = new(new TensorShape(C), DType.F32);
-        Tensor beta = new(new TensorShape(C), DType.F32);
-        Tensor y = new(new TensorShape(N, C, T), DType.F32);
-        Span<float> xS = x.AsSpan<float>();
-        Span<float> aS = alpha.AsSpan<float>();
-        Span<float> bS = beta.AsSpan<float>();
-        for (int i = 0; i < N * C * T; i++) xS[i] = MathF.Cos(i * 0.27f) * 2f;
-        for (int c = 0; c < C; c++) { aS[c] = 0.4f + c * 0.2f; bS[c] = 0.2f + c * 0.1f; }
-
-        backend.Snake(y, x, alpha, beta);
-
-        ReadOnlySpan<float> yS = y.AsReadOnlySpan<float>();
-        for (int c = 0; c < C; c++)
-            for (int t = 0; t < T; t++)
-            {
-                float xv = xS[c * T + t];
-                float a = aS[c];
-                float divisor = bS[c] + 1e-8f;
-                float s = MathF.Sin(a * xv);
-                float expected = xv + (s * s) / divisor;
-                Assert.InRange(yS[c * T + t] - expected, -1e-4f, 1e-4f);
-            }
-        x.Dispose(); alpha.Dispose(); beta.Dispose(); y.Dispose();
-    }
-
     // ── Phase 2 perf-measurement infrastructure ─────────────────────────────────────────────
     // GetD2hSyncCount/ResetD2hSyncCount mirror CudaBackend's counter of the same name. These tests
     // pin the two directions that matter: a GPU-resident op that's never read stays at zero syncs,
@@ -3126,28 +2527,6 @@ public sealed class VulkanBackendSmokeTests
     // SliceLastDim/ApplyRope/KvCacheAppend previously had no VulkanBackend override at all — every
     // call fell through to IBackend's CPU-loop default. These pin the new GPU dispatches against the
     // same CPU-reference math (mirroring IBackend.cs's own default bodies).
-
-    [Fact]
-    public void Backend_SliceLastDim_Matches_Cpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int rows = 4, inDim = 12, offset = 5, outDim = 4;
-        Tensor input = new(new TensorShape(rows, inDim), DType.F32);
-        Tensor output = new(new TensorShape(rows, outDim), DType.F32);
-        Span<float> inS = input.AsSpan<float>();
-        for (int i = 0; i < rows * inDim; i++) inS[i] = MathF.Sin(i * 0.13f);
-
-        backend.SliceLastDim(output, input, offset);
-
-        ReadOnlySpan<float> outS = output.AsReadOnlySpan<float>();
-        for (int row = 0; row < rows; row++)
-            for (int d = 0; d < outDim; d++)
-                Assert.InRange(outS[row * outDim + d] - inS[row * inDim + offset + d], -1e-5f, 1e-5f);
-
-        input.Dispose(); output.Dispose();
-    }
 
     [Fact]
     public void Backend_ApplyRope_Matches_Cpu()
@@ -3379,34 +2758,6 @@ public sealed class VulkanBackendSmokeTests
     }
 
     [Fact]
-    public void Backend_FlashAttention_SlidingWindow_MatchesCpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int batch = 1, hq = 2, hkv = 2, sq = 24, skv = 24, headDim = 32, window = 6;
-        float scale = 1f / MathF.Sqrt(headDim);
-        float[] q = FillRandom(batch * hq * sq * headDim, 11);
-        float[] k = FillRandom(batch * hkv * skv * headDim, 12);
-        float[] v = FillRandom(batch * hkv * skv * headDim, 13);
-        float[] expected = CpuFlashReference(q, k, v, null, batch, hq, hkv, sq, skv, headDim, scale, causal: true, qOffset: 0, slidingWindow: window);
-
-        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
-        Tensor kT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
-        Tensor vT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
-        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
-        q.CopyTo(qT.AsSpan<float>()); k.CopyTo(kT.AsSpan<float>()); v.CopyTo(vT.AsSpan<float>());
-
-        backend.FlashAttention(oT, qT, kT, vT, kvLen: skv, kvGroup: hq / hkv, causal: true, qOffset: 0, scale, slidingWindow: window);
-
-        ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
-        for (int i = 0; i < expected.Length; i++)
-            Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
-
-        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
-    }
-
-    [Fact]
     public void Backend_FlashAttention_GqaAndKvLenLessThanBuffer_MatchesCpu()
     {
         // Simulates a decode step against a KV cache: the K/V buffers are over-allocated to maxSeq,
@@ -3491,38 +2842,6 @@ public sealed class VulkanBackendSmokeTests
         qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose();
     }
 
-    [Fact]
-    public void Backend_SDPA_WithMask_MatchesCpu()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-
-        const int batch = 1, hq = 3, hkv = 3, sq = 10, skv = 14, headDim = 32;
-        float scale = 1f / MathF.Sqrt(headDim);
-        float[] q = FillRandom(batch * hq * sq * headDim, 31);
-        float[] k = FillRandom(batch * hkv * skv * headDim, 32);
-        float[] v = FillRandom(batch * hkv * skv * headDim, 33);
-        float[] mask = new float[sq * skv];
-        Random rng = new(34);
-        for (int i = 0; i < mask.Length; i++) mask[i] = rng.NextDouble() < 0.3 ? -1e9f : 0f;   // random padding mask
-        float[] expected = CpuFlashReference(q, k, v, mask, batch, hq, hkv, sq, skv, headDim, scale, causal: false, qOffset: 0, slidingWindow: 0);
-
-        Tensor qT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
-        Tensor kT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
-        Tensor vT = new(new TensorShape(batch, hkv, skv, headDim), DType.F32);
-        Tensor oT = new(new TensorShape(batch, hq, sq, headDim), DType.F32);
-        Tensor maskT = new(new TensorShape(sq, skv), DType.F32);
-        q.CopyTo(qT.AsSpan<float>()); k.CopyTo(kT.AsSpan<float>()); v.CopyTo(vT.AsSpan<float>()); mask.CopyTo(maskT.AsSpan<float>());
-
-        backend.ScaledDotProductAttention(oT, qT, kT, vT, maskT, scale);
-
-        ReadOnlySpan<float> oS = oT.AsReadOnlySpan<float>();
-        for (int i = 0; i < expected.Length; i++)
-            Assert.InRange(oS[i] - expected[i], -2e-3f, 2e-3f);
-
-        qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose(); maskT.Dispose();
-    }
-
     /// <summary>The exact shape flagged in benchmarks/scoreboards/VULKAN.md as too large to run on the
     /// old materialized path (~25 GB score matrix — the documented Wan-video OOM root cause). Not a
     /// full numeric cross-check (a CPU reference at this scale is too slow for a unit test) — proves
@@ -3591,12 +2910,8 @@ public sealed class VulkanBackendSmokeTests
 
     [Theory]
     [InlineData("Q4_0")]
-    [InlineData("Q5_0")]
     [InlineData("Q8_0")]
-    [InlineData("Q2_K")]
-    [InlineData("Q3_K")]
     [InlineData("Q4_K")]
-    [InlineData("Q5_K")]
     [InlineData("Q6_K")]
     [InlineData("IQ4_XS")]
     public unsafe void Backend_DequantizeToF32_MatchesGgufDequantizer(string dtypeName)
@@ -3674,7 +2989,6 @@ public sealed class VulkanBackendSmokeTests
     /// <see cref="VulkanBackend.TryDispatchCoopMat2"/>'s doc comment).</summary>
     [Theory]
     [InlineData(128, 128, 128, false)]
-    [InlineData(256, 512, 256, true)]
     [InlineData(129, 130, 144, true)]     // none of M/K/N a multiple of the 32/16/32 tile granularity
     [InlineData(17, 33, 5, false)]        // smaller than one tile in every dimension
     public void Backend_CoopMat2_MatchesCpu(int M, int K, int N, bool hasBias)

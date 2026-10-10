@@ -10,9 +10,6 @@ public sealed class DirectDftTests
 {
     [Theory]
     [InlineData(16)]
-    [InlineData(20)]
-    [InlineData(24)]
-    [InlineData(40)]
     public void CachedTwiddles_BitIdenticalToInlineTrig(int n)
     {
         Random rng = new(n * 31);

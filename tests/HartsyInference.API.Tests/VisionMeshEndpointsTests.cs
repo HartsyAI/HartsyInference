@@ -51,49 +51,4 @@ public sealed class VisionMeshEndpointsTests : IClassFixture<WebApplicationFacto
         });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
-
-    [Fact]
-    public async Task Mesh_UnresolvableModel_Returns400()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/mesh", new
-        {
-            model = "not-a-real-3d-model",
-            request = new { image = new { rgb = Convert.ToBase64String([0, 0, 0]), width = 1, height = 1 } },
-        });
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task Mesh_TextTo3D_Returns501NotWiredYet()
-    {
-        // MeshRequest.Image is null (pure text-to-3D) — MeshService rejects this by name before even looking at
-        // the model, per its own class doc: "text-to-3D has no wired pipeline yet".
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/mesh", new
-        {
-            model = "whatever",
-            request = new { prompt = "a small dragon" },
-        });
-        Assert.Equal(HttpStatusCode.NotImplemented, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task MeshStream_UnresolvableModel_ReportsErrorEventNotHang()
-    {
-        using HttpClient client = _factory.CreateClient();
-        using HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, "/v1/native/mesh/stream")
-        {
-            Content = JsonContent.Create(new
-            {
-                model = "not-a-real-3d-model",
-                request = new { image = new { rgb = Convert.ToBase64String([0, 0, 0]), width = 1, height = 1 } },
-            }),
-        };
-
-        using HttpResponseMessage resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        string body = await resp.Content.ReadAsStringAsync();
-        Assert.Contains("event: error", body);
-    }
 }

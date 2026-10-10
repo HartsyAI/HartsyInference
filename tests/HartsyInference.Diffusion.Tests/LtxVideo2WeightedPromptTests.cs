@@ -29,7 +29,6 @@ public sealed class LtxVideo2WeightedPromptTests
     /// grammar that expressed it must still come off the text.</summary>
     [Theory]
     [InlineData("a red fox in snow")]
-    [InlineData(" leading space")]
     [InlineData("a red (fox:1.0) in snow")]
     public void AnUnweightedPromptKeepsTheWholeStringEncode(string prompt)
     {

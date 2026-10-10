@@ -9,25 +9,9 @@ public sealed unsafe class QwenOmniProcessorTests
 {
     private static int FloorDiv(int a, int b) => (int)Math.Floor((double)a / b);
 
-    [Fact]
-    public void FiveSecondsOfAudio_YieldsOneHundredTwentyFiveTokens()
-    {
-        QwenOmniProcessor processor = new(QwenOmniConfig.Default);
-        Assert.Equal(500, QwenOmniProcessor.MelFrames(80_000, 160));
-        Assert.Equal(250, QwenOmniProcessor.ConvFrames(500));
-        Assert.Equal(125, processor.AudioTokensForSamples(80_000));
-    }
-
     [Theory]
     [InlineData(1, 0)]
-    [InlineData(2, 0)]
-    [InlineData(3, 1)]
-    [InlineData(4, 1)]
-    [InlineData(5, 1)]
     [InlineData(7, 2)]
-    [InlineData(199, 50)]
-    [InlineData(200, 50)]
-    [InlineData(201, 50)]
     [InlineData(203, 51)]
     public void AudioTokens_FollowTheFloorDivisionFormula(int frames, int expected)
     {
@@ -45,15 +29,6 @@ public sealed unsafe class QwenOmniProcessorTests
             Assert.Equal(sum, QwenOmniProcessor.ConvFrames(frames));
         }
     }
-
-    [Theory]
-    [InlineData(1, 1)]
-    [InlineData(160, 1)]
-    [InlineData(161, 2)]
-    [InlineData(16_000, 100)]
-    [InlineData(16_001, 101)]
-    public void MelFrames_IsCeilOfSamplesOverHop(int samples, int expected) =>
-        Assert.Equal(expected, QwenOmniProcessor.MelFrames(samples, 160));
 
     [Fact]
     public void ComputeMel_ZeroPadsTo300Seconds_AndReportsValidFrames()

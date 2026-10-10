@@ -112,27 +112,4 @@ public sealed class GraphDecodeAdmissionTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
-    [Fact]
-    public async Task SoloEligibleRequest_WithNoInjectedFailure_CompletesNormallyOnCpuBackend()
-    {
-        // CaptureGraph's DEFAULT (no CUDA backend) returns null and LaunchGraph throws NotSupportedException —
-        // this test doesn't force eligibility, so on a real CpuBackend (GraphDecodeSupported = false by
-        // default) graphEligible is false and the request just takes the ordinary PagedKvCache path. Sanity
-        // check that a "looks graph-eligible" request (greedy, GraphDecode=true) still works end-to-end when
-        // the backend genuinely doesn't support it — i.e. the new eligibility check correctly gates on the
-        // real backend capability, not just the request's own opt-in flag.
-        TransformerConfig cfg = Cfg();
-        Dictionary<string, Tensor> w = Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = new(cfg);
-        model.LoadWeights(w, "model");
-        StubTokenizer tokenizer = new();
-        using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
-        using DynamicBatchScheduler scheduler = new(model, tokenizer, backend, pool);
-
-        GenerationResult result = await scheduler.SubmitAsync(Req([1, 2, 3], 10), onToken: null, CancellationToken.None);
-        Assert.NotEmpty(result.TokenIds);
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
 }

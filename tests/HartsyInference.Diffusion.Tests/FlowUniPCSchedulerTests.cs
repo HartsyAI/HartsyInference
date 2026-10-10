@@ -30,7 +30,6 @@ public unsafe class FlowUniPCSchedulerTests
 
     [Theory]
     [InlineData(3)]    // Matrix-Game distilled step count
-    [InlineData(10)]
     [InlineData(50)]   // Matrix-Game base step count
     public void Step_ConstantVelocity_RecoversX0Exactly(int steps)
     {

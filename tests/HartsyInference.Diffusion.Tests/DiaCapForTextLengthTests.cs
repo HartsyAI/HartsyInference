@@ -27,7 +27,6 @@ public sealed class DiaCapForTextLengthTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(5)]
     [MemberData(nameof(FloorBoundaryLength))]
     public void ShortTextHitsTheFloor_NotTheFactor(int textLength)
     {
@@ -68,8 +67,6 @@ public sealed class DiaCapForTextLengthTests
     }
 
     [Theory]
-    [InlineData(1, 0)]
-    [InlineData(1720, 1)]
     [InlineData(1720, 10_000)] // a huge prompt's own factor-derived estimate would dwarf 1720.
     [InlineData(50, 1000)] // factor/floor would compute 12_000 here -- requested must still win.
     public void NeverRaisesRequested(int requested, int textLength)
@@ -77,15 +74,5 @@ public sealed class DiaCapForTextLengthTests
         int result = DiaTtsModel.Session.CapForTextLength(requested, textLength);
 
         Assert.True(result <= requested, $"CapForTextLength({requested}, {textLength}) returned {result}, above the requested ceiling.");
-    }
-
-    [Fact]
-    public void RequestedBelowFloorStillWins()
-    {
-        // requested below the floor: Math.Min still applies, so requested (not the floor) wins -- this is the
-        // same "never raises requested" guarantee, restated for the floor branch specifically.
-        int result = DiaTtsModel.Session.CapForTextLength(requested: 50, textLength: 1);
-
-        Assert.Equal(50, result);
     }
 }

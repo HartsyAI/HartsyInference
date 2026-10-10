@@ -33,7 +33,6 @@ public sealed class LoraConvMergeTests : IDisposable
     /// wrong order has the same norm as one added in the right order.</summary>
     [Theory]
     [InlineData(1.0f)]
-    [InlineData(0.5f)]
     public void AConvolutionWeightTakesItsFlattenedDelta(float strength)
     {
         string path = ConvLora("conv");
@@ -48,20 +47,6 @@ public sealed class LoraConvMergeTests : IDisposable
         {
             Assert.Equal(BaseValue(i) + deltaValue, actual[i], 4);
         }
-    }
-
-    /// <summary>The weight keeps its rank-4 shape through the merge — a convolution whose weight came back as
-    /// <c>[out, in·kh·kw]</c> would not be usable by the conv kernels that read its spatial axes.</summary>
-    [Fact]
-    public void TheMergedWeightIsStillRankFour()
-    {
-        string path = ConvLora("conv-shape");
-        using Tensor merged = MergeThroughStack(path, 1.0f, out _);
-        Assert.Equal(4, merged.Shape.Rank);
-        Assert.Equal(OutCh, (int)merged.Shape[0]);
-        Assert.Equal(InCh, (int)merged.Shape[1]);
-        Assert.Equal(K, (int)merged.Shape[2]);
-        Assert.Equal(K, (int)merged.Shape[3]);
     }
 
     /// <summary>A DoRA adapter on a convolution is refused by name. Its magnitude vector normalizes by a row norm

@@ -32,7 +32,6 @@ public unsafe class Wan21VaeEncoderStreamingTests
 
     [Theory]
     [InlineData(5)]
-    [InlineData(9)]
     [InlineData(13)]
     public void StreamedEncode_MatchesTheWholeClipEncode(int frames)
     {

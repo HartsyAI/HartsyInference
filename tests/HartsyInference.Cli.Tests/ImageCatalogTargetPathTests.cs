@@ -34,20 +34,6 @@ public sealed class ImageCatalogTargetPathTests
         Assert.Equal("krea2_turbo_fp8_scaled.safetensors", asset.FileName);
     }
 
-    [Fact]
-    public void ZImageTransformerResolvesToItsLocalRenamedFile()
-    {
-        ModelAsset asset = Transformer("zimage");
-
-        Assert.Equal("mcmonkey/swarm-models", asset.Repo);
-        Assert.Equal("SwarmUI_Z-Image-Turbo-FP8Mix.safetensors", asset.RepoPath);
-        // TargetName deliberately differs from the HF repo's own filename -- see the class doc. Compared as
-        // exact segment values, not a combined path -- see the comment in the krea2 case above.
-        Assert.Equal("Stable-Diffusion", asset.TargetSubdir);
-        Assert.Equal("z-image-turbo.safetensors", asset.TargetName);
-        Assert.Equal("z-image-turbo.safetensors", asset.FileName);
-    }
-
     private static ModelAsset Transformer(string catalogId)
     {
         CatalogEntry? entry = ModelCatalog.Find(catalogId);

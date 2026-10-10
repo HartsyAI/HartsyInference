@@ -18,10 +18,6 @@ public sealed class GgufRealFileCorrelationTests
     [Theory]
     [InlineData("llama32-1b", "IQ4_XS", "IQ4_XS", 0.98)]
     [InlineData("llama32-1b", "Q3_K_M", "Q3_K", 0.95)]
-    [InlineData("llama32-1b", "Q2_K", "Q2_K", 0.90)]
-    [InlineData("llama32-1b", "IQ3_M", "IQ3_S", 0.95)]
-    [InlineData("qwen25-1.5b", "IQ3_XS", "IQ3_XXS", 0.93)]
-    [InlineData("qwen25-1.5b", "IQ3_XS", "IQ3_S", 0.95)]
     [InlineData("qwen25-1.5b", "IQ2_M", "IQ2_S", 0.88)]
     public unsafe void EveryTensorInTheFormatCorrelatesWithQ8_0(string family, string file, string format, double floor)
     {

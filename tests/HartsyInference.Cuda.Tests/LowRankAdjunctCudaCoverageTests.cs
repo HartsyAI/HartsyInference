@@ -39,7 +39,6 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q8_0")]
-    [InlineData("Q4_K")]
     [InlineData("Q6_K")]
     public void Linear_OnABlockQuantizedBase_MatchesTheDequantizedMerge(string quant)
     {

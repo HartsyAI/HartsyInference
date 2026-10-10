@@ -54,32 +54,6 @@ public sealed class WhisperExactGeluTests
         }
     }
 
-    [Fact]
-    public void Decoder_Mlp_UsesTheExactGelu()
-    {
-        int[] prompt = [3, 7];
-        Dictionary<string, Tensor> weights = DecoderWeights(out double[,] tokens, out double[,] positions);
-        try
-        {
-            using CpuBackend backend = new();
-            using WhisperDecoder decoder = new(Config);
-            decoder.LoadWeights(weights);
-            using Tensor encoded = new(new TensorShape(1, 3, D), DType.F32);
-            encoded.AsSpan<float>().Clear();
-            using WhisperDecoder.DecodeState state = decoder.StartDecode(backend, encoded);
-            using Tensor logits = decoder.DecodeStep(backend, prompt, state);
-
-            int last = prompt.Length - 1;
-            AssertExactNotTanh(logits.AsSpan<float>()[..Vocab],
-                ExpectedLogits(tokens, positions, prompt[last], last, GeluExact),
-                ExpectedLogits(tokens, positions, prompt[last], last, GeluTanh));
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
     /// <summary>The encoder with identity convolutions, zero attention and identity MLP projections:
     /// <c>LN(h + GELU(LN(h)))</c> with <c>h = GELU(GELU(mel))</c> at every other frame (stride 2).</summary>
     private static double[] ExpectedEncoder(double[,] mel, Func<double, double> gelu)

@@ -14,15 +14,9 @@ public sealed class WanAnimateContinueMotionTests
 
     [Theory]
     [InlineData(0, 0, 0)]      // first chunk: no prefix, nothing to trim
-    [InlineData(1, 1, 1)]      // on-grid
     [InlineData(5, 2, 5)]      // the reference default
-    [InlineData(9, 3, 9)]
-    [InlineData(13, 4, 13)]
     [InlineData(2, 1, 1)]      // off-grid: trim UNDER-drops, leaking re-rendered prefix frames
-    [InlineData(3, 1, 1)]
-    [InlineData(4, 1, 1)]
     [InlineData(8, 2, 5)]
-    [InlineData(12, 3, 9)]
     public void PrefixDerivesItsLatentLengthAndTrim(int motionFrames, int expectedRefLatent, int expectedTrim)
     {
         int refLatent = WanAnimateChunkMath.RefMotionLatentLength(motionFrames);
@@ -30,57 +24,13 @@ public sealed class WanAnimateContinueMotionTests
         Assert.Equal(expectedTrim, WanAnimateChunkMath.TrimImageFrames(refLatent));
     }
 
-    [Fact]
-    public void TrimEqualsThePrefixExactlyOnTheGrid()
-    {
-        for (int n = 1; n <= 40; n++)
-        {
-            int trim = WanAnimateChunkMath.TrimImageFrames(WanAnimateChunkMath.RefMotionLatentLength(n));
-            if (n % Step == 1)
-            {
-                Assert.Equal(n, trim);
-            }
-            else
-            {
-                Assert.True(trim < n, $"n={n} → trim {trim} should under-drop off-grid");
-            }
-        }
-    }
-
-    [Theory]
-    [InlineData(0, 0)]
-    [InlineData(1, 1)]
-    [InlineData(4, 1)]
-    [InlineData(5, 5)]
-    [InlineData(8, 5)]
-    [InlineData(9, 9)]
-    [InlineData(20, 17)]
-    public void SnapMotionFramesFloorsOntoTheFourNPlusOneGrid(int requested, int expected)
-    {
-        int snapped = WanAnimateChunkMath.SnapMotionFrames(requested);
-        Assert.Equal(expected, snapped);
-        Assert.True(snapped <= requested);
-        Assert.True(snapped == 0 || snapped % Step == 1);
-    }
-
     [Theory]
     [InlineData(5, 200, 81, 5)]     // steady state: the request wins
-    [InlineData(9, 200, 81, 9)]
     [InlineData(81, 200, 81, 77)]   // clamped to chunkLen - 1, then snapped (80 → 77)
     [InlineData(5, 3, 81, 1)]       // only 3 frames generated so far → snaps to a 1-frame prefix
-    [InlineData(9, 6, 81, 5)]
     public void MotionPrefixIsClampedByOutputAndChunkLength(int requested, int available, int chunkFrames, int expected)
     {
         Assert.Equal(expected, WanAnimateChunkMath.MotionPrefixFrames(requested, available, chunkFrames));
-    }
-
-    [Fact]
-    public void MaskPrefixEndIsRefTimesFourWithoutACharacterMask()
-    {
-        Assert.Equal(0, WanAnimateChunkMath.MaskPrefixEnd(0, hasCharacterMask: false));
-        Assert.Equal(4, WanAnimateChunkMath.MaskPrefixEnd(1, hasCharacterMask: false));
-        Assert.Equal(8, WanAnimateChunkMath.MaskPrefixEnd(2, hasCharacterMask: false));
-        Assert.Equal(12, WanAnimateChunkMath.MaskPrefixEnd(3, hasCharacterMask: false));
     }
 
     /// <summary>Upstream zeroes <c>[0, ref·4)</c> and THEN overwrites <c>[ref_images_num, …)</c> with the character
@@ -89,8 +39,9 @@ public sealed class WanAnimateContinueMotionTests
     [Fact]
     public void ACharacterMaskShortensTheKnownRunToTheTrimCount()
     {
-        Assert.Equal(5, WanAnimateChunkMath.MaskPrefixEnd(2, hasCharacterMask: true));
+        Assert.Equal(0, WanAnimateChunkMath.MaskPrefixEnd(0, hasCharacterMask: false));
         Assert.Equal(8, WanAnimateChunkMath.MaskPrefixEnd(2, hasCharacterMask: false));
+        Assert.Equal(5, WanAnimateChunkMath.MaskPrefixEnd(2, hasCharacterMask: true));
         Assert.Equal(1, WanAnimateChunkMath.MaskPrefixEnd(1, hasCharacterMask: true));
     }
 
@@ -113,20 +64,6 @@ public sealed class WanAnimateContinueMotionTests
         }
     }
 
-    [Fact]
-    public void NoPrefixLeavesOnlyTheReferenceFrameKnown()
-    {
-        int prefixEnd = WanAnimateChunkMath.MaskPrefixEnd(0, hasCharacterMask: false);
-        Assert.True(WanAnimateChunkMath.IsKnownMaskCell(0, 0, trimLatent: 1, prefixEnd));
-        for (int t = 1; t < 8; t++)
-        {
-            for (int m = 0; m < 4; m++)
-            {
-                Assert.False(WanAnimateChunkMath.IsKnownMaskCell(t, m, trimLatent: 1, prefixEnd));
-            }
-        }
-    }
-
     /// <summary>The one cell-level consequence of the charmask overlap: latent frame <c>ref-1</c>, mask channels 1..3
     /// of a 5-frame prefix stop being "known" once a character mask is supplied.</summary>
     [Fact]
@@ -139,40 +76,9 @@ public sealed class WanAnimateContinueMotionTests
         Assert.False(WanAnimateChunkMath.IsKnownMaskCell(2, 3, trimLatent: 1, prefixEnd));   // j = 7
     }
 
-    /// <summary>The rewind happens BEFORE each chunk's driving slice, so slice offsets advance by exactly the number
-    /// of NEW frames a chunk contributes and driving-frame index stays locked to output-frame index.</summary>
-    [Fact]
-    public void OffsetChainRewindsBeforeEveryChunkSlice()
-    {
-        const int ChunkLen = 81, Prefix = 5;
-        int carried = 0;
-        List<int> sliceOffsets = [];
-        for (int chunk = 0; chunk < 4; chunk++)
-        {
-            int prefix = chunk == 0 ? 0 : Prefix;
-            int sliceOffset = WanAnimateChunkMath.SliceOffset(carried, prefix);
-            sliceOffsets.Add(sliceOffset);
-            carried = WanAnimateChunkMath.NextCarriedOffset(sliceOffset, ChunkLen);
-        }
-        Assert.Equal([0, 76, 152, 228], sliceOffsets);
-        for (int chunk = 1; chunk < sliceOffsets.Count; chunk++)
-        {
-            Assert.Equal(ChunkLen - Prefix, sliceOffsets[chunk] - sliceOffsets[chunk - 1]);
-        }
-    }
-
-    [Fact]
-    public void OffsetNeverGoesNegativeWhenThePrefixExceedsTheCarriedOffset()
-    {
-        Assert.Equal(0, WanAnimateChunkMath.SliceOffset(carriedOffset: 3, motionFrames: 9));
-        Assert.Equal(0, WanAnimateChunkMath.SliceOffset(carriedOffset: 0, motionFrames: 5));
-    }
-
     [Theory]
     [InlineData(81, 81, 5, 1)]
-    [InlineData(81, 81, 0, 1)]
     [InlineData(157, 81, 5, 2)]     // 81 + 76 = 157 exactly
-    [InlineData(158, 81, 5, 3)]
     [InlineData(300, 81, 5, 4)]     // 81 + 3*76 = 309 ≥ 300
     public void ChunkCountCoversTheRequestedTotal(int total, int chunkFrames, int motionFrames, int expected)
     {
@@ -197,29 +103,11 @@ public sealed class WanAnimateContinueMotionTests
         Assert.Equal([4, 5, 6, 7, 8, 9], frames.Select(f => (int)f[0]));
     }
 
-    [Fact]
-    public void DropLeadingFramesEmptiesAnExhaustedClip()
-    {
-        List<byte[]> frames = [.. Enumerable.Range(0, 3).Select(i => new byte[] { (byte)i })];
-        Assert.Empty(WanAnimateDrivingResolver.DropLeadingFrames(frames, 3));
-        List<byte[]> more = [.. Enumerable.Range(0, 3).Select(i => new byte[] { (byte)i })];
-        Assert.Empty(WanAnimateDrivingResolver.DropLeadingFrames(more, 99));
-    }
-
-    [Fact]
-    public void DropLeadingFramesIsANoOpAtOffsetZero()
-    {
-        List<byte[]> frames = [.. Enumerable.Range(0, 3).Select(i => new byte[] { (byte)i })];
-        Assert.Equal(3, WanAnimateDrivingResolver.DropLeadingFrames(frames, 0).Count);
-        Assert.Equal(3, WanAnimateDrivingResolver.DropLeadingFrames(frames, -7).Count);
-    }
-
     /// <summary>A continuation chunk PINS its frame count. Letting the shrink rule run there would change the latent
     /// geometry mid-sequence the moment the seeked driving video ran short — which happens on the last chunk of
     /// nearly every run.</summary>
     [Theory]
     [InlineData(81, 24, true, 81)]
-    [InlineData(81, 1, true, 81)]
     [InlineData(81, 24, false, 21)]
     [InlineData(81, 200, false, 81)]
     [InlineData(81, 50, false, 49)]

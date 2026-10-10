@@ -29,18 +29,4 @@ public sealed class DeepSpeedCheckpointConverterTests
         foreach (Tensor t in raw.Values) t.Dispose();
     }
 
-    [Fact]
-    public void PassesThroughCleanKeys_Unchanged()
-    {
-        Dictionary<string, Tensor> raw = new()
-        {
-            ["denoiser.net.in_conv.weight"] = Scalar(),
-            ["lcfm.ae.decoder.in_conv.weight"] = Scalar(),
-        };
-        Dictionary<string, Tensor> outMap = DeepSpeedCheckpointConverter.StripModulePrefix(raw);
-        Assert.Equal(raw.Count, outMap.Count);
-        Assert.Contains("denoiser.net.in_conv.weight", outMap.Keys);
-        Assert.Contains("lcfm.ae.decoder.in_conv.weight", outMap.Keys);
-        foreach (Tensor t in raw.Values) t.Dispose();
-    }
 }

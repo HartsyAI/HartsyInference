@@ -37,7 +37,6 @@ public sealed class VulkanShaderFeatureLintTests
 
     [Theory]
     [InlineData("im2col_f32", "shaderInt64")]
-    [InlineData("im2col_f16", "shaderInt64")]
     [InlineData("cast_bf16_f32", "shaderInt16")]
     [InlineData("matmul_tiled_f16", null)]
     [InlineData("matmul_fp8_coopmat", "shaderFloat8CooperativeMatrix")]

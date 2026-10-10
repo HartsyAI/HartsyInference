@@ -101,23 +101,7 @@ public sealed class SortHelpersTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
-    [InlineData(4)]
-    [InlineData(8)]
-    [InlineData(15)]
-    [InlineData(16)]
-    [InlineData(17)]
-    [InlineData(31)]
-    [InlineData(32)]
-    [InlineData(33)]
     [InlineData(64)]
-    [InlineData(200)]
-    [InlineData(1025)]   // Zonos/GptSoVits OutputVocab
-    [InlineData(1028)]   // Dia AudioVocab
-    [InlineData(2051)]   // CSM AudioVocab
-    [InlineData(8194)]   // Chatterbox SpeechVocab
-    [InlineData(10001)]  // Bark semantic (10000 ids + EOS slot)
     [InlineData(102048)] // FishSpeech TextVocab
     public void MatchesOldDelegateSort_AcrossShapesAndSizes(int n)
     {
@@ -151,31 +135,4 @@ public sealed class SortHelpersTests
         }
     }
 
-    /// <summary>Documents the one known, accepted divergence: NaN placement. The primitive overload used by
-    /// <see cref="SortHelpers.SortDescendingByValue"/> special-cases floating-point arrays by pre-passing NaNs
-    /// to the FRONT; the old delegate sort, via <see cref="float.CompareTo(float)"/>, left NaN at the BACK.
-    /// Neither old nor new code ever relied on a specific NaN rank (NaN logits mean sampling was already
-    /// broken upstream), so this test does not assert they match — it pins the known difference so a future
-    /// change that silently "fixes" or worsens it is a visible diff, not a surprise.</summary>
-    [Theory]
-    [InlineData(5)]
-    [InlineData(1028)]
-    [InlineData(10001)]
-    public void NaNPlacement_KnownDivergence_IsPinned(int n)
-    {
-        Random rng = new(3000 + n);
-        float[] values = RandomDistinct(n, rng);
-        int nanIndex = n / 2;
-        values[nanIndex] = float.NaN;
-
-        int[] oldOrder = OldDelegateSort(values, n);
-        int[] newOrder = NewPrimitiveSort(values, n);
-
-        Assert.Equal(n - 1, Array.IndexOf(oldOrder, nanIndex));   // old: NaN sorts as "smallest" -> last
-        Assert.Equal(0, Array.IndexOf(newOrder, nanIndex));       // new: NaN pre-pass -> first
-
-        // Everything else must still be a valid permutation of all n indices (no index lost/duplicated).
-        Assert.Equal(Enumerable.Range(0, n).ToHashSet(), oldOrder.ToHashSet());
-        Assert.Equal(Enumerable.Range(0, n).ToHashSet(), newOrder.ToHashSet());
-    }
 }

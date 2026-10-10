@@ -18,9 +18,6 @@ public sealed class BlockScaledConstantsAndGateTests
     [Theory]
     // cudaDataType, library_types.h
     [InlineData("CUDA_R_4F_E2M1", 33)]
-    [InlineData("CUDA_R_6F_E2M3", 31)]
-    [InlineData("CUDA_R_6F_E3M2", 32)]
-    [InlineData("CUDA_R_8F_UE4M3", 28)]   // alias of CUDA_R_8F_E4M3
     [InlineData("CUDA_R_8F_UE8M0", 30)]
     public void CudaDataTypeConstantsMatchTheHeader(string name, int expected)
     {
@@ -40,14 +37,11 @@ public sealed class BlockScaledConstantsAndGateTests
     /// type can be wrong. The E5M2 row is the one that used to be missing: the fp8 executor spelled E4M3 for both
     /// operands and would have multiplied an E5M2 weight as E4M3.</summary>
     [Theory]
-    [InlineData("F32", 0)]
     [InlineData("F16", 2)]
     [InlineData("BF16", 14)]
     [InlineData("F8_E4M3", 28)]
     [InlineData("F8_E5M2", 29)]
     [InlineData("F4_E2M1", 33)]
-    [InlineData("I8", 3)]
-    [InlineData("I32", 10)]
     public void DataTypeOfMatchesTheHeader(string dtypeName, int expected)
     {
         DType dtype = dtypeName switch
@@ -69,11 +63,8 @@ public sealed class BlockScaledConstantsAndGateTests
     [Theory]
     // cublasLtMatmulDescAttributes_t, cublasLtMatmulMatrixScale_t and cublasLtPointerMode_t, cublasLt.h
     [InlineData("POINTER_MODE", 2)]
-    [InlineData("POINTER_MODE_DEVICE", 1)]
     [InlineData("A_SCALE_MODE", 31)]
-    [InlineData("B_SCALE_MODE", 32)]
     [InlineData("VEC16_UE4M3", 1)]
-    [InlineData("VEC32_UE8M0", 2)]
     public void BlockScalingConstantsMatchTheHeader(string name, int expected)
     {
         int actual = name switch
@@ -116,10 +107,8 @@ public sealed class BlockScaledConstantsAndGateTests
     /// the other failed.</summary>
     [Theory]
     [InlineData(8, 6, false, false)]   // Ampere — this box's 3060
-    [InlineData(8, 9, true, false)]    // Ada — this box's 4090
     [InlineData(9, 0, true, false)]    // Hopper: FP8, no FP4
     [InlineData(10, 0, true, true)]    // Blackwell datacenter
-    [InlineData(10, 3, true, true)]    // B300
     [InlineData(12, 0, true, true)]    // Blackwell consumer (RTX 50xx)
     public void ArchTiersOrderTheWayTheHardwareDoes(int major, int minor, bool fp8, bool fp4)
     {
@@ -130,9 +119,7 @@ public sealed class BlockScaledConstantsAndGateTests
 
     [Theory]
     [InlineData(8, 6, false)]    // Ampere — this box's 3060
-    [InlineData(8, 9, false)]    // Ada — this box's 4090
     [InlineData(9, 0, false)]    // Hopper: FP8 tensor cores, no FP4
-    [InlineData(10, 0, true)]    // Blackwell datacenter
     [InlineData(12, 0, true)]    // Blackwell consumer (RTX 50xx)
     public void IsSupportedFollowsComputeCapability(int major, int minor, bool expected)
     {

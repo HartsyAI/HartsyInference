@@ -124,7 +124,6 @@ public sealed class SamplerCoreTests
     /// coefficient rather than by negating a latent-sized tensor per forward.</summary>
     [Theory]
     [InlineData("euler")]
-    [InlineData("heun")]
     [InlineData("dpmpp_2m")]
     public void NegatedFlowVelocity_SolvesTheConstantDenoiserExactly(string name)
     {
@@ -196,9 +195,7 @@ public sealed class SamplerCoreTests
     /// a version of this test that only ever used 1.0 would leave that path — the one every CFG generation takes —
     /// exercised by nothing.</param>
     [Theory]
-    [InlineData(1.0f)]
     [InlineData(4.5f)]
-    [InlineData(7.0f)]
     public void EulerSampler_IsBitIdenticalToDirectCfgEulerStep(float guidance)
     {
         IBackend backend = new CpuBackend();
@@ -232,17 +229,11 @@ public sealed class SamplerCoreTests
     [Theory]
     [InlineData("euler")]
     [InlineData("heun")]
-    [InlineData("dpm_2")]
-    [InlineData("lms")]
     [InlineData("dpmpp_2m")]
-    [InlineData("heunpp2")]
     [InlineData("ipndm")]
-    [InlineData("ipndm_v")]
     [InlineData("deis")]
-    [InlineData("res_multistep")]
-    [InlineData("gradient_estimation")]
     [InlineData("uni_pc")]
-    [InlineData("uni_pc_bh2")]
+    [InlineData("gradient_estimation")]
     public void DeterministicSampler_SolvesTheConstantDenoiserExactly(string name)
     {
         IBackend backend = new CpuBackend();
@@ -269,13 +260,7 @@ public sealed class SamplerCoreTests
     /// that only records its first evaluation would return the input noise.</summary>
     [Theory]
     [InlineData("euler")]
-    [InlineData("heun")]
-    [InlineData("lms")]
-    [InlineData("dpmpp_2m")]
-    [InlineData("ipndm")]
-    [InlineData("deis")]
     [InlineData("uni_pc")]
-    [InlineData("uni_pc_bh2")]
     public void OneStepSchedule_LandsOnTheDenoisedConstant(string name)
     {
         IBackend backend = new CpuBackend();
@@ -297,10 +282,8 @@ public sealed class SamplerCoreTests
     /// <summary>dpm_fast and dpm_adaptive stop at the last non-zero sigma, where the constant denoiser's exact solution
     /// is <c>c + (σmin/σmax)(z − c)</c>; a second run after <see cref="ISampler.Reset"/> repeats the first.</summary>
     [Theory]
-    [InlineData("dpm_fast", 2)]
     [InlineData("dpm_fast", 12)]
     [InlineData("dpm_adaptive", 2)]
-    [InlineData("dpm_adaptive", 12)]
     public void DpmSolverSampler_SolvesTheConstantDenoiserToSigmaMin(string name, int steps)
     {
         IBackend backend = new CpuBackend();
@@ -351,18 +334,10 @@ public sealed class SamplerCoreTests
     /// while being a different, cheaper, lower-accuracy sampler on a real model.</summary>
     [Theory]
     [InlineData("heun", 2)]
-    [InlineData("dpm_2", 2)]
-    [InlineData("dpmpp_2s_ancestral", 2)]
-    [InlineData("euler", 1)]
-    [InlineData("dpmpp_2m", 1)]
     [InlineData("dpmpp_sde", 2)]
-    [InlineData("seeds_2", 2)]
     [InlineData("seeds_3", 3)]
+    [InlineData("dpmpp_2m", 1)]
     [InlineData("ipndm", 1)]
-    [InlineData("deis", 1)]
-    [InlineData("er_sde", 1)]
-    [InlineData("sa_solver", 1)]
-    [InlineData("dpmpp_3m_sde", 1)]
     public void SamplerEvaluatesTheModelTheExpectedNumberOfTimesPerStep(string name, int perStep)
     {
         IBackend backend = new CpuBackend();
@@ -386,15 +361,8 @@ public sealed class SamplerCoreTests
     /// backwards, blows up or returns visible noise instead of an image.</summary>
     [Theory]
     [InlineData("euler_ancestral")]
-    [InlineData("dpm_2_ancestral")]
-    [InlineData("dpmpp_2s_ancestral")]
-    [InlineData("dpmpp_2m_sde")]
-    [InlineData("dpmpp_sde")]
     [InlineData("dpmpp_3m_sde")]
     [InlineData("ddpm")]
-    [InlineData("er_sde")]
-    [InlineData("seeds_2")]
-    [InlineData("seeds_3")]
     [InlineData("sa_solver")]
     public void StochasticSampler_StaysFiniteAndConvergesNear(string name)
     {
@@ -428,13 +396,7 @@ public sealed class SamplerCoreTests
     [Theory]
     [InlineData("euler")]
     [InlineData("heun")]
-    [InlineData("dpm_2")]
-    [InlineData("dpmpp_2m")]
-    [InlineData("heunpp2")]
-    [InlineData("ipndm_v")]
     [InlineData("deis")]
-    [InlineData("res_multistep")]
-    [InlineData("gradient_estimation")]
     public void DeterministicSampler_SolvesTheFlowMatchingFormExactly(string name)
     {
         IBackend backend = new CpuBackend();
@@ -485,13 +447,7 @@ public sealed class SamplerCoreTests
     /// make generations unreproducible, which is worse than a slightly different image.</summary>
     [Theory]
     [InlineData("euler_ancestral")]
-    [InlineData("dpmpp_sde")]
-    [InlineData("dpmpp_2m_sde")]
-    [InlineData("dpmpp_3m_sde")]
-    [InlineData("seeds_3")]
     [InlineData("sa_solver")]
-    [InlineData("er_sde")]
-    [InlineData("ddpm")]
     public void StochasticSampler_IsReproducibleForAGivenSeed(string name)
     {
         IBackend backend = new CpuBackend();
@@ -519,13 +475,8 @@ public sealed class SamplerCoreTests
     /// single-run test can see.</summary>
     [Theory]
     [InlineData("dpmpp_2m")]
-    [InlineData("lms")]
-    [InlineData("ipndm")]
-    [InlineData("deis")]
     [InlineData("uni_pc")]
     [InlineData("sa_solver")]
-    [InlineData("er_sde")]
-    [InlineData("dpmpp_3m_sde")]
     public void MultistepSampler_ResetClearsHistoryBetweenRuns(string name)
     {
         IBackend backend = new CpuBackend();

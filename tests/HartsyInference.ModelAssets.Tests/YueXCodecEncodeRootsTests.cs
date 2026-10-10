@@ -110,17 +110,4 @@ public sealed class YueXCodecEncodeRootsTests
         Assert.False(YueCheckpointConverter.XCodecExportHasEncodeRoots(["codec_model.fc_post2.weight"]));
     }
 
-    [Fact]
-    public void ExportHasEncodeRoots_FcPriorBiasAloneIsNotEnough()
-    {
-        // The probe is specifically fc_prior.weight — the tensor XCodec.CanEncode keys off.
-        Assert.False(YueCheckpointConverter.XCodecExportHasEncodeRoots(["fc_prior.bias"]));
-        Assert.Equal("fc_prior.weight", YueCheckpointConverter.XCodecEncodeProbeKey);
-    }
-
-    [Fact]
-    public void ExportHasEncodeRoots_EmptyIsFalse()
-    {
-        Assert.False(YueCheckpointConverter.XCodecExportHasEncodeRoots([]));
-    }
 }

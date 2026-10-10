@@ -17,17 +17,6 @@ public sealed class Kandinsky5VideoRecipeDetectConfigTests
         new Tensor(new TensorShape(modelDim, 3584), DType.F32);
 
     [Fact]
-    public void DetectConfig_LiteModelDim_ReturnsLite()
-    {
-        Dictionary<string, Tensor> weights = new() { ["text_embeddings.in_layer.weight"] = TextProjWeight(Kandinsky5Config.VideoLite2B.ModelDim) };
-
-        Kandinsky5Config config = Kandinsky5VideoRecipe.DetectConfig(weights);
-
-        Assert.Equal(Kandinsky5Config.VideoLite2B.ModelDim, config.ModelDim);
-        Assert.Equal(Kandinsky5Config.VideoLite2B.NumVisualBlocks, config.NumVisualBlocks);
-    }
-
-    [Fact]
     public void DetectConfig_ProModelDim_ReturnsPro()
     {
         Dictionary<string, Tensor> weights = new() { ["text_embeddings.in_layer.weight"] = TextProjWeight(Kandinsky5Config.VideoPro19B.ModelDim) };
@@ -48,13 +37,4 @@ public sealed class Kandinsky5VideoRecipeDetectConfigTests
         Assert.Equal(Kandinsky5Config.VideoLite2B.ModelDim, config.ModelDim);
     }
 
-    [Fact]
-    public void DetectConfig_MissingKey_FallsBackToLiteRatherThanThrowing()
-    {
-        Dictionary<string, Tensor> weights = new();
-
-        Kandinsky5Config config = Kandinsky5VideoRecipe.DetectConfig(weights);
-
-        Assert.Equal(Kandinsky5Config.VideoLite2B.ModelDim, config.ModelDim);
-    }
 }

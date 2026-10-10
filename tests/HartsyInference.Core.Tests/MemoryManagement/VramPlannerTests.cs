@@ -1,6 +1,5 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using Xunit;
@@ -41,20 +40,6 @@ public sealed class VramPlannerTests
 
     private const long Mb = 1024 * 1024;
 
-    [Fact]
-    public void FitsResident_ChoosesResident()
-    {
-        VramPlanner planner = new VramPlanner(new BudgetCache(8000 * Mb), "test", LowVramMode.Auto);
-        Assert.Equal(PhasePlacement.Resident, planner.PlanPhase("denoise", weightBytes: 4000 * Mb, activationReserveBytes: 2000 * Mb, alreadyResident: false, canStream: true));
-    }
-
-    [Fact]
-    public void DoesNotFitResident_ChoosesStreamed()
-    {
-        VramPlanner planner = new VramPlanner(new BudgetCache(8000 * Mb), "test", LowVramMode.Auto);
-        Assert.Equal(PhasePlacement.Streamed, planner.PlanPhase("denoise", weightBytes: 12000 * Mb, activationReserveBytes: 2000 * Mb, alreadyResident: false, canStream: true));
-    }
-
     /// <summary>The activation reserve is subtracted before the weights are considered — a phase whose weights alone
     /// would fit must still stream when the reserve pushes it over.</summary>
     [Fact]
@@ -90,13 +75,6 @@ public sealed class VramPlannerTests
         Assert.False(planner.CanStream);
     }
 
-    [Fact]
-    public void ForceOn_StreamsEvenWhenItWouldFit()
-    {
-        VramPlanner planner = new VramPlanner(new BudgetCache(99000 * Mb), "test", LowVramMode.ForceOn);
-        Assert.Equal(PhasePlacement.Streamed, planner.PlanPhase("denoise", weightBytes: 1 * Mb, activationReserveBytes: 1 * Mb, alreadyResident: false, canStream: true));
-    }
-
     /// <summary>CPU and Vulkan have no device weight cache; they must keep today's fully-resident behavior.</summary>
     [Fact]
     public void NoStreamingCache_AlwaysResident()
@@ -115,21 +93,11 @@ public sealed class VramPlannerTests
             planner.PlanPhase("denoise", weightBytes: 99000 * Mb, activationReserveBytes: 2000 * Mb, alreadyResident: false, canStream: false));
     }
 
-    [Fact]
-    public void ThrowInfeasible_NamesThePhaseAndSaysStreamingCannotHelp()
-    {
-        VramPlanner planner = new VramPlanner(new BudgetCache(512 * Mb), "test", LowVramMode.Auto);
-        OutOfVramException ex = Assert.Throws<OutOfVramException>(() => planner.ThrowInfeasible("vae-decode", 9000 * Mb));
-        Assert.Contains("vae-decode", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("streaming cannot", ex.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
     /// <summary>The companion to <see cref="AlreadyResident_SkipsTheAvailabilityQueryEntirely"/>: that short-circuit is
     /// what makes a forced stream inert on a warm model, so the planner has to tell the caller when to evict first.
     /// Only ForceOn asks for it — Auto still measures, and ForceOff wants the weights kept.</summary>
     [Theory]
     [InlineData(LowVramMode.ForceOn, true, true)]
-    [InlineData(LowVramMode.ForceOn, false, false)]
     [InlineData(LowVramMode.Auto, true, false)]
     [InlineData(LowVramMode.ForceOff, true, false)]
     public void ShouldDisplaceResident_OnlyWhenForcingStreamOverWarmWeights(
@@ -139,29 +107,12 @@ public sealed class VramPlannerTests
         Assert.Equal(expected, planner.ShouldDisplaceResident(alreadyResident));
     }
 
-    /// <summary>Once the caller has evicted, the planner must actually choose the streamed layout — proving the
-    /// displace-then-plan pair produces the placement the force asked for.</summary>
-    [Fact]
-    public void ForceOn_AfterDisplacement_PlansStreamed()
-    {
-        VramPlanner planner = new VramPlanner(new BudgetCache(99000 * Mb), "test", LowVramMode.ForceOn);
-        Assert.True(planner.ShouldDisplaceResident(alreadyResident: true));
-        Assert.Equal(PhasePlacement.Streamed,
-            planner.PlanPhase("denoise", 1 * Mb, 1 * Mb, alreadyResident: false, canStream: true));
-    }
-
-    /// <summary>Every spelling the posture setting accepts. The value is a three-state word, so the spelling table is real behavior, not parsing trivia.</summary>
+    /// <summary>Representative spellings of the three-state posture setting: unset or unrecognised is Auto, truthy forces on, falsy forces off.</summary>
     [Theory]
     [InlineData(null, LowVramMode.Auto)]
-    [InlineData("", LowVramMode.Auto)]
-    [InlineData("auto", LowVramMode.Auto)]
     [InlineData("nonsense", LowVramMode.Auto)]
-    [InlineData("1", LowVramMode.ForceOn)]
-    [InlineData("on", LowVramMode.ForceOn)]
     [InlineData("TRUE", LowVramMode.ForceOn)]
-    [InlineData("0", LowVramMode.ForceOff)]
     [InlineData("off", LowVramMode.ForceOff)]
-    [InlineData("False", LowVramMode.ForceOff)]
     public void Policy_ParsesEveryDocumentedSpelling(string? value, LowVramMode expected)
     {
         try

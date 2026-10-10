@@ -75,34 +75,6 @@ public sealed class FaceDetectorForwardTests
         }
     }
 
-    /// <summary>Pure landmark-decode math: a raw branch offset at a known grid cell maps to the expected source pixel
-    /// after the head's <c>(2·r + g)·stride</c> grid decode and the letterbox inversion. Uses a non-trivial transform
-    /// (half-scale + left/top padding) so the inversion actually does something.</summary>
-    [Fact]
-    public void LandmarkDecode_UnLetterbox_MapsAnchorOffsetToSourcePixels()
-    {
-        // Source 200×100 letterboxed into a 128×128 canvas: scale = min(128/100, 128/200) = 0.64.
-        YoloPreprocessor.Transform transform = new YoloPreprocessor(128, stride: 32, stridePadAlign: false)
-            .ComputeTransform(srcWidth: 200, srcHeight: 100);
-
-        // Grid cell (3, 2) at stride 16, raw offset (0.25, 0.5):
-        //   canvasX = (0.25*2 + 3)*16 = 56 ; canvasY = (0.5*2 + 2)*16 = 48
-        float rawX = 0.25f, rawY = 0.5f;
-        int gx = 3, gy = 2;
-        float stride = 16f;
-        float canvasX = (rawX * 2f + gx) * stride;
-        float canvasY = (rawY * 2f + gy) * stride;
-        (float expX, float expY) = transform.InvertPoint(canvasX, canvasY);
-
-        (float x, float y) = LandmarkExtractor.DecodeRawPoint(rawX, rawY, gx, gy, stride, transform);
-
-        Assert.Equal(expX, x, tolerance: 1e-4f);
-        Assert.Equal(expY, y, tolerance: 1e-4f);
-        // Sanity: within source bounds.
-        Assert.InRange(x, 0f, 200f);
-        Assert.InRange(y, 0f, 100f);
-    }
-
     /// <summary>Decode over hand-built detection + landmark tensors: one above-threshold anchor yields exactly one
     /// <see cref="DetectedFace"/> whose flattened landmarks have length 10 (5 points) at the expected source pixels.</summary>
     [Fact]

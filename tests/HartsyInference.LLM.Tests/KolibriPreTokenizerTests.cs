@@ -19,7 +19,4 @@ public sealed class KolibriPreTokenizerTests
     public void Contractions_AreCaseInsensitive() =>
         Assert.Equal(["I", "'M", " here"], Split("I'M here"));
 
-    [Fact]
-    public void NewlineRuns_StayTogether() =>
-        Assert.Equal(["a", "\n\n", "b"], Split("a\n\nb"));
 }

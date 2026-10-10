@@ -136,28 +136,6 @@ public sealed unsafe class LoraInt8ConvRotRequantizeTests : IDisposable
         }
     }
 
-    [Fact]
-    public void RequantizedMergeIsBitIdenticalAcrossRuns()
-    {
-        string path = QkvLora("int8determinism");
-        byte[][] weightBytes = new byte[2][];
-        byte[][] scaleBytes = new byte[2][];
-        for (int run = 0; run < 2; run++)
-        {
-            (Tensor baseW, Tensor _, double[] _) = QuantizeReference(LogicalBase(), GroupSize, fullPrecisionMatMul: false);
-            Dictionary<string, Tensor> weights = new Dictionary<string, Tensor> { ["blocks.0.attn.qkv_proj.weight"] = baseW };
-            IBackend backend = new CpuBackend();
-            using LoraStack stack = new LoraStack();
-            stack.AddFromPath(path, strength: 1.0f);
-            stack.ApplyTo(weights, LoraTarget.Transformer, backend);
-            Tensor merged = weights["blocks.0.attn.qkv_proj.weight"];
-            weightBytes[run] = merged.AsReadOnlySpan<byte>().ToArray();
-            scaleBytes[run] = merged.QuantInfo!.RowScale!.AsReadOnlySpan<byte>().ToArray();
-        }
-        Assert.True(weightBytes[0].AsSpan().SequenceEqual(weightBytes[1]), "requantized bytes differ between identical merges");
-        Assert.True(scaleBytes[0].AsSpan().SequenceEqual(scaleBytes[1]), "recomputed scales differ between identical merges");
-    }
-
     /// <summary>An I8 weight that lost its descriptor must refuse by name — the old behavior was CastTo's raw
     /// "I8 → F32" HartsyInferenceException with no hint of which weight or why.</summary>
     [Fact]

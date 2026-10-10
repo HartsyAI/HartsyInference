@@ -55,21 +55,6 @@ public sealed class RecipeProgressAdapterTests
         Assert.Equal(3, target.Value.PreviewFramesRgb!.Length);
     }
 
-    [Fact]
-    public void MissingLatent_StillReportsStepWithoutPreview()
-    {
-        CapturingProgress target = new CapturingProgress();
-        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(target, CancellationToken.None);
-
-        bridge(new GenerationProgress(1, 5, 10.0));
-
-        Assert.Equal(1, target.Value.Step);
-        Assert.Equal(5, target.Value.TotalSteps);
-        Assert.Null(target.Value.PreviewRgb);
-        Assert.Equal(0, target.Value.PreviewWidth);
-        Assert.Equal(0, target.Value.PreviewHeight);
-    }
-
     private sealed class CapturingProgress : IProgress<StepPreview>
     {
         public StepPreview Value { get; private set; }

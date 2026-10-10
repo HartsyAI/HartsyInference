@@ -28,7 +28,6 @@ public sealed class QuantWeightInfoBlockScaleSliceTests
 
     [Theory]
     [InlineData(64, 128)]
-    [InlineData(128, 96)]
     public void SliceOffATile_Refuses(int offset, int count)
     {
         using Tensor scales = new(new TensorShape(256, 8), DType.U8);

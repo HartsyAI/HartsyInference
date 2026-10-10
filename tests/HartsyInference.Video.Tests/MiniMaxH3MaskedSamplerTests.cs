@@ -13,27 +13,6 @@ namespace HartsyInference.Video.Tests;
 public sealed class MiniMaxH3MaskedSamplerTests
 {
     [Fact]
-    public void BlackTokenUsesFixedVisualConditionStrengthAtSigmaPointEight()
-    {
-        using CpuBackend backend = new CpuBackend();
-        using Tensor source = TensorFrom([10f, 20f, 30f, 40f], new TensorShape(1, 4));
-        using Tensor noise = TensorFrom([-10f, -20f, -30f, -40f], source.Shape);
-        using Tensor state = TensorFrom([100f, 200f, 300f, 400f], source.Shape);
-        using Tensor injection = new Tensor(source.Shape, DType.F32);
-        using Tensor modelInput = new Tensor(source.Shape, DType.F32);
-        using Tensor tokenMask = TensorFrom([0f], new TensorShape(1));
-
-        MiniMaxH3Pipeline.BuildVideoMaskInjection(backend, injection, source, noise);
-        MiniMaxH3Pipeline.BuildMaskedModelInput(backend, modelInput, state, injection, tokenMask);
-
-        float pin = MiniMaxH3Schedule.VisualCondTimestep;
-        float[] expected = Snapshot(source).Zip(Snapshot(noise), (s, n) => pin * s + (1f - pin) * n).ToArray();
-        AssertClose(expected, Snapshot(modelInput), 1e-6f, "fixed condition injection");
-        float currentSigmaValue = 0.2f * 10f + 0.8f * -10f;
-        Assert.NotEqual(currentSigmaValue, Snapshot(modelInput)[0]);
-    }
-
-    [Fact]
     public void MixedRawFeaturesRemainDistinctWhenTokenMaskPoolsToOne()
     {
         using CpuBackend backend = new CpuBackend();

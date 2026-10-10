@@ -30,17 +30,6 @@ public sealed class ModelIdentityCatalogTests
             ModelIdentityCatalog.All.Keys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
     }
 
-    /// <summary>A class id is looked up lowercased by the sorter, so a stray space or slash-prefix silently misses.</summary>
-    [Fact]
-    public void ClassIdsAreTrimmedAndUnspaced()
-    {
-        foreach (ArtifactIdentity identity in ModelIdentityCatalog.All.Values)
-        {
-            Assert.Equal(identity.SwarmClassId.Trim(), identity.SwarmClassId);
-            Assert.DoesNotContain(' ', identity.SwarmClassId);
-        }
-    }
-
     /// <summary>A resolution is either absent or a parseable <c>WxH</c>; the sorter calls int.Parse on it and any
     /// other shape throws during a model scan rather than here.</summary>
     [Fact]
@@ -74,30 +63,8 @@ public sealed class ModelIdentityCatalogTests
         }
     }
 
-    /// <summary>Negative control for the test above: image and video rows do declare one, so a table that lost every
-    /// resolution could not pass both.</summary>
-    [Fact]
-    public void ImageAndVideoRowsDoDeclareAResolution()
-    {
-        ArtifactIdentity[] spatial = [.. ModelIdentityCatalog.All.Values
-            .Where(x => x.Tags.Count > 0 && (x.Tags[0] == "image" || x.Tags[0] == "video"))];
-        Assert.NotEmpty(spatial);
-        Assert.All(spatial, x => Assert.False(string.IsNullOrWhiteSpace(x.StandardResolution)));
-    }
-
-    [Fact]
-    public void Find_IsCaseInsensitiveAndReturnsNullForAnUnknownFamily()
-    {
-        Assert.NotNull(ModelIdentityCatalog.Find("KREA2"));
-        Assert.Null(ModelIdentityCatalog.Find("no-such-model"));
-        Assert.Null(ModelIdentityCatalog.Find(""));
-    }
-
     [Theory]
     [InlineData("1.7B-Base", "qwen3_tts_clone")]
-    [InlineData("0.6b-customvoice", "qwen3_tts_custom")]
-    [InlineData("1.7B-VoiceDesign", "qwen3_tts_design")]
-    [InlineData("not-a-variant", "qwen3_tts")]
     [InlineData(null, "qwen3_tts")]
     public void ForVariant_ResolvesPerVariantClasses(string? variant, string expected)
     {

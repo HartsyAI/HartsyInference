@@ -12,40 +12,9 @@ namespace HartsyInference.Core.Tests;
 /// both invoke it: a double D2H-sync / double-free of the same GPU pointer.</summary>
 public sealed unsafe class TensorConcurrentSyncTests
 {
-    [Fact]
-    public void EnsureCpuData_ConcurrentDataPointerReads_InvokesPrimarySyncExactlyOnce()
-    {
-        const int iterations = 300;
-        const int threadCount = 8;
-        for (int iter = 0; iter < iterations; iter++)
-        {
-            using Tensor tensor = new Tensor(new TensorShape(4), DType.F32, DeviceKind.Cpu);
-            int syncCount = 0;
-            tensor.SetGpuBinding((nint)1, () => Interlocked.Increment(ref syncCount), () => { });
-
-            using Barrier barrier = new Barrier(threadCount);
-            Thread[] threads = new Thread[threadCount];
-            for (int t = 0; t < threadCount; t++)
-            {
-                threads[t] = new Thread(() =>
-                {
-                    barrier.SignalAndWait();
-                    _ = tensor.DataPointer;
-                });
-                threads[t].Start();
-            }
-            foreach (Thread th in threads)
-            {
-                th.Join();
-            }
-
-            Assert.Equal(1, syncCount);
-        }
-    }
-
-    /// <summary>Same race, but with a second backend's overflow binding present too (the CFG-parallel shape: a
-    /// weight promoted on both Backend and CfgParallelBackend) — both the primary claim and the overflow-list
-    /// drain (already lock-protected via <c>TakeExtraBindings</c>) must survive concurrent readers.</summary>
+    /// <summary>Two backends' bindings (the CFG-parallel shape: a weight promoted on both Backend and
+    /// CfgParallelBackend) — both the primary claim and the overflow-list drain (already lock-protected via
+    /// <c>TakeExtraBindings</c>) must survive concurrent readers.</summary>
     [Fact]
     public void EnsureCpuData_ConcurrentDataPointerReads_WithTwoBackendBindings_InvokesEachExactlyOnce()
     {

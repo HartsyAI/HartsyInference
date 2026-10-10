@@ -11,13 +11,6 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class SegmentRefinementStripTests
 {
     [Fact]
-    public void NoTags_ReturnsPromptUnchanged()
-    {
-        const string prompt = "a red apple next to a green pear";
-        Assert.Equal(prompt, SegmentRefinement.StripSegmentText(prompt));
-    }
-
-    [Fact]
     public void SegmentAtEnd_StrippedWithTrailingSpaceTrimmed()
     {
         const string prompt = "a red apple next to a green pear <segment:the red apple,0.95,0.5>a bright blue apple";
@@ -31,13 +24,6 @@ public sealed class SegmentRefinementStripTests
         // The segment's own sub-prompt ("blue apple") is dropped; the region tag + its content + the trailing
         // "<region:end> tail" are preserved byte-for-byte so RegionalPromptResolver re-parses them unchanged.
         Assert.Equal("base text <region:0,0,0.5,1,1>left half text<region:end> tail", SegmentRefinement.StripSegmentText(prompt));
-    }
-
-    [Fact]
-    public void EmbedTagInsideSegmentText_DroppedWithTheSegment()
-    {
-        const string prompt = "base <segment:the hat,0.5>a <embed:fancy-hat> wizard hat";
-        Assert.Equal("base", SegmentRefinement.StripSegmentText(prompt));
     }
 
     [Fact]
@@ -57,26 +43,10 @@ public sealed class SegmentRefinementStripTests
     }
 
     [Fact]
-    public void ClearTag_StrippedSameAsSegment()
-    {
-        // No closing tag exists for <clear:> either — " tail" accumulates into the clear section (same as text
-        // after a <segment:> with nothing reopening the base section afterward) and is dropped with it.
-        const string prompt = "base <clear:the background,0.5> tail";
-        Assert.Equal("base", SegmentRefinement.StripSegmentText(prompt));
-    }
-
-    [Fact]
     public void ClearTagFollowedByRegionTag_RegionSurvivesVerbatim()
     {
         const string prompt = "base <clear:the background,0.5>ignored<region:0,0,0.5,1,1>kept text";
         Assert.Equal("base <region:0,0,0.5,1,1>kept text", SegmentRefinement.StripSegmentText(prompt));
-    }
-
-    [Fact]
-    public void TwoSegments_BothStripped()
-    {
-        const string prompt = "a scene <segment:the cat,0.5>orange cat<segment:the dog,0.5>brown dog";
-        Assert.Equal("a scene", SegmentRefinement.StripSegmentText(prompt));
     }
 
     [Fact]

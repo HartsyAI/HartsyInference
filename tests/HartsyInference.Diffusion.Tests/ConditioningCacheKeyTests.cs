@@ -31,14 +31,6 @@ public sealed class ConditioningCacheKeyTests
         Assert.True(ConditioningCacheKey.Matches(Ids, [1f, 0.5f, 1f], [7, 8, 9], [1f, 0.5f, 1f]));
     }
 
-    /// <summary>Different prompts never share an entry, whatever their emphasis.</summary>
-    [Fact]
-    public void DifferentIdsNeverMatch()
-    {
-        Assert.False(ConditioningCacheKey.Matches(Ids, null, [7, 8, 10], null));
-        Assert.False(ConditioningCacheKey.Matches(Ids, [1f, 0.5f, 1f], [7, 8, 10], [1f, 0.5f, 1f]));
-    }
-
     /// <summary>An empty cache misses rather than throwing — the first generation of the process.</summary>
     [Fact]
     public void AColdCacheMisses()

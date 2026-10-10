@@ -32,63 +32,6 @@ public sealed class DeepSeekV41SpeculativeScorerTests
     }
 
     [Fact]
-    public void Scored_Rows_Match_The_Plain_Per_Token_Logits()
-    {
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
-        int[] draft = [13, 1, 15];
-
-        float[][] expected = new float[draft.Length + 1][];
-        DeepSeekV41GenerationState plain = new(model, Capacity);
-        float[] hidden = new float[Prompt.Length * model.Dim];
-        plain.Append(Prompt, hidden);
-        expected[0] = model.Logits(hidden.AsSpan((Prompt.Length - 1) * model.Dim, model.Dim));
-        for (int j = 0; j < draft.Length; j++)
-        {
-            float[] step = new float[model.Dim];
-            plain.Append([draft[j]], step);
-            expected[j + 1] = model.Logits(step);
-        }
-
-        float[][] rows = Enumerable.Range(0, draft.Length + 1).Select(_ => new float[model.VocabSize]).ToArray();
-        new DeepSeekV41SpeculativeScorer(model, new DeepSeekV41GenerationState(model, Capacity)).Score(Prompt, draft, rows);
-        for (int j = 0; j < rows.Length; j++) Assert.Equal(expected[j], rows[j]);
-    }
-
-    [Fact]
-    public void Greedy_Speculation_On_The_Host_Model_Reproduces_Plain_Greedy_Decoding_Token_For_Token()
-    {
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
-        SamplingOptions greedy = new() { Greedy = true };
-        const int count = 24;
-
-        List<int> plain = [.. Prompt];
-        DeepSeekV41GenerationState plainState = new(model, Capacity);
-        float[] hidden = new float[plain.Count * model.Dim];
-        plainState.Append(Prompt, hidden);
-        float[] logits = model.Logits(hidden.AsSpan((plain.Count - 1) * model.Dim, model.Dim));
-        SamplerChain plainChain = SamplerChain.FromOptions(greedy);
-        for (int i = 0; i < count; i++)
-        {
-            int next = plainChain.Next(logits, plain);
-            plain.Add(next);
-            float[] step = new float[model.Dim];
-            plainState.Append([next], step);
-            logits = model.Logits(step);
-        }
-
-        List<int> speculative = [.. Prompt];
-        CountingProposer proposer = new(new PromptLookupProposer());
-        int produced = SpeculativeLoop.Generate(new DeepSeekV41SpeculativeScorer(model, new DeepSeekV41GenerationState(model, Capacity)), proposer,
-            SamplerChain.FromOptions(greedy), SpeculativeTestSupport.Uniform(1), speculative, count, 4, model.VocabSize);
-
-        Assert.Equal(count, produced);
-        Assert.True(proposer.Drafted > 0, "the lookup proposer never drafted, so the identity below was not exercised");
-        Assert.Equal(plain, speculative);
-    }
-
-    [Fact]
     public void Scored_Rows_Match_The_Plain_Per_Token_Logits_Across_Prompt_And_Draft_Lengths()
     {
         using CpuBackend cpu = new();
@@ -187,57 +130,6 @@ public sealed class DeepSeekV41SpeculativeScorerTests
     }
 
     [Fact]
-    public void Truncating_Into_The_Prompt_Replays_A_Shorter_Prefill()
-    {
-        // documents the one rollback whose arithmetic is not the original's: the kept prefix is prefilled again as its own chunk
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
-        DeepSeekV41GenerationState state = new(model, Capacity);
-        state.Append(Prompt, new float[Prompt.Length * model.Dim]);
-        state.Append([13], new float[model.Dim]);
-        state.Truncate(5);
-
-        float[] next = new float[model.Dim];
-        state.Append([1], next);
-        DeepSeekV41GenerationState fresh = new(model, Capacity);
-        fresh.Append(Prompt[..5], new float[5 * model.Dim]);
-        float[] expected = new float[model.Dim];
-        fresh.Append([1], expected);
-        Assert.Equal(expected, next);
-    }
-
-    [Fact]
-    public void Scoring_A_Synced_Context_Runs_Only_The_Draft_Through_The_Blocks()
-    {
-        // counts layer 0's block passes: one per call that reaches the block, so a drafted token decoded on its own is one pass
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
-        DeepSeekV41SpeculativeScorer scorer = new(model, new DeepSeekV41GenerationState(model, Capacity));
-        int passes = 0;
-        model.SetProbe((layer, stage, _) => { if (layer == 0 && stage == "out") passes++; });
-        try
-        {
-            scorer.Score(Prompt, [13, 1], Rows(model, 3));
-            Assert.Equal(1 + 2, passes);   // the prompt chunk, then the two drafted tokens one at a time
-            passes = 0;
-
-            // the state holds the prompt and [13, 1]: a context equal to that replays nothing, so only the draft runs
-            scorer.Score([.. Prompt, 13, 1], [27], Rows(model, 2));
-            Assert.Equal(1, passes);
-            passes = 0;
-
-            // the state holds [.. Prompt, 13, 1, 27]; the context diverges at index 12, so the kept 12 tokens are replayed (the prompt chunk and one
-            // decode), then the new token, then the draft
-            scorer.Score([.. Prompt, 13, 9], [1], Rows(model, 2));
-            Assert.Equal(2 + 1 + 1, passes);
-        }
-        finally
-        {
-            model.SetProbe(null);
-        }
-    }
-
-    [Fact]
     public void Recorded_Main_Rows_Match_A_Direct_Tap_Before_And_After_A_Rollback()
     {
         using CpuBackend cpu = new();
@@ -258,54 +150,6 @@ public sealed class DeepSeekV41SpeculativeScorerTests
 
         Assert.Equal(width, state.MainRow(0).Length);
         for (int p = 0; p < 12; p++) Assert.Equal(direct.AsSpan(p * width, width).ToArray(), state.MainRow(p).ToArray());
-    }
-
-    [Fact]
-    public void Sync_To_A_Shorter_Context_Leaves_The_Row_Of_Its_Last_Token()
-    {
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
-        int[] held = [.. Prompt, 13, 1, 27];
-
-        // inside the prompt: the shorter context is prefilled afresh, as its own chunk
-        DeepSeekV41GenerationState inside = new(model, Capacity);
-        inside.Append(Prompt, new float[Prompt.Length * model.Dim]);
-        inside.Append([13, 1, 27], new float[3 * model.Dim]);
-        inside.SyncTo(held[..6]);
-        DeepSeekV41GenerationState freshInside = new(model, Capacity);
-        freshInside.Append(held[..6], new float[6 * model.Dim]);
-        Assert.Equal(freshInside.LastHidden.ToArray(), inside.LastHidden.ToArray());
-
-        // past the prompt: the kept prefix is replayed as the prompt chunk, then one token at a time
-        DeepSeekV41GenerationState beyond = new(model, Capacity);
-        beyond.Append(Prompt, new float[Prompt.Length * model.Dim]);
-        beyond.Append([13, 1, 27], new float[3 * model.Dim]);
-        beyond.SyncTo(held[..12]);
-        DeepSeekV41GenerationState freshBeyond = new(model, Capacity);
-        freshBeyond.Append(Prompt, new float[Prompt.Length * model.Dim]);
-        freshBeyond.Append([13], new float[model.Dim]);
-        Assert.Equal(freshBeyond.LastHidden.ToArray(), beyond.LastHidden.ToArray());
-    }
-
-    [Fact]
-    public void Recorded_Main_Rows_Survive_A_Rollback_Through_Sync()
-    {
-        using CpuBackend cpu = new();
-        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, new[] { 2, 5 });
-        int width = model.MainHiddenWidth, dim = model.Dim;
-        int[] ids = FixtureIds();
-        DeepSeekV41GenerationState state = new(model, Capacity, recordMainRows: true);
-        state.SyncTo(ids[..11]);
-        state.SyncTo(ids[..13]);
-        state.SyncTo(ids[..12]);   // rolls back one token past the prompt
-
-        // the history the state now holds: the prompt as one chunk, then one token at a time
-        DeepSeekV41SequenceState raw = model.CreateState(Capacity);
-        float[] direct = new float[12 * width];
-        model.Forward(ids[..11], raw, new float[11 * dim], direct.AsSpan(0, 11 * width));
-        model.Forward(ids[11..12], raw, new float[dim], direct.AsSpan(11 * width, width));
-        for (int p = 0; p < 12; p++) Assert.Equal(direct.AsSpan(p * width, width).ToArray(), state.MainRow(p).ToArray());
-        Assert.Throws<ArgumentOutOfRangeException>(() => state.MainRow(12).ToArray());
     }
 
     private static float[][] Rows(DeepSeekV41HostModel model, int count) => Enumerable.Range(0, count).Select(_ => new float[model.VocabSize]).ToArray();

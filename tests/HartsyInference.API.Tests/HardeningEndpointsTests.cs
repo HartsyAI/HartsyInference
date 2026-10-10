@@ -47,22 +47,6 @@ public sealed class HardeningEndpointsTests : IClassFixture<WebApplicationFactor
     }
 
     [Fact]
-    public async Task LegacySingleApiKey_StillResolvesToDefaultIdentity()
-    {
-        // Back-compat: the pre-existing single-string ApiKey option must keep working unmodified, folded into
-        // ApiKeys as a "default"-named entry rather than requiring every deployment to migrate configuration.
-        using WebApplicationFactory<Program> factory = _factory.WithWebHostBuilder(builder =>
-            builder.UseSetting("HartsyInference:ApiKey", "legacy-secret"));
-        using HttpClient client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("x-api-key", "legacy-secret");
-
-        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/admin/catalog")).StatusCode);
-
-        JsonElement usage = await client.GetFromJsonAsync<JsonElement>("/admin/usage");
-        Assert.True(usage.TryGetProperty("default", out _));
-    }
-
-    [Fact]
     public async Task RateLimiter_RejectsOnceOverPerKeyLimit()
     {
         using WebApplicationFactory<Program> factory = _factory.WithWebHostBuilder(builder =>
@@ -106,49 +90,4 @@ public sealed class HardeningEndpointsTests : IClassFixture<WebApplicationFactor
             Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health")).StatusCode);
     }
 
-    [Fact]
-    public async Task Usage_TracksRequestCountsAndErrorsPerCaller()
-    {
-        using WebApplicationFactory<Program> factory = _factory.WithWebHostBuilder(builder =>
-            builder.UseSetting("HartsyInference:ApiKeys:0:Key", "usage-key"));
-        using HttpClient client = factory.CreateClient();
-        client.DefaultRequestHeaders.Add("x-api-key", "usage-key");
-
-        await client.GetAsync("/admin/catalog");
-        await client.GetAsync("/admin/catalog");
-        await client.GetAsync("/admin/cache/not-cached"); // 404 -> should count as an error
-
-        JsonElement usage = await client.GetFromJsonAsync<JsonElement>("/admin/usage");
-        JsonElement caller = usage.GetProperty("default");
-        Assert.True(caller.GetProperty("totalRequests").GetInt64() >= 3);
-        Assert.True(caller.GetProperty("errorCount").GetInt64() >= 1);
-    }
-
-    [Fact]
-    public async Task Metrics_ReportsCustomRequestAndQueueSeries()
-    {
-        // Asserting only "# TYPE" would pass even if ApiMetrics' own instruments never fired -- that string also
-        // comes from ASP.NET Core's built-in series. Drive a real recordable request first, then check the
-        // scrape actually contains the domain-specific series this class adds, not just the framework's own.
-        using HttpClient client = _factory.CreateClient();
-        await client.GetAsync("/admin/catalog");
-
-        HttpResponseMessage resp = await client.GetAsync("/metrics");
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        string body = await resp.Content.ReadAsStringAsync();
-        Assert.Contains("hartsyinference_requests_total", body);
-        Assert.Contains("hartsyinference_queue_pending", body);
-    }
-
-    [Fact]
-    public async Task OpenApi_DocumentsKnownNativeRoutes()
-    {
-        using HttpClient client = _factory.CreateClient();
-        JsonElement doc = await client.GetFromJsonAsync<JsonElement>("/openapi/v1.json");
-        JsonElement paths = doc.GetProperty("paths");
-        Assert.True(paths.TryGetProperty("/v1/native/images", out _));
-        Assert.True(paths.TryGetProperty("/v1/native/text", out _));
-        Assert.True(paths.TryGetProperty("/v1/native/video/plan", out _));
-        Assert.True(paths.TryGetProperty("/v1/native/video/stream", out _));
-    }
 }

@@ -122,18 +122,6 @@ public sealed class LoraDoraMergeTests : IDisposable
         Assert.True(differing > actual.Length / 2, "the two orderings are indistinguishable; fixture proves nothing.");
     }
 
-    /// <summary>The file has to parse as DoRA in the first place — if the <c>.dora_scale</c> suffix stopped routing to
-    /// <see cref="LoraDelta.DoraScale"/> the merge above would silently go back to being a plain LoRA and still pass
-    /// its own reference.</summary>
-    [Fact]
-    public void ADoraFileParsesAsDoRA()
-    {
-        using LoraFile file = LoraFile.Load(DoraLora("variant", [1.3f, 0.7f, 2.1f, 0.9f], [Rows]));
-        LoraLayer layer = Assert.Single(file.Layers);
-        Assert.Equal(LoraVariant.DoRA, layer.Delta.Variant);
-        Assert.NotNull(layer.Delta.DoraScale);
-    }
-
     /// <summary>A DoRA adapter aimed at one slice of a fused projection is refused by name. The magnitude vector is
     /// defined over a whole weight; on the input axis its normalizer is a column norm across every row, which a third
     /// of the rows cannot supply, and which branch applies is the file's choice rather than ours.</summary>

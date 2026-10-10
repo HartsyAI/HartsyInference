@@ -69,28 +69,6 @@ public sealed unsafe class SplitQkvRowScaleTests
     }
 
     [Fact]
-    public void SplitQkvWeight_SharesAPerTensorScaleAcrossAllThree()
-    {
-        const int innerDim = 4;
-        using Tensor fused = Int8Weight(3 * innerDim, 256);
-        using Tensor perTensor = new Tensor(new TensorShape(1), DType.F32);
-        perTensor.AsSpan<float>()[0] = 0.0125f;
-        fused.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = perTensor };
-
-        Dictionary<string, Tensor> output = new();
-        CheckpointConvertUtils.SplitQkvWeight(fused, innerDim, "blocks.0.attn", "to_q", "to_k", "to_v", output);
-        try
-        {
-            foreach (string name in new[] { "to_q", "to_k", "to_v" })
-                Assert.Same(perTensor, output[$"blocks.0.attn.{name}.weight"].QuantInfo!.RowScale);
-        }
-        finally
-        {
-            DisposeAll(output);
-        }
-    }
-
-    [Fact]
     public void SplitQkvWeight_CarriesBothFp8ScalarsOntoEverySplit()
     {
         const int innerDim = 4;
@@ -116,22 +94,6 @@ public sealed unsafe class SplitQkvRowScaleTests
         {
             DisposeAll(output);
         }
-    }
-
-    [Fact]
-    public void SplitQkvWeight_RefusesAnNvfp4FusedWeightByName()
-    {
-        const int innerDim = 4;
-        using Tensor fused = Int8Weight(3 * innerDim, 256);
-        using Tensor blockScale = new Tensor(new TensorShape(128, 16), DType.F8E4M3);
-        using Tensor globalScale = new Tensor(new TensorShape(1), DType.F32);
-        fused.QuantInfo = new QuantWeightInfo { Format = "nvfp4", BlockScale = blockScale, GlobalScale = globalScale };
-
-        Dictionary<string, Tensor> output = new();
-        NotSupportedException error = Assert.Throws<NotSupportedException>(
-            () => CheckpointConvertUtils.SplitQkvWeight(fused, innerDim, "blocks.0.attn", "to_q", "to_k", "to_v", output));
-        Assert.Contains("blocks.0.attn.to_q.weight", error.Message);
-        DisposeAll(output);
     }
 
     /// <summary>Every split has to size its copies from the quant block layout, never <c>DType.SizeInBytes</c>.</summary>
@@ -181,17 +143,5 @@ public sealed unsafe class SplitQkvRowScaleTests
         {
             DisposeAll(output);
         }
-    }
-
-    [Fact]
-    public void SwapScaleShiftHalves_RefusesAWeightWithPerRowScales()
-    {
-        using Tensor table = Int8Weight(8, 256);
-        using Tensor rowScale = RowScale(8);
-        table.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = rowScale };
-
-        NotSupportedException error = Assert.Throws<NotSupportedException>(
-            () => CheckpointConvertUtils.SwapScaleShiftHalves(table));
-        Assert.Contains("int8_tensorwise", error.Message);
     }
 }

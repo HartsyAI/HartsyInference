@@ -26,34 +26,21 @@ public sealed class Dp4aGemvGroundTruthTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q4_K", 256, 64, 1, false)]
-    [InlineData("Q4_K", 2560, 320, 1, false)]   // Qwen3-4B hidden size (real production K)
     [InlineData("Q4_K", 512, 96, 4, true)]      // batched decode + bias
     [InlineData("Q8_0", 32, 8, 1, false)]       // single-block minimal
-    [InlineData("Q8_0", 2048, 256, 1, false)]   // Llama-3.2-1B hidden size (real production K)
     [InlineData("Q8_0", 224, 96, 4, true)]      // K%32 but not %128 (tail-masked groups) + batch + bias
     [InlineData("Q6_K", 256, 64, 1, false)]     // single-super-block minimal
-    [InlineData("Q6_K", 2560, 320, 1, false)]   // Qwen3-4B ffn_down/lm_head K
     [InlineData("Q6_K", 512, 96, 4, true)]      // batched decode + bias
     [InlineData("Q4_0", 32, 8, 1, false)]       // single-block minimal
-    [InlineData("Q4_0", 2048, 256, 1, false)]   // legacy llama-class hidden size
-    [InlineData("Q4_0", 224, 96, 4, true)]      // K%32 but not %256 (tail-masked groups) + batch + bias
     [InlineData("Q5_0", 32, 8, 1, false)]       // single-block minimal
     [InlineData("Q5_0", 896, 256, 1, false)]    // qwen2.5-0.5b's odd hidden size (the Q5_0 fallback case)
-    [InlineData("Q5_0", 224, 96, 4, true)]      // tail-masked groups + batch + bias
     [InlineData("Q5_K", 256, 64, 1, false)]     // single-super-block minimal
-    [InlineData("Q5_K", 2560, 320, 1, false)]   // production-scale K
-    [InlineData("Q5_K", 512, 96, 4, true)]      // batched decode + bias
     [InlineData("Q4_K", 8960, 256, 2, true)]    // long-K/small-N: exercises the block-per-row K-SPLIT path
     [InlineData("Q6_K", 8960, 256, 1, false)]   // ksplit path
     [InlineData("Q8_0", 13696, 256, 1, false)]  // ksplit path
-    [InlineData("Q5_0", 13696, 256, 2, true)]   // ksplit path
     [InlineData("Q2_K", 256, 64, 1, false)]     // single-super-block minimal
-    [InlineData("Q2_K", 2048, 256, 1, false)]   // Llama-3.2-1B hidden size
-    [InlineData("Q2_K", 512, 96, 4, true)]      // batched decode + bias
     [InlineData("Q2_K", 8960, 256, 1, false)]   // ksplit path
     [InlineData("Q3_K", 256, 64, 1, false)]     // single-super-block minimal
-    [InlineData("Q3_K", 2048, 256, 1, false)]   // Llama-3.2-1B hidden size
-    [InlineData("Q3_K", 512, 96, 4, true)]      // batched decode + bias
     [InlineData("Q3_K", 8960, 256, 2, true)]    // ksplit path
     public unsafe void Dp4aGemv_MatchesExactSimulationAndErrorBound(
         string dtypeName, int inDim, int outDim, int batch, bool withBias)

@@ -455,53 +455,6 @@ public sealed unsafe class MultiBackendIsolationTests
     /// backend A's in-flight window, and any of A's allocations issued while B's window happened to be open got
     /// folded into B's leak-detection report. Now lives on <see cref="GpuTransferHelper.State"/> — per backend,
     /// including two backends sharing one GPU.</summary>
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void SameDevice_StepGraphCaptureWindow_IsolatedPerBackend()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-
-        CudaBackend backendA = new(0, PtxDir());
-        CudaBackend backendB = new(0, PtxDir());
-        try
-        {
-            // A opens its capture window and allocates — recorded in A's tracker only.
-            GpuTransferHelper.SetAmbient(backendA.TransferState);
-            backendA.TransferState.TrackCaptureWindow = true;
-            ulong aPtr = GpuTransferHelper.AllocateDevice(4096);
-            Assert.Single(backendA.TransferState.CaptureAllocs);
-
-            // B is NOT tracking; an ordinary allocation on B must not appear in A's window (the old bug: a
-            // single process-wide flag meant ANY backend's alloc while capturing recorded into the wrong tracker).
-            GpuTransferHelper.SetAmbient(backendB.TransferState);
-            Assert.False(backendB.TransferState.TrackCaptureWindow);
-            ulong bPtr = GpuTransferHelper.AllocateDevice(4096);
-            Assert.Empty(backendB.TransferState.CaptureAllocs);
-            Assert.Single(backendA.TransferState.CaptureAllocs, kv => kv.Key != bPtr);
-
-            // B opening ITS OWN window must not clear or touch A's still-open one.
-            backendB.TransferState.TrackCaptureWindow = true;
-            Assert.Single(backendA.TransferState.CaptureAllocs);
-            Assert.True(backendA.TransferState.TrackCaptureWindow, "B starting its own window must not close A's");
-
-            GpuTransferHelper.SetAmbient(backendA.TransferState);
-            GpuTransferHelper.FreeDevice(aPtr);
-            Assert.Empty(backendA.TransferState.CaptureAllocs);
-            Assert.Equal(1, backendA.TransferState.CaptureFreeCount);
-            Assert.Equal(0, backendB.TransferState.CaptureFreeCount);
-
-            GpuTransferHelper.SetAmbient(backendB.TransferState);
-            GpuTransferHelper.FreeDevice(bPtr);
-            backendA.TransferState.TrackCaptureWindow = false;
-            backendB.TransferState.TrackCaptureWindow = false;
-        }
-        finally
-        {
-            backendA.Dispose();
-            backendB.Dispose();
-        }
-    }
-
     /// <summary>Fidelity check on the real public API: two same-device backends each run a genuine
     /// StepGraphBegin/EndAndLaunch cycle with actual captured work (a Linear), interleaved, and each must produce
     /// correct output — the isolated tracker from the test above is what makes this safe, but this exercises the

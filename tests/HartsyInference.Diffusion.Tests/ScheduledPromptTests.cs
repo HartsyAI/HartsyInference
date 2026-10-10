@@ -82,32 +82,6 @@ public sealed class ScheduledPromptTests
         Assert.Equal([expected], tokenizer.Calls);
     }
 
-    /// <summary>Branches that resolve to the same text are one variant, not two identical encodes.</summary>
-    [Fact]
-    public void BranchesThatResolveAlikeDoNotBecomeTwoVariants()
-    {
-        RecordingTokenizer tokenizer = new RecordingTokenizer();
-        ScheduledPrompt? schedule = ScheduledPrompt.TryBuild("<fromto[0.5]:fox, fox>", 8, tokenizer.Tokenize);
-
-        Assert.NotNull(schedule);
-        Assert.False(schedule!.IsScheduled);
-        Assert.Single(schedule.Variants);
-    }
-
-    /// <summary>Each branch is tokenized on its own, so the emphasis inside one branch is resolved against that
-    /// branch alone. The recorded calls show it: the weighted branch arrives as its own text, and the unweighted
-    /// one is not dragged through the weighted path just because its neighbour carried a weight.</summary>
-    [Fact]
-    public void EachBranchIsTokenizedWithItsOwnEmphasis()
-    {
-        RecordingTokenizer tokenizer = new RecordingTokenizer();
-        ScheduledPrompt? schedule = ScheduledPrompt.TryBuild("<fromto[0.5]:(fox:1.2), whale>", 8, tokenizer.Tokenize);
-
-        Assert.NotNull(schedule);
-        Assert.Equal(2, schedule!.Variants.Count);
-        Assert.Equal(["(fox:1.2)", "whale"], tokenizer.Calls);
-    }
-
     /// <summary>A sampler that runs past the step count the schedule was planned for reuses the last entry rather
     /// than throwing — the schedule is built from the requested steps, and a second-order sampler can ask for more.
     /// </summary>

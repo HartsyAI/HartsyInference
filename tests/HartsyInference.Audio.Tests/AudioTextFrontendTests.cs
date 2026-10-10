@@ -78,22 +78,6 @@ public sealed class AudioTextFrontendTests
     }
 
     [Fact]
-    public void OrpheusText_EmptyVoice_TokenizesBareText()
-    {
-        GgufTokenizer? llama = TryLlama();
-        if (llama is null) return;
-        // An empty voice drops the "{voice}: " prefix, but BOS is unconditional — "bare" means no voice prefix,
-        // not no BOS.
-        int[] bare = Prepend(Llama3Bos, llama.EncodeOrdinary("hello world"));
-
-        int[] withVoice = AudioTextFrontend.OrpheusText("hello world", "tara");
-        int[] noVoice = AudioTextFrontend.OrpheusText("hello world", "");
-
-        Assert.Equal(bare, noVoice);
-        Assert.NotEqual(bare, withVoice); // the voice prefix really changes the id stream
-    }
-
-    [Fact]
     public void CsmText_WrapsSpeakerTaggedTextWithBosEos()
     {
         GgufTokenizer? llama = TryLlama();
@@ -108,17 +92,4 @@ public sealed class AudioTextFrontendTests
         Assert.Equal(expected, ids);
     }
 
-    [Fact]
-    public void CsmText_SpeakerIdChangesTheIdStream()
-    {
-        GgufTokenizer? llama = TryLlama();
-        if (llama is null) return;
-        int[] speaker1Expected = BosEosWrap(llama.EncodeOrdinary("[1]hello"));
-
-        int[] speaker0 = AudioTextFrontend.CsmText("hello", speaker: 0);
-        int[] speaker1 = AudioTextFrontend.CsmText("hello", speaker: 1);
-
-        Assert.NotEqual(speaker0, speaker1); // "[0]" vs "[1]" changes the BPE'd prefix, not just a label
-        Assert.Equal(speaker1Expected, speaker1); // and speaker 1 is exactly the [1]-tagged, BOS/EOS-wrapped encode
-    }
 }

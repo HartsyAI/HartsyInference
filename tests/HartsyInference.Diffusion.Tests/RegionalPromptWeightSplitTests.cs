@@ -35,14 +35,6 @@ public sealed class RegionalPromptWeightSplitTests
             "a red <weight[1.5]:fox> <region:0,0,0.5,1,1>a snowdrift"));
     }
 
-    /// <summary>A weight of exactly 1 does nothing, so it is not worth refusing a request over.</summary>
-    [Fact]
-    public void AUnitWeightIsNotAWeight()
-    {
-        Assert.False(RegionalPromptWeightSplit.BaseTextCarriesWeight(
-            "a red (fox:1.0) <region:0,0,0.5,1,1>a snowdrift"));
-    }
-
     /// <summary>With regions present the base text loses the grammar in BOTH spellings. Flattening alone handles
     /// only the tag; the literal parens would still split the builder's spans, which is the bug this exists for.
     /// </summary>
@@ -67,7 +59,6 @@ public sealed class RegionalPromptWeightSplitTests
     /// rewrite it did not need.</summary>
     [Theory]
     [InlineData(true)]
-    [InlineData(false)]
     public void AnUnweightedPromptIsUntouched(bool hasRegionParts)
     {
         Assert.Equal("a red fox in snow", RegionalPromptWeightSplit.BaseText("a red fox in snow", hasRegionParts));

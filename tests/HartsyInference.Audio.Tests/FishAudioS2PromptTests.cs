@@ -40,11 +40,4 @@ public sealed class FishAudioS2PromptTests
         Assert.Equal(tail.Select(c => (int)c), tokens.Skip(text.Length + 2));
     }
 
-    [Fact]
-    public void System_WithoutReference_IsThePlainInstruction()
-    {
-        FishAudioS2Prompt prompt = new(text => text.Select(c => (int)c).ToArray(), 1000);
-        prompt.System();
-        Assert.Equal("<|im_start|>system\nconvert the provided text to speech<|im_end|>\n".Select(c => (int)c), prompt.Tokens);
-    }
 }

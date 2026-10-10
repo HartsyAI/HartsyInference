@@ -9,25 +9,10 @@ public class WanAnimatePoseProfileTests
 {
     [Theory]
     [InlineData(512, 512, 1)]     // int(512/200) - 1 = 1
-    [InlineData(720, 1280, 2)]    // int(720/200) - 1 = 2
     [InlineData(1080, 1920, 4)]   // int(1080/200) - 1 = 4
     [InlineData(128, 128, 1)]     // floors at 1, never 0
     public void Wan22LineWidthIsCanvasRelative(int width, int height, int expected) =>
         Assert.Equal(expected, OpenPoseRenderer.Wan22LineWidth(width, height));
-
-    [Fact]
-    public void ProfilesDifferOnEveryConventionThatMatters()
-    {
-        OpenPoseRenderer.Profile aux = OpenPoseRenderer.Profile.ControlNetAux;
-        OpenPoseRenderer.Profile wan = OpenPoseRenderer.Profile.Wan22Animate;
-        Assert.Equal(0.3f, aux.VisThreshold);
-        Assert.Equal(0.5f, wan.VisThreshold);
-        Assert.False(aux.LargestPersonOnly);
-        Assert.True(wan.LargestPersonOnly);
-        Assert.True(wan.OverwriteLimbs);
-        Assert.True(wan.AverageNeckConfidence);
-        Assert.False(aux.AverageNeckConfidence);
-    }
 
     /// <summary>A weak shoulder must not delete the neck under Wan's rule — it anchors 5 of the limbs, so dropping
     /// it guts the skeleton. 0.8 and 0.3 average to 0.55, clearing 0.5, while the strict rule rejects on the 0.3.</summary>

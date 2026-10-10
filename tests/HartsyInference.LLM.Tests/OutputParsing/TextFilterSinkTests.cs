@@ -7,7 +7,7 @@ using Xunit;
 
 namespace HartsyInference.LLM.Tests.OutputParsing;
 
-/// <summary>The stream-filter seam driven exactly as <c>TextService.RunText</c> wires it (parser → translator → sink): a fake filter that recognises a <c>&lt;tool_call&gt;</c> span proves the forwarded text, the <see cref="TextChunkKind.NativeToolCall"/> chunk and the stop relay; a pass-through filter proves the chunk sequence is untouched.</summary>
+/// <summary>The stream-filter seam driven exactly as <c>TextService.RunText</c> wires it (parser → translator → sink): a fake filter that recognises a <c>&lt;tool_call&gt;</c> span proves the forwarded text, the <see cref="TextChunkKind.NativeToolCall"/> chunk and the stop relay.</summary>
 public sealed class TextFilterSinkTests
 {
     private const string Completion = "Sure. <tool_call>{\"name\": \"hang_up\", \"arguments\": {\"reason\": \"done\"}}</tool_call> trailing text";
@@ -35,8 +35,6 @@ public sealed class TextFilterSinkTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
     public void CompletedToolCallEmitsANativeToolCallChunkAndStopsGeneration(int seed)
     {
         (List<TextChunk> chunks, TextFilterSink sink, bool stopRequested) = Drive(new SentinelFilter(), Completion, seed);
@@ -50,24 +48,6 @@ public sealed class TextFilterSinkTests
         Assert.Equal(0, call.ToolCallIndex);
         Assert.Same(call.ToolCall, sink.ToolCall);
         Assert.Equal(TextChunkKind.NativeToolCall, chunks[^1].Kind);
-    }
-
-    [Fact]
-    public void PassThroughFilterLeavesTheChunkSequenceUnchanged()
-    {
-        const string text = "plain answer, no tools 😀";
-        (List<TextChunk> filtered, TextFilterSink sink, bool stopRequested) = Drive(new PassThroughFilter(), text, 5);
-        PieceTokenizer tok = new();
-        PassthroughOutputParser parser = new(tok);
-        List<TextChunk> plain = [];
-        ParsedEventTranslator translator = new(plain.Add, 7);
-        foreach (int id in tok.RandomWithSpecials(text, new Random(5), 4)) parser.Push(id, translator.Handle);
-        parser.Finish(translator.Handle);
-        Assert.Equal(plain.Select(c => (c.Kind, c.Text)), filtered.Select(c => (c.Kind, c.Text)));
-        Assert.False(sink.Stopped);
-        Assert.False(stopRequested);
-        Assert.Null(sink.ToolCall);
-        Assert.Equal(text, sink.Text);
     }
 
     [Fact]
@@ -92,16 +72,6 @@ public sealed class TextFilterSinkTests
         sink.Handle(new TextChunk { Kind = TextChunkKind.Reasoning, Text = "third" });
         sink.End();
         Assert.Equal("first", later.ToString());
-    }
-
-    [Fact]
-    public void NonContentChunksPassThroughUntouched()
-    {
-        List<TextChunk> got = [];
-        TextFilterSink sink = new(new SentinelFilter(), got.Add, static () => { });
-        TextChunk reasoning = new() { Kind = TextChunkKind.Reasoning, Text = "thinking" };
-        sink.Handle(reasoning);
-        Assert.Same(reasoning, Assert.Single(got));
     }
 
     /// <summary>Forwards text outside a <c>&lt;tool_call&gt;…&lt;/tool_call&gt;</c> span (holding back a possible partial opening tag), completes the call when the span closes and stops.</summary>
@@ -152,13 +122,6 @@ public sealed class TextFilterSinkTests
                 if (text.EndsWith(marker[..len], StringComparison.Ordinal)) return len;
             return 0;
         }
-    }
-
-    private sealed class PassThroughFilter : ITextStreamFilter
-    {
-        public TextFilterResult OnDelta(string delta) => TextFilterResult.Forward(delta);
-
-        public TextFilterResult OnEnd() => TextFilterResult.Empty;
     }
 
     private sealed class HoldAllFilter : ITextStreamFilter

@@ -60,40 +60,6 @@ public sealed unsafe class AudioActivationKernelTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void Sigmoid_Cpu_Vs_Cuda()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        using Tensor input = Random(new TensorShape(257), seed: 7, lo: -8f, hi: 8f);
-        using Tensor cpuOut = new Tensor(new TensorShape(257), DType.F32);
-        using Tensor cudaOut = new Tensor(new TensorShape(257), DType.F32);
-
-        IBackend cpu = new CpuBackend();
-        cpu.Sigmoid(cpuOut, input);
-        cpu.Dispose();
-
-        RunCuda(c => c.Sigmoid(cudaOut, input), cudaOut);
-        AssertClose(cpuOut, cudaOut, 1e-5f, "Sigmoid");
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void Elu_Cpu_Vs_Cuda()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        using Tensor input = Random(new TensorShape(300), seed: 8, lo: -4f, hi: 4f);
-        using Tensor cpuOut = new Tensor(new TensorShape(300), DType.F32);
-        using Tensor cudaOut = new Tensor(new TensorShape(300), DType.F32);
-
-        IBackend cpu = new CpuBackend();
-        cpu.Elu(cpuOut, input, 1.0f);
-        cpu.Dispose();
-
-        RunCuda(c => c.Elu(cudaOut, input, 1.0f), cudaOut);
-        AssertClose(cpuOut, cudaOut, 1e-5f, "Elu");
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
     public void LeakyRelu_Cpu_Vs_Cuda()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }

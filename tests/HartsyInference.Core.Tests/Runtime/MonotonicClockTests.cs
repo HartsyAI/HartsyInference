@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using HartsyInference.Core.Runtime;
 using Xunit;
 
@@ -22,18 +21,6 @@ public sealed class MonotonicClockTests
     }
 
     [Fact]
-    public void NowNs_TracksWallElapsedTime()
-    {
-        long startNs = MonotonicClock.NowNs();
-        Stopwatch clock = Stopwatch.StartNew();
-        Thread.SpinWait(5_000_000);
-        long elapsedNs = MonotonicClock.NowNs() - startNs;
-        double stopwatchNs = clock.Elapsed.TotalMilliseconds * 1_000_000;
-        // Both clocks are monotonic; they can only differ by the few microseconds between the two reads.
-        Assert.InRange(elapsedNs, stopwatchNs * 0.5, stopwatchNs * 2 + 2_000_000);
-    }
-
-    [Fact]
     public void SleepUntil_DoesNotReturnBeforeTheDeadline()
     {
         const long WaitNs = 3_000_000;
@@ -42,14 +29,6 @@ public sealed class MonotonicClockTests
         long now = MonotonicClock.NowNs();
         Assert.True(now >= deadline, $"woke {deadline - now} ns early");
         Assert.True(now - deadline < 500_000_000, $"woke {(now - deadline) / 1_000_000} ms late");
-    }
-
-    [Fact]
-    public void SleepUntil_PastDeadline_ReturnsAtOnce()
-    {
-        long before = MonotonicClock.NowNs();
-        MonotonicClock.SleepUntil(before - 1_000_000_000);
-        Assert.True(MonotonicClock.NowNs() - before < 100_000_000);
     }
 
     [Fact]

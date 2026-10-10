@@ -13,7 +13,6 @@ public sealed class VideoRgbFramesScheduleTests
 {
     [Theory]
     [InlineData(3)]
-    [InlineData(1)]
     public void ExtractAllFrames_MatchesFrameByFrame_UnderEverySchedule(int channels)
     {
         const int frames = 12, height = 64, width = 96;

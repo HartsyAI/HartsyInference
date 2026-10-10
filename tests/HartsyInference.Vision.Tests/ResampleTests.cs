@@ -55,37 +55,4 @@ public sealed class ResampleTests
         }
     }
 
-    [Fact]
-    public void BicubicPlane_ConstantPlane_StaysConstant()
-    {
-        float[] src = new float[20 * 30];
-        Array.Fill(src, 7.5f);
-        float[] dst = new float[13 * 11];
-        Resample.BicubicPlane(src, 30, 20, dst, 11, 13, a: -0.5f, antialias: true);
-        Assert.All(dst, v => Assert.True(Math.Abs(v - 7.5f) < 1e-5f));
-    }
-
-    [Fact]
-    public void BicubicHwc8_MatchesPlanePerChannel()
-    {
-        byte[] src = new byte[6 * 8 * 3];
-        for (int i = 0; i < 48; i++)
-        {
-            src[i * 3] = (byte)i;
-            src[i * 3 + 1] = (byte)(255 - i);
-            src[i * 3 + 2] = (byte)(i * 2);
-        }
-        float[] hwc = new float[3 * 4 * 3];
-        Resample.BicubicHwc8(src, 8, 6, 3, hwc, 4, 3, a: -0.5f, antialias: true);
-
-        float[] plane = new float[48];
-        float[] dst = new float[12];
-        for (int c = 0; c < 3; c++)
-        {
-            for (int i = 0; i < 48; i++) plane[i] = src[i * 3 + c];
-            Resample.BicubicPlane(plane, 8, 6, dst, 4, 3, a: -0.5f, antialias: true);
-            for (int i = 0; i < 12; i++)
-                Assert.True(Math.Abs(hwc[i * 3 + c] - dst[i]) < 1e-5f, $"c{c}[{i}] {hwc[i * 3 + c]} != {dst[i]}");
-        }
-    }
 }

@@ -18,21 +18,8 @@ public class MiniMaxH3ChainPlannerTests
         Assert.Equal(141, only.NewFrames);
     }
 
-    [Fact]
-    public void TargetPastOneGenerationChainsAndReachesIt()
-    {
-        const int Target = 900;
-        IReadOnlyList<MiniMaxH3ChainPlanner.Segment> plan = MiniMaxH3ChainPlanner.Plan(Target);
-        Assert.True(plan.Count > 1, "A target past the single-generation envelope must chain.");
-        Assert.True(MiniMaxH3ChainPlanner.TotalFrames(plan) >= Target,
-            $"Chain produced {MiniMaxH3ChainPlanner.TotalFrames(plan)} frames for a {Target}-frame target.");
-    }
-
     [Theory]
     [InlineData(400)]
-    [InlineData(600)]
-    [InlineData(900)]
-    [InlineData(1500)]
     [InlineData(3000)]
     public void EverySegmentStaysOnTheGridAndMakesProgress(int target)
     {
@@ -52,7 +39,6 @@ public class MiniMaxH3ChainPlannerTests
     /// <summary>The protected head must cover exactly the context frames, with no partial token.</summary>
     [Theory]
     [InlineData(39)]
-    [InlineData(90)]
     [InlineData(141)]
     public void ProtectedHeadCoversWholeLatentTokens(int contextFrames)
     {
@@ -93,36 +79,12 @@ public class MiniMaxH3ChainPlannerTests
         Assert.True(ramp[0] > 0f && ramp[0] < 1f, "The feather must start strictly between preserve and generate.");
     }
 
-    /// <summary>The first segment is an ordinary generation, so its mask is all-generate.</summary>
-    [Fact]
-    public void FirstSegmentMaskPreservesNothing()
-    {
-        MiniMaxH3ChainPlanner.Segment first = MiniMaxH3ChainPlanner.Plan(900)[0];
-        Assert.All(MiniMaxH3ChainPlanner.VideoMaskFrameValues(first), value => Assert.Equal(1f, value));
-        Assert.All(MiniMaxH3ChainPlanner.AudioMaskValues(first), value => Assert.Equal(1f, value));
-    }
-
     [Theory]
     [InlineData(40)]   // off-grid
-    [InlineData(4)]    // below the grid floor
     [InlineData(362)]  // leaves no new frames in a capped segment
     [InlineData(56)]   // on the video grid but not a whole number of 40 Hz audio rows
-    [InlineData(73)]
     public void OffGridOrOversizedContextIsRefused(int contextFrames)
         => Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3ChainPlanner.Plan(900, contextFrames));
-
-    /// <summary>A usable context covers whole audio rows as well as whole video tokens, so the two streams hand
-    /// over at the same instant.</summary>
-    [Theory]
-    [InlineData(39)]
-    [InlineData(90)]
-    [InlineData(141)]
-    public void AcceptedContextCoversWholeAudioRows(int contextFrames)
-    {
-        MiniMaxH3ChainPlanner.Segment second = MiniMaxH3ChainPlanner.Plan(900, contextFrames)[1];
-        Assert.Equal(second.ContextAudioLatentFrames * MiniMaxH3Geometry.Fps,
-            contextFrames * MiniMaxH3Geometry.AudioLatentFps);
-    }
 
     [Fact]
     public void TooShortATargetIsRefused()

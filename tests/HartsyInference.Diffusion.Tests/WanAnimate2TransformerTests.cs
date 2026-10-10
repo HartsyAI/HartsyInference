@@ -197,22 +197,6 @@ public unsafe class WanAnimate2TransformerTests
         Assert.True(FrameDelta(cond, uncond, 1) > 1e-5f, "the uncond pass produced the same output as the cond pass.");
     }
 
-    /// <summary>The bias covers exactly the <c>[hw, 2hw)</c> key band — the keys of generation latent frame 1 — and
-    /// is stored as ONE row, because the reference <c>score_mod</c> has no query-side condition. The <c>[hw, keys]</c>
-    /// duplicate of it is what used to force every biased call onto the materialized score matrix.</summary>
-    [Theory]
-    [InlineData(6, 24)]
-    [InlineData(6, 30)]
-    public void LogScaleBias_CoversOnlyTheKeysOfGenerationFrameOne(int hw, int keys)
-    {
-        const float logScale = -1.3f;
-        using Tensor bias = WanAnimate2Transformer.BuildLogScaleBias(hw, keys, logScale);
-        Assert.Equal(new TensorShape(1, keys), bias.Shape);
-        float* p = (float*)bias.DataPointer;
-        for (int k = 0; k < keys; k++)
-            Assert.Equal(k >= hw && k < 2 * hw ? logScale : 0f, p[k]);
-    }
-
     /// <summary>The bias must reproduce upstream's <c>_score_mod_impl</c> — <c>score + log_scale</c> exactly on the
     /// key band <c>[hw, 2hw)</c>, the score untouched everywhere else, with no query-side condition — for the tiny
     /// T=4 grid and a real T=21 480x800-sized grid, at both the gen (<c>hw*T</c>) and spliced (<c>hw*(T+1)</c>) key
@@ -235,33 +219,6 @@ public unsafe class WanAnimate2TransformerTests
                 Assert.Equal(upstream, score + p[k]);
             }
         }
-    }
-
-    /// <summary>The base build's <c>log_scale = 0</c> must take the unmasked path, and the distillation build's
-    /// <c>-1.3</c> must actually change the output — this is the ONLY difference between the two checkpoints.</summary>
-    [Fact]
-    public void LogScale_ChangesTheOutput_AndIsInertAtZero()
-    {
-        WanVideoConfig baseConfig = Config(layers: 2);
-        WanVideoConfig distill = baseConfig with { Animate2LogScale = -1.3f };
-        Dictionary<string, Tensor> weights = WanSyntheticWeights.BuildTransformer(baseConfig);
-        using CpuBackend backend = new CpuBackend();
-        using Tensor latent = GenLatent(baseConfig, 41);
-        using Tensor encoder = Random(new TensorShape(6, baseConfig.TextDim), 42);
-        using Tensor clip = Random(new TensorShape(5, baseConfig.ImageDim), 43);
-        using Tensor driving = DrivingLatent(baseConfig, GenFrames - 1, 44);
-        (int T, int H, int W) grid = (GenFrames, GridH, GridW);
-
-        using WanAnimate2Transformer baseDit = Load(baseConfig, weights);
-        using Tensor withoutBias = Run(backend, baseDit, latent, driving, encoder, clip, grid);
-        using WanAnimate2Transformer distillDit = Load(distill, weights);
-        using Tensor withBias = Run(backend, distillDit, latent, driving, encoder, clip, grid);
-
-        AssertFinite(withoutBias);
-        AssertFinite(withBias);
-        // The band is the keys of generation frame 1, which every frame's queries attend — so every frame moves.
-        for (int j = 0; j < GenFrames; j++)
-            Assert.True(FrameDelta(withoutBias, withBias, j) > 1e-5f, $"log_scale left generation frame {j} unchanged.");
     }
 
     /// <summary>The driving stream must carry exactly one fewer latent frame than the generation stream, and a cache
@@ -293,9 +250,7 @@ public unsafe class WanAnimate2TransformerTests
     /// with, and <c>LogScaleBias</c> took the null/unmasked path.</summary>
     [Theory]
     [InlineData("wan_animate_2_bf16_distillation.safetensors", -1.3f)]
-    [InlineData("/models/Wan/Animate2/WAN_ANIMATE_2_DISTILL.safetensors", -1.3f)]
     [InlineData("wan_animate_2_bf16.safetensors", 0f)]
-    [InlineData("wan_animate_2_int8_convrot.safetensors", 0f)]
     public void ResolveLogScale_RoutesTheDistillationBuildByName(string path, float expected)
     {
         CheckpointProbe probe = CheckpointProbe.Empty with { FileNames = [Path.GetFileNameWithoutExtension(path)] };

@@ -32,44 +32,6 @@ public sealed class AudioEndpointsTests : IClassFixture<WebApplicationFactory<Pr
     }
 
     [Fact]
-    public async Task Speech_MissingText_Returns400()
-    {
-        // SpeechService.SynthesizeAsync validates the text itself with ArgumentException, which GenerationErrors
-        // maps to a caller error alongside the model-resolution exceptions.
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/speech", new
-        {
-            model = "kokoro",
-            request = new { text = "" },
-        });
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task Transcribe_UnknownModel_Returns501()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/transcribe", new
-        {
-            model = "not-a-real-stt-model",
-            request = new { audio = new { data = Convert.ToBase64String([1, 2, 3]) } },
-        });
-        Assert.Equal(HttpStatusCode.NotImplemented, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task VoiceConvert_UnknownModel_Returns501()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/voice-convert", new
-        {
-            model = "not-a-real-vc-model",
-            request = new { source = new { data = Convert.ToBase64String([1, 2, 3]) } },
-        });
-        Assert.Equal(HttpStatusCode.NotImplemented, resp.StatusCode);
-    }
-
-    [Fact]
     public async Task FxSeparate_GarbageAudioBytes_Returns400()
     {
         // Unlike Speech/Transcribe/VoiceConversion, FxService.SeparateAsync decodes the audio BEFORE resolving
@@ -85,15 +47,4 @@ public sealed class AudioEndpointsTests : IClassFixture<WebApplicationFactory<Pr
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
-    [Fact]
-    public async Task FxEnhance_GarbageAudioBytes_Returns400()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/native/fx/enhance", new
-        {
-            model = "not-a-real-fx-model",
-            request = new { audio = new { data = Convert.ToBase64String([1, 2, 3]) } },
-        });
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-    }
 }

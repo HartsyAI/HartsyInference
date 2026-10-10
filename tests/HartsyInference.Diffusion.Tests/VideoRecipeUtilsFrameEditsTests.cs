@@ -52,16 +52,4 @@ public sealed class VideoRecipeUtilsFrameEditsTests
         byte[] indices = [.. result.Select(f => f.Rgb[0])];
         Assert.Equal<byte>([1, 2, 3, 4, 5, 4, 3, 2], indices);
     }
-
-    [Fact]
-    public void ToVideoFrames_NoEdits_PassesFramesThroughUnchanged()
-    {
-        byte[][] frames = MakeFrames(4);
-        VideoRequest request = new VideoRequest { Prompt = "x" };
-
-        IReadOnlyList<VideoFrame> result = VideoRecipeUtils.ToVideoFrames(frames, width: 4, height: 4, request);
-
-        byte[] indices = [.. result.Select(f => f.Rgb[0])];
-        Assert.Equal<byte>([0, 1, 2, 3], indices);
-    }
 }

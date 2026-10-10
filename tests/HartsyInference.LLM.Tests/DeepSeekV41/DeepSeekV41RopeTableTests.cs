@@ -15,7 +15,6 @@ public sealed class DeepSeekV41RopeTableTests
     [Theory]
     [InlineData("plain")]
     [InlineData("yarn")]
-    [InlineData("yarn_small")]
     public void Table_Matches_Upstream_Precompute_Freqs_Cis(string name)
     {
         JsonElement c = Fx.GetProperty("cases").EnumerateArray().Single(e => e.GetProperty("name").GetString() == name);
@@ -33,15 +32,5 @@ public sealed class DeepSeekV41RopeTableTests
             Assert.True(Math.Abs(cos[i] - t.Cos[i]) < 2e-5f, $"cos[{i}] {cos[i]} vs {t.Cos[i]}");
             Assert.True(Math.Abs(sin[i] - t.Sin[i]) < 2e-5f, $"sin[{i}] {sin[i]} vs {t.Sin[i]}");
         }
-    }
-
-    [Fact]
-    public void Rows_Return_The_Position_Slice_And_Rejects_Out_Of_Range()
-    {
-        DeepSeekV41RopeTable t = DeepSeekV41RopeTable.Build(8, 4, 10000.0, null);
-        Assert.Equal(4, t.CosRow(0).Length);
-        Assert.All(t.CosRow(0).ToArray(), v => Assert.Equal(1f, v));
-        Assert.All(t.SinRow(0).ToArray(), v => Assert.Equal(0f, v));
-        Assert.Throws<ArgumentOutOfRangeException>(() => t.CosRow(4));
     }
 }

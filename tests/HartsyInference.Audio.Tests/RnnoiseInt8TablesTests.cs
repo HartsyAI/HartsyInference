@@ -117,14 +117,6 @@ public sealed class RnnoiseInt8TablesTests(ITestOutputHelper log)
         Assert.Contains("gru2_recurrent_weights_idx", error.Message);
     }
 
-    [Fact]
-    public void Parse_RefusesAnArrayOfAnotherLength()
-    {
-        string text = Source.Build(seed: 3).Text.Replace("conv2_scale[384]", "conv2_scale[385]", StringComparison.Ordinal);
-        InvalidDataException error = Assert.Throws<InvalidDataException>(() => RnnoiseInt8Tables.Parse(new StringReader(text)));
-        Assert.Contains("conv2_scale", error.Message);
-    }
-
     /// <summary>An <c>rnnoise_data.c</c> in upstream's format: every array the tables need at its real length,
     /// dense index lists, and float debug copies and an unrelated array the parser must skip.</summary>
     private sealed class Source

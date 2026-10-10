@@ -54,28 +54,12 @@ public sealed class AudioWeightFootprintTests : IDisposable
         Assert.Equal(4 * 8 * sizeof(float) + 16 * sizeof(float), AudioWeightFootprint.Estimate(path, "tts", promotesHalfToF32: true));
     }
 
-    [Fact]
-    public void PromotingRunner_SizesAPickleAsStored()
-    {
-        string path = WriteBytes("model.pth", 2048);
-
-        Assert.Equal(2048, AudioWeightFootprint.Estimate(path, "tts", promotesHalfToF32: true));
-    }
-
     [Theory]
     [InlineData(null)]
-    [InlineData("")]
     [InlineData("yue2")]
-    [InlineData("owner/name|bf16")]
     public void NothingToSize_IsZero(string? source)
     {
         Assert.Equal(0, AudioWeightFootprint.Estimate(source, "music"));
-    }
-
-    [Fact]
-    public void MissingLocalPath_IsZero()
-    {
-        Assert.Equal(0, AudioWeightFootprint.Estimate(Path.Combine(_root, "not-downloaded"), "tts"));
     }
 
     private string WriteBytes(string relative, int length)

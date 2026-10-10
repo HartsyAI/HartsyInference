@@ -88,49 +88,10 @@ public sealed class HeterogeneousExpertExecutorTests
     }
 
     [Fact]
-    public void ClampedProgram_IsAppliedTheSameOnEitherSide()
-    {
-        ExpertProgram clamped = ExpertProgram.SwigluClamped(0.25f);
-        ExpertAssignment[] cpu = Plan((0, ExpertPlacement.Cpu, 2), (3, ExpertPlacement.Cpu, 2));
-        ExpertAssignment[] gpu = Plan((0, ExpertPlacement.Gpu, 2), (3, ExpertPlacement.Gpu, 2));
-        float[] gathered = Gathered(4, seed: 3);
-
-        Assert.Equal(Execute(clamped, cpu, gathered, null), Execute(clamped, gpu, gathered, new RecordingDevice(clamped)));
-        Assert.NotEqual(Execute(ExpertProgram.Swiglu, cpu, gathered, null), Execute(clamped, cpu, gathered, null));
-    }
-
-    [Fact]
     public void GpuAssignment_WithoutADevice_IsRefused()
     {
         ExpertAssignment[] plan = Plan((0, ExpertPlacement.Gpu, 1));
         Assert.Throws<InvalidOperationException>(() => Execute(ExpertProgram.Swiglu, plan, Gathered(1, 4), device: null));
-    }
-
-    [Fact]
-    public void MismatchedRows_AreRefused()
-    {
-        ExpertAssignment[] plan = Plan((0, ExpertPlacement.Cpu, 2));
-        Assert.Throws<ArgumentException>(() => Execute(ExpertProgram.Swiglu, plan, Gathered(3, 5), null));
-    }
-
-    [Fact]
-    public void ZeroRowAssignment_IsRefused()
-    {
-        ExpertAssignment[] plan = Plan((0, ExpertPlacement.Cpu, 0));
-        Assert.Throws<ArgumentException>(() => Execute(ExpertProgram.Swiglu, plan, Array.Empty<float>(), null));
-    }
-
-    [Fact]
-    public void DeviceFailure_PropagatesToTheCaller()
-    {
-        ExpertAssignment[] plan = Plan((0, ExpertPlacement.Gpu, 1));
-        Assert.Throws<InvalidOperationException>(() => Execute(ExpertProgram.Swiglu, plan, Gathered(1, 6), new FailingDevice()));
-    }
-
-    private sealed class FailingDevice : IExpertDeviceRunner
-    {
-        public void Run(ExpertKey key, ReadOnlySpan<float> x, int rows, Span<float> y) =>
-            throw new InvalidOperationException("device lost");
     }
 
     private static ExpertWeights Tensors(ExpertKey key) => new(

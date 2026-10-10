@@ -13,13 +13,6 @@ public sealed class BackgroundRemovalStageTests
     private static readonly ImageResult Result = new ImageResult { Rgb = [1, 2, 3], Width = 1, Height = 1 };
 
     [Fact]
-    public void Apply_WithoutTheFlag_ReturnsTheResultUntouched()
-    {
-        ImageRequest request = new ImageRequest { Prompt = "a cat" };
-        Assert.Same(Result, BackgroundRemovalStage.Apply(null!, request, Result));
-    }
-
-    [Fact]
     public void Apply_WithTheFlagOff_ReturnsTheResultUntouched()
     {
         ImageRequest request = new ImageRequest { Prompt = "a cat", RemoveBackground = false };

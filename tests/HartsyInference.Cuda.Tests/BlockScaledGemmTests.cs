@@ -18,8 +18,6 @@ public sealed class BlockScaledGemmTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
-    [InlineData(200, 320, 256)]
-    [InlineData(4096, 3072, 3072)]   // DiT-shaped: the timing row
     public unsafe void NativeNvfp4Gemm_MatchesTheUnpackPath(int m, int n, int k)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }

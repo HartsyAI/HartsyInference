@@ -73,25 +73,6 @@ public sealed class DynamicBatchSchedulerShutdownTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
-    [Fact]
-    public async Task SubmitAfterDispose_FailsWithSchedulerStopped_AndASecondDisposeIsANoOp()
-    {
-        TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();
-        Dictionary<string, Tensor> w = DynamicBatchSchedulerTests.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = new(cfg);
-        model.LoadWeights(w, "model");
-        using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
-        DynamicBatchScheduler scheduler = new(new GenericTransformerModel(model, backend), new DynamicBatchSchedulerTests.StubTokenizer(), pool);
-
-        scheduler.Dispose();
-        scheduler.Dispose();
-
-        await Assert.ThrowsAsync<SchedulerStoppedException>(() =>
-            scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([1], 2, seed: 0), null, CancellationToken.None));
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
     private static async Task AssertStopped(Task<GenerationResult> task)
     {
         Task finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(30)));

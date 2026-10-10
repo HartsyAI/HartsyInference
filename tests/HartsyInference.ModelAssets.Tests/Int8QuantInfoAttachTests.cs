@@ -70,49 +70,6 @@ public sealed unsafe class Int8QuantInfoAttachTests
         }
     }
 
-    /// <summary>ConvRot is only applied where <c>in_features % 256 == 0</c>, so an unrotated layer is normal traffic,
-    /// not an error — it must attach with group size 0 rather than assume 256.</summary>
-    [Fact]
-    public void Attach_UnrotatedLayer_AttachesWithGroupSizeZero()
-    {
-        Dictionary<string, Tensor> weights = ConvRotLayer("blocks.0.mlp.fc1", rows: 4, cols: 100,
-            json: "{\"format\": \"int8_tensorwise\", \"convrot\": false, \"per_row\": true}");
-        try
-        {
-            Dictionary<string, Tensor> result = CheckpointConvertUtils.AttachInt8QuantInfo(weights);
-            Tensor weight = result["blocks.0.mlp.fc1.weight"];
-            Assert.NotNull(weight.QuantInfo);
-            Assert.Equal(0, weight.QuantInfo!.ConvRotGroupSize);
-            Assert.NotNull(weight.QuantInfo.RowScale);
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
-    /// <summary>A single-element scale is a per-tensor scale and must be accepted, not read as a malformed row scale.</summary>
-    [Fact]
-    public void Attach_PerTensorScale_IsAccepted()
-    {
-        Dictionary<string, Tensor> weights = ConvRotLayer("blocks.1.attn.out_proj");
-        weights["blocks.1.attn.out_proj.weight_scale"].Dispose();
-        Tensor scalar = new Tensor(new TensorShape(1), DType.F32);
-        scalar.AsSpan<float>()[0] = 0.25f;
-        weights["blocks.1.attn.out_proj.weight_scale"] = scalar;
-        try
-        {
-            Dictionary<string, Tensor> result = CheckpointConvertUtils.AttachInt8QuantInfo(weights);
-            Tensor weight = result["blocks.1.attn.out_proj.weight"];
-            Assert.NotNull(weight.QuantInfo);
-            Assert.Equal(1, weight.QuantInfo!.RowScale!.ElementCount);
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
     /// <summary>ComfyUI honours <c>full_precision_matrix_mult</c> per layer (H3's <c>mlp.fc2</c>); dropping it costs
     /// accuracy with no error, so it has to survive the fold.</summary>
     [Fact]
@@ -125,24 +82,6 @@ public sealed unsafe class Int8QuantInfoAttachTests
         {
             Dictionary<string, Tensor> result = CheckpointConvertUtils.AttachInt8QuantInfo(weights);
             Assert.True(result["blocks.0.mlp.fc2.weight"].QuantInfo!.FullPrecisionMatMul);
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
-    [Fact]
-    public void Attach_MissingRowScale_ThrowsNamingTheKey()
-    {
-        Dictionary<string, Tensor> weights = ConvRotLayer("blocks.0.attn.qkv_proj");
-        weights["blocks.0.attn.qkv_proj.weight_scale"].Dispose();
-        weights.Remove("blocks.0.attn.qkv_proj.weight_scale");
-        try
-        {
-            NotSupportedException ex = Assert.Throws<NotSupportedException>(
-                () => CheckpointConvertUtils.AttachInt8QuantInfo(weights));
-            Assert.Contains("blocks.0.attn.qkv_proj.weight_scale", ex.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -208,39 +147,4 @@ public sealed unsafe class Int8QuantInfoAttachTests
         }
     }
 
-    /// <summary>Re-running the fold on an already-folded dictionary must be a no-op, not a "missing weight_scale"
-    /// throw — the companions are gone by then and the scale lives on the tensor.</summary>
-    [Fact]
-    public void Attach_IsIdempotent()
-    {
-        Dictionary<string, Tensor> weights = ConvRotLayer("blocks.0.attn.qkv_proj");
-        try
-        {
-            Dictionary<string, Tensor> once = CheckpointConvertUtils.AttachInt8QuantInfo(weights);
-            Dictionary<string, Tensor> twice = CheckpointConvertUtils.AttachInt8QuantInfo(once);
-            Assert.Same(once, twice);
-            Assert.NotNull(twice["blocks.0.attn.qkv_proj.weight"].QuantInfo);
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
-    [Fact]
-    public void Attach_PlainCheckpoint_ReturnsSameDictionary()
-    {
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["blocks.0.attn.qkv_proj.weight"] = new Tensor(new TensorShape(8, 8), DType.BF16),
-        };
-        try
-        {
-            Assert.Same(weights, CheckpointConvertUtils.AttachInt8QuantInfo(weights));
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
 }

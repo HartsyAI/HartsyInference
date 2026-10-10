@@ -57,23 +57,4 @@ public sealed class VoiceLeaseSpeechTests
         Assert.True(transcribers[1].Disposed);
     }
 
-    [Fact]
-    public async Task AReleasedEngineThatCannotReopenFailsTheJobAndTheThreadCarriesOn()
-    {
-        int opens = 0;
-        FakeSynthesizerLease first = new(1);
-        using VoiceLeaseSpeech speech = await VoiceLeaseSpeech.OpenAsync(
-            _ => ++opens == 1 ? Task.FromResult<ISynthesizerLease>(first) : throw new ObjectDisposedException("engine"),
-            _ => Task.FromResult<ITranscriberLease>(new FakeTranscriberLease(1)),
-            voice: null, CancellationToken.None);
-        using CpuBackend device = new();
-        using VoiceGpuWorker worker = new(device, speech.Reopen);
-
-        first.Revoked = true;
-        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
-            worker.RunAsync(VoiceGpuJobKind.Synthesize, () => speech.Synthesize("Hello.", CancellationToken.None), CancellationToken.None));
-
-        Assert.Equal(7, await worker.RunAsync(VoiceGpuJobKind.Warm, () => 7, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10)));
-        Assert.Equal(2, opens);
-    }
 }

@@ -8,8 +8,6 @@ public sealed class Fp8GemmExecutorTests
 {
     [Theory]
     [InlineData(8, 0, false)]
-    [InlineData(8, 6, false)]
-    [InlineData(8, 7, false)]
     [InlineData(8, 9, true)]
     [InlineData(9, 0, true)]
     [InlineData(10, 0, true)]

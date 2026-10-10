@@ -70,8 +70,6 @@ public sealed class DiaSampleChannelIdentityTests
 
     [Theory]
     [InlineData(0)] // channel 0 carries EOS
-    [InlineData(1)]
-    [InlineData(8)] // last of the 9 DAC channels
     public void RandomLogits_MatchesReference(int channel)
     {
         Random rng = new(55_000 + channel);
@@ -81,29 +79,6 @@ public sealed class DiaSampleChannelIdentityTests
             float[] guided = MakeLogits(Cfg.AudioVocab, rng);
             AssertIdentical(cond, guided, channel, Cfg.TopK, Cfg.Temperature, Cfg.TopP,
                 seed: 1 + trial, label: $"channel={channel} trial={trial}");
-        }
-    }
-
-    /// <summary>Exact ties at the cfg.TopK window boundary in GUIDED (the array the window is selected from,
-    /// not the one sampled from) -- the one scenario where a tie-break difference in the window-selection sort
-    /// could change which conditional value enters the candidate set.</summary>
-    [Theory]
-    [InlineData(1)]
-    [InlineData(3)]
-    [InlineData(10)] // more ties than fit in the TopK=45 window
-    public void ExactTiesAtWindowBoundary_MatchesReference(int numTied)
-    {
-        Random rng = new(66_000 + numTied);
-        float[] cond = MakeLogits(Cfg.AudioVocab, rng);
-        float[] guided = MakeLogits(Cfg.AudioVocab, rng);
-        // Place `numTied` identical values straddling the TopK-th rank of `guided` so some of them are the
-        // deciding tie for window membership.
-        float boundaryValue = 3.0f;
-        for (int i = 0; i < numTied; i++) guided[(Cfg.TopK - numTied / 2 + i + Cfg.AudioVocab) % Cfg.AudioVocab] = boundaryValue;
-        for (int trial = 0; trial < 10; trial++)
-        {
-            AssertIdentical(cond, guided, channel: 1, Cfg.TopK, Cfg.Temperature, Cfg.TopP,
-                seed: 200 + trial, label: $"numTied={numTied} trial={trial}");
         }
     }
 

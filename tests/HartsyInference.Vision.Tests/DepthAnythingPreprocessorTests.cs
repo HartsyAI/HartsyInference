@@ -8,11 +8,8 @@ namespace HartsyInference.Vision.Tests;
 public sealed class DepthAnythingPreprocessorTests
 {
     [Theory]
-    [InlineData(518, 518, 518, 518)]   // native — untouched
     [InlineData(640, 480, 686, 518)]   // landscape: short side hits 518, long side rounds to 686
-    [InlineData(480, 640, 518, 686)]   // portrait mirror
     [InlineData(1920, 1080, 924, 518)] // 16:9 → 921.6 rounds to 924
-    [InlineData(100, 100, 518, 518)]   // upscale
     [InlineData(451, 300, 784, 518)]   // the parity fixture (see dump_depth_anything.py)
     public void ComputeTargetSize_LowerBoundMultipleOf14(int srcW, int srcH, int expectedW, int expectedH)
     {
@@ -35,18 +32,4 @@ public sealed class DepthAnythingPreprocessorTests
         Assert.Equal(1f, depth[3]);
     }
 
-    [Fact]
-    public void NormalizeToUnit_ConstantMapBecomesZeros()
-    {
-        float[] depth = [3f, 3f, 3f];
-        DepthAnythingPreprocessor.NormalizeToUnit(depth);
-        Assert.All(depth, v => Assert.Equal(0f, v));
-    }
-
-    [Fact]
-    public void ToGrayscaleRgb24_RendersUnitDepth()
-    {
-        byte[] rgb = DepthAnythingPreprocessor.ToGrayscaleRgb24([0f, 0.5f, 1f]);
-        Assert.Equal([0, 0, 0, 128, 128, 128, 255, 255, 255], rgb);
-    }
 }

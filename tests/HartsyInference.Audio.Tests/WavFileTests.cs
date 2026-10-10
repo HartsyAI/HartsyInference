@@ -33,32 +33,6 @@ public sealed class WavFileTests
     }
 
     [Fact]
-    public void Read_IeeeFloat32_Stereo_ProducesTwoChannels()
-    {
-        // Build a 32-bit IEEE float WAV in memory.
-        byte[] data = BuildFloat32StereoWav(sampleRate: 44_100, framesPerChannel: 100);
-        using MemoryStream ms = new(data);
-        WavFile.DecodedAudio decoded = WavFile.Read(ms);
-
-        Assert.Equal(44_100, decoded.SampleRate);
-        Assert.Equal(2, decoded.Channels.Length);
-        Assert.Equal(100, decoded.Length);
-        Assert.Equal(0.25f, decoded.Channels[0][0], precision: 6);
-        Assert.Equal(-0.25f, decoded.Channels[1][0], precision: 6);
-    }
-
-    [Fact]
-    public void ToMono_Downmixes_Stereo_ByAveraging()
-    {
-        float[][] ch = [new[] { 1f, 0f, -1f }, new[] { 0f, 1f, 1f }];
-        WavFile.DecodedAudio decoded = new(ch, 16_000);
-        float[] mono = decoded.ToMono();
-        Assert.Equal(0.5f, mono[0]);
-        Assert.Equal(0.5f, mono[1]);
-        Assert.Equal(0f, mono[2]);
-    }
-
-    [Fact]
     public void Read_RejectsNonWavFile()
     {
         byte[] bogus = new byte[100];

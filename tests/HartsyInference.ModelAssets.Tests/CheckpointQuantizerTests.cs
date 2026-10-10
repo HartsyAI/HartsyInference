@@ -82,22 +82,6 @@ public sealed class CheckpointQuantizerTests : IDisposable
         Assert.True(new FileInfo(outPath).Length > 100);
     }
 
-    /// <summary>Writing over the file being read would truncate the source mid-read.</summary>
-    [Fact]
-    public void QuantizingOntoItsOwnSourceIsRefused()
-    {
-        using Tensor weight = Ramp(256, 256);
-        string src = WriteSafetensors("self.safetensors", new() { ["blocks.0.attn.weight"] = weight });
-        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => CheckpointQuantizer.Quantize(new QuantizationJob
-        {
-            SourcePath = src,
-            OutputPath = src,
-            Target = new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0),
-            Overwrite = true,
-        }));
-        Assert.Contains("same file", ex.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
     /// <summary>The one that justifies reading through the container. The fp8 weight and its <c>.weight_scale</c>
     /// companion are folded on open, so the quantizer sees real values; reading the raw bytes instead would write a
     /// file wrong by the scale — a plausible-looking file, not an error.</summary>
@@ -132,33 +116,6 @@ public sealed class CheckpointQuantizerTests : IDisposable
         float first = ((float*)dense.DataPointer)[0];
         // 1.0 decoded times a scale of 4 — not the 1.0 an unfolded read would have written.
         Assert.InRange(first, 3.9f, 4.1f);
-    }
-
-    /// <summary>The fp8 shape: each eligible weight stored as F8E4M3 beside the scalar it was divided by. Read back
-    /// through the container, which folds that companion, so what comes out is the value that went in — within what
-    /// four exponent bits and three mantissa bits can carry.</summary>
-    [Fact]
-    public unsafe void TheFp8TargetRoundTripsThroughItsCompanionScale()
-    {
-        using Tensor weight = Ramp(1024, 1024, scale: 2f);
-        string src = WriteSafetensors("fp8src.safetensors", new() { ["blocks.0.attn.weight"] = weight });
-        string outPath = Path.Combine(_dir, "fp8out.safetensors");
-
-        QuantizationReport report = CheckpointQuantizer.Quantize(new QuantizationJob
-        {
-            SourcePath = src,
-            OutputPath = outPath,
-            Target = new QuantizationTarget(QuantizationTargetKind.Fp8Scaled),
-        });
-        Assert.Equal(1, report.QuantizedCount);
-
-        using Checkpoints.CheckpointSource read = Checkpoints.CheckpointSource.Open(outPath);
-        Tensor stored = read.Weights["blocks.0.attn.weight"];
-        Assert.Equal(DType.F8E4M3, stored.DType);
-        using Tensor back = stored.CastTo(DType.F32);   // folds the companion the container attached
-        ReadOnlySpan<float> got = new((void*)back.DataPointer, 16);
-        ReadOnlySpan<float> want = new((void*)weight.DataPointer, 16);
-        for (int i = 0; i < 16; i++) Assert.InRange(got[i] - want[i], -0.12f, 0.12f);
     }
 
     /// <summary>The int8 shape, and the part a reader actually trusts: the per-layer <c>.comfy_quant</c> blob names

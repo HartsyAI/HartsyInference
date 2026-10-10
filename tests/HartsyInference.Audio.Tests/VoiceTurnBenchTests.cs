@@ -25,7 +25,7 @@ namespace HartsyInference.Audio.Tests;
 ///
 /// <para>Device rule: opens <c>CudaBackend(ordinal)</c> with the ordinal from <c>HARTSY_VOICE_BENCH_CUDA_ORDINAL</c>
 /// (default 1) and FAILS unless that device reports a name containing "3060" — engine ordinal 0 is the 4090 on
-/// the reference box (fastest-first), the opposite of the nvidia-smi index, and <see cref="SttBenchTests"/>'s
+/// the reference box (fastest-first), the opposite of the nvidia-smi index, and <c>SttBenchTests</c>'s
 /// hard-coded ordinal 0 is exactly the trap this guards against.</para>
 ///
 /// <para>Path rule: every asset is resolved the way the engine resolves it — Whisper and Kokoro through

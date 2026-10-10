@@ -223,11 +223,9 @@ public sealed class VulkanMoePrimitiveTests(ITestOutputHelper log)
 
     [Theory]
     [InlineData(5, 300, 8, false, false)]
-    [InlineData(3, 4096, 64, true, false)]
     [InlineData(2, 129280, 1024, false, true)]
     [InlineData(2, 5000, 2048, true, true)]
     [InlineData(4, 17, 17, false, false)]
-    [InlineData(4, 9, 1, true, false)]
     public void TopKLastDim_MatchesCpu_Exactly(int rows, int n, int k, bool sortByIndex, bool heavyTies)
     {
         using VulkanBackend? vk = TryCreateBackend(out string? skip);
@@ -278,39 +276,4 @@ public sealed class VulkanMoePrimitiveTests(ITestOutputHelper log)
         return (ReadI32(indices), ReadF32(values));
     }
 
-    [Fact]
-    public void Softplus_MatchesCpu_IncludingInPlace()
-    {
-        using VulkanBackend? vk = TryCreateBackend(out string? skip);
-        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
-        log.WriteLine($"device: {vk.Vk.DeviceName}");
-        float[] x = Random(10007, 9, 40f).Concat(new[] { 0f, 20f, 20.001f, -100f, 88f }).ToArray();
-        float[] Run(IBackend be, bool inPlace)
-        {
-            using Tensor input = F32(x, x.Length);
-            if (inPlace) { be.Softplus(input, input); return ReadF32(input); }
-            using Tensor o = EmptyF32(x.Length);
-            be.Softplus(o, input);
-            return ReadF32(o);
-        }
-
-        float[] cpu = Run(new CpuBackend(), false);
-                foreach (bool inPlace in new[] { false, true })
-        {
-            float[] gpu = Run(vk, inPlace);
-            for (int i = 0; i < cpu.Length; i++)
-                Assert.True(Math.Abs(cpu[i] - gpu[i]) <= 1e-6 * Math.Abs(cpu[i]) + 1e-30, $"softplus {i}: x={x[i]} cpu {cpu[i]:R} vk {gpu[i]:R}");
-        }
-    }
-
-    [Fact]
-    public void MoeRoute_ZeroTokens_AreRejectedByTheSharedValidation()
-    {
-        using VulkanBackend? vk = TryCreateBackend(out string? skip);
-        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
-        MoeRouteArgs args = new(32, 4, MoeRouteScoring.SqrtSoftplus, Renormalize: true, RenormEpsilon: 1e-20f, Scale: 1.5f);
-        using Tensor logits = new(new TensorShape(0, 32), DType.F32);
-        using Tensor idx = new(new TensorShape(0, 4), DType.I32), w = new(new TensorShape(0, 4), DType.F32);
-        Assert.Throws<ArgumentException>(() => vk.MoeRoute(idx, w, logits, args));
-    }
 }

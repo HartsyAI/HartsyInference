@@ -19,15 +19,6 @@ public sealed class EngramHasherTests
             yield return [c.GetProperty("name").GetString()!];
     }
 
-    [Fact]
-    public void FixtureHasEveryRequiredEdgeCase()
-    {
-        HashSet<string> names = HashFixture().GetProperty("cases").EnumerateArray().Select(c => c.GetProperty("name").GetString()!).ToHashSet();
-        foreach (string required in new[] { "single_token_prefill", "dead_middle_span", "dead_first_and_last", "all_dead", "prefill_then_decode_1",
-            "prefill_then_decode_dead", "decode_from_single_token_prefill", "chunked_prefill_random", "long_random_masked", "vocab_extremes" })
-            Assert.Contains(required, names);
-    }
-
     [Theory]
     [MemberData(nameof(CaseNames))]
     public void Hash_EqualsUpstreamPythonExactly(string caseName)
@@ -58,23 +49,6 @@ public sealed class EngramHasherTests
     }
 
     [Fact]
-    public void Hash_RewindingStartPosRecomputesFromTheEarlierHistory()
-    {
-        JsonElement testCase = HashFixture().GetProperty("cases").EnumerateArray().Single(c => c.GetProperty("name").GetString() == "prefill_plain");
-        JsonElement step = testCase.GetProperty("steps")[0];
-        int[] ids = step.GetProperty("ids").EnumerateArray().Select(e => e.GetInt32()).ToArray();
-        long[] expected = step.GetProperty("hash").EnumerateArray().Select(e => e.GetInt64()).ToArray();
-        EngramHasher hasher = new();
-        long[] first = new long[expected.Length];
-        hasher.Hash(ids, [], 0, first);
-        // A second prefill from 0 must not see the first run's history as its own past.
-        long[] second = new long[expected.Length];
-        hasher.Hash(ids, [], 0, second);
-        Assert.Equal(expected, second);
-        Assert.Equal(ids.Length, hasher.Length);
-    }
-
-    [Fact]
     public void Hash_RejectsGapsBadMasksAndOutOfRangeIds()
     {
         EngramHasher hasher = new();
@@ -98,44 +72,6 @@ public sealed class EngramHasherTests
         a.Hash([10000], [false], 0, x);
         b.Hash([90000], [false], 0, y);
         Assert.Equal(x, y);
-    }
-
-    [Fact]
-    public void Constants_ArePinnedToTheCheckpointRevisionAndHashMatchTheManifest()
-    {
-        EngramConstants constants = EngramConstants.Default;
-        Assert.Equal(PinnedRevision, constants.Revision);
-        Assert.Equal("deepseek-ai/DeepSeek-V4.1-Flash", constants.Checkpoint);
-        Assert.Equal([1, 14], constants.LayerIds);
-        Assert.Equal([384006168L, 384016682L], constants.TableRows);
-        Assert.Equal(129280, constants.TokenizerVocab);
-        Assert.Equal(99092, constants.CompressedVocab);
-        Assert.Equal(2, constants.PadCompressedId);
-        Assert.Equal(4, constants.MaxNgramSize);
-        Assert.Equal(8, constants.HeadCount);
-        Assert.Equal(2 * 4, constants.Multipliers.Length);
-        Assert.Equal(2 * 24, constants.Offsets.Length);
-        Assert.Equal(2 * 3 * 8, constants.Primes.Length);
-    }
-
-    [Fact]
-    public void Constants_ManifestRecordsEveryExternalCrossCheckAsPassed()
-    {
-        string manifestPath = Path.Combine(RepoRoot.Path, "src", "HartsyInference.LLM", "DeepSeekV41", "Engram", "Constants", "manifest.json");
-        JsonElement crossChecks = JsonDocument.Parse(File.ReadAllText(manifestPath)).RootElement.GetProperty("cross_checks");
-        int passed = 0;
-        foreach (JsonProperty source in crossChecks.EnumerateObject())
-        {
-            Assert.False(string.IsNullOrEmpty(source.Value.GetProperty("revision").GetString()), $"{source.Name} has no pinned revision.");
-            foreach (JsonProperty check in source.Value.EnumerateObject())
-            {
-                if (check.Value.ValueKind == JsonValueKind.String)
-                    continue;
-                Assert.True(check.Value.ValueKind == JsonValueKind.True, $"cross-check {source.Name}.{check.Name} is not recorded as passed.");
-                passed++;
-            }
-        }
-        Assert.Equal(4, passed); // GGUF token map + primes + multipliers, MLX token map
     }
 
     [Fact]

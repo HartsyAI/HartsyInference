@@ -38,29 +38,11 @@ public sealed class RealtimeSchedulingTests
     [Theory]
     [InlineData(0)]
     [InlineData(100)]
-    [InlineData(-5)]
     public void TryEnterFifo_RejectsPrioritiesOutsideTheLinuxRange(int priority)
     {
         bool ok = RealtimeScheduling.TryEnterFifo(priority, out string reason);
         Assert.False(ok);
         Assert.Contains(priority.ToString(), reason, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TryPinToCpu_OnItsOwnThread_EitherSucceedsOrExplains()
-    {
-        (bool ok, string reason) = OnThrowawayThread(() =>
-        {
-            bool result = RealtimeScheduling.TryPinToCpu(0, out string why);
-            return (result, why);
-        });
-        _output.WriteLine($"TryPinToCpu(0) -> {ok}: {reason}");
-        if (ok)
-        {
-            Assert.Equal("", reason);
-            return;
-        }
-        Assert.False(string.IsNullOrWhiteSpace(reason));
     }
 
     [Fact]

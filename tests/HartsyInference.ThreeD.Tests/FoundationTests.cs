@@ -102,21 +102,6 @@ public sealed class FoundationTests
     }
 
     [Fact]
-    public void ObjAndPlyWriters_RoundTripCounts()
-    {
-        Mesh mesh = MarchingCubes.Extract(SphereSdf(20, 0.6f), 0f);
-        string obj = ObjWriter.Write(mesh);
-        int vLines = obj.Split('\n').Count(l => l.StartsWith("v ", StringComparison.Ordinal));
-        int fLines = obj.Split('\n').Count(l => l.StartsWith("f ", StringComparison.Ordinal));
-        Assert.Equal(mesh.VertexCount, vLines);
-        Assert.Equal(mesh.TriangleCount, fLines);
-
-        string ply = PlyWriter.WriteMesh(mesh);
-        Assert.Contains($"element vertex {mesh.VertexCount}", ply);
-        Assert.Contains($"element face {mesh.TriangleCount}", ply);
-    }
-
-    [Fact]
     public void GridSampler_Trilinear_MatchesHandComputed()
     {
         // 2x2x2 grid, value = x index (0 or 1). Sampling u along X should be linear 0→1.

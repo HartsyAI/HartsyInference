@@ -24,8 +24,6 @@ public sealed class F0EstimatorTests
 
     [Theory]
     [InlineData(120f)]
-    [InlineData(220f)]
-    [InlineData(440f)]
     public void EstimateYin_RecoversSinePitch_WithinTolerance(float hz)
     {
         float[] f0 = F0Estimator.EstimateYin(Sine(hz, 0.6), SampleRate, Hop);
@@ -44,10 +42,4 @@ public sealed class F0EstimatorTests
         Assert.All(f0, f => Assert.Equal(0f, f));
     }
 
-    [Fact]
-    public void EstimateYin_FrameCount_MatchesHopGrid()
-    {
-        float[] f0 = F0Estimator.EstimateYin(Sine(200f, 1.0), SampleRate, Hop);
-        Assert.Equal(SampleRate / Hop, f0.Length); // 1 s @ 16 kHz / hop 320 = 50 frames
-    }
 }

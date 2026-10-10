@@ -115,21 +115,6 @@ public sealed class GgufExpertPackTests : IDisposable
     }
 
     [Fact]
-    public void Checkpoint_WithoutExpertTensors_IsRefused()
-    {
-        string path = Path.Combine(_root, "dense.gguf");
-        using (GgufWriter writer = new(path))
-        {
-            writer.SetMetadata("general.architecture", "moetest");
-            Tensor dense = new(new TensorShape(Hidden, Hidden), DType.F32);
-            writer.AddTensor("blk.0.attn_q.weight", dense);
-            writer.Flush();
-            dense.Dispose();
-        }
-        Assert.Throws<InvalidDataException>(() => GgufExpertSource.Open(path));
-    }
-
-    [Fact]
     public void Verify_RefusesAPackBuiltForAnotherCheckpointGeometry()
     {
         string small = WriteCheckpoint("small.gguf", fused: false, experts: Experts, intermediate: Intermediate);

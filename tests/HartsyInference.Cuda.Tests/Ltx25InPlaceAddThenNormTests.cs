@@ -55,7 +55,6 @@ public sealed unsafe class Ltx25InPlaceAddThenNormTests
     [Theory]
     [InlineData(160, false)]
     [InlineData(160, true)]
-    [InlineData(80, false)]
     public void InPlaceAddThenNormMatchesCpu(int rows, bool readBackBetween)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }

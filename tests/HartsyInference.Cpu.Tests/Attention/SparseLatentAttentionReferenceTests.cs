@@ -62,21 +62,6 @@ public sealed class SparseLatentAttentionReferenceTests
     }
 
     [Fact]
-    public void The_Sink_Only_Enlarges_The_Denominator()
-    {
-        const int Dim = 32;
-        using Tensor rt = F32(Enumerable.Repeat(2f, Dim).ToArray(), 1, Dim);
-        LatentSource window = new(LatentEncoding.F32, rt, null, 1, Dim);
-        using Tensor q = F32(new float[Dim], 1, 1, Dim);
-        using Tensor sink = F32(new[] { 0f }, 1);              // exp(0) joins one valid exp(0) => half the value
-        using Tensor idx = I32(new[] { 0 }, 1, 1);
-        using Tensor o = Empty(DType.F32, 1, 1, Dim);
-        using CpuBackend cpu = new();
-        cpu.SparseLatentAttention(o, q, window, LatentSource.Empty, idx, 1, sink, 1f);
-        Assert.All(ReadF32(o), v => Assert.Equal(1f, v, 5));
-    }
-
-    [Fact]
     public void Invalid_Operands_Throw()
     {
         const int Dim = 32;

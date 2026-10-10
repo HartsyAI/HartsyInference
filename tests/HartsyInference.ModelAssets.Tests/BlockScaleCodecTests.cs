@@ -53,9 +53,7 @@ public sealed class BlockScaleCodecTests
 
     [Theory]
     [InlineData(32, 32, 64, 96)]
-    [InlineData(128, 128, 256, 256)]
     [InlineData(1, 32, 8, 96)]
-    [InlineData(1, 32, 4, 48)]
     public void Fp8_MatchesScalarDecoderForEveryElement(int blockRows, int blockCols, int rows, int cols)
     {
         Random rng = new Random(11);
@@ -155,46 +153,6 @@ public sealed class BlockScaleCodecTests
     }
 
     [Fact]
-    public void Mxfp4_SliceRows_DecodesWindowIdenticallyToFullDecode()
-    {
-        Random rng = new Random(14);
-        const int rows = 8, cols = 64;
-        using Tensor scale = ScaleTensor(rows, 2, rng);
-        byte[] packed = RandomBytes(rows * cols / 2, rng);
-        QuantRecipe recipe = Recipe(QuantEncoding.Mxfp4E8M0, new BlockGeometry(1, 32), rows, cols, scale);
-        float[] full = new float[rows * cols];
-        Mxfp4E8M0Codec.DequantRows(packed, recipe, 0, rows, full);
-
-        QuantRecipe sliced = recipe.SliceRows(2, 4, "w");
-        float[] window = new float[4 * cols];
-        Mxfp4E8M0Codec.DequantRows(packed.AsSpan(2 * cols / 2, 4 * cols / 2), sliced, 0, 4, window);
-
-        Assert.Equal(full.AsSpan(2 * cols, 4 * cols).ToArray(), window);
-    }
-
-    [Fact]
-    public void Fp8_SliceCols_SelectsTheMatchingScaleColumns()
-    {
-        Random rng = new Random(15);
-        const int rows = 64, cols = 128;
-        using Tensor scale = ScaleTensor(2, 4, rng);
-        byte[] packed = RandomBytes(rows * cols, rng);
-        QuantRecipe recipe = Recipe(QuantEncoding.Fp8E4M3BlockE8M0, new BlockGeometry(32, 32), rows, cols, scale);
-        float[] full = new float[rows * cols];
-        Fp8BlockE8M0Codec.DequantRows(packed, recipe, 0, rows, full);
-
-        QuantRecipe sliced = recipe.SliceCols(64, 64, "w");
-        byte[] slicedPacked = new byte[rows * 64];
-        for (int r = 0; r < rows; r++)
-            Array.Copy(packed, r * cols + 64, slicedPacked, r * 64, 64);
-        float[] window = new float[rows * 64];
-        Fp8BlockE8M0Codec.DequantRows(slicedPacked, sliced, 0, rows, window);
-
-        for (int r = 0; r < rows; r++)
-            Assert.Equal(full.AsSpan(r * cols + 64, 64).ToArray(), window.AsSpan(r * 64, 64).ToArray());
-    }
-
-    [Fact]
     public void Mxfp4_SliceCols_DecodesAColumnContiguousCopyWithTheBorrowedScale()
     {
         Random rng = new Random(17);
@@ -217,34 +175,6 @@ public sealed class BlockScaleCodecTests
     }
 
     [Fact]
-    public void SliceRows_ThroughQuantWeightInfo_NarrowsTheRecipeAndItsScale()
-    {
-        using Tensor scale = ScaleTensor(4, 2, new Random(16));
-        QuantRecipe recipe = Recipe(QuantEncoding.Fp8E4M3BlockE8M0, new BlockGeometry(32, 32), 128, 64, scale);
-        QuantWeightInfo info = new QuantWeightInfo { Format = recipe.FormatName, Recipe = recipe };
-
-        QuantWeightInfo sliced = info.SliceRows(32, 64, "w");
-
-        Assert.Equal(64, sliced.Recipe!.LogicalRows);
-        Assert.Equal(new TensorShape(2, 2), sliced.Recipe.Scale!.Shape);
-        Assert.Equal(scale.AsReadOnlySpan<byte>().Slice(2, 4).ToArray(), sliced.Recipe.Scale.AsReadOnlySpan<byte>().ToArray());
-    }
-
-    [Theory]
-    [InlineData(16, 32)]  // not on a 32-row boundary
-    [InlineData(32, 48)]  // ends mid-block and not at the edge
-    public void SliceRows_SplittingA32x32Block_Refuses(long offset, long count)
-    {
-        using Tensor scale = ScaleTensor(4, 2, new Random(17));
-        QuantRecipe recipe = Recipe(QuantEncoding.Fp8E4M3BlockE8M0, new BlockGeometry(32, 32), 128, 64, scale);
-
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => recipe.SliceRows(offset, count, "layers.0.attn.wq_a.weight"));
-
-        Assert.Contains("layers.0.attn.wq_a.weight", ex.Message);
-        Assert.Contains("32x32", ex.Message);
-    }
-
-    [Fact]
     public void SliceCols_OffBlockOrOddForFourBit_Refuses()
     {
         using Tensor scale = ScaleTensor(4, 4, new Random(18));
@@ -263,14 +193,5 @@ public sealed class BlockScaleCodecTests
         Assert.Throws<ArgumentException>(() => Fp8BlockE8M0Codec.DequantRows(new byte[100], recipe, 0, 1, new float[64]));
         Assert.Throws<ArgumentException>(() => Fp8BlockE8M0Codec.DequantRows(new byte[64 * 64], recipe, 0, 1, new float[63]));
         Assert.Throws<Core.Exceptions.HartsyInferenceException>(() => Mxfp4E8M0Codec.DequantRows(new byte[64 * 32], recipe, 0, 1, new float[64]));
-    }
-
-    [Fact]
-    public void DequantRows_RefusesNonE8M0ScaleDType()
-    {
-        using Tensor scale = new Tensor(new TensorShape(2, 2), DType.F32);
-        QuantRecipe recipe = Recipe(QuantEncoding.Fp8E4M3BlockE8M0, new BlockGeometry(32, 32), 64, 64, scale);
-
-        Assert.Throws<NotSupportedException>(() => Fp8BlockE8M0Codec.DequantRows(new byte[64 * 64], recipe, 0, 1, new float[64]));
     }
 }

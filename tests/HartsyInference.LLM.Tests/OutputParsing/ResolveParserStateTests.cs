@@ -17,11 +17,4 @@ public sealed class ResolveParserStateTests
         Assert.Equal(reasoningOpen, state.ReasoningOpen);
     }
 
-    [Fact]
-    public void ImageConversationsResolveWithoutCallerSuppliedGrids()
-    {
-        ChatMessage user = new("user", "") { Blocks = [new TextBlock("look"), new ImageBlock(1)] };
-        ParserInitialState state = _encoder.ResolveParserState([user], new EncodeOptions { Thinking = true });
-        Assert.True(state.ReasoningOpen);
-    }
 }

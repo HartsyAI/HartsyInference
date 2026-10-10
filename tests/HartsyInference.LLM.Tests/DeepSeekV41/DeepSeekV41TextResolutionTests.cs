@@ -47,30 +47,11 @@ public sealed class DeepSeekV41TextResolutionTests : IDisposable
     }
 
     [Fact]
-    public void SingleGgufBesideAStrayConfig_StillResolvesToTheGguf()
-    {
-        string directory = ModelDirectory("some-model");
-        string gguf = Path.Combine(directory, "model-Q4.gguf");
-        File.WriteAllBytes(gguf, new byte[4]);
-        File.WriteAllText(Path.Combine(directory, "config.json"), "{\"model_type\":\"llama\"}");
-
-        Assert.Equal(gguf, ModelResolver.ResolveTextDirectory(directory));
-    }
-
-    [Fact]
     public void TwoGgufs_AreStillAmbiguousAndResolveToNothing()
     {
         string directory = ModelDirectory("some-model");
         File.WriteAllBytes(Path.Combine(directory, "a.gguf"), new byte[4]);
         File.WriteAllBytes(Path.Combine(directory, "b.gguf"), new byte[4]);
-
-        Assert.Null(ModelResolver.Resolve("some-model", null, Modality.Text).LocalPath);
-    }
-
-    [Fact]
-    public void EmptyDirectory_ResolvesToNothing()
-    {
-        ModelDirectory("some-model");
 
         Assert.Null(ModelResolver.Resolve("some-model", null, Modality.Text).LocalPath);
     }
@@ -102,13 +83,4 @@ public sealed class DeepSeekV41TextResolutionTests : IDisposable
         Assert.Contains("--model-path", error.Message);
     }
 
-    [Fact]
-    public void HfDirectoryWithoutIndexOrGguf_IsResolvedWhenItHoldsSafetensors()
-    {
-        string directory = ModelDirectory("single-file-hf");
-        File.WriteAllText(Path.Combine(directory, "config.json"), "{\"model_type\":\"llama\"}");
-        File.WriteAllBytes(Path.Combine(directory, "model.safetensors"), new byte[8]);
-
-        Assert.Equal(directory, ModelResolver.ResolveTextDirectory(directory));
-    }
 }

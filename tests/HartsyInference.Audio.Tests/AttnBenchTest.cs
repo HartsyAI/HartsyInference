@@ -8,6 +8,7 @@ namespace HartsyInference.Audio.Tests;
 
 /// <summary>Micro-bench F5's attention shape [1,16,454,64]: monolithic FlashAttention vs
 /// ScaledDotProductAttention (materialized TF32 GEMM path). F5_CUDA=1 + F5_PTX required.</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class AttnBenchTest
 {
     private readonly ITestOutputHelper _out;

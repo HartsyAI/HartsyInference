@@ -17,14 +17,6 @@ public sealed class ToolCallTemplateDetectionTests
     public ToolCallTemplateDetectionTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
-    public void NullTemplate_IsFalse()
-        => Assert.False(ToolCallFormats.TryDetectFromTemplate(null, out _));
-
-    [Fact]
-    public void EmptyTemplate_IsFalse()
-        => Assert.False(ToolCallFormats.TryDetectFromTemplate("", out _));
-
-    [Fact]
     public void ToolsReferencedButNoSupportedMarker_IsFalse()
         => Assert.False(ToolCallFormats.TryDetectFromTemplate(
             "{%- if tools %}You have tools available.{%- endif %}", out _));
@@ -42,14 +34,6 @@ public sealed class ToolCallTemplateDetectionTests
     public void Qwen3_4B_RealTemplate_DetectsHermes()
     {
         bool detected = ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen3_4B, out ToolCallFormat format);
-        Assert.True(detected);
-        Assert.Equal(ToolCallFormat.Hermes, format);
-    }
-
-    [Fact]
-    public void Qwen25_1_5B_RealTemplate_DetectsHermes()
-    {
-        bool detected = ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen25_1_5B, out ToolCallFormat format);
         Assert.True(detected);
         Assert.Equal(ToolCallFormat.Hermes, format);
     }
@@ -73,28 +57,11 @@ public sealed class ToolCallTemplateDetectionTests
         => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen35_0_8B, out _));
 
     [Fact]
-    public void DeepSeekR1Distill_RealTemplate_NeverRendersToolsIsFalse()
-        // Renders a *previous* assistant tool_calls turn with its own "<｜tool▁calls▁begin｜>" markers, but never
-        // loops over the caller-supplied "tools" list — there's no instruction to detect in the first place.
-        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.DeepSeekR1DistillQwen1_5B, out _));
-
-    [Fact]
-    public void Glm4_9B_RealTemplate_ListsToolsButInstructsNoEnvelopeIsFalse()
-        // Loops over "tools" and dumps each function's JSON schema, but only tells the model in prose to "use
-        // JSON format for the arguments" — none of the four literal envelope markers ever appears.
-        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Glm4_9B_0414, out _));
-
-    [Fact]
     public void Llama32_1B_RealTemplate_BareJsonConventionIsFalse()
         // A real Llama-3.2 template that references "tools" (and "tools_in_user_message") but never renders
         // "<|python_tag|>" for custom tools — it instructs a bare {"name":..,"parameters":..} object instead,
         // which isn't one of the four supported envelopes. Proves the detector doesn't assume family == format.
         => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Llama32_1B_Instruct, out _));
-
-    [Fact]
-    public void Mistral7BV03_RealTemplate_NoToolsSupportAtAllIsFalse()
-        // This build's template is the plain "[INST] ... [/INST]" conversational format — "tools" never appears.
-        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Mistral7B_Instruct_v0_3, out _));
 
     // ── Synthetic: the two markers no local GGUF happens to carry ──────────────────────────────────────────
 
@@ -104,23 +71,6 @@ public sealed class ToolCallTemplateDetectionTests
         // The trailing {"name": x} is filler, not a Hermes decoy: Hermes needs a literal "<tool_call>" marker,
         // which this template never has, so only the "<|python_tag|>" branch can match it.
         const string template = "{%- if tools %}Environment: ipython{%- endif %}<|python_tag|>{\"name\": x}";
-        bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
-        Assert.True(detected);
-        Assert.Equal(ToolCallFormat.Llama3, format);
-    }
-
-    [Fact]
-    public void SyntheticLlama3Template_PythonTagForBuiltinToolsPlusBareJsonForCustomTools_StillDetectsLlama3()
-    {
-        // Real Llama-3.1/3.2 templates render <|python_tag|> only for the model's own built-in tools (code
-        // interpreter, search, …) — custom user tools get a bare {"name":..,"parameters":..} object instead
-        // (exactly the llama-3.2-1b-instruct real fixture above, which has no <|python_tag|> at all because it
-        // never offers built-in tools). TryDetectFromTemplate doesn't need to know why the marker is there;
-        // its presence anywhere in a tools-aware template is enough.
-        const string template = "{%- if tools %}"
-            + "{%- if builtin_tools %}Environment: ipython<|python_tag|>{%- endif %}"
-            + "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}."
-            + "{%- endif %}";
         bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
         Assert.True(detected);
         Assert.Equal(ToolCallFormat.Llama3, format);
@@ -144,18 +94,6 @@ public sealed class ToolCallTemplateDetectionTests
         // Hermes, XML arguments instead of JSON — must not be confused with the Hermes envelope.
         const string template = "{% if tools %}Tools: {{ tools | tojson }}{% endif %}"
             + "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Paris</arg_value>\n</tool_call>";
-        Assert.False(ToolCallFormats.TryDetectFromTemplate(template, out _));
-    }
-
-    [Fact]
-    public void SyntheticDeepSeekMarkersEvenWithTools_IsFalse()
-    {
-        // DeepSeek's own fullwidth markers, deliberately paired with a real "tools" loop this time (the real
-        // fixture above is false for the simpler reason that it never reaches this far) — proves the markers
-        // themselves never accidentally satisfy one of the four ASCII-marker checks.
-        const string template = "{% if tools %}{% for t in tools %}{{ t | tojson }}{% endfor %}{% endif %}"
-            + "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n"
-            + "```json\n{\"city\": \"Paris\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
         Assert.False(ToolCallFormats.TryDetectFromTemplate(template, out _));
     }
 

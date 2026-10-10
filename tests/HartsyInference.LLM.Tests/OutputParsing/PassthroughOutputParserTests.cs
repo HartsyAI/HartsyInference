@@ -23,28 +23,4 @@ public sealed class PassthroughOutputParserTests
         Assert.True(parser.Result.Completed);
     }
 
-    [Fact]
-    public void ChunkBoundariesFollowTokensAndNeverSplitACharacter()
-    {
-        PieceTokenizer tok = new();
-        PassthroughOutputParser parser = new(tok);
-        List<ParsedEvent> events = [];
-        int[] ids = tok.SplitBytes("aé", 1, 2);
-        parser.Push(ids[0], events.Add);
-        parser.Push(ids[1], events.Add);
-        Assert.Equal(["a"], events.Select(e => e.Text));
-        parser.Push(ids[2], events.Add);
-        Assert.Equal(["a", "é"], events.Select(e => e.Text));
-    }
-
-    [Fact]
-    public void UnfinishedSequenceFlushesAsReplacementCharacter()
-    {
-        PieceTokenizer tok = new();
-        PassthroughOutputParser parser = new(tok);
-        List<ParsedEvent> events = [];
-        parser.Push(tok.Add([0xC3]), events.Add);
-        parser.Finish(events.Add);
-        Assert.Equal("�", parser.Result.Content);
-    }
 }

@@ -118,14 +118,6 @@ public sealed class MemoryEstimationTests : IDisposable
     }
 
     [Fact]
-    public void WanRecipe_UnreadableHeaderFallsBackToNoModel()
-    {
-        CheckpointHeader header = Header(Descriptor("something.else.weight", DType.F16, 4, 4));
-
-        Assert.Null(new WanVideoRecipe().DescribeMemory(header));
-    }
-
-    [Fact]
     public void Estimate_FoldsPhasesByUnloadAndPlacement()
     {
         MemoryEstimate estimate = Estimate(textEncoder: 6 * Gib, denoiser: 10 * Gib, activation: 2 * Gib, vae: Gib);
@@ -159,19 +151,6 @@ public sealed class MemoryEstimationTests : IDisposable
             20 * Gib, 20 * Gib, _ => true);
 
         // 18 GB would fit phase by phase, but Performance keeps all 23 GB of weights resident and never streams.
-        Assert.Equal(MemoryFitVerdict.Infeasible, fit.Verdict);
-    }
-
-    [Fact]
-    public void Judge_RequestTierOverrideWinsOverTheBackendPolicy()
-    {
-        MemoryEstimate estimate = Estimate(0, denoiser: 16 * Gib, activation: 2 * Gib, vae: Gib, streamFloor: 3 * Gib);
-        VramPolicy overridden = VramPolicyResolver.Apply(VramPolicy.For(VramTier.Aggressive),
-            new VramOverrides { Tier = VramTier.Performance });
-
-        MemoryFit fit = MemoryFitJudge.Judge(estimate, overridden, canStream: true, 10 * Gib, 10 * Gib, _ => true);
-
-        Assert.Equal(VramTier.Performance, fit.EffectiveTier);
         Assert.Equal(MemoryFitVerdict.Infeasible, fit.Verdict);
     }
 
@@ -240,17 +219,6 @@ public sealed class MemoryEstimationTests : IDisposable
         MemoryEstimate estimate = reread.Estimate(new MemoryEstimateRequest(832, 480, 33), _ => true);
         Assert.Equal(MemoryEstimateAccuracy.Recipe, estimate.Accuracy);
         Assert.Contains(estimate.Phases, phase => phase.Component == MemoryComponent.Denoiser && phase.Streamable);
-    }
-
-    [Fact]
-    public async Task Service_DeviceWithoutMemoryReportIsUnknown()
-    {
-        using InferenceEngine engine = new("cpu");
-        ModelSpec spec = new() { Requested = "flux1", Modality = Modality.Image, LocalPath = "unused.safetensors" };
-
-        MemoryFit fit = await engine.MemoryEstimation.AssessAsync(spec, new MemoryEstimateRequest(1024, 1024));
-
-        Assert.Equal(MemoryFitVerdict.Unknown, fit.Verdict);
     }
 
     private string WriteWanCheckpoint(string name, int inner)

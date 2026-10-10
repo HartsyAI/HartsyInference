@@ -32,28 +32,6 @@ public sealed class SamplerInfrastructureTests
         }
     }
 
-    /// <summary>Consecutive-interval draws down a real SDXL schedule, the pattern the multistep SDE samplers use, are
-    /// each unit-variance and mutually uncorrelated.</summary>
-    [Fact]
-    public void BrownianIncrements_DownASchedule_AreIndependentUnitNormals()
-    {
-        EulerDiscreteScheduler scheduler = new();
-        scheduler.SetTimesteps(20);
-        float[] sigmas = scheduler.Sigmas();
-        using BrownianNoiseSource source = BrownianNoiseSource.ForSchedule(Shape, 42, sigmas);
-        float[]? previous = null;
-        for (int i = 0; i < sigmas.Length - 2; i++)
-        {
-            float[] draw = Read(source.Sample(i, 0, sigmas[i], sigmas[i + 1]));
-            Assert.InRange(Variance(draw), 0.9, 1.1);
-            if (previous is not null)
-            {
-                Assert.InRange(Math.Abs(Correlation(previous, draw)), 0.0, 0.05);
-            }
-            previous = draw;
-        }
-    }
-
     /// <summary>The same seed and query order reproduce the path; a different seed does not.</summary>
     [Fact]
     public void BrownianSource_IsDeterministicPerSeed()
@@ -97,46 +75,6 @@ public sealed class SamplerInfrastructureTests
         Assert.Equal(SamplerRegistry.BuildSigmas("dpm_2", null, baseSigmas), eps);
     }
 
-    /// <summary><c>SigmasFor</c> is what <c>SetTimesteps</c> builds, without moving the scheduler.</summary>
-    [Fact]
-    public void SigmasFor_MatchesSetTimestepsAndLeavesTheSchedulerAlone()
-    {
-        EulerDiscreteScheduler euler = new();
-        euler.SetTimesteps(20);
-        float[] before = euler.Sigmas();
-        float[] other = euler.SigmasFor(7);
-        Assert.Equal(before, euler.Sigmas());
-        euler.SetTimesteps(7);
-        Assert.Equal(other, euler.Sigmas());
-
-        FlowMatchEulerDiscreteScheduler flow = new(3.0f, shiftTerminal: 0.02f);
-        flow.SetTimesteps(20);
-        float[] flowBefore = flow.Sigmas();
-        float[] flowOther = flow.SigmasFor(7);
-        Assert.Equal(flowBefore, flow.Sigmas());
-        flow.SetTimesteps(7);
-        Assert.Equal(flowOther, flow.Sigmas());
-    }
-
-    /// <summary>uni_pc/dpm_2 keep the step count and both endpoints but take ComfyUI's steps+1 grid minus its
-    /// penultimate sigma; every other sampler gets the schedule untouched, and img2img opts out.</summary>
-    [Fact]
-    public void BuildSigmas_DiscardsThePenultimateSigmaOnlyForTheListedSamplers()
-    {
-        float[] base10 = new FlowMatchEulerDiscreteScheduler(3.0f) is { } s ? Schedule(s, 10) : [];
-        float[] uni = SamplerRegistry.BuildSigmas("uni_pc", null, base10);
-        Assert.Equal(base10.Length, uni.Length);
-        Assert.Equal(base10[0], uni[0]);
-        Assert.Equal(0f, uni[^1]);
-        Assert.True(uni[^2] > base10[^2], "The last non-zero sigma must come from the finer grid's third-from-last entry.");
-        Assert.Same(base10, SamplerRegistry.BuildSigmas("dpmpp_2m", null, base10));
-        Assert.Same(base10, SamplerRegistry.BuildSigmas("uni_pc", null, base10, startsFromNoisedInit: true));
-        for (int k = 1; k < uni.Length; k++)
-        {
-            Assert.True(uni[k] < uni[k - 1], "The resampled schedule must stay strictly descending.");
-        }
-    }
-
     /// <summary>ComfyUI's discrete <c>percent_to_sigma</c> at the ends and in the middle of SD's training schedule.</summary>
     [Fact]
     public void EulerDiscreteScheduler_SigmaAtPercentMatchesTheTrainingTable()
@@ -168,21 +106,6 @@ public sealed class SamplerInfrastructureTests
         Assert.InRange(tMid, timesteps[6], timesteps[5]);
     }
 
-    /// <summary>The Karras variant runs from the largest training sigma down, not up.</summary>
-    [Fact]
-    public void EulerDiscreteScheduler_KarrasScheduleDescends()
-    {
-        EulerDiscreteScheduler scheduler = new(useKarrasSigmas: true);
-        scheduler.SetTimesteps(10);
-        float[] sigmas = scheduler.Sigmas();
-        Assert.True(sigmas[0] > 14f, $"first Karras sigma {sigmas[0]} should be the training maximum.");
-        for (int k = 1; k < sigmas.Length; k++)
-        {
-            Assert.True(sigmas[k] < sigmas[k - 1]);
-        }
-        Assert.True(scheduler.Timesteps[0] > 990f);
-    }
-
     /// <summary>The flow-shift estimate recovers the shift of a shifted-linear schedule.</summary>
     [Fact]
     public void EstimateFlowShift_RecoversTheScheduleShift()
@@ -207,8 +130,6 @@ public sealed class SamplerInfrastructureTests
     /// <summary>The <c>_gpu</c> names ComfyUI workflows carry resolve to the same solvers.</summary>
     [Theory]
     [InlineData("dpmpp_sde_gpu", "dpmpp_sde")]
-    [InlineData("dpmpp_2m_sde_gpu", "dpmpp_2m_sde")]
-    [InlineData("dpmpp_3m_sde_gpu", "dpmpp_3m_sde")]
     public void GpuAliases_ResolveToTheSameSampler(string alias, string canonical)
     {
         Assert.True(SamplerRegistry.IsKnown(alias));

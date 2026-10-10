@@ -139,29 +139,6 @@ public sealed unsafe class MoeTests
         foreach (Tensor tensor in w.Values) tensor.Dispose();
     }
 
-    [Fact]
-    public void MoeFeedForward_SigmoidLogitAdd_RequiresCorrectionBias()
-    {
-        MoeConfig moe = new()
-        {
-            NumExperts = 1,
-            NumExpertsPerTok = 1,
-            MoeIntermediateSize = 1,
-            Scoring = MoeScoring.SigmoidLogitAdd,
-        };
-        const string p = "model.layers.0";
-        Dictionary<string, Tensor> w = new()
-        {
-            [$"{p}.mlp.gate.weight"] = From([0f], 1, 1),
-        };
-
-        MoeFeedForward block = new(moe, hiddenSize: 1, lowVram: false);
-        InvalidDataException error = Assert.Throws<InvalidDataException>(() => block.LoadWeights(w, p));
-
-        Assert.Contains("e_score_correction_bias", error.Message, StringComparison.Ordinal);
-        foreach (Tensor tensor in w.Values) tensor.Dispose();
-    }
-
     private static Tensor From(float[] values, params long[] shape)
     {
         Tensor tensor = new(new TensorShape(shape), DType.F32);

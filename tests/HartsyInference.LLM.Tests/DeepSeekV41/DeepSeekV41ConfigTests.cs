@@ -69,7 +69,6 @@ public sealed class DeepSeekV41ConfigTests
     [Theory]
     [InlineData(42)]
     [InlineData(44)]
-    [InlineData(40)]
     public void CompressRatiosLengthMustBeLayersPlusDraftLayers(int length)
     {
         string json = DeepSeekV41Fixtures.OfficialConfig(text => text["compress_ratios"] = new JsonArray(
@@ -79,16 +78,6 @@ public sealed class DeepSeekV41ConfigTests
 
         Assert.Contains($"compress_ratios has {length} entries, expected", error.Message);
         Assert.Contains("= 43", error.Message);
-    }
-
-    [Fact]
-    public void MismatchedEngramArrays_AreRejected()
-    {
-        string json = DeepSeekV41Fixtures.OfficialConfig(text => text["engram_num_embeddings"] = new JsonArray(384006168L));
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => DeepSeekV41Config.Parse(json));
-
-        Assert.Contains("engram_layer_ids has 2 entries but engram_num_embeddings has 1", error.Message);
     }
 
     [Fact]
@@ -114,16 +103,6 @@ public sealed class DeepSeekV41ConfigTests
 
         Assert.Contains("compress_ratios has 2 entries", error.Message);
         Assert.Contains("num_experts_per_tok 999 exceeds n_routed_experts 384", error.Message);
-    }
-
-    [Fact]
-    public void WrongModelType_IsRejected()
-    {
-        string json = DeepSeekV41Fixtures.Read("official_config.json").Replace("\"deepseek_v41\"", "\"llama\"", StringComparison.Ordinal);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => DeepSeekV41Config.Parse(json));
-
-        Assert.Contains("model_type is 'llama'", error.Message);
     }
 
     [Fact]

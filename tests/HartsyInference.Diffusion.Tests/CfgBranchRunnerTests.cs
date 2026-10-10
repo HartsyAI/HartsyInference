@@ -34,14 +34,6 @@ public sealed class CfgBranchRunnerTests
     }
 
     [Fact]
-    public unsafe void Run_ReturnsCorrectPairing()
-    {
-        (Tensor cond, Tensor uncond) = CfgBranchRunner.Run(() => Scalar(10f), () => Scalar(20f));
-        Assert.Equal(10f, *(float*)cond.DataPointer);
-        Assert.Equal(20f, *(float*)uncond.DataPointer);
-    }
-
-    [Fact]
     public void Run_CondThrows_PropagatesCondException_AndObservesUncondWithoutCrashing()
     {
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() =>

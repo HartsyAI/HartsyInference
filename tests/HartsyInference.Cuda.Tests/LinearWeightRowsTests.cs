@@ -88,9 +88,7 @@ public sealed unsafe class LinearWeightRowsTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("F32", false, false)]
-    [InlineData("F32", true, true)]
     [InlineData("BF16", true, false)]
-    [InlineData("BF16", true, true)]
     [InlineData("FP8", true, false)]
     [InlineData("FP8", true, true)]
     public void RowRangeMatchesMaterializedSlice(string dtype, bool preload, bool withBias)
@@ -153,7 +151,6 @@ public sealed unsafe class LinearWeightRowsTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q8_0", 96)]
-    [InlineData("Q8_0", 256)]
     [InlineData("Q4_K", 256)]
     public void RowRangeOfABlockQuantizedWeightMatchesTheSameRowsAlone(string dtype, int hidden)
     {

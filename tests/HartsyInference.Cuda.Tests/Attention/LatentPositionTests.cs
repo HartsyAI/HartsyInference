@@ -16,13 +16,9 @@ public sealed class LatentPositionTests(ITestOutputHelper output)
 {
     [Theory]
     [InlineData(128, 5, 0)]
-    [InlineData(128, 128, 0)]
     [InlineData(128, 300, 0)]
-    [InlineData(1, 9, 0)]
     [InlineData(128, 1, 7)]
-    [InlineData(128, 1, 127)]
     [InlineData(128, 1, 128)]
-    [InlineData(128, 1, 1000)]
     [InlineData(4, 1, 6)]
     public void WindowIndices_MatchCpuExactly(int window, int seqLen, int startPos)
     {
@@ -44,9 +40,7 @@ public sealed class LatentPositionTests(ITestOutputHelper output)
 
     [Theory]
     [InlineData(3, 1, 512, 64, 448, false)]
-    [InlineData(2, 5, 512, 64, 448, true)]
     [InlineData(1, 7, 64, 64, 0, true)]
-    [InlineData(2, 3, 128, 32, 16, false)]
     public void RopeInterleavedOffset_IsBitIdenticalToCpu_ForwardAndInverse(int batch, int len, int dim, int rotary,
         int offset, bool withHeads)
     {

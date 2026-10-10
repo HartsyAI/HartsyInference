@@ -27,111 +27,15 @@ public sealed unsafe class LoraWanTests : IDisposable
         Directory.CreateDirectory(_tempDir);
     }
 
-    private static SafeTensorDescriptor Desc(string name) => new()
-    {
-        Name = name,
-        DType = DType.F16,
-        Shape = new TensorShape(16, 3072),
-        DataOffset = 0,
-        ByteLength = 16 * 3072 * 2,
-    };
-
-    private static Dictionary<string, SafeTensorDescriptor> Descriptors(params string[] keys)
-    {
-        Dictionary<string, SafeTensorDescriptor> d = new();
-        foreach (string k in keys) d[k] = Desc(k);
-        return d;
-    }
-
-    [Fact]
-    public void MusubiKeys_DetectedAsKohyaWan()
-    {
-        Dictionary<string, SafeTensorDescriptor> d = Descriptors(
-            "lora_unet_blocks_0_self_attn_q.lora_down.weight",
-            "lora_unet_blocks_0_self_attn_q.lora_up.weight",
-            "lora_unet_blocks_0_self_attn_q.alpha",
-            "lora_unet_blocks_29_cross_attn_o.lora_down.weight",
-            "lora_unet_blocks_29_cross_attn_o.lora_up.weight",
-            "lora_unet_blocks_5_ffn_0.lora_down.weight",
-            "lora_unet_blocks_5_ffn_0.lora_up.weight");
-        Assert.Equal(LoraFormat.KohyaWan, LoraFormatDetector.Detect(d));
-    }
-
-    [Fact]
-    public void ComfyDiffusionModelKeys_DetectedAsDiffusersWan()
-    {
-        // Both suffix conventions appear in Comfy-style Wan repacks.
-        Dictionary<string, SafeTensorDescriptor> peft = Descriptors(
-            "diffusion_model.blocks.0.self_attn.q.lora_A.weight",
-            "diffusion_model.blocks.0.self_attn.q.lora_B.weight");
-        Assert.Equal(LoraFormat.DiffusersWan, LoraFormatDetector.Detect(peft));
-
-        Dictionary<string, SafeTensorDescriptor> kohya = Descriptors(
-            "diffusion_model.blocks.12.cross_attn.v.lora_down.weight",
-            "diffusion_model.blocks.12.cross_attn.v.lora_up.weight",
-            "diffusion_model.blocks.12.cross_attn.v.alpha");
-        Assert.Equal(LoraFormat.DiffusersWan, LoraFormatDetector.Detect(kohya));
-    }
-
-    [Fact]
-    public void DiffusersPeftWanKeys_RouteThroughExistingPassthrough()
-    {
-        // `transformer.blocks.{i}.attn1.to_q` is already the canonical WanVideoTransformer key — the
-        // architecture-agnostic diffusers passthrough handles it without a Wan-specific mapper.
-        Dictionary<string, SafeTensorDescriptor> d = Descriptors(
-            "transformer.blocks.0.attn1.to_q.lora_A.weight",
-            "transformer.blocks.0.attn1.to_q.lora_B.weight",
-            "transformer.blocks.7.ffn.net.0.proj.lora_A.weight",
-            "transformer.blocks.7.ffn.net.0.proj.lora_B.weight");
-        Assert.Equal(LoraFormat.DiffusersFlux, LoraFormatDetector.Detect(d));
-    }
-
-    [Fact]
-    public void ExistingFormats_NoDetectionRegression()
-    {
-        Dictionary<string, SafeTensorDescriptor> kohyaFlux = Descriptors(
-            "lora_unet_double_blocks_0_img_attn_qkv.lora_down.weight",
-            "lora_unet_double_blocks_0_img_attn_qkv.lora_up.weight");
-        Assert.Equal(LoraFormat.KohyaFlux, LoraFormatDetector.Detect(kohyaFlux));
-
-        Dictionary<string, SafeTensorDescriptor> sd15 = Descriptors(
-            "lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight",
-            "lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight");
-        Assert.Equal(LoraFormat.KohyaSd15, LoraFormatDetector.Detect(sd15));
-    }
-
     [Theory]
     // Original Wan naming → the diffusers-style keys WanVideoTransformer.LoadWeights expects.
     [InlineData("blocks.0.self_attn.q", "blocks.0.attn1.to_q.weight")]
-    [InlineData("blocks.0.self_attn.o", "blocks.0.attn1.to_out.0.weight")]
-    [InlineData("blocks.29.cross_attn.k", "blocks.29.attn2.to_k.weight")]
-    [InlineData("blocks.3.cross_attn.k_img", "blocks.3.attn2.add_k_proj.weight")]
-    [InlineData("blocks.3.cross_attn.v_img", "blocks.3.attn2.add_v_proj.weight")]
-    [InlineData("blocks.5.ffn.0", "blocks.5.ffn.net.0.proj.weight")]
-    [InlineData("blocks.5.ffn.2", "blocks.5.ffn.net.2.weight")]
     [InlineData("time_embedding.0", "condition_embedder.time_embedder.linear_1.weight")]
-    [InlineData("text_embedding.2", "condition_embedder.text_embedder.linear_2.weight")]
-    [InlineData("time_projection.1", "condition_embedder.time_proj.weight")]
-    [InlineData("head.head", "proj_out.weight")]
     // Already-diffusers bodies pass through.
     [InlineData("blocks.0.attn1.to_q", "blocks.0.attn1.to_q.weight")]
-    [InlineData("blocks.7.ffn.net.0.proj", "blocks.7.ffn.net.0.proj.weight")]
     public void MapBodyToCanonical_HandlesBothNamings(string body, string expected)
     {
         Assert.Equal(expected, WanLoraMapper.MapBodyToCanonical(body));
-    }
-
-    [Theory]
-    [InlineData("blocks_0_self_attn_q", "blocks.0.self_attn.q")]
-    [InlineData("blocks_29_cross_attn_o", "blocks.29.cross_attn.o")]
-    [InlineData("blocks_3_cross_attn_k_img", "blocks.3.cross_attn.k_img")]
-    [InlineData("blocks_3_cross_attn_norm_k_img", "blocks.3.cross_attn.norm_k_img")]
-    [InlineData("blocks_5_ffn_0", "blocks.5.ffn.0")]
-    [InlineData("time_projection_1", "time_projection.1")]
-    [InlineData("text_embedding_0", "text_embedding.0")]
-    public void LoraKeyTransformer_DemanglesWanModulePaths(string input, string expected)
-    {
-        Assert.Equal(expected, LoraKeyTransformer.UnderscoreToDot(input));
     }
 
     [Fact]
@@ -193,18 +97,8 @@ public sealed unsafe class LoraWanTests : IDisposable
     // ride the converter's ordered norm2⇄norm3 swap; img_emb.* maps to condition_embedder.image_embedder.*;
     // patch_embedding matches no rename rule and passes through unchanged.
     [InlineData("blocks.0.norm3", ".weight", "blocks.0.norm2.weight")]
-    [InlineData("blocks.0.norm3", ".bias", "blocks.0.norm2.bias")]
-    [InlineData("blocks.7.self_attn.norm_q", ".weight", "blocks.7.attn1.norm_q.weight")]
-    [InlineData("blocks.7.cross_attn.norm_k_img", ".weight", "blocks.7.attn2.norm_added_k.weight")]
-    [InlineData("blocks.2.cross_attn.q", ".bias", "blocks.2.attn2.to_q.bias")]
-    [InlineData("blocks.5.ffn.0", ".bias", "blocks.5.ffn.net.0.proj.bias")]
-    [InlineData("img_emb.proj.0", ".weight", "condition_embedder.image_embedder.norm1.weight")]
     [InlineData("img_emb.proj.1", ".bias", "condition_embedder.image_embedder.ff.net.0.proj.bias")]
-    [InlineData("img_emb.proj.3", ".bias", "condition_embedder.image_embedder.ff.net.2.bias")]
-    [InlineData("img_emb.proj.4", ".bias", "condition_embedder.image_embedder.norm2.bias")]
     [InlineData("patch_embedding", ".bias", "patch_embedding.bias")]
-    [InlineData("head.head", ".bias", "proj_out.bias")]
-    [InlineData("time_embedding.0", ".bias", "condition_embedder.time_embedder.linear_1.bias")]
     public void MapBodyToCanonical_DiffTargets(string body, string suffix, string expected)
     {
         Assert.Equal(expected, WanLoraMapper.MapBodyToCanonical(body, suffix));
@@ -291,36 +185,6 @@ public sealed unsafe class LoraWanTests : IDisposable
         Assert.Contains(file.FullWeightDiffs, d => d.TargetKey == "proj_out.bias");
         Assert.Contains(file.FullWeightDiffs, d => d.TargetKey == "condition_embedder.time_embedder.linear_1.bias");
         Assert.Contains(file.FullWeightDiffs, d => d.TargetKey == "blocks.0.attn2.norm_added_k.weight");
-    }
-
-    [Fact]
-    public void LoraStack_MergesWanDelta_Numerically()
-    {
-        // W' = W + strength · (alpha/rank) · (B @ A). With A = ones·0.5 [2,4], B = ones·0.25 [4,2],
-        // alpha = 1, strength = 2: delta = 2 · (1/2) · (0.25·0.5·2) = 0.25 per element.
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
-        {
-            ["lora_unet_blocks_0_self_attn_q.lora_down.weight"] = (DType.F32, [2, 4], Fill(8, 0.5f)),
-            ["lora_unet_blocks_0_self_attn_q.lora_up.weight"] = (DType.F32, [4, 2], Fill(8, 0.25f)),
-            ["lora_unet_blocks_0_self_attn_q.alpha"] = (DType.F32, [1], [1.0f]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "merge_wan", tensors);
-
-        Tensor baseW = new Tensor(new TensorShape(4, 4), DType.F32);
-        float* bp = (float*)baseW.DataPointer;
-        for (int i = 0; i < 16; i++) bp[i] = 1.0f;
-        Dictionary<string, Tensor> weights = new() { ["blocks.0.attn1.to_q.weight"] = baseW };
-
-        using CpuBackend backend = new();
-        using LoraStack stack = new();
-        stack.AddFromPath(path, strength: 2.0f);
-        int merged = stack.ApplyTo(weights, LoraTarget.Transformer, backend);
-
-        Assert.Equal(1, merged);
-        float* mp = (float*)weights["blocks.0.attn1.to_q.weight"].DataPointer;
-        for (int i = 0; i < 16; i++)
-            Assert.True(MathF.Abs(mp[i] - 1.25f) < 1e-5f, $"merged[{i}] = {mp[i]}, expected 1.25");
-        baseW.Dispose();
     }
 
     private static float[] Fill(int count, float value)

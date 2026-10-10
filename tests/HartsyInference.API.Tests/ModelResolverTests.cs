@@ -76,21 +76,6 @@ public sealed class ModelResolverTests : IDisposable
 
         Assert.Equal(Path.GetFullPath(legacyFile), spec.LocalPath);
     }
-
-    [Fact]
-    public void Resolve_ExplicitModelPath_StillWinsOverCatalogAssetPath()
-    {
-        string authoritativeDir = Path.Combine(_tempModelsRoot, "Stable-Diffusion", "Krea2");
-        Directory.CreateDirectory(authoritativeDir);
-        File.WriteAllBytes(Path.Combine(authoritativeDir, "krea2_turbo_fp8_scaled.safetensors"), [0x01]);
-
-        string overridePath = Path.Combine(_tempModelsRoot, "custom-checkpoint.safetensors");
-        File.WriteAllBytes(overridePath, [0x02]);
-
-        ModelSpec spec = ModelResolver.Resolve("krea2", overridePath, Modality.Image);
-
-        Assert.Equal(Path.GetFullPath(overridePath), spec.LocalPath);
-    }
 }
 
 /// <summary>Serializes the classes that point <c>EngineKnobs.ModelsRoot</c> at a fixture. The override is

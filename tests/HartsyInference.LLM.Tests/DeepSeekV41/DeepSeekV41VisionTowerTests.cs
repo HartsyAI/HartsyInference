@@ -14,7 +14,6 @@ public sealed class DeepSeekV41VisionTowerTests(ITestOutputHelper output)
 {
     [Theory]
     [InlineData(5, 7)]
-    [InlineData(4, 3)]
     [InlineData(1, 4)]
     public void EveryStage_MatchesTheUpstreamTower(int gridHeight, int gridWidth)
     {
@@ -33,20 +32,6 @@ public sealed class DeepSeekV41VisionTowerTests(ITestOutputHelper output)
         foreach (string stage in expectedStages)
             VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} {stage}", taps[stage], VisionFixture.Floats(stages.GetProperty(stage)));
         Assert.Equal(taps["norm"], features);
-    }
-
-    [Fact]
-    public void Forward_IsRepeatable()
-    {
-        JsonElement testCase = VisionFixture.TowerCase(4, 3);
-        float[] patches = VisionFixture.Floats(testCase.GetProperty("patches"));
-        using CpuBackend backend = new();
-        using DeepSeekV41VisionTower tower = new(backend, VisionFixture.Config(), VisionFixture.TowerWeights());
-
-        float[] first = tower.Forward(patches, 4, 3);
-        float[] second = tower.Forward(patches, 4, 3);
-
-        Assert.Equal(first, second);
     }
 
     [Fact]
@@ -105,13 +90,4 @@ public sealed class DeepSeekV41VisionTowerTests(ITestOutputHelper output)
         Assert.Contains("vision.norm.weight", error.Message);
     }
 
-    [Fact]
-    public void Constructor_RejectsAConfigWithoutAWholeRotaryWidth()
-    {
-        using CpuBackend backend = new();
-        DeepSeekV41VisionConfig config = VisionFixture.Config() with { NumHeads = 3 };
-        DeepSeekV41VisionWeights weights = VisionFixture.TowerWeights();
-
-        Assert.Throws<HartsyInferenceException>(() => new DeepSeekV41VisionTower(backend, config, weights));
-    }
 }

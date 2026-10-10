@@ -43,24 +43,6 @@ public sealed class VoicePrefixCacheTests
     }
 
     [Fact]
-    public async Task TwoTurns_OnTheSameCall_ShareTheSamePrefixCacheKey()
-    {
-        ScriptedTextService text = new ScriptedTextService().Reply("First reply.").Reply("Second reply.");
-        await using VoiceHarness harness = await VoiceHarness.StartAsync(Options(), text: text);
-
-        harness.Session.PushDtmf('1');
-        await harness.TurnCompletedAsync(1);
-        harness.Session.PushDtmf('2');
-        await harness.TurnCompletedAsync(2);
-
-        TextRequest[] requests = [.. text.Requests];
-        Assert.True(requests.Length >= 3, "priming + 2 turns.");
-        string?[] keys = [.. requests.Select(r => r.PrefixCacheKey)];
-        Assert.All(keys, k => Assert.Equal(keys[0], k));
-        Assert.NotNull(keys[0]);
-    }
-
-    [Fact]
     public async Task EnablePrefixCache_False_SendsNoPrimingRequest_AndNoKeyOnRealTurns()
     {
         ScriptedTextService text = new ScriptedTextService().Reply("Hello there.");

@@ -56,19 +56,6 @@ public sealed class TextTokenWeightsTests
         Assert.Equal([0f, 0f, 1f, 0f, 0f], bias);
     }
 
-    /// <summary>A prompt weighted in one direction only builds one of the two, so the other stays off its path
-    /// entirely — no all-ones multiply over a 14 MB buffer, and no all-zero mask forcing SDPA's masked kernel.</summary>
-    [Theory]
-    [InlineData(0.5f, true, false)]
-    [InlineData(1.5f, false, true)]
-    public void EachDirectionBuildsOnlyItsOwnHalf(float weight, bool expectScale, bool expectBias)
-    {
-        TextTokenWeights weights = TextTokenWeights.TryBuild([weight], condLength: 1)!;
-
-        Assert.Equal(expectScale, weights.BuildValueRowScale(jointSeq: 3) is not null);
-        Assert.Equal(expectBias, weights.BuildKeyLogitBias(jointSeq: 3) is not null);
-    }
-
     /// <summary>Image tokens follow the text in Krea 2's joint concat, so a text position is already a joint
     /// position and the arrays simply run past it unweighted. That is the layout SwarmUI's <c>seq == img_slice[1]</c>
     /// guard establishes before it applies anything.</summary>

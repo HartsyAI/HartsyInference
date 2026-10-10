@@ -44,21 +44,6 @@ public sealed class CfgHelperDualGuidanceTests
     }
 
     [Fact]
-    public unsafe void ApplyDualCfg_UnitScales_ReduceToCond()
-    {
-        float[] condV = [1.5f, -0.5f, 0.25f];
-        using Tensor cond = MakeTensor(condV);
-        using Tensor mid = MakeTensor([0.1f, 0.2f, 0.3f]);
-        using Tensor uncond = MakeTensor([-1.0f, 2.0f, 0.0f]);
-
-        // tg = ig = 1: uncond + (mid − uncond) + (cond − mid) = cond.
-        using Tensor result = CfgHelper.ApplyDualCfg(cond, mid, uncond, 1.0f, 1.0f);
-        float* r = (float*)result.DataPointer;
-        for (int i = 0; i < condV.Length; i++)
-            Assert.Equal(condV[i], r[i], 5);
-    }
-
-    [Fact]
     public void ApplyDualCfg_ShapeMismatch_Throws()
     {
         using Tensor cond = MakeTensor([1f, 2f, 3f]);

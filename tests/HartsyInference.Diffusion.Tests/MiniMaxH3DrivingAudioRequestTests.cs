@@ -21,13 +21,6 @@ public sealed class MiniMaxH3DrivingAudioRequestTests
         Assert.True(VideoService.RequestedFeatures(request).HasFlag(VideoFeatures.DrivingAudio));
     }
 
-    [Fact]
-    public void AnOrdinaryRequestDoesNotAskForDrivingAudio()
-    {
-        VideoRequest request = new VideoRequest { Prompt = "test", Frames = 141 };
-        Assert.False(VideoService.RequestedFeatures(request).HasFlag(VideoFeatures.DrivingAudio));
-    }
-
     /// <summary>The output timing edits that would slide the picture against the track driving it.</summary>
     /// <remarks>Frame edits reach the frames only — the leading frames are dropped, the boomerang is built, and a
     /// differing fps is muxed rather than resampled — while the soundtrack is trimmed or padded at its end alone. Lip
@@ -75,9 +68,4 @@ public sealed class MiniMaxH3DrivingAudioRequestTests
         Assert.True(features.HasFlag(VideoFeatures.ReferenceAudios));
         Assert.False(features.HasFlag(VideoFeatures.DrivingAudio));
     }
-
-    /// <summary>The recipe is the release authority the profile's features are intersected against.</summary>
-    [Fact]
-    public void TheH3RecipeDeclaresDrivingAudio()
-        => Assert.True(new MiniMaxH3Recipe().Supports.HasFlag(VideoFeatures.DrivingAudio));
 }

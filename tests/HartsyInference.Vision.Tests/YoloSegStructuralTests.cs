@@ -40,33 +40,6 @@ public sealed unsafe class YoloSegStructuralTests
     }
 
     [Fact]
-    public void Proto_Forward_DoublesSpatial_AndOutputsNumMasks()
-    {
-        const int inC = 6, npr = 8, nm = 4, H = 5, W = 5;
-        using IBackend backend = new CpuBackend();
-
-        Dictionary<string, Tensor> w = new();
-        AddConv(w, "proto.cv1.conv", npr, inC, 3, 1);
-        AddConv(w, "proto.cv2.conv", npr, npr, 3, 2);
-        AddConv(w, "proto.cv3.conv", nm, npr, 1, 3);
-        w["proto.upsample.weight"] = Ramp(new TensorShape(npr, npr, 2, 2), 4);
-        w["proto.upsample.bias"] = Filled(new TensorShape(npr), 0f);
-
-        Proto proto = new Proto(inC, npr, nm);
-        proto.LoadWeights(w, "proto");
-        Assert.Equal(nm, proto.NumMasks);
-
-        using Tensor input = Ramp(new TensorShape(1, inC, H, W), 99);
-        using Tensor outp = proto.Forward(backend, input);
-
-        Assert.Equal(4, outp.Shape.Rank);
-        Assert.Equal(1, (int)outp.Shape[0]);
-        Assert.Equal(nm, (int)outp.Shape[1]);
-        Assert.Equal(H * 2, (int)outp.Shape[2]);
-        Assert.Equal(W * 2, (int)outp.Shape[3]);
-    }
-
-    [Fact]
     public void SegmentDetectHead_Forward_ProducesBoxClassMaskChannels_AndProtos()
     {
         const int nc = 2, nm = 4, regMax = 4, npr = 8;

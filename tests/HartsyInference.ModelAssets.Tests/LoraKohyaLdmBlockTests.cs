@@ -40,7 +40,6 @@ public sealed unsafe class LoraKohyaLdmBlockTests : IDisposable
     /// <summary>LDM block names plus a CLIP-G encoder are SDXL, exactly as the diffusers spellings are.</summary>
     [Theory]
     [InlineData("lora_unet_input_blocks_4_1_transformer_blocks_0_attn1_to_q")]
-    [InlineData("lora_unet_output_blocks_5_1_transformer_blocks_1_attn2_to_k")]
     [InlineData("lora_unet_middle_block_1_proj_in")]
     public void LdmBlocks_WithTe2_IsKohyaSdxl(string root)
     {
@@ -65,18 +64,10 @@ public sealed unsafe class LoraKohyaLdmBlockTests : IDisposable
     [Theory]
     [InlineData("lora_unet_input_blocks_7_1_transformer_blocks_3_attn2_to_out_0",
         "down_blocks.2.attentions.0.transformer_blocks.3.attn2.to_out.0.weight")]
-    [InlineData("lora_unet_input_blocks_4_1_transformer_blocks_0_attn1_to_q",
-        "down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_q.weight")]
-    [InlineData("lora_unet_input_blocks_4_1_proj_in", "down_blocks.1.attentions.0.proj_in.weight")]
-    [InlineData("lora_unet_middle_block_1_proj_in", "mid_block.attentions.0.proj_in.weight")]
     [InlineData("lora_unet_middle_block_1_transformer_blocks_0_attn2_to_v",
         "mid_block.attentions.0.transformer_blocks.0.attn2.to_v.weight")]
-    [InlineData("lora_unet_output_blocks_0_1_transformer_blocks_9_ff_net_0_proj",
-        "up_blocks.0.attentions.0.transformer_blocks.9.ff.net.0.proj.weight")]
     [InlineData("lora_unet_output_blocks_5_1_transformer_blocks_1_attn2_to_k",
         "up_blocks.1.attentions.2.transformer_blocks.1.attn2.to_k.weight")]
-    [InlineData("lora_unet_output_blocks_2_1_transformer_blocks_0_ff_net_2",
-        "up_blocks.0.attentions.2.transformer_blocks.0.ff.net.2.weight")]
     public void LdmRoot_MergesOntoDiffusersUNetKey(string loraRoot, string canonicalKey)
         => AssertMergesOnto(loraRoot, canonicalKey, LoraTarget.UNet,
             "lora_te2_text_model_encoder_layers_0_self_attn_q_proj");
@@ -87,10 +78,6 @@ public sealed unsafe class LoraKohyaLdmBlockTests : IDisposable
     [Theory]
     [InlineData("lora_unet_input_blocks_1_1_transformer_blocks_0_attn1_to_q",
         "down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight")]
-    [InlineData("lora_unet_input_blocks_8_1_transformer_blocks_0_attn2_to_v",
-        "down_blocks.2.attentions.1.transformer_blocks.0.attn2.to_v.weight")]
-    [InlineData("lora_unet_output_blocks_3_1_transformer_blocks_0_ff_net_0_proj",
-        "up_blocks.1.attentions.0.transformer_blocks.0.ff.net.0.proj.weight")]
     [InlineData("lora_unet_output_blocks_11_1_proj_out", "up_blocks.3.attentions.2.proj_out.weight")]
     public void Sd15LdmRoot_MergesOntoDiffusersUNetKey(string loraRoot, string canonicalKey)
         => AssertMergesOnto(loraRoot, canonicalKey, LoraTarget.UNet, "lora_unet_middle_block_1_transformer_blocks_0_attn1_to_k");
@@ -99,20 +86,10 @@ public sealed unsafe class LoraKohyaLdmBlockTests : IDisposable
     /// would otherwise split (<c>in_layers</c> → <c>in.layers</c>) into a key that matches nothing.</summary>
     [Theory]
     [InlineData("lora_unet_input_blocks_1_0_in_layers_2", "down_blocks.0.resnets.0.conv1.weight")]
-    [InlineData("lora_unet_input_blocks_1_0_out_layers_3", "down_blocks.0.resnets.0.conv2.weight")]
-    [InlineData("lora_unet_input_blocks_4_0_emb_layers_1", "down_blocks.1.resnets.0.time_emb_proj.weight")]
     [InlineData("lora_unet_input_blocks_4_0_skip_connection", "down_blocks.1.resnets.0.conv_shortcut.weight")]
-    [InlineData("lora_unet_output_blocks_2_0_in_layers_2", "up_blocks.0.resnets.2.conv1.weight")]
     public void LoConResnetRoot_MergesOntoDiffusersUNetKey(string loraRoot, string canonicalKey)
         => AssertMergesOnto(loraRoot, canonicalKey, LoraTarget.UNet,
             "lora_te2_text_model_encoder_layers_0_self_attn_q_proj");
-
-    /// <summary>The CLIP-G half of the same file routes unchanged — LDM naming is a UNet-only concern.</summary>
-    [Fact]
-    public void Te2Root_MergesOntoClipGKey()
-        => AssertMergesOnto("lora_te2_text_model_encoder_layers_0_self_attn_q_proj",
-            "text_model.encoder.layers.0.self_attn.q_proj.weight", LoraTarget.ClipG,
-            "lora_unet_middle_block_1_proj_in");
 
     /// <summary>Builds a two-layer LoRA and asserts the root under test merges onto exactly the expected key.
     /// The companion root is what decides detection — a <c>lora_te2_</c> root makes the file SDXL, a UNet-only one

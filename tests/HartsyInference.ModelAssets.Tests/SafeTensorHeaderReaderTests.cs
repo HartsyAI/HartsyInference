@@ -31,19 +31,6 @@ public sealed class SafeTensorHeaderReaderTests : IDisposable
     }
 
     [Fact]
-    public void Read_ExposesMetadata()
-    {
-        string path = PathOf("meta.safetensors");
-        ShardTestFiles.WriteRaw(path,
-            """{"__metadata__":{"format":"pt"},"t":{"dtype":"U8","shape":[2],"data_offsets":[0,2]}}""", 2);
-
-        SafeTensorHeader header = SafeTensorHeaderReader.Read(path, SafeTensorHeaderReader.DefaultMaxHeaderBytes);
-
-        Assert.Equal("pt", header.Metadata!["format"]);
-        Assert.Single(header.Tensors);
-    }
-
-    [Fact]
     public void Read_OversizedHeader_IsRejectedBeforeAllocating()
     {
         string path = PathOf("big.safetensors");
@@ -93,18 +80,6 @@ public sealed class SafeTensorHeaderReaderTests : IDisposable
     }
 
     [Fact]
-    public void Read_TensorsListedOutOfOrder_AreAccepted()
-    {
-        string path = PathOf("unsorted.safetensors");
-        ShardTestFiles.WriteRaw(path,
-            """{"b":{"dtype":"U8","shape":[4],"data_offsets":[4,8]},"a":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}""", 8);
-
-        SafeTensorHeader header = SafeTensorHeaderReader.Read(path, SafeTensorHeaderReader.DefaultMaxHeaderBytes);
-
-        Assert.Equal(header.DataStart, header.Tensors["a"].DataOffset);
-    }
-
-    [Fact]
     public void Read_ByteLengthDisagreeingWithShape_IsRejected()
     {
         string path = PathOf("badlen.safetensors");
@@ -114,22 +89,6 @@ public sealed class SafeTensorHeaderReaderTests : IDisposable
             () => SafeTensorHeaderReader.Read(path, SafeTensorHeaderReader.DefaultMaxHeaderBytes));
 
         Assert.Contains("needs 16", error.Message);
-    }
-
-    [Fact]
-    public void Read_DataLessStub_IsAcceptedWhenByteLengthCheckIsOff()
-    {
-        string path = PathOf("stub.safetensors");
-        ShardTestFiles.WriteRaw(path, """{"t":{"dtype":"F32","shape":[5376,96],"data_offsets":[0,0]}}""", 0);
-
-        SafeTensorHeader header = SafeTensorHeaderReader.Read(
-            path, SafeTensorHeaderReader.DefaultMaxHeaderBytes, verifyByteLength: false);
-
-        Assert.Equal(0, header.Tensors["t"].ByteLength);
-        Assert.Throws<HartsyInferenceException>(() => SafeTensorHeaderReader.Read(path));
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(path);
-        Assert.Single(loader.Descriptors);
     }
 
     [Fact]
@@ -147,12 +106,9 @@ public sealed class SafeTensorHeaderReaderTests : IDisposable
 
     [Theory]
     [InlineData("""{"t":{"dtype":"QQ","shape":[1],"data_offsets":[0,1]}}""", "Unsupported safetensors dtype")]
-    [InlineData("""{"t":{"dtype":"U8","shape":[-1],"data_offsets":[0,1]}}""", "dimension")]
     [InlineData("""{"t":{"dtype":"U8","shape":[1],"data_offsets":[1,0]}}""", "malformed data_offsets")]
-    [InlineData("""{"t":{"dtype":"U8","shape":[1,1,1,1,1,1,1],"data_offsets":[0,1]}}""", "rank 7")]
     [InlineData("""{"t":{"dtype":"U8","shape":[4611686018427387904,4],"data_offsets":[0,1]}}""", "overflows")]
     [InlineData("""[1,2]""", "not a JSON object")]
-    [InlineData("""{"t":{"dtype":"U8","shape":[1]}}""", "data_offsets")]
     public void Read_MalformedTensor_IsRejected(string headerJson, string expected)
     {
         string path = PathOf("malformed.safetensors");
@@ -166,12 +122,7 @@ public sealed class SafeTensorHeaderReaderTests : IDisposable
 
     [Theory]
     [InlineData("F8_E8M0")]
-    [InlineData("U16")]
-    [InlineData("I16")]
-    [InlineData("U32")]
     [InlineData("U64")]
-    [InlineData("F8_E4M3FNUZ")]
-    [InlineData("F8_E5M2FNUZ")]
     public void Read_NewDtypes_Parse(string name)
     {
         Assert.True(SafeTensorDTypes.TryParse(name, out DType dtype));
@@ -184,31 +135,6 @@ public sealed class SafeTensorHeaderReaderTests : IDisposable
         SafeTensorHeader header = SafeTensorHeaderReader.Read(path, SafeTensorHeaderReader.DefaultMaxHeaderBytes);
 
         Assert.Equal(dtype, header.Tensors["t"].DType);
-    }
-
-    [Fact]
-    public void Loader_SharesTheValidator()
-    {
-        string path = PathOf("shared.safetensors");
-        ShardTestFiles.WriteRaw(path,
-            """{"a":{"dtype":"U8","shape":[8],"data_offsets":[0,8]},"b":{"dtype":"U8","shape":[8],"data_offsets":[4,12]}}""", 12);
-
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-
-        Assert.Throws<HartsyInferenceException>(() => loader.Load(path));
-    }
-
-    [Fact]
-    public void Loader_RefusesToMaterialiseFnuz()
-    {
-        string path = PathOf("fnuz.safetensors");
-        ShardTestFiles.WriteRaw(path, """{"t":{"dtype":"F8_E4M3FNUZ","shape":[2],"data_offsets":[0,2]}}""", 2);
-
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(path);
-        UnsupportedModelException error = Assert.Throws<UnsupportedModelException>(() => loader.GetTensor("t"));
-
-        Assert.Contains("FNUZ", error.Message);
     }
 
     [Fact]

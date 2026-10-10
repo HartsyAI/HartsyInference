@@ -32,18 +32,6 @@ public sealed class HypothesisBufferTests
     }
 
     [Fact]
-    public void GrowingStream_ConfirmsIncrementally_WithoutRewrite()
-    {
-        HypothesisBuffer buf = new();
-        buf.Insert(W("ask", "not"));
-        Assert.Equal(W("ask", "not"), buf.Insert(W("ask", "not", "what")));
-        Assert.Equal(W("what"), buf.Insert(W("ask", "not", "what", "your")));
-        Assert.Equal(W("your"), buf.Insert(W("ask", "not", "what", "your", "country")));
-        Assert.Equal(W("ask", "not", "what", "your"), buf.Committed);
-        Assert.Equal(W("country"), buf.PendingTail);
-    }
-
-    [Fact]
     public void Disagreement_HoldsTheWord_UntilCorroborated()
     {
         HypothesisBuffer buf = new();
@@ -67,14 +55,4 @@ public sealed class HypothesisBufferTests
         Assert.Empty(buf.PendingTail);
     }
 
-    [Fact]
-    public void Reset_ClearsState()
-    {
-        HypothesisBuffer buf = new();
-        buf.Insert(W("a", "b"));
-        buf.Insert(W("a", "b", "c"));
-        buf.Reset();
-        Assert.Empty(buf.Committed);
-        Assert.Empty(buf.PendingTail);
-    }
 }

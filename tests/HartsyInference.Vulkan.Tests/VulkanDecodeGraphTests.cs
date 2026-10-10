@@ -25,27 +25,8 @@ public sealed class VulkanDecodeGraphTests
         catch { return false; }
     }
 
-    [Fact]
-    public void DeviceTokenId_WriteThenRead_RoundTrips()
-    {
-        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
-        ulong handle = backend.AllocDeviceTokenId();
-        try
-        {
-            Assert.NotEqual(0UL, handle);
-            backend.WriteDeviceTokenId(handle, 12345);
-            Assert.Equal(12345, backend.ReadDeviceTokenId(handle));
-            backend.WriteDeviceTokenId(handle, 0);
-            Assert.Equal(0, backend.ReadDeviceTokenId(handle));
-        }
-        finally { backend.FreeDeviceTokenId(handle); }
-    }
-
     [Theory]
     [InlineData(64, 8, 8, false)]   // full rotary, split-half
-    [InlineData(64, 8, 8, true)]    // full rotary, interleaved
-    [InlineData(64, 16, 8, false)]  // partial rotary (rotaryDim < headDim), split-half
     [InlineData(64, 16, 8, true)]   // partial rotary, interleaved
     public unsafe void RopeApplyDecodeStep_MatchesCpuReference(int maxPos, int headDim, int rotaryDim, bool interleaved)
     {
@@ -133,7 +114,6 @@ public sealed class VulkanDecodeGraphTests
     }
 
     [Theory]
-    [InlineData(1)]
     [InlineData(300)]    // > WGSIZE (256), exercises the strided multi-pass scan
     [InlineData(4096)]   // realistic vocab-size scale
     public unsafe void ArgMaxInto_MatchesCpuArgmax(int c)

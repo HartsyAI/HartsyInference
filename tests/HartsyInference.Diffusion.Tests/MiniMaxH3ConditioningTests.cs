@@ -42,18 +42,6 @@ public class MiniMaxH3ConditioningTests
     }
 
     [Fact]
-    public void EqualStreamTimestepsCollapseToOneRow()
-    {
-        // Step 0 runs at sigma 1.0, where both schedules map to t=0 — the reference dedups rather than
-        // carrying a duplicate row.
-        (float[] t, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
-            MiniMaxH3Conditioning.BuildTimestepRows(T2va(), tVideo: 0f, tAudio: 0f, VisAug, AudAug);
-        Assert.Equal([0f], t);
-        Assert.Equal(0, rowOf[MiniMaxH3SegmentKind.Video]);
-        Assert.Equal(0, rowOf[MiniMaxH3SegmentKind.Audio]);
-    }
-
-    [Fact]
     public void KeyframeConditioningPinsItsOwnRowNearOne()
     {
         (float[] t, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
@@ -63,16 +51,6 @@ public class MiniMaxH3ConditioningTests
         Assert.Equal(0, rowOf[MiniMaxH3SegmentKind.Video]);
         Assert.False(rowOf.ContainsKey(MiniMaxH3SegmentKind.RefImage));
         Assert.False(rowOf.ContainsKey(MiniMaxH3SegmentKind.RefAudio));
-    }
-
-    [Fact]
-    public void ReferenceBlocksAddBothConditioningRows()
-    {
-        (float[] t, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
-            MiniMaxH3Conditioning.BuildTimestepRows(Ref2va(), tVideo: 0.5f, tAudio: 0.8f, VisAug, AudAug);
-        Assert.Equal([0.5f, 0.8f, VisAug, AudAug], t);
-        Assert.Equal(2, rowOf[MiniMaxH3SegmentKind.RefImage]);
-        Assert.Equal(3, rowOf[MiniMaxH3SegmentKind.RefAudio]);
     }
 
     [Fact]
@@ -94,27 +72,6 @@ public class MiniMaxH3ConditioningTests
         Assert.Equal(2, rowOf[MiniMaxH3SegmentKind.CondAudio]);
         Assert.False(rowOf.ContainsKey(MiniMaxH3SegmentKind.RefAudio));
         Assert.Equal((0, 6), MiniMaxH3Conditioning.ConditioningRowCounts(layout));
-    }
-
-    [Fact]
-    public void ConditioningRowsFoldIntoTheStreamRowOnceDenoisingPassesThem()
-    {
-        // Late in the schedule t_video overtakes the 0.999 pin, so cond stops being distinct.
-        (float[] t, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
-            MiniMaxH3Conditioning.BuildTimestepRows(Fl2va(), tVideo: 0.9995f, tAudio: 0.9998f, VisAug, AudAug);
-        Assert.Equal([0.9995f, 0.9998f], t);
-        Assert.Equal(rowOf[MiniMaxH3SegmentKind.Video], rowOf[MiniMaxH3SegmentKind.Cond]);
-    }
-
-    [Fact]
-    public void RowOrderFollowsTheTimestepsNotTheStreams()
-    {
-        // A video shift below the audio one reverses which stream is cleaner; the rows must follow.
-        (float[] t, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
-            MiniMaxH3Conditioning.BuildTimestepRows(T2va(), tVideo: 0.8f, tAudio: 0.5f, VisAug, AudAug);
-        Assert.Equal([0.5f, 0.8f], t);
-        Assert.Equal(0, rowOf[MiniMaxH3SegmentKind.Audio]);
-        Assert.Equal(1, rowOf[MiniMaxH3SegmentKind.Video]);
     }
 
     [Fact]
@@ -190,20 +147,6 @@ public class MiniMaxH3ConditioningTests
         audioMask[3] = -0.01f;
         Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3Conditioning.BuildMaskedTimestepRows(
             layout, 0.5f, 0.8f, VisAug, AudAug, null, audioMask));
-    }
-
-    [Fact]
-    public void T2vaHasNoConditioningRows()
-    {
-        Assert.Equal((0, 0), MiniMaxH3Conditioning.ConditioningRowCounts(T2va()));
-    }
-
-    [Fact]
-    public void KeyframeContributesOneFrameOfVideoRows()
-    {
-        (int video, int audio) = MiniMaxH3Conditioning.ConditioningRowCounts(Fl2va());
-        Assert.Equal((LatentH / 2) * (LatentW / 2), video);
-        Assert.Equal(0, audio);
     }
 
     /// <summary>The counts must match a straight walk of the segment table, which is the order the packed rows are

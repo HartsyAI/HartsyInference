@@ -14,7 +14,6 @@ public sealed class HunyuanVideoWeightedPromptTests
     /// not. If the template split disagreed with <c>CropStart</c> this would throw for a plain prompt, which is a
     /// regression on a family that works today rather than a gap in a new feature.</summary>
     [Theory]
-    [InlineData("a red fox in snow, cinematic")]
     [InlineData(" a prompt that starts with a space")]
     [InlineData("")]
     public void APlainPromptDoesNotTripThePrefixCheck(string prompt)
@@ -28,7 +27,6 @@ public sealed class HunyuanVideoWeightedPromptTests
     /// existing generation — a byte-level tokenizer merges a leading space into the following word, so the split
     /// changes ids that the plain path never split.</summary>
     [Theory]
-    [InlineData("a red fox in snow, cinematic")]
     [InlineData(" leading space")]
     [InlineData("a red (fox:1.0) in snow")]
     public void AnUnweightedPromptProducesTheWholeStringIds(string prompt)

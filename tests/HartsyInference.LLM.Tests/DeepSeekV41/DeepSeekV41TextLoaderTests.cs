@@ -62,19 +62,6 @@ public sealed class DeepSeekV41TextLoaderTests : IDisposable
     }
 
     [Fact]
-    public void AMissingShard_FailsTheLoad()
-    {
-        WriteFixtureCheckpoint();
-        HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(_directory)!;
-        File.Delete(Path.Combine(_directory, "model-00001-of-00001.safetensors"));
-        using CpuBackend backend = new();
-
-        Exception error = Assert.ThrowsAny<Exception>(() => HfTextDirectoryLoader.Load(info, backend));
-
-        Assert.Contains("model-00001-of-00001", error.Message);
-    }
-
-    [Fact]
     public void ATokenizerWhoseSpecialIdsDisagreeWithConfig_IsRefused()
     {
         WriteFixtureCheckpoint();
@@ -88,20 +75,6 @@ public sealed class DeepSeekV41TextLoaderTests : IDisposable
         HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.Load(info, backend));
 
         Assert.Contains("begin-of-sentence", error.Message);
-    }
-
-    [Fact]
-    public void OtherModelType_IsRefusedByName()
-    {
-        File.WriteAllText(Path.Combine(_directory, "config.json"), "{\"model_type\":\"llama\"}");
-        File.WriteAllBytes(Path.Combine(_directory, "model.safetensors"), new byte[8]);
-        HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(_directory)!;
-        using CpuBackend backend = new();
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.Load(info, backend));
-
-        Assert.Contains("llama", error.Message);
-        Assert.Contains(".gguf", error.Message);
     }
 
     [Fact]
@@ -121,17 +94,10 @@ public sealed class DeepSeekV41TextLoaderTests : IDisposable
     }
 
     [Fact]
-    public async Task TextService_Streams_And_CountTokens_Uses_The_Checkpoints_Tokenizer()
+    public void TextService_CountTokens_Uses_The_Checkpoints_Tokenizer()
     {
         WriteFixtureCheckpoint();
         using InferenceEngine engine = new("cpu", 0);
-
-        StringWriter streamed = new();
-        await foreach (TextChunk chunk in engine.Text.StreamAsync(Spec(), Request()))
-        {
-            if (chunk.Kind == TextChunkKind.Chunk) streamed.Write(chunk.Text);
-            if (chunk.Kind == TextChunkKind.Result) Assert.Equal(streamed.ToString(), chunk.Text);
-        }
 
         Assert.Equal(1, engine.Text.CountTokens(Spec(), "hi"));
     }

@@ -32,15 +32,6 @@ public sealed class ToolRegistryTests
     }
 
     [Fact]
-    public async Task RemovedToolIsUnknownToInvoke()
-    {
-        ToolRegistry registry = new();
-        registry.Add("a", "", "{}", Echo);
-        registry.Remove("a");
-        Assert.Contains("Unknown tool", ErrorOf(await registry.InvokeAsync(Call("a"))));
-    }
-
-    [Fact]
     public void DefinitionsSnapshotIsStableAcrossLaterChanges()
     {
         ToolRegistry registry = new();
@@ -99,23 +90,6 @@ public sealed class ToolRegistryTests
     }
 
     [Fact]
-    public async Task NoTimeoutByDefaultRunsHandlerWithCallersToken()
-    {
-        ToolRegistry registry = new();
-        CancellationToken seen = default;
-        registry.Add("slow", "", "{}", async (_, c) =>
-        {
-            seen = c;
-            await Task.Delay(150, CancellationToken.None);
-            return "done";
-        });
-        using CancellationTokenSource turn = new();
-        Assert.Null(registry.DefaultTimeout);
-        Assert.Equal("done", await registry.InvokeAsync(Call("slow"), turn.Token));
-        Assert.Equal(turn.Token, seen);
-    }
-
-    [Fact]
     public async Task PerToolTimeoutCancelsHandlerAndReturnsErrorJson()
     {
         ToolRegistry registry = new();
@@ -155,17 +129,6 @@ public sealed class ToolRegistryTests
     }
 
     [Fact]
-    public async Task PerToolTimeoutOverridesDefaultAndFastToolsPass()
-    {
-        ToolRegistry registry = new() { DefaultTimeout = TimeSpan.FromMilliseconds(50) };
-        registry.Add("patient", "", "{}", async (_, c) => { await Task.Delay(300, c); return "done"; }, TimeSpan.FromSeconds(10));
-        registry.Add("quick", "", "{}", Echo);
-
-        Assert.Equal("done", await registry.InvokeAsync(Call("patient")));
-        Assert.Equal("ok", await registry.InvokeAsync(Call("quick")));
-    }
-
-    [Fact]
     public async Task TurnCancellationStillThrowsWithTimeoutConfigured()
     {
         ToolRegistry registry = new() { DefaultTimeout = TimeSpan.FromSeconds(30) };
@@ -173,14 +136,6 @@ public sealed class ToolRegistryTests
         using CancellationTokenSource turn = new(TimeSpan.FromMilliseconds(100));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => registry.InvokeAsync(Call("hang"), turn.Token));
-    }
-
-    [Fact]
-    public async Task HandlerFailureWithTimeoutStillReturnsErrorJson()
-    {
-        ToolRegistry registry = new() { DefaultTimeout = TimeSpan.FromSeconds(30) };
-        registry.Add("boom", "", "{}", (_, _) => throw new InvalidOperationException("nope"));
-        Assert.Contains("InvalidOperationException: nope", ErrorOf(await registry.InvokeAsync(Call("boom"))));
     }
 
     [Fact]

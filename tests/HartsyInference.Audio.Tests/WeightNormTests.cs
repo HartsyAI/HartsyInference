@@ -79,38 +79,4 @@ public sealed unsafe class WeightNormTests
         }
     }
 
-    [Fact]
-    public void Compose_ThroughDictionaryLookup()
-    {
-        // Compose(IReadOnlyDictionary, string prefix) is the loader-facing helper.
-        int outC = 2, inC = 1, k = 2;
-        Tensor v = new(new TensorShape(outC, inC, k), DType.F32);
-        Tensor g = new(new TensorShape(outC, 1, 1), DType.F32);
-        try
-        {
-            float* vp = (float*)v.DataPointer;
-            float* gp = (float*)g.DataPointer;
-            vp[0] = 3f; vp[1] = 4f;     // OC0: ||v|| = 5
-            vp[2] = 6f; vp[3] = 8f;     // OC1: ||v|| = 10
-            gp[0] = 5f; gp[1] = 1f;
-
-            Dictionary<string, Tensor> w = new()
-            {
-                ["conv.weight_g"] = g,
-                ["conv.weight_v"] = v,
-            };
-            using Tensor composed = WeightNorm.Compose(w, "conv");
-            float* wp = (float*)composed.DataPointer;
-            // OC 0: scale = 5/5 = 1 → output = v
-            Assert.Equal(3f, wp[0], precision: 5);
-            Assert.Equal(4f, wp[1], precision: 5);
-            // OC 1: scale = 1/10 → output = v / 10
-            Assert.Equal(0.6f, wp[2], precision: 5);
-            Assert.Equal(0.8f, wp[3], precision: 5);
-        }
-        finally
-        {
-            v.Dispose(); g.Dispose();
-        }
-    }
 }

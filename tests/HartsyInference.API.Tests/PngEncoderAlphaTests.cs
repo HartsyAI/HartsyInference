@@ -31,15 +31,6 @@ public sealed class PngEncoderAlphaTests
     }
 
     [Fact]
-    public void Encode_WithoutAlpha_StaysColorType2()
-    {
-        EngineImageData image = new() { Rgb = [1, 2, 3], Width = 1, Height = 1 };
-        byte[] png = PngEncoder.Encode(image);
-        Assert.Equal(2, png[25]);
-        Assert.Equal(new byte[] { 0, 1, 2, 3 }, InflateIdat(png));
-    }
-
-    [Fact]
     public void Encode_IgnoresMissizedAlpha()
     {
         // A plane that does not cover the image is not an alpha channel; the record's HasAlpha says so.

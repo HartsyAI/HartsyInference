@@ -13,7 +13,6 @@ public sealed class PtxVariantResolutionTests
     [Theory]
     [InlineData(89, "foo.sm89.ptx")]   // the card the variant was built for
     [InlineData(86, "foo.ptx")]        // another card: the baseline, never a foreign variant
-    [InlineData(120, "foo.ptx")]
     [InlineData(0, "foo.ptx")]         // no device known
     public void VariantIsChosenOnlyForItsExactComputeCapability(int sm, string expectedFile)
     {

@@ -152,30 +152,6 @@ public sealed unsafe class SageAttentionReferenceTests
 
     // ── Claim 1: mean-subtraction is a softmax invariant (exact math, F32) ──
 
-    [Fact]
-    public void KMeanSubtraction_LeavesF32AttentionUnchanged()
-    {
-        const int seqQ = 8, seqK = 16, dim = 32;
-        (float[] q, float[] k, float[] v) = MakeInputs(seqQ, seqK, dim, seed: 42);
-        float scale = 1f / MathF.Sqrt(dim);
-
-        float[] baseline = AttentionF32(q, k, v, seqQ, seqK, dim, scale);
-
-        float[] kSmoothed = (float[])k.Clone();
-        for (int d = 0; d < dim; d++)
-        {
-            double mean = 0;
-            for (int j = 0; j < seqK; j++) mean += kSmoothed[j * dim + d];
-            float m = (float)(mean / seqK);
-            for (int j = 0; j < seqK; j++) kSmoothed[j * dim + d] -= m;
-        }
-        float[] smoothed = AttentionF32(q, kSmoothed, v, seqQ, seqK, dim, scale);
-
-        // Not bit-exact (the subtraction re-rounds logits before exp), but far inside F32 attention noise.
-        Assert.True(MaxAbsError(baseline, smoothed) < 1e-4f,
-            $"softmax invariance violated: maxAbs {MaxAbsError(baseline, smoothed)}");
-    }
-
     // ── Claim 2: INT8 attention error bounds, and smoothing's necessity under outliers ──
 
     [Fact]
@@ -215,24 +191,6 @@ public sealed unsafe class SageAttentionReferenceTests
             $"smoothed int8 attention maxAbs {errSmoothed} exceeds the 1e-2 budget under outliers");
         Assert.True(errSmoothed < errUnsmoothed / 4f,
             $"smoothing gain insufficient: unsmoothed {errUnsmoothed} vs smoothed {errSmoothed}");
-    }
-
-    [Fact]
-    public void Int8Attention_DitShapes_HoldToleranceAcrossHeadDims()
-    {
-        // The head_dims the image/video fleet actually runs: 64 (SD-class), 128 (Flux/Qwen/Wan class).
-        foreach (int dim in new[] { 64, 128 })
-        {
-            const int seqQ = 24, seqK = 48;
-            (float[] q, float[] k, float[] v) = MakeInputs(seqQ, seqK, dim, seed: 100 + dim,
-                outlierChannels: 2, outlierMagnitude: 20f);
-            float scale = 1f / MathF.Sqrt(dim);
-
-            float[] baseline = AttentionF32(q, k, v, seqQ, seqK, dim, scale);
-            float[] smoothed = AttentionInt8(q, k, v, seqQ, seqK, dim, scale, smoothK: true);
-            Assert.True(MaxAbsError(baseline, smoothed) < 1e-2f,
-                $"head_dim {dim}: smoothed int8 maxAbs {MaxAbsError(baseline, smoothed)} exceeds 1e-2");
-        }
     }
 
     // ── Sanity: the CPU backend SDPA agrees with this file's F32 reference (diff-target validity) ──

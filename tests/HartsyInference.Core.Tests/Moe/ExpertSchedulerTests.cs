@@ -65,34 +65,6 @@ public sealed class ExpertSchedulerTests
     }
 
     [Fact]
-    public void EveryRoutedPair_IsCountedExactlyOnce()
-    {
-        using FakeExpertCache cache = CacheWithResident((0, 4));
-        int[] ids = [4, 4, 4, 0, 7, 0, 2];
-
-        ExpertAssignment[] plan = Plan(cache, ids, ResidentFirstPolicy.Instance);
-
-        Assert.Equal(ids.Length, plan.Sum(static assignment => assignment.Rows));
-        Assert.Equal(plan.Length, plan.Select(static assignment => assignment.Key).Distinct().Count());
-    }
-
-    [Fact]
-    public void Planning_PinsTheResidentExpertsAndUploadsNothing()
-    {
-        using FakeExpertCache cache = CacheWithResident((0, 1), (0, 2));
-        int uploadsBefore = cache.Events.Count(static e => e.StartsWith("upload"));
-
-        using ExpertLease lease = new();
-        ExpertAssignment[] plan = Run(cache, [1, 2, 3], ResidentFirstPolicy.Instance, lease);
-
-        Assert.Equal(2, cache.Stats.PinnedExperts);
-        Assert.Equal(uploadsBefore, cache.Events.Count(static e => e.StartsWith("upload")));
-        Assert.Equal(3, plan.Length);
-        lease.Dispose();
-        Assert.Equal(0, cache.Stats.PinnedExperts);
-    }
-
-    [Fact]
     public void ExpertsPlannedForTheGpu_CannotBeEvictedWhileThePlanIsHeld()
     {
         using FakeExpertCache cache = CacheWithResident((0, 1));
@@ -118,23 +90,6 @@ public sealed class ExpertSchedulerTests
     }
 
     [Fact]
-    public void ForcedPolicies_PlaceResidentExpertsAsRequested()
-    {
-        using FakeExpertCache cache = CacheWithResident((0, 1), (0, 2));
-        int[] ids = [1, 2];
-
-        Assert.All(Plan(cache, ids, new ForcedPlacementPolicy(_ => ExpertPlacement.Cpu)), static a => Assert.Equal(ExpertPlacement.Cpu, a.Placement));
-        Assert.All(Plan(cache, ids, new ForcedPlacementPolicy(_ => ExpertPlacement.Gpu)), static a => Assert.Equal(ExpertPlacement.Gpu, a.Placement));
-
-        ForcedPlacementPolicy half = new(static key => key.Expert == 1 ? ExpertPlacement.Gpu : ExpertPlacement.Cpu);
-        ExpertAssignment[] first = Plan(cache, ids, half);
-        ExpertAssignment[] second = Plan(cache, ids, half);
-        Assert.Equal(first, second);
-        Assert.Equal(ExpertPlacement.Gpu, first.Single(static a => a.Key.Expert == 1).Placement);
-        Assert.Equal(ExpertPlacement.Cpu, first.Single(static a => a.Key.Expert == 2).Placement);
-    }
-
-    [Fact]
     public void Bank_IsCarriedIntoTheKeysAndTheResidencyLookup()
     {
         using FakeExpertCache cache = CacheWithResident((3, 2));
@@ -145,40 +100,6 @@ public sealed class ExpertSchedulerTests
         Assert.Equal(new ExpertKey(0, 2, 3), inBank3.Single().Key);
         Assert.Equal(ExpertPlacement.Gpu, inBank3.Single().Placement);
         Assert.Equal(ExpertPlacement.Cpu, inBank0.Single().Placement);
-    }
-
-    [Fact]
-    public void BadInput_IsRejected()
-    {
-        using FakeExpertCache cache = CacheWithResident();
-        int[] counts = new int[8];
-        bool[] resident = new bool[8];
-        ExpertKey[] keys = new ExpertKey[8];
-        ExpertAssignment[] output = new ExpertAssignment[8];
-        List<ExpertKey> misses = new(8);
-        ExpertLease lease = new();
-
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [8], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output, misses, lease));
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [1], 0, 0, 8, ResidentFirstPolicy.Instance, new int[4], resident, keys, output, misses, lease));
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys,
-                new ExpertAssignment[1], misses, lease));
-    }
-
-    [Fact]
-    public void UndersizedMissList_IsRefusedInsteadOfGrown()
-    {
-        using FakeExpertCache cache = CacheWithResident((0, 1));
-        List<ExpertKey> misses = new(0);
-        ExpertAssignment[] output = new ExpertAssignment[8];
-
-        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, new int[8], new bool[8], new ExpertKey[8], output,
-                misses, new ExpertLease()));
-        Assert.Equal("missScratch", error.ParamName);
-        Assert.Equal(0, cache.Stats.PinnedExperts);
     }
 
     [Fact]

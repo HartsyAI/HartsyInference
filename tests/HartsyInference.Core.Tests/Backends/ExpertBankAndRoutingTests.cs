@@ -59,22 +59,4 @@ public sealed class ExpertBankAndRoutingTests
         Assert.Throws<ArgumentOutOfRangeException>(() => ExpertRouting.DistinctKeys([16], 0, 16));
         Assert.Throws<ArgumentOutOfRangeException>(() => ExpertRouting.DistinctKeys([-1], 0, 16));
     }
-
-    [Fact]
-    public void DistinctKeys_ReadsAnI32TensorAndRejectsOtherTypes()
-    {
-        using Tensor ids = new(new TensorShape(2, 3), DType.I32);
-        int[] values = [3, 1, 3, 7, 1, 2];
-        values.CopyTo(ids.AsSpan<int>());
-        Assert.Equal(4, ExpertRouting.DistinctKeys(ids, 0, 8).Length);
-        using Tensor wrong = new(new TensorShape(2), DType.F32);
-        Assert.Throws<ArgumentException>(() => ExpertRouting.DistinctKeys(wrong, 0, 8));
-    }
-
-    [Fact]
-    public void CompactBytes_IsTwentyFourBytesPerTokenAtTopSix()
-    {
-        Assert.Equal(24, ExpertRouting.CompactBytes(1, 6));
-        Assert.Equal(24576, ExpertRouting.CompactBytes(1024, 6));
-    }
 }

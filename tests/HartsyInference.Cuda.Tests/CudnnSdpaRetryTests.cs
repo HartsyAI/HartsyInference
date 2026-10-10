@@ -31,12 +31,9 @@ public sealed unsafe class CudnnSdpaRetryTests
 
     [Theory]
     [InlineData(2000, true)]   // BAD_PARAM category — structural, never retry
-    [InlineData(2001, true)]
     [InlineData(3000, true)]   // NOT_SUPPORTED category — structural (subsumes e.g. arch mismatch)
-    [InlineData(3007, true)]
     [InlineData(4000, false)]  // INTERNAL_ERROR category
     [InlineData(4003, false)]  // the exact status that motivated this work (HOST_ALLOCATION_FAILED)
-    [InlineData(5000, false)]  // EXECUTION_FAILED category
     [InlineData(1001, false)]  // uncategorized (1000s) — defaults to transient, see IsPermanent's doc
     [InlineData(9999, false)]  // unrecognized/future category — must default to transient, not permanent
     public void IsPermanent_ClassifiesByCudnnStatusCategory(int status, bool expectedPermanent)

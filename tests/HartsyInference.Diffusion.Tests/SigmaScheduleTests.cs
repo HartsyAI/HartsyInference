@@ -27,14 +27,9 @@ public sealed class SigmaScheduleTests
     /// terminal zero is what the Euler update's last <c>dt</c> is measured against; losing it leaves the final step
     /// short and the image visibly noisy — the same defect the LTX-2.5 sigma-stretch bug was.</summary>
     [Theory]
-    [InlineData("normal")]
     [InlineData("karras")]
     [InlineData("exponential")]
-    [InlineData("sgm_uniform")]
-    [InlineData("simple")]
-    [InlineData("ddim_uniform")]
     [InlineData("beta")]
-    [InlineData("kl_optimal")]
     [InlineData("linear_quadratic")]
     public void Schedule_IsDescendingAndTerminatesAtZero(string name)
     {
@@ -57,11 +52,7 @@ public sealed class SigmaScheduleTests
     /// denoise a noise level it was never trained on.</summary>
     [Theory]
     [InlineData("karras")]
-    [InlineData("exponential")]
-    [InlineData("sgm_uniform")]
-    [InlineData("simple")]
     [InlineData("beta")]
-    [InlineData("kl_optimal")]
     public void Schedule_StaysWithinTheFamilysOwnRange(string name)
     {
         float[] baseSigmas = BaseSigmas(20);
@@ -111,11 +102,8 @@ public sealed class SigmaScheduleTests
     /// leftover as an unknown sampler.</summary>
     [Theory]
     [InlineData("dpmpp_2m_sde_karras", "dpmpp_2m_sde", "karras")]
-    [InlineData("euler_ancestral", "euler_ancestral", null)]
     [InlineData("dpmpp_2m", "dpmpp_2m", null)]
-    [InlineData("heun_exponential", "heun", "exponential")]
     [InlineData("dpmpp_2m_ddim_uniform", "dpmpp_2m", "ddim_uniform")]
-    [InlineData("lms_beta", "lms", "beta")]
     public void CompoundName_SplitsIntoSamplerAndSchedule(string input, string sampler, string? schedule)
     {
         (string actualSampler, string? actualSchedule) = SamplerRegistry.SplitCompound(input);

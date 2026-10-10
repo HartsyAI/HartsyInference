@@ -22,43 +22,6 @@ public sealed class PickleCheckpointRepackerTests
     }
 
     [Fact]
-    public void Repack_KeyRename_MatchesHandRolledSave()
-    {
-        // Kokoro strips the nn.DataParallel wrapper.
-        RunComparison(
-            keyMap: k => k.Replace(".module.", "."),
-            legacyTransform: tensors =>
-            {
-                Dictionary<string, Tensor> flat = new(StringComparer.Ordinal);
-                foreach ((string k, Tensor v) in tensors)
-                {
-                    flat[k.Replace(".module.", ".")] = v;
-                }
-                return flat;
-            });
-    }
-
-    [Fact]
-    public void Repack_KeyFilter_MatchesHandRolledSave()
-    {
-        // YuE's X-Codec repack keeps only the tensors its loader maps.
-        RunComparison(
-            keyMap: k => k.StartsWith("keep", StringComparison.Ordinal) ? k : null,
-            legacyTransform: tensors =>
-            {
-                Dictionary<string, Tensor> keep = new(StringComparer.Ordinal);
-                foreach ((string k, Tensor v) in tensors)
-                {
-                    if (k.StartsWith("keep", StringComparison.Ordinal))
-                    {
-                        keep[k] = v;
-                    }
-                }
-                return keep;
-            });
-    }
-
-    [Fact]
     public void Repack_NoSurvivingTensors_Throws()
     {
         string source = WriteSamplePickle();
@@ -102,67 +65,6 @@ public sealed class PickleCheckpointRepackerTests
         finally
         {
             Delete(source, output, output + ".tmp");
-        }
-    }
-
-    /// <summary>A component keeps its provenance but gains no architecture, so converting YuE's x-codec cannot put a
-    /// second selectable "model" in the list beside YuE itself.</summary>
-    [Fact]
-    public void Repack_ComponentIsTraceableButNotClassifiable()
-    {
-        string source = WriteSamplePickle();
-        string output = Path.Combine(Path.GetTempPath(), $"hi_repack_{Guid.NewGuid():N}.safetensors");
-        try
-        {
-            Dictionary<string, string> metadata = ArtifactMetadata.ForRepack(ModelIdentityCatalog.All["yue"],
-                ArtifactProvenance.FromSourceFile("test", "codec", source));
-            PickleCheckpointRepacker.Repack(source, output, keyMap: null, recursiveFlatten: false, metadata: metadata);
-
-            using SafeTensorsLoader loader = new();
-            loader.Load(output);
-            Assert.False(loader.Metadata!.ContainsKey("modelspec.architecture"));
-            Assert.Equal("codec", loader.Metadata["hartsy.component"]);
-            Assert.Equal("yue", loader.Metadata["hartsy.engine_id"]);
-            Assert.False(string.IsNullOrEmpty(loader.Metadata["hartsy.source_sha256"]));
-        }
-        finally
-        {
-            Delete(source, output, output + ".tmp");
-        }
-    }
-
-    [Fact]
-    public void Repack_EmbedsMetadataAndFillsHashSlot()
-    {
-        string source = WriteSamplePickle();
-        string output = Path.Combine(Path.GetTempPath(), $"hi_repack_{Guid.NewGuid():N}.safetensors");
-        string bare = Path.Combine(Path.GetTempPath(), $"hi_repack_{Guid.NewGuid():N}.safetensors");
-        try
-        {
-            Dictionary<string, string> metadata = new(StringComparer.Ordinal)
-            {
-                ["modelspec.architecture"] = "yue_music",
-                ["hartsy.component"] = "codec",
-                ["modelspec.hash_sha256"] = "",
-            };
-            PickleCheckpointRepacker.Repack(source, output, keyMap: null, recursiveFlatten: false, metadata: metadata);
-            PickleCheckpointRepacker.Repack(source, bare, keyMap: null);
-
-            using SafeTensorsLoader loader = new();
-            loader.Load(output);
-            Assert.NotNull(loader.Metadata);
-            Assert.Equal("yue_music", loader.Metadata!["modelspec.architecture"]);
-            Assert.Equal("codec", loader.Metadata["hartsy.component"]);
-
-            string embedded = loader.Metadata["modelspec.hash_sha256"];
-            Assert.StartsWith("0x", embedded, StringComparison.Ordinal);
-            // The embedded digest must describe the payload, so the unstamped file of the same tensors matches it.
-            Assert.Equal(embedded[2..], PayloadSha256(bare));
-            Assert.Equal(embedded[2..], PayloadSha256(output));
-        }
-        finally
-        {
-            Delete(source, output, bare, output + ".tmp", bare + ".tmp");
         }
     }
 

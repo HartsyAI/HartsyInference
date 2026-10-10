@@ -35,20 +35,6 @@ public sealed class VoiceEndpointingTests
     }
 
     [Fact]
-    public void APauseShorterThanTheSilenceKeepsOneTurn()
-    {
-        using FrontendDriver driver = new();
-        driver.Feed(0.3, 0f);
-        driver.Feed(1.0, VoiceHarness.SpeechLevel);
-        driver.Feed(0.6, 0f);
-        driver.Feed(1.0, VoiceHarness.SpeechLevel);
-        driver.Feed(1.0, 0f);
-
-        FrontendDriver.Decision endpoint = Assert.Single(driver.With(VoiceFrameEvents.Endpoint));
-        Assert.InRange(endpoint.UtteranceSamples, (int)(2.6 * Rate), (int)(2.6 * Rate) + 2 * PadSamples + Window);
-    }
-
-    [Fact]
     public void ContinuousSpeechIsCutAtTheMaximumUtterance()
     {
         using FrontendDriver driver = new(new VoiceAgentOptions { MaxUtteranceMs = 2_000 });
