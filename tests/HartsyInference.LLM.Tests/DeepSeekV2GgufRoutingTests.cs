@@ -53,4 +53,13 @@ public sealed class DeepSeekV2GgufRoutingTests
         TransformerConfig config = GgufConfigFactory.FromGguf(Metadata(expertWeightsNorm: true), Weights());
         Assert.True(config.Moe!.NormTopKProb);
     }
+
+    [Theory]
+    [InlineData("deepseek2", false)]
+    [InlineData("olmoe", false)]
+    [InlineData("qwen2moe", false)]
+    [InlineData("mixtral", true)]
+    [InlineData("qwen3moe", true)]
+    public void AbsentExpertWeightsNorm_DefaultMatchesEachArchitecture(string arch, bool expected)
+        => Assert.Equal(expected, GgufConfigFactory.DefaultNormTopK(arch));
 }

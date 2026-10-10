@@ -7,6 +7,12 @@ namespace HartsyInference.LLM.Transformer;
 /// <summary>Builds a <see cref="TransformerConfig"/> from a loaded GGUF model's metadata + remapped weight dict: reads the llama.cpp architecture kv and infers the three Qwen variation axes structurally from the weights (QKV bias / per-head q-norm presence, tied vs separate lm_head). Covers the Qwen2/Qwen3/Llama family decoder LLMs that <see cref="GenericTransformer"/> runs; throws on missing required metadata.</summary>
 public static class GgufConfigFactory
 {
+    /// <summary>Architectures whose top-k expert weights are not renormalized when the GGUF omits <c>expert_weights_norm</c>.</summary>
+    private static readonly HashSet<string> NoTopKRenormByDefault = ["olmoe", "qwen2moe", "deepseek2"];
+
+    /// <summary>The top-k renormalization default for an architecture whose GGUF omits <c>expert_weights_norm</c>.</summary>
+    internal static bool DefaultNormTopK(string arch) => !NoTopKRenormByDefault.Contains(arch);
+
     /// <summary>Derives a <see cref="TransformerConfig"/> from <paramref name="metadata"/> and the HF-remapped <paramref name="weights"/> (the dict returned by <c>GgufModelLoader.Load(...).Weights</c>).</summary>
     public static TransformerConfig FromGguf(GgufMetadata metadata, IReadOnlyDictionary<string, Tensor> weights, bool lowVramQuant = false)
     {
@@ -266,8 +272,11 @@ public static class GgufConfigFactory
             // *Qwen2-MoE* do NOT (qwen2moe is build_moe_ffn(..., false) upstream). Honor an explicit GGUF flag
             // when present, else default per arch. DeepSeek-V2 (V2-Lite: norm_topk_prob=false) omits the key, and
             // llama.cpp then reads false; DeepSeek-V3 writes it true. So an absent key on deepseek2 means no renorm.
-            bool normTopK = metadata.ContainsKey($"{arch}.expert_weights_norm")
-                ? metadata.GetBool($"{arch}.expert_weights_norm") : arch is not ("olmoe" or "qwen2moe" or "deepseek2");
+            bool hasNormKey = metadata.ContainsKey($"{arch}.expert_weights_norm");
+            bool normTopK = hasNormKey ? metadata.GetBool($"{arch}.expert_weights_norm") : DefaultNormTopK(arch);
+            // Info, not Warning: V2-Lite is a valid checkpoint that omits the key, so a warning would fire on every load.
+            if (arch == "deepseek2" && !hasNormKey)
+                HartsyInference.Core.Logging.Logs.Info("[GgufConfigFactory] deepseek2 GGUF has no expert_weights_norm: top-k expert weights are not renormalized (the V2-Lite default). A DeepSeek-V3 GGUF should write the key.");
             moe = new MoeConfig
             {
                 NumExperts = expertCount,
