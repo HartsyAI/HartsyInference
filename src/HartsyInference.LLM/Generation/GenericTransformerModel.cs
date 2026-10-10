@@ -219,19 +219,14 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
             {
                 List<Tensor> toPreload = [];
                 long budget = free - headroom;
-                foreach (Tensor t in _transformer.EnumerateWeights(includeRedundantSplits: false))
-                {
-                    long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
-                    if (budget - bytes < 0) continue;
-                    budget -= bytes;
-                    toPreload.Add(t);
-                }
                 long skipped = 0;
                 int skippedCount = 0;
                 foreach (Tensor t in _transformer.EnumerateWeights(includeRedundantSplits: false))
                 {
-                    long b = Tensor.ComputeByteSize(t.Shape, t.DType);
-                    if (!toPreload.Contains(t)) { skipped += b; skippedCount++; }
+                    long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
+                    if (budget - bytes < 0) { skipped += bytes; skippedCount++; continue; }
+                    budget -= bytes;
+                    toPreload.Add(t);
                 }
                 Logs.Info($"[preload] free={_backend.FreeMemoryBytes() >> 20}MB headroom={headroom >> 20}MB " +
                     $"kept={toPreload.Count} skipped={skippedCount} ({skipped >> 20}MB left lazy)");
