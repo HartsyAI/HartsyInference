@@ -87,7 +87,7 @@ public sealed class GgufLanguageModel : IDisposable
     }
 
     /// <summary>The pre-tokenizer families that choose a split regex.</summary>
-    public enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2 }
+    internal enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2 }
 
     /// <summary>Maps a <c>tokenizer.ggml.pre</c> name to its family. <c>qwen2</c> is llama.cpp's QWEN2 split.</summary>
     internal static PreTokenizerFamily PreTokenizerFamilyFor(string pre) => pre switch

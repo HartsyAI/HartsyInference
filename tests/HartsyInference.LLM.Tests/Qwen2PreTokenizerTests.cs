@@ -8,13 +8,13 @@ namespace HartsyInference.LLM.Tests;
 public sealed class Qwen2PreTokenizerTests
 {
     [Theory]
-    [InlineData("default", GgufLanguageModel.PreTokenizerFamily.Default)]
-    [InlineData("llama-bpe", GgufLanguageModel.PreTokenizerFamily.Llama3)]
-    [InlineData("gpt-4o", GgufLanguageModel.PreTokenizerFamily.Gpt4o)]
-    [InlineData("qwen2", GgufLanguageModel.PreTokenizerFamily.Qwen2)]
-    [InlineData("kolibri1", GgufLanguageModel.PreTokenizerFamily.Qwen2)]
-    public void PreName_MapsToItsFamily(string pre, GgufLanguageModel.PreTokenizerFamily family) =>
-        Assert.Equal(family, GgufLanguageModel.PreTokenizerFamilyFor(pre));
+    [InlineData("default", "Default")]
+    [InlineData("llama-bpe", "Llama3")]
+    [InlineData("gpt-4o", "Gpt4o")]
+    [InlineData("qwen2", "Qwen2")]
+    [InlineData("kolibri1", "Qwen2")]
+    public void PreName_MapsToItsFamily(string pre, string family) =>
+        Assert.Equal(family, GgufLanguageModel.PreTokenizerFamilyFor(pre).ToString());
 
     [Fact]
     public void DefaultFamily_UsesTheGpt2Split() =>
