@@ -85,19 +85,35 @@ __device__ __forceinline__ void fa_decode_gqa(
     }
 
     const size_t kvBase = ((size_t)b * Hkv + hk) * (size_t)Lk * D;
-    for (int k0 = kStart; k0 <= kEnd; k0 += DEC_BK) {
-        __syncthreads();   // the previous tile (and the query staging) are no longer read
-        for (int i = tid; i < DEC_BK * (D / 4); i += DEC_THREADS) {
+
+    // The next tile is fetched into registers while the current one is computed, so the key/value stream is never idle behind the math.
+    constexpr int LOADS = DEC_BK * (D / 4) / DEC_THREADS;
+    float4 rk[LOADS], rv[LOADS];
+    auto fetch = [&](int k0) {
+        #pragma unroll
+        for (int q = 0; q < LOADS; ++q) {
+            const int i = tid + q * DEC_THREADS;
             const int row = i / (D / 4), c4 = i % (D / 4);
-            float4 kv4 = make_float4(0.f, 0.f, 0.f, 0.f), vv4 = kv4;
+            rk[q] = make_float4(0.f, 0.f, 0.f, 0.f);
+            rv[q] = rk[q];
             if (k0 + row <= kEnd) {
                 const size_t at = kvBase + (size_t)(k0 + row) * D + c4 * 4;
-                dec_load4(K + at, kv4);
-                dec_load4(V + at, vv4);
+                dec_load4(K + at, rk[q]);
+                dec_load4(V + at, rv[q]);
             }
-            *reinterpret_cast<float4*>(Ks + row * KS + c4 * 4) = kv4;
-            *reinterpret_cast<float4*>(Vs + row * D + c4 * 4) = vv4;
         }
+    };
+    if (kStart <= kEnd) fetch(kStart);
+    for (int k0 = kStart; k0 <= kEnd; k0 += DEC_BK) {
+        __syncthreads();   // the previous tile (and the query staging) are no longer read
+        #pragma unroll
+        for (int q = 0; q < LOADS; ++q) {
+            const int i = tid + q * DEC_THREADS;
+            const int row = i / (D / 4), c4 = i % (D / 4);
+            *reinterpret_cast<float4*>(Ks + row * KS + c4 * 4) = rk[q];
+            *reinterpret_cast<float4*>(Vs + row * D + c4 * 4) = rv[q];
+        }
+        if (k0 + DEC_BK <= kEnd) fetch(k0 + DEC_BK);
         __syncthreads();
 
         #pragma unroll
