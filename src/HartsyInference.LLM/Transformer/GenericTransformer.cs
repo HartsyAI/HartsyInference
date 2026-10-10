@@ -269,6 +269,26 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
     }
 
+    /// <summary><see cref="EnumerateStageWeights"/> arranged for <see cref="IBackend.PreloadWeightGroups"/>: the stage's MoE
+    /// layers' experts as one group per projection, every other weight of the stage as a group of one, without the redundant
+    /// split originals.</summary>
+    public IEnumerable<IReadOnlyList<Tensor>> EnumerateStageWeightGroups(int startLayer, int endLayer, bool isFirstStage, bool isLastStage)
+    {
+        HashSet<Tensor> grouped = new(ReferenceEqualityComparer.Instance);
+        for (int i = startLayer; i < endLayer; i++)
+        {
+            foreach (IReadOnlyList<Tensor> group in _layers[i].EnumerateExpertGroups())
+            {
+                foreach (Tensor t in group) grouped.Add(t);
+                yield return group;
+            }
+        }
+        foreach (Tensor t in EnumerateStageWeights(startLayer, endLayer, isFirstStage, isLastStage, includeRedundantSplits: false))
+        {
+            if (!grouped.Contains(t)) yield return [t];
+        }
+    }
+
     /// <summary>The weight subset one pipeline stage needs resident on ITS backend: the layer range's tensors, plus (first stage) the embedding norm and (last stage) the tied/untied head, final norm, and PLE projection. The union over a full contiguous stage tiling equals <see cref="EnumerateWeights"/> exactly — unit-asserted, since a dropped tensor here silently becomes a per-op PCIe re-upload.</summary>
     public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
         bool includeRedundantSplits = true)

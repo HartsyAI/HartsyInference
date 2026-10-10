@@ -44,6 +44,10 @@ public interface ITextService
     /// <summary>The residency plan each loaded model was admitted under, for the memory view. Default: none, so an existing <see cref="ITextService"/> keeps compiling unchanged.</summary>
     IReadOnlyList<LoadedModelResidency> LoadedResidency => [];
 
+    /// <summary>The placement each loaded text model was given by the placement planner: one GPU, a split, or expert offload,
+    /// with the reason.</summary>
+    IReadOnlyList<LoadedModelPlacement> LoadedPlacements => [];
+
     /// <summary>Frees deployment <paramref name="deploymentId"/>'s model, but only while that deployment still holds its device: one that another deployment replaced is
     /// reported <see cref="DeploymentUnloadOutcome.AlreadyGone"/>, and its device keeps the model it holds now. Default: not supported, like <see cref="DeployAsync"/>.</summary>
     DeploymentUnloadOutcome UnloadDeployment(string deploymentId)

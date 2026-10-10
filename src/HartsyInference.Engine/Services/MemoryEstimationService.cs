@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Cuda;
@@ -6,6 +7,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.DeepSeekV41;
 
 namespace HartsyInference.Engine.Services;
@@ -56,6 +58,9 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         VramPolicy policy = VramPolicyRegistry.Resolve(backend, request.Vram);
         if (spec.Modality == Modality.Text && TextMemoryProfile.Handles(spec.LocalPath))
             return Task.FromResult(TextFit(spec.LocalPath!, policy));
+        if (spec.Modality == Modality.Text && GgufPlacementDevice(spec.LocalPath) is string device)
+            return Task.FromResult(GgufTextFit(spec.LocalPath!, device, policy));
+
         long totalBytes = TotalBytes(backend);
         if (totalBytes <= 0)
         {
@@ -102,6 +107,58 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
             Reason = plan.Reason,
         };
     }
+
+    /// <summary>The CUDA device a GGUF text model would be planned on: the engine's own ordinal. Null when the checkpoint is not a
+    /// GGUF file or the engine does not run on CUDA, so the generic estimate applies.</summary>
+    private string? GgufPlacementDevice(string? path)
+    {
+        if (path is null || !path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) || !File.Exists(path)) return null;
+        if (BackendFactory.Kind(BackendFactory.Resolve(_engine.BackendSelector)) != "cuda") return null;
+        return BackendFactory.WithOrdinal("cuda", BackendFactory.ParseOrdinal(_engine.BackendSelector));
+    }
+
+    /// <summary>A GGUF language model's fit: the placement planner's answer for the engine's device, with the setting's mode and
+    /// <see cref="TextPlacementPlanner.MinContextTokens"/> of context. A model already loaded fits as it was placed, since its own
+    /// weights are already out of the free memory a fresh plan would read. A planning failure (no CUDA device, an unreadable
+    /// header) reads as <see cref="MemoryFitVerdict.Unknown"/> rather than an exception.</summary>
+    private MemoryFit GgufTextFit(string path, string device, VramPolicy policy)
+    {
+        foreach (LoadedModelPlacement loaded in _engine.Text.LoadedPlacements)
+        {
+            if (string.Equals(Path.GetFullPath(loaded.ModelPath), Path.GetFullPath(path), StringComparison.Ordinal))
+            {
+                return FitFromPlacement(loaded.Placement with { Reason = $"Already loaded. {loaded.Placement.Reason}" }, policy.Tier);
+            }
+        }
+        try
+        {
+            TextPlacement plan = TextPlacementProbe.PlanGguf(path, device, TextPlacementModes.Parse(EngineKnobs.TextPlacement.Value),
+                TextPlacementPlanner.MinContextTokens, includeRedundantSplits: true);
+            return FitFromPlacement(plan, policy.Tier);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new MemoryFit
+            {
+                Verdict = MemoryFitVerdict.Unknown,
+                EffectiveTier = policy.Tier,
+                Reason = $"The placement could not be planned: {ex.Message}",
+            };
+        }
+    }
+
+    /// <summary>A placement as a fit: one GPU and a split are both full-speed residency; expert offload works but runs part of the
+    /// model on the CPU, so it reads as <see cref="MemoryFitVerdict.Streamed"/>; nothing fitting is
+    /// <see cref="MemoryFitVerdict.Infeasible"/>.</summary>
+    internal static MemoryFit FitFromPlacement(TextPlacement plan, VramTier tier) => new()
+    {
+        Verdict = !plan.Feasible ? MemoryFitVerdict.Infeasible
+            : plan.Mode == TextPlacementMode.Offload ? MemoryFitVerdict.Streamed
+            : MemoryFitVerdict.Resident,
+        CapacityBytes = plan.AvailableBytes,
+        EffectiveTier = tier,
+        Reason = plan.Reason,
+    };
 
     /// <summary>Total VRAM of <paramref name="backend"/>, cached per backend instance (a SetBackend swap re-reads).</summary>
     private long TotalBytes(IBackend backend)

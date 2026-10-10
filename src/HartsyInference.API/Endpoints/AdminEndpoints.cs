@@ -101,6 +101,7 @@ public static class AdminEndpoints
         {
             HostAvailableBytes = HostMemoryInfo.AvailableBytes(),
             Models = [.. engine.Text.LoadedResidency.Select(LoadedModelMemoryDto.For)],
+            Placements = [.. engine.Text.LoadedPlacements.Select(LoadedModelPlacementDto.For)],
         }));
 
         // The text model packages under a directory in the models root, discovered from disk; `root` defaults to its llm folder. Nothing is loaded.

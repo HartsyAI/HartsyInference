@@ -36,25 +36,40 @@ public static class CudaTopology
         int count = CudaContext.GetDeviceCount();
         for (int ordinal = 0; ordinal < count; ordinal++)
         {
-            try
+            if (ProbeDevice(ordinal) is GpuTopologyInfo info)
             {
-                using CudaContext context = new CudaContext(ordinal);
-                (nuint free, nuint total) = context.GetMemoryInfo();
-                devices.Add(new GpuTopologyInfo(
-                    ordinal,
-                    context.DeviceName,
-                    (long)total,
-                    (long)free,
-                    context.ComputeCapabilityMajor,
-                    context.ComputeCapabilityMinor,
-                    context.MultiprocessorCount));
-            }
-            catch (Exception ex)
-            {
-                Logs.Warning($"[Cuda] Topology probe failed for device {ordinal}: {ex.Message}");
+                devices.Add(info);
             }
         }
         return devices;
+    }
+
+    /// <summary>Probes one CUDA device; null when CUDA is unavailable, the ordinal is out of range, or the probe fails. Binds the
+    /// device's primary context briefly, as <see cref="Probe"/> does for each device.</summary>
+    public static GpuTopologyInfo? ProbeDevice(int ordinal)
+    {
+        if (!CudaContext.IsAvailable() || ordinal < 0 || ordinal >= CudaContext.GetDeviceCount())
+        {
+            return null;
+        }
+        try
+        {
+            using CudaContext context = new CudaContext(ordinal);
+            (nuint free, nuint total) = context.GetMemoryInfo();
+            return new GpuTopologyInfo(
+                ordinal,
+                context.DeviceName,
+                (long)total,
+                (long)free,
+                context.ComputeCapabilityMajor,
+                context.ComputeCapabilityMinor,
+                context.MultiprocessorCount);
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Cuda] Topology probe failed for device {ordinal}: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>Probes every ordered device pair's peer-link capability. Query-only — peer access is never enabled, so context state is untouched. Empty when CUDA is unavailable or fewer than two devices.</summary>

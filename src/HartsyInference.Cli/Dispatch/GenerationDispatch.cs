@@ -147,6 +147,7 @@ public static class GenerationDispatch
             // target quant selector), so any non-empty sentinel works here — see its doc comment.
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
             AlwaysFreeMemory = parameters.GetBool("always-free-memory", false) ? true : null,
+            Placement = parameters.GetStringOrNull("placement"),
         };
 
         StringBuilder text = new StringBuilder();
