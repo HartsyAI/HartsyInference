@@ -381,7 +381,8 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Whether <paramref name="pointer"/> is a member of a weight group rather than an allocation of its own.</summary>
         internal bool IsWeightGroupMember(ulong pointer) => _slabMembers.ContainsKey(pointer);
 
-        /// <summary>Distinct weight-group allocations still held.</summary>
+        /// <summary>Distinct weight-group allocations still held. Walks every member, so it is for tests and diagnostics, not a
+        /// hot path.</summary>
         internal int WeightGroupCount => _slabMembers.Values.Distinct().Count();
 
         /// <summary>Uploads <paramref name="members"/> into ONE persistent allocation and registers each as a resident
@@ -403,6 +404,8 @@ internal static unsafe class GpuTransferHelper
                 {
                     continue;
                 }
+                // Not resident as a weight (checked above), so the per-weight preload uploads or promotes it: this call owns it,
+                // as the static PreloadWeight reports true for the same case.
                 if (TierOf(member) == GpuResidencyTier.Activation || GpuResidencyCache<ulong>.ByteSize(member) == 0)
                 {
                     PreloadWeight(member);
@@ -457,15 +460,32 @@ internal static unsafe class GpuTransferHelper
             }
 
             WeightSlab slab = new(basePtr, pending.Count);
-            for (int i = 0; i < pending.Count; i++)
+            int registered = 0;
+            try
             {
-                ulong pointer = basePtr + (ulong)offsets[i];
-                Weights[pending[i]] = pointer;
-                CachedBuffers.Add(pointer);
-                _slabMembers[pointer] = slab;
-                UploadTracker.GetOrCreateValue(pending[i]).Blocked = true;
-                uploaded.Add(pending[i]);
+                for (; registered < pending.Count; registered++)
+                {
+                    ulong pointer = basePtr + (ulong)offsets[registered];
+                    _slabMembers[pointer] = slab;
+                    Weights[pending[registered]] = pointer;
+                    CachedBuffers.Add(pointer);
+                    UploadTracker.GetOrCreateValue(pending[registered]).Blocked = true;
+                }
             }
+            catch
+            {
+                // Nothing of this group may stay registered: the caller's rollback only knows the members returned to it.
+                for (int i = 0; i <= Math.Min(registered, pending.Count - 1); i++)
+                {
+                    ulong pointer = basePtr + (ulong)offsets[i];
+                    Weights.Remove(pending[i]);
+                    CachedBuffers.Remove(pointer);
+                    _slabMembers.Remove(pointer);
+                }
+                CudaMemory.Free(basePtr);
+                throw;
+            }
+            uploaded.AddRange(pending);
             return uploaded;
         }
 
