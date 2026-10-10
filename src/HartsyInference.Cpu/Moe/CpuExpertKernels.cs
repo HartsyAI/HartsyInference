@@ -119,32 +119,28 @@ public static unsafe partial class CpuExpertKernels
         float* x, int rows, float* y, sbyte* codes, float* scales, int* sums, float* hiddenAct, bool simd, bool parallel)
     {
         QuantizeRows(x, rows, hidden, codes, scales, sums);
-        if (parallel)
-        {
-            // Pointers into pinned memory cross into the fan-out as addresses: a lambda cannot capture a fixed local.
-            nint g = (nint)gate, u = (nint)up, c = (nint)codes, sc = (nint)scales, su = (nint)sums, a = (nint)hiddenAct;
-            CpuParallel.ForRanges(intermediate, RowsPerRange, 2L * rows * hidden, (start, length) =>
-                GateUpRows(program, dtypes, hidden, intermediate, (byte*)g, (byte*)u, (sbyte*)c, (float*)sc, (int*)su, rows,
-                    (float*)a, (int)start, (int)(start + length), simd));
-        }
-        else
-        {
-            GateUpRows(program, dtypes, hidden, intermediate, gate, up, codes, scales, sums, rows, hiddenAct, 0, intermediate, simd);
-        }
+        if (parallel) GateUpParallel(program, dtypes, hidden, intermediate, (nint)gate, (nint)up, (nint)codes, (nint)scales, (nint)sums, rows, (nint)hiddenAct, simd);
+        else GateUpRows(program, dtypes, hidden, intermediate, gate, up, codes, scales, sums, rows, hiddenAct, 0, intermediate, simd);
 
         QuantizeRows(hiddenAct, rows, intermediate, codes, scales, sums);
-        if (parallel)
-        {
-            nint d = (nint)down, c = (nint)codes, sc = (nint)scales, su = (nint)sums, yo = (nint)y;
-            CpuParallel.ForRanges(hidden, RowsPerRange, (long)rows * intermediate, (start, length) =>
-                DownRows(dtypes, hidden, intermediate, (byte*)d, (sbyte*)c, (float*)sc, (int*)su, rows, (float*)yo, (int)start,
-                    (int)(start + length), simd));
-        }
-        else
-        {
-            DownRows(dtypes, hidden, intermediate, down, codes, scales, sums, rows, y, 0, hidden, simd);
-        }
+        if (parallel) DownParallel(dtypes, hidden, intermediate, (nint)down, (nint)codes, (nint)scales, (nint)sums, rows, (nint)y, simd);
+        else DownRows(dtypes, hidden, intermediate, down, codes, scales, sums, rows, y, 0, hidden, simd);
     }
+
+    // The fan-outs live in their own methods: a lambda's captured parameters are allocated on entry to the method that declares
+    // them, whichever branch then runs, and the serial path must stay allocation-free. Pointers cross as addresses because a lambda
+    // cannot capture a fixed local.
+    private static void GateUpParallel(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, nint gate, nint up,
+        nint codes, nint scales, nint sums, int rows, nint hiddenAct, bool simd) =>
+        CpuParallel.ForRanges(intermediate, RowsPerRange, 2L * rows * hidden, (start, length) =>
+            GateUpRows(program, dtypes, hidden, intermediate, (byte*)gate, (byte*)up, (sbyte*)codes, (float*)scales, (int*)sums, rows,
+                (float*)hiddenAct, (int)start, (int)(start + length), simd));
+
+    private static void DownParallel(ExpertDTypes dtypes, int hidden, int intermediate, nint down, nint codes, nint scales, nint sums,
+        int rows, nint y, bool simd) =>
+        CpuParallel.ForRanges(hidden, RowsPerRange, (long)rows * intermediate, (start, length) =>
+            DownRows(dtypes, hidden, intermediate, (byte*)down, (sbyte*)codes, (float*)scales, (int*)sums, rows, (float*)y, (int)start,
+                (int)(start + length), simd));
 
     /// <summary>Output rows a parallel range covers: enough dot products to outweigh handing the range out.</summary>
     private const int RowsPerRange = 64;

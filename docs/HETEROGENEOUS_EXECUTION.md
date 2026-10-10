@@ -5,6 +5,15 @@ How one layer's routed experts run across the GPU and the CPU. This document cov
 
 ## What is in place
 
+- **Production path (alpha.331).** `MoeFeedForward` runs a layer through `MoeExpertOffload` when the text placement planner
+  chooses expert offload. It plans with `ExpertScheduler.Plan` against a `CudaExpertCache`. Resident experts run through the
+  model's existing device projections, which find the cache's copies; a miss serving at least `StreamRowThreshold` rows (a
+  prefill) runs on the device from a copy uploaded for that call; other misses run on the CPU through
+  `PackedExpertHostRunner`. The host rows are gathered on the device and read back once before any device expert is queued, so
+  the CPU work overlaps the device's. Each CPU expert is combined with its own scatter-add, because the combine kernel needs
+  distinct rows per call. Admission after each layer fills free cache room with misses, and once full admits only hot experts
+  (decayed-LFU score at least `AdmitMinScore`), one per layer per step.
+
 - **Plan.** `ExpertScheduler.Plan` assigns each routed expert a placement (`Gpu` or `Cpu`) and a row count, and pins the
   resident experts so they cannot be evicted before they run. Planning never uploads.
 - **Execute.** `HeterogeneousExpertExecutor.Execute` takes the plan and the expert-major rows (as `MoeBuildDispatch` lays

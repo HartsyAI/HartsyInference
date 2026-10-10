@@ -109,13 +109,16 @@ The 4090 is shared with other work.
   so parity against llama.cpp needs explicit-id runs through `llama-server`.
 - Smoke test, one request, not a benchmark: Granite-3B Q4_K_M on the A40, commit `915324e8`. Output
   `The capital of France is Paris.`, prompt 35.6 tok/s, decode 33.4 tok/s, peak VRAM 1.5 GB, host RSS 1.9 GB.
-- Expert placement on CUDA, the default. Each routed expert runs on the device from its quantized tensors
-  (`MoeFeedForward.Forward`, lines 156-169). The Granite-3B run used 1.5 GB of VRAM for a 2.06 GB quantized file, which
-  fits this. The whole quantized model must therefore fit device memory. Generic MoE has no expert offload or
-  streaming; only DeepSeek-V4.1 has an expert cache. Mixtral Q4_K (26.4 GB) fits the 48 GB A40 and not a 24 GB card.
-- The host expert runtime (`RunRoutedThroughRuntime`, F32 expert arrays, `CpuOnlyPolicy`) runs only when
-  `MoeFeedForward.UseHostExpertRuntime` is set. Nothing in `src/` sets it. `CudaExpertDeviceRunner` has no
-  construction site.
+- Expert placement on CUDA. The text placement planner (alpha.329) decides each GGUF's placement before loading it: one GPU,
+  a layer split across GPUs, or expert offload (`TextPlacementPlanner`, `vram.textPlacement`, `TextRequest.Placement`).
+  A MoE layer's experts take one device allocation per projection (alpha.328), so Qwen3-30B-A3B Q4_K_M (18.5 GB) runs
+  on one 24 GB RTX 4090 at about 24 tok/s. Under expert offload (alpha.331) a `CudaExpertCache` holds the experts its
+  budget allows and the rest run on the CPU from the packed kernels (`MoeExpertOffload`). Measured on the RTX 3060 alone
+  (7.4 GB cache, 46% of the experts): 61-70% of routed rows from the cache and 4-5 tok/s decode, bound by the CPU
+  kernels (about 1 ms per expert row with the row-parallel kernel); faster kernels are the open follow-up.
+- The F32 host expert runtime (`RunRoutedThroughRuntime`, `CpuOnlyPolicy`) still runs only when
+  `MoeFeedForward.UseHostExpertRuntime` is set; expert offload is the production path. `CudaExpertDeviceRunner` (F32 only)
+  has no construction site: resident quantized experts run through the existing device projections instead.
 - The CPU device path dequantizes everything to F32 (`GgufLanguageModel.Load`, `dequantizeToF32`). The load guard
   (`TextService.EnsureRamHeadroomFor`) requires 2.5 times the file on that path, which is less than the F32 size. For
   DeepSeek-V2-Lite the F32 weights are about 63 GB against 26 GB required, and the local host had 41 GB free. Until the

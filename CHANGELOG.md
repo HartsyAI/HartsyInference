@@ -22,6 +22,18 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.331
+
+- **Added: expert offload runs.** When the text placement planner chooses offload for a GGUF MoE model (by `auto`, or forced with `offload`), the load builds a `MoeExpertOffload`. Its parts:
+  - **Cache.** A `CudaExpertCache` of the planned budget holds routed experts, seeded evenly across the layers at load.
+  - **Dense weights.** They are preloaded as before. Weight casts are not cached on that backend, so prefill casts cannot grow into the expert budget.
+  - **Where each expert runs.** `MoeFeedForward` plans each layer with `ExpertScheduler.Plan`. Resident experts run through the existing device projections. A miss serving 16 or more rows (a prefill) runs on the device from a copy uploaded for that call. Other misses run on the CPU through `PackedExpertHostRunner`, reading each projection in its own format.
+  - **Overlap.** Host rows are gathered on the device and read back once, before any device expert is queued, so the CPU work overlaps the device's. Each CPU expert's output is combined with its own scatter-add.
+  - **Admission.** Misses fill free cache room. Once the cache is full, only experts whose decayed-LFU score reaches 8 may displace one, at most one per layer per step.
+  - **Planner and kernels.** The planner refuses offload when the experts are in a format the CPU kernels do not read. `CpuExpertKernels.ApplyParallel` spreads one expert's rows across cores, bit-identical to the serial kernel.
+  - **Measured.** Qwen3-30B-A3B Q4_K_M on the RTX 3060 alone (7.4 GB cache, 46% of the experts, 9.5 GB peak VRAM): 61-70% of routed rows from the cache and 4-5 tok/s decode. The CPU expert kernels bound it, at about 1 ms per expert row. A forced offload on the RTX 4090, where every expert fits the cache, gives tokens identical to the GPU placement. On 10 greedy prompts against the 4090, offload on the 3060 matched 4 of 10 outright, the same as an all-GPU 3060+4090 split.
+  - **Tests.** `MoeExpertOffloadTests` (CPU: every split matches the direct path to 1e-5, each routed pair runs once, large batches stream, admission fills without evicting, reload detaches) and `CudaMoeOffloadTests` (Q4_K on the device against the direct path, relative error at most 1.2e-4).
+
 ## alpha.330
 
 - **Added: the packed CPU expert kernels read Q5_K and Q6_K, and each projection may use its own format.** `CpuExpertKernels` now runs an expert whose gate, up and down are any of Q8_0, Q4_K, Q5_K or Q6_K (`ExpertDTypes`), as a GGUF K-quant mix stores them: Q4_K_M keeps half of Qwen3-30B-A3B's down projections in Q6_K. Q6_K's 16-value scales split each 32-value activation block into two integer sums; Q5_K adds the fifth bit to Q4_K's layout. The AVX2 paths match the scalar paths bit for bit, and a steady-state call still allocates nothing. `PackedExpertHostRunner` gains a constructor that reads each projection in its tensor's own format; the single-format constructor keeps refusing other formats. Measured against the F32 reference on the dequantized weights:
