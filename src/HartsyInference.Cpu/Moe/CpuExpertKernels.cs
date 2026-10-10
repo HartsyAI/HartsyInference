@@ -7,10 +7,12 @@ namespace HartsyInference.Cpu.Moe;
 
 /// <summary>
 /// Quantized expert kernels for the CPU: one MoE expert <c>down( act(clampGate(Gate·x)) * clampUp(Up·x) )</c> computed
-/// directly on packed Q8_0 or Q4_K bytes, for 1 to 8 token rows at once.
+/// directly on packed Q8_0, Q4_K, Q5_K or Q6_K bytes, for 1 to 8 token rows at once. Each projection may use its own format, as
+/// a GGUF K-quant mix does (Q4_K_M keeps some down projections in Q6_K).
 ///
 /// <para><b>Layout.</b> Gate and up are <c>[intermediate, hidden]</c> row-major, down is <c>[hidden, intermediate]</c>;
-/// each row is <c>dtype.ComputeByteCount(cols)</c> bytes, exactly as <c>ExpertPackWriter</c> writes them.</para>
+/// each row is <c>dtype.ComputeByteCount(cols)</c> bytes, exactly as <c>ExpertPackWriter</c> writes them and as a GGUF stores
+/// one expert's slice of its stacked expert tensor.</para>
 ///
 /// <para><b>Integer path.</b> Each token's input row is quantized once to int8 in 32-element blocks, each with a float
 /// scale and the plain sum of its codes. A weight row's dot product is then an exact int32 sum per block, folded into
@@ -27,10 +29,13 @@ public static unsafe partial class CpuExpertKernels
     /// <summary>Most token rows a single call accepts.</summary>
     public const int MaxRows = 8;
 
-    /// <summary>Runs the expert, using AVX2 when the CPU supports it.</summary>
+    /// <summary>Whether the kernels read <paramref name="dtype"/>.</summary>
+    public static bool Supports(DType dtype) => dtype == DType.Q8_0 || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K;
+
+    /// <summary>Runs the expert with every projection in <paramref name="dtype"/>, using AVX2 when the CPU supports it.</summary>
     /// <param name="program">Activation and clamp bounds.</param>
-    /// <param name="dtype">Packed weight dtype: <see cref="DType.Q8_0"/> or <see cref="DType.Q4_K"/>.</param>
-    /// <param name="hidden">Model width H; a multiple of 256 for Q4_K and of 32 for Q8_0.</param>
+    /// <param name="dtype">Packed weight dtype: Q8_0, Q4_K, Q5_K or Q6_K.</param>
+    /// <param name="hidden">Model width H; a multiple of 256 for the K-quants and of 32 for Q8_0.</param>
     /// <param name="intermediate">Expert inner width I; same divisibility as <paramref name="hidden"/>.</param>
     /// <param name="gate">Packed gate matrix, <c>[I, H]</c>.</param>
     /// <param name="up">Packed up matrix, <c>[I, H]</c>.</param>
@@ -39,23 +44,35 @@ public static unsafe partial class CpuExpertKernels
     /// <param name="rows">Token rows, 1 to <see cref="MaxRows"/>.</param>
     /// <param name="y"><c>rows × H</c> outputs, overwritten.</param>
     /// <exception cref="ArgumentException">A shape, buffer length or divisibility rule is violated.</exception>
-    /// <exception cref="NotSupportedException">The dtype is not Q8_0 or Q4_K.</exception>
+    /// <exception cref="NotSupportedException">The dtype is not one <see cref="Supports"/> accepts.</exception>
     public static void Apply(ExpertProgram program, DType dtype, int hidden, int intermediate, ReadOnlySpan<byte> gate,
         ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y) =>
-        Run(program, dtype, hidden, intermediate, gate, up, down, x, rows, y, SimdDispatch.IsAvx2Supported);
+        Run(program, new ExpertDTypes(dtype, dtype, dtype), hidden, intermediate, gate, up, down, x, rows, y, SimdDispatch.IsAvx2Supported);
+
+    /// <summary>Runs the expert with each projection in its own format, using AVX2 when the CPU supports it.</summary>
+    /// <inheritdoc cref="Apply(ExpertProgram, DType, int, int, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{float}, int, Span{float})"/>
+    public static void Apply(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, ReadOnlySpan<byte> gate,
+        ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y) =>
+        Run(program, dtypes, hidden, intermediate, gate, up, down, x, rows, y, SimdDispatch.IsAvx2Supported);
 
     /// <summary>The same computation without SIMD. Public so a test can hold the AVX2 path to it.</summary>
     /// <inheritdoc cref="Apply"/>
     public static void ApplyScalar(ExpertProgram program, DType dtype, int hidden, int intermediate, ReadOnlySpan<byte> gate,
         ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y) =>
-        Run(program, dtype, hidden, intermediate, gate, up, down, x, rows, y, simd: false);
+        Run(program, new ExpertDTypes(dtype, dtype, dtype), hidden, intermediate, gate, up, down, x, rows, y, simd: false);
 
-    private static void Run(ExpertProgram program, DType dtype, int hidden, int intermediate, ReadOnlySpan<byte> gate,
+    /// <summary>The per-projection computation without SIMD. Public so a test can hold the AVX2 path to it.</summary>
+    /// <inheritdoc cref="Apply(ExpertProgram, ExpertDTypes, int, int, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{float}, int, Span{float})"/>
+    public static void ApplyScalar(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, ReadOnlySpan<byte> gate,
+        ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y) =>
+        Run(program, dtypes, hidden, intermediate, gate, up, down, x, rows, y, simd: false);
+
+    private static void Run(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, ReadOnlySpan<byte> gate,
         ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y, bool simd)
     {
         ArgumentNullException.ThrowIfNull(program);
         program.Validated();
-        ValidateShapes(dtype, hidden, intermediate, gate.Length, up.Length, down.Length, x.Length, rows, y.Length);
+        ValidateShapes(dtypes, hidden, intermediate, gate.Length, up.Length, down.Length, x.Length, rows, y.Length);
 
         int maxDim = Math.Max(hidden, intermediate);
         int maxBlocks = maxDim / QuantBlock;
@@ -75,7 +92,7 @@ public static unsafe partial class CpuExpertKernels
             fixed (int* sumsP = sums)
             fixed (float* ap = hiddenAct)
             {
-                Core(program, dtype, hidden, intermediate, gp, up0, dp, xp, rows, yp, cp, sp, sumsP, ap, simd);
+                Core(program, dtypes, hidden, intermediate, gp, up0, dp, xp, rows, yp, cp, sp, sumsP, ap, simd);
             }
         }
         finally
@@ -87,23 +104,24 @@ public static unsafe partial class CpuExpertKernels
         }
     }
 
-    private static void Core(ExpertProgram program, DType dtype, int hidden, int intermediate, byte* gate, byte* up, byte* down,
+    private static void Core(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, byte* gate, byte* up, byte* down,
         float* x, int rows, float* y, sbyte* codes, float* scales, int* sums, float* hiddenAct, bool simd)
     {
         int hiddenBlocks = hidden / QuantBlock;
         int interBlocks = intermediate / QuantBlock;
-        int gateRowBytes = checked((int)dtype.ComputeByteCount(hidden));
-        int downRowBytes = checked((int)dtype.ComputeByteCount(intermediate));
+        int gateRowBytes = checked((int)dtypes.Gate.ComputeByteCount(hidden));
+        int upRowBytes = checked((int)dtypes.Up.ComputeByteCount(hidden));
+        int downRowBytes = checked((int)dtypes.Down.ComputeByteCount(intermediate));
 
         QuantizeRows(x, rows, hidden, codes, scales, sums);
         for (int i = 0; i < intermediate; i++)
         {
             byte* gateRow = gate + (long)i * gateRowBytes;
-            byte* upRow = up + (long)i * gateRowBytes;
+            byte* upRow = up + (long)i * upRowBytes;
             for (int r = 0; r < rows; r++)
             {
-                float g = DotRow(dtype, gateRow, codes + r * hidden, scales + r * hiddenBlocks, sums + r * hiddenBlocks, hidden, simd);
-                float u = DotRow(dtype, upRow, codes + r * hidden, scales + r * hiddenBlocks, sums + r * hiddenBlocks, hidden, simd);
+                float g = DotRow(dtypes.Gate, gateRow, codes + r * hidden, scales + r * hiddenBlocks, sums + r * hiddenBlocks, hidden, simd);
+                float u = DotRow(dtypes.Up, upRow, codes + r * hidden, scales + r * hiddenBlocks, sums + r * hiddenBlocks, hidden, simd);
                 (float clampedGate, float clampedUp) = program.Clamp(g, u);
                 hiddenAct[r * intermediate + i] = ExpertProgramReference.Activate(program.Activation, clampedGate) * clampedUp;
             }
@@ -115,7 +133,7 @@ public static unsafe partial class CpuExpertKernels
             byte* downRow = down + (long)d * downRowBytes;
             for (int r = 0; r < rows; r++)
             {
-                y[r * hidden + d] = DotRow(dtype, downRow, codes + r * intermediate, scales + r * interBlocks, sums + r * interBlocks,
+                y[r * hidden + d] = DotRow(dtypes.Down, downRow, codes + r * intermediate, scales + r * interBlocks, sums + r * interBlocks,
                     intermediate, simd);
             }
         }
@@ -171,6 +189,9 @@ public static unsafe partial class CpuExpertKernels
             return acc;
         }
 
+        if (dtype == DType.Q6_K) return DotRowQ6K(row, act, actScale, dim, simd);
+        if (dtype == DType.Q5_K) return DotRowQ5K(row, act, actScale, actSum, dim, simd);
+
         // Q4_K: 256-element super-blocks of eight 32-element sub-blocks, each with a 6-bit scale and minimum.
         int superBlocks = dim / Q4KSuperBlockElems;
         for (int sb = 0; sb < superBlocks; sb++)
@@ -194,6 +215,65 @@ public static unsafe partial class CpuExpertKernels
         return acc;
     }
 
+    /// <summary>Q5_K: Q4_K's super-block (scales and minimums packed the same way) with a fifth bit per value in <c>qh</c>.
+    /// Value <c>i</c> of sub-block <c>j</c> is the nibble of <c>qs</c> plus 16 when bit <c>j</c> of <c>qh[i]</c> is set.</summary>
+    private static float DotRowQ5K(byte* row, sbyte* act, float* actScale, int* actSum, int dim, bool simd)
+    {
+        float acc = 0f;
+        int superBlocks = dim / Q4KSuperBlockElems;
+        for (int sb = 0; sb < superBlocks; sb++)
+        {
+            byte* block = row + sb * Q5KBlockBytes;
+            float d = ReadHalf(block);
+            float dmin = ReadHalf(block + 2);
+            byte* packedScales = block + 4;
+            byte* qh = block + 16;
+            byte* qs = block + 48;
+            for (int j = 0; j < 8; j++)
+            {
+                GetScaleMinK4(j, packedScales, out int sc, out int mm);
+                int b = sb * 8 + j;
+                byte* subQuants = qs + (j / 2) * QuantBlock;
+                int shift = (j % 2 == 0) ? 0 : 4;
+                int dot = simd ? Q5SubDotAvx2(subQuants, shift, qh, j, act + b * QuantBlock)
+                    : Q5SubDotScalar(subQuants, shift, qh, j, act + b * QuantBlock);
+                acc += actScale[b] * (d * sc * dot - dmin * mm * actSum[b]);
+            }
+        }
+        return acc;
+    }
+
+    /// <summary>Q6_K: 256-element super-blocks of two 128-element halves. A value is a low nibble from <c>ql</c> and two high bits
+    /// from <c>qh</c>, minus 32, scaled by a signed 8-bit scale per 16 values. A 32-value activation block therefore spans two
+    /// scales, and its integer dot is kept as two 16-value sums.</summary>
+    private static float DotRowQ6K(byte* row, sbyte* act, float* actScale, int dim, bool simd)
+    {
+        float acc = 0f;
+        int superBlocks = dim / Q4KSuperBlockElems;
+        for (int sb = 0; sb < superBlocks; sb++)
+        {
+            byte* block = row + sb * Q6KBlockBytes;
+            float d = ReadHalf(block + 208);
+            sbyte* sc = (sbyte*)(block + 192);
+            for (int half = 0; half < 2; half++)
+            {
+                byte* ql = block + half * 64;
+                byte* qh = block + 128 + half * 32;
+                for (int g = 0; g < 4; g++)
+                {
+                    int b = sb * 8 + half * 4 + g;
+                    sbyte* a = act + b * QuantBlock;
+                    int lo, hi;
+                    if (simd) Q6GroupDotAvx2(ql, qh, g, a, out lo, out hi);
+                    else Q6GroupDotScalar(ql, qh, g, a, out lo, out hi);
+                    int scaleBase = half * 8 + 2 * g;
+                    acc += actScale[b] * d * (sc[scaleBase] * lo + sc[scaleBase + 1] * hi);
+                }
+            }
+        }
+        return acc;
+    }
+
     private static float ReadHalf(byte* p) => (float)Unsafe.ReadUnaligned<Half>(p);
 
     /// <summary>The 6-bit scale and minimum of sub-block <paramref name="j"/>, unpacked as in the GGUF K-quant codecs.</summary>
@@ -211,21 +291,26 @@ public static unsafe partial class CpuExpertKernels
         }
     }
 
-    private static void ValidateShapes(DType dtype, int hidden, int intermediate, long gateLength, long upLength, long downLength,
-        long xLength, int rows, long yLength)
+    private static void ValidateShapes(ExpertDTypes dtypes, int hidden, int intermediate, long gateLength, long upLength,
+        long downLength, long xLength, int rows, long yLength)
     {
-        if (!(dtype == DType.Q8_0 || dtype == DType.Q4_K))
-            throw new NotSupportedException($"CPU expert kernels run Q8_0 and Q4_K, not {dtype.Name}.");
+        foreach (DType dtype in (ReadOnlySpan<DType>)[dtypes.Gate, dtypes.Up, dtypes.Down])
+        {
+            if (!Supports(dtype))
+                throw new NotSupportedException($"CPU expert kernels run Q8_0, Q4_K, Q5_K and Q6_K, not {dtype.Name}.");
+            if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0)
+                throw new ArgumentException($"Hidden {hidden} and intermediate {intermediate} must be multiples of {dtype.Name}'s block size.");
+        }
         if (rows < 1 || rows > MaxRows) throw new ArgumentOutOfRangeException(nameof(rows), rows, $"Rows must be 1 to {MaxRows}.");
         if (hidden <= 0) throw new ArgumentOutOfRangeException(nameof(hidden), hidden, "Hidden must be positive.");
         if (intermediate <= 0) throw new ArgumentOutOfRangeException(nameof(intermediate), intermediate, "Intermediate must be positive.");
-        if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0 || hidden % QuantBlock != 0
-            || intermediate % QuantBlock != 0)
-            throw new ArgumentException($"Hidden {hidden} and intermediate {intermediate} must be multiples of {dtype.Name}'s block size.");
-        long expectedGate = (long)intermediate * dtype.ComputeByteCount(hidden);
-        long expectedDown = (long)hidden * dtype.ComputeByteCount(intermediate);
+        if (hidden % QuantBlock != 0 || intermediate % QuantBlock != 0)
+            throw new ArgumentException($"Hidden {hidden} and intermediate {intermediate} must be multiples of {QuantBlock}.");
+        long expectedGate = (long)intermediate * dtypes.Gate.ComputeByteCount(hidden);
+        long expectedUp = (long)intermediate * dtypes.Up.ComputeByteCount(hidden);
+        long expectedDown = (long)hidden * dtypes.Down.ComputeByteCount(intermediate);
         if (gateLength != expectedGate) throw new ArgumentException($"Gate must hold {expectedGate} bytes; it holds {gateLength}.");
-        if (upLength != expectedGate) throw new ArgumentException($"Up must hold {expectedGate} bytes; it holds {upLength}.");
+        if (upLength != expectedUp) throw new ArgumentException($"Up must hold {expectedUp} bytes; it holds {upLength}.");
         if (downLength != expectedDown) throw new ArgumentException($"Down must hold {expectedDown} bytes; it holds {downLength}.");
         if (xLength != (long)rows * hidden) throw new ArgumentException($"x must hold {rows} rows of {hidden}; it holds {xLength}.");
         if (yLength != (long)rows * hidden) throw new ArgumentException($"y must hold {rows} rows of {hidden}; it holds {yLength}.");

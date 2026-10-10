@@ -22,6 +22,18 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.330
+
+- **Added: the packed CPU expert kernels read Q5_K and Q6_K, and each projection may use its own format.** `CpuExpertKernels` now runs an expert whose gate, up and down are any of Q8_0, Q4_K, Q5_K or Q6_K (`ExpertDTypes`), as a GGUF K-quant mix stores them: Q4_K_M keeps half of Qwen3-30B-A3B's down projections in Q6_K. Q6_K's 16-value scales split each 32-value activation block into two integer sums; Q5_K adds the fifth bit to Q4_K's layout. The AVX2 paths match the scalar paths bit for bit, and a steady-state call still allocates nothing. `PackedExpertHostRunner` gains a constructor that reads each projection in its tensor's own format; the single-format constructor keeps refusing other formats. Measured against the F32 reference on the dequantized weights:
+
+  | Weights | Peak relative error |
+  |---|---|
+  | Synthetic, Q5_K | 1.14% |
+  | Synthetic, Q6_K | 1.19% |
+  | Synthetic, Q4_K gate/up with Q6_K down | 1.18% |
+  | Real Qwen3-30B-A3B Q4_K_M experts, read in place from the GGUF's stacked tensors (`GgufMixedQuantExpertTests`) | 1.05% |
+
+  Existing Q8_0 and Q4_K results are unchanged. Not wired into a model yet; the expert-offload path uses it.
 ## alpha.329
 
 - **Added: a text placement planner decides where a GGUF model runs before anything is uploaded.** For a GGUF on a single CUDA device key, the load reads the checkpoint header and charges each device the model's weights as the load keeps them, its KV cache (sized for the request and at least 8192 tokens), and a 1.5 GB reserve. In `auto`, the default, it picks the first placement that fits:

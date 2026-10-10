@@ -22,9 +22,15 @@ public sealed class PackedExpertHostRunnerTests
     [Theory]
     [InlineData("Q8_0", 2e-2f)]
     [InlineData("Q4_K", 2.5e-2f)]
+    [InlineData("Q5_K", 2.5e-2f)]
+    [InlineData("Q6_K", 2.5e-2f)]
+    [InlineData("Q4_K/Q6_K", 2.5e-2f)]
     public void MixedPlan_MatchesTheF32ReferenceWithinTheKernelTolerance(string dtypeName, float tolerance)
     {
-        DType dtype = dtypeName == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
+        // "Q4_K/Q6_K" is Q4_K_M's mix: gate and up in Q4_K, down in Q6_K, served by a runner that reads each tensor's own dtype.
+        string[] parts = dtypeName.Split('/');
+        DType dtype = ParseDType(parts[0]);
+        DType downDtype = parts.Length > 1 ? ParseDType(parts[1]) : dtype;
         ExpertKey[] keys = [new(0, 0, 0), new(0, 1, 0), new(0, 2, 0)];
         int[] rows = [2, 1, 3];
         List<Tensor> owned = [];
@@ -36,7 +42,7 @@ public sealed class PackedExpertHostRunnerTests
             {
                 Tensor gate = Quantize(Random(Intermediate * Hidden, 100 + i, 0.1f), dtype, Intermediate, Hidden, out float[] gateDeq);
                 Tensor up = Quantize(Random(Intermediate * Hidden, 200 + i, 0.1f), dtype, Intermediate, Hidden, out float[] upDeq);
-                Tensor down = Quantize(Random(Hidden * Intermediate, 300 + i, 0.1f), dtype, Hidden, Intermediate, out float[] downDeq);
+                Tensor down = Quantize(Random(Hidden * Intermediate, 300 + i, 0.1f), downDtype, Hidden, Intermediate, out float[] downDeq);
                 owned.AddRange([gate, up, down]);
                 packed[keys[i]] = new ExpertWeights(keys[i], new ExpertMatrix(gate), new ExpertMatrix(down), new ExpertMatrix(up));
                 reference[keys[i]] = new F32ExpertWeights(Hidden, Intermediate, gateDeq, upDeq, downDeq);
@@ -53,7 +59,9 @@ public sealed class PackedExpertHostRunnerTests
                 key => reference[key], device: null);
 
             float[] actual = new float[total * Hidden];
-            PackedExpertHostRunner runner = new PackedExpertHostRunner(dtype, Hidden, Intermediate, key => packed[key]);
+            PackedExpertHostRunner runner = downDtype == dtype
+                ? new PackedExpertHostRunner(dtype, Hidden, Intermediate, key => packed[key])
+                : new PackedExpertHostRunner(Hidden, Intermediate, key => packed[key]);
             HeterogeneousExpertExecutor.Execute(ExpertProgram.Swiglu, mixed, gathered, Hidden, actual, runner,
                 new ReferenceDevice(ExpertProgram.Swiglu, reference));
 
@@ -174,6 +182,14 @@ public sealed class PackedExpertHostRunnerTests
         public void Run(ExpertKey key, ReadOnlySpan<float> x, int rows, Span<float> y) =>
             ExpertProgramReference.Apply(program, weights[key], x, rows, y);
     }
+
+    private static DType ParseDType(string name) => name switch
+    {
+        "Q8_0" => DType.Q8_0,
+        "Q4_K" => DType.Q4_K,
+        "Q5_K" => DType.Q5_K,
+        _ => DType.Q6_K,
+    };
 
     /// <summary>Quantizes <paramref name="values"/> as <c>[rows, cols]</c> with the production quantizer. Returns the packed
     /// tensor, which the caller owns, and the dequantized values the reference uses.</summary>
