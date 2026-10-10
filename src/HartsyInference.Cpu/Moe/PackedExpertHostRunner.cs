@@ -6,9 +6,10 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Cpu.Moe;
 
 /// <summary>
-/// The CPU share of a planned layer on packed weights: each expert's Q8_0, Q4_K, Q5_K or Q6_K projections are read in place by
-/// <see cref="CpuExpertKernels"/>, with no F32 copy. Projections may differ in format, as a GGUF K-quant mix's do. <paramref name="resolve"/> supplies an expert's packed tensors; they must
-/// stay alive while the expert runs, as a pack reader's views do while the reader is open.
+/// The CPU share of a planned layer on packed weights: each expert's Q8_0, Q4_K, Q5_K or Q6_K projections are read in
+/// place by <see cref="CpuExpertKernels"/>, with no F32 copy. Projections may differ in format, as a GGUF K-quant mix's
+/// do. <paramref name="resolve"/> supplies an expert's packed tensors; they must stay alive while the expert runs, as a
+/// pack reader's views do while the reader is open.
 /// </summary>
 public sealed class PackedExpertHostRunner : IExpertHostRunner
 {

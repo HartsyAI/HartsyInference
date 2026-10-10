@@ -25,7 +25,7 @@ public sealed unsafe class CpuExpertKernelsTests
     public static TheoryData<string, int, int> Cases()
     {
         TheoryData<string, int, int> data = new();
-        foreach (string dtype in new[] { "Q8_0", "Q4_K", "Q5_K", "Q6_K", "Q4_K/Q6_K" })
+        foreach (string dtype in new[] { "Q8_0", "Q4_K", "Q5_K", "Q6_K", "Q4_K/Q6_K", "Q4_K/Q8_0/Q6_K" })
             foreach (int program in new[] { 0, 1, 2, 3 })
                 foreach (int rows in new[] { 1, 3, 8 })
                     data.Add(dtype, program, rows);
@@ -143,12 +143,18 @@ public sealed unsafe class CpuExpertKernelsTests
         _ => throw new ArgumentException(name),
     };
 
-    /// <summary><c>Q4_K</c> is every projection in Q4_K; <c>Q4_K/Q6_K</c> is gate and up in Q4_K with down in Q6_K, Q4_K_M's mix.</summary>
+    /// <summary><c>Q4_K</c> is every projection in Q4_K; <c>Q4_K/Q6_K</c> is gate and up in Q4_K with down in Q6_K, Q4_K_M's mix;
+    /// three parts name gate, up and down, so gate and up can differ.</summary>
     private static ExpertDTypes ParseDTypes(string name)
     {
         string[] parts = name.Split('/');
         DType first = ParseDType(parts[0]);
-        return new ExpertDTypes(first, first, parts.Length > 1 ? ParseDType(parts[1]) : first);
+        return parts.Length switch
+        {
+            1 => new ExpertDTypes(first, first, first),
+            2 => new ExpertDTypes(first, first, ParseDType(parts[1])),
+            _ => new ExpertDTypes(first, ParseDType(parts[1]), ParseDType(parts[2])),
+        };
     }
 
     private static ExpertProgram ProgramFor(int kind) => kind switch
