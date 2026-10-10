@@ -38,6 +38,35 @@ public partial interface IBackend
         bool sortByIndex = false) =>
         throw NotSupportedPrimitive(nameof(TopKLastDim));
 
+    /// <summary>True when <see cref="MoeExpertGateUp"/> and <see cref="MoeExpertDown"/> run experts stored as <paramref name="expertType"/>,
+    /// so a routed-expert stage can stay on the device from the router to the combine.</summary>
+    bool SupportsMoeExpertIndexed(DType expertType) => false;
+
+    /// <summary>Gate and up projections of every routed pair with the activation applied: for row <c>r = token * topk + slot</c>,
+    /// <c>act[r] = act(gate[e] . x[token]) * (up[e] . x[token])</c> with <c>e = topkIdx[r]</c> read on the device. The experts are
+    /// one device allocation per projection, back to back in expert order.</summary>
+    /// <param name="act">F32 <c>[1, tokens * topk, N]</c>.</param>
+    /// <param name="x">F32 <c>[1, tokens, K]</c>.</param>
+    /// <param name="gateExperts">Per-expert <c>[N, K]</c> weights, resident and contiguous; so are <paramref name="upExperts"/>.</param>
+    /// <param name="topkIdx">I32 <c>[tokens, topk]</c> expert ids, as <see cref="MoeRoute"/> writes them.</param>
+    /// <param name="gelu">tanh-GELU instead of SiLU.</param>
+    void MoeExpertGateUp(Tensor act, Tensor x, IReadOnlyList<Tensor> gateExperts, IReadOnlyList<Tensor> upExperts, Tensor topkIdx,
+        int topk, bool gelu) =>
+        throw NotSupportedPrimitive(nameof(MoeExpertGateUp));
+
+    /// <summary>Down projection of every routed pair: <c>slotOut[r] = down[topkIdx[r]] . act[r]</c>.</summary>
+    /// <param name="slotOut">F32 <c>[1, tokens * topk, N]</c>.</param>
+    /// <param name="act">F32 <c>[1, tokens * topk, K]</c>, as <see cref="MoeExpertGateUp"/> wrote it.</param>
+    void MoeExpertDown(Tensor slotOut, Tensor act, IReadOnlyList<Tensor> downExperts, Tensor topkIdx, int topk) =>
+        throw NotSupportedPrimitive(nameof(MoeExpertDown));
+
+    /// <summary>Weighted sum of each token's routed rows with the optional shared-expert row:
+    /// <c>output[t] = sigmoid(sharedGateLogit[t]) * shared[t] + sum_j topkWeight[t,j] * slotOut[t*topk+j]</c>, in slot order.</summary>
+    /// <param name="shared">F32 <c>[1, tokens, N]</c>, or null.</param>
+    /// <param name="sharedGateLogit">F32 <c>[tokens]</c> pre-sigmoid gate of the shared row, or null for an ungated shared row.</param>
+    void MoeCombineSlots(Tensor output, Tensor slotOut, Tensor topkWeight, Tensor? shared, Tensor? sharedGateLogit, int topk) =>
+        throw NotSupportedPrimitive(nameof(MoeCombineSlots));
+
     private NotSupportedException NotSupportedPrimitive(string name) =>
         new NotSupportedException($"{name} is not implemented on the {Device} backend.");
 }

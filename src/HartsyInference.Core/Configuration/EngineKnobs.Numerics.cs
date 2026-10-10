@@ -197,6 +197,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SandwichFusion =
         Bool("numerics.sandwichFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.");
 
+    /// <summary>Kill-switch for the device-resident routed-expert stage of MoE decode (router, expert ids and expert GEMVs stay on the device).</summary>
+    public static readonly Knob<bool> MoeIndexed =
+        Bool("numerics.moeIndexed", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the routed experts of a small MoE batch (decode) entirely on the device with expert-indexed GEMVs; =0 returns to the host-routed per-expert loop.");
+
     /// <summary>Runs cuDNN convolutions channels-last, transposing activations and weights around the call; 0 keeps them
     /// NCHW.</summary>
     public static readonly Knob<bool> ConvChannelsLast =

@@ -691,7 +691,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         bool ok = SupportsGraphDecodeCore(backend);
         if (!ok && EngineKnobs.GraphGateLog.Value)
             HartsyInference.Core.Logging.Logs.Info(
-                $"[GraphGate] backend={backend.GraphDecodeSupported} mla={_cfg.Mla is null} moe={_cfg.Moe is null} " +
+                $"[GraphGate] backend={backend.GraphDecodeSupported} mla={_cfg.Mla is null} moe={MoeGraphReady(backend)} " +
                 $"cross={_cfg.CrossAttnLayers.Count == 0} sink={!_cfg.AttnSink} alibi={_cfg.AlibiMaxBias <= 0f} " +
                 $"parRes={!_cfg.ParallelResidual} absPos={!_cfg.AbsolutePositionEmbeddings} " +
                 $"noRopeGlobal={!_cfg.NoRopeOnGlobalLayers} preNorm={_cfg.NormPlacement == NormPlacement.PreNorm} " +
@@ -701,8 +701,20 @@ public sealed unsafe class GenericTransformer : IDisposable
         return ok;
     }
 
+    /// <summary>True when the model has no MoE layers, or every one runs its routed stage on the device (<see cref="MoeFeedForward.CanRunIndexed"/>), so a captured decode step never reads the host between the router and the combine. Gemma-4's parallel dense branch is not part of the graph step.</summary>
+    private bool MoeGraphReady(IBackend backend)
+    {
+        if (_cfg.Moe is null) return true;
+        if (_cfg.ParallelDenseMoeBranch) return false;
+        foreach (Layer layer in _layers)
+        {
+            if (layer.Moe is MoeFeedForward moe && !moe.CanRunIndexed(backend)) return false;
+        }
+        return true;
+    }
+
     private bool SupportsGraphDecodeCore(IBackend backend) =>
-        backend.GraphDecodeSupported && _cfg.Mla is null && _cfg.Moe is null && _cfg.CrossAttnLayers.Count == 0
+        backend.GraphDecodeSupported && _cfg.Mla is null && MoeGraphReady(backend) && _cfg.CrossAttnLayers.Count == 0
         // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are supported
         // as of 2026-07-22: the split-K decode-attention kernel handles window/softcap with a device position,
         // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep

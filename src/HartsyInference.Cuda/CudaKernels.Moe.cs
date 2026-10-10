@@ -44,6 +44,7 @@ public sealed partial class CudaKernels
             _moeDispatchScatterI32 = _moeDispatchModule.GetFunction("moe_dispatch_scatter_i32");
             _moeCombineF32 = _moeDispatchModule.GetFunction("moe_combine_f32");
         }
+        LoadMoeExpertKernels();
         string topKPath = Ptx("lm_topk_f32");
         if (File.Exists(topKPath))
         {

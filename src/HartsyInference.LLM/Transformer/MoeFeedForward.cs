@@ -20,6 +20,12 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private Tensor? _shGateW, _shUpW, _shDownW, _shGateScoreW;       // shared expert (optional)
     private float[]? _correctionBias;                // DeepSeek-V3 e_score_correction_bias [E] (selection only)
 
+    /// <summary>Largest batch the device-resident routed stage serves: every (token, slot) pair reads its expert's rows once, which only
+    /// beats the grouped per-expert path while few tokens share an expert.</summary>
+    internal const int IndexedMaxTokens = 16;
+
+    private bool? _indexedShapeOk;                   // dtype/shape/routing eligibility, fixed once the weights are loaded
+
     // Opt-in heterogeneous runtime state (CPU-only slice). Created on first use; the direct path never touches it.
     private static readonly ForcedPlacementPolicy CpuOnlyPolicy = new(static _ => ExpertPlacement.Cpu);
     private HostExpertCache? _hostCache;
@@ -151,6 +157,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         int e = _moe.NumExperts;
         int topK = _moe.NumExpertsPerTok;
         int inter = _moe.MoeIntermediateSize;
+
+        if (n <= IndexedMaxTokens && CanRunIndexed(backend)) return ForwardIndexed(backend, x, n, routerLogits);
 
         // 1. Router logits, read to host for top-k selection.
         Tensor? ownRouterLogits = null;
@@ -352,6 +360,81 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         offload.AfterLayer(_offMisses);
     }
 
+
+    /// <summary>True when the routed stage can run entirely on <paramref name="backend"/>: the experts' quant type has an indexed GEMV, the routing is
+    /// one the device router reproduces, and no host runtime or offload owns the experts.</summary>
+    internal bool CanRunIndexed(IBackend backend)
+    {
+        if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
+        if (UseHostExpertRuntime || _offload is not null) return false;
+        if (_indexedShapeOk is null) _indexedShapeOk = IndexedShapeOk();
+        return _indexedShapeOk.Value && backend.SupportsMoeExpertIndexed(_gateW[0].DType) && backend.SupportsMoeExpertIndexed(_downW[0].DType);
+    }
+
+    private bool IndexedShapeOk()
+    {
+        // Group-limited and logit-biased routing keep the host router.
+        if (_moe.ExpertGroupCount > 0 || _moe.Scoring == MoeScoring.SigmoidLogitAdd) return false;
+        if (_moe.NumExperts > MoeRouteArgs.MaxExperts || _moe.NumExpertsPerTok > _moe.NumExperts) return false;
+        if (_gateW.Length != _moe.NumExperts || _upW.Length != _moe.NumExperts || _downW.Length != _moe.NumExperts) return false;
+        DType gateType = _gateW[0].DType, downType = _downW[0].DType;
+        if (!gateType.IsQuantized || !downType.IsQuantized || _upW[0].DType != gateType) return false;
+        for (int i = 1; i < _gateW.Length; i++)
+        {
+            if (_gateW[i].DType != gateType || _upW[i].DType != gateType || _downW[i].DType != downType) return false;
+        }
+        int align = gateType == DType.Q8_0 ? 32 : 256;
+        int downAlign = downType == DType.Q8_0 ? 32 : 256;
+        return _hidden % align == 0 && _moe.MoeIntermediateSize % downAlign == 0
+            && _gateW[0].Shape[0] == _moe.MoeIntermediateSize && _gateW[0].Shape[1] == _hidden
+            && _downW[0].Shape[0] == _hidden && _downW[0].Shape[1] == _moe.MoeIntermediateSize;
+    }
+
+    private MoeRouteArgs RouteArgs => new(_moe.NumExperts, _moe.NumExpertsPerTok,
+        _moe.Scoring == MoeScoring.Softmax ? MoeRouteScoring.Softmax : MoeRouteScoring.Sigmoid,
+        Renormalize: _moe.NormTopKProb, Scale: _moe.RoutedScalingFactor);
+
+    /// <summary>The routed stage with nothing leaving the device: router logits, <see cref="IBackend.MoeRoute"/>, the expert-indexed gate/up and down
+    /// GEMVs, then one combine that also folds in the shared expert. Capturable in a CUDA graph.</summary>
+    private Tensor ForwardIndexed(IBackend backend, Tensor x, int n, Tensor? routerLogits)
+    {
+        int e = _moe.NumExperts;
+        int k = _moe.NumExpertsPerTok;
+        Tensor? ownLogits = null;
+        Tensor logits = routerLogits ?? (ownLogits = new(new TensorShape(1, n, e), DType.F32));
+        if (routerLogits is null) GenericTransformer.Project(backend, logits, x, _routerW, null, lowVram: false);
+
+        Tensor topkIdx = new(new TensorShape(n, k), DType.I32);
+        Tensor topkWeight = new(new TensorShape(n, k), DType.F32);
+        backend.MoeRoute(topkIdx, topkWeight, logits, RouteArgs);
+        ownLogits?.Dispose();
+
+        int rows = n * k;
+        Tensor act = new(new TensorShape(1, rows, _moe.MoeIntermediateSize), DType.F32);
+        backend.MoeExpertGateUp(act, x, _gateW, _upW, topkIdx, k, gelu: _moe.Activation == ActivationKind.GeluTanh);
+        Tensor slotOut = new(new TensorShape(1, rows, _hidden), DType.F32);
+        backend.MoeExpertDown(slotOut, act, _downW, topkIdx, k);
+        act.Dispose();
+        topkIdx.Dispose();
+
+        Tensor? shared = null, sharedGate = null;
+        if (_shGateW is not null)
+        {
+            shared = SwiGlu(backend, x, n, _shGateW, _shUpW!, _shDownW!, _moe.SharedExpertIntermediateSize);
+            if (_shGateScoreW is not null)
+            {
+                sharedGate = new(new TensorShape(1, n, 1), DType.F32);
+                GenericTransformer.Project(backend, sharedGate, x, _shGateScoreW, null, lowVram: false);
+            }
+        }
+        Tensor output = new(new TensorShape(1, n, _hidden), DType.F32);
+        backend.MoeCombineSlots(output, slotOut, topkWeight, shared, sharedGate, k);
+        slotOut.Dispose();
+        topkWeight.Dispose();
+        shared?.Dispose();
+        sharedGate?.Dispose();
+        return output;
+    }
 
     /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) — SiLU (SwiGLU, the default) or tanh-GELU (GeGLU, Gemma-4's <see cref="MoeConfig.Activation"/>).</summary>
     private Tensor SwiGlu(IBackend backend, Tensor x, int rows, Tensor gateW, Tensor upW, Tensor downW, int inter)
