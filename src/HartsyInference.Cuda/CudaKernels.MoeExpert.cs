@@ -10,7 +10,7 @@ public sealed partial class CudaKernels
     private nint _moeGateUpIdQ4k, _moeDownIdQ4k, _moeGateUpIdQ6k, _moeDownIdQ6k, _moeGateUpIdQ8_0, _moeDownIdQ8_0;
     private nint _moeCombineSlotsF32;
     private CudaModule? _moePrefillModule;
-    private nint _moeGatherRows16, _moeActMul16, _moeActMul16x16, _moeCombinePairsF32;
+    private nint _moeGatherRows16, _moeActMul16, _moeActMul16x16, _moeCombinePairsF32, _moeCastF16Bf16InPlace;
 
     /// <summary>True when the indexed expert GEMV exists for experts stored as <paramref name="dtype"/>.</summary>
     public bool HasMoeExpertKernel(DType dtype) => dtype switch
@@ -64,6 +64,7 @@ public sealed partial class CudaKernels
             _moeActMul16 = _moePrefillModule.GetFunction("moe_act_mul_16");
             _moeActMul16x16 = _moePrefillModule.GetFunction("moe_act_mul_16x16");
             _moeCombinePairsF32 = _moePrefillModule.GetFunction("moe_combine_pairs_f32");
+            _moeCastF16Bf16InPlace = _moePrefillModule.GetFunction("moe_cast_f16_to_bf16_inplace");
         }
     }
 
@@ -162,5 +163,20 @@ public sealed partial class CudaKernels
         void** a = stackalloc void*[6];
         a[0] = &oA; a[1] = &gA; a[2] = &uA; a[3] = &cA; a[4] = &geluA; a[5] = &bA;
         CudaDriverApi.cuLaunchKernel(_moeActMul16x16, (uint)((count + 255) / 256), 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>True when moe_prefill.ptx carries the in-place F16 to BF16 cast.</summary>
+    public bool HasCastF16ToBf16InPlace => _moeCastF16Bf16InPlace != 0;
+
+    /// <summary>Converts <paramref name="count"/> F16 values at <paramref name="buffer"/> to BF16 in place.</summary>
+    public unsafe void LaunchCastF16ToBf16InPlace(ulong buffer, long count, nint stream)
+    {
+        if (_moeCastF16Bf16InPlace == 0) throw new InvalidOperationException("moe_prefill.ptx not present in the Ptx folder.");
+        ulong bA = buffer;
+        long cA = count;
+        void** a = stackalloc void*[2];
+        a[0] = &bA; a[1] = &cA;
+        long threads = Math.Max(count >> 3, 8);
+        CudaDriverApi.cuLaunchKernel(_moeCastF16Bf16InPlace, (uint)((threads + 255) / 256), 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 }

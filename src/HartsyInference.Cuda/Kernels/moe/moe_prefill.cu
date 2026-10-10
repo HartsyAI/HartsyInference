@@ -103,3 +103,28 @@ extern "C" __global__ void moe_combine_pairs_f32(
     }
     out[(size_t)t * hidden + c] = acc;
 }
+
+// In-place F16 -> BF16 over count values (each value is read before it is written, so the buffer may be the source and the destination):
+// the second half of a quantized -> BF16 dequant that lands in the destination buffer first as F16. Eight values per thread.
+// Launch: grid = ceil(max(count / 8, 1) / 256), block = 256.
+extern "C" __global__ void moe_cast_f16_to_bf16_inplace(unsigned short* __restrict__ buf, long long count)
+{
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long n8 = count >> 3;
+    if (i < n8) {
+        uint4 v = reinterpret_cast<uint4*>(buf)[i];
+        unsigned int w[4] = {v.x, v.y, v.z, v.w};
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const float lo = __half2float(__ushort_as_half((unsigned short)(w[j] & 0xFFFFu)));
+            const float hi = __half2float(__ushort_as_half((unsigned short)(w[j] >> 16)));
+            w[j] = (unsigned int)__bfloat16_as_ushort(__float2bfloat16_rn(lo)) | ((unsigned int)__bfloat16_as_ushort(__float2bfloat16_rn(hi)) << 16);
+        }
+        reinterpret_cast<uint4*>(buf)[i] = make_uint4(w[0], w[1], w[2], w[3]);
+    }
+    const long long tail = count - (n8 << 3);
+    if (i < tail) {
+        const long long at = (n8 << 3) + i;
+        buf[at] = __bfloat16_as_ushort(__float2bfloat16_rn(__half2float(__ushort_as_half(buf[at]))));
+    }
+}

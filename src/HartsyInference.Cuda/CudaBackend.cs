@@ -9426,6 +9426,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             return;
         }
+        if (srcDtype.IsQuantized && dstDtype == DType.BF16 && _kernels!.HasCastF16ToBf16InPlace)
+        {
+            // Dequantize to F16 straight into the destination (same byte size as BF16), then convert in place: no staging buffers.
+            LaunchGgufDequantToF16(output, input, srcDtype, count);
+            _kernels.LaunchCastF16ToBf16InPlace(output, count, _stream.Handle);
+            return;
+        }
         if (srcDtype.IsQuantized && dstDtype == DType.BF16)
         {
             // quant → F16 → F32 → BF16. F32 staging needed because BF16 conversion goes through F32 in our kernel set.

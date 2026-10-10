@@ -378,6 +378,9 @@ public sealed unsafe partial class CudaBackend
 
     private bool _groupedGemmBroken;
 
+    /// <summary>Average rows per active expert from which a dense GEMM per expert beats cuBLAS's grouped kernel (Mixtral: ~1000 rows per expert; Qwen3-30B-A3B: ~60).</summary>
+    private const int DenseExpertRows = 384;
+
     /// <summary>The expert GEMMs of a large batch as grouped cuBLAS calls: the layer's expert stack is dequantized once per projection
     /// (a stacked group is one flat run of quant blocks), then each batch of experts takes one grouped call for gate, one for up and one for
     /// down instead of a GEMM per expert and projection. Returns false, with nothing launched, when the experts are not a resident stack,
@@ -443,6 +446,7 @@ public sealed unsafe partial class CudaBackend
 
             int gemmType = CublasApi.DataTypeOf(gemmDtype);
             int compute = Compute32F(gemmType);
+            bool denseExperts = rows >= DenseExpertRows * (long)active;
             ulong[] hostPtrs = new ulong[9 * experts];
             int[] opT = new int[experts], opN = new int[experts], mArr = new int[experts], nGate = new int[experts], kGate = new int[experts],
                 nDown = new int[experts], kDown = new int[experts], ldK = new int[experts], ldInter = new int[experts], ldH = new int[experts], ones = new int[experts];
@@ -489,6 +493,38 @@ public sealed unsafe partial class CudaBackend
                     CudaMemory.CopyHostToDeviceAsync(ptrDev, hp, (nuint)(9 * group * sizeof(ulong)), _stream.Handle);
                 ulong At(int slot) => ptrDev + (ulong)(slot * group * sizeof(ulong));
                 int batchRows = offsets[batchEnd] - batchRowStart;
+
+                if (denseExperts)
+                {
+                    // Few, large experts: a dense GEMM per expert reaches far more of the tensor-core peak than the grouped kernel does.
+                    float one = 1f, zero = 0f;
+                    for (int e = batchFirst; e < batchEnd; e++)
+                    {
+                        int c = offsets[e + 1] - offsets[e];
+                        if (c == 0) continue;
+                        long local = offsets[e] - batchRowStart;
+                        ulong x = permX + (ulong)((long)offsets[e] * hidden * elem);
+                        CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N, inter, c, hidden, &one,
+                            wsGate + (ulong)(e * matBytes), gemmType, hidden, x, gemmType, hidden, &zero,
+                            gateOut + (ulong)(local * inter * elem), gemmType, inter, compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N, inter, c, hidden, &one,
+                            wsUp + (ulong)(e * matBytes), gemmType, hidden, x, gemmType, hidden, &zero,
+                            upOut + (ulong)(local * inter * elem), gemmType, inter, compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    }
+                    _kernels!.LaunchMoeActMul16x16(act, gateOut, upOut, (long)batchRows * inter, gelu, bf16, _stream.Handle);
+                    for (int e = batchFirst; e < batchEnd; e++)
+                    {
+                        int c = offsets[e + 1] - offsets[e];
+                        if (c == 0) continue;
+                        long local = offsets[e] - batchRowStart;
+                        CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N, hidden, c, inter, &one,
+                            wsDown + (ulong)(e * matBytes), gemmType, inter, act + (ulong)(local * inter * elem), gemmType, inter, &zero,
+                            downTmp + (ulong)(local * hidden * elem), gemmType, hidden, compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    }
+                    CastOnGpu(pOut + (ulong)((long)batchRowStart * hidden * sizeof(float)), downTmp, gemmDtype, DType.F32, batchRows * hidden);
+                    batchFirst = batchEnd;
+                    continue;
+                }
 
                 fixed (int* pT = opT, pN = opN, pM = mArr, pNg = nGate, pKg = kGate, pNd = nDown, pKd = kDown, pLk = ldK, pLi = ldInter, pLh = ldH, pOne = ones)
                 fixed (float* pA = alphas, pB = betas)
