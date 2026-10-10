@@ -5664,7 +5664,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkvRopeScatter");
-        if (devicePos == 0 || qkv.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qkv.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkvRopeScatterDecodeStep requires a device position buffer and F32 qkv/caches; got devicePos={devicePos}, " +
@@ -5686,7 +5686,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQkv + (ulong)((long)hq * headDim * sizeof(float));
             ulong vOff = kOff + (ulong)((long)hkv * headDim * sizeof(float));
-            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQkv, kOff, vOff, pCos, pSin,
+            LaunchQkvRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQkv, kOff, vOff, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
             // The caches were written in place — keep them resident without a host sync (same contract as
             // KvCacheAppendDev).
@@ -5710,7 +5710,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkRopeScatterV");
-        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkRopeScatterVDecodeStep requires a device position buffer and F32 qk/v/caches; got devicePos={devicePos}, " +
@@ -5732,7 +5732,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint qBytes = GpuTransferHelper.ByteSize(qOut);
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQk + (ulong)((long)hq * headDim * sizeof(float));
-            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQk, kOff, pVi, pCos, pSin,
+            LaunchQkvRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQk, kOff, pVi, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;
@@ -5755,7 +5755,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RopeScatterKv");
-        if (devicePos == 0 || q.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || q.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA RopeScatterKvDecodeStep requires a device position buffer and F32 q/caches; got devicePos={devicePos}, " +
@@ -5777,7 +5777,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pV = GpuTransferHelper.CopyToDevice(vCache);
             nuint qBytes = GpuTransferHelper.ByteSize(qOut);
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
-            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQi, pKi, pVi, pCos, pSin,
+            LaunchQkvRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQi, pKi, pVi, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;
@@ -5802,7 +5802,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkvNormRopeScatter");
-        if (devicePos == 0 || qkv.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qkv.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkvNormRopeScatterDecodeStep requires a device position buffer and F32 qkv/caches; got devicePos={devicePos}, " +
@@ -5826,7 +5826,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQkv + (ulong)((long)hq * headDim * sizeof(float));
             ulong vOff = kOff + (ulong)((long)hkv * headDim * sizeof(float));
-            _kernels!.LaunchQkNormRopeScatter(pQ, pK, pV, pQkv, kOff, vOff, pQw, pKw, pCos, pSin,
+            LaunchQkNormRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQkv, kOff, vOff, pQw, pKw, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, eps, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;
@@ -5849,7 +5849,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkNormRopeScatterV");
-        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkNormRopeScatterVDecodeStep requires a device position buffer and F32 qk/v/caches; got devicePos={devicePos}, " +
@@ -5873,7 +5873,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint qBytes = GpuTransferHelper.ByteSize(qOut);
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQk + (ulong)((long)hq * headDim * sizeof(float));
-            _kernels!.LaunchQkNormRopeScatter(pQ, pK, pV, pQk, kOff, pVi, pQw, pKw, pCos, pSin,
+            LaunchQkNormRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQk, kOff, pVi, pQw, pKw, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, eps, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;

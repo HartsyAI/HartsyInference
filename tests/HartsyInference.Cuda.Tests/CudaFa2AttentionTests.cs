@@ -153,4 +153,51 @@ public sealed unsafe class CudaFa2AttentionTests
         double gb = 2.0 * hkv * kvLen * d * sizeof(float) / 1e9;
         _output.WriteLine($"decode attention kvLen={kvLen} hq={hq} hkv={hkv}: {us:F1} us per call, {gb / (us * 1e-6):F0} GB/s of F32 KV");
     }
+
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData(false)]   // rope + scatter of separate q, k, v
+    [InlineData(true)]    // per-head QK-norm + rope + scatter (Qwen3)
+    public void F16KvCache_ScatterMatchesF32(bool qkNorm)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int hq = 8, hkv = 2, d = 128, maxSeq = 64, pos = 17;
+        Random rng = new(qkNorm ? 3 : 4);
+        using CudaBackend cuda = new(0, PtxDir());
+        ulong posBuf = CudaMemory.Allocate(2 * sizeof(int));
+        int* hostPos = stackalloc int[2] { pos + 1, pos };
+        CudaMemory.CopyHostToDevice(posBuf, hostPos, 2 * sizeof(int));
+        using Tensor cos = Random(rng, maxSeq, d), sin = Random(rng, maxSeq, d);
+        using Tensor q = Random(rng, 1, hq, 1, d), k = Random(rng, 1, hkv, 1, d), v = Random(rng, 1, hkv, 1, d);
+        using Tensor qk = Random(rng, 1, 1, (hq + hkv) * d);
+        using Tensor qNorm = Random(rng, d), kNorm = Random(rng, d);
+
+        Tensor[] RunWith(DType cacheType)
+        {
+            Tensor kc = new(new TensorShape(1, hkv, maxSeq, d), cacheType), vc = new(new TensorShape(1, hkv, maxSeq, d), cacheType);
+            Tensor qo = new(new TensorShape(1, hq, 1, d), DType.F32);
+            if (qkNorm) cuda.QkNormRopeScatterVDecodeStep(qo, kc, vc, qk, v, qNorm, kNorm, 1e-6f, cos, sin, hq, hkv, d, d, false, posBuf);
+            else cuda.RopeScatterKvDecodeStep(qo, kc, vc, q, k, v, cos, sin, hq, hkv, d, d, false, posBuf);
+            cuda.Sync();
+            return [qo, kc, vc];
+        }
+        Tensor[] f32 = RunWith(DType.F32);
+        Tensor[] f16 = RunWith(DType.F16);
+        float* q32 = (float*)f32[0].DataPointer, q16 = (float*)f16[0].DataPointer;
+        for (int i = 0; i < hq * d; i++) Assert.Equal(q32[i], q16[i]);   // q is untouched by the cache type
+        for (int c = 1; c <= 2; c++)
+        {
+            float* a = (float*)f32[c].DataPointer;
+            Half* b = (Half*)f16[c].DataPointer;
+            for (int h = 0; h < hkv; h++)
+                for (int i = 0; i < d; i++)
+                {
+                    long at = ((long)h * maxSeq + pos) * d + i;
+                    Assert.Equal((float)(Half)a[at], (float)b[at]);   // the F16 cache holds the F32 value rounded to half
+                }
+        }
+        CudaMemory.Free(posBuf);
+        foreach (Tensor t in f32.Concat(f16)) t.Dispose();
+        _output.WriteLine($"F16 KV scatter matches F32 rounded to half (qkNorm={qkNorm})");
+    }
 }

@@ -3,7 +3,11 @@ namespace HartsyInference.Cuda;
 // Causal grouped-query FlashAttention-2 for LLM prefill (Kernels/lm/flash_attn_causal_f16.cu): F16 tensor cores, F32 accumulation.
 public sealed partial class CudaKernels
 {
-    private CudaModule? _fa2Module, _decodeGqaModule;
+    private CudaModule? _fa2Module, _decodeGqaModule, _kvScatterF16Module;
+    private nint _kvScatterQkvF16, _kvScatterQkNormF16;
+
+    /// <summary>True when kv_scatter_f16.ptx loaded: the fused graph-decode scatter kernels for an F16 key/value cache.</summary>
+    public bool HasKvScatterF16 => _kvScatterQkvF16 != 0 && _kvScatterQkNormF16 != 0;
     private nint _fa2D128, _fa2D64, _kvToF16;
     private nint _decF32D128, _decF32D64, _decF16D128, _decF16D64;
 
@@ -27,6 +31,13 @@ public sealed partial class CudaKernels
         _fa2D128 = _fa2Module.GetFunction("lm_fa2_causal_d128");
         _fa2D64 = _fa2Module.GetFunction("lm_fa2_causal_d64");
         _kvToF16 = _fa2Module.GetFunction("lm_kv_to_f16");
+        string scatter = Ptx("kv_scatter_f16");
+        if (File.Exists(scatter))
+        {
+            _kvScatterF16Module = LoadOwnedModule(scatter);
+            _kvScatterQkvF16 = _kvScatterF16Module.GetFunction("lm_qkv_rope_scatter_f16kv");
+            _kvScatterQkNormF16 = _kvScatterF16Module.GetFunction("lm_qknorm_rope_scatter_f16kv");
+        }
         string decode = Ptx("flash_attn_decode_gqa");
         if (File.Exists(decode))
         {
@@ -88,5 +99,41 @@ public sealed partial class CudaKernels
         a[0] = &mA; a[1] = &lA; a[2] = &accA; a[3] = &qA; a[4] = &hqA; a[5] = &hkvA; a[6] = &lkA; a[7] = &kvLenA; a[8] = &groupA;
         a[9] = &offA; a[10] = &scaleA; a[11] = &capA; a[12] = &winA; a[13] = &gA; a[14] = &chunkA; a[15] = &posA; a[16] = &kA; a[17] = &vA;
         CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, (uint)b, 256, 1, 1, (uint)DecodeSharedBytes(d), stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused graph-decode QKV epilogue writing an F16 key/value cache (q stays F32).</summary>
+    public unsafe void LaunchQkvRopeScatterF16Kv(ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn,
+        ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim, bool interleaved, int maxSeq, ulong devicePos, nint stream)
+    {
+        ulong qA = qOut, kA = kCache, vA = vCache, qiA = qIn, kiA = kIn, viA = vIn, cA = cos, sA = sin, dpA = devicePos;
+        uint nqA = (uint)nq, nkvA = (uint)nkv, dA = (uint)headDim, rdA = (uint)rotaryDim, msA = (uint)maxSeq;
+        int ilA = interleaved ? 1 : 0;
+        void** args = stackalloc void*[15];
+        args[0] = &qA; args[1] = &kA; args[2] = &vA; args[3] = &qiA; args[4] = &kiA; args[5] = &viA;
+        args[6] = &cA; args[7] = &sA;
+        args[8] = &nqA; args[9] = &nkvA; args[10] = &dA; args[11] = &rdA; args[12] = &ilA; args[13] = &msA; args[14] = &dpA;
+        long total = ((long)nq + 2L * nkv) * headDim;
+        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_kvScatterQkvF16, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused per-head QK-norm + RoPE + scatter into an F16 key/value cache (q stays F32).</summary>
+    public unsafe void LaunchQkNormRopeScatterF16Kv(ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn,
+        ulong qNormW, ulong kNormW, ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim,
+        bool interleaved, float eps, int maxSeq, ulong devicePos, nint stream)
+    {
+        ulong qA = qOut, kA = kCache, vA = vCache, qiA = qIn, kiA = kIn, viA = vIn, qwA = qNormW, kwA = kNormW,
+            cA = cos, sA = sin, dpA = devicePos;
+        uint nqA = (uint)nq, nkvA = (uint)nkv, dA = (uint)headDim, rdA = (uint)rotaryDim, msA = (uint)maxSeq;
+        int ilA = interleaved ? 1 : 0;
+        float epsA = eps;
+        void** args = stackalloc void*[18];
+        args[0] = &qA; args[1] = &kA; args[2] = &vA; args[3] = &qiA; args[4] = &kiA; args[5] = &viA;
+        args[6] = &qwA; args[7] = &kwA; args[8] = &cA; args[9] = &sA;
+        args[10] = &nqA; args[11] = &nkvA; args[12] = &dA; args[13] = &rdA; args[14] = &ilA;
+        args[15] = &epsA; args[16] = &msA; args[17] = &dpA;
+        uint grid = (uint)(nq + 2 * nkv);
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(_kvScatterQkNormF16, grid, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 }

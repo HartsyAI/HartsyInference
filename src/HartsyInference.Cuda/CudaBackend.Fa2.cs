@@ -85,4 +85,22 @@ public sealed partial class CudaBackend
             GpuTransferHelper.FreeDevice(pAcc);
         }
     }
+
+    /// <summary>True for a key/value cache pair the fused graph-decode scatter kernels can write: both F32, or both F16 with the F16 twins loaded.</summary>
+    private bool KvScatterCacheOk(Tensor kCache, Tensor vCache) =>
+        kCache.DType == vCache.DType && (kCache.DType == DType.F32 || (kCache.DType == DType.F16 && _kernels is { HasKvScatterF16: true }));
+
+    private void LaunchQkvRopeScatterAny(bool f16Kv, ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn, ulong cos, ulong sin,
+        int nq, int nkv, int headDim, int rotaryDim, bool interleaved, int maxSeq, ulong devicePos, nint stream)
+    {
+        if (f16Kv) _kernels!.LaunchQkvRopeScatterF16Kv(qOut, kCache, vCache, qIn, kIn, vIn, cos, sin, nq, nkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, stream);
+        else _kernels!.LaunchQkvRopeScatter(qOut, kCache, vCache, qIn, kIn, vIn, cos, sin, nq, nkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, stream);
+    }
+
+    private void LaunchQkNormRopeScatterAny(bool f16Kv, ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn, ulong qNormW, ulong kNormW,
+        ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim, bool interleaved, float eps, int maxSeq, ulong devicePos, nint stream)
+    {
+        if (f16Kv) _kernels!.LaunchQkNormRopeScatterF16Kv(qOut, kCache, vCache, qIn, kIn, vIn, qNormW, kNormW, cos, sin, nq, nkv, headDim, rotaryDim, interleaved, eps, maxSeq, devicePos, stream);
+        else _kernels!.LaunchQkNormRopeScatter(qOut, kCache, vCache, qIn, kIn, vIn, qNormW, kNormW, cos, sin, nq, nkv, headDim, rotaryDim, interleaved, eps, maxSeq, devicePos, stream);
+    }
 }
