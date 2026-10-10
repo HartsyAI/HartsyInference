@@ -993,7 +993,8 @@ public sealed class TextService : ITextService, IDisposable
         if (path is null || !PlacementApplies(deviceKey, path) || KeepsLoadedModel(slot, path, hfDirectory: false))
             return GateOrdinalsFor(slot, deviceKey);
         int primary = GateOrdinalFor(deviceKey);
-        return [primary, .. CudaTopology.Probe().Select(static d => d.Ordinal).Where(o => o != primary)];
+        // The device count only: a full topology probe opens a context per device, which the plan does once already.
+        return [primary, .. Enumerable.Range(0, CudaContext.GetDeviceCount()).Where(o => o != primary)];
     }
 
     /// <summary>Whether the placement planner decides this load: a GGUF on a single CUDA device key, with no layer split or
