@@ -346,6 +346,8 @@ public sealed class TextService : ITextService, IDisposable
                 PromptTokens = outcome.PromptTokens,
                 CompletionTokens = outcome.CompletionTokens,
                 ToolCall = outcome.ToolCall,
+                PrefillMilliseconds = outcome.PrefillMilliseconds,
+                DecodeMilliseconds = outcome.DecodeMilliseconds,
             };
         }
         catch (OperationCanceledException)
@@ -683,10 +685,11 @@ public sealed class TextService : ITextService, IDisposable
             if (Parser is not null) Parser.Finish(Emit!);
             StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
             if (FilterSink is null)
-                return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count);
+                return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count, null,
+                    result.PrefillMilliseconds, result.DecodeMilliseconds);
             FilterSink.End();
             return new GenOutcome(FilterSink.Text, FilterSink.ToolCall is null ? stop : StopReason.ToolCall,
-                result.PromptTokens, result.TokenIds.Count, FilterSink.ToolCall);
+                result.PromptTokens, result.TokenIds.Count, FilterSink.ToolCall, result.PrefillMilliseconds, result.DecodeMilliseconds);
         }
 
         /// <summary>The outcome of a request the filter stopped: ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.</summary>
@@ -1788,5 +1791,6 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>The outcome of one generation: full text, stop reason, token counts, and the tool call a stream filter completed (null without one).</summary>
-    private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens, NativeToolCall? ToolCall = null);
+    private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens, NativeToolCall? ToolCall = null,
+        double PrefillMilliseconds = 0, double DecodeMilliseconds = 0);
 }

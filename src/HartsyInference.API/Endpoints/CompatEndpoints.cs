@@ -115,6 +115,7 @@ public static class CompatEndpoints
                             FinishReason = ToFinishReason(result.Stop),
                         }],
                         Usage = new ChatUsage { PromptTokens = result.PromptTokens, CompletionTokens = result.CompletionTokens },
+                        Timings = ChatTimings.From(result.PromptTokens, result.PrefillMilliseconds, result.CompletionTokens, result.DecodeMilliseconds),
                     });
                 }
                 catch (Exception ex)
@@ -373,7 +374,7 @@ public static class CompatEndpoints
             MaxTokens = req.MaxTokens ?? 4096,
             Seed = req.Seed.HasValue ? (long)req.Seed.Value : -1,
             ReasoningEffort = ParseReasoningEffort(req.ReasoningEffort),
-            EnableThinking = ParseThinking(req.Thinking),
+            EnableThinking = ResolveThinking(req.Thinking, req.ChatTemplateKwargs),
             User = req.User,
             Priority = ParsePriority(req.Priority),
             Greedy = req.Temperature is 0f,
@@ -514,6 +515,10 @@ public static class CompatEndpoints
         "disabled" => false,
         _ => throw new ArgumentException($"thinking.type must be 'enabled' or 'disabled', not '{thinking!.Type}'."),
     };
+
+    /// <summary>The reasoning switch a request asks for: the OpenAI <c>thinking</c> field when it is set, otherwise the
+    /// llama.cpp-style <c>chat_template_kwargs.enable_thinking</c>. Neither set leaves the template's default.</summary>
+    internal static bool? ResolveThinking(ChatThinkingDto? thinking, ChatTemplateKwargsDto? kwargs) => ParseThinking(thinking) ?? kwargs?.EnableThinking;
 
     /// <summary>OpenAI-style <c>priority</c>: <c>low</c>, <c>normal</c> or <c>high</c>. Unset is normal.</summary>
     internal static RequestPriority? ParsePriority(string? priority) => priority switch
