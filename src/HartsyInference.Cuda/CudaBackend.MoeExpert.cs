@@ -398,25 +398,40 @@ public sealed unsafe partial class CudaBackend
         if (matElems * experts > int.MaxValue) return false;   // the dequant launch counts elements in an int
         int rowBudget = Math.Max(maxCount, 16384);
         long tempBytes = (long)rowBudget * (3L * inter + hidden) * elem;
-        (long freeBytes, _) = CudaMemory.GetMemInfo();
-        if (freeBytes > 0 && freeBytes < 3 * stackBytes + tempBytes + (2L << 30)) return false;
-
+        // A dequantized stack is cached on the layer's first expert (and released with those weights) while free memory stays above the
+        // headroom a quantized weight cast keeps; otherwise it is dequantized into a buffer freed after the call.
+        DType marker = StackCastMarker(gemmDtype);
         ulong wsGate = 0, wsUp = 0, wsDown = 0, gateOut = 0, upOut = 0, act = 0, downTmp = 0, ptrDev = 0;
+        bool haveGate = GpuTransferHelper.TryGetWeightCast(gateExperts[0], marker, out wsGate);
+        bool haveUp = GpuTransferHelper.TryGetWeightCast(upExperts[0], marker, out wsUp);
+        bool haveDown = GpuTransferHelper.TryGetWeightCast(downExperts[0], marker, out wsDown);
+        int missing = (haveGate ? 0 : 1) + (haveUp ? 0 : 1) + (haveDown ? 0 : 1);
+        (long freeBytes, long totalBytes) = CudaMemory.GetMemInfo();
+        long headroom = Math.Max(4L << 30, totalBytes / 3);
+        bool cacheStacks = CacheWeightCasts && missing > 0 && freeBytes > 0 && freeBytes - missing * stackBytes - tempBytes >= headroom;
+        if (!cacheStacks && freeBytes > 0 && freeBytes < missing * stackBytes + tempBytes + (2L << 30)) return false;
+        bool ownGate = false, ownUp = false, ownDown = false;   // buffers this call must free (not cached)
         try
         {
-            wsGate = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
-            wsUp = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
-            wsDown = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
+            ulong Stack(Tensor first, ulong basePtr, ref ulong have, bool already, ref bool own)
+            {
+                if (already) return have;
+                ulong ws = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
+                // The stacks are flat runs of quant blocks: one dequant launch per projection covers every expert.
+                CastOnGpu(ws, basePtr, first.DType, gemmDtype, (int)(matElems * experts));
+                if (cacheStacks) GpuTransferHelper.CacheWeightCast(first, marker, ws, (nuint)stackBytes);
+                else own = true;
+                return ws;
+            }
+            wsGate = Stack(gateExperts[0], gBase, ref wsGate, haveGate, ref ownGate);
+            wsUp = Stack(upExperts[0], uBase, ref wsUp, haveUp, ref ownUp);
+            wsDown = Stack(downExperts[0], dBase, ref wsDown, haveDown, ref ownDown);
             // The grouped call writes 16-bit outputs only (cuBLAS refuses 16-bit operands with an F32 result), so gate, up and the down
             // result are 16-bit here and the down rows are widened to the F32 expert-major buffer after each batch.
             gateOut = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * inter * elem));
             upOut = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * inter * elem));
             act = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * inter * elem));
             downTmp = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * hidden * elem));
-            // The stacks are flat runs of quant blocks: one dequant launch per projection covers every expert.
-            CastOnGpu(wsGate, gBase, gateExperts[0].DType, gemmDtype, (int)(matElems * experts));
-            CastOnGpu(wsUp, uBase, upExperts[0].DType, gemmDtype, (int)(matElems * experts));
-            CastOnGpu(wsDown, dBase, downExperts[0].DType, gemmDtype, (int)(matElems * experts));
 
             int gemmType = CublasApi.DataTypeOf(gemmDtype);
             int compute = Compute32F(gemmType);
@@ -493,8 +508,15 @@ public sealed unsafe partial class CudaBackend
         }
         finally
         {
-            foreach (ulong p in new[] { wsGate, wsUp, wsDown, gateOut, upOut, act, downTmp, ptrDev })
+            foreach (ulong p in new[] { gateOut, upOut, act, downTmp, ptrDev })
                 if (p != 0) GpuTransferHelper.FreeDevice(p);
+            if (ownGate && wsGate != 0) GpuTransferHelper.FreeDevice(wsGate);
+            if (ownUp && wsUp != 0) GpuTransferHelper.FreeDevice(wsUp);
+            if (ownDown && wsDown != 0) GpuTransferHelper.FreeDevice(wsDown);
         }
     }
+
+    /// <summary>Cache key type for a dequantized expert stack: distinct from every dtype a single weight is cast to, so a stack and the
+    /// per-expert cast of the same first expert never alias.</summary>
+    private static DType StackCastMarker(DType gemmDtype) => new("MoeStack." + gemmDtype.Name, gemmDtype.SizeInBytes, false);
 }
