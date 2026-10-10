@@ -920,7 +920,9 @@ public sealed class TextService : ITextService, IDisposable
         // always pass false) to preserve this path's long-standing behavior for every existing caller; a request
         // can opt out via PreloadRedundantWeightSplits — see its doc comment on TextRequest for the measured cost.
         bool preloadRedundantSplits = request.PreloadRedundantWeightSplits ?? true;
-        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights(preloadRedundantSplits));
+        // Grouped so a MoE model's routed experts land in one device allocation per layer and projection instead of
+        // one per expert, which the driver rounds up (18-62% on Qwen3-30B-A3B's experts).
+        backend.PreloadWeightGroups(slot.Model.Transformer.EnumerateWeightGroups(preloadRedundantSplits));
         slot.PreloadRedundantWeightSplitsApplied = preloadRedundantSplits;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
         slot.Scheduler = CreateGgufScheduler(slot, deviceKey, slot.Model, backend);

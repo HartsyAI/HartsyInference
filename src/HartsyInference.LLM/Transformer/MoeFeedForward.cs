@@ -81,6 +81,16 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         if (_shGateScoreW is not null) yield return _shGateScoreW;
     }
 
+    /// <summary>The routed experts' projections as three groups, every expert's gate, then up, then down, each in expert
+    /// order. The members are the tensors <see cref="EnumerateWeights"/> yields, grouped so a backend can place each
+    /// projection's experts in one device allocation (<see cref="IBackend.PreloadWeightGroups"/>).</summary>
+    public IEnumerable<IReadOnlyList<Tensor>> EnumerateExpertGroups()
+    {
+        yield return _gateW;
+        yield return _upW;
+        yield return _downW;
+    }
+
     /// <summary>Router logits (<c>x @ router_weight</c>) as their own <c>[1, N, E]</c> tensor, for callers that need to compute them from a DIFFERENT input than the expert FFN's (Gemma-4: the router reads a separately normalized view of the attention output) before passing them to <see cref="Forward"/>.</summary>
     public Tensor ComputeRouterLogits(IBackend backend, Tensor x, int n)
     {
