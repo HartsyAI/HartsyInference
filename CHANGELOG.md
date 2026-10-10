@@ -22,6 +22,15 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.332
+
+- **Fixed: the repetition penalty applies once per distinct token, not once per occurrence.** `RepetitionPenaltyStep` divided a token's logit by the penalty for every time it had been generated, so a token seen n times was suppressed by `penalty^n`. Hugging Face and llama.cpp apply it once per token. At the 1.1 the LLM Assistant extension sends by default, a few thousand tokens of reasoning (Qwen3-30B-A3B reviewing code with thinking on) crushed spaces, punctuation and the identifiers under review. The output turned into misspellings (`_correctioinBiase`, `SigmoideLogItAdd`) and drifted into Chinese (1,908 CJK characters). With the fix the same review has neither, and it finishes on its own.
+  - The CPU step marks tokens it has already penalized in a reused stamp array, allocating once per generation.
+  - Graph decode keeps its device history distinct, so its penalty kernels (which penalize every listed entry once) agree with the CPU:
+    - CUDA uses the new `lm_history_append_distinct` (`lm_history_f32.ptx`), in its own module so the hand-tuned `lm_f32` PTX is not rebuilt.
+    - Vulkan's `history_append` shader skips a token already present.
+  - Greedy decoding still applies the penalty, as before.
+  - Covered by `RepetitionPenaltyOncePerTokenTests`, `GraphDecodeRepetitionPenaltyTests` (CUDA graph against eager on Llama-3.2-1B, the 32 tokens identical) and `VulkanDecodeGraphTests` (append and penalty, updated to the distinct rule).
 ## alpha.331
 
 - **Added: expert offload runs.** When the text placement planner chooses offload for a GGUF MoE model (by `auto`, or forced with `offload`), the load builds a `MoeExpertOffload`. Its parts:

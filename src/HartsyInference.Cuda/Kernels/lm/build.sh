@@ -5,6 +5,7 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 KERNELS=(
     "lm_f32"
+    "lm_history_f32"
     "flash_attn_f32"
     "flash_attn_f32_split"
     "flash_attn_v2_tf32"

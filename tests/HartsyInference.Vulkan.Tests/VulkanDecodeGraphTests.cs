@@ -145,7 +145,7 @@ public sealed class VulkanDecodeGraphTests
     }
 
     [Fact]
-    public void AppendTokenHistoryStep_AppendsAndIncrementsCounter()
+    public void AppendTokenHistoryStep_AppendsEachDistinctTokenOnce()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = new();
@@ -164,8 +164,9 @@ public sealed class VulkanDecodeGraphTests
                 backend.AppendTokenHistoryStep(history, counter, tokBuf);
             }
             // ReadDeviceTokenId reads any 1-int scalar control buffer by handle, not just a "token id"
-            // buffer specifically — reused here to read the counter's post-append value.
-            Assert.Equal(tokens.Length, backend.ReadDeviceTokenId(counter));
+            // buffer specifically — reused here to read the counter's post-append value. The repeated 5 is not
+            // appended again: the history lists distinct tokens, so the penalty applies once per token.
+            Assert.Equal(tokens.Distinct().Count(), backend.ReadDeviceTokenId(counter));
         }
         finally
         {
@@ -177,8 +178,8 @@ public sealed class VulkanDecodeGraphTests
 
     /// <summary>Applies penalty over a history built via <see cref="AppendTokenHistoryStep"/> (not a
     /// hand-written buffer) so this also exercises the append path end-to-end, then checks against the HF
-    /// convention (divide positive / multiply negative) with the SAME compounding-on-repeat semantics as
-    /// <c>HartsyInference.LLM.Sampling.RepetitionPenaltyStep</c> — repeated tokens divide multiple times.</summary>
+    /// convention (divide positive / multiply negative), once per distinct token, as
+    /// <c>HartsyInference.LLM.Sampling.RepetitionPenaltyStep</c> applies it: a repeated token is penalized once.</summary>
     [Fact]
     public void ApplyRepetitionPenaltyStep_MatchesHfConventionWithRepeats()
     {
@@ -186,7 +187,7 @@ public sealed class VulkanDecodeGraphTests
         using VulkanBackend backend = new();
         const int vocab = 32;
         const float penalty = 1.3f;
-        int[] tokens = { 3, 10, 3, 3, 25 };   // token 3 repeats 3x — must compound
+        int[] tokens = { 3, 10, 3, 3, 25 };   // token 3 repeats 3x — penalized once
 
         Tensor logits = new(new TensorShape(1, vocab), DType.F32);
         ulong history = backend.AllocDeviceHistory(tokens.Length);
@@ -206,7 +207,7 @@ public sealed class VulkanDecodeGraphTests
                 backend.WriteDeviceTokenId(tokBuf, t);
                 backend.AppendTokenHistoryStep(history, counter, tokBuf);
             }
-            foreach (int t in tokens)   // CPU reference: sequential compounding, same order
+            foreach (int t in tokens.Distinct())   // CPU reference: once per distinct token
             {
                 float logit = expected[t];
                 expected[t] = logit > 0f ? logit / penalty : logit * penalty;
