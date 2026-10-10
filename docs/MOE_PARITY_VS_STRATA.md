@@ -105,8 +105,21 @@ The 4090 is shared with other work.
   `moe/dsv2-lite-mla`. Two suspects are being checked against the reference: the RoPE pairing in MLA, and
   the default for `norm_topk_prob` when the GGUF does not set it.
 - Timings and `/health` for the harness: draft PR #355 (`api/llama-compatible-timings`).
-- Low-VRAM expert placement: the generic preload budgets each tensor by its stored size. Device size can
-  be larger for expert tensors, which is one suspect for the preload OOM on 12 GB cards. Design pending.
+- Low-VRAM expert placement. The generic preload budgets each tensor by its stored size, and the expert
+  path holds routed experts as F32. F32 is 7.1 times the Q4_K size, so the expert weights do not fit a 24 GB
+  card for any model in the table below. A VRAM budget alone is therefore not enough: experts must stay
+  quantized on the device, and the budget must count their device bytes.
+
+  | Model | Routed experts, F32 | Routed experts, Q4_K | GGUF Q4_K_M file |
+  |---|---:|---:|---:|
+  | Mixtral-8x7B | 180.4 GB | 25.4 GB | 26.4 GB |
+  | Qwen3-30B-A3B | 116.0 GB | 16.3 GB | 18.6 GB |
+  | DeepSeek-V2-Lite | 57.6 GB | 8.1 GB | 10.4 GB |
+  | OLMoE-1B-7B | 25.8 GB | 3.6 GB | 4.2 GB |
+  | Granite-3B-A800M | 12.1 GB | 1.7 GB | 2.1 GB |
+
+  Figures are from the published layer counts and hidden and intermediate sizes, with three projections per
+  expert. The Q4_K column assumes 0.5625 bytes per parameter.
 - llama.cpp and Strata are built on the baseline pod at the pinned revisions. Baseline measurements wait
   for the model hash check and for the GPU to be free of the MLA runs.
 
