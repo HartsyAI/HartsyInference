@@ -31,6 +31,9 @@ public sealed unsafe class CudaMoeIndexedTests
             yield return [n, "Q8_0", "Q8_0", false];
             yield return [n, "Q4_K", "Q6_K", true];    // shared expert with its sigmoid gate (Qwen2-MoE)
         }
+        // About 500 rows per expert: past the point where a dense GEMM per expert replaces the grouped call.
+        yield return [2000, "Q4_K", "Q6_K", false];
+        yield return [2000, "Q8_0", "Q8_0", false];
     }
 
     [Trait("Category", "GpuIntegration")]
