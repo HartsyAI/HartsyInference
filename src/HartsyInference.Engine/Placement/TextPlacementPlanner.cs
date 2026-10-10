@@ -50,6 +50,13 @@ public readonly record struct TextPlacementDemand(long DenseBytes, long ExpertBy
 
     /// <summary>Everything the model needs on one device.</summary>
     public long TotalBytes => DenseBytes + ExpertBytes + KvBytes;
+
+    /// <summary>Whether the CPU can run the routed experts in place: every expert tensor in a format the packed CPU kernels read,
+    /// with widths that fit its blocks. Offload needs it; the other placements do not.</summary>
+    public bool ExpertsHostRunnable { get; init; } = true;
+
+    /// <summary>Why <see cref="ExpertsHostRunnable"/> is false; null when it is true.</summary>
+    public string? ExpertsHostReason { get; init; }
 }
 
 /// <summary>One candidate device: its selector (<c>cuda:0</c>) and the bytes it has free now.</summary>
@@ -165,6 +172,11 @@ public static class TextPlacementPlanner
         {
             return new TextPlacement(TextPlacementMode.Offload, false, [device.Device], 0, fixedNeed, device.FreeBytes,
                 "Expert offload needs a mixture-of-experts model; this one is dense.");
+        }
+        if (!demand.ExpertsHostRunnable)
+        {
+            return new TextPlacement(TextPlacementMode.Offload, false, [device.Device], 0, fixedNeed, device.FreeBytes,
+                $"Expert offload runs missed experts on the CPU, and {demand.ExpertsHostReason}");
         }
         long budget = Math.Min(device.FreeBytes - fixedNeed, demand.ExpertBytes);
         if (budget < MinExpertBudgetBytes)
