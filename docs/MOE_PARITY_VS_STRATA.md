@@ -105,10 +105,20 @@ The 4090 is shared with other work.
   `moe/dsv2-lite-mla`. Two suspects are being checked against the reference: the RoPE pairing in MLA, and
   the default for `norm_topk_prob` when the GGUF does not set it.
 - Timings and `/health` for the harness: draft PR #355 (`api/llama-compatible-timings`).
-- Low-VRAM expert placement. The generic preload budgets each tensor by its stored size, and the expert
-  path holds routed experts as F32. F32 is 7.1 times the Q4_K size, so the expert weights do not fit a 24 GB
-  card for any model in the table below. A VRAM budget alone is therefore not enough: experts must stay
-  quantized on the device, and the budget must count their device bytes.
+- MoE expert placement. Every MoE layer builds `MoeFeedForward` with the `CpuOnlyPolicy` placement
+  (`MoeFeedForward.cs:21`, used at line 276), so routed experts never run on the GPU. Each expert's F32
+  weights are built as host arrays on first use (`ResolveHostWeights`, lines 343-352), and `BuildHostCache`
+  requires F32 tensors (`RequireF32`). The CUDA expert runner (`CudaExpertDeviceRunner`) exists, but nothing
+  in `src/` constructs it. The VRAM mode therefore governs only the non-expert weights. The expert path costs
+  host RAM at the F32 size in the table below, which is 7.1 times the Q4_K size.
+- The load guard (`TextService.EnsureRamHeadroomFor`) counts F32 expansion only for quantized tensors outside
+  `GpuSupportedQuant`. Q4_K is inside that set, so a CUDA load does not count the expert expansion. On the local
+  host (62 GB total, 41 GB available at the check) this matters for DeepSeek-V2-Lite (57.6 GB of F32 experts),
+  Qwen3-30B and Mixtral.
+- Pins. The LLM Assistant extension pins engine alpha.270. That release already contains `MoeFeedForward`, and
+  no commit has touched that file since. Twenty-three LLM-layer commits came after it, mostly DeepSeek V4.1, so
+  loading a MoE GGUF in the extension needs no pin bump. The extension's model list scans `*.gguf` recursively
+  with no architecture filter, so the MoE files already list.
 
   | Model | Routed experts, F32 | Routed experts, Q4_K | GGUF Q4_K_M file |
   |---|---:|---:|---:|
