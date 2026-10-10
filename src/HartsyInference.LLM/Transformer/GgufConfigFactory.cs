@@ -264,9 +264,10 @@ public static class GgufConfigFactory
             // Top-k weight renormalization (llama.cpp's per-arch `norm_w` passed to build_moe_ffn): Mixtral
             // (llama arch) and Qwen3-MoE renormalize the selected experts' weights to sum to 1; OLMoE and
             // *Qwen2-MoE* do NOT (qwen2moe is build_moe_ffn(..., false) upstream). Honor an explicit GGUF flag
-            // when present, else default per arch.
+            // when present, else default per arch. DeepSeek-V2 (V2-Lite: norm_topk_prob=false) omits the key, and
+            // llama.cpp then reads false; DeepSeek-V3 writes it true. So an absent key on deepseek2 means no renorm.
             bool normTopK = metadata.ContainsKey($"{arch}.expert_weights_norm")
-                ? metadata.GetBool($"{arch}.expert_weights_norm") : arch is not ("olmoe" or "qwen2moe");
+                ? metadata.GetBool($"{arch}.expert_weights_norm") : arch is not ("olmoe" or "qwen2moe" or "deepseek2");
             moe = new MoeConfig
             {
                 NumExperts = expertCount,
