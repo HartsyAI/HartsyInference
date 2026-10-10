@@ -25,7 +25,7 @@ public sealed unsafe class CpuExpertKernelsTests
     public static TheoryData<string, int, int> Cases()
     {
         TheoryData<string, int, int> data = new();
-        foreach (string dtype in new[] { "Q8_0", "Q4_K" })
+        foreach (string dtype in new[] { "Q8_0", "Q4_K", "Q5_K", "Q6_K", "Q4_K/Q6_K" })
             foreach (int program in new[] { 0, 1, 2, 3 })
                 foreach (int rows in new[] { 1, 3, 8 })
                     data.Add(dtype, program, rows);
@@ -36,35 +36,35 @@ public sealed unsafe class CpuExpertKernelsTests
     [MemberData(nameof(Cases))]
     public void MatchesDequantizedReference(string dtypeName, int programKind, int rows)
     {
-        DType dtype = ParseDType(dtypeName);
+        ExpertDTypes dtypes = ParseDTypes(dtypeName);
         ExpertProgram program = ProgramFor(programKind);
-        Weights weights = MakeWeights(dtype, seed: 100 + programKind * 10 + rows);
+        Weights weights = MakeWeights(dtypes, seed: 100 + programKind * 10 + rows);
         float[] x = Random(rows * Hidden, seed: 7 + rows, scale: 1f);
 
         float[] expected = new float[rows * Hidden];
         ExpertProgramReference.Apply(program, weights.Dequantized, x, rows, expected);
         float[] actual = new float[rows * Hidden];
-        CpuExpertKernels.Apply(program, dtype, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, actual);
+        CpuExpertKernels.Apply(program, dtypes, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, actual);
 
         (float maxAbs, float relative) = Measure(expected, actual);
         _output.WriteLine($"{dtypeName} program={programKind} rows={rows} maxAbs={maxAbs:E4} maxRelative={relative:E4}");
-        Assert.True(relative <= Tolerance(dtype),
-            $"{dtypeName} program {programKind} rows {rows}: relative error {relative:E4} exceeds {Tolerance(dtype):E2}.");
+        Assert.True(relative <= Tolerance(dtypes),
+            $"{dtypeName} program {programKind} rows {rows}: relative error {relative:E4} exceeds {Tolerance(dtypes):E2}.");
     }
 
     [Theory]
     [MemberData(nameof(Cases))]
     public void AvxPathMatchesScalarBitForBit(string dtypeName, int programKind, int rows)
     {
-        DType dtype = ParseDType(dtypeName);
+        ExpertDTypes dtypes = ParseDTypes(dtypeName);
         ExpertProgram program = ProgramFor(programKind);
-        Weights weights = MakeWeights(dtype, seed: 300 + programKind * 10 + rows);
+        Weights weights = MakeWeights(dtypes, seed: 300 + programKind * 10 + rows);
         float[] x = Random(rows * Hidden, seed: 17 + rows, scale: 1f);
 
         float[] simd = new float[rows * Hidden];
         float[] scalar = new float[rows * Hidden];
-        CpuExpertKernels.Apply(program, dtype, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, simd);
-        CpuExpertKernels.ApplyScalar(program, dtype, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, scalar);
+        CpuExpertKernels.Apply(program, dtypes, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, simd);
+        CpuExpertKernels.ApplyScalar(program, dtypes, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, scalar);
 
         for (int i = 0; i < simd.Length; i++)
             Assert.Equal(BitConverter.SingleToInt32Bits(scalar[i]), BitConverter.SingleToInt32Bits(simd[i]));
@@ -75,9 +75,11 @@ public sealed unsafe class CpuExpertKernelsTests
     [InlineData("Q8_0", false)]
     [InlineData("Q4_K", true)]
     [InlineData("Q4_K", false)]
+    [InlineData("Q4_K/Q6_K", true)]
+    [InlineData("Q5_K", true)]
     public void SteadyStateCallAllocatesNothing(string dtypeName, bool simd)
     {
-        DType dtype = ParseDType(dtypeName);
+        ExpertDTypes dtype = ParseDTypes(dtypeName);
         ExpertProgram program = ProgramFor(2);
         Weights weights = MakeWeights(dtype, seed: 500);
         const int rows = 8;
@@ -107,17 +109,18 @@ public sealed unsafe class CpuExpertKernelsTests
             new byte[1], new byte[1], new byte[1], new float[9 * Hidden], 9, new float[9 * Hidden]));
     }
 
-    private static void Run(ExpertProgram program, DType dtype, Weights weights, float[] x, int rows, float[] y, bool simd)
+    private static void Run(ExpertProgram program, ExpertDTypes dtype, Weights weights, float[] x, int rows, float[] y, bool simd)
     {
         if (simd) CpuExpertKernels.Apply(program, dtype, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, y);
         else CpuExpertKernels.ApplyScalar(program, dtype, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, y);
     }
 
-    /// <summary>Largest allowed relative error (max abs error over max abs reference) per format. Measured over all 24
-    /// format, program and batch cases on this suite's seeds: Q8_0 peaks at 1.06e-2 and Q4_K at 1.17e-2. Each bound is
-    /// about twice its measured peak. The reference uses the dequantized weights, so the remaining error is the int8
-    /// quantization of the activations (the input row and the hidden row before Down).</summary>
-    private static float Tolerance(DType dtype) => dtype == DType.Q8_0 ? 2e-2f : 2.5e-2f;
+    /// <summary>Largest allowed relative error (max abs error over max abs reference) per format. Measured over every format,
+    /// program and batch case on this suite's seeds: Q8_0 peaks at 1.06e-2, Q4_K at 1.17e-2, Q5_K at 1.14e-2, Q6_K at 1.19e-2,
+    /// and Q4_K gate and up with a Q6_K down at 1.18e-2.
+    /// Each bound is about twice its measured peak. The reference uses the dequantized weights, so the remaining error is the
+    /// int8 quantization of the activations (the input row and the hidden row before Down).</summary>
+    private static float Tolerance(ExpertDTypes dtypes) => dtypes.Gate == DType.Q8_0 ? 2e-2f : 2.5e-2f;
 
     private static (float MaxAbs, float Relative) Measure(float[] expected, float[] actual)
     {
@@ -131,7 +134,22 @@ public sealed unsafe class CpuExpertKernelsTests
         return (maxAbs, maxRef > 0f ? maxAbs / maxRef : maxAbs);
     }
 
-    private static DType ParseDType(string name) => name == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
+    private static DType ParseDType(string name) => name switch
+    {
+        "Q8_0" => DType.Q8_0,
+        "Q4_K" => DType.Q4_K,
+        "Q5_K" => DType.Q5_K,
+        "Q6_K" => DType.Q6_K,
+        _ => throw new ArgumentException(name),
+    };
+
+    /// <summary><c>Q4_K</c> is every projection in Q4_K; <c>Q4_K/Q6_K</c> is gate and up in Q4_K with down in Q6_K, Q4_K_M's mix.</summary>
+    private static ExpertDTypes ParseDTypes(string name)
+    {
+        string[] parts = name.Split('/');
+        DType first = ParseDType(parts[0]);
+        return new ExpertDTypes(first, first, parts.Length > 1 ? ParseDType(parts[1]) : first);
+    }
 
     private static ExpertProgram ProgramFor(int kind) => kind switch
     {
@@ -150,14 +168,14 @@ public sealed unsafe class CpuExpertKernelsTests
         public required F32ExpertWeights Dequantized { get; init; }
     }
 
-    private static Weights MakeWeights(DType dtype, int seed)
+    private static Weights MakeWeights(ExpertDTypes dtypes, int seed)
     {
         float[] gate = Random(Intermediate * Hidden, seed, scale: 0.1f);
         float[] up = Random(Intermediate * Hidden, seed + 1, scale: 0.1f);
         float[] down = Random(Hidden * Intermediate, seed + 2, scale: 0.1f);
-        byte[] gatePacked = Pack(gate, dtype, Intermediate, Hidden, out float[] gateDeq);
-        byte[] upPacked = Pack(up, dtype, Intermediate, Hidden, out float[] upDeq);
-        byte[] downPacked = Pack(down, dtype, Hidden, Intermediate, out float[] downDeq);
+        byte[] gatePacked = Pack(gate, dtypes.Gate, Intermediate, Hidden, out float[] gateDeq);
+        byte[] upPacked = Pack(up, dtypes.Up, Intermediate, Hidden, out float[] upDeq);
+        byte[] downPacked = Pack(down, dtypes.Down, Hidden, Intermediate, out float[] downDeq);
         return new Weights
         {
             Gate = gatePacked,
