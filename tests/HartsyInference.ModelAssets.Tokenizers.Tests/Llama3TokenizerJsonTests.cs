@@ -15,16 +15,23 @@ public sealed class Llama3TokenizerJsonTests
         return HfTokenizerJson.LoadByteLevelBpe(json);
     }
 
-    [Theory]
-    [InlineData("tara: Hello, world!", new[] { 83, 5169, 25, 22691, 11, 1917, 0 })]
-    [InlineData("plain text without specials", new[] { 21435, 1495, 2085, 60874 })]
-    [InlineData("The year was 2024 and there were 12345 reasons.",
-        new[] { 791, 1060, 574, 220, 2366, 19, 323, 1070, 1051, 220, 4513, 1774, 8125, 13 })]
-    [InlineData("Café déjà vu — naïve", new[] { 34, 2642, 978, 46939, 33614, 2001, 95980, 588 })]
-    public void EncodeOrdinary_MatchesHuggingFaceIds(string text, int[] expected)
+    // One load for all golden rows: each Load() parses the whole tokenizer.json, so a Theory would pay it per row.
+    [Fact]
+    public void EncodeOrdinary_MatchesHuggingFaceIds()
     {
         GgufTokenizer tok = Load();
-        Assert.Equal(expected, tok.EncodeOrdinary(text));
+        (string Text, int[] Expected)[] golden =
+        [
+            ("tara: Hello, world!", new[] { 83, 5169, 25, 22691, 11, 1917, 0 }),
+            ("plain text without specials", new[] { 21435, 1495, 2085, 60874 }),
+            ("The year was 2024 and there were 12345 reasons.",
+                new[] { 791, 1060, 574, 220, 2366, 19, 323, 1070, 1051, 220, 4513, 1774, 8125, 13 }),
+            ("Café déjà vu — naïve", new[] { 34, 2642, 978, 46939, 33614, 2001, 95980, 588 }),
+        ];
+        foreach ((string text, int[] expected) in golden)
+        {
+            Assert.Equal(expected, tok.EncodeOrdinary(text));
+        }
     }
 
     [Fact]

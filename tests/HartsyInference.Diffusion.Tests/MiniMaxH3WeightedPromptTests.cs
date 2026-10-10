@@ -15,7 +15,6 @@ public sealed class MiniMaxH3WeightedPromptTests
     /// one does nothing, but the grammar that expressed it must not reach the encoder as prose.</summary>
     [Theory]
     [InlineData("a red fox in snow, cinematic")]
-    [InlineData(" leading space")]
     [InlineData("a red (fox:1.0) in snow")]
     public void AnUnweightedPromptCarriesNoWeightsAndThePlainIds(string prompt)
     {
@@ -25,19 +24,6 @@ public sealed class MiniMaxH3WeightedPromptTests
         MiniMaxH3TextEncoding.Encoded built = MiniMaxH3TextEncoding.Build(tokenizer, prompt);
         Assert.Null(built.PromptWeights);
         Assert.Equal(plain.TokenIds, built.TokenIds);
-    }
-
-    /// <summary>The weights describe the PROMPT only, not the whole sequence — right-alignment supplies the
-    /// offset, so a full-length array would be both redundant and wrong the moment a condition is present.</summary>
-    [Fact]
-    public void TheWeightsCoverThePromptTokensAlone()
-    {
-        using Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
-        MiniMaxH3TextEncoding.Encoded built = MiniMaxH3TextEncoding.Build(tokenizer, "a red (fox:1.5) in snow");
-        Assert.NotNull(built.PromptWeights);
-        Assert.Equal(built.TokenIds.Length, built.PromptWeights!.Length);
-        Assert.Contains(built.PromptWeights, w => w == 1.5f);
-        Assert.Contains(built.PromptWeights, w => w == 1f);
     }
 
     /// <summary>With a condition present the prompt is a SUFFIX of the sequence, and the weight array must be

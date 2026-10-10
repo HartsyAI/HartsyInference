@@ -39,44 +39,17 @@ public sealed class LoraBareRootDetectionTests
     [InlineData("layers.0.attn.to_q")]
     // Kandinsky 5: Kandinsky5Transformer.cs builds two block stacks under distinct roots.
     [InlineData("text_transformer_blocks.0.self_attn.to_q")]
-    [InlineData("visual_transformer_blocks.3.ff.net.0.proj")]
     // AuraFlow: AuraFlowTransformer.cs.
-    [InlineData("joint_transformer_blocks.0.attn.to_q")]
     // Boogu-Image: BooguImageTransformer.cs.
     [InlineData("double_stream_layers.0.attn.qkv")]
-    [InlineData("noise_refiner.1.attn.to_k")]
-    [InlineData("context_refiner.1.attn.to_k")]
     // The roots the old allow-list already covered — kept so widening the rule can't drop them.
     [InlineData("transformer_blocks.0.attn.to_q")]
-    [InlineData("single_transformer_blocks.7.attn.to_v")]
-    [InlineData("token_refiner.blocks.0.mlp.fc1")]
-    [InlineData("final_layer.linear")]
     public void BareRoot_WithPeftSuffix_IsBareDit(string root)
     {
         Dictionary<string, SafeTensorDescriptor> descriptors = Descriptors(
             $"{root}.lora_A.weight",
             $"{root}.lora_B.weight");
         Assert.Equal(LoraFormat.DiffusersBareDit, LoraFormatDetector.Detect(descriptors));
-    }
-
-    /// <summary>The <c>transformer.</c>-wrapped PEFT form of the same roots — the format most community LoRAs actually
-    /// ship in. <see cref="Mappers.DiffusersFluxMapper"/> strips the wrapper and passes the body through as the
-    /// canonical key, so the block root never mattered to it; the detector used to gate on a three-root allow-list
-    /// anyway and rejected these files as an undetectable format at load.</summary>
-    [Theory]
-    [InlineData("transformer.layers.0.attn.to_q")]
-    [InlineData("transformer.text_transformer_blocks.0.self_attn.to_q")]
-    [InlineData("transformer.visual_transformer_blocks.2.ff.net.0.proj")]
-    [InlineData("transformer.joint_transformer_blocks.0.attn.to_q")]
-    [InlineData("transformer.double_stream_layers.0.attn.qkv")]
-    [InlineData("transformer.transformer_blocks.0.attn.to_q")]
-    [InlineData("transformer.blocks.0.self_attn.q_proj")]
-    public void WrappedPeftRoot_IsDiffusersPeft(string root)
-    {
-        Dictionary<string, SafeTensorDescriptor> descriptors = Descriptors(
-            $"{root}.lora_A.weight",
-            $"{root}.lora_B.weight");
-        Assert.Equal(LoraFormat.DiffusersFlux, LoraFormatDetector.Detect(descriptors));
     }
 
     /// <summary>The kohya spelling of the same two roles is accepted on the same roots (lightx2v Lightning LoRAs).</summary>

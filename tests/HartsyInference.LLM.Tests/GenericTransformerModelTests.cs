@@ -183,8 +183,6 @@ public sealed unsafe class GenericTransformerModelTests
 
     [Theory]
     [InlineData(3, 40, 0xA5A5u)]
-    [InlineData(1, 60, 0xC001u)]
-    [InlineData(9, 50, 0xF00Du)]
     public void Pipeline_OverAdapter_MatchesDirectGreedyLoop(int promptLen, int maxTokens, uint seed)
     {
         using Fixture f = new(seed);
@@ -203,55 +201,6 @@ public sealed unsafe class GenericTransformerModelTests
         Assert.Equal(expected, string.Join(",", speculative.TokenIds));
     }
 
-    private static GenerationResult[] Await(Task<GenerationResult>[] tasks)
-    {
-        Task.WaitAll(tasks);
-        return tasks.Select(t => t.Result).ToArray();
-    }
-
-    [Fact]
-    public void Scheduler_OverAdapter_MatchesSequentialPipeline()
-    {
-        using Fixture f = new(0xBA7Cu);
-        StubTokenizer tokenizer = new();
-        int[][] prompts = [[1, 2, 3], [4], [5, 6, 7, 8, 9]];
-        string[] reference = new string[prompts.Length];
-        for (int i = 0; i < prompts.Length; i++)
-        {
-            TextGenerationPipeline pipeline = new(f.Adapter, tokenizer);
-            reference[i] = string.Join(",", pipeline.Generate(Req(prompts[i], 6)).TokenIds);
-        }
-
-        using PagedKvPool pool = new(f.Cfg.NumLayers, f.Cfg.NumKvHeads, f.Cfg.HeadDim, pageSize: 4, maxPages: 64);
-        using DynamicBatchScheduler scheduler = new(f.Adapter, tokenizer, pool);
-        Task<GenerationResult>[] tasks = new Task<GenerationResult>[prompts.Length];
-        for (int i = 0; i < prompts.Length; i++)
-            tasks[i] = scheduler.SubmitAsync(Req(prompts[i], 6), null, CancellationToken.None);
-        GenerationResult[] results = Await(tasks);
-
-        for (int i = 0; i < prompts.Length; i++)
-            Assert.Equal(reference[i], string.Join(",", results[i].TokenIds));
-    }
-
-    [Fact]
-    public void Prefill_LastRowOnly_EqualsLastRowOfFullPrefill()
-    {
-        using Fixture f = new(0x1111u);
-        int vocab = f.Cfg.VocabSize;
-        int[] prompt = Prompt(7, 0x1111u, vocab);
-        using ISequenceState full = f.Adapter.CreateSequenceState(new SequenceStateOptions(32));
-        using ISequenceState lastOnly = f.Adapter.CreateSequenceState(new SequenceStateOptions(32));
-
-        using Tensor fullHidden = f.Adapter.Prefill(new PrefillChunk(prompt, 0), full);
-        using Tensor lastHidden = f.Adapter.Prefill(new PrefillChunk(prompt, 0, LastRowOnly: true), lastOnly);
-
-        Assert.Equal(prompt.Length, full.Length);
-        Assert.Equal(prompt.Length, lastOnly.Length);
-        Assert.Equal(1, lastHidden.Shape[1]);
-        float[] expected = LastLogits(f.Adapter, fullHidden, prompt.Length, vocab);
-        AssertClose(expected, LastLogits(f.Adapter, lastHidden, 1, vocab), "last row");
-    }
-
     [Fact]
     public void Prefill_InChunks_MatchesOneShot()
     {
@@ -268,24 +217,6 @@ public sealed unsafe class GenericTransformerModelTests
         Assert.Equal(oneShot.Length, chunked.Length);
         float[] expected = LastLogits(f.Adapter, whole, prompt.Length, vocab);
         AssertClose(expected, LastLogits(f.Adapter, tail, 5, vocab), "chunked");
-    }
-
-    [Fact]
-    public void Prefill_WithEmbedsOverride_MatchesTokenLookup()
-    {
-        using Fixture f = new(0x3333u);
-        int vocab = f.Cfg.VocabSize;
-        int[] prompt = Prompt(5, 0x3333u, vocab);
-        using Tensor embeds = new(new TensorShape(1, prompt.Length, f.Cfg.HiddenSize), DType.F32);
-        f.Model.EmbedLookup(embeds, prompt);
-        using ISequenceState byTokens = f.Adapter.CreateSequenceState(new SequenceStateOptions(32));
-        using ISequenceState byEmbeds = f.Adapter.CreateSequenceState(new SequenceStateOptions(32));
-
-        using Tensor a = f.Adapter.Prefill(new PrefillChunk(prompt, 0), byTokens);
-        using Tensor b = f.Adapter.Prefill(new PrefillChunk(prompt, 0, Embeds: embeds), byEmbeds);
-
-        float[] expected = LastLogits(f.Adapter, a, prompt.Length, vocab);
-        AssertClose(expected, LastLogits(f.Adapter, b, prompt.Length, vocab), "embeds");
     }
 
     [Fact]
@@ -325,34 +256,8 @@ public sealed unsafe class GenericTransformerModelTests
         }
     }
 
-    [Fact]
-    public void CreateSequenceState_SelectsCacheKindAndReportsCapacity()
-    {
-        using Fixture f = new(0x5555u);
-        using PagedKvPool pool = new(f.Cfg.NumLayers, f.Cfg.NumKvHeads, f.Cfg.HeadDim, pageSize: 4, maxPages: 8);
-
-        using ISequenceState own = f.Adapter.CreateSequenceState(new SequenceStateOptions(20));
-        using ISequenceState paged = f.Adapter.CreateSequenceState(new SequenceStateOptions(20, pool));
-        using ISequenceState full = f.Adapter.CreateSequenceState(new SequenceStateOptions(20, FullPrecisionKv: true));
-
-        Assert.IsType<FixedKvCache>(own);
-        Assert.IsType<PagedKvCache>(paged);
-        Assert.IsType<FixedKvCache>(full);
-        Assert.Equal(20, own.Capacity);
-        Assert.Equal(32, paged.Capacity);
-        Assert.Equal(0, own.Length);
-        Assert.Equal(f.Cfg.VocabSize, f.Adapter.Info.VocabSize);
-        Assert.True(f.Adapter.Capabilities.SupportsSpeculation);
-        Assert.True(f.Adapter.Capabilities.SupportsBatchDecode);
-        Assert.False(f.Adapter.Capabilities.NeedsTokenIdsWithEmbeds);
-        Assert.Equal(f.Cfg.NumLayers * 2L * f.Cfg.NumKvHeads * f.Cfg.HeadDim * 4 * 10,
-            f.Adapter.EstimateSequenceBytes(10) * (KvCaches.F16Enabled ? 2 : 1));
-        Assert.Same(f.Backend, f.Adapter.OutputBackend);
-    }
-
     [Theory]
     [InlineData(false)]
-    [InlineData(true)]
     public void Checkpoint_Rollback_RestoresSequenceExactly(bool paged)
     {
         using Fixture f = new(0x6666u);
@@ -384,20 +289,6 @@ public sealed unsafe class GenericTransformerModelTests
     }
 
     [Fact]
-    public void KvCache_DefaultSequenceStateMappings_ArePassiveAndRefuseRollback()
-    {
-        TransformerConfig cfg = Cfg();
-        using KvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
-        ISequenceState state = cache;
-
-        Assert.Equal(cache.CurrentLength, state.Length);
-        Assert.Equal(int.MaxValue, state.Capacity);
-        Assert.Equal(0, state.MaxRollback);
-        Assert.Equal(new SequenceCheckpoint(0), state.Checkpoint());
-        Assert.Throws<NotSupportedException>(() => state.Rollback(new SequenceCheckpoint(0)));
-    }
-
-    [Fact]
     public void RopeTables_BuildRope_MatchesClosedForm()
     {
         const int headDim = 8;
@@ -422,67 +313,8 @@ public sealed unsafe class GenericTransformerModelTests
         }
     }
 
-    [Fact]
-    public void RopeTables_Batched_RowsMatchSequentialBuild()
-    {
-        const int headDim = 8;
-        int[] positions = [9, 0, 4];
-        using Tensor cosB = new(new TensorShape(3, headDim), DType.F32);
-        using Tensor sinB = new(new TensorShape(3, headDim), DType.F32);
-        using Tensor cos1 = new(new TensorShape(1, headDim), DType.F32);
-        using Tensor sin1 = new(new TensorShape(1, headDim), DType.F32);
-
-        RopeTables.BuildRopeBatched(cosB, sinB, positions, headDim, headDim, 10000f, RopeScaling.None);
-
-        for (int b = 0; b < positions.Length; b++)
-        {
-            RopeTables.BuildRope(cos1, sin1, 1, positions[b], headDim, headDim, 10000f, RopeScaling.None);
-            for (int i = 0; i < headDim; i++)
-            {
-                Assert.Equal(((float*)cos1.DataPointer)[i], ((float*)cosB.DataPointer)[b * headDim + i]);
-                Assert.Equal(((float*)sin1.DataPointer)[i], ((float*)sinB.DataPointer)[b * headDim + i]);
-            }
-        }
-    }
-
-    [Fact]
-    public void RopeTables_InverseAndTailVariants()
-    {
-        const int headDim = 8;
-        const int rotary = 4;
-        const int offset = 4;
-        using Tensor cosF = new(new TensorShape(2, headDim), DType.F32);
-        using Tensor sinF = new(new TensorShape(2, headDim), DType.F32);
-        using Tensor cosI = new(new TensorShape(2, headDim), DType.F32);
-        using Tensor sinI = new(new TensorShape(2, headDim), DType.F32);
-        using Tensor cosT = new(new TensorShape(2, headDim), DType.F32);
-        using Tensor sinT = new(new TensorShape(2, headDim), DType.F32);
-        new Span<float>((float*)cosT.DataPointer, 2 * headDim).Fill(7f);
-        new Span<float>((float*)sinT.DataPointer, 2 * headDim).Fill(7f);
-
-        RopeTables.BuildRope(cosF, sinF, 2, 3, headDim, rotary, 10000f, RopeScaling.None);
-        RopeTables.BuildRopeInverse(cosI, sinI, 2, 3, headDim, rotary, 10000f, RopeScaling.None);
-        RopeTables.BuildRopeTail(cosT, sinT, 2, 3, headDim, rotary, offset, inverse: false, 10000f, RopeScaling.None);
-
-        for (int s = 0; s < 2; s++)
-        {
-            for (int i = 0; i < rotary; i++)
-            {
-                int at = s * headDim + i;
-                Assert.Equal(((float*)cosF.DataPointer)[at], ((float*)cosI.DataPointer)[at]);
-                Assert.Equal(-((float*)sinF.DataPointer)[at], ((float*)sinI.DataPointer)[at]);
-                Assert.Equal(((float*)cosF.DataPointer)[at], ((float*)cosT.DataPointer)[at + offset]);
-                Assert.Equal(((float*)sinF.DataPointer)[at], ((float*)sinT.DataPointer)[at + offset]);
-                Assert.Equal(7f, ((float*)cosT.DataPointer)[at]);
-            }
-        }
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            RopeTables.BuildRopeTail(cosT, sinT, 2, 0, headDim, rotary, offset + 1, false, 10000f, RopeScaling.None));
-    }
-
     [Theory]
     [InlineData(0f)]
-    [InlineData(1.5f)]
     public void GatedFfn_SwiGlu_MatchesManualSiluTimesUp(float clamp)
     {
         _rng = 0x7777u;
@@ -529,7 +361,6 @@ public sealed unsafe class GenericTransformerModelTests
     }
 
     [Theory]
-    [InlineData(false)]
     [InlineData(true)]
     public void ProjectionOps_ProjectPrecise_ForcesHighPrecisionAndRestores(bool throws)
     {

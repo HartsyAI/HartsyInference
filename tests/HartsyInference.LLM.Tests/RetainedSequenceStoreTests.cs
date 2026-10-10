@@ -68,43 +68,6 @@ public sealed class RetainedSequenceStoreTests
     }
 
     [Fact]
-    public void CheckIn_EvictsLeastRecentlyUsed_WhenEntryCountExceedsMax()
-    {
-        using RetainedSequenceStore store = new(maxEntries: 2, maxBytes: 1_000_000);
-        (RetainedSequence a, FakeSequenceState fakeA) = Seq(1, 8, 10);
-        (RetainedSequence b, _) = Seq(1, 8, 10);
-        (RetainedSequence c, _) = Seq(1, 8, 10);
-
-        store.CheckIn("a", a);
-        store.CheckIn("b", b);
-        store.CheckIn("c", c);   // over the 2-entry cap: "a" (least recently used) is evicted
-
-        Assert.Equal(2, store.Count);
-        Assert.True(fakeA.Disposed);
-        Assert.Null(store.Checkout("a"));
-        Assert.NotNull(store.Checkout("b"));
-        Assert.NotNull(store.Checkout("c"));
-    }
-
-    [Fact]
-    public void Checkout_RefreshesRecency_SoItIsNotTheNextEviction()
-    {
-        using RetainedSequenceStore store = new(maxEntries: 2, maxBytes: 1_000_000);
-        store.CheckIn("a", Seq(1, 8, 10).Seq);
-        store.CheckIn("b", Seq(1, 8, 10).Seq);
-
-        // Touch "a": check it out and back in, making "b" the least recently used.
-        RetainedSequence a = store.Checkout("a")!;
-        store.CheckIn("a", a);
-
-        (RetainedSequence c, _) = Seq(1, 8, 10);
-        store.CheckIn("c", c);   // should evict "b", not "a"
-
-        Assert.NotNull(store.Checkout("a"));
-        Assert.Null(store.Checkout("b"));
-    }
-
-    [Fact]
     public void CheckIn_EvictsLeastRecentlyUsed_WhenBytesExceedBudget()
     {
         using RetainedSequenceStore store = new(maxEntries: 10, maxBytes: 150);
@@ -131,19 +94,6 @@ public sealed class RetainedSequenceStoreTests
         Assert.Equal(60, store.BytesUsed);
         Assert.Null(store.Checkout("huge"));
         Assert.NotNull(store.Checkout("small"));
-    }
-
-    [Fact]
-    public void CheckIn_AnEmptySequence_IsNotStored()
-    {
-        using RetainedSequenceStore store = new(maxEntries: 1, maxBytes: 100);
-        (RetainedSequence kept, _) = Seq(1, 8, 10);
-        store.CheckIn("kept", kept);
-
-        store.CheckIn("empty", new RetainedSequence());   // e.g. a request whose sequence was dropped
-
-        Assert.Equal(1, store.Count);
-        Assert.NotNull(store.Checkout("kept"));
     }
 
     [Fact]

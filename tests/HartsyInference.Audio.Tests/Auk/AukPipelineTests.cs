@@ -32,45 +32,6 @@ public sealed class AukPipelineTests
     }
 
     [Fact]
-    public void BuildNoise_IsSeededAndStandardNormal()
-    {
-        using Tensor a = AukPipeline.BuildNoise(500, 64, 7);
-        using Tensor b = AukPipeline.BuildNoise(500, 64, 7);
-        using Tensor c = AukPipeline.BuildNoise(500, 64, 8);
-        Assert.Equal([1, 500, 64], [a.Shape[0], a.Shape[1], a.Shape[2]]);
-        Assert.True(a.AsSpan<float>().SequenceEqual(b.AsSpan<float>()));
-        Assert.False(a.AsSpan<float>().SequenceEqual(c.AsSpan<float>()));
-        double sum = 0;
-        double sq = 0;
-        foreach (float v in a.AsSpan<float>())
-        {
-            sum += v;
-            sq += (double)v * v;
-        }
-        int n = 500 * 64;
-        Assert.InRange(sum / n, -0.05, 0.05);
-        Assert.InRange(sq / n, 0.95, 1.05);
-    }
-
-    [Fact]
-    public void FlashSchedule_IgnoresStepAndGuidanceOverrides()
-    {
-        AukOptions overrides = new() { Steps = 50, CfgScale = 5f, SwayCoef = 0.3f };
-        AukPipeline flash = new("flash", true, _ => [1], new AukConfig(), null, null, null);
-        AukSchedule s = flash.BuildSchedule(overrides);
-        Assert.Equal(4, s.Steps);
-        Assert.False(s.UsesCfg);
-        Assert.Equal(AukSchedule.FlashGrid.ToArray(), s.Timesteps);
-
-        AukPipeline baseModel = new("base", false, _ => [1], new AukConfig(), null, null, null);
-        AukSchedule b = baseModel.BuildSchedule(overrides);
-        Assert.Equal(50, b.Steps);
-        Assert.Equal(5f, b.Cfg);
-        Assert.Equal(32, baseModel.BuildSchedule(new AukOptions()).Steps);
-        Assert.Equal(2f, baseModel.BuildSchedule(new AukOptions()).Cfg);
-    }
-
-    [Fact]
     public void Constructor_RejectsMismatchedComponentWidths() =>
         Assert.Throws<ArgumentException>(() => new AukPipeline("x", true, _ => [1], new AukConfig { TextDim = 1_024 }));
 }

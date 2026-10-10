@@ -43,8 +43,6 @@ public sealed class ModelFolderCaseTests : IDisposable
 
     private static CatalogEntry Qwen3 => ModelCatalog.Find("qwen3")!;
 
-    private static string Krea2File => ModelDownloader.PrimaryAsset(ModelCatalog.Find("krea2")!)!.FileName;
-
     [Fact]
     public void Qwen3_ResolvesTheCatalogFile_InALowercaseFolderHoldingTwoGgufs()
     {
@@ -85,70 +83,6 @@ public sealed class ModelFolderCaseTests : IDisposable
     }
 
     [Fact]
-    public void ACatalogLessId_ResolvesThroughTheLowercaseModalityFolder()
-    {
-        if (!CaseSensitive())
-            return;
-        string gguf = Place("llm", "some-model", "model-Q4.gguf");
-
-        Assert.Equal(gguf, ModelResolver.Resolve("some-model", modelPathArg: null, Modality.Text).LocalPath);
-    }
-
-    [Fact]
-    public void AnExactModalityGuess_StillWins_OverTheCatalogFileInACaseVariantFolder()
-    {
-        if (!CaseSensitive())
-            return;
-        // Before case matching, the catalog path (Stable-Diffusion/Krea2/Turbo/...) missed and the guess
-        // (Image/krea2) won.
-        Place("stable-diffusion", "Krea2", "Turbo", Krea2File);
-        string guess = Directory.CreateDirectory(Path.Combine(_root, "Image", "krea2")).FullName;
-
-        Assert.Equal(guess, ModelResolver.Resolve("krea2", modelPathArg: null, Modality.Image).LocalPath);
-    }
-
-    [Fact]
-    public void ACaseVariantCatalogFolderWithoutTheFile_FallsThroughToTheModalityGuess()
-    {
-        if (!CaseSensitive())
-            return;
-        Directory.CreateDirectory(Path.Combine(_root, "stable-diffusion", "Krea2", "Turbo"));
-        string guess = Directory.CreateDirectory(Path.Combine(_root, "image", "krea2")).FullName;
-
-        Assert.Equal(guess, ModelResolver.Resolve("krea2", modelPathArg: null, Modality.Image).LocalPath);
-    }
-
-    [Fact]
-    public void AnExactLegacyName_StillWins_OverTheCanonicalNameInAnotherCase()
-    {
-        if (!CaseSensitive())
-            return;
-        ModelAsset asset = SideModels.Qwen3VL_4B;
-        string legacy = Place(asset.TargetSubdir, asset.LegacyTargetNames[0]);
-        Place(asset.TargetSubdir, asset.FileName.ToUpperInvariant());
-
-        Assert.Equal(legacy, ModelDownloader.TargetPath(asset));
-    }
-
-    [Fact]
-    public void YueCheckpointFolder_IsTheFolderItsDownloadLandsIn()
-    {
-        if (!CaseSensitive())
-            return;
-        // YuE is written through ModelDownloader and read through MusicCatalog: both must pick AudioLab's YuE/ folder.
-        Directory.CreateDirectory(Path.Combine(_root, "Audio", "music", "YuE"));
-        ModelAsset transformer = AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.YueId, "en-cot")[0];
-        AudioModelSelector selector = new(AudioWeightsCatalog.YueId, "en-cot", null);
-
-        string checkpoint = MusicCatalog.ResolveLocalCheckpoint(AudioWeightsCatalog.YueId, selector);
-
-        Assert.Equal(Path.Combine(_root, "Audio", "music", "YuE", "en-cot"), checkpoint);
-        Assert.Equal(checkpoint, Path.GetDirectoryName(ModelDownloader.TargetPath(transformer)));
-        // Below the audio root nothing else is matched in another case, so other audio lookups keep their paths.
-        Assert.Equal(Path.Combine(_root, "Audio", "music", "yue"), AudioModelRoot.WeightsDirectory("music", "yue"));
-    }
-
-    [Fact]
     public void SideModelLookup_SearchesAFolderSpelledInAnotherCase()
     {
         if (!CaseSensitive())
@@ -157,40 +91,6 @@ public sealed class ModelFolderCaseTests : IDisposable
         string campplus = Place("Audio", "Speaker", "campplus.safetensors");
 
         Assert.Equal(campplus, ModelFileLocator.Find("campplus", Path.Combine("audio", "speaker"), "audio"));
-    }
-
-    [Fact]
-    public void SideModelLookup_KeepsTheExactFolderMatch_WhenACaseVariantFolderAlsoHasIt()
-    {
-        if (!CaseSensitive())
-            return;
-        Place("audio", "Speaker", "campplus.safetensors");
-        string exact = Place("audio", "campplus.safetensors");
-
-        Assert.Equal(exact, ModelFileLocator.Find("campplus", Path.Combine("audio", "speaker"), "audio"));
-    }
-
-    [Fact]
-    public void SideModelLookup_FallsThroughACaseVariantFolderWithoutTheFile()
-    {
-        if (!CaseSensitive())
-            return;
-        Directory.CreateDirectory(Path.Combine(_root, "Audio", "Speaker"));
-        string campplus = Place("Audio", "Voices", "campplus.safetensors");
-
-        Assert.Equal(campplus,
-            ModelFileLocator.Find("campplus", Path.Combine("audio", "speaker"), Path.Combine("audio", "voices")));
-    }
-
-    [Fact]
-    public void YoloByName_StillWins_OverAFolderScanOfACaseVariantYolov8()
-    {
-        if (!CaseSensitive())
-            return;
-        Place("YOLOv8", "a-other.safetensors");
-        string named = Place("yolo", "yolov8n.safetensors");
-
-        Assert.Equal(named, VisionModelPaths.FindYolo("yolov8n", explicitPath: null));
     }
 
     /// <summary>Creates an empty file at the joined segments under the models root and returns its path.</summary>

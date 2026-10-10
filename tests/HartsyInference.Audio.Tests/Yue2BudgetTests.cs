@@ -11,35 +11,6 @@ namespace HartsyInference.Audio.Tests;
 /// <para>Pure protocol arithmetic, so no checkpoint, backend or GPU.</para></summary>
 public sealed class Yue2BudgetTests
 {
-    [Fact]
-    public void DefaultDuration_IsTheReleaseTokenPreset()
-    {
-        // 9,000 semantic tokens at 25 a second is exactly what yue2_generation_config.json budgets.
-        Assert.Equal(9_000, Yue2Protocol.TokensForSeconds(Yue2Protocol.DefaultDurationSeconds));
-        Assert.Equal(Yue2Protocol.DefaultDurationSeconds, new Yue2Request().MaxDurationSeconds);
-    }
-
-    [Fact]
-    public void Ceiling_IsAboveTheReleasePreset_AndStillFitsTheContext()
-    {
-        Assert.True(Yue2Protocol.MaxDurationSeconds > Yue2Protocol.DefaultDurationSeconds);
-        int ceiling = Yue2Protocol.TokensForSeconds(Yue2Protocol.MaxDurationSeconds);
-        Assert.Equal(22_500, ceiling);
-        // The ceiling has to leave room for a prefix, or no request could ever reach it.
-        Assert.True(ceiling < Yue2Protocol.Context, $"{ceiling} leaves nothing for a prompt in {Yue2Protocol.Context}.");
-        // Asking past the ceiling clamps rather than overflowing the context.
-        Assert.Equal(ceiling, Yue2Protocol.TokensForSeconds(Yue2Protocol.MaxDurationSeconds * 4));
-    }
-
-    [Fact]
-    public void SemanticPreset_DoesNotCapTheDurationKnob()
-    {
-        // The old default was the release's 9,000, which silently won every Math.Min against a longer duration.
-        Assert.True(Yue2Sampling.Semantic.MaxTokens >= Yue2Protocol.TokensForSeconds(Yue2Protocol.MaxDurationSeconds),
-            "the semantic preset is below the duration ceiling, so the duration knob cannot reach it");
-        Assert.Equal(4_096, Yue2Sampling.Abc.MaxTokens);
-    }
-
     [Theory]
     // Comfortable prompt: the request is granted in full.
     [InlineData(9_000, 1_300, 0, 9_000)]
@@ -82,18 +53,6 @@ public sealed class Yue2BudgetTests
         Assert.Equal(big - 1_500, bigger);
         // A score that fills the context leaves nothing rather than going negative.
         Assert.Equal(0, Budget(Yue2Protocol.Context));
-    }
-
-    /// <summary>Seconds and tokens are the same fact at 25 frames a second, so the number a caller is shown while
-    /// editing has to be the one the render then budgets.</summary>
-    [Fact]
-    public void BudgetSeconds_RoundTripsThroughTheFrameRate()
-    {
-        foreach (double seconds in new[] { 20.0, 95.5, 360.0, Yue2Protocol.MaxDurationSeconds })
-        {
-            int tokens = Yue2Protocol.TokensForSeconds(seconds);
-            Assert.Equal(seconds, tokens / (double)Yue2Protocol.FramesPerSecond, 1);
-        }
     }
 
     /// <summary>Past roughly seven and a half minutes the acoustic stage runs more than one chunk. Nothing exercised

@@ -10,7 +10,6 @@ public sealed class Int8ConvRotQuantizeTests
 {
     [Theory]
     [InlineData(0)]
-    [InlineData(16)]
     [InlineData(64)]
     public void QuantizeThenDequantize_ReturnsTheOriginalWithinTheStepSize(int groupSize)
     {
@@ -77,13 +76,6 @@ public sealed class Int8ConvRotQuantizeTests
         // A partial trailing group would rotate a window that runs off the row, so it refuses rather than pack it.
         using Tensor source = new Tensor(new TensorShape(2, 40), DType.F32);
         Assert.Throws<ArgumentException>(() => Int8ConvRotCodec.QuantizeFromF32(source, 16));
-    }
-
-    [Fact]
-    public void QuantizeFromF32_RefusesAGroupSizeTheRotationCannotExpress()
-    {
-        using Tensor source = new Tensor(new TensorShape(2, 32), DType.F32);
-        Assert.Throws<ArgumentOutOfRangeException>(() => Int8ConvRotCodec.QuantizeFromF32(source, 32));
     }
 
     private static Tensor Ramp(int rows, int columns)

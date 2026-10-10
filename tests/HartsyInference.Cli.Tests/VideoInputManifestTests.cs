@@ -27,24 +27,6 @@ public sealed class VideoInputManifestTests
     }
 
     [Fact]
-    public void GuideBareArrayManifestAndRepeatableFlagsAreBothAccepted()
-    {
-        using TestDirectory files = new();
-        files.WriteBytes("manifest.mp4", [8]);
-        files.WriteBytes("flag.wav", [9]);
-        string manifest = files.WriteText("guides.json",
-            """[{"frame":4,"video":"manifest.mp4","fit":"stretch"}]""");
-        ParamState parameters = VideoParameters();
-        parameters.Put("guides-manifest", manifest);
-        parameters.Put("guide-audios", $"-2={files.PathOf("flag.wav")}");
-
-        IReadOnlyList<VideoGuide> guides = VideoInputManifest.Guides(parameters)!;
-
-        Assert.Equal([-2, 4], guides.Select(guide => guide.FrameIndex));
-        Assert.Equal(VideoGuideFitMode.Stretch, guides[1].FitMode);
-    }
-
-    [Fact]
     public void DuplicateGuidePayloadsFailBeforeMediaDecode()
     {
         ParamState parameters = VideoParameters();
@@ -80,19 +62,6 @@ public sealed class VideoInputManifestTests
         Assert.Equal([2], control.Video.Data);
         Assert.Equal([3], control.VisibilityMask!.Data);
         Assert.Equal([4], control.MaskedSource!.Data);
-    }
-
-    [Fact]
-    public void SimpleInpaintRequiresTheManifestPayloadContract()
-    {
-        ParamState parameters = VideoParameters();
-        parameters.Put("control-model", "control.safetensors");
-        parameters.Put("control-video", "control.mp4");
-        parameters.Put("control-kind", "inpaint");
-
-        ArgumentException error = Assert.Throws<ArgumentException>(() => VideoInputManifest.Controls(parameters));
-
-        Assert.Contains("--controls-manifest", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

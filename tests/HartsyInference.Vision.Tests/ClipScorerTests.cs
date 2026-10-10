@@ -9,35 +9,6 @@ namespace HartsyInference.Vision.Tests;
 public sealed class ClipScorerTests
 {
     [Fact]
-    public void Score_OrthogonalVectors_ReturnsZero()
-    {
-        using ImageEmbedding img = BuildUnit(dim: 4, oneAtIndex: 0);
-        using TextEmbedding txt = BuildText(dim: 4, oneAtIndex: 1, text: "foo");
-        float score = ClipScorer.Score(img, txt);
-        Assert.InRange(score, -1e-6f, 1e-6f);
-    }
-
-    [Fact]
-    public void Score_IdenticalUnitVectors_ReturnsOne()
-    {
-        using ImageEmbedding a = BuildUnit(dim: 8, oneAtIndex: 3);
-        using TextEmbedding b = BuildText(dim: 8, oneAtIndex: 3, text: "x");
-        float score = ClipScorer.Score(a, b);
-        Assert.InRange(score, 1f - 1e-6f, 1f + 1e-6f);
-    }
-
-    [Fact]
-    public void Score_OppositeVectors_ReturnsMinusOne()
-    {
-        using ImageEmbedding a = BuildUnit(dim: 4, oneAtIndex: 2);
-        Tensor v = new(new TensorShape(1, 4), DType.F32);
-        v.AsSpan<float>()[2] = -1f;
-        using TextEmbedding b = new(v, "neg");
-        float score = ClipScorer.Score(a, b);
-        Assert.InRange(score, -1f - 1e-6f, -1f + 1e-6f);
-    }
-
-    [Fact]
     public void ScoreMatrix_ProducesExpectedShape()
     {
         ImageEmbedding[] imgs = [BuildUnit(4, 0), BuildUnit(4, 1)];

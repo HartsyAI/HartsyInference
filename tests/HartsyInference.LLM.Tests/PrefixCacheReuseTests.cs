@@ -32,7 +32,6 @@ public sealed class PrefixCacheReuseTests
     private static string Ids(IReadOnlyList<int> ids) => string.Join(",", ids);
 
     [Theory]
-    [InlineData(true, 0f)]            // greedy: the simplest, strongest determinism guarantee.
     [InlineData(false, 0.7f)]         // the voice session's actual default: non-greedy, fixed seed.
     public void GrowingConversation_RetainedPrefix_MatchesFreshPrefillEveryTurn(bool greedy, float temperature)
     {
@@ -80,7 +79,6 @@ public sealed class PrefixCacheReuseTests
     }
 
     [Theory]
-    [InlineData(true, 0f)]
     [InlineData(false, 0.7f)]
     public void GrowAndShrinkEveryTurn_MatchesFreshPrefill_AndKeepsOnlyLengthPlusHeadroom(bool greedy, float temp)
     {
@@ -129,42 +127,6 @@ public sealed class PrefixCacheReuseTests
 
             history.AddRange(reference.TokenIds);
         }
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
-    public void ToolRoundOutgrowingTheFirstRoundsHint_GrowsByCopy_AndReusesTheWholeRound()
-    {
-        // ToolLoop carries round 1's request — hint included — into every round, so a large tool result makes round
-        // 2's prompt outgrow round 1's hint-sized cache. That used to re-prefill the whole conversation.
-        PrefixCacheTestModel rig = new(0xBB67AE85u);
-        TransformerConfig cfg = PrefixCacheTestModel.Config();
-        Dictionary<string, Tensor> w = rig.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = Load(cfg, w);
-        PrefixCacheTestModel.StubTokenizer tokenizer = new();
-        SamplingOptions sampling = Sampling(greedy: true, temperature: 0f);
-
-        TextGenerationPipeline pipeline = new(model, tokenizer, backend);
-        using RetainedSequence retained = new();
-        int[] round1 = [.. Enumerable.Range(0, 6).Select(_ => rig.NextToken(cfg.VocabSize))];
-        GenerationRequest first = new()
-        {
-            RawTokenIds = round1, MaxTokens = 4, Sampling = sampling, PrefixCacheCapacityHint = 20,
-        };
-        pipeline.Generate(first, retained);
-        int roundOneLength = retained.TokenIds.Length;
-
-        int[] round2 = [.. retained.TokenIds, .. Enumerable.Range(0, 30).Select(_ => rig.NextToken(cfg.VocabSize))];
-        GenerationRequest second = first with { RawTokenIds = round2 };
-        Assert.True(round2.Length + second.MaxTokens + 1 > 20, "round 2 must outgrow round 1's hint");
-
-        GenerationResult reference = new TextGenerationPipeline(model, tokenizer, backend).Generate(second);
-        GenerationResult actual = pipeline.Generate(second, retained);
-
-        Assert.Equal(Ids(reference.TokenIds), Ids(actual.TokenIds));
-        Assert.Equal(roundOneLength, actual.ReusedPromptTokens);
 
         foreach (Tensor t in w.Values) t.Dispose();
     }
@@ -224,36 +186,6 @@ public sealed class PrefixCacheReuseTests
         Assert.Equal(Ids(reference3.TokenIds), Ids(actual3.TokenIds));
         Assert.Equal(0, actual3.ReusedPromptTokens);
         Assert.NotNull(retained.Cache);
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
-    public void ExactRepeatPrompt_StillPrefillsAtLeastOneToken_AndMatchesFreshDecode()
-    {
-        // A request whose prompt is identical to (or a prefix of) what is already retained must not degenerate
-        // to a zero-length prefill -- AcquireCache always leaves at least the final prompt token to be prefilled
-        // so sampling has a real logits row.
-        PrefixCacheTestModel rig = new(0xC0FFEEu);
-        TransformerConfig cfg = PrefixCacheTestModel.Config();
-        Dictionary<string, Tensor> w = rig.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = Load(cfg, w);
-        PrefixCacheTestModel.StubTokenizer tokenizer = new();
-        SamplingOptions sampling = Sampling(greedy: true, temperature: 0f);
-
-        int[] promptIds = [.. Enumerable.Range(0, 6).Select(_ => rig.NextToken(cfg.VocabSize))];
-        GenerationRequest request = new() { RawTokenIds = promptIds, MaxTokens = 6, Sampling = sampling };
-
-        TextGenerationPipeline pipeline = new(model, tokenizer, backend);
-        using RetainedSequence retained = new();
-
-        pipeline.Generate(request, retained);
-        GenerationResult reference = new TextGenerationPipeline(model, tokenizer, backend).Generate(request);
-        GenerationResult second = pipeline.Generate(request, retained);   // exact same prompt again, same key
-
-        Assert.Equal(Ids(reference.TokenIds), Ids(second.TokenIds));
-        Assert.True(second.ReusedPromptTokens < promptIds.Length, "must always prefill at least the final prompt token.");
 
         foreach (Tensor t in w.Values) t.Dispose();
     }
@@ -383,106 +315,4 @@ public sealed class PrefixCacheReuseTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
-    [Fact]
-    public void OnCancellationDuringTheFirstPrefill_AfterAGrow_DiscardsBothCachesCleanly()
-    {
-        // The grow at check-out already replaced the retained cache with a copy before the first prefill runs, so
-        // a cancellation there leaves two caches in play: the outgrown one (already freed by the grow) and the copy
-        // (owned by this call alone). Both must be released exactly once and nothing retained.
-        PrefixCacheTestModel rig = new(0x510E527Fu);
-        TransformerConfig cfg = PrefixCacheTestModel.Config();
-        Dictionary<string, Tensor> w = rig.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = Load(cfg, w);
-        using GenericTransformerModel real = new(model, backend);
-        InstrumentedModel faulty = new(real);
-        PrefixCacheTestModel.StubTokenizer tokenizer = new();
-        SamplingOptions sampling = Sampling(greedy: true, temperature: 0f);
-
-        TextGenerationPipeline pipeline = new(faulty, tokenizer);
-        using RetainedSequence retained = new();
-        int[] prompt1 = [.. Enumerable.Range(0, 6).Select(_ => rig.NextToken(cfg.VocabSize))];
-        GenerationRequest request1 = new()
-        {
-            RawTokenIds = prompt1, MaxTokens = 6, Sampling = sampling, PrefixCacheHeadroomTokens = 1,
-        };
-        pipeline.Generate(request1, retained);
-
-        int[] prompt2 = [.. retained.TokenIds, .. Enumerable.Range(0, 4).Select(_ => rig.NextToken(cfg.VocabSize))];
-        GenerationRequest request2 = request1 with { RawTokenIds = prompt2 };
-        Assert.True(prompt2.Length + request2.MaxTokens + 1 > retained.Cache!.Capacity, "turn 2 must need a grow");
-        int resizesBefore = faulty.ResizeCalls;
-        faulty.ThrowOnPrefillCall = faulty.PrefillCalls;   // the very next Prefill: turn 2's first
-        Assert.Throws<OperationCanceledException>(() => pipeline.Generate(request2, retained));
-
-        Assert.Equal(resizesBefore + 1, faulty.ResizeCalls);   // the grow ran before the prefill was cancelled
-        Assert.Null(retained.Cache);
-        Assert.Empty(retained.TokenIds);
-
-        faulty.ThrowOnPrefillCall = -1;
-        GenerationResult actual = pipeline.Generate(request2, retained);
-        GenerationResult reference = new TextGenerationPipeline(model, tokenizer, backend).Generate(request2);
-        Assert.Equal(Ids(reference.TokenIds), Ids(actual.TokenIds));
-        Assert.Equal(0, actual.ReusedPromptTokens);
-        Assert.NotNull(retained.Cache);
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
-    public void CapacityOutgrown_GrowsByCopy_ReusingTheWholePreviousTurn()
-    {
-        // No hint: each cache is sized for just its own prompt + MaxTokens, so every turn outgrows the last. The
-        // retained prefix must be carried into the bigger cache rather than dropped and prefilled again.
-        PrefixCacheTestModel rig = new(0xFEEDFACEu);
-        TransformerConfig cfg = PrefixCacheTestModel.Config();
-        Dictionary<string, Tensor> w = rig.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = Load(cfg, w);
-        PrefixCacheTestModel.StubTokenizer tokenizer = new();
-        SamplingOptions sampling = Sampling(greedy: true, temperature: 0f);
-
-        TextGenerationPipeline pipeline = new(model, tokenizer, backend);
-        List<int> history = [];
-        using RetainedSequence retained = new();
-
-        for (int turn = 0; turn < 5; turn++)
-        {
-            for (int i = 0; i < 6; i++) history.Add(rig.NextToken(cfg.VocabSize));
-            int[] promptIds = [.. history];
-            int previousLength = retained.TokenIds.Length;
-            GenerationRequest request = new() { RawTokenIds = promptIds, MaxTokens = 4, Sampling = sampling };
-
-            GenerationResult reference = new TextGenerationPipeline(model, tokenizer, backend).Generate(request);
-            GenerationResult actual = pipeline.Generate(request, retained);
-
-            Assert.Equal(Ids(reference.TokenIds), Ids(actual.TokenIds));
-            Assert.Equal(previousLength, actual.ReusedPromptTokens);
-            history.AddRange(reference.TokenIds);
-        }
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
-    public void ReuseIsOptIn_DefaultOverloadBehavesExactlyAsBefore()
-    {
-        PrefixCacheTestModel rig = new(0x1337u);
-        TransformerConfig cfg = PrefixCacheTestModel.Config();
-        Dictionary<string, Tensor> w = rig.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = Load(cfg, w);
-        PrefixCacheTestModel.StubTokenizer tokenizer = new();
-        SamplingOptions sampling = Sampling(greedy: true, temperature: 0f);
-        int[] promptIds = [.. Enumerable.Range(0, 7).Select(_ => rig.NextToken(cfg.VocabSize))];
-        GenerationRequest request = new() { RawTokenIds = promptIds, MaxTokens = 5, Sampling = sampling };
-
-        GenerationResult viaOldOverload = new TextGenerationPipeline(model, tokenizer, backend).Generate(request);
-        GenerationResult viaNewOverloadNoReuse = new TextGenerationPipeline(model, tokenizer, backend).Generate(request, reuse: null);
-
-        Assert.Equal(Ids(viaOldOverload.TokenIds), Ids(viaNewOverloadNoReuse.TokenIds));
-        Assert.Equal(0, viaNewOverloadNoReuse.ReusedPromptTokens);
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
 }

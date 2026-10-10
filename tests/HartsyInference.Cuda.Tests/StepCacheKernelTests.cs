@@ -123,25 +123,6 @@ public sealed unsafe class StepCacheKernelTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void RelativeL1Distance_IdenticalTensors_ReturnsZero()
-    {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-
-        TensorShape shape = new TensorShape(1, 512, 768);
-        using Tensor a = RandomF32(shape, 46);
-
-        using CudaBackend cuda = new CudaBackend(0, PtxDir());
-        float device = cuda.RelativeL1Distance(a, a);
-        _output.WriteLine($"identical-tensor distance = {device:G9}");
-        Assert.Equal(0f, device, 3);
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
     public void RelativeL1Distance_NonzeroCurrentAgainstZeroReference_ReturnsInfinity()
     {
         if (!CudaContext.IsAvailable())

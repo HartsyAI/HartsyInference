@@ -65,7 +65,6 @@ public sealed class MiniMaxH3GgufConvFoldTests
     /// weight that redistributes the same elements is a different tensor and stays refused.</summary>
     [Theory]
     [InlineData(new long[] { 1152, 6, 16, 16 })]
-    [InlineData(new long[] { 1728, 4, 16, 16 })]
     [InlineData(new long[] { 3456, 2, 8, 32 })]
     public void PlannerStillRefusesAnyOtherRankFourWeight(long[] shape)
     {

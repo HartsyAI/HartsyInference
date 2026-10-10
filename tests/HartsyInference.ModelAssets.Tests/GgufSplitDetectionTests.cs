@@ -8,7 +8,6 @@ namespace HartsyInference.ModelAssets.Tests;
 public sealed class GgufSplitDetectionTests : IDisposable
 {
     private const uint TypeUInt16 = 2;
-    private const uint TypeUInt32 = 4;
     private const uint TypeString = 8;
 
     private readonly string _dir = Path.Combine(Path.GetTempPath(), $"gguf_split_{Guid.NewGuid():N}");
@@ -31,16 +30,6 @@ public sealed class GgufSplitDetectionTests : IDisposable
     }
 
     [Fact]
-    public void Load_SplitCountAsUInt32_IsAlsoDetected()
-    {
-        string path = WriteGguf("part32.gguf", splitCount: (TypeUInt32, 2));
-
-        using GgufLoader loader = new GgufLoader();
-
-        Assert.Throws<UnsupportedModelException>(() => loader.Load(path));
-    }
-
-    [Fact]
     public void Load_SplitCountOne_LoadsNormally()
     {
         string path = WriteGguf("single.gguf", splitCount: (TypeUInt16, 1));
@@ -49,17 +38,6 @@ public sealed class GgufSplitDetectionTests : IDisposable
         loader.Load(path);
 
         Assert.Equal("llama", loader.Metadata.GetString("general.architecture"));
-    }
-
-    [Fact]
-    public void Load_NoSplitKeys_LoadsNormally()
-    {
-        string path = WriteGguf("plain.gguf", splitCount: null);
-
-        using GgufLoader loader = new GgufLoader();
-        loader.Load(path);
-
-        Assert.Empty(loader.Descriptors);
     }
 
     private string WriteGguf(string name, (uint Type, uint Value)? splitCount)

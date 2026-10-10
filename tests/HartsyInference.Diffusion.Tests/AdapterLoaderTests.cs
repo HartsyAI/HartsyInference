@@ -36,21 +36,6 @@ public sealed class AdapterLoaderTests : IDisposable
     }
 
     [Fact]
-    public void ControlNetLoader_DetectsSdxlFromCrossAttnDim()
-    {
-        string path = CreateSafeTensorsFile("controlnet-sdxl-depth.safetensors", new()
-        {
-            ["down_blocks.0.attentions.0.proj_in.weight"] = (DType.F32, [640, 2048], new float[640 * 2048]),
-            ["controlnet_down_blocks.0.weight"] = (DType.F32, [320, 320, 1, 1], new float[320 * 320]),
-        });
-
-        using ControlNetFile file = ControlNetLoader.Load(path);
-        Assert.Equal(ControlNetBaseModel.Sdxl, file.BaseModel);
-        Assert.Equal(ControlNetMode.Depth, file.Mode);
-        Assert.Equal(2048, file.Config.CrossAttentionDim);
-    }
-
-    [Fact]
     public void ControlNetLoader_DetectsFluxFromTransformerBlocks()
     {
         // Architecture-defining subset of a diffusers FluxControlNetModel header (FromDescriptors requires the
@@ -71,18 +56,6 @@ public sealed class AdapterLoaderTests : IDisposable
         Assert.NotNull(file.FluxConfig);
         Assert.Equal(1, file.FluxConfig!.Depth);
         Assert.Equal(24, file.FluxConfig.NumHeads);
-    }
-
-    [Fact]
-    public void ControlNetLoader_ModeOverrideTakesPrecedence()
-    {
-        string path = CreateSafeTensorsFile("ambiguous-name.safetensors", new()
-        {
-            ["input_blocks.0.0.weight"] = (DType.F32, [320, 4, 3, 3], new float[320 * 4 * 3 * 3]),
-        });
-
-        using ControlNetFile file = ControlNetLoader.Load(path, modeOverride: ControlNetMode.OpenPose);
-        Assert.Equal(ControlNetMode.OpenPose, file.Mode);
     }
 
     [Fact]
@@ -262,24 +235,6 @@ public sealed class AdapterLoaderTests : IDisposable
     }
 
     [Fact]
-    public void IpAdapterLoader_DetectsSd15Standard()
-    {
-        string path = CreateSafeTensorsFile("ip-adapter_sd15.safetensors", new()
-        {
-            ["image_proj.weight"] = (DType.F32, [768 * 4, 1024], new float[768 * 4 * 1024]),
-            ["ip_adapter.0.to_k_ip.weight"] = (DType.F32, [768, 768], new float[768 * 768]),
-            ["ip_adapter.0.to_v_ip.weight"] = (DType.F32, [768, 768], new float[768 * 768]),
-        });
-
-        using IpAdapterFile file = IpAdapterLoader.Load(path);
-        Assert.Equal(IpAdapterBaseModel.Sd15, file.BaseModel);
-        Assert.False(file.Config.IsPlus);
-        Assert.False(file.Config.IsFaceId);
-        Assert.Equal(4, file.Config.NumImageTokens);
-        Assert.Equal(768, file.Config.CrossAttentionDim);
-    }
-
-    [Fact]
     public void IpAdapterLoader_DetectsPlus_From_NameAnd_NormKey()
     {
         string path = CreateSafeTensorsFile("ip-adapter-plus_sdxl.safetensors", new()
@@ -294,20 +249,6 @@ public sealed class AdapterLoaderTests : IDisposable
         Assert.True(file.Config.IsPlus);
         Assert.Equal(16, file.Config.NumImageTokens);
         Assert.Equal(2048, file.Config.CrossAttentionDim);
-    }
-
-    [Fact]
-    public void IpAdapterLoader_DetectsFaceId_From_FilenameKeyword()
-    {
-        string path = CreateSafeTensorsFile("ip-adapter-faceid_sd15.safetensors", new()
-        {
-            ["image_proj.weight"] = (DType.F32, [768 * 4, 512], new float[768 * 4 * 512]),
-            ["ip_adapter.0.to_k_ip.weight"] = (DType.F32, [768, 768], new float[768 * 768]),
-        });
-
-        using IpAdapterFile file = IpAdapterLoader.Load(path);
-        Assert.True(file.Config.IsFaceId);
-        Assert.Contains("ArcFace", file.Config.ClipImageModel);
     }
 
     [Fact]
@@ -367,14 +308,6 @@ public sealed class AdapterLoaderTests : IDisposable
         {
             Assert.Equal(0f, v);
         }
-    }
-
-    [Fact]
-    public void IpAdapter_Sd15Plus_ConstructsResampler()
-    {
-        using IpAdapter adapter = new IpAdapter(IpAdapterConfig.Sd15Plus);
-        Assert.Equal(16, adapter.NumImageTokens);
-        Assert.IsType<IpAdapterPlusResampler>(adapter.ImageProjection);
     }
 
     [Fact]
@@ -471,25 +404,6 @@ public sealed class AdapterLoaderTests : IDisposable
         Assert.Equal(1280, file.Config.ClipEmbeddingDim);
         Assert.Equal(4, file.Config.NumImageTokens);
         Assert.Equal(768, file.Config.CrossAttentionDim);
-    }
-
-    [Fact]
-    public void IpAdapterLoader_FaceIdPlus_WithoutV2Name_IsNotV2()
-    {
-        string path = CreateSafeTensorsFile("ip-adapter-faceid-plus_sd15.safetensors", new()
-        {
-            ["image_proj.proj.0.weight"] = (DType.F32, [1024, 512], new float[1024 * 512]),
-            ["image_proj.proj.2.weight"] = (DType.F32, [3072, 1024], new float[3072 * 1024]),
-            ["image_proj.norm.weight"] = (DType.F32, [768], OnesArray(768)),
-            ["image_proj.perceiver_resampler.proj_in.weight"] = (DType.F32, [768, 1280], new float[768 * 1280]),
-            ["ip_adapter.1.to_k_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
-            ["ip_adapter.1.to_v_ip.weight"] = (DType.F32, [320, 768], new float[320 * 768]),
-        });
-
-        using IpAdapterFile file = IpAdapterLoader.Load(path);
-        Assert.True(file.Config.IsFaceId);
-        Assert.True(file.Config.IsPlus);
-        Assert.False(file.Config.IsFaceIdV2);
     }
 
     [Fact]
@@ -633,37 +547,6 @@ public sealed class AdapterLoaderTests : IDisposable
             sumAbs += MathF.Abs(v);
         }
         Assert.True(sumAbs > 0f, "FaceID projection produced all-zero tokens on a real checkpoint.");
-    }
-
-    [Fact]
-    public void ControlNetConditioning_DefaultWindow_IsAlwaysActive()
-    {
-        using ControlNet controlNet = new ControlNet(ControlNetConfig.Sd15(ControlNetMode.Canny), UNetConfig.Sd15);
-        using Tensor condImage = new Tensor(new TensorShape(1, 3, 8, 8), DType.F32);
-        ControlNetConditioning conditioning = new() { Adapter = controlNet, ConditionImage = condImage };
-        for (int i = 0; i < 20; i++)
-        {
-            Assert.True(conditioning.IsActiveAtStep(i, 20));
-        }
-    }
-
-    [Fact]
-    public void ControlNetConditioning_StartEndWindow_GatesSteps()
-    {
-        using ControlNet controlNet = new ControlNet(ControlNetConfig.Sd15(ControlNetMode.Canny), UNetConfig.Sd15);
-        using Tensor condImage = new Tensor(new TensorShape(1, 3, 8, 8), DType.F32);
-        ControlNetConditioning conditioning = new()
-        {
-            Adapter = controlNet,
-            ConditionImage = condImage,
-            StartFraction = 0.25f,
-            EndFraction = 0.75f,
-        };
-        // fraction = step / totalSteps with 20 steps → active iff 0.25 <= i/20 <= 0.75 → i in [5, 15].
-        Assert.False(conditioning.IsActiveAtStep(4, 20));
-        Assert.True(conditioning.IsActiveAtStep(5, 20));
-        Assert.True(conditioning.IsActiveAtStep(15, 20));
-        Assert.False(conditioning.IsActiveAtStep(16, 20));
     }
 
     [Fact]

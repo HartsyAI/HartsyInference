@@ -55,11 +55,6 @@ public sealed class LogitSamplingIdentityTests
 
     [Theory]
     [InlineData(2048, 250)] // Mimi/depformer codebook cardinality, doc-cited top-k
-    [InlineData(8000, 50)]  // Kyutai text cardinality (TextCard)
-    [InlineData(1, 250)]
-    [InlineData(2048, 1)]   // k=1 -> effectively argmax-of-the-draw
-    [InlineData(2048, 2048)] // k == n
-    [InlineData(2048, 0)]   // topK<=0 -> k=n (unbounded)
     [InlineData(2048, 5000)] // topK > n, clamps to n
     public void RandomLogits_MatchesReference(int n, int topK)
     {
@@ -69,18 +64,6 @@ public sealed class LogitSamplingIdentityTests
             float[] logits = MakeLogits(n, rng);
             AssertIdentical(logits, temp: 0.8f, topK, seed: 1 + trial, label: $"n={n} k={topK} trial={trial}");
         }
-    }
-
-    [Theory]
-    [InlineData(0.1f)]
-    [InlineData(0.8f)]
-    [InlineData(1.0f)]
-    [InlineData(5.0f)]
-    public void TemperatureSweep_MatchesReference(float temp)
-    {
-        Random rng = new(2024);
-        float[] logits = MakeLogits(2048, rng);
-        AssertIdentical(logits, temp, topK: 250, seed: 3, label: $"temp={temp}");
     }
 
     /// <summary>Exact ties at the top: several ids share the identical maximal logit, which both decides

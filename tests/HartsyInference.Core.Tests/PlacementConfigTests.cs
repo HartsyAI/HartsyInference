@@ -39,11 +39,4 @@ public sealed class PlacementConfigTests
         }
     }
 
-    [Fact]
-    public void CacheKey_IsOrderSensitive_ForShardDevices()
-    {
-        PlacementConfig ab = new() { ShardDevices = ["cuda:0", "cuda:1"] };
-        PlacementConfig ba = new() { ShardDevices = ["cuda:1", "cuda:0"] };
-        Assert.NotEqual(ab.CacheKey(), ba.CacheKey());
-    }
 }

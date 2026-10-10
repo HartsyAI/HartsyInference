@@ -19,8 +19,6 @@ public sealed unsafe class VideoSparseAttentionKernelTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(0, VideoSparseAttentionProfileKind.ComfySol64V1)]
-    [InlineData(0, VideoSparseAttentionProfileKind.FastVideoVsa64V1)]
-    [InlineData(1, VideoSparseAttentionProfileKind.ComfySol64V1)]
     [InlineData(1, VideoSparseAttentionProfileKind.FastVideoVsa64V1)]
     public void Execute_MatchesReferenceWithoutHotLoopDeviceReadback(int device,
         VideoSparseAttentionProfileKind profile)

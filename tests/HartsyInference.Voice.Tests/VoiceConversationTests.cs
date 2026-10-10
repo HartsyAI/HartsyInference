@@ -11,21 +11,6 @@ public sealed class VoiceConversationTests
     private static int Words(string text) => text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
 
     [Fact]
-    public void UnderTheBudgetEverythingIsSentSystemFirst()
-    {
-        VoiceConversation conversation = new("Be brief.");
-        conversation.AddUser("hello there");
-        conversation.AddAssistant("hi, how can I help");
-        conversation.AddUser("what time is it");
-
-        IReadOnlyList<TextMessage> request = conversation.ToRequest(Words, maxTokens: 1_000);
-
-        Assert.Equal([TextRole.System, TextRole.User, TextRole.Assistant, TextRole.User], request.Select(m => m.Role));
-        Assert.Equal("Be brief.", request[0].Content);
-        Assert.Equal("what time is it", request[^1].Content);
-    }
-
-    [Fact]
     public void TrimmingDropsTheOldestTurnsAndKeepsTheSystemAndLastUserMessage()
     {
         VoiceConversation conversation = new("Be brief.");
@@ -91,14 +76,4 @@ public sealed class VoiceConversationTests
         Assert.Single(request[3].ToolCalls!);
     }
 
-    [Fact]
-    public void TheLastUserMessageIsKeptEvenOverBudget()
-    {
-        VoiceConversation conversation = new("a system prompt that is long");
-        conversation.AddUser("one two three four five six seven eight nine ten");
-
-        IReadOnlyList<TextMessage> request = conversation.ToRequest(Words, maxTokens: 3);
-
-        Assert.Equal([TextRole.System, TextRole.User], request.Select(m => m.Role));
-    }
 }

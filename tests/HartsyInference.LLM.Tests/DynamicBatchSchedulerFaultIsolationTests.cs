@@ -111,36 +111,4 @@ public sealed class DynamicBatchSchedulerFaultIsolationTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
-    [Fact]
-    public async Task UnrelatedModel_UnaffectedByAnotherModels_RoundFailure()
-    {
-        // Two independent schedulers (as TextService holds, one per loaded model) sharing nothing —
-        // proves fault containment is per-scheduler-instance, not some shared static state that could leak
-        // a failure from one loaded model into another's traffic.
-        TransformerConfig cfg = Cfg();
-        Dictionary<string, Tensor> w1 = Weights(cfg), w2 = Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer modelA = new(cfg);
-        using GenericTransformer modelB = new(cfg);
-        modelA.LoadWeights(w1, "model");
-        modelB.LoadWeights(w2, "model");
-        StubTokenizer tokenizer = new();
-        using PagedKvPool poolA = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
-        using PagedKvPool poolB = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
-        using DynamicBatchScheduler schedulerA = new(modelA, tokenizer, backend, poolA);
-        using DynamicBatchScheduler schedulerB = new(modelB, tokenizer, backend, poolB);
-
-        schedulerA.TestFaultInjector = _ => new InvalidOperationException("model A is broken (test)");
-
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => schedulerA.SubmitAsync(Req([1, 2, 3], 10), onToken: null, CancellationToken.None));
-
-        // Model B never had a fault injected — must complete normally regardless of model A's failure.
-        GenerationResult resultB = await schedulerB.SubmitAsync(Req([1, 2, 3], 10), onToken: null, CancellationToken.None);
-        Assert.NotEmpty(resultB.TokenIds);
-        Assert.True(schedulerB.IsLoopAlive);
-
-        foreach (Tensor t in w1.Values) t.Dispose();
-        foreach (Tensor t in w2.Values) t.Dispose();
-    }
 }

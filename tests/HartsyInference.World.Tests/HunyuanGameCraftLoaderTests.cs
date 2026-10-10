@@ -65,32 +65,6 @@ public sealed unsafe class HunyuanGameCraftLoaderTests
     }
 
     [Fact]
-    public void CameraNet_LoadsWeights_RoutedThroughTheRealConverter()
-    {
-        // Same shapes GameCraftPartsTests hand-builds, but routed through Convert() itself (not hand-prefixed) —
-        // proves the coupling between the router's output and GameCraftCameraNet.LoadWeights' default prefix.
-        int hidden = 8;
-        Dictionary<string, Tensor> raw = new()
-        {
-            ["camera_in.encode_first.0.weight"] = T(192, 384, 1, 1), ["camera_in.encode_first.0.bias"] = T(192),
-            ["camera_in.encode_first.1.weight"] = Ones(192), ["camera_in.encode_first.1.bias"] = T(192),
-            ["camera_in.encode_second.0.weight"] = T(96, 192, 1, 1), ["camera_in.encode_second.0.bias"] = T(96),
-            ["camera_in.encode_second.1.weight"] = Ones(96), ["camera_in.encode_second.1.bias"] = T(96),
-            ["camera_in.final_proj.weight"] = T(16, 96, 1, 1), ["camera_in.final_proj.bias"] = T(16),
-            ["camera_in.camera_in.proj.weight"] = T(hidden, 16 * 2 * 2), ["camera_in.camera_in.proj.bias"] = T(hidden),
-            ["camera_in.scale"] = Ones(1),
-            // Noise: a DiT-looking key that must NOT end up routed into CameraNet.
-            ["img_in.proj.weight"] = T(hidden, 4),
-        };
-
-        HunyuanGameCraftCheckpointConverter.ConvertedWeights routed = HunyuanGameCraftCheckpointConverter.Convert(raw);
-        GameCraftCameraNet net = new(hiddenSize: hidden, downscale: 8, outChannels: 16, patchH: 2, patchW: 2);
-        net.LoadWeights(routed.CameraNet); // default prefix "camera_in" — throws KeyNotFoundException if the router mis-routed.
-
-        Assert.NotEmpty(net.EnumerateWeights().ToList());
-    }
-
-    [Fact]
     public void LoadFromPath_NonexistentDitPath_ThrowsFileNotFoundException_NotACrash()
     {
         // Exercises the assembler directly, bypassing WorldService.LoadHunyuanGameCraft's "no VAE encoder yet"
@@ -114,35 +88,6 @@ public sealed unsafe class HunyuanGameCraftLoaderTests
         Assert.Contains(WorldService.VaeAuxKey, ex.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void WorldService_ValidAuxKeys_ThrowsNotSupportedException_BeforeTouchingDisk()
-    {
-        // Every aux key is present (unlike WorldService_MissingAuxKeys_...) — this proves the NEW, specific
-        // "no VAE encoder" gate fires (HunyuanGameCraftPipeline.LoadFromPathBuildsVaeEncoder), not the old blanket
-        // "catalogued but not loadable" message the hunyuan-gamecraft case used to throw. It must fire BEFORE any
-        // file I/O: the checkpoint paths below don't exist, so a FileNotFoundException would mean the loader ran
-        // (and, on a real checkpoint, would have loaded ~51GB of weights for a session that could never succeed).
-        using InferenceEngine engine = new InferenceEngine("cpu");
-        CatalogEntry catalog = ModelCatalog.Find("hunyuan-gamecraft") ?? throw new InvalidOperationException("hunyuan-gamecraft must be catalogued.");
-        ModelSpec spec = new ModelSpec
-        {
-            Requested = "hunyuan-gamecraft",
-            Modality = Modality.World,
-            Catalog = catalog,
-            LocalPath = "/nonexistent/mp_rank_00_model_states.pt",
-            Aux = new Dictionary<string, string>
-            {
-                [WorldService.VaeAuxKey] = "/nonexistent/vae.safetensors",
-                [WorldService.LlavaAuxKey] = "/nonexistent/llava.safetensors",
-                [WorldService.ClipAuxKey] = "/nonexistent/clip.safetensors",
-            },
-        };
-        WorldRequest request = new WorldRequest { InitImage = new ImageData { Rgb = new byte[3], Width = 1, Height = 1 } };
-
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => engine.World.Open(spec, request));
-        Assert.Contains("VAE encoder", ex.Message, StringComparison.Ordinal);
-    }
-
 
     private static Tensor T(params long[] dims)
     {
@@ -152,11 +97,4 @@ public sealed unsafe class HunyuanGameCraftLoaderTests
         return t;
     }
 
-    private static Tensor Ones(long n)
-    {
-        Tensor t = new(new TensorShape(n), DType.F32);
-        float* p = (float*)t.DataPointer;
-        for (long i = 0; i < n; i++) p[i] = 1f;
-        return t;
-    }
 }

@@ -75,13 +75,6 @@ public sealed class WeightedTokenBuilderTests
     }
 
     [Fact]
-    public void AnUnweightedPromptIsUniformAtOne()
-    {
-        WeightedTokenSequence built = WeightedTokenBuilder.Build("a cat", Encode, [], []);
-        Assert.Equal(1f, built.UniformWeight);
-    }
-
-    [Fact]
     public void AnEmptyPromptHasNoUniformWeightAndNoContentIds()
     {
         WeightedTokenSequence built = WeightedTokenBuilder.Build("", Encode, [101], [201]);

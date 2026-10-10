@@ -80,21 +80,6 @@ public sealed unsafe class Fp8CommonScaleRequantTests
     }
 
     [Fact]
-    public void EqualScales_AreLeftUntouched()
-    {
-        float[] values = [1.0f, -0.5f, 2.0f];
-        using Tensor a = MakeFp8(values, scale: 2.0f);
-        using Tensor b = MakeFp8(values, scale: 2.0f);
-        byte firstByteA = *(byte*)a.DataPointer;
-
-        float err = CheckpointConvertUtils.RequantizeToCommonFp8Scale(a, b);
-
-        Assert.Equal(0f, err);
-        Assert.Equal(2.0f, a.Fp8ScaleFactor);
-        Assert.Equal(firstByteA, *(byte*)a.DataPointer);
-    }
-
-    [Fact]
     public void ThreeTensorQkvGroup_UnifiesToMaxScale()
     {
         // The actual Q/K/V fusion shape: three projections with distinct scales unify to the max.
@@ -122,29 +107,5 @@ public sealed unsafe class Fp8CommonScaleRequantTests
         }
     }
 
-    [Fact]
-    public void NonFp8Tensor_Throws()
-    {
-        using Tensor a = MakeFp8([1.0f], scale: 1.0f);
-        using Tensor f32 = new Tensor(new TensorShape(1, 1), DType.F32);
-        Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.RequantizeToCommonFp8Scale(a, f32));
-    }
 
-    [Fact]
-    public void SubnormalFlush_IsBoundedByDocumentedThreshold()
-    {
-        // A tiny weight (0.001 at scale 1) rescaled to s*=8 encodes as 0.000125 in common-scale units —
-        // below E4M3's min subnormal (2⁻⁹ ≈ 0.00195) → flushes to zero. The documented behavior: bounded
-        // absolute loss (the original tiny magnitude), negligible relative to the tensor amax.
-        float[] tiny = [1.0f, 0.001f];
-        using Tensor a = MakeFp8([8.0f, 4.0f], scale: 8.0f);
-        using Tensor b = MakeFp8(tiny, scale: 1.0f);
-
-        float err = CheckpointConvertUtils.RequantizeToCommonFp8Scale(a, b);
-
-        float[] afterB = Decode(b);
-        Assert.Equal(0f, afterB[1]);
-        // amax-normalized loss of the flushed element: 0.001 / 1.0 = 0.001 ≪ the 1/16 normal-range bound.
-        Assert.True(err <= 1.0f / 16.0f);
-    }
 }

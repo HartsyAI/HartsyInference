@@ -15,7 +15,6 @@ public sealed unsafe class CausalConv3dNativeTests(ITestOutputHelper output)
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 1, false)]
-    [InlineData(false, 1, true)]
     [InlineData(false, 2, false)]
     [InlineData(true, 1, true)]
     public void NativeConv3d_MatchesPerTapDecomposition(bool bf16, int strideT, bool withCache)

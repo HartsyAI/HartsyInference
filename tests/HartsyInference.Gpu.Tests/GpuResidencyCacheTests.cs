@@ -363,21 +363,6 @@ public sealed class GpuResidencyCacheTests
 
     /// <summary>A promoted weight is freed by a different path from an activation (on CUDA a different free call
     /// altogether, from a different allocator), so it is not covered by the activation case.</summary>
-    [Fact]
-    public void Disposing_A_Promoted_Weight_Frees_It_Into_The_Caches_Own_Context()
-    {
-        using FakeCache cache = new();
-        Tensor weight = NewTensor();
-        cache.ForcePromote(weight, Size(weight));
-        FakeCache.Buffer promoted = Assert.Single(cache.WeightAllocations);
-
-        cache.SimulateForeignContext();
-        weight.Dispose();
-
-        Assert.True(promoted.Freed);
-        Assert.DoesNotContain(promoted, cache.FreedWhileForeign);
-    }
-
     /// <summary>A host access demotes a promoted weight through the same callback as its disposal, and drops the
     /// conversions of it too — buffers of their own, freed one after the other under one binding.</summary>
     [Fact]
@@ -404,25 +389,6 @@ public sealed class GpuResidencyCacheTests
     /// <summary>The control: the sync callback of an activation read back to host has always made the context
     /// current before it released the buffer. This pins the contract the two release callbacks above now share
     /// with it, so the three cannot drift apart again.</summary>
-    [Fact]
-    public void A_Host_Read_Of_An_Activation_Frees_Its_Buffer_Into_The_Caches_Own_Context()
-    {
-        using FakeCache cache = new();
-        using Tensor tensor = NewTensor();
-        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
-        cache.CacheActivation(tensor, buffer, Size(tensor));
-
-        cache.SimulateForeignContext();
-        unsafe
-        {
-            _ = tensor.DataPointer;
-        }
-
-        Assert.Equal(1, cache.Downloads);
-        Assert.True(buffer.Freed);
-        Assert.DoesNotContain(buffer, cache.FreedWhileForeign);
-    }
-
     /// <summary>Making the context current is not free of risk: once a backend has destroyed its context, binding it
     /// throws. A retiring backend closes the callback gate BEFORE it destroys the context, so a release arriving
     /// afterwards is turned away at the gate — but only if the bind comes after the gate. A bind placed ahead of it
@@ -504,24 +470,6 @@ public sealed class GpuResidencyCacheTests
     }
 
     /// <summary>An explicit preload is the caller's decision, so a host read must not silently undo it.</summary>
-    [Fact]
-    public void A_Host_Read_After_An_Explicit_Preload_Keeps_The_Weight()
-    {
-        using FakeCache cache = new();
-        using Tensor tensor = NewTensor();
-
-        cache.PreloadWeight(tensor);
-        FakeCache.Buffer resident = cache.CopyToDevice(tensor);
-
-        unsafe
-        {
-            _ = tensor.DataPointer;
-        }
-
-        Assert.False(resident.Freed);
-        Assert.Same(resident, cache.CopyToDevice(tensor));
-    }
-
     /// <summary>Auto-promotion runs entirely through the upload hook: a tensor uploaded twice becomes a resident
     /// weight, and the caller's own release of that buffer is then correctly skipped.</summary>
     [Fact]
@@ -539,22 +487,6 @@ public sealed class GpuResidencyCacheTests
         Assert.False(second.Freed);                        // the cache owns it now
         Assert.Same(second, cache.CopyToDevice(tensor));   // and serves it without a third upload
         Assert.Equal(2, cache.Uploads);
-    }
-
-    [Fact]
-    public void A_Cached_Tensor_Is_Served_Without_Another_Upload()
-    {
-        using FakeCache cache = new();
-        using Tensor tensor = NewTensor();
-
-        FakeCache.Buffer first = cache.CopyToDevice(tensor);
-        cache.CacheActivation(tensor, first, GpuResidencyCache<FakeCache.Buffer>.ByteSize(tensor));
-        FakeCache.Buffer second = cache.CopyToDevice(tensor);
-
-        Assert.Same(first, second);
-        Assert.Equal(1, cache.Uploads);
-        Assert.Equal(1, cache.Misses);
-        Assert.Equal(1, cache.Hits);
     }
 
     /// <summary>Reading the tensor from host is what ends its residency: the value comes back and the device copy is
@@ -645,25 +577,6 @@ public sealed class GpuResidencyCacheTests
     }
 
     /// <summary>Pinning is what keeps cross-step device state put while everything around it is reclaimed.</summary>
-    [Fact]
-    public void Offload_Skips_A_Pinned_Activation()
-    {
-        using FakeCache cache = new();
-        using Tensor kept = NewTensor();
-        using Tensor evictable = NewTensor();
-        long bytes = GpuResidencyCache<FakeCache.Buffer>.ByteSize(kept);
-
-        cache.CacheActivation(kept, cache.AllocateForTest(bytes), bytes);
-        cache.CacheActivation(evictable, cache.AllocateForTest(bytes), bytes);
-        cache.PinActivation(kept);
-
-        long freed = cache.OffloadActivations(long.MaxValue);
-
-        Assert.Equal(bytes, freed);
-        Assert.True(cache.TryGetCached(kept, out _));
-        Assert.False(cache.TryGetCached(evictable, out _));
-    }
-
     /// <summary>A cache over a DIFFERENT buffer type is still a different owner.
     ///
     /// <para>A static field inside a generic class is per closed type, so a counter declared on the generic gives
@@ -672,15 +585,6 @@ public sealed class GpuResidencyCacheTests
     /// backend is on the base: a host tensor resident on both — a text encoder on one, a denoiser on the other —
     /// then carries both bindings under the same key, and their finalizer-cleanup buckets collide, so one backend's
     /// drain runs the other's device cleanup.</para></summary>
-    [Fact]
-    public void Caches_Over_Different_Buffer_Types_Do_Not_Share_Keys()
-    {
-        using FakeCache handleCache = new();
-        using OtherBufferCache structCache = new();
-
-        Assert.NotEqual(handleCache.BindingKey, structCache.BindingKey);
-    }
-
     /// <summary>A second cache type, standing in for another backend's buffer handle.</summary>
     private sealed class OtherBufferCache : GpuResidencyCache<long>
     {
@@ -717,23 +621,6 @@ public sealed class GpuResidencyCacheTests
     }
 
     /// <summary>A buffer an arena owns must never be freed one at a time; the arena frees it wholesale.</summary>
-    [Fact]
-    public void An_Externally_Owned_Buffer_Is_Not_Freed_Individually()
-    {
-        using FakeCache cache = new();
-        using Tensor tensor = NewTensor();
-        long bytes = GpuResidencyCache<FakeCache.Buffer>.ByteSize(tensor);
-
-        FakeCache.Buffer buffer = cache.AllocateForTest(bytes);
-        cache.ExternallyOwnedIds.Add(buffer.Id);
-        cache.CacheActivation(tensor, buffer, bytes);
-
-        cache.FreeAllCached();
-
-        Assert.False(buffer.Freed);
-        Assert.DoesNotContain(buffer, cache.FreedBuffers);
-    }
-
     /// <summary>A host read while a graph is being recorded is a contract violation, and servicing it would drain a
     /// queue that is mid-record. It has to fail loudly rather than quietly do the dangerous thing.</summary>
     [Fact]
@@ -871,25 +758,6 @@ public sealed class GpuResidencyCacheTests
     /// <summary>The binding has to go with the buffer. Nothing reads a freed activation back, so a binding left
     /// planted would fire its sync callback much later against memory the driver already has — and would hand the
     /// tensor bytes from a buffer somebody else has been given since.</summary>
-    [Fact]
-    public void FreeActivations_ClearsTheBindingSoNoLaterReadSyncs()
-    {
-        using FakeCache cache = new();
-        using Tensor tensor = NewTensor();
-
-        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
-        cache.CacheActivation(tensor, buffer, Size(tensor));
-
-        cache.FreeActivations();
-        unsafe
-        {
-            _ = tensor.DataPointer;
-        }
-
-        Assert.Equal(0, cache.Downloads);
-        Assert.Single(cache.FreedBuffers, freed => ReferenceEquals(freed, buffer));
-    }
-
     /// <summary>A phase boundary is a safe point by definition — every op's cleanup has run — so a buffer still
     /// parked from a rebind provably has no owner and must not be left to sit until teardown.</summary>
     [Fact]

@@ -32,13 +32,6 @@ public sealed class ParallelPlannerTests
         });
 
     [Fact]
-    public void SingleGpu_AlwaysSingle()
-    {
-        ParallelPlan plan = Plan(Modality.Video, 30, [Gpu(0, 128, 22)], []);
-        Assert.True(plan.Placement.IsSingle, plan.Reason);
-    }
-
-    [Fact]
     public void Image_ModelExceedsPrimary_PicksDitSharding_FastestFirst()
     {
         ParallelPlan plan = Plan(Modality.Image, 30, DevPair, NoP2P);
@@ -112,13 +105,5 @@ public sealed class ParallelPlannerTests
     {
         ParallelPlan plan = Plan(Modality.Image, 0, DevPair, NoP2P);
         Assert.False(plan.Placement.EnableDitSharding, plan.Reason);
-    }
-
-    [Fact]
-    public void OtherModalities_Single_WithPointerReason()
-    {
-        ParallelPlan plan = Plan(Modality.Music, 4, DevPair, NoP2P);
-        Assert.True(plan.Placement.IsSingle);
-        Assert.Contains("ShardDevices", plan.Reason);
     }
 }

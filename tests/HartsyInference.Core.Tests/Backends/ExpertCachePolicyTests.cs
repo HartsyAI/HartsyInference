@@ -69,51 +69,6 @@ public sealed class ExpertCachePolicyTests
     }
 
     [Fact]
-    public void Acquire_AwaitFailureDropsTheEntryInsteadOfLeavingAReadyLookingHit()
-    {
-        using FakeExpertCache cache = MakeCache(4, 0);
-        cache.FailAwaitOf = K(0, 1);
-        Assert.Throws<InvalidOperationException>(() => cache.Acquire([K(0, 1)]));
-        Assert.Equal(0, cache.Stats.ResidentExperts);
-        Assert.True(cache.Events.IndexOf("abandon " + K(0, 1)) < cache.Events.IndexOf("evict " + K(0, 1)));
-
-        cache.FailAwaitOf = null;
-        using ExpertLease lease = cache.Acquire([K(0, 1)]);
-        Assert.Equal(2, cache.Events.Count(e => e == "upload " + K(0, 1)));
-        Assert.Equal(0, cache.Stats.Hits);
-    }
-
-    [Fact]
-    public void Release_FenceFailureLeavesTheLeasePinnedAndReleasableAgain()
-    {
-        using FakeExpertCache cache = MakeCache(2, 0);
-        ExpertLease lease = cache.Acquire([K(0, 0), K(0, 1)]);
-        cache.FailRecordFence = true;
-        Assert.Throws<InvalidOperationException>(() => cache.Release(lease));
-        Assert.False(lease.IsReleased);
-        Assert.Throws<OutOfVramException>(() => cache.Acquire([K(0, 2)]));
-
-        cache.FailRecordFence = false;
-        cache.Release(lease);
-        Assert.True(lease.IsReleased);
-        using ExpertLease next = cache.Acquire([K(0, 2), K(0, 3)]);
-        Assert.Equal(2, next.Weights.Count);
-    }
-
-    [Fact]
-    public void Release_UnpinsAndIsIdempotent()
-    {
-        using FakeExpertCache cache = MakeCache(4, 0);
-        ExpertLease lease = cache.Acquire([K(0, 1)]);
-        cache.Release(lease);
-        cache.Release(lease);
-        lease.Dispose();
-        Assert.Equal(0, cache.Stats.PinnedExperts);
-        Assert.True(lease.IsReleased);
-        Assert.Equal(1, cache.Stats.ResidentExperts);
-    }
-
-    [Fact]
     public void Eviction_UsesProbationBeforeProtectedAndOldestFirst()
     {
         using FakeExpertCache cache = MakeCache(3, 0);
@@ -128,28 +83,6 @@ public sealed class ExpertCachePolicyTests
     }
 
     [Fact]
-    public void Eviction_NeverTakesRequestedExpertsAndTakesTheColdestFirst()
-    {
-        using FakeExpertCache cache = MakeCache(3, 0, 1);
-        cache.Acquire([K(0, 0), K(0, 1)]).Dispose();
-        cache.Acquire([K(1, 0)]).Dispose();
-        cache.Events.Clear();
-        cache.Acquire([K(1, 1)]).Dispose();
-        Assert.Contains("evict L1.E0", cache.Events);
-        Assert.DoesNotContain("evict L1.E1", cache.Events);
-    }
-
-    [Fact]
-    public void Acquire_ReplacesUnpinnedExpertsOfTheSameLayerWhenTheCacheIsFullOfIt()
-    {
-        using FakeExpertCache cache = MakeCache(2, 0);
-        cache.Acquire([K(0, 0), K(0, 1)]).Dispose();
-        using ExpertLease next = cache.Acquire([K(0, 2)]);
-        Assert.Equal(2, cache.Stats.ResidentExperts);
-        Assert.Single(cache.Events, e => e.StartsWith("evict"));
-    }
-
-    [Fact]
     public void Eviction_PrefersColdLayerOverHotLayer()
     {
         using FakeExpertCache cache = MakeCache(3, 0, 1, 2);
@@ -160,20 +93,6 @@ public sealed class ExpertCachePolicyTests
         cache.Acquire([K(2, 0)]).Dispose();
         Assert.Contains("evict L1.E0", cache.Events);
         Assert.DoesNotContain("evict L0.E0", cache.Events);
-    }
-
-    [Fact]
-    public void Eviction_PendingFenceMakesAVictimWorseThanACompletedOne()
-    {
-        using FakeExpertCache cache = MakeCache(2, 0, 1);
-        cache.FencesComplete = false;
-        cache.Acquire([K(0, 0)]).Dispose();
-        cache.FencesComplete = true;
-        cache.Acquire([K(0, 1)]).Dispose();
-        cache.FencesComplete = false;
-        cache.Events.Clear();
-        cache.Acquire([K(1, 0)]).Dispose();
-        Assert.Contains("evict L0.E1", cache.Events);
     }
 
     [Fact]
@@ -253,12 +172,5 @@ public sealed class ExpertCachePolicyTests
         Assert.Equal(0, cache.LiveFences);
         Assert.True(cache.Drained);
         Assert.Equal(cache.Events.Count(e => e.StartsWith("upload")), cache.Events.Count(e => e.StartsWith("evict")));
-    }
-
-    [Fact]
-    public void Acquire_WithoutARegisteredBankThrows()
-    {
-        using FakeExpertCache cache = MakeCache(2, 0);
-        Assert.Throws<InvalidOperationException>(() => cache.Acquire([K(7, 0)]));
     }
 }

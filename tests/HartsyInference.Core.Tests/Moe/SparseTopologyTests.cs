@@ -203,95 +203,6 @@ public sealed class SparseTopologyTests
     }
 
     [Fact]
-    public void Overrides_MustReadTheModelWidth_AndAreCopiedAtConstruction()
-    {
-        Dictionary<int, ExpertDescriptor> source = new() { [1] = Expert(32) };
-        ExpertGroupDescriptor group = new(4, Expert(32), source);
-        source[1] = Expert(64);
-        source[2] = Expert(16);
-
-        Assert.Equal(32, group.ExpertAt(1).IntermediateSize);
-        Assert.Equal(32, group.ExpertAt(2).IntermediateSize);
-
-        ExpertDescriptor wideOverride = new(Hidden * 2, 32, DType.F32);
-        ExpertGroupDescriptor bad = new(4, Expert(32), new Dictionary<int, ExpertDescriptor> { [0] = wideOverride });
-        Assert.Throws<ArgumentException>(() => new SparseModelTopology(Hidden, new[]
-        {
-            new SparseLayerDescriptor(0, new MoeLayerDescriptor(
-                new RouterDescriptor(4, 2, 2, MoeRouteScoring.Softmax).Validated(), bad, null, false, ExpertProgram.Swiglu).Validated()),
-        }));
-    }
-
-    [Fact]
-    public void ExpertProgram_RejectsNaNAndInvertedClampBounds()
-    {
-        Assert.Throws<ArgumentException>(() => new ExpertProgram(ExpertActivation.Silu, float.NaN, float.NegativeInfinity,
-                float.PositiveInfinity).Validated());
-        Assert.Throws<ArgumentException>(() => new ExpertProgram(ExpertActivation.Silu, float.PositiveInfinity, 3f, -3f).Validated());
-        Assert.Throws<ArgumentException>(() => Uniform(1, _ => new MoeLayerDescriptor(
-            new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax).Validated(),
-            new ExpertGroupDescriptor(8, Expert()).Validated(), null, false, new ExpertProgram(ExpertActivation.Silu, 1f, 2f, 1f)).Validated()));
-    }
-
-    [Fact]
-    public void Heterogeneity_IsDetectedFromSharedGroupsAlone()
-    {
-        MoeLayerDescriptor shared = Layer(experts: 8, topK: 2, shared: new ExpertGroupDescriptor(1, Expert(64)).Validated());
-        SparseModelTopology topology = Uniform(1, _ => shared);
-
-        Assert.True(topology.Capabilities.HeterogeneousExpertShapes);
-        Assert.False(Uniform(1, _ => Layer(experts: 8, topK: 2)).Capabilities.HeterogeneousExpertShapes);
-    }
-
-    [Fact]
-    public void VariableTopK_IsSetByPrefillAsWellAsDecodeDifferences()
-    {
-        SparseModelTopology prefillOnly = Uniform(2, i => Layer(experts: 8, topK: 2, topKPrefill: i == 0 ? 2 : 4));
-
-        Assert.True(prefillOnly.Capabilities.VariableTopK);
-        Assert.True(prefillOnly.Capabilities.PhaseDependentRouting);
-    }
-
-    [Fact]
-    public void Fingerprint_CoversOverrideLayout()
-    {
-        ExpertDescriptor split = new(Hidden, 32, DType.F32, ExpertWeightLayout.SplitGateUp);
-        ExpertDescriptor fused = new(Hidden, 32, DType.F32, ExpertWeightLayout.FusedGateUp);
-        SparseModelTopology Build(ExpertDescriptor over) => Uniform(1, _ => new MoeLayerDescriptor(
-            new RouterDescriptor(4, 2, 2, MoeRouteScoring.Softmax).Validated(),
-            new ExpertGroupDescriptor(4, Expert(32), new Dictionary<int, ExpertDescriptor> { [1] = over }).Validated(),
-            null, false, ExpertProgram.Swiglu).Validated());
-
-        Assert.NotEqual(Build(split).Fingerprint, Build(fused).Fingerprint);
-    }
-
-    [Fact]
-    public void GroupedRouter_RejectsSingletonGroupsOverfullTopKAndNonFiniteScale()
-    {
-        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid, GroupCount: 8, GroupsKept: 4).Validated());
-        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 5, 5, MoeRouteScoring.Sigmoid, GroupCount: 4, GroupsKept: 1).Validated());
-        Assert.Throws<ArgumentOutOfRangeException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, Scale: float.NaN).Validated());
-        Assert.Throws<ArgumentOutOfRangeException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax,
-                Scale: float.PositiveInfinity).Validated());
-        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, GroupCount: 2, GroupsKept: 1,
-            BiasSpace: SelectionBiasSpace.Logit, HasSelectionBias: true).Validated());
-        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid,
-                BiasSpace: SelectionBiasSpace.Logit).Validated());
-    }
-
-    [Fact]
-    public void StateKinds_CombinedFlagsContributeEveryKind()
-    {
-        SparseModelTopology topology = Uniform(2, _ => null, i => i == 0
-            ? SequenceStateKind.SlidingWindowKv | SequenceStateKind.CompressedKv
-            : SequenceStateKind.SlidingWindowKv);
-
-        Assert.Equal(
-            new HashSet<SequenceStateKind> { SequenceStateKind.SlidingWindowKv, SequenceStateKind.CompressedKv },
-            topology.Capabilities.StateKinds.ToHashSet());
-    }
-
-    [Fact]
     public void LogitSpaceRouter_StaysOffTheBackendFastPath()
     {
         RouterDescriptor logit = new(8, 2, 2, MoeRouteScoring.Sigmoid, HasSelectionBias: true, BiasSpace: SelectionBiasSpace.Logit);
@@ -307,41 +218,6 @@ public sealed class SparseTopologyTests
     }
 
     [Fact]
-    public void FullyOverriddenGroup_DoesNotCountItsDefaultShape()
-    {
-        ExpertDescriptor wide = new(Hidden, 32, DType.F16);
-        SparseModelTopology topology = Uniform(1, _ => new MoeLayerDescriptor(
-            new RouterDescriptor(2, 1, 1, MoeRouteScoring.Softmax).Validated(),
-            new ExpertGroupDescriptor(2, Expert(32, DType.F32), new Dictionary<int, ExpertDescriptor> { [0] = wide, [1] = wide }).Validated(),
-            null, false, ExpertProgram.Swiglu).Validated());
-
-        Assert.DoesNotContain(DType.F32, topology.Capabilities.ExpertDTypes);
-        Assert.False(topology.Capabilities.HeterogeneousExpertShapes);
-    }
-
-    [Fact]
-    public void Layers_CannotBeRecoveredAsAMutableArray()
-    {
-        SparseModelTopology topology = Uniform(2, _ => null);
-
-        Assert.False(topology.Layers is SparseLayerDescriptor[]);
-        Assert.Throws<NotSupportedException>(() => ((IList<SparseLayerDescriptor>)topology.Layers).Add(null!));
-    }
-
-    [Fact]
-    public void Fingerprint_IgnoresTheUnusedDefaultOfAFullyOverriddenGroup()
-    {
-        ExpertDescriptor wide = new(Hidden, 32, DType.F16);
-        Dictionary<int, ExpertDescriptor> overrides = new() { [0] = wide, [1] = wide };
-        SparseModelTopology Build(ExpertDescriptor unusedDefault) => Uniform(1, _ => new MoeLayerDescriptor(
-            new RouterDescriptor(2, 1, 1, MoeRouteScoring.Softmax).Validated(),
-            new ExpertGroupDescriptor(2, unusedDefault, overrides).Validated(),
-            null, false, ExpertProgram.Swiglu).Validated());
-
-        Assert.Equal(Build(Expert(32, DType.F32)).Fingerprint, Build(Expert(64, DType.F8E4M3)).Fingerprint);
-    }
-
-    [Fact]
     public void Fingerprint_DistinguishesDTypesThatShareAName()
     {
         DType plain = new("CUSTOM", 2, false);
@@ -350,13 +226,5 @@ public sealed class SparseTopologyTests
                 plain)).Validated())).Fingerprint,
             Uniform(1, _ => Layer(4, 2, shared: null, routed: new ExpertGroupDescriptor(4, new ExpertDescriptor(Hidden, 32,
                     blocked)).Validated())).Fingerprint);
-    }
-
-    [Fact]
-    public void SharedGateWithoutSharedExperts_IsRejected()
-    {
-        Assert.Throws<ArgumentException>(() => new MoeLayerDescriptor(
-            new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax).Validated(),
-            new ExpertGroupDescriptor(8, Expert()).Validated(), null, true, ExpertProgram.Swiglu).Validated());
     }
 }

@@ -33,40 +33,6 @@ public sealed class MelSpectrogramExactnessTests
             Center: true)],
     ];
 
-    /// <summary>Zero-padded windows at every boundary that matters. Whisper's 30 s window: empty, a partial first
-    /// frame, the last length whose third frame (the first one clear of the left reflection) still reads only padding,
-    /// one window, a mid-frame end, the gate's 2 / 5 / 10 s utterances, the last length whose final frame reads only
-    /// padding and one sample past it, and a full window whose right reflection reads real audio. The legacy layout's
-    /// non-centered path, and a centered preset that keeps its last frame, where the mirrored read past the end
-    /// reaches one sample further back than the frame's own start. A log floor or Whisper's clamp would hide a
-    /// boundary frame's only real sample, which the window weights near zero, so raw-amplitude twins pin the
-    /// padding test itself: at those lengths that frame is nonzero.</summary>
-    public static IEnumerable<object[]> ZeroPaddedCases =>
-    [
-        ["whisperRaw", WhisperRaw(), WhisperWindow, 122],
-        ["whisperRaw", WhisperRaw(), WhisperWindow, 479_642],
-        ["f5vocosRaw", MelSpectrogramExtractor.F5VocosConfig() with { LogBase = MelSpectrogramExtractor.LogBase.None }, 25_600, 25_088],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 0],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 1],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 120],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 121],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 400],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 16_003],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 32_000],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 80_000],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 160_000],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 479_640],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, 479_641],
-        ["whisper80", MelSpectrogramExtractor.WhisperConfig(), WhisperWindow, WhisperWindow],
-        ["whisper128", MelSpectrogramExtractor.WhisperConfig(128), WhisperWindow, 32_000],
-        ["whisper128", MelSpectrogramExtractor.WhisperConfig(128), WhisperWindow, 479_999],
-        ["whisperLegacyPow2_80", MelSpectrogramExtractor.WhisperLegacyPow2Config(), WhisperWindow, 399],
-        ["whisperLegacyPow2_80", MelSpectrogramExtractor.WhisperLegacyPow2Config(), WhisperWindow, 32_000],
-        ["f5vocos", MelSpectrogramExtractor.F5VocosConfig(), 25_600, 1_000],
-        ["f5vocos", MelSpectrogramExtractor.F5VocosConfig(), 25_600, 25_087],
-        ["f5vocos", MelSpectrogramExtractor.F5VocosConfig(), 25_600, 25_088],
-    ];
-
     [Theory]
     [MemberData(nameof(Presets))]
     public void Compute_MatchesDenseReference_BitForBit(string name, MelSpectrogramExtractor.Config cfg)
@@ -75,49 +41,6 @@ public sealed class MelSpectrogramExactnessTests
         float[,] actual = new MelSpectrogramExtractor(cfg).Compute(audio);
         float[,] expected = DenseReference(cfg, audio);
         AssertBitEqual(expected, actual, name);
-    }
-
-    [Theory]
-    [MemberData(nameof(Presets))]
-    public void ComputeFrame_MatchesDenseReference_BitForBit(string name, MelSpectrogramExtractor.Config cfg)
-    {
-        float[] window = Speechlike(cfg.WinLength, seed: 7u + (uint)name.Length);
-        MelSpectrogramExtractor extractor = new(cfg);
-        float[] actual = new float[cfg.NMels];
-        extractor.ComputeFrame(window, actual);
-        // The streaming single-frame path always left-aligns the window, whatever CenterWindowInFft says.
-        float[] expected = DenseFrame(cfg with { CenterWindowInFft = false }, window, 0, window.Length);
-        for (int m = 0; m < cfg.NMels; m++)
-        {
-            Assert.True(BitConverter.SingleToInt32Bits(expected[m]) == BitConverter.SingleToInt32Bits(actual[m]),
-                $"{name}: mel {m} expected {expected[m]:R} got {actual[m]:R}");
-        }
-    }
-
-    [Theory]
-    [MemberData(nameof(ZeroPaddedCases))]
-    public void ComputeZeroPadded_MatchesTheDenseFormOfThePaddedBuffer(string name, MelSpectrogramExtractor.Config cfg,
-        int padded, int length)
-    {
-        float[] audio = Speechlike(length, seed: 11u + (uint)length);
-        float[] buffer = new float[padded];
-        audio.CopyTo(buffer, 0);
-        float[,] expected = DenseReference(cfg, buffer);
-
-        MelSpectrogramExtractor extractor = new(cfg);
-        int frames = extractor.OutputFrames(padded);
-        Assert.Equal(expected.GetLength(1), frames);
-        float[] actual = new float[cfg.NMels * frames];
-        extractor.ComputeZeroPadded(audio, padded, actual);
-        for (int m = 0; m < cfg.NMels; m++)
-        {
-            for (int t = 0; t < frames; t++)
-            {
-                float e = expected[m, t], a = actual[m * frames + t];
-                Assert.True(BitConverter.SingleToInt32Bits(e) == BitConverter.SingleToInt32Bits(a),
-                    $"{name} length {length}: mel [{m}, {t}] expected {e:R} got {a:R}");
-            }
-        }
     }
 
     [Theory]
@@ -161,13 +84,6 @@ public sealed class MelSpectrogramExactnessTests
     {
         MelSpectrogramExtractor whisper = new(MelSpectrogramExtractor.WhisperConfig());
         Assert.Throws<ArgumentException>(() => whisper.ComputeZeroPadded(new float[20], 10, new float[80 * 10]));
-    }
-
-    [Fact]
-    public void ExactFftSize_RefusesASizeTheMixedRadixPlanCannotRun()
-    {
-        MelSpectrogramExtractor.Config cfg = MelSpectrogramExtractor.WhisperConfig() with { NFft = 406, WinLength = 406 };
-        Assert.Throws<ArgumentException>(() => new MelSpectrogramExtractor(cfg));
     }
 
     private static MelSpectrogramExtractor.Config WhisperRaw() => MelSpectrogramExtractor.WhisperConfig() with

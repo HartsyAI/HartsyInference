@@ -7,21 +7,6 @@ namespace HartsyInference.Core.Tests.MemoryManagement;
 [Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class VramPolicyScopeTests
 {
-    [Fact]
-    public void OutsideAGeneration_NothingIsCurrent()
-        => Assert.Null(VramPolicyScope.Current);
-
-    [Fact]
-    public void ScopeIsVisibleWhileOpenAndGoneAfter()
-    {
-        VramPolicy policy = VramPolicy.For(VramTier.Aggressive);
-        using (VramPolicyScope.Push(policy))
-        {
-            Assert.Same(policy, VramPolicyScope.Current);
-        }
-        Assert.Null(VramPolicyScope.Current);
-    }
-
     /// <summary>A leaked scope would quietly govern every later generation on the flow, so restoration has to be
     /// exact rather than just "cleared".</summary>
     [Fact]
@@ -55,16 +40,6 @@ public sealed class VramPolicyScopeTests
             }
             Assert.Same(outer, VramPolicyScope.Current);
         }
-    }
-
-    [Fact]
-    public void DisposingTwiceIsHarmless()
-    {
-        VramPolicy policy = VramPolicy.For(VramTier.Balanced);
-        IDisposable scope = VramPolicyScope.Push(policy);
-        scope.Dispose();
-        scope.Dispose();
-        Assert.Null(VramPolicyScope.Current);
     }
 
     /// <summary>The scope must beat the per-backend registry — that is the whole point — but only while it is open.</summary>

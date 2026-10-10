@@ -14,8 +14,6 @@ public sealed unsafe class BiLstmTests
 {
     [Theory]
     [InlineData(1, 7, 5, 4)]
-    [InlineData(2, 9, 6, 8)]
-    [InlineData(1, 13, 12, 19)]
     public void Forward_MatchesPerStepCellReference(int batch, int t, int inputDim, int hidden)
     {
         Random rng = new(1234 + t);

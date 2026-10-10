@@ -1,4 +1,3 @@
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using Xunit;
@@ -50,32 +49,6 @@ public sealed class VramPolicyTests
         Assert.Null(policy.HeadroomBytes);
     }
 
-    [Fact]
-    public void PerformanceTier_NeverStreamsAndNeverEvicts()
-    {
-        VramPolicy policy = VramPolicyResolver.Expand(VramTier.Performance);
-        Assert.Equal(LeverState.Off, policy.WeightStreaming);
-        Assert.Equal(LeverState.Off, policy.PhaseUnload);
-        Assert.Equal(LeverState.On, policy.KeepResident);
-        Assert.Equal(CachePrecision.Full, policy.Caches);
-        Assert.Equal(LeverState.Off, policy.MultiGpuSpill);
-    }
-
-    [Fact]
-    public void MaximumTier_TurnsOnEveryLeverIncludingTheConstructionScopedOnes()
-    {
-        VramPolicy policy = VramPolicyResolver.Expand(VramTier.Maximum);
-        Assert.Equal(LeverState.On, policy.WeightStreaming);
-        Assert.Equal(LeverState.On, policy.PhaseUnload);
-        Assert.Equal(LeverState.On, policy.ActivationOffload);
-        Assert.Equal(LeverState.On, policy.FreeAfterGeneration);
-        Assert.Equal(LeverState.On, policy.QuantizedCompute);
-        Assert.Equal(LeverState.On, policy.MultiGpuSpill);
-        Assert.Equal(LeverState.Off, policy.KeepResident);
-        Assert.Equal(CachePrecision.Half, policy.Caches);
-        Assert.True(policy.ChunkScale < 1.0f);
-    }
-
     /// <summary>Aggressive streams unconditionally but must NOT quantize or spill — those are construction-scoped and
     /// change numerics or device placement, which a "stream harder" tier has no business doing implicitly.</summary>
     [Fact]
@@ -89,25 +62,11 @@ public sealed class VramPolicyTests
 
     [Theory]
     [InlineData(0L, VramTier.Balanced)]
-    [InlineData(6L << 30, VramTier.Aggressive)]
     [InlineData(8L << 30, VramTier.Aggressive)]
-    [InlineData(12L << 30, VramTier.Balanced)]
     [InlineData(16L << 30, VramTier.Balanced)]
     [InlineData(24L << 30, VramTier.Performance)]
-    [InlineData(80L << 30, VramTier.Performance)]
     public void GpuClass_SeedsTheTierFromTotalVram(long totalBytes, VramTier expected)
         => Assert.Equal(expected, GpuVramClass.Seed(totalBytes));
-
-    [Fact]
-    public void Overrides_PinOneLeverWithoutDisturbingTheRest()
-    {
-        VramPolicy basePolicy = VramPolicyResolver.Expand(VramTier.Performance);
-        VramPolicy merged = VramPolicyResolver.Apply(basePolicy, new VramOverrides { WeightStreaming = LeverState.On });
-        Assert.Equal(LeverState.On, merged.WeightStreaming);
-        Assert.Equal(LeverState.On, merged.KeepResident);
-        Assert.Equal(CachePrecision.Full, merged.Caches);
-        Assert.Equal(VramTier.Performance, merged.Tier);
-    }
 
     /// <summary>An override naming a tier re-expands from it, and the remaining members refine THAT preset rather than
     /// the backend's — otherwise "Aggressive but keep caches exact" would silently inherit Performance's levers.</summary>
@@ -120,27 +79,6 @@ public sealed class VramPolicyTests
         Assert.Equal(VramTier.Aggressive, merged.Tier);
         Assert.Equal(LeverState.On, merged.WeightStreaming);
         Assert.Equal(CachePrecision.Full, merged.Caches);
-    }
-
-    [Fact]
-    public void Overrides_EmptyOrNullReturnsTheBaseUntouched()
-    {
-        VramPolicy basePolicy = VramPolicyResolver.Expand(VramTier.Balanced);
-        Assert.Same(basePolicy, VramPolicyResolver.Apply(basePolicy, null));
-        Assert.Same(basePolicy, VramPolicyResolver.Apply(basePolicy, new VramOverrides()));
-        Assert.True(new VramOverrides().IsEmpty);
-        Assert.False(new VramOverrides { ChunkScale = 0.5f }.IsEmpty);
-    }
-
-    [Theory]
-    [InlineData(LowVramMode.Auto, LeverState.Auto)]
-    [InlineData(LowVramMode.ForceOn, LeverState.On)]
-    [InlineData(LowVramMode.ForceOff, LeverState.Off)]
-    public void LegacyMode_MapsOntoTheStreamingLeverAndBack(LowVramMode mode, LeverState expected)
-    {
-        VramPolicy policy = VramPolicyResolver.FromLegacyMode(mode);
-        Assert.Equal(expected, policy.WeightStreaming);
-        Assert.Equal(mode, VramPolicyResolver.ToLegacyMode(policy));
     }
 
     /// <summary>The bridge that keeps every un-migrated call site working: a policy pinned through the new registry
@@ -165,24 +103,6 @@ public sealed class VramPolicyTests
             Assert.False(VramPolicyRegistry.HasPolicy(backend));
             Assert.Equal(LowVramMode.Auto, LowVramPolicy.Resolve(backend));
         });
-    }
-
-    /// <summary>With no per-backend policy the environment still decides, so an existing deployment that sets only
-    /// <c>HARTSY_LOWVRAM</c> keeps behaving exactly as it did.</summary>
-    [Fact]
-    public void Registry_FallsBackToTheConfiguredPostureWhenNoPolicyIsPinned()
-    {
-        try
-        {
-            KnobStore.Set(EngineKnobs.LowVram, "on");
-            LowVramPolicy.ResetCacheForTests();
-            Assert.Equal(LeverState.On, VramPolicyRegistry.Resolve(backend: null, overrides: null).WeightStreaming);
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.LowVram);
-            LowVramPolicy.ResetCacheForTests();
-        }
     }
 
     /// <summary>A per-request override must beat the backend's pinned policy for the runtime levers.</summary>

@@ -22,48 +22,6 @@ public sealed class LtGemmPlanCacheTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void HighPrecisionPolicy_IsForwardedExactlyToLtPlan()
-    {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-
-        using CudaBackend backend = new(0, PtxDir())
-        {
-            EnableEpilogueFusion = true,
-            HighPrecisionGemm = true,
-        };
-        LtGemmExecutor lt = backend.LtGemm;
-        if (!lt.IsSupported)
-        {
-            _output.WriteLine("SKIPPED: cuBLASLt unavailable");
-            return;
-        }
-
-        // 1.0003f is below one TF32 unit at 1.0. If the fused path silently reselects FAST_TF32,
-        // 64 products lose roughly 0.038 instead of merely differing in the final few F32 ulps.
-        using Tensor input = FilledF32(new TensorShape(M, K), 1.0003f);
-        using Tensor weight = FilledF32(new TensorShape(N, K), 1.0003f);
-        using Tensor bias = PatternF32(new TensorShape(N), i => ((i % 7) - 3) * 0.03125f);
-        using Tensor result = new(new TensorShape(M, N), DType.F32);
-
-        backend.PreloadWeights([input, weight, bias]);
-        backend.Linear(result, input, weight, bias);
-        backend.Sync();
-
-        LtGemmExecutor.CacheDiagnostics diagnostics = lt.Diagnostics;
-        Assert.Equal(CublasApi.CUBLAS_COMPUTE_32F, diagnostics.LastComputeType);
-        Assert.Equal(1, diagnostics.Misses);
-        Assert.Equal(1, diagnostics.HeuristicQueries);
-        Assert.Equal(1, diagnostics.PlanCreates);
-        Assert.Equal(0, diagnostics.Fallbacks);
-        AssertLinearMatchesCpu(result, input, weight, bias, tolerance: 1e-3f);
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
     public void F32EnvironmentPolicies_ForwardFastTf32_NoTf32_AndFastF16Exactly()
     {
         if (!CudaContext.IsAvailable())

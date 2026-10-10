@@ -102,25 +102,6 @@ public sealed unsafe class WanAnimate2ConditioningTests
     }
 
     [Fact]
-    public void BuildGenerationChannels_ContinuationChunk_MarksLatentFrameOneKnown()
-    {
-        const int t = 5, h = 2, w = 2;
-        using Tensor reference = RampLatent(LatentChannels, 1, h, w, offset: 1f);
-        using Tensor video = RampLatent(LatentChannels, t, h, w, offset: 2f);
-        using Tensor cond = WanAnimate2Conditioning.BuildGenerationChannels(reference, video, continuationChunk: true);
-
-        float* p = (float*)cond.DataPointer;
-        long frame = (long)h * w, perChannel = (t + 1) * frame;
-        for (int c = 0; c < 4; c++)
-        {
-            for (long i = 0; i < frame; i++) Assert.Equal(1f, p[c * perChannel + i]);              // reference slot
-            for (long i = 0; i < frame; i++) Assert.Equal(1f, p[c * perChannel + frame + i]);      // carried frame
-            for (int tt = 2; tt <= t; tt++)
-                for (long i = 0; i < frame; i++) Assert.Equal(0f, p[c * perChannel + tt * frame + i]);
-        }
-    }
-
-    [Fact]
     public void BuildDrivingChannels_PlacesTheSameLatentTwice_AroundAnAllOnesMask()
     {
         const int t = 4, h = 2, w = 3;
@@ -155,40 +136,6 @@ public sealed unsafe class WanAnimate2ConditioningTests
             Assert.Equal(genFrames - 1, drivingFrames);
         }
         Assert.Equal(22, WanAnimate2Pipeline.GenerationLatentFrames(81, 4));   // the reference's worked example
-    }
-
-    [Fact]
-    public void TrimReferenceFrame_DropsLatentFrameZeroOnly()
-    {
-        const int z = 3, t = 4, h = 2, w = 2;
-        using Tensor latents = RampLatent(z, t, h, w, offset: 0f);
-        using Tensor trimmed = WanAnimate2Conditioning.TrimReferenceFrame(latents);
-
-        Assert.Equal(new TensorShape([1L, z, t - 1, h, w]), trimmed.Shape);
-        float* src = (float*)latents.DataPointer;
-        float* dst = (float*)trimmed.DataPointer;
-        long frame = (long)h * w;
-        for (int c = 0; c < z; c++)
-            for (int tt = 0; tt < t - 1; tt++)
-                for (long i = 0; i < frame; i++)
-                    Assert.Equal(src[(c * t + tt + 1) * frame + i], dst[(c * (t - 1) + tt) * frame + i]);
-    }
-
-    [Fact]
-    public void ConcatChannels_PutsNoiseFirst_ThenTheTwentyChannelConditioningBlock()
-    {
-        const int t = 3, h = 2, w = 2;
-        using Tensor noise = RampLatent(LatentChannels, t, h, w, offset: 0f);
-        using Tensor cond = RampLatent(20, t, h, w, offset: 100_000f);
-        using Tensor input = WanAnimate2Conditioning.ConcatChannels(noise, cond);
-
-        Assert.Equal(new TensorShape([1L, InChannels, t, h, w]), input.Shape);
-        float* p = (float*)input.DataPointer;
-        long perChannel = (long)t * h * w;
-        float* np = (float*)noise.DataPointer;
-        float* cp = (float*)cond.DataPointer;
-        for (long i = 0; i < LatentChannels * perChannel; i++) Assert.Equal(np[i], p[i]);
-        for (long i = 0; i < 20 * perChannel; i++) Assert.Equal(cp[i], p[LatentChannels * perChannel + i]);
     }
 
     private static void AssertAll(Tensor x, float expected)

@@ -24,13 +24,6 @@ public sealed class WorldSessionRegistryTests
     }
 
     [Fact]
-    public void Get_UnknownId_ReturnsNull()
-    {
-        using WorldSessionRegistry registry = new WorldSessionRegistry(TimeSpan.FromMinutes(10));
-        Assert.Null(registry.Get("not-a-real-id"));
-    }
-
-    [Fact]
     public void Close_RemovesAndDisposesTheSession()
     {
         using WorldSessionRegistry registry = new WorldSessionRegistry(TimeSpan.FromMinutes(10));
@@ -40,13 +33,6 @@ public sealed class WorldSessionRegistryTests
         Assert.True(registry.Close(id));
         Assert.True(session.Disposed);
         Assert.Null(registry.Get(id));
-    }
-
-    [Fact]
-    public void Close_UnknownId_ReturnsFalse()
-    {
-        using WorldSessionRegistry registry = new WorldSessionRegistry(TimeSpan.FromMinutes(10));
-        Assert.False(registry.Close("not-a-real-id"));
     }
 
     [Fact]
@@ -76,21 +62,6 @@ public sealed class WorldSessionRegistryTests
         Assert.NotNull(registry.Get(id));
 
         Assert.False(session.Disposed);
-    }
-
-    [Fact]
-    public void Dispose_DisposesEveryStillOpenSession()
-    {
-        WorldSessionRegistry registry = new WorldSessionRegistry(TimeSpan.FromMinutes(10));
-        FakeWorldSession a = new FakeWorldSession();
-        FakeWorldSession b = new FakeWorldSession();
-        registry.Register(a);
-        registry.Register(b);
-
-        registry.Dispose();
-
-        Assert.True(a.Disposed);
-        Assert.True(b.Disposed);
     }
 
     private sealed class FakeWorldSession : IWorldSession

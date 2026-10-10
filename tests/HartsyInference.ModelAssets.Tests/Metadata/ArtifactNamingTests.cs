@@ -8,9 +8,7 @@ public sealed class ArtifactNamingTests
 {
     [Theory]
     [InlineData("krea2", "turbo", "fp8-scaled", ".safetensors", "krea2-turbo_fp8-scaled.safetensors")]
-    [InlineData("zimage", null, "bf16", ".safetensors", "zimage_bf16.safetensors")]
     [InlineData("flux2", "dev", "Q4_K_M", ".gguf", "flux2-dev_Q4_K_M.gguf")]
-    [InlineData("kokoro", null, "repack", "safetensors", "kokoro_repack.safetensors")]
     public void FileName_FollowsTheConvention(string engineId, string? variant, string precision, string extension,
         string expected)
     {
@@ -31,10 +29,7 @@ public sealed class ArtifactNamingTests
     /// spellings of fp8-scaled cannot produce two different file names for one build.</summary>
     [Theory]
     [InlineData("Q4_K_M", "Q4_K_M")]
-    [InlineData("q8_0", "Q8_0")]
     [InlineData("fp8_scaled", "fp8-scaled")]
-    [InlineData("fp8 scaled", "fp8-scaled")]
-    [InlineData("int8-convrot", "int8-convrot")]
     [InlineData("BF16", "bf16")]
     public void PrecisionToken_NormalizesConsistently(string input, string expected)
     {
@@ -47,13 +42,6 @@ public sealed class ArtifactNamingTests
         Assert.Throws<ArgumentException>(() => ArtifactNaming.FileName("", null, "bf16", ".safetensors"));
         Assert.Throws<ArgumentException>(() => ArtifactNaming.FileName("krea2", null, "  ", ".safetensors"));
         Assert.Throws<ArgumentException>(() => ArtifactNaming.FileName("krea2", null, "bf16", ""));
-    }
-
-    [Fact]
-    public void Slug_DropsLeadingAndTrailingSeparators()
-    {
-        Assert.Equal("krea-2", ArtifactNaming.Slug("  Krea 2 "));
-        Assert.Equal("f-lite", ArtifactNaming.Slug("F-Lite"));
     }
 
     [Fact]

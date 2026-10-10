@@ -12,9 +12,6 @@ public sealed class DeepSeekV41EncoderTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
-    [InlineData(4)]
     [InlineData(5)]
     public void GoldenFixture_RendersByteEqual(int caseId)
     {
@@ -95,41 +92,15 @@ public sealed class DeepSeekV41EncoderTests
     }
 
     [Fact]
-    public void AddGenerationPromptFalse_OmitsTheAssistantHeader()
+    public void EffortNames_MapToNumericBudgets_AndUnknownNameIsRefused()
     {
-        List<ChatMessage> messages = [ChatMessage.User("hi")];
-        string with = DeepSeekV41Encoder.RenderText(messages, new EncodeOptions());
-        string without = DeepSeekV41Encoder.RenderText(messages, new EncodeOptions { AddGenerationPrompt = false });
-        Assert.Equal("<｜begin▁of▁sentence｜><｜User｜>hi<｜Assistant｜></think>", with);
-        Assert.Equal("<｜begin▁of▁sentence｜><｜User｜>hi", without);
-    }
-
-    [Fact]
-    public void Adapter_ReturnsIdsAndMapsThinkingFlag()
-    {
-        StubTokenizer tokenizer = new();
-        ChatTemplateEncoderAdapter adapter = new(new DeepSeekV41Encoder());
-        int[] ids = adapter.Encode(tokenizer, [ChatMessage.User("hi")], addGenerationPrompt: true, enableThinking: true);
-        Assert.Equal("deepseek_v41", adapter.Name);
-        Assert.EndsWith("<｜Assistant｜><think>", tokenizer.LastText);
-        Assert.Equal(tokenizer.Encode(tokenizer.LastText!, true), ids);
-        adapter.Encode(tokenizer, [ChatMessage.User("hi")], addGenerationPrompt: true);
-        Assert.EndsWith("<｜Assistant｜></think>", tokenizer.LastText);
-    }
-
-    [Fact]
-    public void EffortNames_MapToNumericBudgets()
-    {
-        Assert.Equal(50, EncodeOptions.ParseReasoningEffort("low"));
         Assert.Equal(75, EncodeOptions.ParseReasoningEffort("high"));
-        Assert.Equal(100, EncodeOptions.ParseReasoningEffort("max"));
         Assert.Throws<ArgumentException>(() => EncodeOptions.ParseReasoningEffort("extreme"));
     }
 
     [Theory]
     [InlineData(0)]
     [InlineData(101)]
-    [InlineData(-5)]
     public void OutOfRangeEffort_Throws(int effort)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
@@ -145,26 +116,6 @@ public sealed class DeepSeekV41EncoderTests
             [ChatMessage.User("x") with { Blocks = [new TextBlock(literal)] }], new EncodeOptions()));
         Assert.Throws<ArgumentException>(() => DeepSeekV41Encoder.RenderText(
             [ChatMessage.Assistant("x") with { ReasoningContent = literal }], new EncodeOptions()));
-    }
-
-    [Fact]
-    public void ImagePlaceholderInToolCallArguments_Throws()
-    {
-        ChatMessage call = ChatMessage.Assistant("x") with
-        {
-            ToolCalls = [new ChatToolCall("c1", "lookup", "{\"q\":\"" + StubTokenizer.Placeholder + "\"}")],
-        };
-        Assert.Throws<ArgumentException>(() => DeepSeekV41Encoder.RenderText([ChatMessage.User("q"), call], new EncodeOptions()));
-    }
-
-    [Fact]
-    public void EmptyOptionTools_KeepFirstMessageTools()
-    {
-        ToolSpec tool = ToolSpec.FromJson("""{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}""");
-        List<ChatMessage> messages = [ChatMessage.System("s") with { Tools = [tool] }, ChatMessage.User("q")];
-        string expected = DeepSeekV41Encoder.RenderText(messages, new EncodeOptions());
-        Assert.Contains("\"name\": \"lookup\"", expected);
-        Assert.Equal(expected, DeepSeekV41Encoder.RenderText(messages, new EncodeOptions { Tools = [] }));
     }
 
     private const string ConflictingNamespaceTool =

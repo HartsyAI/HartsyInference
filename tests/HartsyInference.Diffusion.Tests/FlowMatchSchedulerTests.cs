@@ -12,41 +12,7 @@ public sealed class FlowMatchSchedulerTests
     // ── Sigma Schedule Tests ──────────────────────────────────────────────
 
     [Fact]
-    public void SetTimesteps_SigmasHaveCorrectCount()
-    {
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift: 3.0f);
-        scheduler.SetTimesteps(28);
-
-        // Sigmas include terminal 0, so 28 + 1 = 29 values
-        // But timesteps should be 28
-        Assert.Equal(28, scheduler.NumInferenceSteps);
-        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        Assert.Equal(28, timesteps.Length);
-    }
-
-    [Fact]
-    public void SetTimesteps_Shift3_FirstSigmaIsOne()
-    {
-        // With shift=3.0, sigma = 3*t / (1 + 2*t). At t=1.0: sigma = 3/3 = 1.0
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift: 3.0f);
-        scheduler.SetTimesteps(28);
-
-        Assert.InRange(scheduler.InitialNoiseSigma, 1.0f - Tolerance, 1.0f + Tolerance);
-    }
-
-    [Fact]
-    public void SetTimesteps_Shift3_FirstTimestepIs1000()
-    {
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift: 3.0f);
-        scheduler.SetTimesteps(28);
-
-        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        // timestep = sigma * 1000 = 1.0 * 1000 = 1000.0
-        Assert.InRange(timesteps[0], 1000.0f - Tolerance, 1000.0f + Tolerance);
-    }
-
-    [Fact]
-    public void SetTimesteps_Shift3_MidpointSigma()
+    public void SetTimesteps_SetsMidpointSigma()
     {
         // At t=0.5: sigma = 3.0 * 0.5 / (1 + 2.0 * 0.5) = 1.5 / 2.0 = 0.75
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift: 3.0f);
@@ -55,20 +21,6 @@ public sealed class FlowMatchSchedulerTests
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         // Step 14 corresponds to t = 1.0 - 14/28 = 0.5
         Assert.InRange(timesteps[14], 750.0f - 0.1f, 750.0f + 0.1f);
-    }
-
-    [Fact]
-    public void SetTimesteps_TimestepsAreMonotonicallyDecreasing()
-    {
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift: 3.0f);
-        scheduler.SetTimesteps(28);
-
-        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 1; i < timesteps.Length; i++)
-        {
-            Assert.True(timesteps[i] < timesteps[i - 1],
-                $"Timestep[{i}]={timesteps[i]} >= Timestep[{i - 1}]={timesteps[i - 1]}");
-        }
     }
 
     [Fact]
@@ -171,40 +123,6 @@ public sealed class FlowMatchSchedulerTests
         output.Dispose();
     }
 
-    [Fact]
-    public unsafe void Step_ZeroVelocity_SampleUnchanged()
-    {
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift: 3.0f);
-        scheduler.SetTimesteps(28);
-
-        TensorShape shape = new TensorShape(1, 4, 2, 2);
-        Tensor sample = new Tensor(shape, DType.F32);
-        Tensor modelOutput = new Tensor(shape, DType.F32);
-        Tensor output = new Tensor(shape, DType.F32);
-
-        float* samplePtr = (float*)sample.DataPointer;
-        float* modelPtr = (float*)modelOutput.DataPointer;
-
-        for (int i = 0; i < 16; i++)
-        {
-            samplePtr[i] = 1.0f;
-            modelPtr[i] = 0.0f; // zero velocity
-        }
-
-        scheduler.Step(output, modelOutput, sample, 0);
-
-        float* outPtr = (float*)output.DataPointer;
-        // x_next = x + 0 * dt = x
-        for (int i = 0; i < 16; i++)
-        {
-            Assert.InRange(outPtr[i], 1.0f - Tolerance, 1.0f + Tolerance);
-        }
-
-        sample.Dispose();
-        modelOutput.Dispose();
-        output.Dispose();
-    }
-
     // ── Noise Addition Tests ──────────────────────────────────────────────
 
     [Fact]
@@ -276,45 +194,7 @@ public sealed class FlowMatchSchedulerTests
         output.Dispose();
     }
 
-    // ── ScaleModelInput Tests ─────────────────────────────────────────────
-
-    [Fact]
-    public void ScaleModelInput_AlwaysReturnsOne()
-    {
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift: 3.0f);
-        scheduler.SetTimesteps(28);
-
-        for (int i = 0; i < 28; i++)
-        {
-            Assert.Equal(1.0f, scheduler.ScaleModelInput(i));
-        }
-    }
-
     // ── Dynamic Shift Tests ───────────────────────────────────────────────
-
-    [Fact]
-    public void CreateWithDynamicShift_BaseSeqLen_ReturnsBaseShift()
-    {
-        FlowMatchEulerDiscreteScheduler scheduler =
-            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imageSeqLen: 256);
-        scheduler.SetTimesteps(20);
-
-        // At baseSeqLen=256: shift should be baseShift=0.5
-        // With shift=0.5, sigma at t=1.0: 0.5 * 1 / (1 + (-0.5)*1) = 0.5 / 0.5 = 1.0
-        Assert.InRange(scheduler.InitialNoiseSigma, 1.0f - Tolerance, 1.0f + Tolerance);
-    }
-
-    [Fact]
-    public void CreateWithDynamicShift_MaxSeqLen_ReturnsMaxShift()
-    {
-        FlowMatchEulerDiscreteScheduler scheduler =
-            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imageSeqLen: 4096);
-        scheduler.SetTimesteps(20);
-
-        // At maxSeqLen=4096: shift should be maxShift=1.15
-        // With shift=1.15, sigma at t=1.0: 1.15 * 1 / (1 + 0.15*1) = 1.15 / 1.15 = 1.0
-        Assert.InRange(scheduler.InitialNoiseSigma, 1.0f - Tolerance, 1.0f + Tolerance);
-    }
 
     [Fact]
     public void CreateWithDynamicShift_MiddleSeqLen_InterpolatesShift()

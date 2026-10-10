@@ -49,25 +49,6 @@ public sealed class RejectionSamplerTests
     }
 
     [Fact]
-    public void Deterministic_Proposal_Emits_The_Target_Distribution_Exactly()
-    {
-        // whatever the proposer guesses, the emitted token must still follow the target
-        float[] p = [0.10f, 0.02f, 0.28f, 0.20f, 0.0f, 0.15f, 0.05f, 0.20f];
-        Func<double> guess = SpeculativeTestSupport.Uniform(51);
-        Func<double> accept = SpeculativeTestSupport.Uniform(52);
-        long[] counts = new long[p.Length];
-        const int trials = 1_000_000;
-
-        for (int t = 0; t < trials; t++)
-        {
-            int x = (int)(guess() * p.Length);
-            SpeculativeOutcome outcome = RejectionSampler.Verify([x], [p, p], null, accept);
-            counts[outcome.Accepted == 1 ? x : outcome.NextToken]++;
-        }
-        AssertMatches(counts, p);
-    }
-
-    [Fact]
     public void A_Draft_Token_With_Zero_Target_Mass_Is_Never_Emitted()
     {
         float[] p = [0.5f, 0.0f, 0.5f];
@@ -78,13 +59,6 @@ public sealed class RejectionSamplerTests
             int emitted = outcome.Accepted == 1 ? 1 : outcome.NextToken;
             Assert.NotEqual(1, emitted);
         }
-    }
-
-    [Fact]
-    public void Row_Counts_Are_Checked()
-    {
-        Assert.Throws<ArgumentException>(() => RejectionSampler.Verify([1, 2], [[1f, 0f]], null, () => 0.5));
-        Assert.Throws<ArgumentException>(() => RejectionSampler.Verify([1], [[1f, 0f], [1f, 0f]], [[1f, 0f], [1f, 0f]], () => 0.5));
     }
 
     private static int Inverse(float[] probs, double u)

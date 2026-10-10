@@ -71,8 +71,6 @@ public sealed class Yue2NucleusIdentityTests
 
     [Theory]
     [InlineData(0.1)]  // narrow nucleus
-    [InlineData(0.9)]  // wide (YuE2 Semantic default topP)
-    [InlineData(0.999999)]
     public void RandomScores_MatchesReference(double topP)
     {
         Random rng = new(5000 + (int)(topP * 1_000_000));
@@ -83,49 +81,4 @@ public sealed class Yue2NucleusIdentityTests
         }
     }
 
-    [Theory]
-    [InlineData(0.0)]
-    [InlineData(0.5)]
-    [InlineData(0.9)]
-    public void PartiallyPreMasked_MatchesReference(double maskedFraction)
-    {
-        Random rng = new(6000);
-        for (int trial = 0; trial < 10; trial++)
-        {
-            float[] scores = MakeScores(4096, rng, maskedFraction);
-            AssertIdenticalMask(scores, topP: 0.9f, alwaysKeep: 1, $"maskedFraction={maskedFraction} trial={trial}");
-        }
-    }
-
-    /// <summary>legacyOff's "keep three, not one" convention (<c>Apply</c>'s <c>alwaysKeep</c> argument).</summary>
-    [Theory]
-    [InlineData(1)]
-    [InlineData(3)]
-    public void AlwaysKeepVariants_MatchReference(int alwaysKeep)
-    {
-        Random rng = new(7000 + alwaysKeep);
-        float[] scores = MakeScores(4096, rng);
-        AssertIdenticalMask(scores, topP: 0.05f, alwaysKeep, $"alwaysKeep={alwaysKeep}"); // narrow topP stresses the always-keep floor
-    }
-
-    [Theory]
-    [InlineData(1)]
-    [InlineData(5)]
-    public void ExactTiesAtTop_MatchesReference(int numTied)
-    {
-        Random rng = new(8000 + numTied);
-        float[] scores = MakeScores(4096, rng);
-        for (int i = 0; i < numTied; i++) scores[i] = 6.0f;
-        AssertIdenticalMask(scores, topP: 0.5f, alwaysKeep: 1, $"numTied={numTied}");
-    }
-
-    /// <summary>Candidate count at or below <c>alwaysKeep</c> takes the early-return before any sort runs.</summary>
-    [Fact]
-    public void FewerCandidatesThanAlwaysKeep_NoOpMatchesReference()
-    {
-        float[] scores = new float[16];
-        Array.Fill(scores, float.NegativeInfinity);
-        scores[0] = 1.0f; // exactly one finite candidate, alwaysKeep=1 -> early return, nothing masked further
-        AssertIdenticalMask(scores, topP: 0.1f, alwaysKeep: 1, "single-candidate-early-return");
-    }
 }

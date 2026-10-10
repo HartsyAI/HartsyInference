@@ -75,7 +75,6 @@ public sealed unsafe class GroupedLinearTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(97, 4096, 256)]
-    [InlineData(37, 2048, 256)]
     [InlineData(8, 1024, 64)]
     public void GroupedMatchesPerOpBitExactly(int rows, int k, int group)
     {

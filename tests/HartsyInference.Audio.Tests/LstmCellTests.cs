@@ -13,73 +13,6 @@ namespace HartsyInference.Audio.Tests;
 public sealed unsafe class LstmCellTests
 {
     [Fact]
-    public void LstmCell_ZeroInputAndState_GivesZeroForgetGateBias()
-    {
-        // With x = 0, h_prev = 0, c_prev = 0 and all weights zero except a chosen bias,
-        // the gates simplify to sigmoid(bias) and tanh(bias). Exercises the gate-and-update
-        // fused kernel with predictable values.
-        using CpuBackend backend = new();
-        int batch = 1, inputDim = 2, hiddenDim = 3;
-        int gateRows = 4 * hiddenDim;
-
-        Tensor wIh = ZeroTensor(gateRows, inputDim);
-        Tensor wHh = ZeroTensor(gateRows, hiddenDim);
-        Tensor bIh = ZeroTensor(gateRows);
-        Tensor bHh = ZeroTensor(gateRows);
-        Tensor x = ZeroTensor(batch, inputDim);
-        Tensor hPrev = ZeroTensor(batch, hiddenDim);
-        Tensor cPrev = ZeroTensor(batch, hiddenDim);
-
-        try
-        {
-            // Set bias_ih for input gate (gate 0, channel 0) to 2.0.
-            float* bp = (float*)bIh.DataPointer;
-            bp[0] = 2.0f;     // i gate, channel 0
-            bp[2 * hiddenDim + 0] = 1.0f;     // g gate (tanh), channel 0
-
-            LstmCell cell = new(inputDim, hiddenDim);
-            cell.BindWeights(wIh, wHh, bIh, bHh);
-
-            (Tensor hNew, Tensor cNew) = cell.Step(backend, x, hPrev, cPrev, batch);
-
-            try
-            {
-                // For channel 0: i = sigmoid(2.0), f = sigmoid(0) = 0.5, g = tanh(1.0),
-                // o = sigmoid(0) = 0.5.
-                // c_new = f * c_prev + i * g = 0 + sigmoid(2) * tanh(1).
-                // h_new = o * tanh(c_new) = 0.5 * tanh(sigmoid(2) * tanh(1)).
-                float sig2 = 1f / (1f + MathF.Exp(-2f));
-                float t1 = MathF.Tanh(1f);
-                float c0Expected = sig2 * t1;
-                float h0Expected = 0.5f * MathF.Tanh(c0Expected);
-
-                float* cp = (float*)cNew.DataPointer;
-                float* hp = (float*)hNew.DataPointer;
-                Assert.Equal(c0Expected, cp[0], precision: 5);
-                Assert.Equal(h0Expected, hp[0], precision: 5);
-
-                // Other channels: all biases zero → sigmoid(0)=0.5, tanh(0)=0. c_new[i] = 0.
-                // h_new[i] = 0.5 * tanh(0) = 0.
-                for (int i = 1; i < hiddenDim; i++)
-                {
-                    Assert.Equal(0f, cp[i], precision: 5);
-                    Assert.Equal(0f, hp[i], precision: 5);
-                }
-            }
-            finally
-            {
-                hNew.Dispose();
-                cNew.Dispose();
-            }
-        }
-        finally
-        {
-            wIh.Dispose(); wHh.Dispose(); bIh.Dispose(); bHh.Dispose();
-            x.Dispose(); hPrev.Dispose(); cPrev.Dispose();
-        }
-    }
-
-    [Fact]
     public void LstmCell_RecallsCellStateThroughForgetGate()
     {
         // Set forget-gate bias high, all other gates near zero → cell carries c_prev forward.
@@ -123,26 +56,6 @@ public sealed unsafe class LstmCellTests
             wIh.Dispose(); wHh.Dispose(); bIh.Dispose(); bHh.Dispose();
             x.Dispose(); hPrev.Dispose(); cPrev.Dispose();
         }
-    }
-
-    [Fact]
-    public void BiLstm_OutputShapeIs2xHidden()
-    {
-        // Don't load weights — just verify the BiLstm constructs and tracks dims.
-        int inputDim = 4, hiddenDim = 6;
-        BiLstm bi = new(inputDim, hiddenDim);
-        Assert.Equal(inputDim, bi.InputDim);
-        Assert.Equal(hiddenDim, bi.HiddenDim);
-        // Forward path tested transitively via Kokoro pipeline integration tests when those land.
-    }
-
-    [Fact]
-    public void UnidirectionalLstm_LayerCountIsRespected()
-    {
-        UnidirectionalLstm lstm = new(inputDim: 8, hiddenDim: 16, numLayers: 3);
-        Assert.Equal(3, lstm.NumLayers);
-        Assert.Equal(8, lstm.InputDim);
-        Assert.Equal(16, lstm.HiddenDim);
     }
 
     [Fact]

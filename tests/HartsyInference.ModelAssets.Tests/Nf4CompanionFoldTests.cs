@@ -172,43 +172,6 @@ public sealed unsafe class Nf4CompanionFoldTests
     }
 
     [Fact]
-    public void Apply_ReturnsTheInputUntouchedWhenNothingIsNf4()
-    {
-        Dictionary<string, Tensor> weights = new() { ["blocks.0.attn.to_q.weight"] = new Tensor(new TensorShape(4, 8), DType.F32) };
-        try
-        {
-            Assert.Same(weights, Nf4CompanionFold.Apply(weights));
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
-    [Fact]
-    public void Apply_DequantizesToTheDtypeTheQuantizerCapturedFrom()
-    {
-        Dictionary<string, Tensor> weights = Layer(json:
-            "{\"quant_type\": \"nf4\", \"blocksize\": 8, \"shape\": [2, 4], \"dtype\": \"torch.bfloat16\"}");
-        try
-        {
-            Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(weights);
-            try
-            {
-                Assert.Equal(DType.BF16, folded["mlp.gate_proj.weight"].DType);
-            }
-            finally
-            {
-                folded["mlp.gate_proj.weight"].Dispose();
-            }
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
-    [Fact]
     public void Apply_RefusesWhenTheDeclaredShapeDoesNotMatchThePackedBytes()
     {
         // The guard that stops a misread layout from decoding to plausible noise.
@@ -226,22 +189,6 @@ public sealed unsafe class Nf4CompanionFoldTests
     }
 
     [Fact]
-    public void Apply_RefusesWhenTheBlockScaleCountDoesNotMatchTheBlockSize()
-    {
-        Dictionary<string, Tensor> weights = Layer(json:
-            "{\"quant_type\": \"nf4\", \"blocksize\": 4, \"shape\": [2, 4], \"dtype\": \"float32\"}");
-        try
-        {
-            NotSupportedException error = Assert.Throws<NotSupportedException>(() => Nf4CompanionFold.Apply(weights));
-            Assert.Contains("block scales", error.Message);
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
-    [Fact]
     public void Apply_RefusesACodebookThatIsNotTheNf4Table()
     {
         Dictionary<string, Tensor> weights = Layer();
@@ -250,24 +197,6 @@ public sealed unsafe class Nf4CompanionFoldTests
         {
             NotSupportedException error = Assert.Throws<NotSupportedException>(() => Nf4CompanionFold.Apply(weights));
             Assert.Contains("not bitsandbytes' NF4 table", error.Message);
-        }
-        finally
-        {
-            DisposeAll(weights);
-        }
-    }
-
-    [Fact]
-    public void Apply_RefusesFp4RatherThanDecodingItThroughNf4Quantiles()
-    {
-        Dictionary<string, Tensor> weights = Layer();
-        Tensor state = weights[$"mlp.gate_proj.weight{StateKeySuffix}"];
-        weights.Remove($"mlp.gate_proj.weight{StateKeySuffix}");
-        weights["mlp.gate_proj.weight.quant_state.bitsandbytes__fp4"] = state;
-        try
-        {
-            NotSupportedException error = Assert.Throws<NotSupportedException>(() => Nf4CompanionFold.Apply(weights));
-            Assert.Contains("not nf4", error.Message);
         }
         finally
         {

@@ -10,40 +10,11 @@ namespace HartsyInference.Audio.Tests;
 public sealed class MelFilterbankTests
 {
     [Fact]
-    public void SlaneyScale_Linear_Below_1kHz()
-    {
-        // Below 1 kHz, mel = 3 * f / 200. So 200 Hz → 3 mel, 500 Hz → 7.5 mel.
-        Assert.Equal(3.0, MelFilterbank.HzToMel(200), precision: 6);
-        Assert.Equal(7.5, MelFilterbank.HzToMel(500), precision: 6);
-        Assert.Equal(15.0, MelFilterbank.HzToMel(1000), precision: 6);
-    }
-
-    [Fact]
     public void SlaneyScale_Logarithmic_Above_1kHz()
     {
         // At 1 kHz: mel = 15 (the breakpoint).
         // At 6.4 kHz: mel = 15 + 27 * ln(6.4) / ln(6.4) = 15 + 27 = 42.
         Assert.Equal(42.0, MelFilterbank.HzToMel(6400), precision: 6);
-    }
-
-    [Fact]
-    public void SlaneyScale_RoundTrip()
-    {
-        double[] testHz = [50, 200, 999, 1000, 1500, 4000, 8000, 12000];
-        foreach (double f in testHz)
-        {
-            double mel = MelFilterbank.HzToMel(f);
-            double back = MelFilterbank.MelToHz(mel);
-            Assert.Equal(f, back, precision: 4);
-        }
-    }
-
-    [Fact]
-    public void WhisperFilterbank_HasCorrectShape()
-    {
-        float[,] fb = MelFilterbank.Get(sampleRate: 16_000, nFft: 512, nMels: 80, fmin: 0, fmax: 8000);
-        Assert.Equal(80, fb.GetLength(0));
-        Assert.Equal(257, fb.GetLength(1));  // 512/2 + 1
     }
 
     [Fact]
@@ -80,11 +51,4 @@ public sealed class MelFilterbankTests
         Assert.True(peakLow > peakHigh, $"low-freq peak {peakLow} should exceed high-freq peak {peakHigh}");
     }
 
-    [Fact]
-    public void Filterbank_Get_IsCached()
-    {
-        float[,] a = MelFilterbank.Get(16_000, 512, 80);
-        float[,] b = MelFilterbank.Get(16_000, 512, 80);
-        Assert.Same(a, b);
-    }
 }

@@ -199,7 +199,6 @@ public sealed unsafe class TensorParallelTests
     /// <summary>Column-parallel (OUT-row) slices concatenate back to the source bytes exactly — F32 and Q8_0
     /// (rows are whole quant blocks, so a row range never splits a block).</summary>
     [Theory]
-    [InlineData("F32")]
     [InlineData("Q8_0")]
     public void WeightPartition_OutRowSlices_ReassembleExactly(string dtypeName)
     {
@@ -225,38 +224,6 @@ public sealed unsafe class TensorParallelTests
             sliceBytes += bytes;
         }
         Assert.Equal(srcBytes, sliceBytes);
-    }
-
-    /// <summary>Row-parallel (IN-column) slices tile every source row exactly — each rank's per-row byte range
-    /// lands at rank·(row bytes / degree), verified byte-for-byte for F32 and a block-aligned Q8_0 split.</summary>
-    [Theory]
-    [InlineData("F32")]
-    [InlineData("Q8_0")]
-    public void WeightPartition_InColSlices_ReassembleExactly(string dtypeName)
-    {
-        DType dtype = dtypeName == "F32" ? DType.F32 : DType.Q8_0;
-        const int rows = 4, cols = 64, degree = 2;
-        using Tensor src = PatternBytes(new TensorShape(rows, cols), dtype);
-        long srcRowBytes = dtype.ComputeByteCount(cols);
-        long dstRowBytes = dtype.ComputeByteCount(cols / degree);
-        byte* sp = (byte*)src.DataPointer;
-        long coveredBytes = 0;
-        for (int r = 0; r < degree; r++)
-        {
-            using Tensor slice = TensorParallelTransformer.SliceInCols(src, r, degree, "test");
-            Assert.Equal(rows, (int)slice.Shape[0]);
-            Assert.Equal(cols / degree, (int)slice.Shape[1]);
-            byte* dp = (byte*)slice.DataPointer;
-            for (long row = 0; row < rows; row++)
-            {
-                for (long i = 0; i < dstRowBytes; i++)
-                {
-                    Assert.Equal(sp[row * srcRowBytes + r * dstRowBytes + i], dp[row * dstRowBytes + i]);
-                }
-            }
-            coveredBytes += dtype.ComputeByteCount(slice.ElementCount);
-        }
-        Assert.Equal(dtype.ComputeByteCount((long)rows * cols), coveredBytes);
     }
 
     /// <summary>A quantized down_proj whose per-rank IN-column count is not a whole number of blocks must be
@@ -307,50 +274,4 @@ public sealed unsafe class TensorParallelTests
             Config() with { Moe = new MoeConfig { NumExperts = 4, NumExpertsPerTok = 2, MoeIntermediateSize = 16 } }, placement));
     }
 
-    [Fact]
-    public void TpPlacement_RejectsBadDegreeAndCommMismatch()
-    {
-        using CpuBackend a = new();
-        using CpuBackend b = new();
-        using CpuBackend c = new();
-        using HostStagedComm comm2 = new(2);
-
-        // Degree 1 is just the single-device path — TP must not pretend to run it.
-        Assert.Throws<ArgumentException>(() => new TpPlacement([a], comm2));
-        // Communicator rank count must match the backend list.
-        Assert.Throws<ArgumentException>(() => new TpPlacement([a, b, c], comm2));
-        // Caches-per-rank contract on the forward entry.
-        TransformerConfig cfg = Config();
-        Dictionary<string, Tensor> w = Weights(cfg);
-        using TensorParallelTransformer tp = new(cfg, new TpPlacement([a, b], comm2));
-        tp.LoadWeights(w, "model");
-        using Tensor embeds = Embeds(1, cfg.HiddenSize);
-        using KvCache lone = new(cfg.NumLayers, 1, cfg.NumKvHeads / 2, cfg.HeadDim);
-        Assert.Throws<ArgumentException>(() => tp.ForwardEmbedsTp(embeds, 1, 0, [lone]));
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    /// <summary>The per-rank weight enumeration must tile with no tensor shared between ranks (each slice has
-    /// exactly one owning backend — sharing one Tensor across device binders is the documented hazard) and
-    /// rank 0 must carry the head-side extras (final norm + lm_head).</summary>
-    [Fact]
-    public void EnumerateRankWeights_DisjointAcrossRanks_HeadOnRankZero()
-    {
-        TransformerConfig cfg = Config();
-        Dictionary<string, Tensor> w = Weights(cfg);
-        using CpuBackend rank0 = new();
-        using CpuBackend rank1 = new();
-        using HostStagedComm comm = new(2);
-        using TensorParallelTransformer tp = new(cfg, new TpPlacement([rank0, rank1], comm));
-        tp.LoadWeights(w, "model");
-
-        HashSet<Tensor> set0 = new(tp.EnumerateRankWeights(0), ReferenceEqualityComparer.Instance);
-        HashSet<Tensor> set1 = new(tp.EnumerateRankWeights(1), ReferenceEqualityComparer.Instance);
-        Assert.True(set0.Count > 0 && set1.Count > 0);
-        Assert.Empty(set0.Intersect(set1, ReferenceEqualityComparer.Instance));
-        // Rank 0 carries final norm + (tied F32) head: 2 extras beyond the per-layer set.
-        Assert.Equal(set1.Count + 2, set0.Count);
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
 }

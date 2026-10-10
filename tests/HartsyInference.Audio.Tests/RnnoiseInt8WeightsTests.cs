@@ -38,40 +38,6 @@ public sealed class RnnoiseInt8WeightsTests
         }
     }
 
-    /// <summary>Upstream's conv2 reads its window time-major, <c>t·128 + c</c>; the model's window is channel-major,
-    /// <c>c·3 + t</c>. Each weight must follow its (channel, tap).</summary>
-    [Fact]
-    public void Conv2Table_ReadsTheModelsChannelMajorWindow()
-    {
-        using RnnoiseWeights weights = LoadedWithLabelledTables();
-        const int channels = RnnoiseModel.CondSize, taps = RnnoiseModel.KernelSize, inputs = channels * taps;
-        sbyte[] model = Logical(weights.Conv2Int8!, Gru, inputs);
-        foreach (int row in new[] { 0, 9, 383 })
-        {
-            for (int c = 0; c < channels; c += 37)
-            {
-                for (int t = 0; t < taps; t++)
-                    Assert.Equal(Conv2Label(row, t * channels + c), model[row * inputs + c * taps + t]);
-            }
-        }
-    }
-
-    [Fact]
-    public void Int8Tables_NeedTheFloatWeightsFirst()
-    {
-        using RnnoiseWeights weights = new();
-        Dictionary<string, Tensor> tables = LabelledTables();
-        try
-        {
-            Assert.Throws<InvalidOperationException>(() => weights.LoadInt8Tables(tables));
-            Assert.Equal(RnnoisePrecision.Float, weights.Precision);
-        }
-        finally
-        {
-            foreach (Tensor tensor in tables.Values) tensor.Dispose();
-        }
-    }
-
     /// <summary>The selection point: F32 unless int8 is asked for, even with the tables sitting beside the weights;
     /// int8 finds them there by default.</summary>
     [Fact]

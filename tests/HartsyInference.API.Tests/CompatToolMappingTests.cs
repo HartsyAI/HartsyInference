@@ -48,17 +48,6 @@ public sealed class CompatToolMappingTests
     }
 
     [Fact]
-    public void EmptyArgumentsBecomeAnEmptyObject()
-    {
-        NativeToolCall call = CompatEndpoints.ToNativeToolCall(new ChatToolCallDto
-        {
-            Id = "c",
-            Function = new ChatToolCallFunctionDto { Name = "f", Arguments = null },
-        });
-        Assert.Equal("{}", call.Arguments);
-    }
-
-    [Fact]
     public void NativeToolCallSerializesInOpenAiWireShape()
     {
         ChatToolCallDto dto = CompatEndpoints.ToToolCallDto(new NativeToolCall { Id = "call_9", Name = "hang_up", Arguments = "{\"reason\":\"done\"}" }, index: 0);

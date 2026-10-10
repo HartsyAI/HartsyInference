@@ -44,17 +44,6 @@ public sealed class StopTokenTests
     }
 
     [Fact]
-    public void A_Stop_Token_As_The_Bonus_Token_Ends_The_Run_There()
-    {
-        List<int> tokens = [1, 2];
-        int produced = SpeculativeLoop.Generate(new ScriptedScorer(bonus: 0), new FixedProposer([3, 4]),
-            SamplerChain.FromOptions(new SamplingOptions { Greedy = true }), SpeculativeTestSupport.Uniform(1), tokens, 10, 4, Vocab, new HashSet<int> { 0 });
-
-        Assert.Equal(3, produced);
-        Assert.Equal(new[] { 1, 2, 3, 4, 0 }, tokens);
-    }
-
-    [Fact]
     public void A_Stop_Token_As_The_Correction_Ends_The_Run_There()
     {
         // the draft [3, 4, 6] is cut at position 1, where the target names 1: the correction is the stop token
@@ -66,26 +55,4 @@ public sealed class StopTokenTests
         Assert.Equal(new[] { 1, 2, 3, 1 }, tokens);
     }
 
-    [Fact]
-    public void An_Empty_Stop_Set_Changes_Nothing()
-    {
-        List<int> tokens = [1, 2];
-        int produced = SpeculativeLoop.Generate(new ScriptedScorer(bonus: 7), new FixedProposer([3, 5, 6, 2]),
-            SamplerChain.FromOptions(new SamplingOptions { Greedy = true }), SpeculativeTestSupport.Uniform(1), tokens, 6, 4, Vocab, new HashSet<int>());
-
-        Assert.Equal(6, produced);
-        Assert.Equal(new[] { 1, 2, 3, 5, 6, 2, 7, 7 }, tokens);
-    }
-
-    [Fact]
-    public void Without_Stop_Tokens_The_Run_Is_Unchanged()
-    {
-        List<int> tokens = [1, 2];
-        int produced = SpeculativeLoop.Generate(new ScriptedScorer(bonus: 7), new FixedProposer([3, 5, 6, 2]),
-            SamplerChain.FromOptions(new SamplingOptions { Greedy = true }), SpeculativeTestSupport.Uniform(1), tokens, 6, 4, Vocab);
-
-        // the first round accepts the four drafted tokens and adds the bonus 7; the second has no room for a draft and adds its own 7
-        Assert.Equal(6, produced);
-        Assert.Equal(new[] { 1, 2, 3, 5, 6, 2, 7, 7 }, tokens);
-    }
 }

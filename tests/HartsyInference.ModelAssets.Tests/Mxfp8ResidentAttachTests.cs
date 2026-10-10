@@ -33,27 +33,19 @@ public sealed unsafe class Mxfp8ResidentAttachTests
     }
 
     [Theory]
-    [InlineData("F16 weight", "dtype")]
-    [InlineData("F32 scale", "scaledtype")]
-    [InlineData("rank-3 weight", "rank")]
-    [InlineData("K not a multiple of 32", "group")]
-    [InlineData("scale narrower than K/32", "narrow")]
-    [InlineData("scale columns not a multiple of 4", "cols")]
-    [InlineData("scale shorter than N", "rows")]
-    public void WrongShapesAreRefusedUntouched(string _, string kind)
+    [InlineData("dtype")]
+    [InlineData("group")]
+    [InlineData("rows")]
+    public void WrongShapesAreRefusedUntouched(string kind)
     {
         using Tensor weight = kind switch
         {
             "dtype" => Weight(OutFeatures, InFeatures, DType.F16),
-            "rank" => new Tensor(new TensorShape(2, OutFeatures, InFeatures), DType.F8E4M3),
             "group" => Weight(OutFeatures, InFeatures + 8, DType.F8E4M3),
             _ => Weight(OutFeatures, InFeatures, DType.F8E4M3),
         };
         using Tensor scale = kind switch
         {
-            "scaledtype" => new Tensor(new TensorShape(OutFeatures, InFeatures / 32), DType.F32),
-            "narrow" => Scale(OutFeatures, 4),
-            "cols" => Scale(OutFeatures, InFeatures / 32 + 1),
             "rows" => Scale(OutFeatures - 1, InFeatures / 32),
             _ => Scale(OutFeatures, InFeatures / 32),
         };

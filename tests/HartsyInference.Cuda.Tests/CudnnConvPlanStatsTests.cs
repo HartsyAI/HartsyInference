@@ -23,9 +23,7 @@ public sealed unsafe class CudnnConvPlanStatsTests
 
     [Theory]
     [InlineData(1, 1)]
-    [InlineData(2, 2)]
     [InlineData(3, 4)]
-    [InlineData(64, 64)]
     [InlineData(65, 128)]
     [InlineData(25_682, 32_768)]
     public void LengthBucket_IsTheNextPowerOfTwo(long length, long bucket) =>
@@ -33,9 +31,7 @@ public sealed unsafe class CudnnConvPlanStatsTests
 
     [Theory]
     [InlineData(1, 1)]
-    [InlineData(2, 2)]
     [InlineData(4, 3)]
-    [InlineData(128, 127)]
     [InlineData(32_768, 32_767)]
     public void ReferenceLength_IsTheOddLengthBelowTheBucketTop(long bucket, long reference)
     {

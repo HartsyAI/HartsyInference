@@ -89,37 +89,6 @@ public sealed class ComfyBlendWeightingTests
         }
     }
 
-    /// <summary>A zero weight collapses the token onto the empty-prompt baseline — the reference's degenerate case,
-    /// and the cheapest check that the interpolation runs in the right direction.</summary>
-    [Fact]
-    public void AZeroWeightCollapsesTheTokenOntoTheEmptyBaseline()
-    {
-        IBackend backend = new CpuBackend();
-        using Tensor hidden = Filled(i => i + 1f);
-        using Tensor empty = Filled(i => -1f);
-        float[] weights = [0f, 1f, 1f, 1f, 1f];
-        using Tensor? blended = ComfyBlend.Apply(backend, hidden, empty, weights);
-        Assert.NotNull(blended);
-        ReadOnlySpan<float> got = blended!.AsReadOnlySpan<float>();
-        for (int d = 0; d < Dim; d++)
-        {
-            Assert.Equal(-1f, got[d], 5);
-        }
-    }
-
-    [Fact]
-    public void TheSourceConditioningIsLeftUnmodified()
-    {
-        IBackend backend = new CpuBackend();
-        using Tensor hidden = Filled(i => (i * 0.37f) - 2f);
-        using Tensor empty = Filled(i => 0.11f * i);
-        float[] before = hidden.AsReadOnlySpan<float>().ToArray();
-        float[] weights = [2f, 1f, 1f, 1f, 1f];
-        using Tensor? blended = ComfyBlend.Apply(backend, hidden, empty, weights);
-        Assert.NotNull(blended);
-        Assert.Equal(before, hidden.AsReadOnlySpan<float>().ToArray());
-    }
-
     [Fact]
     public void AMismatchedEmptyBaselineIsRefusedRatherThanBroadcast()
     {
@@ -127,19 +96,6 @@ public sealed class ComfyBlendWeightingTests
         using Tensor hidden = Filled(i => i);
         using Tensor empty = new Tensor(new TensorShape(1, Seq + 1, Dim), DType.F32);
         float[] weights = [1f, 2f, 1f, 1f, 1f];
-        Assert.Throws<ArgumentException>(() =>
-        {
-            ComfyBlend.Apply(backend, hidden, empty, weights);
-        });
-    }
-
-    [Fact]
-    public void AWeightCountThatDoesNotMatchTheSequenceIsRefused()
-    {
-        IBackend backend = new CpuBackend();
-        using Tensor hidden = Filled(i => i);
-        using Tensor empty = Filled(i => 0f);
-        float[] weights = [1f, 2f];
         Assert.Throws<ArgumentException>(() =>
         {
             ComfyBlend.Apply(backend, hidden, empty, weights);

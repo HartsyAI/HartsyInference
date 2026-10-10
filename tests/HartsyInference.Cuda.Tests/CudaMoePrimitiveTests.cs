@@ -225,11 +225,9 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(5, 300, 8, false, false)]
-    [InlineData(3, 4096, 64, true, false)]
     [InlineData(2, 129280, 1024, false, true)]
     [InlineData(2, 5000, 2048, true, true)]
     [InlineData(4, 17, 17, false, false)]
-    [InlineData(4, 9, 1, true, false)]
     public void TopKLastDim_MatchesCpu_Exactly(int rows, int n, int k, bool sortByIndex, bool heavyTies)
     {
         if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }

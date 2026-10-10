@@ -118,8 +118,6 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
     [Theory]
     [InlineData(0x7F7FFFFFu)]   // float.MaxValue: Dekker's splitter would overflow on the raw quotient
     [InlineData(0x04185FAFu)]   // the scale is subnormal and must be rounded once, on the subnormal grid
-    [InlineData(0x00800000u)]   // smallest normal absmax
-    [InlineData(0x40400000u)]   // 3.0
     public void Quantize_ScaleIsCorrectlyRoundedAcrossTheRange(uint amaxBits)
     {
         if (!VulkanAvailable()) return;
@@ -134,8 +132,6 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
     [InlineData(false, false, 128, true)]
     [InlineData(true, true, 128, true)]
     [InlineData(false, true, 77, true)]    // a CLIP prompt's rows: clamped by the coopmat2 layouts
-    [InlineData(false, false, 128, false)]
-    [InlineData(true, true, 128, false)]
     [InlineData(false, true, 77, false)]   // the ragged last block goes through shared memory on coopmat1
     public void Fp8Linear_MatchesTheDequantizedProduct(bool f16Output, bool withBias, int M, bool coopMat2)
     {

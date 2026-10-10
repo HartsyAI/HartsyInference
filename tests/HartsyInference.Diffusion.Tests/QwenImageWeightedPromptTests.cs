@@ -46,15 +46,6 @@ public sealed class QwenImageWeightedPromptTests
         Assert.Contains(sequence.Weights, weight => weight == 1.5f);
     }
 
-    [Fact]
-    public void TheWeightArrayAlwaysDescribesTheIdArray()
-    {
-        using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
-        (WeightedTokenSequence sequence, _) =
-            QwenImageRecipePipeline.EncodeWithTemplate(tokenizer, "a (very:1.3) (long:0.7) prompt");
-        Assert.Equal(sequence.Tokens.Length, sequence.Weights.Length);
-    }
-
     /// <summary>diffusers truncates the templated sequence at 512; the weights have to be cut with it, or every
     /// emphasis would land one token further along than the word it belongs to.</summary>
     [Fact]

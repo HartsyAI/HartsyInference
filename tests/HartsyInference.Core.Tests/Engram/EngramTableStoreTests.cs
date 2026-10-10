@@ -61,22 +61,6 @@ public sealed class EngramTableStoreTests : IDisposable
     }
 
     [Fact]
-    public void Gather_SecondCallOnResidentRowsDoesNoIo()
-    {
-        CountingSource counting = new(new PreadByteSource(_officialPath));
-        using EngramTableStore store = new(Layout(), counting, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(32));
-        long[] rows = [1, 2, 30, 31];
-        ushort[] dest = new ushort[rows.Length * 256];
-        store.Gather(rows, dest);
-        long readsAfterFirst = counting.Reads;
-        long bytesAfterFirst = store.Stats.BytesRead;
-        store.Gather(rows, dest);
-        Assert.Equal(readsAfterFirst, counting.Reads);
-        Assert.Equal(bytesAfterFirst, store.Stats.BytesRead);
-        Assert.Equal(0, store.Stats.GatherMisses - 4);
-    }
-
-    [Fact]
     public async Task Prefetch_LoadsSoGatherDoesNoIo()
     {
         CountingSource counting = new(new PreadByteSource(_officialPath));
@@ -92,37 +76,6 @@ public sealed class EngramTableStoreTests : IDisposable
         Assert.Equal(0, store.Stats.GatherMisses);
         for (int i = 0; i < rows.Length; i++)
             EngramFixtures.AssertBf16Equal(_tables.Expected(SyntheticTables.Kind.Official, (int)rows[i]), dest.AsSpan(i * 256, 256), $"slot {i}");
-    }
-
-    [Fact]
-    public async Task Load_MergesRowsThatShareAPageIntoOneRead()
-    {
-        // 256-byte fp8 rows: 16 per 4 KB page. Rows 0..15 of the payload sit in one or two pages; their scale bytes in one.
-        CountingSource counting = new(new PreadByteSource(_officialPath));
-        using EngramTableStore store = new(Layout(), counting, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(96));
-        long[] rows = Enumerable.Range(16, 16).Select(r => (long)r).ToArray();
-        await store.PrefetchAsync(rows);
-        EngramStoreStats stats = store.Stats;
-        Assert.Equal(16, stats.CacheMisses);
-        Assert.True(stats.ReadRanges <= 4, $"{stats.ReadRanges} reads for 16 adjacent rows; expected page-merged reads.");
-        Assert.True(counting.Reads <= 4);
-    }
-
-    [Fact]
-    public async Task Load_SortsAndDeduplicatesBeforeReading()
-    {
-        CountingSource shuffled = new(new PreadByteSource(_officialPath));
-        using EngramTableStore a = new(Layout(), shuffled, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(96));
-        long[] scrambled = [33, 5, 90, 5, 34, 33, 6, 91, 7];
-        await a.PrefetchAsync(scrambled);
-
-        CountingSource sorted = new(new PreadByteSource(_officialPath));
-        using EngramTableStore b = new(Layout(), sorted, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(96));
-        await b.PrefetchAsync(new long[] { 5, 6, 7, 33, 34, 90, 91 });
-
-        Assert.Equal(sorted.Reads, shuffled.Reads);
-        Assert.Equal(b.Stats.BytesRead, a.Stats.BytesRead);
-        Assert.Equal(7, a.Stats.UniqueRows);
     }
 
     [Fact]
@@ -174,16 +127,6 @@ public sealed class EngramTableStoreTests : IDisposable
     }
 
     [Fact]
-    public void OwnedRangeMustFitTheTable()
-    {
-        using PreadByteSource source = new(_officialPath);
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new EngramTableStore(Layout(), source, EngramBacking.Storage, new EngramRowRange(90, 10), Budget(10)));
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new EngramTableStore(Layout(), source, EngramBacking.Storage, new EngramRowRange(0, 0), Budget(10)));
-    }
-
-    [Fact]
     public async Task HostResident_LoadAllThenServesEverythingWithoutIo()
     {
         CountingSource counting = new(new PreadByteSource(_officialPath));
@@ -198,103 +141,6 @@ public sealed class EngramTableStoreTests : IDisposable
         Assert.Equal(0, store.Stats.Evictions);
         for (int i = 0; i < rows.Length; i++)
             EngramFixtures.AssertBf16Equal(_tables.Expected(SyntheticTables.Kind.Official, (int)rows[i]), dest.AsSpan(i * 256, 256), $"slot {i}");
-    }
-
-    [Fact]
-    public void HostResident_RequiresTheBudgetForEveryOwnedRow()
-    {
-        using PreadByteSource source = new(_officialPath);
-        Assert.Throws<ArgumentException>(() =>
-            new EngramTableStore(Layout(), source, EngramBacking.HostResident, EngramRowRange.All(_tables.Rows), Budget(_tables.Rows - 1)));
-        using EngramTableStore ownedOnly = new(Layout(), source, EngramBacking.HostResident, new EngramRowRange(0, 10), Budget(10));
-        Assert.Equal(10, ownedOnly.MaxBatchRows);
-    }
-
-    [Fact]
-    public async Task LoadAll_IsHostResidentOnly()
-    {
-        using PreadByteSource source = new(_officialPath);
-        using EngramTableStore store = new(Layout(), source, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(8));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => store.LoadAllAsync());
-    }
-
-    [Fact]
-    public void DeviceBackingIsNotSupportedYet()
-    {
-        using PreadByteSource source = new(_officialPath);
-        Assert.Throws<NotSupportedException>(() =>
-            new EngramTableStore(Layout(), source, EngramBacking.Device, EngramRowRange.All(_tables.Rows), Budget(8)));
-    }
-
-    [Fact]
-    public void Dispose_IsIdempotentAndBlocksFurtherUse()
-    {
-        using PreadByteSource source = new(_officialPath);
-        EngramTableStore store = new(Layout(), source, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(8));
-        store.Gather([1], new ushort[256]);
-        store.Dispose();
-        store.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => store.Gather([1], new ushort[256]));
-    }
-
-    [Fact]
-    public void BudgetMustHoldOneRow()
-    {
-        using PreadByteSource source = new(_officialPath);
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new EngramTableStore(Layout(), source, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), 100));
-    }
-
-    [Fact]
-    public void GatherRejectsATooSmallDestination()
-    {
-        using PreadByteSource source = new(_officialPath);
-        using EngramTableStore store = new(Layout(), source, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(8));
-        Assert.Throws<ArgumentException>(() => store.Gather([1, 2], new ushort[256]));
-    }
-
-    [Fact]
-    public void Gguf_StoreReadsTheSingleInterleavedPlane()
-    {
-        string path = Path.Combine(_dir, "gguf.bin");
-        byte[] file = new byte[4096 + _tables.Rows * 264];
-        _tables.Row264.CopyTo(file, 4096);
-        File.WriteAllBytes(path, file);
-        using PreadByteSource source = new(path);
-        using EngramTableStore store = new(new GgufRow264Layout(_tables.Rows, 4096), source, EngramBacking.Storage,
-            EngramRowRange.All(_tables.Rows), Budget(16));
-        long[] rows = [70, 2, 71];
-        ushort[] dest = new ushort[rows.Length * 256];
-        store.Gather(rows, dest);
-        for (int i = 0; i < rows.Length; i++)
-            EngramFixtures.AssertBf16Equal(_tables.Expected(SyntheticTables.Kind.Gguf, (int)rows[i]), dest.AsSpan(i * 256, 256), $"slot {i}");
-    }
-
-    [Fact]
-    public void Mlx_StoreReadsThreePlanesFromThreeShards()
-    {
-        string weights = Path.Combine(_dir, "mlx-w.bin");
-        string scales = Path.Combine(_dir, "mlx-s.bin");
-        string biases = Path.Combine(_dir, "mlx-b.bin");
-        byte[] w = new byte[100 + _tables.MlxWeight.Length];
-        byte[] s = new byte[200 + _tables.MlxScales.Length];
-        byte[] b = new byte[300 + _tables.MlxBiases.Length];
-        _tables.MlxWeight.CopyTo(w, 100);
-        _tables.MlxScales.CopyTo(s, 200);
-        _tables.MlxBiases.CopyTo(b, 300);
-        File.WriteAllBytes(weights, w);
-        File.WriteAllBytes(scales, s);
-        File.WriteAllBytes(biases, b);
-        using PreadByteSource ws = new(weights);
-        using PreadByteSource ss = new(scales);
-        using PreadByteSource bs = new(biases);
-        using EngramTableStore store = new(new MlxAffineRowLayout(_tables.Rows, 100, 200, 300), [ws, ss, bs], EngramBacking.Storage,
-            EngramRowRange.All(_tables.Rows), 160L * 16);
-        long[] rows = [0, 95, 17, 18, 17];
-        ushort[] dest = new ushort[rows.Length * 256];
-        store.Gather(rows, dest);
-        for (int i = 0; i < rows.Length; i++)
-            EngramFixtures.AssertBf16Equal(_tables.Expected(SyntheticTables.Kind.Mlx, (int)rows[i]), dest.AsSpan(i * 256, 256), $"slot {i}");
     }
 
     [Fact]

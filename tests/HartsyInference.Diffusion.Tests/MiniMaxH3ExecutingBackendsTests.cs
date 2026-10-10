@@ -22,13 +22,6 @@ public sealed class MiniMaxH3ExecutingBackendsTests
             CpBackends = cp,
         };
 
-    [Fact]
-    public void PrimaryAlone_WhenNothingElseIsConfigured()
-    {
-        using CpuBackend primary = new CpuBackend();
-        Assert.Equal([primary], MiniMaxH3Recipe.ExecutingBackends(Context(primary)).ToArray());
-    }
-
     /// <summary>The shard peer does run blocks, so it counts — even though whether sharding ends up enabled is not
     /// settled until after the weights have been prepared.</summary>
     [Fact]

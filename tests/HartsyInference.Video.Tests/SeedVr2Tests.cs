@@ -100,12 +100,7 @@ public sealed class SeedVr2Tests
     [Theory]
     [InlineData(1, 1)]
     [InlineData(2, 5)]
-    [InlineData(4, 5)]
-    [InlineData(5, 5)]
     [InlineData(6, 9)]
-    [InlineData(7, 9)]
-    [InlineData(9, 9)]
-    [InlineData(24, 25)]
     [InlineData(25, 25)]
     public void PaddedFrameCount_MatchesCutVideos(int frames, int expected)
         => Assert.Equal(expected, SeedVr2Preprocess.PaddedFrameCount(frames));

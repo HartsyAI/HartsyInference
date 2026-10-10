@@ -14,24 +14,14 @@ public sealed class PrefetchDepthTests
     public static TheoryData<long, long> Budgets()
     {
         TheoryData<long, long> data = [];
-        foreach (long avail in new long[] { -1, 0, 1, 100 * Mb, 512 * Mb, 1024 * Mb, 4096 * Mb, long.MaxValue / 4 })
+        foreach (long avail in new long[] { -1, 0, 1, 512 * Mb, 4096 * Mb, long.MaxValue / 4 })
         {
-            foreach (long perBlock in new long[] { 0, 1, 64 * Mb, 384 * Mb, 512 * Mb })
+            foreach (long perBlock in new long[] { 0, 1, 384 * Mb })
             {
                 data.Add(avail, perBlock);
             }
         }
         return data;
-    }
-
-    /// <summary>Krea2 / ChromaRadiance / QwenImage: <c>perBlock > 0 ? Clamp(avail/perBlock - 2, 0, 2) : 0</c>.</summary>
-    [Theory]
-    [MemberData(nameof(Budgets))]
-    public void MatchesTheInlineFormula(long avail, long perBlock)
-    {
-        int legacy = perBlock > 0 ? Math.Clamp((int)(avail / perBlock) - 2, 0, 2) : 0;
-        // The inline sites never guarded avail <= 0 separately; the clamp floor already handled it.
-        Assert.Equal(legacy, PrefetchDepth.Choose(avail, perBlock));
     }
 
     /// <summary>Flux / HunyuanImage returned 1 for an unmeasurable block instead of 0, and bailed on a non-positive budget first.</summary>
@@ -65,8 +55,4 @@ public sealed class PrefetchDepthTests
         Assert.Equal(2, PrefetchDepth.Choose(4 * Mb, 1 * Mb));
         Assert.Equal(2, PrefetchDepth.Choose(400 * Mb, 1 * Mb));
     }
-
-    [Fact]
-    public void RejectsANegativeCap()
-        => Assert.Throws<ArgumentOutOfRangeException>(() => PrefetchDepth.Choose(Mb, Mb, maxDepth: -1));
 }

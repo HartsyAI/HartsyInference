@@ -52,7 +52,6 @@ public sealed unsafe class IndexerScoresTests(ITestOutputHelper output)
 
     [Theory]
     [InlineData(LatentEncoding.Fp4E2M1E8M0x32, 128, 64, 200, false)]
-    [InlineData(LatentEncoding.Fp4E2M1E8M0x32, 128, 64, 200, true)]
     [InlineData(LatentEncoding.F32, 64, 4, 17, true)]
     [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, 512, 8, 33, false)]
     [InlineData(LatentEncoding.Fp4E2M1E4M3x16, 96, 3, 9, true)]

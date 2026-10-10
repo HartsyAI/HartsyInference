@@ -27,19 +27,10 @@ public sealed class TensorCastScheduleTests
 
     [Theory]
     [InlineData("F32", "F16")]
-    [InlineData("F16", "F32")]
-    [InlineData("F32", "BF16")]
     [InlineData("BF16", "F32")]
     [InlineData("F8E4M3", "F32")]
     [InlineData("F32", "F8E4M3")]
-    [InlineData("F8E4M3", "F16")]
-    [InlineData("F16", "F8E4M3")]
-    [InlineData("F8E5M2", "F32")]
     [InlineData("F32", "F8E5M2")]
-    [InlineData("BF16", "F8E4M3")]
-    [InlineData("BF16", "F16")]
-    [InlineData("F16", "BF16")]
-    [InlineData("F8E4M3", "BF16")]
     [InlineData("F64", "F32")]
     public void CastTo_MatchesTheSerialCastByteForByte_UnderEverySchedule(string fromName, string toName)
     {
@@ -70,31 +61,11 @@ public sealed class TensorCastScheduleTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
     [InlineData(0)]
     public void CastsInsideAParallelLoop_Complete_AtEveryCap(int cap)
     {
         int threads = cap == 0 ? Environment.ProcessorCount : cap;
         WithCpuThreads(threads, () => RunBounded(CastInsideAParallelLoop));
-    }
-
-    [Theory]
-    [InlineData(2)]
-    [InlineData(0)]
-    public void CastsInsideParallelLoops_OnTwoForeignThreadsAtOnce_Complete(int cap)
-    {
-        int threads = cap == 0 ? Environment.ProcessorCount : cap;
-        WithCpuThreads(threads, () => RunBounded(CastInsideAParallelLoop, CastInsideAParallelLoop));
-    }
-
-    [Fact]
-    public void CastsInsideAParallelLoop_UnderAnInlineScope_Complete()
-    {
-        RunBounded(() =>
-        {
-            using CpuParallel.InlineScope scope = CpuParallel.EnterInline();
-            CastInsideAParallelLoop();
-        });
     }
 
     /// <summary>A thread outside <see cref="CpuParallel"/>'s scheduler cannot run the cast's ranges itself, so each

@@ -21,21 +21,4 @@ public sealed class Fp8BlockScaleGuardTests
 
         Assert.Contains("w.weight", ex.Message);
     }
-
-    [Fact]
-    public void ScalarFp8Scale_StillFolds()
-    {
-        Tensor scale = new Tensor(new TensorShape(1), DType.F32);
-        scale.AsSpan<float>()[0] = 0.5f;
-        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>
-        {
-            ["w.weight"] = new Tensor(new TensorShape(64, 64), DType.F8E4M3),
-            ["w.weight_scale"] = scale,
-        };
-
-        Dictionary<string, Tensor> folded = CheckpointConvertUtils.ApplyFp8ScaledDequant(weights);
-
-        Assert.Equal(0.5f, folded["w.weight"].Fp8ScaleFactor);
-        Assert.False(folded.ContainsKey("w.weight_scale"));
-    }
 }

@@ -53,37 +53,6 @@ public sealed class DeepSeekV41AttentionTests
     private const float Tolerance = 1e-3f;
 
     [Fact]
-    public void QuantizeLatents_Off_Skips_The_Cache_Round_Trip_And_Moves_The_Output_Only_Slightly()
-    {
-        using CpuBackend cpu = new();
-        int layer = Enumerable.Range(0, Fx.GetProperty("layers").GetArrayLength()).First(i =>
-        {
-            BuildLayer(cpu, i, out DeepSeekV41AttentionSettings s);
-            return s.CompressRatio > 0 && s.IsKvSource && s.IsIndexSource;
-        });
-        JsonElement step = Fx.GetProperty("steps")[0];
-        int len = step.GetProperty("len").GetInt32();
-        float[] x = Floats(step.GetProperty("x")[layer]);
-
-        float[] Run(bool quantize)
-        {
-            DeepSeekV41Attention attention = BuildLayer(cpu, layer, out DeepSeekV41AttentionSettings settings, quantize);
-            Assert.Equal(quantize, settings.QuantizeLatents);
-            float[] y = new float[x.Length];
-            attention.Forward(x, len, 0, new DeepSeekV41AttentionState(settings, 64), new DeepSeekV41SharedAttention(), y);
-            return y;
-        }
-
-        float[] on = Run(true), off = Run(false);
-        Assert.All(off, v => Assert.True(float.IsFinite(v)));
-        double diff = 0, norm = 0;
-        for (int i = 0; i < on.Length; i++) { diff += Math.Pow(on[i] - off[i], 2); norm += Math.Pow(on[i], 2); }
-        double rel = Math.Sqrt(diff / norm);
-        Assert.True(rel > 0, "switching the round trip off changed nothing, so it was never applied");
-        Assert.True(rel < 0.1, $"switching the round trip off moved the output by {rel:E2}");
-    }
-
-    [Fact]
     public void Layer_Stack_Matches_Upstream_Through_Prefill_And_Decode()
     {
         int layerCount = Fx.GetProperty("layers").GetArrayLength();

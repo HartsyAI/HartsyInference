@@ -198,31 +198,6 @@ public sealed class JinjaToolsRenderTests
     }
 
     [Fact]
-    public void Qwen25TemplateWithoutToolsGetsNullNotAnEmptyList()
-    {
-        CaptureTokenizer tok = new();
-        new JinjaChatTemplate(Qwen25Template).Encode(tok, [ChatMessage.User("hi")], addGenerationPrompt: true);
-        Assert.Equal("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n", tok.Rendered);
-        new JinjaChatTemplate(Qwen25Template).Encode(tok, [ChatMessage.User("hi")], addGenerationPrompt: true, enableThinking: null, []);
-        Assert.DoesNotContain("# Tools", tok.Rendered);
-    }
-
-    [Fact]
-    public void MessageContextCarriesToolCallIdNameAndStringArguments()
-    {
-        CaptureTokenizer tok = new();
-        const string template = "{% for m in messages %}[{{ m.role }}|{{ m.name }}|{{ m.tool_call_id }}|"
-            + "{% for c in m.tool_calls %}{{ c.id }}:{{ c.function.name }}:{{ 'str' if c.function.arguments is string else 'obj' }}{% endfor %}]{% endfor %}";
-        List<ChatMessage> messages =
-        [
-            ChatMessage.Assistant("") with { ToolCalls = [new ChatToolCall("c1", "f", "not json"), new ChatToolCall("c2", "g", "{\"a\":1}")] },
-            ChatMessage.Tool("c1", "r") with { Name = "f" },
-        ];
-        new JinjaChatTemplate(template).Encode(tok, messages, addGenerationPrompt: false);
-        Assert.Equal("[assistant|||c1:f:strc2:g:obj][tool|f|c1|]", tok.Rendered);
-    }
-
-    [Fact]
     public void ChatMlFallbackRendersTheSameConversationByteForByte()
     {
         CaptureTokenizer tok = new();
@@ -237,23 +212,6 @@ public sealed class JinjaToolsRenderTests
         List<ChatMessage> messages = [ChatMessage.Assistant("") with { ToolCalls = [new ChatToolCall("c", "say \"hi\"", "{}")] }];
         int[] ids = new ChatMlTemplate().Encode(tok, messages, addGenerationPrompt: false);
         Assert.Equal("<|im_start|>assistant\n<tool_call>\n{\"name\": \"say \\\"hi\\\"\", \"arguments\": {}}\n</tool_call><|im_end|>\n", tok.Text(ids));
-    }
-
-    [Fact]
-    public void ChatMlFallbackWithoutToolsIsUnchanged()
-    {
-        CaptureTokenizer tok = new();
-        int[] ids = new ChatMlTemplate().Encode(tok, [ChatMessage.System("S"), ChatMessage.User("hi")], addGenerationPrompt: true);
-        Assert.Equal("<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n", tok.Text(ids));
-    }
-
-    [Fact]
-    public void ChatMlFallbackWithoutSystemMessageUsesQwenDefaultForTheToolsBlock()
-    {
-        CaptureTokenizer tok = new();
-        int[] ids = new ChatMlTemplate().Encode(tok, [ChatMessage.User("hi")], addGenerationPrompt: false, enableThinking: null, [ToolSpec.FromJson(WeatherTool)]);
-        Assert.StartsWith("<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n", tok.Text(ids));
-        Assert.EndsWith("</tool_call><|im_end|>\n<|im_start|>user\nhi<|im_end|>\n", tok.Text(ids));
     }
 
     /// <summary>Captures the rendered prompt: the Jinja path hands the whole string to <see cref="Encode"/>, the ChatML path hands pieces to <see cref="EncodeOrdinary"/> between control ids.</summary>

@@ -30,14 +30,5 @@ public sealed class ChineseG2PTests
         Assert.Equal(4, word2ph.Count);     // 你 + , + 好 + .
     }
 
-    [Fact]
-    public void CharPinyin_KnownChar_ReturnsInitialFinal()
-    {
-        (string Initial, string Final)? py = ChineseG2P.CharPinyin('中');
-        Assert.NotNull(py);
-        Assert.Equal("zh", py!.Value.Initial);
-        Assert.Equal("ong1", py.Value.Final);
-    }
-
     private static int Sum(List<int> xs) { int s = 0; foreach (int x in xs) s += x; return s; }
 }

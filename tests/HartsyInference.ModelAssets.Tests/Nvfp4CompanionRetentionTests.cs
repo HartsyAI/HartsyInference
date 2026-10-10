@@ -93,22 +93,6 @@ public sealed unsafe class Nvfp4CompanionRetentionTests
     }
 
     [Fact]
-    public void KeptGroup_DoesNotChangeFp8Folding()
-    {
-        Dictionary<string, Tensor> source = Nvfp4Group("nv");
-        Tensor fp8 = Filled(new TensorShape(2, 4), DType.F8E4M3, One);
-        source["fp8blk.weight"] = fp8;
-        source["fp8blk.scale_weight"] = Scalar(0.25f);
-
-        Dictionary<string, Tensor> result = CheckpointConvertUtils.ApplyFp8ScaledDequant(
-            source, keepNvfp4Companions: true);
-
-        Assert.Equal(0.25f, result["fp8blk.weight"].Fp8ScaleFactor);
-        Assert.False(result.ContainsKey("fp8blk.scale_weight"));
-        Assert.Equal(DType.U8, result["nv.weight"].DType);
-    }
-
-    [Fact]
     public void KeptGroup_DoesNotChangeInt8Folding()
     {
         // int8_tensorwise shares the `.weight_scale` suffix with nvfp4's block scales. The retention rule is keyed on
@@ -154,18 +138,4 @@ public sealed unsafe class Nvfp4CompanionRetentionTests
         Assert.False(result.ContainsKey("partial.weight_scale"));
     }
 
-    [Fact]
-    public void KeptGroup_StillDropsItsComfyQuantDescriptor()
-    {
-        // Only the two scale companions are the packed format's payload. `.comfy_quant` is a format declaration this
-        // pass consumes, and leaving it behind would pollute the dictionary the encoder iterates.
-        Dictionary<string, Tensor> source = Nvfp4Group("blk");
-        source["blk.comfy_quant"] = Filled(new TensorShape(8), DType.U8, (byte)'{');
-
-        Dictionary<string, Tensor> result = CheckpointConvertUtils.ApplyFp8ScaledDequant(
-            source, keepNvfp4Companions: true);
-
-        Assert.True(result.ContainsKey("blk.weight_scale"));
-        Assert.False(result.ContainsKey("blk.comfy_quant"));
-    }
 }

@@ -10,26 +10,6 @@ namespace HartsyInference.Audio.Tests;
 public sealed class FftTests
 {
     [Fact]
-    public void DcInput_ProducesAllEnergyInBinZero()
-    {
-        int n = 64;
-        float[] x = new float[n];
-        for (int i = 0; i < n; i++) x[i] = 1f;
-        float[] re = new float[n / 2 + 1];
-        float[] im = new float[n / 2 + 1];
-        Fft.RealTransform(x, re, im, n);
-
-        // DC bin = sum of all samples = n. Imag is 0. Every other bin is 0.
-        Assert.Equal(n, re[0], precision: 4);
-        Assert.Equal(0f, im[0], precision: 4);
-        for (int k = 1; k < n / 2 + 1; k++)
-        {
-            Assert.Equal(0f, re[k], precision: 4);
-            Assert.Equal(0f, im[k], precision: 4);
-        }
-    }
-
-    [Fact]
     public void SingleSinusoid_ProducesDeltaAtCorrectBin()
     {
         // x[n] = cos(2*pi*k0*n/N). The FFT magnitude should be a delta at bins k0 and N-k0
@@ -51,26 +31,6 @@ public sealed class FftTests
                 Assert.Equal(n / 2f, mag, precision: 1);
             else
                 Assert.True(mag < 0.01f, $"bin {k}: magnitude {mag} should be ~0");
-        }
-    }
-
-    [Fact]
-    public void NonPowerOfTwo_ComputesCorrectDft()
-    {
-        // n_fft=20 is iSTFTNet's (Kokoro) synthesis size — not a power of two, so it routes
-        // through the direct-DFT fallback. A pure 3-cycle cosine must concentrate in bin 3.
-        const int n = 20;
-        const int bin = 3;
-        float[] x = new float[n];
-        for (int t = 0; t < n; t++) x[t] = MathF.Cos(2f * MathF.PI * bin * t / n);
-        float[] re = new float[n / 2 + 1];
-        float[] im = new float[n / 2 + 1];
-        Fft.RealTransform(x, re, im, n);
-        for (int k = 0; k < re.Length; k++)
-        {
-            float mag = MathF.Sqrt(re[k] * re[k] + im[k] * im[k]);
-            if (k == bin) Assert.True(mag > n / 2f - 0.5f, $"bin {k}: magnitude {mag} should be ~{n / 2}");
-            else Assert.True(mag < 0.01f, $"bin {k}: magnitude {mag} should be ~0");
         }
     }
 

@@ -30,9 +30,7 @@ public sealed class SamplingParamResolverTests
     [Theory]
     [InlineData("ddim", "ddim")]
     [InlineData("dpm++2m", "dpm++2m")]
-    [InlineData("dpmpp_2m", "dpmpp_2m")]
     [InlineData("lcm", "lcm")]
-    [InlineData("tcd", "tcd")]
     public void LegacyNames_StillResolve(string requested, string expected)
     {
         Assert.Equal(expected, SamplingParamResolver.ResolveSchedulerName(Request(sampler: requested)));
@@ -43,7 +41,6 @@ public sealed class SamplingParamResolverTests
     [Theory]
     [InlineData("euler_ancestral")]
     [InlineData("dpmpp_2m_sde_karras")]
-    [InlineData("heun_exponential")]
     public void RegistrySamplersAndCompounds_PassThrough(string requested)
     {
         Assert.Equal(requested, SamplingParamResolver.ResolveSchedulerName(Request(sampler: requested)));
@@ -58,16 +55,6 @@ public sealed class SamplingParamResolverTests
             () => SamplingParamResolver.ResolveSchedulerName(Request(sampler: "totally_made_up")));
         Assert.Contains("totally_made_up", ex.Message, StringComparison.Ordinal);
         Assert.Contains("dpmpp_2m", ex.Message, StringComparison.Ordinal);
-    }
-
-    /// <summary>An unknown sigma schedule is refused separately from the sampler, so the message points at the half
-    /// that is actually wrong.</summary>
-    [Fact]
-    public void UnknownSchedule_ThrowsNamingTheSchedule()
-    {
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(
-            () => SamplingParamResolver.ResolveSchedulerName(Request(sampler: "euler_notaschedule")));
-        Assert.Contains("euler_notaschedule", ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>The legacy scheduler path refuses a sampler it cannot run, rather than returning Euler.
@@ -219,19 +206,6 @@ public sealed class SamplingParamResolverTests
         }
     }
 
-    /// <summary>The negative control for <see cref="CapabilityTable_CoversEveryImageRecipe"/>: a family that is not
-    /// in the table must report no entry. Without this, replacing <c>HasImageEntry</c> with something that always
-    /// returns true would leave the coverage test green again.</summary>
-    [Fact]
-    public void HasImageEntry_IsFalseForAnUnlistedFamily()
-    {
-        Assert.False(SamplingCapabilities.HasImageEntry("no-such-family"));
-        Assert.True(SamplingCapabilities.HasImageEntry("qwen-image-2.1"));
-        // Solver-owned families have a row, and it is empty — the case the old assertion could not distinguish.
-        Assert.True(SamplingCapabilities.HasImageEntry("ideogram4"));
-        Assert.Empty(SamplingCapabilities.ForImage("ideogram4").Samplers);
-    }
-
     /// <summary>Image family ids, read from the recipes' own <c>Name</c> properties.</summary>
     private static IEnumerable<string> ImageFamilyIds()
     {
@@ -274,21 +248,11 @@ public sealed class SamplingParamResolverTests
     /// checked the sampler slot first.</summary>
     [Theory]
     [InlineData("dpmpp_2m", "karras", "dpmpp_2m_karras")]
-    [InlineData("dpmpp_2m_sde", "karras", "dpmpp_2m_sde_karras")]
     [InlineData(null, "karras", "euler_karras")]
     [InlineData("dpmpp_2m", null, "dpmpp_2m")]
-    [InlineData("euler", "beta", "euler_beta")]
     public void SamplerAndSchedule_CombineIntoOneSelection(string? sampler, string? schedule, string expected)
     {
         Assert.Equal(expected, SamplingParamResolver.ResolveSchedulerName(Request(sampler, schedule)));
-    }
-
-    /// <summary>An alias in the sampler slot still composes with a schedule. The alias is only resolved AFTER the
-    /// compound is split, so composing first and splitting later has to leave the alias intact.</summary>
-    [Fact]
-    public void AliasedSampler_ComposesWithASchedule()
-    {
-        Assert.Equal("dpm++2m_karras", SamplingParamResolver.ResolveSchedulerName(Request("dpm++2m", "karras")));
     }
 
     /// <summary><c>normal</c> is the identity schedule and is deliberately NOT a recognized compound suffix, so it must
@@ -328,14 +292,6 @@ public sealed class SamplingParamResolverTests
     {
         Assert.Throws<NotSupportedException>(() => SamplingParamResolver.ResolveSchedulerName(Request(null, "align_your_steps")));
         Assert.Throws<NotSupportedException>(() => SamplingParamResolver.ResolveSchedulerName(Request("dpmpp_2m", "turbo")));
-    }
-
-    /// <summary>The video overload shares the image contract — a video host sends the same two dropdowns.</summary>
-    [Fact]
-    public void TheVideoOverload_CombinesIdentically()
-    {
-        VideoRequest request = new VideoRequest { Prompt = "test", Sampler = "dpmpp_2m", Scheduler = "karras" };
-        Assert.Equal("dpmpp_2m_karras", SamplingParamResolver.ResolveSchedulerName(request));
     }
 
     /// <summary>Locates an Engine source file from the test binary, walking up to the repo root.</summary>

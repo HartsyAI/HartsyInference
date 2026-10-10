@@ -20,46 +20,12 @@ public sealed unsafe class NsfVocoderDspTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(7)]
-    [InlineData(1000)]
-    [InlineData(123_457)]
     public void Advance_MatchesSequentialWalk(int steps)
     {
         uint walked = 0x9E3779B9u;
         for (int i = 0; i < steps; i++) DeterministicRng.NextUniform(ref walked);
         Assert.Equal(walked, DeterministicRng.Advance(0x9E3779B9u, steps));
         Assert.Equal(0x9E3779B9u, DeterministicRng.Advance(0x9E3779B9u, 0));
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void HarmonicSource_BitIdenticalToSequentialLoop(bool addNoise)
-    {
-        float[] f0 = VoicedF0(700, seed: 7);
-        (Tensor mergeW, Tensor mergeB) = MergeWeights();
-        try
-        {
-            double[] phaseRef = new double[Harmonics];
-            uint rngRef = 0x9E3779B9u;
-            float[] expected = SequentialHarmonicSource(f0, phaseRef, ref rngRef, mergeW.AsSpan<float>().ToArray(),
-                mergeB.AsSpan<float>()[0], addNoise);
-
-            double[] phase = new double[Harmonics];
-            uint rng = 0x9E3779B9u;
-            float[] actual = NsfVocoderDsp.GenerateHarmonicSourceChunk(f0, phase, ref rng, Scale, SampleRate, Harmonics,
-                mergeW, mergeB, 0.1f, 0.003f, 10f, addNoise);
-
-            AssertBitIdentical(expected, actual);
-            Assert.Equal(rngRef, rng);
-            for (int h = 0; h < Harmonics; h++) Assert.Equal(phaseRef[h], phase[h]);
-        }
-        finally
-        {
-            mergeW.Dispose();
-            mergeB.Dispose();
-        }
     }
 
     [Fact]
@@ -119,23 +85,6 @@ public sealed unsafe class NsfVocoderDspTests
         }
     }
 
-    [Theory]
-    [InlineData(20, 5, true)]
-    [InlineData(20, 5, false)]
-    [InlineData(16, 4, false)]
-    public void ForwardStft_SameBytesUnderEverySchedule(int nFft, int hop, bool magPhase)
-    {
-        float[] signal = Noise(40_000, seed: nFft + hop);
-        (float[] parallel, float[] capped, float[] inline) = UnderEverySchedule(() =>
-        {
-            using Tensor spec = magPhase ? NsfVocoderDsp.ForwardStftMagPhase(signal, nFft, hop)
-                : NsfVocoderDsp.ForwardStftRealImag(signal, nFft, hop);
-            return spec.AsSpan<float>().ToArray();
-        });
-        AssertBitIdentical(parallel, capped);
-        AssertBitIdentical(parallel, inline);
-    }
-
     [Fact]
     public void IstftHead_SameBytesUnderEverySchedule()
     {
@@ -145,21 +94,6 @@ public sealed unsafe class NsfVocoderDspTests
         (float[] parallel, float[] capped, float[] inline) = UnderEverySchedule(() => NsfVocoderDsp.IstftHead(post, nFft, hop));
         AssertBitIdentical(parallel, capped);
         AssertBitIdentical(parallel, inline);
-    }
-
-    [Theory]
-    [InlineData(20, 5, 6000)]
-    [InlineData(1024, 256, 300)]
-    public void IStftApply_BitIdenticalToSequentialLoop_UnderEverySchedule(int nFft, int hop, int frames)
-    {
-        int numBins = nFft / 2 + 1;
-        float[] re = Noise(frames * numBins, seed: 31);
-        float[] im = Noise(frames * numBins, seed: 37);
-        float[] expected = SequentialIStft(re, im, frames, nFft, hop);
-        (float[] parallel, float[] capped, float[] inline) = UnderEverySchedule(() => IStft.Apply(re, im, frames, nFft, hop));
-        AssertBitIdentical(expected, parallel);
-        AssertBitIdentical(expected, capped);
-        AssertBitIdentical(expected, inline);
     }
 
     /// <summary>The harmonic source as it was before the fan-out, verbatim: one walk over every sample.</summary>

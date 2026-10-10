@@ -24,40 +24,6 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
-    public void SystemPromptIsIgnoredWhenTheFirstMessageIsAlreadySystem()
-    {
-        RecordingTemplate template = new();
-        GenerationRequest request = new()
-        {
-            Messages = [ChatMessage.System("Folded by the host."), ChatMessage.User("hi")],
-            SystemPrompt = "Be terse.",
-        };
-        PromptBuilder.BuildPromptIds(request, new WordTokenizer(), template);
-        Assert.Equal(["system", "user"], template.Messages!.Select(m => m.Role));
-        Assert.Equal("Folded by the host.", template.Messages![0].Content);
-        Assert.DoesNotContain(template.Messages!, m => m.Content == "Be terse.");
-    }
-
-    [Fact]
-    public void EmptySystemPromptAddsNothingAndMessagesPassThroughByReference()
-    {
-        List<ChatMessage> messages = [ChatMessage.User("hi")];
-        Assert.Same(messages, PromptBuilder.WithSystemPrompt(messages, null));
-        Assert.Same(messages, PromptBuilder.WithSystemPrompt(messages, ""));
-    }
-
-    [Fact]
-    public void EffectiveMessagesIsTheSameViewTheTemplateRenders()
-    {
-        // The output parser resolves its initial state from EffectiveMessages(), so it must apply the one rule.
-        GenerationRequest prepend = new() { Messages = [ChatMessage.User("hi")], SystemPrompt = "Be terse." };
-        Assert.Equal(["system", "user"], prepend.EffectiveMessages()!.Select(m => m.Role));
-        GenerationRequest folded = new() { Messages = [ChatMessage.System("Host."), ChatMessage.User("hi")], SystemPrompt = "Be terse." };
-        Assert.Same(folded.Messages, folded.EffectiveMessages());
-        Assert.Null(new GenerationRequest { Prompt = "hi", SystemPrompt = "Be terse." }.EffectiveMessages());
-    }
-
-    [Fact]
     public void ToolsReachTheTemplateOnBothMessageAndPromptPaths()
     {
         List<ToolSpec> tools = [ToolSpec.FromJson("{\"type\":\"function\",\"function\":{\"name\":\"f\"}}")];

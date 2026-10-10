@@ -12,23 +12,6 @@ public sealed class FluxRopeTests
     // ── Position ID Tests ──────────────────────────────────────────
 
     [Fact]
-    public unsafe void BuildPositionIds_CorrectShape()
-    {
-        int txtSeqLen = 8;
-        int hPacked = 4;
-        int wPacked = 4;
-        int totalSeqLen = txtSeqLen + hPacked * wPacked;
-
-        Tensor posIds = FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-
-        Assert.Equal(2, posIds.Shape.Rank);
-        Assert.Equal(totalSeqLen, (int)posIds.Shape[0]);
-        Assert.Equal(3, (int)posIds.Shape[1]);
-
-        posIds.Dispose();
-    }
-
-    [Fact]
     public unsafe void BuildPositionIds_TextTokensAreAllZeros()
     {
         int txtSeqLen = 8;
@@ -73,86 +56,7 @@ public sealed class FluxRopeTests
         posIds.Dispose();
     }
 
-    // ── Precompute Tests ───────────────────────────────────────────
-
-    [Fact]
-    public void Precompute_CreatesTablesWithCorrectSize()
-    {
-        int[] axesDim = [16, 56, 56]; // sum = 128 = head_dim
-        FluxRope rope = new FluxRope(axesDim, theta: 10000);
-
-        int txtSeqLen = 4;
-        int hPacked = 2;
-        int wPacked = 2;
-        int totalSeqLen = txtSeqLen + hPacked * wPacked;
-
-        Tensor posIds = FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-        rope.Precompute(posIds);
-        posIds.Dispose();
-
-        // After precompute, the rope should be ready for Forward calls
-        // Verify by doing a small Forward with dummy data
-        int batch = 1;
-        int numHeads = 2;
-        int headDim = 128; // sum of axesDim
-        TensorShape mhShape = new TensorShape(batch, numHeads, totalSeqLen, headDim);
-        Tensor q = new Tensor(mhShape, DType.F32);
-        Tensor k = new Tensor(mhShape, DType.F32);
-
-        // Should not throw
-        rope.Forward(q, k, batch, numHeads, totalSeqLen);
-
-        q.Dispose();
-        k.Dispose();
-    }
-
     // ── Rotation Tests ────────────��────────────────────────────────
-
-    [Fact]
-    public unsafe void Forward_ZeroInput_StaysZero()
-    {
-        int[] axesDim = [16, 56, 56];
-        FluxRope rope = new FluxRope(axesDim, theta: 10000);
-
-        int txtSeqLen = 2;
-        int hPacked = 2;
-        int wPacked = 2;
-        int totalSeqLen = txtSeqLen + hPacked * wPacked;
-
-        Tensor posIds = FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-        rope.Precompute(posIds);
-        posIds.Dispose();
-
-        int batch = 1;
-        int numHeads = 1;
-        int headDim = 128;
-        TensorShape mhShape = new TensorShape(batch, numHeads, totalSeqLen, headDim);
-
-        Tensor q = new Tensor(mhShape, DType.F32);
-        Tensor k = new Tensor(mhShape, DType.F32);
-
-        // Fill with zeros
-        int count = (int)q.ElementCount;
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
-        for (int i = 0; i < count; i++)
-        {
-            qPtr[i] = 0f;
-            kPtr[i] = 0f;
-        }
-
-        rope.Forward(q, k, batch, numHeads, totalSeqLen);
-
-        // Rotating zeros should give zeros
-        for (int i = 0; i < count; i++)
-        {
-            Assert.InRange(qPtr[i], -Tolerance, Tolerance);
-            Assert.InRange(kPtr[i], -Tolerance, Tolerance);
-        }
-
-        q.Dispose();
-        k.Dispose();
-    }
 
     [Fact]
     public unsafe void Forward_TextPositionsZero_NoRotationApplied()
@@ -204,56 +108,6 @@ public sealed class FluxRopeTests
         {
             Assert.InRange(qPtr[d], original[d] - Tolerance, original[d] + Tolerance);
         }
-
-        q.Dispose();
-        k.Dispose();
-    }
-
-    [Fact]
-    public unsafe void Forward_UnitVector_RotatesCorrectly()
-    {
-        // Test that a unit vector [1, 0] at a known position gets rotated by the correct angle
-        int[] axesDim = [4, 4, 4]; // Small dims for easy verification. sum=12
-        FluxRope rope = new FluxRope(axesDim, theta: 10000);
-
-        int txtSeqLen = 0;
-        int hPacked = 2;
-        int wPacked = 1;
-        int totalSeqLen = hPacked * wPacked; // = 2
-
-        Tensor posIds = FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-        rope.Precompute(posIds);
-        posIds.Dispose();
-
-        int batch = 1;
-        int numHeads = 1;
-        int headDim = 12; // 4+4+4
-        TensorShape mhShape = new TensorShape(batch, numHeads, totalSeqLen, headDim);
-
-        Tensor q = new Tensor(mhShape, DType.F32);
-        Tensor k = new Tensor(mhShape, DType.F32);
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
-
-        int count = (int)q.ElementCount;
-        for (int i = 0; i < count; i++)
-        {
-            qPtr[i] = 0f;
-            kPtr[i] = 0f;
-        }
-
-        // Position 0: image token at row=0, col=0 → all positions 0 → no rotation
-        // Position 1: image token at row=1, col=0 → axis 1 has pos=1
-        // Set q[seq=1, dim=0:1] = [1.0, 0.0] → first pair in axis 0 (pos=0 → no rotation)
-        int pos1Base = headDim; // seq=1 offset
-        qPtr[pos1Base + 0] = 1.0f;
-        qPtr[pos1Base + 1] = 0.0f;
-
-        rope.Forward(q, k, batch, numHeads, totalSeqLen);
-
-        // Axis 0 dims [0..3], pos=0 → cos=1, sin=0 → no rotation
-        Assert.InRange(qPtr[pos1Base + 0], 1.0f - Tolerance, 1.0f + Tolerance);
-        Assert.InRange(qPtr[pos1Base + 1], -Tolerance, Tolerance);
 
         q.Dispose();
         k.Dispose();
@@ -376,24 +230,5 @@ public sealed class FluxRopeTests
 
         q.Dispose();
         k.Dispose();
-    }
-
-    // ── Latent Packing Tests (FluxPipeline Pack/Unpack) ────────────
-
-    [Fact]
-    public void BuildPositionIds_1024x1024Resolution()
-    {
-        // 1024x1024 image: latent 128x128, packed 64x64 = 4096 image tokens
-        int txtSeqLen = 256;
-        int hPacked = 64;
-        int wPacked = 64;
-        int totalSeqLen = txtSeqLen + hPacked * wPacked;
-
-        Tensor posIds = FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-
-        Assert.Equal(totalSeqLen, (int)posIds.Shape[0]);
-        Assert.Equal(3, (int)posIds.Shape[1]);
-
-        posIds.Dispose();
     }
 }

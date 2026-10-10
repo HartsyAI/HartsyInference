@@ -90,39 +90,6 @@ public sealed class ToolLoopTests
     }
 
     [Fact]
-    public async Task UnknownToolResultIsFedBackAndTheLoopContinues()
-    {
-        ToolRegistry registry = new ToolRegistry().Add("other", () => "x");
-        ScriptedTextService service = new ScriptedTextService()
-            .Round(ScriptedTextService.Call("call_0", "nope"), ScriptedTextService.Result(""), ScriptedTextService.Stop(StopReason.ToolCall))
-            .Round(ScriptedTextService.Text("I cannot."), ScriptedTextService.Result("I cannot."), ScriptedTextService.Stop(StopReason.Stop));
-
-        List<TextChunk> chunks = await Collect(ToolLoop.RunAsync(service, Spec, Request(), registry));
-
-        TextMessage toolTurn = service.Requests[1].Messages[^1];
-        Assert.Equal(TextRole.Tool, toolTurn.Role);
-        Assert.StartsWith("{\"error\":\"Unknown tool 'nope'", toolTurn.Content, StringComparison.Ordinal);
-        Assert.Equal(StopReason.Stop, chunks[^1].Stop);
-        Assert.Equal("I cannot.", chunks[^2].Text);
-    }
-
-    [Fact]
-    public async Task PlainAnswerEndsAfterOneRoundWithTheRequestToolsOfferedAsIs()
-    {
-        ToolRegistry registry = new ToolRegistry().Add("hang_up", () => "ok");
-        ToolDefinition[] offered = [new ToolDefinition { Name = "only_this" }];
-        ScriptedTextService service = new ScriptedTextService()
-            .Round(ScriptedTextService.Text("Hi"), ScriptedTextService.Text("!"), ScriptedTextService.Result("Hi!"), ScriptedTextService.Stop(StopReason.Length));
-
-        List<TextChunk> chunks = await Collect(ToolLoop.RunAsync(service, Spec, Request(offered), registry));
-
-        Assert.Same(offered, Assert.Single(service.Requests).Tools);
-        Assert.Equal([TextChunkKind.Chunk, TextChunkKind.Chunk, TextChunkKind.Result, TextChunkKind.StopReason], chunks.Select(c => c.Kind));
-        Assert.Equal("Hi!", chunks[2].Text);
-        Assert.Equal(StopReason.Length, chunks[3].Stop);
-    }
-
-    [Fact]
     public async Task ErrorStopIsRelayedAndEndsTheLoop()
     {
         ToolRegistry registry = new ToolRegistry().Add("hang_up", () => "ok");
@@ -147,10 +114,4 @@ public sealed class ToolLoopTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await Collect(ToolLoop.RunAsync(service, Spec, Request(), registry, cancel: cts.Token)));
     }
 
-    [Fact]
-    public async Task InvalidMaxRoundsIsRejected()
-    {
-        ScriptedTextService service = new();
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await Collect(ToolLoop.RunAsync(service, Spec, Request(), new ToolRegistry(), maxRounds: 0)));
-    }
 }

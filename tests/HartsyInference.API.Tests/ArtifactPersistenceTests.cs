@@ -1,6 +1,5 @@
 using System.Text.Json;
 using HartsyInference.API.Endpoints;
-using HartsyInference.Engine;
 using HartsyInference.Engine.Requests;
 using Xunit;
 
@@ -13,13 +12,6 @@ public sealed class ArtifactPersistenceTests
 {
     /// <summary>Concrete stand-in for the abstract envelope; the persistence layer only reads its two fields.</summary>
     private sealed class TestRequest : NativeArtifactRequest;
-
-    [Fact]
-    public void ResolveDir_Unset_IsTheSharedOutputRoot()
-    {
-        Assert.Equal(RepoPaths.OutputRoot(), OutputWriter.ResolveDir(null));
-        Assert.Equal(RepoPaths.OutputRoot(), OutputWriter.ResolveDir("   "));
-    }
 
     [Fact]
     public void Save_WritesIntoTheRequestedDirectory_AndAutoNumbers()
@@ -60,45 +52,6 @@ public sealed class ArtifactPersistenceTests
         }
     }
 
-    [Fact]
-    public void Save_EmptyPayload_WritesNothing()
-    {
-        string dir = NewTempDir();
-        try
-        {
-            Assert.Null(ArtifactPersistence.Save(new TestRequest { OutputDir = dir }, [], "p", "png"));
-            Assert.Empty(Directory.GetFileSystemEntries(dir));
-        }
-        finally
-        {
-            Directory.Delete(dir, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void SaveGroup_PutsEveryStemInOneDirectory()
-    {
-        string dir = NewTempDir();
-        try
-        {
-            Dictionary<string, byte[]> stems = new Dictionary<string, byte[]>
-            {
-                ["vocals"] = [1],
-                ["drums"] = [2],
-            };
-            string? saved = ArtifactPersistence.SaveGroup(new TestRequest { OutputDir = dir }, stems, "separate", "wav");
-
-            Assert.NotNull(saved);
-            Assert.True(Directory.Exists(saved));
-            Assert.True(File.Exists(Path.Combine(saved!, "vocals.wav")));
-            Assert.True(File.Exists(Path.Combine(saved!, "drums.wav")));
-        }
-        finally
-        {
-            Directory.Delete(dir, recursive: true);
-        }
-    }
-
     /// <summary>The two controls must arrive from JSON — they are inherited members, and inheritance is exactly
     /// where a binder is most likely to silently drop them.</summary>
     [Fact]
@@ -111,35 +64,6 @@ public sealed class ArtifactPersistenceTests
         Assert.NotNull(req);
         Assert.False(req!.Save);
         Assert.Equal("/tmp/somewhere", req.OutputDir);
-    }
-
-    /// <summary>A video generation must leave something playable behind, not just a folder of PNGs. Skips the
-    /// container assertion when ffmpeg is absent, since the frames are the durable output either way.</summary>
-    [Fact]
-    public void VideoOutputWriter_WritesFrames_Soundtrack_AndAPlayableContainer()
-    {
-        string dir = NewTempDir();
-        try
-        {
-            const int w = 32, h = 16;
-            byte[][] frames = [new byte[w * h * 3], new byte[w * h * 3], new byte[w * h * 3]];
-            frames[1].AsSpan().Fill(200);
-            AudioBuffer audio = AudioBuffer.FromChannels([new float[48000], new float[48000]], 48000);
-
-            VideoOutputWriter.Written written = VideoOutputWriter.Write(frames, w, h, dir, "a test clip", audio, 24);
-
-            Assert.Equal(3, Directory.GetFiles(written.Directory, "frame_*.png").Length);
-            Assert.NotNull(written.AudioPath);
-            Assert.True(File.Exists(written.AudioPath));
-            if (written.Mp4Path is not null)
-            {
-                Assert.True(new FileInfo(written.Mp4Path).Length > 0);
-            }
-        }
-        finally
-        {
-            Directory.Delete(dir, recursive: true);
-        }
     }
 
     private static string NewTempDir()

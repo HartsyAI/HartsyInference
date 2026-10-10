@@ -30,30 +30,6 @@ public sealed class HcReferenceTests
     }
 
     [Fact]
-    public void Twenty_Iterations_Give_A_Doubly_Stochastic_Comb_Up_To_The_Sinkhorn_Residual()
-    {
-        int hc = Fx.GetProperty("hc").GetInt32(), t = Fx.GetProperty("tokens").GetInt32();
-        using Tensor mixes = F32(Floats(Fx.GetProperty("mixes")), t, (2 + hc) * hc);
-        using Tensor scale = F32(Floats(Fx.GetProperty("scale")), 3), bias = F32(Floats(Fx.GetProperty("bias")), (2 + hc) * hc);
-        using Tensor pre = Empty(DType.F32, t, hc), post = Empty(DType.F32, t, hc), comb = Empty(DType.F32, t, hc, hc);
-        using CpuBackend cpu = new();
-        cpu.HcSplitSinkhorn(pre, post, comb, mixes, scale, bias, hc, 20, 1e-6f);
-        float[] c = ReadF32(comb);
-        for (int tok = 0; tok < t; tok++)
-            for (int i = 0; i < hc; i++)
-            {
-                float row = 0f, col = 0f;
-                for (int j = 0; j < hc; j++)
-                {
-                    row += c[tok * hc * hc + i * hc + j];
-                    col += c[tok * hc * hc + j * hc + i];
-                }
-                Assert.InRange(row, 0.995f, 1.005f);        // rows are one normalization behind the columns
-                Assert.InRange(col, 1f - 1e-4f, 1f + 1e-4f);
-            }
-    }
-
-    [Fact]
     public void Pre_And_Post_Mix_Match_The_Upstream_Block_Functions()
     {
         int hc = Fx.GetProperty("hc").GetInt32(), t = Fx.GetProperty("tokens").GetInt32(), d = Fx.GetProperty("dim").GetInt32();

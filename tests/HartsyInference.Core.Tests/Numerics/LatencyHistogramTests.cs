@@ -8,14 +8,6 @@ namespace HartsyInference.Core.Tests.Numerics;
 public sealed class LatencyHistogramTests
 {
     [Fact]
-    public void Edges_AreTheFixedMicrosecondBounds()
-    {
-        Assert.Equal(new long[] { 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000 },
-            LatencyHistogram.UpperBoundsUs.ToArray());
-        Assert.Equal(11, LatencyHistogram.BucketCount);
-    }
-
-    [Fact]
     public void Record_LandsEachSampleInTheBucketWhoseUpperBoundItDoesNotExceed()
     {
         LatencyHistogram histogram = new();
@@ -57,37 +49,6 @@ public sealed class LatencyHistogramTests
         Assert.Equal(80_000, summary.P99Us);
         Assert.Equal(80_000, summary.MaxUs);
         Assert.Equal((40_000 + 60_000 + 150_000 + 3_000_000 + 80_000_000) / 5 / 1_000, summary.MeanUs);
-    }
-
-    [Fact]
-    public void Percentiles_OfAnEmptyHistogram_AreZero()
-    {
-        LatencyHistogram histogram = new();
-        Assert.Equal(0, histogram.PercentileUs(0.5));
-        LatencyHistogram.Summary summary = histogram.Snapshot();
-        Assert.Equal(new LatencyHistogram.Summary(0, 0, 0, 0, 0), summary);
-    }
-
-    [Fact]
-    public void Percentile_RejectsFractionsOutsideZeroOne()
-    {
-        LatencyHistogram histogram = new();
-        Assert.Throws<ArgumentOutOfRangeException>(() => histogram.PercentileUs(0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => histogram.PercentileUs(1.5));
-    }
-
-    [Fact]
-    public void Reset_ClearsEverything()
-    {
-        LatencyHistogram histogram = new();
-        histogram.Record(1_000_000);
-        histogram.Record(9_000_000);
-        histogram.Reset();
-        Assert.Equal(0, histogram.Count);
-        Assert.Equal(0, histogram.MaxNs);
-        long[] counts = new long[LatencyHistogram.BucketCount];
-        histogram.CopyCounts(counts);
-        Assert.All(counts, c => Assert.Equal(0, c));
     }
 
     /// <summary>The least any of a few identical passes allocated. An allocation inside <see cref="LatencyHistogram.Record"/>

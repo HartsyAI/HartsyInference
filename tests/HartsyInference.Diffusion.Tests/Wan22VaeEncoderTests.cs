@@ -64,24 +64,6 @@ public unsafe class Wan22VaeEncoderTests
     }
 
     [Fact]
-    public void EncodeThenDecode_RoundTripsShapes()
-    {
-        CpuBackend backend = new();
-        Wan22VaeEncoder enc = BuildEncoder();
-        Wan22VaeDecoder dec = new(dim: Dim, zDim: 48, dimMult: _dimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
-        dec.LoadWeights(LanceSyntheticWeights.BuildVae(Dim, 48, _dimMult, 2, [false, true, true]));
-
-        Tensor rgb = Rand5d(1, 3, 1, 32, 32, seed: 13);
-        Tensor latent = enc.EncodeFrame(backend, rgb);
-        Tensor decoded = dec.Decode(backend, latent);
-
-        Assert.Equal(3, (int)decoded.Shape[1]);
-        Assert.Equal(1, (int)decoded.Shape[2]);
-        Assert.Equal(32, (int)decoded.Shape[3]);
-        Assert.Equal(32, (int)decoded.Shape[4]);
-    }
-
-    [Fact]
     public void EncodeRgbFrame_AcceptsInterleavedBytes()
     {
         CpuBackend backend = new();

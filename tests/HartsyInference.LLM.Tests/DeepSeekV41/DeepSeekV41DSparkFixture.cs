@@ -38,14 +38,6 @@ internal static class DeepSeekV41DSparkFixture
     public static IEnumerable<(int Pos, JsonElement Expected)> Drafts() =>
         Dspark.GetProperty("drafts").EnumerateObject().Select(p => (int.Parse(p.Name), p.Value));
 
-    /// <summary>Checks upstream's draft ids exactly, and its logits and confidences within <see cref="Tolerance"/>.</summary>
-    public static void Compare(DeepSeekV41DSparkDraft draft, JsonElement expected, int pos)
-    {
-        Assert.Equal(Ints(expected.GetProperty("ids")), draft.Ids);
-        AssertClose(Floats(expected.GetProperty("logits")), draft.Logits, $"pos {pos} logits");
-        AssertClose(Floats(expected.GetProperty("confidence")), draft.Confidence, $"pos {pos} confidence");
-    }
-
     /// <summary>Runs the target over <paramref name="ids"/> the way upstream did: the 11-token prefill as one chunk, then one token per decode step. Returns the taps
     /// of every position, <c>[ids, Width]</c>.</summary>
     public static float[] RunTarget(CpuBackend cpu, int[] ids)

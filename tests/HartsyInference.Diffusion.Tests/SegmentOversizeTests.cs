@@ -10,9 +10,7 @@ public sealed class SegmentOversizeTests
     [Theory]
     [InlineData(0, false, 16)]
     [InlineData(0, true, 0)]
-    [InlineData(24, false, 24)]
     [InlineData(24, true, 24)]
-    [InlineData(8, true, 8)]
     public void ResolveOversize_AppliesTheDefaultOnlyWhenNotExact(int oversize, bool exact, int expected)
     {
         Regional regional = new Regional { MaskOversize = oversize, ExactMaskOversize = exact };

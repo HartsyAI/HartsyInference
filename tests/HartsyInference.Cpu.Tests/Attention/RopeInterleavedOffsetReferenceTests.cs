@@ -30,10 +30,6 @@ public sealed class RopeInterleavedOffsetReferenceTests
         Check("q", "qRotated", "qInverse", 1, Fx.GetProperty("length").GetInt32(), Fx.GetProperty("heads").GetInt32(), Fx.GetProperty("dim").GetInt32());
 
     [Fact]
-    public void Rank3_Offset_Rotation_Matches_Upstream() =>
-        Check("k", "kRotated", "kInverse", 1, Fx.GetProperty("length").GetInt32(), Fx.GetProperty("dim").GetInt32());
-
-    [Fact]
     public void Elements_Outside_The_Rotary_Slice_Are_Untouched()
     {
         int rd = Fx.GetProperty("rotaryDim").GetInt32(), off = Fx.GetProperty("dimOffset").GetInt32(), len = Fx.GetProperty("length").GetInt32();

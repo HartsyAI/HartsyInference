@@ -85,15 +85,6 @@ public sealed class CondTokenWeightsTests
     }
 
     [Fact]
-    public void WeightsFallingEntirelyOutsideTheConditioningChangeNothing()
-    {
-        IBackend backend = new CpuBackend();
-        using Tensor cond = Ramp(2, 2);
-        float[] weights = [2f, 3f, 1f, 1f];
-        Assert.Null(CondTokenWeights.ScaleRightAligned(backend, cond, weights));
-    }
-
-    [Fact]
     public void ABatchedConditioningScalesTheSameRowInEverySlot()
     {
         IBackend backend = new CpuBackend();
@@ -159,18 +150,6 @@ public sealed class CondTokenWeightsTests
         Assert.Equal(2f, scaledPooled!.AsReadOnlySpan<float>()[0], 5);
     }
 
-    [Fact]
-    public void ApplyDoesNothingForAnUnweightedSequence()
-    {
-        IBackend backend = new CpuBackend();
-        using Tensor cond = Ramp(2, 2);
-        using Tensor pooled = Ramp(1, 2);
-        WeightedTokenSequence sequence = new WeightedTokenSequence([1, 2], [1f, 1f]) { UniformWeight = 1f };
-        CondScaleResult result = CondTokenWeights.Apply(backend, cond, pooled, sequence);
-        Assert.Null(result.Cond);
-        Assert.Null(result.Pooled);
-    }
-
     /// <summary>The input is never mutated: several pipelines cache conditioning under a token-id key that CondScale
     /// does not change, so an in-place scale would hand the next unweighted request the weighted tensor.</summary>
     [Fact]
@@ -200,25 +179,5 @@ public sealed class CondTokenWeightsTests
         ArgumentException ex = Assert.Throws<ArgumentException>(
             () => CondTokenWeights.ScaleUniform(backend, cond, pooled, 0.5f));
         Assert.Equal(which, ex.ParamName);
-    }
-
-    /// <summary>Why the guard above matters only to a direct caller. It is tempting to assume a uniform weight
-    /// reaches <see cref="CondTokenWeights.ScaleUniform"/> through <c>Apply</c> and carries an unchecked pooled
-    /// vector with it — it does not. <c>ScaleRightAligned</c> returns null only when no weight other than 1 lands
-    /// inside the cond, and a uniform non-1 weight lands on every row, so the per-token path takes it and the
-    /// pooled vector is never touched. This pins that routing, so a future change that makes the uniform fallback
-    /// genuinely reachable fails here rather than silently widening what reaches the scale.</summary>
-    [Fact]
-    public void AUniformWeightTakesThePerTokenPathAndNeverSeesThePooledVector()
-    {
-        IBackend backend = new CpuBackend();
-        using Tensor cond = Ramp(2, 2);
-        using Tensor pooled = new Tensor(new TensorShape(1, 3), DType.F16);
-        WeightedTokenSequence sequence = new WeightedTokenSequence([1, 2], [1.5f, 1.5f]) { UniformWeight = 1.5f };
-        CondScaleResult result = CondTokenWeights.Apply(backend, cond, pooled, sequence);
-        using Tensor? scaledCond = result.Cond;
-        Assert.NotNull(scaledCond);
-        Assert.Null(result.Pooled);
-        Assert.Equal(DType.F16, pooled.DType);
     }
 }

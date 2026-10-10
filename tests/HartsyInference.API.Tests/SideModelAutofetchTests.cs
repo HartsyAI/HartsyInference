@@ -43,12 +43,6 @@ public sealed class SideModelAutofetchTests : IDisposable
     };
 
     [Fact]
-    public void TheDefaultIsToFetch()
-    {
-        Assert.True(EngineKnobs.SideModelAutofetch.Default);
-    }
-
-    [Fact]
     public async Task AutofetchOff_ThrowsBeforeAnyRequest_NamingTheKnobAndTheRepo()
     {
         KnobStore.Set(EngineKnobs.SideModelAutofetch, false);

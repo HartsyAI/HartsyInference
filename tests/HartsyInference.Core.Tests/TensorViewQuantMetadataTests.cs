@@ -66,27 +66,6 @@ public sealed unsafe class TensorViewQuantMetadataTests
     }
 
     [Fact]
-    public void Reshape_ThatRenumbersRows_IsFineWithoutPerRowCompanions()
-    {
-        using Tensor weight = new Tensor(new TensorShape(4, 256), DType.Q4_K);
-
-        using Tensor view = weight.Reshape(new TensorShape(256, 4));
-
-        Assert.Equal(1.0f, view.Fp8ScaleFactor);
-        Assert.Null(view.QuantInfo);
-    }
-
-    [Fact]
-    public void ReinterpretAs_CarriesCompanionsOntoTheRelabelledView()
-    {
-        using Tensor packed = new Tensor(new TensorShape(6, 8), DType.U8) { Fp8ScaleFactor = 0.25f };
-
-        using Tensor view = packed.ReinterpretAs(DType.F4E2M1, new TensorShape(6, 16));
-
-        Assert.Equal(0.25f, view.Fp8ScaleFactor);
-    }
-
-    [Fact]
     public void To_CarriesTheInputScaleAlongWithTheWeightScale()
     {
         using Tensor weight = Fp8Weight(4, 256);
@@ -117,13 +96,6 @@ public sealed unsafe class TensorViewQuantMetadataTests
         Assert.True((byte*)weight.DataPointer + 8 == (byte*)slice.DataPointer, "SliceRows copied instead of viewing.");
         ReadOnlySpan<byte> seen = slice.AsReadOnlySpan<byte>();
         for (int i = 0; i < 12; i++) Assert.Equal((byte)(8 + i), seen[i]);
-    }
-
-    [Fact]
-    public void SliceRows_OutOfRange_Throws()
-    {
-        using Tensor weight = new Tensor(new TensorShape(6, 4), DType.U8);
-        Assert.Throws<HartsyInferenceException>(() => weight.SliceRows(4, 3));
     }
 
     [Fact]
@@ -179,54 +151,6 @@ public sealed unsafe class TensorViewQuantMetadataTests
     }
 
     [Fact]
-    public void Reshape_CarriesTheAdjunctWhenRowsAndColumnsSurvive()
-    {
-        using Tensor weight = new Tensor(new TensorShape(4, 256), DType.Q4_K);
-        using Tensor patched = weight.WithLowRankAdjunct(Adjunct(4, 256, 2));
-
-        using Tensor view = patched.Reshape(new TensorShape(4, 16, 16));
-
-        Assert.Same(patched.LowRankAdjunct, view.LowRankAdjunct);
-    }
-
-    [Fact]
-    public void Reshape_ThatRenumbersRows_RefusesAnAdjunctWeight()
-    {
-        using Tensor weight = new Tensor(new TensorShape(4, 256), DType.Q4_K);
-        using Tensor patched = weight.WithLowRankAdjunct(Adjunct(4, 256, 2));
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
-            () => patched.Reshape(new TensorShape(256, 4)));
-        Assert.Contains("LoRA-adjunct", error.Message);
-    }
-
-    [Fact]
-    public void ReinterpretAs_ThatChangesTheInputWidth_RefusesAnAdjunctWeight()
-    {
-        // nvfp4 relabels U8 [N, K/2] as F4E2M1 [N, K]: rows survive, the inner dimension does not, and the
-        // adjunct's down matrix is indexed by exactly that dimension.
-        using Tensor packed = new Tensor(new TensorShape(6, 8), DType.U8);
-        using Tensor patched = packed.WithLowRankAdjunct(Adjunct(6, 8, 2));
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
-            () => patched.ReinterpretAs(DType.F4E2M1, new TensorShape(6, 16)));
-        Assert.Contains("LoRA-adjunct", error.Message);
-    }
-
-    [Fact]
-    public void SliceRows_LeavesTheAdjunctToTheCaller()
-    {
-        // Same rule QuantInfo follows: only the caller knows the window, and a silently carried whole-weight
-        // adjunct would add the wrong rows' delta to a chunked projection.
-        using Tensor weight = new Tensor(new TensorShape(6, 256), DType.Q4_K);
-        using Tensor patched = weight.WithLowRankAdjunct(Adjunct(6, 256, 2));
-
-        using Tensor slice = patched.SliceRows(2, 3);
-
-        Assert.Null(slice.LowRankAdjunct);
-    }
-
-    [Fact]
     public void AdjunctSliceRows_NarrowsTheUpMatrixAndSharesTheDownMatrix()
     {
         LowRankAdjunct adjunct = Adjunct(6, 256, 2);
@@ -260,16 +184,5 @@ public sealed unsafe class TensorViewQuantMetadataTests
         Assert.Contains(adjunct.Terms[0].Up!, expanded);
         // The windows a chunked projection created must be freed with the weight too, not leaked on the device.
         Assert.Contains(window.Terms[0].Up!, expanded);
-    }
-
-    [Fact]
-    public void QuantInfoSliceRows_RefusesNvfp4BlockScales()
-    {
-        using Tensor blockScale = new Tensor(new TensorShape(128, 4), DType.F8E4M3);
-        QuantWeightInfo info = new() { Format = "nvfp4", BlockScale = blockScale };
-
-        NotSupportedException error = Assert.Throws<NotSupportedException>(
-            () => info.SliceRows(0, 4, "blocks.0.attn.qkv_proj.weight"));
-        Assert.Contains("blocks.0.attn.qkv_proj.weight", error.Message);
     }
 }

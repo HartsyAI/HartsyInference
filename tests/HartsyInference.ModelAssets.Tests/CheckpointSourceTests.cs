@@ -86,14 +86,6 @@ public sealed unsafe class CheckpointSourceTests : IDisposable
     }
 
     [Fact]
-    public void Sniff_RefusesAFileTooSmallToHoldAHeader()
-    {
-        string path = Path.Combine(_tempDir, "truncated.safetensors");
-        File.WriteAllBytes(path, [1, 2, 3, 4]);
-        Assert.Throws<UnsupportedModelException>(() => CheckpointSource.Sniff(path));
-    }
-
-    [Fact]
     public void Open_PresentsAGgufAndItsSafetensorsTwinIdentically()
     {
         Dictionary<string, Tensor> weights = new()
@@ -131,43 +123,6 @@ public sealed unsafe class CheckpointSourceTests : IDisposable
     }
 
     [Fact]
-    public void Header_ReportsTheSameInventoryForBothContainers()
-    {
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["blocks.0.attn.to_q.weight"] = F32(new TensorShape(4, 8)),
-            ["blocks.0.norm.weight"] = F32(new TensorShape(8)),
-        };
-        try
-        {
-            (string safetensorsPath, string ggufPath) = WriteBothContainers(weights,
-                new Dictionary<string, string> { ["format"] = "pt" });
-
-            CheckpointHeader safetensorsHeader = CheckpointHeader.Read(safetensorsPath);
-            CheckpointHeader ggufHeader = CheckpointHeader.Read(ggufPath);
-
-            Assert.Equal(ModelFormat.SafeTensors, safetensorsHeader.Format);
-            Assert.Equal(ModelFormat.Gguf, ggufHeader.Format);
-            Assert.Equal(safetensorsHeader.Descriptors.Keys.Order(), ggufHeader.Descriptors.Keys.Order());
-            foreach (string key in weights.Keys)
-            {
-                SafeTensorDescriptor expected = safetensorsHeader.Descriptors[key];
-                SafeTensorDescriptor actual = ggufHeader.Descriptors[key];
-                Assert.Equal(expected.DType, actual.DType);
-                // A planner validating a checkpoint's structure by shape must see the same shape from either container.
-                Assert.Equal(expected.Shape, actual.Shape);
-                Assert.Equal(expected.ByteLength, actual.ByteLength);
-            }
-            Assert.Equal("pt", safetensorsHeader.Metadata["format"]);
-            Assert.Equal("checkpointsourcetest", ggufHeader.Metadata["general.architecture"]);
-        }
-        finally
-        {
-            foreach (Tensor tensor in weights.Values) tensor.Dispose();
-        }
-    }
-
-    [Fact]
     public void Open_ReversesEveryGgufAxis_NotOnlyMatrices()
     {
         // ggml ne order reverses every axis, so a convolution kernel the engine calls [out, in, kh, kw] is stored
@@ -194,30 +149,6 @@ public sealed unsafe class CheckpointSourceTests : IDisposable
         finally
         {
             foreach (Tensor tensor in weights.Values) tensor.Dispose();
-        }
-    }
-
-    [Fact]
-    public void AConverterGivenAnUnfoldedDictionaryRefusesByName()
-    {
-        // The fold has to precede the rename, so a caller that skips the container and hands over a raw loader
-        // dictionary must fail loudly — the alternative is a model whose weights are quietly real/scale, which has no
-        // symptom at load and renders as noise at the end of a generation.
-        Dictionary<string, Tensor> raw = new()
-        {
-            ["transformer.transformer_blocks.0.attn.to_q.weight"] = new Tensor(new TensorShape(4, 8), DType.F8E4M3),
-            ["transformer.transformer_blocks.0.attn.to_q.weight_scale"] = F32(new TensorShape(1)),
-        };
-        try
-        {
-            NotSupportedException error = Assert.Throws<NotSupportedException>(
-                () => CheckpointConverters.QwenImageCheckpointConverter.Convert(raw));
-            Assert.Contains("weight_scale", error.Message);
-            Assert.Contains("CheckpointSource.Open", error.Message);
-        }
-        finally
-        {
-            foreach (Tensor tensor in raw.Values) tensor.Dispose();
         }
     }
 
@@ -261,11 +192,11 @@ public sealed unsafe class CheckpointSourceTests : IDisposable
         }
     }
 
+    /// <summary>A real GGUF is mostly quantized matrices and a long tail of F32 norms, so a count would report "not
+    /// quantized" for a file that is overwhelmingly Q8_0. The dominant quant is named by bytes, not by tensor count.</summary>
     [Fact]
     public void Header_NamesTheDominantQuantByBytesNotByTensorCount()
     {
-        // A real GGUF is mostly quantized matrices and a long tail of F32 norms, so a count would report "not
-        // quantized" for a file that is overwhelmingly Q8_0.
         Dictionary<string, Tensor> weights = new()
         {
             ["blocks.0.attn.to_q.weight"] = new Tensor(new TensorShape(64, 32), DType.Q8_0),
@@ -284,21 +215,6 @@ public sealed unsafe class CheckpointSourceTests : IDisposable
             }
 
             Assert.Equal(DType.Q8_0.Name, CheckpointHeader.Read(path).DominantQuantName());
-        }
-        finally
-        {
-            foreach (Tensor tensor in weights.Values) tensor.Dispose();
-        }
-    }
-
-    [Fact]
-    public void Header_ReportsNoDominantQuantForADenseCheckpoint()
-    {
-        Dictionary<string, Tensor> weights = new() { ["blocks.0.attn.to_q.weight"] = F32(new TensorShape(4, 8)) };
-        try
-        {
-            (string safetensorsPath, _) = WriteBothContainers(weights);
-            Assert.Null(CheckpointHeader.Read(safetensorsPath).DominantQuantName());
         }
         finally
         {

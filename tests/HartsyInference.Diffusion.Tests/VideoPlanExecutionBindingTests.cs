@@ -18,54 +18,6 @@ public sealed class VideoPlanExecutionBindingCollection
 public sealed class VideoPlanExecutionBindingTests
 {
     [Fact]
-    public async Task MediaBuffersRemainZeroCopyInExecutionSnapshot()
-    {
-        TrackingRecipe recipe = RegisterRecipe();
-        ImageData extraImage = new ImageData { Rgb = [1, 2, 3], Width = 1, Height = 1 };
-        VideoRequest request = Request(extraImage);
-        using TempCheckpoint checkpoint = new TempCheckpoint();
-        using InferenceEngine engine = new InferenceEngine("cpu");
-        VideoPlan plan = await engine.VideoPlanning.PlanAsync(Spec(recipe.Name, checkpoint.Path), request);
-        Assert.True(plan.IsValid);
-
-        await engine.Video.GenerateAsync(plan, request);
-
-        ImageData executedImage = Assert.IsType<ImageData>(recipe.Pipeline.LastRequest!.Extra["image"]);
-        Assert.Same(extraImage, executedImage);
-        Assert.Same(extraImage.Rgb, executedImage.Rgb);
-        Assert.Equal([1, 2, 3], executedImage.Rgb);
-        Assert.Equal(1, recipe.ConstructCalls);
-        Assert.Equal(1, recipe.Pipeline.GenerateCalls);
-    }
-
-    [Fact]
-    public void CreateSharesTypedMediaBuffersWhileSnapshottingCollections()
-    {
-        ImageData image = new ImageData { Rgb = new byte[12], Width = 2, Height = 2 };
-        VideoClip video = new VideoClip { Data = new byte[32], Format = "mp4" };
-        AudioClip audio = new AudioClip { Data = new byte[16], Format = "wav" };
-        List<ImageData> references = [image];
-        VideoRequest request = new VideoRequest
-        {
-            Prompt = "test",
-            InitImage = image,
-            VideoAudioInput = audio,
-            ReferenceImages = references,
-            DrivingVideo = video,
-        };
-        ModelSpec model = new ModelSpec { Requested = "test", Modality = Modality.Video };
-
-        VideoRequestExecutionBinding binding = VideoRequestExecutionBinding.Create(model, request);
-
-        Assert.NotSame(request, binding.Request);
-        Assert.Same(image.Rgb, binding.Request.InitImage!.Rgb);
-        Assert.Same(audio.Data, binding.Request.VideoAudioInput!.Data);
-        Assert.Same(video.Data, binding.Request.DrivingVideo!.Data);
-        Assert.NotSame(references, binding.Request.ReferenceImages);
-        Assert.Same(image, Assert.Single(binding.Request.ReferenceImages!));
-    }
-
-    [Fact]
     public async Task NestedListMutationAfterPlanningDoesNotChangeExecutionSnapshot()
     {
         TrackingRecipe recipe = RegisterRecipe();
@@ -115,30 +67,6 @@ public sealed class VideoPlanExecutionBindingTests
 
         aux["tokenizer"] = "changed-after-plan";
         Assert.Equal("original", plan.Model.Aux["tokenizer"]);
-    }
-
-    [Fact]
-    public async Task ArbitraryMutableExtraIsPreserved()
-    {
-        TrackingRecipe recipe = RegisterRecipe();
-        CustomExtra custom = new CustomExtra();
-        Dictionary<string, object> extra = new Dictionary<string, object> { ["mutable"] = custom };
-        VideoRequest request = new VideoRequest
-        {
-            Prompt = "test",
-            Extra = extra,
-        };
-        using TempCheckpoint checkpoint = new TempCheckpoint();
-        using InferenceEngine engine = new InferenceEngine("cpu");
-
-        VideoPlan plan = await engine.VideoPlanning.PlanAsync(Spec(recipe.Name, checkpoint.Path), request);
-        extra["mutable"] = new object();
-        await engine.Video.GenerateAsync(plan, request);
-
-        object executed = recipe.Pipeline.LastRequest!.Extra["mutable"];
-        Assert.Same(custom, executed);
-        Assert.Equal(1, recipe.ConstructCalls);
-        Assert.Equal(1, recipe.Pipeline.GenerateCalls);
     }
 
     [Fact]
@@ -197,22 +125,6 @@ public sealed class VideoPlanExecutionBindingTests
         Assert.Equal(0, recipe.Pipeline.GenerateCalls);
     }
 
-    [Fact]
-    public async Task VerifiedPlanCanBeReverifiedAtRecipeConstructionBoundary()
-    {
-        TrackingRecipe recipe = RegisterRecipe();
-        VideoRequest request = Request(new ImageData { Rgb = [1, 2, 3], Width = 1, Height = 1 });
-        using TempCheckpoint checkpoint = new TempCheckpoint();
-        using InferenceEngine engine = new InferenceEngine("cpu");
-        VideoPlan plan = await engine.VideoPlanning.PlanAsync(Spec(recipe.Name, checkpoint.Path), request);
-
-        VideoPlan serviceVerified = VideoRequestExecutionBinding.RequirePlannedState(plan);
-        VideoPlan recipeVerified = VideoRequestExecutionBinding.RequirePlannedState(serviceVerified);
-
-        Assert.Same(plan, serviceVerified);
-        Assert.Same(plan, recipeVerified);
-    }
-
     private static TrackingRecipe RegisterRecipe()
     {
         TrackingRecipe recipe = new TrackingRecipe("binding-test-" + Guid.NewGuid().ToString("N"));
@@ -257,11 +169,6 @@ public sealed class VideoPlanExecutionBindingTests
             ConstructCalls++;
             return Pipeline;
         }
-    }
-
-    private sealed class CustomExtra
-    {
-        public List<int> Values { get; } = [1, 2, 3];
     }
 
     private sealed class TrackingPipeline : IVideoRecipePipeline

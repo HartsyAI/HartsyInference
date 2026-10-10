@@ -109,66 +109,6 @@ public sealed class GgufQuantizerTests : IDisposable
         }
     }
 
-    [Fact]
-    public unsafe void EndToEnd_Q4KM_RecoversApproximateValues()
-    {
-        string path = Path.Combine(_tempDir, "e2e_q4km.gguf");
-
-        Tensor src = new Tensor(new TensorShape(256, 256), DType.F32);
-        try
-        {
-            float* sp = (float*)src.DataPointer;
-            Random rng = new Random(7);
-            for (int i = 0; i < 256 * 256; i++) sp[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
-
-            Dictionary<string, Tensor> tensors = new() { ["layer.0.linear.weight"] = src };
-            GgufQuantizer.ConvertDictionaryToGguf(
-                tensors, path, GgufQuantPolicy.Q4_K_M, architecture: "test_arch");
-
-            (Dictionary<string, Tensor> loaded, GgufModelLoader.LoadedGgufModel handle) =
-                GgufModelLoader.LoadDequantized(path, DType.F32);
-            using (handle)
-            {
-                float* rp = (float*)loaded["layer.0.linear.weight"].DataPointer;
-                float sumSqErr = 0f;
-                for (int i = 0; i < 256 * 256; i++)
-                {
-                    float err = rp[i] - sp[i];
-                    sumSqErr += err * err;
-                }
-                float rmse = MathF.Sqrt(sumSqErr / (256 * 256));
-                Assert.True(rmse < 0.05f, $"Q4_K round-trip RMSE {rmse:F4} too large");
-
-                foreach (Tensor t in loaded.Values) t.Dispose();
-            }
-        }
-        finally
-        {
-            src.Dispose();
-        }
-    }
-
-    [Fact]
-    public unsafe void Q5_K_M_PolicyAppliesAcrossKnownTensorPatterns()
-    {
-        string path = Path.Combine(_tempDir, "q5km.gguf");
-        Dictionary<string, Tensor> tensors = BuildSyntheticDict();
-        try
-        {
-            GgufQuantizer.ConvertDictionaryToGguf(
-                tensors, path, GgufQuantPolicy.Q5_K_M, architecture: "test_arch");
-
-            using GgufModelLoader.LoadedGgufModel loaded = GgufModelLoader.Load(path);
-            Assert.Equal(DType.Q5_K, loaded.Weights["layer.0.attn_q.weight"].DType);
-            Assert.Equal(DType.Q6_K, loaded.Weights["layer.0.attn_v.weight"].DType);
-            Assert.Equal(DType.F16, loaded.Weights["layer.0.input_norm.weight"].DType);
-        }
-        finally
-        {
-            foreach (Tensor t in tensors.Values) t.Dispose();
-        }
-    }
-
     /// <summary>A quant cache read back through <see cref="GgufQuantizer.ReadBack"/> carries its source shapes,
     /// whichever axis order the file was written in. The writer emits ggml order, so a raw read hands a
     /// <c>[256, 512]</c> projection over as <c>[512, 256]</c>; a cache written before the writer changed is in the

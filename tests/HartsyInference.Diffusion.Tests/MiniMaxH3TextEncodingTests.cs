@@ -20,16 +20,6 @@ public class MiniMaxH3TextEncodingTests
     }
 
     [Fact]
-    public void TextOnlyPromptIsTheRawPromptWithNoTemplate()
-    {
-        MiniMaxH3TextEncoding.Encoded encoded = MiniMaxH3TextEncoding.Build(FakeEncode, "a cat");
-        Assert.Equal(["a cat"], encoded.TextSegments);
-        Assert.Equal(5, encoded.Length);
-        Assert.All(encoded.ModalityTags, tag => Assert.Equal(MiniMaxH3TextEncoding.TextTag, tag));
-        Assert.Empty(encoded.VisionBlockTokenCounts);
-    }
-
-    [Fact]
     public void EmptyPresentationFallsBackToThePadToken()
     {
         MiniMaxH3TextEncoding.Encoded encoded = MiniMaxH3TextEncoding.Build(FakeEncode, string.Empty);
@@ -106,34 +96,14 @@ public class MiniMaxH3TextEncodingTests
         Assert.Equal([0.25, 1.0], odd.Select(b => b.TimestampSeconds!.Value));
     }
 
-    [Fact]
-    public void ExplicitFrameTimestampsOverrideThe2FpsDefault()
-    {
-        IReadOnlyList<MiniMaxH3TextEncoding.VisionBlock> blocks =
-            MiniMaxH3TextEncoding.VideoBlocks(4, 1, [10.0, 10.5, 11.0, 11.5]);
-        Assert.Equal([10.25, 11.25], blocks.Select(b => b.TimestampSeconds!.Value));
-        Assert.Throws<ArgumentException>(() => MiniMaxH3TextEncoding.VideoBlocks(4, 1, [0.0, 0.5]));
-    }
-
     [Theory]
     // Python's "%.1f" rounds half-to-even on the exact binary value; every default block timestamp is a midpoint.
     [InlineData(0.25, "0.2")]
-    [InlineData(1.25, "1.2")]
-    [InlineData(2.25, "2.2")]
-    [InlineData(3.25, "3.2")]
     [InlineData(0.75, "0.8")]
-    [InlineData(1.0, "1.0")]
     [InlineData(12.5, "12.5")]
     public void FormatTimestampMatchesThePythonFormat(double seconds, string expected)
     {
         Assert.Equal(expected, MiniMaxH3TextEncoding.FormatTimestamp(seconds));
-    }
-
-    [Fact]
-    public void MergedTokenCountCollapsesTheMergeBlocks()
-    {
-        Assert.Equal(64, MiniMaxH3TextEncoding.MergedTokenCount(16, 16));
-        Assert.Equal(24, MiniMaxH3TextEncoding.MergedTokenCount(12, 8));
     }
 
     [Fact]

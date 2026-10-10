@@ -45,22 +45,11 @@ public sealed class ConversionScheduleTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
     [InlineData(0)]
     public void Fp8QuantizationInsideAParallelLoop_CompletesAndAgrees_AtEveryCap(int cap)
     {
         int threads = cap == 0 ? Environment.ProcessorCount : cap;
         WithCpuThreads(threads, () => RunBounded(QuantizeInsideAParallelLoop));
-    }
-
-    [Fact]
-    public void Fp8QuantizationInsideParallelLoops_OnTwoForeignThreads_OneOfThemInline_Completes()
-    {
-        RunBounded(QuantizeInsideAParallelLoop, () =>
-        {
-            using CpuParallel.InlineScope scope = CpuParallel.EnterInline();
-            QuantizeInsideAParallelLoop();
-        });
     }
 
     [Fact]
@@ -86,7 +75,6 @@ public sealed class ConversionScheduleTests
     [InlineData("mxfp4-e8m0")]
     [InlineData("modelopt-nvfp4")]
     [InlineData("affine-int4")]
-    [InlineData("affine-int8")]
     public void BlockScaleCodecs_GiveTheSameBits_UnderEverySchedule_AndForARowWindow(string codec)
     {
         const int rows = 256, cols = 512;

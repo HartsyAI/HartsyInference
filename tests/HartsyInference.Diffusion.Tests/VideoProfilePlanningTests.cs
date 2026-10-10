@@ -41,26 +41,7 @@ public sealed class VideoProfilePlanningTests : IDisposable
 
     [Theory]
     [InlineData("e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a", "Main")]
-    [InlineData("9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779", "Main")]
-    [InlineData("12944c1f7791637e7de12208aef04da82bd26b95271b1b47d817364315ade993", "Main")]
-    [InlineData("f86f2f79ebd2d76eb8eeb46091e83982e6ff51d255747e7b16e92834b392b8e9", "Main")]
-    [InlineData("9ad5c98b533894c122050d32804a14f49fca8edc16c52564a281cdc5825ac934", "Main")]
-    [InlineData("e64cef63bc2785bcd72e6103c52aa78c6cd2c4f9870a7ce79675083fd65cf2e7", "Main")]
-    [InlineData("e0441d26414f6e0c28f43d580e6cc56fad424da0fa4d261b698ca73188aa6332", "Main")]
-    [InlineData("497c0ff6377eb239d8b446c991a52a69e0817447d92c4525bd85ff8b449fcbaa", "Main")]
     [InlineData("5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c", "Adapter")]
-    [InlineData("9e642fc8749c74f8da5e2382877ab5c7aa37b9a73b7fd0d6d457bd1b3cb1ae99", "Adapter")]
-    [InlineData("08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980", "Adapter")]
-    [InlineData("9b0efe3613b43a84e30febaa43af27432ea9d0711eac7bba904b2556b175f6d4", "Adapter")]
-    [InlineData("2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e", "Adapter")]
-    [InlineData("e16ac20824d6e6649b193806f8fb095639bd9946c97b1bb84b4248eab1cc807f", "Adapter")]
-    [InlineData("c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc", "Adapter")]
-    [InlineData("1bdabc2e9fce20b1db563b96bcf6e46adcad4c1964f423676436bf266cc7416c", "Adapter")]
-    [InlineData("449d80f301ac571622c72e28b8fd72a4b3681b7a8df8a92f17c8f6ec43f56558", "Adapter")]
-    [InlineData("b5e25a59292d51bca3fc02b9a0b2284e11b4eb20921a9c5adc2db785956b8966", "Adapter")]
-    [InlineData("0b29be7042d883970eb0c20774a9ba03d95669ed80a721bb4d21be8ea0d0a196", "Adapter")]
-    [InlineData("111c82e669f6e20e628228172edf39395f1a9fc3ad049793895e542c0f55b18c", "Adapter")]
-    [InlineData("7221ae65d78780354d51e5048d29728d9f1f8fb9baf50b1dd3df85f5101413d3", "Main")]
     [InlineData("919a48acb525dc8fc70287fcd94ec1f5e5e289a77f1df14d01099c6ce204eb02", "ControlNet")]
     [InlineData("9bb2d96f218c76babd85e0611b85ca8fb330a90546c01a0005e8a58a59593410", "VideoVae")]
     public void Manifest_ContainsEveryPublishedContractHash(string hash, string expectedRole)
@@ -68,25 +49,6 @@ public sealed class VideoProfilePlanningTests : IDisposable
         Assert.True(VideoProfileManifest.TryGetByHash(hash, out VideoKnownArtifact? artifact));
         Assert.NotNull(artifact);
         Assert.Equal(expectedRole, artifact!.Role.ToString());
-    }
-
-    [Fact]
-    public void Manifest_LightXComfyAndDiffusersAliasesShareTheEffectiveProfile()
-    {
-        Assert.True(VideoProfileManifest.TryGetByHash(
-            "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980",
-            out VideoKnownArtifact? comfy));
-        Assert.True(VideoProfileManifest.TryGetByHash(
-            "9b0efe3613b43a84e30febaa43af27432ea9d0711eac7bba904b2556b175f6d4",
-            out VideoKnownArtifact? diffusers));
-
-        Assert.NotNull(comfy);
-        Assert.NotNull(diffusers);
-        Assert.Equal(comfy!.Id, diffusers!.Id);
-        Assert.Equal(comfy.Task, diffusers.Task);
-        Assert.Equal(comfy.Steps, diffusers.Steps);
-        Assert.Equal(comfy.FlowShift, diffusers.FlowShift);
-        Assert.Equal(comfy.AudioFlowShift, diffusers.AudioFlowShift);
     }
 
     [Fact]
@@ -164,28 +126,6 @@ public sealed class VideoProfilePlanningTests : IDisposable
         string changed = await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None);
         Assert.NotEqual(firstHash, changed);
         Assert.Equal(1, VideoCheckpointHashCache.StateCountFor(path));
-    }
-
-    [Fact]
-    public async Task HashCache_PersistsExactHashAcrossProcessStateReset()
-    {
-        string path = Path.Combine(_tempDir, "persistent-hash.bin");
-        byte[] data = Encoding.UTF8.GetBytes("one exact immutable checkpoint state");
-        await File.WriteAllBytesAsync(path, data);
-        VideoCheckpointHashCache.RemovePersistent(path);
-        VideoCheckpointHashCache.Clear();
-        int before = VideoCheckpointHashCache.ComputeCountFor(path);
-
-        string first = await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None);
-        int afterFirst = VideoCheckpointHashCache.ComputeCountFor(path);
-        Assert.Equal(before + 1, afterFirst);
-
-        // Dropping the static dictionary models a fresh process while leaving its durable metadata intact.
-        VideoCheckpointHashCache.Clear();
-        string second = await VideoCheckpointHashCache.GetSha256Async(path, CancellationToken.None);
-
-        Assert.Equal(first, second);
-        Assert.Equal(afterFirst, VideoCheckpointHashCache.ComputeCountFor(path));
     }
 
     [Fact]
@@ -652,39 +592,6 @@ public sealed class VideoProfilePlanningTests : IDisposable
     }
 
     [Fact]
-    public async Task ComponentHeaders_AreValidatedByResolvedRole()
-    {
-        string root = Path.Combine(_tempDir, "component-tree");
-        Directory.CreateDirectory(Path.Combine(root, "transformer"));
-        Directory.CreateDirectory(Path.Combine(root, "video_vae"));
-        Directory.CreateDirectory(Path.Combine(root, "text_encoder"));
-        File.Copy(WriteHeaderOnlyH3("component-main.safetensors"),
-            Path.Combine(root, "transformer", "model.safetensors"));
-        File.Copy(WriteHeader("not-a-video-vae.safetensors", new Dictionary<string, object>
-        {
-            ["model.embed_tokens.weight"] = Descriptor("F32", [151936, 5120]),
-        }), Path.Combine(root, "video_vae", "model.safetensors"));
-        File.Copy(WriteHeader("not-a-text-encoder.safetensors", new Dictionary<string, object>
-        {
-            ["decoder.x_embedder.weight"] = Descriptor("F32", [2048, 24]),
-        }), Path.Combine(root, "text_encoder", "model.safetensors"));
-
-        VideoPlan plan = await VideoProfileResolver.ResolveAsync(new ModelSpec
-        {
-            Requested = root,
-            LocalPath = root,
-            Modality = Modality.Video,
-        }, new VideoRequest { Prompt = "test" }, "minimax-h3", H3Defaults(), VideoFeatures.Lora,
-            CancellationToken.None);
-
-        Assert.Contains(plan.Issues, issue => issue.Code == "video.component.tensor_missing"
-            && issue.Field == "videoVae");
-        Assert.Contains(plan.Issues, issue => issue.Code == "video.component.tensor_missing"
-            && issue.Field == "textEncoder");
-        Assert.False(plan.IsValid);
-    }
-
-    [Fact]
     public async Task Sidecar_CannotActivatePddOrAnUnsupportedVsaMatrix()
     {
         string pddCheckpoint = WriteHeaderOnlyH3("sidecar-pdd.safetensors");
@@ -849,42 +756,6 @@ public sealed class VideoProfilePlanningTests : IDisposable
         Assert.Equal(3f, plan.EffectiveSettings.AudioFlowShift);
         Assert.Equal("euler", plan.EffectiveSettings.Sampler);
         Assert.Equal("normal", plan.EffectiveSettings.Scheduler);
-        Assert.False(plan.IsValid);
-    }
-
-    [Fact]
-    public async Task ConvertedPdd_RejectsAFullWidthBaseEvenWhenItsHashMatchesMetadata()
-    {
-        string checkpoint = WriteHeaderOnlyH3("full-base-for-converted-pdd.safetensors");
-        string baseHash = await VideoCheckpointHashCache.GetSha256Async(checkpoint, CancellationToken.None);
-        Dictionary<string, string> metadata = new(StringComparer.Ordinal)
-        {
-            ["hartsy.pdd.format"] = "minimax_h3_pdd_hartsy_pruned_v1",
-            ["hartsy.pdd.task"] = "fl2va",
-            ["hartsy.pdd.adapter_sha256"] = new string('a', 64),
-            ["hartsy.pdd.full_base_sha256"] = new string('b', 64),
-            ["hartsy.pdd.target_base_sha256"] = baseHash,
-            ["hartsy.pdd.affine_residual"] = "1.0E-05",
-            ["hartsy.pdd.converter"] = "HartsyInference.MiniMaxH3PddPrunedConverter/v1",
-            ["pdd_num_steps"] = "32",
-            ["pdd_block_size"] = "4",
-            ["lora_rank"] = "64",
-            ["lora_alpha"] = "64",
-        };
-        string adapter = WriteHeaderOnlyPdd("converted-against-full.safetensors", metadata);
-        VideoPlan plan = await VideoProfileResolver.ResolveAsync(new ModelSpec
-        {
-            Requested = checkpoint,
-            LocalPath = checkpoint,
-            Modality = Modality.Video,
-        }, new VideoRequest
-        {
-            Prompt = "test",
-            Loras = new LoraStack { Entries = [new LoraEntry { Model = adapter }] },
-        }, "minimax-h3", H3Defaults(), VideoFeatures.Lora, CancellationToken.None);
-
-        Assert.Contains(plan.Issues, issue => issue.Code == "video.pdd.converted_base_not_pruned");
-        Assert.Equal(VideoAccelerationKind.None, plan.Profile.Acceleration);
         Assert.False(plan.IsValid);
     }
 

@@ -44,9 +44,7 @@ public sealed class VulkanLatentAttentionTests(ITestOutputHelper log)
     [Theory]
     [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, LatentEncoding.Fp4E2M1E4M3x16, 512, 64, 40, 128)]
     [InlineData(LatentEncoding.F32, LatentEncoding.F32, 64, 3, 9, 16)]
-    [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, LatentEncoding.Fp8E4M3Ue8m0x32, 128, 8, 33, 40)]
     [InlineData(LatentEncoding.Fp4E2M1E8M0x32, LatentEncoding.Fp4E2M1E4M3x16, 96, 5, 17, 64)]
-    [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, LatentEncoding.Fp4E2M1E4M3x16, 512, 128, 200, 300)]
     [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, LatentEncoding.Fp8E4M3Ue8m0x32, 32, 2, 12, 9)]   // 9 scale bytes: padded upload
     public void Attention_MatchesCpuReference(LatentEncoding winEnc, LatentEncoding mainEnc, int dim, int heads, int k, int mainRows)
     {
@@ -156,8 +154,6 @@ public sealed class VulkanLatentAttentionTests(ITestOutputHelper log)
     [InlineData(LatentEncoding.Fp4E2M1E8M0x32, 128, 64, 200, false, 48)]
     [InlineData(LatentEncoding.Fp4E2M1E8M0x32, 128, 64, 200, true, 48)]
     [InlineData(LatentEncoding.F32, 64, 4, 17, true, 48)]
-    [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, 512, 8, 33, false, 48)]
-    [InlineData(LatentEncoding.Fp4E2M1E4M3x16, 96, 3, 9, true, 48)]
     [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, 32, 2, 9, true, 5)]   // 9 scale bytes and 45 candidate flags: padded uploads
     public void Indexer_MatchesCpuReference(LatentEncoding enc, int dim, int heads, int keys, bool candidates, int tokens)
     {

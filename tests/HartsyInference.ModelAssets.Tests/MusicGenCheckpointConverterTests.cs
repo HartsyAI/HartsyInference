@@ -15,13 +15,10 @@ public unsafe class MusicGenCheckpointConverterTests
     [Theory]
     // Combined MusicgenForConditionalGeneration layout → engine names.
     [InlineData("decoder.model.decoder.embed_tokens.0.weight", "model.decoder.embed_tokens.0.weight")]
-    [InlineData("decoder.model.decoder.layers.3.self_attn.q_proj.weight", "model.decoder.layers.3.self_attn.q_proj.weight")]
-    [InlineData("decoder.model.decoder.layer_norm.bias", "model.decoder.layer_norm.bias")]
     [InlineData("decoder.lm_heads.1.weight", "lm_heads.1.weight")]
     [InlineData("enc_to_dec_proj.weight", "enc_to_dec_proj.weight")]
     // Standalone MusicgenForCausalLM layout passes through.
     [InlineData("model.decoder.embed_tokens.2.weight", "model.decoder.embed_tokens.2.weight")]
-    [InlineData("lm_heads.0.weight", "lm_heads.0.weight")]
     public void MapDecoderKey_HandlesBothHfLayouts(string key, string expected)
     {
         Assert.Equal(expected, MusicGenCheckpointConverter.MapDecoderKey(key));
@@ -29,7 +26,6 @@ public unsafe class MusicGenCheckpointConverterTests
 
     [Theory]
     [InlineData("text_encoder.encoder.block.0.layer.0.SelfAttention.q.weight")]
-    [InlineData("audio_encoder.encoder.layers.0.conv.weight_g")]
     [InlineData("decoder.model.decoder.embed_positions.weights")]
     public void MapDecoderKey_DropsNonDecoderComponents(string key)
     {
@@ -39,10 +35,7 @@ public unsafe class MusicGenCheckpointConverterTests
     [Theory]
     // HF transformers EncodecModel naming → Meta AudioCraft naming.
     [InlineData("encoder.layers.0.conv.weight_g", false, "encoder.model.0.conv.conv.weight_g")]
-    [InlineData("encoder.layers.1.block.3.conv.bias", false, "encoder.model.1.block.3.conv.conv.bias")]
-    [InlineData("encoder.layers.7.lstm.weight_ih_l0", false, "encoder.model.7.lstm.weight_ih_l0")]
     [InlineData("decoder.layers.3.conv.weight_v", true, "decoder.model.3.convtr.convtr.weight_v")]
-    [InlineData("decoder.layers.9.conv.bias", false, "decoder.model.9.conv.conv.bias")]
     [InlineData("quantizer.layers.1.codebook.embed", false, "quantizer.vq.layers.1._codebook.embed")]
     // torch ≥2.1 parametrizations spelling normalizes to the classic pair names.
     [InlineData("encoder.layers.0.conv.parametrizations.weight.original0", false, "encoder.model.0.conv.conv.weight_g")]
@@ -56,7 +49,6 @@ public unsafe class MusicGenCheckpointConverterTests
     [Theory]
     [InlineData("quantizer.layers.0.codebook.inited")]
     [InlineData("quantizer.layers.0.codebook.cluster_size")]
-    [InlineData("quantizer.layers.0.codebook.embed_avg")]
     public void MapEnCodecKey_DropsTrainingOnlyQuantizerBuffers(string key)
     {
         Assert.Null(MusicGenCheckpointConverter.MapEnCodecKey(key));

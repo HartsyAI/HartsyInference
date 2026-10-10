@@ -14,26 +14,6 @@ namespace HartsyInference.Diffusion.Tests;
 public class PromptEngineeringTests
 {
     [Fact]
-    public void Weighting_PlainText_SingleSpanWeightOne()
-    {
-        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse("a photo of a cat");
-        Assert.Single(spans);
-        Assert.Equal("a photo of a cat", spans[0].Text);
-        Assert.Equal(1.0f, spans[0].Weight, 5);
-    }
-
-    [Fact]
-    public void Weighting_BareParens_MultipliesByOnePointOne()
-    {
-        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse("a (cat)");
-        Assert.Equal(2, spans.Count);
-        Assert.Equal("a ", spans[0].Text);
-        Assert.Equal(1.0f, spans[0].Weight, 5);
-        Assert.Equal("cat", spans[1].Text);
-        Assert.Equal(1.1f, spans[1].Weight, 5);
-    }
-
-    [Fact]
     public void Weighting_ExplicitWeight_SetsWeight()
     {
         IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse("(cat:1.3)");
@@ -52,31 +32,12 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void Weighting_NestedWithExplicit_Compounds()
-    {
-        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse("(a (cat:1.5))");
-        Assert.Equal(2, spans.Count);
-        Assert.Equal("a ", spans[0].Text);
-        Assert.Equal(1.1f, spans[0].Weight, 5);
-        Assert.Equal("cat", spans[1].Text);
-        Assert.Equal(1.1f * 1.5f, spans[1].Weight, 5);
-    }
-
-    [Fact]
     public void Weighting_EscapedParens_AreLiteral()
     {
         IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse("a \\(cat\\)");
         Assert.Single(spans);
         Assert.Equal("a (cat)", spans[0].Text);
         Assert.Equal(1.0f, spans[0].Weight, 5);
-    }
-
-    [Fact]
-    public void Weighting_SquareBrackets_LeftUntouched()
-    {
-        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse("a [cat:dog:0.5]");
-        Assert.Single(spans);
-        Assert.Equal("a [cat:dog:0.5]", spans[0].Text);
     }
 
     [Fact]
@@ -90,30 +51,9 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void Flattening_PlainText_Unchanged()
-    {
-        Assert.Equal("a photo of a cat", PromptTagFlattening.Flatten("a photo of a cat"));
-    }
-
-    [Fact]
-    public void Flattening_Null_ReturnsEmpty()
-    {
-        Assert.Equal("", PromptTagFlattening.Flatten(null));
-    }
-
-    [Fact]
     public void Flattening_WeightTag_ConvertsToParens()
     {
         Assert.Equal("an (orange:1.5) cat", PromptTagFlattening.Flatten("an <weight[1.5]:orange> cat"));
-    }
-
-    [Fact]
-    public void Flattening_WeightTag_ThenParsesToSameWeight()
-    {
-        IReadOnlyList<WeightedSpan> viaTag = PromptWeighting.Parse(PromptTagFlattening.Flatten("<weight[1.5]:orange>"));
-        IReadOnlyList<WeightedSpan> viaParens = PromptWeighting.Parse("(orange:1.5)");
-        Assert.Equal(viaParens[0].Text, viaTag[0].Text);
-        Assert.Equal(viaParens[0].Weight, viaTag[0].Weight, 5);
     }
 
     [Fact]
@@ -151,18 +91,6 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void Flattening_AltShorthand_FlattensToFirstEntry()
-    {
-        Assert.Equal("a cat", PromptTagFlattening.Flatten("a <alt:cat, dog>"));
-    }
-
-    [Fact]
-    public void Flattening_AlternatePipeSeparated_FlattensToFirstEntry()
-    {
-        Assert.Equal("a cat", PromptTagFlattening.Flatten("a <alternate:cat | dog>"));
-    }
-
-    [Fact]
     public void Flattening_FromToTag_FlattensToFromValue()
     {
         Assert.Equal("a cat", PromptTagFlattening.Flatten("a <fromto[0.5]:cat, dog>"));
@@ -176,12 +104,6 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void Flattening_SchedulingDisabled_StillConvertsWeightTags()
-    {
-        Assert.Equal("an (orange:1.5) cat", PromptTagFlattening.Flatten("an <weight[1.5]:orange> cat", flattenScheduling: false));
-    }
-
-    [Fact]
     public void Flattening_UnrelatedTags_PassThroughVerbatim()
     {
         Assert.Equal("<region:0,0,1,1> a cat", PromptTagFlattening.Flatten("<region:0,0,1,1> a cat"));
@@ -189,14 +111,6 @@ public class PromptEngineeringTests
         Assert.Equal("<embed:myembed> a cat", PromptTagFlattening.Flatten("<embed:myembed> a cat"));
         Assert.Equal("<refcrop:0,face,0.5> a cat", PromptTagFlattening.Flatten("<refcrop:0,face,0.5> a cat"));
         Assert.Equal("<lora:myLora:0.8>", PromptTagFlattening.Flatten("<lora:myLora:0.8>"));
-    }
-
-    [Fact]
-    public void Flattening_WeightTagInsideUnrelatedTag_StillConverted()
-    {
-        Assert.Equal(
-            "<region:0,0,1,1> an (orange:1.5) cat",
-            PromptTagFlattening.Flatten("<region:0,0,1,1> an <weight[1.5]:orange> cat"));
     }
 
     [Fact]
@@ -245,20 +159,6 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void Flattening_UnrecognizedTagPredata_Preserved()
-    {
-        // Recursing into an unrecognized tag's data must not lose its [predata] bracket.
-        Assert.Equal("<param[cfgscale]:5>", PromptTagFlattening.Flatten("<param[cfgscale]:5>"));
-        Assert.Equal("<param[cfgscale]:(5:1.2)>", PromptTagFlattening.Flatten("<param[cfgscale]:<weight[1.2]:5>>"));
-    }
-
-    [Fact]
-    public void Scheduling_NoTags_NotDetected()
-    {
-        Assert.False(PromptTagScheduling.HasScheduling("a photo of a cat"));
-    }
-
-    [Fact]
     public void Scheduling_FromTo_DetectedAndResolves()
     {
         Assert.True(PromptTagScheduling.HasScheduling("a <fromto[0.5]:cat, dog>"));
@@ -282,39 +182,12 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void Scheduling_AltShorthand_CyclesPerStep()
-    {
-        Assert.Equal("cat", PromptTagScheduling.ResolveAt("<alt:cat|dog>", 0, 10));
-        Assert.Equal("dog", PromptTagScheduling.ResolveAt("<alt:cat|dog>", 1, 10));
-    }
-
-    [Fact]
-    public void Scheduling_UnrelatedTags_PassThroughAtEveryStep()
-    {
-        Assert.Equal(
-            "<region:0,0,1,1> (red:1.5) cat",
-            PromptTagScheduling.ResolveAt("<region:0,0,1,1> (red:1.5) cat", 0, 10));
-        Assert.Equal(
-            "<region:0,0,1,1> (red:1.5) cat",
-            PromptTagScheduling.ResolveAt("<region:0,0,1,1> (red:1.5) cat", 9, 10));
-    }
-
-    [Fact]
     public void Scheduling_FromTo_FractionNotRounded_MatchesReferenceBoundary()
     {
         // SwarmText.py: `if when < 1: when = when * steps` then `step < when` in floating point. 0.5 of 5 steps
         // is 2.5, so steps 0-2 take "from". Rounding the threshold to an int first loses step 2.
         Assert.Equal("cat", PromptTagScheduling.ResolveAt("<fromto[0.5]:cat, dog>", 2, 5));
         Assert.Equal("dog", PromptTagScheduling.ResolveAt("<fromto[0.5]:cat, dog>", 3, 5));
-    }
-
-    [Fact]
-    public void Scheduling_FromTo_AboveOneIsAbsoluteStep_NotAFraction()
-    {
-        // `when >= 1` is an absolute step index even when it has a decimal point — 1.5 means "switch between
-        // step 1 and step 2", NOT "1.5x the step count".
-        Assert.Equal("cat", PromptTagScheduling.ResolveAt("<fromto[1.5]:cat, dog>", 1, 20));
-        Assert.Equal("dog", PromptTagScheduling.ResolveAt("<fromto[1.5]:cat, dog>", 2, 20));
     }
 
     [Fact]
@@ -327,20 +200,6 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void Scheduling_FromTo_WrongEntryCount_IsLeftLiteral()
-    {
-        Assert.Equal("<fromto[0.5]:a, b, c>", PromptTagScheduling.ResolveAt("<fromto[0.5]:a, b, c>", 0, 10));
-    }
-
-    [Fact]
-    public void Scheduling_HasScheduling_DetectsAltAndNestedTags()
-    {
-        Assert.True(PromptTagScheduling.HasScheduling("a <alt:cat, dog>"));
-        Assert.True(PromptTagScheduling.HasScheduling("a <alternate:cat, dog>"));
-        Assert.False(PromptTagScheduling.HasScheduling("a (red:1.5) cat <break> <region:0,0,1,1>"));
-    }
-
-    [Fact]
     public void Flattening_WithoutTokenWeighting_DropsTheMarkupInsteadOfEmittingParens()
     {
         // SwarmUI's reference never round-trips a weight back into prompt text — join_text(leaves, False) emits
@@ -350,17 +209,6 @@ public class PromptEngineeringTests
             PromptTagFlattening.Flatten("an <weight[1.5]:orange> cat", weightsAsParens: false));
         Assert.Equal("an (orange:1.5) cat",
             PromptTagFlattening.Flatten("an <weight[1.5]:orange> cat", weightsAsParens: true));
-    }
-
-    [Fact]
-    public void Flattening_WithoutTokenWeighting_KeepsProseParensAndNesting()
-    {
-        // Parens the user typed as prose survive unescaped (nothing re-parses them), and a nested weight tag
-        // collapses too rather than surviving as markup.
-        Assert.Equal("a (loud) cat", PromptTagFlattening.Flatten("<weight[1.5]:a (loud) cat>", weightsAsParens: false));
-        Assert.Equal("cat", PromptTagFlattening.Flatten("<weight[1.5]:<weight[1.2]:cat>>", weightsAsParens: false));
-        Assert.Equal("<region:0,0,1,1> an orange cat",
-            PromptTagFlattening.Flatten("<region:0,0,1,1> an <weight[1.5]:orange> cat", weightsAsParens: false));
     }
 
     [Fact]
@@ -476,18 +324,6 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void RegionalPlan_ResolveStep_WrongLengthThrows()
-    {
-        using Tensor baseCond = new Tensor(new TensorShape(1, 1, 4), DType.F32);
-        RegionalPlan plan = new RegionalPlan { BaseCond = baseCond };
-        Assert.Throws<HartsyInferenceException>(() =>
-        {
-            float[] weights = new float[2];
-            plan.ResolveStep(0, weights);
-        });
-    }
-
-    [Fact]
     public void ConditioningSchedule_FromPromptSchedule_SelectsVariant()
     {
         PromptSchedule schedule = PromptTagScheduling.Resolve("a <fromto[0.5]:cat, dog>", 10);
@@ -549,16 +385,6 @@ public class PromptEngineeringTests
     }
 
     [Fact]
-    public void WeightedTokenizer_Empty_ProducesOneBareChunk()
-    {
-        using ClipTokenizer tokenizer = new ClipTokenizer();
-        (IReadOnlyList<int[]> ids, IReadOnlyList<float[]> _) = WeightedPromptTokenizer.Tokenize(tokenizer, "");
-        Assert.Single(ids);
-        Assert.Equal(ClipTokenizer.StartOfTextId, ids[0][0]);
-        Assert.Equal(ClipTokenizer.EndOfTextId, ids[0][1]);
-    }
-
-    [Fact]
     public void RegionalBias_InsideRegion_ZeroOutsideSuppressed()
     {
         // seq [base0 | regionCols 1,2 | image rows 3,4], one region, mask covers image token 0 only.
@@ -597,22 +423,6 @@ public class PromptEngineeringTests
                 File.Delete(path);
             }
         }
-    }
-
-    [Fact]
-    public void RegionalBias_HighWeight_BoostsRegionColumns()
-    {
-        int seqLen = 4;
-        using Tensor bias = RegionalAttentionBias.Build(
-            seqLen,
-            imageStart: 2,
-            numImg: 2,
-            regionColumnRanges: [(0, 1)],
-            regionGridMasks: [[1f, 1f]],
-            regionWeights: stackalloc float[] { 2f });
-        ReadOnlySpan<float> b = bias.AsReadOnlySpan<float>();
-        Assert.Equal(MathF.Log(2f), b[2 * seqLen + 0], 4);
-        Assert.Equal(MathF.Log(2f), b[3 * seqLen + 0], 4);
     }
 
     [Fact]

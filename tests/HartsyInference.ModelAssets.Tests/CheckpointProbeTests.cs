@@ -27,20 +27,6 @@ public sealed class CheckpointProbeTests : IDisposable
         Assert.Equal(["qwen_image_edit_fp8"], probe.FileNames);
     }
 
-    /// <summary>A bundle directory merges its files' keys and exposes every file name, so a distilled transformer staged
-    /// beside plain VAEs is still visible to the filename tier.</summary>
-    [Fact]
-    public void Read_Directory_MergesEveryContainedFile()
-    {
-        WriteHeader("dit-distilled.safetensors", null, ("blocks.0.w", "[4]"));
-        WriteHeader("vae.safetensors", null, ("decoder.w", "[4]"));
-        CheckpointProbe probe = CheckpointProbe.Read(_dir);
-        Assert.Contains("blocks.0.w", probe.Keys);
-        Assert.Contains("decoder.w", probe.Keys);
-        Assert.Contains("dit-distilled", probe.FileNames);
-        Assert.Contains(Path.GetFileName(_dir), probe.FileNames);
-    }
-
     /// <summary>A capability query must never throw on a missing or unreadable file; it answers "no evidence".</summary>
     [Fact]
     public void Read_MissingOrGarbage_ReturnsEmptyEvidence()

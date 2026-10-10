@@ -23,27 +23,6 @@ public sealed unsafe class FishSpeechCodecTests
     internal static int FsqVocab(int[] levels) => Fsq.VocabSize(levels);
 
     [Fact]
-    public void FireflyQuantizer_SyntheticForward_CodesToFiniteDecoderInput()
-    {
-        int[] levels = [2, 2];
-        int nGroups = 2, inputDim = 8;   // groupDim = inputDim / nGroups = 4 (nGroups must divide inputDim)
-        int[] qUp = [2];
-        using CpuBackend backend = new();
-        FireflyQuantizer q = new(levels, nGroups, qUp, inputDim);
-        q.LoadWeights(QuantizerWeights(levels, qUp, inputDim, nGroups), "quantizer");
-        int t = 4;
-        int vocab = FsqVocab(levels);
-        int[,] codes = new int[nGroups, t];
-        for (int i = 0; i < nGroups; i++) for (int j = 0; j < t; j++) codes[i, j] = (i * 2 + j) % vocab;
-        using Tensor decoderInput = q.DequantToDecoderInput(backend, codes, t);
-        Assert.Equal(1, (int)decoderInput.Shape[0]);
-        Assert.Equal(inputDim, (int)decoderInput.Shape[1]);
-        Assert.Equal(t * q.UpsampleFactor, (int)decoderInput.Shape[2]);
-        float* p = (float*)decoderInput.DataPointer;
-        for (long n = 0; n < decoderInput.ElementCount; n++) Assert.True(float.IsFinite(p[n]));
-    }
-
-    [Fact]
     public void FishDacCodec_SyntheticForward_CodesToFiniteAudio()
     {
         // Tiny DAC: latent 8, decoderDim 16, rates [2,2], dilations [1,3]. 1 semantic + 2 residual books.

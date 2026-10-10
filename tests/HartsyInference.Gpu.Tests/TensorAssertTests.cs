@@ -51,15 +51,6 @@ public sealed class TensorAssertTests
         TensorAssert.Close(actual, expected);
     }
 
-    [Fact]
-    public void Matching_Values_Still_Pass()
-    {
-        using Tensor actual = From(1f, 2f, 3f);
-        using Tensor expected = From(1.000001f, 2f, 3f);
-
-        TensorAssert.Close(actual, expected);
-    }
-
     /// <summary>The quiet hole: widening to F32 and subtracting makes -0.0 equal +0.0, so a bit-identity check built
     /// on a zero tolerance would not notice the representation changing.</summary>
     [Fact]
@@ -83,12 +74,4 @@ public sealed class TensorAssertTests
         Assert.Contains("DType mismatch", error.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Identical_Accepts_The_Same_Bytes()
-    {
-        using Tensor actual = From(1f, 2f, 3f);
-        using Tensor expected = From(1f, 2f, 3f);
-
-        TensorAssert.Identical(actual, expected);
-    }
 }

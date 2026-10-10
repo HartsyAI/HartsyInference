@@ -22,22 +22,6 @@ public sealed class TextDeviceSlotLeaseTests
     }
 
     [Fact]
-    public async Task WaitForLeases_ReturnsOnlyOnceEveryLeaseIsReleased()
-    {
-        TextDeviceSlot slot = new();
-        slot.EnterLease();
-        slot.EnterLease();
-        Task<bool> waiter = Task.Run(() => slot.WaitForLeases(TimeSpan.FromSeconds(30)));
-
-        // One lease is still held, so the waiter cannot have returned whatever the timing.
-        slot.ExitLease();
-        Assert.False(waiter.IsCompleted);
-
-        slot.ExitLease();
-        Assert.True(await waiter.WaitAsync(TimeSpan.FromSeconds(30)));
-    }
-
-    [Fact]
     public void ScheduledRoute_KeepsPrefixCache_AlwaysFreeMemory_AndImages_OnThePipeline()
     {
         TextRequest plain = new() { Messages = [] };

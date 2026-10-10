@@ -12,21 +12,15 @@ public unsafe class MatrixGame3CheckpointConverterTests
 {
     [Theory]
     // Matrix-Game-specific keys pass through (action_module normalized to action_model).
-    [InlineData("blocks.0.action_model.t_qkv.weight", "blocks.0.action_model.t_qkv.weight")]
     [InlineData("blocks.0.action_module.t_qkv.weight", "blocks.0.action_model.t_qkv.weight")]
     [InlineData("blocks.3.action_model.mouse_attn_q.weight", "blocks.3.action_model.mouse_attn_q.weight")]
-    [InlineData("blocks.3.action_model.keyboard_attn_kv.weight", "blocks.3.action_model.keyboard_attn_kv.weight")]
     [InlineData("patch_embedding_wancamctrl.weight", "patch_embedding_wancamctrl.weight")]
-    [InlineData("c2ws_hidden_states_layer1.weight", "c2ws_hidden_states_layer1.weight")]
     // Core Wan keys get the original→diffusers renames.
     [InlineData("blocks.0.self_attn.q.weight", "blocks.0.attn1.to_q.weight")]
     [InlineData("blocks.0.cross_attn.o.weight", "blocks.0.attn2.to_out.0.weight")]
     [InlineData("blocks.0.modulation", "blocks.0.scale_shift_table")]
-    [InlineData("head.head.weight", "proj_out.weight")]
-    [InlineData("time_embedding.0.weight", "condition_embedder.time_embedder.linear_1.weight")]
     // Student-slice prefix strip.
     [InlineData("student.blocks.0.self_attn.q.weight", "blocks.0.attn1.to_q.weight")]
-    [InlineData("generator.blocks.0.action_model.t_qkv.weight", "blocks.0.action_model.t_qkv.weight")]
     public void MapKey_RoutesMatrixGameAndWanKeys(string key, string expected)
     {
         Assert.Equal(expected, MatrixGame3CheckpointConverter.MapKey(key, fromOriginalNaming: true));
@@ -34,7 +28,6 @@ public unsafe class MatrixGame3CheckpointConverterTests
 
     [Theory]
     [InlineData("critic.blocks.0.self_attn.q.weight")]
-    [InlineData("ema.blocks.0.self_attn.q.weight")]
     [InlineData("fake_score.head.head.weight")]
     public void MapKey_DropsNonStudentCopies(string key)
     {

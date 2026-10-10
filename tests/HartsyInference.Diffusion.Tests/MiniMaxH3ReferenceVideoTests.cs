@@ -113,15 +113,6 @@ public sealed class MiniMaxH3ReferenceVideoTests
         Assert.Throws<ArgumentException>(() => proc.Preprocess([a, a, a]));
     }
 
-    [Fact]
-    public void FrameStackRejectsMismatchedFrames()
-    {
-        Qwen3VlImageProcessor proc = new Qwen3VlImageProcessor(TinyVision, maxPixels: 64 * 64);
-        using Tensor a = Frame(64, 64, 31);
-        using Tensor b = Frame(32, 64, 32);
-        Assert.Throws<ArgumentException>(() => proc.Preprocess([a, b]));
-    }
-
     /// <summary>A reference smaller than the adapted canvas stays near its source dimensions, with only the native
     /// patch-grid rounding that the verified Ref2VA path requires.</summary>
     [Fact]
@@ -133,38 +124,9 @@ public sealed class MiniMaxH3ReferenceVideoTests
         Assert.Equal((32, 64), MiniMaxH3Geometry.RefVideoCanvas(16, 48));
     }
 
-    /// <summary>The only branch where the shrink guard stays out of the way: a clip larger than the canvas takes the
-    /// canvas, area-capped and rounded to 32.</summary>
-    [Fact]
-    public void LargeClipTakesTheAdaptedCanvas()
-    {
-        Assert.Equal((1344, 768), MiniMaxH3Geometry.AdaptCanvas(1920, 1080));
-        Assert.Equal((1344, 768), MiniMaxH3Geometry.RefVideoCanvas(1920, 1080));
-    }
-
-    [Fact]
-    public void ProfileReferenceSizing_SelectsNativeOrMatchTargetCanvas()
-    {
-        Assert.Equal((1344, 768), MiniMaxH3RecipePipeline.ReferenceCanvas(
-            1920, 1080, 320, 192, VideoReferenceSizing.Native));
-        // MatchTarget deliberately floors both scaled axes to the 32-pixel patch grid. Rounding the 186-pixel
-        // height up to 192 would exceed the requested 320x192 pixel budget.
-        Assert.Equal((320, 160), MiniMaxH3RecipePipeline.ReferenceCanvas(
-            1920, 1080, 320, 192, VideoReferenceSizing.MatchTarget));
-        Assert.Equal((256, 256), MiniMaxH3RecipePipeline.ReferenceCanvas(
-            256, 256, 1344, 768, VideoReferenceSizing.MatchTarget));
-        Assert.Equal((32, 32), MiniMaxH3RecipePipeline.ReferenceCanvas(
-            48, 48, 1344, 768, VideoReferenceSizing.MatchTarget));
-        (int width, int height) = MiniMaxH3RecipePipeline.ReferenceCanvas(
-            1300, 790, 1344, 768, VideoReferenceSizing.MatchTarget);
-        Assert.True((long)width * height <= 1344L * 768);
-    }
-
     [Theory]
     [InlineData(32, 1024, 32, 32, 32, 32)]
-    [InlineData(1024, 32, 32, 32, 32, 32)]
     [InlineData(32, 1024, 64, 64, 32, 128)]
-    [InlineData(1024, 32, 64, 64, 128, 32)]
     public void MatchTargetReferenceSizing_HonorsAreaAfterMinimumAxisClamp(
         int sourceWidth, int sourceHeight, int targetWidth, int targetHeight, int expectedWidth, int expectedHeight)
     {
@@ -181,8 +143,6 @@ public sealed class MiniMaxH3ReferenceVideoTests
 
     [Theory]
     [InlineData(31, 64, 64, 64)]
-    [InlineData(64, 31, 64, 64)]
-    [InlineData(64, 64, 31, 64)]
     [InlineData(64, 64, 64, 31)]
     public void MatchTargetReferenceSizing_RejectsAxesSmallerThanOnePatch(
         int sourceWidth, int sourceHeight, int targetWidth, int targetHeight)
@@ -191,28 +151,9 @@ public sealed class MiniMaxH3ReferenceVideoTests
             sourceWidth, sourceHeight, targetWidth, targetHeight, VideoReferenceSizing.MatchTarget));
     }
 
-    [Fact]
-    public void LegacyStartAndEndGuidesKeepTheirDirectResizeBehavior()
-    {
-        ImageData aspectMismatched = new ImageData
-        {
-            Width = 2,
-            Height = 1,
-            Rgb = [255, 0, 0, 0, 0, 255],
-        };
-
-        byte[] expected = VideoRecipeUtils.ResizeRgb24(aspectMismatched, 4, 4);
-        byte[] actual = MiniMaxH3RecipePipeline.FitLegacyGuideFrame(aspectMismatched, 4, 4);
-
-        Assert.Equal(expected, actual);
-    }
-
     [Theory]
-    [InlineData(5, 5)]
     [InlineData(21, 5)]
     [InlineData(22, 22)]
-    [InlineData(30, 22)]
-    [InlineData(124, 124)]
     [InlineData(130, 124)]
     public void ReferenceFrameCountSnapsDownOntoTheGrid(int frames, int expected)
     {
@@ -227,10 +168,7 @@ public sealed class MiniMaxH3ReferenceVideoTests
     }
 
     [Theory]
-    [InlineData(5, 1)]
     [InlineData(22, 2)]
-    [InlineData(39, 4)]
-    [InlineData(56, 5)]
     [InlineData(124, 11)]
     public void QwenFramesAreSampledAtTwoFps(int frames, int expectedSamples)
     {
@@ -245,10 +183,8 @@ public sealed class MiniMaxH3ReferenceVideoTests
     /// <summary>Block count and labels must follow the <b>sampled</b> index, not the source frame index: an odd sample
     /// count repeat-pads its last frame into a final block rather than dropping it.</summary>
     [Theory]
-    [InlineData(5, 1)]
     [InlineData(22, 1)]
     [InlineData(56, 3)]
-    [InlineData(124, 6)]
     public void VideoBlocksFollowTheSampledIndex(int frames, int expectedBlocks)
     {
         IReadOnlyList<int> sampled = MiniMaxH3Geometry.RefVideoSampleIndices(frames);

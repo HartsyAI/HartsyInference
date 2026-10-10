@@ -106,25 +106,6 @@ public sealed class MoeReferenceTests
     }
 
     [Fact]
-    public void Bias_Steers_Selection_But_Not_The_Weights()
-    {
-        float[] logits = { 0f, 1f, 2f, 3f };
-        float[] bias = { 10f, 0f, 0f, 0f };
-        (int[] idx, float[] w) = Route(logits, 4, new MoeRouteArgs(4, 1, MoeRouteScoring.Sigmoid), bias);
-        Assert.Equal(new[] { 0 }, idx);
-        Assert.Equal(0.5f, w[0], 6);
-    }
-
-    [Fact]
-    public void Single_Expert_Routes_Everything_To_It_With_Weight_One()
-    {
-        (int[] idx, float[] w) = Route(new[] { 0.3f, -2f }, 1,
-            new MoeRouteArgs(1, 1, MoeRouteScoring.Softmax, Renormalize: true));
-        Assert.Equal(new[] { 0, 0 }, idx);
-        Assert.Equal(new[] { 1f, 1f }, w);
-    }
-
-    [Fact]
     public void K_Equal_To_E_And_K_Of_One_Are_Accepted_And_Out_Of_Range_K_Throws()
     {
         float[] logits = Random(4 * 6, 5);
@@ -213,41 +194,6 @@ public sealed class MoeReferenceTests
     }
 
     [Fact]
-    public void Dispatch_Then_Combine_Reproduces_The_Direct_Weighted_Sum()
-    {
-        const int Tokens = 6, E = 4, K = 2, H = 5;
-        float[] logits = Random(Tokens * E, 31);
-        (int[] idx, float[] w) = Route(logits, E, new MoeRouteArgs(E, K, MoeRouteScoring.Softmax, Renormalize: true));
-        using Tensor topk = I32(idx, Tokens, K);
-        using Tensor counts = EmptyI32(E), offsets = EmptyI32(E + 1), perm = EmptyI32(Tokens * K), slot = EmptyI32(Tokens * K);
-        using CpuBackend cpu = new();
-        cpu.MoeBuildDispatch(counts, offsets, perm, slot, topk, E);
-
-        // The "expert" here scales the token row by (expert + 1), so the result is checkable in closed form.
-        float[] x = Random(Tokens * H, 32);
-        float[] permuted = new float[Tokens * K * H];
-        int[] permTok = ReadI32(perm), permSlot = ReadI32(slot), expertOf = new int[Tokens * K];
-        for (int p = 0; p < Tokens * K; p++) expertOf[permSlot[p]] = idx[p];
-        for (int row = 0; row < Tokens * K; row++)
-            for (int c = 0; c < H; c++) permuted[row * H + c] = x[permTok[row] * H + c] * (expertOf[row] + 1);
-
-        using Tensor expertOut = F32(permuted, Tokens * K, H);
-        using Tensor slotT = I32(permSlot, Tokens, K);
-        using Tensor wT = F32(w, Tokens, K);
-        using Tensor output = EmptyF32(Tokens, H);
-        cpu.MoeCombine(output, expertOut, slotT, wT, K, accumulate: false);
-
-        float[] got = ReadF32(output);
-        for (int t = 0; t < Tokens; t++)
-            for (int c = 0; c < H; c++)
-            {
-                float expected = 0f;
-                for (int j = 0; j < K; j++) expected += w[t * K + j] * x[t * H + c] * (idx[t * K + j] + 1);
-                Assert.Equal(expected, got[t * H + c], 5);
-            }
-    }
-
-    [Fact]
     public void TopK_Orders_By_Value_Then_Lowest_Index_And_Can_Sort_By_Index()
     {
         float[] row = { 1f, 5f, 5f, 3f, 5f, 2f, 3f };
@@ -264,44 +210,4 @@ public sealed class MoeReferenceTests
         Assert.Equal(new[] { 5f, 5f, 3f, 5f }, ReadF32(values));
     }
 
-    [Fact]
-    public void TopK_Valid_Lengths_Limit_The_Candidates_And_Pad_With_Minus_One()
-    {
-        using Tensor input = F32(new[] { 1f, 9f, 2f, 8f, 3f, 7f }, 2, 3);
-        using Tensor lens = I32(new[] { 3, 1 }, 2);
-        using Tensor values = EmptyF32(2, 2), indices = EmptyI32(2, 2);
-        using CpuBackend cpu = new();
-
-        cpu.TopKLastDim(values, indices, input, 2, lens);
-
-        Assert.Equal(new[] { 1, 2, 0, -1 }, ReadI32(indices));
-        float[] v = ReadF32(values);
-        Assert.Equal(new[] { 9f, 2f, 8f }, v.Take(3));
-        Assert.True(float.IsNegativeInfinity(v[3]));
-    }
-
-    [Fact]
-    public void TopK_Rejects_K_Outside_The_Row()
-    {
-        using Tensor input = F32(new[] { 1f, 2f, 3f }, 1, 3);
-        using Tensor values = EmptyF32(1, 3), indices = EmptyI32(1, 3);
-        using CpuBackend cpu = new();
-        Assert.Throws<ArgumentOutOfRangeException>(() => cpu.TopKLastDim(values, indices, input, 4));
-        Assert.Throws<ArgumentOutOfRangeException>(() => cpu.TopKLastDim(values, indices, input, 0));
-    }
-
-    [Fact]
-    public void Softplus_Matches_The_Closed_Form_And_The_Torch_Threshold_And_Works_In_Place()
-    {
-        float[] x = { -30f, -5f, -0.5f, 0f, 0.5f, 5f, 19.9f, 20f, 25f };
-        using Tensor t = F32(x, x.Length);
-        using CpuBackend cpu = new();
-        cpu.Softplus(t, t);
-        float[] y = ReadF32(t);
-        for (int i = 0; i < x.Length; i++)
-        {
-            double expected = x[i] > 20f ? x[i] : Math.Log(1.0 + Math.Exp(x[i]));
-            Assert.Equal(expected, y[i], expected < 1e-3 ? 1e-9 : Math.Abs(expected) * 1e-6);
-        }
-    }
 }

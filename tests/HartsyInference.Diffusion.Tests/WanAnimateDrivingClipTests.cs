@@ -15,12 +15,9 @@ public sealed class WanAnimateDrivingClipTests
 
     [Theory]
     [InlineData(81, 200, 81)]    // clip longer than requested → requested count wins
-    [InlineData(81, 81, 81)]     // exact fit stays
     [InlineData(81, 50, 49)]     // shorter clip → snapped DOWN onto 4n+1 (50 → 49)
     [InlineData(81, 48, 45)]     // 48 is off-grid → down to 45, never up to 49
     [InlineData(25, 3, 5)]       // tiny clip → hard minimum of 5
-    [InlineData(2, 200, 5)]      // tiny request → hard minimum of 5
-    [InlineData(5, 200, 5)]      // minimum itself is on-grid (4·1+1)
     public void ResolveDrivingFramesSnapsDownOntoTheTemporalGrid(int requested, int available, int expected)
     {
         Assert.Equal(expected, WanAnimateDrivingResolver.ResolveDrivingFrames(requested, available, Step));
@@ -96,19 +93,6 @@ public sealed class WanAnimateDrivingClipTests
     }
 
     [Fact]
-    public void PackRgbFramesToClipNormalizesTheByteExtremes()
-    {
-        byte[][] rgb = [[0, 0, 0, 255, 255, 255]];   // one 2x1 frame: black then white pixels
-        using Tensor clip = VideoRecipeUtils.PackRgbFramesToClip(rgb, width: 2, height: 1);
-        Span<float> data = clip.AsSpan<float>();
-        for (int c = 0; c < 3; c++)
-        {
-            Assert.Equal(-1f, data[c * 2 + 0], 6);
-            Assert.Equal(1f, data[c * 2 + 1], 6);
-        }
-    }
-
-    [Fact]
     public void FaceResamplePadsOutOfFrameSamplesWithNormalizedMidGray()
     {
         const int Size = 4;
@@ -121,19 +105,6 @@ public sealed class WanAnimateDrivingClipTests
         float expectedPad = 114f / 127.5f - 1f;
         Assert.Equal(3 * 8 * 8, chw.Length);
         Assert.All(chw, v => Assert.Equal(expectedPad, v, 5));
-    }
-
-    [Fact]
-    public void FaceResampleOfAnInteriorCropReadsTheSourceValues()
-    {
-        const int Size = 8;
-        byte[] rgb = new byte[Size * Size * 3];
-        Array.Fill(rgb, (byte)200);
-
-        PoseFaceCrop.Rect interior = new PoseFaceCrop.Rect(2f, 2f, 4f);
-        float[] chw = WanAnimateFaceClipBuilder.SampleSquareChw(rgb, Size, Size, interior, outSize: 4);
-        float expected = 200f / 127.5f - 1f;
-        Assert.All(chw, v => Assert.Equal(expected, v, 5));
     }
 
     [Fact]

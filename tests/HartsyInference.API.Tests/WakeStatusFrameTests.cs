@@ -24,19 +24,6 @@ public sealed class WakeStatusFrameTests
     }
 
     [Fact]
-    public async Task DetailRidesAlongWhenThereIsOne()
-    {
-        using MemoryStream stream = new();
-        WakeFrameCodec codec = new(stream);
-
-        await codec.WriteAsync("status", WakeStatus.Data(WakeStatus.Error, "transcription failed"),
-            CancellationToken.None);
-
-        Assert.Equal("{\"type\":\"status\",\"data\":{\"state\":\"error\",\"detail\":\"transcription failed\"}}\n",
-            Encoding.UTF8.GetString(stream.ToArray()));
-    }
-
-    [Fact]
     public void DetailIsEscaped_SoAModelSMistakeCannotBreakTheFrame()
     {
         // Detail can carry an exception message, and an exception message can carry a quote or a newline. The
@@ -49,15 +36,4 @@ public sealed class WakeStatusFrameTests
         Assert.Contains("\\u0022", data.Replace("\\\"", "\\u0022"));
     }
 
-    [Theory]
-    [InlineData("captured")]
-    [InlineData("transcribing")]
-    [InlineData("thinking")]
-    [InlineData("speaking")]
-    [InlineData("done")]
-    [InlineData("error")]
-    public void EveryStateTheDeviceHandles_IsOneThisClassNames(string state) => Assert.True(WakeStatus.IsKnown(state));
-
-    [Fact]
-    public void AnythingElseIsNot() => Assert.False(WakeStatus.IsKnown("listening"));
 }

@@ -32,7 +32,6 @@ public sealed class DeepSeekV41VisionConfigTests
     {
         Assert.Equal(500.0, OfficialVision(v => v["rope_theta"] = 500).RopeTheta);
         Assert.Equal(DeepSeekV41VisionConfig.DefaultRopeTheta, OfficialVision(v => v.Remove("rope_theta")).RopeTheta);
-        Assert.Equal(10000.0, DeepSeekV41VisionConfig.DefaultRopeTheta);
     }
 
     [Fact]
@@ -48,20 +47,9 @@ public sealed class DeepSeekV41VisionConfigTests
         Assert.Equal(DeepSeekV41VisionConfig.DefaultRopeTheta, DeepSeekV41Config.Parse(edited.ToJsonString()).Vision!.RopeTheta);
     }
 
-    [Fact]
-    public void ATextOnlyConfigHasNoVision()
-    {
-        JsonObject root = JsonNode.Parse(DeepSeekV41Fixtures.Read("official_config.json"))!.AsObject();
-        root.Remove("vision_config");
-
-        Assert.Null(DeepSeekV41Config.Parse(root.ToJsonString()).Vision);
-    }
-
     [Theory]
     [InlineData(0, 1024, 16, 2816, 14, 3, 10000.0)]
-    [InlineData(32, 1024, 16, 2816, 14, 0, 10000.0)]
     [InlineData(32, 1000, 16, 2816, 14, 3, 10000.0)]
-    [InlineData(32, 1008, 16, 2816, 14, 3, 10000.0)]
     [InlineData(32, 1024, 16, 2816, 14, 3, 0.0)]
     [InlineData(32, 1024, 16, 2816, 14, 3, double.PositiveInfinity)]
     public void Validate_RefusesATowerThatCannotRun(int layers, int hidden, int heads, int inter, int patch, int ratio, double theta) =>

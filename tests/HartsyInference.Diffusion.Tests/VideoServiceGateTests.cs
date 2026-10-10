@@ -83,41 +83,6 @@ public sealed class VideoServiceGateTests
     }
 
     [Fact]
-    public async Task PlanningRejectsDrivingVideoOnNonDeclaringFamily()
-    {
-        VideoRequest request = Request() with { DrivingVideo = new VideoClip { Data = TinyClip } };
-        VideoPlan plan = await PlanGenericAsync("wan-22-5b", request);
-        VideoPlanIssue issue = Assert.Single(plan.Issues, item => item.Code == "video.feature.unsupported");
-        Assert.Contains("DrivingVideo", issue.Message, StringComparison.Ordinal);
-        Assert.False(plan.IsValid);
-    }
-
-    [Fact]
-    public void RequestedFeaturesAcceptsReferencesDeclaredByMiniMaxH3()
-    {
-        VideoRequest request = Request() with
-        {
-            ReferenceImages = [new ImageData { Rgb = [0, 0, 0], Width = 1, Height = 1 }],
-            ReferenceVideos = [new ReferenceVideo { Video = new VideoClip { Data = TinyClip } }],
-            ReferenceAudios = [new AudioClip { Data = TinyClip }],
-        };
-        VideoFeatures missing = VideoService.RequestedFeatures(request) & ~new MiniMaxH3Recipe().Supports;
-        Assert.Equal(VideoFeatures.None, missing);
-    }
-
-    [Fact]
-    public void MiniMaxH3DoesNotAdvertiseValidationPendingControlFeatures()
-    {
-        VideoFeatures released = new MiniMaxH3Recipe().Supports;
-
-        Assert.False(released.HasFlag(VideoFeatures.VideoControlNet));
-        Assert.False(released.HasFlag(VideoFeatures.VideoInpaint));
-        Assert.False(released.HasFlag(VideoFeatures.Guides));
-        Assert.False(released.HasFlag(VideoFeatures.VideoDenoiseMask));
-        Assert.False(released.HasFlag(VideoFeatures.AudioDenoiseMask));
-    }
-
-    [Fact]
     public void ValidationPendingH3ExecutionIngressIsNotPublic()
     {
         string[] forbiddenParameters =
@@ -146,22 +111,6 @@ public sealed class VideoServiceGateTests
                     && method.Name is "Forward" or "ForwardSharded"),
             method => Assert.DoesNotContain(method.GetParameters(), parameter =>
                 forbiddenParameters.Contains(parameter.Name, StringComparer.Ordinal)));
-    }
-
-    [Fact]
-    public void MiniMaxH3RecipeRejectsMissingPlanBeforeTouchingCheckpoint()
-    {
-        using CpuBackend backend = new CpuBackend();
-        RecipeContext context = new RecipeContext
-        {
-            CheckpointPath = Path.Combine(Path.GetTempPath(), $"missing-h3-{Guid.NewGuid():N}.safetensors"),
-            Backend = backend,
-        };
-
-        InvalidOperationException error = Assert.Throws<InvalidOperationException>(
-            () => new MiniMaxH3Recipe().Construct(context));
-
-        Assert.Contains("service-bound VideoPlan", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

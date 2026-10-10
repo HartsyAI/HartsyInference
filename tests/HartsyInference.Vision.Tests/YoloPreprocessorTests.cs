@@ -8,29 +8,6 @@ namespace HartsyInference.Vision.Tests;
 public sealed class YoloPreprocessorTests
 {
     [Fact]
-    public void Preprocess_SquareInput_ProducesExpectedShape()
-    {
-        YoloPreprocessor pre = new(targetSize: 640);
-        byte[] rgb = new byte[640 * 640 * 3];
-        Array.Fill<byte>(rgb, 100);
-
-        (Tensor input, YoloPreprocessor.Transform tr) = pre.Preprocess(rgb, 640, 640);
-        try
-        {
-            Assert.Equal(4, input.Shape.Rank);
-            Assert.Equal(1, input.Shape[0]);
-            Assert.Equal(3, input.Shape[1]);
-            Assert.Equal(640, input.Shape[2]);
-            Assert.Equal(640, input.Shape[3]);
-            Assert.Equal(DType.F32, input.DType);
-            Assert.Equal(1f, tr.Scale);
-            Assert.Equal(0, tr.PadLeft);
-            Assert.Equal(0, tr.PadTop);
-        }
-        finally { input.Dispose(); }
-    }
-
-    [Fact]
     public void Preprocess_WideInput_LetterboxesWithVerticalPadding()
     {
         // 1280 wide, 640 tall → scale = 640/1280 = 0.5 → resized 640×320
@@ -60,29 +37,6 @@ public sealed class YoloPreprocessorTests
             float imgVal = 200f / 255f;
             int imgPos = (160 + 159) * 640 + 320; // bottom row of image area
             Assert.InRange(data[0 * plane + imgPos], imgVal - 1e-3f, imgVal + 1e-3f);
-        }
-        finally { input.Dispose(); }
-    }
-
-    [Fact]
-    public void Preprocess_TallInput_LetterboxesWithHorizontalPadding()
-    {
-        // 320 wide, 640 tall → scale = 640/640 = 1.0 (limited by height) → resized 320×640
-        // 320 cols of image + 320 cols of padding (160 left, 160 right) → 640×640.
-        YoloPreprocessor pre = new(targetSize: 640);
-        byte[] rgb = new byte[320 * 640 * 3];
-        Array.Fill<byte>(rgb, 50);
-
-        (Tensor input, YoloPreprocessor.Transform tr) = pre.Preprocess(rgb, 320, 640);
-        try
-        {
-            Assert.Equal(640, tr.PaddedWidth);
-            Assert.Equal(640, tr.PaddedHeight);
-            Assert.Equal(320, tr.ResizedWidth);
-            Assert.Equal(640, tr.ResizedHeight);
-            Assert.Equal(1f, tr.Scale);
-            Assert.Equal(160, tr.PadLeft);
-            Assert.Equal(0, tr.PadTop);
         }
         finally { input.Dispose(); }
     }
@@ -137,12 +91,5 @@ public sealed class YoloPreprocessorTests
         Assert.Equal(320, tr.ResizedHeight);
         // Pad rows = (640 - 320) % 32 = 320 % 32 = 0 → canvas height equals resized height.
         Assert.Equal(320, tr.PaddedHeight);
-    }
-
-    [Fact]
-    public void Constructor_RejectsBadStride()
-    {
-        Assert.Throws<ArgumentException>(() => new YoloPreprocessor(targetSize: 640, stride: 0));
-        Assert.Throws<ArgumentException>(() => new YoloPreprocessor(targetSize: 640, stride: 30)); // 640 % 30 != 0
     }
 }

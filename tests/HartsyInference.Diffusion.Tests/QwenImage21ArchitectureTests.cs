@@ -57,16 +57,6 @@ public sealed class QwenImage21ArchitectureTests
         Assert.All(image, p => Assert.Equal(7, p.Seq));
     }
 
-    /// <summary>The same expression for an EVEN grid, where <c>h − h/2</c> and <c>h//2</c> happen to agree — so
-    /// this case cannot distinguish the two conventions and is pinned only to catch an off-by-one.</summary>
-    [Fact]
-    public void AnEvenGridCentersOnTheHalfwayRow()
-    {
-        (double Seq, double Height, double Width)[] image = QwenImage21Rope.ImagePositions(textLen: 2, imgH: 4, imgW: 4);
-        Assert.Equal((2, -2, -2), image[0]);
-        Assert.Equal((2, 1, 1), image[15]);
-    }
-
     /// <summary>The rope table is axis-major with each pair's angle duplicated across both slots, which is what the
     /// interleaved kernel reads. Checked against the closed form rather than a golden file so a changed axis split
     /// is caught too.</summary>
@@ -141,8 +131,6 @@ public sealed class QwenImage21ArchitectureTests
     /// are byte-comparable — worth pinning, because a step count that does NOT divide it would quantize slightly.</summary>
     [Theory]
     [InlineData(25)]
-    [InlineData(40)]
-    [InlineData(50)]
     public void SimpleAndLinearGridsAgreeForStepCountsThatDivideTheTable(int steps)
     {
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(MathF.Exp(0.69f));

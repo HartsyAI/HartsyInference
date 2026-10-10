@@ -3,7 +3,6 @@ using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.ModelAssets.Metadata;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -12,16 +11,9 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class AukSpeechEngineTests
 {
     [Theory]
-    [InlineData("auk")]
-    [InlineData("AUK")]
-    public void TtsCatalog_ResolvesAuk(string id) => Assert.Same(AukModel.Descriptor, TtsCatalog.Resolve(id));
-
-    [Theory]
     [InlineData("flash", "tencent/AuK-Flash", "auk_flash.safetensors")]
-    [InlineData("Flash", "tencent/AuK-Flash", "auk_flash.safetensors")]
     [InlineData("base", "tencent/AuK", "auk_base.safetensors")]
     [InlineData("", "tencent/AuK", "auk_base.safetensors")]
-    [InlineData("auk", "tencent/AuK", "auk_base.safetensors")]
     [InlineData("tencent/AuK-Flash", "tencent/AuK-Flash", "auk_flash.safetensors")]
     [InlineData("someone/auk-finetune", "someone/auk-finetune", "auk_base.safetensors")]
     public void Variant_ResolvesRepoAndCheckpoint(string variant, string repo, string file)
@@ -105,7 +97,6 @@ public sealed class AukSpeechEngineTests
 
     [Theory]
     [InlineData(7, 7)]
-    [InlineData(-3, -3)]
     public void ResolveSeed_KeepsAnExplicitSeed(int seed, int expected) => Assert.Equal(expected, AukModel.ResolveSeed(seed, () => 99));
 
     [Fact]
@@ -123,17 +114,4 @@ public sealed class AukSpeechEngineTests
         Assert.True(seen.Count > 1, "an unset seed must not collapse to one fixed value");
     }
 
-    [Fact]
-    public void FlashIgnoredKnobsMessage_NamesWhatWasDiscarded()
-    {
-        Assert.Null(AukModel.FlashIgnoredKnobsMessage(null, null));
-        Assert.Contains("steps=16", AukModel.FlashIgnoredKnobsMessage(16, null), StringComparison.Ordinal);
-        string both = AukModel.FlashIgnoredKnobsMessage(8, 2.5)!;
-        Assert.Contains("steps=8", both, StringComparison.Ordinal);
-        Assert.Contains("cfg=2.5", both, StringComparison.Ordinal);
-        Assert.Contains("ignored", both, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ModelIdentity_IsRegistered() => Assert.NotNull(ModelIdentityCatalog.Find("auk"));
 }

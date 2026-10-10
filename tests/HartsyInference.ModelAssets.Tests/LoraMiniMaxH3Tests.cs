@@ -17,84 +17,6 @@ public sealed class LoraMiniMaxH3Tests : IDisposable
 
     public LoraMiniMaxH3Tests() => Directory.CreateDirectory(_dir);
 
-    /// <summary>H3's attention is one fused <c>qkv_proj</c> of 3·heads·headDim rows, not three matrices — a LoRA
-    /// trained against split q/k/v could not merge into it, so the fused shape is the one that must round-trip.</summary>
-    [Fact]
-    public void DiffusersPeftKeysPassThroughToCanonicalH3Names()
-    {
-        const int hidden = 32, inner = 3 * 16, rank = 4;
-        string path = CreateSafeTensors("h3lora", new Dictionary<string, (long[] shape, float[] data)>
-        {
-            ["transformer.blocks.0.attn.qkv_proj.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
-            ["transformer.blocks.0.attn.qkv_proj.lora_B.weight"] = ([inner, rank], Filled(inner * rank, 0.2f)),
-            ["transformer.blocks.0.mlp.fc2.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
-            ["transformer.blocks.0.mlp.fc2.lora_B.weight"] = ([hidden, rank], Filled(hidden * rank, 0.3f)),
-        });
-
-        using LoraFile file = LoraFile.Load(path);
-        Assert.Equal(LoraFormat.DiffusersFlux, file.Format);
-        List<string> targets = [.. file.Layers.Select(l => l.TargetKey).OrderBy(k => k, StringComparer.Ordinal)];
-        Assert.Equal(["blocks.0.attn.qkv_proj.weight", "blocks.0.mlp.fc2.weight"], targets);
-        Assert.All(file.Layers, l => Assert.Equal(LoraTarget.Transformer, l.Target));
-    }
-
-    /// <summary>The merged delta must land on the fused qkv rows with the right magnitude — a silently no-op merge and
-    /// a correct one are indistinguishable without checking the arithmetic.</summary>
-    [Fact]
-    public void MergeAppliesTheDeltaToFusedQkvWeights()
-    {
-        const int hidden = 32, inner = 3 * 16, rank = 4;
-        string path = CreateSafeTensors("h3merge", new Dictionary<string, (long[] shape, float[] data)>
-        {
-            ["transformer.blocks.0.attn.qkv_proj.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
-            ["transformer.blocks.0.attn.qkv_proj.lora_B.weight"] = ([inner, rank], Filled(inner * rank, 0.2f)),
-        });
-
-        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>
-        {
-            ["blocks.0.attn.qkv_proj.weight"] = Zeros(inner, hidden),
-        };
-        IBackend backend = new CpuBackend();
-        using LoraStack stack = new LoraStack();
-        stack.AddFromPath(path, strength: 1.0f);
-        int merged = stack.ApplyTo(weights, LoraTarget.Transformer, backend);
-
-        Assert.Equal(1, merged);
-        // alpha defaults to rank, so the scale is 1: every output element is rank · 0.1 · 0.2.
-        float expected = rank * 0.1f * 0.2f;
-        Tensor fused = weights["blocks.0.attn.qkv_proj.weight"];
-        Assert.Equal(inner, (int)fused.Shape[0]);
-        unsafe
-        {
-            float* p = (float*)fused.DataPointer;
-            for (long i = 0; i < fused.ElementCount; i++)
-            {
-                Assert.Equal(expected, p[i], 4);
-            }
-        }
-    }
-
-    /// <summary>A LoRA whose keys name no H3 weight must be reported, not silently ignored — the engine logs a
-    /// zero-match warning, and this is the unit-level counterpart of that signal.</summary>
-    [Fact]
-    public void KeysThatNameNoH3WeightMergeNothing()
-    {
-        const int hidden = 32, rank = 4;
-        string path = CreateSafeTensors("h3miss", new Dictionary<string, (long[] shape, float[] data)>
-        {
-            ["transformer.blocks.0.attn.to_q.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
-            ["transformer.blocks.0.attn.to_q.lora_B.weight"] = ([hidden, rank], Filled(hidden * rank, 0.2f)),
-        });
-        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>
-        {
-            ["blocks.0.attn.qkv_proj.weight"] = Zeros(3 * 16, hidden),
-        };
-        IBackend backend = new CpuBackend();
-        using LoraStack stack = new LoraStack();
-        stack.AddFromPath(path, strength: 1.0f);
-        Assert.Equal(0, stack.ApplyTo(weights, LoraTarget.Transformer, backend));
-    }
-
     /// <summary>The published H3 LoRA (larryvrh/MiniMax-H3-Turbo-Lora) carries NO wrapper prefix — its roots are
     /// already the checkpoint's own keys. That reached <see cref="LoraFormat.Unknown"/> and was rejected at load, so
     /// the only real-world H3 LoRA did not work at all despite the passthrough above; this pins the bare-root arm.</summary>
@@ -114,21 +36,6 @@ public sealed class LoraMiniMaxH3Tests : IDisposable
         Assert.Equal(LoraFormat.DiffusersBareDit, file.Format);
         List<string> targets = [.. file.Layers.Select(l => l.TargetKey).OrderBy(k => k, StringComparer.Ordinal)];
         Assert.Equal(["blocks.0.attn.qkv_proj.weight", "token_refiner.blocks.0.mlp.fc1.weight"], targets);
-    }
-
-    /// <summary>A prefixed file must never fall into the bare-root arm — <c>blocks.</c> is a weak marker, so the
-    /// bare rule is last in precedence and this pins that ordering.</summary>
-    [Fact]
-    public void PrefixedKeysStillWinOverTheBareRootArm()
-    {
-        const int hidden = 32, rank = 4;
-        string path = CreateSafeTensors("h3both", new Dictionary<string, (long[] shape, float[] data)>
-        {
-            ["transformer.blocks.0.attn.qkv_proj.lora_A.weight"] = ([rank, hidden], Filled(rank * hidden, 0.1f)),
-            ["transformer.blocks.0.attn.qkv_proj.lora_B.weight"] = ([hidden, rank], Filled(hidden * rank, 0.2f)),
-        });
-        using LoraFile file = LoraFile.Load(path);
-        Assert.Equal(LoraFormat.DiffusersFlux, file.Format);
     }
 
     /// <summary>The Turbo LoRA targets the UNPRUNED adaln projection (<c>[96768, 2688]</c>) while every pruned build

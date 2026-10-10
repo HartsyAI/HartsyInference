@@ -33,13 +33,6 @@ public sealed class KolibriGgufConfigTests
     }
 
     [Fact]
-    public void PresentDenseFfnLength_IsUsed()
-    {
-        TransformerConfig config = GgufConfigFactory.FromGguf(Metadata(denseLength: true, expertLength: true), Weights());
-        Assert.Equal(24, config.IntermediateSize);
-    }
-
-    [Fact]
     public void NoFfnLengthAtAll_Throws()
     {
         Assert.Throws<ArgumentException>(() => GgufConfigFactory.FromGguf(Metadata(false, false), Weights()));

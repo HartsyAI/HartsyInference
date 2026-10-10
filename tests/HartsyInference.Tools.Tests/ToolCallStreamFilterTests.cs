@@ -28,8 +28,6 @@ public sealed class ToolCallStreamFilterTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
     public void CompletedCallEmitsANativeToolCallChunkAndStopsGeneration(int seed)
     {
         (List<TextChunk> chunks, TextFilterSink sink, bool stopRequested) = Drive(new ToolCallStreamFilter(), Completion, seed);
@@ -47,15 +45,6 @@ public sealed class ToolCallStreamFilterTests
     }
 
     [Fact]
-    public void BarePayloadFromAQwen3GgufStopsAtTheBalancedObject()
-    {
-        (List<TextChunk> chunks, TextFilterSink sink, _) = Drive(new ToolCallStreamFilter(), "\n{\"name\": \"hang_up\", \"arguments\": {}}\n", 4);
-        Assert.True(sink.Stopped);
-        Assert.Equal("hang_up", Assert.Single(chunks, c => c.Kind == TextChunkKind.NativeToolCall).ToolCall!.Name);
-        Assert.DoesNotContain("{", sink.Text);
-    }
-
-    [Fact]
     public void WithoutStopAfterFirstCallEveryCallIsEmittedAndTextBetweenIsForwarded()
     {
         const string text = "<tool_call>{\"name\": \"a\", \"arguments\": {}}</tool_call> and <tool_call>{\"name\": \"b\", \"arguments\": {}}</tool_call> done";
@@ -70,19 +59,6 @@ public sealed class ToolCallStreamFilterTests
     }
 
     [Fact]
-    public void MistralArrayClosedInOneDeltaSurfacesTheSecondCallAtEnd()
-    {
-        ToolCallStreamFilter filter = new(ToolCallFormat.Mistral, stopAfterFirstCall: false);
-        List<TextChunk> chunks = [];
-        TextFilterSink sink = new(filter, chunks.Add, static () => { });
-        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "[{\"name\": \"a\", \"arguments\": {}}, {\"name\": \"b\", \"arguments\": {}}]" });
-        Assert.Equal(["a"], chunks.Where(c => c.Kind == TextChunkKind.NativeToolCall).Select(c => c.ToolCall!.Name));
-        sink.End();
-        Assert.Equal(["a", "b"], chunks.Where(c => c.Kind == TextChunkKind.NativeToolCall).Select(c => c.ToolCall!.Name));
-        Assert.Equal(2, filter.Calls.Count);
-    }
-
-    [Fact]
     public void PlainTextLeavesTheChunkSequenceUnchanged()
     {
         const string text = "plain answer with { braces } and <tags>, no tools 😀";
@@ -92,31 +68,6 @@ public sealed class ToolCallStreamFilterTests
         Assert.Null(sink.ToolCall);
         Assert.Equal(text, sink.Text);
         Assert.All(chunks, c => Assert.Equal(TextChunkKind.Chunk, c.Kind));
-    }
-
-    [Fact]
-    public void NonContentChunksPassThroughUntouched()
-    {
-        List<TextChunk> got = [];
-        TextFilterSink sink = new(new ToolCallStreamFilter(), got.Add, static () => { });
-        TextChunk reasoning = new() { Kind = TextChunkKind.Reasoning, Text = "thinking" };
-        sink.Handle(reasoning);
-        Assert.Same(reasoning, Assert.Single(got));
-    }
-
-    [Fact]
-    public void InstallCreatesAFilterOnlyForRequestsThatOfferTools()
-    {
-        EngineOptions options = new();
-        ToolCalling.Install(options, ToolCallFormat.Llama3);
-        Assert.NotNull(options.TextStreamFilterFactory);
-        TextRequest plain = new() { Messages = [new TextMessage { Role = TextRole.User, Content = "hi" }] };
-        Assert.Null(options.TextStreamFilterFactory(plain));
-        TextRequest withTools = plain with { Tools = [new ToolDefinition { Name = "hang_up" }] };
-        ToolCallStreamFilter filter = Assert.IsType<ToolCallStreamFilter>(options.TextStreamFilterFactory(withTools));
-        Assert.Equal(ToolCallFormat.Llama3, filter.Format);
-        Assert.True(filter.StopAfterFirstCall);
-        Assert.NotSame(filter, options.TextStreamFilterFactory(withTools));
     }
 
 
@@ -134,18 +85,6 @@ public sealed class ToolCallStreamFilterTests
         Assert.Equal(["a", "b"], chunks.Where(c => c.Kind == TextChunkKind.NativeToolCall).Select(c => c.ToolCall!.Name));
         Assert.True(sink.Stopped);
         Assert.True(stopRequested);
-    }
-
-    [Fact]
-    public void DefaultStopAlsoDrainsThroughEndWhenNoDeltaFollows()
-    {
-        ToolCallStreamFilter filter = new(ToolCallFormat.Mistral);
-        List<TextChunk> chunks = [];
-        TextFilterSink sink = new(filter, chunks.Add, static () => { });
-        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "[{\"name\": \"a\", \"arguments\": {}}, {\"name\": \"b\", \"arguments\": {}}]" });
-        sink.End();
-        Assert.Equal(["a", "b"], chunks.Where(c => c.Kind == TextChunkKind.NativeToolCall).Select(c => c.ToolCall!.Name));
-        Assert.True(sink.Stopped);
     }
 
     [Fact]

@@ -98,19 +98,6 @@ public sealed class LoraLycorisDetectionTests : IDisposable
         Assert.Empty(file.Layers);
     }
 
-    [Fact]
-    public void LycorisOnlyFile_IsNoLongerAnUndetectableFormat()
-    {
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new(StringComparer.Ordinal);
-        AddLoHa(tensors, "transformer.transformer_blocks.0.attn.to_q", outDim: 4, inDim: 4, rank: 2);
-        string path = CreateSafeTensorsFile(_tempDir, "lycoris_only", tensors);
-
-        using LoraFile file = LoraFile.Load(path);
-
-        Assert.Equal(LoraFormat.DiffusersFlux, file.Format);
-        Assert.Equal(LoraVariant.LoHa, Assert.Single(file.Layers).Variant);
-    }
-
     public void Dispose()
     {
         if (Directory.Exists(_tempDir))

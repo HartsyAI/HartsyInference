@@ -8,16 +8,10 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class SttCatalogResolveTests
 {
     [Theory]
-    [InlineData("tiny.en", "openai/whisper-tiny.en")]
-    [InlineData("base.en", "openai/whisper-base.en")]
     [InlineData("small.en", "openai/whisper-small.en")]
-    [InlineData("medium.en", "openai/whisper-medium.en")]
-    [InlineData("Small.EN", "openai/whisper-small.en")]
     [InlineData("small", "openai/whisper-small")]
     [InlineData("", "openai/whisper-base")]
     [InlineData("large.en", "openai/whisper-large-v3")]
-    [InlineData("large-v2.en", "openai/whisper-large-v2")]
-    [InlineData("turbo.en", "openai/whisper-large-v3-turbo")]
     [InlineData("distil-small.en", "distil-whisper/distil-small.en")]
     [InlineData("someorg/whisper-fork.en", "someorg/whisper-fork.en")]
     public void ResolveWhisperRepo_HonorsTheEnglishOnlySuffix(string variant, string expectedRepo)

@@ -20,6 +20,7 @@ namespace HartsyInference.Audio.Tests;
 /// <para>This measures both, on the same text and the same pipeline, and asserts the relationship rather than
 /// an absolute number, because the absolute depends entirely on the machine. Gated on the cached voice and
 /// <c>ESPEAK_DATA_DIR</c>, like the other Piper bench.</para></summary>
+[Trait("Category", "Integration")]
 public sealed class PiperSentenceStreamBenchTests
 {
     private readonly ITestOutputHelper _out;

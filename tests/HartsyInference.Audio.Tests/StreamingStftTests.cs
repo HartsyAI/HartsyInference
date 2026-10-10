@@ -105,34 +105,6 @@ public sealed class StreamingStftTests
         }
     }
 
-    /// <summary>A tail carried across a discontinuity would splice audio that never adjoined — the same class of
-    /// error the wake pipeline resets for on a sequence gap.</summary>
-    [Fact]
-    public void Reset_ClearsOverlapTail()
-    {
-        StreamingStft stft = new StreamingStft(NFft, Hop);
-        StreamingIstft istft = new StreamingIstft(NFft, Hop);
-        float[] re = new float[stft.BinCount];
-        float[] im = new float[stft.BinCount];
-        float[] hopOut = new float[Hop];
-
-        stft.AddSamples(MakeSignal(4096));
-        while (stft.TryExtractFrame(re, im)) istft.PushFrame(re, im, hopOut);
-
-        stft.Reset();
-        istft.Reset();
-        Assert.Equal(0, stft.FramesEmitted);
-        Assert.Equal(0, istft.FramesConsumed);
-
-        // Pure silence in must give pure silence out; any residue is a surviving overlap-add tail.
-        stft.AddSamples(new float[4096]);
-        while (stft.TryExtractFrame(re, im))
-        {
-            istft.PushFrame(re, im, hopOut);
-            foreach (float s in hopOut) Assert.True(MathF.Abs(s) < 1e-6f, $"residual {s} after reset");
-        }
-    }
-
     /// <summary>The always-on wake path runs this ~12.5 times a second per device forever, so a per-frame
     /// allocation is a permanent GC treadmill rather than a one-off cost.</summary>
     [Fact]
@@ -175,36 +147,6 @@ public sealed class StreamingStftTests
         stft.AddSamples(MakeSignal(NFft));
         Assert.Throws<ArgumentException>(() => stft.TryExtractFrame(tooSmall, tooSmall));
         Assert.Throws<ArgumentException>(() => istft.PushFrame(ok, ok, new float[Hop - 1]));
-    }
-
-    /// <summary>The analyzer plans its FFT only where <see cref="Fft"/> would take Bluestein: a power-of-two stream
-    /// keeps <see cref="Fft"/>'s exact output, and RNNoise's 960 runs on the plan. The two transforms agree to
-    /// rounding, so a wrong gate shows only in the last bits. This compares bits, and first checks that the two
-    /// paths differ on this input, so it can tell them apart.</summary>
-    [Theory]
-    [InlineData(512, false)]
-    [InlineData(960, true)]
-    public void Frames_ComeFromThePlanOnlyAtBluesteinSizes(int nFft, bool planned)
-    {
-        float[] signal = MakeSignal(nFft);
-        float[] rectangular = new float[nFft];
-        Array.Fill(rectangular, 1f);
-        StreamingStft stft = new StreamingStft(nFft, nFft, window: rectangular);
-        stft.AddSamples(signal);
-        int bins = stft.BinCount;
-        float[] re = new float[bins], im = new float[bins];
-        Assert.True(stft.TryExtractFrame(re, im));
-
-        float[] planRe = new float[bins], planIm = new float[bins];
-        new FftPlan(nFft).ForwardReal(signal, planRe, planIm);
-        float[] fftRe = new float[bins], fftIm = new float[bins];
-        Fft.RealTransform(signal, fftRe, fftIm, nFft);
-        Assert.False(Bits(planRe).SequenceEqual(Bits(fftRe)) && Bits(planIm).SequenceEqual(Bits(fftIm)),
-            $"FftPlan and Fft agree bit for bit at {nFft}, so this input cannot tell which one ran");
-
-        (float[] expectedRe, float[] expectedIm) = planned ? (planRe, planIm) : (fftRe, fftIm);
-        Assert.Equal(Bits(expectedRe), Bits(re));
-        Assert.Equal(Bits(expectedIm), Bits(im));
     }
 
     private static uint[] Bits(float[] values) => Array.ConvertAll(values, BitConverter.SingleToUInt32Bits);

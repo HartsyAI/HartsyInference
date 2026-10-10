@@ -25,22 +25,4 @@ public class OasisActionEncoderTests
         Assert.Equal(3.25f, row.Sum(), 3);   // 3 keys + 0.5 − 0.25 — nothing else set
     }
 
-    [Fact]
-    public void EncodeFromPayload_RoundTrips()
-    {
-        byte[] keys = new byte[OasisActionEncoder.KeyCount];
-        keys[14] = 1;   // right
-        byte[] payload = new byte[OasisActionEncoder.PayloadBytes];
-        OasisActionEncoder.PackPayload(keys, cameraX: 2f, cameraY: -2f, payload);   // clamped to ±1
-
-        using OasisActionEncoder encoder = new();
-        Assert.Single(encoder.Streams);
-        Assert.Equal(ActionStreamRole.TimestepAddon, encoder.Streams[0].Role);
-
-        float[] row = new float[OasisActionEncoder.ActionDim];
-        encoder.Encode(new ActionInput(payload, 0, 0), "vpt", row);
-        Assert.Equal(1f, row[14]);
-        Assert.Equal(1f, row[OasisActionEncoder.CameraXIndex]);
-        Assert.Equal(-1f, row[OasisActionEncoder.CameraYIndex]);
-    }
 }

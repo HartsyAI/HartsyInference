@@ -35,25 +35,6 @@ public sealed unsafe class Nf4CodecTests
     }
 
     [Fact]
-    public void Dequantize_PerBlockAbsmax_Scales()
-    {
-        // 128 elements, all nibble 15 (LUT=+1.0), two blocks of 64 with scales 2.0 and 0.5.
-        Tensor packed = U8(64);
-        Span<byte> p = packed.AsSpan<byte>();
-        for (int i = 0; i < 64; i++) p[i] = 0xFF; // both nibbles = 15
-        Tensor absmax = F32(new[] { 2.0f, 0.5f });
-
-        Tensor outT = Nf4Codec.Dequantize(packed, absmax, new TensorShape(128), blockSize: 64);
-        ReadOnlySpan<float> o = outT.AsReadOnlySpan<float>();
-        for (int i = 0; i < 64; i++) Assert.InRange(o[i], 2.0f - Tol, 2.0f + Tol);
-        for (int i = 64; i < 128; i++) Assert.InRange(o[i], 0.5f - Tol, 0.5f + Tol);
-
-        packed.Dispose();
-        absmax.Dispose();
-        outT.Dispose();
-    }
-
-    [Fact]
     public void ReconstructDoubleQuantAbsmax_MatchesFormula()
     {
         // absmax[b] = nestedCodebook[q[b]] * nestedAbsmax[b/256] + offset

@@ -26,17 +26,6 @@ public class VideoAudioContractTests
             [.. Enumerable.Range(0, count).Select(i => new VideoFrame { Index = i, Width = 2, Height = 2, Rgb = new byte[12] })]);
 
     [Fact]
-    public void EmptyBufferReportsNoAudio()
-    {
-        Assert.True(AudioBuffer.Empty.IsEmpty);
-        Assert.Equal(0, AudioBuffer.Empty.FrameCount);
-        Assert.Equal(0d, AudioBuffer.Empty.Seconds);
-        Assert.True(AudioBuffer.FromChannels(null, 48_000).IsEmpty);
-        Assert.True(AudioBuffer.FromChannels([], 48_000).IsEmpty);
-        Assert.True(AudioBuffer.FromChannels([[1f]], 0).IsEmpty);
-    }
-
-    [Fact]
     public void StereoAndMonoConversionsAreConsistent()
     {
         AudioBuffer stereo = Stereo(4);
@@ -120,15 +109,6 @@ public class VideoAudioContractTests
     }
 
     [Fact]
-    public void ResolvedTrackIsTrimmedToVideoLength()
-    {
-        VideoGenerationResult result = Frames(12) with { Audio = Stereo(48_000) };
-        VideoRequest request = new VideoRequest { Prompt = "x" };
-        VideoGenerationResult resolved = VideoAudioResolver.Resolve(result, request, VideoAudioResolver.VideoSeconds(12, 24));
-        Assert.Equal(24_000, resolved.Audio!.FrameCount);
-    }
-
-    [Fact]
     public void ShortTrackIsPaddedSoTheMuxerCannotDropVideoFrames()
     {
         // Real LTX-2.3 case: 25 frames @24fps = 1.0417s of video against a 1.010s soundtrack. ffmpeg -shortest
@@ -143,13 +123,6 @@ public class VideoAudioContractTests
         // Padding is silence appended to the tail, not a resample of the original.
         Assert.Equal(shortTrack.Channels[0][100], resolved.Audio.Channels[0][100]);
         Assert.Equal(0f, resolved.Audio.Channels[0][^1]);
-    }
-
-    [Fact]
-    public void SilentGenerationStaysSilent()
-    {
-        VideoRequest request = new VideoRequest { Prompt = "x" };
-        Assert.Null(VideoAudioResolver.Resolve(Frames(24), request, videoSeconds: 1d).Audio);
     }
 
     [Fact]

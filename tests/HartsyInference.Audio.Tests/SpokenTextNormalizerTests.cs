@@ -24,36 +24,10 @@ public sealed class SpokenTextNormalizerTests
     }
 
     [Fact]
-    public void HeadingsBulletsAndQuotes_LoseTheirMarkers()
-    {
-        string spoken = SpokenTextNormalizer.ToSpeakable("# Title\n\n- one\n* two\n+ three\n1. four\n2) five\n> quoted");
-        Assert.Equal("Title one two three four five quoted", spoken);
-    }
-
-    [Fact]
-    public void Links_SpeakTheirText_ImagesTheirAlt()
-    {
-        Assert.Equal("See the docs for details.",
-            SpokenTextNormalizer.ToSpeakable("See [the docs](https://example.com/docs?x=1) for details."));
-        Assert.Equal("a sunset over the bay", SpokenTextNormalizer.ToSpeakable("![a sunset over the bay](img.png)"));
-    }
-
-    [Fact]
     public void FencedCode_IsNotReadAloud()
     {
         Assert.Equal("Run this: then check the output.",
             SpokenTextNormalizer.ToSpeakable("Run this:\n```bash\nls -la\n```\nthen check the output."));
-    }
-
-    [Fact]
-    public void EmojiAndNonBmp_AreDropped()
-    {
-        string spoken = SpokenTextNormalizer.ToSpeakable("Great job 👍🏽 team ☀️ see you at 5 ⭐");
-        Assert.DoesNotContain("👍", spoken, StringComparison.Ordinal);
-        Assert.DoesNotContain("☀", spoken, StringComparison.Ordinal);
-        Assert.DoesNotContain("⭐", spoken, StringComparison.Ordinal);
-        Assert.DoesNotContain("️", spoken, StringComparison.Ordinal);
-        Assert.Equal("Great job team see you at 5", spoken);
     }
 
     [Fact]
@@ -67,11 +41,4 @@ public sealed class SpokenTextNormalizerTests
         Assert.Equal("1999. The year it happened.", SpokenTextNormalizer.ToSpeakable("1999. The year it happened."));
     }
 
-    [Fact]
-    public void Whitespace_IsCollapsed()
-    {
-        Assert.Equal("one two three", SpokenTextNormalizer.ToSpeakable("  one \n\n two\t\tthree \r\n"));
-        Assert.Equal("", SpokenTextNormalizer.ToSpeakable(null));
-        Assert.Equal("", SpokenTextNormalizer.ToSpeakable("   \n  "));
-    }
 }

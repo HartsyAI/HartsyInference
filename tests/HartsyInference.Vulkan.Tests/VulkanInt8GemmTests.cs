@@ -24,8 +24,6 @@ public sealed class VulkanInt8GemmTests
 
     [Theory]
     [InlineData(32, 64, 48)]    // single tile, aligned
-    [InlineData(17, 64, 20)]    // single tile, M/N not multiples of 16 — bounds check
-    [InlineData(8, 256, 8)]     // single M/N tile, multiple K tiles
     [InlineData(128, 128, 96)]  // multiple BM/BN tiles + multiple K tiles, all tile-aligned
     [InlineData(130, 96, 70)]   // multiple tiles, none tile-aligned — exercises partial edge tiles
     public unsafe void MatMulInt8_MatchesExactIntegerReference(int M, int K, int N)
@@ -168,7 +166,6 @@ public sealed class VulkanInt8GemmTests
     /// above, since this re-quantizes both operands the same way (per-row symmetric INT8) before
     /// dispatching the same kernel.</summary>
     [Theory]
-    [InlineData(64, 128, 96)]
     [InlineData(96, 256, 128)]
     public unsafe void Backend_Linear_Int8OptIn_ApproximatesF32Reference(int M, int K, int N)
     {

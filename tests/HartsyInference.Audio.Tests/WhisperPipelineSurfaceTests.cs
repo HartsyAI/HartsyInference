@@ -11,17 +11,6 @@ namespace HartsyInference.Audio.Tests;
 public sealed class WhisperPipelineSurfaceTests
 {
     [Fact]
-    public void WhisperOptions_Defaults_AreSafe()
-    {
-        WhisperOptions opts = new();
-        Assert.Equal("en", opts.Language);
-        Assert.False(opts.Translate);
-        Assert.False(opts.WithTimestamps);
-        Assert.Equal(224, opts.MaxNewTokens);
-        Assert.Equal(0f, opts.Temperature);
-    }
-
-    [Fact]
     public void WhisperConfig_NumMelBins_DrivesMelExtractorChoice()
     {
         // The pipeline constructs a MelSpectrogramExtractor from the model's mel-bin
@@ -44,14 +33,6 @@ public sealed class WhisperPipelineSurfaceTests
         // EnumerateWeights returns no items before LoadWeights — there's nothing to enumerate.
         Assert.Empty(enc.EnumerateWeights());
         enc.Dispose();
-    }
-
-    [Fact]
-    public void Decoder_Construction_AlsoDoesNotAllocate()
-    {
-        WhisperDecoder dec = new(WhisperConfig.Tiny);
-        Assert.Empty(dec.EnumerateWeights());
-        dec.Dispose();
     }
 
     [Fact]

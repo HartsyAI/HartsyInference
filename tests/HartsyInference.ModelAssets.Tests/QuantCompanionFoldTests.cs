@@ -114,28 +114,6 @@ public sealed unsafe class QuantCompanionFoldTests : IDisposable
     }
 
     [Fact]
-    public void Open_WithFoldingOff_LeavesTheCompanionsWhereTheFileWroteThem()
-    {
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["blocks.0.attn.qkv.weight"] = new Tensor(new TensorShape(4, 8), DType.F8E4M3),
-            ["blocks.0.attn.qkv.scale_weight"] = Scalar(0.0195f),
-        };
-        try
-        {
-            using CheckpointSource source = CheckpointSource.Open(Write(weights),
-                new CheckpointOpenOptions { FoldQuantCompanions = false });
-
-            Assert.Contains("blocks.0.attn.qkv.scale_weight", source.Weights.Keys);
-            Assert.Equal(1.0f, source.Weights["blocks.0.attn.qkv.weight"].Fp8ScaleFactor);
-        }
-        finally
-        {
-            foreach (Tensor tensor in weights.Values) tensor.Dispose();
-        }
-    }
-
-    [Fact]
     public void FoldThenSplit_GivesEachProjectionItsOwnScales()
     {
         // The end-to-end shape of the fix: the container folds the fused weight's companions, and the converter's

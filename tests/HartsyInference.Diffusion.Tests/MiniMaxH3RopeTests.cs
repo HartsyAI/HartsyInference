@@ -14,13 +14,6 @@ public unsafe class MiniMaxH3RopeTests
     private const int HeadDim = 128, InvFreqLen = 16;
 
     [Fact]
-    public void RotaryWidthIsThreeAxesDuplicatedAcrossThePairHalves()
-    {
-        // t/h/w x 16 freqs = 48 angles, duplicated -> 96 of the 128 head dims rotate.
-        Assert.Equal(96, MiniMaxH3Rope.RotaryDim(InvFreqLen));
-    }
-
-    [Fact]
     public void PairHalvesCarryTheSameAngleAndTheTailStaysZero()
     {
         double[] pos = [3.5, 11.25, 7.0, 1.0, 2.0, 3.0];

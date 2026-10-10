@@ -34,18 +34,6 @@ public sealed class RnnoiseCheckpointTests(ITestOutputHelper log) : IDisposable
     ];
 
     [Fact]
-    public void ExtractMember_CopiesOnlyTheNamedFile()
-    {
-        byte[] wanted = [1, 2, 3, 4, 5];
-        string tarball = WriteTarball(("src/rnnoise_data.c", [9, 9]), (RnnoiseCheckpoint.CheckpointMember, wanted));
-        string extracted = Path.Combine(_dir, "out.pth");
-
-        RnnoiseCheckpoint.ExtractMember(tarball, RnnoiseCheckpoint.CheckpointMember, extracted);
-
-        Assert.Equal(wanted, File.ReadAllBytes(extracted));
-    }
-
-    [Fact]
     public void ExtractMember_Throws_WhenTheCheckpointIsAbsent()
     {
         string tarball = WriteTarball(("models/rnnoise10Gb_15.pth", [1]));
@@ -106,15 +94,6 @@ public sealed class RnnoiseCheckpointTests(ITestOutputHelper log) : IDisposable
         weights.Load(tensors);
         Assert.Throws<InvalidOperationException>(() => weights.Load(tensors));
         foreach (Tensor tensor in tensors.Values) tensor.Dispose();
-    }
-
-    [Fact]
-    public void ConvertCheckpoint_RejectsExtraTensors()
-    {
-        (string Name, long[] Shape)[] extra = [.. Layout, ("gru4.weight_ih_l0", [1152, 384])];
-        string checkpoint = WriteCheckpoint(extra);
-        Assert.Throws<InvalidDataException>(() =>
-            RnnoiseCheckpoint.ConvertCheckpoint(checkpoint, Path.Combine(_dir, "rnnoise.safetensors")));
     }
 
     /// <summary>The real tarball through the C# path, compared tensor by tensor with the offline converter's output

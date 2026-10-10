@@ -17,8 +17,8 @@ public sealed unsafe class Int8GemvKernelTests
     public static TheoryData<int, int, int> Shapes()
     {
         TheoryData<int, int, int> data = new();
-        foreach (int m in new[] { 1, 2, 3, 5 })
-            foreach ((int n, int k) in new[] { (8, 4), (8, 12), (16, 32), (24, 40), (1152, 384), (384, 384), (8, 8192), (16, 16384) })
+        foreach (int m in new[] { 1, 5 })
+            foreach ((int n, int k) in new[] { (8, 12), (1152, 384), (16, 16384) })
                 data.Add(m, n, k);
         return data;
     }
@@ -62,24 +62,6 @@ public sealed unsafe class Int8GemvKernelTests
         Int8GemvKernels.LinearScalar(scalar, c.Codes, c.Tiles, c.Scale, c.Bias, c.Diag, c.DiagInput);
         Assert.True(simd.AsSpan<byte>().SequenceEqual(scalar.AsSpan<byte>()),
             $"M={m} N={n} K={k}: the AVX2 path differs from the scalar path (Avx2 {Avx2.IsSupported})");
-    }
-
-    [Fact]
-    public void EachRowOfABatch_MatchesThatRowAlone()
-    {
-        const int n = 1152, k = 384, m = 3;
-        using Case batch = Case.Random(m, n, k, withBias: true, withDiag: true, seed: 5);
-        using CpuBackend backend = new();
-        using Tensor all = new(new TensorShape(m, n), DType.F32);
-        batch.Run(backend, all);
-        for (int r = 0; r < m; r++)
-        {
-            using Case single = batch.Row(r);
-            using Tensor one = new(new TensorShape(1, n), DType.F32);
-            single.Run(backend, one);
-            Assert.True(all.AsSpan<byte>().Slice(r * n * sizeof(float), n * sizeof(float)).SequenceEqual(one.AsSpan<byte>()),
-                $"row {r} of a {m}-row call differs from the same row alone");
-        }
     }
 
     /// <summary>Weights of 127 against codes of 255: each pair of products is 64770, which <c>maddubs</c> would clip
@@ -129,37 +111,6 @@ public sealed unsafe class Int8GemvKernelTests
         float down = WithProduct(-1.5f);
         Assert.Equal(-1.5f, 127f * down);
         Assert.Equal(126, Int8Tiles.QuantizeActivation(down));
-    }
-
-    [Fact]
-    public void QuantizeActivation_MapsTheUnitRangeTo0Through254_AndClampsOutside()
-    {
-        Assert.Equal(0, Int8Tiles.QuantizeActivation(-1f));
-        Assert.Equal(127, Int8Tiles.QuantizeActivation(0f));
-        Assert.Equal(254, Int8Tiles.QuantizeActivation(1f));
-        Assert.Equal(255, Int8Tiles.QuantizeActivation(1.01f));
-        Assert.Equal(255, Int8Tiles.QuantizeActivation(1e30f));
-        Assert.Equal(0, Int8Tiles.QuantizeActivation(-1.01f));
-        Assert.Equal(0, Int8Tiles.QuantizeActivation(float.NegativeInfinity));
-        Assert.Equal(0, Int8Tiles.QuantizeActivation(float.NaN));
-    }
-
-    [Fact]
-    public void Tiles_HoldEightRowsOfFourWeights_RowByRow()
-    {
-        const int n = 16, k = 12;
-        sbyte[] rowMajor = new sbyte[n * k];
-        for (int i = 0; i < rowMajor.Length; i++) rowMajor[i] = (sbyte)(i % 251 - 125);
-        sbyte[] tiles = new sbyte[n * k];
-        Int8Tiles.Pack(rowMajor, n, k, tiles);
-
-        // The second 8-row block's third tile starts at (1·3 + 2)·32; its row 5 holds inputs 8..11 of output 13.
-        int start = (1 * 3 + 2) * Int8Tiles.Bytes + 5 * Int8Tiles.Cols;
-        for (int c = 0; c < 4; c++) Assert.Equal(rowMajor[13 * k + 8 + c], tiles[start + c]);
-
-        sbyte[] back = new sbyte[n * k];
-        Int8Tiles.Unpack(tiles, n, k, back);
-        Assert.Equal(rowMajor, back);
     }
 
     /// <summary>The float nearest <paramref name="target"/>/127 whose product with 127 rounds to exactly

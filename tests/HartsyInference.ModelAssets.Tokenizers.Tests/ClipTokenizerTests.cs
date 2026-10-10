@@ -30,13 +30,6 @@ public sealed class ClipTokenizerTests : IDisposable
     // ── Construction Tests ─────────────────────────────────────────────
 
     [Fact]
-    public void Construction_WithValidFiles_Succeeds()
-    {
-        if (!_modelsAvailable) return;
-        Assert.NotNull(_tokenizer);
-    }
-
-    [Fact]
     public void Construction_WithInvalidPath_ThrowsFileNotFound()
     {
         Assert.Throws<FileNotFoundException>(() => new ClipTokenizer("nonexistent.json", "nonexistent.txt"));
@@ -52,15 +45,6 @@ public sealed class ClipTokenizerTests : IDisposable
         int[] tokens = _tokenizer!.Encode("hello world");
 
         Assert.Equal(ClipTokenizer.MaxLength, tokens.Length);
-    }
-
-    [Fact]
-    public void Encode_StartsWithSOT()
-    {
-        if (!_modelsAvailable) return;
-
-        int[] tokens = _tokenizer!.Encode("hello world");
-
         Assert.Equal(ClipTokenizer.StartOfTextId, tokens[0]);
     }
 

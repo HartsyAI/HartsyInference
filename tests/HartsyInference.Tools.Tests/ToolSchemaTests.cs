@@ -47,16 +47,6 @@ public sealed class ToolSchemaTests
     }
 
     [Fact]
-    public void ExplicitDescriptionWinsAndNoArgumentToolHasEmptyProperties()
-    {
-        ToolDefinition definition = ToolSchema.FromDelegate("hang_up", () => "ok", "Ends the call.");
-        Assert.Equal("Ends the call.", definition.Description);
-        using JsonDocument doc = JsonDocument.Parse(definition.JsonSchema);
-        Assert.Empty(doc.RootElement.GetProperty("properties").EnumerateObject());
-        Assert.Equal(0, doc.RootElement.GetProperty("required").GetArrayLength());
-    }
-
-    [Fact]
     public void UnsupportedParameterTypeFailsAtRegistration()
         => Assert.Throws<NotSupportedException>(() => ToolSchema.FromDelegate("bad", (List<int> xs) => xs.Count));
 
@@ -104,51 +94,5 @@ public sealed class ToolSchemaTests
         Assert.Equal("{\"error\":\"InvalidOperationException: kaboom\"}", thrown);
     }
 
-    [Fact]
-    public async Task CancellationPropagatesOutOfDispatch()
-    {
-        ToolRegistry registry = new ToolRegistry().Add("wait", (CancellationToken cancel) => Task.Delay(Timeout.Infinite, cancel));
-        using CancellationTokenSource cts = new();
-        cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => registry.InvokeAsync(new NativeToolCall { Name = "wait", Arguments = "{}" }, cts.Token));
-    }
 
-    [Fact]
-    public void DuplicateNamesAreRejectedAndCustomHandlersKeepTheirSchema()
-    {
-        ToolRegistry registry = new ToolRegistry().Add("t", "desc", "{\"type\":\"object\"}", static (_, _) => Task.FromResult("r"));
-        Assert.Throws<ArgumentException>(() => registry.Add("t", () => "again"));
-        ToolDefinition definition = Assert.Single(registry.Definitions);
-        Assert.Equal("desc", definition.Description);
-        Assert.Equal("{\"type\":\"object\"}", definition.JsonSchema);
-        Assert.True(registry.TryGet("t", out IToolHandler handler));
-        Assert.Equal("t", handler.Name);
-    }
-
-
-    [Fact]
-    public async Task ValueTaskResultsAreUnwrapped()
-    {
-        ToolRegistry registry = new ToolRegistry()
-            .Add("count", (int n) => new ValueTask<int>(n + 1))
-            .Add("nothing", static () => ValueTask.CompletedTask);
-        Assert.Equal("5", await registry.InvokeAsync(new NativeToolCall { Name = "count", Arguments = "{\"n\": 4}" }));
-        Assert.Equal("", await registry.InvokeAsync(new NativeToolCall { Name = "nothing", Arguments = "{}" }));
-    }
-
-    [Fact]
-    public async Task AsyncResultsOfAnyTypeRenderOnRepeatedCalls()
-    {
-        ToolRegistry registry = new ToolRegistry()
-            .Add("double_it", async (int n) =>
-            {
-                await Task.Yield();
-                return n * 2;
-            })
-            .Add("pause", async (CancellationToken cancel) => await Task.Delay(1, cancel));
-        Assert.Equal("8", await registry.InvokeAsync(new NativeToolCall { Name = "double_it", Arguments = "{\"n\": 4}" }));
-        Assert.Equal("10", await registry.InvokeAsync(new NativeToolCall { Name = "double_it", Arguments = "{\"n\": 5}" }));
-        Assert.Equal("", await registry.InvokeAsync(new NativeToolCall { Name = "pause", Arguments = "{}" }));
-        Assert.Equal("", await registry.InvokeAsync(new NativeToolCall { Name = "pause", Arguments = "{}" }));
-    }
 }

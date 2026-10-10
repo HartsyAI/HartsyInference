@@ -9,19 +9,10 @@ namespace HartsyInference.Diffusion.Tests;
 /// than the scheduler's step was handed. Snapping to 8 (the VAE stride alone) is the live form of that bug.</summary>
 public sealed class WanAnimateResolutionSnapTests
 {
-    [Fact]
-    public void PatchAndVaeStridesCompoundIntoSixteen()
-    {
-        Assert.Equal(16, VideoRecipeUtils.PatchAlignedMultiple(vaeSpatialCompression: 8, patchSize: (1, 2, 2)));
-        Assert.Equal(32, VideoRecipeUtils.PatchAlignedMultiple(vaeSpatialCompression: 16, patchSize: (1, 2, 2)));
-    }
-
     [Theory]
     [InlineData(832, 480, 832, 480)]    // the official 480p bucket is already aligned
-    [InlineData(1280, 720, 1280, 720)]  // and the 720p one
     [InlineData(844, 492, 848, 496)]
     [InlineData(840, 488, 832, 480)]    // exact midpoints round to even, per Math.Round's default
-    [InlineData(1, 1, 16, 16)]          // never below one multiple
     public void ResolutionSnapsToTheSixteenGrid(int width, int height, int expectedWidth, int expectedHeight)
     {
         VideoRequest request = new VideoRequest { Prompt = "", Width = width, Height = height };

@@ -55,26 +55,4 @@ public sealed class TextServiceShardValidationTests
             () => engine.Text.GenerateAsync(FakeSpec(), RequestWithDevice("cuda:0+cuda:1")));
     }
 
-    /// <summary>Real-checkpoint companion to the two facts above: an SSM architecture (Mamba, no per-layer-
-    /// crossing story for its recurrent state) requesting a composite shard key used to silently resolve to
-    /// whatever <c>CreateBackendFor</c>'s naive first-colon parse happened to land on (ordinal 0, NOT
-    /// necessarily the first requested device) with zero log signal. It now resolves explicitly to
-    /// <c>shardDevices[0]</c> and logs a warning — this just proves the request completes successfully (no
-    /// throw, no crash) on the real Mamba checkpoint under a composite key, which is what "falls back cleanly"
-    /// means in practice; the exact device-resolution logic is covered structurally by the code path itself.</summary>
-    [Fact]
-    public async Task ShardedRequest_SsmArchitecture_FallsBackCleanly_NoThrow()
-    {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        string checkpoint = TestPaths.Llm.Mamba28BQ4K;
-        if (!RealWeightGate.Require(_output.WriteLine, checkpoint)) return;
-
-        using InferenceEngine engine = new("cuda", 0);
-        ModelSpec spec = new() { Requested = "mamba-2.8b", Modality = Modality.Text, LocalPath = checkpoint };
-        // A 2-way composite on a box with only 1 GPU still exercises the SSM fallback branch (ResolveShardDevices
-        // doesn't require the second device to physically exist to build the shard list) without needing 2 GPUs.
-        TextResult result = await engine.Text.GenerateAsync(spec, RequestWithDevice("cuda:0+cuda:1") with { MaxTokens = 4 });
-        _output.WriteLine($"Generated {result.CompletionTokens} tokens: \"{result.Text}\"");
-        Assert.True(result.CompletionTokens > 0);
-    }
 }

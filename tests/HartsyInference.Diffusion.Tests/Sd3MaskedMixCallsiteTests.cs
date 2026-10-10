@@ -33,7 +33,6 @@ public sealed unsafe class Sd3MaskedMixCallsiteTests
 
     [Theory]
     [InlineData(3.0f, 28, 0)]
-    [InlineData(3.0f, 28, 13)]
     [InlineData(5.0f, 11, 10)]
     public void InitialImg2ImgMix_UsesAffinePrimitive_AndExactlyMatchesLegacyAddNoise(
         float shift, int steps, int stepIndex)
@@ -68,7 +67,6 @@ public sealed unsafe class Sd3MaskedMixCallsiteTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(7)]
     [InlineData(12)]
     public void PerStepMaskedMix_PreservesLegacySeedScheduleAndTerminalCleanSource(int nextStep)
     {

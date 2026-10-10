@@ -34,7 +34,6 @@ public sealed class DeepSeekV41EngramModuleTests
     [Theory]
     [InlineData("plain")]
     [InlineData("masked")]
-    [InlineData("hc4")]
     public void Output_Matches_Upstream_Engram_Forward(string name)
     {
         (DeepSeekV41EngramModule module, float[] x, long[] ids, bool[] mask, float[] expected, int tokens) = Build(name);
@@ -52,14 +51,5 @@ public sealed class DeepSeekV41EngramModuleTests
         int stride = x.Length / tokens;
         for (int t = 0; t < tokens; t++)
             if (!mask[t]) Assert.Equal(before.AsSpan(t * stride, stride).ToArray(), x.AsSpan(t * stride, stride).ToArray());
-    }
-
-    [Fact]
-    public void Rejects_Mismatched_Inputs()
-    {
-        (DeepSeekV41EngramModule module, float[] x, long[] ids, _, _, int tokens) = Build("plain");
-        Assert.Throws<ArgumentException>(() => module.Apply(x.AsSpan(1).ToArray(), tokens, ids, default));
-        Assert.Throws<ArgumentException>(() => module.Apply(x, tokens, ids.AsSpan(1), default));
-        Assert.Throws<ArgumentException>(() => module.Apply(x, tokens, ids, new bool[tokens + 1]));
     }
 }

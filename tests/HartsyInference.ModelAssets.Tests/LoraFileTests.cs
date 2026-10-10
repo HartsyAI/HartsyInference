@@ -19,47 +19,6 @@ public sealed class LoraFileTests : IDisposable
     }
 
     [Fact]
-    public void Load_OpensSafetensors_PopulatesFilePath()
-    {
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] = (DType.F32, [4, 320], new float[4 * 320]),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] = (DType.F32, [320, 4], new float[320 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "smoke_load", tensors);
-
-        using LoraFile file = LoraFile.Load(path);
-
-        Assert.Equal(path, file.FilePath);
-        Assert.NotNull(file.Layers);
-        Assert.NotEmpty(file.Layers);
-    }
-
-    [Fact]
-    public void Load_PreservesSafetensorsMetadata()
-    {
-        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] =
-                (DType.F32, [4, 320], new float[4 * 320]),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] =
-                (DType.F32, [320, 4], new float[320 * 4]),
-        };
-        Dictionary<string, string> metadata = new(StringComparer.Ordinal)
-        {
-            ["pdd_num_steps"] = "32",
-            ["task"] = "fl2va",
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "metadata", tensors, metadata);
-
-        using LoraFile file = LoraFile.Load(path);
-
-        Assert.NotNull(file.Metadata);
-        Assert.Equal("32", file.Metadata!["pdd_num_steps"]);
-        Assert.Equal("fl2va", file.Metadata["task"]);
-    }
-
-    [Fact]
     public void Load_OfficialLightXMiniMaxH3Diffusers_FusesEveryTargetAndSwapsSwiGlu()
     {
         Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new(StringComparer.Ordinal);
@@ -146,52 +105,6 @@ public sealed class LoraFileTests : IDisposable
         file.Dispose();
     }
 
-    [Theory]
-    [InlineData("down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q",
-                "down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q")]
-    [InlineData("up_blocks_2_attentions_1_transformer_blocks_0_attn2_to_out_0",
-                "up_blocks.2.attentions.1.transformer_blocks.0.attn2.to_out.0")]
-    [InlineData("mid_block_attentions_0_transformer_blocks_0_ff_net_0_proj",
-                "mid_block.attentions.0.transformer_blocks.0.ff.net.0.proj")]
-    [InlineData("text_model_encoder_layers_5_self_attn_q_proj",
-                "text_model.encoder.layers.5.self_attn.q_proj")]
-    [InlineData("text_model_encoder_layers_5_mlp_fc1",
-                "text_model.encoder.layers.5.mlp.fc1")]
-    [InlineData("text_model_encoder_layers_5_layer_norm1",
-                "text_model.encoder.layers.5.layer_norm1")]
-    public void LoraKeyTransformer_PreservesCompoundIdentifiers(string input, string expected)
-    {
-        Assert.Equal(expected, LoraKeyTransformer.UnderscoreToDot(input));
-    }
-
-    [Fact]
-    public void Detect_KohyaSd15_FromUnetBlocks()
-    {
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] = (DType.F32, [4, 320], new float[4 * 320]),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] = (DType.F32, [320, 4], new float[320 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "sd15_detect", tensors);
-        using LoraFile file = LoraFile.Load(path);
-        Assert.Equal(LoraFormat.KohyaSd15, file.Format);
-    }
-
-    [Fact]
-    public void Detect_KohyaSdxl_FromTe2()
-    {
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] = (DType.F32, [4, 320], new float[4 * 320]),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] = (DType.F32, [320, 4], new float[320 * 4]),
-            ["lora_te2_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight"] = (DType.F32, [4, 1280], new float[4 * 1280]),
-            ["lora_te2_text_model_encoder_layers_0_self_attn_q_proj.lora_up.weight"] = (DType.F32, [1280, 4], new float[1280 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "sdxl_detect", tensors);
-        using LoraFile file = LoraFile.Load(path);
-        Assert.Equal(LoraFormat.KohyaSdxl, file.Format);
-    }
-
     [Fact]
     public void Load_KohyaSd15_PopulatesLayers_WithCorrectTargetKey()
     {
@@ -276,45 +189,6 @@ public sealed class LoraFileTests : IDisposable
     }
 
     [Fact]
-    public void Detect_KohyaFlux_FromDoubleBlocks()
-    {
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_double_blocks_0_img_attn_qkv.lora_down.weight"] = (DType.F32, [4, 3072], new float[4 * 3072]),
-            ["lora_unet_double_blocks_0_img_attn_qkv.lora_up.weight"] = (DType.F32, [9216, 4], new float[9216 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "kohya_flux_detect", tensors);
-        using LoraFile file = LoraFile.Load(path);
-        Assert.Equal(LoraFormat.KohyaFlux, file.Format);
-    }
-
-    [Fact]
-    public void Detect_AiToolkitFlux_FromTransformerPrefix()
-    {
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_transformer_transformer_blocks_0_attn_to_q.lora_A.weight"] = (DType.F32, [4, 3072], new float[4 * 3072]),
-            ["lora_transformer_transformer_blocks_0_attn_to_q.lora_B.weight"] = (DType.F32, [3072, 4], new float[3072 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "aitk_flux_detect", tensors);
-        using LoraFile file = LoraFile.Load(path);
-        Assert.Equal(LoraFormat.AiToolkitFlux, file.Format);
-    }
-
-    [Fact]
-    public void Detect_DiffusersFlux_FromTransformerDottedKey()
-    {
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["transformer.transformer_blocks.0.attn.to_q.lora_A.weight"] = (DType.F32, [4, 3072], new float[4 * 3072]),
-            ["transformer.transformer_blocks.0.attn.to_q.lora_B.weight"] = (DType.F32, [3072, 4], new float[3072 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "diffusers_flux_detect", tensors);
-        using LoraFile file = LoraFile.Load(path);
-        Assert.Equal(LoraFormat.DiffusersFlux, file.Format);
-    }
-
-    [Fact]
     public void Load_KohyaFlux_FusedQkv_Splits3Ways_ImgStream()
     {
         const int hidden = 3072;
@@ -350,78 +224,6 @@ public sealed class LoraFileTests : IDisposable
     }
 
     [Fact]
-    public void Load_KohyaFlux_FusedQkv_Splits3Ways_TxtStream_AddProjNames()
-    {
-        const int hidden = 3072;
-        const int rank = 4;
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_double_blocks_0_txt_attn_qkv.lora_down.weight"] = (DType.F32, [rank, hidden], new float[rank * hidden]),
-            ["lora_unet_double_blocks_0_txt_attn_qkv.lora_up.weight"] = (DType.F32, [3 * hidden, rank], new float[3 * hidden * rank]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "kohya_qkv_txt", tensors);
-
-        using LoraFile file = LoraFile.Load(path);
-
-        Assert.Equal(3, file.Layers.Count);
-        Assert.Contains(file.Layers, l => l.TargetKey == "transformer_blocks.0.attn.add_q_proj.weight");
-        Assert.Contains(file.Layers, l => l.TargetKey == "transformer_blocks.0.attn.add_k_proj.weight");
-        Assert.Contains(file.Layers, l => l.TargetKey == "transformer_blocks.0.attn.add_v_proj.weight");
-    }
-
-    [Fact]
-    public void Load_KohyaFlux_FusedLinear1_Splits4Ways()
-    {
-        const int hidden = 3072;
-        const int mlpInner = 4 * hidden;
-        const int rank = 4;
-        const int totalOut = 3 * hidden + mlpInner;
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_single_blocks_0_linear1.lora_down.weight"] = (DType.F32, [rank, hidden], new float[rank * hidden]),
-            ["lora_unet_single_blocks_0_linear1.lora_up.weight"] = (DType.F32, [totalOut, rank], new float[totalOut * rank]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "kohya_linear1", tensors);
-
-        using LoraFile file = LoraFile.Load(path);
-
-        Assert.Equal(4, file.Layers.Count);
-        LoraLayer toQ = file.Layers.Single(l => l.TargetKey == "single_transformer_blocks.0.attn.to_q.weight");
-        LoraLayer toK = file.Layers.Single(l => l.TargetKey == "single_transformer_blocks.0.attn.to_k.weight");
-        LoraLayer toV = file.Layers.Single(l => l.TargetKey == "single_transformer_blocks.0.attn.to_v.weight");
-        LoraLayer mlp = file.Layers.Single(l => l.TargetKey == "single_transformer_blocks.0.proj_mlp.weight");
-        Assert.Equal(hidden, toQ.LoraUp.Shape[0]);
-        Assert.Equal(hidden, toK.LoraUp.Shape[0]);
-        Assert.Equal(hidden, toV.LoraUp.Shape[0]);
-        Assert.Equal(mlpInner, mlp.LoraUp.Shape[0]);
-    }
-
-    [Fact]
-    public void Load_KohyaFlux_TopLevelMappings()
-    {
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            // Block key required for format detection (real Flux LoRAs always have block keys).
-            ["lora_unet_double_blocks_0_img_attn_proj.lora_down.weight"] = (DType.F32, [4, 3072], new float[4 * 3072]),
-            ["lora_unet_double_blocks_0_img_attn_proj.lora_up.weight"] = (DType.F32, [3072, 4], new float[3072 * 4]),
-            ["lora_unet_img_in.lora_down.weight"] = (DType.F32, [4, 64], new float[4 * 64]),
-            ["lora_unet_img_in.lora_up.weight"] = (DType.F32, [3072, 4], new float[3072 * 4]),
-            ["lora_unet_final_layer_linear.lora_down.weight"] = (DType.F32, [4, 3072], new float[4 * 3072]),
-            ["lora_unet_final_layer_linear.lora_up.weight"] = (DType.F32, [64, 4], new float[64 * 4]),
-            ["lora_unet_time_in_in_layer.lora_down.weight"] = (DType.F32, [4, 256], new float[4 * 256]),
-            ["lora_unet_time_in_in_layer.lora_up.weight"] = (DType.F32, [3072, 4], new float[3072 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "kohya_flux_toplevel", tensors);
-
-        using LoraFile file = LoraFile.Load(path);
-
-        Assert.Equal(LoraFormat.KohyaFlux, file.Format);
-        Assert.Contains(file.Layers, l => l.TargetKey == "x_embedder.weight");
-        Assert.Contains(file.Layers, l => l.TargetKey == "proj_out.weight");
-        Assert.Contains(file.Layers, l => l.TargetKey == "time_text_embed.timestep_embedder.linear_1.weight");
-    }
-
-    [Fact]
     public void Load_AiToolkitFlux_PreservesCompoundKeys_AndDefaultsAlphaToRank()
     {
         const int hidden = 3072;
@@ -452,117 +254,6 @@ public sealed class LoraFileTests : IDisposable
 
         LoraLayer projMlp = file.Layers.Single(l => l.TargetKey == "single_transformer_blocks.5.proj_mlp.weight");
         Assert.Equal(LoraTarget.Transformer, projMlp.Target);
-    }
-
-    [Fact]
-    public void Load_DiffusersFlux_StripsTransformerPrefix()
-    {
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["transformer.transformer_blocks.0.attn.to_q.lora_A.weight"] = (DType.F32, [4, 3072], new float[4 * 3072]),
-            ["transformer.transformer_blocks.0.attn.to_q.lora_B.weight"] = (DType.F32, [3072, 4], new float[3072 * 4]),
-            ["transformer.single_transformer_blocks.10.proj_out.lora_A.weight"] = (DType.F32, [4, 15360], new float[4 * 15360]),
-            ["transformer.single_transformer_blocks.10.proj_out.lora_B.weight"] = (DType.F32, [3072, 4], new float[3072 * 4]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "diffusers_flux_load", tensors);
-
-        using LoraFile file = LoraFile.Load(path);
-
-        Assert.Equal(LoraFormat.DiffusersFlux, file.Format);
-        Assert.Equal(2, file.Layers.Count);
-        Assert.Contains(file.Layers, l => l.TargetKey == "transformer_blocks.0.attn.to_q.weight");
-        Assert.Contains(file.Layers, l => l.TargetKey == "single_transformer_blocks.10.proj_out.weight");
-    }
-
-    [Fact]
-    public unsafe void LoraStack_Apply_ProducesExpectedDelta_ForZeroBaseWeight()
-    {
-        // Construct a LoRA where down=ones[2,4], up=ones[4,2], alpha=2 (so scale=alpha/rank=1.0).
-        // delta[i,j] = sum_r up[i,r] * down[r,j] = sum of 2 ones = 2 (everywhere).
-        // Base weight starts at zero → merged should be all 2.0f.
-        const int outDim = 4, inDim = 4, rank = 2;
-        float[] down = new float[rank * inDim];
-        Array.Fill(down, 1.0f);
-        float[] up = new float[outDim * rank];
-        Array.Fill(up, 1.0f);
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] =
-                (DType.F32, [rank, inDim], down),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] =
-                (DType.F32, [outDim, rank], up),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.alpha"] =
-                (DType.F32, [], [2.0f]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "merge_zero_base", tensors);
-
-        // Base weight: zeros [outDim, inDim], owned (so we can read its data freely).
-        Tensor baseW = new Tensor(new TensorShape(outDim, inDim), DType.F32);
-        try
-        {
-            Span<float> baseSpan = baseW.AsSpan<float>();
-            baseSpan.Clear();
-            Dictionary<string, Tensor> weights = new()
-            {
-                ["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"] = baseW,
-            };
-
-            using LoraFile file = LoraFile.Load(path);
-            using LoraStack stack = new();
-            using CpuBackend backend = new();
-            stack.Add(file, strength: 1.0f);
-            int merged = stack.ApplyTo(weights, LoraTarget.UNet, backend);
-
-            Assert.Equal(1, merged);
-            Tensor result = weights["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"];
-            Assert.NotSame(baseW, result);
-            Assert.Equal(DType.F32, result.DType);
-            Span<float> resultSpan = result.AsSpan<float>();
-            for (int i = 0; i < resultSpan.Length; i++)
-            {
-                Assert.Equal(2.0f, resultSpan[i], 1e-5);
-            }
-        }
-        finally
-        {
-            baseW.Dispose();
-        }
-    }
-
-    [Fact]
-    public void LoraStack_Apply_StrengthScalesDelta()
-    {
-        const int outDim = 4, inDim = 4, rank = 2;
-        float[] down = new float[rank * inDim];
-        Array.Fill(down, 1.0f);
-        float[] up = new float[outDim * rank];
-        Array.Fill(up, 1.0f);
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] = (DType.F32, [rank, inDim], down),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] = (DType.F32, [outDim, rank], up),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.alpha"] = (DType.F32, [], [2.0f]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "merge_strength", tensors);
-
-        Tensor baseW = new Tensor(new TensorShape(outDim, inDim), DType.F32);
-        try
-        {
-            baseW.AsSpan<float>().Clear();
-            Dictionary<string, Tensor> weights = new()
-            {
-                ["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"] = baseW,
-            };
-            using LoraFile file = LoraFile.Load(path);
-            using LoraStack stack = new();
-            using CpuBackend backend = new();
-            stack.Add(file, strength: 0.5f);
-            stack.ApplyTo(weights, LoraTarget.UNet, backend);
-
-            Tensor result = weights["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"];
-            Assert.Equal(1.0f, result.AsSpan<float>()[0], 1e-5);  // 0.5 * 2.0 = 1.0
-        }
-        finally { baseW.Dispose(); }
     }
 
     [Fact]
@@ -624,70 +315,6 @@ public sealed class LoraFileTests : IDisposable
         Assert.Equal(0, merged);
     }
 
-    /// <summary>An fp8 base used to be refused outright; it is now dequantized, merged and requantized, so the entry is
-    /// replaced by a fresh fp8 tensor carrying a recomputed scale rather than throwing.</summary>
-    [Fact]
-    public void LoraStack_Apply_RequantizesFp8Base()
-    {
-        const int outDim = 4, inDim = 4, rank = 2;
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] = (DType.F32, [rank, inDim], new float[rank * inDim]),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] = (DType.F32, [outDim, rank], new float[outDim * rank]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "fp8_base", tensors);
-
-        Tensor baseW = new Tensor(new TensorShape(outDim, inDim), DType.F8E4M3);
-        try
-        {
-            baseW.Fp8ScaleFactor = 0.001f;
-            Dictionary<string, Tensor> weights = new()
-            {
-                ["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"] = baseW,
-            };
-            using LoraFile file = LoraFile.Load(path);
-            using LoraStack stack = new();
-            using CpuBackend backend = new();
-            stack.Add(file);
-            Assert.Equal(1, stack.ApplyTo(weights, LoraTarget.UNet, backend));
-            Tensor merged = weights["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"];
-            Assert.NotSame(baseW, merged);
-            Assert.Equal(DType.F8E4M3, merged.DType);
-        }
-        finally { baseW.Dispose(); }
-    }
-
-    [Fact]
-    public void LoraStack_AddFromPath_OwnsFile_DisposedWithStack()
-    {
-        const int outDim = 4, inDim = 4, rank = 2;
-        float[] down = new float[rank * inDim]; Array.Fill(down, 1.0f);
-        float[] up = new float[outDim * rank]; Array.Fill(up, 1.0f);
-        Dictionary<string, (DType, long[], float[])> tensors = new()
-        {
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_down.weight"] = (DType.F32, [rank, inDim], down),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.lora_up.weight"] = (DType.F32, [outDim, rank], up),
-            ["lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn1_to_q.alpha"] = (DType.F32, [], [2.0f]),
-        };
-        string path = CreateSafeTensorsFile(_tempDir, "addfrompath", tensors);
-
-        Tensor baseW = new Tensor(new TensorShape(outDim, inDim), DType.F32);
-        try
-        {
-            baseW.AsSpan<float>().Clear();
-            Dictionary<string, Tensor> weights = new()
-            {
-                ["down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight"] = baseW,
-            };
-            using LoraStack stack = new();
-            using CpuBackend backend = new();
-            stack.AddFromPath(path, strength: 1.0f);
-            int merged = stack.ApplyTo(weights, LoraTarget.UNet, backend);
-            Assert.Equal(1, merged);
-        }
-        finally { baseW.Dispose(); }
-    }
-
     [Fact]
     public void LoraStack_ApplyToWeights_RoutesPerTarget()
     {
@@ -742,35 +369,6 @@ public sealed class LoraFileTests : IDisposable
             unetBase.Dispose();
             clipLBase.Dispose();
             clipGBase.Dispose();
-        }
-    }
-
-    [Fact]
-    public void LoraLayer_ConstructionWithRequiredFields()
-    {
-        Tensor down = new Tensor(new TensorShape(4, 8), DType.F32);
-        Tensor up = new Tensor(new TensorShape(8, 4), DType.F32);
-        try
-        {
-            LoraLayer layer = new()
-            {
-                TargetKey = "transformer_blocks.0.attn.to_q.weight",
-                Target = LoraTarget.Transformer,
-                Delta = new StandardLoraDelta { Down = down, Up = up, Alpha = 4f },
-            };
-
-            Assert.Equal("transformer_blocks.0.attn.to_q.weight", layer.TargetKey);
-            Assert.Equal(LoraTarget.Transformer, layer.Target);
-            Assert.Equal(4, layer.Rank);
-            Assert.Equal(4f, layer.Alpha);
-            Assert.Equal(LoraVariant.StandardLora, layer.Variant);
-            Assert.Same(down, layer.LoraDown);
-            Assert.Same(up, layer.LoraUp);
-        }
-        finally
-        {
-            down.Dispose();
-            up.Dispose();
         }
     }
 

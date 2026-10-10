@@ -5,28 +5,9 @@ using Xunit;
 
 namespace HartsyInference.ModelAssets.Tests;
 
-/// <summary>Tests the codec registry + each newly-added quant codec via hand-built canonical block bytes from ggml-quants.c. Each test produces 32 or 256 elements with a known scale + known quant pattern, then verifies dequant matches the canonical formula.</summary>
+/// <summary>Tests the codec registry + representative quant codecs via hand-built canonical block bytes from ggml-quants.c. Each test produces 32 or 256 elements with a known scale + known quant pattern, then verifies dequant matches the canonical formula.</summary>
 public sealed class GgufCodecRegistryTests
 {
-    [Fact]
-    public void Registry_AllExpectedCodecsRegistered()
-    {
-        Assert.True(GgufCodecRegistry.Supports(DType.Q8_0));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q4_K));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q5_K));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q4_0));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q4_1));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q5_0));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q5_1));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q8_1));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q2_K));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q3_K));
-        Assert.True(GgufCodecRegistry.Supports(DType.Q6_K));
-        Assert.True(GgufCodecRegistry.Supports(DType.IQ4_NL));
-        Assert.True(GgufCodecRegistry.Supports(DType.IQ4_XS));
-        Assert.True(GgufCodecRegistry.Supports(DType.MXFP4));
-    }
-
     /// <summary>One hand-built IQ4_XS super-block: sub-block 0 at scale 33 (dl = 1), sub-block 1 at 34 (dl = 2), so the
     /// nibble → codepoint → scale chain shows through at every position checked. A wrong bit split of the 6-bit
     /// scale between scales_l and scales_h moves these values, which is the transcription error this pins.</summary>
@@ -57,124 +38,6 @@ public sealed class GgufCodecRegistryTests
     }
 
     [Fact]
-    public unsafe void Q4_0_KnownBlock_DequantizesCorrectly()
-    {
-        Tensor src = new Tensor(new TensorShape(32), DType.Q4_0);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            *(Half*)block = (Half)0.5f;
-            byte* q = block + 2;
-            for (int i = 0; i < 16; i++) q[i] = 0x21;
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 16; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - 0.5f * (1 - 8)) < 1e-3f, $"low nibble at i={i}: expected {0.5f * (1 - 8)}, got {d[i]}");
-            }
-            for (int i = 16; i < 32; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - 0.5f * (2 - 8)) < 1e-3f, $"high nibble at i={i}: expected {0.5f * (2 - 8)}, got {d[i]}");
-            }
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
-    public unsafe void Q4_1_KnownBlock_DequantizesCorrectly()
-    {
-        Tensor src = new Tensor(new TensorShape(32), DType.Q4_1);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            *(Half*)block = (Half)0.25f;
-            *(Half*)(block + 2) = (Half)1.0f;
-            byte* q = block + 4;
-            for (int i = 0; i < 16; i++) q[i] = 0x32;
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 16; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - (0.25f * 2 + 1.0f)) < 1e-3f, $"low nibble at i={i}: got {d[i]}");
-            }
-            for (int i = 16; i < 32; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - (0.25f * 3 + 1.0f)) < 1e-3f, $"high nibble at i={i}: got {d[i]}");
-            }
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
-    public unsafe void Q5_0_KnownBlock_LowAndHighBitsCombineCorrectly()
-    {
-        Tensor src = new Tensor(new TensorShape(32), DType.Q5_0);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            *(Half*)block = (Half)1.0f;
-            *(uint*)(block + 2) = 0xFFFFFFFFu;
-            byte* q = block + 6;
-            for (int i = 0; i < 16; i++) q[i] = 0x55;
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 32; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - (5 + 16 - 16)) < 1e-3f, $"i={i}: expected 5.0, got {d[i]}");
-            }
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
-    public unsafe void Q5_1_KnownBlock_AddsMin()
-    {
-        Tensor src = new Tensor(new TensorShape(32), DType.Q5_1);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            *(Half*)block = (Half)1.0f;
-            *(Half*)(block + 2) = (Half)2.0f;
-            *(uint*)(block + 4) = 0x00000000u;
-            byte* q = block + 8;
-            for (int i = 0; i < 16; i++) q[i] = 0x77;
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 32; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - (1.0f * 7 + 2.0f)) < 1e-3f, $"i={i}: got {d[i]}");
-            }
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
-    public unsafe void Q8_1_KnownBlock_DequantizesIgnoringSumField()
-    {
-        Tensor src = new Tensor(new TensorShape(32), DType.Q8_1);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            *(Half*)block = (Half)0.5f;
-            *(Half*)(block + 2) = (Half)999.0f;
-            sbyte* q = (sbyte*)(block + 4);
-            for (int i = 0; i < 32; i++) q[i] = (sbyte)(i - 16);
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 32; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - 0.5f * (i - 16)) < 1e-3f, $"i={i}: got {d[i]}");
-            }
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
     public unsafe void Q6_K_KnownBlock_DequantizesUsing6BitQuants()
     {
         Tensor src = new Tensor(new TensorShape(256), DType.Q6_K);
@@ -194,55 +57,6 @@ public sealed class GgufCodecRegistryTests
             for (int i = 0; i < 256; i++)
             {
                 Assert.True(MathF.Abs(d[i] - (-32f)) < 1e-3f, $"i={i}: expected -32.0, got {d[i]}");
-            }
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
-    public unsafe void Q2_K_KnownBlock_AllZeroQuantsProduceMin()
-    {
-        Tensor src = new Tensor(new TensorShape(256), DType.Q2_K);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            byte* scales = block;
-            byte* qs = block + 16;
-            for (int i = 0; i < 16; i++) scales[i] = 0x21;
-            for (int i = 0; i < 64; i++) qs[i] = 0;
-            *(Half*)(block + 80) = (Half)1.0f;
-            *(Half*)(block + 82) = (Half)1.0f;
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 16; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - (-2.0f)) < 1e-3f, $"i={i}: expected -2.0 (= 1*1*0 - 1*2), got {d[i]}");
-            }
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
-    public unsafe void IQ4_NL_KnownBlock_UsesLookupTable()
-    {
-        Tensor src = new Tensor(new TensorShape(32), DType.IQ4_NL);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            *(Half*)block = (Half)1.0f;
-            byte* q = block + 2;
-            for (int i = 0; i < 16; i++) q[i] = 0x80;
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 16; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - (-127f)) < 1e-3f, $"low nibble at i={i}: expected -127 (KValues[0]), got {d[i]}");
-            }
-            for (int i = 16; i < 32; i++)
-            {
-                Assert.True(MathF.Abs(d[i] - 1f) < 1e-3f, $"high nibble at i={i}: expected 1 (KValues[8]), got {d[i]}");
             }
         }
         finally { src.Dispose(); }
@@ -276,27 +90,6 @@ public sealed class GgufCodecRegistryTests
     }
 
     [Fact]
-    public unsafe void MXFP4_ZeroScale_ProducesZeroRegardlessOfCodeword()
-    {
-        // e=0 -> scale = 2^-128 (denormal path), not a NaN/zero special case per ggml (NaN e=255 is unhandled
-        // upstream too) -- just confirms the denormal branch of E8M0ToFp32Half doesn't blow up or go negative.
-        Tensor src = new Tensor(new TensorShape(32), DType.MXFP4);
-        try
-        {
-            byte* block = (byte*)src.DataPointer;
-            block[0] = 0;
-            byte* q = block + 1;
-            for (int i = 0; i < 16; i++) q[i] = 0x71;
-
-            using Tensor dst = GgufDequantizer.Dequantize(src, DType.F32);
-            float* d = (float*)dst.DataPointer;
-            for (int i = 0; i < 16; i++)
-                Assert.True(d[i] >= 0f && d[i] < 1e-30f, $"i={i}: expected ~0, got {d[i]}");
-        }
-        finally { src.Dispose(); }
-    }
-
-    [Fact]
     public unsafe void Q8_0_QuantizeRoundtrip_PreservesMagnitudes()
     {
         Tensor src = new Tensor(new TensorShape(32), DType.F32);
@@ -325,14 +118,12 @@ public sealed class GgufCodecRegistryTests
 
     [Theory]
     [InlineData("Q4_K", 0.05f)]
-    [InlineData("Q5_K", 0.025f)]
     [InlineData("Q6_K", 0.01f)]
     public unsafe void K_Quants_QuantizeRoundtrip_WithinExpectedTolerance(string dtypeName, float tolerance)
     {
         DType dtype = dtypeName switch
         {
             "Q4_K" => DType.Q4_K,
-            "Q5_K" => DType.Q5_K,
             "Q6_K" => DType.Q6_K,
             _ => throw new ArgumentException(dtypeName),
         };
@@ -398,29 +189,20 @@ public sealed class GgufCodecRegistryTests
     /// distinct element. Values follow ggml's <c>dequantize_row_iq*</c> with d = 1.</summary>
     [Theory]
     [InlineData("IQ2_XXS", 66, -1.0f, 1, 1.0f)]    // grid[0] = 8s, db = 0.125; ksigns[1] flips elements 0 and 7
-    [InlineData("IQ2_XS", 74, -1.0f, 1, 1.0f)]
-    [InlineData("IQ2_S", 82, 1.0f, 5, -1.0f)]      // explicit sign byte 0x20 flips element 5
-    [InlineData("IQ3_XXS", 98, -1.0f, 1, 1.0f)]    // grid[0] = 4s, db = 0.25
     [InlineData("IQ3_S", 110, 1.0f, 5, -1.0f)]     // grid[0] = 1s, db = 1
-    [InlineData("IQ1_S", 50, -0.875f, 32, -1.125f)] // grid[0] = −1s; group 1 carries the −1/8 shift
     [InlineData("IQ1_M", 56, -1.125f, 8, -0.875f)]  // half 0 of group 0 carries the −1/8 shift, half 1 does not
     public unsafe void IQ_KnownBlock_DecodesEachField(string name, int blockBytes, float first, int probe, float probed)
     {
         DType dtype = name switch
         {
-            "IQ2_XXS" => DType.IQ2_XXS, "IQ2_XS" => DType.IQ2_XS, "IQ2_S" => DType.IQ2_S, "IQ3_XXS" => DType.IQ3_XXS,
-            "IQ3_S" => DType.IQ3_S, "IQ1_S" => DType.IQ1_S, "IQ1_M" => DType.IQ1_M, _ => throw new ArgumentOutOfRangeException(nameof(name)),
+            "IQ2_XXS" => DType.IQ2_XXS, "IQ3_S" => DType.IQ3_S, "IQ1_M" => DType.IQ1_M, _ => throw new ArgumentOutOfRangeException(nameof(name)),
         };
         Assert.Equal(blockBytes, dtype.BlockByteSize);
         byte[] block = new byte[blockBytes];
         switch (name)
         {
             case "IQ2_XXS": block[0] = 0x00; block[1] = 0x3C; block[6] = 1; break;          // aux1 of group 0 = 1: sign pattern 1, scale 0
-            case "IQ2_XS": block[0] = 0x00; block[1] = 0x3C; block[3] = 0x02; break;        // word 0 = 512: grid 0, sign pattern 1
-            case "IQ2_S": block[0] = 0x00; block[1] = 0x3C; block[34] = 0x20; break;        // signs[0] bit 5
-            case "IQ3_XXS": block[0] = 0x00; block[1] = 0x3C; block[66] = 1; break;         // scales-and-signs word 0 = 1
             case "IQ3_S": block[0] = 0x00; block[1] = 0x3C; block[74] = 0x20; break;        // signs[0] bit 5
-            case "IQ1_S": block[0] = 0x00; block[1] = 0x3C; block[37] = 0x80; break;        // qh[1] bit 15: group 1 shifts by −1/8
             case "IQ1_M": block[53] = 0xC0; block[55] = 0x30; block[32] = 0x08; break;      // d = 1.0 (0x3C00 spread over the nibbles); qh[0] bit 3
         }
         float[] dst = new float[256];

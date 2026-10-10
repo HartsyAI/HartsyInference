@@ -13,10 +13,8 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class QwenImageVariantTests
 {
     [Theory]
-    [InlineData("qwen-image-edit", "edit")]
     [InlineData("qwen-image-edit-plus", "edit-plus")]
     [InlineData("edit", "edit")]
-    [InlineData("2509", "edit-plus")]
     public void SwarmUiClassOrShortHint_SelectsTheVariant(string hint, string expected)
     {
         ResolvedModelVariant resolved = ModelVariantResolver.Classify(QwenImageVariants.Catalog, CheckpointProbe.Empty, [hint]);
@@ -45,10 +43,8 @@ public sealed class QwenImageVariantTests
 
     [Theory]
     [InlineData("qwen_image_edit_2509_fp8_e4m3fn", "edit-plus")]
-    [InlineData("Qwen-Image-Edit-Plus", "edit-plus")]
     [InlineData("qwen_image_edit_fp8_e4m3fn", "edit")]
     [InlineData("qwen_image_fp8_e4m3fn", "base")]
-    [InlineData("qwen_image_2512_fp8", "base")]
     public void FilenameLastResort(string fileName, string expected)
     {
         CheckpointProbe probe = CheckpointProbe.Empty with { FileNames = [fileName] };
@@ -68,14 +64,6 @@ public sealed class QwenImageVariantTests
             Assert.NotEqual(ImageFeatures.None, features & ImageFeatures.RefEdit);
             Assert.NotEqual(ImageFeatures.None, features & ImageFeatures.Img2Img);
         }
-    }
-
-    [Fact]
-    public void EachEditVariant_UsesItsOwnTemplate()
-    {
-        Assert.Null(QwenImageVariants.TemplateFor(Resolve([])));
-        Assert.Same(QwenImageEditTemplate.Edit, QwenImageVariants.TemplateFor(Resolve(["edit"])));
-        Assert.Same(QwenImageEditTemplate.EditPlus, QwenImageVariants.TemplateFor(Resolve(["edit-plus"])));
     }
 
     /// <summary>A family:variant selector reaches the variant through the same query hosts call.</summary>

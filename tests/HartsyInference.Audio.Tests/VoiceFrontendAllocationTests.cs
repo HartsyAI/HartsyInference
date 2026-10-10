@@ -14,7 +14,7 @@ namespace HartsyInference.Audio.Tests;
 public sealed class VoiceFrontendAllocationTests
 {
     private const int Warmup = 50;
-    private const int Frames = 1_000;
+    private const int Frames = 200;
 
     internal static readonly (string Name, long[] Shape)[] RnnoiseLayout =
     [

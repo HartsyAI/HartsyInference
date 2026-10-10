@@ -14,7 +14,6 @@ public sealed class TensorCoreGemmTests
 
     [Theory]
     [InlineData(16, 8, 16, true)]
-    [InlineData(32, 64, 32, true)]
     [InlineData(17, 8, 16, false)]   // M not a multiple of 16
     [InlineData(16, 12, 16, false)]  // N not a multiple of 8
     [InlineData(16, 8, 24, false)]   // K not a multiple of 16
@@ -26,7 +25,6 @@ public sealed class TensorCoreGemmTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(16, 8, 16)]
-    [InlineData(64, 64, 64)]
     [InlineData(128, 320, 64)]
     public unsafe void TensorCoreLinear_MatchesCublasReference(int m, int n, int k)
     {

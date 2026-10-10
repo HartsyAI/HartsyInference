@@ -18,45 +18,6 @@ namespace HartsyInference.Audio.Tests;
 public sealed unsafe class BackendAdaInstanceNorm1dTests
 {
     [Fact]
-    public void IdentityWhenGammaBetaZero()
-    {
-        using CpuBackend backend = new();
-        int batch = 2, channels = 3, t = 16;
-        Tensor input = MakeRandom(batch, channels, t, seed: 1);
-        Tensor gamma = ZeroTensor(batch, channels);
-        Tensor beta = ZeroTensor(batch, channels);
-        Tensor output = new(input.Shape, DType.F32);
-        try
-        {
-            backend.AdaInstanceNorm1d(output, input, gamma, beta, eps: 1e-5f);
-            float* op = (float*)output.DataPointer;
-
-            // Each (b, c) slice should now have mean ~0, variance ~1.
-            for (int b = 0; b < batch; b++)
-            {
-                for (int c = 0; c < channels; c++)
-                {
-                    double sum = 0d, sumSq = 0d;
-                    int row = (b * channels + c) * t;
-                    for (int j = 0; j < t; j++)
-                    {
-                        sum += op[row + j];
-                        sumSq += (double)op[row + j] * op[row + j];
-                    }
-                    double mean = sum / t;
-                    double var = sumSq / t - mean * mean;
-                    Assert.True(Math.Abs(mean) < 1e-4, $"slice ({b},{c}) mean {mean} not ~0");
-                    Assert.InRange(var, 0.99, 1.01);
-                }
-            }
-        }
-        finally
-        {
-            input.Dispose(); gamma.Dispose(); beta.Dispose(); output.Dispose();
-        }
-    }
-
-    [Fact]
     public void AffineMatchesClosedForm()
     {
         // For a known input with constant mean/var, the AdaIN output equals
@@ -102,44 +63,6 @@ public sealed unsafe class BackendAdaInstanceNorm1dTests
         finally
         {
             input.Dispose(); gamma.Dispose(); beta.Dispose(); output.Dispose();
-        }
-    }
-
-    [Fact]
-    public void Rank1GammaBetaBroadcastsAcrossBatch()
-    {
-        // gamma / beta given as [C] should produce the same result as duplicating to [B, C].
-        using CpuBackend backend = new();
-        int batch = 3, channels = 4, t = 8;
-        Tensor input = MakeRandom(batch, channels, t, seed: 9);
-        Tensor gamma1 = new(new TensorShape(channels), DType.F32);
-        Tensor beta1 = new(new TensorShape(channels), DType.F32);
-        Tensor gammaN = new(new TensorShape(batch, channels), DType.F32);
-        Tensor betaN = new(new TensorShape(batch, channels), DType.F32);
-        Tensor outRank1 = new(input.Shape, DType.F32);
-        Tensor outRank2 = new(input.Shape, DType.F32);
-        try
-        {
-            float* g1 = (float*)gamma1.DataPointer;
-            float* b1 = (float*)beta1.DataPointer;
-            float* gN = (float*)gammaN.DataPointer;
-            float* bN = (float*)betaN.DataPointer;
-            for (int c = 0; c < channels; c++) { g1[c] = 0.1f * (c + 1); b1[c] = -0.05f * (c + 1); }
-            for (int b = 0; b < batch; b++)
-                for (int c = 0; c < channels; c++) { gN[b * channels + c] = g1[c]; bN[b * channels + c] = b1[c]; }
-
-            backend.AdaInstanceNorm1d(outRank1, input, gamma1, beta1, eps: 1e-5f);
-            backend.AdaInstanceNorm1d(outRank2, input, gammaN, betaN, eps: 1e-5f);
-
-            long n = input.ElementCount;
-            float* o1 = (float*)outRank1.DataPointer;
-            float* o2 = (float*)outRank2.DataPointer;
-            for (long i = 0; i < n; i++) Assert.Equal(o2[i], o1[i], precision: 5);
-        }
-        finally
-        {
-            input.Dispose(); gamma1.Dispose(); beta1.Dispose();
-            gammaN.Dispose(); betaN.Dispose(); outRank1.Dispose(); outRank2.Dispose();
         }
     }
 

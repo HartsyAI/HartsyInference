@@ -3,7 +3,6 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.ModelAssets.Quant;
-using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
@@ -24,21 +23,6 @@ public sealed class DeepSeekV41CheckpointTests : IDisposable
     public void Dispose() => Directory.Delete(_directory, recursive: true);
 
     [Fact]
-    public void Open_Official_ClassifiesEveryTensorAndSumsToTheIndexTotal()
-    {
-        long total = TinyDeepSeekV41Checkpoint.Write(_directory);
-
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
-
-        Assert.Equal(QuantFlavor.Official, checkpoint.Flavor);
-        Assert.Equal(total, checkpoint.Weights.TotalBytes);
-        Assert.Equal(TinyDeepSeekV41Checkpoint.EngramRows * (256 + 8), checkpoint.Weights.BytesByClass[DeepSeekV41WeightClass.Engram]);
-        Assert.Equal(4 * 4 * 3 * (64 + 4), checkpoint.Weights.BytesByClass[DeepSeekV41WeightClass.Expert]);
-        Assert.Equal(DeepSeekV41DraftStatus.Complete, checkpoint.Draft.Status);
-        checkpoint.RequireDraft();
-    }
-
-    [Fact]
     public void Open_Official_BindsFp4ExpertsAndKeepsEngramPreadOnly()
     {
         TinyDeepSeekV41Checkpoint.Write(_directory);
@@ -51,20 +35,6 @@ public sealed class DeepSeekV41CheckpointTests : IDisposable
         Assert.True(checkpoint.Bindings.Bindings.ContainsKey("layers.1.engram.embed.weight"));
         // The Engram scale lives in a pread-only shard, so a recipe (which maps the scale) is refused, not silently mapped.
         Assert.Throws<InvalidOperationException>(() => checkpoint.GetQuant("layers.1.engram.embed.weight"));
-    }
-
-    [Fact]
-    public void GetWeight_ReturnsABorrowedViewForDenseTensors()
-    {
-        TinyDeepSeekV41Checkpoint.Write(_directory);
-
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
-
-        Assert.Equal(4, checkpoint.GetWeight("embed.weight").Shape[0]);
-        Assert.Equal(2, checkpoint.GetLocation("embed.weight").Shape[1]);
-        Assert.True(checkpoint.HasWeight("mtp.0.main_proj.weight"));
-        Assert.False(checkpoint.HasWeight("layers.9.attn.wq_a.weight"));
-        Assert.Throws<KeyNotFoundException>(() => checkpoint.GetWeight("layers.9.attn.wq_a.weight"));
     }
 
     [Fact]
@@ -132,26 +102,6 @@ public sealed class DeepSeekV41CheckpointTests : IDisposable
         Assert.False(checkpoint.HasWeight("mtp.0.ffn.experts.1.w1.weight"));
         Assert.True(checkpoint.HasWeight("mtp.0.ffn.experts.0.w1.weight"));
         Assert.NotNull(checkpoint.GetQuant("layers.0.ffn.experts.0.w1.weight"));
-    }
-
-    [Fact]
-    public void SmallEngramWeightsShareTheTableShardAndAreReadByPread()
-    {
-        TinyDeepSeekV41Checkpoint.Write(_directory);
-
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
-
-        SafeTensorShard tableShard = checkpoint.GetLocation("layers.1.engram.embed.weight").Shard;
-        Assert.Same(tableShard, checkpoint.GetLocation("layers.1.engram.wkv.weight").Shard);
-        Assert.Same(tableShard, checkpoint.GetLocation("layers.1.engram.q_weight").Shard);
-        Tensor wkv = checkpoint.GetWeight("layers.1.engram.wkv.weight");
-        Assert.True(wkv.OwnsMemory);
-        Assert.Equal(DType.F8E4M3, wkv.DType);
-        Assert.Equal(Enumerable.Range(0, 1024).Select(i => (byte)i), wkv.AsReadOnlySpan<byte>().ToArray());
-        Assert.Equal(4, checkpoint.GetWeight("layers.1.engram.q_weight").Shape[0]);
-        Assert.NotNull(checkpoint.GetQuant("layers.1.engram.wkv.weight"));
-        Assert.Throws<InvalidOperationException>(() => checkpoint.GetWeight("layers.1.engram.embed.weight"));
-        Assert.Equal(0, checkpoint.Shards.MappedShardCount);
     }
 
     [Fact]

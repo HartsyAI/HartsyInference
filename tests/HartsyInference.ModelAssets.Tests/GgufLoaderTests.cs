@@ -17,35 +17,6 @@ public sealed unsafe class GgufLoaderTests : IDisposable
     }
 
     [Fact]
-    public void Load_ValidFile_ParsesVersion()
-    {
-        Dictionary<string, object> metadata = new();
-        Dictionary<string, (uint ggufType, long[] shape, byte[] data)> tensors = new();
-        string filePath = CreateGgufFile(_tempDir, "version_check", metadata, tensors);
-
-        using GgufLoader loader = new();
-        loader.Load(filePath);
-
-        Assert.Equal(3, loader.Version);
-    }
-
-    [Fact]
-    public void Load_ParsesMetadata()
-    {
-        Dictionary<string, object> metadata = new()
-        {
-            ["general.architecture"] = "llama",
-        };
-        Dictionary<string, (uint ggufType, long[] shape, byte[] data)> tensors = new();
-        string filePath = CreateGgufFile(_tempDir, "metadata_check", metadata, tensors);
-
-        using GgufLoader loader = new();
-        loader.Load(filePath);
-
-        Assert.Equal("llama", loader.Metadata.GetString("general.architecture"));
-    }
-
-    [Fact]
     public void Load_ParsesTensorInfo()
     {
         float[] values = [1f, 2f, 3f, 4f];

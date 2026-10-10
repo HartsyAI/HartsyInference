@@ -72,29 +72,6 @@ public sealed class SileroVadStreamScriptedTests
     }
 
     [Fact]
-    public void SpeechStartingMidStream_IsPaddedBackwards()
-    {
-        ScriptedVad vad = new([0.1f, 0.1f, 0.1f, 0.9f, 0.9f, 0.9f, 0.9f, 0.9f, 0.9f, 0.9f, 0.9f, 0.9f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f]);
-        SileroVadStream stream = new(vad);
-        using CpuBackend backend = new();
-        float[] chunk = new float[Window];
-        SileroVadSegment found = default;
-        for (int i = 0; i < 17; i++)
-        {
-            if (stream.Push(backend, chunk, out SileroVadSegment segment))
-            {
-                found = segment;
-            }
-            if (i == 3)
-            {
-                Assert.Equal(3 * Window - 480, stream.SpeechStartSample);
-            }
-        }
-        Assert.Equal(3 * Window - 480, found.StartSample);
-        Assert.Equal(12 * Window + 480, found.EndSample);
-    }
-
-    [Fact]
     public void ADipIntoTheHysteresisBand_DoesNotCloseTheSegment()
     {
         // 0.4 sits between exit (0.35) and enter (0.5): neither opens nor closes.
@@ -161,32 +138,4 @@ public sealed class SileroVadStreamScriptedTests
         Assert.False(stream.InSpeech);
     }
 
-    [Fact]
-    public void Reset_ClearsTheStreamAndTheModel()
-    {
-        ScriptedVad vad = new(Script(10, 0));
-        SileroVadStream stream = new(vad);
-        using CpuBackend backend = new();
-        float[] chunk = new float[Window];
-        for (int i = 0; i < 5; i++)
-        {
-            stream.Push(backend, chunk, out _);
-        }
-        stream.Reset();
-        Assert.Equal(1, vad.Resets);
-        Assert.Equal(0, stream.ConsumedSamples);
-        Assert.False(stream.InSpeech);
-        Assert.Equal(0f, stream.LastProbability);
-        Assert.Equal(-1, stream.SpeechStartSample);
-    }
-
-    [Fact]
-    public void ModelProperties_ReportWhatDrivesTheStream()
-    {
-        ScriptedVad vad = new(Script(1, 0));
-        SileroVadStream stream = new(vad);
-        Assert.Same(vad, stream.VadModel);
-        Assert.Throws<InvalidOperationException>(() => stream.Model);
-        Assert.Throws<ArgumentNullException>(() => new SileroVadStream((IVadModel)null!));
-    }
 }

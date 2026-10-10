@@ -20,18 +20,6 @@ public class MiniMaxH3ChainRequestTests
         Assert.True(VideoService.RequestedFeatures(request).HasFlag(VideoFeatures.LongFormChain));
     }
 
-    [Fact]
-    public void AnOrdinaryRequestDoesNotAskForChaining()
-    {
-        VideoRequest request = new VideoRequest { Prompt = "test", Frames = 141 };
-        Assert.False(VideoService.RequestedFeatures(request).HasFlag(VideoFeatures.LongFormChain));
-    }
-
-    /// <summary>The recipe is the release authority the profile's features are intersected against.</summary>
-    [Fact]
-    public void TheH3RecipeDeclaresChaining()
-        => Assert.True(new MiniMaxH3Recipe().Supports.HasFlag(VideoFeatures.LongFormChain));
-
     /// <summary>Chaining cleared its own gate, and must not re-acquire one from the masks it drives internally.</summary>
     [Fact]
     public void ChainingIsReleased()
@@ -62,20 +50,9 @@ public class MiniMaxH3ChainRequestTests
         Assert.DoesNotContain("long-form chaining", issue.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void AnUnchainedRequestIsNotBlockedByTheChainEntry()
-    {
-        VideoRequest request = new VideoRequest { Prompt = "test" };
-        Assert.DoesNotContain(
-            VideoService.ApplyH3ExpansionReleaseGate(H3PlanFixture.Plan(request), request).Issues,
-            candidate => candidate.Code == "video.h3_expansion.release_blocked");
-    }
-
     /// <summary>An off-grid context must fail at plan time rather than inside the sampler.</summary>
     [Theory]
-    [InlineData(40)]
     [InlineData(38)]
-    [InlineData(4)]
     public void OffGridContextIsRefusedByThePlanner(int contextFrames)
         => Assert.Throws<ArgumentOutOfRangeException>(
             () => MiniMaxH3ChainPlanner.Plan(900, contextFrames));

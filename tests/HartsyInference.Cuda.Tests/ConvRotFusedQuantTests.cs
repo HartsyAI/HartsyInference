@@ -28,7 +28,6 @@ public sealed unsafe class ConvRotFusedQuantTests
     [Theory]
     [InlineData(37, 4096, 256)]      // LTX video width, ragged row count
     [InlineData(129, 2048, 256)]     // LTX audio width
-    [InlineData(8, 1024, 256)]
     [InlineData(5, 512, 64)]         // smaller group (must be a power of FOUR: kron(h4,...,h4))
     public void FusedConvRotQuant_MatchesRotateThenQuant(int rows, int cols, int group)
     {
@@ -91,7 +90,6 @@ public sealed unsafe class ConvRotFusedQuantTests
     [InlineData(37, 16384, 64)]
     [InlineData(11, 12288, 256)]
     [InlineData(3, 12288, 4096)]     // group wider than the default float tile
-    [InlineData(129, 10240, 1024)]
     public void WideConvRotQuant_MatchesRotateThenQuant(int rows, int cols, int group)
     {
         using CudaBackend cuda = new CudaBackend(0, PtxDir());

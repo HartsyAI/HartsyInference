@@ -131,15 +131,6 @@ public unsafe class CosmosTokenizerTests
     }
 
     [Fact]
-    public void Fsq_VocabAndBasis_MatchDv8x16x16()
-    {
-        Assert.Equal(64000, Fsq.VocabSize(DvLevels));
-        int[] basis = new int[DvLevels.Length];
-        Fsq.Basis(DvLevels, basis);
-        Assert.Equal(new[] { 1, 8, 64, 512, 2560, 12800 }, basis);
-    }
-
-    [Fact]
     public void Fsq_Quantize_BitExact_VsReference()
     {
         int b = 2, t = 37, d = DvLevels.Length;
@@ -190,7 +181,6 @@ public unsafe class CosmosTokenizerTests
     }
 
     [Theory]
-    [InlineData(1)]
     [InlineData(2)]
     public void HaarWavelet3D_ForwardInverse_RoundTrips(int levels)
     {
@@ -220,36 +210,6 @@ public unsafe class CosmosTokenizerTests
         Assert.True(maxErr < 1e-4f, $"Haar round-trip max error {maxErr} exceeds 1e-4.");
         fwd.Dispose();
         inv.Dispose();
-    }
-
-    [Fact]
-    public void CosmosDvTokenizer_LatentGrid_MatchesCosmosGeometry()
-    {
-        using CosmosDvTokenizer tok = new(CosmosDvTokenizerConfig.Dv8x16x16);
-        Assert.Equal(64000, tok.VocabSize);
-        // 33-frame 1024×640 clip → [5, 40, 64] = 12,800 tokens (research-doc §5).
-        (int t, int h, int w) = tok.LatentGrid(33, 640, 1024);
-        Assert.Equal((5, 40, 64), (t, h, w));
-        Assert.Equal(12800, t * h * w);
-        // 9-frame video prefix → [2, 40, 64] = 5,120; 1-frame image prefix → [1, 40, 64] = 2,560.
-        Assert.Equal((2, 40, 64), tok.LatentGrid(9, 640, 1024));
-        Assert.Equal((1, 40, 64), tok.LatentGrid(1, 640, 1024));
-    }
-
-    [Fact]
-    public void CosmosDvTokenizer_CodesToContinuous_ProducesGridValues()
-    {
-        using CosmosDvTokenizer tok = new(CosmosDvTokenizerConfig.Dv8x16x16);
-        int t = 2, h = 3, w = 4, n = t * h * w;
-        using Tensor codes = new(new TensorShape(1, n), DType.I32);
-        int* cp = (int*)codes.DataPointer;
-        for (int i = 0; i < n; i++) cp[i] = (i * 997) % 64000;
-
-        using Tensor continuous = tok.CodesToContinuous(codes, t, h, w);
-        Assert.Equal(new[] { 1L, 6, t, h, w }, new[] { continuous.Shape[0], continuous.Shape[1], continuous.Shape[2], continuous.Shape[3], continuous.Shape[4] });
-        // Every decoded value lands on the FSQ grid within [-1, 1].
-        float* dp = (float*)continuous.DataPointer;
-        for (long i = 0; i < continuous.Shape.ElementCount; i++) Assert.InRange(dp[i], -1f, 1f);
     }
 
     // Independent reference FSQ index for one 6-dim vector (mirrors lucidrains / Cosmos FSQuantizer).

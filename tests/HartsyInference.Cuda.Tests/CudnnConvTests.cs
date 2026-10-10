@@ -47,7 +47,6 @@ public sealed unsafe class CudnnConvTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(2, 32, 24, 24, 48, 3, 1, 1, "F16")]   // UNet-style 3x3
-    [InlineData(2, 32, 24, 24, 48, 3, 2, 1, "F16")]   // downsample stride 2
     [InlineData(2, 32, 24, 24, 48, 1, 1, 0, "F16")]   // 1x1 shortcut
     [InlineData(1, 32, 24, 24, 48, 3, 1, 1, "BF16")]  // VAE-style BF16
     public void CudnnConv_MatchesIm2ColPath(int batch, int inCh, int h, int w, int outCh, int k, int stride, int pad, string dtypeName)

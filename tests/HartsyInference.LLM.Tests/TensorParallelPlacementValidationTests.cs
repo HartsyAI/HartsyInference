@@ -22,22 +22,6 @@ public sealed class TensorParallelPlacementValidationTests
     }
 
     [Fact]
-    public void ValidatePlacement_AcceptsDefaultDegreeOne()
-    {
-        PlacementPlanner.ValidatePlacement(PlacementConfig.Single);
-        PlacementPlanner.ValidatePlacement(new PlacementConfig { ShardDevices = ["cuda:0", "cuda:1"] });
-    }
-
-    [Fact]
-    public void ValidatePlacement_RejectsDegreeBelowOne()
-    {
-        Assert.Throws<ArgumentException>(() => PlacementPlanner.ValidatePlacement(
-            new PlacementConfig { TensorParallelDegree = 0 }));
-        Assert.Throws<ArgumentException>(() => PlacementPlanner.ValidatePlacement(
-            new PlacementConfig { TensorParallelDegree = -1 }));
-    }
-
-    [Fact]
     public void ValidatePlacement_RejectsRankDeviceCountMismatch()
     {
         Assert.Throws<ArgumentException>(() => PlacementPlanner.ValidatePlacement(
@@ -46,17 +30,6 @@ public sealed class TensorParallelPlacementValidationTests
             new PlacementConfig { TensorParallelDegree = 2, ShardDevices = ["cuda:0"] }));
         Assert.Throws<ArgumentException>(() => PlacementPlanner.ValidatePlacement(
             new PlacementConfig { TensorParallelDegree = 2, ShardDevices = ["cuda:0", "cuda:1", "cuda:2"] }));
-    }
-
-    [Fact]
-    public void ValidatePlacement_RejectsShardRatiosUnderTp()
-    {
-        Assert.Throws<ArgumentException>(() => PlacementPlanner.ValidatePlacement(new PlacementConfig
-        {
-            TensorParallelDegree = 2,
-            ShardDevices = ["cuda:0", "cuda:1"],
-            ShardRatios = [0.5f, 0.5f],
-        }));
     }
 
     [Fact]

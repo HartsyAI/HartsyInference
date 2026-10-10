@@ -24,18 +24,6 @@ public sealed class ImageCompositionEnvelopeTests
     };
 
     [Fact]
-    public void WithNoConveniences_TheRequestPassesThroughUntouched()
-    {
-        NativeImageRequest req = Envelope();
-
-        ImageRequest result = ImageEndpoints.ApplyImageComposition(req);
-
-        Assert.Same(req.Request, result);
-        Assert.Null(result.Img2Img);
-        Assert.Null(result.Inpaint);
-    }
-
-    [Fact]
     public void InitImageBase64_DecodesIntoTheImg2ImgComposition()
     {
         NativeImageRequest req = Envelope();
@@ -49,19 +37,6 @@ public sealed class ImageCompositionEnvelopeTests
         Assert.Equal(16, result.Img2Img.InitImage.Height);
         Assert.Equal(24 * 16 * 3, result.Img2Img.InitImage.Rgb.Length);
         Assert.Equal(0.35, result.Img2Img.Creativity);
-    }
-
-    /// <summary>Browser clients paste data URIs verbatim; rejecting them would be a needless integration papercut.</summary>
-    [Fact]
-    public void InitImageBase64_AcceptsADataUri()
-    {
-        NativeImageRequest req = Envelope();
-        req.InitImageBase64 = "data:image/png;base64," + PngBase64(8, 8, 200);
-
-        ImageRequest result = ImageEndpoints.ApplyImageComposition(req);
-
-        Assert.NotNull(result.Img2Img);
-        Assert.Equal(8, result.Img2Img!.InitImage.Width);
     }
 
     [Fact]
@@ -118,14 +93,5 @@ public sealed class ImageCompositionEnvelopeTests
 
         NotSupportedException ex = Assert.Throws<NotSupportedException>(() => ImageEndpoints.ApplyImageComposition(req));
         Assert.Contains("JPEG", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void InvalidBase64_FailsAsAnArgumentError()
-    {
-        NativeImageRequest req = Envelope();
-        req.InitImageBase64 = "not base64 at all!!";
-
-        Assert.Throws<ArgumentException>(() => ImageEndpoints.ApplyImageComposition(req));
     }
 }

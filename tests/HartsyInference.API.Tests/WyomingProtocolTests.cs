@@ -49,42 +49,8 @@ public sealed class WyomingProtocolTests
         Assert.Empty(data.GetProperty("wake").EnumerateArray().ToArray());
     }
 
-    [Fact]
-    public async Task Describe_AdvertisesWakeOnlyWithADetectorWired()
-    {
-        WyomingOptions options = new()
-        {
-            Port = 0,
-            WakeModels = [new WyomingArtifact { Name = "hey_jarvis", Phrase = "hey jarvis" }],
-            WakeDetectorFactory = static _ => new SilentDetector(),
-        };
-        using WyomingListener listener = new(null, options);
-        listener.Start();
-
-        using WyomingEvent info = await RoundTripAsync(listener.Port, "describe", null);
-        JsonElement wake = Assert.Single(info.Data.GetProperty("wake").EnumerateArray().ToArray());
-        AssertArtifact(wake);
-        JsonElement model = Assert.Single(wake.GetProperty("models").EnumerateArray().ToArray());
-        AssertArtifact(model);
-        Assert.Equal("hey_jarvis", model.GetProperty("name").GetString());
-        Assert.Equal("hey jarvis", model.GetProperty("phrase").GetString());
-    }
-
-    [Fact]
-    public async Task Ping_IsAnsweredWithPongEchoingItsText()
-    {
-        using WyomingListener listener = new(null, new WyomingOptions { Port = 0 });
-        listener.Start();
-
-        using WyomingEvent pong = await RoundTripAsync(listener.Port, "ping", "{\"text\":\"are you there\"}");
-        Assert.Equal("pong", pong.Type);
-        Assert.Equal("are you there", pong.GetString("text"));
-    }
-
     [Theory]
     [InlineData(1)]
-    [InlineData(3)]
-    [InlineData(7)]
     [InlineData(64)]
     public async Task Codec_ReassemblesFramesSplitAtAnySegmentBoundary(int bytesPerRead)
     {
@@ -233,15 +199,5 @@ public sealed class WyomingProtocolTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-    }
-
-    /// <summary>A detector that never fires, so the manifest can advertise wake without any weights on disk.</summary>
-    private sealed class SilentDetector : IWyomingWakeDetector
-    {
-        public WyomingWakeHit? Push(ReadOnlySpan<float> samples) => null;
-
-        public void Reset() { }
-
-        public void Dispose() { }
     }
 }

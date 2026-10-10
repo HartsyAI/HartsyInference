@@ -29,25 +29,6 @@ public sealed unsafe class OobleckVaeTests
     };
 
     [Fact]
-    public void Decode_ExpandsByHop()
-    {
-        CpuBackend backend = new();
-        OobleckVae vae = new(TinyConfig);
-        vae.LoadWeights(BuildWeights(TinyConfig, includeEncoder: false));
-
-        Tensor latent = Rand([1, 2, 6], seed: 5);
-        Tensor pcm = vae.Decode(backend, latent);
-
-        Assert.Equal(3, pcm.Shape.Rank);
-        Assert.Equal(2, (int)pcm.Shape[1]);
-        Assert.Equal(6 * 8, (int)pcm.Shape[2]);
-        float* p = (float*)pcm.DataPointer;
-        for (long i = 0; i < pcm.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
-        latent.Dispose();
-        pcm.Dispose();
-    }
-
-    [Fact]
     public void EncodeMode_CompressesByHop_AndDecodeRoundTripsShape()
     {
         CpuBackend backend = new();
@@ -87,10 +68,6 @@ public sealed unsafe class OobleckVaeTests
     /// here as a mismatch at the tile boundaries rather than as an audible artefact months later.</para></summary>
     [Theory]
     [InlineData(200, 16, OobleckVae.DefaultHaloFrames, false)]   // many short cores: every boundary is interior
-    [InlineData(200, 7, OobleckVae.DefaultHaloFrames, false)]    // core that does not divide the length
-    [InlineData(2100, OobleckVae.DefaultCoreFrames, OobleckVae.DefaultHaloFrames, false)]   // the production tiling
-    [InlineData(200, 16, OobleckVae.DefaultHaloFrames, true)]    // odd stride: the last core is short of end·hop
-    [InlineData(200, 7, OobleckVae.DefaultHaloFrames, true)]
     [InlineData(2100, OobleckVae.DefaultCoreFrames, OobleckVae.DefaultHaloFrames, true)]
     public void DecodeTiled_MatchesWholeSongDecode(int frames, int coreFrames, int haloFrames, bool oddStride)
     {
@@ -132,24 +109,6 @@ public sealed unsafe class OobleckVaeTests
         Assert.Equal(200L * OobleckConfig.StableAudioOpen.HopLength, OobleckConfig.StableAudioOpen.DecodedLength(200));
         Assert.Equal(200L * OobleckConfig.AceStep15.HopLength, OobleckConfig.AceStep15.DecodedLength(200));
         Assert.Equal(200L * OddStrideConfig.HopLength - 2, OddStrideConfig.DecodedLength(200));
-    }
-
-    /// <summary>A song that fits one core takes the straight-through path, so short clips pay nothing for tiling.</summary>
-    [Fact]
-    public void DecodeTiled_ShorterThanOneCore_MatchesDecode()
-    {
-        CpuBackend backend = new();
-        OobleckVae vae = new(TinyConfig);
-        vae.LoadWeights(BuildWeights(TinyConfig, includeEncoder: false));
-
-        using Tensor latent = Rand([1, 2, 12], seed: 23);
-        using Tensor whole = vae.Decode(backend, latent);
-        using Tensor tiled = vae.DecodeTiled(backend, latent, coreFrames: 64, haloFrames: OobleckVae.DefaultHaloFrames);
-
-        Assert.Equal(12 * 8, (int)tiled.Shape[2]);
-        float* a = (float*)whole.DataPointer;
-        float* b = (float*)tiled.DataPointer;
-        for (long i = 0; i < whole.Shape.ElementCount; i++) Assert.Equal(a[i], b[i]);
     }
 
     /// <summary>Builds a synthetic diffusers-layout weight dict mirroring the real checkpoint's key

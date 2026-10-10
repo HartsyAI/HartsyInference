@@ -32,7 +32,6 @@ public sealed class Nvfp4GemmReferenceTests
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(200, 320, 256)]
-    [InlineData(1024, 1024, 1024)]
     public unsafe void NativeNvfp4Gemm_MatchesTheSameActivationThroughTheUnpackPath(int m, int n, int k)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }

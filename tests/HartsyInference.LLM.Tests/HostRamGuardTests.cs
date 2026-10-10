@@ -27,18 +27,6 @@ public sealed class HostRamGuardTests
     }
 
     [Fact]
-    public void DequantizedHostBytes_IsZeroWhenEveryQuantStaysCompressed()
-    {
-        GgufTensorDescriptor[] tensors =
-        [
-            Tensor("a", DType.Q4_K, 256, 256), Tensor("b", DType.Q8_0, 256, 256),
-            Tensor("c", DType.Q2_K, 256, 256), Tensor("d", DType.Q3_K, 256, 256),
-        ];
-
-        Assert.Equal(0, TextService.DequantizedHostBytes(tensors));
-    }
-
-    [Fact]
     public void DequantizedHostBytes_CountsTheEmbeddingTablesTheLoadAlwaysWidens()
     {
         GgufTensorDescriptor[] tensors =

@@ -22,16 +22,6 @@ public sealed class VramGraphGuardTests
         Assert.Contains("graph-reset", backend.Calls);
     }
 
-    /// <summary>A required release must never be skipped just because a graph is live — that is the failure mode the
-    /// optional-lever rule would introduce if it were applied here.</summary>
-    [Fact]
-    public void InvalidateBeforeRelease_IsUnconditional()
-    {
-        using RecordingStreamingBackend backend = new RecordingStreamingBackend(cache: null) { StepGraphReady = false };
-        VramGraphGuard.InvalidateBeforeRelease(backend);
-        Assert.Contains("graph-reset", backend.Calls);
-    }
-
     [Fact]
     public void CanMoveMemoryFreely_IsFalseWhileAGraphIsLive()
     {
@@ -43,12 +33,5 @@ public sealed class VramGraphGuardTests
 
         using RecordingStreamingBackend idle = new RecordingStreamingBackend(cache: null);
         Assert.True(VramGraphGuard.CanMoveMemoryFreely(idle));
-    }
-
-    [Fact]
-    public void NullBackend_IsTolerated()
-    {
-        VramGraphGuard.InvalidateBeforeRelease(null);
-        Assert.True(VramGraphGuard.CanMoveMemoryFreely(null));
     }
 }

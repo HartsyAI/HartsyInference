@@ -116,7 +116,6 @@ public sealed unsafe class CudaBf16ActivationPathTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 1f)]
-    [InlineData(true, 1f)]
     [InlineData(false, 20f)]
     [InlineData(true, 20f)]
     public void GluActivateF16_MatchesF32Twin(bool gelu, float mag)

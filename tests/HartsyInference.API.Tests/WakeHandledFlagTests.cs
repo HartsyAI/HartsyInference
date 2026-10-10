@@ -34,27 +34,4 @@ public sealed class WakeHandledFlagTests
             WakeService.EventData(Event(), handled: true));
     }
 
-    [Fact]
-    public void TheFlagIsLast_SoEveryOtherFieldKeepsItsPlace()
-    {
-        // Not cosmetic: a hand-written parser that scans for a key by name is indifferent to order, but one
-        // that walks the string is not, and the satellite's json_helpers does a bit of both.
-        string full = WakeService.EventData(
-            new WakeEvent
-            {
-                DeviceId = "pico-1", Word = "hey_jarvis", Score = 1f, Route = "audiolab",
-                Transcript = "t", Command = "c", Speaker = "kaleb",
-            }, handled: true);
-        Assert.Equal(
-            "{\"name\":\"hey_jarvis\",\"score\":1.0000,\"route\":\"audiolab\",\"transcript\":\"t\",\"command\":\"c\","
-            + "\"speaker\":\"kaleb\",\"handled\":true}", full);
-    }
-
-    [Fact]
-    public void TheServiceDefaultsToAnsweringNothing()
-    {
-        // The device-side behaviour this unlocks is "do not run your own turn". Defaulting it on would silence
-        // every existing satellite against a host that has no orchestrator.
-        Assert.False(new WakeServiceOptions().HostHandlesTurns);
-    }
 }

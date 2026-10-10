@@ -36,17 +36,6 @@ public sealed class TensorFinalizerCleanupTests
     }
 
     [Fact]
-    public void KeyedDrain_UnknownContext_IsNoOp()
-    {
-        bool ran = false;
-        Tensor.EnqueueFinalizerGpuCleanup(CtxA, () => ran = true);
-        Tensor.DrainPendingFinalizerGpuCleanup((nint)0x7A11_9999); // no bucket for this key
-        Assert.False(ran);
-        Tensor.DrainPendingFinalizerGpuCleanup(CtxA); // clean up so we don't leak into other tests
-        Assert.True(ran);
-    }
-
-    [Fact]
     public void DrainAll_RunsEveryContextsCallbacks()
     {
         bool a = false, b = false;

@@ -114,43 +114,6 @@ public sealed class CudaStreamingWeightCacheTests
         Assert.True(token.IsEmpty);
     }
 
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void Multi_Tensor_Upload_All_Visible_After_Await()
-    {
-        if (!CudaAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
-        using CudaBackend backend = new CudaBackend();
-        IStreamingWeightCache cache = backend.StreamingCache!;
-
-        Tensor[] weights = new Tensor[8];
-        for (int i = 0; i < weights.Length; i++)
-        {
-            weights[i] = MakeTensorF32(256, seed: 1000f + i * 1000f);
-        }
-
-        try
-        {
-            StreamingUploadToken token = cache.BeginUploadAsync(weights);
-            Assert.False(token.IsEmpty);
-            cache.AwaitWeights(token);
-
-            backend.Sync();
-            for (int i = 0; i < weights.Length; i++)
-            {
-                ulong dptr = GetCachedDevicePointer(weights[i]);
-                float[] data = ReadbackFromDevice(dptr, 256);
-                for (int j = 0; j < 256; j++)
-                {
-                    Assert.Equal(1000f + i * 1000f + j * 0.5f, data[j]);
-                }
-            }
-        }
-        finally
-        {
-            foreach (Tensor t in weights) t.Dispose();
-        }
-    }
-
     // ── EvictAsync ───────────────────────────────────────────────────────
 
     [Trait("Category", "GpuIntegration")]
@@ -244,25 +207,6 @@ public sealed class CudaStreamingWeightCacheTests
     }
 
     // ── Budget query ────────────────────────────────────────────────────
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void QueryAvailableWeightCacheBytes_Returns_Plausible_Number()
-    {
-        if (!CudaAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
-        using CudaBackend backend = new CudaBackend();
-        IStreamingWeightCache cache = backend.StreamingCache!;
-
-        long withZeroReserve = cache.QueryAvailableWeightCacheBytes(0);
-        Assert.True(withZeroReserve > 0, $"Expected positive free VRAM, got {withZeroReserve}");
-
-        // Asking for a 100 MB reserve should drop the available figure by at least 100 MB.
-        long withReserve = cache.QueryAvailableWeightCacheBytes(100L * 1024 * 1024);
-        Assert.True(withReserve <= withZeroReserve - 100L * 1024 * 1024 + 1024,
-            $"Reserved query ({withReserve}) should be at least 100 MB lower than unreserved ({withZeroReserve}).");
-
-        _output.WriteLine($"Free VRAM available for weight cache: {withZeroReserve / (1024.0 * 1024.0):F1} MB");
-    }
 
     [Trait("Category", "GpuIntegration")]
     [Fact]

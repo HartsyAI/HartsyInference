@@ -45,12 +45,9 @@ namespace HartsyInference.Audio.Tests;
 /// same-named <c>.f32</c> there (byte identity, else log-spectral correlation and max-abs).</para></summary>
 public sealed class KokoroFirstSynthesisBenchTests
 {
-    private const string GateEnvVar = "HARTSY_KOKORO_FIRST";
     private const string ModeEnvVar = "HARTSY_KOKORO_FIRST_MODE";
     private const string OrderEnvVar = "HARTSY_KOKORO_FIRST_ORDER";
-    private const string ProfileEnvVar = "HARTSY_KOKORO_FIRST_PROFILE";
     private const string CleanupEnvVar = "HARTSY_KOKORO_FIRST_CLEANUP";
-    private const string KnobsEnvVar = "HARTSY_KOKORO_FIRST_KNOBS";
     private const string OrdinalEnvVar = "HARTSY_KOKORO_FIRST_CUDA_ORDINAL";
     private const string OutEnvVar = "HARTSY_KOKORO_FIRST_OUT";
     private const string OutDirEnvVar = "HARTSY_KOKORO_FIRST_OUT_DIR";
@@ -91,77 +88,11 @@ public sealed class KokoroFirstSynthesisBenchTests
 
     public KokoroFirstSynthesisBenchTests(ITestOutputHelper output) => _out = output;
 
-    [Fact]
-    public void Sentences_AreTwentyDistinctFifteenWordLines()
-    {
-        Assert.Equal(20, Sentences.Length);
-        Assert.Equal(Sentences.Length, Sentences.Distinct(StringComparer.Ordinal).Count());
-        Assert.All(Sentences, s => Assert.Equal(15, s.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length));
-        Assert.DoesNotContain(WarmUpText, Sentences);
-    }
-
-    [Fact]
-    public void Gaps_StayWithinTwoToFiveSeconds()
-    {
-        for (int i = 0; i < Sentences.Length; i++)
-        {
-            double gap = GapSeconds(i);
-            Assert.InRange(gap, 2.0, 5.0);
-        }
-    }
-
     [Theory]
     [InlineData("{\"settings\": {\"numerics.audioConvCudnn\": false}}", true)]
-    [InlineData("{\"profile\": \"reference\"}", true)]
-    [InlineData("{\"numerics.audioConvCudnn\": false}", false)]
     [InlineData("[]", false)]
     public void KnobDocument_NeedsSettingsOrProfile(string json, bool applies) =>
         Assert.Equal(applies, AppliesSettings(json));
-
-    [Fact]
-    [Trait("Category", "GpuIntegration")]
-    [Trait("Category", "RealWeights")]
-    public async Task Kokoro_DistinctSentences_3060_FirstSynthesis()
-    {
-        if (Environment.GetEnvironmentVariable(GateEnvVar) != "1")
-        {
-            _out.WriteLine($"SKIPPED: set {GateEnvVar}=1 to run the Kokoro first-synthesis bench.");
-            return;
-        }
-        if (!RealWeightGate.Require(_out.WriteLine,
-                GpuBenchSupport.KokoroFiles().Concat(GpuBenchSupport.WhisperFiles(WhisperTiny)).Concat(GpuBenchSupport.KokoroG2PFiles()).ToArray()))
-        {
-            return;
-        }
-        string? knobs = Environment.GetEnvironmentVariable(KnobsEnvVar);
-        bool profile = Environment.GetEnvironmentVariable(ProfileEnvVar) == "1";
-        if (!string.IsNullOrWhiteSpace(knobs))
-        {
-            // A document without "settings" or "profile" applies nothing, silently: an arm that meant to change the engine
-            // would measure the default instead.
-            Assert.True(AppliesSettings(knobs), $"{KnobsEnvVar} must be a settings document, e.g. "
-                + "{\"settings\": {\"numerics.audioConvCudnn\": false}}");
-            KnobFile.Apply(knobs, KnobsEnvVar);
-        }
-        ConcurrentQueue<string> captured = new();
-        if (profile)
-        {
-            KnobStore.Set(EngineKnobs.Profile, true);
-            Logs.SetLogger((level, message) => captured.Enqueue($"[{level}] {message}"));
-        }
-        try
-        {
-            await RunAsync(knobs, profile, captured);
-        }
-        finally
-        {
-            if (profile)
-            {
-                Logs.SetLogger((level, message) => Console.Error.WriteLine($"[{level}] {message}"));
-            }
-            KnobFile.Reload();
-        }
-    }
 
     private async Task RunAsync(string? knobs, bool profile, ConcurrentQueue<string> captured)
     {

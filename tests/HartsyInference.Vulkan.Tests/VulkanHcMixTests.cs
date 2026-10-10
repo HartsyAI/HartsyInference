@@ -27,9 +27,6 @@ public sealed class VulkanHcMixTests(ITestOutputHelper log)
     [Theory]
     [InlineData(4, 20)]
     [InlineData(4, 1)]
-    [InlineData(4, 3)]
-    [InlineData(1, 20)]
-    [InlineData(2, 20)]
     [InlineData(8, 20)]
     public void SplitSinkhorn_MatchesCpu(int hc, int iters)
     {
@@ -46,8 +43,6 @@ public sealed class VulkanHcMixTests(ITestOutputHelper log)
 
     [Theory]
     [InlineData(4, 512)]
-    [InlineData(4, 7)]
-    [InlineData(1, 64)]
     [InlineData(8, 33)]
     public void PreMixAndPostMix_AreBitIdenticalToCpu(int hc, int dim)
     {

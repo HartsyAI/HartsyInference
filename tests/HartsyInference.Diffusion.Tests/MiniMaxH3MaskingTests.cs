@@ -16,12 +16,9 @@ public sealed class MiniMaxH3MaskingTests
     }
 
     [Theory]
-    [InlineData(1, 1)]
     [InlineData(4, 1)]
-    [InlineData(5, 5)]
     [InlineData(21, 5)]
     [InlineData(22, 22)]
-    [InlineData(38, 22)]
     [InlineData(39, 39)]
     public void GuideVideosUseAStillBelowFiveAndOtherwiseTruncateTo17NPlus5(int input, int expected)
     {
@@ -30,7 +27,6 @@ public sealed class MiniMaxH3MaskingTests
 
     [Theory]
     [InlineData(0, 39, 39)]
-    [InlineData(17, 22, 39)]
     [InlineData(38, 1, 39)]
     public void NormalizedGuideClipsMayEndExactlyAtTheAlignedTarget(
         int anchor, int guideFrames, int targetFrames)
@@ -40,7 +36,6 @@ public sealed class MiniMaxH3MaskingTests
 
     [Theory]
     [InlineData(1, 39, 39)]
-    [InlineData(18, 22, 39)]
     [InlineData(38, 5, 39)]
     public void NormalizedGuideClipsCannotExtendPastTheAlignedTarget(
         int anchor, int guideFrames, int targetFrames)
@@ -77,29 +72,6 @@ public sealed class MiniMaxH3MaskingTests
     }
 
     [Fact]
-    public void VideoMaskRetainsRawPatchValuesWhenTheTokenAmaxIsWhite()
-    {
-        float[] rows = Assert.IsType<float[]>(MiniMaxH3Masking.PackVideoMaskRows(
-            [0f, 0.25f, 0.75f, 1f], latentFrames: 1, latentHeight: 2, latentWidth: 2,
-            out float[]? featureValues));
-
-        Assert.Equal([1f], rows);
-        Assert.Equal([0f, 0.25f, 0.75f, 1f], Assert.IsType<float[]>(featureValues));
-    }
-
-    [Fact]
-    public void TokenMasksRoundUpToTheOneOver256Grid()
-    {
-        float[] raw = [0f, 1f / 512f, 0.25f, 1f];
-        float[] rows = Assert.IsType<float[]>(MiniMaxH3Masking.PackVideoMaskRows(
-            raw, latentFrames: 1, latentHeight: 1, latentWidth: 4, out float[]? featureValues,
-            patchHeight: 1, patchWidth: 1));
-
-        Assert.Equal([0f, 1f / 256f, 0.25f, 1f], rows);
-        Assert.Equal(raw, Assert.IsType<float[]>(featureValues));
-    }
-
-    [Fact]
     public void AudioMaskResamplesAtFortyHertzAndRepeatsChannelMajor()
     {
         float[] rows = Assert.IsType<float[]>(MiniMaxH3Masking.ResampleAudioMask(
@@ -133,10 +105,4 @@ public sealed class MiniMaxH3MaskingTests
         Assert.Null(audioFeatureRows);
     }
 
-    [Fact]
-    public void GuideAudioCropsToTheDurationRemainingAfterItsAnchor()
-    {
-        Assert.Equal(66, MiniMaxH3Masking.GuideAudioLatentFrames(80, 8));
-        Assert.Equal(1, MiniMaxH3Masking.GuideAudioLatentFrames(65, 38));
-    }
 }

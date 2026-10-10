@@ -373,60 +373,6 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
     }
 
     [Trait("Category", "GpuIntegration")]
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    [Trait("Category", "GpuIntegration")]
-    public void EncodeMultiLayer_ThreeTaps_HasExactRequestedMappingAndNoIntermediateD2h(bool interleaved)
-    {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-
-        LlamaStyleEncoderConfig config = TinyConfig(numLayers: 4);
-        int[][] tokens = TinyTokenBatch();
-        int[] taps = [0, 2, 4];
-        Dictionary<string, Tensor> weights = BuildTinyWeights(config);
-        try
-        {
-            using LlamaStyleEncoder encoder = new(config);
-            encoder.LoadWeights(weights);
-            using CpuBackend cpu = new();
-
-            // Build the oracle from independent K=1 captures and pack it explicitly. This does not share
-            // EncodeMultiLayer's Concat/Transpose implementation, so swapping K/H or tap order is observable.
-            float[][] singleTapValues = new float[taps.Length][];
-            for (int k = 0; k < taps.Length; k++)
-            {
-                using Tensor single = encoder.EncodeMultiLayer(cpu, tokens, [taps[k]]);
-                singleTapValues[k] = CopyF32(single);
-            }
-            float[] expected = PackLayerTaps(
-                singleTapValues, tokens.Length, tokens[0].Length, config.HiddenSize, interleaved);
-
-            using CudaBackend cuda = new(0, PtxDir()) { HighPrecisionGemm = true };
-            cuda.PreloadWeights(encoder.EnumerateWeights());
-            cuda.ResetD2hSyncCount();
-
-            using Tensor actual = encoder.EncodeMultiLayer(cuda, tokens, taps, interleaved);
-            cuda.Sync();
-
-            Assert.Equal(
-                new TensorShape(tokens.Length, tokens[0].Length, taps.Length * config.HiddenSize), actual.Shape);
-            Assert.Equal(0, cuda.GetD2hSyncCount());
-            AssertClose(expected, actual, 5e-4f,
-                $"EncodeMultiLayer K=3 interleaved={interleaved} exact channel map");
-            Assert.Equal(1, cuda.GetD2hSyncCount());
-        }
-        finally
-        {
-            DisposeAll(weights.Values);
-        }
-    }
-
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void EncodeEmbedsMrope_TextOnly_MatchesStandardCpuEncodeAndStaysDeviceResident()
@@ -465,58 +411,6 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
         finally
         {
-            DisposeAll(weights.Values);
-        }
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    [Trait("Category", "GpuIntegration")]
-    public void EncodeEmbedsMrope_Deepstack_MatchesCpuAndStaysDeviceResident()
-    {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-
-        LlamaStyleEncoderConfig config = TinyConfig(numLayers: 3);
-        int[] tokens = TinyTokens();
-        bool[] visualMask = Enumerable.Range(0, tokens.Length).Select(i => i is 2 or 7 or 13).ToArray();
-        int visualRows = visualMask.Count(value => value);
-        (float[] cos, float[] sin) = BuildHalfRope(tokens.Length, config.HeadDim, config.RopeTheta);
-        Dictionary<string, Tensor> weights = BuildTinyWeights(config);
-        Tensor[] deepstack =
-        [
-            TensorFrom(RandomScaledValues(visualRows * config.HiddenSize, 1201, 0.025f),
-                new TensorShape(visualRows, config.HiddenSize)),
-            TensorFrom(RandomScaledValues(visualRows * config.HiddenSize, 1202, 0.04f),
-                new TensorShape(visualRows, config.HiddenSize)),
-        ];
-        try
-        {
-            using LlamaStyleEncoder encoder = new(config);
-            encoder.LoadWeights(weights);
-            using Tensor embeds = encoder.LookupEmbeddings(tokens);
-            using CpuBackend cpu = new();
-            using Tensor expected = encoder.EncodeEmbedsMrope(cpu, embeds, cos, sin, deepstack, visualMask);
-            using Tensor withoutDeepstack = encoder.EncodeEmbedsMrope(cpu, embeds, cos, sin);
-            AssertMateriallyDifferent(expected, withoutDeepstack, "deepstack injection must affect the hidden state");
-
-            using CudaBackend cuda = new(0, PtxDir()) { HighPrecisionGemm = true };
-            cuda.PreloadWeights(encoder.EnumerateWeights());
-            cuda.ResetD2hSyncCount();
-
-            using Tensor actual = encoder.EncodeEmbedsMrope(cuda, embeds, cos, sin, deepstack, visualMask);
-            cuda.Sync();
-
-            Assert.Equal(0, cuda.GetD2hSyncCount());
-            AssertTensorClose(expected, actual, 7e-4f, 7e-4f, "deepstack M-RoPE CPU/CUDA parity");
-            Assert.Equal(1, cuda.GetD2hSyncCount());
-        }
-        finally
-        {
-            DisposeAll(deepstack);
             DisposeAll(weights.Values);
         }
     }

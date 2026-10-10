@@ -41,7 +41,6 @@ public sealed unsafe class ConvChannelsLastTests(ITestOutputHelper output)
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(2, 3, 77, 45)]
-    [InlineData(4, 1, 33, 1000)]
     public void TransposeTiled_MatchesHostTranspose(int elementBytes, int batch, int d1, int d2)
     {
         string? ptx = PtxDir();

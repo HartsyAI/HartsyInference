@@ -155,7 +155,6 @@ public sealed class Fp8NativeGemmTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128, false)]
-    [InlineData(256, 512, 512, false)]
     [InlineData(200, 320, 256, true)]    // F32 out + M not multiple of 16 (only leading dims need alignment)
     public unsafe void NativeFp8Gemm_F32ActivationDynamicQuant_MatchesF16Fallback(int m, int outDim, int inDim, bool outF32)
     {

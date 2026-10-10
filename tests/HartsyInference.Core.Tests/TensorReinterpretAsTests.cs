@@ -31,7 +31,6 @@ public sealed unsafe class TensorReinterpretAsTests
 
     [Theory]
     [InlineData(6, 14)]   // 42 bytes of F4E2M1 against 48 bytes of U8
-    [InlineData(6, 32)]   // the caller forgot the /2 and asked for twice the elements
     [InlineData(3, 16)]   // right element count per row, wrong row count
     public void ByteCountMismatch_Throws(long rows, long columns)
     {

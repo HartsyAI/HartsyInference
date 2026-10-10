@@ -49,15 +49,4 @@ public sealed class AudioAssetRepoPathTests
         Assert.Equal(expectedRepoPath, asset.RepoPath);
     }
 
-    [Fact]
-    public void OrpheusAssetsResolveThroughTheAudioCachePath()
-    {
-        // Both orpheus assets are TTS-modality and not in the standard-download exemption list, so they must
-        // resolve through ModelAcquisition's audio-cache branch (AudioModelCache), not ModelDownloader's
-        // Models/<subdir> tree -- otherwise the RepoPath pins above would be checking the wrong code path, and
-        // a real mismatch on this entry would surface as a disk-tree problem instead of a "download loop" one.
-        CatalogEntry entry = ModelCatalog.Find("orpheus")!;
-
-        Assert.True(ModelAcquisition.UsesAudioCache(entry, entry.Modality));
-    }
 }

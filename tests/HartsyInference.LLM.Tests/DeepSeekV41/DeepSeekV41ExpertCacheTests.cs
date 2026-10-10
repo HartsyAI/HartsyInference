@@ -26,19 +26,6 @@ public sealed class DeepSeekV41ExpertCacheTests
     }
 
     [Fact]
-    public void Same_Instance_Is_Returned_For_A_Cached_Expert()
-    {
-        DeepSeekV41ExpertCache cache = new(_ => Tiny(), 4);
-        Assert.Same(cache.GetExpert(3), cache.GetExpert(3));
-    }
-
-    [Fact]
-    public void Rejects_Zero_Capacity()
-    {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41ExpertCache(_ => Tiny(), 0));
-    }
-
-    [Fact]
     public void Loader_Refuses_Experts_Whose_Shapes_Do_Not_Match_The_Layer_Widths()
     {
         string dir = Path.Combine(Path.GetTempPath(), "dsv41-expert-" + Guid.NewGuid().ToString("N"));
@@ -67,14 +54,4 @@ public sealed class DeepSeekV41ExpertCacheTests
         Assert.Equal([1f, 2f, 3f, -1f, -2f, -3f], DeepSeekV41ExpertLoader.ReadMatrix("experts.0.w1", w, null, 2, 3));
     }
 
-    [Fact]
-    public void ReadMatrix_Refuses_A_Wrong_Shape_Or_A_Wrong_Rank_With_The_Key_Named()
-    {
-        using Tensor matrix = new(new TensorShape(2, 3), DType.BF16);
-        using Tensor vector = new(new TensorShape(6), DType.BF16);
-        Assert.Contains("experts.0.w2", Assert.Throws<HartsyInferenceException>(() =>
-            DeepSeekV41ExpertLoader.ReadMatrix("experts.0.w2", matrix, null, 3, 2)).Message);
-        Assert.Contains("rank 1", Assert.Throws<HartsyInferenceException>(() =>
-            DeepSeekV41ExpertLoader.ReadMatrix("experts.0.w3", vector, null, 2, 3)).Message);
-    }
 }

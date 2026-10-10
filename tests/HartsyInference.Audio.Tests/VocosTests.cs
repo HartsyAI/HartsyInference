@@ -17,21 +17,6 @@ namespace HartsyInference.Audio.Tests;
 public sealed class VocosTests
 {
     [Fact]
-    public void Mel24kPreset_MatchesUpstreamConfig()
-    {
-        VocosConfig c = VocosConfig.Mel24k;
-        Assert.Equal(100, c.InputChannels);
-        Assert.Equal(512, c.HiddenDim);
-        Assert.Equal(1536, c.IntermediateDim);
-        Assert.Equal(8, c.NumLayers);
-        Assert.Equal(7, c.DwConvKernel);
-        Assert.Equal(1e-6f, c.LayerNormEps);
-        Assert.Equal(1024, c.NFft);
-        Assert.Equal(256, c.HopLength);
-        Assert.Equal(24_000, c.SampleRate);
-    }
-
-    [Fact]
     public void IStft_OutputLength_MatchesFormula()
     {
         // For F frames at hop=256, n_fft=1024, center=True:

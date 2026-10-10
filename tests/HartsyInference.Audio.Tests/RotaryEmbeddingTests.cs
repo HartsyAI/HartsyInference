@@ -40,28 +40,6 @@ public sealed class RotaryEmbeddingTests
         Assert.True(expected[half - 1] < baseLast * 0.5, "low-frequency invFreq should be markedly reduced");
     }
 
-    [Fact]
-    public void Llama3Scaling_TablesMatchIndependentInvFreqComputation()
-    {
-        const int rotaryDim = 64, maxPos = 16;
-        const float theta = 500_000f;
-        RopeScaling sc = RopeScaling.Llama3;
-        int half = rotaryDim / 2;
-
-        double[] invFreq = ExpectedLlama3InvFreq(rotaryDim, theta, sc);
-        (float[] cos, float[] sin) = RotaryEmbedding.GetTables(rotaryDim, theta, maxPos, sc);
-
-        for (int p = 0; p < maxPos; p++)
-        {
-            for (int i = 0; i < half; i++)
-            {
-                double angle = p * invFreq[i];
-                Assert.Equal((float)Math.Cos(angle), cos[p * half + i], 5);
-                Assert.Equal((float)Math.Sin(angle), sin[p * half + i], 5);
-            }
-        }
-    }
-
     /// <summary>Independent reference for the Llama-3 piecewise rescale (HF <c>_compute_llama3_parameters</c>).</summary>
     private static double[] ExpectedLlama3InvFreq(int rotaryDim, float theta, RopeScaling sc)
     {

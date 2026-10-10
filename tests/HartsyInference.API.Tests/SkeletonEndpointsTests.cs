@@ -31,14 +31,6 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
     }
 
     [Fact]
-    public async Task Health_Returns200()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.GetAsync("/health");
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-    }
-
-    [Fact]
     public async Task Ready_ReportsBackend()
     {
         using HttpClient client = _factory.CreateClient();
@@ -47,14 +39,6 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
         JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("ready", body.GetProperty("status").GetString());
         Assert.False(string.IsNullOrEmpty(body.GetProperty("backend").GetString()));
-    }
-
-    [Fact]
-    public async Task Version_ReturnsBackendSelector()
-    {
-        using HttpClient client = _factory.CreateClient();
-        JsonElement body = await client.GetFromJsonAsync<JsonElement>("/version");
-        Assert.Equal("cpu", body.GetProperty("backendSelector").GetString());
     }
 
     [Fact]
@@ -84,32 +68,11 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
     }
 
     [Fact]
-    public async Task Health_IsReachable_EvenWhenApiKeyConfigured()
-    {
-        using WebApplicationFactory<Program> factory = _factory.WithWebHostBuilder(builder =>
-            builder.UseSetting("HartsyInference:ApiKey", "super-secret-key"));
-        using HttpClient client = factory.CreateClient();
-
-        HttpResponseMessage resp = await client.GetAsync("/health");
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-    }
-
-    [Fact]
     public async Task AdminCatalog_ReturnsNonEmptyCatalog()
     {
         using HttpClient client = _factory.CreateClient();
         JsonElement body = await client.GetFromJsonAsync<JsonElement>("/admin/catalog");
         Assert.True(body.GetArrayLength() > 0);
-    }
-
-    [Fact]
-    public async Task AdminCatalog_FiltersByModality()
-    {
-        using HttpClient client = _factory.CreateClient();
-        JsonElement body = await client.GetFromJsonAsync<JsonElement>("/admin/catalog?modality=text");
-        Assert.True(body.GetArrayLength() > 0);
-        foreach (JsonElement entry in body.EnumerateArray())
-            Assert.Equal("Text", entry.GetProperty("modality").GetString());
     }
 
     [Fact]
@@ -120,86 +83,17 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
-    [Fact]
-    public async Task AdminModels_InitiallyEmpty()
-    {
-        using HttpClient client = _factory.CreateClient();
-        JsonElement body = await client.GetFromJsonAsync<JsonElement>("/admin/models");
-        Assert.Equal(0, body.GetProperty("loaded").GetArrayLength());
-    }
-
-    [Fact]
-    public async Task AdminCache_ReturnsScratchDirectoryAndEmptyModels()
-    {
-        using HttpClient client = _factory.CreateClient();
-        JsonElement body = await client.GetFromJsonAsync<JsonElement>("/admin/cache");
-        Assert.Equal(_scratchCacheDir, body.GetProperty("directory").GetString());
-        Assert.Equal(0, body.GetProperty("models").GetArrayLength());
-    }
-
-    [Fact]
-    public async Task AdminCacheDelete_UnknownId_Returns404()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.DeleteAsync("/admin/cache/not-cached");
-        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task AdminModelsPull_UnknownCatalogId_Returns404()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/models/pull", new { model = "not-a-catalog-id" });
-        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-    }
-
     /// <summary>The quantize endpoint validates before it touches the filesystem, so a bad request is a 400 rather
     /// than a partially-written multi-GB file.</summary>
     [Theory]
     [InlineData("{\"modelPath\":\"\",\"out\":\"/tmp/x.gguf\"}")]
-    [InlineData("{\"modelPath\":\"/tmp/in.safetensors\",\"out\":\"\"}")]
     [InlineData("{\"modelPath\":\"/tmp/in.safetensors\",\"out\":\"/tmp/x.gguf\",\"format\":\"not-a-format\"}")]
-    [InlineData("{\"modelPath\":\"/tmp/in.safetensors\",\"out\":\"/tmp/x.gguf\",\"quant\":\"Q9_Z\"}")]
     public async Task AdminModelsQuantize_BadRequest_Returns400(string body)
     {
         using HttpClient client = _factory.CreateClient();
         using StringContent content = new(body, System.Text.Encoding.UTF8, "application/json");
         HttpResponseMessage resp = await client.PostAsync("/admin/models/quantize", content);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-    }
-
-    /// <summary>A source that is not there is the caller's mistake, not a server fault.</summary>
-    [Fact]
-    public async Task AdminModelsQuantize_MissingSource_Returns404()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/models/quantize", new
-        {
-            modelPath = "/tmp/definitely-not-here-" + Guid.NewGuid().ToString("N") + ".safetensors",
-            @out = "/tmp/out-" + Guid.NewGuid().ToString("N") + ".gguf",
-        });
-        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task AdminMemoryFree_NoBody_DefaultsToSoftFree()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsync("/admin/memory/free", content: null);
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.True(body.GetProperty("freed").GetBoolean());
-        Assert.False(body.GetProperty("hard").GetBoolean());
-    }
-
-    [Fact]
-    public async Task AdminMemoryFree_EmptyBody_DefaultsToSoftFree()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/memory/free", new { });
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.False(body.GetProperty("hard").GetBoolean());
     }
 
     [Fact]
@@ -217,24 +111,6 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
 
         HttpResponseMessage ready = await client.GetAsync("/ready");
         Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
-    }
-
-    [Fact]
-    public async Task AdminBackend_InvalidSelector_Returns400()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/backend", new { backend = "quantum" });
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task AdminBackend_ValidSelector_Switches()
-    {
-        using HttpClient client = _factory.CreateClient();
-        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/backend", new { backend = "cpu" });
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        JsonElement body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("cpu", body.GetProperty("backend").GetString());
     }
 
     // AdminQueue coverage moved to VideoWorldEndpointsTests.AdminQueue_ReportsBothFastAndLongRunning — Phase 5

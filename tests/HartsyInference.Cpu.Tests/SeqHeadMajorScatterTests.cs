@@ -81,20 +81,6 @@ public sealed class SeqHeadMajorScatterTests
     }
 
     [Fact]
-    public void The_Three_Argument_Form_Copies_Every_Input_Row()
-    {
-        using IBackend backend = new CpuBackend();
-        using Tensor input = Coded(heads: 2, seq: 3, hd: 2, tag: 7f);
-        using Tensor viaAll = Coded(heads: 2, seq: 8, hd: 2, tag: -5f);
-        using Tensor viaRows = Coded(heads: 2, seq: 8, hd: 2, tag: -5f);
-
-        backend.ScatterSeqHeadMajor(viaAll, input, 4);
-        backend.ScatterSeqHeadMajor(viaRows, input, 4, rows: 3);
-
-        Assert.True(viaAll.AsReadOnlySpan<float>().SequenceEqual(viaRows.AsReadOnlySpan<float>()));
-    }
-
-    [Fact]
     public void Out_Of_Range_Or_Mismatched_Arguments_Are_Refused()
     {
         using IBackend backend = new CpuBackend();

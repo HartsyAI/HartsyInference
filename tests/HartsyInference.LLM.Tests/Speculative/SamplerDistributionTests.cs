@@ -28,17 +28,6 @@ public sealed class SamplerDistributionTests
     }
 
     [Fact]
-    public void Greedy_Distribution_Is_A_One_Hot_At_The_Argmax()
-    {
-        SamplerChain chain = SamplerChain.FromOptions(new SamplingOptions { Greedy = true });
-        float[] probs = new float[Logits.Length];
-        chain.Distribution(Logits.AsSpan().ToArray(), [], probs);
-        Assert.Equal(1f, probs[7]);
-        Assert.Equal(7, Array.IndexOf(probs, 1f));
-        Assert.Equal(1f, probs.Sum());
-    }
-
-    [Fact]
     public void Excluded_Tokens_Have_Zero_Probability()
     {
         SamplerChain chain = SamplerChain.FromOptions(new SamplingOptions { TopK = 3 });

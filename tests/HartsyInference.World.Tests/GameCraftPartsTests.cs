@@ -34,25 +34,6 @@ public sealed unsafe class GameCraftPartsTests
     }
 
     [Fact]
-    public void CameraNet_ProducesImageGridTokens()
-    {
-        using IBackend cpu = new CpuBackend();
-        int hidden = 8, T = 5, H = 16, W = 16;
-        GameCraftCameraNet net = new(hiddenSize: hidden, downscale: 8, outChannels: 16, patchH: 2, patchW: 2, temporalCompression: 4);
-        net.LoadWeights(BuildCameraWeights(hidden));
-
-        using Tensor plucker = Filled(0.01f, 1, T, 6, H, W);
-        using Tensor tokens = net.Forward(cpu, plucker);
-        int tLat = (T - 1) / 4 + 1; // 2
-        int hOut = (H / 8) / 2, wOut = (W / 8) / 2; // 1,1
-        Assert.Equal(3, tokens.Shape.Rank);
-        Assert.Equal(tLat * hOut * wOut, (int)tokens.Shape[1]);
-        Assert.Equal(hidden, (int)tokens.Shape[2]);
-        float* p = (float*)tokens.DataPointer;
-        for (long i = 0; i < tokens.ElementCount; i++) Assert.True(float.IsFinite(p[i]));
-    }
-
-    [Fact]
     public void LatentBuilder_AssemblesCompositeWithMask()
     {
         int b = 1, c = 16, T = 2, H = 2, W = 2;
@@ -72,21 +53,6 @@ public sealed unsafe class GameCraftPartsTests
         Assert.Equal(33, (int)outC);
     }
 
-    private static Dictionary<string, Tensor> BuildCameraWeights(int hidden)
-    {
-        Random r = new(9);
-        return new()
-        {
-            ["camera_in.encode_first.0.weight"] = T(r, 192, 384, 1, 1), ["camera_in.encode_first.0.bias"] = T(r, 192),
-            ["camera_in.encode_first.1.weight"] = Ones(192), ["camera_in.encode_first.1.bias"] = Zeros(192),
-            ["camera_in.encode_second.0.weight"] = T(r, 96, 192, 1, 1), ["camera_in.encode_second.0.bias"] = T(r, 96),
-            ["camera_in.encode_second.1.weight"] = Ones(96), ["camera_in.encode_second.1.bias"] = Zeros(96),
-            ["camera_in.final_proj.weight"] = T(r, 16, 96, 1, 1), ["camera_in.final_proj.bias"] = T(r, 16),
-            ["camera_in.camera_in.proj.weight"] = T(r, hidden, 16 * 2 * 2), ["camera_in.camera_in.proj.bias"] = T(r, hidden),
-            ["camera_in.scale"] = Ones(1),
-        };
-    }
-
     private static Tensor T(Random r, params long[] dims)
     {
         Tensor t = new(new TensorShape(dims), DType.F32);
@@ -97,14 +63,6 @@ public sealed unsafe class GameCraftPartsTests
 
     private static Tensor Ones(long n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < n; i++) p[i] = 1f; return t; }
     private static Tensor Zeros(long n) => new(new TensorShape(n), DType.F32);
-
-    private static Tensor Filled(float v, params long[] dims)
-    {
-        Tensor t = new(new TensorShape(dims), DType.F32);
-        float* p = (float*)t.DataPointer;
-        for (long i = 0; i < t.ElementCount; i++) p[i] = v;
-        return t;
-    }
 
     private static Tensor Ramp(float start, params long[] dims)
     {

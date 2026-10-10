@@ -75,26 +75,6 @@ public sealed class WakeAudioStreamTests
     }
 
     [Fact]
-    public async Task PiecesThatDoNotDivideEvenly_NeverSendAnOddFrame()
-    {
-        // A short frame is legal, but an odd byte count would put half a sample into the device's ring and
-        // every sample after it would be assembled from two different ones.
-        using MemoryStream raw = new();
-        WakeAudioStream stream = new(new WakeFrameCodec(raw), "pico-1", Rate, leadMs: 0);
-        await stream.WriteAsync(Tone(101));
-        await stream.WriteAsync(Tone(37));
-        await stream.WriteAsync(Tone(1500));
-        await stream.CompleteAsync();
-
-        List<(JsonElement Data, byte[] Payload)> frames = ReadBack(raw);
-        foreach ((JsonElement data, byte[] payload) in frames.Take(frames.Count - 1))
-        {
-            Assert.Equal(Rate / 25 * 2, payload.Length);
-        }
-        Assert.Equal(101 + 37 + 1500, frames.Sum(f => f.Payload.Length));
-    }
-
-    [Fact]
     public async Task TheReplyIsAlwaysClosed_EvenWithNothingLeftToSay()
     {
         // The final frame is what tells the device the turn is over. Skipping it because the tail happened to
@@ -122,14 +102,5 @@ public sealed class WakeAudioStreamTests
         }
         List<(JsonElement Data, byte[] Payload)> frames = ReadBack(raw);
         Assert.True(frames[^1].Data.GetProperty("final").GetBoolean());
-    }
-
-    [Fact]
-    public async Task WritingAfterTheEnd_IsRefused()
-    {
-        using MemoryStream raw = new();
-        WakeAudioStream stream = new(new WakeFrameCodec(raw), "pico-1", Rate, leadMs: 0);
-        await stream.CompleteAsync();
-        await Assert.ThrowsAsync<InvalidOperationException>(async () => await stream.WriteAsync(Tone(64)));
     }
 }

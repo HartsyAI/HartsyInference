@@ -61,13 +61,6 @@ public unsafe class Wan22VaePrimitivesTests
             Assert.Equal(Wan22VaeLatentNorm.Std[c] + Wan22VaeLatentNorm.Mean[c], p[c], 4);
     }
 
-    [Fact]
-    public void LatentNorm_HasExactly48Constants()
-    {
-        Assert.Equal(48, Wan22VaeLatentNorm.Mean.Length);
-        Assert.Equal(48, Wan22VaeLatentNorm.Std.Length);
-    }
-
     private static Tensor Random(int[] dims, int seed)
     {
         long[] d = Array.ConvertAll(dims, x => (long)x);

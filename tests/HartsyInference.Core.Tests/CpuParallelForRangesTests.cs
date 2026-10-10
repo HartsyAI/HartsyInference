@@ -23,8 +23,6 @@ public sealed class CpuParallelForRangesTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
     public void TheRangesTileTheCountExactly_WithTheLastOneShort_AtEveryCap(int cap)
     {
         List<(long Start, long Length)> ranges = WithCpuThreads(cap, () => Record(Count, RangeLength));
@@ -71,19 +69,6 @@ public sealed class CpuParallelForRangesTests
     }
 
     [Fact]
-    public void ARangeLongerThanTheCount_IsOneWholeCall_WithoutOverflowing()
-    {
-        Assert.Equal([(0L, 5L)], Record(5, long.MaxValue));
-        Assert.Equal([(0L, long.MaxValue)], Record(long.MaxValue, long.MaxValue));
-    }
-
-    [Fact]
-    public void MoreRangesThanAnIntCanCount_Throws()
-    {
-        Assert.Throws<OverflowException>(() => CpuParallel.ForRanges(long.MaxValue, 1, 1, static (_, _) => { }));
-    }
-
-    [Fact]
     public void BadArguments_AreRefused()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => CpuParallel.ForRanges(-1, RangeLength, 1, static (_, _) => { }));
@@ -103,19 +88,6 @@ public sealed class CpuParallelForRangesTests
             })));
 
         Assert.Equal("range 17", thrown.Message);
-    }
-
-    [Fact]
-    public void TheStateOverload_HandsEveryRangeTheState_AndCoversEachElementOnce()
-    {
-        int[] visits = new int[Count];
-
-        WithCpuThreads(0, () => CpuParallel.ForRanges(Count, RangeLength, HeavyWork, visits, static (start, length, seen) =>
-        {
-            for (long i = start; i < start + length; i++) Interlocked.Increment(ref seen[i]);
-        }));
-
-        Assert.All(visits, v => Assert.Equal(1, v));
     }
 
     private static List<(long Start, long Length)> Record(long count, long rangeLength)

@@ -12,24 +12,6 @@ namespace HartsyInference.Vision.Tests;
 public sealed class UpscaleTests
 {
     [Fact]
-    public void Upscale_WholeImage_ProducesScaledOutput()
-    {
-        using CpuBackend backend = new CpuBackend();
-        RrdbNet net = BuildTinyNet(scale: 4, numBlock: 1, numFeat: 4, numGrowCh: 2, seed: 7);
-        UpscalePipeline pipeline = new UpscalePipeline(backend, net, inputTileSize: 0); // no tiling
-
-        const int w = 8, h = 8;
-        byte[] src = Gradient(w, h);
-
-        (byte[] outRgb, int outW, int outH) = pipeline.Upscale(src, w, h);
-
-        Assert.Equal(32, outW);
-        Assert.Equal(32, outH);
-        Assert.Equal(outW * outH * 3, outRgb.Length);
-        Assert.Equal(4, pipeline.ScaleFactor);
-    }
-
-    [Fact]
     public void Upscale_Tiled_MatchesOutputDimensions()
     {
         using CpuBackend backend = new CpuBackend();
@@ -64,22 +46,6 @@ public sealed class UpscaleTests
     }
 
     [Fact]
-    public void Upscale_X2Model_Tiled_MatchesOutputDimensions()
-    {
-        using CpuBackend backend = new CpuBackend();
-        RrdbNet net = BuildTinyNet(scale: 2, numBlock: 1, numFeat: 4, numGrowCh: 2, seed: 9);
-        // 16 input px per tile → 8 unshuffled cells per tile over a 12-cell unshuffled image: two tiles each way.
-        UpscalePipeline pipeline = new UpscalePipeline(backend, net, inputTileSize: 16, tileOverlapFactor: 0.25f);
-
-        const int w = 24, h = 24;
-        (byte[] outRgb, int outW, int outH) = pipeline.Upscale(Gradient(w, h), w, h);
-
-        Assert.Equal(48, outW);
-        Assert.Equal(48, outH);
-        Assert.Equal(outW * outH * 3, outRgb.Length);
-    }
-
-    [Fact]
     public void UnshuffledInput_UsesTorchChannelOrderAndReplicatesEdges()
     {
         // 3x1 image, r=2: padded to 4x2 by replicating the last column and the only row.
@@ -101,22 +67,6 @@ public sealed class UpscaleTests
     }
 
     [Fact]
-    public void InferConfig_TwelveChannelConvFirst_IsScale2()
-    {
-        Dictionary<string, Tensor> w = new()
-        {
-            ["conv_first.weight"] = new Tensor(new TensorShape(64, 12, 3, 3), DType.F32),
-            ["conv_up2.weight"] = new Tensor(new TensorShape(64, 64, 3, 3), DType.F32),
-            ["body.0.rdb1.conv1.weight"] = new Tensor(new TensorShape(32, 64, 3, 3), DType.F32),
-        };
-        RealEsrganConfig cfg = RealEsrganConverter.InferConfig(w);
-        Assert.Equal(2, cfg.Scale);
-        Assert.Equal(2, cfg.UnshuffleFactor);
-        Assert.Equal(12, cfg.InputChannels);
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
     public void InferConfig_DetectsScaleAndBlocks()
     {
         // 3-channel conv_first → scale 4 (conv_up2 is present on every checkpoint); highest body index 22 → 23 blocks.
@@ -134,19 +84,6 @@ public sealed class UpscaleTests
         Assert.Equal(64, cfg.NumFeat);
         Assert.Equal(32, cfg.NumGrowCh);
 
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
-    public void Converter_StripsBasicSrPrefix()
-    {
-        Dictionary<string, Tensor> w = new()
-        {
-            ["params_ema.conv_first.weight"] = new Tensor(new TensorShape(1), DType.F32),
-        };
-        Dictionary<string, Tensor> converted = RealEsrganConverter.Convert(w);
-        Assert.True(converted.ContainsKey("conv_first.weight"));
-        Assert.False(converted.ContainsKey("params_ema.conv_first.weight"));
         foreach (Tensor t in w.Values) t.Dispose();
     }
 

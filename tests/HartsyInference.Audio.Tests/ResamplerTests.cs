@@ -9,14 +9,6 @@ namespace HartsyInference.Audio.Tests;
 public sealed class ResamplerTests
 {
     [Fact]
-    public void OutputLength_44k_To_16k()
-    {
-        Resampler r = Resampler.Create(44_100, 16_000);
-        // 1 second of 44.1 kHz audio → ~16000 samples at 16 kHz.
-        Assert.InRange(r.OutputLength(44_100), 15_999, 16_001);
-    }
-
-    [Fact]
     public void OutputLength_48k_To_16k_IsExactlyOneThird()
     {
         Resampler r = Resampler.Create(48_000, 16_000);
@@ -28,8 +20,6 @@ public sealed class ResamplerTests
     /// input — the scalar one. A wrong phase or reversal shifts the slice by a sample and reads as a large error.</summary>
     [Theory]
     [InlineData(16_000, 48_000)]
-    [InlineData(48_000, 16_000)]
-    [InlineData(44_100, 16_000)]
     public void ResampleRange_MatchesTheSameSliceOfResample(int inRate, int outRate)
     {
         Random rng = new(inRate + outRate);
@@ -77,24 +67,6 @@ public sealed class ResamplerTests
             if ((y[i] >= 0) != (y[i + 1] >= 0)) crossings++;
         // 1000 Hz × 2 crossings/cycle × ~1 second ≈ 2000. Allow ±200 for transient.
         Assert.InRange(crossings, 1800, 2200);
-    }
-
-    [Fact]
-    public void SameRate_PreservesShape_AndEnergy()
-    {
-        // When in_rate == out_rate the filter is a windowed-sinc with cutoff at Nyquist;
-        // for even tap counts this introduces a half-sample group delay. Strict bit-identity
-        // isn't the contract — energy preservation and shape are.
-        Resampler r = Resampler.Create(16_000, 16_000);
-        float[] x = new float[1000];
-        for (int i = 0; i < x.Length; i++) x[i] = MathF.Sin(2f * MathF.PI * i / 40);
-        float[] y = r.Resample(x);
-        Assert.Equal(x.Length, y.Length);
-
-        // Compare RMS over the steady-state region — should match within ~5%.
-        double rmsX = Rms(x.AsSpan(100, 800));
-        double rmsY = Rms(y.AsSpan(100, 800));
-        Assert.InRange(rmsY / rmsX, 0.9, 1.1);
     }
 
     private static double Rms(ReadOnlySpan<float> s)

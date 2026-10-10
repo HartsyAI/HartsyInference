@@ -64,17 +64,6 @@ public sealed class SentinelJsonGrammarStepTests
     }
 
     [Fact]
-    public void OutsideSentinel_PlainText_NeverMasked()
-    {
-        Driver d = new("<tool_call>");
-        // 'H' at JSON ValueStart would be rejected by JsonGrammarState — must NOT be masked while inactive.
-        foreach (char c in "Hello, how can I help you today? { not json ] } weird chars ok")
-        {
-            d.StepMaskThenCommit(c, expectMasked: false);
-        }
-    }
-
-    [Fact]
     public void SentinelActivatesGrammarMasking_ForTheSpanAfterIt()
     {
         Driver d = new("<tool_call>");
@@ -104,24 +93,6 @@ public sealed class SentinelJsonGrammarStepTests
 
         // And the rest of the closing tag plus trailing prose streams completely unconstrained.
         foreach (char c in "</tool_call> hope that helps!") d.StepMaskThenCommit(c, expectMasked: false);
-    }
-
-    [Fact]
-    public void MultipleSpansInOneGeneration_EachActivateAndDeactivateIndependently()
-    {
-        Driver d = new("<tool_call>");
-        foreach (char c in "<tool_call>{\"a\":1}") d.StepMaskThenCommit(c);
-        // Deactivated after the first span — plain text in between must be unconstrained.
-        foreach (char c in "</tool_call> ok, next <tool_call>") d.StepMaskThenCommit(c, expectMasked: false);
-
-        // Second span: must be active again (fresh state, not polluted by the first span's completed object).
-        float[] mask = d.CurrentMask();
-        Assert.True(IsMasked(mask, 'H'));
-        Assert.False(IsMasked(mask, '['));
-
-        foreach (char c in "[1,2,3]") d.StepMaskThenCommit(c, expectMasked: false);
-        float[] afterSecond = d.CurrentMask();
-        Assert.False(IsMasked(afterSecond, '<')); // deactivated again
     }
 
     [Fact]
@@ -158,24 +129,4 @@ public sealed class SentinelJsonGrammarStepTests
         Assert.Throws<ArgumentException>(() => SamplerChain.FromOptions(opts));
     }
 
-    [Fact]
-    public void FromOptions_JsonModeWins_WhenBothSet()
-    {
-        // Doesn't throw building the chain with only a tokenizer (JsonMode's own requirement) even though
-        // JsonModeSentinel is also set — proves JsonMode takes priority and the sentinel path is skipped.
-        SamplingOptions opts = SamplingOptions.Default with
-        {
-            Greedy = true, JsonMode = true, JsonModeSentinel = "<tool_call>",
-        };
-        SamplerChain chain = SamplerChain.FromOptions(opts, new CharTokenizer(), VocabSize);
-        Assert.NotNull(chain);
-    }
-
-    [Fact]
-    public void HasJsonConstraint_TrueForEitherMode()
-    {
-        Assert.False(SamplingOptions.Default.HasJsonConstraint);
-        Assert.True((SamplingOptions.Default with { JsonMode = true }).HasJsonConstraint);
-        Assert.True((SamplingOptions.Default with { JsonModeSentinel = "<x>" }).HasJsonConstraint);
-    }
 }

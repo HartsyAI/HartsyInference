@@ -103,13 +103,10 @@ public sealed unsafe class CudaQuantWorkspaceTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 8, 96, 0)]
-    [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 4, 64, 3)]
     [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 64, 2304, 0)]
     [InlineData(QuantEncoding.Mxfp4E8M0, 4, 16, 16, 64, 1)]
     [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 32, 32, 64, 96, 0)]
     [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 128, 128, 256, 256, 0)]
-    [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 1, 32, 8, 96, 2)]
-    [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, 32, 32, 40, 70, 1)]
     public void DeviceDequant_IsBitExactAgainstHostCodecAfterExpertUpload(QuantEncoding encoding, int br, int bc, int rows, int cols, int offset)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }

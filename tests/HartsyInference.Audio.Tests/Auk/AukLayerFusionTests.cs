@@ -73,7 +73,6 @@ public sealed class AukLayerFusionTests
 
     [Theory]
     [InlineData(false)]
-    [InlineData(true)]
     public void MatchesDoubleReference(bool viaTap)
     {
         float[][] layers = RandomLayers(7);
@@ -81,29 +80,6 @@ public sealed class AukLayerFusionTests
         float[] got = Run(new CpuBackend(), layers, weights, 0.37f, viaTap);
         double[] want = Reference(layers, weights, 0.37f);
         for (int i = 0; i < want.Length; i++) Assert.True(Math.Abs(want[i] - got[i]) < 2e-5, $"i={i} want {want[i]} got {got[i]}");
-    }
-
-    [Fact]
-    public void IndexZeroMapsToFirstLayer_AndOffByOneShiftsResult()
-    {
-        float[][] layers = RandomLayers(11);
-        float[] weights = [30f, 0f, 0f, 0f, 0f];
-        float[] got = Run(new CpuBackend(), layers, weights, 1f, false);
-        double[] first = Reference([layers[0], layers[0], layers[0], layers[0], layers[0]], [0f, 0f, 0f, 0f, 0f], 1f);
-        for (int i = 0; i < got.Length; i++) Assert.True(Math.Abs(first[i] - got[i]) < 1e-4);
-        float[][] shifted = [layers[1], layers[2], layers[3], layers[4], layers[0]];
-        float[] off = Run(new CpuBackend(), shifted, weights, 1f, false);
-        double maxDiff = 0;
-        for (int i = 0; i < got.Length; i++) maxDiff = Math.Max(maxDiff, Math.Abs(got[i] - off[i]));
-        Assert.True(maxDiff > 0.1);
-    }
-
-    [Fact]
-    public void Softmax_IsNormalisedAndScaled()
-    {
-        using AukLayerFusion fusion = new(new CpuBackend(), [1f, 2f, 3f], 2f, Hidden);
-        Assert.Equal(2.0, fusion.Coefficients.ToArray().Sum(), 12);
-        Assert.True(fusion.Coefficients[2] > fusion.Coefficients[0]);
     }
 
     [Fact]

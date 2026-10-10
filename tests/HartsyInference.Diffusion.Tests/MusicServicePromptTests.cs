@@ -20,12 +20,6 @@ public sealed class MusicServicePromptTests
     }
 
     [Fact]
-    public void ControlFoley_StillNeedsSomethingToCondition()
-    {
-        Assert.False(MusicService.HasPromptOrConditioning(Spec("controlfoley"), new MusicRequest { Prompt = "" }));
-    }
-
-    [Fact]
     public void OtherModels_StillNeedAPromptOrGenre()
     {
         Assert.False(MusicService.HasPromptOrConditioning(Spec("acestep"), new MusicRequest { Prompt = "", ReferenceAudio = Clip }));

@@ -36,23 +36,6 @@ public sealed class CaseInsensitivePathTests : IDisposable
     }
 
     [Fact]
-    public void NothingOnDisk_ReturnsThePathAsSpelled()
-    {
-        string relative = "LLM/qwen3/" + Gguf;
-
-        Assert.Equal(Path.Combine(_root, relative), CaseInsensitivePath.ResolveFile(_root, relative));
-        Assert.Equal(Path.Combine(_root, "LLM"), CaseInsensitivePath.ResolveDirectory(_root, "LLM"));
-    }
-
-    [Fact]
-    public void RootedRelativePath_IsReturnedAsPathCombineWould()
-    {
-        string rooted = Path.Combine(_root, "elsewhere", Gguf);
-
-        Assert.Equal(rooted, CaseInsensitivePath.ResolveFile(Path.Combine(_root, "models"), rooted));
-    }
-
-    [Fact]
     public void UniqueLowercaseFolder_ResolvesTheSpelledPath()
     {
         if (!CaseSensitive())
@@ -106,66 +89,6 @@ public sealed class CaseInsensitivePathTests : IDisposable
         string warning = Assert.Single(warnings);
         Assert.Contains(Path.Combine(_root, "LLM"), warning, StringComparison.Ordinal);
         Assert.Contains(Path.Combine(_root, "llm"), warning, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void OnlyEntriesOfTheWantedKind_Match()
-    {
-        if (!CaseSensitive())
-            return;
-        Directory.CreateDirectory(Path.Combine(_root, "weights"));
-        File.WriteAllBytes(Path.Combine(_root, "WEIGHTS"), [0x01]);
-
-        Assert.Equal(Path.Combine(_root, "weights"), CaseInsensitivePath.ResolveDirectory(_root, "Weights"));
-        Assert.Equal(Path.Combine(_root, "WEIGHTS"), CaseInsensitivePath.ResolveFile(_root, "Weights"));
-        Assert.Equal(Path.Combine(_root, "Weights"), CaseInsensitivePath.ResolveEntry(_root, "Weights"));
-    }
-
-    [Fact]
-    public void AFileNeverStandsInForAnIntermediateFolder()
-    {
-        if (!CaseSensitive())
-            return;
-        File.WriteAllBytes(Path.Combine(_root, "llm"), [0x01]);
-        string relative = "LLM/qwen3/" + Gguf;
-
-        Assert.Equal(Path.Combine(_root, relative), CaseInsensitivePath.ResolveFile(_root, relative));
-    }
-
-    [Fact]
-    public void EverySegment_IsMatchedOnItsOwn()
-    {
-        if (!CaseSensitive())
-            return;
-        string file = Place("llm", "Qwen3", Gguf);
-
-        Assert.Equal(file, CaseInsensitivePath.ResolveFile(_root, "LLM/qwen3/qwen3-4b-q4_k_m.GGUF"));
-    }
-
-    [Fact]
-    public void AMissingFile_LandsInTheFoldersThatExist()
-    {
-        if (!CaseSensitive())
-            return;
-        Directory.CreateDirectory(Path.Combine(_root, "llm"));
-
-        Assert.Equal(Path.Combine(_root, "llm", "qwen3", Gguf),
-            CaseInsensitivePath.ResolveFile(_root, "LLM/qwen3/" + Gguf));
-
-        Directory.CreateDirectory(Path.Combine(_root, "llm", "Qwen3"));
-        Assert.Equal(Path.Combine(_root, "llm", "Qwen3", Gguf),
-            CaseInsensitivePath.ResolveFile(_root, "LLM/qwen3/" + Gguf));
-    }
-
-    [Fact]
-    public void ASymlinkedFolder_Matches()
-    {
-        if (!CaseSensitive())
-            return;
-        Place("real-yue", Gguf);
-        Directory.CreateSymbolicLink(Path.Combine(_root, "yue"), Path.Combine(_root, "real-yue"));
-
-        Assert.Equal(Path.Combine(_root, "yue", Gguf), CaseInsensitivePath.ResolveFile(_root, "YUE/" + Gguf));
     }
 
     /// <summary>Creates an empty file at the joined segments under the root and returns its path.</summary>

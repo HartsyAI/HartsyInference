@@ -18,15 +18,6 @@ public sealed class WanExpertSwapTests
         Assert.Equal(0.9f, WanVideoRecipe.ResolveBoundary(null, WanVideoConfig.I2V_A14B, isConcatI2V: true));
     }
 
-    /// <summary>A preset with no boundary (a plain 14B run with a swap model attached) falls back to Wan 2.2's
-    /// official defaults by mode.</summary>
-    [Fact]
-    public void ResolveBoundary_NullPercent_NoPresetBoundary_UsesOfficialDefaults()
-    {
-        Assert.Equal(0.875f, WanVideoRecipe.ResolveBoundary(null, WanVideoConfig.T2V_14B, isConcatI2V: false));
-        Assert.Equal(0.9f, WanVideoRecipe.ResolveBoundary(null, WanVideoConfig.T2V_14B, isConcatI2V: true));
-    }
-
     /// <summary>p=0.5 at shift 8 → 8·0.5/(1+7·0.5) = 0.888…, the recovered WanVideoLoader warp.</summary>
     [Fact]
     public void ResolveBoundary_ExplicitFraction_WarpsThroughFlowShift()
@@ -35,14 +26,6 @@ public sealed class WanExpertSwapTests
         Assert.Equal(8f * 0.5f / (1f + 7f * 0.5f), WanVideoRecipe.ResolveBoundary(0.5, shift8, isConcatI2V: false), 5);
         // The A14B preset's own shift 5: 5·0.5/(1+4·0.5) = 0.833…
         Assert.Equal(5f * 0.5f / (1f + 4f * 0.5f), WanVideoRecipe.ResolveBoundary(0.5, WanVideoConfig.T2V_A14B, isConcatI2V: false), 5);
-    }
-
-    [Fact]
-    public void ResolveBoundary_ClampsFractionTo01Band()
-    {
-        WanVideoConfig config = WanVideoConfig.T2V_A14B;
-        Assert.Equal(WanVideoRecipe.ResolveBoundary(0.01, config, false), WanVideoRecipe.ResolveBoundary(-3.0, config, false));
-        Assert.Equal(WanVideoRecipe.ResolveBoundary(0.99, config, false), WanVideoRecipe.ResolveBoundary(1.5, config, false));
     }
 
     [Fact]

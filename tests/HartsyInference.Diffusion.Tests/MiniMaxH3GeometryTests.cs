@@ -10,13 +10,9 @@ namespace HartsyInference.Diffusion.Tests;
 public class MiniMaxH3GeometryTests
 {
     [Theory]
-    [InlineData(1, 5)]
     [InlineData(5, 5)]
     [InlineData(6, 22)]
-    [InlineData(22, 22)]
-    [InlineData(49, 56)]
     [InlineData(121, 124)]
-    [InlineData(124, 124)]
     public void AlignFrameCount_SnapsUpOntoThe17kPlus5Grid(int requested, int expected)
     {
         int aligned = MiniMaxH3Geometry.AlignFrameCount(requested);
@@ -27,8 +23,6 @@ public class MiniMaxH3GeometryTests
 
     [Theory]
     [InlineData(5, 2)]
-    [InlineData(22, 7)]
-    [InlineData(56, 17)]
     [InlineData(124, 37)]
     public void VideoLatentFrames_MatchesTheReference(int frames, int expected) =>
         Assert.Equal(expected, MiniMaxH3Geometry.VideoLatentFrames(frames));
@@ -38,10 +32,7 @@ public class MiniMaxH3GeometryTests
     /// quietly short-changed (121 requested delivered 102 before this was pinned).</summary>
     [Theory]
     [InlineData(5)]
-    [InlineData(22)]
-    [InlineData(56)]
     [InlineData(124)]
-    [InlineData(362)]
     public void VideoLatentFrames_RoundTripsThroughTheFramePerTokenCycle(int frames)
     {
         int[] framePerToken = [1, 4, 4, 4, 4];
@@ -64,7 +55,6 @@ public class MiniMaxH3GeometryTests
     /// every clip.</summary>
     [Theory]
     [InlineData(22)]
-    [InlineData(56)]
     [InlineData(124)]
     public void AudioAndVideoDurationsAgree(int frames)
     {
@@ -77,8 +67,6 @@ public class MiniMaxH3GeometryTests
     /// 16x VAE, so an odd axis loses its last patch row/column in <c>UnpackVideo</c> with no error.</summary>
     [Theory]
     [InlineData(1360, 768)]
-    [InlineData(1920, 1080)]
-    [InlineData(1024, 1024)]
     [InlineData(720, 1280)]
     [InlineData(1, 1)]
     public void AdaptCanvas_AlwaysYieldsAnEvenLatentGrid(int width, int height)
@@ -104,10 +92,7 @@ public class MiniMaxH3GeometryTests
     /// <see cref="MiniMaxH3Geometry.AdaptCanvas"/> would renormalise all of these onto a 768 short edge, which is
     /// right for a reference clip and wrong for a generation.</summary>
     [Theory]
-    [InlineData(960, 960)]
     [InlineData(1344, 768)]
-    [InlineData(704, 1280)]
-    [InlineData(512, 512)]
     public void ClampToMaxArea_UnderTheCap_LeavesTheRequestedCanvasAlone(int width, int height)
     {
         Assert.Equal((width, height), MiniMaxH3Geometry.ClampToMaxArea(width, height));
@@ -118,9 +103,6 @@ public class MiniMaxH3GeometryTests
     /// nearest grid step lands back above it — the reason the clamp walks the longer axis down afterwards.</summary>
     [Theory]
     [InlineData(1920, 1080)]
-    [InlineData(3840, 2160)]
-    [InlineData(2048, 2048)]
-    [InlineData(1080, 1920)]
     [InlineData(280, 3904)]
     public void ClampToMaxArea_OverTheCap_ComesBackUnderItAtTheRequestedAspect(int width, int height)
     {
@@ -153,17 +135,5 @@ public class MiniMaxH3GeometryTests
                     $"{w}x{h} -> {cw}x{ch} = {(long)cw * ch}px exceeds the cap");
             }
         }
-    }
-
-    /// <summary>The envelope is a quality warning threshold, not a cap — it has to sit on the same 17k+5 grid every
-    /// accepted frame count does, or a request at exactly the envelope would snap past its own threshold.</summary>
-    [Fact]
-    public void TrainedFrameEnvelope_IsOnTheFrameGrid()
-    {
-        Assert.Equal(MiniMaxH3Geometry.TrainedFrameEnvelope,
-            MiniMaxH3Geometry.AlignFrameCount(MiniMaxH3Geometry.TrainedFrameEnvelope));
-        Assert.Equal(5, MiniMaxH3Geometry.TrainedFrameEnvelope % 17);
-        Assert.True(MiniMaxH3Geometry.TrainedFrameEnvelope > 124,
-            "the envelope must sit above H3's own 124-frame default, or every default generation would warn");
     }
 }

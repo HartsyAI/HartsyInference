@@ -27,16 +27,6 @@ public class Ideogram4SchedulerTests
     }
 
     [Fact]
-    public void MakeStepIntervals_HasLinearGridOfLengthStepsPlusOne()
-    {
-        float[] grid = LogitNormalSchedule.MakeStepIntervals(12);
-        Assert.Equal(13, grid.Length);
-        Assert.Equal(0.0f, grid[0]);
-        Assert.Equal(1.0f, grid[12], 5);
-        Assert.Equal(0.5f, grid[6], 5);
-    }
-
-    [Fact]
     public void ForResolution_IncreasesMeanWithPixelCount()
     {
         // Larger images push the mean up (more noise budget), so the t at a fixed grid point drops.

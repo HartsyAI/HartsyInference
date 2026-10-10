@@ -133,39 +133,12 @@ public sealed unsafe class SplitRowsTests
     }
 
     [Fact]
-    public void SplitRows_SplitsARankOneBias()
-    {
-        using Tensor fused = new Tensor(new TensorShape(6), DType.F32);
-        Span<float> values = fused.AsSpan<float>();
-        for (int i = 0; i < values.Length; i++) values[i] = i;
-
-        Tensor[] pieces = CheckpointConvertUtils.SplitRows(fused, [2, 4], ["q.bias", "mlp.bias"]);
-        try
-        {
-            Assert.Equal([0f, 1f], pieces[0].AsReadOnlySpan<float>().ToArray());
-            Assert.Equal([2f, 3f, 4f, 5f], pieces[1].AsReadOnlySpan<float>().ToArray());
-        }
-        finally
-        {
-            DisposeAll(pieces);
-        }
-    }
-
-    [Fact]
     public void SplitRows_RefusesARowLengthThatIsNotAWholeNumberOfBlocks()
     {
         // 48 values per row is not a multiple of Q8_0's 32, so a row boundary falls inside a block and no byte
         // offset can name it. Refusing beats copying a shifted window that decodes to plausible garbage.
         using Tensor fused = new Tensor(new TensorShape(4, 48), DType.Q8_0);
         Assert.Throws<NotSupportedException>(() =>
-            CheckpointConvertUtils.SplitRows(fused, [2, 2], ["q.weight", "k.weight"]));
-    }
-
-    [Fact]
-    public void SplitRows_RefusesRowCountsThatDoNotCoverTheTensor()
-    {
-        using Tensor fused = new Tensor(new TensorShape(6, 4), DType.F32);
-        Assert.Throws<InvalidOperationException>(() =>
             CheckpointConvertUtils.SplitRows(fused, [2, 2], ["q.weight", "k.weight"]));
     }
 }

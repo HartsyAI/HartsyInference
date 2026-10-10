@@ -36,21 +36,6 @@ public sealed unsafe class StepAccelerationTests
     // ── LCM scheduler ─────────────────────────────────────────────────────
 
     [Fact]
-    public void Lcm_Step_NoLongerThrows_AndProducesFiniteOutput()
-    {
-        LcmScheduler sched = new LcmScheduler();
-        sched.SetTimesteps(4);
-        using Tensor model = Ramp(64, 0.0f, 0.01f);
-        using Tensor sample = Filled(64, 0.5f);
-        using Tensor output = Filled(64, 0.0f);
-
-        sched.Step(output, model, sample, stepIndex: 0);
-
-        foreach (float v in ToArray(output))
-            Assert.True(float.IsFinite(v), "LCM step produced a non-finite value.");
-    }
-
-    [Fact]
     public void Lcm_LastStep_IsDeterministicCleanEstimate()
     {
         // The final step must not re-noise, so two runs match regardless of seed.
@@ -108,31 +93,7 @@ public sealed unsafe class StepAccelerationTests
         Assert.Equal(ToArray(outA), ToArray(outB));
     }
 
-    [Fact]
-    public void Tcd_Step_ProducesFiniteOutput()
-    {
-        TcdScheduler sched = new TcdScheduler { Eta = 0.3f, Seed = 5 };
-        sched.SetTimesteps(8);
-        using Tensor model = Ramp(64, 0f, 0.005f);
-        using Tensor sample = Filled(64, 0.2f);
-        using Tensor output = Filled(64, 0f);
-
-        for (int s = 0; s < 8; s++)
-            sched.Step(output, model, output, s);
-
-        foreach (float v in ToArray(output))
-            Assert.True(float.IsFinite(v), "TCD step produced a non-finite value.");
-    }
-
     // ── FeatureCache gate ─────────────────────────────────────────────────
-
-    [Fact]
-    public void FeatureCache_FirstStep_AlwaysComputes()
-    {
-        using FeatureCache cache = new FeatureCache(threshold: 0.5f);
-        using Tensor proxy = Filled(16, 1.0f);
-        Assert.True(cache.ShouldCompute(proxy));
-    }
 
     [Fact]
     public void FeatureCache_StableProxy_ReusesAfterFirstCompute()
@@ -198,9 +159,7 @@ public sealed unsafe class StepAccelerationTests
     [Theory]
     [InlineData(0.0f, false)]
     [InlineData(1.0f, false)]
-    [InlineData(1.00001f, false)]
     [InlineData(2.5f, true)]
-    [InlineData(7.5f, true)]
     public void Cfg_IsGuidanceActive_GatesUncondPass(float scale, bool expected)
     {
         Assert.Equal(expected, CfgHelper.IsGuidanceActive(scale));

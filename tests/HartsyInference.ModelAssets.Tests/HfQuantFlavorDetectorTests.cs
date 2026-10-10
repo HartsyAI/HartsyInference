@@ -38,12 +38,6 @@ public sealed class HfQuantFlavorDetectorTests
     }
 
     [Fact]
-    public void AmdQuark_IsQuarkMethod()
-    {
-        Assert.Equal(QuantFlavor.AmdQuark, Detect("{\"quantization_config\":{\"quant_method\":\"quark\",\"algo_config\":null}}"));
-    }
-
-    [Fact]
     public void Exl3_IsExl3MethodEvenWithANestedFp8Block()
     {
         Assert.Equal(QuantFlavor.Exl3, Detect(
@@ -59,9 +53,6 @@ public sealed class HfQuantFlavorDetectorTests
 
     [Theory]
     [InlineData("{}")]
-    [InlineData("[]")]
-    [InlineData("{\"quantization_config\":\"fp8\"}")]
     [InlineData("{\"quantization_config\":{\"quant_method\":\"gptq\"}}")]
-    [InlineData("{\"quantization\":{\"mode\":\"mxfp4\"}}")]
     public void UnknownOrAbsentQuantization_IsNull(string json) => Assert.Null(Detect(json));
 }

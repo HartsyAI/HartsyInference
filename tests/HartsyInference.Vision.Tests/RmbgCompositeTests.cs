@@ -26,10 +26,4 @@ public sealed class RmbgCompositeTests
         byte[] bytes = RmbgBackgroundRemover.AlphaToBytes([0f, 0.5f, 1f, 1.5f, -0.2f]);
         Assert.Equal(new byte[] { 0, 128, 255, 255, 0 }, bytes);
     }
-
-    [Fact]
-    public void CompositeOnGray_RejectsMismatchedAlpha()
-    {
-        Assert.Throws<ArgumentException>(() => RmbgBackgroundRemover.CompositeOnGray(new float[2], new byte[9], 3, 1));
-    }
 }

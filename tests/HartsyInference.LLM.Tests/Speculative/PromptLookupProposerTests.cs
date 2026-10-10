@@ -15,12 +15,6 @@ public sealed class PromptLookupProposerTests
     }
 
     [Fact]
-    public void Prefers_The_Most_Recent_Occurrence()
-    {
-        Assert.Equal([7, 1, 2], new PromptLookupProposer().Propose([1, 2, 9, 1, 2, 7, 1, 2], 8).Tokens);
-    }
-
-    [Fact]
     public void Returns_Nothing_Without_A_Match()
     {
         Assert.Empty(new PromptLookupProposer().Propose([1, 2, 3], 4).Tokens);

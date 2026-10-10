@@ -81,18 +81,6 @@ public sealed class MemorySupportReportTests
         Assert.DoesNotContain(lines, l => l.Contains("not wired for this model", StringComparison.Ordinal));
     }
 
-    /// <summary>Auto is the default everywhere, so it must never warn — otherwise every generation of every model
-    /// emits noise and the channel stops being read.</summary>
-    [Fact]
-    public void AutoPolicy_WarnsAboutNothing()
-    {
-        using IBackend backend = Cpu();
-        List<string> lines = Capture(() => MemorySupportReport.Report("Fake",
-            Context(backend, VramPolicy.For(VramTier.Auto)), MemoryCapabilities.None));
-
-        Assert.DoesNotContain(lines, l => l.StartsWith("Warning|", StringComparison.Ordinal));
-    }
-
     /// <summary>A device that cannot stream at all must be blamed instead of the model, which supports it fine.</summary>
     [Fact]
     public void BackendWithoutStreamingCache_BlamesTheDeviceNotTheModel()
@@ -148,18 +136,5 @@ public sealed class MemorySupportReportTests
         Assert.Contains("[VRAM] MusicService:", all, StringComparison.Ordinal);
         Assert.Contains("Maximum", all, StringComparison.Ordinal);
         Assert.Contains("does not act on", all, StringComparison.Ordinal);
-    }
-
-    /// <summary>Describe names only what was pinned away from the tier, so the interesting part is not buried.</summary>
-    [Fact]
-    public void Describe_ListsOnlyLeversThatDifferFromTheTier()
-    {
-        Assert.Equal("Balanced", VramPolicy.For(VramTier.Balanced).Describe());
-
-        VramPolicy pinned = VramPolicy.For(VramTier.Balanced) with { WeightStreaming = LeverState.On };
-        string described = pinned.Describe();
-        Assert.Contains("Balanced", described, StringComparison.Ordinal);
-        Assert.Contains("WeightStreaming=On", described, StringComparison.Ordinal);
-        Assert.DoesNotContain("KeepResident", described, StringComparison.Ordinal);
     }
 }

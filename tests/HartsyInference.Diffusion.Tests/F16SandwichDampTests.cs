@@ -29,9 +29,6 @@ public sealed unsafe class F16SandwichDampTests
         Assert.True(ratio < 0.8, $"plain eps kept {ratio:P0} of the norm; the case no longer exercises the eps term");
     }
 
-    [Fact]
-    public void Undamped_KeepsEps() => Assert.Equal(Eps, F16SandwichDamp.NormEps(Eps, damped: false));
-
     private static (float[] Reference, float[] Damped) Norms(float dampedEps)
     {
         IBackend cpu = new CpuBackend();

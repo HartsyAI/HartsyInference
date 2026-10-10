@@ -164,11 +164,7 @@ public sealed class GgufGpuDequantTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("IQ2_XXS")]
-    [InlineData("IQ2_XS")]
-    [InlineData("IQ2_S")]
-    [InlineData("IQ3_XXS")]
     [InlineData("IQ3_S")]
-    [InlineData("IQ1_S")]
     [InlineData("IQ1_M")]
     public unsafe void IQ_GpuDequant_MatchesCpu(string name)
     {

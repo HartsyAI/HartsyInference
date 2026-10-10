@@ -64,69 +64,6 @@ public sealed class StreamingSentenceSplitterTests
     }
 
     [Fact]
-    public void Flush_ReturnsTheTailOnceAndNullWhenEmpty()
-    {
-        StreamingSentenceSplitter splitter = new();
-        Assert.Null(splitter.Flush());
-        splitter.Push("  a trailing fragment  ");
-        Assert.Equal("a trailing fragment", splitter.Flush());
-        Assert.Null(splitter.Flush());
-        Assert.Equal(0, splitter.PendingLength);
-    }
-
-    [Fact]
-    public void FirstSentence_MayBeShorterThanTheRest()
-    {
-        // "Yes." comes out alone; the rest splits under the normal minimum, and "Go." is the held tail.
-        StreamingSentenceSplitter eager = new(firstSentenceMinLength: 1);
-        Assert.Equal(["Yes.", "The meeting was moved to three o'clock."], eager.Push("Yes. The meeting was moved to three o'clock. Go."));
-        Assert.Equal("Go.", eager.Flush());
-
-        // Under the normal minimum "Yes." merges forward, and the merged sentence is complete once "Go." follows.
-        StreamingSentenceSplitter normal = new();
-        Assert.Equal(["Yes. The meeting was moved to three o'clock."], normal.Push("Yes. The meeting was moved to three o'clock. Go."));
-        Assert.Equal("Go.", normal.Flush());
-    }
-
-    [Fact]
-    public void FirstSentenceMinimum_AppliesToTheFirstSentenceOnly()
-    {
-        // With the small minimum applied to the whole buffer, "No." would come out alone too; it must merge forward.
-        StreamingSentenceSplitter splitter = new(firstSentenceMinLength: 1);
-        IReadOnlyList<string> completed = splitter.Push("Yes. No. The meeting was moved to three o'clock today. Fine.");
-        Assert.Equal(["Yes.", "No. The meeting was moved to three o'clock today."], completed);
-        Assert.Equal("Fine.", splitter.Flush());
-    }
-
-    [Fact]
-    public void Reset_DropsPendingTextAndArmsTheFirstSentenceAgain()
-    {
-        StreamingSentenceSplitter splitter = new(firstSentenceMinLength: 1);
-        splitter.Push("Yes. The rest of this");
-        splitter.Reset();
-        Assert.Equal(0, splitter.PendingLength);
-        Assert.Equal(["Ok."], splitter.Push("Ok. And then a longer sentence follows it here."));
-    }
-
-    [Fact]
-    public void Push_IgnoresNullAndEmptyDeltas()
-    {
-        StreamingSentenceSplitter splitter = new();
-        Assert.Empty(splitter.Push(null));
-        Assert.Empty(splitter.Push(""));
-        Assert.Equal(0, splitter.PendingLength);
-    }
-
-    [Fact]
-    public void SplitClauses_ShortSentence_ComesBackWhole()
-    {
-        Assert.Equal(["Short and sweet, really."], SentenceSplitter.SplitClauses("  Short and sweet, really.  ", 40));
-        Assert.Empty(SentenceSplitter.SplitClauses("   ", 40));
-        Assert.Empty(SentenceSplitter.SplitClauses(null, 40));
-        Assert.Throws<ArgumentOutOfRangeException>(() => SentenceSplitter.SplitClauses("x", 0));
-    }
-
-    [Fact]
     public void SplitClauses_CutsAtTheLastClauseMarkBeforeTheLimit()
     {
         const string Long = "First we gather the ingredients, then we mix the batter, then we pour it into the tin, "

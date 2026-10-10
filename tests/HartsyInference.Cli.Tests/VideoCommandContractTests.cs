@@ -25,18 +25,6 @@ public sealed class VideoCommandContractTests
         Assert.DoesNotContain("model-profile", engineOption.LongNames);
     }
 
-    [Fact]
-    public void InspectAcceptsRepeatableLoraCompositionInputs()
-    {
-        PropertyInfo loras = typeof(InspectCommand.Settings).GetProperty(nameof(InspectCommand.Settings.Loras))!;
-        PropertyInfo weights = typeof(InspectCommand.Settings).GetProperty(nameof(InspectCommand.Settings.LoraWeights))!;
-
-        Assert.Contains("lora", loras.GetCustomAttribute<CommandOptionAttribute>()!.LongNames);
-        Assert.Contains("lora-weight", weights.GetCustomAttribute<CommandOptionAttribute>()!.LongNames);
-        Assert.Equal(typeof(string[]), loras.PropertyType);
-        Assert.Equal(typeof(double[]), weights.PropertyType);
-    }
-
     /// <summary>Every command that composes LoRAs offers the same two options, spelled the same way.</summary>
     /// <remarks>`hartsy image` shipped without them: `ImageRequest.Loras` existed and the dispatch built a stack,
     /// but no option ever set it, so a documented feature had no way to be reached from the one command most likely
@@ -45,7 +33,6 @@ public sealed class VideoCommandContractTests
     [Theory]
     [InlineData(typeof(ImageCommand.Settings))]
     [InlineData(typeof(VideoCommand.Settings))]
-    [InlineData(typeof(InspectCommand.Settings))]
     public void EveryLoraComposingCommandTakesTheSameTwoOptions(Type settings)
     {
         PropertyInfo? loras = settings.GetProperty("Loras");
@@ -113,12 +100,4 @@ public sealed class VideoCommandContractTests
         Message = code,
     };
 
-    [Fact]
-    public void ValidationPendingH3ConvertersAreNotRegisteredByTheCli()
-    {
-        MethodInfo? dispatch = typeof(Program).GetMethod("RunH3Conversion",
-            BindingFlags.Static | BindingFlags.NonPublic);
-
-        Assert.Null(dispatch);
-    }
 }

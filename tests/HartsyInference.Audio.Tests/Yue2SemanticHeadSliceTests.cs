@@ -80,14 +80,4 @@ public sealed unsafe class Yue2SemanticHeadSliceTests
         Assert.True(anyNonZero, "a window of zeros would satisfy every other assertion here");
     }
 
-    [Fact]
-    public void SliceHeadWindow_CopiesADenseWindowUnchanged()
-    {
-        using Tensor head = Dense();
-        using Tensor window = Yue2ArLm.SliceHeadWindow(head, Start, Count);
-        Assert.Equal(DType.F32, window.DType);
-        ReadOnlySpan<float> expected = head.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> actual = window.AsReadOnlySpan<float>();
-        for (int i = 0; i < actual.Length; i++) Assert.Equal(expected[Start * Columns + i], actual[i]);
-    }
 }

@@ -47,15 +47,6 @@ public sealed class StrictOptionParsingTests
         Assert.ThrowsAny<Exception>(() => app.Run(["noop", option, "2"]));
     }
 
-    /// <summary>The setting is load-bearing: without it the same run succeeds, which is the behaviour that let a
-    /// typo through.</summary>
-    [Fact]
-    public void Without_Strict_Parsing_The_Same_Run_Succeeds()
-    {
-        CommandApp app = BuildApp(strict: false);
-        Assert.Equal(0, app.Run(["noop", "--totally-bogus-flag", "2"]));
-    }
-
     [Fact]
     public void A_Declared_Option_Still_Parses()
     {

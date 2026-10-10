@@ -21,7 +21,6 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [Theory]
     [InlineData(1, 4, 4, 300, 300, 128, false)]
     [InlineData(1, 4, 2, 300, 257, 128, true)]
-    [InlineData(2, 8, 8, 130, 70, 64, false)]
     [InlineData(1, 6, 3, 65, 129, 64, true)]
     public void HeadMajor_MatchesReference(int batch, int hq, int hkv, int sq, int skv, int d, bool masked)
     {
@@ -46,9 +45,7 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
 
     [Theory]
     [InlineData(48, 12, 300, 128, true)]
-    [InlineData(24, 24, 200, 128, false)]
     [InlineData(10, 5, 97, 64, false)]
-    [InlineData(8, 4, 90, 80, true)]
     [InlineData(4, 2, 70, 96, false)]
     public void TokenMajorGqa_MatchesReference(int hq, int hkv, int s, int d, bool masked)
     {

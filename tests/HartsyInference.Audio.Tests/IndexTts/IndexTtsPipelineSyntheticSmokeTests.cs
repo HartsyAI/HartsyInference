@@ -13,7 +13,7 @@ namespace HartsyInference.Audio.Tests.IndexTts;
 /// does, but with tiny random weights and hand-crafted token ids instead of <c>IndexTtsPipeline.LoadAsync</c> and
 /// <c>IndexTtsTokenizer</c> (there is no tiny SentencePiece model file to test against): shapes, finiteness and
 /// determinism only. Says NOTHING about parity with the real checkpoints — see
-/// <see cref="HartsyInference.Audio.Tests.IndexTts.IndexTtsConfigValuesTests"/> for the <c>V1_5</c> preset's
+/// <c>IndexTtsConfigValuesTests</c> for the <c>V1_5</c> preset's
 /// value-equality lock against the real <c>config.yaml</c>, and <c>docs/Research/INDEX_TTS_ARCHITECTURE.md</c> for
 /// the deferred real-weight parity check.</summary>
 [Trait("Category", "SyntheticSmoke")]

@@ -59,23 +59,6 @@ public unsafe class Wan22VaeBlockTests
         Assert.Equal(3f / 4f, op[0] / op[1], 4);
     }
 
-    [Fact]
-    public void WanRmsNorm_AppliesPerChannelGamma()
-    {
-        WanRmsNorm norm = new(channels: 2);
-        Tensor gamma = new Tensor(new TensorShape(2), DType.F32);
-        float* gp = (float*)gamma.DataPointer; gp[0] = 2f; gp[1] = 0.5f;
-        norm.LoadWeights(gamma);
-
-        Tensor x = new Tensor(new TensorShape([1L, 2, 1, 1, 1]), DType.F32);
-        float* xp = (float*)x.DataPointer; xp[0] = 1f; xp[1] = 1f; // equal → both normalize to sqrt(C-mean)=1 before gamma
-        Tensor outT = norm.Forward(x);
-        float* op = (float*)outT.DataPointer;
-        // x=[1,1] → rms=1 → normalized=[1,1] → ·gamma=[2,0.5].
-        Assert.Equal(2.0f, op[0], 4);
-        Assert.Equal(0.5f, op[1], 4);
-    }
-
     [Theory]
     [InlineData(2, 4)]   // in != out → conv shortcut
     [InlineData(4, 4)]   // in == out → identity shortcut

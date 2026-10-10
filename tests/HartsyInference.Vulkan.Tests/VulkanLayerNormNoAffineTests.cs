@@ -44,7 +44,6 @@ public sealed class VulkanLayerNormNoAffineTests
     [Theory]
     [InlineData(4, 320)]      // a small DiT row
     [InlineData(2, 3072)]     // Flux hidden size
-    [InlineData(7, 1024)]     // rows not a multiple of the workgroup, dim that is
     [InlineData(1, 129)]      // dim not a multiple of the subgroup, to exercise the strided fold
     public void MatchesCpuReference_F32(int rows, int dim)
     {

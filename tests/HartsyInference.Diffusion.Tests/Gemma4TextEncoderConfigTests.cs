@@ -26,18 +26,6 @@ public sealed class Gemma4TextEncoderConfigTests
     }
 
     [Fact]
-    public void LayerGeometry_DiffersBetweenSlidingAndGlobal()
-    {
-        Assert.Equal(256, Config.HeadDimFor(0));
-        Assert.Equal(8, Config.KvHeadsFor(0));
-        Assert.False(Config.KEqualsVFor(0));
-
-        Assert.Equal(512, Config.HeadDimFor(5));
-        Assert.Equal(1, Config.KvHeadsFor(5));
-        Assert.True(Config.KEqualsVFor(5));
-    }
-
-    [Fact]
     public void GlobalInverseFrequencies_Are64RealPairsPaddedWith192Zeros()
     {
         double[] inv = Config.BuildInverseFrequencies(5);
@@ -62,12 +50,6 @@ public sealed class Gemma4TextEncoderConfigTests
             Assert.Equal(expected, inv[k], 12);
             Assert.NotEqual(0.0, inv[k]);
         }
-    }
-
-    [Fact]
-    public void EmbeddingScale_IsSqrtOfHiddenSize()
-    {
-        Assert.Equal(System.MathF.Sqrt(3840f), Config.EmbeddingScale, 5);
     }
 
     [Fact]

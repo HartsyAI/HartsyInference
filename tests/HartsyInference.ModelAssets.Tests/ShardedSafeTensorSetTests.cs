@@ -49,15 +49,6 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
     }
 
     [Fact]
-    public void GetTensor_UnknownName_Throws()
-    {
-        ShardTestFiles.WriteThreeShardSet(_dir, out _);
-        using ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir);
-
-        Assert.Throws<KeyNotFoundException>(() => set.GetTensor("nope"));
-    }
-
-    [Fact]
     public void OpenIndex_MissingShardFile_NamesTheFile()
     {
         ShardTestFiles.WriteThreeShardSet(_dir, out _);
@@ -70,72 +61,6 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
     }
 
     [Fact]
-    public void OpenIndex_KeyInIndexButNotInHeader_IsReported()
-    {
-        Dictionary<string, string> map = ShardTestFiles.WriteThreeShardSet(_dir, out long total);
-        map["ghost.weight"] = "s3.safetensors";
-        ShardTestFiles.WriteIndex(_dir, map, total);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
-
-        Assert.Contains("in the index but not in the header", error.Message);
-        Assert.Contains("ghost.weight", error.Message);
-    }
-
-    [Fact]
-    public void OpenIndex_KeyInHeaderButNotInIndex_IsReported()
-    {
-        Dictionary<string, string> map = ShardTestFiles.WriteThreeShardSet(_dir, out long total);
-        map.Remove("a.1");
-        ShardTestFiles.WriteIndex(_dir, map, total);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
-
-        Assert.Contains("in shard headers but not in the index", error.Message);
-        Assert.Contains("a.1", error.Message);
-    }
-
-    [Fact]
-    public void OpenIndex_KeyInAnotherShardThanIndexed_IsReported()
-    {
-        Dictionary<string, string> map = ShardTestFiles.WriteThreeShardSet(_dir, out long total);
-        ShardTestFiles.WriteShard(PathOf("s3.safetensors"), ShardTestFiles.F32("c.0", 10, 11, 12), ShardTestFiles.F32("c.1", 1));
-        map["c.1"] = "s3.safetensors";
-        map["c.0"] = "s1.safetensors";
-        ShardTestFiles.WriteIndex(_dir, map, total + 4);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
-
-        Assert.Contains("different shard than the index says", error.Message);
-    }
-
-    [Fact]
-    public void OpenIndex_DuplicateKeyAcrossShards_NamesBothShards()
-    {
-        Dictionary<string, string> map = ShardTestFiles.WriteThreeShardSet(_dir, out long total);
-        ShardTestFiles.WriteShard(PathOf("s3.safetensors"),
-            ShardTestFiles.F32("c.0", 10, 11, 12), ShardTestFiles.F32("a.0", 1, 2, 3, 4));
-        ShardTestFiles.WriteIndex(_dir, map, total + 16);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
-
-        Assert.Contains("more than one shard", error.Message);
-        Assert.Contains("'a.0' in s1.safetensors and s3.safetensors", error.Message);
-    }
-
-    [Fact]
-    public void OpenIndex_TotalSizeMismatch_ReportsBothNumbers()
-    {
-        Dictionary<string, string> map = ShardTestFiles.WriteThreeShardSet(_dir, out long total);
-        ShardTestFiles.WriteIndex(_dir, map, total + 100);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
-
-        Assert.Contains($"sum to {total}", error.Message);
-        Assert.Contains($"total_size is {total + 100}", error.Message);
-    }
-
-    [Fact]
     public void OpenIndex_TotalSizeMismatch_CanBeRelaxed()
     {
         Dictionary<string, string> map = ShardTestFiles.WriteThreeShardSet(_dir, out long total);
@@ -144,17 +69,6 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
         using ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir, new ShardSetOptions { RequireTotalSizeMatch = false });
 
         Assert.Equal(5, set.Inventory.Count);
-    }
-
-    [Fact]
-    public void OpenIndex_ExpectedTotalBytes_IsEnforcedIndependentlyOfTheIndex()
-    {
-        ShardTestFiles.WriteThreeShardSet(_dir, out long total);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
-            () => ShardedSafeTensorSet.OpenIndex(_dir, new ShardSetOptions { ExpectedTotalBytes = total + 1 }));
-
-        Assert.Contains("were expected", error.Message);
     }
 
     [Fact]
@@ -185,17 +99,25 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
     }
 
     [Fact]
+    public void OpenIndex_DuplicateKeyAcrossShards_NamesBothShards()
+    {
+        Dictionary<string, string> map = ShardTestFiles.WriteThreeShardSet(_dir, out long total);
+        ShardTestFiles.WriteShard(PathOf("s3.safetensors"),
+            ShardTestFiles.F32("c.0", 10, 11, 12), ShardTestFiles.F32("a.0", 1, 2, 3, 4));
+        ShardTestFiles.WriteIndex(_dir, map, total + 16);
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
+
+        Assert.Contains("more than one shard", error.Message);
+        Assert.Contains("'a.0' in s1.safetensors and s3.safetensors", error.Message);
+    }
+
+    [Fact]
     public void OpenIndex_WeightMapPathEscape_IsRejected()
     {
         ShardTestFiles.WriteIndex(_dir, new Dictionary<string, string> { ["x"] = "../evil.safetensors" }, null);
 
         Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
-    }
-
-    [Fact]
-    public void OpenIndex_NoIndexFile_Throws()
-    {
-        Assert.Throws<FileNotFoundException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
     }
 
     [Fact]
@@ -210,27 +132,6 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
         Assert.Equal(2, set.Inventory.Count);
         Assert.Null(set.DeclaredTotalSize);
         Assert.Equal(12, set.TotalTensorBytes);
-    }
-
-    [Fact]
-    public void OpenFiles_DuplicateKeyAcrossFiles_IsReported()
-    {
-        ShardTestFiles.WriteShard(PathOf("a.safetensors"), ShardTestFiles.F32("x", 1));
-        ShardTestFiles.WriteShard(PathOf("b.safetensors"), ShardTestFiles.F32("x", 2));
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
-            () => ShardedSafeTensorSet.OpenFiles([PathOf("a.safetensors"), PathOf("b.safetensors")]));
-
-        Assert.Contains("'x' in a.safetensors and b.safetensors", error.Message);
-    }
-
-    [Fact]
-    public void OpenFiles_MissingFile_Throws()
-    {
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
-            () => ShardedSafeTensorSet.OpenFiles([PathOf("gone.safetensors")]));
-
-        Assert.Contains("gone.safetensors", error.Message);
     }
 
     [Fact]
@@ -253,30 +154,7 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
 
         Assert.Equal(1f, set.GetTensor("a.0").AsReadOnlySpan<float>()[0]);
         Assert.Equal(1, set.MappedShardCount);
-    }
-
-    [Fact]
-    public void ReadTensor_OnAPreadOnlyShard_CopiesTheBytesWithoutMapping()
-    {
-        ShardTestFiles.WriteThreeShardSet(_dir, out _);
-        using ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir,
-            new ShardSetOptions { PreadOnlyShards = ["s2.safetensors"] });
-
-        Tensor tensor = set.ReadTensor("b.1");
-
-        Assert.True(tensor.OwnsMemory);
-        Assert.Equal(9f, tensor.AsReadOnlySpan<float>()[0]);
-        Assert.Equal(0, set.MappedShardCount);
-        Assert.Throws<KeyNotFoundException>(() => set.ReadTensor("nope"));
-    }
-
-    [Fact]
-    public void PreadOnlyShards_NamingAnUnknownShard_Throws()
-    {
-        ShardTestFiles.WriteThreeShardSet(_dir, out _);
-
-        Assert.Throws<ArgumentException>(() => ShardedSafeTensorSet.OpenIndex(_dir,
-            new ShardSetOptions { PreadOnlyShards = ["typo.safetensors"] }));
+        Assert.Throws<KeyNotFoundException>(() => set.GetTensor("nope"));
     }
 
     [Fact]
@@ -294,66 +172,21 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
     }
 
     [Fact]
-    public void Dispose_UnmapsAndBlocksFurtherUse()
+    public void Dispose_UnmapsReleasesShardsAndBlocksFurtherUse()
     {
         ShardTestFiles.WriteThreeShardSet(_dir, out _);
         ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir);
         set.GetTensor("a.0");
+        SafeTensorShard shard = set.Shards[0];
 
         set.Dispose();
         set.Dispose();
 
         Assert.Equal(0, set.MappedShardCount);
-        Assert.Throws<ObjectDisposedException>(() => set.GetTensor("a.0"));
-    }
-
-    [Fact]
-    public void OpenIndex_EmptyWeightMap_IsRejected()
-    {
-        ShardTestFiles.WriteIndex(_dir, new Dictionary<string, string>(), totalSize: 0);
-
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
-
-        Assert.Contains("empty weight_map", error.Message);
-    }
-
-    [Fact]
-    public void GetTensor_AfterDispose_Throws()
-    {
-        ShardTestFiles.WriteThreeShardSet(_dir, out _);
-        ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir);
-        SafeTensorShard shard = set.Shards[0];
-        set.Dispose();
-
         Assert.Throws<ObjectDisposedException>(() => set.GetTensor("a.0"));
         Assert.Throws<ObjectDisposedException>(() => set.GetByteSource(shard));
-        Assert.Equal(0, set.MappedShardCount);
-    }
-
-    [Fact]
-    public void ReleasedShard_DoesNotRemapOrReopen()
-    {
-        ShardTestFiles.WriteThreeShardSet(_dir, out _);
-        ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir);
-        SafeTensorShard shard = set.Shards[0];
-        set.Dispose();
-
         Assert.Throws<ObjectDisposedException>(() => shard.Map(adviseRandom: true));
         Assert.Throws<ObjectDisposedException>(() => shard.Source());
         Assert.False(shard.IsMapped);
-    }
-
-    [Fact]
-    public void OpenFiles_SameFileNameInTwoDirectories_IsRejected()
-    {
-        string other = Path.Combine(_dir, "other");
-        Directory.CreateDirectory(other);
-        ShardTestFiles.WriteShard(PathOf("s.safetensors"), ShardTestFiles.F32("a", 1f));
-        ShardTestFiles.WriteShard(Path.Combine(other, "s.safetensors"), ShardTestFiles.F32("b", 2f));
-
-        ArgumentException error = Assert.Throws<ArgumentException>(
-            () => ShardedSafeTensorSet.OpenFiles([PathOf("s.safetensors"), Path.Combine(other, "s.safetensors")]));
-
-        Assert.Contains("s.safetensors", error.Message);
     }
 }

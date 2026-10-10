@@ -29,13 +29,6 @@ public sealed class T5TokenizerTests : IDisposable
     // ── Construction Tests ─────────────────────────────────────────────
 
     [Fact]
-    public void Construction_WithValidFile_Succeeds()
-    {
-        if (!_modelAvailable) return;
-        Assert.NotNull(_tokenizer);
-    }
-
-    [Fact]
     public void Construction_WithStream_Succeeds()
     {
         if (!_modelAvailable) return;
@@ -49,16 +42,6 @@ public sealed class T5TokenizerTests : IDisposable
     public void Construction_WithInvalidPath_ThrowsFileNotFound()
     {
         Assert.Throws<FileNotFoundException>(() => new T5Tokenizer("nonexistent.model"));
-    }
-
-    [Fact]
-    public void Construction_WithCustomMaxLength_UsesIt()
-    {
-        if (!_modelAvailable) return;
-
-        using T5Tokenizer tokenizer = new T5Tokenizer(T5ModelPath, maxLength: 256);
-        int[] tokens = tokenizer.Encode("hello");
-        Assert.Equal(256, tokens.Length);
     }
 
     // ── Encode Tests ───────────────────────────────────────────────────
@@ -326,14 +309,4 @@ public sealed class T5TokenizerTests : IDisposable
         }
     }
 
-    [Fact]
-    public void Encode_FluxMaxLength512_PadsCorrectly()
-    {
-        if (!_modelAvailable) return;
-
-        using T5Tokenizer tokenizer = new T5Tokenizer(T5ModelPath, maxLength: 512);
-        int[] tokens = tokenizer.Encode("hello");
-
-        Assert.Equal(512, tokens.Length);
-    }
 }

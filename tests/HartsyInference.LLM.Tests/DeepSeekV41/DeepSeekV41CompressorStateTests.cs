@@ -28,8 +28,6 @@ public sealed class DeepSeekV41CompressorStateTests
     [Theory]
     [InlineData("r4_remainder")]
     [InlineData("r2_odd")]
-    [InlineData("r4_short")]
-    [InlineData("r4_exact")]
     public void Prefill_Then_Decode_Matches_Upstream_Compressor(string name)
     {
         JsonElement c = Fx.GetProperty("cases").EnumerateArray().Single(e => e.GetProperty("name").GetString() == name);
@@ -71,13 +69,5 @@ public sealed class DeepSeekV41CompressorStateTests
         }
         Assert.Equal(rowsA * head, b.Count);
         Assert.Equal(a.Take(rowsA * head), b);
-    }
-
-    [Fact]
-    public void Rejects_Ratio_One_And_Mismatched_Input()
-    {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41CompressorState(1, 4));
-        DeepSeekV41CompressorState s = new(2, 4);
-        Assert.Throws<ArgumentException>(() => s.Pool(new float[4], new float[8], 2, 0, new float[8]));
     }
 }

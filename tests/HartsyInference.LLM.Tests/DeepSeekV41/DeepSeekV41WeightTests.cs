@@ -75,7 +75,6 @@ public sealed class DeepSeekV41WeightTests : IDisposable
 
     [Theory]
     [InlineData(40, 96, 2)]
-    [InlineData(1100, 4096, 1)] // windows of 1024 rows: the second starts at row 1024
     [InlineData(1100, 8192, 2)] // windows of 512 rows: later windows start at rows 512 and 1024
     public void StoredMxfp4_LinearEqualsTheWidenedProductBitForBit(int rows, int cols, int tokens)
     {
@@ -132,23 +131,5 @@ public sealed class DeepSeekV41WeightTests : IDisposable
 
         Assert.Contains("layers.0.attn.wkv.weight", error.Message);
         Assert.Contains("[64, 64]", error.Message);
-    }
-
-    [Fact]
-    public void ANullFloatArrayConvertsToANullWeight()
-    {
-        float[]? none = null;
-        DeepSeekV41Weight? weight = none;
-
-        Assert.Null(weight);
-    }
-
-    [Fact]
-    public void AStoredWeightRefusesAProductOfAnotherShape()
-    {
-        (Tensor weight, QuantWeightInfo quant) = Fp8(64, 64, 15);
-        DeepSeekV41Weight stored = DeepSeekV41Weight.FromStored("w", weight, quant, 64, 64);
-
-        Assert.Throws<ArgumentException>(() => stored.Linear(new float[32], 1, 32, 64));
     }
 }

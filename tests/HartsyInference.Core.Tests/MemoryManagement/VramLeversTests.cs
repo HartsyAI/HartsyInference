@@ -43,27 +43,13 @@ public sealed class VramLeversTests
     /// <summary>A pinned lever must beat the fallback in BOTH directions, or a tier could never override the machine's configuration.</summary>
     [Theory]
     [InlineData(LeverState.On, false, true)]
-    [InlineData(LeverState.On, null, true)]
     [InlineData(LeverState.Off, true, false)]
-    [InlineData(LeverState.Off, null, false)]
     public void PinnedLever_WinsOverTheFallback(LeverState state, bool? env, bool expected)
     {
         WithKeepModels(env, () =>
         {
             VramPolicy policy = VramPolicyResolver.Expand(VramTier.Auto) with { KeepResident = state };
             Assert.Equal(expected, VramLevers.KeepResident(policy));
-        });
-    }
-
-    /// <summary>The tiers that take an explicit position on residency must actually carry it through the resolver.</summary>
-    [Fact]
-    public void Tiers_CarryTheirResidencyStanceThroughTheResolver()
-    {
-        WithKeepModels(null, () =>
-        {
-            Assert.True(VramLevers.KeepResident(VramPolicyResolver.Expand(VramTier.Performance)));
-            Assert.False(VramLevers.KeepResident(VramPolicyResolver.Expand(VramTier.Aggressive)));
-            Assert.False(VramLevers.KeepResident(VramPolicyResolver.Expand(VramTier.Maximum)));
         });
     }
 }

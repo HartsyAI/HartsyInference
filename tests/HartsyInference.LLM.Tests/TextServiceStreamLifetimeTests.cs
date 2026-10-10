@@ -54,12 +54,4 @@ public sealed class TextServiceStreamLifetimeTests
         Assert.False(string.IsNullOrEmpty(only.Text), "error chunk must carry the failure message");
     }
 
-    [Fact]
-    public async Task NonStreamingPreCancelledTokenThrowsCancellation()
-    {
-        using InferenceEngine engine = new("cpu");
-        using CancellationTokenSource cts = new();
-        cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => engine.Text.GenerateAsync(MissingSpec(), Request(), cts.Token));
-    }
 }

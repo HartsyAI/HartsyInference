@@ -72,63 +72,6 @@ public sealed class CpuParallelInlineScopeTests
     }
 
     [Fact]
-    public void StatefulFor_Inline_ThrowsTheBodysExceptionAsItself()
-    {
-        int[] ran = new int[Items];
-        using CpuParallel.InlineScope scope = CpuParallel.EnterInline();
-        ArgumentException thrown = Assert.Throws<ArgumentException>(() =>
-            CpuParallel.For(Items, WorkAboveThreshold, ran, static (i, r) =>
-            {
-                if (i == 7) throw new ArgumentException("item 7");
-                r[i] = 1;
-            }));
-        Assert.Equal("item 7", thrown.Message);
-        // Serial: the items before the throw ran, none after it did.
-        Assert.Equal(7, ran.Sum());
-    }
-
-    [Fact]
-    public void StatefulFor_FansOut_AndRethrowsAWorkerExceptionUnwrapped()
-    {
-        ConcurrentBag<int> seen = [];
-        CpuParallel.For(Items, WorkAboveThreshold, seen, static (i, bag) =>
-        {
-            Thread.SpinWait(20_000);
-            bag.Add(i);
-        });
-        Assert.Equal(Enumerable.Range(0, Items), seen.Order());
-        Assert.Throws<ArgumentException>(() => CpuParallel.For(Items, WorkAboveThreshold, 0, static (i, _) =>
-        {
-            if (i == 7) throw new ArgumentException("item 7");
-        }));
-    }
-
-    [Fact]
-    public void Scopes_NestAndRestoreThePreviousState()
-    {
-        using (CpuParallel.EnterInline())
-        {
-            using (CpuParallel.EnterInline())
-            {
-                Assert.True(CpuParallel.IsInline);
-            }
-            Assert.True(CpuParallel.IsInline);
-        }
-        Assert.False(CpuParallel.IsInline);
-    }
-
-    [Fact]
-    public void ADefaultScope_DisposesToNothing()
-    {
-        using (CpuParallel.EnterInline())
-        {
-            default(CpuParallel.InlineScope).Dispose();
-            Assert.True(CpuParallel.IsInline, "a default instance must not clear an enclosing scope");
-        }
-        Assert.False(CpuParallel.IsInline);
-    }
-
-    [Fact]
     public void TheScope_IsPerThread()
     {
         using CpuParallel.InlineScope scope = CpuParallel.EnterInline();

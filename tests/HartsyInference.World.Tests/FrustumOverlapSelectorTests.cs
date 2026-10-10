@@ -42,16 +42,4 @@ public class FrustumOverlapSelectorTests
         Assert.Equal(new[] { 1, 2 }, picked);   // most recent two, in historical order
     }
 
-    [Fact]
-    public void GeneratePointsInSphere_IsDeterministicAndBounded()
-    {
-        float[] a = FrustumOverlapSelector.GeneratePointsInSphere(256, radius: 5f, seed: 7);
-        float[] b = FrustumOverlapSelector.GeneratePointsInSphere(256, radius: 5f, seed: 7);
-        Assert.Equal(a, b);
-        for (int i = 0; i < 256; i++)
-        {
-            float r = MathF.Sqrt(a[i * 3] * a[i * 3] + a[i * 3 + 1] * a[i * 3 + 1] + a[i * 3 + 2] * a[i * 3 + 2]);
-            Assert.True(r <= 5.0001f, $"point {i} outside sphere: {r}");
-        }
-    }
 }

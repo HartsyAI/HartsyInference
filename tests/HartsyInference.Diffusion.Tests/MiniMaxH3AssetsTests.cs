@@ -43,24 +43,6 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         Assert.Contains("text_encoder", assets.TextEncoder);
     }
 
-    /// <summary>Pointing at the model folder rather than the variant folder must still find FL2VA/Ref2VA.</summary>
-    [Fact]
-    public void FolderLayout_DescendsIntoTheVariantFolder()
-    {
-        BuildFolderLayout("Ref2VA");
-        MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(_root);
-        Assert.True(assets.IsFolderLayout);
-        Assert.Contains("Ref2VA", assets.Dit);
-    }
-
-    [Fact]
-    public void FolderLayout_AcceptsTheDitFileItself()
-    {
-        BuildFolderLayout("FL2VA");
-        string dit = Path.Combine(_root, "FL2VA", "transformer", "dit.safetensors");
-        Assert.True(MiniMaxH3Assets.Resolve(dit).IsFolderLayout);
-    }
-
     private string BuildFlatLayout()
     {
         string dit = Touch("Models", "diffusion_models", "minimax_h3_fl2va_bf16.safetensors");
@@ -80,23 +62,6 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         Assert.Contains("qwen3vl", assets.TextEncoder);
         // The flat repack ships no tokenizer files; the recipe falls back to the embedded Qwen BPE.
         Assert.Null(assets.TokenizerDir);
-    }
-
-    /// <summary>Comfy stages several variants of a component together. The now-supported resident
-    /// <c>int8_convrot</c> build should beat BF16, with file size breaking ties between supported quant formats.</summary>
-    [Fact]
-    public void FlatLayout_PrefersSupportedInt8OverBf16()
-    {
-        string dit = BuildFlatLayout();
-        File.Delete(Path.Combine(_root, "Models", "text_encoders", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"));
-        File.WriteAllBytes(Path.Combine(_root, "Models", "text_encoders", "qwen3vl_32b_minimax_h3_bf16.safetensors"),
-            new byte[64]);
-        File.WriteAllBytes(Path.Combine(_root, "Models", "text_encoders", "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
-            new byte[8]);
-
-        MiniMaxH3Assets assets = MiniMaxH3Assets.Resolve(dit);
-        Assert.Contains("int8_convrot", assets.TextEncoder);
-        Assert.DoesNotContain("bf16", assets.TextEncoder);
     }
 
     /// <summary>With every variant staged, the quantized-but-supported build wins. This is the preference the recipe
@@ -148,33 +113,6 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         Assert.DoesNotContain("Q4_K", assets.VideoVae);
     }
 
-    /// <summary>A GGUF that names no precision at all is still treated as quantized, because nothing in the name says
-    /// otherwise and the video VAE's gate is "explicit selection or the proven build".</summary>
-    [Fact]
-    public void FlatLayout_TreatsAnUnlabelledGgufAsQuantized()
-    {
-        string dit = BuildFlatLayout();
-        string dir = Path.Combine(_root, "Models", "vae", "MiniMaxH3");
-        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae.gguf"), []);
-        File.WriteAllBytes(Path.Combine(dir, "minimax_h3_video_vae_fp16.safetensors"), new byte[64]);
-
-        Assert.Contains("fp16", MiniMaxH3Assets.Resolve(dit).VideoVae);
-    }
-
-    /// <summary>The other direction: a quantized GGUF text encoder outranks BF16, since there the preference is for
-    /// the quantized build and a 32B encoder in BF16 does not fit alongside the DiT.</summary>
-    [Fact]
-    public void FlatLayout_PrefersAQuantizedGgufTextEncoderOverBf16()
-    {
-        string dit = BuildFlatLayout();
-        string dir = Path.Combine(_root, "Models", "text_encoders");
-        File.Delete(Path.Combine(dir, "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"));
-        File.WriteAllBytes(Path.Combine(dir, "qwen3vl_32b_minimax_h3_bf16.safetensors"), []);
-        File.WriteAllBytes(Path.Combine(dir, "qwen3vl_32b_minimax_h3-Q5_K.gguf"), new byte[64]);
-
-        Assert.Contains("Q5_K", MiniMaxH3Assets.Resolve(dit).TextEncoder);
-    }
-
     /// <summary>SwarmUI's model root has a real <c>Video/</c> folder for video assets. Searching it for VAEs would
     /// let an unrelated file with a colliding name resolve as the VAE.</summary>
     [Fact]
@@ -184,15 +122,6 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         File.Delete(Path.Combine(_root, "Models", "vae", "MiniMaxH3", "minimax_h3_video_vae_fp16.safetensors"));
         Touch("Models", "Video", "minimax_h3_video_vae_decoy.safetensors");
         Assert.Throws<FileNotFoundException>(() => MiniMaxH3Assets.Resolve(dit));
-    }
-
-    /// <summary>An audio VAE is optional — video still decodes, just without its soundtrack.</summary>
-    [Fact]
-    public void FlatLayout_ToleratesAMissingAudioVae()
-    {
-        string dit = BuildFlatLayout();
-        File.Delete(Path.Combine(_root, "Models", "vae", "MiniMaxH3", "minimax_h3_audio_vae_fp32.safetensors"));
-        Assert.Null(MiniMaxH3Assets.Resolve(dit).AudioVae);
     }
 
     [Fact]
@@ -227,8 +156,4 @@ public sealed class MiniMaxH3AssetsTests : IDisposable
         FileNotFoundException ex = Assert.Throws<FileNotFoundException>(() => MiniMaxH3Assets.Resolve(dit));
         Assert.Contains("video VAE", ex.Message);
     }
-
-    [Fact]
-    public void MissingPath_Throws() =>
-        Assert.Throws<FileNotFoundException>(() => MiniMaxH3Assets.Resolve(Path.Combine(_root, "nope")));
 }

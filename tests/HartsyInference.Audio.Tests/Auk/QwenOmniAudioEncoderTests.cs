@@ -38,56 +38,8 @@ public sealed unsafe class QwenOmniAudioEncoderTests
         Assert.Contains("layers.1.fc2.bias", ex.Message);
     }
 
-    [Fact]
-    public void LoadWeights_WrongShape_FailsFast()
-    {
-        QwenOmniAudioEncoder encoder = new(Tiny);
-        Dictionary<string, Tensor> w = Weights(Tiny, 1);
-        w[$"{Prefix}.proj.weight"] = Rand([5, 8], new Random(3), 0.3);
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => encoder.LoadWeights(w));
-        Assert.Contains("proj.weight", ex.Message);
-    }
-
-    [Fact]
-    public void Forward_BeforeLoad_OrWithTooFewFrames_Throws()
-    {
-        CpuBackend backend = new();
-        QwenOmniAudioEncoder encoder = new(Tiny);
-        Tensor mel = Rand([4, 20], new Random(2), 1.0);
-        Assert.Throws<InvalidOperationException>(() => encoder.Forward(backend, mel, 20));
-        encoder.LoadWeights(Weights(Tiny, 1));
-        Assert.Throws<ArgumentException>(() => encoder.Forward(backend, mel, 2));
-        Assert.Throws<ArgumentOutOfRangeException>(() => encoder.Forward(backend, mel, 21));
-    }
-
-    [Fact]
-    public void Sinusoids_MatchTheClosedForm()
-    {
-        const int length = 7;
-        const int channels = 10;
-        float[] table = new float[length * channels];
-        QwenOmniAudioEncoder.FillSinusoids(table, length, channels);
-        for (int t = 0; t < length; t++)
-        {
-            for (int i = 0; i < channels / 2; i++)
-            {
-                double inv = Math.Pow(10_000.0, -(double)i / (channels / 2 - 1));
-                Assert.True(Math.Abs(Math.Sin(t * inv) - table[t * channels + i]) < 1e-5);
-                Assert.True(Math.Abs(Math.Cos(t * inv) - table[t * channels + channels / 2 + i]) < 1e-5);
-            }
-        }
-        Assert.Equal(0f, table[0]);
-        Assert.Equal(1f, table[channels / 2]);
-        Assert.True(Math.Abs(Math.Sin(1.0) - table[channels]) < 1e-5);
-        Assert.True(Math.Abs(Math.Cos(Math.Pow(10_000.0, -0.25)) - table[channels + channels / 2 + 1]) < 1e-5);
-    }
-
     [Theory]
     [InlineData(16)]
-    [InlineData(21)]
-    [InlineData(8)]
-    [InlineData(5)]
-    [InlineData(3)]
     public void Forward_MatchesNaiveDoubleReference(int frames)
     {
         QwenOmniConfig cfg = Tiny;

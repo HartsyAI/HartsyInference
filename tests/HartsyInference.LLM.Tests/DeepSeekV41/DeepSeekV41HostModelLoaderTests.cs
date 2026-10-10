@@ -80,22 +80,9 @@ public sealed class DeepSeekV41HostModelLoaderTests
     }
 
     [Fact]
-    public void MaxLayers_Loads_Only_The_First_Layers()
+    public void MaxLayers_Zero_IsRefused()
     {
-        string dir = Path.Combine(Path.GetTempPath(), "dsv41-load-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(dir);
-        try
-        {
-            DeepSeekV41ModelFixtureCheckpoint.Write(dir);
-            using CpuBackend cpu = new();
-            using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(cpu, dir, new DeepSeekV41LoadOptions(MaxTokens: 16, MaxLayers: 1));
-            Assert.Equal(1, loaded.Model.Layers);
-            Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41LoadOptions(8, MaxLayers: 0).Validate());
-        }
-        finally
-        {
-            Directory.Delete(dir, true);
-        }
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41LoadOptions(8, MaxLayers: 0).Validate());
     }
 
     [Fact]

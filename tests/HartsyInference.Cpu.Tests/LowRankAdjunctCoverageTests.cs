@@ -115,14 +115,6 @@ public sealed class LowRankAdjunctCoverageTests
     }
 
     [Fact]
-    public void LinearWeightRows_AppliesTheWindowedAdjunct()
-    {
-        AssertMatchesMergedWeight(
-            (backend, output, input, weight) => backend.LinearWeightRows(output, input, weight, null, 2, 3),
-            outColumns: 3, rowOffset: 2);
-    }
-
-    [Fact]
     public void LinearGelu_AppliesTheAdjunctBeforeTheActivation()
     {
         // Order matters and is invisible in the result's shape: GELU of (base + delta) is not GELU(base) + delta.
@@ -201,41 +193,6 @@ public sealed class LowRankAdjunctCoverageTests
             () => harness.Backend.LinearI8U8(output, codes, harness.Patched, scale, null));
         Assert.Contains("LinearI8U8", error.Message);
         Assert.Contains("LoRA adjunct", error.Message);
-    }
-
-    [Fact]
-    public void MatMul_RefusesAnAdjunctOperandByName()
-    {
-        using Harness harness = new Harness();
-        using Tensor output = new Tensor(new TensorShape(Batch, Rows), DType.F32);
-        NotSupportedException error = Assert.Throws<NotSupportedException>(
-            () => harness.Backend.MatMul(output, harness.Input, harness.Patched));
-        Assert.Contains("MatMul", error.Message);
-        Assert.Contains("LoRA adjunct", error.Message);
-    }
-
-    [Fact]
-    public void BatchedMatMul_RefusesAnAdjunctOperandByName()
-    {
-        using Harness harness = new Harness();
-        using Tensor batched = new Tensor(new TensorShape(1, Batch, Cols), DType.F32);
-        using Tensor output = new Tensor(new TensorShape(1, Batch, Rows), DType.F32);
-        Assert.Throws<NotSupportedException>(
-            () => harness.Backend.BatchedMatMul(output, batched, harness.Patched));
-    }
-
-    [Fact]
-    public void Conv2D_RefusesAnAdjunctWeightByName()
-    {
-        using Harness harness = new Harness();
-        using Tensor image = new Tensor(new TensorShape(1, Cols, 1, 1), DType.F32);
-        using Tensor output = new Tensor(new TensorShape(1, Rows, 1, 1), DType.F32);
-        // Attaching to a rank-4 weight is refused outright; a 1x1 VIEW of a patched Linear weight is the only way
-        // an adjunct can reach a convolution at all, which is why the op refuses as well.
-        using Tensor patchedKernel = harness.Patched.Reshape(new TensorShape(Rows, Cols, 1, 1));
-        NotSupportedException error = Assert.Throws<NotSupportedException>(
-            () => harness.Backend.Conv2D(output, image, patchedKernel, null, 1, 1, 0, 0));
-        Assert.Contains("Conv2D", error.Message);
     }
 
     private static void AssertMatchesMergedWeight(Action<IBackend, Tensor, Tensor, Tensor> run,

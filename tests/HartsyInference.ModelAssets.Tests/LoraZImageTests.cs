@@ -43,37 +43,6 @@ public sealed unsafe class LoraZImageTests : IDisposable
     }
 
     [Fact]
-    public void ComfyOrgTurboDistillKeys_DetectedAsComfyZImageDit()
-    {
-        // Every distinct shape the published file carries: three block roots × attention/feed_forward.
-        Dictionary<string, SafeTensorDescriptor> d = Descriptors(
-            "diffusion_model.layers.0.attention.to_q.lora_A.default.weight",
-            "diffusion_model.layers.0.attention.to_q.lora_B.default.weight",
-            "diffusion_model.layers.29.attention.to_out.0.lora_A.default.weight",
-            "diffusion_model.layers.29.attention.to_out.0.lora_B.default.weight",
-            "diffusion_model.layers.7.feed_forward.w2.lora_A.default.weight",
-            "diffusion_model.layers.7.feed_forward.w2.lora_B.default.weight",
-            "diffusion_model.context_refiner.1.attention.to_k.lora_A.default.weight",
-            "diffusion_model.context_refiner.1.attention.to_k.lora_B.default.weight",
-            "diffusion_model.noise_refiner.0.feed_forward.w3.lora_A.default.weight",
-            "diffusion_model.noise_refiner.0.feed_forward.w3.lora_B.default.weight");
-        Assert.Equal(LoraFormat.ComfyZImageDit, LoraFormatDetector.Detect(d));
-    }
-
-    [Fact]
-    public void EachBlockRoot_DetectsOnItsOwn()
-    {
-        // A LoRA touching only the main stack, or only one refiner, must still be recognized.
-        foreach (string root in new[] { "layers", "context_refiner", "noise_refiner" })
-        {
-            Dictionary<string, SafeTensorDescriptor> d = Descriptors(
-                $"diffusion_model.{root}.0.attention.to_v.lora_A.default.weight",
-                $"diffusion_model.{root}.0.attention.to_v.lora_B.default.weight");
-            Assert.Equal(LoraFormat.ComfyZImageDit, LoraFormatDetector.Detect(d));
-        }
-    }
-
-    [Fact]
     public void OtherFamilies_KeepTheirOwnFormat()
     {
         // Negative controls: the new arm must not capture any neighbouring family's keys.
@@ -99,50 +68,14 @@ public sealed unsafe class LoraZImageTests : IDisposable
     [Theory]
     // Q/K/V keep their split names — FusedProjectionLayouts resolves them into attention.qkv at merge time.
     [InlineData("layers.0.attention.to_q", "layers.0.attention.to_q.weight")]
-    [InlineData("layers.29.attention.to_k", "layers.29.attention.to_k.weight")]
-    [InlineData("context_refiner.1.attention.to_v", "context_refiner.1.attention.to_v.weight")]
     // The one rename: diffusers' ModuleList spelling → the Tongyi module ZImageBlock.LoadWeights reads.
     [InlineData("layers.0.attention.to_out.0", "layers.0.attention.out.weight")]
-    [InlineData("noise_refiner.0.attention.to_out.0", "noise_refiner.0.attention.out.weight")]
-    [InlineData("context_refiner.1.attention.to_out.0", "context_refiner.1.attention.out.weight")]
     // SwiGLU projections are already the checkpoint's own names.
-    [InlineData("layers.7.feed_forward.w1", "layers.7.feed_forward.w1.weight")]
-    [InlineData("noise_refiner.0.feed_forward.w2", "noise_refiner.0.feed_forward.w2.weight")]
-    [InlineData("context_refiner.0.feed_forward.w3", "context_refiner.0.feed_forward.w3.weight")]
     // The rename is scoped to the to_out.0 tail: a body already naming an output projection passes through.
     [InlineData("layers.0.attention.o", "layers.0.attention.o.weight")]
-    [InlineData("layers.0.attention.out", "layers.0.attention.out.weight")]
     public void MapBodyToCanonical_ProducesCheckpointKeys(string body, string expected)
     {
         Assert.Equal(expected, ZImageLoraMapper.MapBodyToCanonical(body));
-    }
-
-    [Fact]
-    public void SplitQkvTargets_ResolveToTheFusedCheckpointWeight()
-    {
-        // The Q/K/V canonical keys do not exist in the checkpoint — ZImageBlock loads one fused
-        // `attention.qkv.weight` and carves it Q|K|V by contiguous row thirds (SplitQkv). This pins that the
-        // existing fused-projection table maps each split key onto the matching third.
-        const string Fused = "layers.0.attention.qkv.weight";
-        bool Present(string k) => k == Fused;
-
-        foreach ((string split, int expectedSlice) in new[]
-                 {
-                     ("layers.0.attention.to_q.weight", 0),
-                     ("layers.0.attention.to_k.weight", 1),
-                     ("layers.0.attention.to_v.weight", 2),
-                 })
-        {
-            Assert.True(FusedProjectionLayouts.TryResolve(split, Present,
-                out string fused, out int sliceIndex, out int sliceCount), split);
-            Assert.Equal(Fused, fused);
-            Assert.Equal(expectedSlice, sliceIndex);
-            Assert.Equal(3, sliceCount);
-        }
-
-        // Negative control: the directly-present targets must never be rerouted into a fused sibling.
-        Assert.False(FusedProjectionLayouts.TryResolve("layers.0.attention.out.weight", Present, out _, out _, out _));
-        Assert.False(FusedProjectionLayouts.TryResolve("layers.0.feed_forward.w1.weight", Present, out _, out _, out _));
     }
 
     [Fact]

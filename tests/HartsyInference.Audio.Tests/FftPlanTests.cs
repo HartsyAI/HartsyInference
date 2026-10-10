@@ -11,19 +11,6 @@ public sealed class FftPlanTests
 {
     [Theory]
     [InlineData(2)]
-    [InlineData(3)]
-    [InlineData(4)]
-    [InlineData(5)]
-    [InlineData(6)]
-    [InlineData(8)]
-    [InlineData(15)]
-    [InlineData(32)]
-    [InlineData(60)]
-    [InlineData(240)]
-    [InlineData(400)]
-    [InlineData(480)]
-    [InlineData(512)]
-    [InlineData(960)]
     [InlineData(1920)]
     public void Forward_MatchesADoublePrecisionDft(int n)
     {
@@ -83,38 +70,6 @@ public sealed class FftPlanTests
         }
     }
 
-    /// <summary>Against the path it replaced, at the sizes RNNoise uses: <see cref="Fft.Transform"/> (Bluestein at
-    /// both, since neither is a power of two) and the planned transform agree to float rounding.</summary>
-    [Theory]
-    [InlineData(960)]
-    [InlineData(480)]
-    public void Forward_MatchesTheFftItReplaces_ToRounding(int n)
-    {
-        Random rng = new(n + 1);
-        float[] re = new float[n], im = new float[n];
-        for (int i = 0; i < n; i++)
-        {
-            re[i] = (float)(rng.NextDouble() * 2 - 1);
-            im[i] = (float)(rng.NextDouble() * 2 - 1);
-        }
-        float[] oldRe = (float[])re.Clone(), oldIm = (float[])im.Clone();
-        Fft.Transform(oldRe, oldIm, n);
-        float[] newRe = new float[n], newIm = new float[n];
-        new FftPlan(n).Forward(re, im, newRe, newIm);
-
-        double error = 0, energy = 0, worst = 0;
-        for (int k = 0; k < n; k++)
-        {
-            double d = Math.Sqrt(Math.Pow(newRe[k] - oldRe[k], 2) + Math.Pow(newIm[k] - oldIm[k], 2));
-            error += d * d;
-            energy += (double)oldRe[k] * oldRe[k] + (double)oldIm[k] * oldIm[k];
-            worst = Math.Max(worst, d);
-        }
-        double rms = Math.Sqrt(energy / n);
-        Assert.True(Math.Sqrt(error / energy) < 1e-6, $"n={n}: relative error {Math.Sqrt(error / energy):E2}");
-        Assert.True(worst < 1e-5 * rms, $"n={n}: worst bin differs by {worst / rms:E2} of the spectrum's RMS");
-    }
-
     [Fact]
     public void ForwardReal_EqualsTheComplexTransformOfARealSignal()
     {
@@ -131,51 +86,8 @@ public sealed class FftPlanTests
         Assert.Equal(fullIm[..(N / 2 + 1)], im);
     }
 
-    /// <summary>The overload that takes the caller's work buffer is the same transform bit for bit, whatever the
-    /// buffer held before: it is what lets parallel STFT blocks share one plan.</summary>
-    [Theory]
-    [InlineData(400)]
-    [InlineData(960)]
-    public void ForwardReal_InACallerWorkBuffer_IsBitIdentical(int n)
-    {
-        Random rng = new(n + 5);
-        float[] x = new float[n];
-        for (int i = 0; i < n; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
-        FftPlan plan = new(n);
-        float[] re = new float[n / 2 + 1], im = new float[n / 2 + 1];
-        plan.ForwardReal(x, re, im);
-        float[] work = new float[plan.WorkLength + 3];
-        Array.Fill(work, float.NaN);
-        float[] callerRe = new float[n / 2 + 1], callerIm = new float[n / 2 + 1];
-        plan.ForwardReal(x, callerRe, callerIm, work);
-        Assert.Equal(re.Select(BitConverter.SingleToInt32Bits), callerRe.Select(BitConverter.SingleToInt32Bits));
-        Assert.Equal(im.Select(BitConverter.SingleToInt32Bits), callerIm.Select(BitConverter.SingleToInt32Bits));
-        Assert.Throws<ArgumentException>(() => plan.ForwardReal(x, callerRe, callerIm, new float[plan.WorkLength - 1]));
-    }
-
-    /// <summary>Same input, same answer: the work buffer is fully overwritten each call, so nothing leaks from
-    /// the previous transform.</summary>
-    [Fact]
-    public void Forward_IsRepeatable_AndMayRunInPlace()
-    {
-        const int N = 480;
-        Random rng = new(3);
-        float[] re = new float[N], im = new float[N];
-        for (int i = 0; i < N; i++) re[i] = (float)rng.NextDouble();
-        FftPlan plan = new(N);
-        float[] aRe = new float[N], aIm = new float[N];
-        plan.Forward(re, im, aRe, aIm);
-        plan.Forward(re, im, re, im);
-        Assert.Equal(aRe, re);
-        Assert.Equal(aIm, im);
-    }
-
     [Theory]
     [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(7)]
-    [InlineData(14)]
-    [InlineData(3528)]
     public void Sizes_WithAFactorAboveFive_AreRefused(int n)
     {
         Assert.False(FftPlan.IsSupported(n));

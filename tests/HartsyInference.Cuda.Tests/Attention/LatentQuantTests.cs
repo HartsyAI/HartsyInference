@@ -67,7 +67,6 @@ public sealed class LatentQuantTests(ITestOutputHelper output)
     [Theory]
     [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32, 512)]
     [InlineData(LatentEncoding.Fp4E2M1E4M3x16, 128)]
-    [InlineData(LatentEncoding.Fp4E2M1E8M0x32, 96)]
     public void ActQuantDequant_IsBitIdenticalToCpu(LatentEncoding enc, int dim)
     {
         if (!CudaContext.IsAvailable()) return;

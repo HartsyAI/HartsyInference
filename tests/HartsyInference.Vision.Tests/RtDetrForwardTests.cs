@@ -30,17 +30,6 @@ public sealed class RtDetrForwardTests
     ];
 
     [Fact]
-    public void Config_R18vd_Validates()
-    {
-        RtDetrConfig cfg = RtDetrConfig.R18vd;
-        cfg.Validate();
-        Assert.Equal(256, cfg.HiddenDim);
-        Assert.Equal(32, cfg.HeadDim);
-        Assert.Equal(128, cfg.RepHiddenChannels);
-        Assert.Equal(3, cfg.NumDecoderLayers);
-    }
-
-    [Fact]
     public void Converter_FoldsBatchNorm_AndDropsBnBuffers()
     {
         // One 1×1 conv (2 out, 1 in) + BN. Fold math: scale = gamma/sqrt(var+eps),

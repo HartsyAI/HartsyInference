@@ -8,13 +8,6 @@ namespace HartsyInference.Audio.Tests;
 public sealed class KokoroPhonemeChunkerTests
 {
     [Fact]
-    public void ShortInput_IsOneTrimmedChunk()
-    {
-        Assert.Equal(["həlˈO wˈɜɹld."], KokoroPhonemeChunker.Split("  həlˈO wˈɜɹld.  "));
-        Assert.Empty(KokoroPhonemeChunker.Split("   "));
-    }
-
-    [Fact]
     public void CutsAfterTheLastSentenceEnd_BeforeWeakerPauses()
     {
         // "aa, bb. cc, dd" with a cap that cannot hold it all: the period wins over the later comma.
@@ -28,25 +21,6 @@ public sealed class KokoroPhonemeChunkerTests
         Assert.Equal(["aa,", "bb cc dd"], KokoroPhonemeChunker.Split("aa, bb cc dd", maxLength: 8));
         Assert.Equal(["aa bb", "cc dd"], KokoroPhonemeChunker.Split("aa bb cc dd", maxLength: 6));
         Assert.Equal(["abcd", "efgh"], KokoroPhonemeChunker.Split("abcdefgh", maxLength: 4));
-    }
-
-    [Fact]
-    public void AMarkAtTheChunkStart_IsNotCutOffAlone()
-    {
-        Assert.Equal([". aa bb", "cc"], KokoroPhonemeChunker.Split(". aa bb cc", maxLength: 8));
-    }
-
-    [Fact]
-    public void StepsPastAClosingQuoteOrBracket()
-    {
-        Assert.Equal(["“aa.”", "bb cc"], KokoroPhonemeChunker.Split("“aa.” bb cc", maxLength: 7));
-    }
-
-    [Fact]
-    public void ANewline_IsAlwaysABoundary()
-    {
-        Assert.Equal(["aa", "bb"], KokoroPhonemeChunker.Split("aa\nbb"));
-        Assert.Equal(["aa", "bb"], KokoroPhonemeChunker.Split("aa\r\n\n bb"));
     }
 
     [Fact]

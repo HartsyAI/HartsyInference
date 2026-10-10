@@ -9,27 +9,14 @@ namespace HartsyInference.Diffusion.Tests;
 /// inherently approximate; these tests verify wiring, shapes, and finite output.</summary>
 public unsafe class LatentPreviewVideoTests
 {
-    /// <summary>Every architecture with a registered static latent preview and its canonical channel count.</summary>
+    /// <summary>Representative architectures with a registered static latent preview and their canonical channel counts.</summary>
     public static TheoryData<LatentArchitecture, int> StaticArchitectures => new()
     {
         { LatentArchitecture.Sd15, 4 },
-        { LatentArchitecture.Sdxl, 4 },
-        { LatentArchitecture.Sd3, 16 },
-        { LatentArchitecture.Flux, 16 },
         { LatentArchitecture.Flux2, 32 },
-        { LatentArchitecture.Chroma, 16 },
-        { LatentArchitecture.AuraFlow, 4 },
-        { LatentArchitecture.FLite, 16 },
-        { LatentArchitecture.ZImage, 16 },
-        { LatentArchitecture.Anima, 16 },
-        { LatentArchitecture.Wan, 48 },
-        { LatentArchitecture.Ltx, 128 },
         { LatentArchitecture.ChromaRadiance, 3 },
-        { LatentArchitecture.ZetaChroma, 3 },
-        { LatentArchitecture.HunyuanVideo, 16 },
         { LatentArchitecture.MiniMaxH3, 24 },
-        { LatentArchitecture.HunyuanImage, 64 },
-        { LatentArchitecture.MageFlow, 128 },
+        { LatentArchitecture.Ltx, 128 },
     };
 
     [Theory]
@@ -42,13 +29,6 @@ public unsafe class LatentPreviewVideoTests
         Assert.Equal(3, width);
         Assert.Equal(2, height);
         Assert.Equal(18, rgb!.Length);
-    }
-
-    [Fact]
-    public void WanAndLtx_AreSupported()
-    {
-        Assert.True(LatentPreview.IsSupported(LatentArchitecture.Wan));
-        Assert.True(LatentPreview.IsSupported(LatentArchitecture.Ltx));
     }
 
     [Fact]

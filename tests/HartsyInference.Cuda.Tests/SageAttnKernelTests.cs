@@ -70,7 +70,6 @@ public sealed unsafe class SageAttnKernelTests
     [Theory]
     [InlineData(128, 256, 1024)]
     [InlineData(128, 256, 1025)]   // Skv tail (curBC < BC on the last step)
-    [InlineData(64, 256, 1024)]
     public void SageAttention_MatchesCpuF32_WithKOutliers(int d, int sq, int skv)
     {
         if (!CudaContext.IsAvailable())

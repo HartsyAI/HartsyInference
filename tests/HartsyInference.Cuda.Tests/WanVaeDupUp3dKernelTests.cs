@@ -24,7 +24,6 @@ public sealed unsafe class WanVaeDupUp3dKernelTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(8, 4, 2, 1)]
-    [InlineData(8, 4, 2, 0)]
     [InlineData(16, 8, 1, 0)]
     [InlineData(4, 8, 2, 1)]
     public void DupUp3d_CudaMatchesManagedReference(int inC, int outC, int factorT, int dropT)

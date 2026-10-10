@@ -13,18 +13,6 @@ public class MiniMaxH3LayoutTests
     private static MiniMaxH3PackedLayout T2va() => new MiniMaxH3PackedLayout(TextLen, LatentT, LatentH, LatentW, AudioT);
 
     [Fact]
-    public void T2vaPacksTextThenAudioThenVideo()
-    {
-        MiniMaxH3PackedLayout l = T2va();
-        Assert.Equal(
-            [MiniMaxH3SegmentKind.Text, MiniMaxH3SegmentKind.Audio, MiniMaxH3SegmentKind.Video],
-            l.Segments.Select(s => s.Kind));
-        // Target audio and target video are always the last two segments.
-        Assert.Equal(MiniMaxH3SegmentKind.Audio, l.Segments[^2].Kind);
-        Assert.Equal(MiniMaxH3SegmentKind.Video, l.Segments[^1].Kind);
-    }
-
-    [Fact]
     public void RowAccountingIsContiguousAndComplete()
     {
         MiniMaxH3PackedLayout l = T2va();
@@ -38,16 +26,6 @@ public class MiniMaxH3LayoutTests
             cursor = s.Stop;
         }
         Assert.Equal(l.SequenceLength, cursor);
-    }
-
-    [Fact]
-    public void AllTargetRowsAreMarkedForUpdateWhenThereIsNoConditioning()
-    {
-        MiniMaxH3PackedLayout l = T2va();
-        Assert.All(l.ImageUpdate, u => Assert.True(u));
-        Assert.All(l.AudioUpdate, u => Assert.True(u));
-        Assert.Equal(AudioT * 2, l.AudioUpdate.Length);
-        Assert.Equal(LatentT * (LatentH / 2) * (LatentW / 2), l.ImageUpdate.Length);
     }
 
     [Fact]

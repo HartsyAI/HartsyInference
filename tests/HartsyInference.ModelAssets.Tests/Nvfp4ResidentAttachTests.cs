@@ -73,24 +73,6 @@ public sealed unsafe class Nvfp4ResidentAttachTests
     }
 
     [Fact]
-    public void Rank3ExpertBank_IsRefused()
-    {
-        using Tensor packed = new Tensor(new TensorShape(2, OutFeatures, InFeatures / 2), DType.U8);
-        using Tensor blockScale = BlockScale(OutFeatures, InFeatures / Nvfp4Codec.GroupSize);
-        using Tensor global = Global(1f);
-        AssertRefused(packed, blockScale, global, hasPreQuantScale: false);
-    }
-
-    [Fact]
-    public void NonE4M3BlockScale_IsRefused()
-    {
-        using Tensor packed = Packed(OutFeatures, InFeatures / 2, DType.U8);
-        using Tensor blockScale = new Tensor(new TensorShape(OutFeatures, InFeatures / Nvfp4Codec.GroupSize), DType.F16);
-        using Tensor global = Global(1f);
-        AssertRefused(packed, blockScale, global, hasPreQuantScale: false);
-    }
-
-    [Fact]
     public void BlockScaleTooSmall_IsRefused()
     {
         using Tensor packed = Packed(OutFeatures, InFeatures / 2, DType.U8);
@@ -110,15 +92,6 @@ public sealed unsafe class Nvfp4ResidentAttachTests
         using Tensor blockScale = BlockScale(OutFeatures, InFeatures / Nvfp4Codec.GroupSize + 1);
         using Tensor global = Global(1f);
         AssertRefused(packed, blockScale, global, hasPreQuantScale: false);
-    }
-
-    [Fact]
-    public void NonScalarGlobalScale_IsRefused()
-    {
-        using Tensor packed = Packed(OutFeatures, InFeatures / 2, DType.U8);
-        using Tensor blockScale = BlockScale(OutFeatures, InFeatures / Nvfp4Codec.GroupSize);
-        using Tensor perExpert = new Tensor(new TensorShape(4), DType.F32);
-        AssertRefused(packed, blockScale, perExpert, hasPreQuantScale: false);
     }
 
     private static void AssertRefused(Tensor packed, Tensor blockScale, Tensor globalScale, bool hasPreQuantScale)

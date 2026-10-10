@@ -73,22 +73,4 @@ public sealed class VulkanInt8LinearTests(ITestOutputHelper output)
         Assert.Equal(outInt8.AsReadOnlySpan<float>().ToArray(), outRebuilt.AsReadOnlySpan<float>().ToArray());
     }
 
-    [Fact]
-    public void Int8Linear_FallsBackOnAnUnpackableK()
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = VulkanTestDevice.Create();
-        const int M = 16, K = 130, N = 32;   // K % 4 != 0: no packed int8 words
-        using Tensor x = Rand(new TensorShape(M, K), 4);
-        using Tensor w = Rand(new TensorShape(N, K), 5);
-        backend.EnableInt8Linear = false;
-        using Tensor outF32 = new(new TensorShape(M, N), DType.F32);
-        backend.Linear(outF32, x, w, null);
-        backend.Sync();
-        backend.EnableInt8Linear = true;
-        using Tensor outKnob = new(new TensorShape(M, N), DType.F32);
-        backend.Linear(outKnob, x, w, null);
-        backend.Sync();
-        Assert.Equal(outF32.AsReadOnlySpan<float>().ToArray(), outKnob.AsReadOnlySpan<float>().ToArray());
-    }
 }

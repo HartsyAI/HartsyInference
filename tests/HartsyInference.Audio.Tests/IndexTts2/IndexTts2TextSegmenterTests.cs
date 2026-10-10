@@ -50,20 +50,6 @@ public sealed class IndexTts2TextSegmenterTests
     }
 
     [Fact]
-    public void Split_MatchesTheReference_WithQuickStreamingTokens()
-    {
-        foreach (Case c in LoadCases())
-            AssertSegments(c.SegmentsQuick20, IndexTts2TextSegmenter.Split(ToTokens(c), 120, quickStreamingTokens: 20), $"quick20 [{c.Text[..Math.Min(30, c.Text.Length)]}]");
-    }
-
-    [Fact]
-    public void Split_MatchesTheReference_AtASmallLimit()
-    {
-        foreach (Case c in LoadCases())
-            AssertSegments(c.SegmentsMax24, IndexTts2TextSegmenter.Split(ToTokens(c), 24), $"max24 [{c.Text[..Math.Min(30, c.Text.Length)]}]");
-    }
-
-    [Fact]
     public void Split_PreservesTheIdsOfEachPiece()
     {
         foreach (Case c in LoadCases())

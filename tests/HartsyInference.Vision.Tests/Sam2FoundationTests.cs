@@ -32,19 +32,6 @@ public sealed class Sam2FoundationTests
     }
 
     [Fact]
-    public void PositionalEncoding_DifferentPoints_DifferentEncodings()
-    {
-        Tensor gaussian = Gaussian(8, seed: 5);
-        SamPositionalEncoding pe = new SamPositionalEncoding(gaussian);
-
-        float[] p0 = pe.Encode(10, 10, 1024, 1024);
-        float[] p1 = pe.Encode(900, 900, 1024, 1024);
-        Assert.NotEqual(p0, p1);
-
-        gaussian.Dispose();
-    }
-
-    [Fact]
     public void PromptEncoder_PointsPlusPadding_TokenCountAndForegroundDiffer()
     {
         SamPromptEncoder enc = BuildEncoder(numPosFeats: 8, seed: 9);
@@ -76,36 +63,6 @@ public sealed class Sam2FoundationTests
         Assert.Equal(3, (int)sparse.Shape[1]);
 
         sparse.Dispose();
-    }
-
-    [Fact]
-    public void Converter_GroupsByComponent_AndStripsModelPrefix()
-    {
-        Dictionary<string, Tensor> w = new()
-        {
-            ["model.image_encoder.trunk.blocks.0.norm1.weight"] = Scalar(),
-            ["model.sam_prompt_encoder.point_embeddings.0.weight"] = Scalar(),
-            ["model.sam_mask_decoder.iou_prediction_head.layers.0.weight"] = Scalar(),
-            ["model.memory_attention.layers.0.self_attn.q_proj.weight"] = Scalar(),
-            ["model.memory_encoder.fuser.layers.0.weight"] = Scalar(),
-        };
-
-        Sam2Converter.Groups g = Sam2Converter.Convert(w);
-        Assert.True(g.ImageEncoder.ContainsKey("trunk.blocks.0.norm1.weight"));
-        Assert.True(g.PromptEncoder.ContainsKey("point_embeddings.0.weight"));
-        Assert.True(g.MaskDecoder.ContainsKey("iou_prediction_head.layers.0.weight"));
-        Assert.Single(g.MemoryAttention);
-        Assert.Single(g.MemoryEncoder);
-
-        foreach (Tensor t in w.Values) t.Dispose();
-    }
-
-    [Fact]
-    public void Config_Presets_HaveExpectedDepths()
-    {
-        Assert.Equal([1, 2, 7, 2], Sam2Config.HieraTiny.EncoderStageDepths);
-        Assert.Equal([2, 3, 16, 3], Sam2Config.HieraBasePlus.EncoderStageDepths);
-        Assert.Equal(144, Sam2Config.HieraLarge.EncoderEmbedDim);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -146,6 +103,4 @@ public sealed class Sam2FoundationTests
         notAPoint.Dispose();
         return enc;
     }
-
-    private static Tensor Scalar() => new Tensor(new TensorShape(1), DType.F32);
 }

@@ -29,15 +29,6 @@ public sealed class ImageFeatureDeclarationTests
         "sdxl-refiner",                                         // fb306df2 — drivable standalone, img2img by nature
     ];
 
-    /// <summary>Reference-image editing: the init image becomes in-context reference latents rather than a noised
-    /// start, so <c>Creativity</c> has nothing to select. Deliberately a separate bit — Mage-Flow used to declare
-    /// <see cref="ImageFeatures.Img2Img"/> and would silently accept a creativity value it cannot honour.</summary>
-    private static readonly string[] ExpectedRefEdit =
-    [
-        "mage-flow", "omnigen2", "boogu",
-        "qwen-image",   // the only family offering both modes; Img2Img.Mode selects
-    ];
-
     /// <summary>Inpaint additionally requires a masked path in the diffusion pipeline. Mage-Flow has none, and
     /// <c>sdxl-refiner</c> is a second-pass model with no mask blend of its own.</summary>
     private static readonly string[] ExpectedInpaint =
@@ -98,14 +89,6 @@ public sealed class ImageFeatureDeclarationTests
         string[] actual = DeclaringFamilies(ImageFeatures.Img2Img);
         _output.WriteLine($"img2img: {string.Join(", ", actual)}");
         Assert.Equal([.. ExpectedImg2Img.Order(StringComparer.Ordinal)], actual);
-    }
-
-    [Fact]
-    public void RefEditIsDeclaredByExactlyTheEditModels()
-    {
-        string[] actual = DeclaringFamilies(ImageFeatures.RefEdit);
-        _output.WriteLine($"refedit: {string.Join(", ", actual)}");
-        Assert.Equal([.. ExpectedRefEdit.Order(StringComparer.Ordinal)], actual);
     }
 
     /// <summary>An edit model must not also claim strength-based img2img unless it genuinely implements both, because

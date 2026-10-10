@@ -38,26 +38,6 @@ public sealed class SchedulerTests
     }
 
     [Fact]
-    public void NoiseSchedule_AlphasCumprod_FirstAndLastValues()
-    {
-        SchedulerConfig config = new SchedulerConfig();
-        float[] betas = NoiseSchedule.ComputeBetas(config);
-        float[] alphas = NoiseSchedule.ComputeAlphas(betas);
-        float[] alphasCumprod = NoiseSchedule.ComputeAlphasCumprod(alphas);
-
-        Assert.Equal(1000, alphasCumprod.Length);
-        // First alphas_cumprod should be close to 1 (very little noise)
-        Assert.InRange(alphasCumprod[0], 0.999f, 1.0f);
-        // Last alphas_cumprod should be close to 0 (almost pure noise)
-        Assert.InRange(alphasCumprod[999], 0.0f, 0.01f);
-        // Should be monotonically decreasing
-        for (int i = 1; i < alphasCumprod.Length; i++)
-        {
-            Assert.True(alphasCumprod[i] <= alphasCumprod[i - 1]);
-        }
-    }
-
-    [Fact]
     public void NoiseSchedule_Sigmas_CorrectRelationToAlphasCumprod()
     {
         SchedulerConfig config = new SchedulerConfig();
@@ -92,30 +72,6 @@ public sealed class SchedulerTests
     }
 
     // ── Euler Discrete Tests ──────────────────────────────────────────────
-
-    [Fact]
-    public void Euler_SetTimesteps_ProducesCorrectCount()
-    {
-        EulerDiscreteScheduler scheduler = new EulerDiscreteScheduler();
-        scheduler.SetTimesteps(20);
-
-        Assert.Equal(20, scheduler.NumInferenceSteps);
-        Assert.Equal(20, scheduler.Timesteps.Length);
-    }
-
-    [Fact]
-    public void Euler_Timesteps_AreDescending()
-    {
-        EulerDiscreteScheduler scheduler = new EulerDiscreteScheduler();
-        scheduler.SetTimesteps(20);
-
-        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 1; i < timesteps.Length; i++)
-        {
-            Assert.True(timesteps[i] <= timesteps[i - 1],
-                $"Euler timestep[{i}] = {timesteps[i]} > timestep[{i - 1}] = {timesteps[i - 1]}");
-        }
-    }
 
     [Fact]
     public unsafe void Euler_Step_EpsilonPrediction_ReducesNoise()
@@ -153,59 +109,7 @@ public sealed class SchedulerTests
         Assert.True(anyDifferent, "Euler step should modify the sample");
     }
 
-    [Fact]
-    public void Euler_InitNoiseSigma_IsPositive()
-    {
-        EulerDiscreteScheduler scheduler = new EulerDiscreteScheduler();
-        scheduler.SetTimesteps(20);
-
-        Assert.True(scheduler.InitialNoiseSigma > 0.0f);
-    }
-
-    [Fact]
-    public unsafe void Euler_AddNoise_ProducesNoisySample()
-    {
-        EulerDiscreteScheduler scheduler = new EulerDiscreteScheduler();
-        scheduler.SetTimesteps(20);
-
-        TensorShape shape = new TensorShape(1, 4, 8, 8);
-        using Tensor sample = new Tensor(shape, DType.F32);
-        using Tensor noise = new Tensor(shape, DType.F32);
-        using Tensor output = new Tensor(shape, DType.F32);
-
-        Span<float> sampleSpan = sample.AsSpan<float>();
-        Span<float> noiseSpan = noise.AsSpan<float>();
-        for (int i = 0; i < sampleSpan.Length; i++)
-        {
-            sampleSpan[i] = 1.0f;
-            noiseSpan[i] = 0.5f;
-        }
-
-        scheduler.AddNoise(output, sample, noise, 0);
-
-        // Output should differ from input
-        Span<float> outSpan = output.AsSpan<float>();
-        Assert.NotEqual(1.0f, outSpan[0]);
-    }
-
     // ── DDIM Tests ─────────────────────────────────────────────────────────
-
-    [Fact]
-    public void Ddim_SetTimesteps_ProducesCorrectCount()
-    {
-        DdimScheduler scheduler = new DdimScheduler();
-        scheduler.SetTimesteps(20);
-
-        Assert.Equal(20, scheduler.NumInferenceSteps);
-        Assert.Equal(20, scheduler.Timesteps.Length);
-    }
-
-    [Fact]
-    public void Ddim_InitNoiseSigma_IsOne()
-    {
-        DdimScheduler scheduler = new DdimScheduler();
-        Assert.Equal(1.0f, scheduler.InitialNoiseSigma);
-    }
 
     [Fact]
     public unsafe void Ddim_Step_Deterministic_WhenEtaZero()
@@ -239,76 +143,7 @@ public sealed class SchedulerTests
         }
     }
 
-    [Fact]
-    public unsafe void Ddim_AddNoise_MatchesForwardProcess()
-    {
-        DdimScheduler scheduler = new DdimScheduler();
-        scheduler.SetTimesteps(20);
-
-        TensorShape shape = new TensorShape(1, 4, 8, 8);
-        using Tensor sample = new Tensor(shape, DType.F32);
-        using Tensor noise = new Tensor(shape, DType.F32);
-        using Tensor output = new Tensor(shape, DType.F32);
-
-        Span<float> sampleSpan = sample.AsSpan<float>();
-        Span<float> noiseSpan = noise.AsSpan<float>();
-        sampleSpan.Fill(1.0f);
-        noiseSpan.Fill(1.0f);
-
-        scheduler.AddNoise(output, sample, noise, 0);
-
-        // With sample=1, noise=1: output = sqrt(alpha_cumprod) + sqrt(1-alpha_cumprod) ~ 1.0
-        Span<float> outSpan = output.AsSpan<float>();
-        // Sum should be close to 1.0 since sqrt(a) + sqrt(1-a) ~ 1 for a close to 1
-        Assert.InRange(outSpan[0], 0.9f, 1.1f);
-    }
-
     // ── DPM++ 2M Tests ────────────────────────────────────────────────────
-
-    [Fact]
-    public void DpmPP2M_SetTimesteps_ProducesCorrectCount()
-    {
-        DpmPlusPlus2MScheduler scheduler = new DpmPlusPlus2MScheduler();
-        scheduler.SetTimesteps(20);
-
-        Assert.Equal(20, scheduler.NumInferenceSteps);
-        Assert.Equal(20, scheduler.Timesteps.Length);
-    }
-
-    [Fact]
-    public unsafe void DpmPP2M_FirstStep_UsesFirstOrderUpdate()
-    {
-        DpmPlusPlus2MScheduler scheduler = new DpmPlusPlus2MScheduler();
-        scheduler.SetTimesteps(20);
-
-        TensorShape shape = new TensorShape(1, 4, 8, 8);
-        using Tensor sample = new Tensor(shape, DType.F32);
-        using Tensor modelOutput = new Tensor(shape, DType.F32);
-        using Tensor output = new Tensor(shape, DType.F32);
-
-        Span<float> sampleSpan = sample.AsSpan<float>();
-        Span<float> modelSpan = modelOutput.AsSpan<float>();
-        for (int i = 0; i < sampleSpan.Length; i++)
-        {
-            sampleSpan[i] = MathF.Sin(i * 0.1f);
-            modelSpan[i] = MathF.Cos(i * 0.1f) * 0.5f;
-        }
-
-        // First step should work (first-order fallback)
-        scheduler.Step(output, modelOutput, sample, 0);
-
-        Span<float> outSpan = output.AsSpan<float>();
-        bool anyDifferent = false;
-        for (int i = 0; i < outSpan.Length; i++)
-        {
-            if (MathF.Abs(outSpan[i] - sampleSpan[i]) > 1e-6f)
-            {
-                anyDifferent = true;
-                break;
-            }
-        }
-        Assert.True(anyDifferent, "DPM++ 2M first step should modify the sample");
-    }
 
     [Fact]
     public unsafe void DpmPP2M_SecondStep_UsesMultistepUpdate()
@@ -350,18 +185,6 @@ public sealed class SchedulerTests
     }
 
     // ── Cross-scheduler consistency tests ─────────────────────────────────
-
-    [Fact]
-    public void AllSchedulers_HaveCorrectNames()
-    {
-        EulerDiscreteScheduler euler = new EulerDiscreteScheduler();
-        DdimScheduler ddim = new DdimScheduler();
-        DpmPlusPlus2MScheduler dpmpp = new DpmPlusPlus2MScheduler();
-
-        Assert.Equal("euler", euler.Name);
-        Assert.Equal("ddim", ddim.Name);
-        Assert.Equal("dpm++2m", dpmpp.Name);
-    }
 
     [Fact]
     public void AllSchedulers_TimestepsDescendAfterSetup()

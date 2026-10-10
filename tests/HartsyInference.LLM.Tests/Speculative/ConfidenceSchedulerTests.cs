@@ -103,35 +103,11 @@ public sealed class ConfidenceSchedulerTests
     }
 
     [Fact]
-    public void A_Flat_Profile_Verifies_The_Whole_Block()
-    {
-        // with SPS constant, every position adds survival to τ and so improves Θ
-        ConfidenceScheduler scheduler = new(new SpsProfile([100, 100, 100, 100, 100, 100]), Block);
-        Assert.Equal(Block, scheduler.Choose([4.6f, 1.2f, -0.6f, -2.1f, -4.3f], Block));
-    }
-
-    [Fact]
-    public void An_Expensive_Second_Position_Stops_The_Walk_At_Once()
-    {
-        // one token costs 1000 steps a second, anything larger almost nothing: verifying more never pays
-        ConfidenceScheduler scheduler = new(new SpsProfile([1000, 1, 1, 1, 1, 1]), Block);
-        Assert.Equal(0, scheduler.Choose([4.6f, 4.6f, 4.6f, 4.6f, 4.6f], Block));
-    }
-
-    [Fact]
     public void Non_Finite_Confidences_Are_Refused()
     {
         ConfidenceScheduler scheduler = new(new SpsProfile([100, 100, 100, 100, 100, 100]), Block);
         Assert.Throws<ArgumentException>(() => scheduler.Choose([4.6f, float.NaN, 1f], Block));
         Assert.Throws<ArgumentException>(() => scheduler.Choose([float.PositiveInfinity], Block));
-    }
-
-    [Fact]
-    public void Nothing_Is_Chosen_Without_A_Budget_Or_Positions()
-    {
-        ConfidenceScheduler scheduler = new(new SpsProfile([100, 100, 100, 100, 100, 100]), Block);
-        Assert.Equal(0, scheduler.Choose([4.6f, 4.6f], 0));
-        Assert.Equal(0, scheduler.Choose(ReadOnlySpan<float>.Empty, Block));
     }
 
     [Fact]

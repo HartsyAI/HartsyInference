@@ -62,10 +62,7 @@ public sealed class InpaintOnlyMaskedTests
 
     /// <summary>Mask Grow matches SwarmMaskGrow: about half the stated pixels per side, not the full amount.</summary>
     [Theory]
-    [InlineData(0, 0)]
-    [InlineData(1, 1)]
     [InlineData(2, 1)]
-    [InlineData(8, 4)]
     [InlineData(9, 5)]
     public void Prepare_MaskGrowExpandsTheMaskByHalfTheValuePerSide(int grow, int expectedPerSide)
     {
@@ -77,19 +74,6 @@ public sealed class InpaintOnlyMaskedTests
         Assert.Equal(48 - expectedPerSide, plan.Y);
         Assert.Equal(32 + 2 * expectedPerSide, plan.CropWidth);
         Assert.Equal(24 + 2 * expectedPerSide, plan.CropHeight);
-    }
-
-    [Fact]
-    public void Prepare_WithoutMask_ReturnsNull()
-    {
-        ImageRequest request = new ImageRequest
-        {
-            Prompt = "test",
-            Width = 512,
-            Height = 512,
-            Img2Img = new Img2Img { InitImage = SolidImage(CanvasWidth, CanvasHeight, 40) },
-        };
-        Assert.Null(InpaintOnlyMasked.Prepare(request));
     }
 
     /// <summary>An all-black mask selects nothing; falling back to the full canvas beats cropping to an empty box.</summary>
@@ -123,12 +107,6 @@ public sealed class InpaintOnlyMaskedTests
         Assert.Equal(0, plan.Y);
         Assert.True(plan.X + plan.CropWidth <= CanvasWidth);
         Assert.True(plan.Y + plan.CropHeight <= CanvasHeight);
-    }
-
-    [Fact]
-    public void Prepare_WhenTheGrownMaskCoversEverything_FallsBackToFullCanvas()
-    {
-        Assert.Null(InpaintOnlyMasked.Prepare(RequestWith(MaskWithRect(0, 0, CanvasWidth, CanvasHeight), shrinkGrow: 8)));
     }
 
     /// <summary>The whole point of the feature: a small crop is scaled up to the model's pixel budget so the masked

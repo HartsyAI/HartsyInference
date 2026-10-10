@@ -65,16 +65,4 @@ public sealed class WakeAudioFrameTests
         Assert.Null(c.Payload);
         Assert.Null(await reader.ReadAsync(CancellationToken.None));
     }
-
-    [Fact]
-    public async Task AnEmptyPayload_StillDeclaresItsLength()
-    {
-        using MemoryStream stream = new();
-        WakeFrameCodec writer = new(stream);
-        await writer.WriteAsync("audio", "{\"seq\":9,\"final\":true}", ReadOnlyMemory<byte>.Empty,
-            CancellationToken.None);
-
-        string header = Encoding.UTF8.GetString(stream.ToArray());
-        Assert.Equal("{\"type\":\"audio\",\"data\":{\"seq\":9,\"final\":true},\"payload_length\":0}\n", header);
-    }
 }

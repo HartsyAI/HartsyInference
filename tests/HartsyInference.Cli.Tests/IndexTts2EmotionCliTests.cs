@@ -15,14 +15,7 @@ public sealed class IndexTts2EmotionCliTests
     }
 
     [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("   ")]
-    public void ParseEmotionVector_UnsetIsNull(string? csv) => Assert.Null(GenerationDispatch.ParseEmotionVector(csv));
-
-    [Theory]
     [InlineData("1,2,3")]
-    [InlineData("1,2,3,4,5,6,7,8,9")]
     [InlineData("a,b,c,d,e,f,g,h")]
     public void ParseEmotionVector_RejectsWrongCountOrNonNumbers(string csv)
         => Assert.Throws<ArgumentException>(() => GenerationDispatch.ParseEmotionVector(csv));

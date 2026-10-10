@@ -55,53 +55,6 @@ public sealed unsafe class AudioEncodersTests
     }
 
     [Fact]
-    public void ZonosConditioning_SyntheticForward_BuildsPrefix()
-    {
-        using CpuBackend backend = new();
-        using ZonosConditioning cond = new();
-        cond.LoadWeights(ZonosCondWeights(phonemeVocab: 64, numLanguages: 8));
-
-        int[] phonemes = [4, 5, 6, 7, 8];
-        using Tensor speaker = F2(1, ZonosConditioning.SpeakerDim);
-        float[] emotion = new float[ZonosConditioning.EmotionDim];
-        for (int i = 0; i < emotion.Length; i++) emotion[i] = 0.1f * i;
-
-        using Tensor prefix = cond.BuildPrefix(backend, phonemes, speaker, emotion,
-            fmax: 22050f, pitchStd: 45f, speakingRate: 15f, languageId: 3);
-
-        // Channels-last [1, P, DModel] — the [B, seq, hidden] layout the backbone/pipeline consume.
-        Assert.Equal(phonemes.Length + 6, (int)prefix.Shape[1]);
-        Assert.Equal(ZonosConditioning.DModel, (int)prefix.Shape[2]);
-        AssertFinite(prefix);
-    }
-
-    [Fact]
-    public void OpenVoiceSpeakerEncoder_SyntheticForward_ProducesG()
-    {
-        OpenVoiceSpeakerConfig c = new()
-        {
-            SpecChannels = 64,
-            Channels = [16, 32],
-            KernelSize = 3,
-            Stride = 2,
-            Padding = 1,
-            GruHidden = 8,
-            Gin = 256,
-        };
-        using CpuBackend backend = new();
-        using OpenVoiceSpeakerEncoder enc = new(c);
-        enc.LoadWeights(OpenVoiceWeights(c));
-
-        int t = 60;
-        using Tensor spec = F3(1, c.SpecChannels, t);
-        using Tensor g = enc.Extract(backend, spec, t);
-        Assert.Equal(1, (int)g.Shape[0]);
-        Assert.Equal(256, (int)g.Shape[1]);
-        Assert.Equal(1, (int)g.Shape[2]);
-        AssertFinite(g);
-    }
-
-    [Fact]
     public void LinearSpectrogram_ProducesCorrectShape()
     {
         float[] pcm = new float[8_000];

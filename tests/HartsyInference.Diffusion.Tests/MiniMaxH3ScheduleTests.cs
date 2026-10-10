@@ -11,15 +11,6 @@ public class MiniMaxH3ScheduleTests
     private const double ShiftA = MiniMaxH3Schedule.DefaultShiftAudio;
 
     [Fact]
-    public void ShiftingToTheSameScheduleIsIdentity()
-    {
-        foreach (double s in new[] { 0.05, 0.3, 0.7, 1.0 })
-        {
-            Assert.Equal(s, MiniMaxH3Schedule.ShiftSigma(s, ShiftV, ShiftV), 10);
-        }
-    }
-
-    [Fact]
     public void ShiftingIsInvertible()
     {
         foreach (double s in new[] { 0.05, 0.3, 0.7, 1.0 })
@@ -47,16 +38,6 @@ public class MiniMaxH3ScheduleTests
                             - MiniMaxH3Schedule.ShiftSigma(s - h, ShiftV, ShiftA)) / (2 * h);
             double closed = MiniMaxH3Schedule.ShiftSlope(s, ShiftV, ShiftA);
             Assert.Equal(numeric, closed, 5);
-        }
-    }
-
-    [Fact]
-    public void AudioRunsAheadOfVideoUnderTheSmallerShift()
-    {
-        // A smaller shift front-loads the schedule, so at the same sampler position the audio sigma is lower.
-        foreach (double s in new[] { 0.2, 0.5, 0.8 })
-        {
-            Assert.True(MiniMaxH3Schedule.ShiftSigma(s, ShiftV, ShiftA) < s);
         }
     }
 

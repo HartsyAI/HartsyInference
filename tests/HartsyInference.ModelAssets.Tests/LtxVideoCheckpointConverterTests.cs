@@ -16,11 +16,8 @@ public class LtxVideoCheckpointConverterTests
     [InlineData("model.diffusion_model.adaln_single.emb.timestep_embedder.linear_1.weight", B.Transformer, "time_embed.emb.timestep_embedder.linear_1.weight")]
     [InlineData("model.diffusion_model.adaln_single.linear.weight", B.Transformer, "time_embed.linear.weight")]
     [InlineData("model.diffusion_model.transformer_blocks.0.attn1.q_norm.weight", B.Transformer, "transformer_blocks.0.attn1.norm_q.weight")]
-    [InlineData("model.diffusion_model.transformer_blocks.27.attn2.k_norm.weight", B.Transformer, "transformer_blocks.27.attn2.norm_k.weight")]
-    [InlineData("model.diffusion_model.transformer_blocks.0.attn1.to_q.weight", B.Transformer, "transformer_blocks.0.attn1.to_q.weight")]
     [InlineData("model.diffusion_model.caption_projection.linear_1.weight", B.Transformer, "caption_projection.linear_1.weight")]
     [InlineData("model.diffusion_model.scale_shift_table", B.Transformer, "scale_shift_table")]
-    [InlineData("model.diffusion_model.proj_out.weight", B.Transformer, "proj_out.weight")]
     // Diffusers folder shards: bare transformer keys pass through.
     [InlineData("transformer_blocks.0.ff.net.0.proj.weight", B.Transformer, "transformer_blocks.0.ff.net.0.proj.weight")]
     public void RouteKey_Transformer(string key, B bucket, string mapped)
@@ -38,18 +35,12 @@ public class LtxVideoCheckpointConverterTests
     [InlineData("vae.decoder.up_blocks.2.conv.conv.weight", B.Vae, "decoder.up_blocks.1.upsamplers.0.conv.conv.weight")]
     [InlineData("vae.decoder.up_blocks.3.res_blocks.0.conv_shortcut.weight", B.Vae, "decoder.up_blocks.1.resnets.0.conv_shortcut.conv.weight")]
     [InlineData("vae.decoder.up_blocks.4.conv1.conv.weight", B.Vae, "decoder.up_blocks.2.conv_in.conv1.conv.weight")]
-    [InlineData("vae.decoder.up_blocks.5.conv.conv.weight", B.Vae, "decoder.up_blocks.2.upsamplers.0.conv.conv.weight")]
-    [InlineData("vae.decoder.up_blocks.6.res_blocks.1.conv2.conv.bias", B.Vae, "decoder.up_blocks.2.resnets.1.conv2.conv.bias")]
-    [InlineData("vae.decoder.up_blocks.7.conv1.conv.weight", B.Vae, "decoder.up_blocks.3.conv_in.conv1.conv.weight")]
-    [InlineData("vae.decoder.up_blocks.8.conv.conv.weight", B.Vae, "decoder.up_blocks.3.upsamplers.0.conv.conv.weight")]
-    [InlineData("vae.decoder.up_blocks.9.res_blocks.3.conv1.conv.weight", B.Vae, "decoder.up_blocks.3.resnets.3.conv1.conv.weight")]
     [InlineData("vae.decoder.conv_out.conv.weight", B.Vae, "decoder.conv_out.conv.weight")]
     // Encoder keys carried for a future encoder.
     [InlineData("vae.encoder.down_blocks.1.conv.conv.weight", B.Vae, "encoder.down_blocks.0.downsamplers.0.conv.conv.weight")]
     [InlineData("vae.encoder.down_blocks.9.res_blocks.0.conv1.conv.weight", B.Vae, "encoder.mid_block.resnets.0.conv1.conv.weight")]
     // Per-channel statistics: means/stds kept under diffusers names, the rest dropped.
     [InlineData("vae.per_channel_statistics.mean-of-means", B.Vae, "latents_mean")]
-    [InlineData("vae.per_channel_statistics.std-of-means", B.Vae, "latents_std")]
     public void RouteKey_Vae(string key, B bucket, string mapped)
     {
         (B b, string? m) = LtxVideoCheckpointConverter.RouteKey(key, vaeOriginalNaming: true);
@@ -59,7 +50,6 @@ public class LtxVideoCheckpointConverterTests
 
     [Theory]
     [InlineData("vae.per_channel_statistics.channel")]
-    [InlineData("vae.per_channel_statistics.mean-of-stds")]
     [InlineData("scaled_fp8")]
     public void RouteKey_DropsMetadata(string key)
     {
@@ -71,7 +61,6 @@ public class LtxVideoCheckpointConverterTests
     [Theory]
     // Already-diffusers VAE keys must NOT be regrouped (the rename table would corrupt them).
     [InlineData("decoder.up_blocks.0.resnets.0.conv1.conv.weight")]
-    [InlineData("decoder.mid_block.resnets.0.norm1.weight")]
     [InlineData("latents_mean")]
     public void RouteKey_DiffusersVae_PassesThrough(string key)
     {

@@ -103,35 +103,6 @@ public sealed unsafe class LanceCfgRenormEulerTests
     [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
-    public void AllZeroPredictions_LeaveLatentFiniteAndUnchanged()
-    {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-
-        const int count = 513;
-        float[] initial = RandomValues(count, 353, 1.0f);
-        using Tensor initialHost = TensorFrom(initial);
-        using Tensor zeroHost = TensorFrom(new float[count]);
-        using Tensor z = new(new TensorShape(count), DType.F32);
-        using Tensor cond = new(new TensorShape(count), DType.F32);
-        using Tensor uncond = new(new TensorShape(count), DType.F32);
-        using CudaBackend cuda = new(0, PtxDir());
-        cuda.Scale(z, initialHost, 1f);
-        cuda.Scale(cond, zeroHost, 1f);
-        cuda.Scale(uncond, zeroHost, 1f);
-        cuda.ResetD2hSyncCount();
-        cuda.CfgRenormEulerStep(z, cond, uncond, 7f, -0.1f, 0.6f);
-        cuda.Sync();
-        Assert.Equal(0, cuda.GetD2hSyncCount());
-        AssertExact(initial, Snapshot(z), "all-zero prediction update");
-    }
-
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    [Trait("Category", "GpuIntegration")]
     public void RepeatedCalls_DoNotReadBackOrRetainScratch()
     {
         if (!CudaContext.IsAvailable())

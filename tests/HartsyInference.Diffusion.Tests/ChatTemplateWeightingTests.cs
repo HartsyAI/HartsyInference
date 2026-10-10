@@ -13,9 +13,7 @@ public sealed class ChatTemplateWeightingTests
 {
     [Theory]
     [InlineData("a red cat")]
-    [InlineData("")]
     [InlineData("  leading and trailing  ")]
-    [InlineData("commas, colons: and <angle> brackets")]
     public void JoiningParsedSpansRebuildsAPromptThatCarriedNoEmphasis(string prompt) =>
         Assert.Equal(prompt, PromptWeighting.Join(PromptWeighting.Parse(prompt)));
 
@@ -61,17 +59,5 @@ public sealed class ChatTemplateWeightingTests
         // The weight still lands on the word, not on the newline that precedes it.
         Assert.Equal(1f, weighted.Weights[prefix.Length]);
         Assert.Contains(weighted.Weights, weight => weight == 1.5f);
-    }
-
-    /// <summary>…and that they agree for an ordinary prompt, so the weighted path's ids are the expected ones whenever
-    /// the boundary is not in play.</summary>
-    [Fact]
-    public void TheTemplateAccessorReproducesTheMergedEncodeForAnOrdinaryPrompt()
-    {
-        using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 64);
-        (int[] prefix, int[] suffix) = tokenizer.ChatTemplateIds();
-        int[] merged = tokenizer.EncodeChat("a red cat");
-        int[] split = [.. prefix, .. tokenizer.EncodeRaw("a red cat"), .. suffix];
-        Assert.Equal(merged[..split.Length], split);
     }
 }

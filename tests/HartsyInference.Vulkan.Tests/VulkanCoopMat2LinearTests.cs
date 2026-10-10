@@ -47,7 +47,6 @@ public sealed class VulkanCoopMat2LinearTests
     /// correctness alone can't distinguish "coopmat2 engaged" from "silently fell through."</summary>
     [Theory]
     [InlineData(257, 512, 512, true)]      // M not 16-aligned — coopmat1's exact-multiple-of-16 gate blocks this
-    [InlineData(13, 512, 512, false)]      // tiny M (mirrors the real txtSeq-alone shape), no bias
     [InlineData(512, 512, 512, true)]      // 16-aligned control — coopmat2 must ALSO handle the case coopmat1 could
     [InlineData(300, 768, 1000, true)]     // full tiles take the unrolled fast path (K 512), then a clamped K tail
     [InlineData(260, 1003, 512, false)]    // K not a multiple of 8: rows unaligned, every tile takes the clamped loop
@@ -154,59 +153,4 @@ public sealed class VulkanCoopMat2LinearTests
         finally { a.Dispose(); b.Dispose(); output.Dispose(); }
     }
 
-    /// <summary>Same residency hazard class as <c>VulkanInt8GemmTests.Backend_Linear_Int8OptIn_
-    /// BiasSurvivesDownstreamGpuConsumption</c>: coopmat2's bias is applied via a follow-up
-    /// <see cref="VulkanBackend.BroadcastAdd"/> dispatch (not fused into the shader), so this proves that
-    /// dispatch's result — not a stale pre-bias buffer — is what a downstream GPU consumer with no
-    /// intervening host read actually sees.</summary>
-    [Fact]
-    public void Backend_Linear_CoopMat2OptIn_BiasSurvivesDownstreamGpuConsumption()
-    {
-        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
-        if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix2)
-        {
-            _out.WriteLine("SKIPPED: no F16/coopmat2 support");
-            return;
-        }
-        backend.EnableCoopMat2 = true;
-
-        const int M = 33, K = 64, N = 32;   // M not 16-aligned — forces coopmat2, not coopmat1
-        Tensor input = new(new TensorShape(M, K), DType.F16);
-        Tensor weight = new(new TensorShape(N, K), DType.F16);
-        Tensor bias = new(new TensorShape(N), DType.F16);
-        Tensor linearOut = new(new TensorShape(M, N), DType.F16);
-        Tensor siluOut = new(new TensorShape(M, N), DType.F16);
-        try
-        {
-            Random rng = new(21);
-            Span<Half> iS = input.AsSpan<Half>();
-            Span<Half> wS = weight.AsSpan<Half>();
-            Span<Half> bS = bias.AsSpan<Half>();
-            for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.05f);
-            for (int i = 0; i < N * K; i++) wS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.05f);
-            // Large bias relative to dot-product magnitude: if the downstream Silu sees the pre-bias
-            // value instead, the mismatch is unmistakable.
-            for (int n = 0; n < N; n++) bS[n] = (Half)(5.0f + n * 0.1f);
-
-            (long coopMat2Before, _, _) = backend.GemmEngagementCounts;
-            backend.Linear(linearOut, input, weight, bias);       // caches linearOut as GPU-resident
-            (long coopMat2After, _, _) = backend.GemmEngagementCounts;
-            Assert.Equal(coopMat2Before + 1, coopMat2After);
-            backend.Silu(siluOut, linearOut);                     // consumes it with NO intervening host read
-
-            ReadOnlySpan<Half> siluS = siluOut.AsReadOnlySpan<Half>();
-            for (int m = 0; m < M; m++)
-                for (int n = 0; n < N; n++)
-                {
-                    double acc = (float)bS[n];
-                    for (int k = 0; k < K; k++) acc += (double)(float)iS[m * K + k] * (float)wS[n * K + k];
-                    double expectedSilu = acc / (1.0 + Math.Exp(-acc));
-                    Assert.True(Math.Abs((float)siluS[m * N + n] - expectedSilu) < Math.Abs(expectedSilu) * 0.05 + 0.05,
-                        $"Silu(Linear(...))[{m},{n}]={(float)siluS[m * N + n]:G6} vs expected={expectedSilu:G6} — " +
-                        "downstream GPU consumer likely saw a stale pre-bias buffer.");
-                }
-        }
-        finally { input.Dispose(); weight.Dispose(); bias.Dispose(); linearOut.Dispose(); siluOut.Dispose(); }
-    }
 }

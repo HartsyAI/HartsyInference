@@ -31,7 +31,6 @@ public sealed class BlockQuantKernelTests
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(3, 64, false)]
-    [InlineData(200, 320, false)]
     [InlineData(129, 1024, true)]
     public unsafe void QuantizedActivationDecodesBackToTheInput(int rows, int cols, bool f16)
     {

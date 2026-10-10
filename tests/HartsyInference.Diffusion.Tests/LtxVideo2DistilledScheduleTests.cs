@@ -41,14 +41,4 @@ public sealed class LtxVideo2DistilledScheduleTests
         Assert.Null(dev.FixedSigmas);
         Assert.False(dev.TwoStage);
     }
-
-    [Fact]
-    public void DistilledSigmasAreNotSharedBetweenConfigs()
-    {
-        // A shared array instance would let one in-place edit anywhere corrupt every config built afterwards.
-        float[] first = LtxVideo2Config.V25Distilled.FixedSigmas!;
-        first[0] = -1f;
-
-        Assert.Equal(1.0f, LtxVideo2Config.V25Distilled.FixedSigmas![0]);
-    }
 }

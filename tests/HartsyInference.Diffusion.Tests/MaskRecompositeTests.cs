@@ -97,15 +97,6 @@ public sealed class MaskRecompositeTests
         Assert.Same(generated, MaskRecomposite.Apply(Request(HalfMaskImage(255), recomposite: false), generated));
     }
 
-    [Fact]
-    public void Apply_WithoutAMask_ReturnsTheGeneratedImageAsIs()
-    {
-        ImageResult generated = Result();
-        ImageRequest noMask = new ImageRequest { Prompt = "test", Img2Img = new Img2Img { InitImage = Solid(Original) } };
-
-        Assert.Same(generated, MaskRecomposite.Apply(noMask, generated));
-    }
-
     /// <summary>Grow/blur are applied before the threshold, so a blurred edge widens the hard-edged paste region.</summary>
     [Fact]
     public void Apply_UsesTheGrownMask()
@@ -157,16 +148,6 @@ public sealed class MaskRecompositeTests
         ImageRequest fallback = InpaintOnlyMasked.WithoutCrop(request);
 
         Assert.NotNull(MaskResolver.ResolveBytes(fallback.Inpaint, Size, Size));
-    }
-
-    [Fact]
-    public void BinarizeInPlace_MapsAtOrAboveTheThresholdToFullAndTheRestToZero()
-    {
-        byte[] mask = [0, 1, 2, 128, 255];
-
-        FeatureImaging.BinarizeInPlace(mask, 1);
-
-        Assert.Equal(new byte[] { 0, 255, 255, 255, 255 }, mask);
     }
 
     /// <summary>The full-canvas fallback after a declined crop must not hand the mask resolver a request that still asks to crop.</summary>

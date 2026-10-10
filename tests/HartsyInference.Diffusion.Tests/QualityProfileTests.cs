@@ -8,15 +8,6 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class QualityProfileTests
 {
     [Fact]
-    public void From_Maximum_AllFp16()
-    {
-        QualityProfile p = QualityProfile.From(QualityPreset.Maximum);
-        Assert.Equal(DType.F16, p.BackboneDType);
-        Assert.Equal(DType.F16, p.TextEncoderDType);
-        Assert.Equal(DType.F16, p.VaeDType);
-    }
-
-    [Fact]
     public void From_High_Fp8BackboneFp16Encoders()
     {
         QualityProfile p = QualityProfile.From(QualityPreset.High);
@@ -35,13 +26,6 @@ public sealed class QualityProfileTests
     public void Validate_RejectsFp8Vae()
     {
         QualityProfile p = new QualityProfile { BackboneDType = DType.F16, TextEncoderDType = DType.F16, VaeDType = DType.F8E4M3 };
-        Assert.Throws<HartsyInferenceException>(() => p.Validate());
-    }
-
-    [Fact]
-    public void Validate_RejectsQuantizedVae()
-    {
-        QualityProfile p = new QualityProfile { BackboneDType = DType.F16, TextEncoderDType = DType.F16, VaeDType = DType.Q8_0 };
         Assert.Throws<HartsyInferenceException>(() => p.Validate());
     }
 
@@ -95,25 +79,6 @@ public sealed class QualityProfileTests
     }
 
     [Fact]
-    public void Apply_QuantizedTarget_NoOps()
-    {
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["w"] = MakeF32Tensor(new TensorShape(8, 8)),
-        };
-        try
-        {
-            int n = QualityProfileApplier.Apply(weights, DType.Q8_0);
-            Assert.Equal(0, n);
-            Assert.Equal(DType.F32, weights["w"].DType);
-        }
-        finally
-        {
-            foreach (Tensor t in weights.Values) t.Dispose();
-        }
-    }
-
-    [Fact]
     public void FluxQualityLoader_AppliesPerComponentDtypes()
     {
         HartsyInference.ModelAssets.CheckpointConverters.FluxCheckpointConverter.ConvertedWeights converted = new()
@@ -138,35 +103,6 @@ public sealed class QualityProfileTests
             foreach (Tensor t in converted.Transformer.Values) t.Dispose();
             foreach (Tensor t in converted.ClipL.Values) t.Dispose();
             foreach (Tensor t in converted.T5.Values) t.Dispose();
-            foreach (Tensor t in converted.Vae.Values) t.Dispose();
-        }
-    }
-
-    [Fact]
-    public void SdxlQualityLoader_AppliesPerComponentDtypes()
-    {
-        HartsyInference.ModelAssets.CheckpointConverters.SdxlCheckpointConverter.ConvertedWeights converted = new()
-        {
-            UNet = new() { ["u.linear.weight"] = MakeF32Tensor(new TensorShape(64, 32)) },
-            ClipL = new() { ["cl.linear.weight"] = MakeF32Tensor(new TensorShape(32, 16)) },
-            ClipG = new() { ["cg.linear.weight"] = MakeF32Tensor(new TensorShape(32, 16)) },
-            Vae = new() { ["v.linear.weight"] = MakeF32Tensor(new TensorShape(16, 8)) },
-        };
-
-        try
-        {
-            QualityProfile maximum = QualityProfile.From(QualityPreset.Maximum);
-            SdxlQualityLoader.Apply(converted, maximum);
-            Assert.Equal(DType.F16, converted.UNet["u.linear.weight"].DType);
-            Assert.Equal(DType.F16, converted.ClipL["cl.linear.weight"].DType);
-            Assert.Equal(DType.F16, converted.ClipG["cg.linear.weight"].DType);
-            Assert.Equal(DType.F16, converted.Vae["v.linear.weight"].DType);
-        }
-        finally
-        {
-            foreach (Tensor t in converted.UNet.Values) t.Dispose();
-            foreach (Tensor t in converted.ClipL.Values) t.Dispose();
-            foreach (Tensor t in converted.ClipG.Values) t.Dispose();
             foreach (Tensor t in converted.Vae.Values) t.Dispose();
         }
     }

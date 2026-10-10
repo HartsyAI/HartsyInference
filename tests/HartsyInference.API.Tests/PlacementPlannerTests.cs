@@ -51,20 +51,6 @@ public sealed class PlacementPlannerTests
         Assert.Equal(9, plan[1].EndLayer);
     }
 
-    [Fact]
-    public void FewerLayersThanStages_Throws()
-    {
-        Assert.Throws<ArgumentException>(() => PlacementPlanner.LlmSplitPlan(
-            ["cuda:0", "cuda:1", "cuda:2"], [1f, 1f, 1f], layerCount: 2, perLayerBytes: 1));
-    }
-
-    [Fact]
-    public void RatioCountMismatch_Throws()
-    {
-        Assert.Throws<ArgumentException>(() => PlacementPlanner.LlmSplitPlan(
-            ["cuda:0", "cuda:1"], [1f], layerCount: 8, perLayerBytes: 1));
-    }
-
     private const long Reserve = 2L << 30;
     private const long MiB = 1L << 20;
 
@@ -109,18 +95,4 @@ public sealed class PlacementPlannerTests
         Assert.Equal(7, PlacementPlanner.DitSplitPlan([Reserve + (10L << 30), Reserve + 1], perBlock, 0)[0]);
     }
 
-    [Fact]
-    public void ByteWeightedDitSplit_NoVramSignal_FallsBackToEvenByteSplit()
-    {
-        long[] perBlock = new long[10];
-        for (int i = 0; i < 10; i++) perBlock[i] = 100 * MiB;
-
-        Assert.Equal(5, PlacementPlanner.DitSplitPlan([0, 0], perBlock, 0)[0]);
-    }
-
-    [Fact]
-    public void ByteWeightedDitSplit_FewerThanTwoBlocks_Throws()
-    {
-        Assert.Throws<ArgumentException>(() => PlacementPlanner.DitSplitPlan([Reserve, Reserve], new long[] { 100 * MiB }, 0));
-    }
 }

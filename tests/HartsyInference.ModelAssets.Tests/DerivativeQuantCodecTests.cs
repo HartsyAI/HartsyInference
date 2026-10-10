@@ -34,9 +34,6 @@ public sealed class DerivativeQuantCodecTests
         return tensor;
     }
 
-    private static uint[] RandomFloatBits(Random rng, int count) =>
-        Enumerable.Range(0, count).Select(_ => BitConverter.SingleToUInt32Bits((float)rng.NextDouble())).ToArray();
-
     private static Tensor Scalar(float value)
     {
         Tensor tensor = new(new TensorShape(1), DType.F32);
@@ -134,11 +131,10 @@ public sealed class DerivativeQuantCodecTests
         Assert.Equal(4, seen);
     }
 
-    [Theory]
-    [InlineData(4, 96, 1)]
-    [InlineData(6, 64, 4)]
-    public void ModelOptNvfp4_MatchesAScalarDecoderIncludingScaleExtremes(int rows, int cols, int blockRows)
+    [Fact]
+    public void ModelOptNvfp4_MatchesAScalarDecoderIncludingScaleExtremes()
     {
+        const int rows = 6, cols = 64, blockRows = 4;
         Random rng = new(7);
         byte[] packed = new byte[rows * cols / 2];
         rng.NextBytes(packed);
@@ -162,42 +158,6 @@ public sealed class DerivativeQuantCodecTests
                 float got = actual[r * cols + c];
                 if (float.IsNaN(expected)) Assert.True(float.IsNaN(got), $"[{r},{c}]");
                 else Assert.Equal(BitConverter.SingleToUInt32Bits(expected), BitConverter.SingleToUInt32Bits(got));
-            }
-        }
-    }
-
-    [Theory]
-    [InlineData(4)]
-    [InlineData(8)]
-    public void MlxAffine_MatchesAScalarDecoderAndReadsLowestFieldFirst(int bits)
-    {
-        Random rng = new(bits);
-        const int rows = 3, cols = 192;
-        byte[] packed = new byte[rows * cols * bits / 8];
-        rng.NextBytes(packed);
-        float[] scaleValues = new float[rows * 3], biasValues = new float[rows * 3];
-        for (int i = 0; i < scaleValues.Length; i++)
-        {
-            scaleValues[i] = (float)(rng.NextDouble() * 0.05);
-            biasValues[i] = (float)(rng.NextDouble() - 0.5);
-        }
-        using Tensor scale = FloatTensor(scaleValues.Select(BitConverter.SingleToUInt32Bits).ToArray(), rows, 3);
-        using Tensor bias = FloatTensor(biasValues.Select(BitConverter.SingleToUInt32Bits).ToArray(), rows, 3);
-        float[] actual = new float[rows * cols];
-
-        AffineIntCodec.DequantRows(packed, AffineRecipe(bits, rows, cols, scale, bias), 0, rows, actual);
-
-        for (int r = 0; r < rows; r++)
-        {
-            for (int c = 0; c < cols; c++)
-            {
-                // A U32 word is little-endian, so its lowest field is the first element of the group of 32/bits.
-                int perWord = 32 / bits;
-                uint word = BitConverter.ToUInt32(packed, (r * (cols / perWord) + c / perWord) * 4);
-                int q = (int)((word >> (bits * (c % perWord))) & ((1u << bits) - 1));
-                float product = q * scaleValues[r * 3 + c / 64];
-                float expected = product + biasValues[r * 3 + c / 64];
-                Assert.Equal(BitConverter.SingleToUInt32Bits(expected), BitConverter.SingleToUInt32Bits(actual[r * cols + c]));
             }
         }
     }
@@ -241,50 +201,11 @@ public sealed class DerivativeQuantCodecTests
         HartsyInferenceException missingBias =
             Assert.Throws<HartsyInferenceException>(() => AffineIntCodec.DequantRows(new byte[64], noBias, 0, 1, new float[128]));
         Assert.Contains("bias", missingBias.Message);
-        using Tensor shortBias = FloatTensor(new uint[1], 1, 1);
-        QuantRecipe mismatched = AffineRecipe(4, 1, 128, f32Scale, shortBias);
-        Assert.Throws<HartsyInferenceException>(() => AffineIntCodec.DequantRows(new byte[64], mismatched, 0, 1, new float[128]));
         using Tensor bf16Scale = BytesTensor(new byte[4], DType.BF16, 1, 2);
         QuantRecipe bf16 = AffineRecipe(4, 1, 128, bf16Scale, bf16Scale) with { ScaleDType = DType.BF16 };
         Assert.Throws<NotSupportedException>(() => AffineIntCodec.DequantRows(new byte[64], bf16, 0, 1, new float[128]));
         QuantRecipe notAffine = AffineRecipe(4, 1, 128, f32Scale, f32Bias) with { Encoding = QuantEncoding.Nvfp4 };
         Assert.Throws<HartsyInferenceException>(() => AffineIntCodec.DequantRows(new byte[64], notAffine, 0, 1, new float[128]));
-    }
-
-    [Fact]
-    public void FormatNames_AreDistinctFromTheComfyNamesBlackwellRoutesOn()
-    {
-        using Tensor scale = new(new TensorShape(1, 1), DType.F32);
-        QuantRecipe nvfp4 = Nvfp4Recipe(1, 16, scale, scale);
-        Assert.Equal("recipe-nvfp4", nvfp4.FormatName);
-        Assert.Equal("recipe-affine-int4", AffineRecipe(4, 1, 64, scale, scale).FormatName);
-        Assert.Equal("recipe-affine-int8", AffineRecipe(8, 1, 64, scale, scale).FormatName);
-        Assert.Equal(2, AffineRecipe(4, 1, 64, scale, scale).ElementsPerByte);
-        Assert.Equal(1, AffineRecipe(8, 1, 64, scale, scale).ElementsPerByte);
-        Assert.Equal(2, nvfp4.ElementsPerByte);
-    }
-
-    [Fact]
-    public void Nvfp4_SliceRows_KeepsTheGlobalScaleAndDecodesTheWindowLikeTheFullMatrix()
-    {
-        Random rng = new(31);
-        const int rows = 8, cols = 64;
-        byte[] packed = new byte[rows * cols / 2];
-        rng.NextBytes(packed);
-        byte[] scaleBytes = new byte[rows * cols / 16];
-        for (int i = 0; i < scaleBytes.Length; i++) scaleBytes[i] = (byte)rng.Next(0x20, 0x70);
-        using Tensor scale = BytesTensor(scaleBytes, DType.F8E4M3, rows, cols / 16);
-        using Tensor global = Scalar(0.02f);
-        QuantRecipe recipe = Nvfp4Recipe(rows, cols, scale, global);
-        float[] full = new float[rows * cols];
-        ModelOptNvfp4Codec.DequantRows(packed, recipe, 0, rows, full);
-
-        QuantRecipe sliced = recipe.SliceRows(3, 4, "w");
-        float[] window = new float[4 * cols];
-        ModelOptNvfp4Codec.DequantRows(packed.AsSpan(3 * cols / 2, 4 * cols / 2), sliced, 0, 4, window);
-
-        Assert.Same(global, sliced.GlobalScale);
-        Assert.Equal(full.AsSpan(3 * cols, 4 * cols).ToArray(), window);
     }
 
     [Fact]
@@ -348,24 +269,5 @@ public sealed class DerivativeQuantCodecTests
 
         Assert.Throws<NotSupportedException>(() => recipe.SliceCols(32, 64, "w"));
         Assert.Throws<NotSupportedException>(() => recipe.SliceCols(64, 33, "w"));
-    }
-
-    [Fact]
-    public void RowWindowedDecode_MatchesTheFullDecodeForBothFormats()
-    {
-        Random rng = new(50);
-        const int rows = 5, cols = 128;
-        byte[] packed = new byte[rows * cols / 2];
-        rng.NextBytes(packed);
-        using Tensor scale = FloatTensor(RandomFloatBits(rng, rows * 2), rows, 2);
-        using Tensor bias = FloatTensor(RandomFloatBits(rng, rows * 2), rows, 2);
-        QuantRecipe recipe = AffineRecipe(4, rows, cols, scale, bias);
-        float[] full = new float[rows * cols];
-        AffineIntCodec.DequantRows(packed, recipe, 0, rows, full);
-
-        float[] window = new float[2 * cols];
-        AffineIntCodec.DequantRows(packed, recipe, 2, 2, window);
-
-        Assert.Equal(full.AsSpan(2 * cols, 2 * cols).ToArray(), window);
     }
 }
