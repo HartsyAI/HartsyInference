@@ -6,7 +6,8 @@ namespace HartsyInference.LLM.Tests;
 
 /// <summary>DeepSeek-V2 YaRN rope: HF <c>_compute_yarn_parameters</c> (and the official DeepSeek code) floors the low and
 /// ceils the high correction bound. The inverse frequencies below are what transformers' DeepseekV2RotaryEmbedding
-/// builds from the DeepSeek-V2-Lite config alone (dim 64, theta 10000, factor 40 over 4096, beta 32/1).</summary>
+/// builds from the DeepSeek-V2-Lite config alone (dim 64, theta 10000, factor 40 over 4096, beta 32/1). They were generated
+/// with transformers 5.17 and no weights loaded; attention_scaling is 1.0.</summary>
 public sealed class RopeScalingDeepSeekV2Tests
 {
     private static readonly double[] HfInvFreq =
