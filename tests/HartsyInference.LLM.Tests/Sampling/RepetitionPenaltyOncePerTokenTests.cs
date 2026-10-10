@@ -31,6 +31,18 @@ public sealed class RepetitionPenaltyOncePerTokenTests
     }
 
     [Fact]
+    public void ALargerVocabularyOnALaterCall_GrowsTheStampsAndStillPenalizesOnce()
+    {
+        RepetitionPenaltyStep step = new(2.0f);
+        float[] small = [4.0f, 4.0f];
+        step.Apply(small, [1, 1]);
+        float[] large = [4.0f, 4.0f, 4.0f, 4.0f, 4.0f];
+        step.Apply(large, [4, 1, 4, 4]);
+        Assert.Equal([4.0f, 2.0f], small);
+        Assert.Equal([4.0f, 2.0f, 4.0f, 4.0f, 2.0f], large);
+    }
+
+    [Fact]
     public void OutOfRangeTokens_AreIgnored()
     {
         float[] logits = [3.0f];
