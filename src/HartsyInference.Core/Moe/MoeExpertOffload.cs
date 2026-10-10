@@ -12,6 +12,9 @@ public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRo
 {
     /// <summary>Share of routed pairs served from the device cache.</summary>
     public double ResidentShare => ResidentRows + StreamedRows + HostRows == 0 ? 0 : (double)ResidentRows / (ResidentRows + StreamedRows + HostRows);
+
+    /// <summary>Share of routed pairs that ran on the device, from the cache or streamed for a large batch.</summary>
+    public double DeviceShare => ResidentRows + StreamedRows + HostRows == 0 ? 0 : (double)(ResidentRows + StreamedRows) / (ResidentRows + StreamedRows + HostRows);
 }
 
 /// <summary>

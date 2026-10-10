@@ -1422,7 +1422,8 @@ public sealed class TextService : ITextService, IDisposable
     {
         MoeOffloadStats stats = offload.Stats;
         ExpertCacheStats cache = offload.CacheBase.Stats;
-        return $"{stats.ResidentShare:P1} of routed rows from the GPU cache ({stats.ResidentRows} resident, {stats.StreamedRows} streamed, "
+        return $"{stats.ResidentShare:P1} of routed rows from the GPU cache, {stats.DeviceShare:P1} on the GPU including streamed "
+            + $"({stats.ResidentRows} resident, {stats.StreamedRows} streamed, "
             + $"{stats.HostRows} on the CPU); {stats.Admitted} experts admitted; cache {ByteFormat.GbF1(cache.ResidentBytes)} of "
             + $"{ByteFormat.GbF1(cache.BudgetBytes)} ({cache.ResidentExperts} experts).";
     }

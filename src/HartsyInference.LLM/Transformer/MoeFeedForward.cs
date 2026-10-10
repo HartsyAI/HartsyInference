@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Numerics;
@@ -35,6 +36,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private ExpertKey[] _offKeys = [];
     private ExpertAssignment[] _offPlan = [];
     private List<ExpertKey> _offMisses = [];
+    private int[] _offHostPlan = [];
+    private int[] _offHostOffset = [];
     private readonly ExpertLease _offLease = new();
 
     /// <summary>
@@ -56,6 +59,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _offKeys = new ExpertKey[e];
         _offPlan = new ExpertAssignment[e];
         _offMisses = new List<ExpertKey>(e);
+        _offHostPlan = new int[e];
+        _offHostOffset = new int[e];
         _offloadLayer = layer;
         _offload = offload;
     }
@@ -247,6 +252,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
         int distinct = ExpertScheduler.Plan(offload.Cache, _offIds.AsSpan(0, pairs), _offloadLayer, 0, e, offload.Policy, _offCounts,
             _offResident, _offKeys, _offPlan, _offMisses, _offLease);
+        float[]? hostIn = null, hostOut = null;
+        int[]? hostIndex = null;
         try
         {
             // Host experts: those planned on the CPU that serve too few rows to be worth an upload.
@@ -261,8 +268,6 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             }
 
             // 1. Gather every host row on the device and read it back once, before the device experts are queued.
-            float[]? hostIn = null, hostOut = null;
-            int[]? hostIndex = null;
             if (hostExperts > 0)
             {
                 hostIndex = ArrayPool<int>.Shared.Rent(hostRows);
@@ -287,13 +292,12 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 bool streamed = assignment.Placement == ExpertPlacement.Cpu && offload.Streams(assignment.Rows);
                 if (assignment.Placement != ExpertPlacement.Gpu && !streamed) continue;
                 int ex = assignment.Key.Expert;
-                int[] idx = [.. expertTokens[ex]];
-                float[] wts = [.. expertWeights[ex]];
+                ReadOnlySpan<int> idx = CollectionsMarshal.AsSpan(expertTokens[ex]);
                 Tensor gatheredRows = new(new TensorShape(1, idx.Length, h), DType.F32);
                 backend.GatherRows(gatheredRows, x, idx);
                 Tensor expOut = SwiGlu(backend, gatheredRows, idx.Length, _gateW[ex], _upW[ex], _downW[ex], inter);
                 gatheredRows.Dispose();
-                backend.ScatterAddWeightedRows(output, expOut, idx, wts);
+                backend.ScatterAddWeightedRows(output, expOut, idx, CollectionsMarshal.AsSpan(expertWeights[ex]));
                 expOut.Dispose();
                 offload.Record(assignment.Placement, streamed, assignment.Rows);
             }
@@ -302,8 +306,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             if (hostExperts > 0)
             {
                 ExpertProgram program = _moe.Activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
-                int[] hostPlan = new int[hostExperts];
-                int[] hostOffset = new int[hostExperts];
+                int[] hostPlan = _offHostPlan;
+                int[] hostOffset = _offHostOffset;
                 int k = 0, rowAt = 0;
                 for (int i = 0; i < distinct; i++)
                 {
@@ -324,23 +328,26 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                     int start = hostOffset[j] * h, length = a.Rows * h;
                     runner.Run(program, a.Key, inBuf.AsSpan(start, length), a.Rows, outBuf.AsSpan(start, length));
                 }
+                // One host tensor carries every CPU expert's output; each expert's rows are a view of it, combined on their own.
+                using Tensor allOut = new(new TensorShape(hostRows, h), DType.F32);
+                outBuf.AsSpan(0, hostRows * h).CopyTo(allOut.AsSpan<float>());
                 for (int j = 0; j < hostExperts; j++)
                 {
                     ExpertAssignment a = plan[hostPlan[j]];
                     int ex = a.Key.Expert;
-                    using Tensor expOut = new(new TensorShape(1, a.Rows, h), DType.F32);
-                    outBuf.AsSpan(hostOffset[j] * h, a.Rows * h).CopyTo(expOut.AsSpan<float>());
-                    backend.ScatterAddWeightedRows(output, expOut, expertTokens[ex].ToArray(), expertWeights[ex].ToArray());
+                    using Tensor expOut = allOut.SliceRows(hostOffset[j], a.Rows);
+                    backend.ScatterAddWeightedRows(output, expOut, CollectionsMarshal.AsSpan(expertTokens[ex]),
+                        CollectionsMarshal.AsSpan(expertWeights[ex]));
                     offload.Record(ExpertPlacement.Cpu, streamed: false, a.Rows);
                 }
-                ArrayPool<int>.Shared.Return(hostIndex!);
-                ArrayPool<float>.Shared.Return(inBuf);
-                ArrayPool<float>.Shared.Return(outBuf);
             }
         }
         finally
         {
             _offLease.Dispose();
+            if (hostIndex is not null) ArrayPool<int>.Shared.Return(hostIndex);
+            if (hostIn is not null) ArrayPool<float>.Shared.Return(hostIn);
+            if (hostOut is not null) ArrayPool<float>.Shared.Return(hostOut);
         }
         offload.AfterLayer(_offMisses);
     }
