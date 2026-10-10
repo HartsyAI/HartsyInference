@@ -17,13 +17,16 @@ public sealed partial class CudaKernels
     private nint _moeDispatchScatterI32;
     private nint _moeCombineF32;
     private CudaModule? _topKModule;
-    private nint _topKF32;
+    private nint _topKF32, _topKSlicesF32;
 
     /// <summary>True when moe_route.ptx and moe_dispatch.ptx loaded, so the MoE primitives can run on this device.</summary>
     public bool HasMoeKernels => _moeRouteF32 != 0 && _moeDispatchScatterI32 != 0;
 
     /// <summary>True when lm_topk_f32.ptx loaded.</summary>
     public bool HasTopKKernel => _topKF32 != 0;
+
+    /// <summary>True when the sliced first stage of a wide top-k is available.</summary>
+    public bool HasTopKSlices => _topKSlicesF32 != 0;
 
     // Optional modules: absence leaves the primitives unsupported on this backend instead of failing construction.
     private void LoadMoeKernels()
@@ -50,6 +53,7 @@ public sealed partial class CudaKernels
         {
             _topKModule = LoadOwnedModule(topKPath);
             _topKF32 = _topKModule.GetFunction("lm_topk_f32");
+            _topKSlicesF32 = _topKModule.GetFunction("lm_topk_slices_f32");
         }
     }
 
@@ -125,5 +129,17 @@ public sealed partial class CudaKernels
         void** a = stackalloc void*[7];
         a[0] = &vA; a[1] = &iA; a[2] = &xA; a[3] = &lA; a[4] = &nA; a[5] = &kA; a[6] = &sA;
         CudaDriverApi.cuLaunchKernel(_topKF32, (uint)rows, 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>First stage of a wide-row top-k on <paramref name="slices"/> blocks: slice r (of <paramref name="width"/> entries) of the single row at
+    /// <paramref name="input"/> writes its <paramref name="k"/> largest, with global indices, to row r of the outputs.</summary>
+    public unsafe void LaunchTopKSlices(ulong values, ulong indices, ulong input, int n, int width, int k, int slices, nint stream)
+    {
+        if (_topKSlicesF32 == 0) throw new InvalidOperationException("lm_topk_f32.ptx has no sliced entry point.");
+        ulong vA = values, iA = indices, xA = input;
+        int nA = n, wA = width, kA = k;
+        void** a = stackalloc void*[6];
+        a[0] = &vA; a[1] = &iA; a[2] = &xA; a[3] = &nA; a[4] = &wA; a[5] = &kA;
+        CudaDriverApi.cuLaunchKernel(_topKSlicesF32, (uint)slices, 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 }

@@ -1,7 +1,8 @@
 // Draws one token from the sorted top-k candidates of a logits row, on the device, so a sampling decode step can sit inside a captured
 // CUDA graph like the greedy one does.
 //
-// Input: the k largest logits (value-descending, from lm_topk_f32) and their vocabulary ids. The chain mirrors the host SamplerChain
+// Input: the k largest logits (value-descending, from lm_topk_f32) and their vocabulary ids. When candIdx is given, idx holds positions
+// in a candidate list (the merge of a sliced first stage) and candIdx maps a position to its vocabulary id. The chain mirrors the host SamplerChain
 // after its top-k step: temperature, softmax over the k survivors, nucleus (top-p) cut on the sorted probabilities, min-p cut relative to
 // the best probability, renormalisation and a multinomial draw. temperature <= 0 returns the best id.
 //
@@ -16,12 +17,13 @@ extern "C" __global__ void lm_sample_from_topk(
     int* __restrict__ outToken,
     const float* __restrict__ vals,
     const int* __restrict__ idx,
+    const int* __restrict__ candIdx,
     int k, float temperature, float topP, float minP,
     unsigned long long* __restrict__ rng)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     if (k > SAMPLE_MAX_K) k = SAMPLE_MAX_K;
-    if (temperature <= 0.0f || k <= 1) { outToken[0] = idx[0]; return; }
+    if (temperature <= 0.0f || k <= 1) { outToken[0] = (candIdx != nullptr && idx[0] >= 0) ? candIdx[idx[0]] : idx[0]; return; }
 
     const float inv = 1.0f / temperature;
     const float top = vals[0] * inv;
@@ -70,5 +72,7 @@ extern "C" __global__ void lm_sample_from_topk(
         acc += p[i];
         if (target < acc) { pick = i; break; }
     }
-    outToken[0] = idx[pick];
+    int sel = idx[pick];
+    if (sel < 0) sel = idx[0];
+    outToken[0] = candIdx != nullptr ? candIdx[sel] : sel;
 }

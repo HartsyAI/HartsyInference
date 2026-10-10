@@ -21,14 +21,14 @@ public sealed partial class CudaKernels
     }
 
     /// <summary>One draw from the sorted top-<paramref name="k"/> values and ids; <paramref name="rng"/> is the device {seed, counter} pair.</summary>
-    public unsafe void LaunchSampleFromTopK(ulong outToken, ulong vals, ulong idx, int k, float temperature, float topP, float minP, ulong rng, nint stream)
+    public unsafe void LaunchSampleFromTopK(ulong outToken, ulong vals, ulong idx, ulong candIdx, int k, float temperature, float topP, float minP, ulong rng, nint stream)
     {
         if (_sampleFromTopK == 0) throw new InvalidOperationException("lm_sample_topk.ptx not present in the Ptx folder.");
-        ulong oA = outToken, vA = vals, iA = idx, rA = rng;
+        ulong oA = outToken, vA = vals, iA = idx, cA = candIdx, rA = rng;
         int kA = k;
         float tA = temperature, pA = topP, mA = minP;
-        void** a = stackalloc void*[8];
-        a[0] = &oA; a[1] = &vA; a[2] = &iA; a[3] = &kA; a[4] = &tA; a[5] = &pA; a[6] = &mA; a[7] = &rA;
+        void** a = stackalloc void*[9];
+        a[0] = &oA; a[1] = &vA; a[2] = &iA; a[3] = &cA; a[4] = &kA; a[5] = &tA; a[6] = &pA; a[7] = &mA; a[8] = &rA;
         CudaDriverApi.cuLaunchKernel(_sampleFromTopK, 1, 1, 1, 1, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 }

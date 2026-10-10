@@ -6,6 +6,9 @@ namespace HartsyInference.Cuda;
 // Device-side sampling for captured decode steps.
 public sealed partial class CudaBackend
 {
+    /// <summary>Candidate slots of the two-stage top-k: values then ids, after the final k values and ids in the sampler buffer.</summary>
+    private const int SampleCandidates = 2048;
+
     /// <inheritdoc />
     public bool DeviceSamplingSupported => _kernels is { HasSampleKernel: true };
 
@@ -17,7 +20,7 @@ public sealed partial class CudaBackend
     {
         using OpScope _op = EnterOp();
         int k = Math.Clamp(maxTopK, 1, CudaKernels.SampleMaxK);
-        ulong handle = CudaMemory.AllocatePersistent((nuint)(16 + 8 * k));
+        ulong handle = CudaMemory.AllocatePersistent((nuint)(16 + 8 * k + 8 * SampleCandidates));
         ulong* init = stackalloc ulong[2] { seed == 0 ? 0x9E3779B97F4A7C15ul : seed, 0ul };
         CudaDriverApi.cuMemcpyHtoDAsync(handle, (nint)init, 16, _stream.Handle).ThrowOnError();
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
@@ -46,8 +49,24 @@ public sealed partial class CudaBackend
         {
             ulong vals = rngState + 16;
             ulong idx = vals + (ulong)(4 * topK);
-            _kernels!.LaunchTopKLastDim(vals, idx, pIn, 0, 1, n, topK, false, _stream.Handle);
-            _kernels.LaunchSampleFromTopK(outputTokenId, vals, idx, topK, temperature, topP, minP, rngState, _stream.Handle);
+            // A wide row (a vocabulary) on one block leaves the other SMs idle: take the top k of each slice on its own block, then merge
+            // the few hundred survivors on one. Narrow rows and tiny k keep the single pass.
+            int slices = Math.Min(128, SampleCandidates / topK);
+            if (_kernels!.HasTopKSlices && slices >= 4 && n >= 8192)
+            {
+                int width = (n + slices - 1) / slices;
+                slices = (n + width - 1) / width;
+                ulong candVals = idx + (ulong)(4 * topK);
+                ulong candIdx = candVals + (ulong)(4 * SampleCandidates);
+                _kernels.LaunchTopKSlices(candVals, candIdx, pIn, n, width, topK, slices, _stream.Handle);
+                _kernels.LaunchTopKLastDim(vals, idx, candVals, 0, 1, slices * topK, topK, false, _stream.Handle);
+                _kernels.LaunchSampleFromTopK(outputTokenId, vals, idx, candIdx, topK, temperature, topP, minP, rngState, _stream.Handle);
+            }
+            else
+            {
+                _kernels!.LaunchTopKLastDim(vals, idx, pIn, 0, 1, n, topK, false, _stream.Handle);
+                _kernels.LaunchSampleFromTopK(outputTokenId, vals, idx, 0, topK, temperature, topP, minP, rngState, _stream.Handle);
+            }
         }
         finally
         {
