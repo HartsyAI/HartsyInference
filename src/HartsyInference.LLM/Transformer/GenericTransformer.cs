@@ -2112,9 +2112,12 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor v = new(new TensorShape(1, t, hq, vDim), DType.F32); backend.SliceLastDim(v, kvB, qkNope);
             kvB.Dispose();
 
-            // Decoupled RoPE on the rope parts only (cos/sin are sized to qkRope).
-            backend.ApplyRopeSingle(qRope, cos, sin);
-            backend.ApplyRopeSingle(kRope, cos, sin);
+            // Decoupled RoPE on the rope parts only (cos/sin are sized to qkRope). DeepSeek MLA pairs adjacent dims
+            // (2i, 2i+1) with frequency i, not split-half: HF's apply_rotary_pos_emb de-interleaves before rotate_half,
+            // and llama.cpp runs deepseek2 as LLAMA_ROPE_TYPE_NORM on un-permuted weights. The duplicated-half table
+            // is read with stride qkRope, so its first half supplies the per-pair angles.
+            backend.ApplyRopeInterleaved(qRope, cos, sin, qkRope);
+            backend.ApplyRopeInterleaved(kRope, cos, sin, qkRope);
 
             // Move to head-major [1, heads, t, d] for the broadcast / concat / cache / attention.
             Tensor qNopeMh = new(new TensorShape(1, hq, t, qkNope), DType.F32); backend.Permute0213(qNopeMh, qNope, t, hq, qkNope);
