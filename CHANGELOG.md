@@ -24,6 +24,10 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.351
+
+- **Fixed: Chroma1 Radiance no longer fails in the NeRF head with an UnpatchifyTokens shape error.** Every Radiance generation since the strict shape check landed (2026-08-11) stopped at the first step with `UnpatchifyTokens input shape must be [4096, 4096, 16384]; got [4096, 256, 64]`. The head keeps its per-pixel stream as `[B·N, P², nerfHidden]` and passed that tensor to `UnpatchifyTokens`, which reads dim 0 as the batch and expects `[B, N, nerfHidden·P²]`. The bytes were already in the order the fold needs; the final RMSNorm (or the F16 to F32 cast on the default path) now writes into the token shape directly, so the fix adds no copy and no device-to-host read. The batch>1 path, which passed a rank-2 slice the contract also refuses, is removed because the contract handles any batch. `ChromaRadianceNerfHeadTests` reproduces the failure on the CPU backend and checks that a batch of two equals two single forwards and that one input pixel moves only its own output pixel. Not yet run on a GPU: the CUDA image is unverified and is tracked in `MODEL_STATUS_IMAGE.md`.
+
 ## alpha.349
 
 - **Fixed: the CUDA uncached weight-cast reason no longer floods the log.** `cast-transient-why` logged at Info on every 200th GEMM that cast a quantized, fp8 or bf16 weight without caching it. A Qwen-Image Q4_K_M generation on the production SwarmUI host still wrote hundreds of these lines per image, which buried everything else in the Info log. The line now logs at Debug, once per distinct weight shape and cast path (N, K, dtypes and cache flags), and is skipped entirely when the Debug level is off. The cast path, its counters and the generated output are unchanged.

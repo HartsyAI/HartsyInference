@@ -268,13 +268,25 @@ consumer card here can hold; whether the 8B/32B variants ship their own distills
   weighting and would move every existing AuraFlow generation. Verify against the Pile-T5 SentencePiece vocab
   before touching it. Carried as a `TODO` in `AuraFlowRecipe.Construct`, beside the tokenizer construction, so
   it is visible from the code and not only from this checklist.
-- [ ] **Chroma-Radiance does not generate — found 2026-09-19, PRE-EXISTING, unrelated to prompt weighting.**
-  `chroma-radiance-x0.safetensors` fails at both 512² and 1024² with
-  `UnpatchifyTokens input shape must be [4096, 4096, 16384]; got [4096, 256, 64]` — the middle dimension tracks
-  the resolution while the input's stays 256, so the token count reaching unpatchify is not the one the contract
-  derives. Reproduced byte-for-byte on a clean `origin/main` worktree, so it is not a regression from the
-  weighting work; it surfaced only because that work finally put a real checkpoint through the family. Its
-  ComfyBlend wiring (alpha.130) therefore remains ungated until the family can generate at all.
+- [x] **Chroma-Radiance UnpatchifyTokens shape failure fixed in alpha.351 (2026-10-11), CPU-tested only.**
+  `chroma-radiance-x0.safetensors` (2026-09-19, 512² and 1024²) and prod Swarm's
+  `chroma1-radiance-1_0-chroma-radiance-base-bf16.safetensors` (2026-10-11, alpha.348/349, 1024²) both failed
+  with `UnpatchifyTokens input shape must be [4096, 4096, 16384]; got [4096, 256, 64]`. The NeRF head carries its
+  pixel stream as `[B·N, P², nerfHidden]` and handed that tensor to `UnpatchifyTokens`, whose contract reads
+  dim 0 as the batch and wants `[B, N, nerfHidden·P²]`. The bytes were already in the right order
+  (`innerChannelFastest`); only the declared shape was wrong. It went unnoticed because the strict shape check
+  arrived with `c7d6d1a4` (2026-08-11), five days after the head's CPU tests were removed in `e18ec7e4`. The final
+  RMSNorm (or the F16 to F32 cast) now writes straight into the token shape, so no reshape and no D2H; the
+  batch>1 path, which passed a rank-2 slice and could never pass the contract either, is gone because the
+  contract handles B natively. `ChromaRadianceNerfHeadTests` reproduces the prod message at tiny dims on the CPU
+  backend and checks the fold: batch 2 equals two batch 1 forwards, and with the linear final layer a single
+  input pixel moves only that output pixel (flipping `innerChannelFastest` fails it). No other
+  `UnpatchifyTokens`/`PatchifyTokens` caller shares the bug: each builds its tokens as `[B, seq, feat]`.
+- [ ] **Chroma-Radiance GPU check outstanding.** The local GPU has a driver/library mismatch, so nothing above
+  ran on CUDA. Generate one 1024² image (30 steps, CFG 3.5, euler/beta) with
+  `chroma1-radiance-1_0-chroma-radiance-base-bf16.safetensors` on alpha.351 and view it, on the default
+  `numerics.ditF16` path (the CPU tests run F32 only, because the CPU backend has no F16 BatchedMatMul). Its
+  ComfyBlend wiring (alpha.130) stays ungated until that image is seen.
 - [x] **Flux.1, Anima and SD3 weight prompts — DONE 2026-09-19 (alpha.131).** Both are dual-encoder families where
   only ONE arm is blendable, and the judgement is the substance: Flux.1's CLIP-L contributes its pooled vector and
   its hidden states are disposed right after the EOS extraction, and Anima's T5 side is an `embed[t5_ids]` lookup

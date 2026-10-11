@@ -322,22 +322,19 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         }
 
         // ── Final RMSNorm, back to F32 for the unpatchify + pixel conv, fold to image layout, conv → x0. ──
-        Tensor xnFinal = new Tensor(x.Shape, act);
+        // The norm reads x as [B·N, P², nh] (rows of nh) but writes into the token shape [B, N, P²·nh] that
+        // UnpatchifyTokens validates. Same bytes, (py·P+px)·nh + c inner order = innerChannelFastest. Allocating
+        // the destination in that shape avoids Tensor.Reshape, which reads DataPointer and would force a D2H.
+        TensorShape tokenShape = new TensorShape(batch, seqLen, (long)pix * nh);
+        Tensor xnFinal = new Tensor(act == DType.F32 ? tokenShape : x.Shape, act);
         backend.RmsNorm(xnFinal, x, _finalNormScale!, NormEps);
         if (!ReferenceEquals(x, embed)) x.Dispose();
         Tensor xnFinalF32;
         if (xnFinal.DType == DType.F32) xnFinalF32 = xnFinal;
-        else { xnFinalF32 = new Tensor(xnFinal.Shape, DType.F32); backend.CastToF32(xnFinalF32, xnFinal); xnFinal.Dispose(); }
+        else { xnFinalF32 = new Tensor(tokenShape, DType.F32); backend.CastToF32(xnFinalF32, xnFinal); xnFinal.Dispose(); }
 
         Tensor features = new Tensor(new TensorShape(batch, nh, height, width), DType.F32);
-        if (batch == 1)
-        {
-            backend.UnpatchifyTokens(features, xnFinalF32, nh, hPacked, wPacked, p, innerChannelFastest: true);
-        }
-        else
-        {
-            UnpatchifyBatched(backend, features, xnFinalF32, batch, seqLen, nh, hPacked, wPacked, p, height, width);
-        }
+        backend.UnpatchifyTokens(features, xnFinalF32, nh, hPacked, wPacked, p, innerChannelFastest: true);
         xnFinalF32.Dispose();
 
         int outChannels = (int)_finalConvWeight.Shape[0];
@@ -365,25 +362,6 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         backend.Permute0213(result, normed, outDim, inDim, 1);
         normed.Dispose();
         return result;
-    }
-
-    /// <summary>Batch>1 unpatchify fallback: per-element device row slice + unpatchify, concatenated on dim 0.</summary>
-    private static void UnpatchifyBatched(IBackend backend, Tensor features, Tensor tokens, int batch, int seqLen,
-        int nh, int hPacked, int wPacked, int p, int height, int width)
-    {
-        int pix = p * p;
-        Tensor[] parts = new Tensor[batch];
-        for (int b = 0; b < batch; b++)
-        {
-            Tensor slice = new Tensor(new TensorShape((long)seqLen * pix, nh), DType.F32);
-            backend.SliceRows(slice, tokens, b * seqLen * pix);
-            Tensor part = new Tensor(new TensorShape(1, nh, height, width), DType.F32);
-            backend.UnpatchifyTokens(part, slice, nh, hPacked, wPacked, p, innerChannelFastest: true);
-            slice.Dispose();
-            parts[b] = part;
-        }
-        backend.Concat(features, parts, dim: 0);
-        for (int b = 0; b < batch; b++) parts[b].Dispose();
     }
 
     /// <summary>Folds the per-pixel embed Linear into a stride-P Conv2d: weight [pix·nh, 3, P, P] places the
