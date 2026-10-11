@@ -24,6 +24,13 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.347
+
+- **Added: a real-weight tool-calling matrix** (`ToolLoopRealWeightTheoryTests`). Each checkpoint runs one tool turn through `ToolLoop` and must emit a parsed call in the expected dialect, with the tool prompt injected only where its template has no tools slot, then take a second round. CUDA-only and slow checkpoints skip on CPU with a reason.
+- **Added: a plain-chat guard** (`PlainRequestsUnchangedTests`): a request with no tools generates the same text with the tool filter installed as without it.
+- Real-weight status on CPU: Qwen3-0.6B, Gemma-3-1B and Llama-3.2-1B pass. Qwen2.5-0.5B passes its `hang_up` probe but not the `get_time` case (the model ends the turn after `<tool_call>`). Qwen3.5-0.8B, Phi-3.5, Mistral-7B and GLM-4-9B run on CUDA only here.
+- `docs/Research/TOOL_CALLING.md` describes the current design, the real-weight table and the open items.
+
 ## alpha.346
 
 - **Added: `TextChunkKind.ToolResult`.** A dispatched tool call streams its result as this chunk, with the call and its position in the run. It replaces the `tool_result:` status text. **Breaking:** `ToolLoop.ToolResultPrefix` and `ToolLoop.ToolResultPhase` are removed; read `TextChunkKind.ToolResult` instead.
