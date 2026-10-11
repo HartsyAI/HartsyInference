@@ -51,6 +51,28 @@ public sealed unsafe class CudaMoeIndexedTests
         finally { KnobStore.Clear(EngineKnobs.GemvKsplit); }
     }
 
+    [Fact]
+    public void DownKsplit_DefaultHeuristic_SplitsOnlyLongKFewRowLaunches()
+    {
+        try
+        {
+            KnobStore.Clear(EngineKnobs.GemvKsplit);
+            Assert.Equal(4u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 2));     // Mixtral ffn_down, decode
+            Assert.Equal(4u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 16));    // a speculative-verify batch still fits the cap
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 64));    // many rows: plenty of blocks without splitting
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(2048, 768, 8));       // Qwen3-30B-A3B ffn_down: short K stays unsplit
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(1, 14336, 70000));    // gridDim.y limit
+            KnobStore.Set(EngineKnobs.GemvKsplit, 0);
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 2));     // the knob turns it off
+            KnobStore.Set(EngineKnobs.GemvKsplit, 8);
+            Assert.Equal(8u, CudaKernels.MoeDownKsplitWarps(2048, 768, 8));       // and forces it
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.GemvKsplit);
+        }
+    }
+
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Cases))]

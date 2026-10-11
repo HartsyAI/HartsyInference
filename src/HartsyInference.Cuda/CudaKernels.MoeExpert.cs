@@ -119,9 +119,9 @@ public sealed partial class CudaKernels
     // Warps per output row for the expert-indexed down projection. Long-K rows (Mixtral's ffn_down, K = 14336) run one row per
     // block split across 4 warps when the launch has few rows; numerics.gemvKsplit forces it off (0) or to W warps like the
     // dense GEMV's split.
-    private static uint MoeDownKsplitWarps(int n, int k, int rows)
+    internal static uint MoeDownKsplitWarps(int n, int k, int rows)
     {
-        if (_ksplitOverride == 0) return 1;
+        if (_ksplitOverride == 0 || rows > 65535) return 1;   // gridDim.y carries the row count
         if (_ksplitOverride > 1) return (uint)Math.Min(_ksplitOverride, 16);
         return k >= 8192 && (long)n * rows <= 65536 ? 4u : 1u;
     }
