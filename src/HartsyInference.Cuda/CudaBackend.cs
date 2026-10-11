@@ -2552,11 +2552,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (weight.DType.IsQuantized || weight.DType == DType.F8E4M3 || weight.DType == DType.BF16)
                 {
                     System.Threading.Interlocked.Increment(ref _castTransientUncachedPath);
-                    if (System.Threading.Interlocked.Increment(ref _castWhyLogged) % 200 == 1)
-                        HartsyInference.Core.Logging.Logs.Info(
-                            $"[Cuda] cast-transient-why: cacheParam={cacheWeightCast} propCache={CacheWeightCasts} " +
-                            $"hip={hipUpcast} weightCached={GpuTransferHelper.IsWeightCached(weight)} " +
-                            $"dtype={weight.DType} gemmDtype={gemmDtype} M={m} N={n} K={k}");
+                    if (HartsyInference.Core.Logging.Logs.MinLevel <= HartsyInference.Core.Logging.LogLevel.Debug)
+                    {
+                        bool weightCached = GpuTransferHelper.IsWeightCached(weight);
+                        if (_castWhyLogged.TryAdd((cacheWeightCast, CacheWeightCasts, hipUpcast, weightCached, weight.DType, gemmDtype, n, k), 0))
+                            HartsyInference.Core.Logging.Logs.Debug(
+                                $"[Cuda] cast-transient-why: cacheParam={cacheWeightCast} propCache={CacheWeightCasts} " +
+                                $"hip={hipUpcast} weightCached={weightCached} " +
+                                $"dtype={weight.DType} gemmDtype={gemmDtype} M={m} N={n} K={k}");
+                    }
                 }
                 weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, blockScales);
             }
@@ -3409,7 +3413,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Diagnostic counters for the prefill weight-cast paths; <see cref="DumpCastStats"/> logs them when a caller asks.</summary>
     /// <remarks>transient-because-budget-gate, transient-because-uncached-path (QuantizedMatMul / non-preloaded), and newly-cached casts.</remarks>
-    private static long _castTransientGated, _castTransientUncachedPath, _castCachedNew, _castWhyLogged;
+    private static long _castTransientGated, _castTransientUncachedPath, _castCachedNew;
+
+    /// <summary>Uncached-cast reasons already logged, so the reason line prints once per weight shape and path instead of once per GEMM.</summary>
+    /// <remarks>M is left out of the key: it is the token count and changes per call.</remarks>
+    private static readonly ConcurrentDictionary<(bool CacheParam, bool PropCache, bool Hip, bool WeightCached, DType DType, DType GemmDType, int N, int K), byte>
+        _castWhyLogged = new();
 
     /// <summary>Logs and resets the cast-path counters (called opportunistically; cheap).</summary>
     public static void DumpCastStats(string tag)
