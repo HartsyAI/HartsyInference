@@ -36,7 +36,7 @@ stable release will require. Dates are UTC.
 - **Added: the `safe` template filter** (identity). Qwen3.5's tool-call replay uses it, so its second and later rounds no longer fall back to ChatML.
 - **Added: the GLM `observation` role.** A GLM-4-0414 template now gets tool results under the `observation` role it expects instead of losing them.
 
-## alpha.339
+## alpha.342
 
 - **Changed: `EngineOptions.TextStreamFilterFactory` takes a `TextStreamFilterContext`.** The context carries the request, its request id, the template's name and Jinja source, the architecture and the model path, so a host can pick a parser per model. Breaking for any host that set the factory.
 - **Changed: tool-call ids are unique per request.** Both the structured parser and the filter number calls `call_{requestId}_{index}`, so ids never repeat across rounds of one conversation.
