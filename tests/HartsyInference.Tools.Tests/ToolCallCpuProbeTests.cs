@@ -9,7 +9,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Tools.Tests;
 
-/// <summary>Runs one tool-offering turn on a real GGUF on the CPU and reports the raw streamed text, the parsed call and the stop reason. Skips when the file is absent (set the path env var).</summary>
+/// <summary>Runs one tool-offering turn on a real GGUF (CPU unless TOOLCALL_PROBE_DEVICE says otherwise) and reports the raw streamed text, the parsed call and the stop reason. Skips when the file is absent (set the path env var).</summary>
 public sealed class ToolCallCpuProbeTests
 {
     private static readonly ToolDefinition HangUp = ToolSchema.FromDelegate("hang_up", static () => "call ended", "Ends the current phone call immediately.");
@@ -32,25 +32,27 @@ public sealed class ToolCallCpuProbeTests
     [Fact]
     [Trait("Category", "Integration")]
     public async Task Qwen3SmallCpuTurnEmitsAParsedHangUp()
+        => await RunProbe("QWEN3_06B_GGUF_PATH", "qwen3");
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task Qwen35SmallCpuTurnEmitsAParsedHangUpInXml()
+        => await RunProbe("QWEN35_08B_GGUF_PATH", "qwen35");
+
+    private async Task RunProbe(string envVar, string modelId)
     {
-        string? path = Environment.GetEnvironmentVariable("QWEN3_06B_GGUF_PATH");
+        string? path = Environment.GetEnvironmentVariable(envVar);
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
-            _output.WriteLine("SKIPPED: set QWEN3_06B_GGUF_PATH to a Qwen3-0.6B GGUF.");
+            _output.WriteLine($"SKIPPED: set {envVar} to a GGUF for {modelId}.");
             return;
-        }
-        using (HartsyInference.LLM.Generation.GgufLanguageModel model = HartsyInference.LLM.Generation.GgufLanguageModel.Load(path))
-        {
-            HartsyInference.LLM.ChatTemplates.ToolSpec tool = HartsyInference.LLM.ChatTemplates.ToolSpec.FromJson(
-                "{\"type\":\"function\",\"function\":{\"name\":\"hang_up\",\"description\":\"Ends the current phone call immediately.\",\"parameters\":" + HangUp.JsonSchema + "}}");
-            int[] promptIds = model.Template.Encode(model.Tokenizer, [HartsyInference.LLM.ChatTemplates.ChatMessage.User("please hang up now")], addGenerationPrompt: true, enableThinking: false, tools: [tool]);
-            _output.WriteLine("PROMPT: " + model.Tokenizer.Decode(promptIds));
         }
         EngineOptions options = new();
         StringBuilder raw = new();
         options.TextStreamFilterFactory = context => ToolCalling.CreateFilter(context) is { } inner ? new RecordingFilter(inner, raw) : null;
-        using InferenceEngine engine = new("cpu", options);
-        ModelSpec spec = ModelResolver.Resolve("qwen3", path, Modality.Text);
+        string device = Environment.GetEnvironmentVariable("TOOLCALL_PROBE_DEVICE") is { Length: > 0 } chosen ? chosen : "cpu";
+        using InferenceEngine engine = new(device, options);
+        ModelSpec spec = ModelResolver.Resolve(modelId, path, Modality.Text);
         StringBuilder text = new();
         NativeToolCall? call = null;
         StopReason? stop = null;

@@ -14,4 +14,13 @@ public enum ToolCallPayload
 
     /// <summary>Gemma's <c>[call:]name{key:value,…}</c> block with unquoted keys and <c>&lt;|"|&gt;</c> string delimiters.</summary>
     GemmaCall,
+
+    /// <summary>Qwen's <c>&lt;function=NAME&gt;&lt;parameter=KEY&gt;value&lt;/parameter&gt;&lt;/function&gt;</c> markup; the span completes at its closing marker, not at a balanced value.</summary>
+    XmlFunction,
+
+    /// <summary>GLM's <c>name&lt;arg_key&gt;k&lt;/arg_key&gt;&lt;arg_value&gt;v&lt;/arg_value&gt;</c> pairs; completes at its closing marker.</summary>
+    XmlArgKey,
+
+    /// <summary>DeepSeek-R1's fenced-JSON call blocks; completes at its closing marker.</summary>
+    DeepSeekR1Block,
 }

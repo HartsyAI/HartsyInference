@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.338
+
+- **Added: three markup tool-call dialects.** `QwenXml` (Qwen3.5 and Qwen3-Coder: `<tool_call><function=…><parameter=…>`), `GlmXml` (GLM-4.5: `<arg_key>`/`<arg_value>` pairs) and `DeepSeekR1` (`<｜tool▁calls▁begin｜>` fenced-JSON blocks). The chat template picks the dialect; markup spans complete at their closing marker and their values are typed by the offered tool's schema.
+- **Added: Hermes reads a name on one line and its JSON on the next** (GLM-4-0414's layout), for names the request offers.
+- **Changed: DeepSeek detection** uses the R1 markers and names, not every DeepSeek name, so DeepSeek-V3 keeps the permissive default.
+- Real-weight status: the Qwen3.5-0.8B live run is not verified here, because its Q5_K dense weights have no CPU matmul path (a separate engine gap). GLM-4.5 and DeepSeek-R1 weights are not on this machine; their dialects are covered by unit tests against the documented formats.
+
 ## alpha.337
 
 - **Changed: tool-call format resolves per request.** `ToolCalling.Install` with no format now picks the parser from the model's own chat template first, then its architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter. An explicit format still applies to every request.

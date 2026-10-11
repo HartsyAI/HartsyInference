@@ -25,6 +25,7 @@ public static partial class ToolCallFormats
             new ToolCallMarker("{", ToolCallPayload.JsonObject, TextIsPayload: true, LineStartOnly: true, Strict: true),
         ],
         CloseMarker = "</tool_call>",
+        NamedFormAtLineStart = true,
         ArgumentKeys = HermesArgumentKeys,
     };
 
@@ -67,6 +68,37 @@ public static partial class ToolCallFormats
         ArgumentKeys = HermesArgumentKeys,
     };
 
+    private static readonly ToolCallFormatRules QwenXmlRules = new()
+    {
+        Format = ToolCallFormat.QwenXml,
+        Markers =
+        [
+            new ToolCallMarker("<tool_call>", ToolCallPayload.XmlFunction, Close: "</tool_call>"),
+            new ToolCallMarker("<function=", ToolCallPayload.XmlFunction, Strict: true, Close: "</function>"),
+        ],
+        CloseMarker = "</tool_call>",
+        ArgumentKeys = [],
+    };
+
+    private static readonly ToolCallFormatRules GlmXmlRules = new()
+    {
+        Format = ToolCallFormat.GlmXml,
+        Markers = [new ToolCallMarker("<tool_call>", ToolCallPayload.XmlArgKey, Close: "</tool_call>")],
+        CloseMarker = "</tool_call>",
+        ArgumentKeys = [],
+    };
+
+    private static readonly ToolCallFormatRules DeepSeekR1Rules = new()
+    {
+        Format = ToolCallFormat.DeepSeekR1,
+        Markers =
+        [
+            new ToolCallMarker("<｜tool▁calls▁begin｜>", ToolCallPayload.DeepSeekR1Block, Close: "<｜tool▁calls▁end｜>"),
+            new ToolCallMarker("<｜tool▁call▁begin｜>", ToolCallPayload.DeepSeekR1Block, Close: "<｜tool▁call▁end｜>"),
+        ],
+        ArgumentKeys = [],
+    };
+
     /// <summary>The rule table for <paramref name="format"/>.</summary>
     public static ToolCallFormatRules RulesFor(ToolCallFormat format) => format switch
     {
@@ -74,6 +106,9 @@ public static partial class ToolCallFormats
         ToolCallFormat.Llama3 => Llama3Rules,
         ToolCallFormat.Gemma => GemmaRules,
         ToolCallFormat.Mistral => MistralRules,
+        ToolCallFormat.QwenXml => QwenXmlRules,
+        ToolCallFormat.GlmXml => GlmXmlRules,
+        ToolCallFormat.DeepSeekR1 => DeepSeekR1Rules,
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, "Unknown tool-call format."),
     };
 
@@ -84,11 +119,19 @@ public static partial class ToolCallFormats
     public static ToolCallFormat Detect(string? hint)
     {
         if (string.IsNullOrWhiteSpace(hint)) return ToolCallFormat.Hermes;
-        // A template carries its own literal markers, which beat any family name it happens to mention.
+        // A template carries its own literal markers, which beat any family name it happens to mention. The markup
+        // dialects open with the same <tool_call> tag as Hermes, so their own literals are checked first.
+        if (Has(hint, "<function=")) return ToolCallFormat.QwenXml;
+        if (Has(hint, "<arg_key>")) return ToolCallFormat.GlmXml;
+        if (Has(hint, "tool▁calls▁begin")) return ToolCallFormat.DeepSeekR1;
         if (Has(hint, "<tool_call>")) return ToolCallFormat.Hermes;
         if (Has(hint, "<|python_tag|>")) return ToolCallFormat.Llama3;
         if (Has(hint, "[TOOL_CALLS]")) return ToolCallFormat.Mistral;
         if (Has(hint, "<|tool_call>")) return ToolCallFormat.Gemma;
+        if (Has(hint, "qwen3-coder") || Has(hint, "qwen3coder") || Has(hint, "qwen35") || Has(hint, "qwen3.5")) return ToolCallFormat.QwenXml;
+        if (Has(hint, "glm-4.5") || Has(hint, "glm4.5") || Has(hint, "glm-4-5")) return ToolCallFormat.GlmXml;
+        // Only the R1 family uses these markers; other DeepSeek checkpoints keep the permissive default.
+        if (Has(hint, "deepseek-r1") || Has(hint, "r1-distill")) return ToolCallFormat.DeepSeekR1;
         if (Has(hint, "hermes") || Has(hint, "qwen")) return ToolCallFormat.Hermes;
         if (Has(hint, "mistral") || Has(hint, "mixtral") || Has(hint, "ministral") || Has(hint, "magistral")
             || Has(hint, "devstral") || Has(hint, "codestral"))
@@ -124,6 +167,9 @@ public static partial class ToolCallFormats
         if (string.IsNullOrEmpty(chatTemplate)) return false;
         string t = chatTemplate.Replace("\\\"", "\"", StringComparison.Ordinal);
         if (!ToolsVariableRegex().IsMatch(t)) return false;
+        if (t.Contains("<function=", StringComparison.Ordinal)) { format = ToolCallFormat.QwenXml; return true; }
+        if (t.Contains("<arg_key>", StringComparison.Ordinal)) { format = ToolCallFormat.GlmXml; return true; }
+        if (t.Contains("tool▁calls▁begin", StringComparison.Ordinal)) { format = ToolCallFormat.DeepSeekR1; return true; }
         if (HasHermesJsonInstruction(t)) { format = ToolCallFormat.Hermes; return true; }
         if (t.Contains("<|python_tag|>", StringComparison.Ordinal)) { format = ToolCallFormat.Llama3; return true; }
         if (t.Contains("[TOOL_CALLS]", StringComparison.Ordinal)) { format = ToolCallFormat.Mistral; return true; }
