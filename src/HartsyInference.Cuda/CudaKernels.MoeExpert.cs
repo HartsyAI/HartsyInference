@@ -8,6 +8,7 @@ public sealed partial class CudaKernels
 {
     private CudaModule? _moeIdQ4kModule, _moeIdQ6kModule, _moeIdQ8_0Module, _moeCombineSlotsModule;
     private nint _moeGateUpIdQ4k, _moeDownIdQ4k, _moeGateUpIdQ6k, _moeDownIdQ6k, _moeGateUpIdQ8_0, _moeDownIdQ8_0;
+    private nint _moeDownIdKsplitQ4k, _moeDownIdKsplitQ6k, _moeDownIdKsplitQ8_0;
     private nint _moeCombineSlotsF32;
     private CudaModule? _moePrefillModule;
     private nint _moeGatherRows16, _moeActMul16, _moeActMul16x16, _moeCombinePairsF32, _moeCastF16Bf16InPlace;
@@ -35,6 +36,7 @@ public sealed partial class CudaKernels
             _moeIdQ4kModule = LoadOwnedModule(q4k);
             _moeGateUpIdQ4k = _moeIdQ4kModule.GetFunction("moe_gateup_id_q4k");
             _moeDownIdQ4k = _moeIdQ4kModule.GetFunction("moe_down_id_q4k");
+            _moeDownIdKsplitQ4k = _moeIdQ4kModule.GetFunction("moe_down_id_ksplit_q4k");
         }
         string q6k = Ptx("moe_id_q6k");
         if (File.Exists(q6k))
@@ -42,6 +44,7 @@ public sealed partial class CudaKernels
             _moeIdQ6kModule = LoadOwnedModule(q6k);
             _moeGateUpIdQ6k = _moeIdQ6kModule.GetFunction("moe_gateup_id_q6k");
             _moeDownIdQ6k = _moeIdQ6kModule.GetFunction("moe_down_id_q6k");
+            _moeDownIdKsplitQ6k = _moeIdQ6kModule.GetFunction("moe_down_id_ksplit_q6k");
         }
         string q8 = Ptx("moe_id_q8_0");
         if (File.Exists(q8))
@@ -49,6 +52,7 @@ public sealed partial class CudaKernels
             _moeIdQ8_0Module = LoadOwnedModule(q8);
             _moeGateUpIdQ8_0 = _moeIdQ8_0Module.GetFunction("moe_gateup_id_q8_0");
             _moeDownIdQ8_0 = _moeIdQ8_0Module.GetFunction("moe_down_id_q8_0");
+            _moeDownIdKsplitQ8_0 = _moeIdQ8_0Module.GetFunction("moe_down_id_ksplit_q8_0");
         }
         string combine = Ptx("moe_combine_slots");
         if (File.Exists(combine))
@@ -77,6 +81,7 @@ public sealed partial class CudaKernels
     {
         nint fn = format == DType.Q4_K ? _moeGateUpIdQ4k : format == DType.Q6_K ? _moeGateUpIdQ6k : _moeGateUpIdQ8_0;
         if (fn == 0) throw new InvalidOperationException($"moe_id kernels for {format} are not present in the Ptx folder.");
+        if (format == DType.Q4_K) RequireQ4kGemvAlignment(gateW | upW, xq);
         ulong actA = act, xqA = xq, xdA = xd, xsA = xs, gA = gateW, uA = upW, iA = ids;
         long strideA = expertStride;
         int nA = n, kA = k, tA = topk, eA = numExperts, geluA = gelu ? 1 : 0;
@@ -93,14 +98,32 @@ public sealed partial class CudaKernels
     {
         nint fn = format == DType.Q4_K ? _moeDownIdQ4k : format == DType.Q6_K ? _moeDownIdQ6k : _moeDownIdQ8_0;
         if (fn == 0) throw new InvalidOperationException($"moe_id kernels for {format} are not present in the Ptx folder.");
+        if (format == DType.Q4_K) RequireQ4kGemvAlignment(downW, xq);
         ulong oA = output, xqA = xq, xdA = xd, xsA = xs, wA = downW, iA = ids;
         long strideA = expertStride;
         int nA = n, kA = k, eA = numExperts;
         void** a = stackalloc void*[10];
         a[0] = &oA; a[1] = &xqA; a[2] = &xdA; a[3] = &xsA; a[4] = &wA; a[5] = &iA; a[6] = &strideA;
         a[7] = &nA; a[8] = &kA; a[9] = &eA;
+        uint ksplit = MoeDownKsplitWarps(n, k, rows);
+        nint split = format == DType.Q4_K ? _moeDownIdKsplitQ4k : format == DType.Q6_K ? _moeDownIdKsplitQ6k : _moeDownIdKsplitQ8_0;
+        if (ksplit > 1 && split != 0)
+        {
+            CudaDriverApi.cuLaunchKernel(split, (uint)n, (uint)rows, 1, 32, ksplit, 1, 0, stream, (nint)a, 0).ThrowOnError();
+            return;
+        }
         uint wpb = (uint)_wpbOverride;
         CudaDriverApi.cuLaunchKernel(fn, ((uint)n + wpb - 1) / wpb, (uint)rows, 1, 32, wpb, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    // Warps per output row for the expert-indexed down projection. Long-K rows (Mixtral's ffn_down, K = 14336) run one row per
+    // block split across 4 warps when the launch has few rows; numerics.gemvKsplit forces it off (0) or to W warps like the
+    // dense GEMV's split.
+    internal static uint MoeDownKsplitWarps(int n, int k, int rows)
+    {
+        if (_ksplitOverride == 0 || rows > 65535) return 1;   // gridDim.y carries the row count
+        if (_ksplitOverride > 1) return (uint)Math.Min(_ksplitOverride, 16);
+        return k >= 8192 && (long)n * rows <= 65536 ? 4u : 1u;
     }
 
     /// <summary>Weighted sum of each token's routed rows plus the optional shared-expert row; <paramref name="shared"/> and

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Transformer;
@@ -34,6 +35,42 @@ public sealed unsafe class CudaMoeIndexedTests
         // About 500 rows per expert: past the point where a dense GEMM per expert replaces the grouped call.
         yield return [2000, "Q4_K", "Q6_K", false];
         yield return [2000, "Q8_0", "Q8_0", false];
+    }
+
+    /// <summary>The same comparison with every down projection split across 4 warps per row (the long-K path Mixtral's
+    /// ffn_down takes), forced through <see cref="EngineKnobs.GemvKsplit"/> because the test's K is short.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData(1, "Q4_K", "Q4_K")]
+    [InlineData(3, "Q4_K", "Q6_K")]
+    [InlineData(16, "Q8_0", "Q8_0")]
+    public void IndexedMoe_KsplitDown_MatchesHostRoutedMoe(int n, string gateUpType, string downType)
+    {
+        KnobStore.Set(EngineKnobs.GemvKsplit, 4);
+        try { IndexedMoe_MatchesHostRoutedMoe(n, gateUpType, downType, false); }
+        finally { KnobStore.Clear(EngineKnobs.GemvKsplit); }
+    }
+
+    [Fact]
+    public void DownKsplit_DefaultHeuristic_SplitsOnlyLongKFewRowLaunches()
+    {
+        try
+        {
+            KnobStore.Clear(EngineKnobs.GemvKsplit);
+            Assert.Equal(4u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 2));     // Mixtral ffn_down, decode
+            Assert.Equal(4u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 16));    // a speculative-verify batch still fits the cap
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 64));    // many rows: plenty of blocks without splitting
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(2048, 768, 8));       // Qwen3-30B-A3B ffn_down: short K stays unsplit
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(1, 14336, 70000));    // gridDim.y limit
+            KnobStore.Set(EngineKnobs.GemvKsplit, 0);
+            Assert.Equal(1u, CudaKernels.MoeDownKsplitWarps(4096, 14336, 2));     // the knob turns it off
+            KnobStore.Set(EngineKnobs.GemvKsplit, 8);
+            Assert.Equal(8u, CudaKernels.MoeDownKsplitWarps(2048, 768, 8));       // and forces it
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.GemvKsplit);
+        }
     }
 
     [Trait("Category", "GpuIntegration")]

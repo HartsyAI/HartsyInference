@@ -4887,6 +4887,7 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Fused Q4_K × Q8_1 dp4a matrix-vector product for decode (M small). Consumes the pre-quantized int8 activation (xq/xd/xs from <see cref="LaunchQuantizeActivationQ8_1"/>).</summary>
     public unsafe void LaunchMulMatVecQ4KQ8_1(ulong output, ulong xq, ulong xd, ulong xs, ulong weight, ulong bias, int N, int K, int M, nint stream)
     {
+        RequireQ4kGemvAlignment(weight, xq);
         ulong outA = output, xqA = xq, xdA = xd, xsA = xs, wA = weight, bA = bias;
         int nA = N, kA = K, mA = M;
         void** args = stackalloc void*[9];
@@ -4901,6 +4902,14 @@ public sealed partial class CudaKernels : IDisposable
         uint WARPS_PER_BLOCK = (uint)_wpbOverride;
         uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
         CudaDriverApi.cuLaunchKernel(_mulMatVecQ4KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    // The Q4_K dp4a kernels read weights and the int8 activation with 16-byte loads; a misaligned pointer would fault the
+    // context, so it is refused here. Device allocations are 256-aligned and a Q4_K row (144 * K/256 bytes) keeps that.
+    internal static void RequireQ4kGemvAlignment(ulong weight, ulong xq)
+    {
+        if (((weight | xq) & 15) != 0)
+            throw new ArgumentException($"Q4_K GEMV needs 16-byte aligned weight and activation pointers (weight 0x{weight:X}, xq 0x{xq:X}).");
     }
 
     // Block-per-row K-split policy for the dp4a GEMV kernels: warp-per-row leaves long-K/small-N shapes

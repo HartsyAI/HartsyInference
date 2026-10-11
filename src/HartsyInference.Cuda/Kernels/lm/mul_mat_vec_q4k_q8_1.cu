@@ -11,8 +11,9 @@
 //         = xscale_j * ( subScale * dp4a(q,xq) - subMin * xsum_j )
 //
 // Two entry points share the per-lane body:
-//  - mul_mat_vec_q4k_q8_1: one WARP per output row (8 rows/block). Each lane owns 8 elements of a
-//    sub-block (4 lanes cover one 32-elem sub-block); a warp-shuffle reduction sums the row.
+//  - mul_mat_vec_q4k_q8_1: one WARP per output row. Each lane owns 32 elements (16 qs bytes, both
+//    nibble planes) of a super-block, 8 lanes per super-block; a warp-shuffle reduction sums the row.
+//    Weight and xq pointers must be 16-byte aligned (device allocations are 256-aligned).
 //  - mul_mat_vec_q4k_q8_1_ksplit: one BLOCK per output row; the warps split the row's super-blocks
 //    (stride blockDim.y) and combine through shared memory (deterministic order). Dispatched ONLY for
 //    long-K/small-N shapes (ffn_down class, e.g. N=1536 → 1.1 waves of warps at warp-per-row, measured
@@ -46,11 +47,77 @@ __device__ __forceinline__ void get_scale_min_k4_words(
     }
 }
 
-// Per-lane partial dot over one output row. Each lane owns 8 elements of one sub-block per
-// super-block (plane-per-lane: lanes with even/odd j read the same qs bytes for the lo/hi nibble —
-// L1 absorbs the second read). A byte-shared variant (each lane processing both nibble planes of
-// its uint2, 2 super-blocks/warp-iteration) was built and measured 2026-07-22: ~10% SLOWER on the
-// long-K ffn_down shape, flat elsewhere — reverted to this form.
+// Per-lane partial dot over one output row. Eight lanes share a super-block and a warp covers four
+// super-blocks per iteration (576 contiguous bytes): lane t of its group owns qs bytes [16t, 16t+16) —
+// one 16-byte load — and processes both nibble planes of them (sub-blocks 2p and 2p+1, p = t/2), so
+// every weight byte is requested exactly once. The 16-byte header (d, dmin, 12 scale bytes) is one
+// more 16-byte load; 144 is a multiple of 16, so a 16-aligned row keeps every block aligned.
+// sbStart/sbStride count warp-iterations (the ksplit entry passes warp, warps): group g of warp w
+// handles super-blocks 4*sbStart + g, stepping 4*sbStride.
+// (The 2026-07-22 byte-shared variant used 8-byte loads and two super-blocks per iteration; this one
+// measured +60% on the Mixtral ffn_down shape, 2026-10-10.)
+// R rows (R = 2: an MoE expert's gate and up rows) share every activation load; each row keeps its
+// own accumulator, summed in the same per-super-block order as R = 1.
+template <int R>
+__device__ __forceinline__ void q4k_q8_1_rows_partial(
+    const unsigned char* const (&wrows)[R],
+    const signed char* __restrict__ xqrow,
+    const float* __restrict__ xdrow,
+    const float* __restrict__ xsrow,
+    int nsb, int sbStart, int sbStride, int lane, float (&acc)[R])
+{
+    const int t = lane & 7;                // position in the super-block group
+    const int g = lane >> 3;               // super-block within the warp-iteration
+    const int pr = t >> 1;                 // qs pair: sub-blocks 2pr (lo nibble) and 2pr+1 (hi nibble)
+    const int hh = t & 1;                  // which 16 of the pair's 32 bytes
+    const int qsOff = 16 + pr * 32 + hh * 16;
+    const int xOff0 = pr * 64 + hh * 16;   // lo-nibble elements; the hi-nibble ones are 32 further
+    const bool minLane = hh == 0;          // one lane per sub-block pair adds the min terms
+
+    #pragma unroll
+    for (int r = 0; r < R; ++r) acc[r] = 0.0f;
+    #pragma unroll 2
+    for (int sb = sbStart * 4 + g; sb < nsb; sb += sbStride * 4) {
+        uint4 hdr[R], q[R];
+        #pragma unroll
+        for (int r = 0; r < R; ++r) {
+            const unsigned char* block = wrows[r] + (size_t)sb * SUPER_BYTES;
+            hdr[r] = *reinterpret_cast<const uint4*>(block);
+            q[r] = *reinterpret_cast<const uint4*>(block + qsOff);
+        }
+        const signed char* xb = xqrow + sb * SUPER_ELEMS + xOff0;
+        const int4 xlo = *reinterpret_cast<const int4*>(xb);
+        const int4 xhi = *reinterpret_cast<const int4*>(xb + 32);
+        const int subBlock = sb * 8 + 2 * pr;
+        const float xd0 = xdrow[subBlock], xd1 = xdrow[subBlock + 1];
+        const float xs0 = xsrow[subBlock], xs1 = xsrow[subBlock + 1];
+
+        #pragma unroll
+        for (int r = 0; r < R; ++r) {
+            const float d = __half2float(__ushort_as_half((unsigned short)(hdr[r].x & 0xFFFFu)));
+            const float dmin = __half2float(__ushort_as_half((unsigned short)(hdr[r].x >> 16)));
+            unsigned int sc0, m0, sc1, m1;
+            get_scale_min_k4_words(2 * pr, hdr[r].y, hdr[r].z, hdr[r].w, &sc0, &m0);
+            get_scale_min_k4_words(2 * pr + 1, hdr[r].y, hdr[r].z, hdr[r].w, &sc1, &m1);
+
+            int lo = __dp4a((int)(q[r].x & 0x0F0F0F0Fu), xlo.x, 0);
+            lo = __dp4a((int)(q[r].y & 0x0F0F0F0Fu), xlo.y, lo);
+            lo = __dp4a((int)(q[r].z & 0x0F0F0F0Fu), xlo.z, lo);
+            lo = __dp4a((int)(q[r].w & 0x0F0F0F0Fu), xlo.w, lo);
+            int hi = __dp4a((int)((q[r].x >> 4) & 0x0F0F0F0Fu), xhi.x, 0);
+            hi = __dp4a((int)((q[r].y >> 4) & 0x0F0F0F0Fu), xhi.y, hi);
+            hi = __dp4a((int)((q[r].z >> 4) & 0x0F0F0F0Fu), xhi.z, hi);
+            hi = __dp4a((int)((q[r].w >> 4) & 0x0F0F0F0Fu), xhi.w, hi);
+
+            // Each sub-block's scale and min term rounded as w = d*sc*q - dmin*m: (d*sc) and (dmin*m) first.
+            acc[r] += xd0 * (d * (float)sc0) * (float)lo;
+            if (minLane) acc[r] -= xd0 * (dmin * (float)m0) * xs0;
+            acc[r] += xd1 * (d * (float)sc1) * (float)hi;
+            if (minLane) acc[r] -= xd1 * (dmin * (float)m1) * xs1;
+        }
+    }
+}
+
 __device__ __forceinline__ float q4k_q8_1_row_partial(
     const unsigned char* __restrict__ wrow,
     const signed char* __restrict__ xqrow,
@@ -58,46 +125,10 @@ __device__ __forceinline__ float q4k_q8_1_row_partial(
     const float* __restrict__ xsrow,
     int nsb, int sbStart, int sbStride, int lane)
 {
-    const int j = lane >> 2;               // sub-block 0..7
-    const int base_i = (lane & 3) << 3;    // 0,8,16,24
-    const int nibbleShift = (j & 1) ? 4 : 0;
-    const int subByteBase = (j >> 1) * SUB_ELEMS + base_i;
-    const int xElemBase = j * SUB_ELEMS + base_i;
-    const bool minLane = (lane & 3) == 0;  // one lane per sub-block adds the min term
-
-    float acc = 0.0f;
-    #pragma unroll 4   // independent loads of several blocks in flight; the adds into acc keep their order
-    for (int sb = sbStart; sb < nsb; sb += sbStride) {
-        const unsigned char* block = wrow + (size_t)sb * SUPER_BYTES;
-        const unsigned int ddmin = *(const unsigned int*)block;    // fp16 d | fp16 dmin, one load
-        const float d = __half2float(__ushort_as_half((unsigned short)(ddmin & 0xFFFFu)));
-        const float dmin = __half2float(__ushort_as_half((unsigned short)(ddmin >> 16)));
-        const unsigned int* sc32 = (const unsigned int*)(block + 4);
-        const unsigned char* qs = block + 16;
-
-        unsigned int sc, mm;
-        get_scale_min_k4_words(j, sc32[0], sc32[1], sc32[2], &sc, &mm);
-        const float subScale = d * (float)sc;
-        const float subMin = dmin * (float)mm;
-
-        // 8 int8 activations (2× int32) + 8 quant bytes (uint2).
-        const int2 xqp = *reinterpret_cast<const int2*>(xqrow + sb * SUPER_ELEMS + xElemBase);
-        const uint2 qpack = *reinterpret_cast<const uint2*>(qs + subByteBase);
-
-        // Whole-word nibble extraction: shifting the packed word by 0/4 then masking 0x0F0F0F0F
-        // yields all four byte-lanes' selected nibbles in one op pair.
-        const int wq0 = (int)((qpack.x >> nibbleShift) & 0x0F0F0F0Fu);
-        const int wq1 = (int)((qpack.y >> nibbleShift) & 0x0F0F0F0Fu);
-
-        int idot = __dp4a(wq0, xqp.x, 0);
-        idot = __dp4a(wq1, xqp.y, idot);
-
-        const int subBlock = sb * 8 + j;
-        const float xscale = xdrow[subBlock];
-        acc += xscale * subScale * (float)idot;
-        if (minLane) acc -= xscale * subMin * xsrow[subBlock];
-    }
-    return acc;
+    const unsigned char* const w[1] = { wrow };
+    float acc[1];
+    q4k_q8_1_rows_partial<1>(w, xqrow, xdrow, xsrow, nsb, sbStart, sbStride, lane, acc);
+    return acc[0];
 }
 
 extern "C" __global__ void mul_mat_vec_q4k_q8_1(
