@@ -71,7 +71,8 @@ public sealed partial class VulkanBackend
         long units = (long)k / dtype.BlockElementCount * unitsPerBlock;
         uint subgroup = Math.Max(1u, Vk.SubgroupSize);
         uint wg = subgroup;
-        while (wg < 128 && wg < units) wg *= 2;
+        // Lane r writes activation row r's total, so the workgroup has at least M lanes.
+        while (wg < 128 && (wg < units || wg < m)) wg *= 2;
         // The shader sums one partial per subgroup through 32 shared slots per activation row.
         wg = Math.Min(wg, 32 * subgroup);
 
