@@ -1,3 +1,5 @@
+namespace HartsyInference.Tools;
+
 /// <summary>What <see cref="ToolLoopOptions.OnBeforeToolCall"/> decided: run the call, or refuse it and feed
 /// <see cref="DenialResult"/> back as its result.</summary>
 public readonly record struct ToolCallDecision(bool Allowed, string? DenialResult)

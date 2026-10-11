@@ -31,8 +31,10 @@ public static class ToolLoop
         return Create((r, ct) => text.StreamAsync(spec, r, ct), request, tools, options);
     }
 
-    /// <summary>A run over any model turn: <paramref name="stream"/> streams one round for the request it is given, with the conversation so far.</summary>
-    public static ToolLoopRun Create(Func<TextRequest, CancellationToken, IAsyncEnumerable<TextChunk>> stream, TextRequest request, IToolDispatcher tools, ToolLoopOptions? options = null)
+    /// <summary>A run over any model turn: <paramref name="stream"/> streams one round for the request it is given,
+    /// with the conversation so far.</summary>
+    public static ToolLoopRun Create(Func<TextRequest, CancellationToken, IAsyncEnumerable<TextChunk>> stream,
+        TextRequest request, IToolDispatcher tools, ToolLoopOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentNullException.ThrowIfNull(request);
@@ -43,7 +45,8 @@ public static class ToolLoop
         return new ToolLoopRun(stream, request, tools, resolved);
     }
 
-    /// <summary>Runs the loop over <paramref name="text"/> for <paramref name="request"/>; <paramref name="request"/>.Tools, when set, is offered as-is, else <paramref name="registry"/>.Definitions.</summary>
+    /// <summary>Runs the loop over <paramref name="text"/> for <paramref name="request"/>; <paramref
+    /// name="request"/>.Tools, when set, is offered as-is, else <paramref name="registry"/>.Definitions.</summary>
     public static IAsyncEnumerable<TextChunk> RunAsync(ITextService text, ModelSpec spec, TextRequest request, ToolRegistry registry,
         int maxRounds = DefaultMaxRounds, CancellationToken cancel = default)
         => Create(text, spec, request, registry, new ToolLoopOptions { MaxRounds = maxRounds }).RunAsync(cancel);
