@@ -638,6 +638,7 @@ public sealed class TextService : ITextService, IDisposable
             Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture ?? slot.TpCheckpoint?.Architecture,
             ModelPath = slot.LoadedPath,
             HasStructuredParser = structured,
+            ForcedToolName = request.ForceToolId,
         });
         IReadOnlySet<int>? literalIds = ResolveLiteralIds(filter, tokenizer);
         // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
