@@ -10,6 +10,7 @@ namespace HartsyInference.LLM.ChatTemplates;
 public sealed class JinjaChatTemplate : IChatTemplate
 {
     private readonly JinjaEngine _engine;
+    private readonly string _toolRole;
 
     public string Name => "jinja";
 
@@ -22,6 +23,9 @@ public sealed class JinjaChatTemplate : IChatTemplate
         ArgumentNullException.ThrowIfNull(chatTemplate);
         _engine = new JinjaEngine(chatTemplate);
         Source = chatTemplate;
+        // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
+        _toolRole = chatTemplate.Contains("'observation'", StringComparison.Ordinal) || chatTemplate.Contains("\"observation\"", StringComparison.Ordinal)
+            ? "observation" : "tool";
     }
 
     /// <inheritdoc/>
@@ -63,7 +67,8 @@ public sealed class JinjaChatTemplate : IChatTemplate
             return new ChatMlTemplate().Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools);
         }
         // The template emits the bos_token literal itself, so don't double-add specials beyond literal matching.
-        return tokenizer.Encode(rendered, addSpecial: true);
+        // Message content is escaped against the tokenizer's control literals, so only the template's own literals become ids here.
+        return SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer);
     }
 
     /// <summary>Renders the conversation through the model's Jinja template; an unset <paramref name="enableThinking"/> leaves <c>enable_thinking</c> undefined so <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of being forced off.</summary>
@@ -72,7 +77,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
     {
         List<object?> msgList = new(messages.Count);
         foreach (ChatMessage m in messages)
-            msgList.Add(MessageValue(m));
+            msgList.Add(MessageValue(m, tokenizer.SpecialLiterals));
 
         Dictionary<string, object?> context = new()
         {
@@ -90,9 +95,11 @@ public sealed class JinjaChatTemplate : IChatTemplate
     }
 
     /// <summary>The OpenAI-shaped message dictionary Hugging Face templates expect: <c>tool_calls[i].function.{name,arguments}</c> with arguments as a parsed object when they are JSON, plus <c>tool_call_id</c>, <c>name</c> and <c>reasoning_content</c> when set.</summary>
-    private static Dictionary<string, object?> MessageValue(ChatMessage m)
+    private Dictionary<string, object?> MessageValue(ChatMessage m, IReadOnlyList<string> literals)
     {
-        Dictionary<string, object?> value = new() { ["role"] = m.Role, ["content"] = m.Content };
+        // Every string here came from the conversation (the user, a tool result or the model), so each one is escaped against the control literals.
+        string role = m.Role == ToolRoleName ? _toolRole : m.Role;
+        Dictionary<string, object?> value = new() { ["role"] = role, ["content"] = SpecialLiteralEscaper.Escape(m.Content, literals) };
         if (m.ToolCalls is { Count: > 0 })
         {
             List<object?> calls = new(m.ToolCalls.Count);
@@ -100,18 +107,25 @@ public sealed class JinjaChatTemplate : IChatTemplate
             {
                 calls.Add(new Dictionary<string, object?>
                 {
-                    ["id"] = call.Id,
+                    ["id"] = SpecialLiteralEscaper.Escape(call.Id, literals),
                     ["type"] = "function",
-                    ["function"] = new Dictionary<string, object?> { ["name"] = call.Name, ["arguments"] = ArgumentsValue(call.ArgumentsJson) },
+                    ["function"] = new Dictionary<string, object?>
+                    {
+                        ["name"] = SpecialLiteralEscaper.Escape(call.Name, literals),
+                        ["arguments"] = ArgumentsValue(SpecialLiteralEscaper.Escape(call.ArgumentsJson, literals)),
+                    },
                 });
             }
             value["tool_calls"] = calls;
         }
-        if (m.ToolCallId is not null) value["tool_call_id"] = m.ToolCallId;
-        if (m.Name is not null) value["name"] = m.Name;
-        if (m.ReasoningContent is not null) value["reasoning_content"] = m.ReasoningContent;
+        if (m.ToolCallId is not null) value["tool_call_id"] = SpecialLiteralEscaper.Escape(m.ToolCallId, literals);
+        if (m.Name is not null) value["name"] = SpecialLiteralEscaper.Escape(m.Name, literals);
+        if (m.ReasoningContent is not null) value["reasoning_content"] = SpecialLiteralEscaper.Escape(m.ReasoningContent, literals);
         return value;
     }
+
+    /// <summary>The role a tool result carries in a conversation (see <see cref="ChatMessage.Role"/>).</summary>
+    private const string ToolRoleName = "tool";
 
     private static List<object?>? ToolsValue(IReadOnlyList<ToolSpec>? tools)
     {

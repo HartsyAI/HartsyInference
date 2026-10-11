@@ -293,6 +293,8 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
         switch (name)
         {
             case "trim": return Values.ToStr(v).Trim();
+            // Identity: this engine never HTML-escapes, so "safe" has nothing to undo (templates use it around tojson output).
+            case "safe": return v;
             case "lower": return Values.ToStr(v).ToLowerInvariant();
             case "upper": return Values.ToStr(v).ToUpperInvariant();
             // length/count: char count for strings, element count for sequences/dicts (Jinja semantics).
