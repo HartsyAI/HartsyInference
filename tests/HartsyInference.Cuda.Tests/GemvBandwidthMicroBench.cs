@@ -40,10 +40,13 @@ public sealed unsafe class GemvBandwidthMicroBench
         new("qwen3-30b down q8_0", Kind.Down, DType.Q8_0, 2048, 768, 128, 8),
         new("dense q4k 4096x4096", Kind.Dense, DType.Q4_K, 4096, 4096, 2, 1),
         new("dense q4k 14336x4096", Kind.Dense, DType.Q4_K, 14336, 4096, 2, 1),
+        new("dense q4k 4096x14336", Kind.Dense, DType.Q4_K, 4096, 14336, 2, 1),
         new("dense q6k 4096x14336", Kind.Dense, DType.Q6_K, 4096, 14336, 2, 1),
         new("dense q6k 4096x4096", Kind.Dense, DType.Q6_K, 4096, 4096, 2, 1),
         new("dense q8_0 4096x4096", Kind.Dense, DType.Q8_0, 4096, 4096, 2, 1),
         new("dense q8_0 2048x8192", Kind.Dense, DType.Q8_0, 2048, 8192, 2, 1),
+        // A near-empty launch: its time is the back-to-back launch floor that every row above also pays once.
+        new("launch floor 64x256", Kind.Dense, DType.Q8_0, 64, 256, 2, 1),
     };
 
     private static long RowBytes(DType f, int k) =>
