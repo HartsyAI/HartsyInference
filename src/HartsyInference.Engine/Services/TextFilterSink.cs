@@ -52,6 +52,8 @@ internal sealed class TextFilterSink
     {
         if (Stopped) return;
         Apply(_filter.OnEnd());
+        // One terminal delta can complete several calls; drain them all so none is lost to the end of the stream.
+        while (_filter.HasPendingOutput) Apply(_filter.OnEnd());
     }
 
     private void Apply(TextFilterResult result)

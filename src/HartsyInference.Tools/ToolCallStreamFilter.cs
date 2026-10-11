@@ -34,6 +34,9 @@ public sealed class ToolCallStreamFilter : ITextStreamFilter
     /// <inheritdoc/>
     public TextFilterResult OnEnd() => Emit(_parser.Flush());
 
+    /// <inheritdoc/>
+    public bool HasPendingOutput => _emitted < _calls.Count;
+
     private TextFilterResult Emit(ToolCallParseResult parsed)
     {
         if (parsed.Calls is { Count: > 0 } calls) _calls.AddRange(calls);
