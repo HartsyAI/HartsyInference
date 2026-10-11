@@ -105,23 +105,62 @@ tool:      { Content = <result of c0>, ToolCallId = c0.Id, Name = c0.Name }   //
 Jinja receives `tool_calls[i] = {id, type:"function", function:{name, arguments}}` and `tool_call_id`/`name` on the
 tool turn; Qwen's template folds consecutive tool turns into one `<tool_response>` user turn.
 
-Chunk stream: each round's `Chunk`, `NativeToolCall`, `Reasoning`, `Status`, `ToolCallDelta`, `ToolCallAbort` and
-`Usage` chunks pass through as they arrive; each round's own `Result` and `ToolCall` stop are suppressed; the loop ends
-with one `Result` (visible text of all rounds) and one `StopReason`. Tool results are `TextChunkKind.Status` chunks
-(no Engine kind fits and this package adds none): `Text = "tool_result:" + result`, `Status.Phase = "tool_result"`,
-`ToolCall` = the call, `ToolCallIndex` = running index. When the round limit is hit while the model still asks for a
-tool, the loop yields `Status` `tool_loop:max_rounds=N` (phase `tool_loop`), the result and `StopReason.ToolCall`;
-that last call is not dispatched. `Error`/`Cancelled` stops are relayed and end the loop.
+Chunk stream: each round's `Chunk`, `NativeToolCall`, `Reasoning`, `Status`, `Usage` and other pass-through chunks stream
+as they arrive; each round's own `Result` and `ToolCall` stop are suppressed; the run ends with one `Result` (the visible
+text of all rounds) and one `StopReason`. A dispatched call streams as `TextChunkKind.ToolResult`: `Text` is the result,
+`ToolCall` the call, `ToolCallIndex` its position in the run. When the round limit is hit while the model still asks for
+a tool, the run yields a `Status` chunk `tool_loop:max_rounds=N` (phase `tool_loop`), the result and
+`StopReason.ToolCall`; that last call is not dispatched. `Error`/`Cancelled` stops are relayed and end the run.
+
+`ToolLoop.Create` takes the engine's text service or any model stream (`Func<TextRequest, CancellationToken,
+IAsyncEnumerable<TextChunk>>`), an `IToolDispatcher` (`ToolRegistry` implements it; a host can supply its own executor)
+and `ToolLoopOptions`. The run is single-use and exposes `Conversation`, `ToolResults`, `Rounds`, `Stop` and
+`VisibleText` once it completes. `ToolLoopOptions.OnBeforeToolCall` allows or denies each call; a denial is not
+dispatched and its result is what the model reads. Calls dispatch on any non-error stop, so a plain `Stop` with a call
+still runs it.
 
 Dispatch errors are results, not exceptions: an unknown tool or a throwing handler yields
 `{"error": "…"}` (exception type and message) for the model to read; cancellation propagates. That text is meant
 for the model and the host; a host relaying tool results to a remote end user should rewrite it. An `Error` or
 `Cancelled` stop from the service ends the loop without a final `Result` chunk.
 
+## Status (alpha.335 to alpha.341)
+
+- Per-request format: `ToolCalling.Install` resolves the format from the model's chat template first, then its
+  architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter.
+- Control-token markers reach the parser: a filter lists its markers (`ITextStreamFilter.MarkerLiterals`) and the engine
+  decodes them as text. Message content is escaped against the control literals, so user or tool text cannot open a turn
+  or emit a marker token. `<think>`/`</think>` stream as text.
+- Dialects: Hermes JSON (including the name-on-one-line form GLM-4-0414 uses), Llama 3 `<|python_tag|>`, Gemma 4,
+  Mistral `[TOOL_CALLS]`, Qwen3.5 and Qwen3-Coder `<function=…><parameter=…>` (`QwenXml`), GLM-4.5 `<arg_key>` pairs
+  (`GlmXml`), and DeepSeek-R1 fenced JSON blocks (`DeepSeekR1`). Markup values are typed by the offered tool's schema.
+- A template with no `tools` slot gets the Hermes tool prompt written into the conversation, and the template gets no
+  tools. `ForceToolId` must name an offered tool (refused before model work), is stated in the system prompt, and
+  restricts the parser to that tool. It is not grammar-forced: a model that ignores the instruction can answer in prose.
+- The sentinel grammar (`<tool_call>` JSON forcing) is no longer armed for tool requests. It never fired on GGUF text
+  and it disabled graph and speculative decode for every tool turn.
+
+Real-weight results on this machine (CPU; `ToolLoopRealWeightTheoryTests` and `ToolCallCpuProbeTests`):
+
+| Checkpoint | Dialect | Result |
+|---|---|---|
+| Qwen3-0.6B Q4_K_M | Hermes | `get_time` call, second round, passes |
+| Gemma-3-1B Q4_K_M | Hermes, injected prompt | `get_time` call, second round, passes |
+| Llama-3.2-1B Q8_0 | Llama 3 | `get_time` call, second round, passes |
+| Qwen2.5-0.5B Q4_K_M | Hermes | `hang_up` call passes; `get_time` gets `<tool_call>` then the turn ends, so the matrix case fails (a model limit on this prompt, kept visible) |
+| Qwen3.5-0.8B Q4_K_M | QwenXml | not run on CPU: its Q5_K dense weights have no CPU matmul path |
+| Phi-3.5-mini, Mistral-7B, GLM-4-9B | Hermes | not run on CPU: the CPU path widens weights to F32 (about 15 GB or more) and the OOM killer ends the test host |
+| DeepSeek-R1-Distill-Qwen-1.5B | DeepSeekR1 | not on this machine |
+| GLM-4.5 | GlmXml | not on this machine; the dialect is covered by unit tests only |
+
+Run the CUDA rows with `TOOLCALL_PROBE_DEVICE=cuda` and the checkpoint's `*_GGUF_PATH` variable.
+
 ## Open
 
-- `ForceToolId` (OpenAI `tool_choice` = named function) is carried but not enforced anywhere.
 - Llama 3.2's pythonic `[f(a=1), g()]` call syntax and Gemma 3's ```` ```tool_code ```` prompt-only convention are
   not parsed.
-- Surfacing marker tokens to the filter (or a tokenizer-aware sentinel table for the grammar) is an Engine/LLM
-  decision, not taken here.
+- `ForceToolId` is an instruction plus a parser restriction, not a grammar. A model can still answer in prose.
+- Small models echo a tool's schema into `arguments` instead of an empty object (seen on Gemma-3-1B); the parser
+  faithfully reports what the model wrote.
+- The CPU path cannot run Q5_K dense weights or 3.8B-and-larger checkpoints without an F32 widen; those need CUDA or a
+  quantized CPU kernel.

@@ -64,7 +64,15 @@ public sealed class DynamicBatchSchedulerTests
         public int? SpecialId(string token) => null;
         public int? BosId => null;
         public int? EosId => 31;
-        public IReadOnlyList<int> StopIds => [31];
+        private readonly int[] _stops;
+
+        /// <summary>The stub stops on token 31 unless told otherwise.</summary>
+        public StubTokenizer() : this([31]) { }
+
+        /// <summary>A stub with the given stop ids (empty: only the token budget ends a request).</summary>
+        public StubTokenizer(int[] stops) => _stops = stops;
+
+        public IReadOnlyList<int> StopIds => _stops;
         public string? BosToken => null;
         public string? EosToken => null;
     }
@@ -230,7 +238,8 @@ public sealed class DynamicBatchSchedulerTests
         using CpuBackend backend = new();
         using GenericTransformer model = new(cfg);
         model.LoadWeights(w, "model");
-        StubTokenizer tokenizer = new();
+        // No stop ids: the survivor must run to its six-token budget, whatever the random weights pick first.
+        StubTokenizer tokenizer = new(Array.Empty<int>());
         using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
         using DynamicBatchScheduler scheduler = new(model, tokenizer, backend, pool);
 
@@ -242,7 +251,8 @@ public sealed class DynamicBatchSchedulerTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
         GenerationResult survivorResult = await survivor;
-        Assert.Equal(6, survivorResult.TokenIds.Count);
+        Assert.True(survivorResult.TokenIds.Count == 6,
+            $"survivor produced {survivorResult.TokenIds.Count} tokens (stopped on stop token: {survivorResult.StoppedOnStopToken}, first ids: {string.Join(",", survivorResult.TokenIds.Take(3))})");
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
