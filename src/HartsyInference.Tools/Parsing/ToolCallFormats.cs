@@ -96,6 +96,7 @@ public static partial class ToolCallFormats
             new ToolCallMarker("<｜tool▁calls▁begin｜>", ToolCallPayload.DeepSeekR1Block, Close: "<｜tool▁calls▁end｜>"),
             new ToolCallMarker("<｜tool▁call▁begin｜>", ToolCallPayload.DeepSeekR1Block, Close: "<｜tool▁call▁end｜>"),
         ],
+        ExtraLiterals = ["<｜tool▁sep｜>"],
         ArgumentKeys = [],
     };
 

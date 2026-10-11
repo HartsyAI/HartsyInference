@@ -98,6 +98,21 @@ public sealed class ToolCallMarkupParserTests
         Assert.Equal("", forwarded.Trim());
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(6)]
+    [InlineData(42)]
+    public void DeepSeekR1_ThreeCallsInOneBlockAreAllKept(int seed)
+    {
+        const string completion =
+            "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>a\n```json\n{}\n```<｜tool▁call▁end｜>"
+            + "<｜tool▁call▁begin｜>function<｜tool▁sep｜>b\n```json\n{}\n```<｜tool▁call▁end｜>"
+            + "<｜tool▁call▁begin｜>function<｜tool▁sep｜>c\n```json\n{}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
+        (_, List<NativeToolCall> calls) = RunTools(ToolCallFormat.DeepSeekR1, completion, seed: seed);
+        Assert.Equal(["a", "b", "c"], calls.Select(c => c.Name));
+    }
+
     [Fact]
     public void DeepSeekR1_SingleCallMarkerForm()
     {
