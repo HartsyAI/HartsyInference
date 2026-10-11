@@ -6,7 +6,7 @@ using static HartsyInference.Vulkan.Tests.Dsv41TestData;
 
 namespace HartsyInference.Vulkan.Tests;
 
-/// <summary><c>gemv_quant</c> (Q8_0, Q4_K, Q6_K) against the host dequantizer and a double-precision CPU dot on random
+/// <summary><c>gemv_quant</c> (Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K) against the host dequantizer and a double-precision CPU dot on random
 /// blocks, plus the Linear routing around it: decode-sized M takes the GEMV, a longer M the per-call dequantize and
 /// GEMM, and a K off the block size is refused by name. Skips without a Vulkan device.</summary>
 [Trait("Category", "GpuIntegration")]
@@ -25,8 +25,8 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         for (long b = 0; b < blocks; b++)
         {
             byte* bb = p + b * blockBytes;
-            if (dtype == DType.Q8_0) WriteHalf(bb, 0.002f + 0.01f * (float)rng.NextDouble());
-            else if (dtype == DType.Q4_K)
+            if (dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0) WriteHalf(bb, 0.002f + 0.01f * (float)rng.NextDouble());
+            else if (dtype == DType.Q4_K || dtype == DType.Q5_K)
             {
                 WriteHalf(bb, 0.0005f + 0.002f * (float)rng.NextDouble());
                 WriteHalf(bb + 2, 0.0005f + 0.002f * (float)rng.NextDouble());
@@ -84,7 +84,7 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
 
     public static IEnumerable<object[]> Cases()
     {
-        // name, dtype, N, K, M, bias. N odd everywhere; Q8_0 K=32 and 96 and Q6_K K=256 make rows start unaligned.
+        // type, N, K, M, bias. N odd everywhere; an odd block count per row (Q8_0, Q4_0, Q5_0 at K=32/96, Q6_K at 256) leaves rows unaligned.
         yield return new object[] { "Q8_0", 7, 32, 1, false };
         yield return new object[] { "Q8_0", 33, 96, 3, true };
         yield return new object[] { "Q8_0", 4097, 2048, 1, false };
@@ -94,12 +94,21 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         yield return new object[] { "Q6_K", 3, 256, 1, false };
         yield return new object[] { "Q6_K", 17, 512, 8, true };
         yield return new object[] { "Q6_K", 4097, 2048, 2, false };
+        yield return new object[] { "Q4_0", 9, 32, 1, false };
+        yield return new object[] { "Q4_0", 4097, 2048, 4, true };
+        yield return new object[] { "Q5_0", 11, 96, 1, false };
+        yield return new object[] { "Q5_0", 4097, 896, 3, true };
+        yield return new object[] { "Q5_K", 3, 256, 1, false };
+        yield return new object[] { "Q5_K", 4097, 2048, 8, true };
     }
 
     private static DType Named(string name) => name switch
     {
         "Q8_0" => DType.Q8_0,
+        "Q4_0" => DType.Q4_0,
+        "Q5_0" => DType.Q5_0,
         "Q4_K" => DType.Q4_K,
+        "Q5_K" => DType.Q5_K,
         _ => DType.Q6_K,
     };
 
@@ -128,7 +137,10 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
 
     [Theory]
     [InlineData("Q8_0")]
+    [InlineData("Q4_0")]
+    [InlineData("Q5_0")]
     [InlineData("Q4_K")]
+    [InlineData("Q5_K")]
     [InlineData("Q6_K")]
     public void Linear_PrefillM_DequantizesPerCall(string type)
     {
@@ -170,6 +182,8 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
     [InlineData("Q8_0", 48, 1)]
     [InlineData("Q4_K", 300, 1)]
     [InlineData("Q6_K", 512 + 32, 1)]
+    [InlineData("Q5_0", 40, 1)]
+    [InlineData("Q5_K", 128, 1)]
     public void Gemv_KOffTheBlock_IsRefusedByName(string type, int k, int m)
     {
         using VulkanBackend? vk = TryCreateBackend(out string? skip);

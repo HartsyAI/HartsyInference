@@ -7,7 +7,7 @@ public sealed partial class VulkanBackend
 {
     /// <summary>The GGUF block formats <c>gemv_quant</c> reads directly; the loader keeps exactly these compressed on this
     /// backend (<see cref="Core.Backends.BackendCapabilities.QuantizedTypes"/>) and widens every other format to F32.</summary>
-    internal static readonly IReadOnlySet<DType> QuantGemvTypes = new HashSet<DType> { DType.Q8_0, DType.Q4_K, DType.Q6_K };
+    internal static readonly IReadOnlySet<DType> QuantGemvTypes = new HashSet<DType> { DType.Q8_0, DType.Q4_0, DType.Q5_0, DType.Q4_K, DType.Q5_K, DType.Q6_K };
 
     /// <summary>Most activation rows one <c>gemv_quant</c> dispatch takes (a specialization constant of the shader, one pipeline per count): decode and a short
     /// speculative verify. Longer inputs dequantize the weight per call and run the GEMM.</summary>
@@ -55,7 +55,10 @@ public sealed partial class VulkanBackend
             "Q8_0" => "gemv_quant_q8_0",
             "Q4_K" => "gemv_quant_q4_k",
             "Q6_K" => "gemv_quant_q6_k",
-            _ => throw new NotSupportedException($"gemv_quant has no {dtype.Name} decoder; supported: Q8_0, Q4_K, Q6_K."),
+            "Q4_0" => "gemv_quant_q4_0",
+            "Q5_0" => "gemv_quant_q5_0",
+            "Q5_K" => "gemv_quant_q5_k",
+            _ => throw new NotSupportedException($"gemv_quant has no {dtype.Name} decoder; supported: Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K."),
         };
         if (n < 1 || k < 1) throw new ArgumentOutOfRangeException(nameof(n), $"gemv_quant needs N, K >= 1; got N={n}, K={k}.");
         if (k % dtype.BlockElementCount != 0)
@@ -63,8 +66,8 @@ public sealed partial class VulkanBackend
         if (m < 1 || m > QuantGemvMaxRows)
             throw new ArgumentOutOfRangeException(nameof(m), $"gemv_quant takes 1..{QuantGemvMaxRows} activation rows; got {m}.");
 
-        // A lane per work unit up to 128, never below a subgroup; the shader cuts a Q8_0, Q4_K and Q6_K block into 8, 16 and 16 units.
-        int unitsPerBlock = dtype == DType.Q8_0 ? 8 : 16;
+        // A lane per work unit up to 128, never below a subgroup; units per block as the shader cuts them.
+        int unitsPerBlock = dtype == DType.Q8_0 ? 8 : dtype == DType.Q4_0 || dtype == DType.Q5_0 ? 4 : 16;
         long units = (long)k / dtype.BlockElementCount * unitsPerBlock;
         uint subgroup = Math.Max(1u, Vk.SubgroupSize);
         uint wg = subgroup;

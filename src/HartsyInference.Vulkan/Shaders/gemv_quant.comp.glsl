@@ -1,7 +1,7 @@
 // Fused dequantizing GEMV for the decode-step Linear: out[m, n] = sum_k x[m, k] * W[n, k] (+ bias[n]) for M <= 8 activation
-// rows, reading the GGUF weight blocks directly instead of a dequantized copy. Built three times by build.sh, one module
-// per QTYPE: 0 = Q8_0 (gemv_quant_q8_0), 1 = Q4_K (gemv_quant_q4_k), 2 = Q6_K (gemv_quant_q6_k). Block layouts and the
-// reconstruction formulas are the ones the dequant_q8_0 / dequant_q4_k / dequant_q6_k shaders document.
+// rows, reading the GGUF weight blocks directly instead of a dequantized copy. Built once per block format by build.sh, one module
+// per QTYPE: 0 = Q8_0, 1 = Q4_K, 2 = Q6_K, 3 = Q4_0, 4 = Q5_0, 5 = Q5_K (gemv_quant_<type>). Block layouts and the
+// reconstruction formulas are the ones the matching dequant_<type> shaders document.
 //
 // One workgroup per output row. The row is cut into work units of a few words of quants (Q8_0: 4 values, 8 units per
 // block; Q4_K: 16 bytes of nibbles = 32 values, 8 units per super-block; Q6_K: 4 l-positions of one half = 16 values, 16
@@ -12,8 +12,8 @@
 // subgroup sum followed by a shared-memory sum across subgroups. The integer dot-product variant (dotPacked4x8 against an
 // int8 activation, as the CUDA dp4a kernels do) is a follow-up; the distro glslang cannot compile it.
 //
-// Q8_0 (34 bytes) and Q6_K (210 bytes) blocks are not word aligned, so those reads assemble a word from the two covering
-// words; a Q4_K row is a whole number of 36-word blocks and reads plain words.
+// Q8_0 (34 bytes), Q4_0 (18), Q5_0 (22) and Q6_K (210) blocks are not word aligned, so those reads assemble a word from
+// the two covering words; Q4_K (144) and Q5_K (176) rows are whole numbers of words and read plain words.
 
 #version 460
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -66,10 +66,23 @@ vec4 hi4(uint w) { return vec4((w >> 4) & 0xFu, (w >> 12) & 0xFu, (w >> 20) & 0x
 #define BLOCK_BYTES 144u
 #define Q4K_WORDS 2u
 #define UNITS_PER_BLOCK (32u / Q4K_WORDS)
-#else
+#elif QTYPE == 2
 #define BLOCK_ELEMS 256u
 #define BLOCK_BYTES 210u
 #define UNITS_PER_BLOCK 16u
+#elif QTYPE == 3
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 18u
+#define UNITS_PER_BLOCK 4u
+#elif QTYPE == 4
+#define BLOCK_ELEMS 32u
+#define BLOCK_BYTES 22u
+#define UNITS_PER_BLOCK 4u
+#else
+#define BLOCK_ELEMS 256u
+#define BLOCK_BYTES 176u
+#define Q4K_WORDS 2u
+#define UNITS_PER_BLOCK (32u / Q4K_WORDS)
 #endif
 
 void main() {
@@ -95,8 +108,8 @@ void main() {
         vec4 q = sbytes4(readU32(bb + 2u + 4u * sub));
         uint x0 = (b * 32u + sub * 4u) >> 2;
         for (uint m = 0u; m < M; m++) acc[m] += d * dot(q, x4[m * K4 + x0]);
-#elif QTYPE == 1
-        // Unit sub covers qs words Q4K_WORDS*sub ..: sub-block pair p (low nibbles are sub-block 2p, high 2p+1), each word
+#elif QTYPE == 1 || QTYPE == 5
+        // Q4_K, and Q5_K with its high bits. Unit sub covers qs words Q4K_WORDS*sub ..: sub-block pair p (low nibbles are sub-block 2p, high 2p+1), each word
         // four positions of both.
         uint wb = bb >> 2;
         vec2 dm = unpackHalf2x16(w_data[wb]);
@@ -120,8 +133,16 @@ void main() {
         float accl[M], acch[M], suml[M], sumh[M];
         for (uint m = 0u; m < M; m++) { accl[m] = 0.0; acch[m] = 0.0; suml[m] = 0.0; sumh[m] = 0.0; }
         for (uint w = 0u; w < Q4K_WORDS; w++) {
+#if QTYPE == 1
             uint qw = w_data[wb + 4u + Q4K_WORDS * sub + w];
             vec4 ql = lo4(qw), qh = hi4(qw);
+#else
+            // Q5_K: qs follows 32 bytes of high bits; byte l of qh carries bit 2p (low nibble) and 2p+1 (high) for position l.
+            uint qw = w_data[wb + 12u + Q4K_WORDS * sub + w];
+            uint hw = w_data[wb + 4u + (sub % (8u / Q4K_WORDS)) * Q4K_WORDS + w] >> (2u * p);
+            vec4 ql = lo4(qw) + vec4(hw & 1u, (hw >> 8) & 1u, (hw >> 16) & 1u, (hw >> 24) & 1u) * 16.0;
+            vec4 qh = hi4(qw) + vec4((hw >> 1) & 1u, (hw >> 9) & 1u, (hw >> 17) & 1u, (hw >> 25) & 1u) * 16.0;
+#endif
             uint xl = (b * 256u + p * 64u + (sub % (8u / Q4K_WORDS)) * 4u * Q4K_WORDS) / 4u + w;
             for (uint m = 0u; m < M; m++) {
                 vec4 a = x4[m * K4 + xl];
@@ -131,6 +152,22 @@ void main() {
             }
         }
         for (uint m = 0u; m < M; m++) acc[m] += dl * accl[m] - ml * suml[m] + dh * acch[m] - mh * sumh[m];
+#elif QTYPE == 3 || QTYPE == 4
+        // Q4_0 / Q5_0: unit sub covers qs bytes 4*sub .. +3, whose low nibbles are positions i .. i+3 (i = 4*sub) and high
+        // nibbles positions i+16 .. i+19; Q5_0 adds bit i (and i+16) of the 32-bit qh word as the fifth bit.
+        float d = halfAt(bb);
+#if QTYPE == 3
+        uint qw = readU32(bb + 2u + 4u * sub);
+        vec4 qa = lo4(qw) - 8.0, qb = hi4(qw) - 8.0;
+#else
+        uint qhw = readU32(bb + 2u);
+        uint qw = readU32(bb + 6u + 4u * sub);
+        uint ha = qhw >> (4u * sub), hb = qhw >> (4u * sub + 16u);
+        vec4 qa = lo4(qw) + vec4(ha & 1u, (ha >> 1) & 1u, (ha >> 2) & 1u, (ha >> 3) & 1u) * 16.0 - 16.0;
+        vec4 qb = hi4(qw) + vec4(hb & 1u, (hb >> 1) & 1u, (hb >> 2) & 1u, (hb >> 3) & 1u) * 16.0 - 16.0;
+#endif
+        uint x0 = (b * 32u + sub * 4u) >> 2;
+        for (uint m = 0u; m < M; m++) acc[m] += d * (dot(qa, x4[m * K4 + x0]) + dot(qb, x4[m * K4 + x0 + 4u]));
 #else
         // sub in [0, 16): half h = sub / 8, positions l0 .. l0 + 3 with l0 = (sub % 8) * 4; each position yields the
         // elements l, l + 32, l + 64 and l + 96 of the half.

@@ -177,6 +177,9 @@ done
 compile_one "gemv_quant" -DQTYPE=0 -- "_q8_0"
 compile_one "gemv_quant" -DQTYPE=1 -- "_q4_k"
 compile_one "gemv_quant" -DQTYPE=2 -- "_q6_k"
+compile_one "gemv_quant" -DQTYPE=3 -- "_q4_0"
+compile_one "gemv_quant" -DQTYPE=4 -- "_q5_0"
+compile_one "gemv_quant" -DQTYPE=5 -- "_q5_k"
 
 # sdpa_flash_cm2 with an F32 [Sq,Skv] additive mask; HAS_MASK adds a binding, so it is its own module.
 compile_one "sdpa_flash_cm2" -DHAS_MASK=1 -- "_mask"
