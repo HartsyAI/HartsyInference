@@ -122,12 +122,153 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// device.</remarks>
     protected override void FreeDevice(VulkanBuffer buffer, long bytes)
     {
+        // A group member goes like any buffer; the span over its group goes with the last member.
+        if (_viewGroups.Remove(buffer, out (VulkanAliasedGroup Group, int Index) view))
+        {
+            ReleaseNow(buffer);
+            if (--view.Group.Live == 0)
+            {
+                ReleaseNow(view.Group.Span);
+            }
+            return;
+        }
+        ReleaseNow(buffer);
+    }
+
+    private void ReleaseNow(VulkanBuffer buffer)
+    {
         if (_releasingInBulk)
         {
             buffer.Dispose();
             return;
         }
         _stream.DeferredFree(buffer);
+    }
+
+    // ── Grouped weights: a projection's experts in one allocation ───────────────────────────────────────
+
+    /// <summary>Byte stride between experts of a group. 256 covers every driver's buffer alignment (the experts are separate
+    /// buffers bound at multiples of it) and keeps each expert's first word on its own cache line.</summary>
+    internal const ulong GroupMemberAlignment = 256;
+
+    /// <summary>Group member buffer to its group and index, for the members still resident.</summary>
+    private readonly Dictionary<VulkanBuffer, (VulkanAliasedGroup Group, int Index)> _viewGroups = new();
+
+    /// <summary>Uploads <paramref name="members"/> (equal shape and type) into one allocation, expert i at <c>i * stride</c>, each member
+    /// an ordinary resident weight whose buffer aliases its slot, so every op still finds it by tensor. Returns false, having
+    /// changed nothing, when the group cannot be placed that way: fewer than two members, mixed shapes or types, a member already
+    /// resident, a span over the device's storage-buffer range or the 4 GiB a shader's 32-bit byte offsets reach, or a driver whose
+    /// buffer alignment does not divide the stride. The caller then uploads the members one by one.</summary>
+    public bool TryPreloadWeightGroup(IReadOnlyList<Tensor> members)
+    {
+        if (members.Count < 2) return false;
+        Tensor first = members[0];
+        long bytes = ByteSize(first);
+        if (bytes <= 0) return false;
+        foreach (Tensor member in members)
+        {
+            if (member.DType != first.DType || !member.Shape.Equals(first.Shape) || Weights.ContainsKey(member) || Activations.ContainsKey(member))
+            {
+                return false;
+            }
+        }
+        ulong stride = (ulong)(bytes + (long)GroupMemberAlignment - 1) / GroupMemberAlignment * GroupMemberAlignment;
+        ulong spanBytes = (ulong)(members.Count - 1) * stride + (ulong)bytes;
+        if (spanBytes > _caps.MaxStorageBufferRange || spanBytes > uint.MaxValue) return false;
+
+        VkMemoryPropertyFlags preferred = _caps.HasReBar ? VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent : VkMemoryPropertyFlags.None;
+        VulkanAliasedGroup? group = VulkanBufferFactory.CreateAliasedGroup(
+            _device, _allocator, (ulong)bytes, members.Count, stride,
+            VkBufferUsageFlags.StorageBuffer | VkBufferUsageFlags.TransferSrc | VkBufferUsageFlags.TransferDst,
+            VkMemoryPropertyFlags.DeviceLocal, preferred);
+        if (group is null) return false;
+        try
+        {
+            UploadGroup(group, members, bytes);
+        }
+        catch
+        {
+            group.Span.Dispose();
+            foreach (VulkanBuffer view in group.Members) view.Dispose();
+            throw;
+        }
+        for (int i = 0; i < members.Count; i++)
+        {
+            VulkanBuffer view = group.Members[i];
+            Weights[members[i]] = view;
+            CachedBuffers.Add(view);
+            _viewGroups[view] = (group, i);
+        }
+        return true;
+    }
+
+    /// <summary>Writes each member at its stride into the group's span: through the mapping where ReBAR allows it, else through
+    /// staging buffers of at most <see cref="GroupStagingBytes"/> each, one copy and one submit apiece.</summary>
+    private unsafe void UploadGroup(VulkanAliasedGroup group, IReadOnlyList<Tensor> members, long bytes)
+    {
+        VulkanBuffer span = group.Span;
+        ulong stride = group.Stride;
+        if (span.MappedPointer != 0)
+        {
+            for (int i = 0; i < members.Count; i++)
+            {
+                Buffer.MemoryCopy(members[i].DataPointer, (void*)(span.MappedPointer + (nint)((ulong)i * stride)), bytes, bytes);
+            }
+            FlushIfNonCoherent(span);
+            return;
+        }
+        int perChunk = (int)Math.Max(1UL, GroupStagingBytes / stride);
+        for (int start = 0; start < members.Count; start += perChunk)
+        {
+            int count = Math.Min(perChunk, members.Count - start);
+            ulong chunkBytes = (ulong)(count - 1) * stride + (ulong)bytes;
+            VulkanBuffer staging = VulkanBufferFactory.Create(
+                _device, _allocator, in _memProps, chunkBytes, VkBufferUsageFlags.TransferSrc,
+                VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent);
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    Buffer.MemoryCopy(members[start + i].DataPointer, (void*)(staging.MappedPointer + (nint)((ulong)i * stride)), bytes, bytes);
+                }
+                _stream.RecordComputeToCopyBarrier();
+                _stream.RecordCopyIntoAt(staging.Handle, span.Handle, (ulong)start * stride, chunkBytes);
+                ulong tick = _stream.SubmitAndAdvance();
+                _stream.DeferredFreeAt(tick, staging);
+            }
+            catch
+            {
+                staging.Dispose();
+                throw;
+            }
+        }
+    }
+
+    private const ulong GroupStagingBytes = 256UL << 20;
+
+    /// <summary>The span buffer and per-expert byte stride of <paramref name="experts"/> when they are the resident members, in order, of
+    /// one group from <see cref="TryPreloadWeightGroup"/>; false when any was freed, re-bound or uploaded on its own since. The first,
+    /// second, last and six evenly spaced members are checked, a cost independent of the expert count.</summary>
+    public bool TryResolveExpertGroup(IReadOnlyList<Tensor> experts, out VulkanBuffer? span, out long stride)
+    {
+        span = null;
+        stride = 0;
+        int count = experts.Count;
+        if (count < 2 || !Weights.TryGetValue(experts[0], out VulkanBuffer? b0) || !_viewGroups.TryGetValue(b0, out (VulkanAliasedGroup Group, int Index) v0)
+            || v0.Index != 0)
+        {
+            return false;
+        }
+        VulkanAliasedGroup group = v0.Group;
+        if (group.Members.Length != count || group.Live != count) return false;
+        for (int t = 1; t <= 8; t++)
+        {
+            int i = t == 1 ? 1 : (int)((long)(count - 1) * (t - 1) / 7);
+            if (!Weights.TryGetValue(experts[i], out VulkanBuffer? b) || !ReferenceEquals(b, group.Members[i])) return false;
+        }
+        span = group.Span;
+        stride = (long)group.Stride;
+        return true;
     }
 
     /// <summary>Called after a bulk release has drained the stream, so the backend's own submit accounting can

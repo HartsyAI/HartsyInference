@@ -13,7 +13,7 @@ namespace HartsyInference.Vulkan.Tests;
 public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
 {
     /// <summary>Random GGUF blocks with the half-float scale fields set to small finite values; every other byte random.</summary>
-    private static Tensor RandomQuant(DType dtype, int n, int k, int seed)
+    internal static Tensor RandomQuant(DType dtype, int n, int k, int seed)
     {
         Tensor t = new(new TensorShape(n, k), dtype);
         long bytes = dtype.ComputeByteCount((long)n * k);
@@ -36,7 +36,7 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         return t;
     }
 
-    private static void WriteHalf(byte* dst, float value)
+    internal static void WriteHalf(byte* dst, float value)
     {
         ushort bits = BitConverter.HalfToUInt16Bits((Half)value);
         dst[0] = (byte)bits;
@@ -102,7 +102,7 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         yield return new object[] { "Q5_K", 4097, 2048, 8, true };
     }
 
-    private static DType Named(string name) => name switch
+    internal static DType Named(string name) => name switch
     {
         "Q8_0" => DType.Q8_0,
         "Q4_0" => DType.Q4_0,
@@ -133,6 +133,61 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         float[] got = ReadF32(o);
         Assert.Equal(before + 1, vk.QuantGemvCount);
         AssertClose(expected, mag, got, 2e-5, $"{type} N={n} K={k} M={m} bias={withBias}");
+    }
+
+    /// <summary>An F32 weight (a MoE router matrix) at decode M takes the same shader through the F32 decoder.</summary>
+    [Theory]
+    [InlineData(7, 4, 1, false)]
+    [InlineData(33, 96, 3, true)]
+    [InlineData(64, 2048, 1, false)]
+    [InlineData(4097, 1024, 8, true)]
+    public void Linear_F32Weight_TakesTheGemvAndMatchesADoubleDot(int n, int k, int m, bool withBias)
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        log.WriteLine($"device: {vk.Vk.DeviceName}");
+        float[] wv = Random(n * k, seed: n + k, scale: 0.5f);
+        float[] x = Random(m * k, seed: k + m, scale: 1f);
+        float[]? bias = withBias ? Random(n, seed: n + 5, scale: 0.5f) : null;
+        float[] expected = new float[m * n], mag = new float[m * n];
+        for (int mi = 0; mi < m; mi++)
+        {
+            for (int ni = 0; ni < n; ni++)
+            {
+                double s = bias?[ni] ?? 0, a = Math.Abs(s);
+                for (int ki = 0; ki < k; ki++)
+                {
+                    double prod = (double)wv[ni * k + ki] * x[mi * k + ki];
+                    s += prod;
+                    a += Math.Abs(prod);
+                }
+                expected[mi * n + ni] = (float)s;
+                mag[mi * n + ni] = (float)a;
+            }
+        }
+        using Tensor w = F32(wv, n, k);
+        using Tensor xt = F32(x, 1, m, k);
+        using Tensor? bt = bias is null ? null : F32(bias, n);
+        using Tensor o = EmptyF32(1, m, n);
+        long before = vk.QuantGemvCount;
+        vk.Linear(o, xt, w, bt);
+        float[] got = ReadF32(o);
+        Assert.Equal(before + 1, vk.QuantGemvCount);
+        AssertClose(expected, mag, got, 2e-5, $"F32 N={n} K={k} M={m} bias={withBias}");
+    }
+
+    [Fact]
+    public void Linear_F32Weight_KOffTheVectorUnit_TakesTheGemm()
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        const int N = 5, K = 10;
+        using Tensor w = F32(Random(N * K, seed: 1), N, K);
+        using Tensor xt = F32(Random(K, seed: 2), 1, 1, K);
+        using Tensor o = EmptyF32(1, 1, N);
+        long before = vk.QuantGemvCount;
+        vk.Linear(o, xt, w, null);
+        Assert.Equal(before, vk.QuantGemvCount);
     }
 
     [Theory]
@@ -206,7 +261,8 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         if (viaQuantizedMatMul) vk.QuantizedMatMul(o, xt, patched, null);
         else vk.Linear(o, xt, patched, null);
         float[] got = ReadF32(o);
-        Assert.Equal(before + 1, vk.QuantGemvCount);
+        // The packed GEMV, then the adjunct's two F32 factor Linears, which take the F32 decoder of the same shader.
+        Assert.Equal(before + 3, vk.QuantGemvCount);
         AssertClose(expected, mag, got, 2e-5, $"adjunct via {(viaQuantizedMatMul ? "QuantizedMatMul" : "Linear")}");
     }
 

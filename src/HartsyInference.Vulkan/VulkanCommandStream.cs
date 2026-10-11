@@ -182,6 +182,17 @@ public sealed class VulkanCommandStream : IDisposable
         VulkanApi.vkCmdPipelineBarrier2(cb, in dep);
     }
 
+    /// <summary>Records a copy of <paramref name="size"/> bytes from the start of <paramref name="src"/> to <paramref name="dstOffset"/> of
+    /// <paramref name="dst"/>, then a global barrier making the written bytes visible to every later dispatch. Global, not a barrier on
+    /// <paramref name="dst"/>: the bytes may be read through another buffer aliasing the same memory (an aliased weight group).</summary>
+    public unsafe void RecordCopyIntoAt(ulong src, ulong dst, ulong dstOffset, ulong size)
+    {
+        nint cb = AcquireRecording();
+        VkBufferCopy region = new() { srcOffset = 0, dstOffset = dstOffset, size = size };
+        VulkanApi.vkCmdCopyBuffer(cb, src, dst, 1, (nint)(&region));
+        RecordCopyToComputeBarrierOn(cb);
+    }
+
     /// <summary>Ends the active command buffer and submits it, signalling timeline += 1. Returns the new tick value.</summary>
     public unsafe ulong SubmitAndAdvance()
     {

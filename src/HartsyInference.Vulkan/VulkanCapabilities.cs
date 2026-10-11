@@ -77,6 +77,9 @@ public sealed class VulkanCapabilities
     /// <summary>Maximum storage-buffer descriptors bindable to a single shader stage.</summary>
     public required uint MaxPerStageDescriptorStorageBuffers { get; init; }
 
+    /// <summary>Largest range, in bytes, a storage-buffer descriptor may cover (<c>maxStorageBufferRange</c>): 4 GiB on the NVIDIA and AMD devices, 128 MB on llvmpipe.</summary>
+    public required uint MaxStorageBufferRange { get; init; }
+
     // ── Memory alignment ────────────────────────────────────────────────
 
     /// <summary>Required alignment, in bytes, for storage-buffer descriptor offsets.</summary>

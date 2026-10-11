@@ -380,8 +380,13 @@ public sealed class VulkanBuffer : IDisposable
     /// <summary>Returns the host-visible mapped pointer if this buffer is on a HOST_VISIBLE memory type; 0 otherwise.</summary>
     public nint MappedPointer => Allocation.MappedPointer;
 
+    /// <summary>Set for the buffers of an aliased group (<see cref="VulkanBufferFactory.CreateAliasedGroup"/>): the one allocation they all
+    /// sit in, freed by whichever of them is disposed last. Null for an ordinary buffer, which owns its <see cref="Allocation"/>.</summary>
+    private readonly SharedVulkanAllocation? _shared;
+
     internal VulkanBuffer(nint device, VulkanMemoryAllocator alloc, ulong handle,
-                          VulkanAllocation allocation, ulong size, VkBufferUsageFlags usage)
+                          VulkanAllocation allocation, ulong size, VkBufferUsageFlags usage,
+                          SharedVulkanAllocation? shared = null)
     {
         _device = device;
         _allocator = alloc;
@@ -389,6 +394,20 @@ public sealed class VulkanBuffer : IDisposable
         Allocation = allocation;
         Size = size;
         Usage = usage;
+        _shared = shared;
+    }
+
+    /// <summary>Hands the buffer's memory back: its own allocation, or its share of a group's, freed when the last sharer lets go.</summary>
+    private void FreeMemory()
+    {
+        if (_shared is null)
+        {
+            _allocator.Free(Allocation);
+        }
+        else if (Interlocked.Decrement(ref _shared.Refs) == 0)
+        {
+            _allocator.Free(_shared.Allocation);
+        }
     }
 
     /// <summary>Views the buffer's mapped memory as a typed span.</summary>
@@ -412,7 +431,7 @@ public sealed class VulkanBuffer : IDisposable
             Stopwatch? destroySw = VulkanBufferDiagnostics.TimingEnabled ? Stopwatch.StartNew() : null;
             VulkanApi.vkDestroyBuffer(_device, Handle, 0);
             Handle = 0;
-            _allocator.Free(Allocation);
+            FreeMemory();
             VulkanBufferDiagnostics.RecordDestroy(destroySw?.Elapsed.TotalMilliseconds ?? 0);
         }
         GC.SuppressFinalize(this);
@@ -423,9 +442,29 @@ public sealed class VulkanBuffer : IDisposable
         if (Handle != 0)
         {
             VulkanApi.vkDestroyBuffer(_device, Handle, 0);
-            _allocator.Free(Allocation);
+            FreeMemory();
         }
     }
+}
+
+/// <summary>One memory allocation under several <see cref="VulkanBuffer"/>s (an aliased group); <see cref="Refs"/> counts the buffers still alive.</summary>
+internal sealed class SharedVulkanAllocation(VulkanAllocation allocation, int refs)
+{
+    public VulkanAllocation Allocation { get; } = allocation;
+    public int Refs = refs;
+}
+
+/// <summary>A span buffer over a run of equal-sized member buffers: <see cref="Members"/>[i] aliases bytes <c>i * Stride ..</c> of
+/// <see cref="Span"/>, all in one allocation. Members are ordinary buffers for every op that binds a whole buffer; the span lets a
+/// shader address member i at <c>i * Stride</c>.</summary>
+public sealed class VulkanAliasedGroup(VulkanBuffer span, VulkanBuffer[] members, ulong stride)
+{
+    public VulkanBuffer Span { get; } = span;
+    public VulkanBuffer[] Members { get; } = members;
+    public ulong Stride { get; } = stride;
+
+    /// <summary>Members not yet released; the span is released with the last one.</summary>
+    public int Live { get; set; } = members.Length;
 }
 
 /// <summary>Diagnostic-only counters for per-<see cref="VulkanBuffer"/> object overhead (<c>vkCreateBuffer</c>/<c>vkGetBufferMemoryRequirements</c>/<c>vkBindBufferMemory</c>/<c>vkDestroyBuffer</c>) — separate from <see cref="VulkanMemoryAllocator.VkAllocateMemoryStats"/>, which only measures the underlying <c>vkAllocateMemory</c> block calls. A tensor pays this cost on every create/destroy regardless of whether its memory came from a pooled block or a fresh one, so it can dominate even when block-pooling is working perfectly. Process-wide (not per-backend) since <see cref="VulkanBufferFactory"/> is static; diff two snapshots around the region being measured. Counts are always on (a `long` increment is free, same convention as <c>VulkanBackend</c>'s GEMM engagement counters); the per-call <see cref="Stopwatch"/> timing is gated on <c>HARTSYINFERENCE_VK_PROFILE=1</c> since this runs on every tensor create/destroy in every model, not just diagnostic benchmarks.</summary>
@@ -480,5 +519,84 @@ public static class VulkanBufferFactory
 
         VulkanBufferDiagnostics.RecordCreate(createSw?.Elapsed.TotalMilliseconds ?? 0);
         return new VulkanBuffer(device, allocator, buffer, alloc, size, usage);
+    }
+
+    /// <summary>Creates <paramref name="count"/> buffers of <paramref name="memberBytes"/> bound <paramref name="stride"/> bytes apart in ONE
+    /// allocation, plus a span buffer over all of them, so ops that bind a whole buffer keep working on every member while a shader can
+    /// address member i at <c>i * stride</c> of the span. Returns null when the driver's alignment for the members does not divide
+    /// <paramref name="stride"/>; the caller then allocates the members one by one.</summary>
+    public static VulkanAliasedGroup? CreateAliasedGroup(
+        nint device,
+        VulkanMemoryAllocator allocator,
+        ulong memberBytes,
+        int count,
+        ulong stride,
+        VkBufferUsageFlags usage,
+        VkMemoryPropertyFlags requiredProps,
+        VkMemoryPropertyFlags preferredProps = 0)
+    {
+        ulong memberSize = (memberBytes + 3) & ~3UL;
+        ulong spanSize = (ulong)(count - 1) * stride + memberSize;
+        List<ulong> created = new();
+        try
+        {
+            ulong span = CreateRaw(device, spanSize, usage, created);
+            VulkanApi.vkGetBufferMemoryRequirements(device, span, out VkMemoryRequirements spanReq);
+            ulong[] handles = new ulong[count];
+            for (int i = 0; i < count; i++) handles[i] = CreateRaw(device, memberSize, usage, created);
+            VulkanApi.vkGetBufferMemoryRequirements(device, handles[0], out VkMemoryRequirements memberReq);
+            ulong alignment = Math.Max(spanReq.alignment, memberReq.alignment);
+            uint typeBits = spanReq.memoryTypeBits & memberReq.memoryTypeBits;
+            if (typeBits == 0 || stride % memberReq.alignment != 0 || memberReq.size > stride)
+            {
+                DestroyAll(device, created);
+                return null;
+            }
+            ulong total = Math.Max(spanReq.size, (ulong)(count - 1) * stride + memberReq.size);
+            VulkanAllocation alloc = allocator.Allocate(total, alignment, typeBits, requiredProps, preferredProps);
+            VulkanApi.vkBindBufferMemory(device, span, alloc.DeviceMemory, alloc.Offset).ThrowOnError("vkBindBufferMemory");
+            SharedVulkanAllocation shared = new(alloc, count + 1);
+            VulkanBuffer[] members = new VulkanBuffer[count];
+            for (int i = 0; i < count; i++)
+            {
+                ulong off = (ulong)i * stride;
+                VulkanApi.vkBindBufferMemory(device, handles[i], alloc.DeviceMemory, alloc.Offset + off).ThrowOnError("vkBindBufferMemory");
+                VulkanAllocation view = alloc with
+                {
+                    Offset = alloc.Offset + off,
+                    Size = memberSize,
+                    MappedPointer = alloc.MappedPointer == 0 ? 0 : alloc.MappedPointer + (nint)off,
+                };
+                members[i] = new VulkanBuffer(device, allocator, handles[i], view, memberBytes, usage, shared);
+            }
+            VulkanBuffer spanBuffer = new(device, allocator, span, alloc, spanSize, usage, shared);
+            created.Clear();
+            return new VulkanAliasedGroup(spanBuffer, members, stride);
+        }
+        catch
+        {
+            DestroyAll(device, created);
+            throw;
+        }
+    }
+
+    private static ulong CreateRaw(nint device, ulong size, VkBufferUsageFlags usage, List<ulong> created)
+    {
+        VkBufferCreateInfo bci = new()
+        {
+            sType = VkStructureType.BufferCreateInfo,
+            size = (size + 3) & ~3UL,
+            usage = usage,
+            sharingMode = VkSharingMode.Exclusive,
+        };
+        VulkanApi.vkCreateBuffer(device, in bci, 0, out ulong buffer).ThrowOnError("vkCreateBuffer");
+        created.Add(buffer);
+        return buffer;
+    }
+
+    private static void DestroyAll(nint device, List<ulong> handles)
+    {
+        foreach (ulong h in handles) VulkanApi.vkDestroyBuffer(device, h, 0);
+        handles.Clear();
     }
 }
