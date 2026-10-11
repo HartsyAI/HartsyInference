@@ -456,14 +456,11 @@ public static class ModelCatalog
                 "sentinel bug found+fixed (GgufLanguageModel.BuildTemplate); needs an instruct-tuned checkpoint for a full pass", st, cli: true),
             new CatalogEntry
             {
-                // PARTIAL: the Gated-DeltaNet/attention hybrid forward pass itself is verified correct (coherent,
-                // correct answer in ALL of --thinking/--no-thinking/neither, all three routed through a ChatML
-                // fallback). --thinking specifically against THIS model's real Jinja template remains unverified:
-                // fixing a real 3-part-slice parser gap (messages[::-1], see JinjaExpr.cs SliceExpr) exposed a
-                // SEPARATE, deeper "Unsupported Jinja call expression" failure in the template's tool-calling
-                // filter chain (args_value | tojson | safe if args_value is mapping ... ), not yet root-caused.
-                // A new render-time ChatML fallback (JinjaChatTemplate.cs Encode) means this degrades gracefully
-                // (logged [WRN], not a crash) rather than failing generation outright.
+                // The Gated-DeltaNet/attention hybrid forward pass is verified correct (coherent, correct answer in ALL of
+                // --thinking/--no-thinking/neither). The model's real Jinja template renders: it defines and calls a render_content macro
+                // (the "Unsupported Jinja call expression" that used to send every request through the ChatML fallback), iterates tool-call
+                // arguments as a mapping, and opens one user turn for a run of tool results with loop.previtem; the engine supports all three,
+                // and the tool-calling matrix runs this row on CUDA.
                 Id = "qwen35", Modality = txt, DisplayName = "Qwen3.5 (Gated DeltaNet hybrid)",
                 Architecture = "every 4th layer is GQA+RoPE, the rest are Gated DeltaNet delta-rule recurrence",
                 Status = st, CliDrivable = true,

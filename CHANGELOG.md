@@ -24,6 +24,10 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.348
+
+- **Fixed: Qwen3.5's chat template renders, so its tool-calling turns work.** The Jinja engine skipped every `{% macro %}` and failed a call to a template-defined one with "Unsupported Jinja call expression", so every Qwen3.5 request fell back to ChatML and a tool-calling request came back as an empty `<tool_call></tool_call>`. Macros now work (positional and keyword arguments, defaults that may use earlier parameters, a body that sees earlier variables and keeps its own `set`s local, macros calling macros). Two more gaps the same template depends on are fixed with it: iterating a mapping yields its keys, as in Jinja (it yielded boxed key/value pairs, printing `<parameter=[city, Paris]>`), and `loop.previtem`, `loop.nextitem`, `loop.revindex` and `loop.revindex0` exist (without `previtem` the user turn that holds a run of tool results was never opened). `strip`, `lstrip` and `rstrip` honor a character-set argument instead of always trimming all whitespace. Qwen3.5-0.8B now calls the tool in its XML dialect on CUDA (two rounds, `get_time`).
+
 ## alpha.347
 
 - **Added: a real-weight tool-calling matrix** (`ToolLoopRealWeightTheoryTests`). Each checkpoint runs one tool turn through `ToolLoop` and must emit a parsed call in the expected dialect, with the tool prompt injected only where its template has no tools slot, then take a second round. CUDA-only and slow checkpoints skip on CPU with a reason.

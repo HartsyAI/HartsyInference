@@ -242,6 +242,9 @@ public sealed class JinjaEngine
                 {
                     ["index0"] = (long)idx, ["index"] = (long)(idx + 1),
                     ["first"] = idx == 0, ["last"] = idx == items.Count - 1, ["length"] = (long)items.Count,
+                    ["revindex0"] = (long)(items.Count - 1 - idx), ["revindex"] = (long)(items.Count - idx),
+                    // Neighbouring items (Jinja's undefined, here null, at the ends): Qwen3.5 opens one user turn for a run of tool results with it.
+                    ["previtem"] = idx > 0 ? items[idx - 1] : null, ["nextitem"] = idx < items.Count - 1 ? items[idx + 1] : null,
                 });
                 try { foreach (Node n in body) n.Render(sb, child); }
                 catch (LoopContinue) { continue; }
@@ -255,6 +258,47 @@ public sealed class JinjaEngine
     internal sealed class LoopContinue : Exception { }
 
     internal sealed class BreakNode : Node { public override void Render(StringBuilder sb, Scope scope) => throw new LoopBreak(); }
+
+    /// <summary>A template-defined macro: its parameters (with optional default expressions) and body. Stored in scope under its name by <see cref="MacroNode"/>.</summary>
+    internal sealed class MacroDef(string name, List<(string Name, Expr? Default)> parameters, List<Node> body)
+    {
+        public string Name => name;
+        public List<Node> Body => body;
+        public IEnumerable<Expr> DefaultExprs => parameters.Where(p => p.Default is not null).Select(p => p.Default!);
+
+        /// <summary>Renders the macro body for one call. Parameters bind by position, then by keyword; a parameter left unset takes its default (evaluated in the
+        /// macro's scope, so it may use earlier parameters) or Jinja's undefined (null). The body sees everything defined before the call, and its own
+        /// <c>set</c>s stay inside the call.</summary>
+        public string Invoke(List<object?> positional, Dictionary<string, object?> named, Scope callerScope)
+        {
+            foreach (string key in named.Keys)
+                if (!parameters.Any(p => p.Name == key))
+                    throw new NotSupportedException($"Jinja macro '{name}' has no parameter '{key}'.");
+            if (positional.Count > parameters.Count)
+                throw new NotSupportedException($"Jinja macro '{name}' takes {parameters.Count} argument(s), got {positional.Count}.");
+            Scope local = callerScope.Child();
+            for (int i = 0; i < parameters.Count; i++)
+            {
+                (string pName, Expr? pDefault) = parameters[i];
+                object? value;
+                if (i < positional.Count) value = positional[i];
+                else if (named.TryGetValue(pName, out object? kw)) value = kw;
+                else value = pDefault?.Eval(local);
+                local.Set(pName, value);
+            }
+            StringBuilder sb = new();
+            foreach (Node n in body) n.Render(sb, local);
+            return sb.ToString();
+        }
+    }
+
+    /// <summary><c>{% macro %}</c>: rendering the definition binds the macro in scope and emits nothing.</summary>
+    internal sealed class MacroNode(MacroDef def) : Node
+    {
+        public override IEnumerable<Expr> Exprs => def.DefaultExprs;
+        public override IEnumerable<Node> Children => def.Body;
+        public override void Render(StringBuilder sb, Scope scope) => scope.Set(def.Name, def);
+    }
     internal sealed class ContinueNode : Node { public override void Render(StringBuilder sb, Scope scope) => throw new LoopContinue(); }
 
     // ── Parser (segments → nodes) ────────────────────────────────────────────────────────────────────
@@ -332,22 +376,23 @@ public sealed class JinjaEngine
                     case "continue": nodes.Add(new ContinueNode()); i++; break;
                     case "macro":
                     {
-                        // Macro definitions (e.g. Cohere's RAG/tool document_turn) are skipped wholesale — the
-                        // basic chat path never invokes them. Skip the body without parsing it (it may use
-                        // constructs only meaningful inside a macro), honoring nesting. Full macro support TODO.
-                        i++;
-                        int depth = 1;
-                        while (i < segs.Count && depth > 0)
+                        // {% macro name(a, b, c=default) %}...{% endmacro %}: the header parses as a call expression (positional names, name=default
+                        // for the optional ones), the body as an ordinary block. Executing the node binds the macro in scope; a call renders the body
+                        // in a child scope (see MacroDef.Invoke). Varargs, kwargs and call blocks are not supported.
+                        string header = s.Value["macro".Length..].Trim();
+                        if (ExprParser.ParseExpr(header) is not CallExpr { Callee: VarExpr macroName } headerCall)
+                            throw new FormatException($"Malformed macro: {s.Value}");
+                        List<(string Name, Expr? Default)> parameters = [];
+                        foreach (Expr arg in headerCall.Args)
                         {
-                            if (segs[i].Kind == SegKind.Stmt)
-                            {
-                                string w = FirstWord(segs[i].Value);
-                                if (w == "macro") depth++;
-                                else if (w == "endmacro") depth--;
-                            }
-                            i++;
+                            if (arg is NamedArgExpr named) parameters.Add((named.Name, named.Value));
+                            else if (arg is VarExpr bare) parameters.Add((bare.GetName(), null));
+                            else throw new FormatException($"Malformed macro parameter in: {s.Value}");
                         }
-                        break;
+                        i++;
+                        List<Node> macroBody = ParseBlock(segs, ref i, ["endmacro"]);
+                        Expect(segs, ref i, "endmacro");
+                        nodes.Add(new MacroNode(new MacroDef(macroName.GetName(), parameters, macroBody))); break;
                     }
                     default:
                         throw new NotSupportedException($"Unsupported Jinja statement '{kw}' in: {s.Value}");
