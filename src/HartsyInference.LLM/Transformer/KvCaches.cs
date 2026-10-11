@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
@@ -6,8 +7,17 @@ namespace HartsyInference.LLM.Transformer;
 /// <summary>Factory for the KV cache used by single-sequence autoregressive decode (prefill the prompt, then one token/frame per step) — the <b>one place</b> that decides which cache backing store the in-house transformer decoders use, so models never hand-roll a raw <c>StreamingKvCache</c> (O(n²) memcpy over a sequence) instead of calling <see cref="ForDecode"/> for a <see cref="FixedKvCache"/> (O(1) in-place appends, bounded VRAM). Swapping in a paged/quantized cache later is a one-line change here, not a per-model edit.</summary>
 public static class KvCaches
 {
-    /// <summary>F16-storage KV cache opt-in (halves VRAM; CUDA-only — see <see cref="FixedKvCache"/>'s kvDtype doc). Off by default per the plan's bar for flipping a concurrency/perf default ("after tests soak"); an operator opts in per the ROADMAP.md §1 note. Public so direct <c>FixedKvCache</c> construction sites that bypass <see cref="ForDecode"/> (e.g. <c>TextGenerationPipeline</c>, <c>DynamicBatchScheduler</c>) can still honor the same switch instead of drifting to their own env-var read.</summary>
-    public static bool F16Enabled => EngineKnobs.KvF16.Value;
+    /// <summary>Whether <c>vram.kvF16</c> is explicitly <c>true</c>: the opt-in that forces an F16 cache for every model type built through <see cref="ForDecode"/> and
+    /// the direct <c>FixedKvCache</c> sites (audio decoders and others). Unset keeps those on F32; only text LLMs follow <see cref="F16For"/>.</summary>
+    public static bool F16Enabled => EngineKnobs.KvF16.Value == true;
+
+    /// <summary>The KV cache element type choice for a text LLM running on <paramref name="backend"/>: the knob when it is set, else F16 exactly when the backend
+    /// can run attention over an F16 cache (<see cref="IBackend.SupportsF16KvCache"/>). F16 halves the cache and the bytes every decode step reads, which is
+    /// 9-20% faster decode at 4K-16K context on a 12 GB card and what llama.cpp stores by default.</summary>
+    public static bool F16For(IBackend? backend) => EngineKnobs.KvF16.Value ?? backend?.SupportsF16KvCache == true;
+
+    /// <summary>The same choice for placement planning, which only plans CUDA devices (all of which support an F16 cache).</summary>
+    public static bool F16ForCudaPlacement => EngineKnobs.KvF16.Value ?? true;
 
     /// <summary>Creates a decode KV cache for a batch-1 sequence of at most <paramref name="maxSeqLen"/> tokens; <paramref name="numLayers"/>/<paramref name="numKvHeads"/>/<paramref name="headDim"/> come from the model's transformer config. Dispose it when the utterance/song completes.</summary>
     public static IKvCache ForDecode(int numLayers, int numKvHeads, int headDim, int maxSeqLen)

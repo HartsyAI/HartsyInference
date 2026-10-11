@@ -53,7 +53,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         if (options.Pool is not null) return new PagedKvCache(options.Pool);
         TransformerConfig cfg = _transformer.Config;
         // Gemma-4's local layers are narrower than its global ones; HeadDimsPerLayer is uniform elsewhere.
-        DType kvDtype = KvCaches.F16Enabled ? DType.F16 : DType.F32;
+        DType kvDtype = KvCaches.F16For(_backend) ? DType.F16 : DType.F32;
         return new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDimsPerLayer(), options.MaxSequenceTokens, kvDtype);
     }
 
@@ -119,7 +119,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
     public long EstimateSequenceBytes(int contextTokens)
     {
         TransformerConfig cfg = _transformer.Config;
-        long elementBytes = KvCaches.F16Enabled ? 2 : 4;
+        long elementBytes = KvCaches.F16For(_backend) ? 2 : 4;
         long perToken = 0;
         foreach (int headDim in cfg.HeadDimsPerLayer()) perToken += 2L * cfg.NumKvHeads * headDim * elementBytes;
         return perToken * contextTokens;

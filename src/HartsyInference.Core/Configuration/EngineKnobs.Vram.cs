@@ -16,9 +16,13 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> GraphArena =
         Bool("vram.graphArena", true, KnobScope.Runtime, KnobDomain.Vram, "Routes capture-time intermediate allocations through a persistent bump arena instead of per-replay pool nodes.");
 
-    /// <summary>Stores the single-sequence decode KV cache as F16 instead of F32, halving its VRAM (CUDA only).</summary>
-    public static readonly Knob<bool> KvF16 =
-        Bool("vram.kvF16", false, KnobScope.Runtime, KnobDomain.Vram, "Stores the single-sequence decode KV cache as F16 instead of F32, halving its VRAM (CUDA only).");
+    /// <summary>Stores the decode KV cache as F16 instead of F32, halving its VRAM and the bytes attention reads (CUDA only).</summary>
+    /// <remarks>Unset is automatic: text LLMs on a backend that supports it (<see cref="HartsyInference.Core.Backends.IBackend.SupportsF16KvCache"/>) use F16,
+    /// everything else (audio decoders, other backends) keeps F32. <c>true</c> forces F16 for every model type, <c>false</c> keeps F32 everywhere (the
+    /// reference profile pins it, for runs that must match an F32-cache build). Writes into an F16 cache saturate at the F16 maximum, so an
+    /// extreme key or value cannot become infinity.</remarks>
+    public static readonly Knob<bool?> KvF16 =
+        BoolOverride("vram.kvF16", KnobScope.Runtime, KnobDomain.Vram, "KV cache element type: unset = F16 for text LLMs on CUDA and F32 elsewhere, true = F16 for every model, false = F32 everywhere (CUDA only for F16).");
 
     /// <summary>Makes LLMs keep GGUF weights compressed and use QuantizedMatMul instead of caching an F16 dequant.</summary>
     public static readonly Knob<bool> LowvramQuant =

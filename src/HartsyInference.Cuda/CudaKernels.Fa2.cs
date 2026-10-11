@@ -8,7 +8,7 @@ public sealed partial class CudaKernels
 
     /// <summary>Test hook: route the RMSNorm Q8 launchers to the reference kernels even when the fast ones loaded.</summary>
     internal bool ForceReferenceNorm { get; set; }
-    private nint _kvScatterQkvF16, _kvScatterQkNormF16;
+    private nint _kvScatterQkvF16, _kvScatterQkNormF16, _kvAppendF16Sat;
 
     /// <summary>True when kv_scatter_f16.ptx loaded: the fused graph-decode scatter kernels for an F16 key/value cache.</summary>
     public bool HasKvScatterF16 => _kvScatterQkvF16 != 0 && _kvScatterQkNormF16 != 0;
@@ -42,6 +42,7 @@ public sealed partial class CudaKernels
             _kvScatterF16Module = LoadOwnedModule(scatter);
             _kvScatterQkvF16 = _kvScatterF16Module.GetFunction("lm_qkv_rope_scatter_f16kv");
             _kvScatterQkNormF16 = _kvScatterF16Module.GetFunction("lm_qknorm_rope_scatter_f16kv");
+            _kvAppendF16Sat = _kvScatterF16Module.GetFunction("lm_kv_append_f16_sat");
         }
         string normFast = Ptx("lm_norm_q8_fast");
         if (File.Exists(normFast))

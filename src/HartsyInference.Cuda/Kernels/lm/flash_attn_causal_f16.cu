@@ -47,6 +47,9 @@ __device__ __forceinline__ void mma_16816(float (&c)[4], const uint32_t (&a)[4],
 
 __device__ __forceinline__ uint32_t pack_half2(float lo, float hi)
 {
+    // Saturating: Q, K and V are rounded to F16 here, and one value past the F16 range would otherwise become infinity.
+    lo = lo > 65504.0f ? 65504.0f : (lo < -65504.0f ? -65504.0f : lo);
+    hi = hi > 65504.0f ? 65504.0f : (hi < -65504.0f ? -65504.0f : hi);
     __half2 h = __floats2half2_rn(lo, hi);
     return *reinterpret_cast<uint32_t*>(&h);
 }
