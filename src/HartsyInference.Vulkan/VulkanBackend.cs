@@ -210,9 +210,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             SupportsF32 = true,
             SupportsF16 = Vk.SupportsFp16 && Vk.Storage16Bit,
             SupportsBF16 = false,
-            // GGUF blocks the fused GEMV reads stay compressed on the device; the loader widens every other format.
-            SupportsQuantized = true,
-            QuantizedTypes = QuantGemvTypes,
+            // GGUF blocks the fused GEMV reads stay compressed on the device; the loader widens every other format. The GEMV shaders need no FP16,
+            // but a prefill of more than QuantGemvMaxRows rows dequantizes through the F16 dequant shaders, so a device without FP16 and 16-bit storage
+            // keeps nothing packed and the loader widens on the host as before.
+            SupportsQuantized = Vk.SupportsFp16 && Vk.Storage16Bit,
+            QuantizedTypes = Vk.SupportsFp16 && Vk.Storage16Bit ? QuantGemvTypes : null,
             SupportsConv2D = true,
             SupportsSdpa = true,
             SupportsFft = false,
