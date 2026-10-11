@@ -183,7 +183,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
 
         // ── 1. Static-shift flow-match Euler scheduler ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
-        FlowMatchEulerDiscreteScheduler scheduler = new(_config.SchedulerShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 2. Build initial latent (t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at sigma[startStep]) ──

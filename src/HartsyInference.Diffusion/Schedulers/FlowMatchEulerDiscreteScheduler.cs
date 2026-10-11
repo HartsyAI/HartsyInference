@@ -45,6 +45,23 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         _timesteps = Array.Empty<float>();
     }
 
+    /// <summary>This scheduler with <paramref name="shift"/> as a static shift in place of its own (static or dynamic),
+    /// keeping its shift terminal; this same instance when <paramref name="shift"/> is null. Call before
+    /// <see cref="SetTimesteps"/>.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="shift"/> is not a positive finite number.</exception>
+    public FlowMatchEulerDiscreteScheduler WithShift(float? shift)
+    {
+        if (shift is not float s)
+        {
+            return this;
+        }
+        if (!float.IsFinite(s) || s <= 0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(shift), s, "Sigma shift must be a positive finite number.");
+        }
+        return new FlowMatchEulerDiscreteScheduler(s, _shiftTerminal);
+    }
+
     /// <summary>Configures the scheduler for the given number of inference steps.</summary>
     public void SetTimesteps(int numInferenceSteps)
     {
@@ -200,6 +217,10 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
 
         // Flux uses exponential shift: shift = exp(mu)
         float shift = MathF.Exp(mu);
+        if (!float.IsFinite(shift) || shift <= 0f)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxShift), maxShift, $"Dynamic shift resolved to {shift}; the shift line must be finite.");
+        }
 
         return new FlowMatchEulerDiscreteScheduler(shift, shiftTerminal);
     }

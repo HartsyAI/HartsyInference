@@ -125,6 +125,7 @@ public sealed class SamplerCoreTests
     [Theory]
     [InlineData("euler")]
     [InlineData("dpmpp_2m")]
+    [InlineData("lcm")]
     public void NegatedFlowVelocity_SolvesTheConstantDenoiserExactly(string name)
     {
         IBackend backend = new CpuBackend();

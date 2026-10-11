@@ -268,7 +268,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         // ── 2. Set up flow-match scheduler ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 3. Initial latent (t2i: noise * initSigma; img2img: VAE-encoded source + AddNoise at sigma[startStep]) ──

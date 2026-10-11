@@ -217,7 +217,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         if (blendedUncond is not null) uncondContext = blendedUncond;
 
         // ── 2. Set up flow-match scheduler (static shift) ────────────────
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 3. Build initial latent [1, 4, latentH, latentW] (t2i: noise * initSigma; img2img: encode + AddNoise at sigma[startStep]) ──

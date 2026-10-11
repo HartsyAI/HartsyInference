@@ -14,7 +14,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Anima (Cosmos-Predict2 family) text-to-image pipeline. Image-only path with two-stage text conditioning: caller-supplied Qwen-3 0.6B hidden states are first refined by the in-checkpoint <see cref="AnimaLlmAdapter"/> (a 6-block self+cross+MLP transformer) into 1024-dim features, which then feed the DiT's cross-attention. The flow-match Euler scheduler is fixed at <c>shift = 3.0</c> per the Anima reference workflow (ER-SDE substitute; pixel parity with Comfy's <c>er_sde + simple</c> requires a dedicated SDE scheduler — see roadmap).</summary>
+/// <summary>Anima (Cosmos-Predict2 family) text-to-image pipeline. Image-only path with two-stage text conditioning: caller-supplied Qwen-3 0.6B hidden states are first refined by the in-checkpoint <see cref="AnimaLlmAdapter"/> (a 6-block self+cross+MLP transformer) into 1024-dim features, which then feed the DiT's cross-attention. The flow-match Euler scheduler uses <c>shift = 3.0</c> per the Anima reference workflow unless the request sets <c>SigmaShift</c> (ER-SDE substitute; pixel parity with Comfy's <c>er_sde + simple</c> requires a dedicated SDE scheduler — see roadmap).</summary>
 public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 {
     /// <summary>Strict opt-in (<c>ANIMA_DEBUG_STATS=1</c>) for the per-boundary min/max/mean prints. Each one reads a tensor's <c>DataPointer</c>, which D2H-syncs and evicts the GPU activation — off by default so real runs stay device-resident (same opt-in form as <c>ANIMA_BYPASS_LLM_ADAPTER</c> below).</summary>
@@ -181,10 +181,10 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         // index N is the terminal zero. The array is therefore bit-identical to the loop this replaces; going
         // through the scheduler is what lets `FlowMatchSampling` re-space the sigmas for a named schedule.
         const float Shift = 3.0f;
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(Shift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(Shift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
         float[] sigmas = scheduler.Sigmas();
-        Logs.Info($"Anima sigmas (Z-Image flow-match, shift={Shift}): [{sigmas[0]:F4}, {sigmas[1]:F4}, ..., {sigmas[^2]:F4}, {sigmas[^1]:F4}]");
+        Logs.Info($"Anima sigmas (Z-Image flow-match, shift={scheduler.Shift}): [{sigmas[0]:F4}, {sigmas[1]:F4}, ..., {sigmas[^2]:F4}, {sigmas[^1]:F4}]");
 
         // Initial latent: fresh noise (t2i) or the VAE-encoded source noised to sigma[startStep] (img2img).
         // For masked inpaint the clean source latent + latent-resolution mask stay alive for per-step blending.

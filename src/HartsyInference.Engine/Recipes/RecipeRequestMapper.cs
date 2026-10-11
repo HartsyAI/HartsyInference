@@ -13,6 +13,9 @@ internal static class RecipeRequestMapper
     /// <summary>Maps a zero/negative CLIP-skip to <c>null</c> so the text encoder's standard final layer is used.</summary>
     public static int? MapClipSkip(int? clipSkip) => clipSkip is null or <= 0 ? null : clipSkip;
 
+    /// <summary>Narrows the native sigma shift to the diffusion request's float; null keeps the family's own shift.</summary>
+    public static float? MapSigmaShift(double? sigmaShift) => sigmaShift is double shift ? (float)shift : null;
+
     /// <summary>The concrete pixel size for a pipeline that has to snap or clamp it; <c>ImagesService</c> fills width/height from the family's <see cref="ImageDefaults"/> before <c>Generate</c>, so the coalesce here only covers a directly-driven pipeline.</summary>
     public static (int Width, int Height) Size(ImageRequest request)
     {
@@ -38,6 +41,7 @@ internal static class RecipeRequestMapper
             VariationSeed = request.VariationSeed?.Seed ?? -1,
             VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
             Seed = MapSeed(request.Seed),
+            SigmaShift = MapSigmaShift(request.SigmaShift),
             // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
             // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
             Scheduler = SamplingParamResolver.ResolveSchedulerName(request),

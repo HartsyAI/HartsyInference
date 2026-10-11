@@ -90,6 +90,7 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
+                SigmaShift = RecipeRequestMapper.MapSigmaShift(request.SigmaShift),
                 SeamlessTiling = request.SeamlessTiling,
                 ModelSpecificEnhancements = request.ModelSpecificEnhancements,
                     VariationSeed = request.VariationSeed?.Seed ?? -1,

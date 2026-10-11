@@ -64,6 +64,7 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
 
         TextToImageRequest inner = new TextToImageRequest
         {
+            SigmaShift = RecipeRequestMapper.MapSigmaShift(request.SigmaShift),
             SeamlessTiling = request.SeamlessTiling,
                     VariationSeed = request.VariationSeed?.Seed ?? -1,
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
