@@ -1,3 +1,4 @@
+using System.Globalization;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -13,16 +14,18 @@ public static class ToolCalling
     {
         ArgumentNullException.ThrowIfNull(options);
         ToolCallFormat resolved = format ?? ToolCallFormat.Hermes;
-        options.TextStreamFilterFactory = request => CreateFilter(request, resolved, stopAfterFirstCall);
+        options.TextStreamFilterFactory = context => CreateFilter(context, resolved, stopAfterFirstCall);
     }
 
-    /// <summary>The filter for <paramref name="request"/>: a <see cref="ToolCallStreamFilter"/> restricted to the offered tool names when it offers tools, else null.</summary>
-    public static ITextStreamFilter? CreateFilter(TextRequest request, ToolCallFormat format = ToolCallFormat.Hermes, bool stopAfterFirstCall = true)
+    /// <summary>The filter for <paramref name="context"/>'s request: a <see cref="ToolCallStreamFilter"/> restricted to the offered tool names when it offers tools, else null. A template with its own structured parser needs none, and its call ids are <c>call_{RequestId}_{n}</c> like the parser's.</summary>
+    public static ITextStreamFilter? CreateFilter(TextStreamFilterContext context, ToolCallFormat format = ToolCallFormat.Hermes, bool stopAfterFirstCall = true)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        if (request.Tools is not { Count: > 0 } tools) return null;
+        ArgumentNullException.ThrowIfNull(context);
+        if (context.HasStructuredParser) return null;
+        if (context.Request.Tools is not { Count: > 0 } tools) return null;
         string[] names = new string[tools.Count];
         for (int i = 0; i < names.Length; i++) names[i] = tools[i].Name;
-        return new ToolCallStreamFilter(format, stopAfterFirstCall, names);
+        string idPrefix = "call_" + context.RequestId.ToString(CultureInfo.InvariantCulture) + "_";
+        return new ToolCallStreamFilter(format, stopAfterFirstCall, names, idPrefix);
     }
 }

@@ -13,11 +13,15 @@ public sealed class JinjaChatTemplate : IChatTemplate
 
     public string Name => "jinja";
 
+    /// <inheritdoc/>
+    public string? Source { get; }
+
     /// <summary>Compiles the model's chat-template source.</summary>
     public JinjaChatTemplate(string chatTemplate)
     {
         ArgumentNullException.ThrowIfNull(chatTemplate);
         _engine = new JinjaEngine(chatTemplate);
+        Source = chatTemplate;
     }
 
     /// <inheritdoc/>

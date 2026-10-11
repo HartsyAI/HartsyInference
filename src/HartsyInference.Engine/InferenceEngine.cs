@@ -36,8 +36,8 @@ public sealed class InferenceEngine : IInferenceEngine
     internal bool DiagnosticsEnabled => _options?.Diagnostics is not null && _diagnosticsFailed == 0;
 
     /// <summary>The stream filter installed for <paramref name="request"/>, or null for plain text streaming.</summary>
-    internal Services.ITextStreamFilter? CreateTextStreamFilter(Requests.TextRequest request)
-        => _options?.TextStreamFilterFactory?.Invoke(request);
+    internal Services.ITextStreamFilter? CreateTextStreamFilter(Services.TextStreamFilterContext context)
+        => _options?.TextStreamFilterFactory?.Invoke(context);
 
     /// <summary>Begins a correlated request only when an observer is active.</summary>
     internal long StartDiagnostics()

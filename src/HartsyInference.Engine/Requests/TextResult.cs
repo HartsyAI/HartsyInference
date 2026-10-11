@@ -15,8 +15,11 @@ public sealed record TextResult
     /// <summary>Generated token count.</summary>
     public int CompletionTokens { get; init; }
 
-    /// <summary>A native tool call the model emitted; null when it produced plain text.</summary>
+    /// <summary>The last native tool call the model emitted; null when it produced plain text. Equal to the last of <see cref="ToolCalls"/>.</summary>
     public NativeToolCall? ToolCall { get; init; }
+
+    /// <summary>Every native tool call the model emitted, in order; null or empty when it produced plain text.</summary>
+    public IReadOnlyList<NativeToolCall>? ToolCalls { get; init; }
 
     /// <summary>Prefill wall time in milliseconds (prompt processing up to the first token); 0 when the path did not time it.</summary>
     public double PrefillMilliseconds { get; init; }

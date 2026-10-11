@@ -6,8 +6,14 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## Unreleased
+## alpha.335
 
+- **Changed: `EngineOptions.TextStreamFilterFactory` takes a `TextStreamFilterContext`.** The context carries the request, its request id, the template's name and Jinja source, the architecture and the model path, so a host can pick a parser per model. Breaking for any host that set the factory.
+- **Changed: tool-call ids are unique per request.** Both the structured parser and the filter number calls `call_{requestId}_{index}`, so ids never repeat across rounds of one conversation.
+- **Fixed: tool calls from a structured output parser end the turn as a tool call.** DeepSeek-V4.1's tool calls now stop generation as `StopReason.ToolCall` and dispatch, instead of ending as a plain stop.
+- **Added: `TextResult.ToolCalls`.** Non-streaming generation reports every tool call, not only the last. The OpenAI-compatible route returns all of them.
+- **Added: `ITextStreamFilter.MarkerLiterals`.** A filter lists the control-token literals it needs to see (for example `<tool_call>`); the engine decodes those tokens as text and still drops every other control token.
+- **Removed: the `<tool_call>` sentinel grammar.** It never fired on GGUF models and it turned off graph decode and speculative decode for every tool request. Those stay on for tool requests now.
 - **Fixed: Qwen2 and Qwen3 GGUFs use the Qwen2 pre-tokenizer split.** The GGUF names it `tokenizer.ggml.pre = "qwen2"`, and only `kolibri1` selected the single-digit split. Qwen text tokenized with the GPT-2 split, 6-8% more tokens on the same text (the 4K benchmark prompt came out at 4,036 against llama.cpp's 3,742). The Qwen2 split now applies to both names.
 - **Fixed: DeepSeek-V2 YaRN uses the truncated correction range.** Long-context RoPE for `deepseek2` GGUFs now floors the low end and ceils the high end of the YaRN correction range, as HF and the official code do. V2-Lite's inverse frequencies differed from HF by up to 33% in one dimension, so the cosine error grew with position (0.26 at position 1024).
 - **Fixed: DeepSeek-V2-Lite produces coherent text again.** MLA's decoupled RoPE pairs adjacent dims (2i, 2i+1) as HF's `apply_rotary_pos_emb` and llama.cpp do, not split-half. A `deepseek2` GGUF without `expert_weights_norm` no longer renormalizes its top-k expert weights (V2-Lite has `norm_topk_prob=false`); an explicit key still decides. The engine's greedy text, re-tokenized with the HF tokenizer, matches the HF bf16 reference 16/16 on the chat prompt. DeepSeek-V3 shares this MLA path and is not verified yet.

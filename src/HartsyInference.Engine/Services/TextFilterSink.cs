@@ -10,6 +10,7 @@ internal sealed class TextFilterSink
     private readonly Action<TextChunk>? _downstream;
     private readonly Action _requestStop;
     private readonly StringBuilder _text = new();
+    private readonly List<NativeToolCall> _calls = [];
     private int _callIndex;
 
     /// <summary>Creates a sink over <paramref name="filter"/>; <paramref name="downstream"/> receives the filtered chunks (null on the non-streaming path) and <paramref name="requestStop"/> cancels generation.</summary>
@@ -26,7 +27,10 @@ internal sealed class TextFilterSink
     public string Text => _text.ToString();
 
     /// <summary>The most recent tool call the filter completed, or null.</summary>
-    public NativeToolCall? ToolCall { get; private set; }
+    public NativeToolCall? ToolCall => _calls.Count > 0 ? _calls[^1] : null;
+
+    /// <summary>Every tool call the filter completed, in order.</summary>
+    public IReadOnlyList<NativeToolCall> ToolCalls => _calls;
 
     /// <summary>True once the filter asked generation to stop; every later chunk is dropped.</summary>
     public bool Stopped { get; private set; }
@@ -59,7 +63,7 @@ internal sealed class TextFilterSink
         }
         if (result.ToolCall is { } call)
         {
-            ToolCall = call;
+            _calls.Add(call);
             _downstream?.Invoke(new TextChunk { Kind = TextChunkKind.NativeToolCall, ToolCall = call, ToolCallIndex = _callIndex++ });
         }
         if (result.Stop)
