@@ -8,6 +8,9 @@ namespace HartsyInference.LLM.ChatTemplates;
 internal abstract class Expr
 {
     public abstract object? Eval(JinjaEngine.Scope scope);
+
+    /// <summary>Direct sub-expressions, for static inspection of a compiled template (never used to render).</summary>
+    public virtual IEnumerable<Expr> Children => [];
 }
 
 /// <summary>Dynamic-typed value helpers (string / bool / long / double / null / list / dict).</summary>
@@ -168,6 +171,8 @@ internal static class Values
 // ── Literal / variable / unary / binary / ternary ──────────────────────────────────────────────────────
 internal sealed class LiteralExpr(object? value) : Expr
 {
+    public object? Value => value;
+
     public override object? Eval(JinjaEngine.Scope scope) => value;
 }
 
@@ -179,6 +184,8 @@ internal sealed class VarExpr(string name) : Expr
 
 internal sealed class MemberExpr(Expr target, string name) : Expr
 {
+    public override IEnumerable<Expr> Children => [target];
+
     public override object? Eval(JinjaEngine.Scope scope)
     {
         object? t = target.Eval(scope);
@@ -190,6 +197,9 @@ internal sealed class MemberExpr(Expr target, string name) : Expr
 
 internal sealed class IndexExpr(Expr target, Expr index) : Expr
 {
+    public Expr Index => index;
+    public override IEnumerable<Expr> Children => [target, index];
+
     public override object? Eval(JinjaEngine.Scope scope)
     {
         object? t = target.Eval(scope);
@@ -202,12 +212,16 @@ internal sealed class IndexExpr(Expr target, Expr index) : Expr
 
 internal sealed class UnaryNotExpr(Expr inner) : Expr
 {
+    public override IEnumerable<Expr> Children => [inner];
+
     public override object? Eval(JinjaEngine.Scope scope) => !Values.Truthy(inner.Eval(scope));
 }
 
 /// <summary>Python-style <c>target[start:stop:step]</c>; <paramref name="step"/> is null for the common two-part form, but negative steps (Qwen3.5's <c>messages[::-1]</c> history reversal) are handled explicitly rather than falling back to a step-1 slice.</summary>
 internal sealed class SliceExpr(Expr target, Expr? start, Expr? stop, Expr? step) : Expr
 {
+    public override IEnumerable<Expr> Children => new[] { target, start, stop, step }.OfType<Expr>();
+
     public override object? Eval(JinjaEngine.Scope scope)
     {
         object? t = target.Eval(scope);
@@ -245,6 +259,11 @@ internal sealed class SliceExpr(Expr target, Expr? start, Expr? stop, Expr? step
 
 internal sealed class BinaryExpr(string op, Expr left, Expr right) : Expr
 {
+    public string Op => op;
+    public Expr Left => left;
+    public Expr Right => right;
+    public override IEnumerable<Expr> Children => [left, right];
+
     public override object? Eval(JinjaEngine.Scope scope)
     {
         if (op == "and") return Values.Truthy(left.Eval(scope)) ? right.Eval(scope) : left.Eval(scope);
@@ -277,16 +296,22 @@ internal sealed class BinaryExpr(string op, Expr left, Expr right) : Expr
 /// <summary>Unary <c>-x</c> — negates as a long, matching <see cref="BinaryExpr"/>'s integer arithmetic (every Jinja number literal here is a long).</summary>
 internal sealed class UnaryMinusExpr(Expr operand) : Expr
 {
+    public override IEnumerable<Expr> Children => [operand];
+
     public override object? Eval(JinjaEngine.Scope scope) => -(long)Values.ToD(operand.Eval(scope));
 }
 
 internal sealed class TernaryExpr(Expr cond, Expr ifTrue, Expr ifFalse) : Expr
 {
+    public override IEnumerable<Expr> Children => [cond, ifTrue, ifFalse];
+
     public override object? Eval(JinjaEngine.Scope scope) => Values.Truthy(cond.Eval(scope)) ? ifTrue.Eval(scope) : ifFalse.Eval(scope);
 }
 
 internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Expr
 {
+    public override IEnumerable<Expr> Children => [inner, .. args];
+
     public override object? Eval(JinjaEngine.Scope scope)
     {
         object? v = inner.Eval(scope);
@@ -321,6 +346,8 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
 /// <summary>A keyword argument <c>name=value</c> in a call; evaluates to its value so positional consumers work, while <see cref="CallExpr"/> for <c>namespace(...)</c> inspects the name.</summary>
 internal sealed class NamedArgExpr(string name, Expr value) : Expr
 {
+    public override IEnumerable<Expr> Children => [value];
+
     public string Name => name;
     public Expr Value => value;
     public override object? Eval(JinjaEngine.Scope scope) => value.Eval(scope);
@@ -328,6 +355,8 @@ internal sealed class NamedArgExpr(string name, Expr value) : Expr
 
 internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
 {
+    public override IEnumerable<Expr> Children => [callee, .. args];
+
     public override object? Eval(JinjaEngine.Scope scope)
     {
         // Method calls on the result of a member access (e.g. content.strip()).
@@ -615,12 +644,17 @@ internal static class ExprParser
 
 internal sealed class ListLiteralExpr(List<Expr> items) : Expr
 {
+    public IReadOnlyList<Expr> Items => items;
+    public override IEnumerable<Expr> Children => items;
+
     public override object? Eval(JinjaEngine.Scope scope) => items.Select(e => e.Eval(scope)).ToList();
 }
 
 /// <summary>Jinja <c>is</c> tests (<c>defined</c>, <c>none</c>, <c>string</c>, <c>mapping</c>, <c>iterable</c>, ...), with optional <c>not</c>; <c>defined</c> uses scope membership so a missing variable reads as undefined.</summary>
 internal sealed class IsTestExpr(Expr target, string test, bool negated) : Expr
 {
+    public override IEnumerable<Expr> Children => [target];
+
     public override object? Eval(JinjaEngine.Scope scope)
     {
         bool result = test switch

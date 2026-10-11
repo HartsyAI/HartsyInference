@@ -96,6 +96,19 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         return ByteLevelCodec.Decode(raw);
     }
 
+    private static readonly Dictionary<int, byte[]> SpecialBytesById =
+        SpecialTokens.ToDictionary(kv => kv.Value, kv => System.Text.Encoding.UTF8.GetBytes(kv.Key));
+
+    /// <summary>The bytes a token contributes, as <see cref="Decode"/> would produce them; a control token gives its literal only when <paramref name="includeSpecial"/> is set.</summary>
+    public byte[]? TokenBytes(int id, bool includeSpecial)
+    {
+        ThrowIfDisposed();
+        if (id >= EndOfTextId)
+            return includeSpecial && SpecialBytesById.TryGetValue(id, out byte[]? literal) ? literal : [];
+        if (id < 0) return [];
+        return ByteLevelCodec.DecodeToBytes(_tokenizer.Decode([id]) ?? string.Empty);
+    }
+
     // ── ILlmTokenizer ────────────────────────────────────────────────────────────────────────────────
     /// <summary>Ordinary BPE encode (no special-token handling).</summary>
     public int[] EncodeOrdinary(string text) { ThrowIfDisposed(); return [.. _tokenizer.EncodeToIds(text)]; }
