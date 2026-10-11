@@ -11,6 +11,7 @@ internal sealed class ParsedEventTranslator
     private readonly Action<TextChunk> _sink;
     private readonly long _requestId;
     private readonly StringBuilder _args = new();
+    private readonly List<NativeToolCall> _calls = [];
     private string _name = "";
     private string? _namespace;
 
@@ -20,6 +21,9 @@ internal sealed class ParsedEventTranslator
         _sink = sink;
         _requestId = requestId;
     }
+
+    /// <summary>Every tool call completed so far, in order.</summary>
+    public IReadOnlyList<NativeToolCall> Calls => _calls;
 
     /// <summary>Handles one parser event.</summary>
     public void Handle(ParsedEvent e)
@@ -43,12 +47,9 @@ internal sealed class ParsedEventTranslator
                 _sink(new TextChunk { Kind = TextChunkKind.ToolCallDelta, ToolCallIndex = e.ToolCallIndex, Text = e.Text });
                 break;
             case ParsedEventKind.ToolCallEnd:
-                _sink(new TextChunk
-                {
-                    Kind = TextChunkKind.NativeToolCall,
-                    ToolCallIndex = e.ToolCallIndex,
-                    ToolCall = Call(e.ToolCallIndex, _args.ToString()),
-                });
+                NativeToolCall completed = Call(e.ToolCallIndex, _args.ToString());
+                _calls.Add(completed);
+                _sink(new TextChunk { Kind = TextChunkKind.NativeToolCall, ToolCallIndex = e.ToolCallIndex, ToolCall = completed });
                 break;
             case ParsedEventKind.ToolCallAbort:
                 _sink(new TextChunk { Kind = TextChunkKind.ToolCallAbort, ToolCallIndex = e.ToolCallIndex });

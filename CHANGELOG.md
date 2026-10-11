@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.339
+
+- **Changed: `EngineOptions.TextStreamFilterFactory` takes a `TextStreamFilterContext`.** The context carries the request, its request id, the template's name and Jinja source, the architecture and the model path, so a host can pick a parser per model. Breaking for any host that set the factory.
+- **Changed: tool-call ids are unique per request.** Both the structured parser and the filter number calls `call_{requestId}_{index}`, so ids never repeat across rounds of one conversation.
+- **Fixed: tool calls from a structured output parser end the turn as a tool call.** DeepSeek-V4.1's tool calls now stop generation as `StopReason.ToolCall` and dispatch, instead of ending as a plain stop.
+- **Added: `TextResult.ToolCalls`.** Non-streaming generation reports every tool call, not only the last. The OpenAI-compatible route returns all of them.
+- **Added: `ITextStreamFilter.MarkerLiterals`.** A filter lists the control-token literals it needs to see (for example `<tool_call>`); the engine decodes those tokens as text and still drops every other control token.
+- **Removed: the `<tool_call>` sentinel grammar.** It never fired on GGUF models and it turned off graph decode and speculative decode for every tool request. Those stay on for tool requests now.
+
 ## Unreleased
 
 

@@ -97,7 +97,8 @@ public sealed class ToolCallStreamFilterTests
             Messages = [new TextMessage { Role = TextRole.User, Content = "hi" }],
             Tools = [new ToolDefinition { Name = "hang_up" }],
         };
-        ToolCallStreamFilter filter = Assert.IsType<ToolCallStreamFilter>(options.TextStreamFilterFactory!(request));
+        TextStreamFilterContext context = new() { Request = request, RequestId = 7, TemplateName = "jinja" };
+        ToolCallStreamFilter filter = Assert.IsType<ToolCallStreamFilter>(options.TextStreamFilterFactory!(context));
         List<TextChunk> chunks = [];
         TextFilterSink sink = new(filter, chunks.Add, static () => { });
         sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "{\"name\": \"Bob\", \"age\": 3}\n" });
@@ -106,5 +107,25 @@ public sealed class ToolCallStreamFilterTests
         sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "{\"name\": \"hang_up\", \"arguments\": {}}" });
         Assert.True(sink.Stopped);
         Assert.Equal("hang_up", sink.ToolCall!.Name);
+        Assert.Equal("call_7_0", sink.ToolCall.Id);
+    }
+
+    [Fact]
+    public void StructuredParserTemplateGetsNoFilter()
+    {
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "hi" }],
+            Tools = [new ToolDefinition { Name = "hang_up" }],
+        };
+        TextStreamFilterContext context = new() { Request = request, RequestId = 1, TemplateName = "deepseek", HasStructuredParser = true };
+        Assert.Null(ToolCalling.CreateFilter(context));
+    }
+
+    [Fact]
+    public void RequestWithoutToolsGetsNoFilter()
+    {
+        TextRequest request = new() { Messages = [new TextMessage { Role = TextRole.User, Content = "hi" }] };
+        Assert.Null(ToolCalling.CreateFilter(new TextStreamFilterContext { Request = request, RequestId = 1, TemplateName = "jinja" }));
     }
 }
