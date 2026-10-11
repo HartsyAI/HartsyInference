@@ -19,10 +19,9 @@ pip install -q --break-system-packages ninja psutil numpy 2>&1 | tail -n1
     got=$(sha256sum $D/$name | cut -d' ' -f1); [ "$got" = "$sha" ] && echo "OK $name" || echo "SHA-MISMATCH $name"; }
   fetch https://huggingface.co/bartowski/granite-3.0-3b-a800m-instruct-GGUF/resolve/main/granite-3.0-3b-a800m-instruct-Q4_K_M.gguf granite-3b-a800m-Q4_K_M.gguf 2059356000 aa6287bafd182d06a6d11b0d001458deec902e8c0522875fc20cde2f561ebf6d
   fetch https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf qwen3-30b-a3b-Q4_K_M.gguf 18556686912 9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48
-  # NOT TheBloke's file: it stores one tensor per expert, which this llama.cpp (and the stacked-expert loader) rejects. mradermacher's stacks them.
-  [ -f $D/mixtral-8x7b-instruct-v0.1-mradermacher-Q4_K_M.gguf ] && [ "$(stat -c %s $D/mixtral-8x7b-instruct-v0.1-mradermacher-Q4_K_M.gguf)" = 28448468384 ] || curl -sSL --retry 5 -o $D/mixtral-8x7b-instruct-v0.1-mradermacher-Q4_K_M.gguf https://huggingface.co/mradermacher/Mixtral-8x7B-Instruct-v0.1-GGUF/resolve/main/Mixtral-8x7B-Instruct-v0.1.Q4_K_M.gguf
-  [ "$(stat -c %s $D/mixtral-8x7b-instruct-v0.1-mradermacher-Q4_K_M.gguf)" = 28448468384 ] && echo "OK mixtral (size matches)" || echo "SIZE-MISMATCH mixtral"
-  [ -f $D/olmoe-1b-7b-0924-instruct-q4_k_m.gguf ] && echo "OK olmoe (uploaded)" || echo "MISSING olmoe: scp it to $D"
+  # NOT TheBloke's Mixtral: it stores one tensor per expert, which this llama.cpp (and the stacked-expert loader) rejects. mradermacher's stacks them.
+  fetch https://huggingface.co/mradermacher/Mixtral-8x7B-Instruct-v0.1-GGUF/resolve/main/Mixtral-8x7B-Instruct-v0.1.Q4_K_M.gguf mixtral-8x7b-instruct-v0.1-mradermacher-Q4_K_M.gguf 28448468384 9f8d778c2eb8fd7f8426d03496aec30c46cf4076e98758818cc73d020ed01d44
+  fetch https://huggingface.co/allenai/OLMoE-1B-7B-0924-Instruct-GGUF/resolve/main/olmoe-1b-7b-0924-instruct-q4_k_m.gguf olmoe-1b-7b-0924-instruct-q4_k_m.gguf 4213512672 8c310f1435a1222338fd2d3d974975be9cd908180b644bab0c2a94da1ac32f3f
   echo MODELS_DONE ) > $L/models.log 2>&1 &
 
 # 2. dotnet + engine source ------------------------------------------------------------------------------------------------

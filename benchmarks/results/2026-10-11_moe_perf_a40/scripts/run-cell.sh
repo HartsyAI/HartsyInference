@@ -11,4 +11,9 @@ esac
 rm -rf "$O"; mkdir -p "$O"
 cp "$P4" "$O/prompt-4k.txt"; cp "$P32" "$O/prompt-32k.txt"
 python3 /root/baseline/Strata/bench/bench_vs_llama.py run --machine /root/baseline/cfg/$M-$V.json --out "$O" --rounds "$ROUNDS" --cells "$CELLS" --configs "$CONFIGS" > "$O/run.log" 2>&1
-echo "exit=$? $(date -u +%T)" > "$O/DONE"
+rc=$?
+# The harness exits 0 even when every trial failed (server would not start, HTTP 500): a cell passes only if each config produced trials and the log has no ERROR lines.
+for c in ${CONFIGS//,/ }; do [ -s "$O/raw/$c.jsonl" ] || { echo "no trials for $c" >> "$O/run.log"; rc=2; }; done
+grep -q '^ERROR' "$O/run.log" && rc=3
+echo "exit=$rc $(date -u +%T)" > "$O/DONE"
+exit $rc
