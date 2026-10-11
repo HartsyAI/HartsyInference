@@ -55,7 +55,8 @@ public sealed class ToolLoopRun
     /// <see cref="TextChunkKind.Result"/> replaces its already-streamed deltas in <see cref="VisibleText"/> and the final
     /// result when the two differ. A gate or dispatcher failure becomes that call's error result. An <see
     /// cref="StopReason.Error"/> or <see cref="StopReason.Cancelled"/> stop is relayed and
-    /// ends the run without a final result.</remarks>
+    /// ends the run without a final result; that round's partial text stays out of <see cref="Conversation"/>, since
+    /// the turn did not complete.</remarks>
     public async IAsyncEnumerable<TextChunk> RunAsync([EnumeratorCancellation] CancellationToken cancel = default)
     {
         if (_started) throw new InvalidOperationException("A tool loop runs once; create a new one for another run.");
@@ -77,7 +78,8 @@ public sealed class ToolLoopRun
             List<NativeToolCall> calls = [];
             // A call's id is settled when its first delta arrives, so the deltas, the completed call and its result share it.
             Dictionary<int, string> idsByIndex = [];
-            HashSet<string> settledIds = new(StringComparer.Ordinal);
+            // Index-less calls match their delta by the id the delta arrived with (empty ids in arrival order).
+            Dictionary<string, Queue<string>> idsByOriginal = new(StringComparer.Ordinal);
             StopReason stop = StopReason.Stop;
             await foreach (TextChunk chunk in _stream(roundRequest, cancel).WithCancellation(cancel).ConfigureAwait(false))
             {
@@ -91,7 +93,9 @@ public sealed class ToolLoopRun
                     case TextChunkKind.ToolCallDelta when chunk.ToolCall is { } begin:
                     {
                         NativeToolCall repairedBegin = EnsureUsableId(begin);
-                        settledIds.Add(repairedBegin.Id);
+                        string original = begin.Id ?? "";
+                        if (!idsByOriginal.TryGetValue(original, out Queue<string>? pending)) idsByOriginal[original] = pending = new();
+                        pending.Enqueue(repairedBegin.Id);
                         if (chunk.ToolCallIndex is int beginIndex) idsByIndex[beginIndex] = repairedBegin.Id;
                         yield return chunk with { ToolCall = repairedBegin };
                         break;
@@ -99,9 +103,9 @@ public sealed class ToolLoopRun
                     case TextChunkKind.NativeToolCall:
                         if (chunk.ToolCall is { } call)
                         {
-                            NativeToolCall repaired = chunk.ToolCallIndex is int index && idsByIndex.TryGetValue(index, out string? settled)
+                            NativeToolCall repaired = SettledId(chunk.ToolCallIndex, call, idsByIndex, idsByOriginal) is { } settled
                                 ? call with { Id = settled }
-                                : settledIds.Remove(call.Id) ? call : EnsureUsableId(call);
+                                : EnsureUsableId(call);
                             calls.Add(repaired);
                             yield return chunk with { ToolCall = repaired };
                         }
@@ -171,6 +175,15 @@ public sealed class ToolLoopRun
                 yield return new TextChunk { Kind = TextChunkKind.ToolResult, Text = result, ToolCall = call, ToolCallIndex = resultIndex++ };
             }
         }
+    }
+
+    /// <summary>The id a call's first delta settled: by index, else by the id the delta arrived with; null when no delta
+    /// came.</summary>
+    private static string? SettledId(int? index, NativeToolCall call, Dictionary<int, string> idsByIndex,
+        Dictionary<string, Queue<string>> idsByOriginal)
+    {
+        if (index is int i && idsByIndex.TryGetValue(i, out string? byIndex)) return byIndex;
+        return idsByOriginal.TryGetValue(call.Id ?? "", out Queue<string>? pending) && pending.Count > 0 ? pending.Dequeue() : null;
     }
 
     /// <summary>Runs the gate and the dispatcher for one call. A failure in either becomes the call's error result, so every

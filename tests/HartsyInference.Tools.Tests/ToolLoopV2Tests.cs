@@ -217,6 +217,22 @@ public sealed class ToolLoopV2Tests
         Assert.Equal("c1", run.ToolResults.Single().Call.Id);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("c1")]
+    public async Task AnIndexlessCallKeepsItsDeltasRepairedId(string id)
+    {
+        // "" has no id at all; "c1" was already used in round one, so round two's delta is repaired.
+        TextChunk begin = new() { Kind = TextChunkKind.ToolCallDelta, ToolCall = new NativeToolCall { Id = id, Name = "get_time", Arguments = "" } };
+        Rounds rounds = new([Call("c1", "get_time"), Stop(StopReason.ToolCall)], [begin, Call(id, "get_time"), Stop(StopReason.ToolCall)], [Text("ok"), Stop(StopReason.Stop)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("x")));
+        List<TextChunk> chunks = await Collect(run);
+        string deltaId = chunks.Single(c => c.Kind == TextChunkKind.ToolCallDelta).ToolCall!.Id;
+        Assert.NotEqual("c1", deltaId);
+        Assert.False(string.IsNullOrEmpty(deltaId));
+        Assert.Equal(deltaId, run.ToolResults[1].Call.Id);
+    }
+
     [Fact]
     public async Task ARepairedIdCoversTheCallsDeltasToo()
     {
