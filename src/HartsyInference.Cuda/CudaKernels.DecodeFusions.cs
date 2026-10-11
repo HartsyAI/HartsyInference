@@ -36,7 +36,7 @@ public sealed partial class CudaKernels
     /// false when not applicable, and the caller launches the register-resident or shared-memory kernel instead.</summary>
     private unsafe bool TryLaunchNormWide(bool add, int normDim, int totalRows, void** args, nint stream)
     {
-        if (ForceReferenceNorm || !EngineKnobs.NormWide.Value) return false;
+        if (!WideNormEnabled) return false;
         int k = FastNormK(normDim);
         nint fn = k == 0 ? 0 : add ? _addNormWide[k] : _normWide[k];
         if (fn == 0) return false;
@@ -44,11 +44,16 @@ public sealed partial class CudaKernels
         return true;
     }
 
-    /// <summary>True when <see cref="LaunchMoeCombineAddRmsNormQ8"/> has a kernel for this row width.</summary>
+    /// <summary>The wide kernels run only while both norm switches are on and the reference test hook is off: <c>numerics.lmNormFast=0</c>
+    /// still returns every RMSNorm Q8 launch to the shared-memory tree.</summary>
+    private bool WideNormEnabled => !ForceReferenceNorm && EngineKnobs.NormFast.Value && EngineKnobs.NormWide.Value;
+
+    /// <summary>True when <see cref="LaunchMoeCombineAddRmsNormQ8"/> has a kernel for this row width and the wide norms are enabled
+    /// (the fused kernel carries the wide norm's body).</summary>
     public bool HasMoeCombineAddRmsNormQ8(int normDim)
     {
         int k = FastNormK(normDim);
-        return k > 0 && _moeCombineAddNorm[k] != 0;
+        return k > 0 && _moeCombineAddNorm[k] != 0 && WideNormEnabled;
     }
 
     /// <summary>One token: <c>residOut = a + combine(slots)</c>, <c>normOut = rmsnorm(residOut)·w</c> and its Q8_1 sidecar (bit-identical to
