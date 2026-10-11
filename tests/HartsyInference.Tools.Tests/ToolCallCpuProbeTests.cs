@@ -41,6 +41,32 @@ public sealed class ToolCallCpuProbeTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task Qwen3LoopRunsTheToolAndFeedsItsResultBack()
+    {
+        string? path = Environment.GetEnvironmentVariable("QWEN3_06B_GGUF_PATH");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        {
+            _output.WriteLine("SKIPPED: set QWEN3_06B_GGUF_PATH to a Qwen3-0.6B GGUF.");
+            return;
+        }
+        EngineOptions options = new();
+        ToolCalling.Install(options);
+        using InferenceEngine engine = new("cpu", options);
+        ModelSpec spec = ModelResolver.Resolve("qwen3", path, Modality.Text);
+        ToolRegistry registry = new ToolRegistry().Add("hang_up", "Ends the current phone call immediately.", HangUp.JsonSchema, (_, _) => Task.FromResult("call ended"));
+        TextRequest request = Request() with { Tools = [HangUp], EnableThinking = false, MaxTokens = 96 };
+        ToolLoopRun run = ToolLoop.Create(engine.Text, spec, request, registry, new ToolLoopOptions { MaxRounds = 2 });
+        List<TextChunk> chunks = [];
+        await foreach (TextChunk chunk in run.RunAsync()) chunks.Add(chunk);
+        _output.WriteLine($"ROUNDS: {run.Rounds} STOP: {run.Stop} RESULTS: {string.Join(" | ", run.ToolResults.Select(r => r.Call.Name + "=" + r.Result))}");
+        TextChunk result = Assert.Single(chunks, c => c.Kind == TextChunkKind.ToolResult);
+        Assert.Equal("call ended", result.Text);
+        Assert.Equal("hang_up", result.ToolCall!.Name);
+        Assert.Contains(run.Conversation, m => m.Role == TextRole.Tool && m.Content == "call ended");
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task Gemma3ToolLessTemplateGetsTheInjectedPromptAndCalls()
         => await RunProbe("GEMMA3_1B_GGUF_PATH", "gemma");
 
