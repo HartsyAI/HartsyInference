@@ -98,7 +98,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Set up flow-match scheduler with shift=5.0 ──
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 2. Build initial latent [B, 16, latentH, latentW] (t2i: noise * initSigma; img2img: encode + AddNoise) ──

@@ -217,7 +217,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 
         // ── 2. Static-shift flow-match Euler scheduler (shift 1.0 — see config) ──
         TensorShape pixelShape = new TensorShape(1, 3, padHeight, padWidth);
-        FlowMatchEulerDiscreteScheduler scheduler = new(_config.SchedulerShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 3. Initial pixel sample (the "latent" IS the image) ──

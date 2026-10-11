@@ -280,8 +280,10 @@ _transformer.InvalidateStepGraph(Backend);
         // ── 2. Set up dynamic-shift flow-match scheduler ──────────────
         TensorShape noiseShape = new TensorShape(1, _config.InChannels, patH, patW);
         TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
-        FlowMatchEulerDiscreteScheduler scheduler =
-            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen);
+        // An explicit shift is the line's max (SwarmUI's ModelSamplingFlux max_shift), so it stays resolution-dependent.
+        FlowMatchEulerDiscreteScheduler scheduler = request.SigmaShift is float maxShift
+            ? FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen, maxShift: maxShift)
+            : FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen);
         scheduler.SetTimesteps(steps);
 
         // ── 3. Build initial packed latent (t2i: noise * initSigma; img2img: encode + patchify + BN-norm + pack + AddNoise) ──

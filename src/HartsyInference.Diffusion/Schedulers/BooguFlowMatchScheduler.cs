@@ -30,6 +30,7 @@ public sealed class BooguFlowMatchScheduler : IScheduler
     private readonly int _seqLen;
     private readonly float _baseShift;
     private readonly float _maxShift;
+    private readonly float? _shift;
 
     private float[] _timesteps;
     private float[] _timestepsFull;
@@ -61,8 +62,16 @@ public sealed class BooguFlowMatchScheduler : IScheduler
     /// <param name="doShift">Apply the v1 logistic shift. False uses the raw linspace.</param>
     /// <param name="baseShift">Shift at 256 tokens (0.5).</param>
     /// <param name="maxShift">Shift at 4096 tokens (1.15).</param>
-    public BooguFlowMatchScheduler(int seqLen = 4096, bool doShift = true, float baseShift = 0.5f, float maxShift = 1.15f)
+    /// <param name="shift">Explicit static sigma shift replacing the <paramref name="seqLen"/> line (<c>mu = ln shift</c>,
+    /// ComfyUI's 3.16 default being <c>exp(1.15)</c>); null keeps the line.</param>
+    public BooguFlowMatchScheduler(int seqLen = 4096, bool doShift = true, float baseShift = 0.5f, float maxShift = 1.15f,
+        float? shift = null)
     {
+        if (shift is float s && (!float.IsFinite(s) || s <= 0f))
+        {
+            throw new ArgumentOutOfRangeException(nameof(shift), s, "Sigma shift must be a positive finite number.");
+        }
+        _shift = shift;
         _seqLen = seqLen;
         _doShift = doShift;
         _baseShift = baseShift;
@@ -81,7 +90,7 @@ public sealed class BooguFlowMatchScheduler : IScheduler
         // mu from the (256 -> baseShift) .. (4096 -> maxShift) line, evaluated at seq_len.
         double m = (_maxShift - _baseShift) / (4096.0 - 256.0);
         double b = _baseShift - m * 256.0;
-        double mu = m * _seqLen + b;
+        double mu = _shift is float s ? Math.Log(s) : m * _seqLen + b;
         double expMu = Math.Exp(mu);
         const double eps = 1e-8;
 

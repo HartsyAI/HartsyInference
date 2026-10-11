@@ -69,6 +69,7 @@ public sealed unsafe class Kandinsky5RecipePipeline(Kandinsky5Pipeline pipeline,
             TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
                 new TextToImageRequest
                 {
+                    SigmaShift = RecipeRequestMapper.MapSigmaShift(request.SigmaShift),
                     SeamlessTiling = request.SeamlessTiling,
                     VariationSeed = request.VariationSeed?.Seed ?? -1,
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,

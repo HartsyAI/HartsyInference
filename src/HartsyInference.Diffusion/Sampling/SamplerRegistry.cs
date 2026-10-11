@@ -16,7 +16,7 @@ public static class SamplerRegistry
         "euler", "euler_ancestral", "heun", "heunpp2", "dpm_2", "dpm_2_ancestral", "lms", "dpm_fast", "dpm_adaptive",
         "dpmpp_2s_ancestral", "dpmpp_sde", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_3m_sde", "ddpm", "ipndm", "ipndm_v",
         "deis", "res_multistep", "gradient_estimation", "er_sde", "seeds_2", "seeds_3", "sa_solver", "euler_cfg_pp",
-        "uni_pc", "uni_pc_bh2",
+        "uni_pc", "uni_pc_bh2", "lcm",
     ];
 
     /// <summary>Samplers ComfyUI exposes that this engine does not implement yet, kept as data so the refusal message
@@ -25,7 +25,7 @@ public static class SamplerRegistry
     [
         "euler_ancestral_cfg_pp", "dpmpp_2s_ancestral_cfg_pp", "dpmpp_2m_cfg_pp", "dpmpp_2m_sde_heun",
         "dpmpp_2m_sde_heun_gpu", "res_multistep_cfg_pp", "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp",
-        "gradient_estimation_cfg_pp", "exp_heun_2_x0", "exp_heun_2_x0_sde", "sa_solver_pece", "cfgpp_ud10_ab", "lcm",
+        "gradient_estimation_cfg_pp", "exp_heun_2_x0", "exp_heun_2_x0_sde", "sa_solver_pece", "cfgpp_ud10_ab",
     ];
 
     /// <summary>Samplers for which ComfyUI builds <c>steps + 1</c> sigmas and drops the penultimate one.</summary>
@@ -96,6 +96,7 @@ public static class SamplerRegistry
             "euler_cfg_pp" => new EulerCfgPlusPlusSampler(sigmas, options),
             "uni_pc" => new UniPcSampler(sigmas, false, options),
             "uni_pc_bh2" => new UniPcSampler(sigmas, true, options),
+            "lcm" => new LcmSampler(sigmas, seed, options),
             _ => throw new NotSupportedException(Refusal(name, key)),
         };
     }

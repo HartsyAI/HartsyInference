@@ -29,6 +29,11 @@ public record TextToImageRequest
     /// <summary>Scheduler to use. Null = default (Euler).</summary>
     public string? Scheduler { get; init; }
 
+    /// <summary>Explicit flow-match sigma shift; null keeps the family's own (static or resolution-dependent). Each
+    /// flow-matching family reads it as SwarmUI's ComfyUI workflow does: a static shift for most, the max shift of the
+    /// resolution-dependent line for Flux.2, and <c>exp(value)</c> for Krea 2. Ignored by families that do not wire it.</summary>
+    public float? SigmaShift { get; init; }
+
     /// <summary>"CLIP skip" — how many layers from the end of the CLIP text encoder to take hidden states from. 1 = standard last layer (default), 2 = penultimate (common for SD1.5 anime checkpoints). Null = 1. Only honored by pipelines whose text encoder is CLIP-final-layer based (SD 1.5); SDXL already uses penultimate by spec.</summary>
     public int? ClipSkip { get; init; }
 

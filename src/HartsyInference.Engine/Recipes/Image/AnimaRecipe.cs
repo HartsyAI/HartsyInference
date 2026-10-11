@@ -14,6 +14,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -41,11 +42,21 @@ public sealed class AnimaRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "anima", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Anima's sampling settings: 20 steps, guidance-free (CFG 1.0), 1024x1024 — the Cosmos-Predict2 lineage samples without classifier-free guidance, and the pipeline resolves steps against <c>GenerationDefaults.Generic</c>.</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+    /// <summary>Anima base's sampling settings from the model card: 30 steps (card: 30-50) at CFG 4.0 (card: 4-5), 1024x1024.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+
+    /// <summary>Anima Turbo's sampling settings from the model card: 10 steps (card: 8-12), guidance-free (CFG 1.0).</summary>
+    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 10, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => AnimaVariants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(AnimaVariants.Turbo) ? TurboDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -131,7 +142,8 @@ public sealed class AnimaRecipe : IArchitectureRecipe
 
             AnimaPipeline pipeline = new AnimaPipeline(context.Backend, transformer, llmAdapter, vae, vaeEncoder, animaConfig);
             Logs.Info("[AnimaRecipe] Anima ready (scheduler=FlowMatchEuler shift=3.0).");
-            return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, checkpoint, loaders, loraStack);
+            return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, checkpoint, loaders, loraStack,
+                DefaultsFor(context.ResolveVariant(AnimaVariants.Catalog)));
         }
         catch (Exception ex)
         {

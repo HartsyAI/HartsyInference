@@ -36,8 +36,10 @@ public sealed class Sd3Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sd3", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>SD 3.5's official sampling settings: 28 steps at CFG 7.0, 1024x1024 (diffusers <c>StableDiffusion3Pipeline.__call__</c>, mirrored by <c>GenerationDefaults.Sd35</c>).</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 7.0f, Width = 1024, Height = 1024 };
+    /// <summary>SD 3.5 Medium's official sampling settings: 40 steps at CFG 4.5, 1024x1024 (the model card's diffusers
+    /// example, mirrored by <c>GenerationDefaults.Sd35</c>). The catalog pins 3.5 Medium; 28 / 7.0 is only the bare
+    /// <c>StableDiffusion3Pipeline.__call__</c> default.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 40, CfgScale = 4.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;

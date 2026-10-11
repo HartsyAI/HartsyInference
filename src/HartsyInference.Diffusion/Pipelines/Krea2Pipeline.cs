@@ -251,7 +251,10 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         }
 
         // ── scheduler: resolution-aware exp shift (Turbo pins mu=1.15) ──
-        FlowMatchEulerDiscreteScheduler scheduler = _config.IsDistilled
+        // An explicit shift is mu (SwarmUI pins ModelSamplingFlux base = max = value), so the static shift is exp(value).
+        FlowMatchEulerDiscreteScheduler scheduler = request.SigmaShift is float mu
+            ? new FlowMatchEulerDiscreteScheduler().WithShift(MathF.Exp(mu))
+            : _config.IsDistilled
             ? new FlowMatchEulerDiscreteScheduler(MathF.Exp(1.15f))
             : FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imageSeqLen, baseSeqLen: 256, maxSeqLen: 6400,
                 baseShift: 0.5f, maxShift: 1.15f);

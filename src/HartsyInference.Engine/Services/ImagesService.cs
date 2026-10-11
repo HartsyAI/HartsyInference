@@ -83,8 +83,11 @@ public sealed class ImagesService : IImagesService
                 // the refiner family's img2img init. Runs BEFORE segment refinement, matching Comfy's stage order.
                 // The classic SDXL-on-SDXL pair is skipped here — SdxlRecipePipeline keeps that internally, with
                 // RefinerStage.IsSdxlInternalPair as the single routing decision both sides consult.
+                // The base family's sampling defaults (a Turbo's sampler, a shift) are not the refiner's; only the
+                // caller's own choices carry over, and the refiner fills the rest from its family.
                 result = RefinerStage.Apply(
-                    _engine, spec, basePass, result, progress, cancel, rawPrompt, rawNegativePrompt);
+                    _engine, spec, basePass with { Sampler = request.Sampler, Scheduler = request.Scheduler, SigmaShift = request.SigmaShift },
+                    result, progress, cancel, rawPrompt, rawNegativePrompt);
 
                 // Tier 3.2: <segment:X> runs AFTER pixels exist (it needs to segment the decoded image), so it
                 // composes on top of whatever the ordinary inpaint-only-masked path above already produced —

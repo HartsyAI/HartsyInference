@@ -82,9 +82,9 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Scheduler / sigma-schedule name (default: the model family's schedule).")]
         public string? Scheduler { get; init; }
 
-        /// <summary>Flow-match sigma shift; unset uses the family's trained shift.</summary>
+        /// <summary>Flow-match sigma shift; unset uses the family's trained shift. Flux.2 and Krea 2 read it as mu (shift = exp(mu)), as SwarmUI does.</summary>
         [CommandOption("--sigma-shift")]
-        [Description("Flow-match sigma shift (default: the model family's trained shift).")]
+        [Description("Flow-match sigma shift (default: the model family's trained shift). On Flux.2 and Krea 2 it is mu, so 0 means shift 1.")]
         public double? SigmaShift { get; init; }
 
         /// <summary>Per-run VRAM posture; unset follows the engine's own (the vram.lowVram environment).</summary>
