@@ -635,7 +635,7 @@ public sealed class TextService : ITextService, IDisposable
             RequestId = requestId,
             TemplateName = template.Name,
             ChatTemplateSource = template.Source,
-            Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture,
+            Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture ?? slot.TpCheckpoint?.Architecture,
             ModelPath = slot.LoadedPath,
             HasStructuredParser = structured,
         });

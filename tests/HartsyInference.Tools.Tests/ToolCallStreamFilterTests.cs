@@ -128,4 +128,17 @@ public sealed class ToolCallStreamFilterTests
         TextRequest request = new() { Messages = [new TextMessage { Role = TextRole.User, Content = "hi" }] };
         Assert.Null(ToolCalling.CreateFilter(new TextStreamFilterContext { Request = request, RequestId = 1, TemplateName = "jinja" }));
     }
+
+    [Fact]
+    public void EndOfStreamDrainsEveryCallOneTerminalDeltaCompleted()
+    {
+        // One delta closes a Mistral array of three calls; the sink must hand over all three even though no delta follows.
+        ToolCallStreamFilter filter = new(ToolCallFormat.Mistral, stopAfterFirstCall: false);
+        List<TextChunk> chunks = [];
+        TextFilterSink sink = new(filter, chunks.Add, static () => { });
+        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "[TOOL_CALLS][{\"name\": \"a\", \"arguments\": {}}, {\"name\": \"b\", \"arguments\": {}}, {\"name\": \"c\", \"arguments\": {}}]" });
+        sink.End();
+        Assert.Equal(["a", "b", "c"], sink.ToolCalls.Select(c => c.Name));
+        Assert.Equal(3, chunks.Count(c => c.Kind == TextChunkKind.NativeToolCall));
+    }
 }

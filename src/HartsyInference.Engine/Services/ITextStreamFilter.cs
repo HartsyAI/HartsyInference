@@ -14,4 +14,7 @@ public interface ITextStreamFilter
 
     /// <summary>Control-token literals (for example <c>&lt;tool_call&gt;</c>) this filter needs to see as text. The engine decodes those special tokens into the filter's deltas instead of dropping them; every other control token is still skipped.</summary>
     IReadOnlyCollection<string> MarkerLiterals => Array.Empty<string>();
+
+    /// <summary>True while the filter holds completed output it has not yet handed over (for example several calls from one delta). <see cref="OnEnd"/> is called again until this is false.</summary>
+    bool HasPendingOutput => false;
 }
