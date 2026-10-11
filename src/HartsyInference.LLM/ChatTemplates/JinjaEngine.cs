@@ -271,6 +271,11 @@ public sealed class JinjaEngine
         /// <c>set</c>s stay inside the call.</summary>
         public string Invoke(List<object?> positional, Dictionary<string, object?> named, Scope callerScope)
         {
+            foreach (string key in named.Keys)
+                if (!parameters.Any(p => p.Name == key))
+                    throw new NotSupportedException($"Jinja macro '{name}' has no parameter '{key}'.");
+            if (positional.Count > parameters.Count)
+                throw new NotSupportedException($"Jinja macro '{name}' takes {parameters.Count} argument(s), got {positional.Count}.");
             Scope local = callerScope.Child();
             for (int i = 0; i < parameters.Count; i++)
             {
@@ -281,11 +286,6 @@ public sealed class JinjaEngine
                 else value = pDefault?.Eval(local);
                 local.Set(pName, value);
             }
-            foreach (string key in named.Keys)
-                if (!parameters.Any(p => p.Name == key))
-                    throw new NotSupportedException($"Jinja macro '{name}' has no parameter '{key}'.");
-            if (positional.Count > parameters.Count)
-                throw new NotSupportedException($"Jinja macro '{name}' takes {parameters.Count} argument(s), got {positional.Count}.");
             StringBuilder sb = new();
             foreach (Node n in body) n.Render(sb, local);
             return sb.ToString();
