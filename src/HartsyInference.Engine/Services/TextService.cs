@@ -924,10 +924,12 @@ public sealed class TextService : ITextService, IDisposable
         // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
         // what it supports rather than what class it is means Vulkan gets the right answer the moment it publishes
         // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.
-        bool dequantize = !backend.Capabilities.SupportsQuantized;
+        // A backend that reads only some block formats (Vulkan) loads widened except for those, which stay packed.
+        IReadOnlySet<DType>? keepQuantized = backend.Capabilities.SupportsQuantized ? backend.Capabilities.QuantizedTypes : null;
+        bool dequantize = !backend.Capabilities.SupportsQuantized || keepQuantized is not null;
         string architecture = architecture0;
         bool ssm = SsmLanguageModel.IsSsmArchitecture(architecture);
-        EnsureRamHeadroomFor(path, dequantizesEverything: dequantize || ssm);
+        EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || ssm);
         if (ssm)
         {
             slot.SsmModel = SsmLanguageModel.Load(path, architecture);
@@ -943,7 +945,7 @@ public sealed class TextService : ITextService, IDisposable
         // The engine's on-disk quant is honored as-is; LowVramQuant here is the "keep quant compressed on-device"
         // toggle (any non-empty value enables it) — the loader takes a bool, not a target quant string.
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
-        slot.Model = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: dequantize);
+        slot.Model = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: dequantize, keepQuantized);
         // Unconditional: PreloadWeights is a no-op on a backend with no device memory, and a backend that HAS
         // device memory wants its weights resident — gating on the class meant Vulkan re-uploaded every weight
         // over PCIe on every op.

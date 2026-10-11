@@ -199,13 +199,14 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Loads the GGUF at <paramref name="path"/>; <paramref name="lowVramQuant"/> keeps weights compressed on-device instead of caching dequantized F16, and <paramref name="dequantizeToF32"/> widens every quantized/half tensor to F32 for the CPU backend (F32-only, can't consume compressed projection weights).</summary>
-    public static GgufLanguageModel Load(string path, bool lowVramQuant = false, bool dequantizeToF32 = false)
+    /// <summary>Loads the GGUF at <paramref name="path"/>; <paramref name="lowVramQuant"/> keeps weights compressed on-device instead of caching dequantized F16, and <paramref name="dequantizeToF32"/> widens every quantized/half tensor to F32 for the CPU backend (F32-only, can't consume compressed projection weights). <paramref name="keepQuantized"/> exempts those quantized formats from <paramref name="dequantizeToF32"/>: a backend that reads only some block formats directly (Vulkan) keeps them packed and has the rest widened.</summary>
+    public static GgufLanguageModel Load(string path, bool lowVramQuant = false, bool dequantizeToF32 = false,
+        IReadOnlySet<DType>? keepQuantized = null)
     {
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(path);
         try
         {
-            (Dictionary<string, Tensor> weights, TransformerConfig config) = PrepareWeights(handle, lowVramQuant, dequantizeToF32);
+            (Dictionary<string, Tensor> weights, TransformerConfig config) = PrepareWeights(handle, lowVramQuant, dequantizeToF32, keepQuantized);
             GenericTransformer transformer = new(config);
             transformer.LoadWeights(weights, "model");
 
@@ -223,7 +224,7 @@ public sealed class GgufLanguageModel : IDisposable
 
     /// <summary>The shared load core: relabel GGUF dims → dequant unsupported formats → split fused tensors → infer config; everything up to (but excluding) transformer construction.</summary>
     private static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
-        GgufModelLoader.LoadedGgufModel handle, bool lowVramQuant, bool dequantizeToF32)
+        GgufModelLoader.LoadedGgufModel handle, bool lowVramQuant, bool dequantizeToF32, IReadOnlySet<DType>? keepQuantized = null)
     {
         {
             if (SsmArchitectures.Contains(handle.Architecture))
@@ -243,7 +244,11 @@ public sealed class GgufLanguageModel : IDisposable
                 // mix) are dequantized to F32 up front; the supported formats stay quantized for the
                 // dequant-to-F16 / fused-GEMV path. The CPU backend is F32-only, so dequantizeToF32 widens
                 // everything (quantized and half-float) to F32 instead.
-                if (t.DType.IsQuantized && (dequantizeToF32 || !GpuSupportedQuant.Contains(t.DType.Name)))
+                if (t.DType.IsQuantized && keepQuantized?.Contains(t.DType) == true)
+                {
+                    // Kept packed: the backend reads this block format directly.
+                }
+                else if (t.DType.IsQuantized && (dequantizeToF32 || !GpuSupportedQuant.Contains(t.DType.Name)))
                     t = GgufDequantizer.Dequantize(t, DType.F32);
                 else if (dequantizeToF32 && t.DType.IsFloatingPoint && t.DType != DType.F32)
                     t = t.CastTo(DType.F32);

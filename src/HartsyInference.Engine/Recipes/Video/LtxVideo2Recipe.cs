@@ -123,8 +123,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         try
         {
             // An nvfp4 build only stays packed where the backend can consume a packed weight; CPU and Vulkan need the
-            // eager unpack. SupportsQuantized is that line — it is exactly "this backend has a packed-weight GEMM path".
-            bool residentNvfp4 = context.Backend.Capabilities.SupportsQuantized;
+            // eager unpack. SupportsQuantized for the packed FP4 type is that line — "this backend has a packed-weight
+            // GEMM path for it"; Vulkan's quantized support covers GGUF blocks only.
+            bool residentNvfp4 = context.Backend.Capabilities.SupportsQuantizedType(DType.F4E2M1);
             AddFile(context.CheckpointPath, loaders, merged);
             LtxVideo2CheckpointConverter.ConvertedWeights conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
 
