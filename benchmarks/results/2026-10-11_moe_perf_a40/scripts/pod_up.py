@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Rent an A40 on RunPod, wait for SSH, copy this kit over and start bootstrap.sh in the background.
+usage: pod_up.py [name]      prints POD_ID, SSH host/port; run `ssh ... tail -f /root/baseline/logs/bootstrap.log` to follow.
+Stop the pod with: curl -s --config ~/.runpod/curlrc -X POST https://rest.runpod.io/v1/pods/<id>/stop"""
+import json, pathlib, subprocess, sys, time
+
+API = "https://rest.runpod.io/v1"
+CURLRC = str(pathlib.Path.home() / ".runpod/curlrc")
+KEY = str(pathlib.Path.home() / ".ssh/runpod_blackwell")
+KIT = pathlib.Path(__file__).resolve().parent
+
+def api(method, path, body=None):
+    cmd = ["curl", "-s", "--config", CURLRC, "-X", method, API + path, "-w", "\n%{http_code}"]
+    if body is not None:
+        cmd += ["-d", json.dumps(body)]
+    out = subprocess.run(cmd, capture_output=True, text=True).stdout
+    text, _, code = out.rpartition("\n")
+    return int(code), (json.loads(text) if text.strip().startswith(("{", "[")) else text)
+
+name = sys.argv[1] if len(sys.argv) > 1 else "dsv41-perf-a40-t3"
+pub = pathlib.Path(KEY + ".pub").read_text().strip()
+body = {"name": name, "imageName": "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404", "gpuTypeIds": ["NVIDIA A40"], "gpuCount": 1,
+        "cloudType": "SECURE", "containerDiskInGb": 160, "volumeInGb": 20, "volumeMountPath": "/workspace", "ports": ["22/tcp"],
+        "env": {"PUBLIC_KEY": pub}}
+code, pod = api("POST", "/pods", body)
+if code >= 300 or not isinstance(pod, dict) or "id" not in pod:
+    sys.exit(f"create failed HTTP {code}: {pod}")
+pid = pod["id"]
+print("POD_ID", pid, flush=True)
+host = port = None
+for _ in range(120):
+    time.sleep(10)
+    code, p = api("GET", f"/pods/{pid}")
+    if isinstance(p, dict) and p.get("publicIp") and (p.get("portMappings") or {}).get("22"):
+        host, port = p["publicIp"], p["portMappings"]["22"]
+        r = subprocess.run(["ssh", "-i", KEY, "-p", str(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new", f"root@{host}", "echo up"], capture_output=True, text=True)
+        if r.stdout.strip() == "up":
+            break
+else:
+    sys.exit(f"pod {pid} never became reachable")
+print("SSH", host, port, flush=True)
+ssh = ["ssh", "-i", KEY, "-p", str(port), "-o", "StrictHostKeyChecking=accept-new", f"root@{host}"]
+subprocess.run(ssh + ["mkdir -p /root/podkit"], check=True)
+subprocess.run(["scp", "-i", KEY, "-P", str(port), "-r", "-o", "StrictHostKeyChecking=accept-new", str(KIT) + "/.", f"root@{host}:/root/podkit/"], check=True)
+subprocess.run(ssh + ["mkdir -p /root/baseline/logs && nohup bash /root/podkit/bootstrap.sh > /root/baseline/logs/bootstrap.log 2>&1 < /dev/null & echo started"], check=True)
+olmoe = pathlib.Path("/mnt/model-storage/Models/llm/olmoe/olmoe-1b-7b-0924-instruct-q4_k_m.gguf")
+subprocess.run(ssh + ["mkdir -p /root/models/moe"], check=True)
+subprocess.run(["scp", "-i", KEY, "-P", str(port), "-o", "StrictHostKeyChecking=accept-new", str(olmoe), f"root@{host}:/root/models/moe/{olmoe.name}"], check=True)
+print(json.dumps({"pod": pid, "host": host, "port": port}), flush=True)
