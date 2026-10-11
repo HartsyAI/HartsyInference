@@ -17,7 +17,11 @@ public sealed class ToolCallStreamFilter : ITextStreamFilter
     {
         _parser = new ToolCallParser(format, ToolCallParser.DefaultMaxSpanChars, knownTools, idPrefix);
         StopAfterFirstCall = stopAfterFirstCall;
+        MarkerLiterals = ToolCallFormats.RulesFor(format).ControlLiterals;
     }
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<string> MarkerLiterals { get; }
 
     /// <summary>The format being parsed.</summary>
     public ToolCallFormat Format => _parser.Format;

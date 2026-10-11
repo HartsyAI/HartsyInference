@@ -709,6 +709,8 @@ public sealed class TextService : ITextService, IDisposable
         {
             if (Parser is not null) Parser.Finish(Emit!);
             StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
+            // End drains calls the filter still queues, so the call list is read after it.
+            FilterSink?.End();
             // Calls from the filter, else from a structured parser (DeepSeek-V4.1): either one ends the turn as a tool call.
             IReadOnlyList<NativeToolCall> calls = FilterSink?.ToolCalls ?? Array.Empty<NativeToolCall>();
             if (calls.Count == 0 && Translator is not null) calls = Translator.Calls;
@@ -720,9 +722,8 @@ public sealed class TextService : ITextService, IDisposable
                 return new GenOutcome(text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
                     result.PrefillMilliseconds, result.DecodeMilliseconds);
             }
-            FilterSink.End();
-            return new GenOutcome(FilterSink.Text, calls.Count > 0 ? StopReason.ToolCall : stop,
-                result.PromptTokens, result.TokenIds.Count, FilterSink.ToolCalls, result.PrefillMilliseconds, result.DecodeMilliseconds);
+            return new GenOutcome(FilterSink.Text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
+                result.PrefillMilliseconds, result.DecodeMilliseconds);
         }
 
         /// <summary>The outcome of a request the filter stopped: ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.</summary>

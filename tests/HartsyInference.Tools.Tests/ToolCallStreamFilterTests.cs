@@ -141,4 +141,14 @@ public sealed class ToolCallStreamFilterTests
         Assert.Equal(["a", "b", "c"], sink.ToolCalls.Select(c => c.Name));
         Assert.Equal(3, chunks.Count(c => c.Kind == TextChunkKind.NativeToolCall));
     }
+
+    [Fact]
+    public void MarkerLiteralsListTheControlMarkersAndNotTheBarePayload()
+    {
+        // The control markers must reach the filter as text; a bare "{" is ordinary text and must not be a literal.
+        ToolCallStreamFilter hermes = new(ToolCallFormat.Hermes);
+        Assert.Equal(["<tool_call>", "</tool_call>"], hermes.MarkerLiterals);
+        Assert.DoesNotContain("{", hermes.MarkerLiterals);
+        Assert.Contains("[TOOL_CALLS]", new ToolCallStreamFilter(ToolCallFormat.Mistral).MarkerLiterals);
+    }
 }
