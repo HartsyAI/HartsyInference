@@ -966,11 +966,18 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// and GEMM <see cref="Linear"/> takes. An F16 activation is accepted (the large-vocabulary head passes one).</summary>
     public void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
     {
-        using OpScope _ = EnterOp();
         if (!quantWeight.DType.IsQuantized)
             throw new ArgumentException($"QuantizedMatMul expects a GGUF-quantized weight; got {quantWeight.DType.Name}.", nameof(quantWeight));
-        if (!TryDispatchQuantGemv(output, input, quantWeight, bias))
-            DispatchMatmul(output, input, quantWeight, transposeA: false, transposeB: true, bias: bias);
+        using (OpScope _ = EnterOp())
+        {
+            if (!TryDispatchQuantGemv(output, input, quantWeight, bias))
+                DispatchMatmul(output, input, quantWeight, transposeA: false, transposeB: true, bias: bias);
+        }
+        // A LoRA that cannot merge into packed blocks rides as an adjunct; outside the scope, as Linear applies it.
+        if (quantWeight.LowRankAdjunct is LowRankAdjunct adjunct)
+        {
+            LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
+        }
     }
 
     /// <summary>The opt-in INT8 Linear: the activation is quantized per row on the device each call, the weight once (cached

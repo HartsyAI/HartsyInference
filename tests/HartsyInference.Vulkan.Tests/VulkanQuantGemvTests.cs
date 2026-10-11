@@ -178,6 +178,38 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         AssertClose(expected, mag, ReadF32(o), 2e-3, "QuantizedMatMul F16 activation");
     }
 
+    /// <summary>A LoRA on a packed weight rides as an adjunct; both entry points add it after the GEMV.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Gemv_AppliesTheLowRankAdjunct(bool viaQuantizedMatMul)
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        const int N = 65, K = 256, Rank = 4;
+        const float DownValue = 0.01f, UpValue = 0.02f;
+        using Tensor w = RandomQuant(DType.Q8_0, N, K, seed: 11);
+        using Tensor down = F32(Enumerable.Repeat(DownValue, Rank * K).ToArray(), Rank, K);
+        using Tensor up = F32(Enumerable.Repeat(UpValue, N * Rank).ToArray(), N, Rank);
+        using Tensor patched = w.WithLowRankAdjunct(new LowRankAdjunct
+        {
+            Terms = [new LowRankAdjunctTerm { Down = down, Up = up, Scale = 1.0f }],
+        });
+        float[] x = Random(K, seed: 12);
+        (float[] expected, float[] mag) = Reference(w, x, null, N, K, 1);
+        float delta = Rank * DownValue * UpValue * x.Sum();
+        for (int i = 0; i < N; i++) { expected[i] += delta; mag[i] += Math.Abs(delta); }
+
+        using Tensor xt = F32(x, 1, 1, K);
+        using Tensor o = EmptyF32(1, 1, N);
+        long before = vk.QuantGemvCount;
+        if (viaQuantizedMatMul) vk.QuantizedMatMul(o, xt, patched, null);
+        else vk.Linear(o, xt, patched, null);
+        float[] got = ReadF32(o);
+        Assert.Equal(before + 1, vk.QuantGemvCount);
+        AssertClose(expected, mag, got, 2e-5, $"adjunct via {(viaQuantizedMatMul ? "QuantizedMatMul" : "Linear")}");
+    }
+
     [Theory]
     [InlineData("Q8_0", 48, 1)]
     [InlineData("Q4_K", 300, 1)]
