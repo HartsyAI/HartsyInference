@@ -24,15 +24,12 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
-## alpha.341
+## alpha.343
 
 - **Changed: tool-call format resolves per request.** `ToolCalling.Install` with no format now picks the parser from the model's own chat template first, then its architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter. An explicit format still applies to every request.
 - **Changed: the control-token markers reach the parser.** A filter declares its markers (`<tool_call>`, `</tool_call>`, and for Gemma `<|tool_call>`, `<tool_call|>` and the string delimiter `<|"|>`), and the engine decodes them as text. Qwen3-0.6B's real completion is captured as a fixture and parses to one `hang_up` call at every tested split point.
 - **Added: a forced tool restricts the bare call forms** to that one name and stops after its call.
 - A stray close tag outside a call now streams as text, where it used to be dropped.
-
-## alpha.340
-
 - **Fixed: message content cannot open a turn or emit a control token.** A chat template renders control literals such as `<|im_start|>` and `<tool_call>` into the prompt, so a user message, a tool result or a model reply containing one used to become a real control token. Those literals in content now encode as plain text. The template's own literals are unchanged, and clean conversations encode to the same ids as before.
 - **Changed: `<think>` and `</think>` stream as text.** They are control tokens in Qwen3 GGUFs, so streamed replies dropped the tags while keeping the reasoning text. They now stream as written, and a reasoning model's history keeps its own reasoning split.
 - **Added: `ILlmTokenizer.SpecialLiterals`.** The control literals a tokenizer maps to ids. The GGUF tokenizer and the Qwen2 tokenizer report them; other tokenizers report none, so their content is not escaped.
