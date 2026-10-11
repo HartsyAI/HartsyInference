@@ -83,7 +83,8 @@ half-empty second wave cost about a sixth of the kernel at 32K context.
 **Sampling in the graph.** A sampled decode step draws on the device (`lm_topk_f32` then `lm_sample_from_topk`, top-k up to 64).
 Over a vocabulary the top-k runs as two stages: `lm_topk_slices_f32` takes each slice's k largest on its own block (indices already
 global), the one-block kernel merges at most 2048 survivors, and the sampler maps merged positions back to token ids. Ties keep the
-lowest index through both stages. One block over 152K logits took 550 us per step; the two stages take about 55 us.
+lowest index through both stages. The device draws with splitmix64, the host chain with its own generator, so one seed gives different
+tokens on the two paths (the distributions match, which `CudaDeviceSamplerTests` checks); a request is not reproducible across them. One block over 152K logits took 550 us per step; the two stages take about 55 us.
 
 **Graph capture cost.** Capturing a decode graph walks every weight tensor once to decide which fit the preload budget. That walk
 was quadratic in the tensor count (a MoE checkpoint has thousands), about 330 ms per request on Qwen3-30B-A3B; it is one pass now,

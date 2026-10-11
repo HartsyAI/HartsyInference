@@ -146,8 +146,8 @@ public sealed unsafe partial class CudaBackend
     }
 
     /// <summary>Resolves a group of per-expert weights to its base device address and per-expert byte stride. The experts must be
-    /// resident weights placed back to back (<see cref="IBackend.PreloadWeightGroups"/> does that). The first, middle and last
-    /// member are checked against the stride, so a group whose members were re-placed individually is refused rather than read at
+    /// resident weights placed back to back (<see cref="IBackend.PreloadWeightGroups"/> does that). The first, second, last and six
+    /// evenly spaced members are checked against the stride (a per-call cost independent of the expert count), so a group whose members were re-placed individually is refused rather than read at
     /// a wrong address.</summary>
     private bool TryResolveExpertGroup(IReadOnlyList<Tensor> experts, out ulong baseAddr, out long stride)
     {
@@ -170,8 +170,9 @@ public sealed unsafe partial class CudaBackend
         if (p1 <= p0) return false;
         long step = (long)(p1 - p0);
         if (step < (long)GpuTransferHelper.ByteSize(first)) return false;
-        foreach (int i in new[] { count / 2, count - 1 })
+        for (int t = 2; t <= 8; t++)
         {
+            int i = (int)((long)(count - 1) * t / 8);
             Tensor member = experts[i];
             if (!GpuTransferHelper.IsWeightCached(member)) return false;
             if (GpuTransferHelper.CopyToDevice(member) != p0 + (ulong)(step * i)) return false;
@@ -378,6 +379,13 @@ public sealed unsafe partial class CudaBackend
 
     private bool _groupedGemmBroken;
 
+    /// <summary>True for the errors that mean "this cuBLAS cannot run the grouped call" (unsupported, invalid for these types, wrong
+    /// architecture) or a kernel module that is absent; allocation and execution failures are not refusals.</summary>
+    private static bool IsGroupedGemmRefusal(Exception ex) =>
+        ex is NotSupportedException or InvalidOperationException
+        || (ex is CudaException ce && ce.Message.StartsWith("CUBLAS_STATUS_", StringComparison.Ordinal)
+            && (ce.Message.Contains("NOT_SUPPORTED") || ce.Message.Contains("INVALID_VALUE") || ce.Message.Contains("ARCH_MISMATCH")));
+
     /// <summary>Average rows per active expert from which a dense GEMM per expert beats cuBLAS's grouped kernel (Mixtral: ~1000 rows per expert; Qwen3-30B-A3B: ~60).</summary>
     private const int DenseExpertRows = 384;
 
@@ -428,8 +436,16 @@ public sealed unsafe partial class CudaBackend
             {
                 if (already) return have;
                 ulong ws = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
-                // The stacks are flat runs of quant blocks: one dequant launch per projection covers every expert.
-                CastOnGpu(ws, basePtr, first.DType, gemmDtype, (int)(matElems * experts));
+                try
+                {
+                    // The stacks are flat runs of quant blocks: one dequant launch per projection covers every expert.
+                    CastOnGpu(ws, basePtr, first.DType, gemmDtype, (int)(matElems * experts));
+                }
+                catch
+                {
+                    GpuTransferHelper.FreeDevice(ws);
+                    throw;
+                }
                 if (cacheStacks) GpuTransferHelper.CacheWeightCast(first, marker, ws, (nuint)stackBytes);
                 else own = true;
                 return ws;
@@ -543,9 +559,10 @@ public sealed unsafe partial class CudaBackend
             }
             return true;
         }
-        catch (Exception ex) when (ex is CudaException or InvalidOperationException or NotSupportedException || ex.GetType().Name.Contains("Cublas"))
+        catch (Exception ex) when (IsGroupedGemmRefusal(ex))
         {
             // Refused (older cuBLAS, or a type combination without a grouped kernel): remember it and let the per-expert path run.
+            // Any other failure (an allocation, a launch, a sticky CUDA error) is not a refusal and propagates.
             _groupedGemmBroken = true;
             HartsyInference.Core.Logging.Logs.Warning($"[Cuda] grouped expert GEMM unavailable ({ex.Message}); using one GEMM per expert.");
             return false;

@@ -13,6 +13,16 @@
 
 #define SAMPLE_MAX_K 64
 
+// The token id of candidate i: the vocabulary id idx[i] (through candIdx when the candidates came from a sliced first stage), or 0 when the
+// slot holds no candidate (idx -1: every logit was invalid), so a bad draw is a valid id and never an out-of-range read.
+__device__ __forceinline__ int sample_token_id(const int* idx, const int* candIdx, int i)
+{
+    int id = idx[i];
+    if (id < 0) return 0;
+    if (candIdx != nullptr) id = candIdx[id];
+    return id < 0 ? 0 : id;
+}
+
 extern "C" __global__ void lm_sample_from_topk(
     int* __restrict__ outToken,
     const float* __restrict__ vals,
@@ -23,7 +33,7 @@ extern "C" __global__ void lm_sample_from_topk(
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     if (k > SAMPLE_MAX_K) k = SAMPLE_MAX_K;
-    if (temperature <= 0.0f || k <= 1) { outToken[0] = (candIdx != nullptr && idx[0] >= 0) ? candIdx[idx[0]] : idx[0]; return; }
+    if (temperature <= 0.0f || k <= 1) { outToken[0] = sample_token_id(idx, candIdx, 0); return; }
 
     const float inv = 1.0f / temperature;
     const float top = vals[0] * inv;
@@ -35,6 +45,7 @@ extern "C" __global__ void lm_sample_from_topk(
         p[i] = e;
         sum += e;
     }
+    if (!(sum > 0.0f)) { outToken[0] = sample_token_id(idx, candIdx, 0); return; }   // no valid candidate
     const float invSum = 1.0f / sum;
     for (int i = 0; i < k; ++i) p[i] *= invSum;
 
@@ -72,7 +83,5 @@ extern "C" __global__ void lm_sample_from_topk(
         acc += p[i];
         if (target < acc) { pick = i; break; }
     }
-    int sel = idx[pick];
-    if (sel < 0) sel = idx[0];
-    outToken[0] = candIdx != nullptr ? candIdx[sel] : sel;
+    outToken[0] = sample_token_id(idx, candIdx, pick);
 }

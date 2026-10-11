@@ -9,6 +9,9 @@ public sealed partial class CudaBackend
     /// <summary>Candidate slots of the two-stage top-k: values then ids, after the final k values and ids in the sampler buffer.</summary>
     private const int SampleCandidates = 2048;
 
+    // Largest top-k each sampler buffer was allocated for: its value, id and candidate regions are laid out from that size.
+    private readonly Dictionary<ulong, int> _rngMaxK = [];
+
     /// <inheritdoc />
     public bool DeviceSamplingSupported => _kernels is { HasSampleKernel: true };
 
@@ -24,6 +27,7 @@ public sealed partial class CudaBackend
         ulong* init = stackalloc ulong[2] { seed == 0 ? 0x9E3779B97F4A7C15ul : seed, 0ul };
         CudaDriverApi.cuMemcpyHtoDAsync(handle, (nint)init, 16, _stream.Handle).ThrowOnError();
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
+        lock (_rngMaxK) _rngMaxK[handle] = k;
         return handle;
     }
 
@@ -32,6 +36,7 @@ public sealed partial class CudaBackend
     {
         if (handle == 0) return;
         using OpScope _op = EnterOp();
+        lock (_rngMaxK) _rngMaxK.Remove(handle);
         CudaMemory.Free(handle);
     }
 
@@ -41,6 +46,10 @@ public sealed partial class CudaBackend
         using NvtxRange _nvtx = NvtxRange.Push("SampleTopK");
         if (outputTokenId == 0 || rngState == 0 || logits.DType != DType.F32 || topK < 1 || topK > CudaKernels.SampleMaxK)
             throw new NotSupportedException("SampleTopKInto requires F32 logits, a token-id buffer, an RNG buffer and 1 <= topK <= 64.");
+        int allocatedK;
+        lock (_rngMaxK) if (!_rngMaxK.TryGetValue(rngState, out allocatedK)) allocatedK = 0;
+        if (topK > allocatedK)
+            throw new ArgumentException($"topK {topK} exceeds the {allocatedK} the RNG buffer was allocated for.", nameof(topK));
         using OpScope _op = EnterOp();
         EnsureKernels();
         int n = (int)logits.Shape[logits.Shape.Rank - 1];

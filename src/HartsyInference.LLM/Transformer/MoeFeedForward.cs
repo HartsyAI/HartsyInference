@@ -24,8 +24,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// beats the grouped per-expert path while few tokens share an expert.</summary>
     internal const int IndexedMaxTokens = 16;
 
-    private bool? _indexedShapeOk;                   // dtype/shape/routing eligibility, fixed once the weights are loaded
-    private bool? _groupedShapeOk;
+    private bool? _deviceShapeOk;                    // dtype/shape/routing eligibility, fixed once the weights are loaded
+    private bool? _indexedAlignOk;                   // block alignment the indexed GEMVs need
     private int[] _groupedOffsets = [];              // host copy of the dispatch offsets, reused across calls
 
     // Opt-in heterogeneous runtime state (CPU-only slice). Created on first use; the direct path never touches it.
@@ -368,14 +368,29 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// one the device router reproduces, and no host runtime or offload owns the experts.</summary>
     internal bool CanRunIndexed(IBackend backend)
     {
-        if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
-        if (UseHostExpertRuntime || _offload is not null) return false;
-        if (_indexedShapeOk is null) _indexedShapeOk = IndexedShapeOk();
-        return _indexedShapeOk.Value && backend.SupportsMoeExpertIndexed(_gateW[0].DType) && backend.SupportsMoeExpertIndexed(_downW[0].DType)
+        if (!DeviceRoutingEligible()) return false;
+        _indexedAlignOk ??= IndexedAlignmentOk();
+        return _indexedAlignOk.Value && backend.SupportsMoeExpertIndexed(_gateW[0].DType) && backend.SupportsMoeExpertIndexed(_downW[0].DType)
             && backend.MoeExpertsResident(_gateW, _upW, _downW);
     }
 
-    private bool IndexedShapeOk()
+    /// <summary>True when a large batch can take the device-routed grouped path: routing the device router reproduces, one quantized type per
+    /// projection, and a backend that runs the grouped expert GEMMs for those types.</summary>
+    internal bool CanRunGrouped(IBackend backend) =>
+        DeviceRoutingEligible() && backend.SupportsMoeExpertsGrouped(_gateW[0].DType) && backend.SupportsMoeExpertsGrouped(_downW[0].DType)
+        && backend.MoeExpertsResident(_gateW, _upW, _downW);
+
+    /// <summary>What both device-routed paths need whatever the backend: the knob, experts owned by this layer (no host runtime or offload), and a
+    /// routing/dtype/shape combination the device router and expert kernels reproduce.</summary>
+    private bool DeviceRoutingEligible()
+    {
+        if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
+        if (UseHostExpertRuntime || _offload is not null) return false;
+        _deviceShapeOk ??= DeviceRoutedShapeOk();
+        return _deviceShapeOk.Value;
+    }
+
+    private bool DeviceRoutedShapeOk()
     {
         // Group-limited and logit-biased routing keep the host router.
         if (_moe.ExpertGroupCount > 0 || _moe.Scoring == MoeScoring.SigmoidLogitAdd) return false;
@@ -387,37 +402,16 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         {
             if (_gateW[i].DType != gateType || _upW[i].DType != gateType || _downW[i].DType != downType) return false;
         }
-        int align = gateType == DType.Q8_0 ? 32 : 256;
-        int downAlign = downType == DType.Q8_0 ? 32 : 256;
-        return _hidden % align == 0 && _moe.MoeIntermediateSize % downAlign == 0
-            && _gateW[0].Shape[0] == _moe.MoeIntermediateSize && _gateW[0].Shape[1] == _hidden
-            && _downW[0].Shape[0] == _hidden && _downW[0].Shape[1] == _moe.MoeIntermediateSize;
-    }
-
-    /// <summary>True when a large batch can take the device-routed grouped path: routing the device router reproduces, one quantized type per
-    /// projection, and a backend that runs the grouped expert GEMMs for those types.</summary>
-    internal bool CanRunGrouped(IBackend backend)
-    {
-        if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
-        if (UseHostExpertRuntime || _offload is not null) return false;
-        if (_groupedShapeOk is null) _groupedShapeOk = GroupedShapeOk();
-        return _groupedShapeOk.Value && backend.SupportsMoeExpertsGrouped(_gateW[0].DType) && backend.SupportsMoeExpertsGrouped(_downW[0].DType)
-            && backend.MoeExpertsResident(_gateW, _upW, _downW);
-    }
-
-    private bool GroupedShapeOk()
-    {
-        if (_moe.ExpertGroupCount > 0 || _moe.Scoring == MoeScoring.SigmoidLogitAdd) return false;
-        if (_moe.NumExperts > MoeRouteArgs.MaxExperts || _moe.NumExpertsPerTok > _moe.NumExperts) return false;
-        if (_gateW.Length != _moe.NumExperts || _upW.Length != _moe.NumExperts || _downW.Length != _moe.NumExperts) return false;
-        DType gateType = _gateW[0].DType, downType = _downW[0].DType;
-        if (!gateType.IsQuantized || !downType.IsQuantized || _upW[0].DType != gateType) return false;
-        for (int i = 1; i < _gateW.Length; i++)
-        {
-            if (_gateW[i].DType != gateType || _upW[i].DType != gateType || _downW[i].DType != downType) return false;
-        }
         return _gateW[0].Shape[0] == _moe.MoeIntermediateSize && _gateW[0].Shape[1] == _hidden
             && _downW[0].Shape[0] == _hidden && _downW[0].Shape[1] == _moe.MoeIntermediateSize;
+    }
+
+    /// <summary>The indexed GEMVs read whole quant blocks along the input length, so the hidden and intermediate sizes must be block multiples.</summary>
+    private bool IndexedAlignmentOk()
+    {
+        int align = _gateW[0].DType == DType.Q8_0 ? 32 : 256;
+        int downAlign = _downW[0].DType == DType.Q8_0 ? 32 : 256;
+        return _hidden % align == 0 && _moe.MoeIntermediateSize % downAlign == 0;
     }
 
     /// <summary>The routed stage of a large batch with the routing on the device: <see cref="IBackend.MoeRoute"/>, <see cref="IBackend.MoeBuildDispatch"/>
