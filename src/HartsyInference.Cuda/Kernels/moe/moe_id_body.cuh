@@ -7,6 +7,9 @@
 //   moe_id_row_bytes(K)                bytes of one weight row of K elements
 //   moe_id_row_partial(w, xq, xd, xs, K, warp, warps, lane)   per-lane partial dot of one weight row against one quantized
 //                                      activation row; warp/warps split the row's blocks between the warps of a block (0, 1 = whole row)
+// and optionally:
+//   MOE_ID_HAS_PAIR, moe_id_row_partial_pair(wg, wu, xq, xd, xs, K, lane, &g, &u)   the gate and up rows in one pass, each
+//                                      activation load shared by both (the fused gate/up kernel uses it when defined)
 //
 // Layout (rows = tokens * topk, row r = token * topk + slot, ids[r] = the expert for that pair):
 //   gate/up weights  base of expert 0, experts back to back, expertStride bytes apart, each [N, K] row-major
@@ -52,8 +55,12 @@ extern "C" __global__ void MOE_ID_NAME(moe_gateup_id)(
         const signed char* xqr = xq + (size_t)token * K;
         const float* xdr = xd + (size_t)token * (K / 32);
         const float* xsr = xs + (size_t)token * (K / 32);
+#ifdef MOE_ID_HAS_PAIR
+        moe_id_row_partial_pair(gateW + rowOff, upW + rowOff, xqr, xdr, xsr, K, lane, &g, &u);
+#else
         g = moe_id_row_partial(gateW + rowOff, xqr, xdr, xsr, K, 0, 1, lane);
         u = moe_id_row_partial(upW + rowOff, xqr, xdr, xsr, K, 0, 1, lane);
+#endif
     }
     g = moe_id_warp_sum(g);
     u = moe_id_warp_sum(u);

@@ -56,12 +56,15 @@ __device__ __forceinline__ void get_scale_min_k4_words(
 // handles super-blocks 4*sbStart + g, stepping 4*sbStride.
 // (The 2026-07-22 byte-shared variant used 8-byte loads and two super-blocks per iteration; this one
 // measured +60% on the Mixtral ffn_down shape, 2026-10-10.)
-__device__ __forceinline__ float q4k_q8_1_row_partial(
-    const unsigned char* __restrict__ wrow,
+// R rows (R = 2: an MoE expert's gate and up rows) share every activation load; each row keeps its
+// own accumulator, summed in the same per-super-block order as R = 1.
+template <int R>
+__device__ __forceinline__ void q4k_q8_1_rows_partial(
+    const unsigned char* const (&wrows)[R],
     const signed char* __restrict__ xqrow,
     const float* __restrict__ xdrow,
     const float* __restrict__ xsrow,
-    int nsb, int sbStart, int sbStride, int lane)
+    int nsb, int sbStart, int sbStride, int lane, float (&acc)[R])
 {
     const int t = lane & 7;                // position in the super-block group
     const int g = lane >> 3;               // super-block within the warp-iteration
@@ -71,38 +74,60 @@ __device__ __forceinline__ float q4k_q8_1_row_partial(
     const int xOff0 = pr * 64 + hh * 16;   // lo-nibble elements; the hi-nibble ones are 32 further
     const bool minLane = hh == 0;          // one lane per sub-block pair adds the min terms
 
-    float acc = 0.0f;
+    #pragma unroll
+    for (int r = 0; r < R; ++r) acc[r] = 0.0f;
     #pragma unroll 2
     for (int sb = sbStart * 4 + g; sb < nsb; sb += sbStride * 4) {
-        const unsigned char* block = wrow + (size_t)sb * SUPER_BYTES;
-        const uint4 hdr = *reinterpret_cast<const uint4*>(block);
-        const uint4 q = *reinterpret_cast<const uint4*>(block + qsOff);
+        uint4 hdr[R], q[R];
+        #pragma unroll
+        for (int r = 0; r < R; ++r) {
+            const unsigned char* block = wrows[r] + (size_t)sb * SUPER_BYTES;
+            hdr[r] = *reinterpret_cast<const uint4*>(block);
+            q[r] = *reinterpret_cast<const uint4*>(block + qsOff);
+        }
         const signed char* xb = xqrow + sb * SUPER_ELEMS + xOff0;
         const int4 xlo = *reinterpret_cast<const int4*>(xb);
         const int4 xhi = *reinterpret_cast<const int4*>(xb + 32);
         const int subBlock = sb * 8 + 2 * pr;
         const float xd0 = xdrow[subBlock], xd1 = xdrow[subBlock + 1];
+        const float xs0 = xsrow[subBlock], xs1 = xsrow[subBlock + 1];
 
-        const float d = __half2float(__ushort_as_half((unsigned short)(hdr.x & 0xFFFFu)));
-        const float dmin = __half2float(__ushort_as_half((unsigned short)(hdr.x >> 16)));
-        unsigned int sc0, m0, sc1, m1;
-        get_scale_min_k4_words(2 * pr, hdr.y, hdr.z, hdr.w, &sc0, &m0);
-        get_scale_min_k4_words(2 * pr + 1, hdr.y, hdr.z, hdr.w, &sc1, &m1);
+        #pragma unroll
+        for (int r = 0; r < R; ++r) {
+            const float d = __half2float(__ushort_as_half((unsigned short)(hdr[r].x & 0xFFFFu)));
+            const float dmin = __half2float(__ushort_as_half((unsigned short)(hdr[r].x >> 16)));
+            unsigned int sc0, m0, sc1, m1;
+            get_scale_min_k4_words(2 * pr, hdr[r].y, hdr[r].z, hdr[r].w, &sc0, &m0);
+            get_scale_min_k4_words(2 * pr + 1, hdr[r].y, hdr[r].z, hdr[r].w, &sc1, &m1);
 
-        int lo = __dp4a((int)(q.x & 0x0F0F0F0Fu), xlo.x, 0);
-        lo = __dp4a((int)(q.y & 0x0F0F0F0Fu), xlo.y, lo);
-        lo = __dp4a((int)(q.z & 0x0F0F0F0Fu), xlo.z, lo);
-        lo = __dp4a((int)(q.w & 0x0F0F0F0Fu), xlo.w, lo);
-        int hi = __dp4a((int)((q.x >> 4) & 0x0F0F0F0Fu), xhi.x, 0);
-        hi = __dp4a((int)((q.y >> 4) & 0x0F0F0F0Fu), xhi.y, hi);
-        hi = __dp4a((int)((q.z >> 4) & 0x0F0F0F0Fu), xhi.z, hi);
-        hi = __dp4a((int)((q.w >> 4) & 0x0F0F0F0Fu), xhi.w, hi);
+            int lo = __dp4a((int)(q[r].x & 0x0F0F0F0Fu), xlo.x, 0);
+            lo = __dp4a((int)(q[r].y & 0x0F0F0F0Fu), xlo.y, lo);
+            lo = __dp4a((int)(q[r].z & 0x0F0F0F0Fu), xlo.z, lo);
+            lo = __dp4a((int)(q[r].w & 0x0F0F0F0Fu), xlo.w, lo);
+            int hi = __dp4a((int)((q[r].x >> 4) & 0x0F0F0F0Fu), xhi.x, 0);
+            hi = __dp4a((int)((q[r].y >> 4) & 0x0F0F0F0Fu), xhi.y, hi);
+            hi = __dp4a((int)((q[r].z >> 4) & 0x0F0F0F0Fu), xhi.z, hi);
+            hi = __dp4a((int)((q[r].w >> 4) & 0x0F0F0F0Fu), xhi.w, hi);
 
-        acc += xd0 * (d * (float)sc0) * (float)lo + xd1 * (d * (float)sc1) * (float)hi;
-        if (minLane) acc -= dmin * (xd0 * (float)m0 * xsrow[subBlock] + xd1 * (float)m1 * xsrow[subBlock + 1]);
+            acc[r] += xd0 * (d * (float)sc0) * (float)lo + xd1 * (d * (float)sc1) * (float)hi;
+            if (minLane) acc[r] -= dmin * (xd0 * (float)m0 * xs0 + xd1 * (float)m1 * xs1);
+        }
     }
-    return acc;
 }
+
+__device__ __forceinline__ float q4k_q8_1_row_partial(
+    const unsigned char* __restrict__ wrow,
+    const signed char* __restrict__ xqrow,
+    const float* __restrict__ xdrow,
+    const float* __restrict__ xsrow,
+    int nsb, int sbStart, int sbStride, int lane)
+{
+    const unsigned char* const w[1] = { wrow };
+    float acc[1];
+    q4k_q8_1_rows_partial<1>(w, xqrow, xdrow, xsrow, nsb, sbStart, sbStride, lane, acc);
+    return acc[0];
+}
+
 
 extern "C" __global__ void mul_mat_vec_q4k_q8_1(
     float* __restrict__ output,
