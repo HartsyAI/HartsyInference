@@ -41,7 +41,7 @@ public sealed class KvCachesDefaultTests
         {
             using CpuBackend cpu = new();
             KnobStore.Set(EngineKnobs.TextKvF16, true);
-            Assert.True(KvCaches.F16For(cpu), "an explicit text setting is honored whatever the backend reports");
+            Assert.False(KvCaches.F16For(cpu), "asking for an F16 text cache on a backend that cannot hold one must stay F32, not build a cache it cannot append to");
             Assert.False(KvCaches.F16Enabled, "the text setting does not force other model types");
             KnobStore.Set(EngineKnobs.TextKvF16, false);
             Assert.False(KvCaches.F16For(cpu));
