@@ -831,21 +831,42 @@ public sealed unsafe class GenericTransformer : IDisposable
             tokDirect.Dispose();
         }
 
-        Tensor hidden = embeds;
+        // Residual folding (numerics.decodeResidualFold): layer i's final residual add (and an MoE layer's expert combine) runs inside
+        // layer i+1's input norm launch — or the final norm's — instead of as its own kernel(s). Bit-identical on a backend that opts in.
+        bool fold = backend.FoldsDecodeResidual && !_cfg.UseLayerNorm && _finalNormBias is null;
+        Tensor? hidden = embeds;
+        GraphResidual? pending = null;
         for (int i = 0; i < _layers.Length; i++)
         {
             // Gemma-3 dual-RoPE: local (sliding-window) layers rotate with the local-theta table.
             bool localRope = _graphDecodeCosLocal is not null && !_cfg.IsGlobalLayer(i);
-            Tensor next = _layers[i].ForwardGraphStep(backend, hidden, cache, i,
+            bool nextTakes = i + 1 < _layers.Length ? _layers[i + 1].CanTakeGraphResidual : true;
+            bool defer = fold && nextTakes && _layers[i].CanDeferGraphResidual(perLayerInputs is not null);
+            Tensor? next = _layers[i].ForwardGraphStep(backend, hidden, pending, defer, out GraphResidual? deferred, cache, i,
                 localRope ? _graphDecodeCosLocal! : cosTable, localRope ? _graphDecodeSinLocal! : sinTable, devicePos,
                 perLayerInputs?[i]);
-            hidden.Dispose();
+            hidden?.Dispose();
             hidden = next;
+            pending = deferred;
         }
 
         Tensor normed = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
-        Normalize(backend, normed, hidden, _finalNorm!, _finalNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
-        hidden.Dispose();
+        if (pending is { } last)
+        {
+            // The last layer's deferred residual joins the final RMSNorm (whose Q8_1 sidecar the lm_head GEMV then reads).
+            using Tensor resid = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
+            if (last.Moe is { } m)
+                backend.MoeCombineAddRmsNormEmitQ8(resid, normed, last.A, m.SlotOut, m.TopkWeight, m.Shared, m.SharedGate, m.TopK,
+                    _finalNorm!, _cfg.RmsNormEps);
+            else
+                backend.AddRmsNormEmitQ8(resid, normed, last.A, last.Delta!, _finalNorm!, _cfg.RmsNormEps);
+            last.Dispose();
+        }
+        else
+        {
+            Normalize(backend, normed, hidden!, _finalNorm!, _finalNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+            hidden!.Dispose();
+        }
 
         Tensor logits = ProjectLogits(backend, normed, 1);
         normed.Dispose();
@@ -1104,6 +1125,18 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual → RMSNorm → SwiGLU → residual; all <see cref="IBackend"/> ops.</summary>
+    /// <summary>A graph-decode layer's output residual whose final add was deferred into the next norm: <c>A + Delta</c>, or
+    /// <c>A + combine(Moe)</c> for a device-routed MoE layer. Disposing it frees the terms.</summary>
+    private sealed record GraphResidual(Tensor A, Tensor? Delta, MoeCombineParts? Moe) : IDisposable
+    {
+        public void Dispose()
+        {
+            A.Dispose();
+            Delta?.Dispose();
+            Moe?.Dispose();
+        }
+    }
+
     private sealed class Layer
     {
         private readonly TransformerConfig _cfg;
@@ -1775,8 +1808,28 @@ public sealed unsafe class GenericTransformer : IDisposable
         /// <remarks>Caller (<see cref="GenericTransformer"/>'s graph-decode eligibility check) guarantees this layer has none of the config this doesn't handle (MLA, MoE, cross-attention, sliding window, softcap, sink, ALiBi, parallel residual, sandwich norm) — this method does not re-check, it assumes the plain GQA/RoPE decoder shape.</remarks>
         public Tensor ForwardGraphStep(IBackend backend, Tensor hidden, IKvCache cache, int layerIndex,
             Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor? perLayerInput = null)
+            => ForwardGraphStep(backend, hidden, null, deferOut: false, out _, cache, layerIndex, cosTable, sinTable, devicePos,
+                perLayerInput)!;
+
+        /// <summary>True when this layer's output residual add can be deferred into the next layer's input norm
+        /// (<see cref="ForwardGraphStep(IBackend, Tensor?, GraphResidual?, bool, out GraphResidual?, IKvCache, int, Tensor, Tensor, ulong, Tensor?)"/>):
+        /// a plain add (no post-FFN norm, residual multiplier, per-layer embedding or output scale).</summary>
+        internal bool CanDeferGraphResidual(bool hasPerLayerInput) =>
+            _postFfnNorm is null && _cfg.ResidualMultiplier == 1f && !hasPerLayerInput && _outScale is null;
+
+        /// <summary>True when this layer's input norm can absorb the previous layer's deferred residual add: a plain pre-norm RMSNorm.</summary>
+        internal bool CanTakeGraphResidual =>
+            _cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _normBias is null && _inNorm is not null;
+
+        /// <summary>Graph-decode layer step with residual folding. When <paramref name="residIn"/> is given, <paramref name="hidden"/> is null and the
+        /// layer's input is <c>residIn.A + residIn.Delta</c> (or plus the MoE combine), computed inside the input norm's launch. When
+        /// <paramref name="deferOut"/> is true (caller checked <see cref="CanDeferGraphResidual"/>), the final residual add is NOT run: the
+        /// method returns null and hands the two terms back in <paramref name="residOut"/> for the next layer (or the final norm) to fold.</summary>
+        internal Tensor? ForwardGraphStep(IBackend backend, Tensor? hidden, GraphResidual? residIn, bool deferOut, out GraphResidual? residOut,
+            IKvCache cache, int layerIndex, Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor? perLayerInput)
         {
             const int t = 1;
+            residOut = null;
             int h = _cfg.HiddenSize;
             int hq = _cfg.NumHeads;
             int hkv = _cfg.NumKvHeads;
@@ -1786,12 +1839,25 @@ public sealed unsafe class GenericTransformer : IDisposable
             TensorShape flat = new(1, t, h);
 
             Tensor pre = new(flat, DType.F32);
+            Tensor? ownHidden = null;   // the residual materialized by a folded input norm; this method owns it
+            if (residIn is { } rin)
+            {
+                // Folded residual: the previous layer's FFN output joins the residual inside this norm's launch.
+                ownHidden = new(flat, DType.F32);
+                if (rin.Moe is { } m)
+                    backend.MoeCombineAddRmsNormEmitQ8(ownHidden, pre, rin.A, m.SlotOut, m.TopkWeight, m.Shared, m.SharedGate, m.TopK,
+                        _inNorm!, _cfg.RmsNormEps);
+                else
+                    backend.AddRmsNormEmitQ8(ownHidden, pre, rin.A, rin.Delta!, _inNorm!, _cfg.RmsNormEps);
+                rin.Dispose();
+                hidden = ownHidden;
+            }
             // Quantize-at-producer: the plain-RMS pre-attn norm feeds the QKV GEMV directly, so emit its
             // Q8_1 sidecar in the same launch (identical output bytes; the GEMV skips its quantize).
-            if (_cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _normBias is null)
-                backend.RmsNormEmitQ8(pre, hidden, _inNorm!, _cfg.RmsNormEps);
+            else if (_cfg.NormPlacement == NormPlacement.PreNorm && !_cfg.UseLayerNorm && _normBias is null)
+                backend.RmsNormEmitQ8(pre, hidden!, _inNorm!, _cfg.RmsNormEps);
             else
-                PreSublayer(backend, pre, hidden, _inNorm, _normBias);
+                PreSublayer(backend, pre, hidden!, _inNorm, _normBias);
 
             // t=1 makes [1,1,heads,d] and [1,heads,1,d] byte-identical contiguous layouts, so q/k/v are
             // allocated DIRECTLY in the head-major shape attention and KV-append expect — the four per-layer
@@ -1891,6 +1957,38 @@ public sealed unsafe class GenericTransformer : IDisposable
                 qkOut.Dispose();
                 v.Dispose();
             }
+            else if (fullNorm && !_cfg.UseLayerNorm && !_cfg.VNorm && (_qkvW is not null || _qkW is not null)
+                && _qNorm!.ElementCount == (long)hq * d && _kNorm!.ElementCount == (long)hkv * d
+                && EngineKnobs.QknormFullScatter.Value)   // kill-switch
+            {
+                // Full-width QK-norm epilogue (OLMoE): ONE kernel norms all q heads together and all k heads together,
+                // ropes, and scatters k/v — replacing the slices, two RMSNorm rows and the rope-scatter (bit-identical,
+                // see lm_qknorm_full_rope_scatter_f32).
+                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0];
+                q = new(new TensorShape(1, hq, t, d), DType.F32);
+                if (_qkvW is not null)
+                {
+                    int nv = (int)_vW!.Shape[0];
+                    Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
+                    Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
+                    pre.Dispose();
+                    backend.QkNormFullRopeScatterDecodeStep(q, kFull, vFull, qkvOut, null, _qNorm!, _kNorm!,
+                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
+                    qkvOut.Dispose();
+                }
+                else
+                {
+                    Tensor qkOut = new(new TensorShape(1, t, nq + nk), DType.F32);
+                    Project(backend, qkOut, pre, _qkW!, _qkB, _cfg.LowVramQuant);
+                    Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
+                    Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+                    pre.Dispose();
+                    backend.QkNormFullRopeScatterDecodeStep(q, kFull, vFull, qkOut, v, _qNorm!, _kNorm!,
+                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
+                    qkOut.Dispose();
+                    v.Dispose();
+                }
+            }
             else
             {
                 q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, hq, t, d), DType.F32);
@@ -1959,19 +2057,36 @@ public sealed unsafe class GenericTransformer : IDisposable
             // composed sequence.
             if (plainPreNorm && _postAttnNorm is not null && sandwichFusion)
             {
-                backend.NormAddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postAttnNorm, _postNorm!, _cfg.RmsNormEps);
+                backend.NormAddRmsNormEmitQ8(afterAttn, preMlp, hidden!, attnOut, _postAttnNorm, _postNorm!, _cfg.RmsNormEps);
             }
             else if (plainPreNorm && _postAttnNorm is null)
             {
-                backend.AddRmsNormEmitQ8(afterAttn, preMlp, hidden, attnOut, _postNorm!, _cfg.RmsNormEps);
+                backend.AddRmsNormEmitQ8(afterAttn, preMlp, hidden!, attnOut, _postNorm!, _cfg.RmsNormEps);
             }
             else
             {
                 attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
-                backend.Add(afterAttn, hidden, attnOut);
+                backend.Add(afterAttn, hidden!, attnOut);
                 PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
             }
             attnOut.Dispose();
+            ownHidden?.Dispose();   // folded residual: consumed by the post-attention add above
+            if (deferOut)
+            {
+                // Residual folding: hand (afterAttn, FFN output) to the next layer's input norm instead of adding here. An MoE
+                // layer on the device-routed path also defers its combine, so the next norm's launch does all three.
+                MoeCombineParts? parts = _moe?.TryForwardDeferred(backend, preMlp);
+                if (parts is not null)
+                {
+                    preMlp.Dispose();
+                    residOut = new GraphResidual(afterAttn, null, parts);
+                }
+                else
+                {
+                    residOut = new GraphResidual(afterAttn, Mlp(backend, preMlp, t, emitQ: true), null);
+                }
+                return null;
+            }
             Tensor mlpOut = Mlp(backend, preMlp, t, emitQ: true);
 
             Tensor result = new(flat, DType.F32);

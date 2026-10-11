@@ -10258,6 +10258,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         splits = (lk + chunk - 1) / chunk;              // exact # of chunks covering capacity
 
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        AttnSidecar attnSidecar = default;
         bool cachedOutput = false;
         try
         {
@@ -10269,7 +10270,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             int grp = kvGroup <= 0 ? 1 : kvGroup;
             if (DecodeGqaEligible(tq, causal, hq, hkv, grp, d))
             {
-                RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, lk, d, kvLen, grp, qOffset, scale, softcap, slidingWindow, devicePos, devF16Kv);
+                attnSidecar = TryAllocAttnCombineSidecar(b, tq, hq, d);
+                RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, lk, d, kvLen, grp, qOffset, scale, softcap, slidingWindow, devicePos, devF16Kv,
+                    attnSidecar);
             }
             else if (splits >= 2)
             {
@@ -10283,7 +10286,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos, softcap, slidingWindow,
                         f16Kv: devF16Kv);
-                    _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
+                    attnSidecar = TryAllocAttnCombineSidecar(b, tq, hq, d);
+                    if (attnSidecar.Xq != 0)
+                        _kernels!.LaunchFlashAttentionCombineQ8(pOut, attnSidecar.Xq, attnSidecar.Xd, attnSidecar.Xs, pM, pL, pAcc, b, hq, tq, d,
+                            splits, _stream.Handle);
+                    else
+                        _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
                 }
                 finally
                 {
@@ -10304,11 +10312,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            if (attnSidecar.Xq != 0) GpuTransferHelper.RegisterSidecar(output, attnSidecar.Xq, attnSidecar.Xd, attnSidecar.Xs, hq * d);
             cachedOutput = true;
         }
         finally
         {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) { GpuTransferHelper.FreeDevice(pOut); FreeAttnSidecar(attnSidecar); }
             GpuTransferHelper.FreeDevice(pQ);
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);
