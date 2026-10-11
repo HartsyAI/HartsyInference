@@ -19,6 +19,13 @@ public sealed class ToolCallStreamFilter : ITextStreamFilter
         StopAfterFirstCall = stopAfterFirstCall;
     }
 
+    /// <summary>Wraps a parser already built for the offered tools (see <see cref="ToolCallParser.ForTools"/>).</summary>
+    internal ToolCallStreamFilter(ToolCallParser parser, bool stopAfterFirstCall)
+    {
+        _parser = parser;
+        StopAfterFirstCall = stopAfterFirstCall;
+    }
+
     /// <summary>The format being parsed.</summary>
     public ToolCallFormat Format => _parser.Format;
 

@@ -35,14 +35,14 @@ public static class ToolCalling
         if (context.Request.Tools is not { Count: > 0 } tools) return null;
         ToolCallFormat? resolved = format ?? ResolveFormat(context);
         if (resolved is not { } chosen) return null;
-        IEnumerable<string> names = tools.Select(t => t.Name);
+        IReadOnlyList<ToolDefinition> offered = tools;
         bool stop = stopAfterFirstCall;
         if (context.ForcedToolName is { Length: > 0 } forced)
         {
-            names = [forced];
+            offered = tools.Where(t => t.Name == forced).ToList();
             stop = true;
         }
         string idPrefix = "call_" + context.RequestId.ToString(CultureInfo.InvariantCulture) + "_";
-        return new ToolCallStreamFilter(chosen, stop, names, idPrefix);
+        return new ToolCallStreamFilter(ToolCallParser.ForTools(chosen, offered, idPrefix), stop);
     }
 }
