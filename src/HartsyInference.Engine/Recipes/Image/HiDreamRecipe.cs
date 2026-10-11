@@ -12,6 +12,8 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>HiDream-I1 recipe (Full / Dev): an MMDiT with FOUR text encoders — CLIP-L, CLIP-G, T5-XXL, and Llama-3.1-8B (run as a multi-layer feature extractor). Lifted from the SwarmUI backend's <c>HiDreamLoader</c>: an all-in-one checkpoint's bundled components win, and anything it omits resolves from the canonical side models (<see cref="SideModels.HiDreamClipL"/>, <see cref="SideModels.HiDreamClipG"/>, <see cref="SideModels.T5XxlEnconly"/>, <see cref="SideModels.Llama31_8B"/>, <see cref="SideModels.FluxAe"/> — HiDream reuses the Flux VAE). Constructs and drives through <see cref="HiDreamRecipePipeline"/>.</summary>
@@ -37,11 +39,31 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hidream", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>HiDream-I1's official sampling settings: 28 steps at CFG 5.0, 1024x1024. Kept from the lifted loader rather than <c>GenerationDefaults.HiDreamFull</c> (50/5.0) because Full/Dev/Fast are not distinguishable from the weights and Dev is the shipped checkpoint.</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 5.0f, Width = 1024, Height = 1024 };
+    /// <summary>HiDream-I1 Dev's official sampling settings (<c>inference.py</c> MODEL_CONFIGS): 28 steps, guidance-distilled
+    /// so guidance 0 upstream, which is CFG 1.0 here (one conditional pass), 1024x1024. Dev is the catalog's checkpoint.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+
+    /// <summary>HiDream-I1 Full's official sampling settings: 50 steps at CFG 5.0.</summary>
+    public static ImageDefaults FullDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 5.0f, Width = 1024, Height = 1024 };
+
+    /// <summary>HiDream-I1 Fast's official sampling settings: 16 steps, guidance-distilled (CFG 1.0).</summary>
+    public static ImageDefaults FastDefaults { get; } = new ImageDefaults { Steps = 16, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => HiDreamVariants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant)
+    {
+        if (variant is not null && variant.Is(HiDreamVariants.Full))
+        {
+            return FullDefaults;
+        }
+        return variant is not null && variant.Is(HiDreamVariants.Fast) ? FastDefaults : FamilyDefaults;
+    }
 
     /// <inheritdoc/>
     /// <inheritdoc/>
@@ -175,7 +197,8 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
                 DitShardSplitBlock = ditShardSplitBlock,
             };
             Logs.Info("[HiDreamRecipe] HiDream ready (4 text encoders; scheduler=flow-match).");
-            return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders, loraStack);
+            return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders, loraStack,
+                DefaultsFor(context.ResolveVariant(HiDreamVariants.Catalog)));
         }
         catch (Exception ex)
         {

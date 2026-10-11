@@ -34,13 +34,16 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     private readonly IReadOnlyList<IDisposable> _sideModelLoaders;
 
     private readonly MergedLoraStack? _loraStack;
+    private readonly ImageDefaults _defaults;
 
     /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable.</summary>
     public AnimaRecipePipeline(AnimaPipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, T5Tokenizer t5Tokenizer,
         AnimaTransformer transformer, AnimaLlmAdapter llmAdapter, IBackend backend,
-        IDisposable checkpoint, IReadOnlyList<IDisposable> sideModelLoaders, MergedLoraStack? loraStack = null)
+        IDisposable checkpoint, IReadOnlyList<IDisposable> sideModelLoaders, MergedLoraStack? loraStack = null,
+        ImageDefaults? defaults = null)
     {
         _loraStack = loraStack;
+        _defaults = defaults ?? AnimaRecipe.FamilyDefaults;
         _pipeline = pipeline;
         _qwen = qwen;
         _tokenizer = tokenizer;
@@ -53,13 +56,16 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     }
 
     /// <inheritdoc/>
+    public ImageDefaults? VariantDefaults => _defaults;
+
+    /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? AnimaRecipe.FamilyDefaults.Steps;
-        float cfg = request.CfgScale ?? AnimaRecipe.FamilyDefaults.CfgScale;
+        int steps = request.Steps ?? _defaults.Steps;
+        float cfg = request.CfgScale ?? _defaults.CfgScale;
 
 
         // Plain (non-chat) tokenization: Anima's reference workflow uses CLIPLoader type="stable_diffusion", which is

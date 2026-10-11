@@ -17,8 +17,9 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed HiDream-I1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HiDreamPipeline"/> owns all four encoder forwards, so this only tokenizes: one CLIP BPE pass reused for both CLIP-L and CLIP-G (the reference feeds identical ids to both), a T5 pass with its attention mask, and a Llama-3.1 pass — then calls <see cref="HiDreamPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HiDreamLoader.Generate</c> drive path. Wraps the constructed HiDream pipeline plus its tokenizers and heavyweight components, taking ownership of every disposable.</summary>
 public sealed class HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer,
     LlamaTokenizer llamaTokenizer, T5TextEncoder t5, LlamaStyleEncoder llama, HiDreamTransformer transformer,
-    IReadOnlyList<IDisposable> componentSources, MergedLoraStack? loraStack = null) : IRecipePipeline
+    IReadOnlyList<IDisposable> componentSources, MergedLoraStack? loraStack = null, ImageDefaults? defaults = null) : IRecipePipeline
 {
+    private readonly ImageDefaults _defaults = defaults ?? HiDreamRecipe.FamilyDefaults;
     private readonly HiDreamPipeline _pipeline = pipeline;
     private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
     private readonly T5Tokenizer _t5Tokenizer = t5Tokenizer;
@@ -31,13 +32,16 @@ public sealed class HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenize
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
+    public ImageDefaults? VariantDefaults => _defaults;
+
+    /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? HiDreamRecipe.FamilyDefaults.Steps;
-        float cfg = request.CfgScale ?? HiDreamRecipe.FamilyDefaults.CfgScale;
+        int steps = request.Steps ?? _defaults.Steps;
+        float cfg = request.CfgScale ?? _defaults.CfgScale;
 
         // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter, refiner, regional prompting and
         // ImageRequest.Components overrides are deferred — text-to-image only.

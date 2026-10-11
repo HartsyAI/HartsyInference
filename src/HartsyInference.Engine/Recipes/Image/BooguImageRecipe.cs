@@ -12,6 +12,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Boogu-Image recipe (<c>boogu-project/Boogu-Image</c>, 10B): an OmniGen2/Lumina-2 lineage DiT (8 dual-stream + 32 single-stream blocks, GQA 28:7) conditioned on Qwen3-VL-8B (<see cref="SideModels.Qwen3VL_8B"/>) and decoded by the FLUX.1 VAE (<see cref="SideModels.FluxAe"/>). Lifted from the SwarmUI backend's <c>BooguImageLoader</c>; constructs the components and drives generation through <see cref="BooguImageRecipePipeline"/>.</summary>
@@ -43,11 +44,20 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "boogu", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Boogu's sampling settings: 25 steps at text-guidance 3.5, 1024x1024 — the step count is the lifted loader's, and 3.5 sits in the 2-5 band the base model is documented to work in (Turbo wants 1.0).</summary>
+    /// <summary>Boogu's sampling settings: 25 steps at text-guidance 3.5, 1024x1024. The step count is the lifted loader's, and 3.5 sits in the 2-5 band the base model is documented to work in.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 25, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+
+    /// <summary>Boogu Turbo's sampling settings: 4 distilled steps, guidance-free (CFG 1.0).</summary>
+    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => BooguImageVariants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) => BooguImageVariants.IsTurbo(variant) ? TurboDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -119,7 +129,8 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 4096);
             BooguImagePipeline pipeline = new BooguImagePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[BooguImageRecipe] Boogu-Image ready (text-to-image).");
-            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack);
+            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack,
+                DefaultsFor(context.ResolveVariant(BooguImageVariants.Catalog)));
         }
         catch (Exception ex)
         {

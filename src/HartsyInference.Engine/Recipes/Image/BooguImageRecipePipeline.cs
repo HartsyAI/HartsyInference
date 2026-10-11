@@ -20,7 +20,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed Boogu-Image pipeline driven against the native <see cref="ImageRequest"/>. Builds the Qwen3-VL chat-templated instruction tokens, encodes them through the 8B language tower under the loader's TE ⇄ DiT staging (evict the resident DiT, encode, free the encoder weights), and calls <see cref="BooguImagePipeline.GenerateFromEmbeddings"/>. Mirrors the SwarmUI backend's <c>BooguImageLoader.Generate</c> text-to-image drive path. Wraps the constructed Boogu-Image pipeline plus its text stack, taking ownership of every disposable.</summary>
 public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline, Qwen3Tokenizer tokenizer, LlamaStyleEncoder textEncoder,
     BooguImageTransformer transformer, IBackend backend, IReadOnlyList<IDisposable> componentSources,
-    MergedLoraStack? loraStack = null) : IRecipePipeline
+    MergedLoraStack? loraStack = null, ImageDefaults? defaults = null) : IRecipePipeline
 {
     /// <summary>Boogu T2I system prompt (verbatim from <c>pipeline_boogu.py</c> <c>SYSTEM_PROMPT_4_T2I_UNIFIED</c>).</summary>
     private const string SystemPromptT2I =
@@ -33,6 +33,7 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
     private readonly IBackend _backend = backend;
     private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
+    private readonly ImageDefaults _defaults = defaults ?? BooguImageRecipe.FamilyDefaults;
 
     // Prompt-embedding cache: repeat prompts skip the whole Qwen3-VL-8B encode (and the DiT eviction it forces —
     // the ~10 GB encoder and the ~10 GB fp8 DiT cannot coexist beside activations on 24 GB). Reusing the SAME
@@ -43,14 +44,17 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
     private Tensor? _cachedNeg;
 
     /// <inheritdoc/>
+    public ImageDefaults? VariantDefaults => _defaults;
+
+    /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? BooguImageRecipe.FamilyDefaults.Steps;
+        int steps = request.Steps ?? _defaults.Steps;
         // Text guidance from CFG scale (Boogu Base works well ~2–5; Turbo = 1). The negative prompt drives the uncond pass.
-        float textGuidance = request.CfgScale ?? BooguImageRecipe.FamilyDefaults.CfgScale;
+        float textGuidance = request.CfgScale ?? _defaults.CfgScale;
 
         // Reference editing runs at TEXT-ONLY guidance (imageGuidanceScale = 1), which BooguImagePipeline explicitly
         // supports by skipping the drop-all pass. Full image guidance additionally needs the Qwen3-VL vision tower to
