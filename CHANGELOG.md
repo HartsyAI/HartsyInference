@@ -24,12 +24,21 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
-## alpha.340
+## alpha.347
 
 - **Changed: text models keep their KV cache in F16 on CUDA by default.** The new `vram.textKvF16` setting is automatic when unset: text LLMs on a CUDA device store keys and values as F16, which halves the cache and the bytes every decode step reads. On an RTX 3060 (12 GB) decode is 9% faster at 4K tokens of context and 16% at 8K (Mistral-7B Q4_K_M), and 19% at 8K and 20% at 16K (Qwen3-4B Q4_K_M); at short context there is no difference. On the A40 it is what puts Qwen3-30B-A3B and Mixtral decode at 0.96-0.98x of llama.cpp (0.91-0.94x with an F32 cache), and llama.cpp stores F16 by default. Audio decoders, other backends (CPU, Vulkan), the SSM and hybrid models that keep their own caches, and the paged KV pool of the opt-in continuous-batching scheduler (`vram.continuousBatching`, off by default) stay on F32. `vram.textKvF16=false` keeps F32 for text models (the `reference` profile pins it) and `true` asks for F16 wherever the backend supports it; `vram.kvF16` keeps its meaning (force F16 for every model type) and its default.
   - Outputs are not token-identical to an F32 cache. Of 18 models compared greedily on the 3060 (dense, MoE, SSM and hybrid), Mamba, Qwen3.5, GLM-4, GPT-2 and Mistral-7B are byte-identical, and the rest take a different continuation after 14-90% of the text; none produced NaN or garbage. The earliest divergence is StarCoder2-3B, a base code model: on one prose prompt its F16 run fell into a loop of empty comment lines where the F32 run answered, while on six code prompts the two matched on three and diverged later on the others with similar repetition. Set `vram.textKvF16=false` where exact reproducibility against an earlier build matters.
   - Every write into an F16 cache now saturates at the F16 maximum (a NaN stays a NaN) instead of rounding to infinity: the eager append, the graph-decode scatter kernels, the fused QK-norm scatter, and the FA2 prefill tile packing. One extreme key or value can no longer poison the softmax of every later token.
   - Placement planning sizes the cache as F16 on CUDA, so a model that needs the smaller cache is judged to fit.
+
+## alpha.342
+
+- **Changed: `EngineOptions.TextStreamFilterFactory` takes a `TextStreamFilterContext`.** The context carries the request, its request id, the template's name and Jinja source, the architecture and the model path, so a host can pick a parser per model. Breaking for any host that set the factory.
+- **Changed: tool-call ids are unique per request.** Both the structured parser and the filter number calls `call_{requestId}_{index}`, so ids never repeat across rounds of one conversation.
+- **Fixed: tool calls from a structured output parser end the turn as a tool call.** DeepSeek-V4.1's tool calls now stop generation as `StopReason.ToolCall` and dispatch, instead of ending as a plain stop.
+- **Added: `TextResult.ToolCalls`.** Non-streaming generation reports every tool call, not only the last. The OpenAI-compatible route returns all of them.
+- **Added: `ITextStreamFilter.MarkerLiterals`.** A filter lists the control-token literals it needs to see (for example `<tool_call>`); the engine decodes those tokens as text and still drops every other control token.
+- **Removed: the `<tool_call>` sentinel grammar.** It never fired on GGUF models and it turned off graph decode and speculative decode for every tool request. Those stay on for tool requests now.
 
 ## alpha.338
 

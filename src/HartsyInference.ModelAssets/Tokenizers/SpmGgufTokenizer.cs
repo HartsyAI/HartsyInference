@@ -160,6 +160,16 @@ public sealed class SpmGgufTokenizer : ILlmTokenizer
         return Encoding.UTF8.GetString(bytes.ToArray());
     }
 
+    /// <summary>The bytes a token contributes: the same as <see cref="Decode"/>, except a special token's literal text when
+    /// <paramref name="includeSpecial"/> is set (the detokenizer then sees control markers as text).</summary>
+    public byte[]? TokenBytes(int id, bool includeSpecial)
+    {
+        if (id < 0 || id >= _tokens.Length) return [];
+        if (_specialIds.Contains(id)) return includeSpecial ? Encoding.UTF8.GetBytes(_tokens[id]) : [];
+        if (_byteToId.Count > 0 && TryParseByteToken(_tokens[id], out byte raw)) return [raw];
+        return Encoding.UTF8.GetBytes(_tokens[id].Replace(SpaceMeta, ' '));
+    }
+
     /// <summary>Parses a SentencePiece byte token literal <c>&lt;0xNN&gt;</c> into its byte value.</summary>
     private static bool TryParseByteToken(string token, out byte value)
     {

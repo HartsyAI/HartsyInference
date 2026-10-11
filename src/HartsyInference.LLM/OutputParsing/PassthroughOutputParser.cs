@@ -11,7 +11,13 @@ public sealed class PassthroughOutputParser : IOutputParser
     private bool _done;
 
     /// <summary>Creates a passthrough parser over <paramref name="tokenizer"/>.</summary>
-    public PassthroughOutputParser(ILlmTokenizer tokenizer) => _detok = new IncrementalDetokenizer(tokenizer, includeSpecial: false);
+    public PassthroughOutputParser(ILlmTokenizer tokenizer) : this(tokenizer, null)
+    {
+    }
+
+    /// <summary>Creates a passthrough parser that also decodes the control tokens in <paramref name="literalSpecialIds"/> as text (for tool-call markers a filter asked to see).</summary>
+    public PassthroughOutputParser(ILlmTokenizer tokenizer, IReadOnlySet<int>? literalSpecialIds)
+        => _detok = new IncrementalDetokenizer(tokenizer, includeSpecial: false, literalSpecialIds);
 
     /// <inheritdoc />
     public ParsedAssistant Result => new("", _content.ToString(), [], false, _done);

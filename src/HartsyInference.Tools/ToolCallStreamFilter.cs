@@ -13,9 +13,9 @@ public sealed class ToolCallStreamFilter : ITextStreamFilter
     private int _emitted;
 
     /// <summary>Creates a filter for <paramref name="format"/>; <paramref name="stopAfterFirstCall"/> ends generation as <see cref="StopReason.ToolCall"/> once a call completes (and any calls completed with it have been emitted); <paramref name="knownTools"/> restricts the bare call forms to the offered tool names.</summary>
-    public ToolCallStreamFilter(ToolCallFormat format = ToolCallFormat.Hermes, bool stopAfterFirstCall = true, IEnumerable<string>? knownTools = null)
+    public ToolCallStreamFilter(ToolCallFormat format = ToolCallFormat.Hermes, bool stopAfterFirstCall = true, IEnumerable<string>? knownTools = null, string idPrefix = "call_")
     {
-        _parser = new ToolCallParser(format, ToolCallParser.DefaultMaxSpanChars, knownTools);
+        _parser = new ToolCallParser(format, ToolCallParser.DefaultMaxSpanChars, knownTools, idPrefix);
         StopAfterFirstCall = stopAfterFirstCall;
     }
 
@@ -33,6 +33,9 @@ public sealed class ToolCallStreamFilter : ITextStreamFilter
 
     /// <inheritdoc/>
     public TextFilterResult OnEnd() => Emit(_parser.Flush());
+
+    /// <inheritdoc/>
+    public bool HasPendingOutput => _emitted < _calls.Count;
 
     private TextFilterResult Emit(ToolCallParseResult parsed)
     {
