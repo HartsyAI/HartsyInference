@@ -109,8 +109,11 @@ __device__ __forceinline__ void q4k_q8_1_rows_partial(
             hi = __dp4a((int)((q[r].z >> 4) & 0x0F0F0F0Fu), xhi.z, hi);
             hi = __dp4a((int)((q[r].w >> 4) & 0x0F0F0F0Fu), xhi.w, hi);
 
-            acc[r] += xd0 * (d * (float)sc0) * (float)lo + xd1 * (d * (float)sc1) * (float)hi;
-            if (minLane) acc[r] -= dmin * (xd0 * (float)m0 * xs0 + xd1 * (float)m1 * xs1);
+            // Each sub-block's scale and min term rounded as w = d*sc*q - dmin*m: (d*sc) and (dmin*m) first.
+            acc[r] += xd0 * (d * (float)sc0) * (float)lo;
+            if (minLane) acc[r] -= xd0 * (dmin * (float)m0) * xs0;
+            acc[r] += xd1 * (d * (float)sc1) * (float)hi;
+            if (minLane) acc[r] -= xd1 * (dmin * (float)m1) * xs1;
         }
     }
 }
