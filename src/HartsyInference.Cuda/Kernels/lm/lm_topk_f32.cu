@@ -25,14 +25,15 @@ __device__ __forceinline__ unsigned int topk_key(float v)
     return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
 }
 
-extern "C" __global__ void __launch_bounds__(TOPK_THREADS) lm_topk_f32(
-    float* __restrict__ values,
-    int* __restrict__ indices,
-    const float* __restrict__ input,
-    const int* __restrict__ validLengths,
-    int n,
+// One row's top-k: x[0, len) -> outVals/outIdx[0, k). indexBase is added to every valid output index (a slice's offset in its row).
+__device__ __forceinline__ void topk_row_impl(
+    float* __restrict__ outVals,
+    int* __restrict__ outIdx,
+    const float* __restrict__ x,
+    int len,
     int k,
-    int sortByIndex)
+    int sortByIndex,
+    int indexBase)
 {
     __shared__ unsigned int hist[256];
     __shared__ unsigned long long sortBuf[TOPK_MAX_K];
@@ -40,11 +41,7 @@ extern "C" __global__ void __launch_bounds__(TOPK_THREADS) lm_topk_f32(
     __shared__ unsigned int prefix, threshold;
     __shared__ int remaining, eqNeeded, taken;
 
-    const int row = blockIdx.x;
     const int tid = threadIdx.x;
-    const float* x = input + (long long)row * n;
-    int len = validLengths == nullptr ? n : validLengths[row];
-    len = len < 0 ? 0 : (len > n ? n : len);
     const int m = k < len ? k : len;
 
     if (m > 0)
@@ -155,13 +152,47 @@ extern "C" __global__ void __launch_bounds__(TOPK_THREADS) lm_topk_f32(
         if (j < m)
         {
             const int idx = (int)(sortBuf[j] & 0xffffffffull);
-            indices[(long long)row * k + j] = idx;
-            values[(long long)row * k + j] = x[idx];
+            outIdx[j] = idx + indexBase;
+            outVals[j] = x[idx];
         }
         else
         {
-            indices[(long long)row * k + j] = -1;
-            values[(long long)row * k + j] = NEG_INF;
+            outIdx[j] = -1;
+            outVals[j] = NEG_INF;
         }
     }
+}
+
+extern "C" __global__ void __launch_bounds__(TOPK_THREADS) lm_topk_f32(
+    float* __restrict__ values,
+    int* __restrict__ indices,
+    const float* __restrict__ input,
+    const int* __restrict__ validLengths,
+    int n,
+    int k,
+    int sortByIndex)
+{
+    const int row = blockIdx.x;
+    int len = validLengths == nullptr ? n : validLengths[row];
+    len = len < 0 ? 0 : (len > n ? n : len);
+    topk_row_impl(values + (long long)row * k, indices + (long long)row * k, input + (long long)row * n, len, k, sortByIndex, 0);
+}
+
+// First stage of a wide row on many blocks: block r takes the slice [r * width, min(n, (r + 1) * width)) of the single input row and
+// writes its k largest to row r of the outputs, with indices already global. Ties stay lowest-index-first, so a second pass over the
+// concatenated slice results (flat order = index order) reproduces the one-block answer.
+// Launch: grid = number of slices, block = 256.
+extern "C" __global__ void __launch_bounds__(TOPK_THREADS) lm_topk_slices_f32(
+    float* __restrict__ values,
+    int* __restrict__ indices,
+    const float* __restrict__ input,
+    int n,
+    int width,
+    int k)
+{
+    const int row = blockIdx.x;
+    const long long start = (long long)row * width;
+    int len = (int)((long long)n - start);
+    len = len < 0 ? 0 : (len > width ? width : len);
+    topk_row_impl(values + (long long)row * k, indices + (long long)row * k, input + start, len, k, 0, (int)start);
 }

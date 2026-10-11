@@ -74,6 +74,8 @@ public sealed unsafe class KvF16SplitDecodeTests
         using Tensor monoOut = new(new TensorShape(1, hq, 1, d), DType.F32);
         try
         {
+            // This test compares the split-K kernel with the monolithic one; the grouped-query decode kernel would serve both calls.
+            KnobStore.Set(EngineKnobs.FlashDecodeGqa, false);
             KnobStore.Set(EngineKnobs.FlashSplitOff, false);
             b.FlashAttention(splitOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
             backend.Sync();
@@ -85,6 +87,7 @@ public sealed unsafe class KvF16SplitDecodeTests
         finally
         {
             KnobStore.Clear(EngineKnobs.FlashSplitOff);
+            KnobStore.Clear(EngineKnobs.FlashDecodeGqa);
         }
 
         float* s = (float*)splitOut.DataPointer;
@@ -143,6 +146,7 @@ public sealed unsafe class KvF16SplitDecodeTests
         using Tensor monoOut = new(new TensorShape(1, hq, 1, d), DType.F32);
         try
         {
+            KnobStore.Set(EngineKnobs.FlashDecodeGqa, false);
             KnobStore.Clear(EngineKnobs.FlashSplitOff);
             b.FlashAttention(splitOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
             backend.Sync();
@@ -153,6 +157,7 @@ public sealed unsafe class KvF16SplitDecodeTests
         finally
         {
             KnobStore.Clear(EngineKnobs.FlashSplitOff);
+            KnobStore.Clear(EngineKnobs.FlashDecodeGqa);
         }
 
         float* r = (float*)refOut.DataPointer;
@@ -168,5 +173,66 @@ public sealed unsafe class KvF16SplitDecodeTests
         Assert.True(splitErr <= monoErr * 1.5f + 1e-6f,
             $"split-K over F16 is {splitErr:E3} from the F32-cache answer while the monolithic F16 kernel is {monoErr:E3} — "
             + "the split path is losing accuracy the storage change alone does not explain.");
+    }
+
+    /// <summary>The grouped-query flash-decoding kernel over an F16 cache against the monolithic F16 kernel and the F32-cache answer, at the same geometry.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData(375)]
+    [InlineData(1500)]
+    public void GqaDecodeKernel_OverF16Cache_AgreesWithMonolithicAndTracksF32(int lk)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        using CudaBackend backend = new(0, PtxDir());
+        IBackend b = backend;
+
+        const int hq = 32, hkv = 8, d = 128, group = hq / hkv;
+        int qOffset = lk - 1;
+        float scale = 1f / MathF.Sqrt(d);
+        using Tensor q = Rnd(1, hq, 1, d);
+        using Tensor kF32 = Rnd(1, hkv, lk, d);
+        using Tensor vF32 = Rnd(1, hkv, lk, d);
+        using Tensor refOut = new(new TensorShape(1, hq, 1, d), DType.F32);
+        b.FlashAttention(refOut, q, kF32, vF32, lk, group, causal: true, qOffset, scale);
+        backend.Sync();
+
+        using Tensor kF16 = new(new TensorShape(1, hkv, lk, d), DType.F16);
+        using Tensor vF16 = new(new TensorShape(1, hkv, lk, d), DType.F16);
+        b.ResidentAllocateKv(kF16);
+        b.ResidentAllocateKv(vF16);
+        b.KvCacheAppend(kF16, kF32, offset: 0);
+        b.KvCacheAppend(vF16, vF32, offset: 0);
+        backend.Sync();
+
+        using Tensor gqaOut = new(new TensorShape(1, hq, 1, d), DType.F32);
+        using Tensor monoOut = new(new TensorShape(1, hq, 1, d), DType.F32);
+        try
+        {
+            KnobStore.Clear(EngineKnobs.FlashDecodeGqa);
+            b.FlashAttention(gqaOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
+            backend.Sync();
+            KnobStore.Set(EngineKnobs.FlashDecodeGqa, false);
+            KnobStore.Set(EngineKnobs.FlashSplitOff, true);
+            b.FlashAttention(monoOut, q, kF16, vF16, lk, group, causal: true, qOffset, scale);
+            backend.Sync();
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.FlashSplitOff);
+            KnobStore.Clear(EngineKnobs.FlashDecodeGqa);
+        }
+
+        float* g = (float*)gqaOut.DataPointer, m = (float*)monoOut.DataPointer, r = (float*)refOut.DataPointer;
+        float vsMono = 0f, gqaErr = 0f, monoErr = 0f, peak = 0f;
+        for (long i = 0; i < refOut.ElementCount; i++)
+        {
+            vsMono = MathF.Max(vsMono, MathF.Abs(g[i] - m[i]));
+            gqaErr = MathF.Max(gqaErr, MathF.Abs(g[i] - r[i]));
+            monoErr = MathF.Max(monoErr, MathF.Abs(m[i] - r[i]));
+            peak = MathF.Max(peak, MathF.Abs(m[i]));
+        }
+        _output.WriteLine($"lk={lk}: |gqa - monolithic| {vsMono:E3}; vs F32 cache gqa {gqaErr:E3}, monolithic {monoErr:E3} (peak {peak:E3})");
+        Assert.True(vsMono <= 1e-4f * MathF.Max(peak, 1e-3f), $"the grouped-query kernel differs from the monolithic one by {vsMono:E3}");
+        Assert.True(gqaErr <= monoErr * 1.5f + 1e-6f, $"the grouped-query kernel is {gqaErr:E3} from the F32 answer, the monolithic one {monoErr:E3}");
     }
 }

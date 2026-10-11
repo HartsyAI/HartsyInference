@@ -136,8 +136,12 @@ public sealed class TextGenerationPipeline
             // Staged v1 keeps decode eager (the adapter reports no graph support): the step graph is a single-backend
             // capture, so per-stage graphs are a measured follow-up, not a default.
             IGraphDecodable? graphModel = _model as IGraphDecodable;
-            bool useGraphDecode = request.Sampling.Greedy && !request.Sampling.HasJsonConstraint && graphDecodeRequested
-                && graphModel is not null && graphModel.SupportsGraphDecode(_backend);
+            // A sampled (non-greedy) request can replay a graph too when the backend draws on the device: top-k, temperature, top-p and
+            // min-p are done there, which covers the common server defaults; anything else (no top-k, a larger k) stays on the host chain.
+            DeviceSamplerConfig? deviceSampler = DeviceSamplerFor(request.Sampling);
+            bool useGraphDecode = !request.Sampling.HasJsonConstraint && graphDecodeRequested
+                && graphModel is not null && graphModel.SupportsGraphDecode(_backend)
+                && (request.Sampling.Greedy || (deviceSampler is not null && graphModel.SupportsDeviceSampling(_backend)));
 
             // Prompt-lookup speculative decoding: batches a verify pass across several drafted tokens instead of
             // one plain decode step apiece. Mutually exclusive with graph decode (graph decode wins when both are
@@ -149,7 +153,8 @@ public sealed class TextGenerationPipeline
 
             if (useGraphDecode)
             {
-                stopped = GenerateGraphDecode(request, graphModel!, cache, promptIds.Length, next, generated, stops, onToken, ct);
+                stopped = GenerateGraphDecode(request, graphModel!, cache, promptIds.Length, next, generated, stops, onToken, ct,
+                    request.Sampling.Greedy ? null : deviceSampler);
             }
             else if (useSpecDecode)
             {
@@ -402,13 +407,20 @@ public sealed class TextGenerationPipeline
         }
     }
 
-    /// <summary>Greedy decode via one captured CUDA graph, replayed once per token; <paramref name="firstToken"/> is the token already sampled from the prefill's last position.</summary>
-    /// <remarks>Device state (position, current token id, the RoPE table, and — when a repetition penalty is requested — the token history) is refreshed OUTSIDE the graph before each replay, which is what makes one capture valid for every step (see IBackend's "Device-side decode position" docs). Repetition penalty is the only sampler stage graph decode replicates (see <see cref="GenericTransformer.ForwardGraphDecodeStep"/> for why temperature/top-k/top-p/min-p are no-ops for a greedy pick); when the request's penalty is 1.0 the history buffers are still allocated but the backend skips the append/penalty kernels entirely. If capture throws (an eligible-looking model hits something the graphed path doesn't support), the exception propagates rather than falling back — this path is opt-in (env-gated), so a gap surfaces as a clear error, not silent mis-generation.</remarks>
+    /// <summary>The device sampler configuration for <paramref name="options"/>, or null when the request needs the host chain (top-k outside 1..64, or no temperature to scale by).</summary>
+    private static DeviceSamplerConfig? DeviceSamplerFor(SamplingOptions options) =>
+        options.TopK is >= 1 and <= 64 && options.Temperature > 0f
+            ? new DeviceSamplerConfig(options.TopK, options.Temperature, options.TopP, options.MinP, options.Seed)
+            : null;
+
+    /// <summary>Decode via one captured CUDA graph, replayed once per token (greedy, or sampled on the device when <paramref name="sampler"/> is given); <paramref name="firstToken"/> is the token already sampled from the prefill's last position.</summary>
+    /// <remarks>Device state (position, current token id, the RoPE table, and — when a repetition penalty is requested — the token history) is refreshed OUTSIDE the graph before each replay, which is what makes one capture valid for every step (see IBackend's "Device-side decode position" docs). For a greedy request repetition penalty is the only sampler stage graph decode replicates (see <see cref="GenericTransformer.ForwardGraphDecodeStep"/> for why temperature/top-k/top-p/min-p are no-ops for a greedy pick); a sampled request draws its token on the device from the top-k, temperature, top-p and min-p of <paramref name="sampler"/>; when the request's penalty is 1.0 the history buffers are still allocated but the backend skips the append/penalty kernels entirely. If capture throws (an eligible-looking model hits something the graphed path doesn't support), the exception propagates rather than falling back — a gap surfaces as a clear error, not silent mis-generation.</remarks>
     private bool GenerateGraphDecode(GenerationRequest request, IGraphDecodable graphModel, ISequenceState cache,
-        int promptLen, int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
+        int promptLen, int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct,
+        DeviceSamplerConfig? sampler = null)
     {
         GraphDecodeSession session = graphModel.CaptureDecodeGraph(cache, promptLen, firstToken,
-            request.Sampling.RepetitionPenalty);
+            request.Sampling.RepetitionPenalty, sampler);
         try
         {
             int next = firstToken;

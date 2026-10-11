@@ -197,6 +197,26 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SandwichFusion =
         Bool("numerics.sandwichFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.");
 
+    /// <summary>Kill-switch for running a large MoE batch's expert GEMMs as grouped cuBLAS calls over a single dequantized weight stack.</summary>
+    public static readonly Knob<bool> MoeGroupedGemm =
+        Bool("numerics.moeGroupedGemm", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the expert GEMMs of a large MoE batch as three grouped cuBLAS calls per row batch over one dequantized stack of the layer's experts; =0 returns to one GEMM per expert.");
+
+    /// <summary>Kill-switch for the register-resident RMSNorm + Q8_1 sidecar kernels (bit-identical to the shared-memory ones) used by LLM graph decode.</summary>
+    public static readonly Knob<bool> NormFast =
+        Bool("numerics.lmNormFast", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the fused RMSNorm and add-RMSNorm Q8_1 kernels of LLM decode in registers with two barriers instead of nine; outputs are bit-identical. =0 returns to the shared-memory tree.");
+
+    /// <summary>Kill-switch for the grouped-query flash-decoding kernel: one block per KV head reads the cache once for all of its query heads.</summary>
+    public static readonly Knob<bool> FlashDecodeGqa =
+        Bool("numerics.flashDecodeGqa", true, KnobScope.Runtime, KnobDomain.Numerics, "Decodes one query row per sequence with the grouped-query flash-decoding kernel (the KV cache is streamed once per KV head, not once per query head); =0 returns to the split-K kernel with one block per query head.");
+
+    /// <summary>Kill-switch for the tensor-core causal FlashAttention-2 kernel used for LLM prefill and draft-verify blocks.</summary>
+    public static readonly Knob<bool> Fa2Prefill =
+        Bool("numerics.fa2Prefill", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs causal LLM attention over a block of 16 or more query rows with the F16 tensor-core FlashAttention-2 kernel (F32 accumulate); =0 returns to the per-row F32 kernel.");
+
+    /// <summary>Kill-switch for the device-resident routed-expert stage of MoE decode (router, expert ids and expert GEMVs stay on the device).</summary>
+    public static readonly Knob<bool> MoeIndexed =
+        Bool("numerics.moeIndexed", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the routed experts of a small MoE batch (decode) entirely on the device with expert-indexed GEMVs; =0 returns to the host-routed per-expert loop.");
+
     /// <summary>Runs cuDNN convolutions channels-last, transposing activations and weights around the call; 0 keeps them
     /// NCHW.</summary>
     public static readonly Knob<bool> ConvChannelsLast =

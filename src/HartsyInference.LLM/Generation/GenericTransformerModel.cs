@@ -131,9 +131,11 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         return new CapacitySnapshot(free, total);
     }
 
+    bool IGraphDecodable.SupportsDeviceSampling(IBackend backend) => backend.DeviceSamplingSupported;
+
     bool IGraphDecodable.SupportsGraphDecode(IBackend backend) => !Staged && _transformer.SupportsGraphDecode(backend);
 
-    GraphDecodeSession IGraphDecodable.CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty)
+    GraphDecodeSession IGraphDecodable.CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty, DeviceSamplerConfig? sampler)
     {
         if (state is not FixedKvCache cache)
             throw new ArgumentException("Graph decode captures against a FixedKvCache.", nameof(state));
@@ -158,6 +160,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         ulong deviceTokenId = _backend.AllocDeviceTokenId();
         ulong history = _backend.AllocDeviceHistory(cache.MaxSequenceLength);
         ulong historyCount = _backend.AllocDeviceCounter();
+        ulong rng = sampler is { } cfg0 ? _backend.AllocDeviceRng(cfg0.Seed, cfg0.TopK) : 0;
         object? graph = null;
         try
         {
@@ -166,8 +169,8 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
             _backend.WriteDeviceCounter(historyCount, 0);
             graph = _backend.CaptureGraph(() =>
                 _transformer.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos,
-                    deviceTokenId, history, historyCount, repetitionPenalty));
-            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos);
+                    deviceTokenId, history, historyCount, repetitionPenalty, sampler, rng));
+            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos, rng);
         }
         catch
         {
@@ -176,6 +179,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
             _backend.FreeDeviceTokenId(deviceTokenId);
             _backend.FreeDeviceHistory(history);
             _backend.FreeDeviceCounter(historyCount);
+            _backend.FreeDeviceRng(rng);
             throw;
         }
     }
@@ -211,19 +215,14 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
             {
                 List<Tensor> toPreload = [];
                 long budget = free - headroom;
-                foreach (Tensor t in _transformer.EnumerateWeights(includeRedundantSplits: false))
-                {
-                    long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
-                    if (budget - bytes < 0) continue;
-                    budget -= bytes;
-                    toPreload.Add(t);
-                }
                 long skipped = 0;
                 int skippedCount = 0;
                 foreach (Tensor t in _transformer.EnumerateWeights(includeRedundantSplits: false))
                 {
-                    long b = Tensor.ComputeByteSize(t.Shape, t.DType);
-                    if (!toPreload.Contains(t)) { skipped += b; skippedCount++; }
+                    long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
+                    if (budget - bytes < 0) { skipped += bytes; skippedCount++; continue; }
+                    budget -= bytes;
+                    toPreload.Add(t);
                 }
                 Logs.Info($"[preload] free={_backend.FreeMemoryBytes() >> 20}MB headroom={headroom >> 20}MB " +
                     $"kept={toPreload.Count} skipped={skippedCount} ({skipped >> 20}MB left lazy)");

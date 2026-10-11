@@ -11,13 +11,14 @@ internal sealed class GraphDecodeSession
     private readonly ulong _deviceTokenId;
     private readonly ulong _history;
     private readonly ulong _historyCount;
+    private readonly ulong _rng;
     private int _disposed;
 
     /// <summary>Absolute position of the token this session is about to generate next; advanced by the scheduler after every replay.</summary>
     public int Pos { get; set; }
 
     public GraphDecodeSession(IBackend backend, object graph, ulong devicePos, ulong deviceTokenId,
-        ulong history, ulong historyCount, int pos)
+        ulong history, ulong historyCount, int pos, ulong rng = 0)
     {
         _backend = backend;
         _graph = graph;
@@ -25,6 +26,7 @@ internal sealed class GraphDecodeSession
         _deviceTokenId = deviceTokenId;
         _history = history;
         _historyCount = historyCount;
+        _rng = rng;
         Pos = pos;
     }
 
@@ -47,5 +49,6 @@ internal sealed class GraphDecodeSession
         _backend.FreeDeviceTokenId(_deviceTokenId);
         _backend.FreeDeviceHistory(_history);
         _backend.FreeDeviceCounter(_historyCount);
+        _backend.FreeDeviceRng(_rng);
     }
 }

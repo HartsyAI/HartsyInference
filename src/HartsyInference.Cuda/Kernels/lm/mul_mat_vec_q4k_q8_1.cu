@@ -66,6 +66,7 @@ __device__ __forceinline__ float q4k_q8_1_row_partial(
     const bool minLane = (lane & 3) == 0;  // one lane per sub-block adds the min term
 
     float acc = 0.0f;
+    #pragma unroll 4   // independent loads of several blocks in flight; the adds into acc keep their order
     for (int sb = sbStart; sb < nsb; sb += sbStride) {
         const unsigned char* block = wrow + (size_t)sb * SUPER_BYTES;
         const unsigned int ddmin = *(const unsigned int*)block;    // fp16 d | fp16 dmin, one load

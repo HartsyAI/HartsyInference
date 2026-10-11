@@ -5664,7 +5664,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkvRopeScatter");
-        if (devicePos == 0 || qkv.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qkv.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkvRopeScatterDecodeStep requires a device position buffer and F32 qkv/caches; got devicePos={devicePos}, " +
@@ -5686,7 +5686,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQkv + (ulong)((long)hq * headDim * sizeof(float));
             ulong vOff = kOff + (ulong)((long)hkv * headDim * sizeof(float));
-            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQkv, kOff, vOff, pCos, pSin,
+            LaunchQkvRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQkv, kOff, vOff, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
             // The caches were written in place — keep them resident without a host sync (same contract as
             // KvCacheAppendDev).
@@ -5710,7 +5710,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkRopeScatterV");
-        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkRopeScatterVDecodeStep requires a device position buffer and F32 qk/v/caches; got devicePos={devicePos}, " +
@@ -5732,7 +5732,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint qBytes = GpuTransferHelper.ByteSize(qOut);
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQk + (ulong)((long)hq * headDim * sizeof(float));
-            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQk, kOff, pVi, pCos, pSin,
+            LaunchQkvRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQk, kOff, pVi, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;
@@ -5755,7 +5755,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RopeScatterKv");
-        if (devicePos == 0 || q.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || q.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA RopeScatterKvDecodeStep requires a device position buffer and F32 q/caches; got devicePos={devicePos}, " +
@@ -5777,7 +5777,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pV = GpuTransferHelper.CopyToDevice(vCache);
             nuint qBytes = GpuTransferHelper.ByteSize(qOut);
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
-            _kernels!.LaunchQkvRopeScatter(pQ, pK, pV, pQi, pKi, pVi, pCos, pSin,
+            LaunchQkvRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQi, pKi, pVi, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;
@@ -5802,7 +5802,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkvNormRopeScatter");
-        if (devicePos == 0 || qkv.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qkv.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkvNormRopeScatterDecodeStep requires a device position buffer and F32 qkv/caches; got devicePos={devicePos}, " +
@@ -5826,7 +5826,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQkv + (ulong)((long)hq * headDim * sizeof(float));
             ulong vOff = kOff + (ulong)((long)hkv * headDim * sizeof(float));
-            _kernels!.LaunchQkNormRopeScatter(pQ, pK, pV, pQkv, kOff, vOff, pQw, pKw, pCos, pSin,
+            LaunchQkNormRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQkv, kOff, vOff, pQw, pKw, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, eps, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;
@@ -5849,7 +5849,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         using NvtxRange _nvtx = NvtxRange.Push("QkNormRopeScatterV");
-        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || kCache.DType != DType.F32 || vCache.DType != DType.F32)
+        if (devicePos == 0 || qk.DType != DType.F32 || v.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
         {
             throw new NotSupportedException(
                 $"CUDA QkNormRopeScatterVDecodeStep requires a device position buffer and F32 qk/v/caches; got devicePos={devicePos}, " +
@@ -5873,7 +5873,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint qBytes = GpuTransferHelper.ByteSize(qOut);
             pQ = GpuTransferHelper.AllocateDevice(qBytes);
             ulong kOff = pQk + (ulong)((long)hq * headDim * sizeof(float));
-            _kernels!.LaunchQkNormRopeScatter(pQ, pK, pV, pQk, kOff, pVi, pQw, pKw, pCos, pSin,
+            LaunchQkNormRopeScatterAny(kCache.DType == DType.F16, pQ, pK, pV, pQk, kOff, pVi, pQw, pKw, pCos, pSin,
                 hq, hkv, headDim, rotaryDim, interleaved, eps, maxSeq, devicePos, _stream.Handle);
             kCache._gpuSyncCallback = null;
             kCache._gpuDisposeCallback = null;
@@ -9426,6 +9426,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             return;
         }
+        if (srcDtype.IsQuantized && dstDtype == DType.BF16 && _kernels!.HasCastF16ToBf16InPlace)
+        {
+            // Dequantize to F16 straight into the destination (same byte size as BF16), then convert in place: no staging buffers.
+            LaunchGgufDequantToF16(output, input, srcDtype, count);
+            _kernels.LaunchCastF16ToBf16InPlace(output, count, _stream.Handle);
+            return;
+        }
         if (srcDtype.IsQuantized && dstDtype == DType.BF16)
         {
             // quant → F16 → F32 → BF16. F32 staging needed because BF16 conversion goes through F32 in our kernel set.
@@ -9875,6 +9882,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// so the reduction's full-mask shuffle remains valid. Unsupported inputs fall back to the CPU reference.</remarks>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
+        using NvtxRange _nvtxFa = NvtxRange.Push(NvtxRange.ProfileShapes ? $"FlashAttention tq={query.Shape[2]}" : "FlashAttention");
         ValidateFlashAttentionContract(
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
@@ -9912,6 +9920,17 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             return;
         }
 
+        // Prefill-shaped causal attention (a block of query rows): the tensor-core FlashAttention-2 kernel. The per-row kernel below
+        // is built for decode and costs hundreds of milliseconds a layer once thousands of query rows share it.
+        if (causal && tq >= Fa2MinQueryRows && sink is null && alibiSlopes is null && softcap == 0f
+            && query.DType == DType.F32 && output.DType == DType.F32 && (key.DType == DType.F32 || f16Kv) && value.DType == key.DType
+            && _kernels is { HasFa2Causal: true } && CudaKernels.Fa2SupportsHeadDim(d) && hq % Math.Max(1, hkv) == 0
+            && EngineKnobs.Fa2Prefill.Value)
+        {
+            FlashAttentionFa2(output, query, key, value, b, hq, hkv, tq, lk, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, slidingWindow, f16Kv);
+            return;
+        }
+
         using OpScope _op = EnterOp();
         EnsureKernels();
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0, pSink = 0, pAlibi = 0;
@@ -9931,6 +9950,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // merge with a combine kernel. Numerically exact vs the monolithic kernel (same per-key scores,
             // online-softmax merge). Sink/ALiBi/soft-cap/sliding-window keep the proven monolithic path.
             int baseBlocks = b * hq * tq;
+            bool gqaDecode = pSink == 0 && pAlibi == 0 && kvLen >= 64 && DecodeGqaEligible(tq, causal, hq, hkv, kvGroup <= 0 ? 1 : kvGroup, d);
             // Soft-cap and sliding-window are handled inside the split kernel (per-logit transform / key-range
             // clamp — see flash_attn_f32_split.cu); only sink and ALiBi still require the monolithic kernel.
             // This matters enormously for low-head-count windowed models: gemma3-1b decodes with FOUR query
@@ -9961,7 +9981,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (g >= 2) splits = g;
             }
 
-            if (splits >= 2)
+            if (gqaDecode)
+            {
+                RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, kvLen, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, softcap,
+                    slidingWindow, 0, f16Kv);
+            }
+            else if (splits >= 2)
             {
                 int chunk = (kvLen + splits - 1) / splits;
                 splits = (kvLen + chunk - 1) / chunk;   // exact # of non-empty chunks covering kvLen
@@ -10242,7 +10267,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             int grp = kvGroup <= 0 ? 1 : kvGroup;
-            if (splits >= 2)
+            if (DecodeGqaEligible(tq, causal, hq, hkv, grp, d))
+            {
+                RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, lk, d, kvLen, grp, qOffset, scale, softcap, slidingWindow, devicePos, devF16Kv);
+            }
+            else if (splits >= 2)
             {
                 long n = baseBlocks;
                 ulong pM = 0, pL = 0, pAcc = 0;
