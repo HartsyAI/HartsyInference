@@ -31,7 +31,7 @@ stable release will require. Dates are UTC.
   - Sampling in the graph: top-k, temperature, top-p and min-p are drawn on the device, so sampled decode replays a graph like greedy. The top-k over a vocabulary runs on 128 blocks in two stages (550 us to about 55 us per step).
   - `vram.kvF16` now works with graph decode, including through the API.
   - New knobs, all on by default: `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`, `numerics.lmNormFast`.
-  - Greedy output of the dense models checked on an RTX 3060 matches the old build for most models; three diverge after 70-95% of 96 tokens, because the fused kernels sum in a different float order.
+  - Greedy output of the dense models checked on an RTX 3060 matches the old build for six of nine models; three diverge after 70-95% of 96 tokens, because the fused kernels sum in a different float order. Their decode is 8-15% faster on the four 1B-7B models measured, flat on two, and 3-10% lower on the three smallest (0.5B-1.5B), within run-to-run noise.
 - **Fixed: every graph-decode request spent about 330 ms rescanning expert tensors.** The weight-preload pass checked membership in a list for each of the thousands of expert tensors of a MoE checkpoint. It is one pass now and graph capture takes about 17 ms. Qwen3-30B-A3B API decode at 4K went from 80 to 125 tok/s.
 
 ## alpha.333
