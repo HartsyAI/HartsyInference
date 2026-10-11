@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
@@ -24,8 +25,9 @@ public sealed class JinjaChatTemplate : IChatTemplate
         _engine = new JinjaEngine(chatTemplate);
         Source = chatTemplate;
         // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
-        _toolRole = chatTemplate.Contains("'observation'", StringComparison.Ordinal) || chatTemplate.Contains("\"observation\"", StringComparison.Ordinal)
-            ? "observation" : "tool";
+        // Only a template that branches on the observation role (not one that merely mentions the word) is remapped, and a template
+        // that also branches on "tool" keeps the tool role.
+        _toolRole = ObservationRoleBranchPattern.IsMatch(chatTemplate) && !ToolRoleBranchPattern.IsMatch(chatTemplate) ? "observation" : "tool";
     }
 
     /// <inheritdoc/>
@@ -126,6 +128,12 @@ public sealed class JinjaChatTemplate : IChatTemplate
 
     /// <summary>The role a tool result carries in a conversation (see <see cref="ChatMessage.Role"/>).</summary>
     private const string ToolRoleName = "tool";
+
+    /// <summary>A template branch that compares the message role to "observation" (not a bare mention of the word).</summary>
+    private static readonly Regex ObservationRoleBranchPattern = new(@"role\s*==\s*['""]observation['""]", RegexOptions.Compiled);
+
+    /// <summary>A template branch that compares the message role to "tool".</summary>
+    private static readonly Regex ToolRoleBranchPattern = new(@"role\s*==\s*['""]tool['""]", RegexOptions.Compiled);
 
     private static List<object?>? ToolsValue(IReadOnlyList<ToolSpec>? tools)
     {
