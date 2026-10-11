@@ -19,6 +19,51 @@ public sealed class JinjaEngine
         return sb.ToString();
     }
 
+    /// <summary>True when an executable expression in the template compares a message role to <paramref name="role"/>
+    /// (<c>x.role == 'r'</c>, <c>x['role'] != 'r'</c>, or <c>x.role in ['r', ...]</c>). Comments and text never become
+    /// expressions and a string literal is a single leaf, so a mention in either cannot match.</summary>
+    public bool ComparesRoleTo(string role)
+    {
+        Stack<Node> nodes = new(_program);
+        while (nodes.Count > 0)
+        {
+            Node node = nodes.Pop();
+            foreach (Node child in node.Children) nodes.Push(child);
+            foreach (Expr expr in node.Exprs)
+                if (ExprComparesRole(expr, role)) return true;
+        }
+        return false;
+    }
+
+    private static bool ExprComparesRole(Expr root, string role)
+    {
+        Stack<Expr> pending = new();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            Expr e = pending.Pop();
+            if (e is BinaryExpr b)
+            {
+                if ((b.Op is "==" or "!=") && ((IsRoleAccess(b.Left) && IsLiteral(b.Right, role)) || (IsRoleAccess(b.Right) && IsLiteral(b.Left, role))))
+                    return true;
+                if ((b.Op is "in" or "notin") && IsRoleAccess(b.Left) && b.Right is ListLiteralExpr list && list.Items.Any(i => IsLiteral(i, role)))
+                    return true;
+            }
+            foreach (Expr child in e.Children) pending.Push(child);
+        }
+        return false;
+    }
+
+    private static bool IsLiteral(Expr e, string value) => e is LiteralExpr { Value: string s } && s == value;
+
+    private static bool IsRoleAccess(Expr e) => e switch
+    {
+        MemberExpr m => m.Name == "role",
+        IndexExpr i => IsLiteral(i.Index, "role"),
+        VarExpr v => v.GetName() == "role",
+        _ => false,
+    };
+
     // ── Runtime scope ────────────────────────────────────────────────────────────────────────────────
     internal sealed class Scope
     {
@@ -105,7 +150,14 @@ public sealed class JinjaEngine
     }
 
     // ── AST nodes ────────────────────────────────────────────────────────────────────────────────────
-    internal abstract class Node { public abstract void Render(StringBuilder sb, Scope scope); }
+    internal abstract class Node
+    {
+        public abstract void Render(StringBuilder sb, Scope scope);
+        /// <summary>Expressions this node evaluates itself, for static inspection.</summary>
+        public virtual IEnumerable<Expr> Exprs => [];
+        /// <summary>Nested statement bodies, for static inspection.</summary>
+        public virtual IEnumerable<Node> Children => [];
+    }
 
     internal sealed class TextNode(string text) : Node
     {
@@ -114,17 +166,20 @@ public sealed class JinjaEngine
 
     internal sealed class ExprNode(Expr expr) : Node
     {
+        public override IEnumerable<Expr> Exprs => [expr];
         public override void Render(StringBuilder sb, Scope scope) => sb.Append(Values.ToStr(expr.Eval(scope)));
     }
 
     internal sealed class SetNode(string name, Expr expr) : Node
     {
+        public override IEnumerable<Expr> Exprs => [expr];
         public override void Render(StringBuilder sb, Scope scope) => AssignSet(name, expr.Eval(scope), scope);
     }
 
     /// <summary>Block-capture <c>{% set name %}...{% endset %}</c>: renders the body to a string and assigns it (Gemma-4's chat template captures a message's rendered content this way before post-processing it).</summary>
     internal sealed class SetBlockNode(string name, List<Node> body) : Node
     {
+        public override IEnumerable<Node> Children => body;
         public override void Render(StringBuilder sb, Scope scope)
         {
             StringBuilder inner = new();
@@ -146,6 +201,8 @@ public sealed class JinjaEngine
 
     internal sealed class IfNode(List<(Expr? Cond, List<Node> Body)> branches) : Node
     {
+        public override IEnumerable<Expr> Exprs => branches.Select(b => b.Cond).OfType<Expr>();
+        public override IEnumerable<Node> Children => branches.SelectMany(b => b.Body);
         public override void Render(StringBuilder sb, Scope scope)
         {
             foreach ((Expr? cond, List<Node> body) in branches)
@@ -160,6 +217,8 @@ public sealed class JinjaEngine
     /// <summary>A <c>{% for x in seq %}</c> loop, optionally with Jinja's inline filter clause (<c>{% for x in seq if cond %}</c>); <c>loop.index</c>/<c>loop.length</c>/etc. reflect the FILTERED count, matching real Jinja — the filter narrows the sequence before iteration starts, it isn't a per-item skip inside a still-full-length loop.</summary>
     internal sealed class ForNode(string var, Expr seq, List<Node> body, Expr? filter = null) : Node
     {
+        public override IEnumerable<Expr> Exprs => filter is null ? [seq] : [seq, filter];
+        public override IEnumerable<Node> Children => body;
         public override void Render(StringBuilder sb, Scope scope)
         {
             List<object?> raw = Values.AsList(seq.Eval(scope));

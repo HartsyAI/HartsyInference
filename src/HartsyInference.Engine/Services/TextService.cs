@@ -718,9 +718,7 @@ public sealed class TextService : ITextService, IDisposable
             StopReason resolved = calls.Count > 0 ? StopReason.ToolCall : stop;
             if (FilterSink is null)
             {
-                // A structured parser's content is the visible text once it has reported calls; the raw decode still holds the markup.
-                string text = calls.Count > 0 && Parser is not null ? Parser.Result.Content : result.Text;
-                return new GenOutcome(text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
+                return new GenOutcome(FinalText(Parser, calls.Count, result.Text), resolved, result.PromptTokens, result.TokenIds.Count, calls,
                     result.PrefillMilliseconds, result.DecodeMilliseconds);
             }
             return new GenOutcome(FilterSink.Text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
@@ -737,6 +735,10 @@ public sealed class TextService : ITextService, IDisposable
 
         public void Dispose() => StopSource?.Dispose();
     }
+
+    /// <summary>The terminal text of a request without a filter. A structured parser's content is the visible text once it has reported calls (the raw decode still holds the markup); the passthrough parser's content is exactly what streamed, including the special literals it was asked to show (reasoning tags), which the raw decode skips.</summary>
+    internal static string FinalText(IOutputParser? parser, int callCount, string decoded)
+        => parser is PassthroughOutputParser || (parser is not null && callCount > 0) ? parser.Result.Content : decoded;
 
     /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
     private static IOutputParser CreateParser(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest,

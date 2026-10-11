@@ -131,7 +131,9 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
             {
                 node = next;
                 i++;
-                if (node.TokenId >= 0) { bestId = node.TokenId; bestLen = i - pos; }
+                // Ordinary text never yields a control id: the trie holds special tokens too, and matching one here would let
+                // escaped-then-restored content (SpecialLiteralEscaper) become a control token again.
+                if (node.TokenId >= 0 && !_specialIds.Contains(node.TokenId)) { bestId = node.TokenId; bestLen = i - pos; }
             }
             if (bestId < 0)
             {
