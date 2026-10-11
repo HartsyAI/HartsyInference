@@ -51,6 +51,7 @@ public sealed partial class VulkanBackend
         if (upExperts[0].DType != format)
             throw new NotSupportedException($"MoeExpertGateUp has no shader for gate {format.Name} / up {upExperts[0].DType.Name}.");
         if (x.DType != DType.F32 || act.DType != DType.F32) throw new NotSupportedException("MoeExpertGateUp takes F32 activations.");
+        if (topk <= 0) throw new ArgumentOutOfRangeException(nameof(topk), topk, "MoeExpertGateUp needs at least one slot per token.");
         int n = (int)g0.Shape[0], k = (int)g0.Shape[1];
         if (k % GemvBlockElements(format) != 0) throw new ArgumentException($"MoeExpertGateUp {format.Name}: K={k} is not a whole number of blocks.", nameof(x));
         int tokens = (int)(x.ElementCount / k);

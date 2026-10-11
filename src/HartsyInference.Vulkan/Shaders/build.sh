@@ -154,6 +154,9 @@ SINGLE_KERNELS=(
     moe_build_dispatch
     moe_combine
     moe_combine_slots
+    moe_combine_pairs
+    moe_gather_rows_f16
+    moe_act_mul_f16
     hc_split_sinkhorn
     hc_pre_mix
     hc_post_mix
