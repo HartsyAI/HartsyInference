@@ -20,7 +20,7 @@ public static class TextPlacementProbe
     public static TextPlacement PlanGguf(string path, string deviceKey, TextPlacementMode mode, int contextTokens,
         bool includeRedundantSplits)
     {
-        TextPlacementDemand demand = TextPlacementDemandReader.FromGguf(path, contextTokens, includeRedundantSplits, KvCaches.F16Enabled);
+        TextPlacementDemand demand = TextPlacementDemandReader.FromGguf(path, contextTokens, includeRedundantSplits, KvCaches.F16ForCudaPlacement);
         int primary = BackendFactory.ParseOrdinal(deviceKey);
         if (CudaTopology.ProbeDevice(primary) is not GpuTopologyInfo first)
             throw new HartsyInferenceException($"CUDA device '{deviceKey}' was not found; no placement can be planned.");

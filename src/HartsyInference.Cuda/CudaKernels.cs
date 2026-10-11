@@ -3108,7 +3108,8 @@ public sealed partial class CudaKernels : IDisposable
         args[4] = &tArg; args[5] = &dArg; args[6] = &offArg; args[7] = &totalArg; args[8] = &dPosArg;
 
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmKvAppendF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        // The saturating twin (kv_scatter_f16.ptx) when it loaded, else the original kernel.
+        CudaDriverApi.cuLaunchKernel(_kvAppendF16Sat != 0 ? _kvAppendF16Sat : _lmKvAppendF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches KV time-range extraction: output[1,h,t,d] = input[1,h,start+t,d] for t in [0,len).</summary>

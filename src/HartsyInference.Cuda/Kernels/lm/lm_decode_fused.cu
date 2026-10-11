@@ -145,7 +145,7 @@ WIDE(24) WIDE(25) WIDE(26) WIDE(27) WIDE(28) WIDE(29) WIDE(30) WIDE(31) WIDE(32)
 // Launch: grid = nq + 2 * nkv, block = 256 (dit_rmsnorm_f32's production geometry), shared = 256 floats.
 
 __device__ __forceinline__ void kv_store(float* p, float v) { *p = v; }
-__device__ __forceinline__ void kv_store(__half* p, float v) { *p = __float2half_rn(v); }
+__device__ __forceinline__ void kv_store(__half* p, float v) { *p = __float2half_rn(v > 65504.0f ? 65504.0f : (v < -65504.0f ? -65504.0f : v)); }   // saturates: see kv_half_sat in kv_scatter_f16.cu
 
 template <typename KvT>
 __device__ __forceinline__ void qknorm_full_rope_scatter(

@@ -48,12 +48,20 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         if (_preloadWeights) PreloadDecodeWeights();
     }
 
+    private static int _pooledF16NoticeLogged;
+
     public ISequenceState CreateSequenceState(SequenceStateOptions options)
     {
-        if (options.Pool is not null) return new PagedKvCache(options.Pool);
+        if (options.Pool is not null)
+        {
+            // The shared page pool allocates F32 pages, so an F16 choice (the default on CUDA, or an explicit setting) does not apply to pooled sequences.
+            if (KvCaches.F16For(_backend) && Interlocked.Exchange(ref _pooledF16NoticeLogged, 1) == 0)
+                Logs.Info("[kv] The F16 cache setting does not apply to the continuous-batching page pool: pooled sequences keep F32 pages.");
+            return new PagedKvCache(options.Pool);
+        }
         TransformerConfig cfg = _transformer.Config;
         // Gemma-4's local layers are narrower than its global ones; HeadDimsPerLayer is uniform elsewhere.
-        DType kvDtype = KvCaches.F16Enabled ? DType.F16 : DType.F32;
+        DType kvDtype = KvCaches.F16For(_backend) ? DType.F16 : DType.F32;
         return new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDimsPerLayer(), options.MaxSequenceTokens, kvDtype);
     }
 
@@ -116,10 +124,11 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
     public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits) =>
         _transformer.EnumerateWeights(includeRedundantSplits);
 
+    /// <remarks>Sized for the cache <see cref="CreateSequenceState"/> builds without a pool (F16 by default on CUDA); a sequence in the continuous-batching page pool uses F32 pages and is twice this.</remarks>
     public long EstimateSequenceBytes(int contextTokens)
     {
         TransformerConfig cfg = _transformer.Config;
-        long elementBytes = KvCaches.F16Enabled ? 2 : 4;
+        long elementBytes = KvCaches.F16For(_backend) ? 2 : 4;
         long perToken = 0;
         foreach (int headDim in cfg.HeadDimsPerLayer()) perToken += 2L * cfg.NumKvHeads * headDim * elementBytes;
         return perToken * contextTokens;

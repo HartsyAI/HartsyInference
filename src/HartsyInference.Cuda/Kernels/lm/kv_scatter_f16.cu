@@ -6,6 +6,14 @@
 
 #include <cuda_fp16.h>
 
+// F32 to F16 with saturation: a value beyond the F16 range stores as +-65504 instead of +-inf (a NaN stays a NaN, which the comparisons below do not touch),
+// so one extreme key or value cannot poison the softmax of every later token.
+__device__ __forceinline__ __half kv_half_sat(float v)
+{
+    return __float2half_rn(v > 65504.0f ? 65504.0f : (v < -65504.0f ? -65504.0f : v));
+}
+
+
 extern "C" __global__ void lm_qkv_rope_scatter_f16kv(
     float* __restrict__ qOut,
     __half* __restrict__ kCache,
@@ -35,7 +43,7 @@ extern "C" __global__ void lm_qkv_rope_scatter_f16kv(
         unsigned long long vi = gid - qElems - kvElems;
         unsigned int h = (unsigned int)(vi / headDim);
         unsigned int i = (unsigned int)(vi % headDim);
-        vCache[(((unsigned long long)h * maxSeq) + (unsigned int)pos) * headDim + i] = __float2half_rn(vIn[vi]);
+        vCache[(((unsigned long long)h * maxSeq) + (unsigned int)pos) * headDim + i] = kv_half_sat(vIn[vi]);
         return;
     }
 
@@ -74,7 +82,7 @@ extern "C" __global__ void lm_qkv_rope_scatter_f16kv(
         qOut[si] = outv;
     } else {
         unsigned int h = (unsigned int)(si / headDim);
-        kCache[(((unsigned long long)h * maxSeq) + (unsigned int)pos) * headDim + i] = __float2half_rn(outv);
+        kCache[(((unsigned long long)h * maxSeq) + (unsigned int)pos) * headDim + i] = kv_half_sat(outv);
     }
 }
 
@@ -109,7 +117,7 @@ extern "C" __global__ void lm_qknorm_rope_scatter_f16kv(
         const float* src = vIn + (size_t)vh * headDim;
         __half* dst = vCache + (((unsigned long long)vh * maxSeq) + (unsigned int)pos) * headDim;
         for (unsigned int i = threadIdx.x; i < headDim; i += blockDim.x)
-            dst[i] = __float2half_rn(src[i]);
+            dst[i] = kv_half_sat(src[i]);
         return;
     }
 
@@ -164,6 +172,30 @@ extern "C" __global__ void lm_qknorm_rope_scatter_f16kv(
                 outv = self;
             }
         }
-        if (isQ) qDst[i] = outv; else kDst[i] = __float2half_rn(outv);
+        if (isQ) qDst[i] = outv; else kDst[i] = kv_half_sat(outv);
     }
+}
+
+// The eager (non-graph) F16 KV append: lm_kv_append_f16 of lm_f32.cu with a saturating store. Kept here so the tuned lm_f32.ptx is not rebuilt.
+extern "C" __global__ void lm_kv_append_f16_sat(
+    __half* __restrict__ buffer,
+    const float* __restrict__ newKv,
+    unsigned int heads,
+    unsigned int maxSeq,
+    unsigned int tNew,
+    unsigned int headDim,
+    unsigned int offset,
+    unsigned long long total,
+    const int* __restrict__ dPos)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    if (dPos != nullptr) offset = (unsigned int)dPos[1];
+
+    unsigned int d = (unsigned int)(i % headDim);
+    unsigned long long rem = i / headDim;
+    unsigned int ti = (unsigned int)(rem % tNew);
+    unsigned int h = (unsigned int)(rem / tNew);
+
+    buffer[(((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d] = kv_half_sat(newKv[i]);
 }

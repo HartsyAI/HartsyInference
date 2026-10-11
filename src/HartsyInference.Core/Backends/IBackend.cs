@@ -2106,6 +2106,10 @@ public partial interface IBackend : IDisposable
     /// bit-identical to its separate ones. False keeps the separate launches.</summary>
     bool FoldsDecodeResidual => false;
 
+    /// <summary>True when this backend can store a transformer KV cache as F16 and run attention and graph decode over it, which is what lets
+    /// <c>vram.kvF16</c> default to on for text models. CUDA only today.</summary>
+    bool SupportsF16KvCache => false;
+
     /// <summary>Partial-fusion <see cref="QkvNormRopeScatterDecodeStep"/> variant: q/k concatenated, v separate (mixed-dtype v).</summary>
     void QkNormRopeScatterVDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor v,
         Tensor qNorm, Tensor kNorm, float eps,
