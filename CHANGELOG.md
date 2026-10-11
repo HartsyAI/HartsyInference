@@ -23,6 +23,10 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.335
+
+- **Fixed: the continuous-batching scheduler honors `vram.kvF16` for graph-eligible solo sequences.** It forced an F32 KV cache there because graph decode used to need one; since #367 the F16 scatter kernels cover it, so a scheduler-served request now halves its KV VRAM like `TextGenerationPipeline` does when the knob is on. A sequence that is joined mid-generation retires its graph session and continues eagerly on the same F16 cache. The default stays off. `SequenceStateOptions.FullPrecisionKv` is removed (no remaining caller).
+
 ## alpha.334
 
 - **Faster MoE on CUDA: prefill is at or above llama.cpp and decode is within 6-16% on Qwen3-30B-A3B and Mixtral.** On an A40 (4K prompt, F16 KV cache for the like-for-like column), Qwen3-30B-A3B prefill goes from 265 to 3850 tok/s (llama.cpp 3715) and decode from 18.8 to 137 (145); Mixtral-8x7B prefill 325 to 2270 (2008) and decode 29.5 to 53 (61); OLMoE decode 60 to 301 (290); Granite-3B decode 36 to 299 (210). The per-model tables, the method and the remaining gaps are in `benchmarks/results/2026-10-11_moe_perf_a40.md`.
