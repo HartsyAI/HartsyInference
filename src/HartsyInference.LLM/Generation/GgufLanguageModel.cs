@@ -331,12 +331,7 @@ public sealed class GgufLanguageModel : IDisposable
     }
 
     /// <summary>Zero-copy view of <paramref name="count"/> elements of a 1-D tensor starting at <paramref name="start"/> (used to split a fused F32 bias vector).</summary>
-    private static unsafe Tensor SliceVec(Tensor src, int start, int count)
-    {
-        long elemBytes = src.DType.ComputeByteCount(1);
-        byte* s = (byte*)src.DataPointer + (long)start * elemBytes;
-        return new Tensor((void*)s, new TensorShape(count), src.DType, src.Device);
-    }
+    private static Tensor SliceVec(Tensor src, int start, int count) => src.SliceRows(start, count);
 
     /// <summary>Splits each MoE layer's stacked expert tensors (<c>gate_exps</c>/<c>up_exps</c>/<c>down_exps</c>, shape <c>[E, ·, ·]</c>) into the per-expert 2D <c>experts.{i}.{gate,up,down}_proj</c> weights the MoE block loads via a flatten-to-2D + per-expert row-byte copy (no dequant needed).</summary>
     /// <remarks>Internal (not private) so <c>HartsyInference.LLM.Tests</c> can regression-test the fused-vs-separate expert tensor split directly, without constructing a full synthetic GGUF file.</remarks>
@@ -387,16 +382,15 @@ public sealed class GgufLanguageModel : IDisposable
         w.Remove(stackedKey);
     }
 
-    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of a rank-2 tensor into a new tensor of the same dtype; a row is contiguous in both float and block-quantized layouts (quant blocks run along the column dim), so this is a plain byte-range copy that works on quantized weights.</summary>
-    private static unsafe Tensor SliceRows(Tensor src, int startRow, int numRows)
+    /// <summary>Views rows <c>[startRow, startRow+numRows)</c> of a rank-2 tensor as a new tensor of the same dtype, rooting the source; a row is contiguous in both float and block-quantized layouts (quant blocks run along the column dim), so this is a plain byte-range copy that works on quantized weights.</summary>
+    private static Tensor SliceRows(Tensor src, int startRow, int numRows)
     {
-        int inDim = (int)src.Shape[1];
-        long rowBytes = src.DType.ComputeByteCount(inDim);
-        // Zero-copy view over the source's memory (the GGUF mmap). Splitting a large MoE checkpoint into hundreds
-        // of per-expert tensors must not duplicate the weights in host RAM — the views borrow the mmap, which the
-        // GgufLanguageModel keeps alive, and each is uploaded to the GPU exactly once like any other weight.
-        byte* s = (byte*)src.DataPointer + (long)startRow * rowBytes;
-        return new Tensor((void*)s, new TensorShape(numRows, inDim), src.DType, src.Device);
+        // Zero-copy view over the source's memory: splitting a large MoE checkpoint into hundreds of per-expert
+        // tensors must not duplicate the weights in host RAM. The view ROOTS its source (Tensor.SliceRows), so a source
+        // that owns its buffer, such as a stacked expert tensor dequantized to F32 for a backend with no quantized
+        // path, outlives the split. A raw borrowed pointer here left the per-expert views reading freed memory once
+        // the stacked tensor was collected, an AccessViolation on the first weight upload of any MoE GGUF on Vulkan.
+        return src.SliceRows(startRow, numRows);
     }
 
     public void Dispose()
