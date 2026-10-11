@@ -210,7 +210,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             SupportsF32 = true,
             SupportsF16 = Vk.SupportsFp16 && Vk.Storage16Bit,
             SupportsBF16 = false,
-            SupportsQuantized = false,
+            // GGUF blocks the fused GEMV reads stay compressed on the device; the loader widens every other format. The GEMV shaders need no FP16,
+            // but a prefill of more than QuantGemvMaxRows rows dequantizes through the F16 dequant shaders, so a device without FP16 and 16-bit storage
+            // keeps nothing packed and the loader widens on the host as before.
+            SupportsQuantized = Vk.SupportsFp16 && Vk.Storage16Bit,
+            QuantizedTypes = Vk.SupportsFp16 && Vk.Storage16Bit ? QuantGemvTypes : null,
             SupportsConv2D = true,
             SupportsSdpa = true,
             SupportsFft = false,
@@ -226,6 +230,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     }
 
 
+
+    /// <inheritdoc/>
+    public bool CacheQuantizedWeightCasts { get; set; } = true;
 
     /// <summary>Master kill-switch for weight dtype-cast caching — mirrors <c>CudaBackend.CacheWeightCasts</c> exactly (same name, same purpose): turn off for a large FP8/quantized model whose full cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights, trading recompute for memory via transient (dispatched-and-freed-per-call) dequant instead of a cast cached forever. Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>.</summary>
     public bool CacheWeightCasts
@@ -772,7 +779,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
         if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
         long elements = src.ElementCount;
-        bool cacheThis = _xfer.ShouldCacheCast(src) && CastFitsCache(elements * want.SizeInBytes);
+        // With CacheQuantizedWeightCasts off (the text path), a quantized weight's widened copy is per call: decode reads
+        // the packed blocks through the GEMV, so the copy would only serve prefill at two to four times the weight's VRAM.
+        bool cacheThis = _xfer.ShouldCacheCast(src) && (CacheQuantizedWeightCasts || !src.DType.IsQuantized)
+            && CastFitsCache(elements * want.SizeInBytes);
 
         ulong outBytes = (ulong)(elements * want.SizeInBytes);
         VulkanBuffer dst = _xfer.AllocateDevice(outBytes);
@@ -940,7 +950,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         using (OpScope _ = EnterOp())
         {
-            if (!TryDispatchFp8Linear(output, input, weight, bias) && !TryDispatchInt8Linear(output, input, weight, bias))
+            if (!TryDispatchQuantGemv(output, input, weight, bias)
+                && !TryDispatchFp8Linear(output, input, weight, bias) && !TryDispatchInt8Linear(output, input, weight, bias))
             {
                 // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
                 DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
@@ -948,6 +959,24 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
         // Outside the scope: Accumulate re-enters through the public ops, exactly as an ordinary caller would.
         if (weight.LowRankAdjunct is LowRankAdjunct adjunct)
+        {
+            LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
+        }
+    }
+
+    /// <summary>A Linear on a GGUF-quantized weight: the fused GEMV at a decode-sized M, otherwise the per-call dequantize
+    /// and GEMM <see cref="Linear"/> takes. An F16 activation is accepted (the large-vocabulary head passes one).</summary>
+    public void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
+    {
+        if (!quantWeight.DType.IsQuantized)
+            throw new ArgumentException($"QuantizedMatMul expects a GGUF-quantized weight; got {quantWeight.DType.Name}.", nameof(quantWeight));
+        using (OpScope _ = EnterOp())
+        {
+            if (!TryDispatchQuantGemv(output, input, quantWeight, bias))
+                DispatchMatmul(output, input, quantWeight, transposeA: false, transposeB: true, bias: bias);
+        }
+        // A LoRA that cannot merge into packed blocks rides as an adjunct; outside the scope, as Linear applies it.
+        if (quantWeight.LowRankAdjunct is LowRankAdjunct adjunct)
         {
             LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
         }

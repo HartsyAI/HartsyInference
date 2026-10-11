@@ -15,6 +15,13 @@ public sealed class BackendCapabilities
     /// <summary>Whether this backend supports quantized (Q8_0, Q4_K) operations.</summary>
     public bool SupportsQuantized { get; init; }
 
+    /// <summary>When set, the quantized formats <see cref="SupportsQuantized"/> covers; null means every format the
+    /// loaders keep packed. A loader widens a format outside the set as it would on a backend without quantized support.</summary>
+    public IReadOnlySet<Tensors.DType>? QuantizedTypes { get; init; }
+
+    /// <summary>Whether a weight of <paramref name="dtype"/> can stay packed on this backend.</summary>
+    public bool SupportsQuantizedType(Tensors.DType dtype) => SupportsQuantized && (QuantizedTypes?.Contains(dtype) ?? true);
+
     /// <summary>Whether a block-scaled weight (NVFP4/MXFP4/MXFP8 with its scale tensor on <c>QuantInfo</c>) multiplies natively here, so a loader should keep it packed rather than fold it to fp8 or F16.</summary>
     public bool NativeBlockScaledGemm { get; init; }
 

@@ -38,4 +38,21 @@ public sealed class HostRamGuardTests
 
         Assert.Equal((1024.0 * 256 + 2048.0 * 256) * 4, TextService.DequantizedHostBytes(tensors));
     }
+
+    [Fact]
+    public void DequantizedHostBytes_WithABackendKeepSet_CountsEveryOtherQuantAndHalfFloat()
+    {
+        // Vulkan keeps a subset: Q3_K is packed on CUDA but widened there, and so are F16 tensors.
+        GgufTensorDescriptor[] tensors =
+        [
+            Tensor("a", DType.Q4_K, 256, 256),
+            Tensor("b", DType.Q3_K, 256, 256),
+            Tensor("c", DType.F16, 256, 256),
+            Tensor("d", DType.F32, 256, 256),
+        ];
+        HashSet<DType> keep = [DType.Q4_K, DType.Q6_K];
+
+        Assert.Equal(0.0, TextService.DequantizedHostBytes(tensors));
+        Assert.Equal(2 * 256.0 * 256 * 4, TextService.DequantizedHostBytes(tensors, keep));
+    }
 }

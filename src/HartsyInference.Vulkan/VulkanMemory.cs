@@ -462,7 +462,10 @@ public static class VulkanBufferFactory
         VkBufferCreateInfo bci = new()
         {
             sType = VkStructureType.BufferCreateInfo,
-            size = size,
+            // Rounded up to a whole 32-bit word: shaders read storage buffers as uint arrays, and a byte-packed tensor
+            // (a GGUF row of 34- or 210-byte blocks) can end mid-word. With the descriptor range at WHOLE_SIZE, that
+            // last word is then inside the buffer rather than undefined. The VulkanBuffer keeps the requested size.
+            size = (size + 3) & ~3UL,
             usage = usage,
             sharingMode = VkSharingMode.Exclusive,
         };
