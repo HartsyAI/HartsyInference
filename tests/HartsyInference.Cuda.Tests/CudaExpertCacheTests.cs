@@ -126,10 +126,12 @@ public sealed unsafe class CudaExpertCacheTests
         AssertResident(pinned.Get(new(0, 0)), 0f);
         AssertResident(pinned.Get(new(0, 1)), 10f);
 
+        // Release clears the lease's slots, so keep the weights to check they were evicted afterwards.
+        ExpertWeights released = pinned.Get(new(0, 0));
         cache.Release(pinned);
         using ExpertLease next = cache.Acquire([new(0, 2), new(0, 3)]);
         Assert.Equal(2, cache.Stats.Evictions);
-        Assert.False(GpuTransferHelper.IsWeightCached(pinned.Get(new(0, 0)).W1.Weight));
+        Assert.False(GpuTransferHelper.IsWeightCached(released.W1.Weight));
         backend.Sync();
         AssertResident(next.Get(new(0, 3)), 30f);
     }
