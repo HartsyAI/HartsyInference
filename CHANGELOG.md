@@ -24,6 +24,15 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.342
+
+- **Changed: `EngineOptions.TextStreamFilterFactory` takes a `TextStreamFilterContext`.** The context carries the request, its request id, the template's name and Jinja source, the architecture and the model path, so a host can pick a parser per model. Breaking for any host that set the factory.
+- **Changed: tool-call ids are unique per request.** Both the structured parser and the filter number calls `call_{requestId}_{index}`, so ids never repeat across rounds of one conversation.
+- **Fixed: tool calls from a structured output parser end the turn as a tool call.** DeepSeek-V4.1's tool calls now stop generation as `StopReason.ToolCall` and dispatch, instead of ending as a plain stop.
+- **Added: `TextResult.ToolCalls`.** Non-streaming generation reports every tool call, not only the last. The OpenAI-compatible route returns all of them.
+- **Added: `ITextStreamFilter.MarkerLiterals`.** A filter lists the control-token literals it needs to see (for example `<tool_call>`); the engine decodes those tokens as text and still drops every other control token.
+- **Removed: the `<tool_call>` sentinel grammar.** It never fired on GGUF models and it turned off graph decode and speculative decode for every tool request. Those stay on for tool requests now.
+
 ## alpha.338
 
 - **Changed: fewer, faster kernels in the CUDA-graph decode step (`numerics.graphDecode`).** Four fusions, each bit-identical to the launches it replaces and each with its own knob (all on): the RMSNorm + Q8_1 kernels run on up to 1024 threads at every width that is a multiple of 256, so hidden 2560, 3072 or 5120 no longer fall back to the generic kernel (`numerics.lmNormWide`); each layer's final residual add, and an MoE layer's expert combine, run inside the next layer's input norm or the final norm (`numerics.decodeResidualFold`); OLMoE's full-width QK-norm, RoPE and KV scatter are one kernel (`numerics.qknormFullScatter`); and the decode attention's combine kernel writes the Q8_1 copy the o-projection reads (`numerics.attnCombineQ8`). RTX 3060, greedy, same text as before: OLMoE-1B-7B Q4_K_M goes from 326 to 205 kernels per token and 290 to 309 tok/s; Qwen3-4B Q4_K_M from 456 to 383 kernels and 103 to 108 tok/s.

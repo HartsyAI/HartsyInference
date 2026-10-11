@@ -110,7 +110,7 @@ public static class CompatEndpoints
                             {
                                 Role = "assistant",
                                 Content = result.ToolCall is null ? result.Text : null,
-                                ToolCalls = result.ToolCall is { } call ? [ToToolCallDto(call)] : null,
+                                ToolCalls = result.ToolCalls is { Count: > 0 } calls ? [.. calls.Select(c => ToToolCallDto(c))] : null,
                             },
                             FinishReason = ToFinishReason(result.Stop),
                         }],
