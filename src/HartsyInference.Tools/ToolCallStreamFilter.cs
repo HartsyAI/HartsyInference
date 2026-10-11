@@ -17,11 +17,7 @@ public sealed class ToolCallStreamFilter : ITextStreamFilter
     {
         _parser = new ToolCallParser(format, ToolCallParser.DefaultMaxSpanChars, knownTools, idPrefix);
         StopAfterFirstCall = stopAfterFirstCall;
-        MarkerLiterals = ToolCallFormats.RulesFor(format).ControlLiterals;
     }
-
-    /// <inheritdoc/>
-    public IReadOnlyCollection<string> MarkerLiterals { get; }
 
     /// <summary>The format being parsed.</summary>
     public ToolCallFormat Format => _parser.Format;
@@ -31,6 +27,9 @@ public sealed class ToolCallStreamFilter : ITextStreamFilter
 
     /// <summary>Every call completed so far, in order, including ones the seam has not surfaced yet.</summary>
     public IReadOnlyList<NativeToolCall> Calls => _calls;
+
+    /// <summary>The format's control-token markers, which the engine decodes as text so the parser sees them (see <see cref="ToolCallFormatRules.MarkerLiterals"/>).</summary>
+    public IReadOnlyCollection<string> MarkerLiterals => ToolCallFormats.RulesFor(Format).MarkerLiterals;
 
     /// <inheritdoc/>
     public TextFilterResult OnDelta(string delta) => Emit(_parser.Push(delta));
