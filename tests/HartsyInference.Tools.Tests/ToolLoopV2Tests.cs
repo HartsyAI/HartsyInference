@@ -98,6 +98,16 @@ public sealed class ToolLoopV2Tests
     }
 
     [Fact]
+    public async Task ResultOnlyRoundKeepsItsTextInTheTurn()
+    {
+        Rounds rounds = new([new TextChunk { Kind = TextChunkKind.Result, Text = "14:05" }, Stop(StopReason.Stop)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry());
+        List<TextChunk> chunks = await Collect(run);
+        Assert.Equal("14:05", run.VisibleText);
+        Assert.Contains(chunks, c => c.Kind == TextChunkKind.Chunk && c.Text == "14:05");
+    }
+
+    [Fact]
     public async Task MissingOrDuplicateIdsAreRewritten()
     {
         Rounds rounds = new([Call("", "get_time"), Call("dup", "get_time"), Call("dup", "get_time"), Stop(StopReason.ToolCall)], [Text("done"), Stop(StopReason.Stop)]);

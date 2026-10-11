@@ -84,6 +84,13 @@ public sealed class ToolLoopRun
                         }
                         break;
                     case TextChunkKind.Result:
+                        // A stream that reports its text only at the end (no deltas this round) still gets that text into the turn.
+                        if (roundText.Length == 0 && !string.IsNullOrEmpty(chunk.Text))
+                        {
+                            roundText.Append(chunk.Text);
+                            visible.Append(chunk.Text);
+                            yield return new TextChunk { Kind = TextChunkKind.Chunk, Text = chunk.Text };
+                        }
                         break;
                     case TextChunkKind.StopReason:
                         stop = chunk.Stop ?? StopReason.Stop;

@@ -4,7 +4,14 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.Tools;
 
-/// <summary>The agent loop: streams a model turn, dispatches every call it ends on through an <see cref="IToolDispatcher"/>, appends the assistant turn and one <see cref="TextRole.Tool"/> message per result, and asks the model again, up to <see cref="ToolLoopOptions.MaxRounds"/> model invocations. Use <see cref="Create(ITextService, ModelSpec, TextRequest, IToolDispatcher, ToolLoopOptions?)"/> over an engine, or <see cref="Create(Func{TextRequest, CancellationToken, IAsyncEnumerable{TextChunk}}, TextRequest, IToolDispatcher, ToolLoopOptions?)"/> over any provider's stream.</summary>
+/// <summary>The agent loop: streams a model turn, dispatches the calls it ends on through an <see cref="IToolDispatcher"/>,
+/// appends the assistant turn and one <see cref="TextRole.Tool"/> message per result, and asks the model again, up to
+/// <see cref="ToolLoopOptions.MaxRounds"/> model invocations.</summary>
+/// <remarks>
+/// Use <see cref="Create(ITextService, ModelSpec, TextRequest, IToolDispatcher, ToolLoopOptions?)"/> over an engine, or
+/// <see cref="Create(Func{TextRequest, CancellationToken, IAsyncEnumerable{TextChunk}}, TextRequest, IToolDispatcher, ToolLoopOptions?)"/>
+/// over any provider's stream.
+/// </remarks>
 public static class ToolLoop
 {
     /// <summary>Default model invocations per run.</summary>
