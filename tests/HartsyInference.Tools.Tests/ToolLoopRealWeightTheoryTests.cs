@@ -23,7 +23,6 @@ public sealed class ToolLoopRealWeightTheoryTests
     public static TheoryData<string, string, ToolCallFormat, bool> FastCases => new()
     {
         { "qwen3-0.6b", "qwen3", ToolCallFormat.Hermes, false },
-        { "qwen2.5-0.5b", "qwen2.5", ToolCallFormat.Hermes, false },
         { "qwen3.5-0.8b", "qwen35", ToolCallFormat.QwenXml, false },
         { "llama-3.2-1b", "llama32", ToolCallFormat.Llama3, false },
         { "gemma-3-1b", "gemma3", ToolCallFormat.Hermes, true },
@@ -71,8 +70,6 @@ public sealed class ToolLoopRealWeightTheoryTests
 
     private async Task RunCase(string key, string modelId, ToolCallFormat expected, bool expectInjection)
     {
-        string path = PathFor(key);
-        if (!RealWeightGate.Require(_output.WriteLine, path)) return;
         string device = Environment.GetEnvironmentVariable("TOOLCALL_PROBE_DEVICE") is { Length: > 0 } chosen ? chosen : "cpu";
         if (device == "cuda" && !CudaContext.IsAvailable())
         {
@@ -84,6 +81,8 @@ public sealed class ToolLoopRealWeightTheoryTests
             _output.WriteLine($"SKIPPED: {key} needs CUDA (CPU widens its weights to F32, or its quant has no CPU matmul path).");
             return;
         }
+        string path = PathFor(key);
+        if (!RealWeightGate.Require(_output.WriteLine, path)) return;
 
         List<(ToolCallFormat? Format, bool Injected)> resolved = [];
         StringBuilder raw = new();

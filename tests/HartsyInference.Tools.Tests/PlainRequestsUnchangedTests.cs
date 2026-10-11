@@ -4,19 +4,24 @@ using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Tests.Common;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Tools.Tests;
 
 /// <summary>A request that offers no tools must generate exactly what it did before the tool filter existed: installing the filter may not change plain chat.</summary>
 public sealed class PlainRequestsUnchangedTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public PlainRequestsUnchangedTests(ITestOutputHelper output) => _output = output;
+
     [Fact]
     [Trait("Category", "Integration")]
     [Trait("Category", "RealWeights")]
     public async Task PlainChatIsIdenticalWithTheToolFilterInstalled()
     {
         string path = TestPaths.Llm.Qwen3_06BQ4KM;
-        if (!File.Exists(path)) return;
+        if (!RealWeightGate.Require(_output.WriteLine, path)) return;
         string without = await Generate(path, install: false);
         string with = await Generate(path, install: true);
         Assert.Equal(without, with);
