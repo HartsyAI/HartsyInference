@@ -183,6 +183,41 @@ public sealed class ToolLoopV2Tests
     }
 
     [Fact]
+    public async Task TheRoundLimitKeepsTheLastTurnsTextWithoutItsCalls()
+    {
+        Rounds rounds = new([Text("Let me check."), Call("c1", "get_time"), Stop(StopReason.ToolCall)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("x")),
+            new ToolLoopOptions { MaxRounds = 1 });
+        await Collect(run);
+        TextMessage last = run.Conversation[^1];
+        Assert.Equal(TextRole.Assistant, last.Role);
+        Assert.Equal("Let me check.", last.Content);
+        Assert.True(last.ToolCalls is null || last.ToolCalls.Count == 0);
+    }
+
+    [Fact]
+    public async Task AThrowingDispatcherBecomesTheCallsErrorResult()
+    {
+        Rounds rounds = new([Call("c1", "get_time"), Stop(StopReason.ToolCall)], [Text("sorry"), Stop(StopReason.Stop)]);
+        ToolRegistry tools = new ToolRegistry().Add("get_time", "time", "{}", (_, _) => throw new InvalidOperationException("clock down"));
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), tools);
+        await Collect(run);
+        Assert.Contains("clock down", run.ToolResults.Single().Result);
+        Assert.Contains(run.Conversation, m => m.Role == TextRole.Tool && m.ToolCallId == "c1");
+        Assert.Equal(StopReason.Stop, run.Stop);
+    }
+
+    [Fact]
+    public async Task AnIndexlessCallKeepsTheIdItsDeltaSettled()
+    {
+        TextChunk begin = new() { Kind = TextChunkKind.ToolCallDelta, ToolCall = new NativeToolCall { Id = "c1", Name = "get_time", Arguments = "" } };
+        Rounds rounds = new([begin, Call("c1", "get_time"), Stop(StopReason.ToolCall)], [Text("ok"), Stop(StopReason.Stop)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("x")));
+        await Collect(run);
+        Assert.Equal("c1", run.ToolResults.Single().Call.Id);
+    }
+
+    [Fact]
     public async Task ARepairedIdCoversTheCallsDeltasToo()
     {
         // Both calls arrive without an id; the begin delta, the completed call and the tool result must share each repaired id.

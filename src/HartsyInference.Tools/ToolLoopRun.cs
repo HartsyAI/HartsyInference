@@ -29,7 +29,8 @@ public sealed class ToolLoopRun
         _conversation = [.. request.Messages];
     }
 
-    /// <summary>The conversation as the loop left it: the request's messages, then each round's assistant turn and its tool results.</summary>
+    /// <summary>The conversation as the loop left it: the request's messages, then each round's assistant turn and its
+    /// tool results. Like the other summaries, read it after <see cref="RunAsync"/> completes; it is not synchronized.</summary>
     public IReadOnlyList<TextMessage> Conversation => _conversation;
 
     /// <summary>Model invocations made so far.</summary>
@@ -50,7 +51,9 @@ public sealed class ToolLoopRun
     /// cref="VisibleText"/> and one <see cref="TextChunkKind.StopReason"/>. A dispatched call streams as <see
     /// cref="TextChunkKind.ToolResult"/>. Hitting the round limit while the model still asks for a tool streams a <see
     /// cref="ToolLoop.RoundLimitPhase"/> status, the final result and <see cref="StopReason.ToolCall"/>; that last call
-    /// is not dispatched. An <see cref="StopReason.Error"/> or <see cref="StopReason.Cancelled"/> stop is relayed and
+    /// is not dispatched, and that round's text (without the call) ends <see cref="Conversation"/>. A round's own
+    /// <see cref="TextChunkKind.Result"/> replaces its already-streamed deltas in <see cref="VisibleText"/> and the final
+    /// result when the two differ. A gate or dispatcher failure becomes that call's error result. An <see cref="StopReason.Error"/> or <see cref="StopReason.Cancelled"/> stop is relayed and
     /// ends the run without a final result.</remarks>
     public async IAsyncEnumerable<TextChunk> RunAsync([EnumeratorCancellation] CancellationToken cancel = default)
     {
@@ -73,6 +76,7 @@ public sealed class ToolLoopRun
             List<NativeToolCall> calls = [];
             // A call's id is settled when its first delta arrives, so the deltas, the completed call and its result share it.
             Dictionary<int, string> idsByIndex = [];
+            HashSet<string> settledIds = new(StringComparer.Ordinal);
             StopReason stop = StopReason.Stop;
             await foreach (TextChunk chunk in _stream(roundRequest, cancel).WithCancellation(cancel).ConfigureAwait(false))
             {
@@ -83,10 +87,11 @@ public sealed class ToolLoopRun
                         visible.Append(chunk.Text);
                         yield return chunk;
                         break;
-                    case TextChunkKind.ToolCallDelta when chunk.ToolCall is { } begin && chunk.ToolCallIndex is int beginIndex:
+                    case TextChunkKind.ToolCallDelta when chunk.ToolCall is { } begin:
                     {
                         NativeToolCall repairedBegin = EnsureUsableId(begin);
-                        idsByIndex[beginIndex] = repairedBegin.Id;
+                        settledIds.Add(repairedBegin.Id);
+                        if (chunk.ToolCallIndex is int beginIndex) idsByIndex[beginIndex] = repairedBegin.Id;
                         yield return chunk with { ToolCall = repairedBegin };
                         break;
                     }
@@ -95,7 +100,7 @@ public sealed class ToolLoopRun
                         {
                             NativeToolCall repaired = chunk.ToolCallIndex is int index && idsByIndex.TryGetValue(index, out string? settled)
                                 ? call with { Id = settled }
-                                : EnsureUsableId(call);
+                                : settledIds.Remove(call.Id) ? call : EnsureUsableId(call);
                             calls.Add(repaired);
                             yield return chunk with { ToolCall = repaired };
                         }
@@ -143,6 +148,8 @@ public sealed class ToolLoopRun
             }
             if (round == _options.MaxRounds)
             {
+                // The turn's text stays in the conversation; its calls do not, since they were never dispatched and have no results.
+                if (roundText.Length > 0) _conversation.Add(new TextMessage { Role = TextRole.Assistant, Content = roundText.ToString() });
                 Stop = StopReason.ToolCall;
                 yield return new TextChunk
                 {
@@ -157,15 +164,29 @@ public sealed class ToolLoopRun
             _conversation.Add(new TextMessage { Role = TextRole.Assistant, Content = roundText.ToString(), ToolCalls = calls });
             foreach (NativeToolCall call in calls)
             {
-                ToolCallDecision decision = _options.OnBeforeToolCall is { } gate
-                    ? await gate(call, cancel).ConfigureAwait(false) : ToolCallDecision.Allow;
-                string result = decision.Allowed
-                    ? await _tools.InvokeAsync(call, cancel).ConfigureAwait(false)
-                    : decision.DenialResult ?? ToolRegistry.ErrorJson("The host denied this tool call.");
+                string result = await DispatchAsync(call, cancel).ConfigureAwait(false);
                 _conversation.Add(new TextMessage { Role = TextRole.Tool, Content = result, ToolCallId = call.Id, Name = call.Name });
                 _results.Add((call, result));
                 yield return new TextChunk { Kind = TextChunkKind.ToolResult, Text = result, ToolCall = call, ToolCallIndex = resultIndex++ };
             }
+        }
+    }
+
+    /// <summary>Runs the gate and the dispatcher for one call. A failure in either becomes the call's error result, so every
+    /// call in the conversation has a result; cancellation still ends the run.</summary>
+    private async Task<string> DispatchAsync(NativeToolCall call, CancellationToken cancel)
+    {
+        try
+        {
+            ToolCallDecision decision = _options.OnBeforeToolCall is { } gate
+                ? await gate(call, cancel).ConfigureAwait(false) : ToolCallDecision.Allow;
+            return decision.Allowed
+                ? await _tools.InvokeAsync(call, cancel).ConfigureAwait(false)
+                : decision.DenialResult ?? ToolRegistry.ErrorJson("The host denied this tool call.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return ToolRegistry.ErrorJson(ex.Message);
         }
     }
 
