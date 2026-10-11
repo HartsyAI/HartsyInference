@@ -53,7 +53,8 @@ public sealed class ToolLoopRun
     /// cref="ToolLoop.RoundLimitPhase"/> status, the final result and <see cref="StopReason.ToolCall"/>; that last call
     /// is not dispatched, and that round's text (without the call) ends <see cref="Conversation"/>. A round's own
     /// <see cref="TextChunkKind.Result"/> replaces its already-streamed deltas in <see cref="VisibleText"/> and the final
-    /// result when the two differ. A gate or dispatcher failure becomes that call's error result. An <see cref="StopReason.Error"/> or <see cref="StopReason.Cancelled"/> stop is relayed and
+    /// result when the two differ. A gate or dispatcher failure becomes that call's error result. An <see
+    /// cref="StopReason.Error"/> or <see cref="StopReason.Cancelled"/> stop is relayed and
     /// ends the run without a final result.</remarks>
     public async IAsyncEnumerable<TextChunk> RunAsync([EnumeratorCancellation] CancellationToken cancel = default)
     {
