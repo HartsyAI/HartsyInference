@@ -12,11 +12,6 @@ public sealed class ChatMlTemplate : IChatTemplate
     private const string ImStart = "<|im_start|>";
     private const string ImEnd = "<|im_end|>";
     private const string DefaultSystem = "You are a helpful assistant.";
-    private const string ToolsHeader = "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
-        + "You are provided with function signatures within <tools></tools> XML tags:\n<tools>";
-    private const string ToolsFooter = "\n</tools>\n\nFor each function call, return a json object with function name and arguments "
-        + "within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>";
-
     /// <inheritdoc/>
     public string Name => "chatml";
 
@@ -47,7 +42,7 @@ public sealed class ChatMlTemplate : IChatTemplate
         bool withTools = tools is { Count: > 0 };
         bool leadingSystem = messages.Count > 0 && IsRole(messages[0], "system");
         if (withTools)
-            Turn("system\n" + (leadingSystem ? messages[0].Content : DefaultSystem) + ToolsBlock(tools!));
+            Turn("system\n" + (leadingSystem ? messages[0].Content : DefaultSystem) + HermesToolPrompt.ToolsBlock(tools!));
         for (int i = 0; i < messages.Count; i++)
         {
             ChatMessage message = messages[i];
@@ -68,7 +63,7 @@ public sealed class ChatMlTemplate : IChatTemplate
                 StringBuilder body = new("assistant");
                 if (!string.IsNullOrEmpty(message.Content)) body.Append('\n').Append(message.Content);
                 foreach (ChatToolCall call in message.ToolCalls)
-                    body.Append("\n<tool_call>\n{\"name\": ").Append(Values.ToJson(call.Name)).Append(", \"arguments\": ").Append(ArgumentsJson(call.ArgumentsJson)).Append("}\n</tool_call>");
+                    body.Append("\n<tool_call>\n{\"name\": ").Append(Values.ToJson(call.Name)).Append(", \"arguments\": ").Append(HermesToolPrompt.ArgumentsJson(call.ArgumentsJson)).Append("}\n</tool_call>");
                 Turn(body.ToString());
                 continue;
             }
@@ -97,23 +92,4 @@ public sealed class ChatMlTemplate : IChatTemplate
 
     private static bool IsRole(ChatMessage message, string role) => string.Equals(message.Role, role, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The <c># Tools</c> block with each schema re-serialized the way Jinja's <c>tojson</c> would print it, so the fallback matches the real template byte for byte.</summary>
-    private static string ToolsBlock(IReadOnlyList<ToolSpec> tools)
-    {
-        StringBuilder block = new(ToolsHeader);
-        foreach (ToolSpec tool in tools) block.Append('\n').Append(Values.ToJson(Values.ParseJson(tool.Json)));
-        return block.Append(ToolsFooter).ToString();
-    }
-
-    private static string ArgumentsJson(string argumentsJson)
-    {
-        try
-        {
-            return Values.ToJson(Values.ParseJson(argumentsJson));
-        }
-        catch (JsonException)
-        {
-            return Values.ToJson(argumentsJson);
-        }
-    }
 }

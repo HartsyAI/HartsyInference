@@ -17,6 +17,8 @@ public sealed class ToolCallParser
 
     private readonly ToolCallFormatRules _rules;
     private readonly int _maxSpanChars;
+    private readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? _schemas;
+    private string? _closeText;
     private readonly StringBuilder _forward = new();
     private readonly StringBuilder _hold = new();
     private readonly StringBuilder _span = new();
@@ -34,6 +36,7 @@ public sealed class ToolCallParser
     private bool _holdIsIdentifier;
     private ToolCallMarker? _holdSingle;
     private bool _closeSeen;
+    private bool _awaitingNamedBrace;
     private bool _strictSpan;
     private string? _probe;
     private int _probeIndex;
@@ -50,7 +53,18 @@ public sealed class ToolCallParser
 
     /// <summary>Creates a parser over custom <paramref name="rules"/>; see the format overload for <paramref name="knownTools"/> and <paramref name="idPrefix"/>.</summary>
     public ToolCallParser(ToolCallFormatRules rules, int maxSpanChars = DefaultMaxSpanChars, IEnumerable<string>? knownTools = null, string idPrefix = ToolCallJson.IdPrefix)
+        : this(rules, maxSpanChars, knownTools, idPrefix, null)
     {
+    }
+
+    /// <summary>Creates a parser for <paramref name="format"/> that knows the offered <paramref name="tools"/>: their names restrict the bare forms, and their JSON schemas type the markup parameters.</summary>
+    public static ToolCallParser ForTools(ToolCallFormat format, IReadOnlyList<ToolDefinition> tools, string idPrefix = ToolCallJson.IdPrefix)
+        => new(ToolCallFormats.RulesFor(format), DefaultMaxSpanChars, tools.Select(t => t.Name).ToList(), idPrefix, ToolCallXml.IndexSchemas(tools));
+
+    private ToolCallParser(ToolCallFormatRules rules, int maxSpanChars, IEnumerable<string>? knownTools, string idPrefix,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? schemas)
+    {
+        _schemas = schemas;
         _idPrefix = idPrefix ?? throw new ArgumentNullException(nameof(idPrefix));
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxSpanChars, 16);
@@ -123,6 +137,7 @@ public sealed class ToolCallParser
     private void ResetScan()
     {
         _hold.Clear();
+        _closeText = null;
         _span.Clear();
         _name.Clear();
         _presetName = null;
@@ -202,8 +217,31 @@ public sealed class ToolCallParser
 
     private void ExtendHold(char c)
     {
+        if (_awaitingNamedBrace)
+        {
+            // "name" then a newline opens a named call only when the next character is its JSON object (GLM-4-0414's layout).
+            _awaitingNamedBrace = false;
+            if (c == '{')
+            {
+                string name = _hold.ToString(0, _hold.Length - 1);
+                _hold.Clear();
+                _holdIsIdentifier = false;
+                StartNamedCall(name, ToolCallPayload.JsonObject);
+                FeedCall(c);
+                return;
+            }
+            ReleaseHold();
+            Feed(c);
+            return;
+        }
         if (_holdIsIdentifier)
         {
+            if (c == '\n' && _knownNames is not null && _knownNames.Contains(_hold.ToString()))
+            {
+                _hold.Append(c);
+                _awaitingNamedBrace = true;
+                return;
+            }
             if (c == '{')
             {
                 string name = _hold.ToString();
@@ -268,6 +306,12 @@ public sealed class ToolCallParser
     {
         BeginSpan(marker.Payload, presetName: null);
         _strictSpan = marker.Strict;
+        if (IsClosedPayload(marker.Payload))
+        {
+            // Markup keeps its opening marker in the span and ends at its closing one; it has no name prefix or balanced value to read.
+            _closeText = marker.Close ?? _rules.CloseMarker;
+            _phase = Phase.Value;
+        }
         // A bare JSON span is only worth holding while it still opens with "name": code and JSON answers are released
         // at their first key instead of at the balancing brace.
         if (marker.Strict && marker.Payload == ToolCallPayload.JsonObject) _probe = ObjectProbe;
@@ -310,6 +354,11 @@ public sealed class ToolCallParser
         if (_span.Length > _maxSpanChars)
         {
             Abort();
+            return;
+        }
+        if (IsClosedPayload(_payload))
+        {
+            if (_closeText is { } closing && EndsWith(_span, closing)) CompleteClosed();
             return;
         }
         if (_phase == Phase.Prefix)
@@ -450,6 +499,26 @@ public sealed class ToolCallParser
         bool ok = _payload == ToolCallPayload.GemmaCall
             ? TryConvertGemma(value, found)
             : ToolCallJson.TryParse(value, _rules.ArgumentKeys, _presetName, found, _completed, _idPrefix);
+        FinishCall(ok, found);
+    }
+
+    /// <summary>A markup span ends at its closing marker; the whole span, closing marker included, is converted as one block.</summary>
+    private void CompleteClosed()
+    {
+        string value = _span.ToString();
+        List<NativeToolCall> found = new(1);
+        bool ok = _payload switch
+        {
+            ToolCallPayload.XmlFunction => ToolCallXml.TryConvertFunctionBlocks(value, _schemas, _idPrefix, _completed, found),
+            ToolCallPayload.XmlArgKey => ToolCallXml.TryConvertArgKey(value, _schemas, _idPrefix, _completed, found),
+            _ => ToolCallXml.TryConvertDeepSeek(value, _idPrefix, _completed, found),
+        };
+        FinishCall(ok, found);
+    }
+
+    /// <summary>Records a converted span's calls and resumes after the call; a span that did not convert, named no offered tool, or produced nothing is plain text.</summary>
+    private void FinishCall(bool ok, List<NativeToolCall> found)
+    {
         if (!ok || found.Count == 0 || !AllKnown(found))
         {
             Abort();
@@ -460,11 +529,15 @@ public sealed class ToolCallParser
         _span.Clear();
         _name.Clear();
         _presetName = null;
+        _closeText = null;
         _phase = Phase.Prefix;
         _lineStart = true;
         _closeSeen = false;
         _state = State.AfterCall;
     }
+
+    private static bool IsClosedPayload(ToolCallPayload payload)
+        => payload is ToolCallPayload.XmlFunction or ToolCallPayload.XmlArgKey or ToolCallPayload.DeepSeekR1Block;
 
     private bool TryConvertGemma(string block, List<NativeToolCall> into)
     {
@@ -480,6 +553,7 @@ public sealed class ToolCallParser
         _span.Clear();
         _name.Clear();
         _presetName = null;
+        _closeText = null;
         _phase = Phase.Prefix;
         _state = State.Text;
         Forward(text);

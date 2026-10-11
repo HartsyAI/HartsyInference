@@ -302,9 +302,8 @@ public sealed partial class VoiceAgentSession
                         session.SetState(VoiceAgentState.ToolRunning, id);
                         session.Emit(VoiceAgentEventKind.ToolCall, id, call: call);
                         break;
-                    case TextChunkKind.Status when chunk.Status is { Phase: ToolLoop.ToolResultPhase } && chunk.ToolCall is { } done:
-                        string text = chunk.Text ?? "";
-                        OnToolResult(done, text.StartsWith(ToolLoop.ToolResultPrefix, StringComparison.Ordinal) ? text[ToolLoop.ToolResultPrefix.Length..] : text);
+                    case TextChunkKind.ToolResult when chunk.ToolCall is { } done:
+                        OnToolResult(done, chunk.Text ?? "");
                         break;
                     case TextChunkKind.Status when chunk.Status is { Phase: ToolLoop.RoundLimitPhase }:
                         Logs.Warning($"[Voice] Turn {id} reached {session._options.MaxToolRoundsPerTurn} model rounds; its last tool call was not run.");
