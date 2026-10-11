@@ -18,7 +18,7 @@ public static partial class EngineKnobs
 
     /// <summary>Stores the decode KV cache as F16 instead of F32, halving its VRAM and the bytes attention reads (CUDA only).</summary>
     /// <remarks>Unset is automatic: text LLMs on a backend that supports it (<see cref="HartsyInference.Core.Backends.IBackend.SupportsF16KvCache"/>) use F16,
-    /// everything else (audio decoders, other backends) keeps F32. <c>true</c> forces F16 for every model type, <c>false</c> keeps F32 everywhere (the
+    /// everything else (audio decoders, other backends, and the paged KV pool that the opt-in continuous-batching scheduler shares between sequences) keeps F32. <c>true</c> forces F16 for every model type, <c>false</c> keeps F32 everywhere (the
     /// reference profile pins it, for runs that must match an F32-cache build). Writes into an F16 cache saturate at the F16 maximum, so an
     /// extreme key or value cannot become infinity.</remarks>
     public static readonly Knob<bool?> KvF16 =
