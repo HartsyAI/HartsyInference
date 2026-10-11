@@ -67,6 +67,24 @@ public partial interface IBackend
     void MoeCombineSlots(Tensor output, Tensor slotOut, Tensor topkWeight, Tensor? shared, Tensor? sharedGateLogit, int topk) =>
         throw NotSupportedPrimitive(nameof(MoeCombineSlots));
 
+    /// <summary><see cref="MoeCombineSlots"/> fused with the residual add and the next RMSNorm: <c>residOut = a + combine</c>,
+    /// <c>normOut = rmsnorm(residOut) · weight</c>, with the Q8_1 sidecar of <paramref name="normOut"/> where the backend keeps one
+    /// (see <see cref="IBackend.RmsNormEmitQ8"/>). Semantically the composition, which is also the default.</summary>
+    void MoeCombineAddRmsNormEmitQ8(Tensor residOut, Tensor normOut, Tensor a, Tensor slotOut, Tensor topkWeight, Tensor? shared,
+        Tensor? sharedGateLogit, int topk, Tensor weight, float eps)
+    {
+        Tensor combined = new(a.Shape, DType.F32);
+        try
+        {
+            MoeCombineSlots(combined, slotOut, topkWeight, shared, sharedGateLogit, topk);
+            AddRmsNormEmitQ8(residOut, normOut, a, combined, weight, eps);
+        }
+        finally
+        {
+            combined.Dispose();
+        }
+    }
+
     /// <summary>True when the three expert groups are resident on the device as contiguous stacks the expert-indexed and grouped ops can address
     /// (<see cref="IBackend.PreloadWeightGroups"/> places them so). A layer whose experts are lazily uploaded, offloaded or re-placed keeps the host-routed path.</summary>
     bool MoeExpertsResident(IReadOnlyList<Tensor> gateExperts, IReadOnlyList<Tensor> upExperts, IReadOnlyList<Tensor> downExperts) => false;

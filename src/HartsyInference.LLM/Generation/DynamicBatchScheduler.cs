@@ -575,11 +575,12 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 
         // Throws KvPoolExhaustedException if the pool can't fit the prompt (PagedKvCache path only) —
         // propagates to the caller's SubmitAsync task as a fault, the reject policy PagedKvPool documents.
-        // Stays F32 regardless of vram.kvF16: this branch exists specifically BECAUSE graphEligible, and
-        // FlashAttentionDev refuses F16-storage KV (v1 scope — see CudaBackend), silently falling back to
-        // eager per-token. Honoring the switch here would sabotage the very feature this branch selects for.
+        // A graph-eligible sequence gets its own FixedKvCache, whose dtype follows vram.kvF16 exactly as
+        // TextGenerationPipeline's does (KvCaches.F16Enabled). Graph decode writes an F16 cache through the
+        // F16 scatter kernels; if the sequence is later joined and retires its session, the eager rounds keep
+        // reading the same cache, which KvCacheAppend/FlashAttention handle in either dtype.
         ISequenceState cache = graphEligible
-            ? _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, FullPrecisionKv: true))
+            ? _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1))
             : _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, _pool));
         try
         {

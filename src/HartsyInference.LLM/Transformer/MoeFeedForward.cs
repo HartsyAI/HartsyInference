@@ -474,6 +474,20 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// GEMVs, then one combine that also folds in the shared expert. Capturable in a CUDA graph.</summary>
     private Tensor ForwardIndexed(IBackend backend, Tensor x, int n, Tensor? routerLogits)
     {
+        using MoeCombineParts parts = ForwardIndexedParts(backend, x, n, routerLogits);
+        Tensor output = new(new TensorShape(1, n, _hidden), DType.F32);
+        backend.MoeCombineSlots(output, parts.SlotOut, parts.TopkWeight, parts.Shared, parts.SharedGate, parts.TopK);
+        return output;
+    }
+
+    /// <summary>Single-token device-routed MoE up to (not including) the combine, for a caller that fuses the combine into the next op
+    /// (<see cref="IBackend.MoeCombineAddRmsNormEmitQ8"/>). Null when this layer does not take the device-routed path; the caller then
+    /// runs <see cref="Forward"/>.</summary>
+    public MoeCombineParts? TryForwardDeferred(IBackend backend, Tensor x)
+        => CanRunIndexed(backend) ? ForwardIndexedParts(backend, x, 1, routerLogits: null) : null;
+
+    private MoeCombineParts ForwardIndexedParts(IBackend backend, Tensor x, int n, Tensor? routerLogits)
+    {
         int e = _moe.NumExperts;
         int k = _moe.NumExpertsPerTok;
         Tensor? ownLogits = null;
@@ -503,13 +517,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 GenericTransformer.Project(backend, sharedGate, x, _shGateScoreW, null, lowVram: false);
             }
         }
-        Tensor output = new(new TensorShape(1, n, _hidden), DType.F32);
-        backend.MoeCombineSlots(output, slotOut, topkWeight, shared, sharedGate, k);
-        slotOut.Dispose();
-        topkWeight.Dispose();
-        shared?.Dispose();
-        sharedGate?.Dispose();
-        return output;
+        return new MoeCombineParts(slotOut, topkWeight, shared, sharedGate, k);
     }
 
     /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) — SiLU (SwiGLU, the default) or tanh-GELU (GeGLU, Gemma-4's <see cref="MoeConfig.Activation"/>).</summary>
@@ -783,5 +791,18 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             Buffer.MemoryCopy(src, dst, count * 4L, count * 4L);
         }
         return r;
+    }
+}
+
+/// <summary>A device-routed MoE output before its combine: the per-slot expert rows, their routing weights and the optional shared-expert
+/// row and gate logit. Disposing it frees all four.</summary>
+public sealed record MoeCombineParts(Tensor SlotOut, Tensor TopkWeight, Tensor? Shared, Tensor? SharedGate, int TopK) : IDisposable
+{
+    public void Dispose()
+    {
+        SlotOut.Dispose();
+        TopkWeight.Dispose();
+        Shared?.Dispose();
+        SharedGate?.Dispose();
     }
 }

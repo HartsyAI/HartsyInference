@@ -61,7 +61,7 @@ public sealed partial class CudaBackend
     /// <summary>Grouped-query flash-decoding into <paramref name="pOut"/>: partial states per (split, KV head), then the shared combine.
     /// With <paramref name="devicePos"/> the split count follows the cache capacity <paramref name="keySpan"/> so a captured graph keeps its grid.</summary>
     private void RunFlashDecodeGqa(ulong pOut, ulong pQ, ulong pK, ulong pV, int b, int hq, int hkv, int keyStride, int keySpan, int d, int kvLen,
-        int kvGroup, int qOffset, float scale, float softcap, int window, ulong devicePos, bool f16Kv)
+        int kvGroup, int qOffset, float scale, float softcap, int window, ulong devicePos, bool f16Kv, AttnSidecar sidecar = default)
     {
         // One wave: shared memory leaves room for four blocks per SM with an F16 cache and two with F32, so more blocks than that run a half-empty second wave.
         int target = (f16Kv ? 4 : 2) * _context.MultiprocessorCount;
@@ -77,7 +77,10 @@ public sealed partial class CudaBackend
             pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
             _kernels!.LaunchFlashDecodeGqa(pM, pL, pAcc, pQ, pK, pV, b, hq, d, hkv, keyStride, kvLen, kvGroup, qOffset, scale, softcap, window,
                 splits, chunk, devicePos, f16Kv, _stream.Handle);
-            _kernels.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, 1, d, splits, _stream.Handle);
+            if (sidecar.Xq != 0)
+                _kernels.LaunchFlashAttentionCombineQ8(pOut, sidecar.Xq, sidecar.Xd, sidecar.Xs, pM, pL, pAcc, b, hq, 1, d, splits, _stream.Handle);
+            else
+                _kernels.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, 1, d, splits, _stream.Handle);
         }
         finally
         {

@@ -35,6 +35,10 @@ public sealed class Dp4aGemvGroundTruthTests
     [InlineData("Q5_0", 32, 8, 1, false)]       // single-block minimal
     [InlineData("Q5_0", 896, 256, 1, false)]    // qwen2.5-0.5b's odd hidden size (the Q5_0 fallback case)
     [InlineData("Q5_K", 256, 64, 1, false)]     // single-super-block minimal
+    [InlineData("Q4_K", 768, 64, 1, false)]     // 3 super-blocks: fewer than one warp-iteration's 4
+    [InlineData("Q4_K", 1536, 96, 2, true)]     // 6 super-blocks: a partial second warp-iteration
+    [InlineData("Q6_K", 768, 64, 1, false)]
+    [InlineData("Q6_K", 1536, 96, 2, true)]
     [InlineData("Q4_K", 8960, 256, 2, true)]    // long-K/small-N: exercises the block-per-row K-SPLIT path
     [InlineData("Q6_K", 8960, 256, 1, false)]   // ksplit path
     [InlineData("Q8_0", 13696, 256, 1, false)]  // ksplit path

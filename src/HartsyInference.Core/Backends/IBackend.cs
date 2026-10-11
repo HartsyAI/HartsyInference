@@ -2058,6 +2058,48 @@ public partial interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Full-width QK-norm variant of <see cref="QkvNormRopeScatterDecodeStep"/> (OLMoE): ONE RMSNorm over all q heads with the
+    /// <c>[hq·headDim]</c> weight <paramref name="qNorm"/> and one over all k heads, then RoPE and the KV scatter.</summary>
+    /// <param name="qk">The projection output: <c>[q | k | v]</c> when <paramref name="v"/> is null, else <c>[q | k]</c>.</param>
+    void QkNormFullRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor? v,
+        Tensor qNorm, Tensor kNorm, float eps,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+        => ComposeQkNormFullRopeScatter(this, qOut, kCache, vCache, qk, v, qNorm, kNorm, eps, cosTable, sinTable,
+            hq, hkv, headDim, rotaryDim, interleaved, devicePos);
+
+    /// <summary>The unfused composition behind <see cref="QkNormFullRopeScatterDecodeStep"/>: slices, two full-width RMSNorms, the rope-scatter.
+    /// Static so a backend that overrides the op can still fall back to it.</summary>
+    static void ComposeQkNormFullRopeScatter(IBackend b, Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor? v,
+        Tensor qNorm, Tensor kNorm, float eps,
+        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        int nq = hq * headDim, nkv = hkv * headDim;
+        Tensor q = new(new TensorShape(1, 1, nq), DType.F32);
+        Tensor k = new(new TensorShape(1, 1, nkv), DType.F32);
+        Tensor? vOwn = v is null ? new(new TensorShape(1, hkv, 1, headDim), DType.F32) : null;
+        Tensor qN = new(new TensorShape(1, 1, nq), DType.F32);
+        Tensor kN = new(new TensorShape(1, 1, nkv), DType.F32);
+        try
+        {
+            b.SliceLastDim(q, qk, 0);
+            b.SliceLastDim(k, qk, nq);
+            if (vOwn is not null) b.SliceLastDim(vOwn, qk, nq + nkv);
+            b.RmsNorm(qN, q, qNorm, eps);
+            b.RmsNorm(kN, k, kNorm, eps);
+            b.RopeScatterKvDecodeStep(qOut, kCache, vCache, qN, kN, v ?? vOwn!, cosTable, sinTable,
+                hq, hkv, headDim, rotaryDim, interleaved, devicePos);
+        }
+        finally
+        {
+            q.Dispose(); k.Dispose(); vOwn?.Dispose(); qN.Dispose(); kN.Dispose();
+        }
+    }
+
+    /// <summary>True when the graph decode step should fold each layer's final residual add into the next layer's input norm
+    /// (<see cref="AddRmsNormEmitQ8"/> / <see cref="MoeCombineAddRmsNormEmitQ8"/>) because this backend's fused kernels are
+    /// bit-identical to its separate ones. False keeps the separate launches.</summary>
+    bool FoldsDecodeResidual => false;
+
     /// <summary>Partial-fusion <see cref="QkvNormRopeScatterDecodeStep"/> variant: q/k concatenated, v separate (mixed-dtype v).</summary>
     void QkNormRopeScatterVDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor v,
         Tensor qNorm, Tensor kNorm, float eps,
