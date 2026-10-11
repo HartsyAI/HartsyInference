@@ -29,4 +29,7 @@ public enum TextChunkKind
 
     /// <summary>Token accounting, carried in <see cref="TextChunk.Usage"/>.</summary>
     Usage,
+
+    /// <summary>The result of a dispatched tool call: <see cref="TextChunk.Text"/> is the result, <see cref="TextChunk.ToolCall"/> the call and <see cref="TextChunk.ToolCallIndex"/> its position in the run.</summary>
+    ToolResult,
 }

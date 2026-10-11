@@ -6,6 +6,14 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.340
+
+- **Added: `TextChunkKind.ToolResult`.** A dispatched tool call streams its result as this chunk, with the call and its position in the run. It replaces the `tool_result:` status text. **Breaking:** `ToolLoop.ToolResultPrefix` and `ToolLoop.ToolResultPhase` are removed; read `TextChunkKind.ToolResult` instead.
+- **Added: `ToolLoop.Create`, `ToolLoopRun` and `IToolDispatcher`.** A host runs the loop over the engine or over any model stream, supplies its own dispatcher (`ToolRegistry` implements it), and reads the final `Conversation`, `ToolResults`, `Rounds`, `Stop` and `VisibleText`. The run is single-use.
+- **Added: `ToolLoopOptions`.** `OnBeforeToolCall` allows or denies each call; a denial is not dispatched, and its result is fed back to the model. `IdPrefix` names the ids the loop gives a call that arrives without one or with one already used.
+- **Changed: calls dispatch on any non-error stop.** A call is run even when the model's stop reason is plain `Stop`; an error or cancellation still ends the run.
+- **Changed: `ForceToolId` applies to round one only**, so a forced call is not repeated on later rounds.
+
 ## alpha.339
 
 - **Added: tools for templates that never mention them.** A chat template with no `tools` slot used to drop the tool definitions silently. The engine now writes the Hermes tool prompt into the conversation (the `# Tools` block, the calls and the results) and sends the template no tools. Templates that do render tools are unchanged.

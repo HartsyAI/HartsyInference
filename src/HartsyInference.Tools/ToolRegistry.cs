@@ -6,7 +6,7 @@ namespace HartsyInference.Tools;
 
 /// <summary>The tools a host offers to the model: handlers keyed by name, their <see cref="ToolDefinition"/>s for <see cref="TextRequest.Tools"/>, and dispatch of a <see cref="NativeToolCall"/>. Dispatch never throws for an ordinary failure: an unknown tool, a throwing handler or a handler that outlives its timeout yields an <c>{"error": …}</c> result the model can read and recover from; cancellation of the caller's token propagates.</summary>
 /// <remarks>Thread-safe: <see cref="Add(IToolHandler)"/>, <see cref="Remove"/>, lookup and enumeration may run concurrently. Writers swap in a new immutable snapshot, so a <see cref="Definitions"/> list or <see cref="Names"/> sequence already handed out never changes underneath a request in flight. Handlers have no timeout unless <see cref="DefaultTimeout"/> or a per-tool timeout is set.</remarks>
-public sealed class ToolRegistry
+public sealed class ToolRegistry : IToolDispatcher
 {
     private readonly object _writeLock = new();
     private volatile Snapshot _snapshot = Snapshot.Empty;

@@ -44,11 +44,10 @@ public sealed class ToolLoopTests
         Assert.Equal(1, invoked);
         Assert.Equal("{\"reason\": \"done\"}", seenArguments);
         Assert.Equal(
-            [TextChunkKind.Chunk, TextChunkKind.NativeToolCall, TextChunkKind.Status, TextChunkKind.Chunk, TextChunkKind.Result, TextChunkKind.StopReason],
+            [TextChunkKind.Chunk, TextChunkKind.NativeToolCall, TextChunkKind.ToolResult, TextChunkKind.Chunk, TextChunkKind.Result, TextChunkKind.StopReason],
             chunks.Select(c => c.Kind));
         TextChunk result = chunks[2];
-        Assert.Equal(ToolLoop.ToolResultPrefix + "ok", result.Text);
-        Assert.Equal(ToolLoop.ToolResultPhase, result.Status!.Value.Phase);
+        Assert.Equal("ok", result.Text);
         Assert.Equal("hang_up", result.ToolCall!.Name);
         Assert.Equal(0, result.ToolCallIndex);
         Assert.Equal("Sure. Done.", chunks[4].Text);
