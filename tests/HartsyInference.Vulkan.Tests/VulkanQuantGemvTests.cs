@@ -7,8 +7,8 @@ using static HartsyInference.Vulkan.Tests.Dsv41TestData;
 namespace HartsyInference.Vulkan.Tests;
 
 /// <summary><c>gemv_quant</c> (Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K) against the host dequantizer and a double-precision CPU dot on random
-/// blocks, plus the Linear routing around it: decode-sized M takes the GEMV, a longer M the per-call dequantize and
-/// GEMM, and a K off the block size is refused by name. Skips without a Vulkan device.</summary>
+/// blocks, plus the Linear routing around it: decode-sized M takes the GEMV, a longer M the dequantize and GEMM, and a
+/// K off the block size is refused by name. Skips without a Vulkan device.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
 {
@@ -142,7 +142,7 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
     [InlineData("Q4_K")]
     [InlineData("Q5_K")]
     [InlineData("Q6_K")]
-    public void Linear_PrefillM_DequantizesPerCall(string type)
+    public void Linear_PrefillM_TakesTheDequantizeAndGemm(string type)
     {
         using VulkanBackend? vk = TryCreateBackend(out string? skip);
         if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }

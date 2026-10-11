@@ -927,6 +927,8 @@ public sealed class TextService : ITextService, IDisposable
         // A backend that reads only some block formats (Vulkan) loads widened except for those, which stay packed.
         IReadOnlySet<DType>? keepQuantized = backend.Capabilities.SupportsQuantized ? backend.Capabilities.QuantizedTypes : null;
         bool dequantize = !backend.Capabilities.SupportsQuantized || keepQuantized is not null;
+        // Such a backend decodes from the packed blocks, so a widened copy would only serve prefill: make it per call.
+        if (keepQuantized is not null) backend.CacheQuantizedWeightCasts = false;
         string architecture = architecture0;
         bool ssm = SsmLanguageModel.IsSsmArchitecture(architecture);
         EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || ssm);

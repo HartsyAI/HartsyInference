@@ -229,6 +229,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
 
 
+    /// <inheritdoc/>
+    public bool CacheQuantizedWeightCasts { get; set; } = true;
+
     /// <summary>Master kill-switch for weight dtype-cast caching — mirrors <c>CudaBackend.CacheWeightCasts</c> exactly (same name, same purpose): turn off for a large FP8/quantized model whose full cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights, trading recompute for memory via transient (dispatched-and-freed-per-call) dequant instead of a cast cached forever. Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>.</summary>
     public bool CacheWeightCasts
     {
@@ -774,9 +777,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
         if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
         long elements = src.ElementCount;
-        // A weight the fused GEMV reads stays compressed: decode never needs its widened copy, so the prefill GEMM
-        // dequantizes it per call rather than caching an F16 (or F32) copy that would cost two to four times its VRAM.
-        bool cacheThis = _xfer.ShouldCacheCast(src) && !QuantGemvTypes.Contains(src.DType)
+        // With CacheQuantizedWeightCasts off (the text path), a quantized weight's widened copy is per call: decode reads
+        // the packed blocks through the GEMV, so the copy would only serve prefill at two to four times the weight's VRAM.
+        bool cacheThis = _xfer.ShouldCacheCast(src) && (CacheQuantizedWeightCasts || !src.DType.IsQuantized)
             && CastFitsCache(elements * want.SizeInBytes);
 
         ulong outBytes = (ulong)(elements * want.SizeInBytes);

@@ -72,6 +72,8 @@ public sealed partial class VulkanBackend
         uint subgroup = Math.Max(1u, Vk.SubgroupSize);
         uint wg = subgroup;
         while (wg < 128 && wg < units) wg *= 2;
+        // The shader sums one partial per subgroup through 32 shared slots per activation row.
+        wg = Math.Min(wg, 32 * subgroup);
 
         VulkanKernel kernel = GetKernel(shader, storageBufferCount: 4, new SpecConstant[]
         {

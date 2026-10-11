@@ -99,8 +99,8 @@ a subgroup reads one contiguous run of weights and activations, fixed that; and 
 specialization constant, because indexed by a runtime bound the per-row accumulators spill to local memory (Q4_K went
 from 0.100 to 0.073 ms a call). Workgroups of 64 or 256 lanes and 4-word units were both slower than 128 lanes and 2 words.
 
-Prefill keeps the GEMM: a quantized weight at M above 8 is dequantized to F16 per call and not cached, since caching is
-what would keep an F16 copy resident. That costs about 25 ms per prompt on Llama-3.2-1B and about 75 ms on Qwen3-4B.
+Prefill keeps the GEMM: a quantized weight at M above 8 is dequantized to F16, and the text path makes that copy per call
+(`IBackend.CacheQuantizedWeightCasts` off) so it never sits resident beside the packed weight; other callers still cache it. That costs about 25 ms per prompt on Llama-3.2-1B and about 75 ms on Qwen3-4B.
 
 What remains from steps 1 and 2:
 - **Integer dot-product variant.** Quantize the activation to int8 per 32 and use `dotPacked4x8`, as the CUDA kernels use
