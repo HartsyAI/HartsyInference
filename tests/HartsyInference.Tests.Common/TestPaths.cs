@@ -423,7 +423,9 @@ public static class TestPaths
     {
         /// <summary>Llama-3.2-1B-Instruct, Q8_0 GGUF (~1.3 GB). Small enough that a 2-GPU layer split is a pure
         /// placement change — the exact-token-parity oracle vs the same model unsharded.</summary>
-        public static string Llama32_1BQ8 => Resolve("LLAMA32_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", "llama-3.2-1b-instruct-q8_0.gguf"));
+        public static string Llama32_1BQ8 => FirstExisting("LLAMA32_1B_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "llama32-1b", "llama-3.2-1b-instruct-q8_0.gguf"),
+            Path.Combine(ModelsDir, "llm", "llama-3.2-1b-instruct-q8_0.gguf"));
         /// <summary>The same Llama-3.2-1B-Instruct in another llama.cpp quantization (<c>IQ4_XS</c>, <c>Q3_K_M</c>, <c>Q2_K</c>), staged beside the Q8_0 as its full-precision reference.</summary>
         public static string Llama32_1B(string quant) => Resolve($"LLAMA32_1B_{quant}_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", $"Llama-3.2-1B-Instruct-{quant}.gguf"));
         /// <summary>Qwen2.5-1.5B-Instruct in a llama.cpp quantization (<c>Q8_0</c> is the reference; <c>IQ3_XS</c> carries IQ3_XXS + IQ3_S tensors, <c>IQ2_M</c> IQ2_S + IQ3_S).</summary>
@@ -440,7 +442,8 @@ public static class TestPaths
         /// <summary>Qwen2.5-0.5B-Instruct, Q4_K_M GGUF (~469 MB). The smallest real model that is still a different
         /// family and quantization from the Llama above, for a swap test that has to run on a backend which
         /// dequantizes to F32 on load — where the 4B costs sixteen gigabytes and several minutes.</summary>
-        public static string Qwen25_05BQ4KM => Resolve("QWEN25_05B_GGUF_PATH",
+        public static string Qwen25_05BQ4KM => FirstExisting("QWEN25_05B_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "qwen25", "qwen2.5-0.5b-instruct-q4_k_m.gguf"),
             Path.Combine(ModelsDir, "llm", "qwen2.5-0.5b-instruct-q4_k_m.gguf"));
 
         /// <summary>Qwen3-32B, Q4_K_M GGUF (~19.8 GB). Too large for a single 24 GB consumer card once driver
@@ -490,16 +493,16 @@ public static class TestPaths
         public static string Gemma4E2BItQ4KM => Resolve("GEMMA4_E2B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "gemma4", "gemma-4-E2B-it-Q4_K_M.gguf"));
 
         /// <summary>Qwen3-0.6B, Q4_K_M GGUF: the smallest Hermes-format checkpoint on the tool-calling matrix.</summary>
-        public static string Qwen3_06BQ4KM => Resolve("QWEN3_06B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "Qwen3-0.6B-Q4_K_M.gguf"));
+        public static string Qwen3_06BQ4KM => FirstExisting("QWEN3_06B_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-0.6B-Q4_K_M.gguf"), Path.Combine(ModelsDir, "llm", "Qwen3-0.6B-Q4_K_M.gguf"));
 
         /// <summary>Gemma-3-1B-it, Q4_K_M GGUF: a template with no tools slot (the tool prompt is injected).</summary>
-        public static string Gemma3_1BItQ4KM => Resolve("GEMMA3_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "gemma-3-1b-it-Q4_K_M.gguf"));
+        public static string Gemma3_1BItQ4KM => FirstExisting("GEMMA3_1B_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "gemma3", "gemma-3-1b-it-Q4_K_M.gguf"), Path.Combine(ModelsDir, "llm", "gemma-3-1b-it-Q4_K_M.gguf"));
 
         /// <summary>Phi-3.5-mini-instruct, Q4_K_M GGUF: a template with no tools slot (the tool prompt is injected).</summary>
-        public static string Phi35MiniQ4KM => Resolve("PHI35_MINI_GGUF_PATH", Path.Combine(ModelsDir, "llm", "Phi-3.5-mini-instruct-Q4_K_M.gguf"));
-
-        /// <summary>Llama-3.2-1B-Instruct, Q8_0 GGUF as it sits in the flat model folder.</summary>
-        public static string Llama32_1BQ8Flat => Resolve("LLAMA32_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama-3.2-1b-instruct-q8_0.gguf"));
+        public static string Phi35MiniQ4KM => FirstExisting("PHI35_MINI_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "phi", "Phi-3.5-mini-instruct-Q4_K_M.gguf"), Path.Combine(ModelsDir, "llm", "Phi-3.5-mini-instruct-Q4_K_M.gguf"));
     }
 
     /// <summary>Oasis-500m (Decart/Etched) world-model paths. The upstream `Etched/oasis-500m` repo is gated;

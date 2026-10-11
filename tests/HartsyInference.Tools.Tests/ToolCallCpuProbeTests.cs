@@ -4,6 +4,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -36,8 +37,14 @@ public sealed class ToolCallCpuProbeTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    [Trait("Category", "RealWeights")]
     public async Task Qwen25SmallCpuTurnEmitsAParsedHangUp()
-        => await RunProbe("QWEN25_05B_GGUF_PATH", "qwen2.5");
+    {
+        // Resolved through TestPaths and the mandatory gate, so a required-weights campaign cannot pass it by skipping.
+        string path = TestPaths.Llm.Qwen25_05BQ4KM;
+        if (!RealWeightGate.Require(_output.WriteLine, path)) return;
+        await RunProbeAt(path, "qwen2.5");
+    }
 
     [Fact]
     [Trait("Category", "Integration")]
@@ -83,6 +90,11 @@ public sealed class ToolCallCpuProbeTests
             _output.WriteLine($"SKIPPED: set {envVar} to a GGUF for {modelId}.");
             return;
         }
+        await RunProbeAt(path, modelId);
+    }
+
+    private async Task RunProbeAt(string path, string modelId)
+    {
         EngineOptions options = new();
         StringBuilder raw = new();
         options.TextStreamFilterFactory = context => ToolCalling.CreateFilter(context) is { } inner ? new RecordingFilter(inner, raw) : null;

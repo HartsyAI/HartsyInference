@@ -55,12 +55,33 @@ public sealed class ToolLoopRealWeightTheoryTests
     public async Task SlowCheckpointCallsTheToolInItsDialect(string key, string modelId, ToolCallFormat expected, bool injected)
         => await RunCase(key, modelId, expected, injected);
 
+    /// <summary>Every row whose checkpoint needs CUDA, for the GPU lane.</summary>
+    public static TheoryData<string, string, ToolCallFormat, bool> CudaCases
+    {
+        get
+        {
+            TheoryData<string, string, ToolCallFormat, bool> cases = new();
+            foreach (TheoryData<string, string, ToolCallFormat, bool> source in new[] { FastCases, SlowCases })
+                foreach (object[] row in source)
+                    if (CudaOnly.Contains((string)row[0])) cases.Add((string)row[0], (string)row[1], (ToolCallFormat)row[2], (bool)row[3]);
+            return cases;
+        }
+    }
+
+    /// <summary>The CUDA-only rows on CUDA, so <c>Category=GpuIntegration</c> runs (and serializes) them.</summary>
+    [Theory]
+    [MemberData(nameof(CudaCases))]
+    [Trait("Category", "GpuIntegration")]
+    [Trait("Category", "RealWeights")]
+    public async Task CudaCheckpointCallsTheToolInItsDialect(string key, string modelId, ToolCallFormat expected, bool injected)
+        => await RunCase(key, modelId, expected, injected, "cuda");
+
     private static string PathFor(string key) => key switch
     {
         "qwen3-0.6b" => TestPaths.Llm.Qwen3_06BQ4KM,
         "qwen2.5-0.5b" => TestPaths.Llm.Qwen25_05BQ4KM,
         "qwen3.5-0.8b" => TestPaths.Llm.Qwen35_08BQ4KM,
-        "llama-3.2-1b" => TestPaths.Llm.Llama32_1BQ8Flat,
+        "llama-3.2-1b" => TestPaths.Llm.Llama32_1BQ8,
         "gemma-3-1b" => TestPaths.Llm.Gemma3_1BItQ4KM,
         "phi-3.5-mini" => TestPaths.Llm.Phi35MiniQ4KM,
         "mistral-7b-v0.3" => TestPaths.Llm.Mistral7BInstructV0_3Q4KM,
@@ -68,9 +89,10 @@ public sealed class ToolLoopRealWeightTheoryTests
         _ => throw new ArgumentOutOfRangeException(nameof(key), key, "Unknown checkpoint key."),
     };
 
-    private async Task RunCase(string key, string modelId, ToolCallFormat expected, bool expectInjection)
+    private async Task RunCase(string key, string modelId, ToolCallFormat expected, bool expectInjection, string? forcedDevice = null)
     {
-        string device = Environment.GetEnvironmentVariable("TOOLCALL_PROBE_DEVICE") is { Length: > 0 } chosen ? chosen : "cpu";
+        string device = forcedDevice
+            ?? (Environment.GetEnvironmentVariable("TOOLCALL_PROBE_DEVICE") is { Length: > 0 } chosen ? chosen : "cpu");
         if (device == "cuda" && !CudaContext.IsAvailable())
         {
             _output.WriteLine("SKIPPED: CUDA unavailable.");
