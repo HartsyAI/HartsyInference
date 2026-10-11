@@ -153,6 +153,7 @@ SINGLE_KERNELS=(
     moe_route
     moe_build_dispatch
     moe_combine
+    moe_combine_slots
     hc_split_sinkhorn
     hc_pre_mix
     hc_post_mix
@@ -181,6 +182,17 @@ compile_one "gemv_quant" -DQTYPE=3 -- "_q4_0"
 compile_one "gemv_quant" -DQTYPE=4 -- "_q5_0"
 compile_one "gemv_quant" -DQTYPE=5 -- "_q5_k"
 compile_one "gemv_quant" -DQTYPE=6 -- "_f32"
+
+# MoE expert-indexed GEMVs (decode): gate/up with the activation fused, and down. Same QTYPE numbering and the same shared
+# per-unit decoder (gemv_quant_unit.glsl); gate/up and down are separate modules because their types may differ in one layer.
+for moe_kernel in moe_expert_gate_up moe_expert_down; do
+    compile_one "$moe_kernel" -DQTYPE=0 -- "_q8_0"
+    compile_one "$moe_kernel" -DQTYPE=1 -- "_q4_k"
+    compile_one "$moe_kernel" -DQTYPE=2 -- "_q6_k"
+    compile_one "$moe_kernel" -DQTYPE=3 -- "_q4_0"
+    compile_one "$moe_kernel" -DQTYPE=4 -- "_q5_0"
+    compile_one "$moe_kernel" -DQTYPE=5 -- "_q5_k"
+done
 
 # sdpa_flash_cm2 with an F32 [Sq,Skv] additive mask; HAS_MASK adds a binding, so it is its own module.
 compile_one "sdpa_flash_cm2" -DHAS_MASK=1 -- "_mask"

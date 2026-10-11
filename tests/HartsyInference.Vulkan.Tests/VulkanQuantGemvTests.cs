@@ -13,7 +13,7 @@ namespace HartsyInference.Vulkan.Tests;
 public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
 {
     /// <summary>Random GGUF blocks with the half-float scale fields set to small finite values; every other byte random.</summary>
-    private static Tensor RandomQuant(DType dtype, int n, int k, int seed)
+    internal static Tensor RandomQuant(DType dtype, int n, int k, int seed)
     {
         Tensor t = new(new TensorShape(n, k), dtype);
         long bytes = dtype.ComputeByteCount((long)n * k);
@@ -36,7 +36,7 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         return t;
     }
 
-    private static void WriteHalf(byte* dst, float value)
+    internal static void WriteHalf(byte* dst, float value)
     {
         ushort bits = BitConverter.HalfToUInt16Bits((Half)value);
         dst[0] = (byte)bits;
@@ -102,7 +102,7 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         yield return new object[] { "Q5_K", 4097, 2048, 8, true };
     }
 
-    private static DType Named(string name) => name switch
+    internal static DType Named(string name) => name switch
     {
         "Q8_0" => DType.Q8_0,
         "Q4_0" => DType.Q4_0,

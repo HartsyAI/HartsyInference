@@ -194,6 +194,16 @@ public sealed class VulkanKernelRegistry : IDisposable
         }
     }
 
+    /// <summary>Whether the SPIR-V module <paramref name="name"/> ships next to the backend, so a caller can decline an op whose shader is absent
+    /// instead of throwing from the first dispatch.</summary>
+    internal bool HasModule(string name)
+    {
+        if (_modules.ContainsKey(name)) return true;
+        string path = Path.Combine(_spvDir, name);
+        if (!path.EndsWith(".spv", StringComparison.OrdinalIgnoreCase)) path += ".spv";
+        return File.Exists(path);
+    }
+
     private ulong GetOrLoadModule(string name)
     {
         if (_modules.TryGetValue(name, out ulong cached)) return cached;

@@ -283,6 +283,7 @@ public sealed class VulkanDevice : IDisposable
             MaxComputeWorkGroupCountZ = props2.properties.limits.maxComputeWorkGroupCountZ,
             MaxPushConstantsSize = props2.properties.limits.maxPushConstantsSize,
             MaxPerStageDescriptorStorageBuffers = props2.properties.limits.maxPerStageDescriptorStorageBuffers,
+            MaxStorageBufferRange = props2.properties.limits.maxStorageBufferRange,
 
             MinStorageBufferOffsetAlignment = props2.properties.limits.minStorageBufferOffsetAlignment,
             NonCoherentAtomSize = props2.properties.limits.nonCoherentAtomSize,
