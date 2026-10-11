@@ -441,7 +441,7 @@ public static class TestPaths
         /// family and quantization from the Llama above, for a swap test that has to run on a backend which
         /// dequantizes to F32 on load — where the 4B costs sixteen gigabytes and several minutes.</summary>
         public static string Qwen25_05BQ4KM => Resolve("QWEN25_05B_GGUF_PATH",
-            Path.Combine(ModelsDir, "llm", "qwen25", "qwen2.5-0.5b-instruct-q4_k_m.gguf"));
+            Path.Combine(ModelsDir, "llm", "qwen2.5-0.5b-instruct-q4_k_m.gguf"));
 
         /// <summary>Qwen3-32B, Q4_K_M GGUF (~19.8 GB). Too large for a single 24 GB consumer card once driver
         /// overhead and KV/activations are counted — the layer-split tok/s oracle.</summary>
@@ -488,6 +488,18 @@ public static class TestPaths
         /// <summary>gemma-4-E2B-it, Q4_K_M GGUF — the tool-call template-detection fixtures' real source for the
         /// Gemma <c>&lt;|tool_call&gt;</c> envelope.</summary>
         public static string Gemma4E2BItQ4KM => Resolve("GEMMA4_E2B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "gemma4", "gemma-4-E2B-it-Q4_K_M.gguf"));
+
+        /// <summary>Qwen3-0.6B, Q4_K_M GGUF: the smallest Hermes-format checkpoint on the tool-calling matrix.</summary>
+        public static string Qwen3_06BQ4KM => Resolve("QWEN3_06B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "Qwen3-0.6B-Q4_K_M.gguf"));
+
+        /// <summary>Gemma-3-1B-it, Q4_K_M GGUF: a template with no tools slot (the tool prompt is injected).</summary>
+        public static string Gemma3_1BItQ4KM => Resolve("GEMMA3_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "gemma-3-1b-it-Q4_K_M.gguf"));
+
+        /// <summary>Phi-3.5-mini-instruct, Q4_K_M GGUF: a template with no tools slot (the tool prompt is injected).</summary>
+        public static string Phi35MiniQ4KM => Resolve("PHI35_MINI_GGUF_PATH", Path.Combine(ModelsDir, "llm", "Phi-3.5-mini-instruct-Q4_K_M.gguf"));
+
+        /// <summary>Llama-3.2-1B-Instruct, Q8_0 GGUF as it sits in the flat model folder.</summary>
+        public static string Llama32_1BQ8Flat => Resolve("LLAMA32_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama-3.2-1b-instruct-q8_0.gguf"));
     }
 
     /// <summary>Oasis-500m (Decart/Etched) world-model paths. The upstream `Etched/oasis-500m` repo is gated;

@@ -36,6 +36,11 @@ public sealed class ToolCallCpuProbeTests
 
     [Fact]
     [Trait("Category", "Integration")]
+    public async Task Qwen25SmallCpuTurnEmitsAParsedHangUp()
+        => await RunProbe("QWEN25_05B_GGUF_PATH", "qwen2.5");
+
+    [Fact]
+    [Trait("Category", "Integration")]
     public async Task Qwen35SmallCpuTurnEmitsAParsedHangUpInXml()
         => await RunProbe("QWEN35_08B_GGUF_PATH", "qwen35");
 
