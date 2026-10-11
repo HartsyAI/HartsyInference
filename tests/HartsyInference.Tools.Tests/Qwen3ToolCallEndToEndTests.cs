@@ -123,7 +123,7 @@ public sealed class Qwen3ToolCallEndToEndTests
             _output.WriteLine($"loop {chunk.Kind}: {chunk.Text ?? chunk.ToolCall?.Name ?? chunk.Stop?.ToString() ?? ""}");
         }
         Assert.Equal(1, invoked);
-        Assert.Contains(chunks, c => c.Kind == TextChunkKind.Status && c.Text == ToolLoop.ToolResultPrefix + "call ended");
+        Assert.Contains(chunks, c => c.Kind == TextChunkKind.ToolResult && c.Text == "call ended");
         Assert.Equal(TextChunkKind.StopReason, chunks[^1].Kind);
         Assert.NotEqual(StopReason.Error, chunks[^1].Stop);
         Assert.DoesNotContain("<think>", visible.ToString(), StringComparison.Ordinal);
