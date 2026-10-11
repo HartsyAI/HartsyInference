@@ -8,8 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Fixed: MoE GGUFs and gpt2 no longer crash on the first weight upload on Vulkan.** The per-expert views split from a stacked expert tensor, and the fused-QKV and bias views of Phi-3, GLM-4 and GPT-2, borrowed a raw pointer. When the loader had widened the source to F32 (every backend without a quantized path) the source owned its buffer and was collected, so the views read freed memory and the process died with an access violation. They now root their source. granite-3.0-1b-a400m generates on Vulkan with the same 128 tokens as CUDA; OLMoE-1B-7B still needs a quantized Vulkan path (its F32 form is about 27 GB), measured in `docs/VULKAN_MOE_PLAN.md`.
 
+- **Fixed: stale expert-cache test read a released lease.** `PinnedExpertsAreNeverEvicted_AndUnpinnedOnesAre` called `pinned.Get` after `Release`, but released leases clear their slots by design (reusable leases, #306). The test now keeps the weights before releasing; the pinned-never-evicted and unpinned-evicted assertions are unchanged.
 - **Fixed: Qwen2 and Qwen3 GGUFs use the Qwen2 pre-tokenizer split.** The GGUF names it `tokenizer.ggml.pre = "qwen2"`, and only `kolibri1` selected the single-digit split. Qwen text tokenized with the GPT-2 split, 6-8% more tokens on the same text (the 4K benchmark prompt came out at 4,036 against llama.cpp's 3,742). The Qwen2 split now applies to both names.
 - **Fixed: DeepSeek-V2 YaRN uses the truncated correction range.** Long-context RoPE for `deepseek2` GGUFs now floors the low end and ceils the high end of the YaRN correction range, as HF and the official code do. V2-Lite's inverse frequencies differed from HF by up to 33% in one dimension, so the cosine error grew with position (0.26 at position 1024).
 - **Fixed: DeepSeek-V2-Lite produces coherent text again.** MLA's decoupled RoPE pairs adjacent dims (2i, 2i+1) as HF's `apply_rotary_pos_emb` and llama.cpp do, not split-half. A `deepseek2` GGUF without `expert_weights_norm` no longer renormalizes its top-k expert weights (V2-Lite has `norm_topk_prob=false`); an explicit key still decides. The engine's greedy text, re-tokenized with the HF tokenizer, matches the HF bf16 reference 16/16 on the chat prompt. DeepSeek-V3 shares this MLA path and is not verified yet.
@@ -23,6 +23,14 @@ stable release will require. Dates are UTC.
 - **Fixed: the certification runner reads the .NET 10 SDK's test summary.** `run_class` matched only the classic `Passed!`/`Failed!` line, so a class that passed on this SDK was recorded as `no test summary`. The summary is now parsed by `tests/dsv41-certification-summary.awk`, which reads the `Test Run Successful.` / `Test Run Failed.` block and its totals. `tests/dsv41-certification-summary-test.sh` checks both formats.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
+
+## alpha.336
+
+- **Fixed: MoE GGUFs and gpt2 no longer crash on the first weight upload on Vulkan.** The per-expert views split from a stacked expert tensor, and the fused-QKV and bias views of Phi-3, GLM-4 and GPT-2, borrowed a raw pointer. When the loader had widened the source to F32 (every backend without a quantized path) the source owned its buffer and was collected, so the views read freed memory and the process died with an access violation. They now root their source. granite-3.0-1b-a400m generates on Vulkan with the same 128 tokens as CUDA; OLMoE-1B-7B still needs a quantized Vulkan path (its F32 form is about 27 GB), measured in `docs/VULKAN_MOE_PLAN.md`.
+
+## alpha.335
+
+- **Fixed: the continuous-batching scheduler honors `vram.kvF16` for graph-eligible solo sequences.** It forced an F32 KV cache there because graph decode used to need one; since #367 the F16 scatter kernels cover it, so a scheduler-served request now halves its KV VRAM like `TextGenerationPipeline` does when the knob is on. A sequence that is joined mid-generation retires its graph session and continues eagerly on the same F16 cache. The default stays off. `SequenceStateOptions.FullPrecisionKv` is removed (no remaining caller).
 
 ## alpha.334
 
