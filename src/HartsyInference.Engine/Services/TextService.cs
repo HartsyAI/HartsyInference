@@ -354,6 +354,7 @@ public sealed class TextService : ITextService, IDisposable
                 PromptTokens = outcome.PromptTokens,
                 CompletionTokens = outcome.CompletionTokens,
                 ToolCall = outcome.ToolCall,
+                ToolCalls = outcome.ToolCalls,
                 PrefillMilliseconds = outcome.PrefillMilliseconds,
                 DecodeMilliseconds = outcome.DecodeMilliseconds,
             };
@@ -626,7 +627,19 @@ public sealed class TextService : ITextService, IDisposable
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Template : slot.Model!.Template;
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer);
-        ITextStreamFilter? filter = _engine.CreateTextStreamFilter(request);
+        long requestId = Interlocked.Increment(ref _requestCounter);
+        bool structured = !rawCompletion && template is ChatTemplateEncoderAdapter;
+        ITextStreamFilter? filter = _engine.CreateTextStreamFilter(new TextStreamFilterContext
+        {
+            Request = request,
+            RequestId = requestId,
+            TemplateName = template.Name,
+            ChatTemplateSource = template.Source,
+            Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture,
+            ModelPath = slot.LoadedPath,
+            HasStructuredParser = structured,
+        });
+        IReadOnlySet<int>? literalIds = ResolveLiteralIds(filter, tokenizer);
         // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
         CancellationTokenSource? stopSource = filter is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancel);
         GenerationRequestWiring run = new() { Request = genRequest, Generation = stopSource?.Token ?? cancel, StopSource = stopSource };
@@ -643,16 +656,19 @@ public sealed class TextService : ITextService, IDisposable
             // A request that waits behind others says where it stands, as a status chunk.
             run.Request = run.Request with { OnQueued = position => emitStatus(new TextChunk { Kind = TextChunkKind.Status, Status = new TextStatus("queued", position) }) };
         }
-        if (sink is not null || filter is not null)
+        // A structured parser also runs without a stream when the request offers tools: its tool calls are the only way a non-streaming reply can end on a call.
+        bool structuredTools = structured && request.Tools is { Count: > 0 };
+        if (sink is not null || filter is not null || structuredTools)
         {
-            run.Parser = CreateParser(template, tokenizer, run.Request, request, rawCompletion);
-            Action<TextChunk> chunkSink = sink!;
+            run.Parser = CreateParser(template, tokenizer, run.Request, request, rawCompletion, literalIds);
+            Action<TextChunk> chunkSink = sink ?? (_ => { });
             if (filter is not null)
             {
                 run.FilterSink = new TextFilterSink(filter, sink, stopSource!.Cancel);
                 chunkSink = run.FilterSink.Handle;
             }
-            run.Emit = new ParsedEventTranslator(chunkSink, Interlocked.Increment(ref _requestCounter)).Handle;
+            run.Translator = new ParsedEventTranslator(chunkSink, requestId);
+            run.Emit = run.Translator.Handle;
             run.OnToken = id =>
             {
                 if (run.Generation.IsCancellationRequested)
@@ -681,6 +697,7 @@ public sealed class TextService : ITextService, IDisposable
         public CancellationToken Generation { get; init; }
         public CancellationTokenSource? StopSource { get; init; }
         public TextFilterSink? FilterSink { get; set; }
+        public ParsedEventTranslator? Translator { get; set; }
         public IOutputParser? Parser { get; set; }
         public Action<ParsedEvent>? Emit { get; set; }
         public Action<int>? OnToken { get; set; }
@@ -692,19 +709,28 @@ public sealed class TextService : ITextService, IDisposable
         {
             if (Parser is not null) Parser.Finish(Emit!);
             StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
+            // Calls from the filter, else from a structured parser (DeepSeek-V4.1): either one ends the turn as a tool call.
+            IReadOnlyList<NativeToolCall> calls = FilterSink?.ToolCalls ?? Array.Empty<NativeToolCall>();
+            if (calls.Count == 0 && Translator is not null) calls = Translator.Calls;
+            StopReason resolved = calls.Count > 0 ? StopReason.ToolCall : stop;
             if (FilterSink is null)
-                return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count, null,
+            {
+                // A structured parser's content is the visible text once it has reported calls; the raw decode still holds the markup.
+                string text = calls.Count > 0 && Parser is not null ? Parser.Result.Content : result.Text;
+                return new GenOutcome(text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
                     result.PrefillMilliseconds, result.DecodeMilliseconds);
+            }
             FilterSink.End();
-            return new GenOutcome(FilterSink.Text, FilterSink.ToolCall is null ? stop : StopReason.ToolCall,
-                result.PromptTokens, result.TokenIds.Count, FilterSink.ToolCall, result.PrefillMilliseconds, result.DecodeMilliseconds);
+            return new GenOutcome(FilterSink.Text, calls.Count > 0 ? StopReason.ToolCall : stop,
+                result.PromptTokens, result.TokenIds.Count, FilterSink.ToolCalls, result.PrefillMilliseconds, result.DecodeMilliseconds);
         }
 
         /// <summary>The outcome of a request the filter stopped: ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.</summary>
         public GenOutcome FilterStopOutcome()
         {
-            StopReason stop = FilterSink!.ToolCall is null ? StopReason.Stop : StopReason.ToolCall;
-            return new GenOutcome(FilterSink.Text, stop, PromptTokens, Count, FilterSink.ToolCall);
+            IReadOnlyList<NativeToolCall> calls = FilterSink!.ToolCalls;
+            StopReason stop = calls.Count == 0 ? StopReason.Stop : StopReason.ToolCall;
+            return new GenOutcome(FilterSink.Text, stop, PromptTokens, Count, calls);
         }
 
         public void Dispose() => StopSource?.Dispose();
@@ -712,7 +738,7 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
     private static IOutputParser CreateParser(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest,
-        TextRequest request, bool rawCompletion)
+        TextRequest request, bool rawCompletion, IReadOnlySet<int>? literalSpecialIds)
     {
         // The parser's initial state must come from the message list the template renders (system prompt included).
         if (!rawCompletion && template is ChatTemplateEncoderAdapter adapter && genRequest.EffectiveMessages() is { } messages)
@@ -726,7 +752,19 @@ public sealed class TextService : ITextService, IDisposable
                 Logs.Warning($"Structured output parser unavailable, streaming plain text: {ex.Message}");
             }
         }
-        return new PassthroughOutputParser(tokenizer);
+        return new PassthroughOutputParser(tokenizer, literalSpecialIds);
+    }
+
+    /// <summary>The special-token ids behind the control-token literals a filter asked to see. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
+    private static IReadOnlySet<int>? ResolveLiteralIds(ITextStreamFilter? filter, ILlmTokenizer tokenizer)
+    {
+        if (filter is null) return null;
+        HashSet<int> ids = [];
+        foreach (string literal in filter.MarkerLiterals)
+        {
+            if (tokenizer.SpecialId(literal) is { } id) ids.Add(id);
+        }
+        return ids.Count == 0 ? null : ids;
     }
 
     private static GenOutcome RunVision(TextDeviceSlot slot, TextRequest request, ImageData image, Action<TextChunk>? sink, CancellationToken cancel)
@@ -1794,10 +1832,6 @@ public sealed class TextService : ITextService, IDisposable
     internal static GenerationRequest BuildRequest(TextRequest request, bool rawCompletion, ILlmTokenizer tokenizer)
     {
         SamplingOptions sampling = BuildSampling(request);
-        // Base/non-instruct checkpoints have no chat-template slot to teach the <tool_call> convention in, so
-        // grammar-hardening the tool span can't reach the raw path.
-        if (!rawCompletion && request.Tools is { Count: > 0 })
-            sampling = sampling with { JsonModeSentinel = "<tool_call>" };
         GenerationRequest genRequest = new GenerationRequest
         {
             MaxTokens = request.MaxTokens > 0 ? request.MaxTokens : 4096,
@@ -1970,6 +2004,10 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>The outcome of one generation: full text, stop reason, token counts, and the tool call a stream filter completed (null without one).</summary>
-    private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens, NativeToolCall? ToolCall = null,
-        double PrefillMilliseconds = 0, double DecodeMilliseconds = 0);
+    private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens, IReadOnlyList<NativeToolCall>? ToolCalls = null,
+        double PrefillMilliseconds = 0, double DecodeMilliseconds = 0)
+    {
+        /// <summary>The last tool call the generation completed, or null.</summary>
+        public NativeToolCall? ToolCall => ToolCalls is { Count: > 0 } calls ? calls[^1] : null;
+    }
 }

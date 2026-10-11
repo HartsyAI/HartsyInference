@@ -8,6 +8,7 @@ public sealed class IncrementalDetokenizer
 {
     private readonly ILlmTokenizer _tokenizer;
     private readonly bool _includeSpecial;
+    private readonly IReadOnlySet<int>? _literalIds;
     private readonly Decoder _decoder = new UTF8Encoding(false, false).GetDecoder();
     private readonly List<int> _window = [];
     private char[] _chars = new char[64];
@@ -15,17 +16,24 @@ public sealed class IncrementalDetokenizer
     private string _prefixText = "";
 
     /// <summary>Creates a detokenizer; <paramref name="includeSpecial"/> keeps control tokens as their literal text instead of skipping them.</summary>
-    public IncrementalDetokenizer(ILlmTokenizer tokenizer, bool includeSpecial)
+    public IncrementalDetokenizer(ILlmTokenizer tokenizer, bool includeSpecial) : this(tokenizer, includeSpecial, null)
+    {
+    }
+
+    /// <summary>Creates a detokenizer that also keeps the control tokens in <paramref name="literalSpecialIds"/> as their literal text; other control tokens follow <paramref name="includeSpecial"/>.</summary>
+    public IncrementalDetokenizer(ILlmTokenizer tokenizer, bool includeSpecial, IReadOnlySet<int>? literalSpecialIds)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         _tokenizer = tokenizer;
         _includeSpecial = includeSpecial;
+        _literalIds = literalSpecialIds;
     }
 
     /// <summary>Adds one token and returns the text that became decodable (possibly empty).</summary>
     public string Push(int id)
     {
-        byte[]? bytes = _tokenizer.TokenBytes(id, _includeSpecial);
+        bool special = _includeSpecial || (_literalIds is not null && _literalIds.Contains(id));
+        byte[]? bytes = _tokenizer.TokenBytes(id, special);
         if (bytes is null) return PushByRedecode(id);
         return DecodeBytes(bytes, flush: false);
     }

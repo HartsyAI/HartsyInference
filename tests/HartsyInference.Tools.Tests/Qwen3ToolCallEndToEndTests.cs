@@ -91,7 +91,7 @@ public sealed class Qwen3ToolCallEndToEndTests
         Assert.DoesNotContain("<tool_call>", forwarded, StringComparison.Ordinal);
         TextChunk call = Assert.Single(chunks, c => c.Kind == TextChunkKind.NativeToolCall);
         Assert.Equal("hang_up", call.ToolCall!.Name);
-        Assert.Equal("call_0", call.ToolCall.Id);
+        Assert.StartsWith("call_", call.ToolCall.Id, StringComparison.Ordinal);
         Assert.Equal(TextChunkKind.StopReason, chunks[^1].Kind);
         Assert.Equal(StopReason.ToolCall, chunks[^1].Stop);
         Assert.Equal(TextChunkKind.Result, chunks[^2].Kind);

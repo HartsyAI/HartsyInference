@@ -11,7 +11,7 @@ public sealed class EngineOptions
     public Diagnostics.IInferenceDiagnostics? Diagnostics { get; set; }
 
     /// <summary>Creates the per-request <see cref="Services.ITextStreamFilter"/> that sees every decoded text delta (tool-call parsing lives in the Tools package, not here); null, or a factory returning null, streams plain text exactly as before.</summary>
-    public Func<Requests.TextRequest, Services.ITextStreamFilter?>? TextStreamFilterFactory { get; set; }
+    public Func<Services.TextStreamFilterContext, Services.ITextStreamFilter?>? TextStreamFilterFactory { get; set; }
 
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
