@@ -122,6 +122,7 @@ public sealed unsafe class GemvBandwidthMicroBench
                 bool odd = (it & 1) != 0;
                 if (c.Kind == Kind.Dense)
                 {
+                    // Dense cases allocate two matrices (Experts = 2) and alternate between them, like the id sets.
                     ulong w = w0 + (odd ? (ulong)expertStride : 0);
                     if (c.Format == DType.Q4_K) k.LaunchMulMatVecQ4KQ8_1(outp, xq, xd, xs, w, 0, c.N, c.K, 1, 0);
                     else if (c.Format == DType.Q6_K) k.LaunchMulMatVecQ6KQ8_1(outp, xq, xd, w, 0, c.N, c.K, 1, 0);

@@ -131,7 +131,6 @@ __device__ __forceinline__ float q4k_q8_1_row_partial(
     return acc[0];
 }
 
-
 extern "C" __global__ void mul_mat_vec_q4k_q8_1(
     float* __restrict__ output,
     const signed char* __restrict__ xq,

@@ -81,6 +81,7 @@ public sealed partial class CudaKernels
     {
         nint fn = format == DType.Q4_K ? _moeGateUpIdQ4k : format == DType.Q6_K ? _moeGateUpIdQ6k : _moeGateUpIdQ8_0;
         if (fn == 0) throw new InvalidOperationException($"moe_id kernels for {format} are not present in the Ptx folder.");
+        if (format == DType.Q4_K) RequireQ4kGemvAlignment(gateW | upW, xq);
         ulong actA = act, xqA = xq, xdA = xd, xsA = xs, gA = gateW, uA = upW, iA = ids;
         long strideA = expertStride;
         int nA = n, kA = k, tA = topk, eA = numExperts, geluA = gelu ? 1 : 0;
@@ -97,6 +98,7 @@ public sealed partial class CudaKernels
     {
         nint fn = format == DType.Q4_K ? _moeDownIdQ4k : format == DType.Q6_K ? _moeDownIdQ6k : _moeDownIdQ8_0;
         if (fn == 0) throw new InvalidOperationException($"moe_id kernels for {format} are not present in the Ptx folder.");
+        if (format == DType.Q4_K) RequireQ4kGemvAlignment(downW, xq);
         ulong oA = output, xqA = xq, xdA = xd, xsA = xs, wA = downW, iA = ids;
         long strideA = expertStride;
         int nA = n, kA = k, eA = numExperts;
