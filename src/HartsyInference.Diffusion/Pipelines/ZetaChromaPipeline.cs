@@ -85,7 +85,7 @@ public sealed class ZetaChromaPipeline(IBackend backend, ZetaChromaTransformer t
         int tokenCount = (height / 32) * (width / 32);
         float mu = 0.5f + 0.65f * (tokenCount - 256) / 3840.0f;
         float dynamicShift = MathF.Exp(mu);
-        FlowMatchEulerDiscreteScheduler scheduler = new(dynamicShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(dynamicShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 2. Initial pixel sample ──
