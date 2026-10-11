@@ -331,12 +331,7 @@ public sealed class GgufLanguageModel : IDisposable
     }
 
     /// <summary>Zero-copy view of <paramref name="count"/> elements of a 1-D tensor starting at <paramref name="start"/> (used to split a fused F32 bias vector).</summary>
-    private static unsafe Tensor SliceVec(Tensor src, int start, int count)
-    {
-        long elemBytes = src.DType.ComputeByteCount(1);
-        byte* s = (byte*)src.DataPointer + (long)start * elemBytes;
-        return new Tensor((void*)s, new TensorShape(count), src.DType, src.Device);
-    }
+    private static Tensor SliceVec(Tensor src, int start, int count) => src.SliceRows(start, count);
 
     /// <summary>Splits each MoE layer's stacked expert tensors (<c>gate_exps</c>/<c>up_exps</c>/<c>down_exps</c>, shape <c>[E, ·, ·]</c>) into the per-expert 2D <c>experts.{i}.{gate,up,down}_proj</c> weights the MoE block loads via a flatten-to-2D + per-expert row-byte copy (no dequant needed).</summary>
     /// <remarks>Internal (not private) so <c>HartsyInference.LLM.Tests</c> can regression-test the fused-vs-separate expert tensor split directly, without constructing a full synthetic GGUF file.</remarks>

@@ -22,7 +22,9 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 | Image | Flux / Qwen-Image / Z-Image | untested | no weights in the local model tree |
 | LLM | Llama-3.2-1B Q8_0 | runs | |
 | LLM | Qwen3-4B Q4_K_M | runs | coherent output |
-| LLM | gpt2-medium Q4_K_M | **crashes** | segfault; the same file runs on CUDA. Not a Q4_K fault — Qwen3-4B Q4_K_M is fine — so it is specific to the GPT-2 architecture |
+| LLM | gpt2-medium Q4_K_M | runs | crashed until the fused-QKV split viewed freed memory (the GGUF is dequantized to F32 for Vulkan, so the split source owned its buffer); the same cause crashed every MoE GGUF. See [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md) |
+| LLM | granite-3.0-1b-a400m Q4_K_M (MoE) | runs | same text as CUDA over 128 greedy tokens; host-routed experts, about 18x slower than CUDA |
+| LLM | OLMoE-1B-7B Q4_K_M (MoE) | **crashes** | out of device memory on a 12 GB card: Vulkan dequantizes the 4.2 GB file to about 27 GB of F32 |
 | Video | Wan 2.2 5B | incomplete | text-encoder weights not present locally |
 | Video | LTX-2 | untested | no weights in the local model tree |
 | Vision | RT-DETR | runs | detect over a real photo |
