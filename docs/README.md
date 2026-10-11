@@ -11,6 +11,7 @@ git preserves removed history.
 | Tensor, CUDA, planning and pipeline patterns | [Agents/ENGINE_PATTERNS.md](Agents/ENGINE_PATTERNS.md) |
 | Current model support and model-specific gaps | [Checklists/MODEL_STATUS.md](Checklists/MODEL_STATUS.md) |
 | Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |
+| Vulkan LLM and MoE: measured gap to CUDA and the port plan | [VULKAN_MOE_PLAN.md](VULKAN_MOE_PLAN.md) |
 | Cross-cutting open work | [Checklists/ROADMAP.md](Checklists/ROADMAP.md) |
 | Real-weight numerical evidence | [Checklists/PARITY_VERIFICATION.md](Checklists/PARITY_VERIFICATION.md) |
 | DeepSeek-V4.1-Flash rented-GPU runbook and frozen gates | [Checklists/DSV41_RENTAL_RUNBOOK.md](Checklists/DSV41_RENTAL_RUNBOOK.md), [Checklists/DSV41_CAMPAIGN_FREEZE.md](Checklists/DSV41_CAMPAIGN_FREEZE.md) |
