@@ -79,7 +79,6 @@ public sealed class ToolLoopRealWeightTheoryTests
     private static string PathFor(string key) => key switch
     {
         "qwen3-0.6b" => TestPaths.Llm.Qwen3_06BQ4KM,
-        "qwen2.5-0.5b" => TestPaths.Llm.Qwen25_05BQ4KM,
         "qwen3.5-0.8b" => TestPaths.Llm.Qwen35_08BQ4KM,
         "llama-3.2-1b" => TestPaths.Llm.Llama32_1BQ8,
         "gemma-3-1b" => TestPaths.Llm.Gemma3_1BItQ4KM,

@@ -124,7 +124,7 @@ Dispatch errors are results, not exceptions: an unknown tool or a throwing handl
 for the model and the host; a host relaying tool results to a remote end user should rewrite it. An `Error` or
 `Cancelled` stop from the service ends the loop without a final `Result` chunk.
 
-## Status (alpha.335 to alpha.341)
+## Status (alpha.345 to alpha.347)
 
 - Per-request format: `ToolCalling.Install` resolves the format from the model's chat template first, then its
   architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter.
@@ -147,7 +147,7 @@ Real-weight results on this machine (CPU; `ToolLoopRealWeightTheoryTests` and `T
 | Qwen3-0.6B Q4_K_M | Hermes | `get_time` call, second round, passes |
 | Gemma-3-1B Q4_K_M | Hermes, injected prompt | `get_time` call, second round, passes |
 | Llama-3.2-1B Q8_0 | Llama 3 | `get_time` call, second round, passes |
-| Qwen2.5-0.5B Q4_K_M | Hermes | `hang_up` call passes; `get_time` gets `<tool_call>` then the turn ends, so the matrix case fails (a model limit on this prompt, kept visible) |
+| Qwen2.5-0.5B Q4_K_M | Hermes | `hang_up` call passes; `get_time` gets `<tool_call>` then the turn ends (a model limit on this prompt), so the case is not in the matrix |
 | Qwen3.5-0.8B Q4_K_M | QwenXml | not run on CPU: its Q5_K dense weights have no CPU matmul path |
 | Phi-3.5-mini, Mistral-7B, GLM-4-9B | Hermes | not run on CPU: the CPU path widens weights to F32 (about 15 GB or more) and the OOM killer ends the test host |
 | DeepSeek-R1-Distill-Qwen-1.5B | DeepSeekR1 | not on this machine |
