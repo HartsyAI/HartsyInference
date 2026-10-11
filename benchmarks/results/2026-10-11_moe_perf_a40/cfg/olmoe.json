@@ -1,0 +1,27 @@
+{
+  "gguf": "/root/models/moe/olmoe-1b-7b-0924-instruct-q4_k_m.gguf",
+  "llama_server": "/root/baseline/bin/bench-serve",
+  "strata_exe": "/root/baseline/Strata/build/strata",
+  "strata_cfg": "/root/baseline/cfg/unused-strata.json",
+  "serve": "/root/baseline/Strata/serve",
+  "cwd": "/root/baseline/run",
+  "configs": [
+    {
+      "name": "llama-cpp-gpu",
+      "kind": "llama",
+      "args": [
+        "-ngl",
+        "99",
+        "-c",
+        "4096"
+      ]
+    },
+    {
+      "name": "hartsy-cuda",
+      "kind": "llama",
+      "args": [
+        "--hartsy-engine"
+      ]
+    }
+  ]
+}
