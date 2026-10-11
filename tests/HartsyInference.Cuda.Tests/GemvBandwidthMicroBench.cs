@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using Xunit;
 using Xunit.Abstractions;
@@ -21,7 +22,7 @@ public sealed unsafe class GemvBandwidthMicroBench
 
     private enum Kind { Dense, GateUp, Down }
 
-    private sealed record Case(string Tag, Kind Kind, DType Format, int N, int K, int Experts, int TopK);
+    private sealed record Case(string Tag, Kind Kind, DType Format, int N, int K, int Experts, int TopK, int Tokens = 1);
 
     private static readonly Case[] Cases =
     {
@@ -59,6 +60,7 @@ public sealed unsafe class GemvBandwidthMicroBench
         double peak = double.TryParse(Environment.GetEnvironmentVariable("GEMV_BENCH_PEAK_GBS"), out double pk) ? pk : 360.0;
         string? only = Environment.GetEnvironmentVariable("GEMV_BENCH_ONLY");
 
+        if (int.TryParse(Environment.GetEnvironmentVariable("GEMV_BENCH_KSPLIT"), out int ks)) KnobStore.Set(EngineKnobs.GemvKsplit, ks);
         using CudaBackend cuda = new(0, ptxDir);
         CudaKernels k = cuda.Kernels ?? throw new InvalidOperationException("no kernels");
         _output.WriteLine($"{"shape",-26}{"us",9}{"MB",8}{"GB/s",8}{"%peak",7}");
@@ -69,6 +71,7 @@ public sealed unsafe class GemvBandwidthMicroBench
             double gbs = mb * 1e6 / (us * 1e-6) / 1e9;
             _output.WriteLine($"{c.Tag,-26}{us,9:F1}{mb,8:F1}{gbs,8:F0}{100 * gbs / peak,6:F0}%");
         }
+        KnobStore.Clear(EngineKnobs.GemvKsplit);
     }
 
     private static (double us, double mb) Run(CudaKernels k, Case c)
@@ -76,8 +79,8 @@ public sealed unsafe class GemvBandwidthMicroBench
         long rowBytes = RowBytes(c.Format, c.K);
         long expertStride = rowBytes * c.N;
         int mats = c.Kind == Kind.GateUp ? 2 : 1;
-        int rows = c.TopK;                         // one token
-        int xRows = c.Kind == Kind.Down ? rows : 1;
+        int rows = c.TopK * c.Tokens;
+        int xRows = c.Kind == Kind.Down ? rows : c.Tokens;
         List<ulong> allocs = new();
         ulong Alloc(long bytes, bool random)
         {

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Transformer;
@@ -34,6 +35,20 @@ public sealed unsafe class CudaMoeIndexedTests
         // About 500 rows per expert: past the point where a dense GEMM per expert replaces the grouped call.
         yield return [2000, "Q4_K", "Q6_K", false];
         yield return [2000, "Q8_0", "Q8_0", false];
+    }
+
+    /// <summary>The same comparison with every down projection split across 4 warps per row (the long-K path Mixtral's
+    /// ffn_down takes), forced through <see cref="EngineKnobs.GemvKsplit"/> because the test's K is short.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData(1, "Q4_K", "Q4_K")]
+    [InlineData(3, "Q4_K", "Q6_K")]
+    [InlineData(16, "Q8_0", "Q8_0")]
+    public void IndexedMoe_KsplitDown_MatchesHostRoutedMoe(int n, string gateUpType, string downType)
+    {
+        KnobStore.Set(EngineKnobs.GemvKsplit, 4);
+        try { IndexedMoe_MatchesHostRoutedMoe(n, gateUpType, downType, false); }
+        finally { KnobStore.Clear(EngineKnobs.GemvKsplit); }
     }
 
     [Trait("Category", "GpuIntegration")]
