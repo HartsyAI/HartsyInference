@@ -174,7 +174,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
 
         // ── 2. Set up flow-match scheduler ──────────────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 3. Build initial latent ─────────────────────────────────────

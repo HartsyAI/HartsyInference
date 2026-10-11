@@ -286,7 +286,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         TensorShape packedShape = new TensorShape(1, imgSeqLen, 64);
 
         FlowMatchEulerDiscreteScheduler scheduler =
-            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen);
+            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen).WithShift(request.SigmaShift);
         // Touch the fallback shift field so the field isn't unused on builds that don't reach the dynamic path.
         _ = _schedulerShiftFallback;
         scheduler.SetTimesteps(steps);

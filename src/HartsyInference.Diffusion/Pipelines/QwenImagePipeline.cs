@@ -442,7 +442,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // shift_terminal 0.02 is applied inside SetTimesteps below.
         FlowMatchEulerDiscreteScheduler scheduler =
             FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(
-                imgSeqLen, baseSeqLen: 256, maxSeqLen: 8192, baseShift: 0.5f, maxShift: 0.9f, shiftTerminal: 0.02f);
+                imgSeqLen, baseSeqLen: 256, maxSeqLen: 8192, baseShift: 0.5f, maxShift: 0.9f, shiftTerminal: 0.02f)
+                .WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // Build initial packed latent — t2i: packed noise * initSigma; img2img: encode + pack + AddNoise

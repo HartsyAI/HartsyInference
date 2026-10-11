@@ -125,6 +125,7 @@ public sealed class SamplerCoreTests
     [Theory]
     [InlineData("euler")]
     [InlineData("dpmpp_2m")]
+    [InlineData("lcm")]
     public void NegatedFlowVelocity_SolvesTheConstantDenoiserExactly(string name)
     {
         IBackend backend = new CpuBackend();
@@ -261,6 +262,7 @@ public sealed class SamplerCoreTests
     [Theory]
     [InlineData("euler")]
     [InlineData("uni_pc")]
+    [InlineData("lcm")]
     public void OneStepSchedule_LandsOnTheDenoisedConstant(string name)
     {
         IBackend backend = new CpuBackend();
@@ -364,6 +366,7 @@ public sealed class SamplerCoreTests
     [InlineData("dpmpp_3m_sde")]
     [InlineData("ddpm")]
     [InlineData("sa_solver")]
+    [InlineData("lcm")]
     public void StochasticSampler_StaysFiniteAndConvergesNear(string name)
     {
         IBackend backend = new CpuBackend();
@@ -419,6 +422,51 @@ public sealed class SamplerCoreTests
         }
     }
 
+    /// <summary>LCM re-noises the denoised estimate with the model type's own scaling (ComfyUI <c>noise_scaling</c>):
+    /// flow interpolates toward noise, epsilon adds it, and the terminal step returns the estimate untouched.</summary>
+    [Theory]
+    [InlineData(0.4f, true, 0.6f, 0.4f)]
+    [InlineData(0.4f, false, 1.0f, 0.4f)]
+    [InlineData(0f, true, 1.0f, 0f)]
+    [InlineData(0f, false, 1.0f, 0f)]
+    public void LcmSampler_RenoisesWithTheModelTypesNoiseScaling(float sigmaNext, bool flow, float denoised, float noise)
+    {
+        Assert.Equal((denoised, noise), LcmSampler.Renoise(sigmaNext, flow));
+    }
+
+    /// <summary>On flow sigmas LCM still ends on the denoised constant: the last step adds no noise, so whatever the
+    /// interior draws were, a constant denoiser pins the result.</summary>
+    [Fact]
+    public void LcmSampler_OnFlowSigmasEndsOnTheDenoisedConstant()
+    {
+        IBackend backend = new CpuBackend();
+        float[] sigmas = FlowSigmas(4);
+        const float Constant = -0.75f;
+
+        using Tensor z = Filled(2.0f);
+        ISampler sampler = SamplerRegistry.Create("lcm", sigmas, seed: 5);
+        sampler.Reset(Shape);
+        for (int i = 0; i < sigmas.Length - 1; i++)
+        {
+            sampler.Step(backend, z, new ConstantFlowDenoiser(Constant), i);
+        }
+
+        Assert.All(Read(z), v => Assert.True(MathF.Abs(v - Constant) < 1e-4f, $"lcm landed on {v}, expected {Constant}."));
+    }
+
+    /// <summary>SD1.5 and SDXL keep <c>lcm</c> on the diffusers LCM scheduler now that the sampler registry also has an
+    /// <c>lcm</c>; switching an LCM-LoRA workflow to a different integrator would change its images silently.</summary>
+    [Fact]
+    public void Lcm_StaysOnTheDedicatedSchedulerForSdFamilies()
+    {
+        Assert.True(SamplerRegistry.IsKnown("lcm"));
+        Assert.True(SchedulerFactory.IsDedicated("lcm"));
+        Assert.False(SchedulerFactory.IsDedicated("euler"));
+        Assert.False(SchedulerFactory.IsDedicated("dpmpp2m"));
+        Assert.True(SamplerRegistry.IsKnown(" LCM") && SchedulerFactory.IsDedicated(" LCM"));
+        Assert.IsType<LcmScheduler>(SchedulerFactory.Create("lcm"));
+    }
+
     /// <summary><see cref="EulerSampler"/> refuses a v-prediction model rather than mis-integrating it. Its fused
     /// update is the epsilon/flow expression; silently applying it to v-prediction would produce mud with no error.</summary>
     [Fact]
@@ -448,6 +496,7 @@ public sealed class SamplerCoreTests
     [Theory]
     [InlineData("euler_ancestral")]
     [InlineData("sa_solver")]
+    [InlineData("lcm")]
     public void StochasticSampler_IsReproducibleForAGivenSeed(string name)
     {
         IBackend backend = new CpuBackend();

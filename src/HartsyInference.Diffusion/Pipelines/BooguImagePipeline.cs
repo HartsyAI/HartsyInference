@@ -86,7 +86,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         Tensor latent = DiTUtils.PatchifyNCHW(noiseNchw, _config.PatchSize);
         noiseNchw.Dispose();
 
-        BooguFlowMatchScheduler scheduler = new(seqLen);
+        BooguFlowMatchScheduler scheduler = new(seqLen, shift: request.SigmaShift);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -233,7 +233,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
         Tensor latent = TakeOrCreateNoise(request, latentShape, seed);
 
-        BooguFlowMatchScheduler scheduler = new(seqLen);
+        BooguFlowMatchScheduler scheduler = new(seqLen, shift: request.SigmaShift);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 

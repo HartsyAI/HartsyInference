@@ -146,6 +146,11 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Numeric validation
 - [ ] Run a first real-checkpoint layer-diff for each 🔧 built-but-validation-pending model to promote it to verified-e2e.
+- [ ] GPU-check the sampling defaults changed in alpha.352 (no generation ran with them): Anima base 30 steps at CFG 4,
+  HiDream Dev CFG 1 (one conditional pass), SD3.5 Medium 40 steps at CFG 4.5, Qwen-Image 1328² on the Q4_K_M GGUF
+  (24 GB fit), Flux.2 Klein 4 steps, Boogu Turbo with `lcm`. An explicit Sigma Shift now reaches the flow-matching
+  families; A/B Flux.2 Dev at HartsyWeb's 2.02 and Krea 2 base at 1.15, which those presets send. Zeta-Chroma's shift
+  is unresolved: A/B 1.88 / 3.0 / 8.0 ([research item 9](../Research/CHROMA_RADIANCE_ARCHITECTURE.md)).
 
 ### Not yet built (more-model support)
 

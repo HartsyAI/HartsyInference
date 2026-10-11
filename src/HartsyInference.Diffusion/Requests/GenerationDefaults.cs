@@ -15,8 +15,8 @@ public readonly record struct GenerationDefaults(int Steps, float CfgScale, int 
     public static GenerationDefaults Sd15 => new(50, 7.5f, 512, 512);
     /// <summary>SDXL base: 50 steps, cfg 5.0, 1024².</summary>
     public static GenerationDefaults Sdxl => new(50, 5.0f, 1024, 1024);
-    /// <summary>SD 3.5: 28 steps, cfg 7.0, 1024².</summary>
-    public static GenerationDefaults Sd35 => new(28, 7.0f, 1024, 1024);
+    /// <summary>SD 3.5 Medium (model card): 40 steps, cfg 4.5, 1024².</summary>
+    public static GenerationDefaults Sd35 => new(40, 4.5f, 1024, 1024);
     /// <summary>Flux dev / Tools / Krea: 28 steps, guidance 3.5 (Krea 4.5), 1024².</summary>
     public static GenerationDefaults FluxDev => new(28, 3.5f, 1024, 1024);
     /// <summary>Flux schnell: 4 steps, guidance ignored, 1024².</summary>
@@ -28,8 +28,8 @@ public readonly record struct GenerationDefaults(int Steps, float CfgScale, int 
 
     /// <summary>Z-Image Base: official undistilled CFG sampling defaults.</summary>
     public static GenerationDefaults ZImageBase => new(50, 5.0f, 1024, 1024);
-    /// <summary>Qwen-Image: 50 steps, true-cfg 4.0, 1024².</summary>
-    public static GenerationDefaults QwenImage => new(50, 4.0f, 1024, 1024);
+    /// <summary>Qwen-Image: 50 steps, true-cfg 4.0, 1328² (the model card's 1:1 size).</summary>
+    public static GenerationDefaults QwenImage => new(50, 4.0f, 1328, 1328);
     /// <summary>AuraFlow: 50 steps, guidance 3.5, 1024².</summary>
     public static GenerationDefaults AuraFlow => new(50, 3.5f, 1024, 1024);
     /// <summary>Lumina-Image-2.0: 30 steps, guidance 4.0, 1024².</summary>

@@ -54,8 +54,9 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
-    /// <summary>Flux.2 Klein's sampling settings: 10 steps at guidance 4.0 — the Klein checkpoints are CFG-distilled few-step models, so they carry no guidance embedding.</summary>
-    public static ImageDefaults KleinDefaults { get; } = new ImageDefaults { Steps = 10, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+    /// <summary>Flux.2 Klein's sampling settings: 4 steps, guidance-free (CFG 1.0), the official settings for the distilled
+    /// Klein checkpoints, which carry no guidance embedding. <see cref="Flux2RecipePipeline"/> does not read CfgScale yet.</summary>
+    public static ImageDefaults KleinDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

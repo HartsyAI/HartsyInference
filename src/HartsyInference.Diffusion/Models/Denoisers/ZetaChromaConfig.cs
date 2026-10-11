@@ -28,14 +28,14 @@ public sealed record ZetaChromaConfig
     /// decoder treats the whole flattened patch as ONE token: patch_size 1 → all cosines collapse to 1/(1+u·v)).</summary>
     public int DecoderMaxFreqs { get; init; } = 8;
 
-    /// <summary>Default CFG scale (5.0 — validation-gated, mid-pretraining recommendation).</summary>
+    /// <summary>Default CFG scale (3.0, validation-gated: the checkpoint is mid-pretraining).</summary>
     public float DefaultCfgScale { get; init; } = 3.0f;
 
     /// <summary>Default inference steps (50).</summary>
     public int DefaultSteps { get; init; } = 50;
 
-    /// <summary>Flow-match Euler static shift. ComfyUI's ZImagePixelSpace inherits Z-Image's shift 3.0
-    /// (validation-gated, research doc item 9).</summary>
+    /// <summary>ComfyUI's static shift for ZImagePixelSpace (inherited from Z-Image). <c>ZetaChromaPipeline</c>
+    /// does not read it: it samples with a resolution-dependent shift (research doc item 9).</summary>
     public float SchedulerShift { get; init; } = 3.0f;
 
     /// <summary>True when a Z-Image-family weight dict is a Zeta-Chroma pixel checkpoint (decoder head present).</summary>

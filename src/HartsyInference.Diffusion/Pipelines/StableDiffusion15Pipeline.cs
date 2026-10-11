@@ -112,7 +112,8 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         }
         // A SamplerRegistry sampler supplies its own integrator, so the scheduler is only here for the sigma range —
         // pass null for the Euler base rather than the sampler's name, which the factory would (correctly) refuse.
-        IScheduler scheduler = SchedulerFactory.Create(SamplerRegistry.IsKnown(samplerName) ? null : samplerName);
+        bool registrySampler = SamplerRegistry.IsKnown(samplerName) && !SchedulerFactory.IsDedicated(samplerName);
+        IScheduler scheduler = SchedulerFactory.Create(registrySampler ? null : samplerName);
         scheduler.SetTimesteps(steps);
 
         // 3. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
@@ -135,7 +136,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         // euler_ancestral (or ignoring `karras`) is the exact INVISIBLE fallback this seam exists to remove — the
         // image is fine, just not the one that was requested. The sampler half has to be checked as well as the
         // schedule half, because a bare `euler_ancestral` carries no schedule suffix.
-        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName) && samplerName.Length > 0
+        bool nonDefaultSampler = registrySampler && samplerName.Length > 0
             && !string.Equals(samplerName, "euler", StringComparison.Ordinal);
         if (!samplerLoop && (nonDefaultSampler || !string.IsNullOrEmpty(scheduleName)))
         {

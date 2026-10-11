@@ -14,7 +14,7 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// <list type="bullet">
 ///   <item><b>x0 prediction</b> — converted per step via <see cref="X0Prediction.ToVelocity"/> (<c>v = (x_t − x0) / t</c>, ComfyUI <c>NextDiTPixelSpace</c>), then Chroma-family cond-anchored CFG on v (<see cref="CfgHelper.ApplyCfgCondAnchored"/>, <c>cond + scale·(cond − uncond)</c> — NOT Z-Image's non-standard cond-baseline formula; item 8).</item>
 ///   <item><b>Timestep inversion</b> — the transformer is conditioned on <c>1 − sigma</c>, inheriting Z-Image's convention (item 7).</item>
-///   <item><b>Flow-match Euler</b>, static shift 3.0 (item 9), default 50 steps, CFG 5.0.</item>
+///   <item><b>Flow-match Euler</b>, resolution-dependent shift (exp(mu), about 1.88 at 1024², item 9), default 50 steps, CFG 3.0.</item>
 ///   <item><b>Resolution must be divisible by the pixel patch size</b> (32 reported) — no pad/crop path until the training resolution behavior is known.</item>
 /// </list>
 ///
@@ -78,14 +78,14 @@ public sealed class ZetaChromaPipeline(IBackend backend, ZetaChromaTransformer t
             "(mid-pretraining checkpoint — output quality is validation-gated)");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Static-shift flow-match Euler scheduler ──
+        // ── 1. Flow-match Euler scheduler, resolution-dependent shift ──
         TensorShape pixelShape = new TensorShape(1, 3, height, width);
         // Reference dynamic shift (FLUX-style): mu linear in token count, exp(mu) ≈ 1.88 at 1024²
         // (1024 tokens) — the static 3.0 starved the low-sigma tail where patch texture harmonizes.
         int tokenCount = (height / 32) * (width / 32);
         float mu = 0.5f + 0.65f * (tokenCount - 256) / 3840.0f;
         float dynamicShift = MathF.Exp(mu);
-        FlowMatchEulerDiscreteScheduler scheduler = new(dynamicShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(dynamicShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
 
         // ── 2. Initial pixel sample ──

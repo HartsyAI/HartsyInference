@@ -115,7 +115,7 @@ Keys follow Z-Image single-file naming: `x_embedder.*`, `layers.{0..29}.*`, `t_e
 | 6 | Zeta decoder head | Subsequently implemented and consumer-verified; see image status for decoder-head BF16 fix | Key dump of a Zeta pixel-proto checkpoint |
 | 7 | Zeta timestep convention | `(1 − sigma)` like Z-Image, ×1000 internally | ComfyUI `NextDiTPixelSpace` |
 | 8 | Zeta CFG formula | Standard CFG on velocity | ComfyUI sampling path |
-| 9 | Zeta scheduler shift | Static 3.0 (Z-Image Turbo default) | ComfyUI model config |
+| 9 | Zeta scheduler shift | Dynamic `exp(mu)`, mu linear in 32-px token count over (256 → 0.5)…(4096 → 1.15), about 1.88 at 1024². Three sources disagree: ComfyUI's `ZImagePixelSpace` inherits Z-Image's static 3.0; the published `workflow_zeta.png` reportedly overrides it with `ModelSamplingAuraFlow` shift 8.0 (with er_sde, beta, CFG 3.8, 30 steps; read off the image, not extracted from its embedded workflow); no upstream inference code uses the dynamic form. The engine's choice was tuned visually, not against a reference | A/B at 1.88 / 3.0 / 8.0 on the same seeds, against the published workflow run in ComfyUI |
 | 10 | Zeta pad tokens / SeqMultiOf in pixel mode | Same as Z-Image (32, learned pad tokens if present) | Checkpoint key dump |
 
 ## Historical implementation notes (superseded by current code/status)

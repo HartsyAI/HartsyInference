@@ -109,7 +109,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         Tensor latent = DiTUtils.PatchifyNCHW(noiseNchw, _config.PatchSize);
         noiseNchw.Dispose();
 
-        FlowMatchEulerDiscreteScheduler scheduler = new(3.0f);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(3.0f).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int textSeqLen = (int)captionEmbeddings.Shape[1];
@@ -265,7 +265,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
 
         // Reference dynamic_time_shift (m = sqrt(latent_h·latent_w)/40) ≡ sigma shift m — see method docs.
         float dynamicShift = MathF.Sqrt((float)latentH * latentW) / 40.0f;
-        FlowMatchEulerDiscreteScheduler scheduler = new(dynamicShift);
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(dynamicShift).WithShift(request.SigmaShift);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int textSeqLen = (int)captionEmbeddings.Shape[1];

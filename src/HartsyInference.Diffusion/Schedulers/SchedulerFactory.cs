@@ -19,6 +19,11 @@ public static class SchedulerFactory
         return key.Length == 0 || Names.Contains(key, StringComparer.Ordinal);
     }
 
+    /// <summary>Whether <paramref name="name"/> selects one of this factory's own algorithms rather than an Euler sigma
+    /// range, so an SD-family pipeline keeps it here even when <c>Sampling.SamplerRegistry</c> has a sampler of the same
+    /// name: <c>lcm</c> on SD1.5/SDXL stays the diffusers LCM scheduler its LoRAs were validated with.</summary>
+    public static bool IsDedicated(string? name) => (name?.Trim().ToLowerInvariant()) is "lcm" or "tcd";
+
     /// <summary>Returns the requested epsilon/v-prediction scheduler for SD1.5- / SDXL-style sigma-domain sampling.
     /// Null or empty gives <see cref="EulerDiscreteScheduler"/>.
     ///
