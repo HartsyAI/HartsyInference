@@ -63,10 +63,10 @@ Row count: 16, sorted by Ratio descending.
 
 ## Excluded / not comparable (no reliable head-to-head number)
 
-- **olmoe-1b-7b-0924 (MoE, Q4_K_M)** and **granite-3.0-1b-a400m (MoE, Q4_K_M)** — measured 0.086× and
-  0.187× respectively (round 12), but both fail the checklist's own health-assert (D2H syncs 2193/rep
-  and 3225/rep vs the ~0 target) — the source doc explicitly flags these numbers as "likely NOT
-  representative," so they're left out rather than reported as real MoE performance.
+- **olmoe-1b-7b-0924 (MoE, Q4_K_M)** and **granite-3.0-1b-a400m (MoE, Q4_K_M)** — the round-12 numbers (0.086x and 0.187x) were
+  not representative (D2H syncs 2193/rep and 3225/rep) and are superseded. MoE models are measured on a different protocol (server
+  timings against llama.cpp on an A40, prefill and decode at 4K and 32K context); see
+  [2026-10-11_moe_perf_a40.md](../results/2026-10-11_moe_perf_a40.md).
 - **Qwen2.5-VL-7B-Instruct** — HartsyInference measures 63.33 tok/s but no valid llama.cpp baseline
   exists (llama-cpp-python 0.3.34 fails to construct a `llama_context` for this GGUF).
 - **llava-v1.5-7b, gpt2-medium, starcoder2-3b** — crash the Tier-1 benchmark harness (works fine through

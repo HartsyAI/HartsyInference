@@ -65,13 +65,32 @@ grouped operands only with a 16-bit result, so gate, up and the down rows are BF
 F32 expert-major buffer. A refused grouped call falls back to one GEMM per expert. `MoeCombinePairs` sums each token's rows
 through the pair map and adds the shared expert.
 
+Two measured choices sit in that path. A quantized stack becomes BF16 by dequantizing to F16 straight into the destination
+buffer and converting in place (`moe_cast_f16_to_bf16_inplace`); the generic route staged the whole stack through F16 and F32
+temporaries, three passes and 4x the memory, which cost about a fifth of a Mixtral prefill. And when the active experts average
+384 rows or more (Mixtral: about 1000), each expert takes a dense `cublasGemmEx` instead of the grouped call, which reached about a
+third of the tensor-core rate on those shapes. Many small experts (Qwen3-30B-A3B: about 60 rows each) stay on the grouped call.
+
 **Attention** is not part of the MoE contract but decides the end-to-end result for these models. Prefill of 16 or more query
 rows runs `flash_attn_causal_f16` (mma.sync FlashAttention-2, grouped-query, window and offset aware); one decode row per
 sequence runs `flash_attn_decode_gqa`, which reads each KV head's cache once for all of its query heads and writes the split-K
 partials the existing combine merges.
 
-Knobs (all default on): `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`.
-`vram.kvF16` now works with graph decode.
+The decode attention kernel prefetches the next key/value tile into registers while it computes the current one, keeps F16 tiles
+F16 in shared memory, and sizes its split count to one wave of resident blocks (four per SM with an F16 cache, two with F32); a
+half-empty second wave cost about a sixth of the kernel at 32K context.
+
+**Sampling in the graph.** A sampled decode step draws on the device (`lm_topk_f32` then `lm_sample_from_topk`, top-k up to 64).
+Over a vocabulary the top-k runs as two stages: `lm_topk_slices_f32` takes each slice's k largest on its own block (indices already
+global), the one-block kernel merges at most 2048 survivors, and the sampler maps merged positions back to token ids. Ties keep the
+lowest index through both stages. One block over 152K logits took 550 us per step; the two stages take about 55 us.
+
+**Graph capture cost.** Capturing a decode graph walks every weight tensor once to decide which fit the preload budget. That walk
+was quadratic in the tensor count (a MoE checkpoint has thousands), about 330 ms per request on Qwen3-30B-A3B; it is one pass now,
+and capture takes about 17 ms.
+
+Knobs (all default on): `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`,
+`numerics.lmNormFast`. `vram.kvF16` works with graph decode.
 
 ## Capabilities
 

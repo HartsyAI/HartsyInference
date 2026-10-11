@@ -22,6 +22,18 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.334
+
+- **Faster MoE on CUDA: prefill is at or above llama.cpp and decode is within 6-16% on Qwen3-30B-A3B and Mixtral.** On an A40 (4K prompt, F16 KV cache for the like-for-like column), Qwen3-30B-A3B prefill goes from 265 to 3850 tok/s (llama.cpp 3715) and decode from 18.8 to 137 (145); Mixtral-8x7B prefill 325 to 2270 (2008) and decode 29.5 to 53 (61); OLMoE decode 60 to 301 (290); Granite-3B decode 36 to 299 (210). The per-model tables, the method and the remaining gaps are in `benchmarks/results/2026-10-11_moe_perf_a40.md`.
+  - Decode: the routed experts run on the device. Routing, the expert GEMVs (the expert id is read from device memory) and the combine are captured in the CUDA graph, so a decode step issues no host reads. Q4_K, Q6_K and Q8_0 experts are covered.
+  - Prefill: the (token, expert) pairs are ordered by expert and each projection takes one grouped cuBLAS GEMM over dequantized expert stacks cached per layer. A quantized stack is dequantized to F16 straight into the BF16 destination and converted in place, without the F32 staging buffers. Experts that average 384 or more rows (Mixtral) take a dense GEMM each, which is faster than the grouped call at that size.
+  - Attention: a tensor-core FlashAttention-2 kernel for prefill (Qwen3-30B at 32K: 35 to 3260 tok/s) and a grouped-query flash-decoding kernel that reads each KV head once, prefetches the next tile and sizes its splits to one wave of blocks.
+  - Sampling in the graph: top-k, temperature, top-p and min-p are drawn on the device, so sampled decode replays a graph like greedy. The top-k over a vocabulary runs on 128 blocks in two stages (550 us to about 55 us per step).
+  - `vram.kvF16` now works with graph decode, including through the API.
+  - New knobs, all on by default: `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`, `numerics.lmNormFast`.
+  - Greedy output of the dense models checked on an RTX 3060 matches the old build for most models; three diverge after 70-95% of 96 tokens, because the fused kernels sum in a different float order.
+- **Fixed: every graph-decode request spent about 330 ms rescanning expert tensors.** The weight-preload pass checked membership in a list for each of the thousands of expert tensors of a MoE checkpoint. It is one pass now and graph capture takes about 17 ms. Qwen3-30B-A3B API decode at 4K went from 80 to 125 tok/s.
+
 ## alpha.333
 
 - **Faster CPU expert kernels for expert offload.** Qwen3-30B-A3B Q4_K_M offloaded on the RTX 3060 now decodes at 6.7-7.1 tok/s, up from 5.0, with the same 61% of routed rows on the GPU.
