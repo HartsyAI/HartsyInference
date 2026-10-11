@@ -1,4 +1,5 @@
 namespace HartsyInference.Tools.Parsing;
 
 /// <summary>Literal text that opens a tool-call span. <paramref name="TextIsPayload"/> means the marker's own characters are the first characters of the payload (the bare <c>{</c> / <c>[</c> forms); <paramref name="LineStartOnly"/> restricts the match to the start of the message or of a line; <paramref name="Strict"/> marks a bare form that can also occur in ordinary output: a JSON payload must open with <c>"name"</c> (checked per character, so anything else is forwarded at once) and, when the parser has the offered names, the call must name one of them (checked at the brace for the <c>name{</c> forms, when the value closes for JSON).</summary>
-public readonly record struct ToolCallMarker(string Text, ToolCallPayload Payload, bool TextIsPayload = false, bool LineStartOnly = false, bool Strict = false);
+/// <remarks><paramref name="Close"/> overrides the rules' close marker for this span; the markup payloads complete at it.</remarks>
+public readonly record struct ToolCallMarker(string Text, ToolCallPayload Payload, bool TextIsPayload = false, bool LineStartOnly = false, bool Strict = false, string? Close = null);

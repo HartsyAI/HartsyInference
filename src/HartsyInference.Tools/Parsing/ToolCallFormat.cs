@@ -14,4 +14,13 @@ public enum ToolCallFormat
 
     /// <summary>Mistral: <c>[TOOL_CALLS][{"name": …, "arguments": {…}}, …]</c>, a single object, or the <c>name{…}</c> form of Mistral Small 3.x.</summary>
     Mistral,
+
+    /// <summary>Qwen3.5 and Qwen3-Coder: <c>&lt;tool_call&gt;&lt;function=NAME&gt;&lt;parameter=KEY&gt;value&lt;/parameter&gt;&lt;/function&gt;&lt;/tool_call&gt;</c>, arguments as XML parameters.</summary>
+    QwenXml,
+
+    /// <summary>GLM-4.5: <c>&lt;tool_call&gt;name\n&lt;arg_key&gt;k&lt;/arg_key&gt;&lt;arg_value&gt;v&lt;/arg_value&gt;…&lt;/tool_call&gt;</c>.</summary>
+    GlmXml,
+
+    /// <summary>DeepSeek-R1: <c>&lt;｜tool▁calls▁begin｜&gt;&lt;｜tool▁call▁begin｜&gt;function&lt;｜tool▁sep｜&gt;NAME\n```json\n{…}\n```&lt;｜tool▁call▁end｜&gt;&lt;｜tool▁calls▁end｜&gt;</c>.</summary>
+    DeepSeekR1,
 }

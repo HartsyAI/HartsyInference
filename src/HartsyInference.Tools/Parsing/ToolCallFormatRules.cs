@@ -30,6 +30,7 @@ public sealed record ToolCallFormatRules
             foreach (ToolCallMarker marker in Markers)
             {
                 if (!marker.TextIsPayload) literals.Add(marker.Text);
+                if (marker.Close is not null) literals.Add(marker.Close);
             }
             if (CloseMarker is not null) literals.Add(CloseMarker);
             literals.AddRange(ExtraLiterals);

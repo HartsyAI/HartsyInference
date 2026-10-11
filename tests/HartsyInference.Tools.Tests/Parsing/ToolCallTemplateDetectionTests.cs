@@ -51,10 +51,12 @@ public sealed class ToolCallTemplateDetectionTests
     // ── Real fixtures: false, for family-specific reasons ───────────────────────────────────────────────────
 
     [Fact]
-    public void Qwen35_0_8B_RealTemplate_XmlFunctionArgsDoNotMatchHermes()
-        // Qwen3.5 / Qwen3-Coder style: opens with the identical "<tool_call>" tag as the Hermes pair above, but
-        // instructs "<function=name><parameter=...>" — neither "name" nor "arguments" appears anywhere in it.
-        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen35_0_8B, out _));
+    public void Qwen35_0_8B_RealTemplate_IsTheQwenXmlDialect()
+    {
+        // Qwen3.5 opens with the same "<tool_call>" tag as Hermes, but its body is <function=…><parameter=…> markup.
+        Assert.True(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen35_0_8B, out ToolCallFormat format));
+        Assert.Equal(ToolCallFormat.QwenXml, format);
+    }
 
     [Fact]
     public void Llama32_1B_RealTemplate_BareJsonConventionIsFalse()
@@ -88,13 +90,13 @@ public sealed class ToolCallTemplateDetectionTests
     // ── Synthetic: the exact failure modes the review named ───────────────────────────────────────────────
 
     [Fact]
-    public void SyntheticGlm45StyleXmlArgKey_IsFalse()
+    public void SyntheticGlm45StyleXmlArgKey_IsTheGlmXmlDialect()
     {
-        // GLM-4.5's actual convention per the review: "<tool_call>name\n<arg_key>...". Same opening tag as
-        // Hermes, XML arguments instead of JSON — must not be confused with the Hermes envelope.
+        // GLM-4.5's convention: "<tool_call>name\n<arg_key>...". Same opening tag as Hermes, XML arguments instead of JSON.
         const string template = "{% if tools %}Tools: {{ tools | tojson }}{% endif %}"
             + "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Paris</arg_value>\n</tool_call>";
-        Assert.False(ToolCallFormats.TryDetectFromTemplate(template, out _));
+        Assert.True(ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format));
+        Assert.Equal(ToolCallFormat.GlmXml, format);
     }
 
     [Fact]
