@@ -32,10 +32,15 @@ public sealed class IncrementalDetokenizer
     /// <summary>Adds one token and returns the text that became decodable (possibly empty).</summary>
     public string Push(int id)
     {
-        bool special = _includeSpecial || (_literalIds is not null && _literalIds.Contains(id));
-        byte[]? bytes = _tokenizer.TokenBytes(id, special);
-        if (bytes is null) return PushByRedecode(id);
-        return DecodeBytes(bytes, flush: false);
+        bool literal = _literalIds is not null && _literalIds.Contains(id);
+        byte[]? bytes = _tokenizer.TokenBytes(id, _includeSpecial || literal);
+        if (bytes is not null) return DecodeBytes(bytes, flush: false);
+        // Re-decoding skips control tokens, so a literal the caller asked for would silently vanish.
+        if (literal)
+        {
+            throw new NotSupportedException($"Tokenizer {_tokenizer.GetType().Name} reports no bytes for control token {id}; implement ILlmTokenizer.TokenBytes to surface it.");
+        }
+        return PushByRedecode(id);
     }
 
     /// <summary>Ends the stream; an unfinished multibyte sequence is emitted as U+FFFD, matching a one-shot decode.</summary>

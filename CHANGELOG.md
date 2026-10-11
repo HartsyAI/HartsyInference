@@ -24,6 +24,21 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.345
+
+- **Changed: tool-call format resolves per request.** `ToolCalling.Install` with no format now picks the parser from the model's own chat template first, then its architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter. An explicit format still applies to every request.
+- **Changed: the control-token markers reach the parser.** A filter declares its markers (`<tool_call>`, `</tool_call>`, and for Gemma `<|tool_call>`, `<tool_call|>` and the string delimiter `<|"|>`), and the engine decodes them as text. Qwen3-0.6B's real completion is captured as a fixture and parses to one `hang_up` call at every tested split point.
+- **Added: a forced tool restricts the bare call forms** to that one name and stops after its call.
+- A stray close tag outside a call now streams as text, where it used to be dropped.
+- **Fixed: message content cannot open a turn or emit a control token.** A chat template renders control literals such as `<|im_start|>` and `<tool_call>` into the prompt, so a user message, a tool result or a model reply containing one used to become a real control token. Those literals in content now encode as plain text. The template's own literals are unchanged, and clean conversations encode to the same ids as before.
+- **Changed: `<think>` and `</think>` stream as text.** They are control tokens in Qwen3 GGUFs, so streamed replies dropped the tags while keeping the reasoning text. They now stream as written, and a reasoning model's history keeps its own reasoning split.
+- **Added: `ILlmTokenizer.SpecialLiterals`.** The control literals a tokenizer maps to ids. The GGUF (BPE, SentencePiece and RWKV) tokenizers and the Qwen2 tokenizer report them; other tokenizers report none, so their content is not escaped. Tool definitions (names, descriptions, schema keys and values) are escaped like message content.
+- **Fixed: RWKV ordinary encoding never emits a control id**, so escaped content cannot turn back into one.
+- **Added: `Qwen2Tokenizer.TokenBytes`**, so a filter that asks for a Qwen2 control literal streams it instead of throwing.
+- **Fixed: a streamed request's final text keeps the special literals its chunks showed** (the reasoning tags), so it equals the concatenated chunks.
+- **Added: the `safe` template filter** (identity). Qwen3.5's tool-call replay uses it, so its second and later rounds no longer fall back to ChatML.
+- **Added: the GLM `observation` role.** A GLM-4-0414 template now gets tool results under the `observation` role it expects instead of losing them. The role is chosen from the parsed template: only an executable comparison of the role to `observation` counts, not a comment or string, and a template that also compares it to `tool` keeps `tool`.
+
 ## alpha.344
 
 - **Changed: text models keep their KV cache in F16 on CUDA by default.** The new `vram.textKvF16` setting is automatic when unset: text LLMs on a CUDA device store keys and values as F16, which halves the cache and the bytes every decode step reads. On an RTX 3060 (12 GB) decode is 9% faster at 4K tokens of context and 16% at 8K (Mistral-7B Q4_K_M), and 19% at 8K and 20% at 16K (Qwen3-4B Q4_K_M); at short context there is no difference. On the A40 it is what puts Qwen3-30B-A3B and Mixtral decode at 0.96-0.98x of llama.cpp (0.91-0.94x with an F32 cache), and llama.cpp stores F16 by default. Audio decoders, other backends (CPU, Vulkan), the SSM and hybrid models that keep their own caches, and the paged KV pool of the opt-in continuous-batching scheduler (`vram.continuousBatching`, off by default) stay on F32. `vram.textKvF16=false` keeps F32 for text models (the `reference` profile pins it) and `true` asks for F16 wherever the backend supports it; `vram.kvF16` keeps its meaning (force F16 for every model type) and its default.

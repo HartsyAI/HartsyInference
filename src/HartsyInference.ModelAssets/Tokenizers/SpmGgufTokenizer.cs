@@ -80,6 +80,9 @@ public sealed class SpmGgufTokenizer : ILlmTokenizer
 
     public int? SpecialId(string token) => _specialByLiteral.TryGetValue(token, out int id) ? id : null;
 
+    /// <inheritdoc/>
+    public IReadOnlyList<string> SpecialLiterals => _specialLiterals;
+
     public int[] Encode(string text, bool addSpecial)
     {
         if (!addSpecial || _specialLiterals.Length == 0) return EncodeOrdinary(text);

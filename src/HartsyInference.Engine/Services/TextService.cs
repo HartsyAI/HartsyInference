@@ -638,6 +638,7 @@ public sealed class TextService : ITextService, IDisposable
             Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture ?? slot.TpCheckpoint?.Architecture,
             ModelPath = slot.LoadedPath,
             HasStructuredParser = structured,
+            ForcedToolName = request.ForceToolId,
         });
         IReadOnlySet<int>? literalIds = ResolveLiteralIds(filter, tokenizer);
         // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
@@ -709,20 +710,19 @@ public sealed class TextService : ITextService, IDisposable
         {
             if (Parser is not null) Parser.Finish(Emit!);
             StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
+            // End drains calls the filter still queues, so the call list is read after it.
+            FilterSink?.End();
             // Calls from the filter, else from a structured parser (DeepSeek-V4.1): either one ends the turn as a tool call.
             IReadOnlyList<NativeToolCall> calls = FilterSink?.ToolCalls ?? Array.Empty<NativeToolCall>();
             if (calls.Count == 0 && Translator is not null) calls = Translator.Calls;
             StopReason resolved = calls.Count > 0 ? StopReason.ToolCall : stop;
             if (FilterSink is null)
             {
-                // A structured parser's content is the visible text once it has reported calls; the raw decode still holds the markup.
-                string text = calls.Count > 0 && Parser is not null ? Parser.Result.Content : result.Text;
-                return new GenOutcome(text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
+                return new GenOutcome(FinalText(Parser, calls.Count, result.Text), resolved, result.PromptTokens, result.TokenIds.Count, calls,
                     result.PrefillMilliseconds, result.DecodeMilliseconds);
             }
-            FilterSink.End();
-            return new GenOutcome(FilterSink.Text, calls.Count > 0 ? StopReason.ToolCall : stop,
-                result.PromptTokens, result.TokenIds.Count, FilterSink.ToolCalls, result.PrefillMilliseconds, result.DecodeMilliseconds);
+            return new GenOutcome(FilterSink.Text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
+                result.PrefillMilliseconds, result.DecodeMilliseconds);
         }
 
         /// <summary>The outcome of a request the filter stopped: ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.</summary>
@@ -735,6 +735,10 @@ public sealed class TextService : ITextService, IDisposable
 
         public void Dispose() => StopSource?.Dispose();
     }
+
+    /// <summary>The terminal text of a request without a filter. A structured parser's content is the visible text once it has reported calls (the raw decode still holds the markup); the passthrough parser's content is exactly what streamed, including the special literals it was asked to show (reasoning tags), which the raw decode skips.</summary>
+    internal static string FinalText(IOutputParser? parser, int callCount, string decoded)
+        => parser is PassthroughOutputParser || (parser is not null && callCount > 0) ? parser.Result.Content : decoded;
 
     /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
     private static IOutputParser CreateParser(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest,
@@ -755,14 +759,20 @@ public sealed class TextService : ITextService, IDisposable
         return new PassthroughOutputParser(tokenizer, literalSpecialIds);
     }
 
-    /// <summary>The special-token ids behind the control-token literals a filter asked to see. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
+    /// <summary>The special-token ids the passthrough parser decodes as text: the control-token literals a filter asked to see, plus the reasoning markers so a thinking model's <c>&lt;think&gt;</c> tags stay in the stream. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
     private static IReadOnlySet<int>? ResolveLiteralIds(ITextStreamFilter? filter, ILlmTokenizer tokenizer)
     {
-        if (filter is null) return null;
         HashSet<int> ids = [];
-        foreach (string literal in filter.MarkerLiterals)
+        if (filter is not null)
         {
-            if (tokenizer.SpecialId(literal) is { } id) ids.Add(id);
+            foreach (string literal in filter.MarkerLiterals)
+            {
+                if (tokenizer.SpecialId(literal) is { } id) ids.Add(id);
+            }
+        }
+        foreach (string marker in SpecialLiteralEscaper.ReasoningMarkers)
+        {
+            if (tokenizer.SpecialId(marker) is { } id) ids.Add(id);
         }
         return ids.Count == 0 ? null : ids;
     }

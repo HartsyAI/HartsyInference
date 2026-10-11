@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <None Include="Fixtures\ChatTemplates\*.jinja" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\CapturedOutput\*.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
