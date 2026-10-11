@@ -16,13 +16,19 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> GraphArena =
         Bool("vram.graphArena", true, KnobScope.Runtime, KnobDomain.Vram, "Routes capture-time intermediate allocations through a persistent bump arena instead of per-replay pool nodes.");
 
-    /// <summary>Stores the decode KV cache as F16 instead of F32, halving its VRAM and the bytes attention reads (CUDA only).</summary>
-    /// <remarks>Unset is automatic: text LLMs on a backend that supports it (<see cref="HartsyInference.Core.Backends.IBackend.SupportsF16KvCache"/>) use F16,
-    /// everything else (audio decoders, other backends, and the paged KV pool that the opt-in continuous-batching scheduler shares between sequences) keeps F32. <c>true</c> forces F16 for every model type, <c>false</c> keeps F32 everywhere (the
-    /// reference profile pins it, for runs that must match an F32-cache build). Writes into an F16 cache saturate at the F16 maximum, so an
-    /// extreme key or value cannot become infinity.</remarks>
-    public static readonly Knob<bool?> KvF16 =
-        BoolOverride("vram.kvF16", KnobScope.Runtime, KnobDomain.Vram, "KV cache element type: unset = F16 for text LLMs on CUDA and F32 elsewhere, true = F16 for every model, false = F32 everywhere (CUDA only for F16).");
+    /// <summary>Stores the single-sequence decode KV cache as F16 instead of F32, halving its VRAM (CUDA only).</summary>
+    /// <remarks>The published opt-in, unchanged: <c>true</c> forces F16 for every model type that builds its cache through the shared factories. Text models do
+    /// not need it any more, see <see cref="TextKvF16"/>.</remarks>
+    public static readonly Knob<bool> KvF16 =
+        Bool("vram.kvF16", false, KnobScope.Runtime, KnobDomain.Vram, "Stores the single-sequence decode KV cache as F16 instead of F32, halving its VRAM (CUDA only).");
+
+    /// <summary>The KV cache element type of text LLMs: unset = F16 on a backend that supports it (CUDA), F32 elsewhere.</summary>
+    /// <remarks>Unset is automatic: text LLMs on a backend that reports <see cref="HartsyInference.Core.Backends.IBackend.SupportsF16KvCache"/> use an F16 cache, which halves
+    /// the cache and the bytes every decode step reads. <c>false</c> keeps F32 for text models (the <c>reference</c> profile pins it), <c>true</c> asks for F16 wherever the
+    /// backend can. Audio decoders and other cache users follow <see cref="KvF16"/> only. Writes into an F16 cache saturate at the F16 maximum, so an extreme key
+    /// or value cannot become infinity. The paged KV pool of the opt-in continuous-batching scheduler stays F32.</remarks>
+    public static readonly Knob<bool?> TextKvF16 =
+        BoolOverride("vram.textKvF16", KnobScope.Runtime, KnobDomain.Vram, "KV cache element type of text LLMs: unset = F16 on CUDA and F32 elsewhere, false = F32, true = F16 where the backend supports it. vram.kvF16 forces F16 for every model type.");
 
     /// <summary>Makes LLMs keep GGUF weights compressed and use QuantizedMatMul instead of caching an F16 dequant.</summary>
     public static readonly Knob<bool> LowvramQuant =

@@ -54,9 +54,9 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
     {
         if (options.Pool is not null)
         {
-            // The shared page pool allocates F32 pages, so an F16 request (the default on CUDA, or an explicit true) does not apply to pooled sequences.
+            // The shared page pool allocates F32 pages, so an F16 choice (the default on CUDA, or an explicit setting) does not apply to pooled sequences.
             if (KvCaches.F16For(_backend) && Interlocked.Exchange(ref _pooledF16NoticeLogged, 1) == 0)
-                Logs.Info("[kv] vram.kvF16 does not apply to the continuous-batching page pool: pooled sequences keep F32 pages.");
+                Logs.Info("[kv] The F16 cache setting does not apply to the continuous-batching page pool: pooled sequences keep F32 pages.");
             return new PagedKvCache(options.Pool);
         }
         TransformerConfig cfg = _transformer.Config;

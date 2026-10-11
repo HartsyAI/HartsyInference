@@ -1,7 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
 using HartsyInference.LLM.Transformer;
 using Xunit;
 using Xunit.Abstractions;
@@ -128,45 +127,22 @@ public sealed unsafe class KvF16SaturationTests
         for (long i = 0; i < o.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"attention output {i} is {p[i]}");
     }
 
-    [Fact]
-    public void KvF16Default_ResolvesPerBackend_AndModelType()
-    {
-        try
-        {
-            KnobStore.Clear(EngineKnobs.KvF16);
-            Assert.Null(EngineKnobs.KvF16.Value);
-            using CpuBackend cpu = new();
-            Assert.False(KvCaches.F16For(cpu), "an unset knob keeps backends without F16 caches on F32");
-            Assert.False(KvCaches.F16For(null));
-            Assert.False(KvCaches.F16Enabled, "unset must not force F16 onto audio decoders and other FixedKvCache users");
-            Assert.True(KvCaches.F16ForCudaPlacement);
-
-            KnobStore.Set(EngineKnobs.KvF16, false);
-            Assert.False(KvCaches.F16For(cpu));
-            Assert.False(KvCaches.F16Enabled);
-            Assert.False(KvCaches.F16ForCudaPlacement);
-
-            KnobStore.Set(EngineKnobs.KvF16, true);
-            Assert.True(KvCaches.F16For(cpu), "an explicit true is honored whatever the backend reports");
-            Assert.True(KvCaches.F16Enabled);
-        }
-        finally { KnobStore.Clear(EngineKnobs.KvF16); }
-    }
-
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void KvF16Default_IsOnForTextModelsOnCuda_AndOffWhenPinned()
+    public void TextKvF16Default_IsOnForCuda_AndOffWhenPinned()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new(0, PtxDir());
         try
         {
+            KnobStore.Clear(EngineKnobs.TextKvF16);
             KnobStore.Clear(EngineKnobs.KvF16);
             Assert.True(cuda.SupportsF16KvCache);
             Assert.True(KvCaches.F16For(cuda));
-            KnobStore.Set(EngineKnobs.KvF16, false);
+            Assert.False(KvCaches.F16Enabled, "the automatic text default must not force F16 onto audio decoders");
+            KnobStore.Set(EngineKnobs.TextKvF16, false);
             Assert.False(KvCaches.F16For(cuda), "the reference profile's pin must win over the CUDA default");
         }
-        finally { KnobStore.Clear(EngineKnobs.KvF16); }
+        finally { KnobStore.Clear(EngineKnobs.TextKvF16); KnobStore.Clear(EngineKnobs.KvF16); }
     }
 }
