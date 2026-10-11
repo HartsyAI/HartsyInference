@@ -9,7 +9,7 @@ public sealed partial class VulkanBackend
     /// backend (<see cref="Core.Backends.BackendCapabilities.QuantizedTypes"/>) and widens every other format to F32.</summary>
     internal static readonly IReadOnlySet<DType> QuantGemvTypes = new HashSet<DType> { DType.Q8_0, DType.Q4_K, DType.Q6_K };
 
-    /// <summary>Most activation rows one <c>gemv_quant</c> dispatch takes (the shader's <c>MAX_M</c>): decode and a short
+    /// <summary>Most activation rows one <c>gemv_quant</c> dispatch takes (a specialization constant of the shader, one pipeline per count): decode and a short
     /// speculative verify. Longer inputs dequantize the weight per call and run the GEMM.</summary>
     internal const int QuantGemvMaxRows = 8;
 
@@ -63,8 +63,8 @@ public sealed partial class VulkanBackend
         if (m < 1 || m > QuantGemvMaxRows)
             throw new ArgumentOutOfRangeException(nameof(m), $"gemv_quant takes 1..{QuantGemvMaxRows} activation rows; got {m}.");
 
-        // A lane per work unit up to 128, never below a subgroup; the shader's unit counts per block are 1, 4 and 16.
-        int unitsPerBlock = dtype == DType.Q8_0 ? 1 : dtype == DType.Q4_K ? 4 : 16;
+        // A lane per work unit up to 128, never below a subgroup; the shader cuts a Q8_0, Q4_K and Q6_K block into 8, 16 and 16 units.
+        int unitsPerBlock = dtype == DType.Q8_0 ? 8 : 16;
         long units = (long)k / dtype.BlockElementCount * unitsPerBlock;
         uint subgroup = Math.Max(1u, Vk.SubgroupSize);
         uint wg = subgroup;
@@ -74,12 +74,12 @@ public sealed partial class VulkanBackend
         {
             SpecConstant.UInt(0, wg),
             SpecConstant.Bool(1, bias != 0),
+            SpecConstant.UInt(2, (uint)m),
         });
-        Span<byte> raw = stackalloc byte[16];
+        Span<byte> raw = stackalloc byte[8];
         PushConstants pc = new(raw);
         pc.U32((uint)n);
         pc.U32((uint)k);
-        pc.U32((uint)m);
         // HAS_BIAS=false never reads binding 3; the output stands in so the layout stays four buffers.
         Span<ulong> bufs = stackalloc ulong[] { weight, x, output, bias != 0 ? bias : output };
         const uint MaxGroupsPerDim = 65535;
