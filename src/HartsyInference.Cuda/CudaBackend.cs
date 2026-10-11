@@ -2552,13 +2552,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (weight.DType.IsQuantized || weight.DType == DType.F8E4M3 || weight.DType == DType.BF16)
                 {
                     System.Threading.Interlocked.Increment(ref _castTransientUncachedPath);
-                    bool weightCached = GpuTransferHelper.IsWeightCached(weight);
-                    if (HartsyInference.Core.Logging.Logs.MinLevel <= HartsyInference.Core.Logging.LogLevel.Debug
-                        && _castWhyLogged.TryAdd((cacheWeightCast, CacheWeightCasts, hipUpcast, weightCached, weight.DType, gemmDtype, n, k), 0))
-                        HartsyInference.Core.Logging.Logs.Debug(
-                            $"[Cuda] cast-transient-why: cacheParam={cacheWeightCast} propCache={CacheWeightCasts} " +
-                            $"hip={hipUpcast} weightCached={weightCached} " +
-                            $"dtype={weight.DType} gemmDtype={gemmDtype} M={m} N={n} K={k}");
+                    if (HartsyInference.Core.Logging.Logs.MinLevel <= HartsyInference.Core.Logging.LogLevel.Debug)
+                    {
+                        bool weightCached = GpuTransferHelper.IsWeightCached(weight);
+                        if (_castWhyLogged.TryAdd((cacheWeightCast, CacheWeightCasts, hipUpcast, weightCached, weight.DType, gemmDtype, n, k), 0))
+                            HartsyInference.Core.Logging.Logs.Debug(
+                                $"[Cuda] cast-transient-why: cacheParam={cacheWeightCast} propCache={CacheWeightCasts} " +
+                                $"hip={hipUpcast} weightCached={weightCached} " +
+                                $"dtype={weight.DType} gemmDtype={gemmDtype} M={m} N={n} K={k}");
+                    }
                 }
                 weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, blockScales);
             }
