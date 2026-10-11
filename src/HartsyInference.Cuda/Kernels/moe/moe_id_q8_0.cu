@@ -6,9 +6,9 @@
 __device__ __forceinline__ long long moe_id_row_bytes(int K) { return (long long)(K / BLK_ELEMS) * BLK_BYTES; }
 
 __device__ __forceinline__ float moe_id_row_partial(const unsigned char* w, const signed char* xq, const float* xd,
-                                                    const float* xs, int K, int lane)
+                                                    const float* xs, int K, int warp, int warps, int lane)
 {
-    return q8_0_q8_1_row_partial(w, xq, xd, K / BLK_ELEMS, 0, 8, lane);   // symmetric format: no int-sum term
+    return q8_0_q8_1_row_partial(w, xq, xd, K / BLK_ELEMS, warp * 8, warps * 8, lane);   // symmetric format: no int-sum term
 }
 
 #include "moe_id_body.cuh"
