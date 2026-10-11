@@ -26,6 +26,51 @@ public sealed unsafe class GgufMoeExpertSplitTests
 
     private static float At(Tensor t, int row, int col) => ((float*)t.DataPointer)[row * (int)t.Shape[1] + col];
 
+    /// <summary>A stacked tensor that OWNS its buffer (a MoE GGUF dequantized to F32 for Vulkan or CPU) is dropped by the
+    /// split. The per-expert views must keep it alive: they once borrowed a raw pointer and read freed memory after a
+    /// collection, an AccessViolation on the first weight upload.</summary>
+    [Fact]
+    public void SplitStackedExperts_OwnedStackedTensor_ViewsSurviveCollection()
+    {
+        const int e = 4, inter = 2, hidden = 4;
+        TransformerConfig cfg = new()
+        {
+            HiddenSize = hidden, NumLayers = 1, NumHeads = 1, NumKvHeads = 1, HeadDim = hidden,
+            IntermediateSize = inter, VocabSize = 8, MaxPositionEmbeddings = 8,
+            Moe = new MoeConfig { NumExperts = e, NumExpertsPerTok = 1, MoeIntermediateSize = inter, Scoring = MoeScoring.Softmax },
+        };
+        Dictionary<string, Tensor> w = [];
+        SplitOwned(w, cfg);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        // Churn the allocator so a freed buffer would be reused and overwritten.
+        for (int i = 0; i < 64; i++)
+        {
+            Tensor churn = F2(64, 64);
+            Assert.NotEqual(0, (nint)churn.DataPointer);
+        }
+
+        for (int x = 0; x < e; x++)
+        {
+            Tensor gate = w[$"model.layers.0.mlp.experts.{x}.gate_proj.weight"];
+            for (int r = 0; r < inter; r++)
+                for (int c = 0; c < hidden; c++)
+                    Assert.Equal((x * inter + r) * 100f + c, At(gate, r, c));
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void SplitOwned(Dictionary<string, Tensor> w, TransformerConfig cfg)
+    {
+        MoeConfig moe = cfg.Moe!;
+        w["model.layers.0.mlp.gate_exps.weight"] = F2(moe.NumExperts * moe.MoeIntermediateSize, cfg.HiddenSize);
+        w["model.layers.0.mlp.up_exps.weight"] = F2(moe.NumExperts * moe.MoeIntermediateSize, cfg.HiddenSize);
+        w["model.layers.0.mlp.down_exps.weight"] = F2(moe.NumExperts * cfg.HiddenSize, moe.MoeIntermediateSize);
+        GgufLanguageModel.SplitStackedExperts(w, cfg);
+    }
+
     [Fact]
     public void SplitStackedExperts_FusedGateUpExps_SplitsGateThenUpPerExpert()
     {
