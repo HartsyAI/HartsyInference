@@ -16,7 +16,7 @@ public sealed partial class CudaBackend
     public bool FoldsDecodeResidual => EngineKnobs.DecodeResidualFold.Value;
 
     /// <inheritdoc />
-    public bool SupportsF16KvCache => true;
+    public bool SupportsF16KvCache => _kernels is { HasKvScatterF16: true, HasFa2Causal: true, HasDecodeGqa: true };
 
     /// <summary>Allocates the o-projection's Q8_1 sidecar for a single-row decode attention output when the combine kernel can emit it
     /// and the dp4a GEMV would consume it; otherwise returns the empty sidecar and the plain combine runs.</summary>
