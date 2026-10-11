@@ -66,7 +66,7 @@ public sealed record TextRequest
     /// <summary>Tool definitions offered to the model; null/empty disables tool calling.</summary>
     public IReadOnlyList<ToolDefinition>? Tools { get; init; }
 
-    /// <summary>Force the model to call this tool by name; null lets it choose. Not implemented yet: carried for API compatibility, no template or grammar forcing happens.</summary>
+    /// <summary>Force the model to call this tool by name; null lets it choose. Must name one of <see cref="Tools"/> (refused before any model work otherwise). The engine states the choice in the system prompt and restricts the call parser to that one tool; grammar forcing is not done, so a model that ignores the instruction can still answer in prose.</summary>
     public string? ForceToolId { get; init; }
 
     /// <summary>Enable graph-mode decode when supported; null uses the engine default.</summary>
