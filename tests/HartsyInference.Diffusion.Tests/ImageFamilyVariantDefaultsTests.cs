@@ -70,6 +70,18 @@ public sealed class ImageFamilyVariantDefaultsTests
         Assert.Equal((steps, cfg), (defaults.Steps, defaults.CfgScale));
     }
 
+    /// <summary>Only the text-to-image Turbo names LCM: the reference-edit path refuses any sampler selection, so a
+    /// default sampler on Edit Turbo would fail every edit request.</summary>
+    [Theory]
+    [InlineData("boogu_image_turbo_bf16.safetensors", "lcm")]
+    [InlineData("boogu_image_edit_turbo_bf16.safetensors", null)]
+    [InlineData("boogu_image_edit_fp8_scaled.safetensors", null)]
+    public void Boogu_OnlyTextToImageTurboDefaultsToLcm(string fileName, string? sampler)
+    {
+        ImageDefaults defaults = new BooguImageRecipe().DefaultsFor(Classify(BooguImageVariants.Catalog, fileName));
+        Assert.Equal(sampler, defaults.Sampler);
+    }
+
     private static ResolvedModelVariant Classify(ModelVariantCatalog catalog, string fileName) =>
         ModelVariantResolver.Classify(catalog, CheckpointProbe.Empty with { FileNames = [fileName] }, []);
 }

@@ -261,7 +261,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
         // A SamplerRegistry sampler supplies its own integrator, so the scheduler is only here for the sigma range —
         // pass null for the Euler base rather than the sampler's name, which the factory would (correctly) refuse.
-        IScheduler scheduler = SchedulerFactory.Create(SamplerRegistry.IsKnown(samplerName) ? null : samplerName);
+        bool registrySampler = SamplerRegistry.IsKnown(samplerName) && !SchedulerFactory.IsDedicated(samplerName);
+        IScheduler scheduler = SchedulerFactory.Create(registrySampler ? null : samplerName);
         scheduler.SetTimesteps(steps);
 
         // 4. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
@@ -346,7 +347,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // Non-obvious case worth spelling out: a bare `euler_ancestral` with, say, an inpaint mask has no schedule
         // suffix, so a schedule-only check passes it straight through to the reference loop and plain Euler. The
         // sampler half has to be checked too.
-        bool nonDefaultSampler = SamplerRegistry.IsKnown(samplerName) && samplerName.Length > 0
+        bool nonDefaultSampler = registrySampler && samplerName.Length > 0
             && !string.Equals(samplerName, "euler", StringComparison.Ordinal);
         if (!fusedLoop && (nonDefaultSampler || !string.IsNullOrEmpty(scheduleName)))
         {

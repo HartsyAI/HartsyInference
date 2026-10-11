@@ -47,8 +47,13 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <summary>Boogu's sampling settings: 25 steps at text-guidance 3.5, 1024x1024. The step count is the lifted loader's, and 3.5 sits in the 2-5 band the base model is documented to work in.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 25, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
-    /// <summary>Boogu Turbo's sampling settings: 4 distilled steps, guidance-free (CFG 1.0).</summary>
-    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+    /// <summary>Boogu Turbo's sampling settings: 4 distilled steps, guidance-free (CFG 1.0), LCM. Boogu's own shifted
+    /// linspace is already ComfyUI's <c>sgm_uniform</c> for this model, so no schedule is named.</summary>
+    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Sampler = "lcm", Width = 1024, Height = 1024 };
+
+    /// <summary>Boogu Edit Turbo's settings: <see cref="TurboDefaults"/> without the sampler, because the reference-edit
+    /// path refuses any sampler selection.</summary>
+    public static ImageDefaults EditTurboDefaults { get; } = TurboDefaults with { Sampler = null };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
@@ -57,7 +62,14 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     public ModelVariantCatalog? Variants => BooguImageVariants.Catalog;
 
     /// <inheritdoc/>
-    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) => BooguImageVariants.IsTurbo(variant) ? TurboDefaults : FamilyDefaults;
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant)
+    {
+        if (variant is not null && variant.Is(BooguImageVariants.EditTurbo))
+        {
+            return EditTurboDefaults;
+        }
+        return variant is not null && variant.Is(BooguImageVariants.Turbo) ? TurboDefaults : FamilyDefaults;
+    }
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
