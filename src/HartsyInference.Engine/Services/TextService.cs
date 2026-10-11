@@ -425,6 +425,7 @@ public sealed class TextService : ITextService, IDisposable
     private async Task<GenOutcome> RunAsync(ModelSpec spec, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
     {
         RequireValidRawTokenIds(request);
+        ValidateForcedTool(request);
         // The tenant comes from the caller's identity when the request names none, so per-tenant state is keyed the same way for every route.
         request = request with { TenantId = TenantContext.Resolve(request.TenantId) };
         long diagnosticId = _engine.StartDiagnostics();
@@ -626,7 +627,8 @@ public sealed class TextService : ITextService, IDisposable
             : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Template
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Template : slot.Model!.Template;
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
-        GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer);
+        bool injectToolPrompt = ShouldInjectToolPrompt(request, rawCompletion, template);
+        GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer, injectToolPrompt);
         long requestId = Interlocked.Increment(ref _requestCounter);
         bool structured = !rawCompletion && template is ChatTemplateEncoderAdapter;
         ITextStreamFilter? filter = _engine.CreateTextStreamFilter(new TextStreamFilterContext
@@ -638,12 +640,13 @@ public sealed class TextService : ITextService, IDisposable
             Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture ?? slot.TpCheckpoint?.Architecture,
             ModelPath = slot.LoadedPath,
             HasStructuredParser = structured,
+            ToolPromptInjected = injectToolPrompt,
             ForcedToolName = request.ForceToolId,
         });
         IReadOnlySet<int>? literalIds = ResolveLiteralIds(filter, tokenizer);
         // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
         CancellationTokenSource? stopSource = filter is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        GenerationRequestWiring run = new() { Request = genRequest, Generation = stopSource?.Token ?? cancel, StopSource = stopSource };
+        GenerationRequestWiring run = new() { Request = genRequest, Generation = stopSource?.Token ?? cancel, StopSource = stopSource, ForcedToolName = request.ForceToolId };
         if (diagnosticId != 0 || filter is not null)
         {
             run.Request = genRequest with { OnPrefillCompleted = count =>
@@ -705,6 +708,9 @@ public sealed class TextService : ITextService, IDisposable
         public int PromptTokens { get; set; }
         public int Count { get; set; }
 
+        /// <summary>The tool a request forced (<see cref="TextRequest.ForceToolId"/>); a completed call to any other tool is not reported.</summary>
+        public string? ForcedToolName { get; init; }
+
         /// <summary>The outcome of a completed request: the parser is flushed, then the filter's text and any tool call replace the raw decode when a filter is present.</summary>
         public GenOutcome Finish(GenerationResult result)
         {
@@ -715,6 +721,7 @@ public sealed class TextService : ITextService, IDisposable
             // Calls from the filter, else from a structured parser (DeepSeek-V4.1): either one ends the turn as a tool call.
             IReadOnlyList<NativeToolCall> calls = FilterSink?.ToolCalls ?? Array.Empty<NativeToolCall>();
             if (calls.Count == 0 && Translator is not null) calls = Translator.Calls;
+            if (ForcedToolName is { Length: > 0 } forced) calls = calls.Where(c => c.Name == forced).ToList();
             StopReason resolved = calls.Count > 0 ? StopReason.ToolCall : stop;
             if (FilterSink is null)
             {
@@ -1836,8 +1843,21 @@ public sealed class TextService : ITextService, IDisposable
             throw new HartsyInferenceException("RawTokenIds is empty: a pre-tokenized request needs at least one token id.");
     }
 
-    /// <summary>Builds the engine's <see cref="GenerationRequest"/> from the native request; raw-completion feeds the last user message's plain text through <see cref="GenerationRequest.RawTokenIds"/>.</summary>
-    internal static GenerationRequest BuildRequest(TextRequest request, bool rawCompletion, ILlmTokenizer tokenizer)
+    /// <summary>True when the request offers tools to a template that never refers to them: the engine then writes the Hermes tool prompt into the conversation itself, rather than offering tools the template would drop.</summary>
+    internal static bool ShouldInjectToolPrompt(TextRequest request, bool rawCompletion, IChatTemplate template)
+        => request.RawTokenIds is null && !rawCompletion && request.Tools is { Count: > 0 } && template.Source is { } source && !HermesToolPrompt.TemplateOffersTools(source);
+
+    /// <summary>Refuses a forced tool the request does not offer, before any model work.</summary>
+    /// <exception cref="HartsyInferenceException"><see cref="TextRequest.ForceToolId"/> names a tool that is not in <see cref="TextRequest.Tools"/>.</exception>
+    internal static void ValidateForcedTool(TextRequest request)
+    {
+        if (request.ForceToolId is not { Length: > 0 } forced) return;
+        if (request.Tools is null || !request.Tools.Any(t => t.Name == forced))
+            throw new HartsyInferenceException($"ForceToolId '{forced}' is not one of the offered tools.");
+    }
+
+    /// <summary>Builds the engine's <see cref="GenerationRequest"/> from the native request; raw-completion feeds the last user message's plain text through <see cref="GenerationRequest.RawTokenIds"/>. With <paramref name="injectToolPrompt"/> the tools go into the conversation (see <see cref="ShouldInjectToolPrompt"/>) and the template gets none.</summary>
+    internal static GenerationRequest BuildRequest(TextRequest request, bool rawCompletion, ILlmTokenizer tokenizer, bool injectToolPrompt = false)
     {
         SamplingOptions sampling = BuildSampling(request);
         GenerationRequest genRequest = new GenerationRequest
@@ -1857,12 +1877,32 @@ public sealed class TextService : ITextService, IDisposable
             string rawText = LastUserText(request);
             return genRequest with { RawTokenIds = tokenizer.EncodeOrdinary(rawText) };
         }
-        return genRequest with
+        if (injectToolPrompt && request.Tools is { Count: > 0 })
         {
-            Messages = [.. request.Messages.Select(ToChatMessage)],
-            SystemPrompt = request.SystemPrompt,
-            Tools = ToToolSpecs(request.Tools),
-        };
+            IReadOnlyList<ChatMessage> rewritten = HermesToolPrompt.RewriteForToolLessTemplate(
+                [.. request.Messages.Select(ToChatMessage)], ToToolSpecs(request.Tools)!, request.SystemPrompt, request.ForceToolId);
+            return genRequest with { Messages = [.. rewritten], SystemPrompt = null, Tools = null };
+        }
+        List<ChatMessage> messages = [.. request.Messages.Select(ToChatMessage)];
+        string? systemPrompt = request.SystemPrompt;
+        if (request.Messages.Count > 0 && request.Messages[0].Role == TextRole.System)
+        {
+            // The directive joins the conversation's own system turn instead of starting a second one.
+            messages[0] = messages[0] with { Content = WithForceDirective(messages[0].Content, request.ForceToolId) ?? messages[0].Content };
+        }
+        else
+        {
+            systemPrompt = WithForceDirective(systemPrompt, request.ForceToolId);
+        }
+        return genRequest with { Messages = messages, SystemPrompt = systemPrompt, Tools = ToToolSpecs(request.Tools) };
+    }
+
+    /// <summary>The system prompt with the force directive appended when a tool is forced; unchanged otherwise.</summary>
+    private static string? WithForceDirective(string? systemPrompt, string? forcedTool)
+    {
+        if (forcedTool is not { Length: > 0 }) return systemPrompt;
+        string directive = HermesToolPrompt.ForceDirective(forcedTool);
+        return string.IsNullOrEmpty(systemPrompt) ? directive : systemPrompt + "\n\n" + directive;
     }
 
     private static ChatMessage ToChatMessage(TextMessage m) => new(RoleName(m.Role), m.Content ?? "")
