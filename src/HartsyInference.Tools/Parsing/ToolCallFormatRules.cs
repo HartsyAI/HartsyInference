@@ -17,4 +17,23 @@ public sealed record ToolCallFormatRules
 
     /// <summary>JSON keys that may carry the arguments object (<c>arguments</c>, <c>parameters</c>), first match wins.</summary>
     public required IReadOnlyList<string> ArgumentKeys { get; init; }
+
+    /// <summary>Further control-token literals the format's span needs as text (for example Gemma's string delimiter), beyond its markers.</summary>
+    public IReadOnlyList<string> ExtraLiterals { get; init; } = [];
+
+    /// <summary>The control-token literals a filter for this format needs to see as text: its non-payload opening markers, its close marker and <see cref="ExtraLiterals"/>. The payload-only forms are plain text already.</summary>
+    public IReadOnlyList<string> MarkerLiterals
+    {
+        get
+        {
+            List<string> literals = [];
+            foreach (ToolCallMarker marker in Markers)
+            {
+                if (!marker.TextIsPayload) literals.Add(marker.Text);
+            }
+            if (CloseMarker is not null) literals.Add(CloseMarker);
+            literals.AddRange(ExtraLiterals);
+            return literals;
+        }
+    }
 }

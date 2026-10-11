@@ -50,6 +50,7 @@ public static partial class ToolCallFormats
         ],
         CloseMarker = "<tool_call|>",
         ArgumentKeys = HermesArgumentKeys,
+        ExtraLiterals = ["<|\"|>"],
     };
 
     private static readonly ToolCallFormatRules MistralRules = new()

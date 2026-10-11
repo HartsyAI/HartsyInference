@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.337
+
+- **Changed: tool-call format resolves per request.** `ToolCalling.Install` with no format now picks the parser from the model's own chat template first, then its architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter. An explicit format still applies to every request.
+- **Changed: the control-token markers reach the parser.** A filter declares its markers (`<tool_call>`, `</tool_call>`, and for Gemma `<|tool_call>`, `<tool_call|>` and the string delimiter `<|"|>`), and the engine decodes them as text. Qwen3-0.6B's real completion is captured as a fixture and parses to one `hang_up` call at every tested split point.
+- **Added: a forced tool restricts the bare call forms** to that one name and stops after its call.
+- A stray close tag outside a call now streams as text, where it used to be dropped.
+
 ## alpha.336
 
 - **Fixed: message content cannot open a turn or emit a control token.** A chat template renders control literals such as `<|im_start|>` and `<tool_call>` into the prompt, so a user message, a tool result or a model reply containing one used to become a real control token. Those literals in content now encode as plain text. The template's own literals are unchanged, and clean conversations encode to the same ids as before.
