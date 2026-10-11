@@ -210,7 +210,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             SupportsF32 = true,
             SupportsF16 = Vk.SupportsFp16 && Vk.Storage16Bit,
             SupportsBF16 = false,
-            SupportsQuantized = false,
+            // GGUF blocks the fused GEMV reads stay compressed on the device; the loader widens every other format.
+            SupportsQuantized = true,
+            QuantizedTypes = QuantGemvTypes,
             SupportsConv2D = true,
             SupportsSdpa = true,
             SupportsFft = false,
@@ -772,7 +774,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
         if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
         long elements = src.ElementCount;
-        bool cacheThis = _xfer.ShouldCacheCast(src) && CastFitsCache(elements * want.SizeInBytes);
+        // A weight the fused GEMV reads stays compressed: decode never needs its widened copy, so the prefill GEMM
+        // dequantizes it per call rather than caching an F16 (or F32) copy that would cost two to four times its VRAM.
+        bool cacheThis = _xfer.ShouldCacheCast(src) && !QuantGemvTypes.Contains(src.DType)
+            && CastFitsCache(elements * want.SizeInBytes);
 
         ulong outBytes = (ulong)(elements * want.SizeInBytes);
         VulkanBuffer dst = _xfer.AllocateDevice(outBytes);
@@ -940,7 +945,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         using (OpScope _ = EnterOp())
         {
-            if (!TryDispatchFp8Linear(output, input, weight, bias) && !TryDispatchInt8Linear(output, input, weight, bias))
+            if (!TryDispatchQuantGemv(output, input, weight, bias)
+                && !TryDispatchFp8Linear(output, input, weight, bias) && !TryDispatchInt8Linear(output, input, weight, bias))
             {
                 // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
                 DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
@@ -951,6 +957,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         {
             LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
         }
+    }
+
+    /// <summary>A Linear on a GGUF-quantized weight: the fused GEMV at a decode-sized M, otherwise the per-call dequantize
+    /// and GEMM <see cref="Linear"/> takes. An F16 activation is accepted (the large-vocabulary head passes one).</summary>
+    public void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
+    {
+        using OpScope _ = EnterOp();
+        if (!quantWeight.DType.IsQuantized)
+            throw new ArgumentException($"QuantizedMatMul expects a GGUF-quantized weight; got {quantWeight.DType.Name}.", nameof(quantWeight));
+        if (!TryDispatchQuantGemv(output, input, quantWeight, bias))
+            DispatchMatmul(output, input, quantWeight, transposeA: false, transposeB: true, bias: bias);
     }
 
     /// <summary>The opt-in INT8 Linear: the activation is quantized per row on the device each call, the weight once (cached
