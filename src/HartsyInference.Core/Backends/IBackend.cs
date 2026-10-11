@@ -42,6 +42,12 @@ public partial interface IBackend : IDisposable
     /// each new backend is invisible to the policy until someone adds another arm to the chain.</remarks>
     bool CacheWeightCasts { get => true; set { } }
 
+    /// <summary>Whether the widened (F16 or F32) copy of a GGUF-quantized weight is cached like any other weight cast.
+    /// The text path turns it off on a backend whose decode GEMV reads the packed blocks (Vulkan): there the copy only
+    /// serves prefill, and keeping it resident would cost two to four times the packed weight. A diffusion model that
+    /// runs every step at a large M keeps the default and dequantizes once. No-op on a backend that does not cache casts.</summary>
+    bool CacheQuantizedWeightCasts { get => true; set { } }
+
     /// <summary>Whether this backend's GEMM consumes fp8 operands natively instead of widening them first. Recipes
     /// read it to decide whether an fp8 checkpoint can keep its weights packed.</summary>
     /// <remarks>A property rather than a <see cref="BackendCapabilities"/> field because the backends that have such
@@ -2099,6 +2105,10 @@ public partial interface IBackend : IDisposable
     /// (<see cref="AddRmsNormEmitQ8"/> / <see cref="MoeCombineAddRmsNormEmitQ8"/>) because this backend's fused kernels are
     /// bit-identical to its separate ones. False keeps the separate launches.</summary>
     bool FoldsDecodeResidual => false;
+
+    /// <summary>True when this backend can store a transformer KV cache as F16 and run attention and graph decode over it, which is what lets
+    /// <c>vram.kvF16</c> default to on for text models. CUDA only today.</summary>
+    bool SupportsF16KvCache => false;
 
     /// <summary>Partial-fusion <see cref="QkvNormRopeScatterDecodeStep"/> variant: q/k concatenated, v separate (mixed-dtype v).</summary>
     void QkNormRopeScatterVDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor v,

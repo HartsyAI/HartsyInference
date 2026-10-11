@@ -576,7 +576,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // Throws KvPoolExhaustedException if the pool can't fit the prompt (PagedKvCache path only) —
         // propagates to the caller's SubmitAsync task as a fault, the reject policy PagedKvPool documents.
         // A graph-eligible sequence gets its own FixedKvCache, whose dtype follows vram.kvF16 exactly as
-        // TextGenerationPipeline's does (KvCaches.F16Enabled). Graph decode writes an F16 cache through the
+        // TextGenerationPipeline's does (KvCaches.F16For: F16 by default on CUDA, the knob when set). Graph decode writes an F16 cache through the
         // F16 scatter kernels; if the sequence is later joined and retires its session, the eager rounds keep
         // reading the same cache, which KvCacheAppend/FlashAttention handle in either dtype.
         ISequenceState cache = graphEligible

@@ -92,7 +92,7 @@ public sealed class ToolLoopV2Tests
         ToolRegistry tools = new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("{\"now\":\"14:05\"}"));
         ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), tools);
         await Collect(run);
-        Assert.Equal([TextRole.User, TextRole.Assistant, TextRole.Tool], run.Conversation.Select(m => m.Role));
+        Assert.Equal([TextRole.User, TextRole.Assistant, TextRole.Tool, TextRole.Assistant], run.Conversation.Select(m => m.Role));
         Assert.Equal("c1", run.Conversation[2].ToolCallId);
         Assert.Equal("c1", run.ToolResults.Single().Call.Id);
     }
@@ -157,5 +157,99 @@ public sealed class ToolLoopV2Tests
         ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry());
         await Collect(run);
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await Collect(run));
+    }
+
+    [Fact]
+    public async Task AResultThatCorrectsItsDeltasIsAuthoritative()
+    {
+        Rounds rounds = new([Text("It is 14:0"), new TextChunk { Kind = TextChunkKind.Result, Text = "It is 14:05." }, Stop(StopReason.Stop)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry());
+        List<TextChunk> chunks = await Collect(run);
+        Assert.Equal("It is 14:05.", run.VisibleText);
+        Assert.Equal("It is 14:05.", Assert.Single(chunks, c => c.Kind == TextChunkKind.Result).Text);
+        Assert.Equal("It is 14:05.", run.Conversation[^1].Content);
+    }
+
+    [Fact]
+    public async Task TheFinalAnswerIsInTheConversation()
+    {
+        Rounds rounds = new([Call("c1", "get_time"), Stop(StopReason.ToolCall)], [Text("It is 14:05."), Stop(StopReason.Stop)]);
+        ToolRegistry tools = new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("14:05"));
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), tools);
+        await Collect(run);
+        TextMessage last = run.Conversation[^1];
+        Assert.Equal(TextRole.Assistant, last.Role);
+        Assert.Equal("It is 14:05.", last.Content);
+    }
+
+    [Fact]
+    public async Task TheRoundLimitKeepsTheLastTurnsTextWithoutItsCalls()
+    {
+        Rounds rounds = new([Text("Let me check."), Call("c1", "get_time"), Stop(StopReason.ToolCall)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("x")),
+            new ToolLoopOptions { MaxRounds = 1 });
+        await Collect(run);
+        TextMessage last = run.Conversation[^1];
+        Assert.Equal(TextRole.Assistant, last.Role);
+        Assert.Equal("Let me check.", last.Content);
+        Assert.True(last.ToolCalls is null || last.ToolCalls.Count == 0);
+    }
+
+    [Fact]
+    public async Task AThrowingDispatcherBecomesTheCallsErrorResult()
+    {
+        Rounds rounds = new([Call("c1", "get_time"), Stop(StopReason.ToolCall)], [Text("sorry"), Stop(StopReason.Stop)]);
+        ToolRegistry tools = new ToolRegistry().Add("get_time", "time", "{}", (_, _) => throw new InvalidOperationException("clock down"));
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), tools);
+        await Collect(run);
+        Assert.Contains("clock down", run.ToolResults.Single().Result);
+        Assert.Contains(run.Conversation, m => m.Role == TextRole.Tool && m.ToolCallId == "c1");
+        Assert.Equal(StopReason.Stop, run.Stop);
+    }
+
+    [Fact]
+    public async Task AnIndexlessCallKeepsTheIdItsDeltaSettled()
+    {
+        TextChunk begin = new() { Kind = TextChunkKind.ToolCallDelta, ToolCall = new NativeToolCall { Id = "c1", Name = "get_time", Arguments = "" } };
+        Rounds rounds = new([begin, Call("c1", "get_time"), Stop(StopReason.ToolCall)], [Text("ok"), Stop(StopReason.Stop)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("x")));
+        await Collect(run);
+        Assert.Equal("c1", run.ToolResults.Single().Call.Id);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("c1")]
+    public async Task AnIndexlessCallKeepsItsDeltasRepairedId(string id)
+    {
+        // "" has no id at all; "c1" was already used in round one, so round two's delta is repaired.
+        TextChunk begin = new() { Kind = TextChunkKind.ToolCallDelta, ToolCall = new NativeToolCall { Id = id, Name = "get_time", Arguments = "" } };
+        Rounds rounds = new([Call("c1", "get_time"), Stop(StopReason.ToolCall)], [begin, Call(id, "get_time"), Stop(StopReason.ToolCall)], [Text("ok"), Stop(StopReason.Stop)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("x")));
+        List<TextChunk> chunks = await Collect(run);
+        string deltaId = chunks.Single(c => c.Kind == TextChunkKind.ToolCallDelta).ToolCall!.Id;
+        Assert.NotEqual("c1", deltaId);
+        Assert.False(string.IsNullOrEmpty(deltaId));
+        Assert.Equal(deltaId, run.ToolResults[1].Call.Id);
+    }
+
+    [Fact]
+    public async Task ARepairedIdCoversTheCallsDeltasToo()
+    {
+        // Both calls arrive without an id; the begin delta, the completed call and the tool result must share each repaired id.
+        TextChunk Begin(int index) => new() { Kind = TextChunkKind.ToolCallDelta, ToolCallIndex = index, ToolCall = new NativeToolCall { Id = "", Name = "get_time", Arguments = "" } };
+        TextChunk Done(int index) => new() { Kind = TextChunkKind.NativeToolCall, ToolCallIndex = index, ToolCall = new NativeToolCall { Id = "", Name = "get_time", Arguments = "{}" } };
+        Rounds rounds = new([Begin(0), Done(0), Begin(1), Done(1), Stop(StopReason.ToolCall)], [Text("ok"), Stop(StopReason.Stop)]);
+        ToolRegistry tools = new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("14:05"));
+        List<TextChunk> chunks = await Collect(ToolLoop.Create(rounds.Stream, Request(), tools));
+        for (int index = 0; index < 2; index++)
+        {
+            string begin = chunks.Single(c => c.Kind == TextChunkKind.ToolCallDelta && c.ToolCallIndex == index).ToolCall!.Id;
+            string done = chunks.Single(c => c.Kind == TextChunkKind.NativeToolCall && c.ToolCallIndex == index).ToolCall!.Id;
+            Assert.False(string.IsNullOrEmpty(begin));
+            Assert.Equal(begin, done);
+        }
+        string[] resultIds = [.. chunks.Where(c => c.Kind == TextChunkKind.ToolResult).Select(c => c.ToolCall!.Id)];
+        Assert.Equal(2, resultIds.Distinct().Count());
     }
 }

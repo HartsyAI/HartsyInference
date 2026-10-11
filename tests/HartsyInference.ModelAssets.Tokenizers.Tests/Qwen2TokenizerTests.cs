@@ -69,4 +69,16 @@ public sealed class Qwen2TokenizerTests
         Assert.True(ids.Count >= 2);
         Assert.All(ids, t => Assert.InRange(t, 0, Qwen2Tokenizer.VocabSize - 1));
     }
+
+    [Fact]
+    public void TokenBytes_ReportsOrdinaryAndControlTokens()
+    {
+        // The incremental detokenizer needs bytes for every id, including a requested control literal.
+        using Qwen2Tokenizer tok = new();
+        int[] ids = tok.EncodeOrdinary("hello world");
+        byte[] joined = [.. ids.SelectMany(id => tok.TokenBytes(id, includeSpecial: false)!)];
+        Assert.Equal(tok.Decode(ids), System.Text.Encoding.UTF8.GetString(joined));
+        Assert.Equal("<|im_end|>", System.Text.Encoding.UTF8.GetString(tok.TokenBytes(Qwen2Tokenizer.ImEndId, includeSpecial: true)!));
+        Assert.Empty(tok.TokenBytes(Qwen2Tokenizer.ImEndId, includeSpecial: false)!);
+    }
 }

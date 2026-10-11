@@ -24,49 +24,55 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
-## alpha.348
+## alpha.347
 
 - **Added: a real-weight tool-calling matrix** (`ToolLoopRealWeightTheoryTests`). Each checkpoint runs one tool turn through `ToolLoop` and must emit a parsed call in the expected dialect, with the tool prompt injected only where its template has no tools slot, then take a second round. CUDA-only and slow checkpoints skip on CPU with a reason.
 - **Added: a plain-chat guard** (`PlainRequestsUnchangedTests`): a request with no tools generates the same text with the tool filter installed as without it.
 - Real-weight status on CPU: Qwen3-0.6B, Gemma-3-1B and Llama-3.2-1B pass. Qwen2.5-0.5B passes its `hang_up` probe but not the `get_time` case (the model ends the turn after `<tool_call>`). Qwen3.5-0.8B, Phi-3.5, Mistral-7B and GLM-4-9B run on CUDA only here.
 - `docs/Research/TOOL_CALLING.md` describes the current design, the real-weight table and the open items.
 
-## alpha.347
+## alpha.346
 
 - **Added: `TextChunkKind.ToolResult`.** A dispatched tool call streams its result as this chunk, with the call and its position in the run. It replaces the `tool_result:` status text. **Breaking:** `ToolLoop.ToolResultPrefix` and `ToolLoop.ToolResultPhase` are removed; read `TextChunkKind.ToolResult` instead.
 - **Added: `ToolLoop.Create`, `ToolLoopRun` and `IToolDispatcher`.** A host runs the loop over the engine or over any model stream, supplies its own dispatcher (`ToolRegistry` implements it), and reads the final `Conversation`, `ToolResults`, `Rounds`, `Stop` and `VisibleText`. The run is single-use.
 - **Added: `ToolLoopOptions`.** `OnBeforeToolCall` allows or denies each call; a denial is not dispatched, and its result is fed back to the model. `IdPrefix` names the ids the loop gives a call that arrives without one or with one already used.
 - **Changed: calls dispatch on any non-error stop.** A call is run even when the model's stop reason is plain `Stop`; an error or cancellation still ends the run.
 - **Changed: `ForceToolId` applies to round one only**, so a forced call is not repeated on later rounds.
-
-## alpha.346
-
+- The loop's final `Conversation` ends with the model's final answer; a round's `Result` text replaces its deltas when it differs; a repaired call id also covers that call's streamed deltas.
 - **Added: tools for templates that never mention them.** A chat template with no `tools` slot used to drop the tool definitions silently. The engine now writes the Hermes tool prompt into the conversation (the `# Tools` block, the calls and the results) and sends the template no tools. Templates that do render tools are unchanged.
 - **Added: `ForceToolId` is enforced.** A forced tool must be one of the offered tools; anything else is refused before any model work. The system prompt states the forced tool, and the call parser accepts only that tool, stopping after its call. Grammar forcing is not done, so a model can still answer in prose.
 - **Changed: the ChatML fallback's tools block lives in `HermesToolPrompt`.** The bytes are unchanged; a test checks the fallback against the shared helper.
 - Real-weight status: Gemma-3-1B (no tools in its template) takes the injected prompt and emits a parsed `hang_up` call that stops as a tool call. Its arguments came back as the schema object rather than `{}`, a small-model quality issue the parser does not fix.
-
-## alpha.345
-
 - **Added: three markup tool-call dialects.** `QwenXml` (Qwen3.5 and Qwen3-Coder: `<tool_call><function=…><parameter=…>`), `GlmXml` (GLM-4.5: `<arg_key>`/`<arg_value>` pairs) and `DeepSeekR1` (`<｜tool▁calls▁begin｜>` fenced-JSON blocks). The chat template picks the dialect; markup spans complete at their closing marker and their values are typed by the offered tool's schema.
 - **Added: Hermes reads a name on one line and its JSON on the next** (GLM-4-0414's layout), for names the request offers.
 - **Changed: DeepSeek detection** uses the R1 markers and names, not every DeepSeek name, so DeepSeek-V3 keeps the permissive default.
 - Real-weight status: the Qwen3.5-0.8B live run is not verified here, because its Q5_K dense weights have no CPU matmul path (a separate engine gap). GLM-4.5 and DeepSeek-R1 weights are not on this machine; their dialects are covered by unit tests against the documented formats.
 
-## alpha.344
+## alpha.345
 
 - **Changed: tool-call format resolves per request.** `ToolCalling.Install` with no format now picks the parser from the model's own chat template first, then its architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter. An explicit format still applies to every request.
 - **Changed: the control-token markers reach the parser.** A filter declares its markers (`<tool_call>`, `</tool_call>`, and for Gemma `<|tool_call>`, `<tool_call|>` and the string delimiter `<|"|>`), and the engine decodes them as text. Qwen3-0.6B's real completion is captured as a fixture and parses to one `hang_up` call at every tested split point.
 - **Added: a forced tool restricts the bare call forms** to that one name and stops after its call.
 - A stray close tag outside a call now streams as text, where it used to be dropped.
+- **Fixed: message content cannot open a turn or emit a control token.** A chat template renders control literals such as `<|im_start|>` and `<tool_call>` into the prompt, so a user message, a tool result or a model reply containing one used to become a real control token. Those literals in content now encode as plain text. The template's own literals are unchanged, and clean conversations encode to the same ids as before.
+- **Changed: `<think>` and `</think>` stream as text.** They are control tokens in Qwen3 GGUFs, so streamed replies dropped the tags while keeping the reasoning text. They now stream as written, and a reasoning model's history keeps its own reasoning split.
+- **Added: `ILlmTokenizer.SpecialLiterals`.** The control literals a tokenizer maps to ids. The GGUF (BPE, SentencePiece and RWKV) tokenizers and the Qwen2 tokenizer report them; other tokenizers report none, so their content is not escaped. Tool definitions (names, descriptions, schema keys and values) are escaped like message content.
+- **Fixed: RWKV ordinary encoding never emits a control id**, so escaped content cannot turn back into one.
+- **Added: `Qwen2Tokenizer.TokenBytes`**, so a filter that asks for a Qwen2 control literal streams it instead of throwing.
+- **Fixed: a streamed request's final text keeps the special literals its chunks showed** (the reasoning tags), so it equals the concatenated chunks.
+- **Added: the `safe` template filter** (identity). Qwen3.5's tool-call replay uses it, so its second and later rounds no longer fall back to ChatML.
+- **Added: the GLM `observation` role.** A GLM-4-0414 template now gets tool results under the `observation` role it expects instead of losing them. The role is chosen from the parsed template: only an executable comparison of the role to `observation` counts, not a comment or string, and a template that also compares it to `tool` keeps `tool`.
+
+## alpha.344
+
+- **Changed: text models keep their KV cache in F16 on CUDA by default.** The new `vram.textKvF16` setting is automatic when unset: text LLMs on a CUDA device store keys and values as F16, which halves the cache and the bytes every decode step reads. On an RTX 3060 (12 GB) decode is 9% faster at 4K tokens of context and 16% at 8K (Mistral-7B Q4_K_M), and 19% at 8K and 20% at 16K (Qwen3-4B Q4_K_M); at short context there is no difference. On the A40 it is what puts Qwen3-30B-A3B and Mixtral decode at 0.96-0.98x of llama.cpp (0.91-0.94x with an F32 cache), and llama.cpp stores F16 by default. Audio decoders, other backends (CPU, Vulkan), the SSM and hybrid models that keep their own caches, and the paged KV pool of the opt-in continuous-batching scheduler (`vram.continuousBatching`, off by default) stay on F32. `vram.textKvF16=false` keeps F32 for text models (the `reference` profile pins it) and `true` asks for F16 wherever the backend supports it; `vram.kvF16` keeps its meaning (force F16 for every model type) and its default.
+  - Outputs are not token-identical to an F32 cache. Of 18 models compared greedily on the 3060 (dense, MoE, SSM and hybrid), Mamba, Qwen3.5, GLM-4, GPT-2 and Mistral-7B are byte-identical, and the rest take a different continuation after 14-90% of the text; none produced NaN or garbage. The earliest divergence is StarCoder2-3B, a base code model: on one prose prompt its F16 run fell into a loop of empty comment lines where the F32 run answered, while on six code prompts the two matched on three and diverged later on the others with similar repetition. Set `vram.textKvF16=false` where exact reproducibility against an earlier build matters.
+  - Every write into an F16 cache now saturates at the F16 maximum (a NaN stays a NaN) instead of rounding to infinity: the eager append, the graph-decode scatter kernels, the fused QK-norm scatter, and the FA2 prefill tile packing. One extreme key or value can no longer poison the softmax of every later token.
+  - Placement planning sizes the cache as F16 on CUDA, so a model that needs the smaller cache is judged to fit.
 
 ## alpha.343
 
-- **Fixed: message content cannot open a turn or emit a control token.** A chat template renders control literals such as `<|im_start|>` and `<tool_call>` into the prompt, so a user message, a tool result or a model reply containing one used to become a real control token. Those literals in content now encode as plain text. The template's own literals are unchanged, and clean conversations encode to the same ids as before.
-- **Changed: `<think>` and `</think>` stream as text.** They are control tokens in Qwen3 GGUFs, so streamed replies dropped the tags while keeping the reasoning text. They now stream as written, and a reasoning model's history keeps its own reasoning split.
-- **Added: `ILlmTokenizer.SpecialLiterals`.** The control literals a tokenizer maps to ids. The GGUF tokenizer and the Qwen2 tokenizer report them; other tokenizers report none, so their content is not escaped.
-- **Added: the `safe` template filter** (identity). Qwen3.5's tool-call replay uses it, so its second and later rounds no longer fall back to ChatML.
-- **Added: the GLM `observation` role.** A GLM-4-0414 template now gets tool results under the `observation` role it expects instead of losing them.
+- **Changed: Vulkan keeps GGUF weights quantized and decodes with a fused dequantizing GEMV.** New `gemv_quant` compute shaders read Q8_0, Q4_0, Q5_0, Q4_K, Q5_K and Q6_K blocks directly for a Linear of up to 8 activation rows (plain float math; the integer dot-product variant is a follow-up). `VulkanBackend` now reports `SupportsQuantized` with the new `BackendCapabilities.QuantizedTypes` naming those six formats, so the GGUF loader keeps them packed on Vulkan and widens every other format to F32 as before. A longer input (prefill) dequantizes the weight to F16; the text path makes that copy per call through the new `IBackend.CacheQuantizedWeightCasts`, so it never sits resident beside the packed weight, while other callers (a GGUF diffusion model) keep caching it. Vulkan also implements `QuantizedMatMul`. LTX-2 now keeps NVFP4 packed only where the backend lists `F4E2M1`, which leaves CUDA unchanged and Vulkan unpacking it as before. RTX 3060, greedy, 128 tokens, median of 5: Llama-3.2-1B Q8_0 goes from 15.3 to 118.7 tok/s and 7.3 to 2.2 GB of VRAM; Qwen2.5-0.5B Q4_K_M from 27.0 to 98.8 tok/s; granite-3.0-1b-a400m (MoE) from 8.0 to 23.2 tok/s; Qwen3-4B Q4_K_M (49 tok/s) and OLMoE-1B-7B Q4_K_M (27 tok/s) now fit a 12 GB card. Text is unchanged on Vulkan and matches the CPU backend for Llama, Qwen2.5 and granite. Measurements and what remains are in `docs/VULKAN_MOE_PLAN.md`.
 
 ## alpha.342
 

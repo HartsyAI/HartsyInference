@@ -117,6 +117,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.HeartcodecScalarChunk, (int?)0)
         // Keeps the single-sequence decode KV cache at F32; F16 storage rounds every cached key and value.
         .With(EngineKnobs.KvF16, false)
+        // Text models default to an F16 cache on CUDA; the reference runs keep F32.
+        .With(EngineKnobs.TextKvF16, (bool?)false)
         // false never forces the online-softmax tiled path; note the engine still auto-tiles when scores exceed half of free VRAM.
         .With(EngineKnobs.SdpaForceTiled, false)
         // Keeps the full-resolution direct VAE decode; =0 forces always-tiled decoding with tent-blended overlaps.

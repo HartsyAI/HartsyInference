@@ -20,11 +20,12 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 | Image | SDXL | runs | 768², 4 steps, batch=2 CFG. Refused outright until alpha.86 — its fused loop runs one batch=2 UNet forward per step, and `Conv2D` rejected any batch above 1 |
 | Image | Krea2 Turbo fp8 | runs | 1024², 4 steps |
 | Image | Flux / Qwen-Image / Z-Image | untested | no weights in the local model tree |
-| LLM | Llama-3.2-1B Q8_0 | runs | |
-| LLM | Qwen3-4B Q4_K_M | runs | coherent output |
-| LLM | gpt2-medium Q4_K_M | runs | crashed until the fused-QKV split viewed freed memory (the GGUF is dequantized to F32 for Vulkan, so the split source owned its buffer); the same cause crashed every MoE GGUF. See [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md) |
-| LLM | granite-3.0-1b-a400m Q4_K_M (MoE) | runs | same text as CUDA over 128 greedy tokens; host-routed experts, about 18x slower than CUDA |
-| LLM | OLMoE-1B-7B Q4_K_M (MoE) | **crashes** | out of device memory on a 12 GB card: Vulkan dequantizes the 4.2 GB file to about 27 GB of F32 |
+| LLM | Llama-3.2-1B Q8_0 | runs | weights stay Q8_0 on the device (fused GEMV); same text as the CPU backend over 128 greedy tokens |
+| LLM | Qwen3-4B Q4_K_M | runs | fits a 12 GB card now that the weights stay packed (4.0 GB in use); same text as CUDA over 128 greedy tokens |
+| LLM | gpt2-medium Q4_K_M | runs | crashed until the fused-QKV split stopped viewing freed memory (the split source was a dequantized F32 copy; the same cause crashed every MoE GGUF); same text as CUDA over 128 greedy tokens. See [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md) |
+| LLM | granite-3.0-1b-a400m Q4_K_M (MoE) | runs | same text as the CPU backend over 128 greedy tokens; host-routed experts, about 6x slower than CUDA |
+| LLM | OLMoE-1B-7B Q4_K_M (MoE) | runs | 4.3 GB in use with the weights packed (it ran out of device memory while they were widened to F32); matches CUDA for about 100 words; host-routed experts |
+| LLM | Qwen2.5-0.5B Q4_K_M | runs | same text as the CPU backend over 128 greedy tokens |
 | Video | Wan 2.2 5B | incomplete | text-encoder weights not present locally |
 | Video | LTX-2 | untested | no weights in the local model tree |
 | Vision | RT-DETR | runs | detect over a real photo |

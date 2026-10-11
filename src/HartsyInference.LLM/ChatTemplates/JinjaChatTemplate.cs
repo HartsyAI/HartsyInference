@@ -25,9 +25,9 @@ public sealed class JinjaChatTemplate : IChatTemplate
         _engine = new JinjaEngine(chatTemplate);
         Source = chatTemplate;
         // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
-        // Only a template that branches on the observation role (not one that merely mentions the word) is remapped, and a template
-        // that also branches on "tool" keeps the tool role.
-        _toolRole = ObservationRoleBranchPattern.IsMatch(chatTemplate) && !ToolRoleBranchPattern.IsMatch(chatTemplate) ? "observation" : "tool";
+        // Only a template whose parsed expressions compare the role to "observation" is remapped (a comment, text or string literal
+        // naming it is not an expression), and a template that also compares the role to "tool" keeps the tool role.
+        _toolRole = _engine.ComparesRoleTo("observation") && !_engine.ComparesRoleTo("tool") ? "observation" : "tool";
     }
 
     /// <inheritdoc/>
@@ -88,7 +88,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
             ["bos_token"] = tokenizer.BosToken ?? string.Empty,
             ["eos_token"] = tokenizer.EosToken ?? string.Empty,
             // Null rather than an empty list when nothing is offered: templates branch on `tools is not none`.
-            ["tools"] = ToolsValue(tools),
+            ["tools"] = ToolsValue(tools, tokenizer.SpecialLiterals),
             ["documents"] = null,
         };
         if (enableThinking.HasValue)
@@ -114,6 +114,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
                     ["function"] = new Dictionary<string, object?>
                     {
                         ["name"] = SpecialLiteralEscaper.Escape(call.Name, literals),
+                        // Escaped before parsing: the swapped character is valid inside a JSON string, so keys and values are both covered.
                         ["arguments"] = ArgumentsValue(SpecialLiteralEscaper.Escape(call.ArgumentsJson, literals)),
                     },
                 });
@@ -129,18 +130,33 @@ public sealed class JinjaChatTemplate : IChatTemplate
     /// <summary>The role a tool result carries in a conversation (see <see cref="ChatMessage.Role"/>).</summary>
     private const string ToolRoleName = "tool";
 
-    /// <summary>A template branch that compares the message role to "observation" (not a bare mention of the word).</summary>
-    private static readonly Regex ObservationRoleBranchPattern = new(@"role\s*==\s*['""]observation['""]", RegexOptions.Compiled);
-
-    /// <summary>A template branch that compares the message role to "tool".</summary>
-    private static readonly Regex ToolRoleBranchPattern = new(@"role\s*==\s*['""]tool['""]", RegexOptions.Compiled);
-
-    private static List<object?>? ToolsValue(IReadOnlyList<ToolSpec>? tools)
+    /// <summary>The parsed tool definitions, with every string in them (names, descriptions, schema keys and values) escaped like message content: tool metadata can come from outside the caller's control too.</summary>
+    private static List<object?>? ToolsValue(IReadOnlyList<ToolSpec>? tools, IReadOnlyList<string> literals)
     {
         if (tools is not { Count: > 0 }) return null;
         List<object?> value = new(tools.Count);
-        foreach (ToolSpec tool in tools) value.Add(Values.ParseJson(tool.Json));
+        foreach (ToolSpec tool in tools) value.Add(EscapeGraph(Values.ParseJson(tool.Json), literals));
         return value;
+    }
+
+    /// <summary>Escapes every string, including dictionary keys, in a parsed JSON value graph.</summary>
+    private static object? EscapeGraph(object? node, IReadOnlyList<string> literals)
+    {
+        switch (node)
+        {
+            case string s:
+                return SpecialLiteralEscaper.Escape(s, literals);
+            case List<object?> list:
+                for (int i = 0; i < list.Count; i++) list[i] = EscapeGraph(list[i], literals);
+                return list;
+            case Dictionary<string, object?> dict:
+                Dictionary<string, object?> escaped = new(dict.Count);
+                foreach (KeyValuePair<string, object?> kv in dict)
+                    escaped[SpecialLiteralEscaper.Escape(kv.Key, literals)] = EscapeGraph(kv.Value, literals);
+                return escaped;
+            default:
+                return node;
+        }
     }
 
     private static object? ArgumentsValue(string argumentsJson)
