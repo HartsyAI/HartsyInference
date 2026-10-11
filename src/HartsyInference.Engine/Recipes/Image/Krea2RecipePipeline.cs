@@ -1,4 +1,3 @@
-using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Logging;
@@ -9,12 +8,12 @@ using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
-
-using HartsyInference.Engine.Features;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -90,11 +89,11 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
-                SigmaShift = RecipeRequestMapper.MapSigmaShift(request.SigmaShift),
+                SigmaShift = RecipeRequestMapper.MapFluxMaxShift(request.SigmaShift),
                 SeamlessTiling = request.SeamlessTiling,
                 ModelSpecificEnhancements = request.ModelSpecificEnhancements,
-                    VariationSeed = request.VariationSeed?.Seed ?? -1,
-                    VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
+                VariationSeed = request.VariationSeed?.Seed ?? -1,
+                VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = negative,
                 Width = width,

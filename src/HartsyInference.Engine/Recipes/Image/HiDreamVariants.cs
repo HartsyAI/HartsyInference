@@ -9,8 +9,9 @@ public static class HiDreamVariants
     /// <summary>Guidance-distilled Dev build (default: the catalog pins <c>hidream_i1_dev_fp8</c>).</summary>
     public static ModelVariant Dev { get; } = new ModelVariant { Id = "dev", DisplayName = "HiDream-I1 Dev", FilenameTokenSets = [["dev"]] };
 
-    /// <summary>Undistilled Full build, sampled with real CFG.</summary>
-    public static ModelVariant Full { get; } = new ModelVariant { Id = "full", DisplayName = "HiDream-I1 Full", FilenameTokenSets = [["full"]] };
+    /// <summary>Undistilled Full build, sampled with real CFG. <c>full</c> is also an ordinary word in names like
+    /// <c>..._dev_full_precision</c>, so a name that also says <c>dev</c> or <c>fast</c> is not Full.</summary>
+    public static ModelVariant Full { get; } = new ModelVariant { Id = "full", DisplayName = "HiDream-I1 Full", FilenameTokenSets = [["full", "!dev", "!fast"]] };
 
     /// <summary>Guidance-distilled Fast build.</summary>
     public static ModelVariant Fast { get; } = new ModelVariant { Id = "fast", DisplayName = "HiDream-I1 Fast", FilenameTokenSets = [["fast"]] };

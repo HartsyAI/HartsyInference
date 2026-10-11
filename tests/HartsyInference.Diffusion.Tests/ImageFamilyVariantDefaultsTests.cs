@@ -34,6 +34,8 @@ public sealed class ImageFamilyVariantDefaultsTests
     [InlineData("hidream_i1_full_fp16.safetensors", "full")]
     [InlineData("hidream_i1_fast_fp8.safetensors", "fast")]
     [InlineData("hidream.safetensors", "dev")]
+    [InlineData("hidream_i1_dev_full_precision.safetensors", "dev")]
+    [InlineData("hidream_i1_fast_full_precision.safetensors", "fast")]
     public void HiDream_VariantResolvesFromFileName(string fileName, string expected) =>
         Assert.Equal(expected, Classify(HiDreamVariants.Catalog, fileName).Id);
 

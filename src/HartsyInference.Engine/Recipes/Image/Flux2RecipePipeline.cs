@@ -1,4 +1,3 @@
-using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Memory;
@@ -8,12 +7,12 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
-
-using HartsyInference.Engine.Features;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -69,10 +68,10 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
-                SigmaShift = RecipeRequestMapper.MapSigmaShift(request.SigmaShift),
+                SigmaShift = RecipeRequestMapper.MapFluxMaxShift(request.SigmaShift),
                 SeamlessTiling = request.SeamlessTiling,
-                    VariationSeed = request.VariationSeed?.Seed ?? -1,
-                    VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
+                VariationSeed = request.VariationSeed?.Seed ?? -1,
+                VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 Width = width,
                 Height = height,

@@ -70,6 +70,48 @@ public sealed class SigmaShiftOverrideTests
         Assert.True(other.Sigmas()[4] > baseline[4], "a larger shift must keep more noise at mid-schedule");
     }
 
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    [InlineData(1e39)]
+    [InlineData(1e-50)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void RecipeMapper_RefusesABadStaticShiftByTheRequestField(double shift)
+    {
+        ImageRequest request = new ImageRequest { Prompt = "p", SigmaShift = shift };
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => RecipeRequestMapper.ToTextToImage(request, ""));
+        Assert.Equal(nameof(ImageRequest.SigmaShift), error.ParamName);
+    }
+
+    /// <summary>Flux.2 and Krea 2 read the value as mu (ModelSamplingFlux max_shift), where SwarmUI's minimum 0 is a
+    /// real setting, so only a negative, non-finite or exp-overflowing mu is refused.</summary>
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(1e39)]
+    [InlineData(100.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void FluxMaxShift_RefusesABadMuByTheRequestField(double shift)
+    {
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => RecipeRequestMapper.MapFluxMaxShift(shift));
+        Assert.Equal(nameof(ImageRequest.SigmaShift), error.ParamName);
+    }
+
+    /// <summary>Mu 0 builds the exact schedulers the Flux.2 and Krea 2 pipelines construct from it.</summary>
+    [Fact]
+    public void FluxMaxShift_ZeroIsAcceptedOnFlux2AndKrea2()
+    {
+        float mu = Assert.IsType<float>(RecipeRequestMapper.MapFluxMaxShift(0.0));
+        Assert.Equal(0f, mu);
+        Assert.Null(RecipeRequestMapper.MapFluxMaxShift(null));
+
+        FlowMatchEulerDiscreteScheduler flux2 = FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(4096, maxShift: mu);
+        Assert.Equal(1f, flux2.Shift, 5);
+        FlowMatchEulerDiscreteScheduler krea2 = new FlowMatchEulerDiscreteScheduler().WithShift(MathF.Exp(mu));
+        Assert.Equal(1f, krea2.Shift);
+    }
+
     [Fact]
     public void RecipeMapper_CarriesTheShiftOntoTheDiffusionRequest()
     {

@@ -463,6 +463,7 @@ public sealed class SamplerCoreTests
         Assert.True(SchedulerFactory.IsDedicated("lcm"));
         Assert.False(SchedulerFactory.IsDedicated("euler"));
         Assert.False(SchedulerFactory.IsDedicated("dpmpp2m"));
+        Assert.True(SamplerRegistry.IsKnown(" LCM") && SchedulerFactory.IsDedicated(" LCM"));
         Assert.IsType<LcmScheduler>(SchedulerFactory.Create("lcm"));
     }
 
