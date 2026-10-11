@@ -114,6 +114,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
                     ["function"] = new Dictionary<string, object?>
                     {
                         ["name"] = SpecialLiteralEscaper.Escape(call.Name, literals),
+                        // Escaped before parsing: the swapped character is valid inside a JSON string, so keys and values are both covered.
                         ["arguments"] = ArgumentsValue(SpecialLiteralEscaper.Escape(call.ArgumentsJson, literals)),
                     },
                 });

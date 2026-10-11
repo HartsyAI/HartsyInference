@@ -132,7 +132,8 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
                 node = next;
                 i++;
                 // Ordinary text never yields a control id: the trie holds special tokens too, and matching one here would let
-                // escaped-then-restored content (SpecialLiteralEscaper) become a control token again.
+                // escaped-then-restored content (SpecialLiteralEscaper) become a control token again. A World vocab has a
+                // token for every single byte, so a non-special match always exists.
                 if (node.TokenId >= 0 && !_specialIds.Contains(node.TokenId)) { bestId = node.TokenId; bestLen = i - pos; }
             }
             if (bestId < 0)

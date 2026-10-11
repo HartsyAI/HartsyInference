@@ -21,7 +21,8 @@ public sealed class JinjaEngine
 
     /// <summary>True when an executable expression in the template compares a message role to <paramref name="role"/>
     /// (<c>x.role == 'r'</c>, <c>x['role'] != 'r'</c>, or <c>x.role in ['r', ...]</c>). Comments and text never become
-    /// expressions and a string literal is a single leaf, so a mention in either cannot match.</summary>
+    /// expressions and a string literal is a single leaf, so a mention in either cannot match. A role copied into another
+    /// variable first (<c>{% set r = m.role %}</c>) is not followed; that misses toward keeping the default role.</summary>
     public bool ComparesRoleTo(string role)
     {
         Stack<Node> nodes = new(_program);
