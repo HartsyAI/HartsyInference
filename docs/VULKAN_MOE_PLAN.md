@@ -63,7 +63,52 @@ Absent (inheriting the throwing or false defaults in `IBackend.Moe.cs` and `IBac
 | `SupportsMoeExpertsGrouped`, `MoeExpertsGrouped`, `MoeCombinePairs` | prefill |
 | `DeviceSamplingSupported`, `AllocDeviceRng`, `FreeDeviceRng`, `SampleTopKInto` | stochastic sampling inside a captured step; greedy needs only `ArgMaxInto`, which exists |
 | a grouped `PreloadWeightGroups` | experts of a projection in one contiguous allocation; Vulkan uploads each member alone |
-| quantized `Linear` (`SupportsQuantized = true`) | everything above, and the dense gap |
+
+## Steps 1 and 2: measured result
+
+Same card, prompt and protocol as the baseline (greedy, 128 new tokens, 5 runs; CUDA with `CUDA_VISIBLE_DEVICES=1`).
+"Before" is `origin/main` at 3c79b346 built fresh; peak VRAM is `nvidia-smi` memory used on the card during the run.
+
+| Model | CUDA tok/s | Vulkan before tok/s | Vulkan after tok/s | VRAM CUDA / before / after (MiB) |
+|---|---|---|---|---|
+| Llama-3.2-1B Q8_0 | 142.4 (136.0 to 144.8) | 15.3 (15.1 to 15.4) | 118.7 (117.1 to 120.3) | 4123 / 7251 / 2211 |
+| Qwen2.5-0.5B Q4_K_M | 120.3 (116.3 to 123.8) | 27.0 (27.0 to 27.0) | 98.8 (95.0 to 104.1) | 1561 / 2875 / 684 |
+| granite-3.0-1b-a400m Q4_K_M (MoE) | 135.2 (125.0 to 143.7) | 8.0 (8.0 to 8.1) | 23.2 (22.6 to 23.3) | 3615 / 5375 / 911 |
+| Qwen3-4B Q4_K_M | 79.8 (69.6 to 80.6) | does not fit | 49.0 (48.8 to 49.7) | 7981 / - / 4014 |
+| OLMoE-1B-7B Q4_K_M (MoE, 3 runs) | 186.1 (178.0 to 188.5) | out of device memory | 27.1 (26.3 to 27.3) | 7819 / - / 4296 |
+
+Output: Llama, Qwen2.5 and granite produce the same 128 tokens on Vulkan before and after, and the same as the CPU
+backend. CUDA now differs from all three at about word 85 (Llama), 10 (granite) and 27 (Qwen2.5), on `main` as on this
+branch, so that divergence is on the CUDA side: its decode GEMVs quantize the activation to int8, and the baseline above,
+taken before #369 and #372, had CUDA and Vulkan identical. Qwen3-4B matches CUDA over all 128 tokens, OLMoE for about
+100 words, and gpt2-medium Q4_K_M (fused QKV split, now kept packed) over all 128.
+
+GEMV bandwidth, from `vkProfileGpu` timestamps: a shader's total time over the decode steps against the bytes of the
+weights of that type a step reads (tied heads counted, untied embeddings and routed experts not).
+
+| Shader | Model | Avg per call | Achieved |
+|---|---|---|---|
+| `gemv_quant_q8_0` | Llama-3.2-1B | 0.081 ms | about 250 GB/s |
+| `gemv_quant_q4_k` | Qwen3-4B | 0.073 ms | about 190 GB/s |
+| `gemv_quant_q6_k` | Qwen3-4B | 0.092 ms | about 210 GB/s |
+| `gemv_quant_q5_0` | Qwen2.5-0.5B | 0.021 ms | about 115 GB/s (small rows, launch bound) |
+
+The card's 360 GB/s is the ceiling. What the profile showed while tuning the shader: giving each lane a whole quant block
+strides the activation loads by a block per lane and ran at about 50 GB/s; one or two 32-bit words of quants per lane, so
+a subgroup reads one contiguous run of weights and activations, fixed that; and the activation row count has to be a
+specialization constant, because indexed by a runtime bound the per-row accumulators spill to local memory (Q4_K went
+from 0.100 to 0.073 ms a call). Workgroups of 64 or 256 lanes and 4-word units were both slower than 128 lanes and 2 words.
+
+Prefill keeps the GEMM: a quantized weight at M above 8 is dequantized to F16 per call and not cached, since caching is
+what would keep an F16 copy resident. That costs about 25 ms per prompt on Llama-3.2-1B and about 75 ms on Qwen3-4B.
+
+What remains from steps 1 and 2:
+- **Integer dot-product variant.** Quantize the activation to int8 per 32 and use `dotPacked4x8`, as the CUDA kernels use
+  `dp4a`. Needs the LunarG SDK glslang. Llama's Q8_0 GEMV already reaches about 70% of bandwidth, so the gain is bounded.
+- **An F32 GEMV.** The MoE router weight (`ffn_gate_inp`) is F32 and still runs `matmul_tiled_f32` at M = 1, 0.35 ms a
+  call, 26 to 28% of GPU time on granite and OLMoE. It is the same shader with an F32 decoder.
+- **M from 9 to 16.** A speculative verify longer than 8 rows takes the dequantize-and-GEMM path.
+- MoE stays host-routed until steps 3 to 5; granite and OLMoE are host-bound, which is why they gain less than the dense models.
 
 ## Plan, in order
 
@@ -75,7 +120,8 @@ measurements.
 and gpt2 crashed on the first upload on a backend that widens to F32. They now root their source. Granite runs; OLMoE reaches
 the device-memory limit above.
 
-**1. Fused dequant GEMV for the dense path (the largest single win; about a week).** `gemv_q8_0`, `gemv_q4_k`, `gemv_q6_k`
+**1. Fused dequant GEMV for the dense path. Done: `gemv_quant` for Q8_0, Q4_0, Q5_0, Q4_K, Q5_K and Q6_K, plain float
+math, M up to 8; results above.** The original plan: `gemv_q8_0`, `gemv_q4_k`, `gemv_q6_k`
 (then Q4_0, Q5_0, Q5_K): one workgroup per few output rows, activation vector in shared memory as F32, each lane walks whole
 quant blocks, dequantizes in registers with FMA, subgroup reduction to the row result, bias and residual as in
 `matmul_tiled`. Q4_K and Q6_K blocks are 256 elements with packed scales; the `dequant_q4_k` and `dequant_q6_k` shaders
@@ -86,7 +132,9 @@ kernels do with `dp4a`; it needs `GL_EXT_integer_dot_product`, which the distro 
 Expected effect: weight bytes per token fall to 1.3 GB for Llama Q8_0, so the arithmetic ceiling at 360 GB/s is about 270
 tok/s against 15.5 today; what the shader reaches is unmeasured.
 
-**2. Keep GGUF weights compressed on Vulkan (about three days after step 1).** Set `SupportsQuantized = true` and keep the
+**2. Keep GGUF weights compressed on Vulkan. Done: `SupportsQuantized` is true and `QuantizedTypes` names the six
+formats the GEMV reads; the loader keeps those packed and widens every other format to F32 as before, and LTX-2's resident
+NVFP4 gate asks for `F4E2M1` specifically, so Vulkan still unpacks it.** The original plan: Set `SupportsQuantized = true` and keep the
 loader's existing `GpuSupportedQuant` list. Types without a GEMV and prefill (M above the GEMV limit) take the existing
 dequant-to-F16 then cooperative-matrix GEMM; with `CacheWeightCasts` off a 7B model cannot hold an F16 copy, so the cast is
 per use and prefill pays one dequant per layer. Check the VRAM and prefill cost on Llama before turning it on by default; this
