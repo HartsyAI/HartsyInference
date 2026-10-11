@@ -45,6 +45,8 @@ internal static class Values
         null => [],
         List<object?> l => l,
         string s => [.. s.Select(ch => (object?)ch.ToString())],
+        // Iterating a mapping yields its keys (Jinja: for k in d, list(d), d|join, d|length); the pairs are not what a template asks for.
+        Dictionary<string, object?> d => [.. d.Keys.Cast<object?>()],
         System.Collections.IEnumerable e => [.. e.Cast<object?>()],
         _ => throw new InvalidOperationException($"Value is not iterable: {v.GetType().Name}"),
     };
@@ -355,6 +357,8 @@ internal sealed class NamedArgExpr(string name, Expr value) : Expr
 
 internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
 {
+    public Expr Callee => callee;
+    public List<Expr> Args => args;
     public override IEnumerable<Expr> Children => [callee, .. args];
 
     public override object? Eval(JinjaEngine.Scope scope)
@@ -367,9 +371,10 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
             object? Arg(int idx) => idx < args.Count ? args[idx].Eval(scope) : null;
             return m.Name switch
             {
-                "strip" => s.Trim(),
-                "lstrip" => s.TrimStart(),
-                "rstrip" => s.TrimEnd(),
+                // With an argument these strip exactly those characters (Python semantics), not all whitespace.
+                "strip" => Arg(0) is { } sc ? s.Trim(Values.ToStr(sc).ToCharArray()) : s.Trim(),
+                "lstrip" => Arg(0) is { } lc ? s.TrimStart(Values.ToStr(lc).ToCharArray()) : s.TrimStart(),
+                "rstrip" => Arg(0) is { } rc ? s.TrimEnd(Values.ToStr(rc).ToCharArray()) : s.TrimEnd(),
                 "lower" => s.ToLowerInvariant(),
                 "upper" => s.ToUpperInvariant(),
                 "title" => CultureInfo.InvariantCulture.TextInfo.ToTitleCase(s),
@@ -385,6 +390,17 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
         // Bare function calls templates use: raise_exception, namespace, strftime_now.
         if (callee is VarExpr v)
         {
+            if (scope.Get(v.GetName()) is JinjaEngine.MacroDef macro)
+            {
+                List<object?> positional = [];
+                Dictionary<string, object?> named = [];
+                foreach (Expr a in args)
+                {
+                    if (a is NamedArgExpr na) named[na.Name] = na.Value.Eval(scope);
+                    else positional.Add(a.Eval(scope));
+                }
+                return macro.Invoke(positional, named, scope);
+            }
             switch (v.GetName())
             {
                 case "raise_exception" or "raise":
