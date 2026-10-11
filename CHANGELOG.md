@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.339
+
+- **Added: tools for templates that never mention them.** A chat template with no `tools` slot used to drop the tool definitions silently. The engine now writes the Hermes tool prompt into the conversation (the `# Tools` block, the calls and the results) and sends the template no tools. Templates that do render tools are unchanged.
+- **Added: `ForceToolId` is enforced.** A forced tool must be one of the offered tools; anything else is refused before any model work. The system prompt states the forced tool, and the call parser accepts only that tool, stopping after its call. Grammar forcing is not done, so a model can still answer in prose.
+- **Changed: the ChatML fallback's tools block lives in `HermesToolPrompt`.** The bytes are unchanged; a test checks the fallback against the shared helper.
+- Real-weight status: Gemma-3-1B (no tools in its template) takes the injected prompt and emits a parsed `hang_up` call that stops as a tool call. Its arguments came back as the schema object rather than `{}`, a small-model quality issue the parser does not fix.
+
 ## alpha.338
 
 - **Added: three markup tool-call dialects.** `QwenXml` (Qwen3.5 and Qwen3-Coder: `<tool_call><function=…><parameter=…>`), `GlmXml` (GLM-4.5: `<arg_key>`/`<arg_value>` pairs) and `DeepSeekR1` (`<｜tool▁calls▁begin｜>` fenced-JSON blocks). The chat template picks the dialect; markup spans complete at their closing marker and their values are typed by the offered tool's schema.

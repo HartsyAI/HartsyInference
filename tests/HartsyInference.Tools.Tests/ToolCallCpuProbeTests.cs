@@ -39,6 +39,11 @@ public sealed class ToolCallCpuProbeTests
     public async Task Qwen35SmallCpuTurnEmitsAParsedHangUpInXml()
         => await RunProbe("QWEN35_08B_GGUF_PATH", "qwen35");
 
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task Gemma3ToolLessTemplateGetsTheInjectedPromptAndCalls()
+        => await RunProbe("GEMMA3_1B_GGUF_PATH", "gemma");
+
     private async Task RunProbe(string envVar, string modelId)
     {
         string? path = Environment.GetEnvironmentVariable(envVar);
