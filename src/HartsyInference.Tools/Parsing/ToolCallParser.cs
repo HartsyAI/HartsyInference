@@ -40,16 +40,18 @@ public sealed class ToolCallParser
     private JsonBalance _json;
     private GemmaBalance _gemma;
     private int _completed;
+    private readonly string _idPrefix;
 
-    /// <summary>Creates a parser for <paramref name="format"/>; <paramref name="knownTools"/> (the offered tool names) makes the bare forms resolve only to those names, null keeps them permissive.</summary>
-    public ToolCallParser(ToolCallFormat format, int maxSpanChars = DefaultMaxSpanChars, IEnumerable<string>? knownTools = null)
-        : this(ToolCallFormats.RulesFor(format), maxSpanChars, knownTools)
+    /// <summary>Creates a parser for <paramref name="format"/>; <paramref name="knownTools"/> (the offered tool names) makes the bare forms resolve only to those names, null keeps them permissive; <paramref name="idPrefix"/> numbers the calls' ids.</summary>
+    public ToolCallParser(ToolCallFormat format, int maxSpanChars = DefaultMaxSpanChars, IEnumerable<string>? knownTools = null, string idPrefix = ToolCallJson.IdPrefix)
+        : this(ToolCallFormats.RulesFor(format), maxSpanChars, knownTools, idPrefix)
     {
     }
 
-    /// <summary>Creates a parser over custom <paramref name="rules"/>; see the format overload for <paramref name="knownTools"/>.</summary>
-    public ToolCallParser(ToolCallFormatRules rules, int maxSpanChars = DefaultMaxSpanChars, IEnumerable<string>? knownTools = null)
+    /// <summary>Creates a parser over custom <paramref name="rules"/>; see the format overload for <paramref name="knownTools"/> and <paramref name="idPrefix"/>.</summary>
+    public ToolCallParser(ToolCallFormatRules rules, int maxSpanChars = DefaultMaxSpanChars, IEnumerable<string>? knownTools = null, string idPrefix = ToolCallJson.IdPrefix)
     {
+        _idPrefix = idPrefix ?? throw new ArgumentNullException(nameof(idPrefix));
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxSpanChars, 16);
         if (rules.Markers.Count == 0) throw new ArgumentException("Rules need at least one opening marker.", nameof(rules));
@@ -447,7 +449,7 @@ public sealed class ToolCallParser
         List<NativeToolCall> found = new(1);
         bool ok = _payload == ToolCallPayload.GemmaCall
             ? TryConvertGemma(value, found)
-            : ToolCallJson.TryParse(value, _rules.ArgumentKeys, _presetName, found, _completed);
+            : ToolCallJson.TryParse(value, _rules.ArgumentKeys, _presetName, found, _completed, _idPrefix);
         if (!ok || found.Count == 0 || !AllKnown(found))
         {
             Abort();
@@ -467,7 +469,7 @@ public sealed class ToolCallParser
     private bool TryConvertGemma(string block, List<NativeToolCall> into)
     {
         if (!GemmaCallDsl.TryConvert(block, out string json)) return false;
-        into.Add(new NativeToolCall { Id = ToolCallJson.IdFor(_completed), Name = _presetName!, Arguments = json });
+        into.Add(new NativeToolCall { Id = ToolCallJson.IdFor(_idPrefix, _completed), Name = _presetName!, Arguments = json });
         return true;
     }
 

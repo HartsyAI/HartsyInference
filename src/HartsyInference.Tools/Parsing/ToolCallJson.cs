@@ -11,8 +11,8 @@ internal static class ToolCallJson
 
     private const int MaxDepth = 64;
 
-    /// <summary>Parses <paramref name="json"/> into <paramref name="into"/>, numbering ids from <paramref name="firstIndex"/>; false when the text is not valid JSON or is not shaped like a call.</summary>
-    public static bool TryParse(string json, IReadOnlyList<string> argumentKeys, string? presetName, List<NativeToolCall> into, int firstIndex)
+    /// <summary>Parses <paramref name="json"/> into <paramref name="into"/>, numbering ids from <paramref name="firstIndex"/> under <paramref name="idPrefix"/>; false when the text is not valid JSON or is not shaped like a call.</summary>
+    public static bool TryParse(string json, IReadOnlyList<string> argumentKeys, string? presetName, List<NativeToolCall> into, int firstIndex, string idPrefix)
     {
         try
         {
@@ -21,15 +21,15 @@ internal static class ToolCallJson
             if (presetName is not null)
             {
                 if (root.ValueKind != JsonValueKind.Object) return false;
-                into.Add(Make(firstIndex, presetName, root.GetRawText()));
+                into.Add(Make(idPrefix, firstIndex, presetName, root.GetRawText()));
                 return true;
             }
-            if (root.ValueKind == JsonValueKind.Object) return TryAdd(root, argumentKeys, firstIndex, into);
+            if (root.ValueKind == JsonValueKind.Object) return TryAdd(root, argumentKeys, idPrefix, firstIndex, into);
             if (root.ValueKind != JsonValueKind.Array) return false;
             int count = 0;
             foreach (JsonElement element in root.EnumerateArray())
             {
-                if (!TryAdd(element, argumentKeys, firstIndex + count, into)) return false;
+                if (!TryAdd(element, argumentKeys, idPrefix, firstIndex + count, into)) return false;
                 count++;
             }
             return count > 0;
@@ -40,10 +40,10 @@ internal static class ToolCallJson
         }
     }
 
-    /// <summary>The id for the call at <paramref name="index"/> within the request.</summary>
-    public static string IdFor(int index) => IdPrefix + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    /// <summary>The id for the call at <paramref name="index"/> under <paramref name="idPrefix"/>.</summary>
+    public static string IdFor(string idPrefix, int index) => idPrefix + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-    private static bool TryAdd(JsonElement element, IReadOnlyList<string> argumentKeys, int index, List<NativeToolCall> into)
+    private static bool TryAdd(JsonElement element, IReadOnlyList<string> argumentKeys, string idPrefix, int index, List<NativeToolCall> into)
     {
         if (element.ValueKind != JsonValueKind.Object) return false;
         JsonElement call = element.TryGetProperty("function", out JsonElement function) && function.ValueKind == JsonValueKind.Object
@@ -64,10 +64,10 @@ internal static class ToolCallJson
             };
             break;
         }
-        into.Add(Make(index, toolName, arguments));
+        into.Add(Make(idPrefix, index, toolName, arguments));
         return true;
     }
 
-    private static NativeToolCall Make(int index, string name, string arguments)
-        => new() { Id = IdFor(index), Name = name, Arguments = arguments };
+    private static NativeToolCall Make(string idPrefix, int index, string name, string arguments)
+        => new() { Id = IdFor(idPrefix, index), Name = name, Arguments = arguments };
 }

@@ -9,6 +9,9 @@ public interface IChatTemplate
     /// <summary>Registry key for this template (for example "chatml").</summary>
     string Name { get; }
 
+    /// <summary>The raw Jinja source this template was compiled from, or null for a template built in code.</summary>
+    string? Source => null;
+
     /// <summary>Encodes <paramref name="messages"/> to ids, appending a trailing assistant header when <paramref name="addGenerationPrompt"/> is true; <paramref name="enableThinking"/> sets the Qwen3-family <c>enable_thinking</c> toggle, or falls back to the template's default when null.</summary>
     int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null);
 

@@ -156,6 +156,9 @@ public sealed class GgufLanguageModel : IDisposable
         private readonly GgufModelLoader.LoadedGgufModel _handle;
         private int _disposed;
 
+        /// <summary>The GGUF architecture the checkpoint was loaded as (for example <c>llama</c>).</summary>
+        public string Architecture => _handle.Architecture;
+
         internal TpCheckpoint(GgufModelLoader.LoadedGgufModel handle, Dictionary<string, Tensor> weights,
             TransformerConfig config, ILlmTokenizer tokenizer, IChatTemplate template)
         {

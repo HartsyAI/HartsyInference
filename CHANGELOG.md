@@ -24,9 +24,18 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
-## alpha.339
+## alpha.346
 
 - **Changed: Vulkan keeps GGUF weights quantized and decodes with a fused dequantizing GEMV.** New `gemv_quant` compute shaders read Q8_0, Q4_0, Q5_0, Q4_K, Q5_K and Q6_K blocks directly for a Linear of up to 8 activation rows (plain float math; the integer dot-product variant is a follow-up). `VulkanBackend` now reports `SupportsQuantized` with the new `BackendCapabilities.QuantizedTypes` naming those six formats, so the GGUF loader keeps them packed on Vulkan and widens every other format to F32 as before. A longer input (prefill) dequantizes the weight to F16; the text path makes that copy per call through the new `IBackend.CacheQuantizedWeightCasts`, so it never sits resident beside the packed weight, while other callers (a GGUF diffusion model) keep caching it. Vulkan also implements `QuantizedMatMul`. LTX-2 now keeps NVFP4 packed only where the backend lists `F4E2M1`, which leaves CUDA unchanged and Vulkan unpacking it as before. RTX 3060, greedy, 128 tokens, median of 5: Llama-3.2-1B Q8_0 goes from 15.3 to 118.7 tok/s and 7.3 to 2.2 GB of VRAM; Qwen2.5-0.5B Q4_K_M from 27.0 to 98.8 tok/s; granite-3.0-1b-a400m (MoE) from 8.0 to 23.2 tok/s; Qwen3-4B Q4_K_M (49 tok/s) and OLMoE-1B-7B Q4_K_M (27 tok/s) now fit a 12 GB card. Text is unchanged on Vulkan and matches the CPU backend for Llama, Qwen2.5 and granite. Measurements and what remains are in `docs/VULKAN_MOE_PLAN.md`.
+
+## alpha.342
+
+- **Changed: `EngineOptions.TextStreamFilterFactory` takes a `TextStreamFilterContext`.** The context carries the request, its request id, the template's name and Jinja source, the architecture and the model path, so a host can pick a parser per model. Breaking for any host that set the factory.
+- **Changed: tool-call ids are unique per request.** Both the structured parser and the filter number calls `call_{requestId}_{index}`, so ids never repeat across rounds of one conversation.
+- **Fixed: tool calls from a structured output parser end the turn as a tool call.** DeepSeek-V4.1's tool calls now stop generation as `StopReason.ToolCall` and dispatch, instead of ending as a plain stop.
+- **Added: `TextResult.ToolCalls`.** Non-streaming generation reports every tool call, not only the last. The OpenAI-compatible route returns all of them.
+- **Added: `ITextStreamFilter.MarkerLiterals`.** A filter lists the control-token literals it needs to see (for example `<tool_call>`); the engine decodes those tokens as text and still drops every other control token.
+- **Removed: the `<tool_call>` sentinel grammar.** It never fired on GGUF models and it turned off graph decode and speculative decode for every tool request. Those stay on for tool requests now.
 
 ## alpha.338
 
