@@ -15,6 +15,9 @@ public sealed partial class CudaBackend
     /// residual add of layer i into layer i+1's input norm.</summary>
     public bool FoldsDecodeResidual => EngineKnobs.DecodeResidualFold.Value;
 
+    /// <inheritdoc />
+    public bool SupportsF16KvCache => _kernels is { HasKvScatterF16: true, HasFa2Causal: true, HasDecodeGqa: true };
+
     /// <summary>Allocates the o-projection's Q8_1 sidecar for a single-row decode attention output when the combine kernel can emit it
     /// and the dp4a GEMV would consume it; otherwise returns the empty sidecar and the plain combine runs.</summary>
     private AttnSidecar TryAllocAttnCombineSidecar(int b, int tq, int hq, int d)
