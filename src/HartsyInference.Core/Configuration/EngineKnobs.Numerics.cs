@@ -205,6 +205,22 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> NormFast =
         Bool("numerics.lmNormFast", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the fused RMSNorm and add-RMSNorm Q8_1 kernels of LLM decode in registers with two barriers instead of nine; outputs are bit-identical. =0 returns to the shared-memory tree.");
 
+    /// <summary>Kill-switch for the 1024-thread RMSNorm + Q8_1 kernels of LLM decode (any row width that is a multiple of 256 up to 8192).</summary>
+    public static readonly Knob<bool> NormWide =
+        Bool("numerics.lmNormWide", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the fused RMSNorm and add-RMSNorm Q8_1 kernels of LLM decode on up to 1024 threads with the row staged in shared memory, at every width that is a multiple of 256 up to 8192 (hidden 2560, 3072, 5120 ... included); outputs are bit-identical. =0 returns to numerics.lmNormFast's kernels.");
+
+    /// <summary>Kill-switch for folding each graph-decode layer's final residual add (and an MoE layer's slot combine) into the next layer's input RMSNorm.</summary>
+    public static readonly Knob<bool> DecodeResidualFold =
+        Bool("numerics.decodeResidualFold", true, KnobScope.Runtime, KnobDomain.Numerics, "In the CUDA-graph decode step, adds each layer's FFN output to the residual inside the next layer's input norm (and an MoE layer's expert combine too), one launch instead of two or three; outputs are bit-identical. =0 keeps the separate kernels.");
+
+    /// <summary>Kill-switch for the fused full-width QK-norm + RoPE + KV-scatter graph-decode epilogue (OLMoE shapes).</summary>
+    public static readonly Knob<bool> QknormFullScatter =
+        Bool("numerics.qknormFullScatter", true, KnobScope.Runtime, KnobDomain.Numerics, "Fuses the full-width QK-norm (one norm over all q heads, one over all k heads, as OLMoE has), RoPE and the KV-cache scatter of a graph decode step into one kernel; outputs are bit-identical. =0 keeps slices, two norms and the scatter.");
+
+    /// <summary>Kill-switch for the decode attention combine kernel emitting the Q8_1 copy of its output for the o-projection.</summary>
+    public static readonly Knob<bool> AttnCombineQ8 =
+        Bool("numerics.attnCombineQ8", true, KnobScope.Runtime, KnobDomain.Numerics, "Has the decode attention's combine kernel also write the int8 (Q8_1) copy of its output, so the o-projection skips its own quantize launch; outputs are bit-identical. =0 keeps the separate quantize.");
+
     /// <summary>Kill-switch for the grouped-query flash-decoding kernel: one block per KV head reads the cache once for all of its query heads.</summary>
     public static readonly Knob<bool> FlashDecodeGqa =
         Bool("numerics.flashDecodeGqa", true, KnobScope.Runtime, KnobDomain.Numerics, "Decodes one query row per sequence with the grouped-query flash-decoding kernel (the KV cache is streamed once per KV head, not once per query head); =0 returns to the split-K kernel with one block per query head.");

@@ -1195,6 +1195,7 @@ public sealed partial class CudaKernels : IDisposable
         _mulMatVecQ5KQ8_1 = _mulMatVecQ5KQ8_1Module.GetFunction("mul_mat_vec_q5k_q8_1");
         LoadMoeKernels();
         LoadFa2Kernels();
+        LoadDecodeFusedKernels();
         LoadSamplingKernels();
         LoadRecipeDequantKernels();
         LoadAttentionKernels();
@@ -3234,6 +3235,7 @@ public sealed partial class CudaKernels : IDisposable
         void** args = stackalloc void*[9];
         args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &xsA; args[4] = &inA; args[5] = &wA;
         args[6] = &dimA; args[7] = &rowsA; args[8] = &epsA;
+        if (BlockSize == 256 && TryLaunchNormWide(add: false, normDim, totalRows, args, stream)) return;
         int fast = BlockSize == 256 ? NormFastSlot(normDim) : 0;
         if (fast != 0)
         {
@@ -3255,6 +3257,7 @@ public sealed partial class CudaKernels : IDisposable
         args[0] = &rA; args[1] = &nA; args[2] = &xqA; args[3] = &xdA; args[4] = &xsA;
         args[5] = &aA; args[6] = &bA; args[7] = &wA;
         args[8] = &dimA; args[9] = &rowsA; args[10] = &epsA;
+        if (BlockSize == 256 && TryLaunchNormWide(add: true, normDim, totalRows, args, stream)) return;
         int fast = BlockSize == 256 ? NormFastSlot(normDim) : 0;
         if (fast != 0)
         {

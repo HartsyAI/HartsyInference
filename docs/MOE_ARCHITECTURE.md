@@ -90,8 +90,14 @@ tokens on the two paths (the distributions match, which `CudaDeviceSamplerTests`
 was quadratic in the tensor count (a MoE checkpoint has thousands), about 330 ms per request on Qwen3-30B-A3B; it is one pass now,
 and capture takes about 17 ms.
 
+**Decode-step fusions.** A device-routed MoE layer's expert combine, its residual add and the next layer's input RMSNorm (with the
+Q8_1 copy the next GEMV reads) are one kernel; a dense layer's residual add folds into the next norm the same way. OLMoE's full-width
+QK-norm, RoPE and KV scatter are one kernel, and the attention combine writes the o-projection's Q8_1 input. All of them are
+bit-identical to the launches they replace. On an RTX 3060 OLMoE-1B-7B Q4_K_M runs 205 kernels per token instead of 326.
+
 Knobs (all default on): `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`,
-`numerics.lmNormFast`. `vram.kvF16` works with graph decode.
+`numerics.lmNormFast`, `numerics.lmNormWide`, `numerics.decodeResidualFold`, `numerics.qknormFullScatter`,
+`numerics.attnCombineQ8`. `vram.kvF16` works with graph decode.
 
 ## Capabilities
 
