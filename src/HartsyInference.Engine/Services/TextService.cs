@@ -962,10 +962,14 @@ public sealed class TextService : ITextService, IDisposable
         // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
         // what it supports rather than what class it is means Vulkan gets the right answer the moment it publishes
         // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.
-        bool dequantize = !backend.Capabilities.SupportsQuantized;
+        // A backend that reads only some block formats (Vulkan) loads widened except for those, which stay packed.
+        IReadOnlySet<DType>? keepQuantized = backend.Capabilities.SupportsQuantized ? backend.Capabilities.QuantizedTypes : null;
+        bool dequantize = !backend.Capabilities.SupportsQuantized || keepQuantized is not null;
+        // Such a backend decodes from the packed blocks, so a widened copy would only serve prefill: make it per call.
+        if (keepQuantized is not null) backend.CacheQuantizedWeightCasts = false;
         string architecture = architecture0;
         bool ssm = SsmLanguageModel.IsSsmArchitecture(architecture);
-        EnsureRamHeadroomFor(path, dequantizesEverything: dequantize || ssm);
+        EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || ssm, keepQuantized);
         if (ssm)
         {
             slot.SsmModel = SsmLanguageModel.Load(path, architecture);
@@ -981,7 +985,7 @@ public sealed class TextService : ITextService, IDisposable
         // The engine's on-disk quant is honored as-is; LowVramQuant here is the "keep quant compressed on-device"
         // toggle (any non-empty value enables it) — the loader takes a bool, not a target quant string.
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
-        slot.Model = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: dequantize);
+        slot.Model = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: dequantize, keepQuantized);
         // Unconditional: PreloadWeights is a no-op on a backend with no device memory, and a backend that HAS
         // device memory wants its weights resident — gating on the class meant Vulkan re-uploaded every weight
         // over PCIe on every op.
@@ -1639,7 +1643,7 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>Refuses to load when there isn't enough free host RAM to survive the load, so a big model fails with a clear error instead of OOM-killing the process. A load that dequantizes everything needs <see cref="RamHeadroomMultiplier"/> times the file; one that keeps supported quants compressed needs <see cref="QuantizedResidentHeadroomMultiplier"/> times the file plus the F32 size of any quantized tensor it still has to expand. No-op when <c>/proc/meminfo</c> is absent.</summary>
-    private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything)
+    private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything, IReadOnlySet<DType>? keepQuantized = null)
     {
         long availableKb = ReadAvailableMemoryKb();
         if (availableKb <= 0)
@@ -1648,7 +1652,7 @@ public sealed class TextService : ITextService, IDisposable
         try { fileBytes = new FileInfo(path).Length; }
         catch (Exception ex) { Logs.Debug($"[TextService] Could not stat '{path}': {ex.Message}"); return; }
         double availableBytes = availableKb * 1024.0;
-        double requiredBytes = RequiredHostRamBytes(path, fileBytes, dequantizesEverything, out double expandedBytes);
+        double requiredBytes = RequiredHostRamBytes(path, fileBytes, dequantizesEverything, out double expandedBytes, keepQuantized);
         if (availableBytes < requiredBytes)
         {
             throw new HartsyInferenceException(
@@ -1663,26 +1667,31 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>Free host RAM a GGUF load needs: <see cref="RamHeadroomMultiplier"/> times the file when everything is dequantized, else
     /// <see cref="QuantizedResidentHeadroomMultiplier"/> times the file plus the F32 size of the tensors still expanded (read from the header).</summary>
-    internal static double RequiredHostRamBytes(string path, long fileBytes, bool dequantizesEverything, out double expandedBytes)
+    /// <remarks><paramref name="keepQuantized"/> is the backend's own keep set (<see cref="BackendCapabilities.QuantizedTypes"/>):
+    /// every other quantized format, and every half-float tensor, is widened to F32 on such a load.</remarks>
+    internal static double RequiredHostRamBytes(string path, long fileBytes, bool dequantizesEverything, out double expandedBytes,
+        IReadOnlySet<DType>? keepQuantized = null)
     {
         expandedBytes = 0;
         if (dequantizesEverything)
             return fileBytes * RamHeadroomMultiplier;
         using GgufLoader probe = new GgufLoader();
         probe.Load(path);
-        expandedBytes = DequantizedHostBytes(probe.Descriptors.Values);
+        expandedBytes = DequantizedHostBytes(probe.Descriptors.Values, keepQuantized);
         return fileBytes * QuantizedResidentHeadroomMultiplier + expandedBytes;
     }
 
     /// <summary>Host bytes of F32 copies the load builds even for a quantized-capable backend: every quantized tensor it cannot keep compressed,
     /// plus the token and per-layer embedding tables, which <c>GenericTransformer.LoadWeights</c> always widens.</summary>
-    internal static double DequantizedHostBytes(IEnumerable<GgufTensorDescriptor> tensors)
+    internal static double DequantizedHostBytes(IEnumerable<GgufTensorDescriptor> tensors, IReadOnlySet<DType>? keepQuantized = null)
     {
         double bytes = 0;
         foreach (GgufTensorDescriptor tensor in tensors)
         {
             bool widenedEmbedding = tensor.Name is "token_embd.weight" or "per_layer_token_embd.weight";
-            bool expanded = tensor.DType.IsQuantized && !GgufLanguageModel.KeepsQuantizedOnGpu(tensor.DType.Name);
+            bool expanded = keepQuantized is null
+                ? tensor.DType.IsQuantized && !GgufLanguageModel.KeepsQuantizedOnGpu(tensor.DType.Name)
+                : tensor.DType.IsQuantized ? !keepQuantized.Contains(tensor.DType) : tensor.DType.IsFloatingPoint;
             if ((expanded || widenedEmbedding) && tensor.DType != DType.F32)
                 bytes += tensor.Shape.ElementCount * 4.0;
         }
