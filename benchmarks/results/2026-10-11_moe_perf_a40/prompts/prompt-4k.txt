@@ -1,0 +1,190 @@
+# Add a model
+
+1. Read the relevant architecture reference and modality status; search TROUBLESHOOTING for the family/operation.
+2. Map shapes, dtypes, masks, prediction type and ownership at every boundary. Inspect checkpoint keys/metadata before designing conversion; repack once at load time.
+3. Use the sibling package and IBackend/shared operations. Engine owns registration, catalog, loading and consumer dispatch; video must use the planning contract in [engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
+4. If builds share the architecture but not the contract (base/edit, turbo/distilled), declare a variant catalog; see [model variants](ENGINE_PATTERNS.md#model-variants). Map each SwarmUI class id and `modelspec.architecture` value before reaching for filename tokens.
+5. Validate components with saved reference noise/embeddings, then real weights, generated output and the intended consumer. Matching seeds does not match RNG implementations.
+6. Record exact checkpoint, reference version, inputs, dtype/backend, tolerances and evidence in the canonical status/parity docs.
+
+Use the safe-subset pickle parser; never execute checkpoint pickle. Preserve configuration/tokenizer metadata and report quantization loss. Choose precision per family from validated behavior, not a universal Q8/F16 prescription.
+
+Keep synthetic tests labeled SyntheticSmoke. Real-weight/GPU/network tests keep their resource categories and gates even after verification; a clean skip is not a pass. Follow [test filtering](../CODE_STYLE.md).
+
+Bisect numerical differences before changing tolerances. Typical FP32 diagnostic scales are elementwise 1e-7, normalization 1e-6, GEMM 1e-5, attention 1e-4 and full denoiser 1e-3; these are starting points, not universal acceptance criteria. Finite tensors alone do not establish useful output.
+
+Common traps: legacy diffusers attention_head_dim can mean head count; absent Shape dimensions return zero; gated activations split the last dimension; CLIP final normalization and timestep ordering matter; BF16/F16 storage must not be read as float pointers.
+# Shared architecture and task routing
+
+Read with [code style](../CODE_STYLE.md); load only the linked sections a task needs.
+
+## Task Routing
+
+Read the file matching your task before starting. A task spanning two (add a model *and* write its kernel) loads both.
+
+| Task | File |
+|---|---|
+| Add a model (any modality) | `ADD_MODEL.md` |
+| Non-model feature (engine, CLI, API, extension) | `BUILD_FEATURE.md` |
+| Review or audit code | `AUDIT.md` |
+| GPU math, SIMD/PTX/SPIR-V kernels, performance | `KERNEL.md` |
+| Research a topic before implementing | `RESEARCH.md` |
+| Cleanup, doc upkeep, NuGet packaging | `CLEANUP.md` |
+
+## Shipping a change
+
+Author is `kalebbroo <kalebbroo@gmail.com>` alone: no co-author, session, or tool-attribution trailers in any
+commit message or PR body, and none in the changelog.
+
+1. Branch and **push as soon as commits exist** — unpushed non-`main` branches get reaped. Check
+   `git branch --show-current` before every commit; the checkout is shared with other agents and a commit
+   landing on someone else's branch is rescued with a cherry-pick, never by rewriting theirs.
+2. Open a **draft PR** early, before the work is finished.
+3. Finish implementation and all testing against it:
+   - Run the CPU lane and the tests covering the changed area; see [testing](../CODE_STYLE.md#testing) for the
+     trait filters. A docs-only change needs a link and claim check instead.
+   - GPU suites run one at a time, never alongside another suite, benchmark, or generation — concurrent runs
+     manufacture contention failures that bury real ones. Record failures by test name, not count.
+   - A CUDA/Vulkan change runs the whole `Category=GpuIntegration` category for the affected backends, not the
+     tests it appears to touch: a dispatch-gate change runs on every weight of that dtype.
+   - Anything that can move output or speed needs a real-generation A/B: `origin/main` built fresh (PTX
+     included) against the branch, interleaved on the same seeds, reporting wall clock, per-step ms, VRAM and
+     SSIM or raw-pixel digest per pair, via `tests/regression-ab.sh`. State up front whether the expectation
+     is identical (refactor) or bounded (numerics change, with a floor and a reason). Table goes in the PR body.
+4. Final pass: comment/doc cleanup, a `## alpha.N` section in `CHANGELOG.md`, and the matching
+   `Directory.Build.props` `VersionSuffix` bump — one per PR, docs-only PRs skip both. The bump is not
+   optional for code: the engine version is what the SwarmUI extension's NuGet pin resolves against.
+5. Mark ready for review. `claude-code-review.yml` reviews on open, on each push and on ready; the Codex
+   connector reviews independently. A Codex usage-limit note means no review happened — comment
+   `@claude review pr` on the PR and wait for `claude[bot]`.
+6. Resolve every comment. Reviews and comments are different API objects, so check all three surfaces:
+   ```bash
+   gh api --paginate repos/HartsyAI/HartsyInference/issues/<N>/comments --jq '.[]|"\(.user.login) \(.created_at)"'
+   gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/reviews  --jq '.[]|"\(.user.login) \(.state)"'
+   gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/comments --jq '.[]|"\(.path):\(.line)"'
+   ```
+   Reply per thread, then resolve it with the GraphQL `resolveReviewThread` mutation — `gh pr` has no resolve verb.
+7. Merge once CI is green and every thread is resolved, one PR at a time: each merge stale-dates the
+   others' version bump and changelog insert, and a single push carrying several merges publishes only the
+   top version.
+
+Report in plain language. Keep answers terse, skip restating what the diff already shows, and close a long
+answer or a research session with a short plain-English TL;DR.
+
+## Shared Design Rules
+
+These apply to ALL agents; specialized files only add task-specific rules.
+
+**Pure C# runtime and model implementation** — no Python/C++ inference wrappers, ONNX Runtime, or managed GPU
+frameworks. Vendor driver/compute-library P/Invoke, CUDA sources compiled to PTX, and offline Python reference
+tools are existing boundaries.
+
+**Eager model execution** — backend CUDA graph capture/replay is a backend optimization, not a model graph.
+
+**Zero GC on hot paths** — no managed allocations during inference. `NativeMemory.AlignedAlloc(byteCount, 64)`;
+`ArrayPool<T>.Shared` for managed metadata only. (`TensorPool` still has no production call site — adopt or
+retire it, see ROADMAP; do not cite it as established practice.)
+
+**IBackend abstraction** — model code never calls CPU/CUDA/Vulkan directly. Each backend delegates to static kernels.
+
+**Package boundaries** — one folder per NuGet package under `src/`; dependencies run one way
+(`Core` ← modality packages ← `Engine` ← CLI/API/extension). No CUDA/Vulkan in CPU-only packages — GPU code lives
+behind `IBackend`. When unsure, match the package a sibling model or feature already lives in.
+
+**Reuse before writing anything.** The backend is modular so models share it. Before adding ANY helper, inline or
+shared, grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`,
+`Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics below. A `[1,C,T]↔[1,T,C]` layout
+transpose is `backend.Transpose2D(out, in, d1, d2)`, never a hand-rolled loop.
+
+| Package | Shared statics |
+|---|---|
+| `Core` | `TensorCasts` host dtype casts (`EnsureF32`, `LoadF32`/`LoadF32Opt`, `F32ToBf16Bits`, `RelabelRank2Copy`), `ByteFormat` for VRAM log lines, `Runtime/MonotonicClock` (monotonic ns + absolute-deadline sleep), `Runtime/RealtimeScheduling` (`TryEnterFifo`, `TryPinToCpu`), `Runtime/SpscRing<T>` (lock-free single-producer/single-consumer ring), `Numerics/LatencyHistogram` (fixed µs buckets, p50/p99/max), `CpuParallel.InlineScope` (thread-local "never fan out") |
+| `Diffusion` | `DiTUtils` (denoiser blocks), `CfgHelper` (`SliceBatchElement`, `ApplyCfg`, `ConcatLastDim`), `DtypeCastHelper` (backend-routed, source-disposing casts), `Img2ImgSetup.Prepare`, `Schedulers/SchedulerFactory.Create`, `NoiseSchedule`, `VaeOps`/`MageVaeOps`, `WeightBytes` |
+| `ModelAssets` | `CheckpointConvertUtils` (key remaps, quant-aware QKV splits) |
+| `Audio` | `WhisperOps.ProjectLinear`, `Layers/Activations` (`ErfGelu`, `SigmoidS`), `RnnOps`, `VqOps`, `WeightNormFusion.LoadFused`, `LogitSampling`, `SignalPadding`, `IStft`, `Dsp/NsfVocoderDsp` (NSF source, STFT/iSTFT head, pad, scale), `Dsp/DeterministicRng`, `Streaming/SentenceChunkedSynthesis` (sentence streaming over any whole-utterance synth; Piper and Kokoro use it), `Frontends/SentenceSplitter` + `StreamingSentenceSplitter` + `SplitClauses`, `Frontends/SpokenTextNormalizer`, `Io/G711` (μ-law/A-law), `Models/Wake/IVadModel` |
+
+Pick by ownership, not by name: `TensorCasts` is host-side, `DtypeCastHelper` routes through the backend and
+disposes its source. New shared code stays generic: when two or more callers need an operation, hoist ONE helper
+**parameterized by the differences** — a few extra parameters or a `switch` beats a dozen near-identical methods.
+Adding a model includes auditing it against models already built and folding the shared parts; re-run the
+affected models' tests afterwards, because shared code is load-bearing.
+
+## Engine Patterns
+
+Tensor ownership, CUDA launch/PTX, config, streaming, error handling, video planning, GPU weight and activation
+management, and diffusion pipeline conventions live in [ENGINE_PATTERNS.md](ENGINE_PATTERNS.md). Read it when
+touching engine, backend or pipeline code; the rules above stand on their own for everything else.
+
+Ownership in one line: `Tensor` is owned and disposed by its creator, `TensorView` and `TensorRef` are borrowed
+and must never outlive the storage behind them.
+# Audit
+
+Review the affected path against [shared architecture](AGENTS.md), [engine patterns](ENGINE_PATTERNS.md),
+[style](../CODE_STYLE.md), and relevant [known failures](../Checklists/TROUBLESHOOTING.md).
+
+- Trace inputs through Engine, ownership, backend execution, result delivery, cancellation and disposal. Check package boundaries, shape/dtype validation, path handling and resource limits.
+- Borrowed TensorView/TensorRef values must not outlive storage. Check preload/CPU disposal, GPU callbacks, stream ordering, partial construction and exception cleanup.
+- Check hot-path allocations, unnecessary device transfers, SIMD tails and native status handling. Prove performance findings with measurements.
+- Reproduce numerical failures using saved reference inputs; isolate the first divergent layer. INF can indicate F16 overflow; finite garbage can indicate layout errors. Neither symptom proves a unique cause.
+- Report actionable findings with source location, trigger, impact, evidence and remaining uncertainty. Distinguish confirmed bugs from hypotheses and missing verification.
+- Fix root causes minimally; preserve tolerances. Add meaningful regression coverage for behavior changes; do not refactor unrelated code during diagnosis.
+# Build a feature
+
+HartsyInference.Engine owns model lifecycle and load/generate dispatch. CLI, HTTP API and SwarmUI are consumers; extend the service contract rather than duplicating orchestration.
+
+- Preserve public compatibility with published consumers. Prefer compatible overloads/options; coordinate intentional breaks with packaging and extension updates.
+- Keep HTTP/SSE in HartsyInference.API. Native and compatibility endpoints should share Engine handlers. Preserve bounded default and long-running queue behavior.
+- Trace shape, dtype, device and ownership across boundaries. Thread cancellation through work and cleanup; distinguish stream completion, cancellation and faults.
+- Use source-generated JSON metadata at serialization boundaries. Backend-specific math belongs behind IBackend.
+- Keep CLI compiling as a consumer example; verify relevant API/engine behavior and partial-failure cleanup. Ordinary request failures must not terminate the host.
+
+Video features must follow the planning and exact-checkpoint identity rules in
+[engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
+# Cleanup and documentation
+
+- Refactor for measured cost, real duplication or a boundary/ownership defect. Preserve public compatibility and numerical tolerances; avoid speculative abstractions and cosmetic churn.
+- Check coverage appropriate to the change. Benchmark performance changes before/after. Documentation-only edits need link/claim checks, not new implementation-mirroring tests.
+- TensorPool has no established production adoption; do not prescribe it merely because an older agent file did.
+- Follow [documentation ownership](../README.md): cross-cutting open work in ROADMAP; model gaps in the modality status; reference evidence in PARITY_VERIFICATION; recurring traps in TROUBLESHOOTING. Delete completed task journals after preserving unique evidence/decisions.
+- Update verification claims only to the level actually demonstrated: synthetic, component parity, real generation, consumer verification and full numerical parity differ.
+- Keep examples short, current and compilable. Agent files add task-specific constraints rather than repeating core/style rules.
+
+## Packaging
+
+Version comes from Directory.Build.props. Libraries target net8.0/net10.0; API is not packable. Check actual package metadata and the publishing workflow before changing release steps.
+Validate Release builds and a fresh consumer. Publish the engine version and verify availability before repinning the SwarmUI extension; local extension development uses UseLocalHartsy=true. Do not claim a version is publicly available from the repository version alone.
+# Engine patterns
+
+The engine's own patterns for tensors, CUDA launches, config and disposal — native, not a dependency on any
+external framework. LLM text generation is native too, in `HartsyInference.LLM` (config-driven generic decoder
+transformer: Qwen2/Qwen3/Llama/Mistral, GGUF quantized inference, device-resident KV cache, sampler chain, chat
+templates). Full P/Invoke and disposal patterns are in [code style](../CODE_STYLE.md); the design rules that
+frame these patterns are in [shared architecture](AGENTS.md).
+
+## Tensor Type System
+
+| Type | Owns Memory | Dispose | Use For |
+|---|---|---|---|
+| `Tensor` | Yes | `Interlocked.Exchange` + `AlignedFree` | Weights, intermediates |
+| `TensorView` | No | No-op | Borrowed refs, mmap slices |
+| `TensorRef` | No | N/A (value type) | Kernel hot paths |
+
+Creator disposes `Tensor`. `TensorView` never outlives backing memory. `TensorRef` is a non-owning readonly
+record struct, not a stack-only `ref struct`; its lifetime must also stay within the storage lifetime.
+
+## CUDA Launch Pattern
+```csharp
+nint outputArg = output, inputArg = input;
+int nArg = n;
+float epsArg = eps;
+void** args = stackalloc void*[] {&outputArg, &inputArg, &nArg, &epsArg};
+CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+```
+`stackalloc void*[]` over **local variables** for stable addresses; never pass field refs. PTX loads from disk via
+`CudaModule.LoadFromFile(path)`, function handles live in `nint` fields, `sm_80` minimum.
+
+## Config, Streaming, Errors
+- `ModelConfig` is a class `record` with `required` + `init`; options are three-tier (flat props / explicit
+  composition / custom injection); JSON uses source-generated `[JsonSerializable]` contexts, no reflection.
+- Streams are `IAsyncEnumerable<GenerationProgress>`, `GenerationProgress` a `readonly record struct`.
+- Shape mismatches fail fast with `HartsyInferenceException`;

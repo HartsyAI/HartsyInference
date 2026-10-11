@@ -1,0 +1,27 @@
+{
+  "gguf": "/root/models/moe/mixtral-8x7b-instruct-v0.1-mradermacher-Q4_K_M.gguf",
+  "llama_server": "/root/baseline/bin/bench-serve",
+  "strata_exe": "/root/baseline/Strata/build/strata",
+  "strata_cfg": "/root/baseline/cfg/unused-strata.json",
+  "serve": "/root/baseline/Strata/serve",
+  "cwd": "/root/baseline/run",
+  "configs": [
+    {
+      "name": "llama-cpp-gpu",
+      "kind": "llama",
+      "args": [
+        "-ngl",
+        "99",
+        "-c",
+        "32768"
+      ]
+    },
+    {
+      "name": "hartsy-cuda",
+      "kind": "llama",
+      "args": [
+        "--hartsy-engine"
+      ]
+    }
+  ]
+}
