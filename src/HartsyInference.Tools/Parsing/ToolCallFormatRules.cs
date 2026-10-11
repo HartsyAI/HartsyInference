@@ -17,4 +17,25 @@ public sealed record ToolCallFormatRules
 
     /// <summary>JSON keys that may carry the arguments object (<c>arguments</c>, <c>parameters</c>), first match wins.</summary>
     public required IReadOnlyList<string> ArgumentKeys { get; init; }
+
+    /// <summary>The control-token literals a filter must see as text: each opening marker that is neither a text payload nor strict, and the close marker.</summary>
+    public IReadOnlyList<string> ControlLiterals
+    {
+        get
+        {
+            List<string> literals = [];
+            foreach (ToolCallMarker marker in Markers)
+            {
+                if (!marker.TextIsPayload && !marker.Strict)
+                {
+                    literals.Add(marker.Text);
+                }
+            }
+            if (CloseMarker is not null)
+            {
+                literals.Add(CloseMarker);
+            }
+            return literals;
+        }
+    }
 }

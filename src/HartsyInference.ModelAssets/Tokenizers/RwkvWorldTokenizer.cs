@@ -20,6 +20,7 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
     private readonly Dictionary<string, int> _specialByLiteral;
     private readonly string[] _specialLiterals;   // sorted by length desc (longest-match, for chat-template literals)
     private readonly HashSet<int> _specialIds;
+    private readonly Dictionary<int, string> _specialTextById = [];
 
     public int? BosId { get; }
     public int? EosId { get; }
@@ -48,6 +49,7 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
             {
                 _specialByLiteral[tokens[id]] = id;
                 _specialIds.Add(id);
+                _specialTextById[id] = tokens[id];
             }
         }
         _specialLiterals = _specialByLiteral.Keys.OrderByDescending(s => s.Length).ToArray();
@@ -167,6 +169,15 @@ public sealed class RwkvWorldTokenizer : ILlmTokenizer
             raw.AddRange(_tokenBytes[id]);
         }
         return Encoding.UTF8.GetString([.. raw]);
+    }
+
+    /// <summary>The bytes a token contributes: the same as <see cref="Decode"/>, except a special token's literal text when
+    /// <paramref name="includeSpecial"/> is set (the detokenizer then sees control markers as text).</summary>
+    public byte[]? TokenBytes(int id, bool includeSpecial)
+    {
+        if (id < 0 || id >= _tokenBytes.Length) return [];
+        if (!_specialIds.Contains(id)) return _tokenBytes[id];
+        return includeSpecial ? Encoding.UTF8.GetBytes(_specialTextById[id]) : [];
     }
 
     private string? MatchSpecialAt(string text, int i)
