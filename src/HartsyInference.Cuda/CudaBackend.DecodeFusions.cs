@@ -35,13 +35,25 @@ public sealed partial class CudaBackend
         GpuTransferHelper.FreeDevice(s.Xs);
     }
 
+    /// <summary>Whether the fused full-width QK-norm kernel may run on these buffers. It writes <c>hq * headDim</c> floats to <paramref name="qOut"/>,
+    /// reads <c>(hq + hkv [+ hkv]) * headDim</c> from <paramref name="qk"/> and the norm weights' widths, so each buffer's dtype and size is checked;
+    /// anything else takes the composed path, which validates by itself.</summary>
+    internal static bool QkNormFullFusedEligible(Tensor qOut, Tensor qk, Tensor? v, Tensor qNorm, Tensor kNorm, int hq, int hkv, int headDim, ulong devicePos)
+    {
+        long qWidth = (long)hq * headDim, kvWidth = (long)hkv * headDim;
+        return EngineKnobs.QknormFullScatter.Value && devicePos != 0
+            && qk.DType == DType.F32 && (v is null || v.DType == DType.F32) && qNorm.DType == DType.F32 && kNorm.DType == DType.F32
+            && qOut.DType == DType.F32 && qOut.ElementCount >= qWidth
+            && qk.ElementCount >= qWidth + kvWidth + (v is null ? kvWidth : 0) && (v is null || v.ElementCount >= kvWidth)
+            && qNorm.ElementCount >= qWidth && kNorm.ElementCount >= kvWidth;
+    }
+
     public void QkNormFullRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor? v,
         Tensor qNorm, Tensor kNorm, float eps,
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
         bool f16Kv = kCache.DType == DType.F16;
-        if (!EngineKnobs.QknormFullScatter.Value || devicePos == 0 || qk.DType != DType.F32 || (v is not null && v.DType != DType.F32)
-            || qNorm.DType != DType.F32 || kNorm.DType != DType.F32 || !KvScatterCacheOk(kCache, vCache))
+        if (!QkNormFullFusedEligible(qOut, qk, v, qNorm, kNorm, hq, hkv, headDim, devicePos) || !KvScatterCacheOk(kCache, vCache))
         {
             HartsyInference.Core.Backends.IBackend.ComposeQkNormFullRopeScatter(this, qOut, kCache, vCache, qk, v, qNorm, kNorm, eps, cosTable, sinTable,
                 hq, hkv, headDim, rotaryDim, interleaved, devicePos);

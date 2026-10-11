@@ -225,6 +225,37 @@ public sealed unsafe class CudaDecodeFusionTests
         _output.WriteLine($"full-width QK-norm scatter == composition (separateV {separateV}, f16 {f16Cache}, interleaved {interleaved})");
     }
 
+    [Fact]
+    public void QkNormFullFusedEligible_RejectsBuffersTheKernelWouldOverrun()
+    {
+        const int hq = 16, hkv = 4, d = 128;
+        Random rng = new(5);
+        using Tensor qk = Random(rng, 1, 1, (hq + hkv * 2) * d), qkShort = Random(rng, 1, 1, (hq + hkv) * d);
+        using Tensor v = Random(rng, 1, hkv, 1, d), vShort = Random(rng, 1, 1, 1, d);
+        using Tensor qNorm = Random(rng, hq * d), kNorm = Random(rng, hkv * d), qNormShort = Random(rng, d);
+        using Tensor qOut = new(new TensorShape(1, hq, 1, d), DType.F32);
+        using Tensor qOutHalf = new(new TensorShape(1, hq, 1, d), DType.F16);
+        using Tensor qOutSmall = new(new TensorShape(1, hq - 1, 1, d), DType.F32);
+        try
+        {
+            KnobStore.Set(EngineKnobs.QknormFullScatter, true);
+            Assert.True(CudaBackend.QkNormFullFusedEligible(qOut, qk, null, qNorm, kNorm, hq, hkv, d, 1));
+            Assert.True(CudaBackend.QkNormFullFusedEligible(qOut, qkShort, v, qNorm, kNorm, hq, hkv, d, 1));
+            Assert.False(CudaBackend.QkNormFullFusedEligible(qOutHalf, qk, null, qNorm, kNorm, hq, hkv, d, 1));      // F16 output: kernel writes floats
+            Assert.False(CudaBackend.QkNormFullFusedEligible(qOutSmall, qk, null, qNorm, kNorm, hq, hkv, d, 1));     // too small
+            Assert.False(CudaBackend.QkNormFullFusedEligible(qOut, qkShort, null, qNorm, kNorm, hq, hkv, d, 1));     // no room for v
+            Assert.False(CudaBackend.QkNormFullFusedEligible(qOut, qkShort, vShort, qNorm, kNorm, hq, hkv, d, 1));   // separate v too small
+            Assert.False(CudaBackend.QkNormFullFusedEligible(qOut, qk, null, qNormShort, kNorm, hq, hkv, d, 1));     // norm weight too narrow
+            Assert.False(CudaBackend.QkNormFullFusedEligible(qOut, qk, null, qNorm, kNorm, hq, hkv, d, 0));          // no device position
+            KnobStore.Set(EngineKnobs.QknormFullScatter, false);
+            Assert.False(CudaBackend.QkNormFullFusedEligible(qOut, qk, null, qNorm, kNorm, hq, hkv, d, 1));
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.QknormFullScatter);
+        }
+    }
+
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(32, 8, 128, 300, 1024)]   // Qwen3-4B decode shape, grouped-query kernel
