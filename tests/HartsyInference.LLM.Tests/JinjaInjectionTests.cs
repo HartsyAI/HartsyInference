@@ -62,8 +62,17 @@ public sealed class JinjaInjectionTests
     public void ToolRoleRendersAsObservationWhenTheTemplateAsksForIt()
     {
         // GLM-4-0414's template names the "observation" role and drops a "tool" turn; the mapping keeps the result.
+        JinjaChatTemplate template = new("{% for m in messages %}{% if m.role == 'observation' %}O:{% endif %}{{ m.role }};{% endfor %}");
+        int[] ids = template.Encode(Tok, [new("tool", "42")], addGenerationPrompt: false);
+        Assert.Equal("O:observation;", string.Concat(ids.Select(id => (char)id)));
+    }
+
+    [Fact]
+    public void ABareMentionOfObservationKeepsTheToolRole()
+    {
+        // A comment that names "observation" does not change the role a template's own tool branch expects.
         JinjaChatTemplate template = new("{# 'observation' #}{% for m in messages %}{{ m.role }};{% endfor %}");
         int[] ids = template.Encode(Tok, [new("tool", "42")], addGenerationPrompt: false);
-        Assert.Equal("observation;", string.Concat(ids.Select(id => (char)id)));
+        Assert.Equal("tool;", string.Concat(ids.Select(id => (char)id)));
     }
 }
