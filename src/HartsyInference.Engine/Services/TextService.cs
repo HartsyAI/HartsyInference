@@ -646,7 +646,7 @@ public sealed class TextService : ITextService, IDisposable
         IReadOnlySet<int>? literalIds = ResolveLiteralIds(filter, tokenizer);
         // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
         CancellationTokenSource? stopSource = filter is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        GenerationRequestWiring run = new() { Request = genRequest, Generation = stopSource?.Token ?? cancel, StopSource = stopSource };
+        GenerationRequestWiring run = new() { Request = genRequest, Generation = stopSource?.Token ?? cancel, StopSource = stopSource, ForcedToolName = request.ForceToolId };
         if (diagnosticId != 0 || filter is not null)
         {
             run.Request = genRequest with { OnPrefillCompleted = count =>
@@ -708,6 +708,9 @@ public sealed class TextService : ITextService, IDisposable
         public int PromptTokens { get; set; }
         public int Count { get; set; }
 
+        /// <summary>The tool a request forced (<see cref="TextRequest.ForceToolId"/>); a completed call to any other tool is not reported.</summary>
+        public string? ForcedToolName { get; init; }
+
         /// <summary>The outcome of a completed request: the parser is flushed, then the filter's text and any tool call replace the raw decode when a filter is present.</summary>
         public GenOutcome Finish(GenerationResult result)
         {
@@ -718,6 +721,7 @@ public sealed class TextService : ITextService, IDisposable
             // Calls from the filter, else from a structured parser (DeepSeek-V4.1): either one ends the turn as a tool call.
             IReadOnlyList<NativeToolCall> calls = FilterSink?.ToolCalls ?? Array.Empty<NativeToolCall>();
             if (calls.Count == 0 && Translator is not null) calls = Translator.Calls;
+            if (ForcedToolName is { Length: > 0 } forced) calls = calls.Where(c => c.Name == forced).ToList();
             StopReason resolved = calls.Count > 0 ? StopReason.ToolCall : stop;
             if (FilterSink is null)
             {
@@ -1841,7 +1845,7 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>True when the request offers tools to a template that never refers to them: the engine then writes the Hermes tool prompt into the conversation itself, rather than offering tools the template would drop.</summary>
     internal static bool ShouldInjectToolPrompt(TextRequest request, bool rawCompletion, IChatTemplate template)
-        => !rawCompletion && request.Tools is { Count: > 0 } && template.Source is { } source && !HermesToolPrompt.TemplateOffersTools(source);
+        => request.RawTokenIds is null && !rawCompletion && request.Tools is { Count: > 0 } && template.Source is { } source && !HermesToolPrompt.TemplateOffersTools(source);
 
     /// <summary>Refuses a forced tool the request does not offer, before any model work.</summary>
     /// <exception cref="HartsyInferenceException"><see cref="TextRequest.ForceToolId"/> names a tool that is not in <see cref="TextRequest.Tools"/>.</exception>
@@ -1879,12 +1883,18 @@ public sealed class TextService : ITextService, IDisposable
                 [.. request.Messages.Select(ToChatMessage)], ToToolSpecs(request.Tools)!, request.SystemPrompt, request.ForceToolId);
             return genRequest with { Messages = [.. rewritten], SystemPrompt = null, Tools = null };
         }
-        return genRequest with
+        List<ChatMessage> messages = [.. request.Messages.Select(ToChatMessage)];
+        string? systemPrompt = request.SystemPrompt;
+        if (request.Messages.Count > 0 && request.Messages[0].Role == TextRole.System)
         {
-            Messages = [.. request.Messages.Select(ToChatMessage)],
-            SystemPrompt = WithForceDirective(request.SystemPrompt, request.ForceToolId),
-            Tools = ToToolSpecs(request.Tools),
-        };
+            // The directive joins the conversation's own system turn instead of starting a second one.
+            messages[0] = messages[0] with { Content = WithForceDirective(messages[0].Content, request.ForceToolId) ?? messages[0].Content };
+        }
+        else
+        {
+            systemPrompt = WithForceDirective(systemPrompt, request.ForceToolId);
+        }
+        return genRequest with { Messages = messages, SystemPrompt = systemPrompt, Tools = ToToolSpecs(request.Tools) };
     }
 
     /// <summary>The system prompt with the force directive appended when a tool is forced; unchanged otherwise.</summary>

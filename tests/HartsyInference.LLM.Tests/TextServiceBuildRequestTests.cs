@@ -96,4 +96,22 @@ public sealed class TextServiceToolPromptTests
         Assert.Contains(HartsyInference.LLM.ChatTemplates.HermesToolPrompt.ForceDirective("get_time"), generation.SystemPrompt, StringComparison.Ordinal);
         Assert.NotNull(generation.Tools);
     }
+
+    [Fact]
+    public void RawTokenIdsAreNeverInjected()
+        => Assert.False(TextService.ShouldInjectToolPrompt(Request() with { RawTokenIds = [1, 2] }, rawCompletion: false, new JinjaChatTemplate(ToolLess)));
+
+    [Fact]
+    public void ForcedDirectiveJoinsALeadingSystemTurn()
+    {
+        TextRequest request = Request("get_time") with
+        {
+            Messages = [new TextMessage { Role = TextRole.System, Content = "Be brief." }, new TextMessage { Role = TextRole.User, Content = "What time is it?" }],
+        };
+        GenerationRequest generation = TextService.BuildRequest(request, rawCompletion: false, new LiteralControlTokenizer());
+        Assert.Equal(2, generation.Messages!.Count);
+        Assert.Null(generation.SystemPrompt);
+        Assert.StartsWith("Be brief.", generation.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains(HartsyInference.LLM.ChatTemplates.HermesToolPrompt.ForceDirective("get_time"), generation.Messages[0].Content, StringComparison.Ordinal);
+    }
 }
