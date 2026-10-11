@@ -105,10 +105,35 @@ Prefill keeps the GEMM: a quantized weight at M above 8 is dequantized to F16, a
 What remains from steps 1 and 2:
 - **Integer dot-product variant.** Quantize the activation to int8 per 32 and use `dotPacked4x8`, as the CUDA kernels use
   `dp4a`. Needs the LunarG SDK glslang. Llama's Q8_0 GEMV already reaches about 70% of bandwidth, so the gain is bounded.
-- **An F32 GEMV.** The MoE router weight (`ffn_gate_inp`) is F32 and still runs `matmul_tiled_f32` at M = 1, 0.35 ms a
-  call, 26 to 28% of GPU time on granite and OLMoE. It is the same shader with an F32 decoder.
+- **An F32 GEMV.** Done in steps 3 and 4 below: `gemv_quant_f32`, 0.004 ms a call on the OLMoE router against 0.35 ms.
 - **M from 9 to 16.** A speculative verify longer than 8 rows takes the dequantize-and-GEMM path.
-- MoE stays host-routed until steps 3 to 5; granite and OLMoE are host-bound, which is why they gain less than the dense models.
+- MoE decode was host-routed until steps 3 and 4 (below); prefill above 16 tokens still is, until step 5.
+
+## Steps 3 and 4 and the F32 GEMV: measured result
+
+RTX 3060, greedy, 128 new tokens, `hartsy text` with `-b vulkan:1`, 5 interleaved runs, median (range). "Before" is `origin/main` built fresh; peak VRAM is `nvidia-smi` on the card.
+
+| Model | Vulkan before tok/s | Vulkan after tok/s | VRAM before / after (MiB) |
+|---|---|---|---|
+| granite-3.0-1b-a400m Q4_K_M (MoE) | 23.4 (20.5 to 24.1) | 127.6 (115.7 to 136.3) | 911 / 905 |
+| OLMoE-1B-7B Q4_K_M (MoE) | 26.7 (25.1 to 27.1) | 132.5 (128.4 to 133.8) | 4296 / 4218 |
+| Llama-3.2-1B Q8_0 | 118.2 (115.7 to 119.5) | 117.3 (110.8 to 118.4) | 2211 / 2211 |
+| Qwen2.5-0.5B Q4_K_M | 94.7 (90.7 to 101.6) | 95.3 (87.3 to 103.8) | 682 / 684 |
+| Qwen3-4B Q4_K_M | 49.2 (48.6 to 50.1) | 49.2 (49.0 to 49.6) | 4014 / 4014 |
+
+Output: all five models give the same 128 tokens before and after. granite and OLMoE equal the CPU backend and the host-routed path of this branch (`numerics.moeIndexed=false`). Host waits in granite decode: 129 for 128 tokens, all the sampler's logits read, none inside a MoE layer (before: about 175 a token); the remaining waits are prefill, which is still host-routed.
+
+Bandwidth from `vkProfileGpu` (bytes the dispatch reads over its time):
+
+| Shader | Model | Avg per call | Achieved |
+|---|---|---|---|
+| `moe_expert_gate_up_q4_k` | OLMoE | 0.079 ms | about 240 GB/s |
+| `moe_expert_down_q6_k` | OLMoE | 0.065 ms | about 212 GB/s |
+| `moe_expert_down_q4_k` | OLMoE | 0.050 ms | about 189 GB/s |
+| `moe_expert_gate_up_q4_k` | granite | 0.041 ms | about 115 GB/s (K = 1024, launch bound) |
+| `gemv_quant_f32` | OLMoE router | 0.004 ms | n/a (was 0.35 ms) |
+
+Design: one subgroup computes one output row of one (token, slot) pair, so the grid is (row groups, pairs) and the accumulators are constants; the inner loop is `gemv_quant_unit.glsl`, shared with `gemv_quant`. Workgroup sizes of 64, 128 and 256 lanes measured the same.
 
 ## Plan, in order
 
@@ -140,12 +165,12 @@ dequant-to-F16 then cooperative-matrix GEMM; with `CacheWeightCasts` off a 7B mo
 per use and prefill pays one dequant per layer. Check the VRAM and prefill cost on Llama before turning it on by default; this
 step is also what makes OLMoE and Qwen3-4B load at all on a 12 GB card.
 
-**3. Grouped expert upload (about two days).** Override `PreloadWeightGroups` so a projection's experts share one buffer in
+**3. Grouped expert upload. Done: a projection's experts are one allocation, each expert a buffer bound at `i * stride` (256-byte aligned) plus a span buffer; `MoeExpertsResident` refuses a group with a freed or re-placed member.** The original plan: Override `PreloadWeightGroups` so a projection's experts share one buffer in
 expert order, record base and stride, and answer `MoeExpertsResident` the way `CudaBackend` does, refusing a group whose
 members were re-placed. Per-layer groups are 75 to 110 MB on OLMoE, below the 4 GiB storage-buffer range of the NVIDIA devices
 (llvmpipe reports 128 MB, so a software-rasterizer test needs small shapes).
 
-**4. Device-routed decode (about a week).** `SupportsMoeExpertIndexed(Q4_K | Q6_K | Q8_0)`, then:
+**4. Device-routed decode. Done: `moe_expert_gate_up_*`, `moe_expert_down_*` (Q8_0, Q4_K, Q6_K, Q4_0, Q5_0, Q5_K) and `moe_combine_slots`; results below.** The original plan: `SupportsMoeExpertIndexed(Q4_K | Q6_K | Q8_0)`, then:
 `moe_expert_gate_up` (one workgroup per `(pair, row block)`; reads `topkIdx[pair]`, addresses `base + e * stride`, runs the
 step-1 dot for gate and up against the token's activation, writes `act(gate) * up` in the same dispatch, SiLU or tanh-GELU by
 specialization constant), `moe_expert_down` (same shape, the down projection per pair), and `moe_combine_slots` (the weighted
