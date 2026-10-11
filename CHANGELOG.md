@@ -24,6 +24,13 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.342
+
+- **Added: three markup tool-call dialects.** `QwenXml` (Qwen3.5 and Qwen3-Coder: `<tool_call><function=…><parameter=…>`), `GlmXml` (GLM-4.5: `<arg_key>`/`<arg_value>` pairs) and `DeepSeekR1` (`<｜tool▁calls▁begin｜>` fenced-JSON blocks). The chat template picks the dialect; markup spans complete at their closing marker and their values are typed by the offered tool's schema.
+- **Added: Hermes reads a name on one line and its JSON on the next** (GLM-4-0414's layout), for names the request offers.
+- **Changed: DeepSeek detection** uses the R1 markers and names, not every DeepSeek name, so DeepSeek-V3 keeps the permissive default.
+- Real-weight status: the Qwen3.5-0.8B live run is not verified here, because its Q5_K dense weights have no CPU matmul path (a separate engine gap). GLM-4.5 and DeepSeek-R1 weights are not on this machine; their dialects are covered by unit tests against the documented formats.
+
 ## alpha.341
 
 - **Changed: tool-call format resolves per request.** `ToolCalling.Install` with no format now picks the parser from the model's own chat template first, then its architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter. An explicit format still applies to every request.
