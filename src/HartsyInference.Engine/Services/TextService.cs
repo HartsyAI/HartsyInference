@@ -755,14 +755,20 @@ public sealed class TextService : ITextService, IDisposable
         return new PassthroughOutputParser(tokenizer, literalSpecialIds);
     }
 
-    /// <summary>The special-token ids behind the control-token literals a filter asked to see. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
+    /// <summary>The special-token ids the passthrough parser decodes as text: the control-token literals a filter asked to see, plus the reasoning markers so a thinking model's <c>&lt;think&gt;</c> tags stay in the stream. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
     private static IReadOnlySet<int>? ResolveLiteralIds(ITextStreamFilter? filter, ILlmTokenizer tokenizer)
     {
-        if (filter is null) return null;
         HashSet<int> ids = [];
-        foreach (string literal in filter.MarkerLiterals)
+        if (filter is not null)
         {
-            if (tokenizer.SpecialId(literal) is { } id) ids.Add(id);
+            foreach (string literal in filter.MarkerLiterals)
+            {
+                if (tokenizer.SpecialId(literal) is { } id) ids.Add(id);
+            }
+        }
+        foreach (string marker in SpecialLiteralEscaper.ReasoningMarkers)
+        {
+            if (tokenizer.SpecialId(marker) is { } id) ids.Add(id);
         }
         return ids.Count == 0 ? null : ids;
     }

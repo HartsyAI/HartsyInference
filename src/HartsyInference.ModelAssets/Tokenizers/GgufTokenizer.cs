@@ -91,6 +91,9 @@ public sealed class GgufTokenizer : ILlmTokenizer
 
     public int? SpecialId(string token) => _specialByLiteral.TryGetValue(token, out int id) ? id : null;
 
+    /// <inheritdoc/>
+    public IReadOnlyList<string> SpecialLiterals => _specialLiterals;
+
     public int[] EncodeOrdinary(string text)
     {
         if (text.Length == 0) return [];

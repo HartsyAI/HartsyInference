@@ -11,7 +11,10 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         ["<|vision_start|>"] = VisionStartId, ["<|vision_end|>"] = VisionEndId,
         ["<|vision_pad|>"] = VisionPadId, ["<|image_pad|>"] = ImagePadId, ["<|video_pad|>"] = VideoPadId,
     };
-    private static readonly string[] SpecialLiterals = [.. SpecialTokens.Keys.OrderByDescending(s => s.Length)];
+    private static readonly string[] SpecialLiteralsByLength = [.. SpecialTokens.Keys.OrderByDescending(s => s.Length)];
+
+    /// <inheritdoc/>
+    public IReadOnlyList<string> SpecialLiterals => SpecialLiteralsByLength;
 
     /// <summary>Vocabulary size (matches Qwen2.5-VL's <c>config.json</c>).</summary>
     public const int VocabSize = 151936;
@@ -107,11 +110,11 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         while (i < text.Length)
         {
             string? hit = null;
-            foreach (string lit in SpecialLiterals)
+            foreach (string lit in SpecialLiteralsByLength)
                 if (i + lit.Length <= text.Length && string.CompareOrdinal(text, i, lit, 0, lit.Length) == 0) { hit = lit; break; }
             if (hit is not null) { ids.Add(SpecialTokens[hit]); i += hit.Length; continue; }
             int next = text.Length;
-            foreach (string lit in SpecialLiterals) { int idx = text.IndexOf(lit, i, StringComparison.Ordinal); if (idx >= 0 && idx < next) next = idx; }
+            foreach (string lit in SpecialLiteralsByLength) { int idx = text.IndexOf(lit, i, StringComparison.Ordinal); if (idx >= 0 && idx < next) next = idx; }
             ids.AddRange(EncodeOrdinary(text[i..next]));
             i = next;
         }

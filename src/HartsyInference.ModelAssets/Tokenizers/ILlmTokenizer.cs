@@ -18,6 +18,9 @@ public interface ILlmTokenizer
     /// <summary>Id of a special/control token by its literal string, or null if not a known special token.</summary>
     int? SpecialId(string token);
 
+    /// <summary>Every special/control literal this tokenizer maps to an id, longest first. Empty when the tokenizer cannot report them, in which case content is not escaped.</summary>
+    IReadOnlyList<string> SpecialLiterals => Array.Empty<string>();
+
     /// <summary>Beginning-of-sequence id, or null if the model has none.</summary>
     int? BosId { get; }
 

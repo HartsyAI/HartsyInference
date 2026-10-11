@@ -6,6 +6,14 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.336
+
+- **Fixed: message content cannot open a turn or emit a control token.** A chat template renders control literals such as `<|im_start|>` and `<tool_call>` into the prompt, so a user message, a tool result or a model reply containing one used to become a real control token. Those literals in content now encode as plain text. The template's own literals are unchanged, and clean conversations encode to the same ids as before.
+- **Changed: `<think>` and `</think>` stream as text.** They are control tokens in Qwen3 GGUFs, so streamed replies dropped the tags while keeping the reasoning text. They now stream as written, and a reasoning model's history keeps its own reasoning split.
+- **Added: `ILlmTokenizer.SpecialLiterals`.** The control literals a tokenizer maps to ids. The GGUF tokenizer and the Qwen2 tokenizer report them; other tokenizers report none, so their content is not escaped.
+- **Added: the `safe` template filter** (identity). Qwen3.5's tool-call replay uses it, so its second and later rounds no longer fall back to ChatML.
+- **Added: the GLM `observation` role.** A GLM-4-0414 template now gets tool results under the `observation` role it expects instead of losing them.
+
 ## alpha.335
 
 - **Changed: `EngineOptions.TextStreamFilterFactory` takes a `TextStreamFilterContext`.** The context carries the request, its request id, the template's name and Jinja source, the architecture and the model path, so a host can pick a parser per model. Breaking for any host that set the factory.
