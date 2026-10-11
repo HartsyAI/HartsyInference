@@ -11,4 +11,4 @@ for spec in "granite-3b 4k" "olmoe 4k" "qwen3-30b 4k,32k" "mixtral 4k,32k"; do
   echo "$m exit=$rc $(date -u +%T)" >> $R/final.progress
   [ $rc -eq 0 ] || failed="$failed $m"
 done
-if [ -z "${failed:-}" ]; then echo ALL_DONE > $R/final.status; else echo "FAILED:$failed" > $R/final.status; fi
+if [ -z "${failed:-}" ]; then echo ALL_DONE > $R/final.status; else echo "FAILED:$failed" > $R/final.status; exit 1; fi

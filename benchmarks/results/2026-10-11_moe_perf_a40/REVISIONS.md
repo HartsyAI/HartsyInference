@@ -11,6 +11,5 @@
 
 Contents: `round1/` and `round2/` hold the harness summaries (`<model>.summary.md`) and the raw per-trial files (`raw-<model>/*.jsonl`);
 `pod_up.py` and `bootstrap.sh` bring a pod up from this folder (it copies itself, `scripts/`, `cfg/` and `prompts/` to the pod); `scripts/` are the
-pod scripts that produced the runs (`make_report.py` builds the report's tables from the summaries; `libcuptitrace.so` is built from
-`cupti_trace.c`). The scripts here are the corrected versions: the originals' `run-cell.sh` swallowed the harness exit status, which let a failed
-Mixtral cell read as passed during the campaign; it now fails the cell when a config has no trials or the log has errors. `MANIFEST.sha256` lists the SHA-256 of every file here. Kernel traces (CUPTI CSVs, 64 MB) are not archived.
+pod scripts that produced the runs (`make_report.py` builds the report's tables from the summaries; `trace-decode.sh` / `trace-decode-long.sh` run a CLI generation under the tracer and `analyze_trace.py` summarizes the CSV). The scripts here are the corrected versions: the originals' `run-cell.sh` swallowed the harness exit status, which let a failed
+Mixtral cell read as passed during the campaign; it now fails the cell when a config has no trials or the log has errors. `MANIFEST.sha256` lists the SHA-256 of every file here. Kernel traces (CUPTI CSVs, 64 MB) are not archived, and neither is the prebuilt `libcuptitrace.so`: it was compiled on the pod from `scripts/cupti_trace.c` against that container's CUPTI (CUDA 12.8 image); the exact compiler flags were not recorded, so regenerating the traces means rebuilding the library (a shared object linked with `-lcupti`) and is not verified from this archive.

@@ -38,6 +38,8 @@ cmake -S llama.cpp -B llama.cpp/build -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHI
 cmake --build llama.cpp/build -j "$(nproc)" --target llama-server llama-cli llama-bench > $L/llamacpp-build.log 2>&1 || fail llama-build
 say "llama.cpp built"
 wait
+# The engine clone and the model downloads ran in the background: a bare `wait` reports success whatever they did, so check their markers.
+grep -q ENGINE_CLONED $L/engine.log && [ -x /root/dotnet/dotnet ] && [ -d $B/engine/src-main/.git ] || fail engine
 cat $L/models.log; cat $L/engine.log | tail -n 2
 grep -q MODELS_DONE $L/models.log && ! grep -q -E "FAILED|MISMATCH|MISSING" $L/models.log || fail models
 say "BOOTSTRAP_DONE"
