@@ -52,8 +52,8 @@ For calibration: a real precision change *inside* CUDA costs ~2% SSIM over 20 st
 cross-backend gap is ~44%. So the residual is larger than rounding and remains unexplained; attention and the
 GEMM dtype path are the untested suspects.
 
-**Step-graph decode covers a subset.** Greedy text-LLM decode replays a recorded step (`numerics.vkLlmGraph`, on by default,
-`GraphDecodeSupported` still off). An F16 KV cache, a sliding window or soft-cap (Gemma-2/3) and head dims above the flash
+**Step-graph decode covers a subset.** Greedy text-LLM decode replays a recorded step (`--graph-decode`, or by default for requests of 512 or more
+new tokens; kill-switch `numerics.vkLlmGraph`; `GraphDecodeSupported` still off). An F16 KV cache, a sliding window or soft-cap (Gemma-2/3) and head dims above the flash
 kernel's limit are refused at capture and decode eagerly; sampled decode is eager (no device sampler); the SSM, CSM and
 MusicGen graph paths have no Vulkan capture evidence. Capture keeps an F32 copy of the embedding table on the device
 (1.05 GB for Llama-3.2-1B, 1.56 GB for Qwen3-4B). Details in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6.

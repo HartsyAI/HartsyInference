@@ -35,7 +35,8 @@ public sealed partial class VulkanBackend
         long n = weight.Shape[0], k = weight.Shape[1];
         // K comes from the weight: the decode graph feeds the o-projection the head-major attention output
         // [1, heads, 1, headDim], whose last dim is the head size, not K (the rows are the same bytes as [1, 1, heads*headDim]).
-        if (input.ElementCount % k != 0 || k % GemvBlockElements(weight.DType) != 0) return false;
+        // The input is read as row-contiguous [M, K]; a tensor whose element count is a multiple of K is taken to be laid out so.
+        if (k < 1 || k % GemvBlockElements(weight.DType) != 0 || input.ElementCount % k != 0) return false;
         long m = input.ElementCount / k;
         if (m < 1 || m > QuantGemvMaxRows || output.ElementCount != m * n) return false;
         if (bias is not null && (bias.DType != DType.F32 || bias.ElementCount != n)) return false;

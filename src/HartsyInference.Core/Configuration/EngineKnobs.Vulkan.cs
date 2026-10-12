@@ -40,10 +40,10 @@ public static partial class EngineKnobs
         Bool("numerics.vkPushDescriptors", false, KnobScope.Construction, KnobDomain.Numerics,
             "Uses VK_KHR_push_descriptor instead of the descriptor-pool ring when the extension is available.");
 
-    /// <summary>Lets Vulkan text-LLM decode use the recorded step graph (one submit per token) when a request asks for graph decode.</summary>
+    /// <summary>Kill-switch for the Vulkan text-LLM step graph (one submit per token); off keeps decode eager even when graph decode is requested.</summary>
     public static readonly Knob<bool> VkLlmGraph =
         Bool("numerics.vkLlmGraph", true, KnobScope.Runtime, KnobDomain.Numerics,
-            "Lets Vulkan text-LLM decode use the recorded step graph (one submit per token) when a request asks for graph decode.");
+            "Kill-switch for the Vulkan text-LLM step graph (one submit per token): off keeps decode on the eager loop even when graph decode is requested or the backend would default to it.");
 
     /// <summary>Submits one command buffer per op instead of batching dispatches, for isolating a faulting op.</summary>
     public static readonly Knob<bool> VkSubmitPerOp =

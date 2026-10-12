@@ -52,6 +52,9 @@ public sealed class TextGenerationPipeline
         _stopIds = [.. tokenizer.StopIds];
     }
 
+    /// <summary>Fewest <see cref="GenerationRequest.MaxTokens"/> for which a backend's default-on graph decode is used. A fresh process pays 0.2 s to 1.4 s once (the F32 embedding table) before the graph saves 1.5 ms to 5.5 ms a token, so the break-even is 37 to 460 tokens; shorter requests, and any process that wants it always, say so with <c>GraphDecode</c> or <c>numerics.graphDecode</c>.</summary>
+    internal const int ImplicitGraphMinTokens = 512;
+
     /// <summary>Generates text for <paramref name="request"/>, invoking <paramref name="onToken"/> per produced token; cancelling via <paramref name="ct"/> stops between layers during the prompt prefill and between tokens during decode, and throws, discarding already-produced tokens (rely on <paramref name="onToken"/> for partial output, which still fires for every token generated before cancellation is observed).</summary>
     public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null, CancellationToken ct = default)
         => Generate(request, reuse: null, onToken, ct);
@@ -122,23 +125,26 @@ public sealed class TextGenerationPipeline
 
             request.OnPrefillCompleted?.Invoke(promptIds.Length);
 
-            // CUDA-graph decode: collapses the ~600-700 kernel launches/token the plain loop below issues into one
+            // Graph decode (a CUDA graph, or a recorded Vulkan command buffer): collapses the ~600-700 kernel launches/token the plain loop below issues into one
             // cuGraphLaunch/step, removing the CPU launch-issuance bottleneck the perf grind identified as the
             // biggest remaining gap to llama.cpp (docs/Checklists/LLM_DECODE_PERF_GRIND.md Phase 6). Opt-in
-            // (env-gated) and scoped to what's actually graph-safe: greedy only (the on-device argmax has no
+            // (a request flag or numerics.graphDecode; a backend may default it on for long requests) and scoped to what's actually graph-safe: greedy only (the on-device argmax has no
             // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
             // cross-attention/sliding-window models fall through to the verified default loop unchanged.
-            // A request or the knob asks for it explicitly; otherwise a backend whose graph is validated and faster than its eager
-            // loop (Vulkan) turns it on by itself. Only the second case falls back to the eager loop if the capture fails.
+            // A request or the knob asks for it explicitly. Otherwise a backend whose graph is validated and faster than its eager loop
+            // (Vulkan) turns it on by itself for a request long enough to repay it: the first capture in a process builds an F32 copy of the
+            // embedding table (0.2 s to 1.4 s on the models measured) and each capture warms one step, which a short reply does not recover.
+            // Only the implicit case falls back to the eager loop if the capture fails.
+            IGraphDecodable? graphModel = _model as IGraphDecodable;
             bool graphDecodeExplicit = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
-            bool graphDecodeRequested = request.GraphDecode ?? (EngineKnobs.GraphDecode.Value || _backend.LlmGraphDecodeDefault);
+            bool graphDecodeRequested = request.GraphDecode ?? (EngineKnobs.GraphDecode.Value
+                || (request.MaxTokens >= ImplicitGraphMinTokens && graphModel?.GraphDecodeByDefault(_backend) == true));
             // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
             // including any JSON grammar step — so combining the two would silently produce unconstrained output.
             // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
             // excluded it — now consistent.)
             // Staged v1 keeps decode eager (the adapter reports no graph support): the step graph is a single-backend
             // capture, so per-stage graphs are a measured follow-up, not a default.
-            IGraphDecodable? graphModel = _model as IGraphDecodable;
             // A sampled (non-greedy) request can replay a graph too when the backend draws on the device: top-k, temperature, top-p and
             // min-p are done there, which covers the common server defaults; anything else (no top-k, a larger k) stays on the host chain.
             DeviceSamplerConfig? deviceSampler = DeviceSamplerFor(request.Sampling);
@@ -431,8 +437,8 @@ public sealed class TextGenerationPipeline
             ? new DeviceSamplerConfig(options.TopK, options.Temperature, options.TopP, options.MinP, options.Seed)
             : null;
 
-    /// <summary>Decode via one captured CUDA graph, replayed once per token (greedy, or sampled on the device when <paramref name="sampler"/> is given); <paramref name="firstToken"/> is the token already sampled from the prefill's last position.</summary>
-    /// <remarks>Device state (position, current token id, the RoPE table, and — when a repetition penalty is requested — the token history) is refreshed OUTSIDE the graph before each replay, which is what makes one capture valid for every step (see IBackend's "Device-side decode position" docs). For a greedy request repetition penalty is the only sampler stage graph decode replicates (see <see cref="GenericTransformer.ForwardGraphDecodeStep"/> for why temperature/top-k/top-p/min-p are no-ops for a greedy pick); a sampled request draws its token on the device from the top-k, temperature, top-p and min-p of <paramref name="sampler"/>; when the request's penalty is 1.0 the history buffers are still allocated but the backend skips the append/penalty kernels entirely. If capture throws (an eligible-looking model hits something the graphed path doesn't support), the exception propagates rather than falling back — a gap surfaces as a clear error, not silent mis-generation.</remarks>
+    /// <summary>Decode via the already captured graph (CUDA graph or recorded Vulkan command buffer), replayed once per token (greedy, or sampled on the device when <paramref name="sampler"/> is given); <paramref name="firstToken"/> is the token already sampled from the prefill's last position.</summary>
+    /// <remarks>Device state (position, current token id, the RoPE table, and — when a repetition penalty is requested — the token history) is refreshed OUTSIDE the graph before each replay, which is what makes one capture valid for every step (see IBackend's "Device-side decode position" docs). For a greedy request repetition penalty is the only sampler stage graph decode replicates (see <see cref="GenericTransformer.ForwardGraphDecodeStep"/> for why temperature/top-k/top-p/min-p are no-ops for a greedy pick); a sampled request draws its token on the device from the top-k, temperature, top-p and min-p of <paramref name="sampler"/>; when the request's penalty is 1.0 the history buffers are still allocated but the backend skips the append/penalty kernels entirely. Capture happens before this method: when graph decode was asked for explicitly a capture that throws propagates (a gap surfaces as a clear error, not silent mis-generation); when it was only the backend's default, the caller logs it and decodes eagerly.</remarks>
     private bool GenerateGraphDecode(GenerationRequest request, IGraphDecodable graphModel, GraphDecodeSession session, ISequenceState cache,
         int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {

@@ -1655,7 +1655,7 @@ public partial interface IBackend : IDisposable
     /// <summary>True when the generic text-LLM decode step (<c>GenericTransformer.ForwardGraphDecodeStep</c>) can be captured through <see cref="CaptureGraph"/> and replayed. Separate from <see cref="GraphDecodeSupported"/> so a backend can enable it for text LLMs without also routing the SSM, CSM and MusicGen paths (which gate on that flag) into a capture they were never validated against.</summary>
     bool LlmGraphDecodeSupported => GraphDecodeSupported;
 
-    /// <summary>True when text-LLM graph decode should be used without being asked for (<c>numerics.graphDecode</c> / a request's <c>GraphDecode</c>): the backend measured it faster than its eager loop for every model it supports. A failed capture then falls back to eager instead of failing the request. CUDA keeps the explicit opt-in.</summary>
+    /// <summary>True when text-LLM graph decode should be used without being asked for (<c>numerics.graphDecode</c> / a request's <c>GraphDecode</c>): the backend measured it faster than its eager loop for every model it supports. Applies to requests of at least 512 new tokens (the first capture in a process costs 0.2 s to 1.4 s); a failed capture then falls back to eager instead of failing the request. CUDA keeps the explicit opt-in.</summary>
     bool LlmGraphDecodeDefault => false;
 
     /// <summary>Allocates a persistent 2-int device buffer {kvLen, qOffset} (0 = unsupported); free with <see cref="FreeDevicePos"/>.</summary>
