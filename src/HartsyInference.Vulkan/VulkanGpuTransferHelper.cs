@@ -48,7 +48,15 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// <summary>Whether a step graph is being recorded. Set by the backend around capture.</summary>
     public bool CapturingStepGraph { get; set; }
 
-    private readonly List<VulkanBuffer> _stepGraphRetained = new();
+    private List<VulkanBuffer> _stepGraphRetained = new();
+
+    /// <summary>Installs <paramref name="replacement"/> as the list capture retains into and returns the previous one, so each captured LLM graph owns exactly the buffers its own capture retained.</summary>
+    public List<VulkanBuffer> SwapStepGraphRetained(List<VulkanBuffer> replacement)
+    {
+        List<VulkanBuffer> old = _stepGraphRetained;
+        _stepGraphRetained = replacement;
+        return old;
+    }
 
     /// <summary>A host read is illegal while recording: it violates the capture contract, and servicing it would
     /// submit and drain the normal stream while the capture buffer is still open.</summary>

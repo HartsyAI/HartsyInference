@@ -3,7 +3,7 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Generation;
 
-/// <summary>Optional capability of a model whose single-token greedy step can be captured as one CUDA graph and replayed.</summary>
+/// <summary>Optional capability of a model whose single-token greedy step can be captured as one graph (a CUDA graph, or a recorded Vulkan command buffer) and replayed.</summary>
 internal interface IGraphDecodable
 {
     /// <summary>True when this model's decode step is graph-capturable on <paramref name="backend"/>.</summary>
@@ -11,6 +11,9 @@ internal interface IGraphDecodable
 
     /// <summary>Warms, makes resident and captures the decode step for <paramref name="state"/>, whose committed length is <paramref name="pos"/>; <paramref name="firstToken"/> is the token already sampled.</summary>
     GraphDecodeSession CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty, DeviceSamplerConfig? sampler = null);
+
+    /// <summary>True when graph decode should run without being asked for on <paramref name="backend"/> (see <c>IBackend.LlmGraphDecodeDefault</c>).</summary>
+    bool GraphDecodeByDefault(IBackend backend) => backend.LlmGraphDecodeDefault;
 
     /// <summary>True when the captured step can draw tokens on the device (<paramref name="sampler"/> given to <see cref="CaptureDecodeGraph"/>) on <paramref name="backend"/>.</summary>
     bool SupportsDeviceSampling(IBackend backend) => false;

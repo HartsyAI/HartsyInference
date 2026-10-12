@@ -51,7 +51,9 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
 - [x] Subgroup-size pinning (to the device default; `sdpa_flash` passes no spec constants and is not pinned),
   descriptor-pool reuse waits on the timeline, and the int64/int16 shader features are enabled. im2col past
   2^31 elements is refused on the host rather than indexed in 64 bits.
-- [ ] Real-model Vulkan decode parity/throughput before enabling GraphDecodeSupported by default.
+- [x] Real-model Vulkan decode parity/throughput for the text-LLM step graph: five models equal `origin/main` over 128 greedy
+  tokens and 1.17x to 2.4x faster ([VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6). It is gated by
+  `LlmGraphDecodeSupported`; `GraphDecodeSupported` itself stays off for the SSM, CSM and MusicGen paths, which have no Vulkan capture evidence.
 - [ ] INT8 loading policy, end-to-end quality gate, cached quantized-weight lifetime, and shape-specific tuning.
   The opt-in Linear primitive already exists; that alone does not establish model support.
 - [ ] Measure actual GPU time with VulkanGpuTimer before attributing full-model latency to a specific op.

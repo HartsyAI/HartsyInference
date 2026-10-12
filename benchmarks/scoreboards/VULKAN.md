@@ -195,8 +195,8 @@ The leaf ops a future graph replay would drive: device-resident RoPE table build
 `argmax_lastdim`), repetition-penalty history append + apply (`history_append`/`repetition_penalty`), and
 the device-position variants of KV-cache append and flash attention (`kv_cache_append_dev`,
 `sdpa_flash_dev_f32`). All 14 tests in `VulkanDecodeGraphTests` pass on both the 3060 and llvmpipe — no
-throughput numbers yet, since `GraphDecodeSupported` stays off (a settable property, not hardcoded) until
-Phase 6f's real end-to-end decode-loop parity test validates it; see `ROADMAP.md` §3 for what's still open
+throughput numbers at the time (the end-to-end decode-loop parity test and the throughput came with the text-LLM step graph: see
+[VULKAN_MOE_PLAN.md](../../docs/VULKAN_MOE_PLAN.md) step 6; `GraphDecodeSupported` itself still stays off); see `ROADMAP.md` §3 for what's still open
 and why `VulkanStepGraph` (the actual command-buffer-replay mechanism these ops would eventually run
 under) was deliberately not built this pass.
 

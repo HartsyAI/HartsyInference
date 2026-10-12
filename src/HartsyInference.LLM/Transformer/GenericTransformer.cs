@@ -691,7 +691,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         bool ok = SupportsGraphDecodeCore(backend);
         if (!ok && EngineKnobs.GraphGateLog.Value)
             HartsyInference.Core.Logging.Logs.Info(
-                $"[GraphGate] backend={backend.GraphDecodeSupported} mla={_cfg.Mla is null} moe={MoeGraphReady(backend)} " +
+                $"[GraphGate] backend={backend.LlmGraphDecodeSupported} mla={_cfg.Mla is null} moe={MoeGraphReady(backend)} " +
                 $"cross={_cfg.CrossAttnLayers.Count == 0} sink={!_cfg.AttnSink} alibi={_cfg.AlibiMaxBias <= 0f} " +
                 $"parRes={!_cfg.ParallelResidual} absPos={!_cfg.AbsolutePositionEmbeddings} " +
                 $"noRopeGlobal={!_cfg.NoRopeOnGlobalLayers} preNorm={_cfg.NormPlacement == NormPlacement.PreNorm} " +
@@ -714,7 +714,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     private bool SupportsGraphDecodeCore(IBackend backend) =>
-        backend.GraphDecodeSupported && _cfg.Mla is null && MoeGraphReady(backend) && _cfg.CrossAttnLayers.Count == 0
+        backend.LlmGraphDecodeSupported && _cfg.Mla is null && MoeGraphReady(backend) && _cfg.CrossAttnLayers.Count == 0
         // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are supported
         // as of 2026-07-22: the split-K decode-attention kernel handles window/softcap with a device position,
         // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep

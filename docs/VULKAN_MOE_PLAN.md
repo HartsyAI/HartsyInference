@@ -105,7 +105,7 @@ What remains from steps 1 and 2:
 - **Integer dot-product variant.** Quantize the activation to int8 per 32 and use `dotPacked4x8`, as the CUDA kernels use
   `dp4a`. Needs the LunarG SDK glslang. Llama's Q8_0 GEMV already reaches about 70% of bandwidth, so the gain is bounded.
 - **An F32 GEMV.** Done in steps 3 and 4 below: `gemv_quant_f32`, 0.004 ms a call on the OLMoE router against 0.35 ms.
-- **M from 9 to 16.** A speculative verify longer than 8 rows takes the dequantize-and-GEMM path.
+- **M from 9 to 16.** Done in step 6 below: the shader already took the row count as a specialization constant, so the cap moved from 8 to 16.
 - MoE decode was host-routed until steps 3 and 4, and prefill above 16 tokens until step 5 (both below).
 
 ## Steps 3 and 4 and the F32 GEMV: measured result
@@ -148,6 +148,54 @@ The range is wide because another agent shares the card between runs; the first 
 Output over 128 greedy tokens after a 750-token prompt: granite is identical on the device-routed path, the host-routed path (`numerics.moeIndexed=false`), `origin/main` and the CPU backend. OLMoE is identical across those three Vulkan runs and differs from the CPU backend at word 57 ("more accessible to the general public" against "accessible to a wider audience"); the host-routed path and `origin/main` produce the same text as the device path, so the split is the CPU's F32 against the GPU's F16 GEMMs at a near-tie, not the new path.
 
 Design: `MoeExpertsGrouped` gathers the activation rows into expert-major order as F16 (`moe_gather_rows_f16`), then for each expert that received rows dequantizes its gate, up and down to F16 into three layer-long workspaces of one expert each (a cached cast is used if one exists), runs the cooperative-matrix GEMMs with F32 accumulation and F32 outputs, applies the activation in `moe_act_mul_f16`, and writes the down GEMM straight into the expert-major output at the expert's row offset. Dequantizing only the active experts keeps the transient at three experts' F16 weights (12 MB for OLMoE) instead of the 1 GB of a layer's F16 stacks; an earlier version that allocated a fresh buffer per projection per expert paid 267 blocking waits on OLMoE for allocator reclaims, which the workspaces removed. The op is available where the device has cooperative matrices (`SupportsMoeExpertsGrouped`); the register-tiled GEMM cannot write an F32 output at a row offset, so a device without them keeps the host-routed layer. `MoeCombinePairs` is `moe_combine_slots` through the pair map. GPU time in a 750-token granite prefill is now 86% `sdpa_flash_f32` (22 ms a call) and 11% the grouped experts, so prefill is attention-bound from here.
+
+## Step 6 and M 9 to 16: measured result
+
+**Does it pay: the host share of a token.** `diagnostics.vkProfile=true` on Llama-3.2-1B Q8_0 (after step 1, 8.6 ms a token): the host spends about 660 ms in ops over the 128 tokens and the prefill, roughly 5 ms a token, against 8.6 ms for the whole token, so decode is host-bound (recording about 390 dispatches a token and the per-op batching) and the GPU waits on the host. Replay removes that recording.
+
+RTX 3060 (`-b vulkan:1`), greedy, 128 new tokens, `hartsy text`, 5 interleaved runs, median (range). "Before" is `origin/main` at 64dca4e3 (before the device-routed prefill PR; decode is unaffected by it) built fresh; "eager, this branch" is the branch with `numerics.vkLlmGraph=false`; "graph" is the graph decode path (`--graph-decode`, or the default for a request of 512 or more new tokens). The tok/s is the decode rate the CLI reports, which leaves out the one-time cost below. Peak VRAM is `nvidia-smi` memory used on the card minus the idle baseline.
+
+| Model | Before tok/s | Eager, this branch tok/s | Graph tok/s | VRAM before / graph (MiB) |
+|---|---|---|---|---|
+| Llama-3.2-1B Q8_0 | 119.9 (118.9 to 120.7) | 119.5 (106.8 to 120.5) | 158.7 (155.1 to 159.3) | 2163 / 3165 |
+| Qwen2.5-0.5B Q4_K_M | 104.2 (93.1 to 113.6) | 98.3 (94.7 to 116.8) | 214.8 (210.8 to 216.9) | 636 / 1155 |
+| granite-3.0-1b-a400m Q4_K_M (MoE) | 110.7 (107.5 to 111.8) | 115.2 (112.2 to 120.5) | 261.5 (258.4 to 275.1) | 855 / 1241 |
+| OLMoE-1B-7B Q4_K_M (MoE) | 134.2 (124.8 to 139.6) | 135.6 (134.5 to 141.8) | 168.7 (168.1 to 171.2) | 4138 / 4531 |
+| Qwen3-4B Q4_K_M | 49.8 (49.3 to 50.1) | 49.6 (49.4 to 50.1) | 58.4 (58.3 to 58.6) | 3966 / 5262 |
+
+The gain is the host share: it is largest where the GPU time per token is smallest (Qwen2.5-0.5B 2.1x, granite 2.4x) and smallest on Qwen3-4B (1.17x), which is GPU-bound at about 17 ms a token even with the graph. No model is slower, and the eager path of the branch matches `origin/main` within the run-to-run range (the card is shared, so the low runs of the eager columns are another process).
+
+Output: the 128 tokens are identical to `origin/main` on all five models in all 15 runs of each (granite stops on its end token before 128; the others run to the length limit). A repetition penalty of 1.15 on Llama gives the same text before and after, and a sampled run (temperature 0.8) takes the eager loop, since Vulkan has no device sampler (step 7).
+
+**One-time cost, and why the default needs 512 tokens.** The first capture in a process builds and uploads the F32 embedding table and warms a step. Extra wall time of a fresh `hartsy text` run with the graph (8 new tokens) over eager, and the tokens the graph needs to repay it at its per-token saving:
+
+| Model | One-time wall cost | Saving per token | Break-even |
+|---|---|---|---|
+| Llama-3.2-1B Q8_0 | 0.95 s | 2.1 ms | about 460 tokens |
+| Qwen2.5-0.5B Q4_K_M | 0.36 s | 5.5 ms | about 65 |
+| granite-3.0-1b-a400m | 0.18 s | 4.9 ms | about 37 |
+| OLMoE-1B-7B | 0.37 s | 1.5 ms | about 255 |
+| Qwen3-4B Q4_K_M | 1.39 s | 3.0 ms | about 460 |
+
+So a one-shot 128-token CLI run is slower in wall time with the graph on Llama and Qwen3 (the reported tok/s does not show it), which is why the implicit default applies only to requests of at least `TextGenerationPipeline.ImplicitGraphMinTokens` (512) new tokens; a long-lived host that wants it always sets `numerics.graphDecode`, and then pays the cost once per model. Replaying a graph in a process that already holds the table costs only the warm step and the recording. Building the table from the quantized weights on the device, or gathering from the quantized table, would remove both this cost and the VRAM below; it is not done.
+
+**VRAM is the F32 embedding table, not the graph.** Graph decode gathers the token's row on the device, so it keeps an F32 copy of the embedding table (`vocab * hidden * 4`: Llama 1.05 GB, Qwen3-4B 1.56 GB, Qwen2.5-0.5B 0.54 GB, OLMoE 0.41 GB, granite twice 0.2 GB because its embedding scale needs a pre-scaled copy). Each model's growth matches its table size to within a few MiB, which leaves no room for retained intermediates beyond that. A quantized-table gather would remove the growth; it is not done.
+
+**Gates and what the graph refuses.** `IBackend.LlmGraphDecodeSupported` (push descriptors and the `numerics.vkLlmGraph` kill-switch) is separate from `GraphDecodeSupported`, which stays false: the SSM, CSM and MusicGen paths gate on that one and were never validated against a Vulkan capture. `LlmGraphDecodeDefault` makes graph decode the default for requests of 512 or more new tokens that do not ask either way; an explicit `GraphDecode`/`numerics.graphDecode` still throws on a capture failure, a default one logs a warning and decodes eagerly. The dynamic-batch scheduler keeps its explicit opt-in. Shapes the device-position kernels do not cover fail at capture instead of attending over zero keys: an F16 KV cache (`vram.kvF16`), a sliding window or soft-cap (Gemma-2/3), and head dims above `FlashMaxHeadDim`; each of those then takes the eager loop. Capture needs every weight resident (a miss throws), which the decode preload provides.
+
+**Bugs the parity work found** (each invisible to the per-op tests): the o-projection receives the head-major attention output `[1, heads, 1, headDim]`, and Linear took K from its last dim (16) instead of the weight's, so the whole layer was wrong; `CopyTo` ran on the normal stream during capture, so QK-norm models copied once at capture and never on replay; and the interface's full-width QK-norm composition (OLMoE) roped one giant head. `VulkanLlmGraphDecodeTests` now runs a synthetic Llama, Qwen2, Qwen3 and OLMoE shape through a captured replay and compares the hidden state to the eager forward (exactly equal) and the greedy token loop; the MoE shapes are checked end to end on granite and OLMoE above, not in a unit test.
+
+**M from 9 to 16.** `gemv_quant` takes the row count as a specialization constant, so no shader changed: `QuantGemvMaxRows` went from 8 to 16 (the same cap as the MoE indexed path, so a verify round is on the fused path in the dense and MoE layers). `VulkanQuantGemvTests` gained cases for 9 to 16 rows on every format and the F32 matrix. Prompt-lookup speculative decode (draft 8, so a 9-row verify), graph off, same 128-token prompt, median of 3 to 4 interleaved runs:
+
+| Model | Spec decode before tok/s | After tok/s | Text equal to plain greedy |
+|---|---|---|---|
+| Llama-3.2-1B Q8_0 | 122.1 | 149.3 | yes |
+| Qwen2.5-0.5B Q4_K_M | 201.6 | 244.6 | yes |
+| granite-3.0-1b-a400m Q4_K_M | 259.0 | 308.5 | yes |
+| OLMoE-1B-7B Q4_K_M | 118.1 | 139.5 | yes |
+| Qwen3-4B Q4_K_M | 40.5 | 45.4 | yes |
+
+Speculation only pays on repetitive text: this prompt repeats a sentence, and for Qwen3-4B and OLMoE the speculative run (45.4 and 139.5) is still not faster than plain greedy with the graph (58.4 and 168.7) or even without it (47.2 and 135.8), so speculative decode stays opt-in (`numerics.specDecode`) and is not combined with the graph (the pipeline picks the graph when both apply).
 
 ## Plan, in order
 
@@ -199,7 +247,8 @@ stack as a flat run of blocks), then one cooperative-matrix GEMM per active expe
 CUDA does. `MoeCombinePairs` is the pair-map variant of `moe_combine` plus the shared row. Prefill is where the F16 cache
 question of step 2 bites: a layer's three stacks are 260 MB as Q4_K/Q6_K and about 1 GB as F16 for OLMoE.
 
-**6. Command-buffer reuse for LLM decode (about a week, after step 4).** `VulkanStepGraph` is the Vulkan counterpart of a
+**6. Command-buffer reuse for LLM decode. Done: `CaptureGraph`/`LaunchGraph`/`DisposeGraph` on Vulkan record a decode step onto its own command buffer and replay it with one fence-waited submit per token; on by default for greedy decode, with an eager fallback; results below.** The original plan:
+`VulkanStepGraph` is the Vulkan counterpart of a
 CUDA graph, so the equivalent of `CaptureDecodeGraph` is: warm up one step so every weight and scratch buffer is resident
 (capture refuses a cache miss), record the step against push descriptors with the device position and token id buffers the
 leaf ops already take, then replay with one fence-waited submit per token. Requirements: `MoeGraphReady` true (step 4, since a

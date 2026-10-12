@@ -87,6 +87,15 @@ public sealed unsafe class VulkanStepGraph(nint device, nint queue, uint queueFa
         SubmitAndWait();
     }
 
+    /// <summary>Ends recording WITHOUT executing the step (the CUDA-style capture contract: the first <see cref="Launch"/> runs it). Used by the LLM decode graph, whose chained token buffer makes an extra execution at capture time change the output.</summary>
+    public void EndCapture()
+    {
+        if (!_recording) throw new InvalidOperationException("VulkanStepGraph.EndCapture called without a matching BeginCapture.");
+        VulkanApi.vkEndCommandBuffer(_commandBuffer).ThrowOnError("vkEndCommandBuffer (step-graph)");
+        _recording = false;
+        _ready = true;
+    }
+
     /// <summary>Replays the captured command buffer (one launch call).</summary>
     public void Launch()
     {
