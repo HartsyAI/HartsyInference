@@ -49,7 +49,7 @@ public sealed partial class VulkanBackend
         }
 
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)Math.Max((long)rows * hidden * sizeof(float), 4));
-        VulkanBuffer? permX = null, gateOut = null, upOut = null, act = null;
+        VulkanBuffer? permX = null, gateOut = null, upOut = null, act = null, wsGate = null, wsUp = null, wsDown = null;
         try
         {
             if (rows > 0)
@@ -60,6 +60,10 @@ public sealed partial class VulkanBackend
                 gateOut = _xfer.AllocateDevice((ulong)((long)maxCount * inter * sizeof(float)));
                 upOut = _xfer.AllocateDevice((ulong)((long)maxCount * inter * sizeof(float)));
                 act = _xfer.AllocateDevice((ulong)((long)maxCount * inter * sizeof(ushort)));
+                ulong wsBytes = (ulong)((long)inter * hidden * sizeof(ushort));
+                wsGate = _xfer.AllocateDevice(wsBytes);
+                wsUp = _xfer.AllocateDevice(wsBytes);
+                wsDown = _xfer.AllocateDevice(wsBytes);
 
                 long gatherTotal = (long)rows * hidden;
                 VulkanKernel gather = GetKernel("moe_gather_rows_f16", storageBufferCount: 3, _default1DSpec);
@@ -78,35 +82,25 @@ public sealed partial class VulkanBackend
                 {
                     int first = offsets[e], count = offsets[e + 1] - first;
                     if (count == 0) continue;
-                    // Dequantize this expert's three projections to F16 (cached or transient per the cast policy; transients are freed deferred).
-                    (VulkanBuffer wGate, VulkanBuffer? ownGate) = CastIfNeeded(gateExperts[e], GetBuffer(gateExperts[e]), DType.F16);
-                    (VulkanBuffer wUp, VulkanBuffer? ownUp) = CastIfNeeded(upExperts[e], GetBuffer(upExperts[e]), DType.F16);
-                    (VulkanBuffer wDown, VulkanBuffer? ownDown) = CastIfNeeded(downExperts[e], GetBuffer(downExperts[e]), DType.F16);
-                    try
-                    {
-                        uint aOffset = (uint)((long)first * hidden);
-                        // C[count, inter] = permX[first.., hidden] . W[inter, hidden]^T, F32 accumulate and F32 out.
-                        DispatchGemm(new GemmOperands(permX.Handle, wGate.Handle, gateOut.Handle, count, inter, hidden, false, true, DType.F16, DType.F32)
-                        { AOffset = aOffset });
-                        DispatchGemm(new GemmOperands(permX.Handle, wUp.Handle, upOut.Handle, count, inter, hidden, false, true, DType.F16, DType.F32)
-                        { AOffset = aOffset });
+                    // Dequantize this expert's three projections to F16 in the layer's three workspaces (a cached cast is used as is). Every
+                    // dispatch ends in a global barrier, so the next expert's dequant cannot overtake the GEMM still reading the workspace.
+                    VulkanBuffer wGate = ExpertWeightF16(gateExperts[e], wsGate), wUp = ExpertWeightF16(upExperts[e], wsUp), wDown = ExpertWeightF16(downExperts[e], wsDown);
+                    uint aOffset = (uint)((long)first * hidden);
+                    // C[count, inter] = permX[first.., hidden] . W[inter, hidden]^T, F32 accumulate and F32 out.
+                    DispatchGemm(new GemmOperands(permX.Handle, wGate.Handle, gateOut.Handle, count, inter, hidden, false, true, DType.F16, DType.F32)
+                    { AOffset = aOffset });
+                    DispatchGemm(new GemmOperands(permX.Handle, wUp.Handle, upOut.Handle, count, inter, hidden, false, true, DType.F16, DType.F32)
+                    { AOffset = aOffset });
 
-                        long actCount = (long)count * inter;
-                        PushConstants apc = new(apcRaw);
-                        apc.U32((uint)actCount);
-                        apc.U32(gelu ? 1u : 0u);
-                        Dispatch(actMul, abufs, apc.Written, GroupCount(actCount, LocalX1D));
+                    long actCount = (long)count * inter;
+                    PushConstants apc = new(apcRaw);
+                    apc.U32((uint)actCount);
+                    apc.U32(gelu ? 1u : 0u);
+                    Dispatch(actMul, abufs, apc.Written, GroupCount(actCount, LocalX1D));
 
-                        // expertOut[first.., hidden] = act[count, inter] . Wdown[hidden, inter]^T
-                        DispatchGemm(new GemmOperands(act.Handle, wDown.Handle, outBuf.Handle, count, hidden, inter, false, true, DType.F16, DType.F32)
-                        { COffset = (uint)((long)first * hidden) });
-                    }
-                    finally
-                    {
-                        if (ownGate is not null) _xfer.FreeDevice(ownGate);
-                        if (ownUp is not null) _xfer.FreeDevice(ownUp);
-                        if (ownDown is not null) _xfer.FreeDevice(ownDown);
-                    }
+                    // expertOut[first.., hidden] = act[count, inter] . Wdown[hidden, inter]^T
+                    DispatchGemm(new GemmOperands(act.Handle, wDown.Handle, outBuf.Handle, count, hidden, inter, false, true, DType.F16, DType.F32)
+                    { COffset = (uint)((long)first * hidden) });
                 }
             }
             CacheOutput(expertOut, outBuf);
@@ -123,7 +117,18 @@ public sealed partial class VulkanBackend
             if (gateOut is not null) _xfer.FreeDevice(gateOut);
             if (upOut is not null) _xfer.FreeDevice(upOut);
             if (act is not null) _xfer.FreeDevice(act);
+            if (wsGate is not null) _xfer.FreeDevice(wsGate);
+            if (wsUp is not null) _xfer.FreeDevice(wsUp);
+            if (wsDown is not null) _xfer.FreeDevice(wsDown);
         }
+    }
+
+    /// <summary>The F16 form of an expert projection: its cached cast when one exists, else a fresh dequantization into <paramref name="workspace"/>.</summary>
+    private VulkanBuffer ExpertWeightF16(Tensor weight, VulkanBuffer workspace)
+    {
+        if (_xfer.TryGetWeightCast(weight, DType.F16, out VulkanBuffer? cached)) return cached!;
+        DispatchDequantF16(weight.DType, GetBuffer(weight), workspace, weight.ElementCount);
+        return workspace;
     }
 
     /// <inheritdoc/>
