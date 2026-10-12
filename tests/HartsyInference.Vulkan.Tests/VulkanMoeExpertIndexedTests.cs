@@ -11,7 +11,7 @@ namespace HartsyInference.Vulkan.Tests;
 [Trait("Category", "GpuIntegration")]
 public sealed unsafe class VulkanMoeExpertIndexedTests(ITestOutputHelper log)
 {
-    private static Tensor[] RandomExperts(DType type, int experts, int n, int k, int seed)
+    internal static Tensor[] RandomExperts(DType type, int experts, int n, int k, int seed)
     {
         Tensor[] list = new Tensor[experts];
         for (int e = 0; e < experts; e++) list[e] = VulkanQuantGemvTests.RandomQuant(type, n, k, seed + 131 * e);
@@ -19,7 +19,7 @@ public sealed unsafe class VulkanMoeExpertIndexedTests(ITestOutputHelper log)
     }
 
     /// <summary>Host-dequantized experts as flat float arrays [n * k].</summary>
-    private static float[][] Dequantized(Tensor[] experts)
+    internal static float[][] Dequantized(Tensor[] experts)
     {
         float[][] result = new float[experts.Length][];
         for (int e = 0; e < experts.Length; e++)
@@ -30,7 +30,7 @@ public sealed unsafe class VulkanMoeExpertIndexedTests(ITestOutputHelper log)
         return result;
     }
 
-    private static (double Value, double Magnitude) Dot(float[] w, int row, int k, float[] x, int xOffset)
+    internal static (double Value, double Magnitude) Dot(float[] w, int row, int k, float[] x, int xOffset)
     {
         double s = 0, a = 0;
         for (int i = 0; i < k; i++)
@@ -42,9 +42,9 @@ public sealed unsafe class VulkanMoeExpertIndexedTests(ITestOutputHelper log)
         return (s, a);
     }
 
-    private static double Silu(double x) => x / (1 + Math.Exp(-x));
+    internal static double Silu(double x) => x / (1 + Math.Exp(-x));
 
-    private static double GeluTanh(double x) => 0.5 * x * (1 + Math.Tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
+    internal static double GeluTanh(double x) => 0.5 * x * (1 + Math.Tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
 
     private static int[] RandomIds(int pairs, int experts, int seed)
     {
@@ -54,7 +54,7 @@ public sealed unsafe class VulkanMoeExpertIndexedTests(ITestOutputHelper log)
         return ids;
     }
 
-    private static void Preload(VulkanBackend vk, params Tensor[][] groups) => vk.PreloadWeightGroups(groups.Select(g => (IReadOnlyList<Tensor>)g));
+    internal static void Preload(VulkanBackend vk, params Tensor[][] groups) => vk.PreloadWeightGroups(groups.Select(g => (IReadOnlyList<Tensor>)g));
 
     public static IEnumerable<object[]> Types()
     {
@@ -338,6 +338,7 @@ public sealed unsafe class VulkanMoeExpertIndexedTests(ITestOutputHelper log)
         if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
         Assert.False(vk.SupportsMoeExpertIndexed(DType.F32));
         Assert.False(vk.SupportsMoeExpertIndexed(DType.Q2_K));
-        Assert.False(((HartsyInference.Core.Backends.IBackend)vk).SupportsMoeExpertsGrouped(DType.Q4_K));
+        Assert.False(((HartsyInference.Core.Backends.IBackend)vk).SupportsMoeExpertsGrouped(DType.F32));
+        Assert.False(((HartsyInference.Core.Backends.IBackend)vk).SupportsMoeExpertsGrouped(DType.Q2_K));
     }
 }

@@ -60,7 +60,6 @@ Absent (inheriting the throwing or false defaults in `IBackend.Moe.cs` and `IBac
 | `SupportsMoeExpertIndexed`, `MoeExpertsResident` | the gate that selects the device-routed layer |
 | `MoeExpertGateUp`, `MoeExpertDown` | decode and speculative verify, at most 16 tokens |
 | `MoeCombineSlots` | decode combine with the shared expert |
-| `SupportsMoeExpertsGrouped`, `MoeExpertsGrouped`, `MoeCombinePairs` | prefill |
 | `DeviceSamplingSupported`, `AllocDeviceRng`, `FreeDeviceRng`, `SampleTopKInto` | stochastic sampling inside a captured step; greedy needs only `ArgMaxInto`, which exists |
 | a grouped `PreloadWeightGroups` | experts of a projection in one contiguous allocation; Vulkan uploads each member alone |
 
@@ -107,7 +106,7 @@ What remains from steps 1 and 2:
   `dp4a`. Needs the LunarG SDK glslang. Llama's Q8_0 GEMV already reaches about 70% of bandwidth, so the gain is bounded.
 - **An F32 GEMV.** Done in steps 3 and 4 below: `gemv_quant_f32`, 0.004 ms a call on the OLMoE router against 0.35 ms.
 - **M from 9 to 16.** A speculative verify longer than 8 rows takes the dequantize-and-GEMM path.
-- MoE decode was host-routed until steps 3 and 4 (below); prefill above 16 tokens still is, until step 5.
+- MoE decode was host-routed until steps 3 and 4, and prefill above 16 tokens until step 5 (both below).
 
 ## Steps 3 and 4 and the F32 GEMV: measured result
 
@@ -121,7 +120,7 @@ RTX 3060, greedy, 128 new tokens, `hartsy text` with `-b vulkan:1`, 5 interleave
 | Qwen2.5-0.5B Q4_K_M | 94.7 (90.7 to 101.6) | 95.3 (87.3 to 103.8) | 682 / 684 |
 | Qwen3-4B Q4_K_M | 49.2 (48.6 to 50.1) | 49.2 (49.0 to 49.6) | 4014 / 4014 |
 
-Output: all five models give the same 128 tokens before and after. granite and OLMoE equal the CPU backend and the host-routed path of this branch (`numerics.moeIndexed=false`). Host waits in granite decode: 129 for 128 tokens, all the sampler's logits read, none inside a MoE layer (before: about 175 a token); the remaining waits are prefill, which is still host-routed.
+Output: all five models give the same 128 tokens before and after. granite and OLMoE equal the CPU backend and the host-routed path of this branch (`numerics.moeIndexed=false`). Host waits in granite decode: 129 for 128 tokens, all the sampler's logits read, none inside a MoE layer (before: about 175 a token); the remaining waits were prefill, which step 5 moved to the device.
 
 Bandwidth from `vkProfileGpu` (bytes the dispatch reads over its time):
 
@@ -134,6 +133,21 @@ Bandwidth from `vkProfileGpu` (bytes the dispatch reads over its time):
 | `gemv_quant_f32` | OLMoE router | 0.004 ms | n/a (was 0.35 ms) |
 
 Design: one subgroup computes one output row of one (token, slot) pair, so the grid is (row groups, pairs) and the accumulators are constants; the inner loop is `gemv_quant_unit.glsl`, shared with `gemv_quant`. Workgroup sizes of 64, 128 and 256 lanes measured the same.
+
+## Step 5: device-routed prefill, measured result
+
+RTX 3060, `hartsy text` with `-b vulkan:1`, greedy, a 750-token prompt (granite) and a 754-token prompt (OLMoE), 5 interleaved runs, median (range). "Before" is `origin/main` at 64dca4e3 built fresh. The prefill time is the wall time of a one-token generation on the long prompt minus that of a one-token generation on a two-token prompt, so model load and start-up cancel; host waits are the blocking waits `diagnostics.vkProfileGpu` records over the same one-token run (prefill plus the first sampled token); peak VRAM is `nvidia-smi` on the card during a 128-token run.
+
+| Model | Prefill before (s) | Prefill after (s) | Prefill tok/s before / after | Host waits before / after | Peak VRAM before / after (MiB) |
+|---|---|---|---|---|---|
+| granite-3.0-1b-a400m Q4_K_M (MoE) | 2.81 (2.67 to 2.86) | 1.30 (0.96 to 1.49) | 267 / 577 | 1692 / 58 | 1017 / 1079 |
+| OLMoE-1B-7B Q4_K_M (MoE) | 3.47 (2.91 to 4.53) | 1.96 (1.39 to 3.49) | 217 / 385 | 2068 / 57 | 4465 / 4595 |
+
+The range is wide because another agent shares the card between runs; the first clean set (before the dequant workspaces below) gave 2.85 to 1.45 s and 3.50 to 1.99 s. Decode is unchanged (granite 94.2 to 94.9 tok/s, OLMoE 66.8 to 67.0 on these long-prompt runs). The waits left are the layer's one read of the E + 1 offsets (24 and 16), the sampler's read, and allocator reclaims, none of them per expert; before, they were the router read and each expert's rows. Dense Qwen2.5-1.5B Q8_0 on the same 769-token prompt: identical text, 38.6 to 38.8 tok/s.
+
+Output over 128 greedy tokens after a 750-token prompt: granite is identical on the device-routed path, the host-routed path (`numerics.moeIndexed=false`), `origin/main` and the CPU backend. OLMoE is identical across those three Vulkan runs and differs from the CPU backend at word 57 ("more accessible to the general public" against "accessible to a wider audience"); the host-routed path and `origin/main` produce the same text as the device path, so the split is the CPU's F32 against the GPU's F16 GEMMs at a near-tie, not the new path.
+
+Design: `MoeExpertsGrouped` gathers the activation rows into expert-major order as F16 (`moe_gather_rows_f16`), then for each expert that received rows dequantizes its gate, up and down to F16 into three layer-long workspaces of one expert each (a cached cast is used if one exists), runs the cooperative-matrix GEMMs with F32 accumulation and F32 outputs, applies the activation in `moe_act_mul_f16`, and writes the down GEMM straight into the expert-major output at the expert's row offset. Dequantizing only the active experts keeps the transient at three experts' F16 weights (12 MB for OLMoE) instead of the 1 GB of a layer's F16 stacks; an earlier version that allocated a fresh buffer per projection per expert paid 267 blocking waits on OLMoE for allocator reclaims, which the workspaces removed. The op is available where the device has cooperative matrices (`SupportsMoeExpertsGrouped`); the register-tiled GEMM cannot write an F32 output at a row offset, so a device without them keeps the host-routed layer. `MoeCombinePairs` is `moe_combine_slots` through the pair map. GPU time in a 750-token granite prefill is now 86% `sdpa_flash_f32` (22 ms a call) and 11% the grouped experts, so prefill is attention-bound from here.
 
 ## Plan, in order
 
@@ -179,7 +193,7 @@ slot sum with the sigmoid-gated shared row; closely related to `moe_combine`, wh
 and the 85k per-expert launches become about 5 per layer. OLMoE reads roughly 0.8 GB a token (a top-8 of 64 slice of 4.2 GB
 plus attention and the output head), so at 360 GB/s its ceiling is about 450 tok/s; that is arithmetic, not a measurement.
 
-**5. Device-routed prefill (about a week).** `MoeBuildDispatch` exists. `MoeExpertsGrouped` needs per-expert GEMMs on
+**5. Device-routed prefill. Done: `SupportsMoeExpertsGrouped`, `MoeExpertsGrouped` and `MoeCombinePairs`, with `moe_gather_rows_f16`, `moe_act_mul_f16` and `moe_combine_pairs`; results below.** The original plan: `MoeBuildDispatch` exists. `MoeExpertsGrouped` needs per-expert GEMMs on
 contiguous rows: dequantize the expert stacks to F16 in one dispatch per projection (the dequant shaders already treat a
 stack as a flat run of blocks), then one cooperative-matrix GEMM per active expert, with the offsets read once per layer as
 CUDA does. `MoeCombinePairs` is the pair-map variant of `moe_combine` plus the shared row. Prefill is where the F16 cache

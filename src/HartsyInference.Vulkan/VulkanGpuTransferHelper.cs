@@ -257,6 +257,11 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// <summary>The span buffer and per-expert byte stride of <paramref name="experts"/> when they are the resident members, in order, of
     /// one group from <see cref="TryPreloadWeightGroup"/>; false when any was freed, re-bound or uploaded on its own since. The first,
     /// second, last and six evenly spaced members are checked, a cost independent of the expert count.</summary>
+    /// <remarks>Sampling is enough because a group is only ever created whole by <see cref="TryPreloadWeightGroup"/> and released member by member:
+    /// a freed member lowers <c>group.Live</c> below the member count, which the count check catches whichever member it was. A re-placement of
+    /// one unsampled member while all the others stay live would pass; the engine re-places a projection's experts together, and even then
+    /// the shaders read inside the span (ids are bounded by <c>numExperts</c> on the device), so the cost would be stale expert bytes, not an
+    /// out-of-bounds read.</remarks>
     public bool TryResolveExpertGroup(IReadOnlyList<Tensor> experts, out VulkanBuffer? span, out long stride)
     {
         span = null;

@@ -22,7 +22,7 @@ public sealed unsafe class VulkanMoeLayerTests(ITestOutputHelper output)
 
     public static IEnumerable<object[]> Cases()
     {
-        foreach (int n in new[] { 1, 3, 16, 40 })
+        foreach (int n in new[] { 1, 3, 16, 40, 300 })
         {
             yield return [n, "Q4_K", "Q4_K", false];
             yield return [n, "Q4_K", "Q6_K", false];   // the Q4_K_M mix: gate/up Q4_K, down Q6_K
@@ -84,11 +84,14 @@ public sealed unsafe class VulkanMoeLayerTests(ITestOutputHelper output)
         vk.PreloadWeightGroups(moeFf.EnumerateExpertGroups());
         vk.PreloadWeights([.. moeFf.EnumerateWeights()]);
         bool indexed = n <= MoeFeedForward.IndexedMaxTokens;
+        bool grouped = !indexed && moeFf.CanRunGrouped(vk);
         Assert.True(moeFf.CanRunIndexed(vk), "the layer must be eligible for the device-routed stage");
+        if (!indexed) output.WriteLine($"grouped prefill path: {grouped}");
         long before = vk.GetD2hSyncCount();
         using Tensor og = moeFf.Forward(vk, x, n);
         long hostReads = vk.GetD2hSyncCount() - before;
         if (indexed) Assert.Equal(0, hostReads);   // the device-routed layer reads nothing back
+        else if (grouped) Assert.Equal(1, hostReads);   // the grouped path's only read is the E + 1 offsets
         else Assert.True(hostReads > 0);           // the host-routed loop reads the router and each expert's rows back
         vk.Sync();
         float* pg = (float*)og.DataPointer;
@@ -100,8 +103,8 @@ public sealed unsafe class VulkanMoeLayerTests(ITestOutputHelper output)
             norm += (double)reference[i] * reference[i];
         }
         double rel = Math.Sqrt(diff / Math.Max(norm, 1e-30));
-        output.WriteLine($"n={n} {gateUpType}/{downType} shared={shared} deviceRouted={indexed}: relative L2 error {rel:E3}, host reads in Forward {hostReads}");
-        // The device-routed stage is F32 end to end; the host-routed loop above 16 tokens runs its per-expert GEMMs in F16 (numerics.vkF16Gemm).
+        output.WriteLine($"n={n} {gateUpType}/{downType} shared={shared} deviceRouted={indexed || grouped}: relative L2 error {rel:E3}, host reads in Forward {hostReads}");
+        // The decode stage is F32 end to end; the grouped prefill path and the host-routed loop run their per-expert GEMMs on F16 weights and activations.
         Assert.True(rel <= (indexed ? 1e-5 : 2e-3), $"MoE layer diverges from the host-routed CPU layer by {rel:E3}");
 
         foreach ((string key, Tensor t) in wRef) if (!ReferenceEquals(t, w[key])) t.Dispose();

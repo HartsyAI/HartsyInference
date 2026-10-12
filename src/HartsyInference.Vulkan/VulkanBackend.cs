@@ -771,6 +771,35 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return free + pooledIdle - bytes >= total / 5;
     }
 
+    /// <summary>Dequantizes <paramref name="elements"/> values of a GGUF-quantized buffer to F16 into <paramref name="dst"/>.</summary>
+    private void DispatchDequantF16(DType type, VulkanBuffer src, VulkanBuffer dst, long elements)
+    {
+        string dequantShader = type.Name switch
+        {
+            "Q4_0" => "dequant_q4_0",
+            "Q5_0" => "dequant_q5_0",
+            "Q8_0" => "dequant_q8_0",
+            "Q2_K" => "dequant_q2_k",
+            "Q3_K" => "dequant_q3_k",
+            "Q4_K" => "dequant_q4_k",
+            "Q5_K" => "dequant_q5_k",
+            "Q6_K" => "dequant_q6_k",
+            "IQ4_XS" => "dequant_iq4_xs",
+            _ => throw new NotSupportedException(
+                $"Vulkan GGUF dequant for {type.Name} not implemented. Supported: Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_XS."),
+        };
+        long blockCount = elements / type.BlockElementCount;
+        // dequant_q6_k emits 4 outputs/thread (64 threads/super-block); every other dequant kernel
+        // is one thread per output element.
+        long dispatchCount = dequantShader == "dequant_q6_k" ? blockCount * 64 : elements;
+
+        VulkanKernel dqKernel = GetKernel(dequantShader, storageBufferCount: 2, _default1DSpec);
+        Span<byte> dqPc = stackalloc byte[4];
+        BinaryWriteUInt(dqPc, 0, (uint)blockCount);
+        Span<ulong> dqBufs = stackalloc ulong[] { src.Handle, dst.Handle };
+        Dispatch(dqKernel, dqBufs, dqPc, GroupCount(dispatchCount, LocalX1D));
+    }
+
     /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
@@ -804,30 +833,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // quantized-source handling in its own CastIfNeeded-equivalent.
         if (src.DType.IsQuantized && want == DType.F16)
         {
-            string dequantShader = src.DType.Name switch
-            {
-                "Q4_0" => "dequant_q4_0",
-                "Q5_0" => "dequant_q5_0",
-                "Q8_0" => "dequant_q8_0",
-                "Q2_K" => "dequant_q2_k",
-                "Q3_K" => "dequant_q3_k",
-                "Q4_K" => "dequant_q4_k",
-                "Q5_K" => "dequant_q5_k",
-                "Q6_K" => "dequant_q6_k",
-                "IQ4_XS" => "dequant_iq4_xs",
-                _ => throw new NotSupportedException(
-                    $"Vulkan GGUF dequant for {src.DType.Name} not implemented. Supported: Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_XS."),
-            };
-            long blockCount = elements / src.DType.BlockElementCount;
-            // dequant_q6_k emits 4 outputs/thread (64 threads/super-block); every other dequant kernel
-            // is one thread per output element.
-            long dispatchCount = dequantShader == "dequant_q6_k" ? blockCount * 64 : elements;
-
-            VulkanKernel dqKernel = GetKernel(dequantShader, storageBufferCount: 2, _default1DSpec);
-            Span<byte> dqPc = stackalloc byte[4];
-            BinaryWriteUInt(dqPc, 0, (uint)blockCount);
-            Span<ulong> dqBufs = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
-            Dispatch(dqKernel, dqBufs, dqPc, GroupCount(dispatchCount, LocalX1D));
+            DispatchDequantF16(src.DType, srcBuf, dst, elements);
             return FinishCast(src, want, dst, cacheThis);
         }
         if (src.DType.IsQuantized && want == DType.F32)
