@@ -9,9 +9,10 @@ public sealed partial class VulkanBackend
     /// backend (<see cref="Core.Backends.BackendCapabilities.QuantizedTypes"/>) and widens every other format to F32.</summary>
     internal static readonly IReadOnlySet<DType> QuantGemvTypes = new HashSet<DType> { DType.Q8_0, DType.Q4_0, DType.Q5_0, DType.Q4_K, DType.Q5_K, DType.Q6_K };
 
-    /// <summary>Most activation rows one <c>gemv_quant</c> dispatch takes (a specialization constant of the shader, one pipeline per count): decode and a short
-    /// speculative verify. Longer inputs dequantize the weight per call and run the GEMM.</summary>
-    internal const int QuantGemvMaxRows = 8;
+    /// <summary>Most activation rows one <c>gemv_quant</c> dispatch takes (a specialization constant of the shader, one pipeline per count): decode and a
+    /// speculative verify (the prompt-lookup draft is 8 tokens, so a round is 9 rows). Longer inputs dequantize the weight per call and run the GEMM.
+    /// Sixteen matches <c>MoeFeedForward.IndexedMaxTokens</c>, so a verify round is on the fused path in the dense and the MoE layers alike.</summary>
+    internal const int QuantGemvMaxRows = 16;
 
     private long _quantGemvCount;
 
@@ -32,7 +33,9 @@ public sealed partial class VulkanBackend
         if (!(QuantGemvTypes.Contains(weight.DType) || weight.DType == DType.F32) || weight.Shape.Rank != 2) return false;
         if (input.DType != DType.F32 || output.DType != DType.F32) return false;
         long n = weight.Shape[0], k = weight.Shape[1];
-        if (input.Shape[input.Shape.Rank - 1] != k || k % GemvBlockElements(weight.DType) != 0) return false;
+        // K comes from the weight: the decode graph feeds the o-projection the head-major attention output
+        // [1, heads, 1, headDim], whose last dim is the head size, not K (the rows are the same bytes as [1, 1, heads*headDim]).
+        if (input.ElementCount % k != 0 || k % GemvBlockElements(weight.DType) != 0) return false;
         long m = input.ElementCount / k;
         if (m < 1 || m > QuantGemvMaxRows || output.ElementCount != m * n) return false;
         if (bias is not null && (bias.DType != DType.F32 || bias.ElementCount != n)) return false;

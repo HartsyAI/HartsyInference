@@ -100,6 +100,16 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         yield return new object[] { "Q5_0", 4097, 896, 3, true };
         yield return new object[] { "Q5_K", 3, 256, 1, false };
         yield return new object[] { "Q5_K", 4097, 2048, 8, true };
+        // Speculative verify: 9 rows (8 drafted tokens and the bonus position) up to the 16-row cap.
+        yield return new object[] { "Q8_0", 4097, 2048, 9, true };
+        yield return new object[] { "Q8_0", 64, 512, 16, false };
+        yield return new object[] { "Q4_K", 4097, 2048, 9, false };
+        yield return new object[] { "Q4_K", 300, 1024, 12, true };
+        yield return new object[] { "Q6_K", 4097, 1024, 16, true };
+        yield return new object[] { "Q6_K", 33, 512, 10, false };
+        yield return new object[] { "Q4_0", 257, 1024, 13, true };
+        yield return new object[] { "Q5_0", 129, 896, 9, false };
+        yield return new object[] { "Q5_K", 513, 1024, 16, false };
     }
 
     internal static DType Named(string name) => name switch
@@ -141,6 +151,8 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
     [InlineData(33, 96, 3, true)]
     [InlineData(64, 2048, 1, false)]
     [InlineData(4097, 1024, 8, true)]
+    [InlineData(4097, 1024, 9, true)]
+    [InlineData(64, 2048, 16, false)]
     public void Linear_F32Weight_TakesTheGemvAndMatchesADoubleDot(int n, int k, int m, bool withBias)
     {
         using VulkanBackend? vk = TryCreateBackend(out string? skip);
@@ -202,7 +214,7 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         using VulkanBackend? vk = TryCreateBackend(out string? skip);
         if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
         DType dtype = Named(type);
-        const int N = 64, K = 512, M = 24;
+        const int N = 64, K = 512, M = 24;   // above VulkanBackend.QuantGemvMaxRows (16)
         using Tensor w = RandomQuant(dtype, N, K, seed: 7);
         float[] x = Random(M * K, seed: 9);
         (float[] expected, float[] mag) = Reference(w, x, null, N, K, M);

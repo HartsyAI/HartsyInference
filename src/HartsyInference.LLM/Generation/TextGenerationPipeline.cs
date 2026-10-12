@@ -128,7 +128,10 @@ public sealed class TextGenerationPipeline
             // (env-gated) and scoped to what's actually graph-safe: greedy only (the on-device argmax has no
             // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
             // cross-attention/sliding-window models fall through to the verified default loop unchanged.
-            bool graphDecodeRequested = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
+            // A request or the knob asks for it explicitly; otherwise a backend whose graph is validated and faster than its eager
+            // loop (Vulkan) turns it on by itself. Only the second case falls back to the eager loop if the capture fails.
+            bool graphDecodeExplicit = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
+            bool graphDecodeRequested = request.GraphDecode ?? (EngineKnobs.GraphDecode.Value || _backend.LlmGraphDecodeDefault);
             // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
             // including any JSON grammar step — so combining the two would silently produce unconstrained output.
             // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
@@ -148,13 +151,28 @@ public sealed class TextGenerationPipeline
             // eligible — it's the more mature, unconditionally-faster path). See GenerateSpeculative's doc for why
             // this is restricted to greedy, non-JSON-mode requests.
             bool specDecodeRequested = request.SpeculativeDecode ?? EngineKnobs.SpecDecode.Value;
+            // An implicit graph that cannot be recorded (a weight left non-resident, a shape its kernels exclude, too little VRAM for the
+            // extra buffers) must not turn a request that worked eagerly into an error: capture first, and drop to the eager loop if it throws.
+            GraphDecodeSession? graphSession = null;
+            if (useGraphDecode)
+            {
+                try
+                {
+                    graphSession = graphModel!.CaptureDecodeGraph(cache, promptIds.Length, next, request.Sampling.RepetitionPenalty,
+                        request.Sampling.Greedy ? null : deviceSampler);
+                }
+                catch (Exception ex) when (!graphDecodeExplicit && ex is not OperationCanceledException)
+                {
+                    Logs.Warning($"Graph decode could not be captured on this backend, decoding eagerly: {ex.Message}");
+                    useGraphDecode = false;
+                }
+            }
             bool useSpecDecode = !useGraphDecode && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
                 && _model.Capabilities.SupportsSpeculation && specDecodeRequested;
 
             if (useGraphDecode)
             {
-                stopped = GenerateGraphDecode(request, graphModel!, cache, promptIds.Length, next, generated, stops, onToken, ct,
-                    request.Sampling.Greedy ? null : deviceSampler);
+                stopped = GenerateGraphDecode(request, graphModel!, graphSession!, cache, next, generated, stops, onToken, ct);
             }
             else if (useSpecDecode)
             {
@@ -415,12 +433,9 @@ public sealed class TextGenerationPipeline
 
     /// <summary>Decode via one captured CUDA graph, replayed once per token (greedy, or sampled on the device when <paramref name="sampler"/> is given); <paramref name="firstToken"/> is the token already sampled from the prefill's last position.</summary>
     /// <remarks>Device state (position, current token id, the RoPE table, and — when a repetition penalty is requested — the token history) is refreshed OUTSIDE the graph before each replay, which is what makes one capture valid for every step (see IBackend's "Device-side decode position" docs). For a greedy request repetition penalty is the only sampler stage graph decode replicates (see <see cref="GenericTransformer.ForwardGraphDecodeStep"/> for why temperature/top-k/top-p/min-p are no-ops for a greedy pick); a sampled request draws its token on the device from the top-k, temperature, top-p and min-p of <paramref name="sampler"/>; when the request's penalty is 1.0 the history buffers are still allocated but the backend skips the append/penalty kernels entirely. If capture throws (an eligible-looking model hits something the graphed path doesn't support), the exception propagates rather than falling back — a gap surfaces as a clear error, not silent mis-generation.</remarks>
-    private bool GenerateGraphDecode(GenerationRequest request, IGraphDecodable graphModel, ISequenceState cache,
-        int promptLen, int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct,
-        DeviceSamplerConfig? sampler = null)
+    private bool GenerateGraphDecode(GenerationRequest request, IGraphDecodable graphModel, GraphDecodeSession session, ISequenceState cache,
+        int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
-        GraphDecodeSession session = graphModel.CaptureDecodeGraph(cache, promptLen, firstToken,
-            request.Sampling.RepetitionPenalty, sampler);
         try
         {
             int next = firstToken;

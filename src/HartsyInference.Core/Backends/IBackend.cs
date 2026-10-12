@@ -1613,7 +1613,7 @@ public partial interface IBackend : IDisposable
     // EndAndLaunch only async device work is issued (no DataPointer reads, no sync allocs); per-step-varying
     // inputs are refreshed into FIXED device buffers via CopyInto before each Launch. Defaults: unsupported.
 
-    /// <summary>True when the backend can capture/replay a step graph (CUDA only).</summary>
+    /// <summary>True when the backend can capture/replay a step graph (CUDA and Vulkan).</summary>
     bool StepGraphSupported => false;
 
     /// <summary>True when a captured step graph is ready to <see cref="StepGraphLaunch"/>.</summary>
@@ -1649,8 +1649,14 @@ public partial interface IBackend : IDisposable
     // read the position from a small device buffer {kvLen, qOffset}, refreshed (outside capture) each step. This
     // lets ONE captured graph replay at every step. Defaults: unsupported (eager backends use the host ints).
 
-    /// <summary>True when the backend supports device-position decode-graph replay (CUDA only).</summary>
+    /// <summary>True when the backend supports device-position decode-graph replay for every graph consumer (text LLM, SSM, CSM, MusicGen). CUDA only; Vulkan reports its text-LLM graph through <see cref="LlmGraphDecodeSupported"/> instead.</summary>
     bool GraphDecodeSupported => false;
+
+    /// <summary>True when the generic text-LLM decode step (<c>GenericTransformer.ForwardGraphDecodeStep</c>) can be captured through <see cref="CaptureGraph"/> and replayed. Separate from <see cref="GraphDecodeSupported"/> so a backend can enable it for text LLMs without also routing the SSM, CSM and MusicGen paths (which gate on that flag) into a capture they were never validated against.</summary>
+    bool LlmGraphDecodeSupported => GraphDecodeSupported;
+
+    /// <summary>True when text-LLM graph decode should be used without being asked for (<c>numerics.graphDecode</c> / a request's <c>GraphDecode</c>): the backend measured it faster than its eager loop for every model it supports. A failed capture then falls back to eager instead of failing the request. CUDA keeps the explicit opt-in.</summary>
+    bool LlmGraphDecodeDefault => false;
 
     /// <summary>Allocates a persistent 2-int device buffer {kvLen, qOffset} (0 = unsupported); free with <see cref="FreeDevicePos"/>.</summary>
     ulong AllocDevicePos() => 0;

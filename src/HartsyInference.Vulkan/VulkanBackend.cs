@@ -1187,7 +1187,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // [B, S, heads, headDim] spans the GEMM's column count across two trailing dims.
         int N = transposeB ? (int)b.Shape[0] : (int)b.Shape[b.Shape.Rank - 1];
         int M = (int)(output.ElementCount / N);
-        int K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
+        // A Linear's K is the weight's row length. The decode graph hands the o-projection the head-major attention
+        // output [1, heads, 1, headDim] (the same bytes as [1, 1, heads*headDim]), whose last dim is not K.
+        int K = transposeA ? (int)a.Shape[0] : transposeB ? (int)b.Shape[b.Shape.Rank - 1] : (int)a.Shape[a.Shape.Rank - 1];
 
         // Coopmat needs M/N/K all multiples of 16 and nothing here pads, so a prompt-length-dependent joint
         // sequence almost never qualifies; benchmarks/scoreboards/VULKAN.md has the measurement and the reverted
@@ -3865,6 +3867,13 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
+        // During step-graph capture the copy must land on the capture buffer (CopyInto's branch), not the normal
+        // stream, where it would run once at capture time and never replay.
+        if (_capturingStepGraph)
+        {
+            CopyInto(destination, source);
+            return;
+        }
         // Fast path: source is ALREADY GPU-resident (weight or activation cache) — copy device-to-device
         // instead of forcing a D2H sync (source) + H2D re-upload (destination, on whatever GPU op reads
         // it next). TryGetCached never uploads on a miss, so a genuinely host-only source still falls
@@ -4082,6 +4091,110 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     /// <summary>Settable, default OFF: several real production call sites (Qwen35Model, GenericTransformer, SsmGenerationPipeline, CsmModel, MusicGenDecoder) gate straight onto the graph-decode path the instant this is true, with no separate opt-in of their own. Flip only after a real end-to-end decode-loop parity test (not just the per-op unit tests below) confirms this device-buffer path matches the eager path on a real model — matching the same staged-rollout discipline used for <see cref="EnableInt8Linear"/>, and for the same reason: a capability flag this many callers trust unconditionally must not flip on unit-level confidence alone.</summary>
     public bool GraphDecodeSupported { get; set; }
+
+    /// <inheritdoc/>
+    /// <remarks>Gated on push descriptors (capture cannot use pool sets) and the <c>numerics.vkLlmGraph</c> kill-switch. Independent of <see cref="GraphDecodeSupported"/>, which stays false so the SSM, CSM and MusicGen graph paths keep running eagerly here.</remarks>
+    public bool LlmGraphDecodeSupported => GraphDecodeSupported || (StepGraphSupported && EngineKnobs.VkLlmGraph.Value);
+
+    /// <inheritdoc/>
+    public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
+
+    /// <summary>One captured LLM decode step: its own command buffer and the buffers its capture retained.</summary>
+    private sealed class CapturedLlmGraph(VulkanStepGraph graph, List<VulkanBuffer> retained)
+    {
+        public VulkanStepGraph Graph { get; } = graph;
+        public List<VulkanBuffer> Retained { get; } = retained;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Records the step onto a private command buffer without executing it (the first <see cref="LaunchGraph"/> runs it), so the chained token buffer is not advanced by capture. The caller warms every weight and scratch buffer first; a cache miss during capture throws.</remarks>
+    public object? CaptureGraph(Action recordWork)
+    {
+        if (!StepGraphSupported) return null;
+        DrainStream();
+        VulkanStepGraph graph = new(_vkDevice.Handle, _vkDevice.ComputeQueue, Vk.ComputeQueueFamilyIndex);
+        List<VulkanBuffer> retained = new();
+        List<VulkanBuffer> savedRetained = _xfer.SwapStepGraphRetained(retained);
+        VulkanStepGraph? savedGraph = _stepGraph;
+        try
+        {
+            _stepGraph = graph;
+            graph.BeginCapture();
+            _capturingStepGraph = true;
+            _xfer.CapturingStepGraph = true;
+            recordWork();
+            _capturingStepGraph = false;
+            _xfer.CapturingStepGraph = false;
+            graph.EndCapture();
+            return new CapturedLlmGraph(graph, retained);
+        }
+        catch
+        {
+            _capturingStepGraph = false;
+            _xfer.CapturingStepGraph = false;
+            graph.Dispose();
+            foreach (VulkanBuffer b in retained) b.Dispose();
+            throw;
+        }
+        finally
+        {
+            _stepGraph = savedGraph;
+            _xfer.SwapStepGraphRetained(savedRetained);
+        }
+    }
+
+    /// <summary>Full-width QK-norm epilogue (OLMoE) for the decode graph. The interface's composition ropes the normed rows as they come, <c>[1, 1, heads*headDim]</c>, and the rope step takes the head size from the last dim, so it would rotate one giant head; the rows are re-shaped per head first (the same bytes).</summary>
+    public void QkNormFullRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor? v,
+        Tensor qNorm, Tensor kNorm, float eps, Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim,
+        int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        int nq = hq * headDim, nkv = hkv * headDim;
+        Tensor q = new(new TensorShape(1, 1, nq), DType.F32);
+        Tensor k = new(new TensorShape(1, 1, nkv), DType.F32);
+        Tensor? vOwn = v is null ? new(new TensorShape(1, hkv, 1, headDim), DType.F32) : null;
+        Tensor qN = new(new TensorShape(1, 1, nq), DType.F32);
+        Tensor kN = new(new TensorShape(1, 1, nkv), DType.F32);
+        Tensor qH = new(new TensorShape(1, hq, 1, headDim), DType.F32);
+        Tensor kH = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        try
+        {
+            SliceLastDim(q, qk, 0);
+            SliceLastDim(k, qk, nq);
+            if (vOwn is not null) SliceLastDim(vOwn, qk, nq + nkv);
+            RmsNorm(qN, q, qNorm, eps);
+            RmsNorm(kN, k, kNorm, eps);
+            SliceLastDim(qH, qN, 0);
+            SliceLastDim(kH, kN, 0);
+            // The interface's RopeScatterKvDecodeStep, spelled out (an override cannot call the default it replaces).
+            RopeApplyDecodeStep(qH, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            RopeApplyDecodeStep(kH, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            KvCacheAppendDev(kCache, kH, 0, devicePos);
+            KvCacheAppendDev(vCache, v ?? vOwn!, 0, devicePos);
+            CopyTo(qOut, qH);
+        }
+        finally
+        {
+            q.Dispose(); k.Dispose(); vOwn?.Dispose(); qN.Dispose(); kN.Dispose(); qH.Dispose(); kH.Dispose();
+        }
+    }
+
+    /// <inheritdoc/>
+    public void LaunchGraph(object graphHandle)
+    {
+        CapturedLlmGraph g = (CapturedLlmGraph)graphHandle;
+        // The pre-launch control-buffer writes went through the normal stream; make them complete first.
+        DrainStream();
+        g.Graph.Launch();
+    }
+
+    /// <inheritdoc/>
+    public void DisposeGraph(object graphHandle)
+    {
+        CapturedLlmGraph g = (CapturedLlmGraph)graphHandle;
+        g.Graph.Dispose();
+        foreach (VulkanBuffer b in g.Retained) b.Dispose();
+        g.Retained.Clear();
+    }
 
     /// <summary>Backs every "persistent 1-int/N-int device control buffer" handle below: <see cref="VulkanBuffer.Handle"/> (a raw VkBuffer u64, mirroring CUDA's raw-CUdeviceptr-as-ulong convention) keyed back to the owning buffer so it can be freed, written (mapped-or-staged), or read (D2H) by handle alone.</summary>
     private readonly Dictionary<ulong, VulkanBuffer> _scalarBuffers = new();
@@ -4398,12 +4511,15 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos)
     {
         using OpScope _op = EnterOp();
-        if (devicePos == 0 || !_scalarBuffers.TryGetValue(devicePos, out VulkanBuffer? posBuf)
-            || buffer.DType != DType.F32 || newKv.DType != DType.F32)
+        if (devicePos == 0 || !_scalarBuffers.TryGetValue(devicePos, out VulkanBuffer? posBuf))
         {
             KvCacheAppend(buffer, newKv, offset);
             return;
         }
+        // A valid device position means the caller passed a placeholder offset: the eager append would write slot
+        // `offset` (0) every step and corrupt the cache without an error, so an unsupported dtype fails loudly.
+        if (buffer.DType != DType.F32 || newKv.DType != DType.F32)
+            throw new NotSupportedException($"KvCacheAppendDev needs an F32 cache and F32 K/V on Vulkan; got {buffer.DType}/{newKv.DType}. Leave graph decode off for an F16 KV cache.");
         int heads = (int)buffer.Shape[1], maxSeq = (int)buffer.Shape[2], headDim = (int)buffer.Shape[3];
         int tNew = (int)newKv.Shape[2];
         VulkanBuffer bufBuf = GetBuffer(buffer);
@@ -4441,9 +4557,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             DispatchFlashAttentionDev(output, query, key, value, scale, causal, kvGroup, devicePos);
             return;
         }
-        // Falls back to the eager path — correct only if kvLen/qOffset are the real (not placeholder)
-        // values; a caller relying on devicePos for a shape this scope excludes (sliding window, softcap,
-        // large head dim) is not yet supported on Vulkan's graph-decode path.
+        // The eager path is correct only if kvLen/qOffset are the real values. With a valid device position the caller
+        // passed placeholders, so a shape this kernel excludes (sliding window, softcap, large head dim, non-F32)
+        // has nothing correct to fall back to and fails loudly instead of attending over zero keys.
+        if (devicePos != 0 && _scalarBuffers.ContainsKey(devicePos))
+            throw new NotSupportedException("FlashAttentionDev on Vulkan covers F32 attention without a sliding window or soft-cap and with head dim <= "
+                + $"{FlashMaxHeadDim}; got headDim={headDim}, softcap={softcap}, window={slidingWindow}, dtype={query.DType}. Leave graph decode off for this model.");
         FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
     }
 
