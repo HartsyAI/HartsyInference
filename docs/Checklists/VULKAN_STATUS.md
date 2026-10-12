@@ -20,12 +20,12 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 | Image | SDXL | runs | 768², 4 steps, batch=2 CFG. Refused outright until alpha.86 — its fused loop runs one batch=2 UNet forward per step, and `Conv2D` rejected any batch above 1 |
 | Image | Krea2 Turbo fp8 | runs | 1024², 4 steps |
 | Image | Flux / Qwen-Image / Z-Image | untested | no weights in the local model tree |
-| LLM | Llama-3.2-1B Q8_0 | runs | weights stay Q8_0 on the device (fused GEMV); same text as the CPU backend over 128 greedy tokens |
-| LLM | Qwen3-4B Q4_K_M | runs | fits a 12 GB card now that the weights stay packed (4.0 GB in use); same text as CUDA over 128 greedy tokens |
+| LLM | Llama-3.2-1B Q8_0 | runs | weights stay Q8_0 on the device (fused GEMV); same text as the CPU backend over 128 greedy tokens; greedy decode replays a recorded step graph (one submit a token), about 159 tok/s on the RTX 3060 against 120 eager |
+| LLM | Qwen3-4B Q4_K_M | runs | fits a 12 GB card now that the weights stay packed (4.0 GB in use); same text as CUDA over 128 greedy tokens; step graph 58 tok/s against 50 eager |
 | LLM | gpt2-medium Q4_K_M | runs | crashed until the fused-QKV split stopped viewing freed memory (the split source was a dequantized F32 copy; the same cause crashed every MoE GGUF); same text as CUDA over 128 greedy tokens. See [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md) |
-| LLM | granite-3.0-1b-a400m Q4_K_M (MoE) | runs | same text as the CPU backend over 128 greedy tokens; device-routed decode (router, experts and combine on the device), about 128 tok/s on the RTX 3060; prefill above 16 tokens device-routed too (grouped per-expert GEMMs on F16 weights of the active experts; 2.8 to 1.3 s for 750 tokens) |
-| LLM | OLMoE-1B-7B Q4_K_M (MoE) | runs | 4.3 GB in use with the weights packed (it ran out of device memory while they were widened to F32); matches the CPU backend for about 100 words; device-routed decode, about 132 tok/s on the RTX 3060; prefill above 16 tokens device-routed too (3.5 to 2.0 s for 754 tokens) |
-| LLM | Qwen2.5-0.5B Q4_K_M | runs | same text as the CPU backend over 128 greedy tokens |
+| LLM | granite-3.0-1b-a400m Q4_K_M (MoE) | runs | same text as the CPU backend over 128 greedy tokens; device-routed decode (router, experts and combine on the device), about 128 tok/s on the RTX 3060; prefill above 16 tokens device-routed too (grouped per-expert GEMMs on F16 weights of the active experts; 2.8 to 1.3 s for 750 tokens); greedy decode replays the step graph, about 262 tok/s |
+| LLM | OLMoE-1B-7B Q4_K_M (MoE) | runs | 4.3 GB in use with the weights packed (it ran out of device memory while they were widened to F32); matches the CPU backend for about 100 words; device-routed decode, about 132 tok/s on the RTX 3060; prefill above 16 tokens device-routed too (3.5 to 2.0 s for 754 tokens); step graph about 169 tok/s |
+| LLM | Qwen2.5-0.5B Q4_K_M | runs | same text as the CPU backend over 128 greedy tokens; step graph 215 tok/s against 104 eager |
 | Video | Wan 2.2 5B | incomplete | text-encoder weights not present locally |
 | Video | LTX-2 | untested | no weights in the local model tree |
 | Vision | RT-DETR | runs | detect over a real photo |
@@ -51,5 +51,11 @@ in-place steps, and TF32 was ruled out by re-running CUDA with `numerics.noTf32`
 For calibration: a real precision change *inside* CUDA costs ~2% SSIM over 20 steps at this guidance, while the
 cross-backend gap is ~44%. So the residual is larger than rounding and remains unexplained; attention and the
 GEMM dtype path are the untested suspects.
+
+**Step-graph decode covers a subset.** Greedy text-LLM decode replays a recorded step (`numerics.vkLlmGraph`, on by default,
+`GraphDecodeSupported` still off). An F16 KV cache, a sliding window or soft-cap (Gemma-2/3) and head dims above the flash
+kernel's limit are refused at capture and decode eagerly; sampled decode is eager (no device sampler); the SSM, CSM and
+MusicGen graph paths have no Vulkan capture evidence. Capture keeps an F32 copy of the embedding table on the device
+(1.05 GB for Llama-3.2-1B, 1.56 GB for Qwen3-4B). Details in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6.
 
 **Not speed.** A `runs` verdict says nothing about how long it took relative to CUDA; the scoreboard carries that.
