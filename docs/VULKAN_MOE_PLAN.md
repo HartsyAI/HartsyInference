@@ -203,7 +203,23 @@ Measured on the RTX 3060 (`-b vulkan:1`), `origin/main` at 9f8994a3 built fresh 
 
 granite and Qwen3-4B now sit within 3 MiB of eager. Qwen2.5 is 90 MiB above it, which misses a 50 MiB target; the next paragraph says why. OLMoE already carried the same kind of cost on `origin/main`.
 
-**An untied quantized table costs its own size on the graph path.** Eager gathers `token_embd` on the host and never uploads it for an untied model, so a device gather has to upload the quantized table. Qwen2.5-0.5B's Q5_0 table is 151936 × 28 blocks × 22 bytes, about 89 MiB, which is the +90 above; OLMoE's Q4_K table (50304 × 8 super-blocks × 144 bytes, about 55 MiB) is the +58 that `origin/main` has had since #393. Removing that upload means dequantizing the one needed row on the host into a host-visible buffer that the captured step reads: one submit per token and no table on the device. That is not done here. It is the follow-up for this step: implement the host-staged row for untied quantized tables, then measure Qwen2.5-0.5B and OLMoE against the 50 MiB target and the per-token host cost.
+**An untied quantized table costs its own size on the graph path.** Eager gathers `token_embd` on the host and never uploads it for an untied model, so a device gather has to upload the quantized table. Qwen2.5-0.5B's Q5_0 table is 151936 × 28 blocks × 22 bytes, about 89 MiB, which is the +90 above; OLMoE's Q4_K table (50304 × 8 super-blocks × 144 bytes, about 55 MiB) is the +58 that `origin/main` has had since #393. Removing that upload means dequantizing the one needed row on the host into a host-visible buffer that the captured step reads: one submit per token and no table on the device. That was the follow-up for this step, and it is done below.
+
+**Untied quantized tables are staged from the host, not uploaded.** Graph decode keeps an untied quantized `token_embd` on the host. Before each replay the host writes the step's embedding row into a mapped, coherent buffer (`IBackend.AllocDecodeEmbedRow`, `WriteDecodeEmbedRow`), and the captured step copies it into the embedding tensor (`EmbedStagedRowDecodeStep`). The row is the host F32 table row times the embedding scale, which is `EmbedLookup`'s arithmetic bit for bit. The host F32 copy already exists for eager decode, so no per-step dequantization runs. Each replay embeds the token the previous replay sampled, as before, and the submit count per token is unchanged. Tied tables keep the device gather, and CUDA is unchanged (its backend reports `StagesDecodeEmbedRows` false).
+
+Measured on the RTX 3060 (`-b vulkan:1`) against the device-table build (1f923240, same tree otherwise): 128-token greedy runs, 3 reps, medians. VRAM is the per-process peak from `nvidia-smi`, filtered by pid.
+
+| Model (token_embd) | Eager VRAM (MiB) | Graph VRAM before → after (MiB) | Graph tok/s before → after | Text, eager vs graph |
+|---|---|---|---|---|
+| Qwen2.5-0.5B Q4_K_M (Q5_0, untied) | 616 | 706 → 616 | 186.1 → 203.5 | identical (12 runs) |
+| OLMoE-1B-7B Q4_K_M (Q4_K, untied) | 4150 | 4208 → 4153 | 165.8 → 164.5 | identical (12 runs) |
+| granite-3.0-1b-a400m Q4_K_M (Q6_K, tied, unchanged) | 837 | 839 → 839 | 264.0 → 260.3 | identical (12 runs) |
+| Qwen3-4B Q4_K_M (Q6_K, tied, unchanged) | 3946 | 3949 → 3949 | 57.4 → 57.5 | identical (12 runs) |
+| Llama-3.2-1B Q8_0 (tied, unchanged) | 2148 | 2148 → 2148 | 153.0 → 152.0 | identical (12 runs) |
+
+The Qwen2.5 bar holds: the graph is at eager VRAM (0 MiB over, against a 50 MiB target), and the 128-token text is identical to eager on all five models, across both builds. First capture (8-token wall clock, graph minus eager, median of 3 pairs, seconds; before → after): Qwen2.5 +0.005 → −0.002, OLMoE −0.003 → −0.005, granite −0.012 → −0.002, Qwen3-4B +0.040 → +0.058, Llama −0.250 → +0.010. Single pairs vary by about ±0.3 s on this card, so none of these is a measured change; the capture cost does not regress. Eager decode rates vary widely while other GPU work shares the card, so the graph rates are the reported figures; the differences are within their ranges.
+
+Covered on CPU: `GraphDecodeEmbedRow` equals `EmbedLookup` bit for bit at scales 1 and 12, and a `GraphDecodeSession` writes each replay's row before its launch, for the token the previous replay sampled. Covered on the GPU: `VulkanLlmGraphDecodeTests` runs an untied Q8_0 and an untied Q5_0 table through the staged path and requires the eager greedy tokens.
 
 First-capture cost, the wall clock of a fresh 8-token process, graph minus eager, paired within each arm and rep (seconds). The 3-pair median is the measure this step was asked to report; the 7-pair column is the same measure over more pairs.
 
