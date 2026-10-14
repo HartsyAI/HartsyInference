@@ -64,8 +64,10 @@ internal sealed unsafe class Wav2Vec2BertConformerLayer
         _finalNormB = WhisperOps.EnsureF32(w[$"{prefix}.final_layer_norm.bias"]);
     }
 
-    /// <summary>Runs the block over <paramref name="seq"/> <c>[1, T, C]</c> (channels-last); returns a new tensor.</summary>
-    public Tensor Forward(IBackend backend, Tensor seq, int t)
+    /// <summary>Runs the block over <paramref name="seq"/> <c>[1, T, C]</c> (channels-last); returns a new tensor.
+    /// Rows from <paramref name="validFrames"/> on are padding: masked as attention keys and zeroed before the
+    /// convolution module, as HF does under an attention mask.</summary>
+    public Tensor Forward(IBackend backend, Tensor seq, int t, int validFrames)
     {
         float eps = _cfg.LayerNormEps;
         Tensor x = new(seq.Shape, DType.F32);
@@ -81,13 +83,14 @@ internal sealed unsafe class Wav2Vec2BertConformerLayer
         // 2. Self-attention (relative_key bias).
         Tensor attnNormed = new(x.Shape, DType.F32);
         backend.LayerNorm(attnNormed, x, _attnNormW!, _attnNormB!, eps);
-        Tensor attn = RelativeKeyAttention(backend, attnNormed, t);
+        Tensor attn = RelativeKeyAttention(backend, attnNormed, t, validFrames);
         attnNormed.Dispose();
         AddInPlace(x, attn); attn.Dispose();
 
         // 3. Convolution module (causal left-pad).
         Tensor convNormed = new(x.Shape, DType.F32);
         backend.LayerNorm(convNormed, x, _convNormW!, _convNormB!, eps);
+        ZeroTail(convNormed, validFrames);
         Tensor conv = ConvModule(backend, convNormed, t);
         convNormed.Dispose();
         AddInPlace(x, conv); conv.Dispose();
@@ -120,7 +123,7 @@ internal sealed unsafe class Wav2Vec2BertConformerLayer
     /// <c>eager_attention_forward</c>): content score <c>q·kᵀ</c> plus a position bias from a learned embedding
     /// indexed by the clamped relative distance <c>clamp(j-i, -left, right)</c> — no skew trick, no
     /// <c>pos_bias_u/v</c> (those belong to the different "relative" Transformer-XL variant).</summary>
-    private Tensor RelativeKeyAttention(IBackend backend, Tensor x, int t)
+    private Tensor RelativeKeyAttention(IBackend backend, Tensor x, int t, int validFrames)
     {
         int h = _numHeads, d = _headDim, c = _channels;
         int left = _cfg.LeftMaxPositionEmbeddings, right = _cfg.RightMaxPositionEmbeddings;
@@ -144,7 +147,7 @@ internal sealed unsafe class Wav2Vec2BertConformerLayer
             {
                 float* qi = qp + (long)i * c + hOff;
                 float maxS = float.NegativeInfinity;
-                for (int j = 0; j < t; j++)
+                for (int j = 0; j < validFrames; j++)
                 {
                     float* kj = kp + (long)j * c + hOff;
                     int distance = Math.Clamp(j - i, -left, right);
@@ -156,11 +159,11 @@ internal sealed unsafe class Wav2Vec2BertConformerLayer
                     if (s > maxS) maxS = s;
                 }
                 float sum = 0f;
-                for (int j = 0; j < t; j++) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }
+                for (int j = 0; j < validFrames; j++) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }
                 float invSum = 1f / sum;
                 float* oi = om + (long)i * c + hOff;
                 for (int e = 0; e < d; e++) oi[e] = 0f;
-                for (int j = 0; j < t; j++)
+                for (int j = 0; j < validFrames; j++)
                 {
                     float a = scores[j] * invSum;
                     float* vj = vp + (long)j * c + hOff;
@@ -216,6 +219,15 @@ internal sealed unsafe class Wav2Vec2BertConformerLayer
         backend.Transpose2D(outChLast, pw2, c, t);
         pw2.Dispose();
         return outChLast;
+    }
+
+    /// <summary>Zeroes rows <c>[validFrames, T)</c> of a channels-last <c>[1, T, C]</c> tensor (HF's
+    /// <c>masked_fill(~attention_mask, 0)</c>).</summary>
+    internal static void ZeroTail(Tensor seq, int validFrames)
+    {
+        long rowLen = seq.Shape[2], rows = seq.Shape[1];
+        if (validFrames >= rows) return;
+        new Span<float>((float*)seq.DataPointer + validFrames * rowLen, (int)((rows - validFrames) * rowLen)).Clear();
     }
 
     private static void GluChannelSplit(Tensor output, Tensor gate, int c, int t)
