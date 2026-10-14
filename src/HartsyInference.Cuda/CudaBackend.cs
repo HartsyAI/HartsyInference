@@ -7981,7 +7981,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // Callers perform this check before entering, but another request can publish a failure while this
             // request waits for the shared cuDNN handle. Recheck under the same lock that serializes attempts so
             // a queued request cannot bypass a newly established backoff window.
-            if (_cudnnSdpaDead || !CudnnSdpaDimEligible(d))
+            // An F32 Q/K/V needs the saturating cast; without it (kv_scatter_f16.ptx missing) the materialized path keeps the call.
+            if (_cudnnSdpaDead || !CudnnSdpaDimEligible(d) || (query.DType != DType.F16 && _kernels is not { HasCastF32ToF16Sat: true }))
                 return false;
 
             return TryCudnnSdpaLocked(output, query, key, value, mask, scale, layout, b, h, sq, skv, d);
@@ -8036,9 +8037,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 kF16 = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
                 vF16 = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
                 oF16 = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
-                _kernels!.LaunchCastF32ToF16(qF16, pQ, (int)query.ElementCount, _stream.Handle);
-                _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
-                _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
+                // Saturating cast: a Q/K/V value past F16's 65504 becomes the limit, not infinity, before the fused softmax sees it.
+                _kernels!.LaunchCastF32ToF16Sat(qF16, pQ, (int)query.ElementCount, _stream.Handle);
+                _kernels!.LaunchCastF32ToF16Sat(kF16, pK, (int)key.ElementCount, _stream.Handle);
+                _kernels!.LaunchCastF32ToF16Sat(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
                 _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, layout, pMask, biasB, biasSq);
 

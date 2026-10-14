@@ -199,3 +199,16 @@ extern "C" __global__ void lm_kv_append_f16_sat(
 
     buffer[(((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d] = kv_half_sat(newKv[i]);
 }
+
+// F32 to F16 with the same saturation as the F16 KV store, for activations headed into a cuDNN fused-attention graph (CudnnSdpa):
+// a value past +-65504 stores as the limit rather than infinity, and a NaN stays a NaN. A plain cast would turn one extreme Q/K/V into an
+// infinity that the fused softmax then spreads over every row. Elementwise over `count` values.
+extern "C" __global__ void cast_f32_to_f16_sat(
+    __half* __restrict__ output,
+    const float* __restrict__ input,
+    unsigned int count)
+{
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    output[i] = kv_half_sat(input[i]);
+}
