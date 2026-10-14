@@ -17,6 +17,10 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     private readonly TransformerConfig _cfg;
     private readonly Layer[] _layers;
+    // The two attention shapes the graph's device-position attention takes only where LlmGraphDecodeWindowSoftcap is set: a
+    // sliding window in some layer (the per-layer test is the one every call site uses), and an attention logit soft-cap.
+    private readonly bool _usesLocalWindow;
+    private readonly bool _usesWindowOrSoftcap;
     private Tensor? _embed;
     private Tensor? _posEmbed;   // GPT-2/StarCoder absolute position table [maxPos, hidden] (host gather); null otherwise
     private Tensor? _embedNorm, _embedNormBias;   // BLOOM word-embedding LayerNorm (applied before the first block)
@@ -40,6 +44,10 @@ public sealed unsafe class GenericTransformer : IDisposable
     // graph-decode gather kernel (see EnsureEmbedResidentForGraphDecode) — EmbedGatherDecodeStep has no scale
     // parameter, unlike EmbedLookup's host gather which multiplies per call.
     private Tensor? _graphDecodeEmbedScaled;
+    // The QUANTIZED embed table (Q8_0 or Q4_K) as loaded. Graph decode gathers it directly on backends that report
+    // CanGatherQuantEmbed, so no F32 device copy is made. For a tied model this is the same tensor as
+    // _lmHeadQuant (no extra upload). Null for every other dtype, which keeps the F32 gather path.
+    private Tensor? _embedGatherQuant;
     // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
     // layer (each layer additionally has its own gate/proj/post-norm — see Layer). Null when PerLayerEmbeddingDim=0.
     private Tensor? _perLayerTokEmbd, _perLayerModelProj, _perLayerProjNorm;
@@ -54,6 +62,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         _cfg = cfg;
         _layers = new Layer[cfg.NumLayers];
         for (int i = 0; i < cfg.NumLayers; i++) _layers[i] = new Layer(cfg);
+        _usesLocalWindow = cfg.SlidingWindow > 0 && Enumerable.Range(0, cfg.NumLayers).Any(i => !cfg.IsGlobalLayer(i));
+        _usesWindowOrSoftcap = _usesLocalWindow || cfg.AttnLogitSoftcap > 0f;
     }
 
     // F32 for the host-side embedding gather and the norm/bias vectors. Dequantizes quantized GGUF tensors
@@ -175,6 +185,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         // as a BF16 fused GEMV. (Qwen 151k×1024 quant head was ~28% of decode time — same fix, quant dtype.)
         if (_cfg.TieWordEmbeddings && (embedRaw.DType.IsQuantized || embedRaw.DType == DType.BF16 || embedRaw.DType == DType.F16))
             _lmHeadQuant = embedRaw;
+        if (embedRaw.DType == DType.Q8_0 || embedRaw.DType == DType.Q4_K) _embedGatherQuant = embedRaw;
         if (_cfg.AbsolutePositionEmbeddings) _posEmbed = EnsureF32(w[$"{prefix}.embed_positions.weight"]);
         if (_cfg.EmbeddingLayerNorm)
         {
@@ -684,7 +695,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return result;
     }
 
-    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm GQA/RoPE decoder shape (Llama/Qwen/Mistral family), including the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE.</summary>
+    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm GQA/RoPE decoder shape (Llama/Qwen/Mistral family), including the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE. A backend without <see cref="IBackend.LlmGraphDecodeWindowSoftcap"/> (Vulkan) refuses the window and soft-cap, so Gemma-2/3 are false there.</summary>
     /// <remarks>Excludes anything <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, attention sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement (OLMo-2), BLOOM's embedding LayerNorm, Gemma-4's per-layer SWA head dim. Non-1.0 embedding scale (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it once to a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no scale param.</remarks>
     public bool SupportsGraphDecode(IBackend backend)
     {
@@ -697,6 +708,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 $"noRopeGlobal={!_cfg.NoRopeOnGlobalLayers} preNorm={_cfg.NormPlacement == NormPlacement.PreNorm} " +
                 $"embedLn={!_cfg.EmbeddingLayerNorm} kvShared={_cfg.KvSharedFromLayer == 0} " +
                 $"ple={_cfg.PerLayerEmbeddingDim == 0 || _perLayerTokEmbdRaw?.DType == DType.Q5_K} " +
+                $"windowSoftcap={!_usesWindowOrSoftcap || backend.LlmGraphDecodeWindowSoftcap} " +
                 $"(pleDim={_cfg.PerLayerEmbeddingDim} pleRaw={_perLayerTokEmbdRaw?.DType.ToString() ?? "null"})");
         return ok;
     }
@@ -714,12 +726,17 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     private bool SupportsGraphDecodeCore(IBackend backend) =>
+        GraphShapeSupported(backend) && (backend.LlmGraphDecodeWindowSoftcap || !_usesWindowOrSoftcap);
+
+    /// <summary>Every graph-decode condition except the sliding window and soft-cap, which <see cref="SupportsGraphDecodeCore"/> checks against the backend.</summary>
+    private bool GraphShapeSupported(IBackend backend) =>
         backend.LlmGraphDecodeSupported && _cfg.Mla is null && MoeGraphReady(backend) && _cfg.CrossAttnLayers.Count == 0
-        // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are supported
+        // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are CUDA graph-supported
         // as of 2026-07-22: the split-K decode-attention kernel handles window/softcap with a device position,
         // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep
-        // selects the local-theta rope table per layer. Gemma-4's per-layer SWA head-dim (HeadDimSwa) is NOT
-        // supported — the graph rope tables are built at a single head dim.
+        // selects the local-theta rope table per layer. Vulkan's device-position attention takes neither the window
+        // nor the soft-cap, so those two are gated per backend by LlmGraphDecodeWindowSoftcap. Gemma-4's per-layer
+        // SWA head-dim (HeadDimSwa) is NOT supported — the graph rope tables are built at a single head dim.
         && !_cfg.AttnSink
         && _cfg.AlibiMaxBias <= 0f
         && !_cfg.ParallelResidual
@@ -732,10 +749,29 @@ public sealed unsafe class GenericTransformer : IDisposable
         // run a q-only path against the donor layer's cache) are all graph-supported now.
         && (_cfg.PerLayerEmbeddingDim == 0 || _perLayerTokEmbdRaw?.DType == DType.Q5_K);
 
+    /// <summary>The reason an explicit graph-decode request must be refused for this model on <paramref name="backend"/>, or null. Refused only when the sliding window or attention soft-cap is the one thing in the way: every other graph condition holds, so the graph would run here if the backend had that attention shape. Any other blocker keeps the silent eager fallback, and CUDA never refuses.</summary>
+    /// <remarks>Names the architecture (GGUF <c>general.architecture</c>, e.g. <c>gemma2</c>) so the caller can see which model was refused; "this model" when the config was built in code.</remarks>
+    public string? GraphDecodeRefusal(IBackend backend)
+    {
+        if (!_usesWindowOrSoftcap || backend.LlmGraphDecodeWindowSoftcap || !GraphShapeSupported(backend)) return null;
+        string who = string.IsNullOrEmpty(_cfg.Architecture) ? "this model" : _cfg.Architecture;
+        bool both = _usesLocalWindow && _cfg.AttnLogitSoftcap > 0f;
+        string shape = both ? "sliding-window attention and attention logit soft-cap"
+            : _usesLocalWindow ? "sliding-window attention" : "attention logit soft-cap";
+        return $"{who}: {shape} {(both ? "are" : "is")} not supported by the Vulkan decode graph; decode eagerly or use CUDA";
+    }
+
     /// <summary>Ensures the embedding table is GPU-resident and returns it for <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather (untied models normally skip uploading <c>_embed</c> since <see cref="EmbedLookup"/>'s host gather doesn't need it there). When <see cref="TransformerConfig.EmbeddingScale"/> isn't 1.0 (Granite/MiniCPM), returns a separate, lazily-built, pre-scaled GPU copy instead, since the plain <c>_embed</c> table stays unscaled for <see cref="EmbedLookup"/>'s own per-call host scale. Call once before entering a graph-decode session.</summary>
     public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)
     {
         ThrowIfDisposed();
+        // Q8_0/Q4_K tables stay quantized on device and are gathered by the backend (no F32 copy). Other dtypes, and
+        // backends without the quantized gather, take the F32 path below unchanged.
+        if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
+        {
+            backend.PreloadWeights([quant]);
+            return quant;
+        }
         backend.PreloadWeights([_embed!]);
         if (_cfg.EmbeddingScale == 1f) return _embed!;
         if (_graphDecodeEmbedScaled is null)
@@ -744,6 +780,29 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.Scale(_graphDecodeEmbedScaled, _embed!, _cfg.EmbeddingScale);
         }
         return _graphDecodeEmbedScaled;
+    }
+
+    /// <summary>True when the backend can gather this quantized embed table on device: the backend accepts a table of
+    /// this size (one storage-buffer descriptor), the table is block-aligned for its row width, and every row offset
+    /// fits the device's uint32 byte addressing.</summary>
+    private bool QuantEmbedGatherFits(IBackend backend, Tensor quant)
+    {
+        int block = quant.DType == DType.Q8_0 ? 32 : 256;
+        int blockBytes = quant.DType == DType.Q8_0 ? 34 : 144;
+        if (_cfg.HiddenSize % block != 0) return false;
+        long rows = quant.ElementCount / _cfg.HiddenSize;
+        long rowBytes = (long)(_cfg.HiddenSize / block) * blockBytes;
+        return rows * rowBytes <= uint.MaxValue && backend.CanGatherQuantEmbed(Tensor.ComputeByteSize(quant.Shape, quant.DType));
+    }
+
+    /// <summary>Device bytes graph decode adds for its embed table, beyond the weights the decode preload already uploads:
+    /// 0 for a tied quantized table (already one of the weights, gathered in place), the table's size for an untied
+    /// quantized table (uploaded only for the gather), and the F32 copy's size otherwise.</summary>
+    public long GraphDecodeEmbedExtraBytes(IBackend backend)
+    {
+        if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
+            return ReferenceEquals(quant, _lmHeadQuant) ? 0 : Tensor.ComputeByteSize(quant.Shape, quant.DType);
+        return (long)_cfg.VocabSize * _cfg.HiddenSize * sizeof(float);
     }
 
     /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>
@@ -794,7 +853,12 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (applyRepPenalty) backend.AppendTokenHistoryStep(history, historyCount, deviceTokenId);
 
         Tensor embeds = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
-        backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
+        // A quantized table (EnsureEmbedResidentForGraphDecode's gated path) is dequantized and scaled on device here;
+        // an F32 table was already pre-scaled, so it takes the plain gather.
+        if (embedTable.DType.IsQuantized)
+            backend.EmbedGatherQuantDecodeStep(embeds, embedTable, _cfg.EmbeddingScale, deviceTokenId);
+        else
+            backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
 
         // Gemma-4 PLE (graph flavor of ComputePerLayerInputs): device Q5_K row gather by the device token
         // id replaces the host gather; the projected path and per-layer mixing use the same ops in the same
@@ -1119,7 +1183,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null;
+        _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null; _embedGatherQuant = null;
         _perLayerTokEmbd = null; _perLayerModelProj = null; _perLayerProjNorm = null;
         _graphDecodeEmbedScaled?.Dispose(); _graphDecodeEmbedScaled = null;
     }

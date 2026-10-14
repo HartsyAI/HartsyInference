@@ -144,6 +144,9 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
 
     bool IGraphDecodable.SupportsGraphDecode(IBackend backend) => !Staged && _transformer.SupportsGraphDecode(backend);
 
+    // A layer-split model is refused by staging, not by the attention shape, so its explicit request keeps the eager fallback.
+    string? IGraphDecodable.GraphDecodeRefusal(IBackend backend) => Staged ? null : _transformer.GraphDecodeRefusal(backend);
+
     GraphDecodeSession IGraphDecodable.CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty, DeviceSamplerConfig? sampler)
     {
         if (state is not FixedKvCache cache)
@@ -207,12 +210,12 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
     {
         try
         {
-            // 2 GB base plus the F32 embed table graph decode later materializes, reserved only for graph-eligible
-            // models: reserving it for graph-excluded ones halved their eager decode (91.7 -> 48.8 tok/s).
-            TransformerConfig cfg = _transformer.Config;
+            // 2 GB base plus the embed table graph decode later adds (the F32 copy, or nothing extra for a quantized table
+            // it gathers in place), reserved only for graph-eligible models: reserving it for graph-excluded ones halved
+            // their eager decode (91.7 -> 48.8 tok/s).
             long headroom = 2L << 30;
             if (_transformer.SupportsGraphDecode(_backend))
-                headroom += (long)cfg.VocabSize * cfg.HiddenSize * sizeof(float);
+                headroom += _transformer.GraphDecodeEmbedExtraBytes(_backend);
             // No extra prefill slack: it pushed weights out of the budget and unresident weights bake per-token
             // PCIe memcpy nodes into a captured graph (GLM 43.8 -> 27.9 tok/s).
             if (Staged)

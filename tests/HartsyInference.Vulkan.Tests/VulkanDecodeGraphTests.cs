@@ -328,4 +328,60 @@ public sealed class VulkanDecodeGraphTests
         }
         finally { qT.Dispose(); kT.Dispose(); vT.Dispose(); oT.Dispose(); backend.FreeDevicePos(pos); }
     }
+
+    /// <summary>Quantized table with block scales log-uniform in [2^-20, 2^-3]: spans F16 subnormals (below 6.1e-5), where unpackHalf2x16 is most likely to diverge from the CPU reader.</summary>
+    private static unsafe Tensor SmallScaleQuantTable(DType dtype, int rows, int cols, int seed)
+    {
+        Tensor t = new(new TensorShape(rows, cols), dtype);
+        long elems = (long)rows * cols;
+        long bytes = dtype.ComputeByteCount(elems);
+        byte* p = (byte*)t.DataPointer;
+        Random rng = new(seed);
+        for (long i = 0; i < bytes; i++) p[i] = (byte)rng.Next(256);
+        long blocks = elems / dtype.BlockElementCount;
+        int blockBytes = (int)(bytes / blocks);
+        for (long b = 0; b < blocks; b++)
+        {
+            byte* bb = p + b * blockBytes;
+            VulkanQuantGemvTests.WriteHalf(bb, (float)Math.Pow(2, -20 + 17 * rng.NextDouble()));
+            if (dtype == DType.Q4_K)
+                VulkanQuantGemvTests.WriteHalf(bb + 2, (float)Math.Pow(2, -20 + 17 * rng.NextDouble()));
+        }
+        return t;
+    }
+
+    [Theory]
+    [InlineData("Q8_0", 1f, 128)]
+    [InlineData("Q8_0", 12f, 128)]
+    [InlineData("Q4_K", 1f, 512)]
+    [InlineData("Q4_K", 12f, 512)]
+    public unsafe void EmbedGatherQuantDecodeStep_MatchesCpuDequantBitExact(string dtypeName, float scale, int hidden)
+    {
+        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
+        DType dtype = dtypeName == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        const int vocab = 97;
+        using Tensor table = SmallScaleQuantTable(dtype, vocab, hidden, seed: hidden + dtypeName.Length);
+        // Reference: the CPU codec that EnsureF32 uses for the eager F32 table, then the same per-element scale.
+        using Tensor cpu = HartsyInference.ModelAssets.Gguf.GgufDequantizer.Dequantize(table, DType.F32);
+        backend.PreloadWeights([table]);
+        ulong tokBuf = backend.AllocDeviceTokenId();
+        Tensor output = new(new TensorShape(1, 1, hidden), DType.F32);
+        try
+        {
+            ReadOnlySpan<float> want = cpu.AsReadOnlySpan<float>();
+            foreach (int tok in new[] { 0, 1, 42, vocab - 1 })
+            {
+                backend.WriteDeviceTokenId(tokBuf, tok);
+                backend.EmbedGatherQuantDecodeStep(output, table, scale, tokBuf);
+                ReadOnlySpan<float> got = output.AsReadOnlySpan<float>();
+                for (int i = 0; i < hidden; i++)
+                {
+                    float expected = want[tok * hidden + i] * scale;
+                    Assert.Equal(BitConverter.SingleToInt32Bits(expected), BitConverter.SingleToInt32Bits(got[i]));
+                }
+            }
+        }
+        finally { output.Dispose(); backend.FreeDeviceTokenId(tokBuf); }
+    }
 }

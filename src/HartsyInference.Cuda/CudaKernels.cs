@@ -4724,6 +4724,10 @@ public sealed partial class CudaKernels : IDisposable
     public void LaunchCastF32ToF16(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_castF32ToF16, output, input, count, stream);
 
+    /// <summary>Launches FP32 to FP16 cast that saturates at +-65504 (a NaN stays a NaN). Requires <see cref="HasCastF32ToF16Sat"/>.</summary>
+    public void LaunchCastF32ToF16Sat(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_castF32ToF16Sat, output, input, count, stream);
+
     /// <summary>Launches FP16 to FP32 cast.</summary>
     public void LaunchCastF16ToF32(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_castF16ToF32, output, input, count, stream);

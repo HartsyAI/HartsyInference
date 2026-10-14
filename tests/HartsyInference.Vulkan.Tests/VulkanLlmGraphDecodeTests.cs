@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -28,6 +29,8 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
     private Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
     private Tensor F1(int a, float center) { Tensor t = F1(a); float* p = (float*)t.DataPointer; for (int i = 0; i < a; i++) p[i] += center; return t; }
     private Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
+    /// <summary>Q8_0 expert matrix: the device-routed MoE stage runs only quantized experts (F32 experts fall back to host routing).</summary>
+    private Tensor Q8(int a, int b) { using Tensor f = F2(a, b); return GgufQuantizer.Quantize(f, DType.Q8_0); }
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 
     [Theory]
@@ -84,15 +87,53 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
             TieWordEmbeddings = true,
         };
         Dictionary<string, Tensor> w = Weights(cfg, bias, qkNorm, fullNorm);
+        float worst = ReplayedHiddenWorstDelta(b, cfg, w, steps: 12);
+        _out.WriteLine($"worst |delta| over 12 replays: {worst:E3}");
+        foreach (Tensor t in w.Values) t.Dispose();
+        Assert.True(worst < 2e-3f, $"replayed graph diverges from eager by {worst:E3}");
+    }
+
+    /// <summary>Granite-shaped MoE decoder (every layer routed, top-2 of 4 experts, device-routed indexed stage). The router,
+    /// top-k and combine run on the device inside the captured step, so a replay that baked a stale route would show here
+    /// and not in the dense cases above. Compared per step against the eager forward on distinct embeddings.</summary>
+    [Fact]
+    public void GraphDecodeEmbeds_MoeLayerReplayMatchesEager()
+    {
+        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        IBackend b = backend;
+        if (!b.LlmGraphDecodeSupported) { _out.WriteLine("SKIPPED: push descriptors unavailable"); return; }
+        TransformerConfig cfg = new()
+        {
+            HiddenSize = 64, NumLayers = 2, NumHeads = 4, NumKvHeads = 2, HeadDim = 16,
+            IntermediateSize = 96, VocabSize = 80, MaxPositionEmbeddings = 256, TieWordEmbeddings = true,
+            Moe = new MoeConfig { NumExperts = 4, NumExpertsPerTok = 2, MoeIntermediateSize = 32, NormTopKProb = true, Scoring = MoeScoring.Softmax },
+        };
+        Dictionary<string, Tensor> w = Weights(cfg, bias: false, qkNorm: false);
+        float worst = ReplayedHiddenWorstDelta(b, cfg, w, steps: 12);
+        _out.WriteLine($"worst |delta| over 12 MoE replays: {worst:E3}");
+        foreach (Tensor t in w.Values) t.Dispose();
+        // Exact: the replay runs the same kernels on the same inputs as the eager step, so any difference is a bug.
+        Assert.True(worst == 0f, $"replayed MoE graph diverges from eager by {worst:E3}");
+    }
+
+    /// <summary>Runs <paramref name="steps"/> distinct-embedding decode steps eagerly and as one replayed graph and returns the
+    /// largest per-element difference of the post-norm hidden state. The caller owns and disposes <paramref name="w"/>.</summary>
+    private float ReplayedHiddenWorstDelta(IBackend b, TransformerConfig cfg, Dictionary<string, Tensor> w, int steps)
+    {
         using GenericTransformer model = new(cfg);
         model.LoadWeights(w, "model");
-        const int maxLen = 48, prefill = 5, steps = 12;
+        // Expert banks must be placed as groups before any forward: a group with one member already resident is refused whole,
+        // and MoeExpertsResident (the device-routed stage) then stays false.
+        b.PreloadWeightGroups(model.EnumerateWeightGroups(includeRedundantSplits: false));
+        const int maxLen = 48, prefill = 5;
         using FixedKvCache ce = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxLen);
         using FixedKvCache cg = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxLen);
         int[] prompt = [3, 17, 5, 41, 9];
         model.Forward(b, prompt, 0, ce).Dispose();
         model.Forward(b, prompt, 0, cg).Dispose();
-        b.PreloadWeights(model.EnumerateWeights(includeRedundantSplits: false).ToList());
+        // Checked after the preload: the MoE gate asks whether the expert banks are resident on the device.
+        Assert.True(model.SupportsGraphDecode(b), "the model must be eligible for the decode graph");
         (Tensor cos, Tensor sin) = model.EnsureRopeTableForGraphDecode(b, maxLen);
         ulong dp = b.AllocDevicePos();
         int h = cfg.HiddenSize;
@@ -121,19 +162,15 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
                 using Tensor scratch = new(new TensorShape(1, 1, h), DType.F32);
                 b.CopyTo(scratch, outH);
                 new Span<float>((float*)scratch.DataPointer, h).CopyTo(got);
-                float d = 0f;
-                for (int i = 0; i < h; i++) d = MathF.Max(d, MathF.Abs(want[i] - got[i]));
-                worst = MathF.Max(worst, d);
+                for (int i = 0; i < h; i++) worst = MathF.Max(worst, MathF.Abs(want[i] - got[i]));
             }
         }
         finally
         {
             if (graph is not null) b.DisposeGraph(graph);
             b.FreeDevicePos(dp);
-            foreach (Tensor t in w.Values) t.Dispose();
         }
-        _out.WriteLine($"worst |delta| over {steps} replays: {worst:E3}");
-        Assert.True(worst < 2e-3f, $"replayed graph diverges from eager by {worst:E3}");
+        return worst;
     }
 
     [Fact]
@@ -265,9 +302,23 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
                 w[$"{p}.self_attn.q_norm.weight"] = fullNorm ? F1(qDim, 1f) : Ones(c.HeadDim);
                 w[$"{p}.self_attn.k_norm.weight"] = fullNorm ? F1(kvDim, 1f) : Ones(c.HeadDim);
             }
-            w[$"{p}.mlp.gate_proj.weight"] = F2(c.IntermediateSize, h);
-            w[$"{p}.mlp.up_proj.weight"] = F2(c.IntermediateSize, h);
-            w[$"{p}.mlp.down_proj.weight"] = F2(h, c.IntermediateSize);
+            if (c.Moe is null)
+            {
+                w[$"{p}.mlp.gate_proj.weight"] = F2(c.IntermediateSize, h);
+                w[$"{p}.mlp.up_proj.weight"] = F2(c.IntermediateSize, h);
+                w[$"{p}.mlp.down_proj.weight"] = F2(h, c.IntermediateSize);
+            }
+            else
+            {
+                MoeConfig m = c.Moe;
+                w[$"{p}.mlp.gate.weight"] = F2(m.NumExperts, h);
+                for (int x = 0; x < m.NumExperts; x++)
+                {
+                    w[$"{p}.mlp.experts.{x}.gate_proj.weight"] = Q8(m.MoeIntermediateSize, h);
+                    w[$"{p}.mlp.experts.{x}.up_proj.weight"] = Q8(m.MoeIntermediateSize, h);
+                    w[$"{p}.mlp.experts.{x}.down_proj.weight"] = Q8(h, m.MoeIntermediateSize);
+                }
+            }
         }
         return w;
     }
