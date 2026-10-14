@@ -111,15 +111,18 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// (Audio has no dependency on any concrete backend package, so the caller supplies one). The classifier
     /// (a 0.6B LLM, ~2.4 GB once widened to F32) is loaded lazily on the first <see cref="IndexTts2Options.UseEmoText"/>
     /// request, so a pipeline that never uses text emotion pays nothing for it; the directory's files are checked up front.
-    /// <paramref name="textNormalizers"/> are the FST normalizers upstream takes from wetext (default
-    /// <see cref="IndexTtsFstNormalizers.Interim"/>).</summary>
+    /// <paramref name="textNormalizers"/> are the FST normalizers upstream takes from wetext; pass
+    /// <see cref="IndexTtsFstNormalizers.FromWeText"/> for upstream text (the engine does), or
+    /// <see cref="IndexTtsFstNormalizers.Interim"/> when the grammars are unavailable.</summary>
     public static async Task<IndexTts2Pipeline> LoadAsync(
         string tokenizerPath, string gptPath, string s2melPath, string codecPath,
         string w2vBertSafetensorsPath, string w2vStatsPath, string campplusPath, string bigVganPath,
+        IndexTtsFstNormalizers textNormalizers,
         string? feat1Path = null, string? feat2Path = null, string? qwenEmoDir = null, IBackend? qwenBackend = null,
-        IndexTts2Config? cfg = null, IndexTtsFstNormalizers? textNormalizers = null, CancellationToken ct = default)
+        IndexTts2Config? cfg = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(textNormalizers);
         IndexTts2Config resolved = cfg ?? IndexTts2Config.V2_5;
 
         IDisposable? tokenizerOwner = null;
@@ -245,7 +248,7 @@ public sealed class IndexTts2Pipeline : IDisposable
 
             return new IndexTts2Pipeline(resolved, encode, tokenizerOwner, semanticFeatures, camplus, semanticCodec, gpt,
                 lengthRegulator, dit, bigVgan, emoLookup, qwenEmoDir, qwenBackend, loaders, converted,
-                textNormalizers ?? IndexTtsFstNormalizers.Interim);
+                textNormalizers);
         }
         catch
         {
@@ -374,7 +377,9 @@ public sealed class IndexTts2Pipeline : IDisposable
         ArgumentNullException.ThrowIfNull(reference);
         reference.ThrowIfDisposed();
         if (!ReferenceEquals(reference.Owner, this)) throw new ArgumentException("The reference was prepared by a different pipeline.", nameof(reference));
+        ArgumentNullException.ThrowIfNull(text);
         IndexTts2Options opts = options ?? new IndexTts2Options();
+        if (opts.Language is null) opts = opts with { Language = IndexTtsTextFrontend.DetectLanguage(text) };
         List<int[]> segments = SegmentText(text, opts);
         if (segments.Count == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
         return StreamSegments(backend, text, reference, opts, segments, ct);
@@ -427,7 +432,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             return _frontend.SegmentSentencePiece(text, _spm, IndexTtsTextFrontend.DefaultMaxTextTokensPerSegment, opts.QuickStreamingTokens);
         if (string.IsNullOrWhiteSpace(text)) return [];
         // text_pos_embedding has max_text_tokens + 2 rows; upstream's split budget reads that capacity.
-        return _frontend.SegmentTiktoken(text, opts.Language, _encode, _cfg.MaxTextTokens + 2);
+        return _frontend.SegmentTiktoken(text, opts.Language ?? IndexTtsTextFrontend.DetectLanguage(text), _encode, _cfg.MaxTextTokens + 2);
     }
 
     /// <summary>Real emotion resolution (<c>infer_generator</c>'s own branching, read in full): an explicit
@@ -578,7 +583,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     internal int[] GenerateCodes(IBackend backend, IndexTts2Reference reference, Tensor emoVec, int[] textIds, IndexTts2Options opts, ulong seed)
     {
         uint rngState = DeterministicRng.Seed(unchecked((int)seed));
-        int? langId = _cfg.Version == IndexTts2Version.V2_0 ? null : IndexTts2TiktokenTokenizer.LangToToken(opts.Language);
+        int? langId = _cfg.Version == IndexTts2Version.V2_0 ? null : IndexTts2TiktokenTokenizer.LangToToken(opts.Language ?? "en");
         IndexTtsOptions gptOpts = new()
         {
             Temperature = opts.Temperature,

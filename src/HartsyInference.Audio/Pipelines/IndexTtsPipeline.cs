@@ -61,12 +61,14 @@ public sealed class IndexTtsPipeline : IDisposable
 
     /// <summary>Loads IndexTTS-1.5 from already-downloaded checkpoint files. <c>dvae.pth</c> is deliberately not
     /// a parameter here — confirmed unused in the real inference path, and the Engine layer no longer downloads
-    /// it at all. <paramref name="textNormalizers"/> are the FST normalizers upstream takes from wetext (default
-    /// <see cref="IndexTtsFstNormalizers.Interim"/>).</summary>
+    /// it at all. <paramref name="textNormalizers"/> are the FST normalizers upstream takes from wetext; pass
+    /// <see cref="IndexTtsFstNormalizers.FromWeText"/> for upstream text (the engine does), or
+    /// <see cref="IndexTtsFstNormalizers.Interim"/> when the grammars are unavailable.</summary>
     public static Task<IndexTtsPipeline> LoadAsync(string tokenizerPath, string gptPath, string bigVganPath,
-        IndexTtsConfig? cfg, IndexTtsFstNormalizers? textNormalizers = null, CancellationToken ct = default)
+        IndexTtsConfig? cfg, IndexTtsFstNormalizers textNormalizers, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(textNormalizers);
         IndexTtsConfig resolved = cfg ?? IndexTtsConfig.V1_5;
 
         IndexTtsTokenizer? tokenizer = null;
@@ -108,7 +110,7 @@ public sealed class IndexTtsPipeline : IDisposable
             bigVgan.LoadWeights(bigVganWeights, "generator", "generator.speaker_encoder");
 
             return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader, converted,
-                textNormalizers ?? IndexTtsFstNormalizers.Interim));
+                textNormalizers));
         }
         catch
         {

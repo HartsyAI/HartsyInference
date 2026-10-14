@@ -1,4 +1,3 @@
-using System.Text;
 using HartsyInference.Audio.Frontends.WeText;
 
 namespace HartsyInference.Audio.Pipelines;
@@ -17,43 +16,29 @@ public sealed record IndexTtsFstNormalizers
     /// <summary>Chinese text normalization (wetext <c>zh</c> <c>tn</c>, erhua kept).</summary>
     public required Func<string, string> Chinese { get; init; }
 
-    /// <summary>Stand-in until the WeText runtime is wired in: English goes through <see cref="EnglishSpokenForm"/>
-    /// (an approximation of the FST that covers numbers, money, dates and titles), Chinese is left unchanged.</summary>
+    /// <summary>Fallback for when the WeText grammars cannot be loaded (offline, no cached grammars): English goes
+    /// through <see cref="EnglishSpokenForm"/>, an approximation of the FST covering numbers, money, dates and titles;
+    /// Chinese is left unchanged. Not upstream parity; prefer <see cref="FromWeText"/>.</summary>
     public static IndexTtsFstNormalizers Interim { get; } = new()
     {
         English = EnglishSpokenForm.Expand,
         Chinese = static text => text,
     };
 
-    /// <summary>wetext 0.1.8 <c>Normalizer(lang=..., operator="tn").normalize</c> (what IndexTTS's <c>wetext&gt;=0.0.9</c>
-    /// resolves to) over <paramref name="weText"/>'s grammars: the text is stripped, English always runs tagger,
-    /// reorder and verbalizer, Chinese only when it holds a decimal digit. <paramref name="weText"/> must hold both
-    /// grammars, Chinese with erhua kept.</summary>
+    /// <summary>Upstream's <c>Normalizer(lang="en")</c> / <c>Normalizer(lang="zh", remove_erhua=False)</c> over
+    /// <paramref name="weText"/>, which must reproduce wetext 0.1.8 (<see cref="WeTextVersion.V0_1_8"/>, what IndexTTS's
+    /// <c>wetext&gt;=0.0.9</c> resolves to) and hold both grammars, Chinese with erhua kept.</summary>
     public static IndexTtsFstNormalizers FromWeText(WeTextNormalizer weText)
     {
         ArgumentNullException.ThrowIfNull(weText);
+        if (weText.Version != WeTextVersion.V0_1_8)
+            throw new ArgumentException("IndexTTS runs wetext 0.1.8; load the normalizer with WeTextVersion.V0_1_8.", nameof(weText));
+        if (weText.Language != WeTextLanguage.Auto)
+            throw new ArgumentException("IndexTTS needs both the English and the Chinese grammars.", nameof(weText));
         return new IndexTtsFstNormalizers
         {
-            English = text => RunWeText(weText, text, WeTextLanguage.English),
-            Chinese = text => RunWeText(weText, text, WeTextLanguage.Chinese),
+            English = text => weText.Normalize(text, WeTextLanguage.English),
+            Chinese = text => weText.Normalize(text, WeTextLanguage.Chinese),
         };
-    }
-
-    private static string RunWeText(WeTextNormalizer weText, string text, WeTextLanguage language)
-    {
-        string prepared = text.Trim();
-        if (prepared.Length == 0) return prepared;
-        if (language == WeTextLanguage.Chinese && !ContainsDecimalDigit(prepared)) return prepared;
-        string tagged = weText.Tag(prepared, language).Trim();
-        if (tagged.Length == 0) throw new FormatException("wetext tagger accepts no path for the text");
-        return weText.Verbalize(tagged, language, wetext018: true).Trim();
-    }
-
-    // Python's re \d on str: any Unicode decimal digit.
-    private static bool ContainsDecimalDigit(string text)
-    {
-        foreach (Rune rune in text.EnumerateRunes())
-            if (Rune.IsDigit(rune)) return true;
-        return false;
     }
 }

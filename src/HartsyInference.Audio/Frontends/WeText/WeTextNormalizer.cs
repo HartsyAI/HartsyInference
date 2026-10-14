@@ -3,11 +3,13 @@ using System.Text;
 
 namespace HartsyInference.Audio.Frontends.WeText;
 
-/// <summary>Port of the <c>wetext</c> 0.0.4 text normalizer (pengzhendong/wetext, Apache-2.0) that CosyVoice 2 pins:
-/// text holding a decimal digit is tagged by <c>{lang}/tn/tagger.fst</c>, its tokens reordered, then verbalized by
-/// <c>{lang}/tn/verbalizer.fst</c>; text without a digit is returned untouched. Output is byte-identical to the
-/// Python package on the same FST files (see <c>tools/parity/wetext_parity_reference.py</c>). Only the TN operator
-/// is ported. Instances are immutable and safe to share across threads.</summary>
+/// <summary>Port of the <c>wetext</c> text normalizer (pengzhendong/wetext, Apache-2.0): text is tagged by
+/// <c>{lang}/tn/tagger.fst</c>, its tokens reordered, then verbalized by <c>{lang}/tn/verbalizer.fst</c>.
+/// <see cref="Version"/> selects the release reproduced: 0.0.4 (CosyVoice 2's pin) normalizes only text holding a
+/// decimal digit; 0.1.8 (IndexTTS) strips the text, always normalizes English and re-escapes field values in the
+/// reorder. Output is byte-identical to the Python package on the same FST files (see
+/// <c>tools/parity/wetext_parity_reference.py</c> and <c>tools/parity/indextts_frontend_dump.py</c>). Only the TN
+/// operator is ported. Instances are immutable and safe to share across threads.</summary>
 public sealed class WeTextNormalizer
 {
     private readonly FstTextRewriter? _englishTagger;
@@ -15,10 +17,11 @@ public sealed class WeTextNormalizer
     private readonly FstTextRewriter? _chineseTagger;
     private readonly FstTextRewriter? _chineseVerbalizer;
 
-    private WeTextNormalizer(WeTextLanguage language, FstTextRewriter? englishTagger, FstTextRewriter? englishVerbalizer,
-        FstTextRewriter? chineseTagger, FstTextRewriter? chineseVerbalizer)
+    private WeTextNormalizer(WeTextLanguage language, WeTextVersion version, FstTextRewriter? englishTagger,
+        FstTextRewriter? englishVerbalizer, FstTextRewriter? chineseTagger, FstTextRewriter? chineseVerbalizer)
     {
         Language = language;
+        Version = version;
         _englishTagger = englishTagger;
         _englishVerbalizer = englishVerbalizer;
         _chineseTagger = chineseTagger;
@@ -28,18 +31,22 @@ public sealed class WeTextNormalizer
     /// <summary>The language this normalizer was built for; <see cref="WeTextLanguage.Auto"/> holds both grammars.</summary>
     public WeTextLanguage Language { get; }
 
+    /// <summary>The wetext release this normalizer reproduces.</summary>
+    public WeTextVersion Version { get; }
+
     /// <summary>Loads the TN grammars under <paramref name="fstDirectory"/> (<c>en/tn/*.fst</c>, <c>zh/tn/*.fst</c>, the
     /// layout of the wetext FST repository). <see cref="WeTextLanguage.Auto"/> loads both, as wetext does.
     /// <paramref name="removeErhua"/> selects the Chinese <c>verbalizer_remove_erhua.fst</c>.</summary>
     public static WeTextNormalizer Load(string fstDirectory, WeTextLanguage language = WeTextLanguage.Auto,
-        bool removeErhua = false)
+        bool removeErhua = false, WeTextVersion version = WeTextVersion.V0_0_4)
     {
         ArgumentException.ThrowIfNullOrEmpty(fstDirectory);
         if (!Enum.IsDefined(language)) throw new ArgumentOutOfRangeException(nameof(language));
+        if (!Enum.IsDefined(version)) throw new ArgumentOutOfRangeException(nameof(version));
         bool english = language is WeTextLanguage.Auto or WeTextLanguage.English;
         bool chinese = language is WeTextLanguage.Auto or WeTextLanguage.Chinese;
         string chineseVerbalizer = removeErhua ? "verbalizer_remove_erhua.fst" : "verbalizer.fst";
-        return new WeTextNormalizer(language,
+        return new WeTextNormalizer(language, version,
             english ? Grammar(fstDirectory, "en", "tagger.fst") : null,
             english ? Grammar(fstDirectory, "en", "verbalizer.fst") : null,
             chinese ? Grammar(fstDirectory, "zh", "tagger.fst") : null,
@@ -58,15 +65,29 @@ public sealed class WeTextNormalizer
         return files;
     }
 
-    /// <summary>wetext 0.0.4 <c>Normalizer.normalize</c>. Throws <see cref="FormatException"/> where the Python
-    /// package raises: the tagger accepts no path for the text (it returns nothing for some symbols, e.g. <c>+</c>
-    /// and <c>#</c> in English).</summary>
-    public string Normalize(string text)
+    /// <summary>wetext <c>Normalizer.normalize</c> of <see cref="Version"/>. Throws <see cref="FormatException"/> where
+    /// the Python package raises: the tagger accepts no path for the text (it returns nothing for some symbols, e.g.
+    /// <c>+</c> and <c>#</c> in English).</summary>
+    public string Normalize(string text) => Normalize(text, Language);
+
+    /// <summary><see cref="Normalize(string)"/> with the grammar forced to <paramref name="language"/>, as a wetext
+    /// <c>Normalizer(lang=...)</c> built for one language does; <see cref="WeTextLanguage.Auto"/> detects it.</summary>
+    public string Normalize(string text, WeTextLanguage language)
     {
         ArgumentNullException.ThrowIfNull(text);
-        if (!ContainsDecimalDigit(text)) return text;
-        WeTextLanguage language = Resolve(text);
-        return Verbalize(Tag(text, language), language);
+        if (Version == WeTextVersion.V0_0_4)
+        {
+            if (!ContainsDecimalDigit(text)) return text;
+            WeTextLanguage concrete = Concrete(language, text);
+            return Verbalize(Tag(text, concrete), concrete);
+        }
+        string prepared = WeTextTokenParser.PythonStrip(text);
+        WeTextLanguage lang = language != WeTextLanguage.Auto ? language
+            : ContainsChinese(prepared) || IsAllDigits(prepared) ? WeTextLanguage.Chinese : WeTextLanguage.English;
+        bool normalize = lang == WeTextLanguage.English ? prepared.Length > 0 : ContainsDecimalDigit(prepared);
+        if (!normalize) return prepared;
+        string tagged = WeTextTokenParser.PythonStrip(Tag(prepared, lang));
+        return WeTextTokenParser.PythonStrip(Verbalize(tagged, lang));
     }
 
     /// <summary><see cref="Normalize"/>, returning false instead of throwing where the Python package raises (no tagger
@@ -76,17 +97,9 @@ public sealed class WeTextNormalizer
     {
         ArgumentNullException.ThrowIfNull(text);
         normalized = null;
-        if (!ContainsDecimalDigit(text))
-        {
-            normalized = text;
-            return true;
-        }
-        WeTextLanguage language = Resolve(text);
         try
         {
-            string tagged = Tag(text, language);
-            if (tagged.Length == 0) return false;
-            normalized = Verbalize(tagged, language);
+            normalized = Normalize(text);
             return true;
         }
         catch (FormatException)
@@ -106,15 +119,11 @@ public sealed class WeTextNormalizer
 
     /// <summary>Reorders the tagger output's token fields and runs the verbalizer (wetext
     /// <c>Normalizer.verbalize</c>).</summary>
-    public string Verbalize(string tagged, WeTextLanguage language) => Verbalize(tagged, language, wetext018: false);
-
-    /// <summary><see cref="Verbalize(string, WeTextLanguage)"/> with the wetext 0.1.x reorder when
-    /// <paramref name="wetext018"/> is set (see <see cref="WeTextTokenParser.Reorder"/>).</summary>
-    internal string Verbalize(string tagged, WeTextLanguage language, bool wetext018)
+    public string Verbalize(string tagged, WeTextLanguage language)
     {
         // Normalize passes the language it tagged with; Auto here only serves direct callers holding tagged text.
         WeTextLanguage concrete = Concrete(language, tagged);
-        return Rewriters(concrete).Verbalizer.Rewrite(WeTextTokenParser.Reorder(tagged, concrete, wetext018));
+        return Rewriters(concrete).Verbalizer.Rewrite(WeTextTokenParser.Reorder(tagged, concrete, Version));
     }
 
     /// <summary>wetext's language test: any CJK Unified Ideograph (U+4E00..U+9FFF).</summary>
@@ -132,6 +141,15 @@ public sealed class WeTextNormalizer
         foreach (Rune rune in text.EnumerateRunes())
             if (Rune.IsDigit(rune)) return true;
         return false;
+    }
+
+    // Python str.isdigit() on a non-empty string, approximated by Unicode decimal digits.
+    private static bool IsAllDigits(string text)
+    {
+        if (text.Length == 0) return false;
+        foreach (Rune rune in text.EnumerateRunes())
+            if (!Rune.IsDigit(rune)) return false;
+        return true;
     }
 
     private static FstTextRewriter Grammar(string directory, string language, string file)

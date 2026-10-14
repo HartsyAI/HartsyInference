@@ -52,7 +52,7 @@ public sealed class IndexTts2V20PipelineRealWeightTests(ITestOutputHelper output
         using CpuBackend backend = new();
 
         using IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
-            bpePath, gptPath, s2melPath, codecPath!, w2vBertPath!, statsPath, campplusPath!, bigVganPath!,
+            bpePath, gptPath, s2melPath, codecPath!, w2vBertPath!, statsPath, campplusPath!, bigVganPath!, IndexTtsTestNormalizers.Resolve(),
             feat1Path: haveFeat ? feat1 : null, feat2Path: haveFeat ? feat2 : null,
             qwenEmoDir: haveQwen ? qwenDir : null, qwenBackend: haveQwen ? backend : null, cfg: IndexTts2Config.V2_0);
         Assert.Equal("indextts2-2.0", pipeline.ModelName);

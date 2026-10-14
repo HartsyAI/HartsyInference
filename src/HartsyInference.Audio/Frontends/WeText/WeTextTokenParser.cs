@@ -32,10 +32,10 @@ internal sealed class WeTextTokenParser
     // The current character, or -1 past the end (Python's "<EOS>" sentinel).
     private int Current => _eos ? -1 : _text[_index];
 
-    /// <summary>wetext <c>TokenParser(lang, "tn").reorder(text)</c>. <paramref name="wetext018"/> selects the
-    /// wetext 0.1.x serializer: values are re-escaped (<c>\</c> and <c>"</c>) and fields outside the order table
-    /// follow the ordered ones instead of being dropped.</summary>
-    public static string Reorder(string tagged, WeTextLanguage language, bool wetext018 = false)
+    /// <summary>wetext <c>TokenParser(lang, "tn").reorder(text)</c> of <paramref name="version"/>: 0.1.x re-escapes
+    /// values (<c>\</c> and <c>"</c>) and keeps fields outside the order table after the ordered ones; 0.0.4 writes
+    /// values raw and drops those fields.</summary>
+    public static string Reorder(string tagged, WeTextLanguage language, WeTextVersion version = WeTextVersion.V0_0_4)
     {
         ArgumentNullException.ThrowIfNull(tagged);
         Dictionary<string, string[]> orders = language switch
@@ -47,7 +47,7 @@ internal sealed class WeTextTokenParser
         if (tagged.Length == 0) throw new FormatException("the tagger produced no tokens");
         WeTextTokenParser parser = new(tagged);
         StringBuilder output = new(tagged.Length + 16);
-        foreach (Token token in parser.Parse()) token.Write(output, orders, wetext018).Append(' ');
+        foreach (Token token in parser.Parse()) token.Write(output, orders, version).Append(' ');
         return PythonStrip(output.ToString());
     }
 
@@ -159,17 +159,17 @@ internal sealed class WeTextTokenParser
             _members[key] = value;
         }
 
-        public StringBuilder Write(StringBuilder output, Dictionary<string, string[]> orders, bool wetext018)
+        public StringBuilder Write(StringBuilder output, Dictionary<string, string[]> orders, WeTextVersion version)
         {
             output.Append(name).Append(" {");
             IReadOnlyList<string> order = _order;
             if (orders.TryGetValue(name, out string[]? fixedOrder)
                 && !(_members.TryGetValue("preserve_order", out string? preserve) && preserve == "true"))
-                order = wetext018 ? [.. fixedOrder, .. _order.Where(k => Array.IndexOf(fixedOrder, k) < 0)] : fixedOrder;
+                order = version == WeTextVersion.V0_1_8 ? [.. fixedOrder, .. _order.Where(k => Array.IndexOf(fixedOrder, k) < 0)] : fixedOrder;
             foreach (string key in order)
             {
                 if (!_members.TryGetValue(key, out string? value)) continue;
-                if (wetext018) value = value.Replace(@"\", @"\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+                if (version == WeTextVersion.V0_1_8) value = value.Replace(@"\", @"\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
                 output.Append(' ').Append(key).Append(": \"").Append(value).Append('"');
             }
             return output.Append(" }");

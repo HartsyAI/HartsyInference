@@ -98,6 +98,14 @@ public sealed partial class IndexTtsTextFrontend
         return new TiktokenStages(cleaned, normalized, lowered, annotated, prepared);
     }
 
+    /// <summary>The IndexTTS-2.5 language for text whose caller names none: <c>"zh"</c> when it holds a CJK Unified
+    /// Ideograph (upstream <c>use_chinese</c>'s Chinese test), otherwise <c>"en"</c>.</summary>
+    public static string DetectLanguage(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        return ChineseChar().IsMatch(text) ? "zh" : "en";
+    }
+
     /// <summary>Upstream <c>lang_prefix</c>: <c>"&lt;|en|&gt; "</c>.</summary>
     public static string LanguagePrefix(string language)
     {

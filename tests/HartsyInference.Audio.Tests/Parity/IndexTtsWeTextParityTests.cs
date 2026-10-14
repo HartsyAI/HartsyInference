@@ -24,7 +24,8 @@ public sealed class IndexTtsWeTextParityTests(ITestOutputHelper output)
     {
         if (!RealWeightGate.Require(output.WriteLine, Path.Combine(FstDirectory, "en", "tn", "tagger.fst"),
                 Path.Combine(FstDirectory, "zh", "tn", "verbalizer.fst"))) return;
-        IndexTtsFstNormalizers fst = IndexTtsFstNormalizers.FromWeText(WeTextNormalizer.Load(FstDirectory));
+        IndexTtsFstNormalizers fst = IndexTtsFstNormalizers.FromWeText(
+            WeTextNormalizer.Load(FstDirectory, WeTextLanguage.Auto, removeErhua: false, WeTextVersion.V0_1_8));
         List<string> failures = [];
         int calls = 0;
         foreach (JsonElement c in IndexTtsFrontendFixture.Cases)

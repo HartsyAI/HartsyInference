@@ -1,5 +1,4 @@
 using HartsyInference.Audio.Cache;
-using HartsyInference.Audio.Frontends.WeText;
 using HartsyInference.Audio.Models.IndexTts2;
 using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Pipelines;
@@ -109,15 +108,14 @@ internal static class IndexTts2Model
                 Logs.Info("[Audio][IndexTTS2] QwenEmotion files not all available; free-text emotion (--emotion-text) is disabled.");
             }
 
-            WeTextNormalizer weText = await WeTextAssets.LoadAsync(WeTextLanguage.Auto, removeErhua: false, cancel).ConfigureAwait(false);
+            IndexTtsFstNormalizers textNormalizers = await IndexTtsTextNormalizers.LoadAsync(cancel).ConfigureAwait(false);
             IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
                 fetched[v20 ? BpeFile : TiktokenFile], fetched[GptFile], fetched[S2MelFile],
                 fetched[v20 ? MaskGctCodecFile : CodecFile],
-                fetched[W2vBertWeightsFile], fetched[W2vStatsFile], fetched[CamplusFile], fetched[BigVganFile],
+                fetched[W2vBertWeightsFile], fetched[W2vStatsFile], fetched[CamplusFile], fetched[BigVganFile], textNormalizers,
                 feat1Path: fetched[Feat1File], feat2Path: fetched[Feat2File],
                 qwenEmoDir: haveQwen ? Path.GetDirectoryName(fetched[qwenPaths[0]]) : null, qwenBackend: haveQwen ? context.Backend : null,
-                cfg: v20 ? IndexTts2Config.V2_0 : IndexTts2Config.V2_5, textNormalizers: IndexTtsFstNormalizers.FromWeText(weText),
-                ct: cancel).ConfigureAwait(false);
+                cfg: v20 ? IndexTts2Config.V2_0 : IndexTts2Config.V2_5, ct: cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][IndexTTS2] Loaded {repo} (IndexTTS-{(v20 ? "2.0" : "2.5")}, emotion-controllable zero-shot cloning, 22050 Hz).");
 
             ReferenceCache references = new(pipeline);

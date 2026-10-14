@@ -19,10 +19,12 @@ public sealed record IndexTts2Options
 
     public ulong Seed { get; init; } = 42;
 
-    /// <summary>BCP-47-ish language code (e.g. <c>"en"</c>, <c>"zh"</c>) resolved to the GPT's
-    /// <c>lang_embedding</c> row via <see cref="HartsyInference.ModelAssets.Tokenizers.IndexTts2TiktokenTokenizer.LangToToken"/>;
-    /// an unrecognized code falls back to the real tokenizer's own <c>"common"</c> row, matching upstream.</summary>
-    public string Language { get; init; } = "en";
+    /// <summary>IndexTTS-2.5 language code (e.g. <c>"en"</c>, <c>"zh"</c>): the <c>&lt;|lang|&gt;</c> text prefix and the
+    /// GPT's <c>lang_embedding</c> row (<see cref="HartsyInference.ModelAssets.Tokenizers.IndexTts2TiktokenTokenizer.LangToToken"/>;
+    /// an unrecognized code falls back to upstream's <c>"common"</c> row). Null derives it from the text with
+    /// <see cref="IndexTtsTextFrontend.DetectLanguage"/>: <c>"zh"</c> when it holds a Chinese character, else <c>"en"</c>.
+    /// Upstream has no default (the caller always passes <c>lang</c>).</summary>
+    public string? Language { get; init; }
 
     /// <summary>Optional separate emotion-reference clip (mono PCM + its sample rate). When null, the main
     /// speaker reference doubles as the emotion reference and <see cref="EmoAlpha"/> is forced to 1.0,
