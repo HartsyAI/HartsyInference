@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Codecs.Mimi;
+using HartsyInference.Audio.Sampling;
 
 namespace HartsyInference.Audio.Models.BreezeTts;
 
@@ -40,6 +41,8 @@ public sealed record BreezeTts2Config
     public int CodebookSize { get; init; } = 2_048;
     public int CodebookEosTokenId { get; init; } = 0;
     public int CodebookPadTokenId { get; init; } = 2_050;
+    /// <summary>Floor 1 frame. The reference Breeze-TTS2 implementation was not verified offline; a zero-frame result yields no audio.</summary>
+    public StopGate EosGate { get; init; } = new(MinTokens: 1);
     public bool SupportsVoiceDesign { get; init; } = true;
     public bool SupportsVoiceDirection { get; init; } = true;
     public bool SupportsVoiceClone { get; init; } = true;
