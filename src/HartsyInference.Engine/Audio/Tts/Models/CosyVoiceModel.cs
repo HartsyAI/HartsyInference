@@ -1,4 +1,6 @@
+using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
@@ -22,12 +24,17 @@ internal static class CosyVoiceModel
 {
     private const string Repo = "FunAudioLLM/CosyVoice2-0.5B";
     private const string FrozenRepo = "ResembleAI/chatterbox";
+    private const string BlankEnVocab = "CosyVoice-BlankEN/vocab.json";
+    private const string BlankEnMerges = "CosyVoice-BlankEN/merges.txt";
 
     /// <summary>Shared by the loader and prefetch. The LM is last — it is the artifact that marks CosyVoice
     /// installed — and the S3 generator comes from the frozen Chatterbox repo rather than this model's own.</summary>
     private static readonly AudioModelFile[] ModelFiles =
     [
         new("s3gen.safetensors", Repo: FrozenRepo),
+        // CosyVoice 2's own Qwen vocabulary: its CJK merges differ from the embedded Qwen3 set.
+        new(BlankEnVocab),
+        new(BlankEnMerges),
         new("flow.pt"),
         new("hift.pt"),
         new("llm.pt"),
@@ -73,35 +80,62 @@ internal static class CosyVoiceModel
             s3.LoadWeights(s3gen, "tokenizer");
             CosyVoicePipeline pipeline = new CosyVoicePipeline(config, lm, flow, vocoder, speaker, s3);
 
-            Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
+            Qwen2Tokenizer tokenizer = new Qwen2Tokenizer(fetched[BlankEnVocab], fetched[BlankEnMerges]);
+            int[] Encode(string text) => tokenizer.EncodeExact(text, CosyVoiceTextFrontend.SpecialTokens);
+            CosyVoiceTextFrontend frontend = new CosyVoiceTextFrontend(text => Encode(text).Length);
             Logs.Info("[Audio][CosyVoice] Loaded FunAudioLLM/CosyVoice2-0.5B (Qwen LM + OT-CFM flow + HiFTNet, 24 kHz)"
                 + $"{(lm.Placement is not null ? ", layer-split across " + lm.Placement.Stages.Count + " GPUs" : "")}.");
 
             IDisposable?[] keep = [pipeline, llmLoader, flowLoader, hiftLoader, s3genLoader];
+
+            // Reference flow (cosyvoice/cli/cosyvoice.py inference_zero_shot): the prompt transcript is normalized
+            // without splitting, the target text is normalized and split into segments, and each segment runs its own
+            // LM/flow/vocoder pass with the same voice prompt.
+            (List<int[]> Segments, int[] Reference) Prepare(TtsJob job)
+            {
+                if (job.ReferenceMono24k is null || job.ReferenceMono24k.Length == 0)
+                {
+                    throw new InvalidOperationException(
+                        "CosyVoice 2 is zero-shot — it needs a voice reference. Supply a short WAV clip as the request's reference.");
+                }
+                List<int[]> segments = [.. frontend.Segments(job.Text).Select(Encode).Where(static ids => ids.Length > 0)];
+                int[] reference = string.IsNullOrWhiteSpace(job.RefText) ? [] : Encode(frontend.Normalize(job.RefText));
+                return (segments, reference);
+            }
             float[] Synth(IBackend backend, TtsJob job)
             {
-                if (job.ReferenceMono24k is null || job.ReferenceMono24k.Length == 0)
+                (List<int[]> segments, int[] reference) = Prepare(job);
+                List<float[]> parts = new(segments.Count);
+                foreach (int[] ids in segments)
                 {
-                    throw new InvalidOperationException(
-                        "CosyVoice 2 is zero-shot — it needs a voice reference. Supply a short WAV clip as the request's reference.");
+                    // The pipeline derives the S3 mel, CAM++ fbank, and flow mel from the raw reference itself.
+                    parts.Add(pipeline.Synthesize(backend, ids, referenceAudio: job.ReferenceMono24k,
+                        referenceSampleRate: 24_000, referenceTextTokens: reference, seed: job.Seed));
                 }
-                int[] textTokenIds = [.. tokenizer.EncodeRawByteLevel(job.Text)];
-                int[] referenceTextTokens = string.IsNullOrWhiteSpace(job.RefText) ? [] : [.. tokenizer.EncodeRawByteLevel(job.RefText)];
-                // The pipeline derives the S3 mel, CAM++ fbank, and flow mel from the raw reference itself.
-                return pipeline.Synthesize(backend, textTokenIds, referenceAudio: job.ReferenceMono24k,
-                    referenceSampleRate: 24_000, referenceTextTokens: referenceTextTokens, seed: job.Seed);
+                float[] audio = new float[parts.Sum(static p => p.Length)];
+                int offset = 0;
+                foreach (float[] part in parts)
+                {
+                    part.CopyTo(audio, offset);
+                    offset += part.Length;
+                }
+                return audio;
             }
-            IAsyncEnumerable<AudioChunk> Stream(IBackend backend, TtsJob job, CancellationToken cancel)
+            async IAsyncEnumerable<AudioChunk> Stream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
             {
-                if (job.ReferenceMono24k is null || job.ReferenceMono24k.Length == 0)
+                (List<int[]> segments, int[] reference) = Prepare(job);
+                long offset = 0;
+                foreach (int[] ids in segments)
                 {
-                    throw new InvalidOperationException(
-                        "CosyVoice 2 is zero-shot — it needs a voice reference. Supply a short WAV clip as the request's reference.");
+                    long segmentStart = offset;
+                    await foreach (AudioChunk chunk in pipeline.SynthesizeStream(backend, ids, referenceAudio: job.ReferenceMono24k,
+                        referenceSampleRate: 24_000, referenceTextTokens: reference, seed: job.Seed, cancel: cancel).ConfigureAwait(false))
+                    {
+                        // Each segment's stream counts from zero; re-base it onto the request's timeline.
+                        yield return chunk with { StartSampleOffset = segmentStart + chunk.StartSampleOffset };
+                        offset = Math.Max(offset, segmentStart + chunk.StartSampleOffset + chunk.FrameCount);
+                    }
                 }
-                int[] textTokenIds = [.. tokenizer.EncodeRawByteLevel(job.Text)];
-                int[] referenceTextTokens = string.IsNullOrWhiteSpace(job.RefText) ? [] : [.. tokenizer.EncodeRawByteLevel(job.RefText)];
-                return pipeline.SynthesizeStream(backend, textTokenIds, referenceAudio: job.ReferenceMono24k,
-                    referenceSampleRate: 24_000, referenceTextTokens: referenceTextTokens, seed: job.Seed, cancel: cancel);
             }
             return new StreamingTtsRunner(config.SampleRate, Synth, Stream, keep);
         },

@@ -1,0 +1,1575 @@
+{
+ "special_tokens": {
+  "<|im_start|>": 151644,
+  "<|im_end|>": 151645,
+  "<|endofprompt|>": 151646,
+  "[breath]": 151647,
+  "<strong>": 151648,
+  "</strong>": 151649,
+  "[noise]": 151650,
+  "[laughter]": 151651,
+  "[cough]": 151652,
+  "[clucking]": 151653,
+  "[accent]": 151654,
+  "[quick_breath]": 151655,
+  "<laughter>": 151656,
+  "</laughter>": 151657,
+  "[hissing]": 151658,
+  "[sigh]": 151659,
+  "[vocalized-noise]": 151660,
+  "[lipsmack]": 151661,
+  "[mn]": 151662
+ },
+ "numbers": [
+  {
+   "in": "0",
+   "out": "zero"
+  },
+  {
+   "in": "1",
+   "out": "one"
+  },
+  {
+   "in": "2",
+   "out": "two"
+  },
+  {
+   "in": "7",
+   "out": "seven"
+  },
+  {
+   "in": "9",
+   "out": "nine"
+  },
+  {
+   "in": "10",
+   "out": "ten"
+  },
+  {
+   "in": "11",
+   "out": "eleven"
+  },
+  {
+   "in": "13",
+   "out": "thirteen"
+  },
+  {
+   "in": "19",
+   "out": "nineteen"
+  },
+  {
+   "in": "20",
+   "out": "twenty"
+  },
+  {
+   "in": "21",
+   "out": "twenty-one"
+  },
+  {
+   "in": "30",
+   "out": "thirty"
+  },
+  {
+   "in": "45",
+   "out": "forty-five"
+  },
+  {
+   "in": "99",
+   "out": "ninety-nine"
+  },
+  {
+   "in": "100",
+   "out": "one hundred"
+  },
+  {
+   "in": "101",
+   "out": "one hundred and one"
+  },
+  {
+   "in": "110",
+   "out": "one hundred and ten"
+  },
+  {
+   "in": "115",
+   "out": "one hundred and fifteen"
+  },
+  {
+   "in": "120",
+   "out": "one hundred and twenty"
+  },
+  {
+   "in": "199",
+   "out": "one hundred and ninety-nine"
+  },
+  {
+   "in": "200",
+   "out": "two hundred"
+  },
+  {
+   "in": "250",
+   "out": "two hundred and fifty"
+  },
+  {
+   "in": "999",
+   "out": "nine hundred and ninety-nine"
+  },
+  {
+   "in": "1000",
+   "out": "one thousand"
+  },
+  {
+   "in": "1001",
+   "out": "one thousand and one"
+  },
+  {
+   "in": "1010",
+   "out": "one thousand and ten"
+  },
+  {
+   "in": "1100",
+   "out": "one thousand, one hundred"
+  },
+  {
+   "in": "1999",
+   "out": "one thousand, nine hundred and ninety-nine"
+  },
+  {
+   "in": "2000",
+   "out": "two thousand"
+  },
+  {
+   "in": "2001",
+   "out": "two thousand and one"
+  },
+  {
+   "in": "2026",
+   "out": "two thousand and twenty-six"
+  },
+  {
+   "in": "2100",
+   "out": "two thousand, one hundred"
+  },
+  {
+   "in": "9999",
+   "out": "nine thousand, nine hundred and ninety-nine"
+  },
+  {
+   "in": "10000",
+   "out": "ten thousand"
+  },
+  {
+   "in": "10001",
+   "out": "ten thousand and one"
+  },
+  {
+   "in": "12345",
+   "out": "twelve thousand, three hundred and forty-five"
+  },
+  {
+   "in": "99999",
+   "out": "ninety-nine thousand, nine hundred and ninety-nine"
+  },
+  {
+   "in": "100000",
+   "out": "one hundred thousand"
+  },
+  {
+   "in": "100001",
+   "out": "one hundred thousand and one"
+  },
+  {
+   "in": "123456",
+   "out": "one hundred and twenty-three thousand, four hundred and fifty-six"
+  },
+  {
+   "in": "999999",
+   "out": "nine hundred and ninety-nine thousand, nine hundred and ninety-nine"
+  },
+  {
+   "in": "1000000",
+   "out": "one million"
+  },
+  {
+   "in": "1000001",
+   "out": "one million and one"
+  },
+  {
+   "in": "1234567",
+   "out": "one million, two hundred and thirty-four thousand, five hundred and sixty-seven"
+  },
+  {
+   "in": "10000000",
+   "out": "ten million"
+  },
+  {
+   "in": "123456789",
+   "out": "one hundred and twenty-three million, four hundred and fifty-six thousand, seven hundred and eighty-nine"
+  },
+  {
+   "in": "1000000000",
+   "out": "one billion"
+  },
+  {
+   "in": "9876543210",
+   "out": "nine billion, eight hundred and seventy-six million, five hundred and forty-three thousand, two hundred and ten"
+  },
+  {
+   "in": "007",
+   "out": "seven"
+  },
+  {
+   "in": "00",
+   "out": "zero"
+  },
+  {
+   "in": "0001",
+   "out": "one"
+  },
+  {
+   "in": "000123",
+   "out": "one hundred and twenty-three"
+  }
+ ],
+ "cases": [
+  {
+   "text": "Yes.",
+   "plain_normalized": "Yes.",
+   "plain_segments": [
+    "Yes."
+   ],
+   "tn_normalized": "Yes.",
+   "tn_segments": [
+    "Yes."
+   ],
+   "tn_segment_ids": [
+    [
+     9454,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     9454,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "Okay, see you.",
+   "plain_normalized": "Okay, see you.",
+   "plain_segments": [
+    "Okay, see you."
+   ],
+   "tn_normalized": "Okay, see you.",
+   "tn_segments": [
+    "Okay, see you."
+   ],
+   "tn_segment_ids": [
+    [
+     32313,
+     11,
+     1490,
+     498,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     32313,
+     11,
+     1490,
+     498,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "The weather is nice today, so we might take a walk.",
+   "plain_normalized": "The weather is nice today, so we might take a walk.",
+   "plain_segments": [
+    "The weather is nice today, so we might take a walk."
+   ],
+   "tn_normalized": "The weather is nice today, so we might take a walk.",
+   "tn_segments": [
+    "The weather is nice today, so we might take a walk."
+   ],
+   "tn_segment_ids": [
+    [
+     785,
+     9104,
+     374,
+     6419,
+     3351,
+     11,
+     773,
+     582,
+     2578,
+     1896,
+     264,
+     4227,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     785,
+     9104,
+     374,
+     6419,
+     3351,
+     11,
+     773,
+     582,
+     2578,
+     1896,
+     264,
+     4227,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+   "plain_normalized": "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+   "plain_segments": [
+    "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter."
+   ],
+   "tn_normalized": "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+   "tn_segments": [
+    "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter."
+   ],
+   "tn_segment_ids": [
+    [
+     6025,
+     279,
+     6438,
+     9482,
+     11,
+     279,
+     2083,
+     20190,
+     304,
+     279,
+     9780,
+     311,
+     3061,
+     911,
+     279,
+     501,
+     1985,
+     7050,
+     11,
+     279,
+     8039,
+     11,
+     323,
+     279,
+     9700,
+     369,
+     279,
+     5001,
+     8338,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     6025,
+     279,
+     6438,
+     9482,
+     11,
+     279,
+     2083,
+     20190,
+     304,
+     279,
+     9780,
+     311,
+     3061,
+     911,
+     279,
+     501,
+     1985,
+     7050,
+     11,
+     279,
+     8039,
+     11,
+     323,
+     279,
+     9700,
+     369,
+     279,
+     5001,
+     8338,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+   "plain_normalized": "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+   "plain_segments": [
+    "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster."
+   ],
+   "tn_normalized": "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+   "tn_segments": [
+    "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster."
+   ],
+   "tn_segment_ids": [
+    [
+     7981,
+     3015,
+     4031,
+     11465,
+     3309,
+     419,
+     2254,
+     11,
+     773,
+     358,
+     2598,
+     279,
+     5163,
+     311,
+     2548,
+     3170,
+     13,
+     576,
+     44257,
+     1053,
+     264,
+     22962,
+     5290,
+     572,
+     13628,
+     304,
+     5470,
+     13,
+     2932,
+     18951,
+     311,
+     5046,
+     279,
+     3255,
+     323,
+     3624,
+     264,
+     35965,
+     5114,
+     2878,
+     1378,
+     5555,
+     13,
+     358,
+     56495,
+     1059,
+     11,
+     18295,
+     705,
+     11,
+     323,
+     6139,
+     279,
+     2400,
+     389,
+     847,
+     13168,
+     773,
+     358,
+     1035,
+     6099,
+     311,
+     1779,
+     13,
+     7996,
+     882,
+     419,
+     6932,
+     432,
+     3867,
+     2326,
+     4540,
+     6738,
+     11,
+     773,
+     358,
+     1079,
+     15652,
+     419,
+     825,
+     5780,
+     10596,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     7981,
+     3015,
+     4031,
+     11465,
+     3309,
+     419,
+     2254,
+     11,
+     773,
+     358,
+     2598,
+     279,
+     5163,
+     311,
+     2548,
+     3170,
+     13,
+     576,
+     44257,
+     1053,
+     264,
+     22962,
+     5290,
+     572,
+     13628,
+     304,
+     5470,
+     13,
+     2932,
+     18951,
+     311,
+     5046,
+     279,
+     3255,
+     323,
+     3624,
+     264,
+     35965,
+     5114,
+     2878,
+     1378,
+     5555,
+     13,
+     358,
+     56495,
+     1059,
+     11,
+     18295,
+     705,
+     11,
+     323,
+     6139,
+     279,
+     2400,
+     389,
+     847,
+     13168,
+     773,
+     358,
+     1035,
+     6099,
+     311,
+     1779,
+     13,
+     7996,
+     882,
+     419,
+     6932,
+     432,
+     3867,
+     2326,
+     4540,
+     6738,
+     11,
+     773,
+     358,
+     1079,
+     15652,
+     419,
+     825,
+     5780,
+     10596,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "On March 3rd, 2026 at 4:30 PM, 1,250 people paid $99.95 each.",
+   "plain_normalized": "On March threerd, two thousand and twenty-six at four:thirty PM, one,two hundred and fifty people paid $ninety-nine.ninety-five each.",
+   "plain_segments": [
+    "On March threerd, two thousand and twenty-six at four:thirty PM, one,two hundred and fifty people paid $ninety-nine.ninety-five each."
+   ],
+   "tn_normalized": "On the third of march, twenty twenty six at four thirty PM, thousand two hundred and fifty people paid ninety nine point nine five dollars each.",
+   "tn_segments": [
+    "On the third of march, twenty twenty six at four thirty PM, thousand two hundred and fifty people paid ninety nine point nine five dollars each."
+   ],
+   "tn_segment_ids": [
+    [
+     1925,
+     279,
+     4843,
+     315,
+     15217,
+     11,
+     17073,
+     17073,
+     4743,
+     518,
+     3040,
+     26127,
+     5851,
+     11,
+     16183,
+     1378,
+     7739,
+     323,
+     32417,
+     1251,
+     7171,
+     77876,
+     11627,
+     1459,
+     11627,
+     4236,
+     11192,
+     1817,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     1925,
+     5470,
+     270,
+     265,
+     14348,
+     11,
+     1378,
+     16183,
+     323,
+     17073,
+     54441,
+     518,
+     3040,
+     25,
+     339,
+     16531,
+     5851,
+     11,
+     825,
+     13960,
+     1126,
+     7739,
+     323,
+     32417,
+     1251,
+     7171,
+     400,
+     78460,
+     2611,
+     85603,
+     1253,
+     258,
+     2611,
+     35299,
+     1817,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+   "plain_normalized": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+   "plain_segments": [
+    "Wait. what? No -- really; (yes), 'quoted' & \"double\" -- ok?"
+   ],
+   "tn_normalized": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+   "tn_segments": [
+    "Wait. what? No -- really; (yes), 'quoted' & \"double\" -- ok?"
+   ],
+   "tn_segment_ids": [
+    [
+     14190,
+     13,
+     1128,
+     30,
+     2308,
+     1177,
+     2167,
+     26,
+     320,
+     9693,
+     701,
+     364,
+     63725,
+     6,
+     609,
+     330,
+     4331,
+     1,
+     1177,
+     5394,
+     30
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     14190,
+     13,
+     1128,
+     30,
+     2308,
+     1177,
+     2167,
+     26,
+     320,
+     9693,
+     701,
+     364,
+     63725,
+     6,
+     609,
+     330,
+     4331,
+     1,
+     1177,
+     5394,
+     30
+    ]
+   ]
+  },
+  {
+   "text": "No no no no no no no no no no no no.",
+   "plain_normalized": "No no no no no no no no no no no no.",
+   "plain_segments": [
+    "No no no no no no no no no no no no."
+   ],
+   "tn_normalized": "No no no no no no no no no no no no.",
+   "tn_segments": [
+    "No no no no no no no no no no no no."
+   ],
+   "tn_segment_ids": [
+    [
+     2753,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     2753,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     902,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "The quick brown fox jumps over the lazy dog near the river bank.",
+   "plain_normalized": "The quick brown fox jumps over the lazy dog near the river bank.",
+   "plain_segments": [
+    "The quick brown fox jumps over the lazy dog near the river bank."
+   ],
+   "tn_normalized": "The quick brown fox jumps over the lazy dog near the river bank.",
+   "tn_segments": [
+    "The quick brown fox jumps over the lazy dog near the river bank."
+   ],
+   "tn_segment_ids": [
+    [
+     785,
+     3974,
+     13876,
+     38835,
+     34208,
+     916,
+     279,
+     15678,
+     5562,
+     3143,
+     279,
+     14796,
+     6073,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     785,
+     3974,
+     13876,
+     38835,
+     34208,
+     916,
+     279,
+     15678,
+     5562,
+     3143,
+     279,
+     14796,
+     6073,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "Dr. Smith lives at 221B Baker St. and earns 12% more in 1999.",
+   "plain_normalized": "Dr. Smith lives at two hundred and twenty-oneB Baker St. and earns twelve% more in one thousand, nine hundred and ninety-nine.",
+   "plain_segments": [
+    "Dr. Smith lives at two hundred and twenty-oneB Baker St. and earns twelve% more in one thousand, nine hundred and ninety-nine."
+   ],
+   "tn_normalized": "doctor Smith lives at two hundred twenty one B Baker St. and earns twelve percent more in nineteen ninety nine.",
+   "tn_segments": [
+    "doctor Smith lives at two hundred twenty one B Baker St. and earns twelve percent more in nineteen ninety nine."
+   ],
+   "tn_segment_ids": [
+    [
+     36983,
+     9082,
+     6305,
+     518,
+     1378,
+     7739,
+     17073,
+     825,
+     425,
+     28392,
+     794,
+     13,
+     323,
+     63759,
+     29235,
+     3266,
+     803,
+     304,
+     93835,
+     77876,
+     11627,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     8847,
+     13,
+     9082,
+     6305,
+     518,
+     1378,
+     7739,
+     323,
+     17073,
+     18589,
+     33,
+     28392,
+     794,
+     13,
+     323,
+     63759,
+     29235,
+     4,
+     803,
+     304,
+     825,
+     16183,
+     11,
+     11627,
+     7739,
+     323,
+     77876,
+     85603,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "No final punctuation here",
+   "plain_normalized": "No final punctuation here",
+   "plain_segments": [
+    "No final punctuation here."
+   ],
+   "tn_normalized": "No final punctuation here",
+   "tn_segments": [
+    "No final punctuation here."
+   ],
+   "tn_segment_ids": [
+    [
+     2753,
+     1590,
+     61503,
+     1588,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     2753,
+     1590,
+     61503,
+     1588,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "  Leading and trailing spaces.  ",
+   "plain_normalized": "Leading and trailing spaces.",
+   "plain_segments": [
+    "Leading and trailing spaces."
+   ],
+   "tn_normalized": "Leading and trailing spaces.",
+   "tn_segments": [
+    "Leading and trailing spaces."
+   ],
+   "tn_segment_ids": [
+    [
+     69750,
+     323,
+     27748,
+     12621,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     69750,
+     323,
+     27748,
+     12621,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "He said \"stop.\" Then he left.",
+   "plain_normalized": "He said \"stop.\" Then he left.",
+   "plain_segments": [
+    "He said \"stop.\" Then he left."
+   ],
+   "tn_normalized": "He said \"stop.\" Then he left.",
+   "tn_segments": [
+    "He said \"stop.\" Then he left."
+   ],
+   "tn_segment_ids": [
+    [
+     1519,
+     1053,
+     330,
+     9495,
+     1189,
+     5005,
+     566,
+     2115,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     1519,
+     1053,
+     330,
+     9495,
+     1189,
+     5005,
+     566,
+     2115,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "Room 101 has 3 chairs, 12 desks and 1000 pens.",
+   "plain_normalized": "Room one hundred and one has three chairs, twelve desks and one thousand pens.",
+   "plain_segments": [
+    "Room one hundred and one has three chairs, twelve desks and one thousand pens."
+   ],
+   "tn_normalized": "Room one hundred and one has three chairs, twelve desks and ten hundred pens.",
+   "tn_segments": [
+    "Room one hundred and one has three chairs, twelve desks and ten hundred pens."
+   ],
+   "tn_segment_ids": [
+    [
+     14003,
+     825,
+     7739,
+     323,
+     825,
+     702,
+     2326,
+     25904,
+     11,
+     29235,
+     75815,
+     323,
+     5779,
+     7739,
+     22601,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     14003,
+     825,
+     7739,
+     323,
+     825,
+     702,
+     2326,
+     25904,
+     11,
+     29235,
+     75815,
+     323,
+     825,
+     16183,
+     22601,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "Call 555-0199 before 9 or after 21.",
+   "plain_normalized": "Call five hundred and fifty-five-one hundred and ninety-nine before nine or after twenty-one.",
+   "plain_segments": [
+    "Call five hundred and fifty-five-one hundred and ninety-nine before nine or after twenty-one."
+   ],
+   "tn_normalized": "Call five hundred and fifty five-oh one hundred and ninety nine before nine or after twenty one.",
+   "tn_segments": [
+    "Call five hundred and fifty five-oh one hundred and ninety nine before nine or after twenty one."
+   ],
+   "tn_segment_ids": [
+    [
+     7220,
+     4236,
+     7739,
+     323,
+     32417,
+     4236,
+     12,
+     2267,
+     825,
+     7739,
+     323,
+     77876,
+     11627,
+     1573,
+     11627,
+     476,
+     1283,
+     17073,
+     825,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     7220,
+     4236,
+     7739,
+     323,
+     32417,
+     35299,
+     18589,
+     7739,
+     323,
+     77876,
+     85603,
+     1573,
+     11627,
+     476,
+     1283,
+     17073,
+     18589,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "First sentence. Second one! Third one? Fourth; fifth: sixth.",
+   "plain_normalized": "First sentence. Second one! Third one? Fourth; fifth: sixth.",
+   "plain_segments": [
+    "First sentence. Second one! Third one? Fourth; fifth: sixth."
+   ],
+   "tn_normalized": "First sentence. Second one! Third one? Fourth; fifth: sixth.",
+   "tn_segments": [
+    "First sentence. Second one! Third one? Fourth; fifth: sixth."
+   ],
+   "tn_segment_ids": [
+    [
+     5338,
+     11652,
+     13,
+     10440,
+     825,
+     0,
+     20861,
+     825,
+     30,
+     35074,
+     26,
+     17702,
+     25,
+     25031,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     5338,
+     11652,
+     13,
+     10440,
+     825,
+     0,
+     20861,
+     825,
+     30,
+     35074,
+     26,
+     17702,
+     25,
+     25031,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "It is 50/50 whether the 2nd or 3rd option wins on 12/25.",
+   "plain_normalized": "It is fifty/fifty whether the twond or threerd option wins on twelve/twenty-five.",
+   "plain_segments": [
+    "It is fifty/fifty whether the twond or threerd option wins on twelve/twenty-five."
+   ],
+   "tn_normalized": "It is fifty fiftieths whether the second or third option wins on twelve twenty fifths.",
+   "tn_segments": [
+    "It is fifty fiftieths whether the second or third option wins on twelve twenty fifths."
+   ],
+   "tn_segment_ids": [
+    [
+     2132,
+     374,
+     32417,
+     282,
+     2085,
+     72,
+     769,
+     82,
+     3425,
+     279,
+     2086,
+     476,
+     4843,
+     2999,
+     14816,
+     389,
+     29235,
+     17073,
+     11128,
+     16896,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     2132,
+     374,
+     32417,
+     6663,
+     38624,
+     3425,
+     279,
+     4384,
+     2111,
+     476,
+     270,
+     265,
+     14348,
+     2999,
+     14816,
+     389,
+     29235,
+     5523,
+     86,
+     7166,
+     35299,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "今天是2026年3月3日，天气很好。",
+   "plain_normalized": "今天是2026年3月3日，天气很好。",
+   "plain_segments": [
+    "今天是2026年3月3日，天气很好。"
+   ],
+   "tn_normalized": "今天是二零二六年三月三日，天气很好。",
+   "tn_segments": [
+    "今天是二零二六年三月三日，天气很好。"
+   ],
+   "tn_segment_ids": [
+    [
+     36171,
+     35727,
+     20412,
+     40820,
+     99822,
+     40820,
+     99566,
+     7948,
+     44991,
+     9754,
+     44991,
+     8903,
+     3837,
+     35727,
+     99180,
+     99165,
+     52801,
+     1773
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     36171,
+     35727,
+     20412,
+     17,
+     15,
+     17,
+     21,
+     7948,
+     18,
+     9754,
+     18,
+     8903,
+     3837,
+     35727,
+     99180,
+     99165,
+     52801,
+     1773
+    ]
+   ]
+  },
+  {
+   "text": "我有3个苹果和12个橘子，一共15个水果。",
+   "plain_normalized": "我有3个苹果和12个橘子，一共15个水果。",
+   "plain_segments": [
+    "我有3个苹果和12个橘子，一共15个水果。"
+   ],
+   "tn_normalized": "我有三个苹果和十二个橘子，一共十五个水果。",
+   "tn_segments": [
+    "我有三个苹果和十二个橘子，一共十五个水果。"
+   ],
+   "tn_segment_ids": [
+    [
+     35946,
+     18830,
+     44991,
+     18947,
+     102081,
+     27773,
+     33108,
+     94498,
+     40820,
+     18947,
+     114088,
+     44729,
+     3837,
+     14777,
+     54899,
+     94498,
+     75108,
+     18947,
+     52510,
+     27773,
+     1773
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     35946,
+     18830,
+     18,
+     18947,
+     102081,
+     27773,
+     33108,
+     16,
+     17,
+     18947,
+     114088,
+     44729,
+     3837,
+     14777,
+     54899,
+     16,
+     20,
+     18947,
+     52510,
+     27773,
+     1773
+    ]
+   ]
+  },
+  {
+   "text": "这是一个很长的句子，用来测试分段逻辑是否和参考实现一致。第二句也在这里。第三句话结束了！",
+   "plain_normalized": "这是一个很长的句子，用来测试分段逻辑是否和参考实现一致。第二句也在这里。第三句话结束了！",
+   "plain_segments": [
+    "这是一个很长的句子，用来测试分段逻辑是否和参考实现一致。第二句也在这里。第三句话结束了！"
+   ],
+   "tn_normalized": "这是一个很长的句子，用来测试分段逻辑是否和参考实现一致。第二句也在这里。第三句话结束了！",
+   "tn_segments": [
+    "这是一个很长的句子，用来测试分段逻辑是否和参考实现一致。第二句也在这里。第三句话结束了！"
+   ],
+   "tn_segment_ids": [
+    [
+     43288,
+     20412,
+     14777,
+     18947,
+     99165,
+     45861,
+     9370,
+     99700,
+     44729,
+     3837,
+     11622,
+     36407,
+     26601,
+     66635,
+     17177,
+     37474,
+     101414,
+     46939,
+     20412,
+     32376,
+     33108,
+     73743,
+     77598,
+     39973,
+     46451,
+     14777,
+     99299,
+     1773,
+     29437,
+     40820,
+     99700,
+     74763,
+     18493,
+     43288,
+     69249,
+     1773,
+     29437,
+     44991,
+     99700,
+     57443,
+     36885,
+     62963,
+     34187,
+     6313
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     43288,
+     20412,
+     14777,
+     18947,
+     99165,
+     45861,
+     9370,
+     99700,
+     44729,
+     3837,
+     11622,
+     36407,
+     26601,
+     66635,
+     17177,
+     37474,
+     101414,
+     46939,
+     20412,
+     32376,
+     33108,
+     73743,
+     77598,
+     39973,
+     46451,
+     14777,
+     99299,
+     1773,
+     29437,
+     40820,
+     99700,
+     74763,
+     18493,
+     43288,
+     69249,
+     1773,
+     29437,
+     44991,
+     99700,
+     57443,
+     36885,
+     62963,
+     34187,
+     6313
+    ]
+   ]
+  },
+  {
+   "text": "Mixed 中文 and English 文本 123.",
+   "plain_normalized": "Mixed中文and English文本123。",
+   "plain_segments": [
+    "Mixed中文and English文本123。"
+   ],
+   "tn_normalized": "Mixed中文and English文本一百二十三。",
+   "tn_segments": [
+    "Mixed中文and English文本一百二十三。"
+   ],
+   "tn_segment_ids": [
+    [
+     86433,
+     15946,
+     16744,
+     437,
+     6364,
+     16744,
+     21894,
+     14777,
+     99271,
+     40820,
+     94498,
+     44991,
+     1773
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     86433,
+     15946,
+     16744,
+     437,
+     6364,
+     16744,
+     21894,
+     16,
+     17,
+     18,
+     1773
+    ]
+   ]
+  },
+  {
+   "text": "<|endofprompt|>SSML-like text 42 stays untouched.",
+   "plain_normalized": "<|endofprompt|>SSML-like text 42 stays untouched.",
+   "plain_segments": [
+    "<|endofprompt|>SSML-like text 42 stays untouched."
+   ],
+   "tn_normalized": "<|endofprompt|>SSML-like text 42 stays untouched.",
+   "tn_segments": [
+    "<|endofprompt|>SSML-like text 42 stays untouched."
+   ],
+   "tn_segment_ids": [
+    [
+     151646,
+     1220,
+     2668,
+     12681,
+     1467,
+     220,
+     19,
+     17,
+     26558,
+     67522,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     151646,
+     1220,
+     2668,
+     12681,
+     1467,
+     220,
+     19,
+     17,
+     26558,
+     67522,
+     13
+    ]
+   ]
+  },
+  {
+   "text": "Breathe [breath] then laugh [laughter] and <strong>stress</strong> this.",
+   "plain_normalized": "Breathe [breath] then laugh [laughter] and <strong>stress</strong> this.",
+   "plain_segments": [
+    "Breathe [breath] then laugh [laughter] and <strong>stress</strong> this."
+   ],
+   "tn_normalized": "Breathe [breath] then laugh [laughter] and <strong>stress</strong> this.",
+   "tn_segments": [
+    "Breathe [breath] then laugh [laughter] and <strong>stress</strong> this."
+   ],
+   "tn_segment_ids": [
+    [
+     33,
+     1222,
+     383,
+     220,
+     151647,
+     1221,
+     12550,
+     220,
+     151651,
+     323,
+     220,
+     151648,
+     94190,
+     151649,
+     419,
+     13
+    ]
+   ],
+   "plain_segment_ids": [
+    [
+     33,
+     1222,
+     383,
+     220,
+     151647,
+     1221,
+     12550,
+     220,
+     151651,
+     323,
+     220,
+     151648,
+     94190,
+     151649,
+     419,
+     13
+    ]
+   ]
+  }
+ ]
+}

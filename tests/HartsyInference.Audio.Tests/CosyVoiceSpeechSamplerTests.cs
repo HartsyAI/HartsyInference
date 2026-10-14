@@ -29,7 +29,7 @@ public sealed unsafe class CosyVoiceSpeechSamplerTests
     [InlineData(0)]
     public void WithoutIgnoreEos_EosDominant_DrawsEos(int topK)
     {
-        CosyVoiceSamplingConfig cfg = new CosyVoiceSamplingConfig { TopK = topK, UseRas = false, RepetitionPenalty = 1f };
+        CosyVoiceSamplingConfig cfg = new CosyVoiceSamplingConfig { TopK = topK, UseRas = false };
         SpeechSampler sampler = new SpeechSampler(cfg, EosToken, seed: 7);
         using Tensor logits = EosDominantLogits();
         List<int> history = new List<int>();
@@ -43,7 +43,7 @@ public sealed unsafe class CosyVoiceSpeechSamplerTests
     [InlineData(0)]
     public void IgnoreEos_EosDominant_NeverDrawsEos(int topK)
     {
-        CosyVoiceSamplingConfig cfg = new CosyVoiceSamplingConfig { TopK = topK, UseRas = false, RepetitionPenalty = 1f };
+        CosyVoiceSamplingConfig cfg = new CosyVoiceSamplingConfig { TopK = topK, UseRas = false };
         SpeechSampler sampler = new SpeechSampler(cfg, EosToken, seed: 7);
         using Tensor logits = EosDominantLogits();
         List<int> history = new List<int>();
