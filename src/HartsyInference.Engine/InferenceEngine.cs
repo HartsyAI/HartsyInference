@@ -21,11 +21,9 @@ namespace HartsyInference.Engine;
 /// Progress flows through each service's <c>IProgress</c>/stream; results are returned as typed records.</summary>
 public sealed class InferenceEngine : IInferenceEngine
 {
-    /// <summary>How long a release waits for an in-flight audio generation before dropping its pipelines anyway.</summary>
-    private const int AudioUnloadWaitSeconds = 120;
-
-    /// <summary>How long a release waits for the jobs on its devices before skipping (free) or proceeding (teardown).</summary>
-    internal TimeSpan DeviceReleaseWait { get; set; } = TimeSpan.FromSeconds(AudioUnloadWaitSeconds);
+    /// <summary>How long a release waits in total for in-flight work: the audio unload first, then the jobs still on
+    /// its devices, before skipping the device release (free) or proceeding anyway (teardown).</summary>
+    internal TimeSpan DeviceReleaseWait { get; set; } = TimeSpan.FromSeconds(120);
 
     private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
@@ -838,6 +836,8 @@ public sealed class InferenceEngine : IInferenceEngine
         // Every step runs even when an earlier one throws: a failed dispose must not strand the device memory, the
         // services or the backend behind it.
         List<Exception>? failures = null;
+        // One budget for the whole release: the audio unload and the device gate wait for the same jobs.
+        long deadline = Environment.TickCount64 + (long)DeviceReleaseWait.TotalMilliseconds;
         foreach (KeyValuePair<string, IRecipePipeline> entry in _recipePipelines)
             ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
         _recipePipelines.Clear();
@@ -867,11 +867,11 @@ public sealed class InferenceEngine : IInferenceEngine
         // Audio pipelines are cached per-engine by the audio runtime; drop THIS engine's so none outlives the backend
         // it was constructed against. Other engines' resident audio models are untouched.
         if (_audioRuntime is not null)
-            ReleaseLogged("the audio models", () => _audioRuntime.UnloadAll(AudioUnloadWaitSeconds), ref failures);
+            ReleaseLogged("the audio models", () => _audioRuntime.UnloadAll((int)Math.Ceiling(Remaining(deadline).TotalSeconds)), ref failures);
         if (disposeBackend)
         {
             // Teardown must not hang on a wedged job, so it proceeds once the wait runs out, as the audio unload does.
-            bool idle = DeviceGate.TryAcquireAll(OwnedBackends(), DeviceReleaseWait, out IDisposable gate);
+            bool idle = DeviceGate.TryAcquireAll(OwnedBackends(), Remaining(deadline), out IDisposable gate);
             if (!idle)
                 Logs.Warning($"[Engine] Disposing the backend with a job still on its device after {DeviceReleaseWait.TotalSeconds:0}s.");
             using (gate)
@@ -893,9 +893,13 @@ public sealed class InferenceEngine : IInferenceEngine
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        ReleaseDeviceMemory();
+        ReleaseDeviceMemory(Remaining(deadline));
         HostMemory.TrimAndLog("free-memory sweep");
     }
+
+    /// <summary>What is left of a release budget that ends at <paramref name="deadline"/>.</summary>
+    private static TimeSpan Remaining(long deadline) =>
+        TimeSpan.FromMilliseconds(Math.Max(0, deadline - Environment.TickCount64));
 
     /// <summary>The primary and every placement backend this engine has already built, without building any.</summary>
     private IEnumerable<IBackend?> OwnedBackends() => [_backend, .. _placementBackends.Values];
@@ -905,9 +909,9 @@ public sealed class InferenceEngine : IInferenceEngine
     /// the gate — an audio job takes it inside its generation lock, so the gap between the audio unload and this
     /// sweep is exactly where one starts. Sweeping without the gate emptied the residency cache under that job's
     /// lookups. A device still busy when the wait runs out is skipped: its memory is in use by that job anyway.</remarks>
-    private void ReleaseDeviceMemory()
+    private void ReleaseDeviceMemory(TimeSpan wait)
     {
-        if (!DeviceGate.TryAcquireAll(OwnedBackends(), DeviceReleaseWait, out IDisposable gate))
+        if (!DeviceGate.TryAcquireAll(OwnedBackends(), wait, out IDisposable gate))
         {
             Logs.Warning($"[Engine] A job still held the device after {DeviceReleaseWait.TotalSeconds:0}s; "
                 + "skipped releasing its device memory rather than release it under that job.");

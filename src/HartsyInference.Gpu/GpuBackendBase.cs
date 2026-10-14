@@ -389,7 +389,12 @@ public abstract class GpuBackendBase
         }
         try
         {
-            DisposeCore();
+            // Under the cache lock, like an op, so teardown waits for another thread's op in flight instead of
+            // emptying the cache under it. That op's next entry then finds the backend gone.
+            lock (Residency.ExclusiveLock)
+            {
+                DisposeCore();
+            }
         }
         finally
         {

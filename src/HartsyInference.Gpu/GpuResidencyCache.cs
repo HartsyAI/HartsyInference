@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -75,7 +77,14 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// weight footprint, which is what lets a large fp8 model fit a card it otherwise would not.</summary>
     public bool CacheWeightCasts { get; set; } = true;
 
+    /// <summary>The BCL helper behind a collection's "concurrent operations" error, the only failure a lookup can
+    /// raise on a cache whose collections are otherwise valid.</summary>
+    private const string ConcurrentUseThrower = "ThrowInvalidOperationException_ConcurrentOperationsNotSupported";
+
     private readonly object _exclusive = new();
+
+    /// <summary>Releases and demotions that found another thread inside the cache, run at its next op.</summary>
+    private readonly ConcurrentQueue<(Tensor Tensor, Callback Kind)> _deferredCallbacks = new();
     private long _hits;
     private long _misses;
     private long _d2hSyncs;
@@ -218,7 +227,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
                 return true;
             }
         }
-        catch (InvalidOperationException ex)
+        catch (InvalidOperationException ex) when (IsCorruption(ex))
         {
             throw Corrupted(ex);
         }
@@ -226,9 +235,12 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         return false;
     }
 
+    /// <summary>Whether <paramref name="error"/> is a collection reporting that concurrent use broke it.</summary>
+    private static bool IsCorruption(InvalidOperationException error) => error.TargetSite?.Name == ConcurrentUseThrower;
+
     /// <summary>Flags the cache for a full release at the backend's next op and returns the error that fails this
-    /// one. A lookup throws <see cref="InvalidOperationException"/> only when concurrent use broke a bucket chain, and
-    /// that chain stays broken: without the reset every later lookup would throw the same error.</summary>
+    /// one. A bucket chain that concurrent use broke stays broken: without the reset every later lookup would throw
+    /// the same error.</summary>
     private InvalidOperationException Corrupted(InvalidOperationException cause)
     {
         _resetPending = true;
@@ -276,17 +288,24 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         // it out from under the new one, so clear first — keyed, so another device's binding on this tensor stands.
         tensor.ClearGpuBinding(BindingKey);
 
-        bool rebinding;
-        (TBuffer Buffer, long Bytes) displaced;
         try
         {
-            rebinding = Activations.TryGetValue(tensor, out displaced);
+            CacheActivationCore(tensor, buffer, bytes);
         }
-        catch (InvalidOperationException ex)
+        catch (InvalidOperationException ex) when (IsCorruption(ex))
         {
             throw Corrupted(ex);
         }
-        if (rebinding)
+
+        tensor.SetGpuBinding(
+            BindingKey,
+            sync: () => SyncActivationToHost(tensor),
+            dispose: () => ReleaseActivation(tensor));
+    }
+
+    private void CacheActivationCore(Tensor tensor, TBuffer buffer, long bytes)
+    {
+        if (Activations.TryGetValue(tensor, out (TBuffer Buffer, long Bytes) displaced))
         {
             // Fires on ANY rebind, including an in-place op that writes through the same buffer. What hangs off an
             // activation describes its CONTENTS — a producer-emitted quantized sidecar, say — and a write through
@@ -318,15 +337,25 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         CachedBuffers.Add(buffer);
         // Re-cached between being parked and being swept: it has an owner again.
         PendingOrphans.Remove(buffer);
-
-        tensor.SetGpuBinding(
-            BindingKey,
-            sync: () => SyncActivationToHost(tensor),
-            dispose: () => ReleaseActivation(tensor));
     }
 
     /// <summary>Host code read the tensor: bring the value back and give up the device copy.</summary>
-    private void SyncActivationToHost(Tensor tensor)
+    private void SyncActivationToHost(Tensor tensor) => RunCallback(tensor, Callback.Sync);
+
+    /// <summary>The tensor is gone: drop the device copy without reading it back.</summary>
+    private void ReleaseActivation(Tensor tensor) => RunCallback(tensor, Callback.Release);
+
+    /// <summary>Host code touched a tensor this cache promoted on its own initiative: give up the device copy.</summary>
+    private void DemotePromotedWeight(Tensor tensor) => RunCallback(tensor, Callback.Demote);
+
+    /// <summary>Runs a tensor callback under <see cref="ExclusiveLock"/>, so it never interleaves with another
+    /// thread's op on this cache.</summary>
+    /// <remarks>A host read needs the bytes now, so it waits for the op in flight. A release or a demotion only gives
+    /// up a device copy, so when another thread holds the cache it is queued for this cache's next op instead:
+    /// waiting there could deadlock two backends whose ops each touch a tensor the other one holds. The lock comes
+    /// before <see cref="TryEnterCallback"/>, so a retiring backend that drains claimed callbacks while holding the
+    /// lock never waits on one blocked behind it.</remarks>
+    private void RunCallback(Tensor tensor, Callback kind)
     {
         // Disposal first, before any collection is touched: this callback was planted on a tensor that can outlive
         // the cache, and by here the device it would talk to may be gone.
@@ -334,7 +363,16 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             return;
         }
-        lock (_exclusive)
+        if (kind == Callback.Sync)
+        {
+            Monitor.Enter(_exclusive);
+        }
+        else if (!Monitor.TryEnter(_exclusive))
+        {
+            _deferredCallbacks.Enqueue((tensor, kind));
+            return;
+        }
+        try
         {
             if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
             {
@@ -342,12 +380,31 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             }
             try
             {
-                SyncActivationToHostCore(tensor);
+                switch (kind)
+                {
+                    case Callback.Sync:
+                        SyncActivationToHostCore(tensor);
+                        break;
+                    case Callback.Release:
+                        ReleaseActivationCore(tensor);
+                        break;
+                    default:
+                        DemotePromotedWeightCore(tensor);
+                        break;
+                }
+            }
+            catch (InvalidOperationException ex) when (IsCorruption(ex))
+            {
+                throw Corrupted(ex);
             }
             finally
             {
                 ExitCallback();
             }
+        }
+        finally
+        {
+            Monitor.Exit(_exclusive);
         }
     }
 
@@ -373,30 +430,6 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         Pinned.Remove(tensor);
         CachedBuffers.Remove(entry.Buffer);
         ReleaseBuffer(entry.Buffer, entry.Bytes);
-    }
-
-    /// <summary>The tensor is gone: drop the device copy without reading it back.</summary>
-    private void ReleaseActivation(Tensor tensor)
-    {
-        if (Volatile.Read(ref _disposed) != 0)
-        {
-            return;
-        }
-        lock (_exclusive)
-        {
-            if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
-            {
-                return;
-            }
-            try
-            {
-                ReleaseActivationCore(tensor);
-            }
-            finally
-            {
-                ExitCallback();
-            }
-        }
     }
 
     private void ReleaseActivationCore(Tensor tensor)
@@ -450,13 +483,20 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             return;
         }
-        foreach ((TBuffer buffer, long bytes) in PendingOrphans)
+        try
         {
-            // Bound to a tensor again since it was parked, so it is owned and no longer an orphan.
-            if (!CachedBuffers.Contains(buffer))
+            foreach ((TBuffer buffer, long bytes) in PendingOrphans)
             {
-                ReleaseBuffer(buffer, bytes);
+                // Bound to a tensor again since it was parked, so it is owned and no longer an orphan.
+                if (!CachedBuffers.Contains(buffer))
+                {
+                    ReleaseBuffer(buffer, bytes);
+                }
             }
+        }
+        catch (InvalidOperationException ex) when (IsCorruption(ex))
+        {
+            throw Corrupted(ex);
         }
         PendingOrphans.Clear();
     }
@@ -497,30 +537,6 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             BindingKey,
             sync: () => DemotePromotedWeight(tensor),
             dispose: () => DemotePromotedWeight(tensor));
-    }
-
-    /// <summary>Host code touched a tensor this cache promoted on its own initiative: give up the device copy.</summary>
-    private void DemotePromotedWeight(Tensor tensor)
-    {
-        if (Volatile.Read(ref _disposed) != 0)
-        {
-            return;
-        }
-        lock (_exclusive)
-        {
-            if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
-            {
-                return;
-            }
-            try
-            {
-                DemotePromotedWeightCore(tensor);
-            }
-            finally
-            {
-                ExitCallback();
-            }
-        }
     }
 
     private void DemotePromotedWeightCore(Tensor tensor)
@@ -632,17 +648,40 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// released by the same op's cleanup, and freeing it there would leave the tensor pointing at dead memory.</summary>
     public void ReleaseIfNotCached(TBuffer? buffer, long bytes)
     {
-        if (buffer is null || CachedBuffers.Contains(buffer))
+        if (buffer is null)
         {
             return;
         }
-        // The caller did own this one after all, so the sweep must not free it a second time.
-        PendingOrphans.Remove(buffer);
+        try
+        {
+            if (CachedBuffers.Contains(buffer))
+            {
+                return;
+            }
+            // The caller did own this one after all, so the sweep must not free it a second time.
+            PendingOrphans.Remove(buffer);
+        }
+        catch (InvalidOperationException ex) when (IsCorruption(ex))
+        {
+            throw Corrupted(ex);
+        }
         ReleaseBuffer(buffer, bytes);
     }
 
     /// <summary>Uploads one weight and keeps it resident. Already-resident weights cost nothing.</summary>
     public void PreloadWeight(Tensor weight)
+    {
+        try
+        {
+            PreloadWeightCore(weight);
+        }
+        catch (InvalidOperationException ex) when (IsCorruption(ex))
+        {
+            throw Corrupted(ex);
+        }
+    }
+
+    private void PreloadWeightCore(Tensor weight)
     {
         if (Weights.ContainsKey(weight))
         {
@@ -696,10 +735,12 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     }
 
     /// <inheritdoc/>
-    /// <remarks>Always ends with every collection empty, so it is also how a cache flagged by
+    /// <remarks>Every buffer is handed back even when an earlier free throws, and the first failure is rethrown at
+    /// the end. Always ends with every collection empty, so it is also how a cache flagged by
     /// <see cref="ResetPending"/> comes back.</remarks>
     public virtual void FreeAllCached()
     {
+        Exception? failure = null;
         try
         {
             MakeCurrent();
@@ -708,10 +749,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             foreach ((Tensor tensor, (TBuffer buffer, long bytes)) in Activations.ToArray())
             {
                 tensor.ClearGpuBinding(BindingKey);
-                if (released.Add(buffer))
-                {
-                    ReleaseBuffer(buffer, bytes);
-                }
+                Release(buffer, bytes);
             }
 
             foreach ((Tensor tensor, TBuffer buffer) in Weights.ToArray())
@@ -719,20 +757,14 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
                 // Same reason as FreeWeights: a promoted weight's binding must not outlive the cache that planted
                 // it.
                 tensor.ClearGpuBinding(BindingKey);
-                if (released.Add(buffer))
-                {
-                    ReleaseBuffer(buffer, ByteSize(tensor));
-                }
+                Release(buffer, ByteSize(tensor));
             }
 
             foreach (Dictionary<DType, (TBuffer Buffer, long Bytes)> casts in WeightCasts.Values)
             {
                 foreach ((TBuffer cast, long castBytes) in casts.Values)
                 {
-                    if (released.Add(cast))
-                    {
-                        ReleaseBuffer(cast, castBytes);
-                    }
+                    Release(cast, castBytes);
                 }
             }
 
@@ -743,25 +775,35 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             // dead one.
             foreach (TBuffer orphan in CachedBuffers)
             {
-                if (released.Add(orphan))
-                {
-                    ReleaseBuffer(orphan, 0);
-                }
+                Release(orphan, 0);
             }
 
             // Parked buffers left CachedBuffers when they were displaced, so the sweep above does not reach them.
             foreach ((TBuffer orphan, long bytes) in PendingOrphans)
             {
-                if (released.Add(orphan))
+                Release(orphan, bytes);
+            }
+
+            void Release(TBuffer buffer, long bytes)
+            {
+                if (!released.Add(buffer))
                 {
-                    ReleaseBuffer(orphan, bytes);
+                    return;
+                }
+                try
+                {
+                    ReleaseBuffer(buffer, bytes);
+                }
+                catch (Exception ex)
+                {
+                    failure ??= ex;
                 }
             }
         }
         finally
         {
-            // A sweep that throws partway still leaves an empty, consistent cache: Clear rebuilds a dictionary's
-            // buckets from nothing, so it also repairs one whose chains concurrent use had broken.
+            // Even a sweep that could not run to the end leaves an empty, consistent cache: Clear rebuilds a
+            // dictionary's buckets from nothing, so it also repairs one whose chains concurrent use had broken.
             Activations.Clear();
             Pinned.Clear();
             Weights.Clear();
@@ -769,6 +811,10 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             CachedBuffers.Clear();
             PendingOrphans.Clear();
             _resetPending = false;
+        }
+        if (failure is not null)
+        {
+            ExceptionDispatchInfo.Throw(failure);
         }
     }
 
@@ -850,7 +896,15 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     }
 
     /// <inheritdoc/>
-    public void DrainFinalizerCleanup() => Tensor.DrainPendingFinalizerGpuCleanup(BindingKey);
+    /// <remarks>Also runs the releases and demotions that arrived while another thread held the cache.</remarks>
+    public void DrainFinalizerCleanup()
+    {
+        Tensor.DrainPendingFinalizerGpuCleanup(BindingKey);
+        while (_deferredCallbacks.TryDequeue(out (Tensor Tensor, Callback Kind) deferred))
+        {
+            RunCallback(deferred.Tensor, deferred.Kind);
+        }
+    }
 
     /// <inheritdoc/>
     public virtual string DiagnosticsSummary()
@@ -874,10 +928,19 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         FreeAllCached();
         // Anything queued by a finalizer after this point has no cache left to run against.
         Tensor.DiscardPendingFinalizerGpuCleanup(BindingKey);
+        _deferredCallbacks.Clear();
         DisposeCore();
         GC.SuppressFinalize(this);
     }
 
     /// <summary>Subclass cleanup, after the caches are emptied.</summary>
     protected virtual void DisposeCore() { }
+
+    /// <summary>Which tensor callback <see cref="RunCallback"/> runs.</summary>
+    private enum Callback
+    {
+        Sync,
+        Release,
+        Demote,
+    }
 }

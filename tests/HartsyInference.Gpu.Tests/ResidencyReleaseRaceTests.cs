@@ -70,10 +70,11 @@ public sealed class ResidencyReleaseRaceTests
         Assert.Equal(0, backend.Cache.WeightCountForTest);
     }
 
-    /// <summary>A tensor disposed on another thread reaches the cache through its binding callback, outside any op,
-    /// so the callback has to wait for the op in flight too.</summary>
+    /// <summary>A tensor disposed on another thread reaches the cache through its binding callback, outside any op.
+    /// It must not touch the cache while another thread's op is inside it, and it must not wait either: the release
+    /// is queued and runs at the cache's next op.</summary>
     [Fact]
-    public void A_Tensor_Callback_Waits_For_The_Op_In_Flight()
+    public void A_Dispose_During_Another_Threads_Op_Is_Deferred_To_The_Next_Op()
     {
         using FakeBackend backend = new();
         using Tensor weight = NewTensor();
@@ -86,14 +87,84 @@ public sealed class ResidencyReleaseRaceTests
         Assert.True(backend.Cache.UploadEntered.Wait(Generous));
 
         Worker dispose = Worker.Start(activation.Dispose);
+        Assert.True(dispose.Join(Generous), "A tensor dispose waited for another thread's op.");
+        int cachedAfterDispose = backend.Cache.ActivationCountForTest;
+
+        backend.Cache.ResumeUploads();
+        Assert.True(op.Join(Generous));
+        Assert.Equal(1, cachedAfterDispose);
+        backend.RunOp(() => { });
+        Assert.Equal(0, backend.Cache.ActivationCountForTest);
+    }
+
+    /// <summary>A host read on another thread needs the bytes now, so it waits for the op in flight instead.</summary>
+    [Fact]
+    public void A_Host_Read_Waits_For_The_Op_In_Flight()
+    {
+        using FakeBackend backend = new();
+        using Tensor weight = NewTensor();
+        using Tensor activation = NewTensor();
+        backend.RunOp(() =>
+            backend.Cache.CacheActivation(activation, backend.Cache.AllocateForTest(Size(activation)), Size(activation)));
+        backend.Cache.PauseUploads();
+
+        Worker op = Worker.Start(() => backend.RunOp(() => backend.Cache.CopyToDevice(weight)));
+        Assert.True(backend.Cache.UploadEntered.Wait(Generous));
+
+        Worker read = Worker.Start(() => ReadHost(activation));
+        bool readDuringOp = read.Join(Blocked);
+
+        backend.Cache.ResumeUploads();
+        Assert.True(op.Join(Generous));
+        Assert.True(read.Join(Generous));
+        Assert.False(readDuringOp, "A host read synced from the cache while another thread's op was inside it.");
+        Assert.Equal(0, backend.Cache.ActivationCountForTest);
+    }
+
+    /// <summary>Disposing the backend is a whole-cache release too, and waits for the op in flight.</summary>
+    [Fact]
+    public void Disposing_The_Backend_Waits_For_The_Op_In_Flight()
+    {
+        FakeBackend backend = new();
+        using Tensor weight = NewTensor();
+        backend.Cache.PauseUploads();
+
+        Worker op = Worker.Start(() => backend.RunOp(() => backend.Cache.CopyToDevice(weight)));
+        Assert.True(backend.Cache.UploadEntered.Wait(Generous));
+
+        Worker dispose = Worker.Start(((IDisposable)backend).Dispose);
         bool disposedDuringOp = dispose.Join(Blocked);
 
         backend.Cache.ResumeUploads();
         Assert.True(op.Join(Generous));
         Assert.True(dispose.Join(Generous));
-        Assert.False(disposedDuringOp, "A tensor's dispose callback mutated the cache while an op was inside it.");
-        Assert.Equal(0, backend.Cache.ActivationCountForTest);
+        Assert.False(disposedDuringOp, "The backend was disposed while another thread's op was inside its cache.");
     }
+
+    /// <summary>A free that throws partway through a full release still hands back every other buffer and leaves the
+    /// cache empty, then reports the failure.</summary>
+    [Fact]
+    public void A_Failed_Free_Does_Not_Stop_The_Full_Release()
+    {
+        using FakeBackend backend = new();
+        Tensor[] weights = [NewTensor(), NewTensor(), NewTensor()];
+        backend.RunOp(() => backend.Cache.PreloadWeights(weights));
+        backend.Cache.FailFreesOf = 1;
+
+        Assert.Throws<InvalidOperationException>(backend.FreeAllDeviceMemory);
+
+        Assert.Equal(3, backend.Cache.FreeAttempts);
+        Assert.Equal(0, backend.Cache.WeightCountForTest);
+        backend.Cache.FailFreesOf = 0;
+        backend.RunOp(() => backend.Cache.PreloadWeights(weights));
+        Assert.Equal(3, backend.Cache.WeightCountForTest);
+        foreach (Tensor weight in weights)
+        {
+            weight.Dispose();
+        }
+    }
+
+    private static unsafe void ReadHost(Tensor tensor) => _ = tensor.DataPointer;
 
     /// <summary>The unscripted form: ops and full releases hammered from two threads leave the cache usable.</summary>
     [Fact]
@@ -171,6 +242,23 @@ public sealed class ResidencyReleaseRaceTests
         backend.RunOp(() => backend.Cache.CopyToDevice(lookup));
         backend.RunOp(() => backend.Cache.PreloadWeights([resident]));
         Assert.Equal(1, backend.Cache.WeightCountForTest);
+    }
+
+    /// <summary>The same recovery when the broken collection is the owned-buffer set, reached through an op's own
+    /// temporary release rather than a lookup.</summary>
+    [Fact]
+    public void A_Corrupted_Owned_Buffer_Set_Recovers_At_The_Next_Op()
+    {
+        using FakeBackend backend = new();
+        using Tensor resident = NewTensor();
+        backend.RunOp(() => backend.Cache.PreloadWeights([resident]));
+        backend.Cache.CorruptOwnedBufferChains();
+        FakeCache.Buffer temporary = backend.Cache.AllocateForTest(64);
+
+        Assert.Throws<InvalidOperationException>(() => backend.RunOp(() => backend.Cache.ReleaseIfNotCached(temporary, 64)));
+
+        backend.RunOp(() => backend.Cache.ReleaseIfNotCached(temporary, 64));
+        Assert.Equal(0, backend.Cache.WeightCountForTest);
     }
 
     private static Tensor NewTensor(int elements = 64) => new(new TensorShape(elements), DType.F32);
@@ -276,24 +364,42 @@ public sealed class ResidencyReleaseRaceTests
         /// <summary>Leaves the weight dictionary in the state a concurrent insert can: every bucket leads to an entry
         /// whose chain points back at itself, so a lookup of any other key walks the loop until the dictionary
         /// reports the concurrent use it cannot otherwise tell from corruption.</summary>
-        public void CorruptWeightChains()
+        public void CorruptWeightChains() => CorruptChains(Weights);
+
+        /// <summary>As <see cref="CorruptWeightChains"/>, for the set of buffers the cache owns.</summary>
+        public void CorruptOwnedBufferChains() => CorruptChains(CachedBuffers);
+
+        private static void CorruptChains(object collection)
         {
             const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
-            Type type = Weights.GetType();
-            int[] buckets = (int[])type.GetField("_buckets", Private)!.GetValue(Weights)!;
-            Array entries = (Array)type.GetField("_entries", Private)!.GetValue(Weights)!;
+            Type type = collection.GetType();
+            int[] buckets = (int[])type.GetField("_buckets", Private)!.GetValue(collection)!;
+            Array entries = (Array)type.GetField("_entries", Private)!.GetValue(collection)!;
             Array.Fill(buckets, 1);
             object first = entries.GetValue(0)!;
-            first.GetType().GetField("next")!.SetValue(first, 0);
+            FieldInfo next = first.GetType().GetField("next", BindingFlags.Public | BindingFlags.NonPublic
+                | BindingFlags.Instance | BindingFlags.IgnoreCase)!;
+            next.SetValue(first, 0);
             entries.SetValue(first, 0);
         }
 
         protected override Buffer AllocateDevice(long bytes) => new(bytes);
 
+        /// <summary>How many of the next frees throw, standing in for a driver error partway through a sweep.</summary>
+        public int FailFreesOf { get; set; }
+
+        public int FreeAttempts { get; private set; }
+
         protected override void FreeDevice(Buffer buffer, long bytes)
         {
             FreeEntered.Set();
             _freesOpen.Wait();
+            FreeAttempts++;
+            if (FailFreesOf > 0)
+            {
+                FailFreesOf--;
+                throw new InvalidOperationException("The fake device refused a free.");
+            }
         }
 
         protected override void Upload(Buffer destination, Tensor source, long bytes)
