@@ -239,6 +239,20 @@ public sealed class TextPlacementPlannerTests
     }
 
     [Fact]
+    public void Prefill_HoldsGemma4PerLayerEmbeddingsAcrossTheLayers()
+    {
+        Dictionary<string, long> arch = new()
+        {
+            ["block_count"] = 4, ["attention.head_count"] = 4, ["attention.head_count_kv"] = 4, ["embedding_length"] = 256,
+            ["feed_forward_length"] = 1024, ["embedding_length_per_layer_input"] = 128,
+        };
+        TextPlacementDemand demand = TextPlacementDemandReader.FromHeader([], k => arch.TryGetValue(k, out long v) ? v : null,
+            contextTokens: 100, includeRedundantSplits: false, kvF16: false);
+        // Hidden 256 x 4, attention 4 x 64 x 4, FFN 1024 x 4, and three per-layer tensors of 128 x 4 layers.
+        Assert.Equal((256L * 4 + 4 * 64 * 4 + 1024L * 4 + 3 * 128L * 4) * sizeof(float), demand.PrefillBytesPerToken);
+    }
+
+    [Fact]
     public void Prefill_UsesTheMlaWidthsForDeepSeek2()
     {
         Dictionary<string, long> arch = new()
