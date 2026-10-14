@@ -1,5 +1,6 @@
 using System.Text.Json;
 using HartsyInference.Audio.Frontends;
+using HartsyInference.Audio.Frontends.WeText;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Tests.Common;
 using Xunit;
@@ -54,6 +55,28 @@ public sealed class CosyVoiceFrontendParityTests(ITestOutputHelper output)
         foreach (JsonProperty p in doc.RootElement.GetProperty("tn_raw").EnumerateObject()) tnRaw[p.Name] = p.Value.GetString()!;
         string Lookup(string s) => tnRaw.TryGetValue(s, out string? v) ? v : throw new KeyNotFoundException($"No reference FST output for '{s}'.");
         CosyVoiceTextFrontend frontend = new(static s => Embedded.EncodeExact(s, CosyVoiceTextFrontend.SpecialTokens).Length, Lookup, Lookup);
+        foreach (JsonElement c in doc.RootElement.GetProperty("cases").EnumerateArray())
+        {
+            string text = c.GetProperty("text").GetString()!;
+            Assert.Equal(c.GetProperty("tn_normalized").GetString(), frontend.Normalize(text));
+            Assert.Equal(FrontendParityFixture.Strings(c.GetProperty("tn_segments")), frontend.Segments(text));
+        }
+    }
+
+    /// <summary>The full reference path through the C# WeText runtime (the engine's real configuration): normalized text
+    /// and segments must equal the reference built with wetext 0.0.4.</summary>
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void NormalizedPath_WithWeTextRuntime_MatchesReference()
+    {
+        string fstDir = Environment.GetEnvironmentVariable("WETEXT_FST_DIR")
+            ?? "/mnt/model-storage/scratch/tts-ref/fe-venv/lib/python3.12/site-packages/wetext/fsts";
+        if (!RealWeightGate.Require(output.WriteLine, [.. WeTextNormalizer.RequiredFiles().Select(f => Path.Combine(fstDir, f))])) return;
+
+        WeTextNormalizer weText = WeTextNormalizer.Load(fstDir);
+        string Tn(string s) => weText.TryNormalize(s, out string? n) ? n! : s;
+        CosyVoiceTextFrontend frontend = new(static s => Embedded.EncodeExact(s, CosyVoiceTextFrontend.SpecialTokens).Length, Tn, Tn);
+        using JsonDocument doc = FrontendParityFixture.Load("cosyvoice_frontend");
         foreach (JsonElement c in doc.RootElement.GetProperty("cases").EnumerateArray())
         {
             string text = c.GetProperty("text").GetString()!;

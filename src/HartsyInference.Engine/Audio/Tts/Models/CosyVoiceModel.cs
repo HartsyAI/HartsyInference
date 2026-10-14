@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Frontends;
+using HartsyInference.Audio.Frontends.WeText;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
@@ -82,7 +83,17 @@ internal static class CosyVoiceModel
 
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer(fetched[BlankEnVocab], fetched[BlankEnMerges]);
             int[] Encode(string text) => tokenizer.EncodeExact(text, CosyVoiceTextFrontend.SpecialTokens);
-            CosyVoiceTextFrontend frontend = new CosyVoiceTextFrontend(text => Encode(text).Length);
+            // The reference pins wetext 0.0.4 and builds both its English and Chinese normalizers with the default
+            // (auto-detecting) language, so one Auto normalizer serves both. Where wetext raises, the reference
+            // request fails; this keeps the raw text and logs instead.
+            WeTextNormalizer weText = await WeTextAssets.LoadAsync(WeTextLanguage.Auto, removeErhua: false, cancel).ConfigureAwait(false);
+            string Tn(string text)
+            {
+                if (weText.TryNormalize(text, out string? normalized)) return normalized!;
+                Logs.Warning($"[Audio][CosyVoice] Text normalization found no path for '{text}'; using it unnormalized.");
+                return text;
+            }
+            CosyVoiceTextFrontend frontend = new CosyVoiceTextFrontend(text => Encode(text).Length, Tn, Tn);
             Logs.Info("[Audio][CosyVoice] Loaded FunAudioLLM/CosyVoice2-0.5B (Qwen LM + OT-CFM flow + HiFTNet, 24 kHz)"
                 + $"{(lm.Placement is not null ? ", layer-split across " + lm.Placement.Stages.Count + " GPUs" : "")}.");
 
