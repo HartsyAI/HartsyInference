@@ -1,6 +1,5 @@
-using HartsyInference.Audio.Sampling;
-
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Sampling;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
