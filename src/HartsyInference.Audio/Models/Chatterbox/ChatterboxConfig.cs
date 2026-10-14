@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Sampling;
 
 namespace HartsyInference.Audio.Models.Chatterbox;
 
@@ -51,6 +52,8 @@ public sealed record ChatterboxConfig
     public int StopTextToken { get; init; } = 0;
     public int StartSpeechToken { get; init; } = 6_561;
     public int StopSpeechToken { get; init; } = 6_562;
+    /// <summary>Floor 1: chatterbox <c>t3.py</c> has no minimum length, so a first-step stop would emit zero speech tokens.</summary>
+    public StopGate EosGate { get; init; } = new(MinTokens: 1);
 
     /// <summary>S3 speech-token rate (Hz) and the underlying FSQ codebook size (3^8).</summary>
     public int SpeechTokenRate { get; init; } = 25;

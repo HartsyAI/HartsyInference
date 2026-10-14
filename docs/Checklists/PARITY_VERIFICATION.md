@@ -98,7 +98,7 @@ code that simply needs a real CUDA device, which the hosted runner lacks.
 | Model | Parity | Components verified (maxAbs) | Notes |
 |---|---|---|---|
 | **Kyutai TTS** (tts-1.6b-en_fr) | 🔬 | backbone 1.3e-4 · depformer 32/32 tokens · conditioner ~1e-8 · forward_text 2.6e-6 · scheduler exact · KV-cache StepForward 1.3e-4 | All numerical cores + loop logic verified. Greedy end-to-end codes diverge after cb-0 by **numerical argmax cascade** (not a bug). Mimi DSM decode = separate codec reconcile (in progress). See [[kyutai-tts-reconcile]]. |
-| **GPT-SoVITS v2** | ✅ | HuBERT 1.07e-5 · s1 GPT (golden-fixed) · s2 SoVITS (3 goldens) · EN end-to-end → 32 kHz | English path end-to-end on real `lj1995` weights. See [[gptsovits-v2-validated]]. |
+| **GPT-SoVITS v2** | ✅ | HuBERT 1.07e-5 · s1 GPT (golden-fixed) · s2 SoVITS (3 goldens) · EN end-to-end → 32 kHz · EN text frontend exact (119/119 fixture lines, 3000/3000 seeded stress lines, cut segments and prompt phones) | English path end-to-end on real `lj1995` weights. See [[gptsovits-v2-validated]]. Frontend: `GptSoVitsEnglishFrontendParityTests` against `tools/parity/gptsovits_frontend_dump.py`. |
 | **Chatterbox** (ResembleAI) | ✅ | S3Gen enc 2.6e-6 · dec 4.4e-5 · vocoder 1.6e-5 · perceiver 1.5e-6 · T3/VE/tokenizer | Full S3Gen rewrite (== CosyVoice2); end-to-end on CUDA. Supersedes the old "not real-weight validated" note. |
 | **Qwen3-TTS** | ✅ | bit-exact | RoPE split-half + byte-level tokenizer fixes. See [[qwen-tokenizer-bytelevel-bug]]. |
 | **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime | 7 VITS bugs fixed (affect all VITS). See [[piper-vits-parity]]. Phonemization (espeak) is the only gap. |
@@ -361,3 +361,5 @@ Real bugs surfaced by the parity loop — kept here so the patterns repeat-catch
 - **Build:** audio with `-m:1`; tests crash under xunit parallel → run sequentially
   (`-- xUnit.ParallelizeTestCollections=false`). Reuse a model cache via `HARTSYINFERENCE_MODEL_CACHE`.
 - **Never** commit/push — the user does all git manually.
+
+GPT-SoVITS English frontend: re-run `tools/parity/gptsovits_frontend_dump.py --stress 3000` (3000 seeded random lines, not in CI) whenever the pinned upstream commit or any pinned frontend package (g2p_en, nltk, inflect, wordsegment) changes, and regenerate the fixture.

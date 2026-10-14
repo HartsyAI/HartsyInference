@@ -115,7 +115,9 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         Tensor hidden = RunBody(promptEmbeds, promptLen, 0, cache);
         promptEmbeds.Dispose();
 
-        for (int step = 0; step < maxTokens; step++)
+        // Reference length cap: max_len = target_text_len × max_token_text_ratio, never above the caller's cap.
+        int maxLen = Math.Min(maxTokens, (int)(textTokens.Length * _cfg.Sampling.MaxTokenTextRatio));
+        for (int step = 0; step < maxLen; step++)
         {
             int t = (int)hidden.Shape[1];
             Tensor last = VibeVoiceOps.SliceLastFrame(hidden, h);
@@ -123,9 +125,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
             Tensor logits = WhisperOps.ProjectLinear(headBackend, last, _llmDecoderW!, _llmDecoderB, 1, 1, h, _speechVocab);
             last.Dispose();
 
-            // EOS is suppressed until the target text has produced MinTokenTextRatio speech tokens per text token.
-            bool ignoreEos = generated.Count < textTokens.Length * _cfg.Sampling.MinTokenTextRatio;
-            int next = sampler.Sample(logits, generated, ignoreEos);
+            int next = sampler.Sample(logits, generated, _cfg.Sampling.EosGate, textTokens.Length);
             logits.Dispose();
             if (next == _eosSpeechToken) break;
             generated.Add(next);

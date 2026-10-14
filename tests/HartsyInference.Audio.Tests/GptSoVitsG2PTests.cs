@@ -5,7 +5,7 @@ using Xunit;
 namespace HartsyInference.Audio.Tests;
 
 /// <summary>Validates the GPT-SoVITS English G2P (CMUdict → ARPAbet) and the language-routing front-end
-/// (checkpoint-free; golden phones from <c>cmudict.rep</c>).</summary>
+/// (checkpoint-free; golden phones from the merged GPT-SoVITS dictionary).</summary>
 public sealed class GptSoVitsG2PTests
 {
     [Fact]

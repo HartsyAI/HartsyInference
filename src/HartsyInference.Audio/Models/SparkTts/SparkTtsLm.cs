@@ -62,6 +62,7 @@ public sealed unsafe class SparkTtsLm : IDisposable
             last.Dispose();
 
             Span<float> logitSpan = new((void*)logits.DataPointer, vocab);
+            _cfg.EosGate.Apply(logitSpan, step, 0, [_cfg.EosTokenId, _cfg.EndSemanticTokenId]);
             int next;
             if (greedy)
             {

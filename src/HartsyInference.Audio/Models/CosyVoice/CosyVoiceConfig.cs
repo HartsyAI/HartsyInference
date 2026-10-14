@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Sampling;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
@@ -125,19 +126,24 @@ public sealed record CosyVoiceHiftConfig
     public int HarmonicNum { get; init; } = 8;
 }
 
-/// <summary>LM autoregressive speech-token sampling defaults (CosyVoice 2).</summary>
+/// <summary>LM autoregressive speech-token sampling, matching the reference <c>cosyvoice2.yaml</c>
+/// (<c>ras_sampling</c>: top_p 0.8, top_k 25, win_size 10, tau_r 0.1) and <c>cosyvoice/llm/llm.py</c> length bounds.
+/// The reference samples at temperature 1 with no repetition penalty; RAS is its only anti-repetition mechanism.</summary>
 public sealed record CosyVoiceSamplingConfig
 {
-    public float Temperature { get; init; } = 0.8f;
     public int TopK { get; init; } = 25;
     public float TopP { get; init; } = 0.8f;
-    public float RepetitionPenalty { get; init; } = 1.1f;
 
-    /// <summary>Repetition-Aware Sampling: detect a degenerate speech-token loop and re-roll with a flatter distribution. Window + max-repeat thresholds mirror <c>cosyvoice/llm/llm.py</c>.</summary>
+    /// <summary>Repetition-Aware Sampling (<see cref="RasSampling"/>): a drawn token seen at least
+    /// <c>RasWindow × RasTauR</c> times in the trailing window is masked and redrawn from the full distribution.</summary>
     public bool UseRas { get; init; } = true;
     public int RasWindow { get; init; } = 10;
-    public int RasMaxRepeat { get; init; } = 4;
+    public float RasTauR { get; init; } = 0.1f;
 
-    /// <summary>End-of-speech is not drawn until at least <c>MinTokenTextRatio × target-text-tokens</c> speech tokens have been emitted. Without it an EOS on step 0 yields an empty speech-token stream. Mirrors the <c>min_token_text_ratio</c> gate in <c>cosyvoice/llm/llm.py</c>.</summary>
-    public int MinTokenTextRatio { get; init; } = 2;
+    /// <summary>End-of-speech gate: not drawn until <c>2 × target-text tokens</c> speech tokens exist. Reference: <c>min_token_text_ratio</c> in <c>cosyvoice/llm/llm.py</c> (target text only; verified by reading the source).</summary>
+    public StopGate EosGate { get; init; } = new(MinTokens: 0, MinTokenTextRatio: 2f);
+
+    /// <summary>Hard cap: at most <c>20 × target-text tokens</c> speech tokens. Reference: <c>max_token_text_ratio</c>
+    /// in <c>cosyvoice/llm/llm.py</c> (target text only).</summary>
+    public float MaxTokenTextRatio { get; init; } = 20f;
 }
