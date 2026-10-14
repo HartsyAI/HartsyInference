@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Models.Chatterbox;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Pipelines;
@@ -89,7 +90,7 @@ internal static class ChatterboxModel
                 t3Loader, s3Loader, veLoader, condsLoader, referenceSpeaker];
             return new TtsRunner(config.SampleRate, (backend, job) =>
             {
-                int[] textTokens = tokenizer.EncodeWithStartStop(job.Text);
+                int[] textTokens = tokenizer.EncodeWithStartStop(ChatterboxTextNormalizer.Normalize(job.Text));
                 float exaggeration = job.Exaggeration.HasValue ? (float)job.Exaggeration.Value : config.Exaggeration;
                 float cfgWeight = job.CfgScale.HasValue ? (float)job.CfgScale.Value : config.CfgWeight;
                 if (job.ReferenceMono24k is not null && job.ReferenceMono24k.Length > 0)

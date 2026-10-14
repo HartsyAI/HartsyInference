@@ -33,6 +33,7 @@
     <None Include="Fixtures\ControlFoleyClap\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\ControlFoleyStyle\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\kokoro_zh_parity.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\chatterbox_frontend_parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\kokoro_japanese_parity.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
