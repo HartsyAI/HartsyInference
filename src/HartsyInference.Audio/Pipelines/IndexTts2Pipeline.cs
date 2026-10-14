@@ -277,7 +277,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// (soxr high quality — approximated by a long sinc), and the 16 kHz copy is
     /// <c>torchaudio.transforms.Resample(22050, 16000)</c> OF THAT 22.05 kHz signal (torchaudio defaults, reproduced
     /// exactly by <see cref="SincResampler"/>).</summary>
-    private static (float[] Audio16k, float[] Audio22k) ResampleReference(ReadOnlySpan<float> clip, int sampleRate)
+    internal static (float[] Audio16k, float[] Audio22k) ResampleReference(ReadOnlySpan<float> clip, int sampleRate)
     {
         float[] audio22k = SoxrHq(clip, sampleRate, 22_050);
         float[] audio16k = SincResampler.Resample(audio22k, 22_050, 16_000);
@@ -286,7 +286,7 @@ public sealed class IndexTts2Pipeline : IDisposable
 
     /// <summary>The reference's emotion-clip load, <c>librosa.load(path, sr=16000)</c>: the file straight to 16 kHz,
     /// not the 22.05 kHz → 16 kHz chain the speaker path uses.</summary>
-    private static float[] ResampleEmotionClip(ReadOnlySpan<float> clip, int sampleRate) => SoxrHq(clip, sampleRate, 16_000);
+    internal static float[] ResampleEmotionClip(ReadOnlySpan<float> clip, int sampleRate) => SoxrHq(clip, sampleRate, 16_000);
 
     private static float[] SoxrHq(ReadOnlySpan<float> clip, int inRate, int outRate) =>
         inRate == outRate ? clip.ToArray() : SincResampler.Resample(clip, inRate, outRate, PrecisionFilterWidth, SoxrHqRolloff);

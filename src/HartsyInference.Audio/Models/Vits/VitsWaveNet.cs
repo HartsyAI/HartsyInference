@@ -7,13 +7,16 @@ namespace HartsyInference.Audio.Models.Vits;
 public sealed unsafe class VitsWaveNet
 {
     private readonly int _hidden, _layers, _kernel, _dilationRate;
+    private readonly bool _reflectPad;
     private readonly Tensor?[] _inW, _inB, _rsW, _rsB;
     private Tensor? _condW, _condB;     // cond_layer (multispeaker g), optional
     private Tensor?[]? _condWLayers, _condBLayers;   // per-layer row views (persistent, so a backend's weight cache keeps them resident)
 
-    public VitsWaveNet(int hidden, int kernel, int dilationRate, int layers)
+    /// <param name="reflectPad">Pads each dilated <c>in_layer</c> by reflection instead of zeros, as the
+    /// <c>SConv1d</c> wrapping IndexTTS-2's S2Mel WaveNet does (its <c>pad_mode</c> defaults to reflect).</param>
+    public VitsWaveNet(int hidden, int kernel, int dilationRate, int layers, bool reflectPad = false)
     {
-        _hidden = hidden; _kernel = kernel; _dilationRate = dilationRate; _layers = layers;
+        _hidden = hidden; _kernel = kernel; _dilationRate = dilationRate; _layers = layers; _reflectPad = reflectPad;
         _inW = new Tensor?[layers]; _inB = new Tensor?[layers];
         _rsW = new Tensor?[layers]; _rsB = new Tensor?[layers];
     }
@@ -60,9 +63,17 @@ public sealed unsafe class VitsWaveNet
         {
             Tensor input = cur ?? x;
             int dilation = Pow(_dilationRate, i);
-            int pad = dilation * (_kernel - 1) / 2;
+            int padTotal = dilation * (_kernel - 1), padRight = padTotal / 2, padLeft = padTotal - padRight;
             Tensor xIn = new(new TensorShape(1, 2 * h, t), DType.F32);
-            backend.Conv1d(xIn, input, _inW[i]!, _inB[i], 1, pad, pad, dilation, 1);
+            if (_reflectPad)
+            {
+                using Tensor padded = ReflectPadTime(backend, input, h, t, padLeft, padRight);
+                backend.Conv1d(xIn, padded, _inW[i]!, _inB[i], 1, 0, 0, dilation, 1);
+            }
+            else
+            {
+                backend.Conv1d(xIn, input, _inW[i]!, _inB[i], 1, padLeft, padRight, dilation, 1);
+            }
 
             // Per-layer speaker-conditioning slice (broadcast over time): this layer's rows of cond_layer applied to g.
             if (g is not null && _condWLayers is not null)
@@ -113,6 +124,35 @@ public sealed unsafe class VitsWaveNet
         }
         cur?.Dispose();
         return skipSum!;
+    }
+
+    /// <summary>PyTorch <c>F.pad(x, (left, right), mode="reflect")</c> over the time axis of <c>[1, C, T]</c>: column
+    /// <c>-k</c> mirrors column <c>k</c> and column <c>T-1+k</c> mirrors <c>T-1-k</c>, the edge itself not repeated.</summary>
+    internal static Tensor ReflectPadTime(IBackend backend, Tensor x, int channels, int t, int left, int right)
+    {
+        if (left >= t || right >= t)
+            throw new ArgumentException($"Reflect padding of {left}/{right} needs more than {t} frames.", nameof(x));
+        Tensor[] parts = new Tensor[left + 1 + right];
+        try
+        {
+            for (int k = 0; k < left; k++) parts[k] = Column(backend, x, channels, left - k);
+            parts[left] = x;
+            for (int k = 0; k < right; k++) parts[left + 1 + k] = Column(backend, x, channels, t - 2 - k);
+            Tensor padded = new(new TensorShape(1, channels, t + left + right), DType.F32);
+            backend.Concat(padded, parts, 2);
+            return padded;
+        }
+        finally
+        {
+            for (int k = 0; k < parts.Length; k++) if (k != left) parts[k]?.Dispose();
+        }
+    }
+
+    private static Tensor Column(IBackend backend, Tensor x, int channels, int index)
+    {
+        Tensor column = new(new TensorShape(1, channels, 1), DType.F32);
+        backend.SliceLastDim(column, x, index);
+        return column;
     }
 
     /// <summary><c>sum + skip</c>; the first skip becomes the running sum itself (the old zero-initialised accumulator, minus the add).</summary>
