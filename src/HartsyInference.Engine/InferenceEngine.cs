@@ -24,6 +24,10 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>How long a release waits for an in-flight audio generation before dropping its pipelines anyway.</summary>
     private const int AudioUnloadWaitSeconds = 120;
 
+    /// <summary>How long a release waits, after the audio unload, for the jobs still on its devices: a free then skips
+    /// the device release, and a teardown stops the job at its next op and waits as long again.</summary>
+    internal TimeSpan DeviceReleaseWait { get; set; } = TimeSpan.FromSeconds(120);
+
     private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
@@ -122,6 +126,14 @@ public sealed class InferenceEngine : IInferenceEngine
     public InferenceEngine(string backendSelector, int deviceOrdinal, EngineOptions? options = null)
         : this(BackendFactory.WithOrdinal(backendSelector, deviceOrdinal), options)
     {
+    }
+
+    /// <summary>Creates an engine over a backend the caller built, which the engine then owns.</summary>
+    internal InferenceEngine(IBackend backend, string backendSelector, EngineOptions? options = null)
+        : this(backendSelector, options)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        _backend = backend;
     }
 
     /// <inheritdoc/>
@@ -859,12 +871,15 @@ public sealed class InferenceEngine : IInferenceEngine
             ReleaseLogged("the audio models", () => _audioRuntime.UnloadAll(AudioUnloadWaitSeconds), ref failures);
         if (disposeBackend)
         {
-            foreach (IBackend extra in _placementBackends.Values)
-                ReleaseLogged("a placement backend", extra.Dispose, ref failures);
-            _placementBackends.Clear();
-            if (_backend is not null)
-                ReleaseLogged("the backend", _backend.Dispose, ref failures);
-            _backend = null;
+            using (IDisposable gate = AcquireForTeardown())
+            {
+                foreach (IBackend extra in _placementBackends.Values)
+                    ReleaseLogged("a placement backend", extra.Dispose, ref failures);
+                _placementBackends.Clear();
+                if (_backend is not null)
+                    ReleaseLogged("the backend", _backend.Dispose, ref failures);
+                _backend = null;
+            }
             // Teardown callers must know something leaked; a between-jobs free has already logged each failure.
             if (failures is not null)
                 throw new AggregateException("The engine released everything it could, but some items failed to dispose.", failures);
@@ -875,28 +890,70 @@ public sealed class InferenceEngine : IInferenceEngine
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        try
+        ReleaseDeviceMemory();
+        HostMemory.TrimAndLog("free-memory sweep");
+    }
+
+    /// <summary>The device gate for a teardown, taken once the jobs on the devices have stopped.</summary>
+    /// <remarks>Teardown must not hang on a wedged job, and must not free memory under one either. So after the wait
+    /// it refuses new ops on every owned backend: the job's op in flight finishes and its next one throws
+    /// <see cref="ObjectDisposedException"/>, which ends the job and frees the gate. A job still holding the gate
+    /// after a second wait is not inside an op on these backends (an op would have been refused), and each backend's
+    /// dispose takes its residency lock, so teardown still never runs under an op.</remarks>
+    private IDisposable AcquireForTeardown()
+    {
+        if (DeviceGate.TryAcquireAll(OwnedBackends(), DeviceReleaseWait, out IDisposable gate))
+            return gate;
+        Logs.Warning($"[Engine] A job still held the device after {DeviceReleaseWait.TotalSeconds:0}s; stopping it at "
+            + "its next op before disposing the backend.");
+        foreach (IBackend? backend in OwnedBackends())
+            backend?.RefuseNewOps();
+        if (DeviceGate.TryAcquireAll(OwnedBackends(), DeviceReleaseWait, out gate))
+            return gate;
+        Logs.Warning("[Engine] The job still held the device after being stopped; disposing the backend between its ops.");
+        return gate;
+    }
+
+    /// <summary>The primary and every placement backend this engine has already built, without building any.</summary>
+    private IEnumerable<IBackend?> OwnedBackends() => [_backend, .. _placementBackends.Values];
+
+    /// <summary>Returns every owned backend's device memory, under the device gate every job holds.</summary>
+    /// <remarks>Services and audio runners are released before this, and a request that arrives after them runs under
+    /// the gate — an audio job takes it inside its generation lock, so the gap between the audio unload and this
+    /// sweep is exactly where one starts. Sweeping without the gate emptied the residency cache under that job's
+    /// lookups. A device still busy when the wait runs out is skipped: its memory is in use by that job anyway.</remarks>
+    private void ReleaseDeviceMemory()
+    {
+        if (!DeviceGate.TryAcquireAll(OwnedBackends(), DeviceReleaseWait, out IDisposable gate))
         {
-            _backend?.FreeAllDeviceMemory();
-            _backend?.TrimMemoryPool();
+            Logs.Warning($"[Engine] A job still held the device after {DeviceReleaseWait.TotalSeconds:0}s; "
+                + "skipped releasing its device memory rather than release it under that job.");
+            return;
         }
-        catch (Exception ex)
-        {
-            Logs.Warning($"[Engine] Releasing device memory failed: {ex.Message}");
-        }
-        foreach (IBackend extra in _placementBackends.Values)
+        using (gate)
         {
             try
             {
-                extra.FreeAllDeviceMemory();
-                extra.TrimMemoryPool();
+                _backend?.FreeAllDeviceMemory();
+                _backend?.TrimMemoryPool();
             }
             catch (Exception ex)
             {
-                Logs.Warning($"[Engine] Releasing a placement backend's device memory failed: {ex.Message}");
+                Logs.Warning($"[Engine] Releasing device memory failed: {ex.Message}");
+            }
+            foreach (IBackend extra in _placementBackends.Values)
+            {
+                try
+                {
+                    extra.FreeAllDeviceMemory();
+                    extra.TrimMemoryPool();
+                }
+                catch (Exception ex)
+                {
+                    Logs.Warning($"[Engine] Releasing a placement backend's device memory failed: {ex.Message}");
+                }
             }
         }
-        HostMemory.TrimAndLog("free-memory sweep");
     }
 
     /// <summary>Runs one release step of a sweep, logging and collecting its failure instead of letting it abort the rest.</summary>
