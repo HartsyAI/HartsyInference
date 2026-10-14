@@ -253,6 +253,27 @@ Decode rate, the CLI's `decode_tok_s` for the graph: Qwen2.5 217.3 on `origin/ma
 
 Speculation only pays on repetitive text: this prompt repeats a sentence, and for Qwen3-4B and OLMoE the speculative run (45.4 and 139.5) is still not faster than plain greedy with the graph (58.4 and 168.7) or even without it (47.2 and 135.8), so speculative decode stays opt-in (`numerics.specDecode`) and is not combined with the graph (the pipeline picks the graph when both apply).
 
+**The implicit default starts at 128 new tokens on Vulkan (`IBackend.LlmGraphDecodeDefaultMinTokens`).** The threshold was 512 on every backend. It is now a backend property: Vulkan returns 128, and every other backend keeps 512, because nothing was measured for them. Measured on the RTX 3060 (`-b vulkan:1`): greedy, a 750-token prompt, 128 new tokens, whole-process wall from `hartsy text` (a fresh process per run), 5 interleaved clean reps per arm, median (range). The arms are the default (this branch, no flag), eager (this branch with `--set numerics.vkLlmGraph=false`, the kill switch), and `origin/main` 30841cb8 (alpha.363, eager at 128 tokens).
+
+| Model | default wall s | eager wall s | origin/main wall s | default vs eager | default decode tok/s | eager decode tok/s |
+|---|---|---|---|---|---|---|
+| Llama-3.2-1B Q8_0 | 4.51 (4.47 to 4.52) | 4.50 (4.45 to 4.52) | 5.03 (4.50 to 5.07) | +0.2% | 100.0 (99.3 to 100.9) | 78.1 (77.2 to 79.0) |
+| Qwen2.5-0.5B Q4_K_M | 3.35 (3.33 to 3.43) | 3.93 (3.89 to 3.94) | 3.93 (3.91 to 3.93) | -14.8% | 102.3 (101.2 to 103.8) | 76.7 (76.5 to 77.4) |
+| granite-3.0-1b-a400m Q4_K_M (MoE) | 3.35 (3.34 to 3.37) | 3.33 (3.31 to 3.35) | 3.35 (3.31 to 3.36) | +0.5% | 111.7 (111.5 to 112.4) | 93.5 (91.7 to 93.8) |
+| OLMoE-1B-7B Q4_K_M (MoE) | 5.05 (5.02 to 5.54) | 5.59 (5.51 to 5.61) | 5.57 (5.56 to 5.62) | -9.5% | 79.5 (79.2 to 80.3) | 66.8 (65.4 to 67.7) |
+| Qwen3-4B Q4_K_M | 8.94 (8.91 to 8.98) | 9.53 (9.47 to 9.55) | 9.46 (9.09 to 9.56) | -6.1% | 31.0 (31.0 to 31.2) | 26.6 (26.5 to 26.7) |
+
+What the numbers show:
+
+- Decode is 17 to 33 percent faster on all five models.
+- Whole-process wall at 128 tokens is 6 to 15 percent lower than eager on Qwen2.5, OLMoE and Qwen3-4B. Granite is unchanged (3.35 s against 3.33 s). Llama's medians match eager (4.50 s against 4.51 s). Llama's `origin/main` arm sat at about 4.5 s or 5.0 s. Over ten runs the eager arm showed the 5.0 s mode in 2 runs and the `origin/main` arm in 6, and the default arm in none.
+- The text is identical on all five models in every run: the default, eager and `origin/main` arms give one distinct 128-token text per model.
+- The one-time capture is small. A 1-token explicit graph run is 0.02 s slower than eager on Llama and 0.01 s on granite.
+- Not explained: on granite and Llama the decode saving (0.2 to 0.4 s per 128 tokens) does not show in the wall, and the capture is too small to be the cause. The non-decode part of the run differs between arms in both directions, and it is not isolated.
+- The explicit `--graph-decode` flag gives the same wall and decode as the implicit default (granite 3.36 s against 3.35 s; Llama 4.50 s against 4.51 s).
+- Below the threshold nothing changed. A 32-token request takes the eager loop: its wall and decode match the kill-switch run on all five models (Llama 3.37 s against 3.40 s), and its profiled dispatch count is identical (Llama 13,029 and 13,029). A 128-token default run records the prefill-only count (Llama 970, the same as one token), which is what a replayed step looks like to the profiler.
+- Peak 3060 memory is the same across arms (Llama 2276 MiB, Qwen2.5 718 to 719, granite 1038 to 1059, OLMoE 4530 to 4551, Qwen3-4B 4573 to 4628), so the graph adds no VRAM on these five models.
+
 ## Causal prefill attention: measured result
 
 Before this change a causal `FlashAttention` call, which every prompt makes, reached only the scalar `sdpa_flash_f32`; the cooperative-matrix-2 gate lived on the non-causal `ScaledDotProductAttention` entry points. `numerics.vkFlashCm2Prefill`, on by default, routes causal prefill of 64 or more query rows through `sdpa_flash_cm2_mask` when the shape fits: batch 1, head dimension 64 or 128, F32 Q/K/V, no softcap, sink or ALiBi, and a device with `VK_NV_cooperative_matrix2`, and a host mask of at most 256 MiB (`4 * sq * kvLen` bytes; `FlashCm2PrefillPolicy`). The causal and sliding-window mask is one host-built F32 tile, reused across the layers of one prefill on the host and released by the first attention call that does not take the cm2 path. Decode (one query row) and chunks under 64 rows stay on the scalar kernel, and `numerics.vkFlashCm2Prefill=0` keeps every prefill on it.

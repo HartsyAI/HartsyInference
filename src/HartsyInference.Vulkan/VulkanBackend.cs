@@ -4110,9 +4110,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
 
     /// <inheritdoc/>
-    /// <remarks>128, measured on the RTX 3060 (docs/VULKAN_MOE_PLAN.md, step 6): a 128-token greedy run with the graph is faster
-    /// than eager on wall clock for all five measured models, the first capture included, and the text is identical. The first
-    /// capture gathers a quantized embedding table on the device, so it costs 0.01 s to 0.21 s there.</remarks>
+    /// <remarks>128, measured on the RTX 3060 (docs/VULKAN_MOE_PLAN.md, step 6): at 128 new tokens the graph decodes 17 to 33 percent
+    /// faster than eager on all five measured models, with identical text, and the first capture costs 0.01 s to 0.21 s there.</remarks>
     public int LlmGraphDecodeDefaultMinTokens => 128;
 
     /// <inheritdoc/>
