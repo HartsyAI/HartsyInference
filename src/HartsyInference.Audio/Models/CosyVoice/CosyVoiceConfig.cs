@@ -137,4 +137,7 @@ public sealed record CosyVoiceSamplingConfig
     public bool UseRas { get; init; } = true;
     public int RasWindow { get; init; } = 10;
     public int RasMaxRepeat { get; init; } = 4;
+
+    /// <summary>End-of-speech is not drawn until at least <c>MinTokenTextRatio × target-text-tokens</c> speech tokens have been emitted. Without it an EOS on step 0 yields an empty speech-token stream. Mirrors the <c>min_token_text_ratio</c> gate in <c>cosyvoice/llm/llm.py</c>.</summary>
+    public int MinTokenTextRatio { get; init; } = 2;
 }

@@ -25,12 +25,15 @@ public sealed unsafe class SpeechSampler
         _rng = DeterministicRng.Seed(seed);
     }
 
-    /// <summary>Draws the next speech token from <paramref name="logits"/> (<c>[1, 1, vocab]</c>), conditioning the repetition penalty + RAS check on the already-generated <paramref name="history"/>.</summary>
-    public int Sample(Tensor logits, List<int> history)
+    /// <summary>Draws the next speech token from <paramref name="logits"/> (<c>[1, 1, vocab]</c>), conditioning the repetition penalty + RAS check on the already-generated <paramref name="history"/>.
+    /// When <paramref name="ignoreEos"/> is set the end-of-speech token (the last candidate) is excluded from the draw.</summary>
+    public int Sample(Tensor logits, List<int> history, bool ignoreEos = false)
     {
         float* lp = (float*)logits.DataPointer;
         float[] work = new float[_numCandidates];
         for (int i = 0; i < _numCandidates; i++) work[i] = lp[i];
+        // EOS is the last candidate index, so shrinking the count drops it from the draw and from top-p's denominator.
+        int count = ignoreEos ? _numCandidates - 1 : _numCandidates;
 
         // Repetition penalty over the trailing window (HF convention: >0 divide, <0 multiply).
         if (_cfg.RepetitionPenalty != 1f && history.Count > 0)
@@ -48,9 +51,9 @@ public sealed unsafe class SpeechSampler
 
         // Filtered draw via the shared sampler; RAS re-rolls (masking the repeated token) if we're at
         // the repeat ceiling.
-        int chosen = NucleusSampler.Draw(work, _numCandidates, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref _rng);
+        int chosen = NucleusSampler.Draw(work, count, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref _rng);
         if (_cfg.UseRas && recentRepeat >= _cfg.RasMaxRepeat - 1 && history.Count > 0 && chosen == history[^1])
-            chosen = NucleusSampler.Draw(work, _numCandidates, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref _rng, maskToken: history[^1]);
+            chosen = NucleusSampler.Draw(work, count, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref _rng, maskToken: history[^1]);
         return chosen;
     }
 
