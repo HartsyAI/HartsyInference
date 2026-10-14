@@ -392,9 +392,9 @@ no bug, any more than one bad seed was proof there was one.
 - **"Operations that change non-concurrent collections must have exclusive access" in
   `GpuResidencyCache.CopyToDevice` means two threads used one backend's residency cache at once.** The live case
   was `InferenceEngine.FreeMemory` sweeping the backend without the device gate while an STT job ran on it. Every
-  op scope and tensor callback now holds `IGpuResidency.ExclusiveLock`, so a missed gate costs a wait rather
-  than a corrupted dictionary. A cache that is still found corrupted flags `ResetPending` and is emptied at the
-  backend's next op. Any new whole-device release (`FreeAllDeviceMemory`, a backend `Dispose`) belongs under
+  op scope, backend dispose and host-read sync now holds `IGpuResidency.ExclusiveLock` (a release or demotion
+  from another thread is queued for the next op), so a missed gate costs a wait rather than a corrupted
+  dictionary. A cache that is still found corrupted flags `ResetPending` and is emptied at the backend's next op. Any new whole-device release (`FreeAllDeviceMemory`, a backend `Dispose`) belongs under
   `DeviceGate`, taken after the service and audio locks.
 - **DeepSeek/large-MoE memory:** expert split must be a zero-copy view over mmap (copying ~7GB → host
   OOM-kill); keep the untied embedding table host-only (not uploaded to GPU) to save ~0.8GB.
