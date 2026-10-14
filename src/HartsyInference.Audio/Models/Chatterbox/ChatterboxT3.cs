@@ -183,13 +183,28 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         }
 
         int cacheCap = Math.Min(_cfg.T3.MaxPositionEmbeddings, prefill + maxNew + 4);
-        IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
-        IKvCache? cacheUncond = useCfg ? _backbone.CreateDecodeCache(cacheCap) : null;
-        Tensor hidden = _backbone.ForwardEmbeds(backend, embeds, 1, prefill, 0, cache);
-        embeds.Dispose();
-        Tensor? hiddenUncond = useCfg ? _backbone.ForwardEmbeds(backend, embedsUncond!, 1, prefill, 0, cacheUncond!) : null;
-        embedsUncond?.Dispose();
-        return new DecodeState(this, cache, cacheUncond, hidden, hiddenUncond, cacheCap);
+        IKvCache? cache = null, cacheUncond = null;
+        Tensor? hidden = null;
+        try
+        {
+            cache = _backbone.CreateDecodeCache(cacheCap);
+            cacheUncond = useCfg ? _backbone.CreateDecodeCache(cacheCap) : null;
+            hidden = _backbone.ForwardEmbeds(backend, embeds, 1, prefill, 0, cache);
+            Tensor? hiddenUncond = useCfg ? _backbone.ForwardEmbeds(backend, embedsUncond!, 1, prefill, 0, cacheUncond!) : null;
+            return new DecodeState(this, cache, cacheUncond, hidden, hiddenUncond, cacheCap);
+        }
+        catch
+        {
+            hidden?.Dispose();
+            cache?.Dispose();
+            cacheUncond?.Dispose();
+            throw;
+        }
+        finally
+        {
+            embeds.Dispose();
+            embedsUncond?.Dispose();
+        }
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -253,16 +268,17 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         public bool Step(IBackend backend, int token, int speechPos)
         {
             int h = owner._cfg.T3.HiddenSize;
-            Tensor step1 = new(new TensorShape(1, 1, h), DType.F32);
+            using Tensor step1 = new(new TensorShape(1, 1, h), DType.F32);
             AddEmbPlusPos((float*)step1.DataPointer, owner._speechEmb!, token, owner._speechPos!, speechPos, h);
+            Tensor next = owner._backbone.ForwardEmbeds(backend, step1, 1, 1, cache.CurrentLength, cache);
             _hidden.Dispose();
-            _hidden = owner._backbone.ForwardEmbeds(backend, step1, 1, 1, cache.CurrentLength, cache);
+            _hidden = next;
             if (cacheUncond is not null)
             {
+                Tensor nextUncond = owner._backbone.ForwardEmbeds(backend, step1, 1, 1, cacheUncond.CurrentLength, cacheUncond);
                 _hiddenUncond!.Dispose();
-                _hiddenUncond = owner._backbone.ForwardEmbeds(backend, step1, 1, 1, cacheUncond.CurrentLength, cacheUncond);
+                _hiddenUncond = nextUncond;
             }
-            step1.Dispose();
             return cache.CurrentLength < cacheCap - 2;
         }
 

@@ -10,6 +10,7 @@ on every line of CORPUS and writes {text, normalized, ids} per line, ids includi
 """
 import json
 import sys
+import unicodedata
 
 from chatterbox.models.tokenizers import EnTokenizer
 from chatterbox.tts import punc_norm
@@ -49,6 +50,18 @@ CORPUS = [
     "\tlower tab",
     "\U0001D44E math italic start",
     "ﬁne ligature start.",
+    "ﬀ ligature.",
+    "ﬂ ligature.",
+    "ﬃ ligature.",
+    "ﬄ ligature.",
+    "ﬅ ligature.",
+    "ﬆ ligature.",
+    "ŉ apostrophe n.",
+    "ª ordinal start.",
+    "ⓐ circled start.",
+    "ǅ titlecase start.",
+    "ǰ j caron start.",
+    "Next\x85line.",
     # no final punctuation
     "Hello world",
     "This sentence has no ending",
@@ -140,9 +153,13 @@ def main() -> None:
         ids = [START_TEXT_TOKEN] + list(tokenizer.text_to_tokens(normalized)[0].tolist()) + [STOP_TEXT_TOKEN]
         lines.append({"text": text, "normalized": normalized, "ids": ids})
     with open(sys.argv[2], "w", encoding="utf-8") as f:
-        json.dump({"source": "resemble-ai/chatterbox tts.py punc_norm + EnTokenizer", "lines": lines}, f,
-                  ensure_ascii=True, indent=1)
-        f.write("\n")
+        f.write('{"source": "resemble-ai/chatterbox tts.py punc_norm + EnTokenizer", "lines": [\n')
+        f.write(",\n".join(json.dumps(line, ensure_ascii=True) for line in lines))
+        # punc_norm's first-character rule over every code point it changes: {code point: text[0].upper()}.
+        capitalize = {f"{cp:X}": chr(cp).upper() for cp in range(0x110000)
+                      if chr(cp).islower() and chr(cp).upper() != chr(cp)}
+        f.write("\n],\n\"unicode\": \"%s\",\n\"capitalize\": %s}\n"
+                % (unicodedata.unidata_version, json.dumps(capitalize, ensure_ascii=True)))
     print(f"wrote {len(lines)} lines")
 
 
