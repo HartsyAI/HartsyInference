@@ -25,6 +25,7 @@
   <ItemGroup>
     <None Include="Fixtures\Piper\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\indextts2_segmenter_golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Frontend\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\FishAudioS2\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Breeze\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\ControlFoley\**\*" CopyToOutputDirectory="PreserveNewest" />
