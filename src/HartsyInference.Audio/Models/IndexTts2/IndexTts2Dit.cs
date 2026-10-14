@@ -64,7 +64,7 @@ internal sealed unsafe class IndexTts2Dit : ICfmEstimator, IDisposable
         _tEmbedder = new IndexTts2TimestepEmbedder(cfg.HiddenDim, cfg.FreqEmbedSize);
         _tEmbedder2 = new IndexTts2TimestepEmbedder(cfg.WavenetHiddenDim, cfg.FreqEmbedSize);
         _finalTransformerNorm = new AdaptiveLayerNorm(cfg.HiddenDim);
-        _wavenet = new VitsWaveNet(cfg.WavenetHiddenDim, cfg.WavenetKernelSize, cfg.WavenetDilationRate, cfg.WavenetNumLayers);
+        _wavenet = new VitsWaveNet(cfg.WavenetHiddenDim, cfg.WavenetKernelSize, cfg.WavenetDilationRate, cfg.WavenetNumLayers, reflectPad: true);
     }
 
     /// <param name="prefix">e.g. <c>net.cfm.estimator</c> — the real checkpoint's own module path.</param>

@@ -20,6 +20,8 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
     private const int NumMelBins = 80;
     private const int Stride = 2;
     private const float Int16Scale = 32768f;
+    /// <summary><c>padding_value</c> of w2v-bert-2.0's <c>preprocessor_config.json</c>.</summary>
+    private const float PaddingValue = 1f;
 
     private readonly Wav2Vec2BertConfig _cfg;
     private readonly KaldiFbankExtractor _fbank = new(SampleRate, NumMelBins);
@@ -93,7 +95,7 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
 
     /// <summary>Real <c>SeamlessM4TFeatureExtractor.__call__</c>: Kaldi fbank (the extractor's own ×2^15 Kaldi
     /// scaling already matches torchaudio's convention), per-mel-bin zero-mean/unit-variance normalize over time
-    /// (sample variance, ddof=1, +1e-7 epsilon), pad an odd frame count with one zero frame
+    /// (sample variance, ddof=1, +1e-7 epsilon), pad an odd frame count with one frame of the padding value
     /// (<c>pad_to_multiple_of=2</c>), then reshape consecutive frame PAIRS into one <c>numMelBins*stride</c>-wide
     /// vector (so the 80-bin fbank becomes this model's real 160-dim input and the frame rate halves to ~20 ms).
     /// <paramref name="validFrames"/> is the unpadded stacked count, HF's <c>attention_mask[:, 1::2]</c>.</summary>
@@ -128,7 +130,7 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
         for (int x = 0; x < stackedFrames; x++)
             for (int s = 0; s < Stride; s++)
                 for (int m = 0; m < bins; m++)
-                    d2[x * bins * Stride + s * bins + m] = x * Stride + s < frames ? normed[x * Stride + s, m] : 0f;
+                    d2[x * bins * Stride + s * bins + m] = x * Stride + s < frames ? normed[x * Stride + s, m] : PaddingValue;
         return stacked;
     }
 
