@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.IndexTts;
@@ -28,6 +27,7 @@ public sealed class IndexTtsPipeline : IDisposable
 {
     private readonly IndexTtsConfig _cfg;
     private readonly IndexTtsTokenizer _tokenizer;
+    private readonly IndexTtsTextFrontend _frontend;
     private readonly IndexTtsSpeakerEncoder _speakerEncoder;
     private readonly IndexTtsT2sDecoder _t2s;
     private readonly IndexTtsBigVganGenerator _bigVgan;
@@ -41,10 +41,11 @@ public sealed class IndexTtsPipeline : IDisposable
 
     private IndexTtsPipeline(IndexTtsConfig cfg, IndexTtsTokenizer tokenizer, IndexTtsSpeakerEncoder speakerEncoder,
         IndexTtsT2sDecoder t2s, IndexTtsBigVganGenerator bigVgan, PytorchPickleLoader gptLoader, PytorchPickleLoader bigVganLoader,
-        List<Tensor> convertedWeights)
+        List<Tensor> convertedWeights, IndexTtsFstNormalizers textNormalizers)
     {
         _cfg = cfg;
         _tokenizer = tokenizer;
+        _frontend = new IndexTtsTextFrontend(new IndexTtsFrontNormalizer(textNormalizers, enableGlossary: false));
         _speakerEncoder = speakerEncoder;
         _t2s = t2s;
         _bigVgan = bigVgan;
@@ -60,11 +61,14 @@ public sealed class IndexTtsPipeline : IDisposable
 
     /// <summary>Loads IndexTTS-1.5 from already-downloaded checkpoint files. <c>dvae.pth</c> is deliberately not
     /// a parameter here — confirmed unused in the real inference path, and the Engine layer no longer downloads
-    /// it at all.</summary>
+    /// it at all. <paramref name="textNormalizers"/> are the FST normalizers upstream takes from wetext; pass
+    /// <see cref="IndexTtsFstNormalizers.FromWeText"/> for upstream text (the engine does), or
+    /// <see cref="IndexTtsFstNormalizers.Interim"/> when the grammars are unavailable.</summary>
     public static Task<IndexTtsPipeline> LoadAsync(string tokenizerPath, string gptPath, string bigVganPath,
-        IndexTtsConfig? cfg, CancellationToken ct = default)
+        IndexTtsConfig? cfg, IndexTtsFstNormalizers textNormalizers, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(textNormalizers);
         IndexTtsConfig resolved = cfg ?? IndexTtsConfig.V1_5;
 
         IndexTtsTokenizer? tokenizer = null;
@@ -105,7 +109,8 @@ public sealed class IndexTtsPipeline : IDisposable
             bigVgan = new IndexTtsBigVganGenerator(resolved.BigVgan);
             bigVgan.LoadWeights(bigVganWeights, "generator", "generator.speaker_encoder");
 
-            return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader, converted));
+            return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader, converted,
+                textNormalizers));
         }
         catch
         {
@@ -155,14 +160,9 @@ public sealed class IndexTtsPipeline : IDisposable
 
     /// <summary>Clones the voice in <paramref name="referenceAudioMono"/> speaking <paramref name="text"/>.
     /// Returns 24 kHz mono PCM float samples in [-1, 1].</summary>
-    /// <remarks>Text longer than <see cref="DefaultMaxTextTokensPerSegment"/> tokens is split into sentence-bounded
-    /// segments and synthesized one at a time against the same reference voice, then concatenated — matching the
-    /// reference <c>infer()</c>'s own chunk-and-concatenate strategy. Without this, text that fits under
-    /// <see cref="IndexTtsConfig.MaxTextTokens"/> but is long enough that <c>condLen + textLen</c> leaves little of
-    /// the GPT's 1,402-token block size for mel generation would silently stop speaking mid-utterance once the
-    /// per-call generation cap is hit, with no error. This is a simplified port (sentence-then-comma-then-hard-token
-    /// splitting) of the reference's more intricate recursive <c>split_segments_by_token</c>, not a byte-exact
-    /// match — the goal is avoiding silent truncation, not reproducing its exact segment boundaries.</remarks>
+    /// <remarks>The text goes through the upstream frontend (<see cref="IndexTtsTextFrontend"/>): normalized,
+    /// tokenized and cut by <c>split_segments</c> at <see cref="DefaultMaxTextTokensPerSegment"/> tokens; each segment
+    /// is synthesized against the same reference voice and the results concatenated, as upstream <c>infer()</c> does.</remarks>
     public float[] Synthesize(IBackend backend, string text, float[] referenceAudioMono, int referenceSampleRate, IndexTtsOptions? options = null)
     {
         ThrowIfDisposed();
@@ -170,7 +170,7 @@ public sealed class IndexTtsPipeline : IDisposable
 
         // Validate + segment text (cheap, no tensor allocation) before computing the reference mel, so a rejected
         // prompt never leaves an undisposed Tensor behind.
-        List<int[]> segments = SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment, EncodeNormalized);
+        List<int[]> segments = _frontend.SegmentSentencePiece(text, _tokenizer, DefaultMaxTextTokensPerSegment);
         if (segments.Count == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
         int totalTokens = 0;
         foreach (int[] seg in segments) totalTokens += seg.Length;
@@ -265,78 +265,6 @@ public sealed class IndexTtsPipeline : IDisposable
         {
             wave.Dispose();
         }
-    }
-
-    /// <summary>Splits <paramref name="text"/> into token-id segments, each tokenizing to at most
-    /// <paramref name="maxTokensPerSegment"/> ids: sentence-bounded first (splitting on <c>. ! ? 。！？</c>),
-    /// falling back to comma/semicolon splitting for an overlong single sentence, and finally a hard token-count
-    /// cut for an overlong single clause with no further punctuation to split on. Generalized to an
-    /// <paramref name="encode"/> delegate (rather than a field closed over a concrete tokenizer type) so
-    /// <see cref="IndexTts2Pipeline"/> can share this exact segment-splitting logic across both IndexTTS-2's
-    /// tokenizer types (SentencePiece for 2.0, tiktoken for 2.5) without duplicating it.</summary>
-    internal static List<int[]> SplitIntoTokenSegments(string text, int maxTokensPerSegment, Func<string, int[]> encode)
-    {
-        List<int[]> result = [];
-        List<string> pending = [];
-        int pendingTokens = 0;
-
-        void FlushPending()
-        {
-            if (pending.Count == 0) return;
-            int[] ids = encode(string.Concat(pending));
-            if (ids.Length > 0) result.Add(ids);
-            pending.Clear();
-            pendingTokens = 0;
-        }
-
-        foreach (string sentence in SplitOnPattern(text, SentenceBoundaryPattern))
-        {
-            int[] sentIds = encode(sentence);
-            if (sentIds.Length == 0) continue;
-            if (sentIds.Length > maxTokensPerSegment)
-            {
-                FlushPending();
-                foreach (string clause in SplitOnPattern(sentence, ClauseBoundaryPattern))
-                {
-                    int[] clauseIds = encode(clause);
-                    if (clauseIds.Length == 0) continue;
-                    if (clauseIds.Length > maxTokensPerSegment)
-                    {
-                        for (int offset = 0; offset < clauseIds.Length; offset += maxTokensPerSegment)
-                            result.Add(clauseIds[offset..Math.Min(offset + maxTokensPerSegment, clauseIds.Length)]);
-                    }
-                    else if (pendingTokens + clauseIds.Length > maxTokensPerSegment)
-                    {
-                        FlushPending();
-                        pending.Add(clause);
-                        pendingTokens = clauseIds.Length;
-                    }
-                    else
-                    {
-                        pending.Add(clause);
-                        pendingTokens += clauseIds.Length;
-                    }
-                }
-                continue;
-            }
-            if (pendingTokens + sentIds.Length > maxTokensPerSegment) FlushPending();
-            pending.Add(sentence);
-            pendingTokens += sentIds.Length;
-        }
-        FlushPending();
-        return result;
-    }
-
-    private int[] EncodeNormalized(string segment) => _tokenizer.Encode(IndexTtsTextNormalizer.InjectCjkBoundaries(segment));
-
-    private static readonly Regex SentenceBoundaryPattern = new(@"[^.!?。！？]+[.!?。！？]*\s*", RegexOptions.Compiled);
-    private static readonly Regex ClauseBoundaryPattern = new(@"[^,;，；]+[,;，；]*\s*", RegexOptions.Compiled);
-
-    private static List<string> SplitOnPattern(string text, Regex pattern)
-    {
-        List<string> parts = [];
-        foreach (Match m in pattern.Matches(text)) if (m.Value.Trim().Length > 0) parts.Add(m.Value);
-        return parts.Count > 0 ? parts : [text];
     }
 
     /// <summary>Runs the shared mel front end and transposes its channels-first <c>[nMels, T]</c> output into the

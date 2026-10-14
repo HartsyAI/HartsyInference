@@ -102,7 +102,7 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
         using CpuBackend backend = new();
         using IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
             Path.Combine(v20Dir, "bpe.model"), Path.Combine(v20Dir, "gpt.pth"), Path.Combine(v20Dir, "s2mel.pth"), codecPath!,
-            w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!,
+            w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!, IndexTtsTestNormalizers.Resolve(),
             feat1Path: Path.Combine(v20Dir, "feat1.pt"), feat2Path: Path.Combine(v20Dir, "feat2.pt"), cfg: IndexTts2Config.V2_0);
 
         // 0. Resampling: the C# resamplers against librosa(22.05k)+torchaudio(16k) on the same clip.
@@ -240,7 +240,7 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
         using CpuBackend backend = new();
         using IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
             Path.Combine(v20Dir, "bpe.model"), Path.Combine(v20Dir, "gpt.pth"), Path.Combine(v20Dir, "s2mel.pth"), codecPath!,
-            w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!, cfg: IndexTts2Config.V2_0);
+            w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!, IndexTtsTestNormalizers.Resolve(), cfg: IndexTts2Config.V2_0);
 
         int[] textIds = [.. d["seg0_text_ids"].Select(static c => (int)c)];
         using Tensor latents = ToTensor(d["spk_latent"], 1, 32, 1280);

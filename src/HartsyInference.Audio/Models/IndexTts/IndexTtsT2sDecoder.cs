@@ -27,6 +27,10 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     public const int NumTextTokens = 12001;
     public const int StartTextToken = 0;
     public const int StopTextToken = 1;
+    /// <summary>Upstream <c>infer()</c>'s default <c>max_mel_tokens</c>.</summary>
+    public const int UpstreamMaxMelTokens = 600;
+    // prepare_gpt_inputs' fake input_ids are all ones, which HF's repetition penalty also sees.
+    private const int FakePromptToken = 1;
 
     private readonly GptConfig _cfg;
     private readonly GptBackbone _gpt;
@@ -95,7 +99,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         wrappedTextIds[^1] = StopTextToken;
         int textLen = wrappedTextIds.Length;
 
-        int cap = Math.Min(options.MaxMelTokens ?? _maxMelTokens, _maxMelTokens);
+        int cap = Math.Min(options.MaxMelTokens ?? UpstreamMaxMelTokens, _maxMelTokens);
         // Leave room in the KV cache for conditioning + text before the decode loop starts consuming it, so a
         // long prompt can't run ForwardStep past the cache's capacity and throw mid-generation. The extra -1
         // reserves a slot for pass 2's re-embedding, whose mel segment is N+1 long (StartMelToken plus every
@@ -109,33 +113,15 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         }
 
         List<int> generated = new(Math.Min(cap, 256));
-        // Seeded with StartMelToken: the reference's HF RepetitionPenaltyLogitsProcessor runs over the complete
-        // `input_ids` it has fed the model, which already ends with the start token before the first generation
-        // step — so the real penalty can suppress re-sampling it from step 0, unlike a set built fresh from
-        // `generated` (which never contains the start token at all). Updated incrementally (one Add per accepted
-        // step) rather than rebuilt from `generated` every step, which would be O(cap) allocation+copy per step.
-        HashSet<int> seenForPenalty = [StartMelToken];
-        using (Tensor textEmb = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h))
-        using (Tensor prefix = Concat(speechConditioning, textEmb, condLen, textLen, h))
-        using (IKvCache cache = _gpt.CreateCache())
+        if (options.NumBeams > 1)
         {
-            _gpt.Forward(backend, prefix, nonCausal: false, cache, positionsApplied: true).Dispose();
-
-            int prevToken = StartMelToken;
-            for (int step = 0; step < cap; step++)
-            {
-                using Tensor stepInput = EmbedOneWithPosition(prevToken, _melEmbed!, _melPos!, step, h);
-                using Tensor hiddenStep = _gpt.ForwardStep(backend, stepInput, cache, positionsApplied: true);
-                using Tensor normedStep = new(hiddenStep.Shape, DType.F32);
-                backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
-
-                using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
-                int nextToken = SampleNextToken(logits, seenForPenalty, options, ref rngState, generated.Count);
-                if (nextToken == StopMelToken) break;
-                generated.Add(nextToken);
-                seenForPenalty.Add(nextToken);
-                prevToken = nextToken;
-            }
+            using Tensor beamTextEmb = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h);
+            using Tensor beamPrefix = Concat(speechConditioning, beamTextEmb, condLen, textLen, h);
+            generated.AddRange(GenerateBeams(backend, beamPrefix, cap, options, ref rngState));
+        }
+        else
+        {
+            SampleSingle(backend, speechConditioning, wrappedTextIds, condLen, textLen, cap, options, generated, ref rngState);
         }
 
         if (generated.Count == 0)
@@ -158,6 +144,71 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
             backend.LayerNorm(latent, melSlice, _finalNormW!, _finalNormB!, 1e-5f);
             return latent;
         }
+    }
+
+    /// <summary>Single-sequence decode (<c>num_beams=1</c>): sampling, or greedy when sampling is off.</summary>
+    private void SampleSingle(IBackend backend, Tensor speechConditioning, int[] wrappedTextIds, int condLen, int textLen, int cap,
+        IndexTtsOptions options, List<int> generated, ref uint rngState)
+    {
+        int h = _cfg.Hidden;
+        // Seeded with StartMelToken: the reference's HF RepetitionPenaltyLogitsProcessor runs over the complete
+        // `input_ids` it has fed the model, which already ends with the start token before the first generation
+        // step — so the real penalty can suppress re-sampling it from step 0, unlike a set built fresh from
+        // `generated` (which never contains the start token at all). Updated incrementally (one Add per accepted
+        // step) rather than rebuilt from `generated` every step, which would be O(cap) allocation+copy per step.
+        HashSet<int> seenForPenalty = [FakePromptToken, StartMelToken];
+        using (Tensor textEmb = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h))
+        using (Tensor prefix = Concat(speechConditioning, textEmb, condLen, textLen, h))
+        using (IKvCache cache = _gpt.CreateCache())
+        {
+            _gpt.Forward(backend, prefix, nonCausal: false, cache, positionsApplied: true).Dispose();
+
+            int prevToken = StartMelToken;
+            for (int step = 0; step < cap; step++)
+            {
+                using Tensor stepInput = EmbedOneWithPosition(prevToken, _melEmbed!, _melPos!, step, h);
+                using Tensor hiddenStep = _gpt.ForwardStep(backend, stepInput, cache, positionsApplied: true);
+                using Tensor normedStep = new(hiddenStep.Shape, DType.F32);
+                backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
+
+                using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
+                int nextToken = SampleNextToken(logits, seenForPenalty, options, ref rngState, generated.Count);
+                if (nextToken == StopMelToken) break;
+                generated.Add(nextToken);
+                seenForPenalty.Add(nextToken);
+                prevToken = nextToken;
+            }
+        }
+    }
+
+    /// <summary>Upstream's default decode: HF beam search (beam sampling when <see cref="IndexTtsOptions.DoSample"/>)
+    /// over the mel head, returning the best beam's codes without the stop token.</summary>
+    private int[] GenerateBeams(IBackend backend, Tensor prefix, int cap, IndexTtsOptions options, ref uint rngState)
+    {
+        int h = _cfg.Hidden;
+        BeamSearchSettings settings = new()
+        {
+            NumBeams = options.NumBeams,
+            MaxNewTokens = cap,
+            EosToken = StopMelToken,
+            DoSample = options.DoSample && options.Temperature > 0f,
+            Temperature = options.Temperature,
+            TopK = options.TopK,
+            TopP = options.TopP,
+            RepetitionPenalty = options.RepetitionPenalty,
+            LengthPenalty = options.LengthPenalty,
+            MinNewTokens = EosGate.MinTokens,
+        };
+        using GptBeamDecoder beams = new(backend, _gpt, options.NumBeams, prefix,
+            (token, step) => EmbedOneWithPosition(token, _melEmbed!, _melPos!, step, h),
+            hidden =>
+            {
+                using Tensor normed = new(hidden.Shape, DType.F32);
+                backend.LayerNorm(normed, hidden, _finalNormW!, _finalNormB!, 1e-5f);
+                return WhisperOps.ProjectLinear(backend, normed, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
+            });
+        int[] tokens = BeamSearch.Generate(beams, settings, [FakePromptToken, StartMelToken], StartMelToken, NumMelCodes, ref rngState);
+        return tokens.Length > 0 && tokens[^1] == StopMelToken ? tokens[..^1] : tokens;
     }
 
     /// <summary>Temperature/top-k/top-p (nucleus) sampling with a multiplicative repetition penalty (CTRL-style:
@@ -189,7 +240,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
                 span[id] = v > 0 ? v / penalty : v * penalty;
             }
         }
-        return options.Temperature <= 0f
+        return options.Temperature <= 0f || !options.DoSample
             ? LogitSampling.ArgMax(span)
             : NucleusSampler.Draw(span, n, options.Temperature, options.TopK, options.TopP, ref rngState);
     }

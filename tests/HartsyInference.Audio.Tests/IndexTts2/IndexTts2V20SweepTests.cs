@@ -41,7 +41,7 @@ public sealed class IndexTts2V20SweepTests(ITestOutputHelper output)
         using CpuBackend backend = new();
         using IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
             Path.Combine(v20Dir, "bpe.model"), Path.Combine(v20Dir, "gpt.pth"), Path.Combine(v20Dir, "s2mel.pth"), codecPath!,
-            w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!,
+            w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!, IndexTtsTestNormalizers.Resolve(),
             feat1Path: Path.Combine(v20Dir, "feat1.pt"), feat2Path: Path.Combine(v20Dir, "feat2.pt"), cfg: IndexTts2Config.V2_0);
 
         WavFile.DecodedAudio refAudio = WavFile.Read(refWavPath!);
