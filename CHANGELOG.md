@@ -24,6 +24,10 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.364
+
+- **Fixed: GPT-SoVITS spoke numbers, dates and currency as garbage.** The English G2P had no number normalization. CMUdict has no digit entries, so "2026", "4:30" and "$99.95" fell through to the letter-spelling fallback and came out as nonsense ("March R.D. at PM"). The English path now runs the same spoken-form normalizer the IndexTTS frontends use. Regression tests compare digit input with its normalized form and check that no unknown phones are emitted for digits.
+
 ## alpha.363
 
 - **Changed: Vulkan graph decode gathers quantized embedding tables from their quantized form, and stages untied ones from the host.** A Q5_0 or Q6_K embedding table is now gathered on the device from its quantized form (`embed_gather_quant_q5_0`, `embed_gather_quant_q6_k`), as Q8_0 and Q4_K already were, so a tied Q5_0 or Q6_K table keeps no F32 copy in the graph. An untied quantized table is no longer uploaded for the graph: the host writes each step's embedding row into a mapped staging buffer, and the captured step copies it into the embedding tensor. On Qwen2.5-0.5B (untied Q5_0) the graph's VRAM falls from 1136 to 616 MiB, equal to eager, and its first capture by about 0.4 s; on Qwen3-4B (tied Q6_K) the first capture falls by about 1.35 s. The 128-token greedy text is identical to eager, and to the previous build, on all five models measured. Graph decode on Qwen2.5-0.5B is about 2% slower (209.6 against 214.4 tok/s over 10 interleaved runs); that is accepted, and it is the first item of the perf pass. CUDA is unchanged.

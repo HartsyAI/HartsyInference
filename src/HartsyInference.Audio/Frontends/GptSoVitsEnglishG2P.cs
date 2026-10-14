@@ -44,6 +44,9 @@ public static class GptSoVitsEnglishG2P
     /// emitted phone is guaranteed to be in the model symbol set.</summary>
     public static List<string> G2P(string text)
     {
+        // Spoken form first: CMUdict has no entries for digits, so numbers, dates and currency would otherwise fall
+        // through to the letter-spelling fallback. Same normalizer the IndexTTS frontends use.
+        text = HartsyInference.Audio.Pipelines.EnglishSpokenForm.Expand(text);
         List<string> phones = [];
         foreach (string token in Tokenize(text))
         {
