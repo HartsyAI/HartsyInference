@@ -27,6 +27,10 @@ public sealed class ChatterboxFrontendParityTests
         Assert.Equal(expected, ChatterboxTextNormalizer.Normalize(text));
 
     [Fact]
+    public void Normalize_LeavesALeadingLoneSurrogateAlone() =>
+        Assert.Equal("\ud800 lone.", ChatterboxTextNormalizer.Normalize("\ud800 lone"));
+
+    [Fact]
     public void FirstCharacterCapitalization_MatchesPythonOnEveryCodePoint()
     {
         using JsonDocument fixture = OpenFixture();

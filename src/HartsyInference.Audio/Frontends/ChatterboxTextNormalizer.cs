@@ -80,7 +80,10 @@ public static class ChatterboxTextNormalizer
 
     internal static string CapitalizeFirst(string text)
     {
-        Rune first = Rune.GetRuneAt(text, 0);
+        if (!Rune.TryGetRuneAt(text, 0, out Rune first))
+        {
+            return text;   // a lone surrogate has no case
+        }
         if (!PythonUpperOverrides.TryGetValue(first.Value, out string? upper))
         {
             // Python's islower() also covers Other_Lowercase symbols such as U+24D0; titlecase letters are not lowercase.

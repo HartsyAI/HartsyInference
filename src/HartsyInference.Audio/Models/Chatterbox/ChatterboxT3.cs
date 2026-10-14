@@ -148,6 +148,7 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         for (int step = 0; step < steps; step++)
         {
             state.Logits(backend, result.AsSpan(step * 2 * vocab, vocab), result.AsSpan((step * 2 + 1) * vocab, vocab));
+            // The cache is sized for every forced token, so Step never reports it full here.
             if (step < forcedTokens.Length) state.Step(backend, forcedTokens[step], step + 1);
         }
         return result;

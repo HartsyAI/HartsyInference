@@ -74,6 +74,8 @@ public sealed class ChatterboxPipeline : IDisposable
         int[] promptSpeechTokens = flowPromptTokens.ToArray();
         ReadOnlySpan<int> t3Prompt = t3PromptSpeechTokens;
         Tensor? promptMel = null;
+        if ((!flowPromptTokens.IsEmpty || flowPromptMel is not null) && !referenceAudio.IsEmpty)
+            throw new ArgumentException("A precomputed flow prompt and referenceAudio are mutually exclusive.", nameof(flowPromptTokens));
         if (!flowPromptTokens.IsEmpty && (flowPromptMel is null || flowPromptMel.Shape[2] != 2L * flowPromptTokens.Length))
             throw new ArgumentException("flowPromptMel must be [1, 80, 2 * flowPromptTokens.Length] when prompt tokens are given.", nameof(flowPromptMel));
         Tensor? veEmbed = refSpeakerEmbed;
