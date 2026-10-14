@@ -24,12 +24,16 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
-## alpha.356
+## alpha.357
 
 - **Tested: granite-shaped MoE decode under the Vulkan step graph.** `VulkanLlmGraphDecodeTests` replays a two-layer top-2-of-4 Q8_0 MoE decoder through the captured step and compares the post-norm hidden state with the eager forward over 12 steps; the difference is exactly zero on the RTX 3060.
 - **Changed: the quantized GEMV gate states its row limit and exact-shape check, and `CaptureGraph` asserts it is not reentrant.** The gate already refused row counts outside 1 to 16; it now also requires `M * K` to equal the input length, with a comment on the row-contiguous assumption.
 - **Docs: "default" graph decode means greedy requests only, and the Vulkan status checklist lists the paths with no Vulkan evidence** (coopmat-1 only, non-NVIDIA devices, SSM/CSM/MusicGen graph paths).
 - **Added: the A40 pod kit auto-stops leased pods.** `pod_up.py --max-hours H` (default 6, or `PODKIT_MAX_HOURS`) records each pod in the operator's lease file, and `watchdog.py --once`, run from cron on the operator machine, POSTs `/stop` once a leased pod is past its limit. No API key is ever copied to a pod. `test_watchdog.py` covers it with a stubbed API.
+
+## alpha.356
+
+- **Fixed: the cuDNN fused SDPA saturates its F32 Q/K/V to F16 instead of overflowing.** The cast into the fused attention graph was a plain F32-to-F16 conversion, so a query, key or value past F16's 65504 became infinity and the fused softmax spread it over every row. The cast now uses `cast_f32_to_f16_sat` (in `kv_scatter_f16.ptx`, the same saturation the F16 KV store uses since #383): a value past the range stores as the limit and a NaN stays a NaN. An F32 call on a build without that kernel declines the cuDNN path and keeps the materialized one. `CudnnSdpaSaturationTests` covers an out-of-range V (the test fails on the plain cast) and a NaN in V reaching the output; the existing cuDNN SDPA, key-only bias, F16 KV saturation and cuDNN plan-release tests pass on the RTX 3060.
 
 ## alpha.355
 
