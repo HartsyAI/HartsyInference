@@ -154,6 +154,40 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         AssertClose(expected, mag, got, 2e-5, $"{type} N={n} K={k} M={m} bias={withBias}");
     }
 
+    /// <summary>The split of the <c>gemv_quant</c> shader (subgroups per output row) takes the requested value, clamped to the
+    /// workgroup's subgroups. Split 2 and split 4 run on the 32-wide RTX 3060; a split of 4 on a two-subgroup workgroup clamps to
+    /// 2. Each runs the reference check with bias, and the split the dispatch used is read back.</summary>
+    [Theory]
+    [InlineData("Q5_0", 2051, 896, 1, 1u, 1u)]
+    [InlineData("Q5_0", 2051, 896, 1, 2u, 2u)]
+    [InlineData("Q5_0", 2051, 896, 3, 4u, 4u)]
+    [InlineData("Q8_0", 4097, 2048, 2, 2u, 2u)]
+    [InlineData("Q8_0", 4097, 2048, 2, 4u, 4u)]
+    [InlineData("Q6_K", 2051, 2048, 3, 4u, 4u)]
+    [InlineData("Q4_K", 1025, 1024, 1, 4u, 2u)]
+    public void Split_OverrideRunsTheRequestedSplitAndMatchesHostDequant(string type, int n, int k, int m, uint requested, uint wantSplit)
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        if (vk.Vk.SubgroupSize != 32) { log.WriteLine($"SKIPPED: subgroup size {vk.Vk.SubgroupSize}; the split cases are written for 32-wide subgroups"); return; }
+        log.WriteLine($"device: {vk.Vk.DeviceName}");
+        DType dtype = Named(type);
+        using Tensor w = RandomQuant(dtype, n, k, seed: n * 31 + k + (int)requested);
+        float[] x = Random(m * k, seed: k + m, scale: 1f);
+        float[] bias = Random(n, seed: n + 5, scale: 0.5f);
+        (float[] expected, float[] mag) = Reference(w, x, bias, n, k, m);
+        using Tensor xt = F32(x, 1, m, k);
+        using Tensor bt = F32(bias, n);
+        using Tensor o = EmptyF32(1, m, n);
+        vk.QuantGemvSplitOverride = requested;
+        long before = vk.QuantGemvCount;
+        vk.Linear(o, xt, w, bt);
+        float[] got = ReadF32(o);
+        Assert.Equal(before + 1, vk.QuantGemvCount);
+        Assert.Equal(wantSplit, vk.LastQuantGemvSplit);
+        AssertClose(expected, mag, got, 2e-5, $"{type} N={n} K={k} M={m} requested split {requested} ran {vk.LastQuantGemvSplit}");
+    }
+
     /// <summary>An F32 weight (a MoE router matrix) at decode M takes the same shader through the F32 decoder.</summary>
     [Theory]
     [InlineData(7, 4, 1, false)]

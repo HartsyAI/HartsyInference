@@ -8,7 +8,7 @@
 // SPLIT subgroups: subgroup part p of the row takes units p * subgroupSize + lane, stepping by SPLIT * subgroupSize, so one
 // subgroup step reads one contiguous run of weight bytes and one of activations (vec4 loads).
 //   SPLIT = 1: one subgroup per row. The row total is one subgroupAdd per activation row; no shared memory, no barrier. The
-//              workgroup is gl_NumSubgroups rows. Best where a lane's loads are the cost (memory-bound formats).
+//              workgroup holds ROWS_PER_WG rows (its subgroups). Best where a lane's loads are the cost (memory-bound formats).
 //   SPLIT > 1: SPLIT subgroups share a row and sum through shared memory, with one barrier. Best where a unit's decode is the
 //              cost (Q5_0's bit unpacking), since more lanes work on one row.
 // Each lane unrolls four units per step, so four units' loads are in flight rather than each waited on in turn.
@@ -33,6 +33,8 @@ layout(constant_id = 1) const bool HAS_BIAS = false;
 layout(constant_id = 2) const uint M = 1u;
 // Subgroups per output row (see the header). A specialization constant; the host divides the workgroup's subgroups by it.
 layout(constant_id = 3) const uint SPLIT = 1u;
+// Output rows per workgroup: the workgroup's subgroups divided by SPLIT, computed by the host (QuantGemv.cs) and not re-derived here.
+layout(constant_id = 4) const uint ROWS_PER_WG = 1u;
 
 // N output rows, K inputs per row (a multiple of the block).
 layout(push_constant) uniform Push { uint N; uint K; } pc;
@@ -53,12 +55,11 @@ shared float partials[32u * M];
 
 void main() {
     uint sg = gl_SubgroupSize;
-    uint rowsPerWg = gl_NumSubgroups / SPLIT;
     uint rowInWg = gl_SubgroupID / SPLIT;
     uint part = gl_SubgroupID % SPLIT;
-    // The grid holds ceil(N / rowsPerWg) workgroups. A vocabulary-sized N exceeds the 65535 workgroups a dimension is
+    // The grid holds ceil(N / ROWS_PER_WG) workgroups. A vocabulary-sized N exceeds the 65535 workgroups a dimension is
     // guaranteed, so the grid may be two-dimensional.
-    uint row = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * rowsPerWg + rowInWg;
+    uint row = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * ROWS_PER_WG + rowInWg;
     bool live = row < pc.N;
     uint lane = gl_SubgroupInvocationID;
     uint blocksPerRow = pc.K / BLOCK_ELEMS;

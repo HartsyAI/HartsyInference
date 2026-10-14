@@ -27,6 +27,9 @@ public sealed class VulkanGemvBenchmark(ITestOutputHelper output)
         yield return new object[] { "Q5_0", 896, 896, 1 };        // Qwen2.5 q and o
         yield return new object[] { "Q5_0", 128, 896, 1 };        // Qwen2.5 k and v
         yield return new object[] { "Q5_0", 896, 4864, 1 };       // Qwen2.5 down
+        yield return new object[] { "Q5_0", 2048, 32, 1 };        // short K: one block per row
+        yield return new object[] { "Q5_0", 2048, 96, 1 };        // short K: three blocks per row
+        yield return new object[] { "Q5_0", 2048, 256, 1 };       // short K: eight blocks per row
         yield return new object[] { "Q4_K", 4096, 2560, 1 };      // Qwen3 q
         yield return new object[] { "Q4_K", 1024, 2560, 1 };      // Qwen3 k and v
         yield return new object[] { "Q4_K", 2560, 4096, 1 };      // Qwen3 o

@@ -64,6 +64,14 @@ public sealed partial class VulkanBackend
     /// measured faster with a subgroup per row.</summary>
     internal static uint GemvSplit(DType dtype) => dtype == DType.Q5_0 ? 4u : 1u;
 
+    /// <summary>Test override of the split <see cref="GemvSplit"/> asks for; the dispatch still clamps it to the workgroup's
+    /// subgroups. Null (the default) takes the format's split. The parity tests run split 2 and split 4 through it on the 32-wide
+    /// RTX 3060.</summary>
+    internal uint? QuantGemvSplitOverride { get; set; }
+
+    /// <summary>The split the last <c>gemv_quant</c> dispatch ran with, after the clamp; tests read it to prove the override took.</summary>
+    internal uint LastQuantGemvSplit { get; private set; }
+
     /// <summary>Work units per block as <c>gemv_quant_unit.glsl</c> cuts them (<c>UNITS_PER_BLOCK</c>).</summary>
     internal static int GemvUnitsPerBlock(DType dtype) =>
         dtype == DType.F32 ? 1 : dtype == DType.Q8_0 ? 8 : dtype == DType.Q4_0 || dtype == DType.Q5_0 ? 4 : 16;
@@ -90,12 +98,18 @@ public sealed partial class VulkanBackend
         if (m < 1 || m > QuantGemvMaxRows)
             throw new ArgumentOutOfRangeException(nameof(m), $"gemv_quant takes 1..{QuantGemvMaxRows} activation rows; got {m}.");
 
-        // A 128-lane workgroup holds 128 / subgroupSize / split rows: `split` subgroups share one row (GemvSplit), and the
-        // shader sums their parts through shared memory when split is above 1.
+        // The workgroup has one lane per work unit up to 128 and never below a subgroup, as the base kernel sized it, so a short
+        // row does not leave most of 128 lanes idle. `split` subgroups share a row: the requested split (the test override, else
+        // the format's GemvSplit), clamped to the workgroup's subgroups. The shader sums the parts through shared memory when the
+        // split is above 1. rowsPerWg is the rows one workgroup then holds, passed to the shader as a specialization constant.
         uint subgroup = Math.Max(1u, Vk.SubgroupSize);
-        uint wg = 128u;
-        uint split = Math.Min(GemvSplit(dtype), Math.Max(1u, wg / subgroup));
-        uint rowsPerWg = Math.Max(1u, wg / subgroup / split);
+        long units = (long)k / GemvBlockElements(dtype) * GemvUnitsPerBlock(dtype);
+        uint wg = subgroup;
+        while (wg < 128 && wg < units) wg *= 2;
+        uint subgroupsPerWg = Math.Max(1u, wg / subgroup);
+        uint split = Math.Min(Math.Max(1u, QuantGemvSplitOverride ?? GemvSplit(dtype)), subgroupsPerWg);
+        uint rowsPerWg = subgroupsPerWg / split;
+        LastQuantGemvSplit = split;
 
         VulkanKernel kernel = GetKernel(shader, storageBufferCount: 4, new SpecConstant[]
         {
@@ -103,6 +117,7 @@ public sealed partial class VulkanBackend
             SpecConstant.Bool(1, bias != 0),
             SpecConstant.UInt(2, (uint)m),
             SpecConstant.UInt(3, split),
+            SpecConstant.UInt(4, rowsPerWg),
         });
         Span<byte> raw = stackalloc byte[8];
         PushConstants pc = new(raw);
