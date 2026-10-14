@@ -64,7 +64,11 @@ public sealed partial class VulkanBackend
     /// <summary>Causal prefill calls served by <c>sdpa_flash_cm2</c> on this backend (tests and profiling).</summary>
     public long FlashCm2PrefillDispatches { get; private set; }
 
-    /// <summary>Host-built causal (and sliding-window) additive mask, reused by every layer of one prefill.</summary>
+    /// <summary>Host-built causal (and sliding-window) additive mask for the cm2 prefill path: 4 * sq * kvLen bytes, never
+    /// above <see cref="FlashCm2PrefillPolicy.MaxMaskBytes"/>. Lifetime: the first causal prefill layer that takes the cm2
+    /// path builds it, and the layers after it reuse it while the shape stays the same. The first attention call that does
+    /// not take the cm2 path releases it (the first decode step, a short chunk, or a shape above the cap), so it is held
+    /// only across the layers of one prefill. <c>DisposeCore</c> releases it on teardown.</summary>
     private Tensor? _prefillMask;
     private int _prefillMaskSq, _prefillMaskKv, _prefillMaskOffset, _prefillMaskWindow;
 
@@ -83,6 +87,9 @@ public sealed partial class VulkanBackend
             return false;
         int hkv = hq / kvGroup;
         if (!CanUseFlashCm2(headDim, hq, hkv, sq, kvLen, mask: null)) return false;
+        // Above the cap the host mask is not built and nothing is retained for this shape: the scalar kernel runs, as
+        // it does on main. FlashCm2PrefillPolicy has the cost per layer.
+        if (!FlashCm2PrefillPolicy.MaskFits(sq, kvLen)) return false;
 
         Tensor mask = PrefillCausalMask(sq, kvLen, qOffset, slidingWindow);
         long kvCap = key.Shape[2];
@@ -114,6 +121,18 @@ public sealed partial class VulkanBackend
         _prefillMaskSq = sq; _prefillMaskKv = kvLen; _prefillMaskOffset = qOffset; _prefillMaskWindow = window;
         return mask;
     }
+
+    /// <summary>Releases the cached host mask. <c>FlashAttention</c> calls this whenever the cm2 path is not taken, so the
+    /// mask is held only across the layers of one prefill (see <see cref="_prefillMask"/>).</summary>
+    private void ReleasePrefillMask()
+    {
+        _prefillMask?.Dispose();
+        _prefillMask = null;
+    }
+
+    /// <summary>Host bytes the cached prefill mask holds right now, 0 when released. Tests read it to check the lifetime.</summary>
+    internal long FlashCm2RetainedMaskBytes =>
+        _prefillMask is null ? 0 : (long)_prefillMask.ElementCount * DType.F32.SizeInBytes;
 
     /// <summary>Shapes the cooperative-matrix-2 kernel does not serve: permute to [1,H,S,D], attend, permute back.</summary>
     private void AttendTokenMajorViaHeadMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,

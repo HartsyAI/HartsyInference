@@ -129,6 +129,67 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
     }
 
+    /// <summary>A prefill whose host mask would be above the cap takes the scalar kernel: no cm2 dispatch and no mask
+    /// retained. The shape is 8193 query rows by 8192 keys, one row past the 8K cap. Its first 64 rows are checked against
+    /// the reference for a 64-row prefill over the same keys, which is exact for causal attention and keeps the CPU
+    /// reference cheap.</summary>
+    [Fact]
+    public void CausalPrefill_AboveTheMaskCap_TakesTheScalarPath_AndRetainsNoMask()
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        backend.EnableFlashCm2Prefill = true;
+        const int hq = 1, hkv = 1, d = 64, sq = 8193, kvLen = 8192, check = 64;
+        float scale = 1f / MathF.Sqrt(d);
+        float[] q = Half(Random(hq * sq * d, 21));
+        float[] k = Half(Random(hkv * kvLen * d, 22));
+        float[] v = Half(Random(hkv * kvLen * d, 23));
+        float[] expected = new float[hq * check * d];
+        using (Tensor rq = FromHost(new TensorShape(1, hq, check, d), q.AsSpan(0, hq * check * d).ToArray()))
+        using (Tensor rk = FromHost(new TensorShape(1, hkv, kvLen, d), k))
+        using (Tensor rv = FromHost(new TensorShape(1, hkv, kvLen, d), v))
+        using (Tensor ro = new(new TensorShape(1, hq, check, d), DType.F32))
+        {
+            AttentionReference.FlashAttention(ro, rq, rk, rv, kvLen, hq / hkv, causal: true, 0, scale, slidingWindow: 0);
+            ro.AsReadOnlySpan<float>().CopyTo(expected);
+        }
+        using Tensor qt = FromHost(new TensorShape(1, hq, sq, d), q);
+        using Tensor kt = FromHost(new TensorShape(1, hkv, kvLen, d), k);
+        using Tensor vt = FromHost(new TensorShape(1, hkv, kvLen, d), v);
+        using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        long before = backend.FlashCm2PrefillDispatches;
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, hq / hkv, causal: true, 0, scale, slidingWindow: 0);
+        Assert.Equal(before, backend.FlashCm2PrefillDispatches);
+        Assert.Equal(0L, backend.FlashCm2RetainedMaskBytes);
+        Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>().Slice(0, hq * check * d)) < Tolerance);
+    }
+
+    /// <summary>The cached host mask is held across a prefill's cm2 layers and released by the next attention call that does
+    /// not take the cm2 path, such as a decode step.</summary>
+    [Fact]
+    public void CausalPrefill_MaskIsHeldAcrossLayers_AndReleasedByTheNextDecodeCall()
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        backend.EnableFlashCm2Prefill = true;
+        const int hq = 2, hkv = 2, d = 64, sq = 128, kvLen = 128;
+        float scale = 1f / MathF.Sqrt(d);
+        using Tensor qt = FromHost(new TensorShape(1, hq, sq, d), Half(Random(hq * sq * d, 31)));
+        using Tensor kt = FromHost(new TensorShape(1, hkv, kvLen, d), Half(Random(hkv * kvLen * d, 32)));
+        using Tensor vt = FromHost(new TensorShape(1, hkv, kvLen, d), Half(Random(hkv * kvLen * d, 33)));
+        using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, 1, causal: true, 0, scale, slidingWindow: 0);
+        Assert.Equal(4L * sq * kvLen, backend.FlashCm2RetainedMaskBytes);
+        // The next layer of the same prefill reuses the mask.
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, 1, causal: true, 0, scale, slidingWindow: 0);
+        Assert.Equal(4L * sq * kvLen, backend.FlashCm2RetainedMaskBytes);
+        // A decode step (one query row) does not take the cm2 path, so the mask is released.
+        using Tensor q1 = FromHost(new TensorShape(1, hq, 1, d), Half(Random(hq * d, 34)));
+        using Tensor o1 = new(new TensorShape(1, hq, 1, d), DType.F32);
+        backend.FlashAttention(o1, q1, kt, vt, kvLen, 1, causal: true, kvLen - 1, scale, slidingWindow: 0);
+        Assert.Equal(0L, backend.FlashCm2RetainedMaskBytes);
+    }
+
     private static float[] Pad(float[] dense, int heads, int len, int cap, int d)
     {
         float[] p = new float[heads * cap * d];
