@@ -46,7 +46,10 @@ public sealed partial class CudaKernels
             _kvScatterQkvF16 = _kvScatterF16Module.GetFunction("lm_qkv_rope_scatter_f16kv");
             _kvScatterQkNormF16 = _kvScatterF16Module.GetFunction("lm_qknorm_rope_scatter_f16kv");
             _kvAppendF16Sat = _kvScatterF16Module.GetFunction("lm_kv_append_f16_sat");
-            _castF32ToF16Sat = _kvScatterF16Module.GetFunction("cast_f32_to_f16_sat");
+            // A kv_scatter_f16.ptx built before this entry point lacks it: leave the handle at zero so HasCastF32ToF16Sat is false
+            // and the cuDNN SDPA path declines, instead of failing the whole backend's construction.
+            try { _castF32ToF16Sat = _kvScatterF16Module.GetFunction("cast_f32_to_f16_sat"); }
+            catch (CudaException) { _castF32ToF16Sat = 0; }
         }
         string normFast = Ptx("lm_norm_q8_fast");
         if (File.Exists(normFast))
