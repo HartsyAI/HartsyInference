@@ -85,6 +85,22 @@ public sealed class CosyVoiceFrontendParityTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>The added-token ids must lie outside the BPE vocabulary, so a special literal and an ordinary merge can
+    /// never share an id.</summary>
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void SpecialTokenIds_AreOutsideTheBpeVocabulary()
+    {
+        string vocab = Path.Combine(BlankEnDir, "vocab.json");
+        if (!RealWeightGate.Require(output.WriteLine, vocab)) return;
+
+        using JsonDocument doc = JsonDocument.Parse(File.ReadAllBytes(vocab));
+        HashSet<int> bpeIds = [.. doc.RootElement.EnumerateObject().Select(static p => p.Value.GetInt32())];
+        foreach ((string literal, int id) in CosyVoiceTextFrontend.SpecialTokens)
+            Assert.False(bpeIds.Contains(id), $"{literal} ({id}) collides with a vocab.json entry");
+        Assert.Equal(CosyVoiceTextFrontend.SpecialTokens.Count, CosyVoiceTextFrontend.SpecialTokens.Values.Distinct().Count());
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public void SegmentTokenIds_MatchReferenceTokenizer()
