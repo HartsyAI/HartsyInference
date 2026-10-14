@@ -31,7 +31,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void RopeApplyDecodeStep_MatchesCpuReference(int maxPos, int headDim, int rotaryDim, bool interleaved)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int numHeads = 4;
         const int position = 17;
 
@@ -91,7 +91,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void EmbedGatherDecodeStep_GathersCorrectRow()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int vocab = 37, hidden = 64, tokenId = 19;
 
         Tensor embed = new(new TensorShape(vocab, hidden), DType.F32);
@@ -119,7 +119,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void ArgMaxInto_MatchesCpuArgmax(int c)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor logits = new(new TensorShape(1, c), DType.F32);
         ulong tokBuf = backend.AllocDeviceTokenId();
@@ -148,7 +148,7 @@ public sealed class VulkanDecodeGraphTests
     public void AppendTokenHistoryStep_AppendsEachDistinctTokenOnce()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int capacity = 8;
 
         ulong history = backend.AllocDeviceHistory(capacity);
@@ -184,7 +184,7 @@ public sealed class VulkanDecodeGraphTests
     public void ApplyRepetitionPenaltyStep_MatchesHfConventionWithRepeats()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int vocab = 32;
         const float penalty = 1.3f;
         int[] tokens = { 3, 10, 3, 3, 25 };   // token 3 repeats 3x — penalized once
@@ -239,7 +239,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void KvCacheAppendDev_UsesDevicePositionNotHostOffset()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int heads = 2, maxSeq = 8, headDim = 4;
 
         Tensor cache = new(new TensorShape(1, heads, maxSeq, headDim), DType.F32);
@@ -292,7 +292,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void FlashAttentionDev_MatchesCpuReference(int priorLen)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int batch = 1, hq = 8, hkv = 2, sq = 1, maxSeq = 32, headDim = 32;
         int kvLen = priorLen + 1;   // this step's own K/V was already appended before attending
         float scale = 1f / MathF.Sqrt(headDim);

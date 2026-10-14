@@ -126,6 +126,12 @@ public static class BackendGate
                 // having no usable Vulkan. Search for one, and remember which, because the backend has to be opened
                 // on the same ordinal that was accepted.
                 bool allowSoftware = Environment.GetEnvironmentVariable(AllowSoftwareEnvVar) == "1";
+                // A pinned ordinal is the whole answer. The loop below takes the first hardware device it finds, which
+                // on the dev box is the RTX 4090 at ordinal 0, so a pin must never reach that loop.
+                if (VulkanTestDeviceSelection.FromEnvironment() is int pinned)
+                {
+                    return PinVulkan(pinned, deviceCount, allowSoftware);
+                }
                 string? lastName = null;
                 for (int ordinal = 0; ordinal < deviceCount; ordinal++)
                 {
@@ -151,6 +157,27 @@ public static class BackendGate
             default:
                 return $"unknown backend kind '{kind}'";
         }
+    }
+
+    /// <summary>Accepts exactly the Vulkan device the environment names, and nothing else. A name that matches no device,
+    /// or a software one without <see cref="AllowSoftwareEnvVar"/>, throws rather than skipping: a skip prints SKIPPED
+    /// and lets the run come back green on a device nobody chose.</summary>
+    private static string? PinVulkan(int ordinal, int deviceCount, bool allowSoftware)
+    {
+        if (ordinal >= deviceCount)
+        {
+            throw new InvalidOperationException(
+                $"{VulkanTestDeviceSelection.EnvVar}={ordinal} names no Vulkan device; {deviceCount} enumerated.");
+        }
+        using VulkanBackend probe = new(ordinal, KernelDir("Spirv", "HartsyInference.Vulkan"));
+        if (!allowSoftware && probe.Capabilities.Vendor == GpuVendor.Software)
+        {
+            throw new InvalidOperationException(
+                $"{VulkanTestDeviceSelection.EnvVar}={ordinal} is a software rasterizer ({probe.Capabilities.DeviceName}); "
+                + $"set {AllowSoftwareEnvVar}=1 to test against one.");
+        }
+        _vulkanOrdinal = ordinal;
+        return null;
     }
 
     private static IBackend Create(string kind) => kind.ToLowerInvariant() switch

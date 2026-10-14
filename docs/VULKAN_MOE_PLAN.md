@@ -253,6 +253,29 @@ Decode rate, the CLI's `decode_tok_s` for the graph: Qwen2.5 217.3 on `origin/ma
 
 Speculation only pays on repetitive text: this prompt repeats a sentence, and for Qwen3-4B and OLMoE the speculative run (45.4 and 139.5) is still not faster than plain greedy with the graph (58.4 and 168.7) or even without it (47.2 and 135.8), so speculative decode stays opt-in (`numerics.specDecode`) and is not combined with the graph (the pipeline picks the graph when both apply).
 
+## Causal prefill attention: measured result
+
+Before this change a causal `FlashAttention` call, which every prompt makes, reached only the scalar `sdpa_flash_f32`; the cooperative-matrix-2 gate lived on the non-causal `ScaledDotProductAttention` entry points. `numerics.vkFlashCm2Prefill`, on by default, routes causal prefill of 64 or more query rows through `sdpa_flash_cm2_mask` when the shape fits: batch 1, head dimension 64 or 128, F32 Q/K/V, no softcap, sink or ALiBi, and a device with `VK_NV_cooperative_matrix2`, and a host mask of at most 256 MiB (`4 * sq * kvLen` bytes; `FlashCm2PrefillPolicy`). The causal and sliding-window mask is one host-built F32 tile, reused across the layers of one prefill on the host and released by the first attention call that does not take the cm2 path. Decode (one query row) and chunks under 64 rows stay on the scalar kernel, and `numerics.vkFlashCm2Prefill=0` keeps every prefill on it.
+
+Evidence, RTX 3060 (`-b vulkan:1`), prompt about 750 tokens, 128 greedy tokens. Prefill is the wall time of the long prompt with one new token minus the wall time of the prompt "Hi" with one new token. Median of 3 interleaved reps, flag off then on. The first run of each model includes a cold cache, so the medians are the numbers to quote. The card is shared, so wall times are noisy.
+
+| Model | Prefill off | Prefill on | Text, off vs on | Text vs CPU backend |
+|---|---|---|---|---|
+| Llama-3.2-1B Q8_0 | 1.94 s | 0.22 s | identical | identical |
+| Qwen2.5-0.5B Q4_K_M | 1.27 s | 0.16 s | identical | identical |
+| granite-3.0-1b-a400m Q4_K_M | 1.38 s | 0.39 s | identical | identical |
+| OLMoE-1B-7B Q4_K_M | 2.03 s | 0.69 s | differ | on: equal, 105 words; off: diverges at character 362 |
+| Qwen3-4B Q4_K_M | 6.65 s | 0.74 s | identical | identical |
+
+Decode tokens per second is unchanged within noise. On OLMoE the scalar path was the less correct of the two, so the default change moves that model's output toward the CPU reference.
+
+Parity: `VulkanFlashCm2Tests.CausalPrefill_MatchesReference` (8 cases on the cm2 kernel, asserting that the dispatch counter moved) and `CausalPrefill_FlagOff_UsesScalarPath_MatchesReference` (3 cases on the scalar path, asserting that no cm2 dispatch ran). Both compare against a double-precision CPU reference within 1e-3.
+
+Open:
+
+- The mask is not cached on the device. `DispatchFlashCm2` calls `GetBuffer(mask)`, which goes through `GpuResidencyCache.CopyToDevice`: a host tensor that is neither a cached weight nor a cached activation gets a fresh transient upload, and Vulkan does not override the promote-on-miss hook. Each layer therefore uploads the mask again: 2.25 MB a layer at 750 tokens, and `4 * sq * kvLen` bytes a layer in general (64 MiB at 4K, 256 MiB at 8K, 4 GiB at 32K). The cap keeps any prefill above 8K off this path. The follow-up is a device-side mask with no host upload, which is the proper fix. Not done here, because it changes the dispatch path these numbers were measured on. Raised by the Codex review of #394.
+- Nothing above 750 tokens has been measured on this path.
+
 ## Plan, in order
 
 Each step lands as its own PR, with a parity test against the CPU reference for every new shader and a before/after

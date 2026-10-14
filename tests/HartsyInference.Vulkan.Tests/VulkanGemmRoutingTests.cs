@@ -49,7 +49,7 @@ public sealed class VulkanGemmRoutingTests(ITestOutputHelper output)
     public void BatchedMatMul_OnF16_RunsOnCoopmat_AndMatchesTheF32Product()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasCooperativeMatrix) { _out.WriteLine("SKIPPED: no cooperative matrix on this device"); return; }
         const int B = 3, M = 64, K = 64, N = 128;
         using Tensor a32 = Rand(new TensorShape(B, M, K), 1);
@@ -74,7 +74,7 @@ public sealed class VulkanGemmRoutingTests(ITestOutputHelper output)
     public void Conv2D_OnF16_RunsOnCoopmat_AndMatchesTheF32Convolution()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasCooperativeMatrix) { _out.WriteLine("SKIPPED: no cooperative matrix on this device"); return; }
         const int batch = 2, cin = 32, cout = 64, h = 16, w = 16;   // K = 32·9 = 288, N = 256, M = 64: all 16-aligned
         using Tensor x32 = Rand(new TensorShape(batch, cin, h, w), 3);
@@ -104,7 +104,7 @@ public sealed class VulkanGemmRoutingTests(ITestOutputHelper output)
     public void Linear_WithF16Weight_ComputesInF16_AndMatchesTheF32Rule(int M, int K, int N)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         using Tensor x = Rand(new TensorShape(M, K), 7);
         using Tensor w32 = Rand(new TensorShape(N, K), 8);
         using Tensor w16 = w32.CastTo(DType.F16);
