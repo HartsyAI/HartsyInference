@@ -119,20 +119,28 @@ class WatchdogTests(unittest.TestCase):
         watchdog.run_once(stub, self.leases, now=T0 + dt.timedelta(hours=50), log=self.log)
         self.assertEqual(stub.stops(), [])
 
-    def test_no_second_stop_after_request_recorded(self):
+    def test_stop_is_retried_each_pass_while_the_pod_stays_running(self):
         self.bound("p", 7)
         stub = StubRunPod([{"id": "p", "desiredStatus": "RUNNING"}])
         watchdog.run_once(stub, self.leases, now=T0, log=self.log)
         watchdog.run_once(stub, self.leases, now=T0 + dt.timedelta(minutes=5), log=self.log)
+        self.assertEqual(stub.stops(), ["/pods/p/stop", "/pods/p/stop"])
+
+    def test_pod_restarted_from_the_console_is_stopped_again(self):
+        self.bound("p", 7)
+        stub = StubRunPod([{"id": "p", "desiredStatus": "EXITED"}])
+        watchdog.run_once(stub, self.leases, now=T0, log=self.log)
+        self.assertEqual(stub.stops(), [])
+        stub.pods = [{"id": "p", "desiredStatus": "RUNNING"}]     # operator restarted it
+        self.assertEqual(watchdog.run_once(stub, self.leases, now=T0 + dt.timedelta(hours=1), log=self.log), ["p"])
         self.assertEqual(stub.stops(), ["/pods/p/stop"])
 
-    def test_stop_mark_is_not_cleared_when_the_pod_is_restarted(self):
+    def test_exited_pod_is_logged_once_not_every_pass(self):
         self.bound("p", 7)
-        stub = StubRunPod([{"id": "p", "desiredStatus": "RUNNING"}])
-        watchdog.run_once(stub, self.leases, now=T0, log=self.log)
-        stub.pods = [{"id": "p", "desiredStatus": "RUNNING"}]     # operator restarted it from the console
-        watchdog.run_once(stub, self.leases, now=T0 + dt.timedelta(hours=1), log=self.log)
-        self.assertEqual(stub.stops(), ["/pods/p/stop"])
+        stub = StubRunPod([{"id": "p", "desiredStatus": "EXITED"}])
+        for minutes in (0, 5, 10):
+            watchdog.run_once(stub, self.leases, now=T0 + dt.timedelta(minutes=minutes), log=self.log)
+        self.assertEqual(sum("not stopping" in m for m in self.logs), 1)
 
     def test_failed_stop_is_retried_next_pass(self):
         self.bound("p", 7)

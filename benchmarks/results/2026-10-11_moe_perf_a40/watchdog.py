@@ -12,9 +12,9 @@ Lease lifecycle (file: ~/.runpod/podkit-leases.json, outside the repo):
      created pod), the pending lease stays.
   3. pod_up.py binds the pending lease to the pod id once the response has it. If that write fails, the next watchdog
      pass finds the pod by its unique name and binds it there.
-  4. Only leased pods are ever stopped: once RUNNING and older than their max hours, the watchdog POSTs /stop once.
-     Its stop_requested mark is never cleared, so a pod restarted from the console after a stop is not re-armed; that
-     is deliberate, because a restart is a new decision for the operator.
+  4. Only leased pods are ever stopped. Every pass that finds a leased pod RUNNING and past its max hours POSTs /stop
+     again, so a pod the operator restarts from the console is stopped again at the next pass. A pod that is not
+     RUNNING is left alone and logged once per status change. stop_requested records the last POST (information only).
 
 Run it on a timer, for example cron every 5 minutes:
 
@@ -165,10 +165,10 @@ def _age_h(rec, now):
 
 
 def pods_due(leases, now):
-    """Bound pod ids whose max lifetime has passed and that have not already been asked to stop."""
+    """Bound pod ids whose max lifetime has passed. Stopping is retried each pass until the pod is no longer RUNNING."""
     due = []
     for pid, rec in leases.items():
-        if pid.startswith(PENDING) or rec.get("stop_requested"):
+        if pid.startswith(PENDING):
             continue
         if _age_h(rec, now) >= float(rec["max_hours"]):
             due.append(pid)
@@ -218,18 +218,21 @@ def _run_once_locked(api_call, path, now, dry_run, log):
             continue
         if (now - _parse_time(rec["missing_since"])).total_seconds() / 3600.0 > VANISH_GRACE_H:
             # Terminated or deleted by someone else: the lease no longer protects anything.
-            if not rec.get("stop_requested"):
-                log(f"watchdog: {pid} has been absent from the listing for over {VANISH_GRACE_H} h; dropping its lease")
+            log(f"watchdog: {pid} has been absent from the listing for over {VANISH_GRACE_H} h; dropping its lease")
             leases.pop(pid)
 
     stopped = []
     for pid in pods_due(leases, now):
         if pid not in live:
             continue   # absent this pass: keep the lease, decide on a later pass
-        if live[pid].get("desiredStatus") != "RUNNING":
-            log(f"watchdog: {pid} ({leases[pid]['name']}) is past its max hours but {live[pid].get('desiredStatus')}; not stopping, will check again")
-            continue
         rec = leases[pid]
+        status = live[pid].get("desiredStatus")
+        if status != "RUNNING":
+            if rec.get("last_status") != status:   # log once per change, not every pass
+                log(f"watchdog: {pid} ({rec['name']}) is past its max hours but {status}; not stopping")
+                rec["last_status"] = status
+            continue
+        rec["last_status"] = status
         age = _age_h(rec, now)
         if dry_run:
             log(f"watchdog: DRY RUN would stop {pid} ({rec['name']}), {age:.2f} h old, max {rec['max_hours']} h")

@@ -36,7 +36,7 @@ except ValueError as e:
     sys.exit(f"refusing to rent a pod: {e}")
 code, pod = api("POST", "/pods", body, timeout=CREATE_TIMEOUT_S)
 if code >= 300 or not isinstance(pod, dict) or "id" not in pod:
-    if 400 <= code < 500:
+    if 400 <= code < 500 and code != 408:   # 408 is ambiguous (the server may have acted), so it keeps the lease
         drop_pending(pod_name)   # a definitive refusal (no capacity, bad request): no pod exists, so no lease is needed
         sys.exit(f"create refused HTTP {code}: {pod}")
     # Timeout, 5xx or unreadable reply: a pod may exist. The pending lease stays; the watchdog finds it by pod_name.
