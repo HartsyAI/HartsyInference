@@ -27,6 +27,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
     private static readonly int[] BlockDilations = [1, 2, 2];
 
     private readonly int _embedDim;
+    private readonly bool _onnxSegmentPooling;
     private int _disposed;
 
     // FCM (ResNet front). layer1/layer2 each have 2 BasicResBlocks; the first of each downsamples freq.
@@ -43,7 +44,15 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
     // Final dense (BN affine=false, no ReLU).
     private Tensor? _denseW; private Bn _denseBn = new();
 
-    public CamPlusSpeakerEncoder(int embedDim = 192) => _embedDim = embedDim;
+    /// <param name="onnxSegmentPooling">How the CAM context pool averages a trailing partial 100-frame segment: true
+    /// divides by the full segment length, as the <c>campplus.onnx</c> export CosyVoice 2 deploys does; false divides
+    /// by the frames it covers, as PyTorch <c>avg_pool1d(ceil_mode=True)</c> in upstream <c>CAMPPlus</c> does
+    /// (IndexTTS-2).</param>
+    public CamPlusSpeakerEncoder(int embedDim = 192, bool onnxSegmentPooling = true)
+    {
+        _embedDim = embedDim;
+        _onnxSegmentPooling = onnxSegmentPooling;
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
@@ -103,7 +112,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
         {
             foreach (DenseLayerW layer in _blocks[b])
             {
-                Tensor outL = layer.Forward(backend, h, BlockDilations[b]);
+                Tensor outL = layer.Forward(backend, h, BlockDilations[b], _onnxSegmentPooling);
                 Tensor cat = Concat(h, outL);     // dense growth: cat([x, layer(x)], dim=1)
                 h.Dispose(); outL.Dispose();
                 h = cat;
@@ -371,7 +380,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
             _ctx2B = WhisperOps.EnsureF32(w[$"{p}.cam_layer.linear2.bias"]),
         };
 
-        public Tensor Forward(IBackend backend, Tensor x, int dilation)
+        public Tensor Forward(IBackend backend, Tensor x, int dilation, bool onnxSegmentPooling)
         {
             // bn_function: nonlinear1 (BN+ReLU) then 1×1 bottleneck. Operates on a copy (x is reused by concat).
             Tensor h = new(x.Shape, DType.F32);
@@ -384,7 +393,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
             // CAMLayer: y = linear_local(bn); m = sigmoid(linear2(relu(linear1(mean + seg_pool(bn)))))); return y*m.
             int dilPad = dilation;     // (kernel 3 - 1)//2 * dilation = dilation
             Tensor y = Conv1d(backend, bn, _localW!, null, 1, dilPad, dilation);     // [1,32,T]
-            Tensor ctx = ContextPool(bn);                                            // [1,128,T]
+            Tensor ctx = ContextPool(bn, onnxSegmentPooling);                        // [1,128,T]
             bn.Dispose();
             Tensor c1 = Conv1d(backend, ctx, _ctx1W!, _ctx1B, 1, 0, 1); ctx.Dispose();
             Relu(backend, c1);
@@ -395,7 +404,7 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
         }
 
         /// <summary>CAM context: <c>x.mean(time) + seg_pool(x)</c>, where seg_pool averages each 100-frame segment (ceil mode) and broadcasts it back over the frames it covers.</summary>
-        private static Tensor ContextPool(Tensor x)
+        private static Tensor ContextPool(Tensor x, bool onnxSegmentPooling)
         {
             int C = (int)x.Shape[1], T = (int)x.Shape[2];
             const int seg = 100;
@@ -412,9 +421,8 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
                     int end = Math.Min(s + seg, T);
                     double segSum = 0;
                     for (int j = s; j < end; j++) segSum += p[baseI + j];
-                    // ONNX AveragePool (ceil_mode, no pad) divides by the kernel size, not the valid count —
-                    // CosyVoice2 deploys the ONNX, so partial windows divide by seg_len too.
-                    float segMean = (float)(segSum / seg);
+                    // ONNX AveragePool (ceil_mode, no pad) divides a partial window by the kernel size, torch by the valid count.
+                    float segMean = (float)(segSum / (onnxSegmentPooling ? seg : end - s));
                     for (int j = s; j < end; j++) op[baseI + j] = (float)mean + segMean;
                 }
             }

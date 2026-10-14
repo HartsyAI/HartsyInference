@@ -14,14 +14,12 @@ namespace HartsyInference.Audio.Tests.IndexTts2;
 /// text (<c>Fixtures/indextts25_beam_reference.json</c>, from tools/parity/indextts25_beam_reference.py). Needs the
 /// 2.5 checkpoint and aux models under <c>HARTSY_INDEXTTS_MODELS_ROOT</c> and the recorded clip in
 /// <c>INDEXTTS2_BEAM_REF_WAV</c> (checked against the fixture's SHA-256). Runs on the CPU backend.</summary>
-/// <remarks>Only the opening codes and the length are asserted: plain greedy decoding (one beam) already leaves
-/// upstream's codes after six to eight tokens, so the C# forward's numerics, not the search, decide where a near-tie
-/// flips. The search itself is checked exactly against transformers in <see cref="BeamSearchTests"/>.</remarks>
+/// <remarks>The whole code sequence is asserted. The C# resamplers approximate librosa's soxr, so another clip can still
+/// flip a near-tie late in a sequence; <see cref="Parity.IndexTts25GptDecodeParityTests"/> localizes such a drift.
+/// The search itself is checked exactly against transformers in <see cref="BeamSearchTests"/>.</remarks>
 [Trait("Category", "Integration")]
 public sealed class IndexTts25BeamParityTests(ITestOutputHelper output)
 {
-    private const int LeadingCodes = 6;
-
     [Fact]
     public async Task GreedyBeamCodes_MatchUpstream()
     {
@@ -64,8 +62,7 @@ public sealed class IndexTts25BeamParityTests(ITestOutputHelper output)
                 output.WriteLine($"{text} beams={beams}: {codes.Length} codes (upstream {expected.Length}), {same} equal by position");
                 output.WriteLine("  engine:   " + string.Join(',', codes));
                 output.WriteLine("  upstream: " + string.Join(',', expected));
-                Assert.Equal(expected[..LeadingCodes], codes[..LeadingCodes]);
-                Assert.InRange(codes.Length, expected.Length - 3, expected.Length + 3);
+                Assert.Equal(expected, codes);
             }
             finally
             {
