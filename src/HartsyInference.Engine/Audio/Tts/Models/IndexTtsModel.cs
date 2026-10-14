@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Frontends.WeText;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -40,8 +41,10 @@ internal static class IndexTtsModel
                     new AudioModelFile(GptFile),
                 ], "tts", ct: cancel).ConfigureAwait(false);
 
+            WeTextNormalizer weText = await WeTextAssets.LoadAsync(WeTextLanguage.Auto, removeErhua: false, cancel).ConfigureAwait(false);
             IndexTtsPipeline pipeline = await IndexTtsPipeline.LoadAsync(
-                fetched[TokenizerFile], fetched[GptFile], fetched[BigVganFile], cfg: null, ct: cancel).ConfigureAwait(false);
+                fetched[TokenizerFile], fetched[GptFile], fetched[BigVganFile], cfg: null,
+                IndexTtsFstNormalizers.FromWeText(weText), cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][IndexTTS] Loaded {Repo} (IndexTTS-1.5, zero-shot cloning, 24 kHz).");
 
             return new TtsRunner(24_000, (backend, job) => Synthesize(pipeline, backend, job), pipeline);

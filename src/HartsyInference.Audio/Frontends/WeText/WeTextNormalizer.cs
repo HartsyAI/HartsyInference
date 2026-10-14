@@ -106,11 +106,15 @@ public sealed class WeTextNormalizer
 
     /// <summary>Reorders the tagger output's token fields and runs the verbalizer (wetext
     /// <c>Normalizer.verbalize</c>).</summary>
-    public string Verbalize(string tagged, WeTextLanguage language)
+    public string Verbalize(string tagged, WeTextLanguage language) => Verbalize(tagged, language, wetext018: false);
+
+    /// <summary><see cref="Verbalize(string, WeTextLanguage)"/> with the wetext 0.1.x reorder when
+    /// <paramref name="wetext018"/> is set (see <see cref="WeTextTokenParser.Reorder"/>).</summary>
+    internal string Verbalize(string tagged, WeTextLanguage language, bool wetext018)
     {
         // Normalize passes the language it tagged with; Auto here only serves direct callers holding tagged text.
         WeTextLanguage concrete = Concrete(language, tagged);
-        return Rewriters(concrete).Verbalizer.Rewrite(WeTextTokenParser.Reorder(tagged, concrete));
+        return Rewriters(concrete).Verbalizer.Rewrite(WeTextTokenParser.Reorder(tagged, concrete, wetext018));
     }
 
     /// <summary>wetext's language test: any CJK Unified Ideograph (U+4E00..U+9FFF).</summary>

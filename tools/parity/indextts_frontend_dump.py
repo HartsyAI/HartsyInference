@@ -461,9 +461,11 @@ def main():
         "cases": cases,
     }
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    # One case per line keeps the fixture small and its diffs readable.
+    header = json.dumps({k: v for k, v in out.items() if k != "cases"}, ensure_ascii=False)
+    lines = [json.dumps(c, ensure_ascii=False, separators=(",", ":")) for c in cases]
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=1)
-        f.write("\n")
+        f.write(header[:-1] + ',\n"cases":[\n' + ",\n".join(lines) + "\n]}\n")
     print(f"{len(cases)} lines -> {out_path}")
 
 
