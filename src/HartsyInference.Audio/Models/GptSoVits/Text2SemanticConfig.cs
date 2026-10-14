@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Sampling;
 namespace HartsyInference.Audio.Models.GptSoVits;
 
 /// <summary>Configuration for GPT-SoVITS stage 1 — the T2S (text→semantic) AR GPT (`Text2SemanticDecoder`).
@@ -17,6 +18,8 @@ public sealed record Text2SemanticConfig
     public int PhonemeVocab { get; init; } = 512;
     public int SemanticVocab { get; init; } = 1_025;  // 1024 codes + EOS
     public int EosToken { get; init; } = 1_024;
+    /// <summary>Floor 11: reference <c>t2s_model.py infer_panel_naive</c> runs <c>if idx &lt; 11: logits = logits[:, :-1]</c>, dropping the EOS column for the first 11 steps.</summary>
+    public StopGate EosGate { get; init; } = new(MinTokens: 11);
     public int BertDim { get; init; } = 1_024;        // chinese-roberta-wwm-ext-large
     public float NormEps { get; init; } = 1e-5f;
 

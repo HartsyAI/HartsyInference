@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.CosyVoice;
+using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -10,7 +11,9 @@ namespace HartsyInference.Audio.Tests;
 public sealed unsafe class CosyVoiceSpeechSamplerTests
 {
     private const int EosToken = 4;     // candidates [0, 4] inclusive; index 4 is end-of-speech
-    private const int Vocab = 6;        // extra decoder rows above EOS are never sampled
+    private const int Vocab = 6;
+    private static readonly StopGate Gate = new(MinTokens: 0, MinTokenTextRatio: 2f);
+    private const int TargetText = 5;   // floor = 10 speech tokens        // extra decoder rows above EOS are never sampled
 
     private static Tensor EosDominantLogits()
     {
@@ -32,7 +35,7 @@ public sealed unsafe class CosyVoiceSpeechSamplerTests
         List<int> history = new List<int>();
 
         for (int i = 0; i < 50; i++)
-            Assert.Equal(EosToken, sampler.Sample(logits, history));
+            Assert.Equal(EosToken, sampler.Sample(logits, history, StopGate.Disabled, 0));
     }
 
     [Theory]
@@ -45,11 +48,13 @@ public sealed unsafe class CosyVoiceSpeechSamplerTests
         using Tensor logits = EosDominantLogits();
         List<int> history = new List<int>();
 
-        for (int i = 0; i < 200; i++)
+        for (int i = 0; i < 10; i++)
         {
-            int tok = sampler.Sample(logits, history, ignoreEos: true);
+            int tok = sampler.Sample(logits, history, Gate, TargetText);
             Assert.InRange(tok, 0, EosToken - 1);
             history.Add(tok);
         }
+        // Gate opens at 10 generated tokens: EOS is then drawable again.
+        Assert.Equal(EosToken, sampler.Sample(logits, history, Gate, TargetText));
     }
 }
