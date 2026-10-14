@@ -167,22 +167,27 @@ public static class TextPlacementPlanner
         // Every stage runs the whole prompt's prefill on its own device, so each device must hold its share of the weights and KV
         // cache plus a full prefill and its reserve. The share is proportional to free memory, as the layer split is. An aggregate
         // check alone would accept two cards whose sum covers the weights and one prefill, then run out of memory in prefill.
+        if (free <= 0)
+        {
+            return new TextPlacement(TextPlacementMode.Split, false, names, 0, need, free, "The GPUs report no free memory.");
+        }
         long shared = demand.DenseBytes + demand.ExpertBytes + demand.KvBytes;
-        TextPlacementDevice? tight = null;
-        long tightNeed = 0;
+        // The stage with the least room left decides the split; its own need and free are what the placement reports.
+        TextPlacementDevice worst = devices[0];
+        long worstNeed = 0, worstMargin = long.MinValue;
         foreach (TextPlacementDevice d in devices)
         {
             long stage = (long)(shared * (d.FreeBytes / (double)free)) + demand.PrefillBytes + ReserveBytes;
-            if (stage <= d.FreeBytes) continue;
-            tight = d;
-            tightNeed = stage;
-            break;
+            if (stage - d.FreeBytes <= worstMargin) continue;
+            worst = d;
+            worstNeed = stage;
+            worstMargin = stage - d.FreeBytes;
         }
-        bool fits = tight is null;
+        bool fits = worstMargin <= 0;
         string reason = fits
             ? $"Split across {string.Join(" and ", names)}: each stage fits its share, prefill included."
-            : $"{tight!.Value.Device} has {Gb(tight!.Value.FreeBytes)} free; its share of the split plus the prefill needs {Gb(tightNeed)}.";
-        return new TextPlacement(TextPlacementMode.Split, fits, names, 0, need, free, reason);
+            : $"{worst.Device} has {Gb(worst.FreeBytes)} free; its share of the split plus the prefill needs {Gb(worstNeed)}.";
+        return new TextPlacement(TextPlacementMode.Split, fits, names, 0, worstNeed, worst.FreeBytes, reason);
     }
 
     private static TextPlacement Offload(TextPlacementDemand demand, TextPlacementDevice device, long? hostFreeBytes)

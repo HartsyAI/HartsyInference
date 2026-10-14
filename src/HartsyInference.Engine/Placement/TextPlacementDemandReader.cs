@@ -99,7 +99,9 @@ public static class TextPlacementDemandReader
             foreach (TextTensorInfo t in tensors)
             {
                 if (t.Name.Contains("_exps.", StringComparison.Ordinal)) continue;
-                if (t.Name.EndsWith(".ffn_up.weight", StringComparison.Ordinal) || t.Name.EndsWith(".ffn_gate.weight", StringComparison.Ordinal))
+                // The shared expert (ffn_*_shexp) runs beside the routed experts in the same layer, so its width counts too.
+                if (t.Name.EndsWith(".ffn_up.weight", StringComparison.Ordinal) || t.Name.EndsWith(".ffn_gate.weight", StringComparison.Ordinal)
+                    || t.Name.EndsWith(".ffn_up_shexp.weight", StringComparison.Ordinal) || t.Name.EndsWith(".ffn_gate_shexp.weight", StringComparison.Ordinal))
                     ffnWidth = Math.Max(ffnWidth, t.Elements / hidden);
             }
         }

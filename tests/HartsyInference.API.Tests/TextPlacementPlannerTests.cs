@@ -223,6 +223,22 @@ public sealed class TextPlacementPlannerTests
     }
 
     [Fact]
+    public void Split_UnevenPair_RefusesTheSmallCardAtLongContext_AndAdmitsItAtAShortOne()
+    {
+        // A 24 GB card with an 8 GB card: the 8 GB stage holds a quarter of the 12 GB of weights and KV, plus a full 32K prefill.
+        TextPlacementDemand demand = Dense8BAt32K();
+        TextPlacement plan = TextPlacementPlanner.Plan(demand, [Card("cuda:0", 24), Card("cuda:1", 8)], null, TextPlacementMode.Split);
+        Assert.False(plan.Feasible);
+        Assert.Contains("cuda:1", plan.Reason);
+        Assert.Equal(Card("cuda:1", 8).FreeBytes, plan.AvailableBytes);
+        Assert.True(plan.RequiredBytes > plan.AvailableBytes, "the reported need is the refused stage's, measured against its own free memory");
+
+        TextPlacement shorter = TextPlacementPlanner.Plan(demand with { ContextTokens = 4096 }, [Card("cuda:0", 24), Card("cuda:1", 8)],
+            null, TextPlacementMode.Split);
+        Assert.True(shorter.Feasible);
+    }
+
+    [Fact]
     public void Prefill_UsesTheWidestFfnFromTheHeaders()
     {
         // Gemma-style per-layer FFN widths: the metadata says 4096, but one layer's up projection is 12288 wide.
