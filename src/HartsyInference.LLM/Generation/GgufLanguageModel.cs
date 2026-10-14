@@ -138,9 +138,7 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    // Qwen2-style split (Kolibri-1's tokenizer.json): case-insensitive contractions, single digits, newline-aware whitespace.
-    internal const string Qwen2PreTokenRegex =
-        @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+    internal const string Qwen2PreTokenRegex = GgufTokenizer.Qwen2PreTokenRegex;
 
     // Llama-3 / GPT-4 byte-level pre-token split (matches llama.cpp LLAMA3 + HF tokenizer.json).
     private const string Llama3PreTokenRegex =

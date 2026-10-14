@@ -69,33 +69,68 @@ internal static class GptSoVitsModel
                         "GPT-SoVITS needs the reference transcript — the exact words spoken in the reference clip.");
                 }
 
+                // Cut and phonemize the text before allocating the reference tensors, so a text error leaks nothing.
+                // Upstream TTS.run: the target is cut (four sentences per segment), each segment is synthesized after
+                // the reference transcript's phones (s1 text span = ref + segment, zero BERT on the English path), and
+                // the fragments are joined with 0.3 s of silence after each.
+                int[] referenceIds = GptSoVitsSymbols.ToSequence(GptSoVitsTextSegmenter.PrepareEnglishPrompt(job.RefText).Phones);
+                List<GptSoVitsTextSegment> segments;
+                try
+                {
+                    segments = GptSoVitsTextSegmenter.PrepareEnglish(job.Text);
+                }
+                catch (ArgumentException e)
+                {
+                    // Upstream asserts on punctuation- or whitespace-only text; surface it as the same request error.
+                    throw new InvalidOperationException("GPT-SoVITS found nothing to speak in the text.", e);
+                }
+                if (segments.Count == 0)
+                {
+                    throw new InvalidOperationException("GPT-SoVITS found nothing to speak in the text.");
+                }
+
                 // Reference clip → 16 kHz (HuBERT) + 32 kHz (1025-bin linear spectrogram for the speaker embedding).
                 float[] reference16k = AudioClipCodec.DecodeMono(job.Reference, 16_000);
                 float[] reference32k = AudioClipCodec.DecodeMono(job.Reference, 32_000);
-                Tensor referencePcm = new Tensor(new TensorShape(1, 1, reference16k.Length), DType.F32);
-                reference16k.AsSpan().CopyTo(referencePcm.AsSpan<float>());
-                Tensor referenceSpec = LinearSpectrogram.Extract(reference32k, 2048, 640);
+                // Upstream TTS._set_prompt_semantic appends int(sampling_rate × 0.3) zeros, sized at the model's 32 kHz
+                // rate, to the 16 kHz clip before HuBERT: 0.6 s of silence at 16 kHz.
+                int hubertLength = reference16k.Length + pipeline.SampleRate * 3 / 10;
+                using Tensor referencePcm = new Tensor(new TensorShape(1, 1, hubertLength), DType.F32);
+                Span<float> hubertInput = referencePcm.AsSpan<float>();
+                reference16k.AsSpan().CopyTo(hubertInput);
+                hubertInput[reference16k.Length..].Clear();
+                using Tensor referenceSpec = LinearSpectrogram.Extract(reference32k, 2048, 640);
                 int specFrames = (int)referenceSpec.Shape[2];
 
-                // English G2P → phoneme ids; the s1 text span is ref + target, BERT is zero for the English path.
-                int[] referenceIds = GptSoVitsSymbols.ToSequence(GptSoVitsFrontend.CleanText(job.RefText, "en").Phones);
-                int[] targetIds = GptSoVitsSymbols.ToSequence(GptSoVitsFrontend.CleanText(job.Text, "en").Phones);
-                int[] allIds = [.. referenceIds, .. targetIds];
-                Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
-                try
+                int gap = pipeline.SampleRate * 3 / 10;
+                List<float> output = [];
+                for (int i = 0; i < segments.Count; i++)
                 {
-                    return pipeline.Generate(backend, referencePcm, reference16k.Length, referenceSpec, specFrames,
-                        allIds, zeroBert, targetIds, seed: job.Seed);
+                    int[] targetIds = GptSoVitsSymbols.ToSequence(segments[i].Phones);
+                    int[] allIds = [.. referenceIds, .. targetIds];
+                    using Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
+                    // Deliberate deviation: upstream seeds once per run, so its fragments draw from one continuing
+                    // RNG stream. The engine seeds each fragment as Seed + i (segment 0 keeps the request seed), which
+                    // stays reproducible per seed without reusing one stream start for every fragment. An unset seed
+                    // (0) is sampled as seed 0, as before, so it gets 0, 1, 2, ... too.
+                    float[] fragment = pipeline.Generate(backend, referencePcm, hubertLength, referenceSpec,
+                        specFrames, allIds, zeroBert, targetIds, seed: unchecked(job.Seed + i));
+                    AppendPeakLimited(output, fragment);
+                    output.AddRange(new float[gap]);
                 }
-                finally
-                {
-                    referencePcm.Dispose();
-                    referenceSpec.Dispose();
-                    zeroBert.Dispose();
-                }
+                return [.. output];
             }, keep);
         },
     };
+
+    /// <summary>Appends <paramref name="fragment"/>, scaled down to peak 1 when it clips (upstream audio_postprocess).</summary>
+    private static void AppendPeakLimited(List<float> output, float[] fragment)
+    {
+        float peak = 0f;
+        foreach (float s in fragment) peak = MathF.Max(peak, MathF.Abs(s));
+        float divisor = peak > 1f ? peak : 1f;
+        foreach (float s in fragment) output.Add(s / divisor);
+    }
 
     /// <summary>GPT-SoVITS v2 SoVITS (VITS) config — resblock "1", upsample product 640 hop, 32 kHz output.</summary>
     private static VitsConfig V2Config() => new VitsConfig
