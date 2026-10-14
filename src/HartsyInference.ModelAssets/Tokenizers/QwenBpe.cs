@@ -8,9 +8,9 @@ namespace HartsyInference.ModelAssets.Tokenizers;
 /// CJK merges), so <c>tokenizer.json</c> is not available but the split rules are Qwen's.</summary>
 public static class QwenBpe
 {
-    /// <summary>Qwen2/Qwen2.5/Qwen3 pre-tokenizer split pattern (<c>tokenizer.json</c> <c>pre_tokenizer.Split</c>).</summary>
-    public const string SplitPattern =
-        @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+    /// <summary>Qwen2/Qwen2.5/Qwen3 pre-tokenizer split pattern (<c>tokenizer.json</c> <c>pre_tokenizer.Split</c>); the
+    /// engine's single copy lives on <see cref="GgufTokenizer.Qwen2PreTokenRegex"/>.</summary>
+    public const string SplitPattern = GgufTokenizer.Qwen2PreTokenRegex;
 
     /// <summary>Loads the BPE. Ids missing from <c>vocab.json</c> (added tokens) get <c>&lt;|unused_N|&gt;</c> placeholder
     /// names that no merge produces; callers map their own added-token literals before encoding.</summary>
