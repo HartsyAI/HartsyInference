@@ -41,7 +41,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     // parameter, unlike EmbedLookup's host gather which multiplies per call.
     private Tensor? _graphDecodeEmbedScaled;
     // The QUANTIZED embed table (Q8_0 or Q4_K) as loaded. Graph decode gathers it directly on backends that report
-    // LlmGraphDecodeQuantEmbed, so no F32 device copy is made. For a tied model this is the same tensor as
+    // CanGatherQuantEmbed, so no F32 device copy is made. For a tied model this is the same tensor as
     // _lmHeadQuant (no extra upload). Null for every other dtype, which keeps the F32 gather path.
     private Tensor? _embedGatherQuant;
     // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
@@ -743,7 +743,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         // Q8_0/Q4_K tables stay quantized on device and are gathered by the backend (no F32 copy). Other dtypes, and
         // backends without the quantized gather, take the F32 path below unchanged.
-        if (_embedGatherQuant is { } quant && backend.LlmGraphDecodeQuantEmbed && QuantEmbedGatherFits(quant))
+        if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
         {
             backend.PreloadWeights([quant]);
             return quant;
@@ -758,15 +758,27 @@ public sealed unsafe class GenericTransformer : IDisposable
         return _graphDecodeEmbedScaled;
     }
 
-    /// <summary>True when the quantized embed table is block-aligned for its row width and every row offset fits the device's uint32 byte addressing.</summary>
-    private bool QuantEmbedGatherFits(Tensor quant)
+    /// <summary>True when the backend can gather this quantized embed table on device: the backend accepts a table of
+    /// this size (one storage-buffer descriptor), the table is block-aligned for its row width, and every row offset
+    /// fits the device's uint32 byte addressing.</summary>
+    private bool QuantEmbedGatherFits(IBackend backend, Tensor quant)
     {
         int block = quant.DType == DType.Q8_0 ? 32 : 256;
         int blockBytes = quant.DType == DType.Q8_0 ? 34 : 144;
         if (_cfg.HiddenSize % block != 0) return false;
         long rows = quant.ElementCount / _cfg.HiddenSize;
         long rowBytes = (long)(_cfg.HiddenSize / block) * blockBytes;
-        return rows * rowBytes <= uint.MaxValue;
+        return rows * rowBytes <= uint.MaxValue && backend.CanGatherQuantEmbed(Tensor.ComputeByteSize(quant.Shape, quant.DType));
+    }
+
+    /// <summary>Device bytes graph decode adds for its embed table, beyond the weights the decode preload already uploads:
+    /// 0 for a tied quantized table (already one of the weights, gathered in place), the table's size for an untied
+    /// quantized table (uploaded only for the gather), and the F32 copy's size otherwise.</summary>
+    public long GraphDecodeEmbedExtraBytes(IBackend backend)
+    {
+        if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
+            return ReferenceEquals(quant, _lmHeadQuant) ? 0 : Tensor.ComputeByteSize(quant.Shape, quant.DType);
+        return (long)_cfg.VocabSize * _cfg.HiddenSize * sizeof(float);
     }
 
     /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>

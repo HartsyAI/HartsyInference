@@ -4105,8 +4105,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <inheritdoc/>
     public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
 
-    /// <summary>Quantized (Q8_0/Q4_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>.</summary>
-    public bool LlmGraphDecodeQuantEmbed => true;
+    /// <summary>Quantized (Q8_0/Q4_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>. The whole table is one storage-buffer descriptor, so it must fit <c>maxStorageBufferRange</c> (128 MB on llvmpipe, 4 GB on NVIDIA).</summary>
+    public bool CanGatherQuantEmbed(long tableBytes) => tableBytes <= Vk.MaxStorageBufferRange;
 
     /// <summary>One captured LLM decode step: its own command buffer and the buffers its capture retained.</summary>
     private sealed class CapturedLlmGraph(VulkanStepGraph graph, List<VulkanBuffer> retained)
