@@ -147,9 +147,9 @@ public static class TextPlacementPlanner
     }
 
     /// <summary>Every device keeps its own reserve, and the KV cache splits with the layers, so the sum is what must fit.</summary>
-    /// <remarks>Approximate: it checks the total, not each device against the layer ranges <c>LlmSplitPlan</c> will give it, so a
-    /// very uneven pair could pass here and run short on one device. Tightening it to a per-device check belongs with the
-    /// expert-offload execution, where auto can fall through to offload instead.</remarks>
+    /// <remarks>Approximate: each device is charged a share of the weights and KV cache proportional to its free memory, not the
+    /// layer ranges <c>LlmSplitPlan</c> will give it, so an uneven split can still differ from this estimate by a layer's worth.
+    /// Every device is charged the full prefill, which the stage runs on its own GPU.</remarks>
     private static TextPlacement Split(TextPlacementDemand demand, IReadOnlyList<TextPlacementDevice> devices)
     {
         string[] names = [.. devices.Select(static d => d.Device)];
@@ -164,10 +164,24 @@ public static class TextPlacementPlanner
             return new TextPlacement(TextPlacementMode.Split, false, names, 0, need, free,
                 $"The model has {demand.LayerCount} layers, fewer than the {devices.Count} GPUs.");
         }
-        bool fits = need <= free;
+        // Every stage runs the whole prompt's prefill on its own device, so each device must hold its share of the weights and KV
+        // cache plus a full prefill and its reserve. The share is proportional to free memory, as the layer split is. An aggregate
+        // check alone would accept two cards whose sum covers the weights and one prefill, then run out of memory in prefill.
+        long shared = demand.DenseBytes + demand.ExpertBytes + demand.KvBytes;
+        TextPlacementDevice? tight = null;
+        long tightNeed = 0;
+        foreach (TextPlacementDevice d in devices)
+        {
+            long stage = (long)(shared * (d.FreeBytes / (double)free)) + demand.PrefillBytes + ReserveBytes;
+            if (stage <= d.FreeBytes) continue;
+            tight = d;
+            tightNeed = stage;
+            break;
+        }
+        bool fits = tight is null;
         string reason = fits
-            ? $"Split across {string.Join(" and ", names)}: needs {Gb(need)} of {Gb(free)} free."
-            : $"{string.Join(" and ", names)} have {Gb(free)} free together; the model needs {Gb(need)}.";
+            ? $"Split across {string.Join(" and ", names)}: each stage fits its share, prefill included."
+            : $"{tight!.Value.Device} has {Gb(tight!.Value.FreeBytes)} free; its share of the split plus the prefill needs {Gb(tightNeed)}.";
         return new TextPlacement(TextPlacementMode.Split, fits, names, 0, need, free, reason);
     }
 

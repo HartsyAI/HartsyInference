@@ -68,17 +68,40 @@ public static class TextPlacementDemandReader
         long keyLength = archValue("attention.key_length") ?? (heads > 0 ? hidden / heads : 0);
         long valueLength = archValue("attention.value_length") ?? keyLength;
         long kvPerToken = layers * kvHeads * (keyLength + valueLength) * (kvF16 ? 2 : 4);
-        // Prefill runs the whole prompt in one pass (GenerationCapabilities.MaxPrefillChunk defaults to unbounded), so its F32
-        // activations scale with the prompt: the residual, normed input, Q/K/V and attention output, and the FFN gate, up,
-        // activation and down. A MoE token runs expert_used_count experts, each with expert_feed_forward_length.
-        long ffnWidth = Math.Max(archValue("feed_forward_length") ?? 0,
-            (archValue("expert_feed_forward_length") ?? 0) * Math.Max(1, archValue("expert_used_count") ?? 1));
-        long prefillPerToken = (hidden * 8 + ffnWidth * 4) * sizeof(float);
+        long prefillPerToken = PrefillBytesPerToken(tensors, archValue, hidden, heads, kvHeads, keyLength, valueLength);
         return new TextPlacementDemand(dense, experts, layers, kvPerToken, contextTokens, prefillPerToken)
         {
             ExpertsHostRunnable = hostReason is null,
             ExpertsHostReason = hostReason,
         };
+    }
+
+    /// <summary>F32 activation bytes one prompt token holds during prefill, which runs the whole prompt in one pass
+    /// (<c>GenerationCapabilities.MaxPrefillChunk</c> defaults to unbounded). Four hidden-wide buffers (residual, normed input,
+    /// attention and FFN inputs), the attention intermediates (Q, K, V and the attention output, at the widths the MLA path uses
+    /// for <c>deepseek2</c>), and the FFN intermediates at the widest layer: a dense FFN's gate, up, activation and down, or a
+    /// MoE token's experts. The widest FFN comes from the tensor headers, since a model may vary it by layer (Gemma-4).</summary>
+    private static long PrefillBytesPerToken(IReadOnlyCollection<TextTensorInfo> tensors, Func<string, long?> archValue,
+        long hidden, long heads, long kvHeads, long keyLength, long valueLength)
+    {
+        bool mla = archValue("attention.key_length_mla") is not null;
+        long keyWidth = archValue("attention.key_length_mla") ?? keyLength;
+        long valueWidth = archValue("attention.value_length_mla") ?? valueLength;
+        long attnKvHeads = mla ? heads : kvHeads;
+        long attnWidth = heads * keyWidth + attnKvHeads * keyWidth + attnKvHeads * valueWidth + heads * valueWidth;
+
+        long ffnWidth = Math.Max(archValue("feed_forward_length") ?? 0,
+            (archValue("expert_feed_forward_length") ?? 0) * Math.Max(1, archValue("expert_used_count") ?? 1));
+        if (hidden > 0)
+        {
+            foreach (TextTensorInfo t in tensors)
+            {
+                if (t.Name.Contains("_exps.", StringComparison.Ordinal)) continue;
+                if (t.Name.EndsWith(".ffn_up.weight", StringComparison.Ordinal) || t.Name.EndsWith(".ffn_gate.weight", StringComparison.Ordinal))
+                    ffnWidth = Math.Max(ffnWidth, t.Elements / hidden);
+            }
+        }
+        return (hidden * 4 + attnWidth + ffnWidth * 4) * sizeof(float);
     }
 
     /// <summary>Why the packed CPU kernels cannot run this model's experts in place, or null when they can: every <c>*_exps</c>

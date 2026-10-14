@@ -182,8 +182,8 @@ public sealed class TextPlacementPlannerTests
     public void Header_CountsPrefillActivationsAtTheContext()
     {
         TextPlacementDemand demand = Dense8BAt32K();
-        // (8 x hidden 4096 + 4 x FFN 14336) F32 values per prompt token.
-        Assert.Equal((4096L * 8 + 14336L * 4) * sizeof(float), demand.PrefillBytesPerToken);
+        // (4 x hidden 4096 + Q, K, V and output 32x128 + 8x128 + 8x128 + 32x128 + 4 x FFN 14336) F32 values per prompt token.
+        Assert.Equal((4096L * 4 + (32 * 128 + 8 * 128 + 8 * 128 + 32 * 128) + 14336L * 4) * sizeof(float), demand.PrefillBytesPerToken);
         Assert.Equal(demand.PrefillBytesPerToken * 32768, demand.PrefillBytes);
         Assert.Equal(demand.DenseBytes + demand.KvBytes + demand.PrefillBytes, demand.TotalBytes);
     }
@@ -197,12 +197,59 @@ public sealed class TextPlacementPlannerTests
         TextPlacementDevice card = Card("cuda:0", 16);
         Assert.True(oldNeed <= card.FreeBytes, "the weights, KV cache and reserve alone fit this card");
 
-        // The full prefill of a 32K prompt does not: about 11.8 GB of activations on top of 12 GB.
+        // The full prefill of a 32K prompt does not: about 11 GB of activations on top of 12 GB.
         TextPlacement plan = TextPlacementPlanner.Plan(demand, [card], null, TextPlacementMode.Gpu);
         Assert.False(plan.Feasible);
         Assert.True(plan.RequiredBytes > card.FreeBytes);
         Assert.True(plan.RequiredBytes >= oldNeed + demand.PrefillBytes);
         Assert.Contains("needs", plan.Reason);
+    }
+
+    [Fact]
+    public void Split_ChargesEveryStageItsOwnPrefill_NotOnlyTheSum()
+    {
+        // Two 16 GB cards hold the 12 GB of weights and KV and one prefill in aggregate (32 GB), but each stage runs the whole prefill
+        // on its own GPU: about 18.5 GB per stage, so the split is refused.
+        TextPlacementDemand demand = Dense8BAt32K();
+        TextPlacement plan = TextPlacementPlanner.Plan(demand, [Card("cuda:0", 16), Card("cuda:1", 16)], null, TextPlacementMode.Split);
+        Assert.True(demand.DenseBytes + demand.KvBytes + demand.PrefillBytes + 2 * TextPlacementPlanner.ReserveBytes <= 32 * Gb);
+        Assert.False(plan.Feasible);
+        Assert.Contains("prefill", plan.Reason);
+
+        // The same pair admits a context whose prefill fits beside each stage's share.
+        TextPlacement shorter = TextPlacementPlanner.Plan(demand with { ContextTokens = 4096 }, [Card("cuda:0", 16), Card("cuda:1", 16)],
+            null, TextPlacementMode.Split);
+        Assert.True(shorter.Feasible);
+    }
+
+    [Fact]
+    public void Prefill_UsesTheWidestFfnFromTheHeaders()
+    {
+        // Gemma-style per-layer FFN widths: the metadata says 4096, but one layer's up projection is 12288 wide.
+        TextTensorInfo[] tensors = [new("blk.0.ffn_up.weight", DType.F16, 256L * 12288), new("blk.1.ffn_up.weight", DType.F16, 256L * 4096)];
+        Dictionary<string, long> arch = new()
+        {
+            ["block_count"] = 2, ["attention.head_count"] = 4, ["attention.head_count_kv"] = 4, ["embedding_length"] = 256,
+            ["feed_forward_length"] = 4096,
+        };
+        TextPlacementDemand demand = TextPlacementDemandReader.FromHeader(tensors, k => arch.TryGetValue(k, out long v) ? v : null,
+            contextTokens: 100, includeRedundantSplits: false, kvF16: false);
+        // Hidden 256 x 4, attention 4 heads x 64 x 4 widths, FFN 12288 x 4: F32 values per prompt token.
+        Assert.Equal((256L * 4 + 4 * 64 * 4 + 12288L * 4) * sizeof(float), demand.PrefillBytesPerToken);
+    }
+
+    [Fact]
+    public void Prefill_UsesTheMlaWidthsForDeepSeek2()
+    {
+        Dictionary<string, long> arch = new()
+        {
+            ["block_count"] = 1, ["attention.head_count"] = 16, ["attention.head_count_kv"] = 1, ["embedding_length"] = 2048,
+            ["attention.key_length_mla"] = 192, ["attention.value_length_mla"] = 128,
+        };
+        TextPlacementDemand demand = TextPlacementDemandReader.FromHeader([], k => arch.TryGetValue(k, out long v) ? v : null,
+            contextTokens: 100, includeRedundantSplits: false, kvF16: false);
+        // MLA: Q and K at 16 x 192, V and the output at 16 x 128, plus four hidden-wide buffers; no FFN tensors in this header.
+        Assert.Equal((2048L * 4 + 16 * 192 * 2 + 16 * 128 * 2) * sizeof(float), demand.PrefillBytesPerToken);
     }
 
     [Fact]
