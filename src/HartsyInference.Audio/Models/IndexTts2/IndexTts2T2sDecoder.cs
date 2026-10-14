@@ -36,6 +36,8 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
     public const int StartMelToken = 8192;
     public const int StopMelToken = 8193;
     public const int NumMelCodes = 8194;
+    /// <summary>Floor 1: index-tts <c>gpt/model.py</c> has no minimum length, so a first-step stop would emit zero mel frames.</summary>
+    public static readonly StopGate EosGate = new(MinTokens: 1);
     public const int StartTextToken = 0;
     public const int StopTextToken = 1;
 
@@ -241,7 +243,7 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
                 backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
 
                 using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
-                int nextToken = SampleNextToken(logits, seenForPenalty, options, ref rngState);
+                int nextToken = SampleNextToken(logits, seenForPenalty, options, ref rngState, generated.Count);
                 if (nextToken == StopMelToken) break;
                 generated.Add(nextToken);
                 seenForPenalty.Add(nextToken);
@@ -391,11 +393,12 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
     /// <summary>Temperature/top-k/top-p sampling with a multiplicative repetition penalty — identical scheme to
     /// IndexTTS-1.5's <c>IndexTtsT2sDecoder.SampleNextToken</c> (same <see cref="NucleusSampler"/>, same CTRL-style
     /// penalty). Beam search (the reference's real default) is not implemented, same documented gap as Phase 1.</summary>
-    private static int SampleNextToken(Tensor logits, HashSet<int> seen, IndexTtsOptions options, ref uint rngState)
+    private static int SampleNextToken(Tensor logits, HashSet<int> seen, IndexTtsOptions options, ref uint rngState, int generated)
     {
         float* lp = (float*)logits.DataPointer;
         int n = (int)logits.ElementCount;
         Span<float> span = new(lp, n);
+        EosGate.Apply(span, generated, 0, StopMelToken);
         if (options.RepetitionPenalty != 1f)
         {
             float penalty = options.RepetitionPenalty;

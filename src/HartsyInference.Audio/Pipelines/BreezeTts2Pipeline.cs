@@ -159,6 +159,7 @@ public sealed unsafe class BreezeTts2Pipeline : IDisposable
             if (!first) ApplyRepetitionPenalty(logits, history, rep);
             first = false;
             for (int r = _cfg.CodebookSize; r < _cfg.AudioVocabSize; r++) logits[r] = float.NegativeInfinity;
+            _cfg.EosGate.Apply(logits, frames.Count, 0, eos);
             int token = NucleusSampler.Draw(logits, logits.Length, temperature, topK, topP, ref rng);
             if (token == eos) break;
             history.Add(token);
