@@ -168,6 +168,26 @@ public sealed class FixedKvCache : IKvCache, IDisposable
         }
     }
 
+    /// <summary>Replaces this cache's contents with <paramref name="source"/>'s committed tokens, in place (beam-search
+    /// reordering), each layer copied on the backend the source layer lives on. Both caches must share a shape.</summary>
+    public void CopyFrom(FixedKvCache source)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(source);
+        source.ThrowIfDisposed();
+        if (ReferenceEquals(source, this)) return;
+        if (source.NumLayers != NumLayers || source.MaxSequenceLength != MaxSequenceLength || source._dtype != _dtype)
+            throw new ArgumentException("The source cache has a different shape.", nameof(source));
+        for (int layer = 0; layer < NumLayers; layer++)
+        {
+            if (source._currentLength == 0 || source._layerBackend[layer] is not { } backend) continue;
+            _layerBackend[layer] = backend;
+            backend.ScatterSeqHeadMajor(_k[layer]!, source._k[layer]!, 0, source._currentLength);
+            backend.ScatterSeqHeadMajor(_v[layer]!, source._v[layer]!, 0, source._currentLength);
+        }
+        _currentLength = source._currentLength;
+    }
+
     private void ThrowIfDisposed()
     {
         if (_disposed != 0) throw new ObjectDisposedException(nameof(FixedKvCache));

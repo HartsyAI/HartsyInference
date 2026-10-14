@@ -5,8 +5,9 @@ namespace HartsyInference.Audio.Pipelines;
 /// <c>infer_generator</c>'s four emotion modes: none (defaults to the speaker's own voice as the emotion
 /// reference, forced <c>alpha=1</c>), an explicit emotion-reference clip, an explicit 8-dim vector, or
 /// free-text through <see cref="IndexTts2QwenEmotion"/>.</summary>
-/// <remarks>Beam search (<c>num_beams=3</c>, the reference's real default) is not implemented, same documented
-/// gap as IndexTTS-1.5 — single-sequence temperature/top-k/top-p decoding only.</remarks>
+/// <remarks>Decoding defaults are upstream <c>infer_v2.py</c> / <c>infer_v2_5.py</c>'s <c>generate()</c> arguments: beam
+/// sampling with 3 beams, temperature 0.8, top-k 30, top-p 0.8, repetition penalty 10, length penalty 0, at most
+/// 1500 mel tokens.</remarks>
 public sealed record IndexTts2Options
 {
     public float Temperature { get; init; } = 0.8f;
@@ -19,10 +20,21 @@ public sealed record IndexTts2Options
 
     public ulong Seed { get; init; } = 42;
 
-    /// <summary>BCP-47-ish language code (e.g. <c>"en"</c>, <c>"zh"</c>) resolved to the GPT's
-    /// <c>lang_embedding</c> row via <see cref="HartsyInference.ModelAssets.Tokenizers.IndexTts2TiktokenTokenizer.LangToToken"/>;
-    /// an unrecognized code falls back to the real tokenizer's own <c>"common"</c> row, matching upstream.</summary>
-    public string Language { get; init; } = "en";
+    /// <summary>HF <c>num_beams</c>; see <see cref="IndexTtsOptions.NumBeams"/>.</summary>
+    public int NumBeams { get; init; } = 3;
+
+    /// <summary>HF <c>do_sample</c>; see <see cref="IndexTtsOptions.DoSample"/>.</summary>
+    public bool DoSample { get; init; } = true;
+
+    /// <summary>HF <c>length_penalty</c>; see <see cref="IndexTtsOptions.LengthPenalty"/>.</summary>
+    public float LengthPenalty { get; init; }
+
+    /// <summary>IndexTTS-2.5 language code (e.g. <c>"en"</c>, <c>"zh"</c>): the <c>&lt;|lang|&gt;</c> text prefix and the
+    /// GPT's <c>lang_embedding</c> row (<see cref="HartsyInference.ModelAssets.Tokenizers.IndexTts2TiktokenTokenizer.LangToToken"/>;
+    /// an unrecognized code falls back to upstream's <c>"common"</c> row). Null derives it from the text with
+    /// <see cref="IndexTtsTextFrontend.DetectLanguage"/>: <c>"zh"</c> when it holds a Chinese character, else <c>"en"</c>.
+    /// Upstream has no default (the caller always passes <c>lang</c>).</summary>
+    public string? Language { get; init; }
 
     /// <summary>Optional separate emotion-reference clip (mono PCM + its sample rate). When null, the main
     /// speaker reference doubles as the emotion reference and <see cref="EmoAlpha"/> is forced to 1.0,

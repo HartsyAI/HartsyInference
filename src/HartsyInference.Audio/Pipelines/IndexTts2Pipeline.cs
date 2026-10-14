@@ -42,13 +42,13 @@ namespace HartsyInference.Audio.Pipelines;
 /// tokenizer; everything else is shared and byte-for-byte the same code path.</summary>
 public sealed class IndexTts2Pipeline : IDisposable
 {
-    private const int DefaultMaxTextTokensPerSegment = 120;
     private const float TailFadeMs = 20.0f;
 
     private readonly IndexTts2Config _cfg;
     private readonly Func<string, int[]> _encode;
     private readonly IDisposable? _tokenizerOwner;
     private readonly IndexTtsTokenizer? _spm;
+    private readonly IndexTtsTextFrontend _frontend;
     private readonly IndexTts2SemanticFeatures _semanticFeatures;
     private readonly CamPlusSpeakerEncoder _camplus;
     private readonly VocosFactorizedCodec _semanticCodec;
@@ -74,12 +74,13 @@ public sealed class IndexTts2Pipeline : IDisposable
         CamPlusSpeakerEncoder camplus, VocosFactorizedCodec semanticCodec, IndexTts2T2sDecoder gpt,
         InterpolateLengthRegulator lengthRegulator, IndexTts2Dit dit, IndexTts2BigVganGenerator bigVgan,
         IndexTts2EmotionVectorLookup? emoLookup, string? qwenEmoDir, IBackend? qwenBackend,
-        List<IDisposable> loaders, List<Tensor> convertedWeights)
+        List<IDisposable> loaders, List<Tensor> convertedWeights, IndexTtsFstNormalizers textNormalizers)
     {
         _cfg = cfg;
         _encode = encode;
         _tokenizerOwner = tokenizerOwner;
         _spm = tokenizerOwner as IndexTtsTokenizer;
+        _frontend = new IndexTtsTextFrontend(new IndexTtsFrontNormalizer(textNormalizers, enableGlossary: true));
         _semanticFeatures = semanticFeatures;
         _camplus = camplus;
         _semanticCodec = semanticCodec;
@@ -109,14 +110,19 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// every other component here which defers to whatever backend <see cref="Synthesize"/> is called with
     /// (Audio has no dependency on any concrete backend package, so the caller supplies one). The classifier
     /// (a 0.6B LLM, ~2.4 GB once widened to F32) is loaded lazily on the first <see cref="IndexTts2Options.UseEmoText"/>
-    /// request, so a pipeline that never uses text emotion pays nothing for it; the directory's files are checked up front.</summary>
+    /// request, so a pipeline that never uses text emotion pays nothing for it; the directory's files are checked up front.
+    /// <paramref name="textNormalizers"/> are the FST normalizers upstream takes from wetext; pass
+    /// <see cref="IndexTtsFstNormalizers.FromWeText"/> for upstream text (the engine does), or
+    /// <see cref="IndexTtsFstNormalizers.Interim"/> when the grammars are unavailable.</summary>
     public static async Task<IndexTts2Pipeline> LoadAsync(
         string tokenizerPath, string gptPath, string s2melPath, string codecPath,
         string w2vBertSafetensorsPath, string w2vStatsPath, string campplusPath, string bigVganPath,
+        IndexTtsFstNormalizers textNormalizers,
         string? feat1Path = null, string? feat2Path = null, string? qwenEmoDir = null, IBackend? qwenBackend = null,
         IndexTts2Config? cfg = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(textNormalizers);
         IndexTts2Config resolved = cfg ?? IndexTts2Config.V2_5;
 
         IDisposable? tokenizerOwner = null;
@@ -241,7 +247,8 @@ public sealed class IndexTts2Pipeline : IDisposable
             }
 
             return new IndexTts2Pipeline(resolved, encode, tokenizerOwner, semanticFeatures, camplus, semanticCodec, gpt,
-                lengthRegulator, dit, bigVgan, emoLookup, qwenEmoDir, qwenBackend, loaders, converted);
+                lengthRegulator, dit, bigVgan, emoLookup, qwenEmoDir, qwenBackend, loaders, converted,
+                textNormalizers);
         }
         catch
         {
@@ -370,7 +377,9 @@ public sealed class IndexTts2Pipeline : IDisposable
         ArgumentNullException.ThrowIfNull(reference);
         reference.ThrowIfDisposed();
         if (!ReferenceEquals(reference.Owner, this)) throw new ArgumentException("The reference was prepared by a different pipeline.", nameof(reference));
+        ArgumentNullException.ThrowIfNull(text);
         IndexTts2Options opts = options ?? new IndexTts2Options();
+        if (opts.Language is null) opts = opts with { Language = IndexTtsTextFrontend.DetectLanguage(text) };
         List<int[]> segments = SegmentText(text, opts);
         if (segments.Count == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
         return StreamSegments(backend, text, reference, opts, segments, ct);
@@ -415,19 +424,15 @@ public sealed class IndexTts2Pipeline : IDisposable
         }
     }
 
-    /// <summary>The text's segments as token-id arrays. 2.0 follows the reference tokenizer exactly (whole-text
-    /// tokenization, then <see cref="IndexTts2TextSegmenter"/>); 2.5 uses the sentence-level splitter.</summary>
-    private List<int[]> SegmentText(string text, IndexTts2Options opts)
+    /// <summary>The text's segments as GPT text-id arrays, through the upstream frontend of the loaded version.</summary>
+    internal List<int[]> SegmentText(string text, IndexTts2Options opts)
     {
         ArgumentNullException.ThrowIfNull(text);
-        if (_spm is null) return IndexTtsPipeline.SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment, EncodeNormalized);
-
-        string prepared = text.Trim().Length == 1 ? text : IndexTtsTextNormalizer.InjectCjkBoundaries(IndexTts2TextNormalizer.Normalize(text));
-        if (prepared.Length == 0) return [];
-        IReadOnlyList<(string Piece, int Id)> pieces = _spm.EncodeToPieces(prepared);
-        IndexTts2TextSegmenter.Token[] tokens = [.. pieces.Select(static p => new IndexTts2TextSegmenter.Token(p.Piece, p.Id))];
-        List<IndexTts2TextSegmenter.Token[]> split = IndexTts2TextSegmenter.Split(tokens, DefaultMaxTextTokensPerSegment, opts.QuickStreamingTokens);
-        return [.. split.Select(static seg => seg.Select(static t => t.Id).ToArray())];
+        if (_spm is not null)
+            return _frontend.SegmentSentencePiece(text, _spm, IndexTtsTextFrontend.DefaultMaxTextTokensPerSegment, opts.QuickStreamingTokens);
+        if (string.IsNullOrWhiteSpace(text)) return [];
+        // text_pos_embedding has max_text_tokens + 2 rows; upstream's split budget reads that capacity.
+        return _frontend.SegmentTiktoken(text, opts.Language ?? IndexTtsTextFrontend.DetectLanguage(text), _encode, _cfg.MaxTextTokens + 2);
     }
 
     /// <summary>Real emotion resolution (<c>infer_generator</c>'s own branching, read in full): an explicit
@@ -436,7 +441,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// vector's own leftover weight (<c>emovec_mat + (1-sum(weights))*emovec</c>, weights exactly as given unless
     /// <see cref="IndexTts2Options.NormalizeEmoVector"/>); otherwise an explicit or implicit (defaults to the
     /// speaker's own clip, alpha forced to 1) audio reference goes straight through <c>merge_emovec</c>.</summary>
-    private (Tensor EmoVec, bool Owned) ResolveEmotion(IBackend backend, IndexTts2Options opts, string text, IndexTts2Reference reference, IndexTts2Timings timings)
+    internal (Tensor EmoVec, bool Owned) ResolveEmotion(IBackend backend, IndexTts2Options opts, string text, IndexTts2Reference reference, IndexTts2Timings timings)
     {
         Stopwatch sw = Stopwatch.StartNew();
         try
@@ -578,7 +583,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     internal int[] GenerateCodes(IBackend backend, IndexTts2Reference reference, Tensor emoVec, int[] textIds, IndexTts2Options opts, ulong seed)
     {
         uint rngState = DeterministicRng.Seed(unchecked((int)seed));
-        int? langId = _cfg.Version == IndexTts2Version.V2_0 ? null : IndexTts2TiktokenTokenizer.LangToToken(opts.Language);
+        int? langId = _cfg.Version == IndexTts2Version.V2_0 ? null : IndexTts2TiktokenTokenizer.LangToToken(opts.Language ?? "en");
         IndexTtsOptions gptOpts = new()
         {
             Temperature = opts.Temperature,
@@ -586,6 +591,9 @@ public sealed class IndexTts2Pipeline : IDisposable
             TopP = opts.TopP,
             RepetitionPenalty = opts.RepetitionPenalty,
             MaxMelTokens = opts.MaxMelTokens ?? 1_500,
+            NumBeams = opts.NumBeams,
+            DoSample = opts.DoSample,
+            LengthPenalty = opts.LengthPenalty,
         };
         return _gpt.Generate(backend, reference.SpeakerConditioning, emoVec, textIds, langId, gptOpts, ref rngState);
     }
@@ -717,8 +725,6 @@ public sealed class IndexTts2Pipeline : IDisposable
                 op[(long)m * t + f] = mel[m, f];
         return outT;
     }
-
-    private int[] EncodeNormalized(string segment) => _encode(IndexTtsTextNormalizer.InjectCjkBoundaries(segment));
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
