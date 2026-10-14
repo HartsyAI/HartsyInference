@@ -38,7 +38,9 @@ public sealed partial class VulkanBackend
         // The input is read as row-contiguous [M, K]; a tensor whose element count is a multiple of K is taken to be laid out so.
         if (k < 1 || k % GemvBlockElements(weight.DType) != 0 || input.ElementCount % k != 0) return false;
         long m = input.ElementCount / k;
-        if (m < 1 || m > QuantGemvMaxRows || output.ElementCount != m * n) return false;
+        // Row count is gated here, not only in the shader: the kernel covers 1..QuantGemvMaxRows rows, and a larger
+        // prefill must take the dequantize-then-GEMM path rather than reach DispatchQuantGemv's ArgumentOutOfRangeException.
+        if (m < 1 || m > QuantGemvMaxRows || m * k != input.ElementCount || output.ElementCount != m * n) return false;
         if (bias is not null && (bias.DType != DType.F32 || bias.ElementCount != n)) return false;
 
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(m * n * sizeof(float)));

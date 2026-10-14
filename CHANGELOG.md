@@ -24,9 +24,16 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
-## alpha.358
+## alpha.359
 
 - **Fixed: CosyVoice 2 could sample end-of-speech on the first step and return no audio, crashing the flow.** The LM broke on the first EOS draw with no minimum length, so a text whose first sampled token was EOS produced zero speech tokens. The streaming flush then built an empty window and the flow threw on a zero-length tensor. The sampler now takes `ignoreEos` and drops the EOS candidate from the draw (and from top-p's denominator) until the target text has produced `CosyVoiceSamplingConfig.MinTokenTextRatio` (default 2) speech tokens per text token, the reference `min_token_text_ratio` gate. Both the streaming and non-streaming paths get it. Defensive guards also return empty audio instead of crashing when the LM emits no tokens: the streaming flush returns early and the non-streaming path returns an empty buffer with a warning. `CosyVoiceSpeechSamplerTests` covers EOS-dominant logits on the top-k and full-distribution paths.
+
+## alpha.358
+
+- **Tested: granite-shaped MoE decode under the Vulkan step graph.** `VulkanLlmGraphDecodeTests` replays a two-layer top-2-of-4 Q8_0 MoE decoder through the captured step and compares the post-norm hidden state with the eager forward over 12 steps; the difference is exactly zero on the RTX 3060.
+- **Changed: the quantized GEMV gate states its row limit and exact-shape check, and `CaptureGraph` asserts it is not reentrant.** The gate already refused row counts outside 1 to 16; it now also requires `M * K` to equal the input length, with a comment on the row-contiguous assumption.
+- **Docs: "default" graph decode means greedy requests only, and the Vulkan status checklist lists the paths with no Vulkan evidence** (coopmat-1 only, non-NVIDIA devices, SSM/CSM/MusicGen graph paths).
+- **Added: the A40 pod kit auto-stops leased pods.** `pod_up.py --max-hours H` (default 6, or `PODKIT_MAX_HOURS`) records each pod in the operator's lease file, and `watchdog.py --once`, run from cron on the operator machine, POSTs `/stop` once a leased pod is past its limit. No API key is ever copied to a pod. `test_watchdog.py` covers it with a stubbed API.
 
 ## alpha.357
 
