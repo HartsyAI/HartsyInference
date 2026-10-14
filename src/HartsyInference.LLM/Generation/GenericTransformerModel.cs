@@ -144,6 +144,9 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
 
     bool IGraphDecodable.SupportsGraphDecode(IBackend backend) => !Staged && _transformer.SupportsGraphDecode(backend);
 
+    // A layer-split model is refused by staging, not by the attention shape, so its explicit request keeps the eager fallback.
+    string? IGraphDecodable.GraphDecodeRefusal(IBackend backend) => Staged ? null : _transformer.GraphDecodeRefusal(backend);
+
     GraphDecodeSession IGraphDecodable.CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty, DeviceSamplerConfig? sampler)
     {
         if (state is not FixedKvCache cache)

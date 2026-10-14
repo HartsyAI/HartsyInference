@@ -4105,6 +4105,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <inheritdoc/>
     public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
 
+    /// <inheritdoc/>
+    /// <remarks>False: <c>FlashAttentionDev</c> throws for a sliding window or a soft-cap while a device position is set, and a window/soft-cap kernel is out of scope. Gemma-2/3 therefore decode eagerly here.</remarks>
+    public bool LlmGraphDecodeWindowSoftcap => false;
+
     /// <summary>Quantized (Q8_0/Q5_0/Q4_K/Q6_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>. The whole table is one storage-buffer descriptor, so it must fit <c>maxStorageBufferRange</c> (128 MB on llvmpipe, 4 GB on NVIDIA).</summary>
     public bool CanGatherQuantEmbed(long tableBytes) => tableBytes <= Vk.MaxStorageBufferRange;
 

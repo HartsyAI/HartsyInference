@@ -53,8 +53,8 @@ cross-backend gap is ~44%. So the residual is larger than rounding and remains u
 GEMM dtype path are the untested suspects.
 
 **Step-graph decode covers a subset.** Greedy text-LLM decode replays a recorded step (`--graph-decode`, or by default for requests of 512 or more
-new tokens; kill-switch `numerics.vkLlmGraph`; `GraphDecodeSupported` still off). An F16 KV cache, a sliding window or soft-cap (Gemma-2/3) and head dims above the flash
-kernel's limit are refused at capture and decode eagerly; sampled decode is eager (no device sampler), so the "default" graph decode above means greedy requests only; the SSM, CSM and
+new tokens; kill-switch `numerics.vkLlmGraph`; `GraphDecodeSupported` still off). An F16 KV cache and head dims above the flash
+kernel's limit are refused at capture and decode eagerly. A sliding window or soft-cap (Gemma-2/3) is refused before capture: the implicit default decodes eagerly, and an explicit `--graph-decode` fails with the model and the reason (`NotSupportedException`, HTTP 501 on the API); CUDA runs both in the graph. Sampled decode is eager (no device sampler), so the "default" graph decode above means greedy requests only; the SSM, CSM and
 MusicGen graph paths have no Vulkan capture evidence. Capture gathers a Q8_0, Q5_0, Q4_K or Q6_K embedding table from its quantized form on the device, so those tables keep no F32 copy (Qwen3-4B's 1.56 GB copy is gone); every other dtype keeps an F32 copy of the table. An untied quantized table is uploaded for the gather (0.09 GB for Qwen2.5-0.5B's Q5_0, 0.06 GB for OLMoE's Q4_K), so untied models keep that much on the graph path. Details in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6.
 
 **Untested on Vulkan (no device evidence yet).** These paths compile and are wired, but no run has covered them:

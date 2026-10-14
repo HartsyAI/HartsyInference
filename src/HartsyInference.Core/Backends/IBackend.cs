@@ -1658,6 +1658,9 @@ public partial interface IBackend : IDisposable
     /// <summary>True when text-LLM graph decode should be used without being asked for (<c>numerics.graphDecode</c> / a request's <c>GraphDecode</c>): the backend measured it faster than its eager loop for every model it supports. Applies to requests of at least 512 new tokens (the first capture in a process costs 0.2 s to 1.4 s); a failed capture then falls back to eager instead of failing the request. CUDA keeps the explicit opt-in.</summary>
     bool LlmGraphDecodeDefault => false;
 
+    /// <summary>True when the text-LLM graph's device-position attention takes a sliding window and an attention logit soft-cap (the Gemma-2/3 shapes). CUDA does. A backend that returns false refuses those models from the graph: they decode eagerly, and an explicit graph request for them fails with the reason (<c>GenericTransformer.GraphDecodeRefusal</c>).</summary>
+    bool LlmGraphDecodeWindowSoftcap => true;
+
     /// <summary>Allocates a persistent 2-int device buffer {kvLen, qOffset} (0 = unsupported); free with <see cref="FreeDevicePos"/>.</summary>
     ulong AllocDevicePos() => 0;
 
