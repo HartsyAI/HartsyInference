@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Sampling;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
@@ -138,6 +139,6 @@ public sealed record CosyVoiceSamplingConfig
     public int RasWindow { get; init; } = 10;
     public int RasMaxRepeat { get; init; } = 4;
 
-    /// <summary>End-of-speech is not drawn until at least <c>MinTokenTextRatio × target-text-tokens</c> speech tokens have been emitted. Without it an EOS on step 0 yields an empty speech-token stream. Mirrors the <c>min_token_text_ratio</c> gate in <c>cosyvoice/llm/llm.py</c>.</summary>
-    public int MinTokenTextRatio { get; init; } = 2;
+    /// <summary>End-of-speech gate: not drawn until <c>2 × target-text tokens</c> speech tokens exist. Reference: <c>min_token_text_ratio</c> in <c>cosyvoice/llm/llm.py</c> (target text only; verified by reading the source).</summary>
+    public StopGate EosGate { get; init; } = new(MinTokens: 0, MinTokenTextRatio: 2f);
 }

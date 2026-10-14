@@ -71,6 +71,7 @@ public sealed unsafe class Text2Semantic : IDisposable
             Tensor logitsT = WhisperOps.ProjectLinear(backend, last, _predW!, null, 1, 1, h, _cfg.SemanticVocab);
             last.Dispose();
             Span<float> logits = new((void*)logitsT.DataPointer, _cfg.SemanticVocab);
+            _cfg.EosGate.Apply(logits, y.Count - prefix.Length, 0, _cfg.EosToken);
             if (_cfg.RepetitionPenalty != 1f)
                 foreach (int tok in seen) logits[tok] = logits[tok] > 0 ? logits[tok] / _cfg.RepetitionPenalty : logits[tok] * _cfg.RepetitionPenalty;
             int next = NucleusSampler.Draw(logits, _cfg.SemanticVocab, _cfg.Temperature, _cfg.TopK, 0f, ref rng);

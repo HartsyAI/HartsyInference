@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Sampling;
 
 namespace HartsyInference.Audio.Models.SparkTts;
 
@@ -43,6 +44,8 @@ public sealed record SparkTtsConfig
     public int EndGlobalTokenId { get; init; } = 165_156;
     public int StartSemanticTokenId { get; init; } = 165_151;
     public int EndSemanticTokenId { get; init; } = 165_157;           // generation stop marker
+    /// <summary>Floor 1: <c>SparkTTS.inference</c> passes no <c>min_new_tokens</c>, so the reference has no gate. A zero-token stream cannot be decoded, so the first draw may not stop.</summary>
+    public StopGate EosGate { get; init; } = new(MinTokens: 1);
 
     // ── Controllable-TTS control tokens (optional; only used by the attribute-controlled path) ──
     /// <summary>Plain zero-shot/voice-clone TTS task marker (<c>&lt;|task_tts|&gt;</c>).</summary>
