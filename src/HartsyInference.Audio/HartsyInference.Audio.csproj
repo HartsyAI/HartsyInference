@@ -35,8 +35,23 @@
        Drives the (validated) PinyinPhonemizer for the common, non-polyphone path; g2pW refines polyphones. -->
   <ItemGroup>
     <EmbeddedResource Include="Frontends\Resources\pinyin_char_dict.txt" LogicalName="HartsyInference.Audio.Frontends.Resources.pinyin_char_dict.txt" />
-    <!-- GPT-SoVITS English G2P: CMUdict (word → ARPAbet). OOV beyond letter-spelling needs the g2p_en LTS (future). -->
+    <!-- CMUdict (word → ARPAbet), read by the MeloTTS English frontend. -->
     <EmbeddedResource Include="Frontends\Resources\cmudict.rep" LogicalName="HartsyInference.Audio.Frontends.Resources.cmudict.rep" />
+  </ItemGroup>
+
+  <!-- GPT-SoVITS English G2P data, exported from the upstream code path by tools/parity/gptsovits_frontend_dump.py
+       (~10 MB gzip): GPT-SoVITS's merged dictionary and name dictionary, g2p_en's homographs and letter-to-sound GRU,
+       NLTK's perceptron tagger tables and wordsegment's unigram/bigram counts. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Frontends\Resources\gptsovits_en_dict.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.gptsovits_en_dict.txt.gz" />
+    <EmbeddedResource Include="Frontends\Resources\gptsovits_en_names.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.gptsovits_en_names.txt.gz" />
+    <EmbeddedResource Include="Frontends\Resources\gptsovits_en_homographs.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.gptsovits_en_homographs.txt.gz" />
+    <EmbeddedResource Include="Frontends\Resources\g2p_en_lts.bin.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.g2p_en_lts.bin.gz" />
+    <EmbeddedResource Include="Frontends\Resources\nltk_perceptron_weights.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.nltk_perceptron_weights.txt.gz" />
+    <EmbeddedResource Include="Frontends\Resources\nltk_perceptron_tagdict.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.nltk_perceptron_tagdict.txt.gz" />
+    <EmbeddedResource Include="Frontends\Resources\nltk_perceptron_classes.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.nltk_perceptron_classes.txt.gz" />
+    <EmbeddedResource Include="Frontends\Resources\wordsegment_unigrams.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.wordsegment_unigrams.txt.gz" />
+    <EmbeddedResource Include="Frontends\Resources\wordsegment_bigrams.txt.gz" LogicalName="HartsyInference.Audio.Frontends.Resources.wordsegment_bigrams.txt.gz" />
   </ItemGroup>
 
 </Project>
