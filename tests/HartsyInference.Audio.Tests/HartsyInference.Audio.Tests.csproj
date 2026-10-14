@@ -34,10 +34,13 @@
     <None Include="Fixtures\ControlFoleyClap\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\ControlFoleyStyle\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\kokoro_zh_parity.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\beam_search_reference.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\indextts25_beam_reference.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\gptsovits_en_frontend_parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\kokoro_japanese_parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\SparkTts\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\wetext_parity.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\chatterbox_frontend_parity.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

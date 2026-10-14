@@ -60,6 +60,10 @@ public sealed class RestoreService : IRestoreService
 
         (List<byte[]> restored, int outW, int outH) = await Task.Run(() =>
         {
+            FreeEngineBeforeLoad(spec);
+            // Under the device gate like every other job, so an engine-wide release waits for the restore instead of
+            // emptying the device under it. Taken after the free above, which takes the gate itself.
+            using IDisposable gate = DeviceGate.AcquireAll([_engine.Backend], cancel);
             SeedVr2RestorePipeline pipeline = GetOrLoadPipeline(spec);
             if (progress is null)
             {
@@ -106,6 +110,23 @@ public sealed class RestoreService : IRestoreService
         return ([.. frames.Select(f => f.Rgb)], frames[0].Width, frames[0].Height);
     }
 
+    /// <summary>Frees the engine's other models when <paramref name="spec"/> is not the loaded restore model: a resident
+    /// video DiT and SeedVR2's VAE peak cannot share 24 GB.</summary>
+    /// <remarks>Outside the device gate and outside <c>_lock</c>: the free takes the gate, and it releases this
+    /// service's pipeline under <c>_lock</c>.</remarks>
+    private void FreeEngineBeforeLoad(ModelSpec spec)
+    {
+        bool loaded;
+        lock (_lock)
+        {
+            loaded = _pipeline is not null && _loadedPath == spec.LocalPath;
+        }
+        if (!loaded)
+        {
+            _engine.FreeMemory();
+        }
+    }
+
     private SeedVr2RestorePipeline GetOrLoadPipeline(ModelSpec spec)
     {
         string ditPath = spec.LocalPath
@@ -117,8 +138,6 @@ public sealed class RestoreService : IRestoreService
             if (_pipeline is not null && _loadedPath == ditPath)
                 return _pipeline;
             ReleasePipeline();
-            // A resident video DiT and SeedVR2's VAE peak cannot share 24 GB.
-            _engine.FreeMemory();
 
             (string vaePath, string embPath) = ResolveSideAssets(spec, ditPath);
             Logs.Info($"Loading SeedVR2: dit={ditPath} vae={vaePath} emb={embPath}");

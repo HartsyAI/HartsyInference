@@ -18,13 +18,18 @@ public sealed class IndexTts2Reference : IDisposable
     internal Tensor Style { get; }
     internal Tensor PromptCondition { get; }
     internal Tensor SpeakerConditioning { get; }
+    /// <summary><c>get_emovec(spk_cond_emb)</c>: the base an external emotion clip is merged against.</summary>
     internal Tensor BaseEmoVec { get; }
+
+    /// <summary>The emotion vector with no separate emotion clip, from the speaker's clip reloaded at 16 kHz.</summary>
+    internal Tensor EmoVec { get; }
     internal float[] Audio16k { get; }
     private int _disposed;
 
     internal IndexTts2Reference(IndexTts2Pipeline owner, Tensor spkCondEmb, int tSpk, Tensor refMel, int tRef, Tensor style,
-        Tensor promptCondition, Tensor speakerConditioning, Tensor baseEmoVec, float[] audio16k)
+        Tensor promptCondition, Tensor speakerConditioning, Tensor baseEmoVec, Tensor emoVec, float[] audio16k)
     {
+        EmoVec = emoVec;
         Owner = owner;
         SpkCondEmb = spkCondEmb;
         TSpk = tSpk;
@@ -54,6 +59,7 @@ public sealed class IndexTts2Reference : IDisposable
         PromptCondition.Dispose();
         SpeakerConditioning.Dispose();
         BaseEmoVec.Dispose();
+        EmoVec.Dispose();
         GC.SuppressFinalize(this);
     }
 }

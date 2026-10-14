@@ -38,7 +38,13 @@ public sealed unsafe class GptBackbone : IDisposable
     /// <summary>Runs the stack over <paramref name="inputEmbeds"/> <c>[1, T, hidden]</c>, positioned from the cache's committed length (0 if none); supplying <paramref name="cache"/> makes this the incremental-decode PREFILL (every layer's K/V appended into the device cache, enabling continuation via <see cref="ForwardStep"/>), otherwise it's a plain full-sequence forward (causal unless <paramref name="nonCausal"/>, used by the bidirectional Bark-Fine stage).</summary>
     /// <param name="positionsApplied">True when the caller already added its own positional embedding(s) to <paramref name="inputEmbeds"/> — e.g. IndexTTS, whose text and mel segments each restart from position 0 under separate learned tables rather than one table spanning the whole sequence. Skips this backbone's own single shared <see cref="_posEmbed"/> addition.</param>
     /// <returns><c>[1, T, hidden]</c>.</returns>
-    public Tensor Forward(IBackend backend, Tensor inputEmbeds, bool nonCausal = false, IKvCache? cache = null, bool positionsApplied = false)
+    public Tensor Forward(IBackend backend, Tensor inputEmbeds, bool nonCausal = false, IKvCache? cache = null, bool positionsApplied = false) =>
+        Forward(backend, inputEmbeds, nonCausal, cache, positionsApplied, layerTap: null);
+
+    /// <summary><see cref="Forward(IBackend, Tensor, bool, IKvCache?, bool)"/> that hands each block's output
+    /// <c>[1, T, hidden]</c> to <paramref name="layerTap"/> (block index, borrowed tensor) for parity dumps.</summary>
+    internal Tensor Forward(IBackend backend, Tensor inputEmbeds, bool nonCausal, IKvCache? cache, bool positionsApplied,
+        Action<int, Tensor>? layerTap)
     {
         ThrowIfDisposed();
         int t = (int)inputEmbeds.Shape[1];
@@ -58,6 +64,7 @@ public sealed unsafe class GptBackbone : IDisposable
                 Tensor next = _blocks[i].ForwardCached(backend, hidden, cache, i, posStart);
                 hidden.Dispose();
                 hidden = next;
+                layerTap?.Invoke(i, hidden);
             }
             cache.AdvanceLength(t);
         }
@@ -69,6 +76,7 @@ public sealed unsafe class GptBackbone : IDisposable
                 Tensor next = _blocks[i].Forward(backend, hidden, causalMask);
                 hidden.Dispose();
                 hidden = next;
+                layerTap?.Invoke(i, hidden);
             }
             causalMask?.Dispose();
         }
@@ -84,7 +92,12 @@ public sealed unsafe class GptBackbone : IDisposable
 
     /// <summary>Runs one token's embedding <c>[1, 1, hidden]</c> through the stack against <paramref name="cache"/> (appending its K/V at <see cref="IKvCache.CurrentLength"/>) — equivalent to the last position of a full-sequence causal <see cref="Forward"/> over the cached prefix plus this token, but at O(T) instead of O(T²).</summary>
     /// <param name="positionsApplied">See <see cref="Forward"/>; when true the caller has already added the right positional embedding for this token (e.g. a segment-relative one) to <paramref name="inputEmbed"/>.</param>
-    public Tensor ForwardStep(IBackend backend, Tensor inputEmbed, IKvCache cache, bool positionsApplied = false)
+    public Tensor ForwardStep(IBackend backend, Tensor inputEmbed, IKvCache cache, bool positionsApplied = false) =>
+        ForwardStep(backend, inputEmbed, cache, positionsApplied, layerTap: null);
+
+    /// <summary><see cref="ForwardStep(IBackend, Tensor, IKvCache, bool)"/> that hands each block's output
+    /// <c>[1, 1, hidden]</c> to <paramref name="layerTap"/> (block index, borrowed tensor) for parity dumps.</summary>
+    internal Tensor ForwardStep(IBackend backend, Tensor inputEmbed, IKvCache cache, bool positionsApplied, Action<int, Tensor>? layerTap)
     {
         ThrowIfDisposed();
         int pos = cache.CurrentLength;
@@ -100,6 +113,7 @@ public sealed unsafe class GptBackbone : IDisposable
             Tensor next = _blocks[i].ForwardCached(backend, hidden, cache, i, pos);
             hidden.Dispose();
             hidden = next;
+            layerTap?.Invoke(i, hidden);
         }
         cache.AdvanceLength(1);
 

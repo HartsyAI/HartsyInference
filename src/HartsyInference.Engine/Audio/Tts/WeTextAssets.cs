@@ -67,12 +67,16 @@ internal static class WeTextAssets
         }
     }
 
-    /// <summary>Extracts any missing grammar and loads the normalizer from them.</summary>
-    public static async Task<WeTextNormalizer> LoadAsync(WeTextLanguage language, bool removeErhua,
+    /// <summary>Extracts any missing grammar and loads the wetext 0.0.4 normalizer from them.</summary>
+    public static Task<WeTextNormalizer> LoadAsync(WeTextLanguage language, bool removeErhua,
+        CancellationToken cancel) => LoadAsync(language, removeErhua, WeTextVersion.V0_0_4, cancel);
+
+    /// <summary>Extracts any missing grammar and loads the normalizer of <paramref name="version"/> from them.</summary>
+    public static async Task<WeTextNormalizer> LoadAsync(WeTextLanguage language, bool removeErhua, WeTextVersion version,
         CancellationToken cancel)
     {
         string directory = await EnsureAsync(language, removeErhua, cancel).ConfigureAwait(false);
-        return await Task.Run(() => WeTextNormalizer.Load(directory, language, removeErhua), cancel).ConfigureAwait(false);
+        return await Task.Run(() => WeTextNormalizer.Load(directory, language, removeErhua, version), cancel).ConfigureAwait(false);
     }
 
     private static List<string> Missing(string directory, WeTextLanguage language, bool removeErhua) =>

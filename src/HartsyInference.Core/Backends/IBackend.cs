@@ -3680,6 +3680,11 @@ public partial interface IBackend : IDisposable
     /// <summary>Frees EVERY cached device allocation for a clean VRAM slate; do NOT call while any model is still in use.</summary>
     void FreeAllDeviceMemory() { }
 
+    /// <summary>Makes every op that starts from now on fail with <see cref="ObjectDisposedException"/>, while the op in
+    /// flight finishes. A teardown that could not wait for a job calls this first, so the job stops cleanly at its next
+    /// op instead of running against freed device memory. A no-op on a backend with nothing to refuse.</summary>
+    void RefuseNewOps() { }
+
     /// <summary>Free device memory in bytes (0 if not a device backend). For diagnostics / adaptive tiling.</summary>
     /// <remarks>The free half of <see cref="GetVramInfo"/>, so a backend that answers one answers both. It used to
     /// be an independent <c>0</c>, which is not "unknown" to the code that reads it — it is "nothing fits", and it
