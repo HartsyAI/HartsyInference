@@ -57,6 +57,12 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
         if (_projW is null) throw new InvalidOperationException("Wav2Vec2BertExtractor weights not loaded.");
 
         Tensor stacked = ExtractStackedFeatures(audio16k, out int validFrames);
+        if (validFrames < 1)
+        {
+            stacked.Dispose();
+            throw new ArgumentException($"{audio16k.Length} samples at 16 kHz are too short for w2v-bert: it needs two 25 ms fbank frames (560 samples).",
+                nameof(audio16k));
+        }
         return ForwardFromFeatures(backend, stacked, validFrames);
     }
 

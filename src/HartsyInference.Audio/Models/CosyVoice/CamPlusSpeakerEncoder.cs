@@ -154,6 +154,32 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
         foreach (Tensor t in _denseBn.Weights()) yield return t;
     }
 
+    /// <summary>CAM context <c>[1, C, T]</c>: <c>x.mean(time) + seg_pool(x)</c>, where seg_pool averages each 100-frame segment (ceil mode) and broadcasts it back over the frames it covers.</summary>
+    internal static Tensor ContextPool(Tensor x, bool onnxSegmentPooling)
+    {
+        int C = (int)x.Shape[1], T = (int)x.Shape[2];
+        const int seg = 100;
+        Tensor o = new(new TensorShape(1, C, T), DType.F32);
+        float* p = (float*)x.DataPointer, op = (float*)o.DataPointer;
+        for (int c = 0; c < C; c++)
+        {
+            long baseI = (long)c * T;
+            double mean = 0;
+            for (int j = 0; j < T; j++) mean += p[baseI + j];
+            mean /= T;
+            for (int s = 0; s < T; s += seg)
+            {
+                int end = Math.Min(s + seg, T);
+                double segSum = 0;
+                for (int j = s; j < end; j++) segSum += p[baseI + j];
+                // ONNX AveragePool (ceil_mode, no pad) divides a partial window by the kernel size, torch by the valid count.
+                float segMean = (float)(segSum / (onnxSegmentPooling ? seg : end - s));
+                for (int j = s; j < end; j++) op[baseI + j] = (float)mean + segMean;
+            }
+        }
+        return o;
+    }
+
     // ---- shared op helpers ----
 
     private static Tensor Conv2d(IBackend backend, Tensor x, Conv2dW w, int sH, int sW, int pH, int pW)
@@ -401,32 +427,6 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
             backend.Sigmoid(m, m);
             MulInPlace(y, m); m.Dispose();
             return y;
-        }
-
-        /// <summary>CAM context: <c>x.mean(time) + seg_pool(x)</c>, where seg_pool averages each 100-frame segment (ceil mode) and broadcasts it back over the frames it covers.</summary>
-        private static Tensor ContextPool(Tensor x, bool onnxSegmentPooling)
-        {
-            int C = (int)x.Shape[1], T = (int)x.Shape[2];
-            const int seg = 100;
-            Tensor o = new(new TensorShape(1, C, T), DType.F32);
-            float* p = (float*)x.DataPointer, op = (float*)o.DataPointer;
-            for (int c = 0; c < C; c++)
-            {
-                long baseI = (long)c * T;
-                double mean = 0;
-                for (int j = 0; j < T; j++) mean += p[baseI + j];
-                mean /= T;
-                for (int s = 0; s < T; s += seg)
-                {
-                    int end = Math.Min(s + seg, T);
-                    double segSum = 0;
-                    for (int j = s; j < end; j++) segSum += p[baseI + j];
-                    // ONNX AveragePool (ceil_mode, no pad) divides a partial window by the kernel size, torch by the valid count.
-                    float segMean = (float)(segSum / (onnxSegmentPooling ? seg : end - s));
-                    for (int j = s; j < end; j++) op[baseI + j] = (float)mean + segMean;
-                }
-            }
-            return o;
         }
 
         public IEnumerable<Tensor> AllWeights()

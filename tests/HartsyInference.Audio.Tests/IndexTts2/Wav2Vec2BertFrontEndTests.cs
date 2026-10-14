@@ -38,4 +38,24 @@ public sealed class Wav2Vec2BertFrontEndTests
         }
         Assert.True(Math.Sqrt(num / den) < 0.02, $"features depend on the input gain: relative RMS {Math.Sqrt(num / den):E2}");
     }
+
+    /// <summary><c>SeamlessM4TFeatureExtractor</c> pads an odd fbank frame count to even with a zero frame
+    /// (<c>pad_to_multiple_of=2</c>) and masks the last stacked frame; it does not drop the odd frame.</summary>
+    [Theory]
+    [InlineData(1_040, 3, 2)]   // 5 fbank frames
+    [InlineData(1_200, 3, 3)]   // 6 fbank frames
+    public void OddFrameCount_IsPaddedWithAZeroFrame_AndMasked(int samples, int rows, int valid)
+    {
+        Random rng = new(3);
+        float[] audio = new float[samples];
+        for (int i = 0; i < audio.Length; i++) audio[i] = (float)(0.1 * (rng.NextDouble() - 0.5));
+
+        using Wav2Vec2BertExtractor extractor = new(Wav2Vec2BertConfig.V2(17));
+        using Tensor stacked = extractor.ExtractStackedFeatures(audio, out int validFrames);
+        Assert.Equal(rows, stacked.Shape[1]);
+        Assert.Equal(valid, validFrames);
+        ReadOnlySpan<float> lastRow = stacked.AsSpan<float>().Slice((rows - 1) * 160, 160);
+        Assert.Contains(lastRow[..80].ToArray(), static v => v != 0f);
+        Assert.Equal(valid < rows, lastRow[80..].ToArray().All(static v => v == 0f));
+    }
 }
