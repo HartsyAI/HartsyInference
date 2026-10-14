@@ -31,7 +31,8 @@ public sealed partial class IndexTtsFrontNormalizer
 
     private readonly IndexTtsFstNormalizers _fst;
     private readonly bool _enableGlossary;
-    private readonly List<KeyValuePair<string, IndexTtsGlossaryTerm>> _glossary = [];
+    private readonly object _glossaryLock = new();
+    private KeyValuePair<string, IndexTtsGlossaryTerm>[] _glossary = [];
 
     /// <param name="fst">The English/Chinese FST normalizers upstream takes from wetext.</param>
     /// <param name="enableGlossary">Upstream <c>TextNormalizer(enable_glossary=...)</c>: off for 1.5, on for 2.0/2.5.</param>
@@ -42,15 +43,21 @@ public sealed partial class IndexTtsFrontNormalizer
         _enableGlossary = enableGlossary;
     }
 
-    /// <summary>Adds or replaces glossary terms (upstream <c>load_glossary</c>); used only when the glossary is enabled.</summary>
+    /// <summary>Adds or replaces glossary terms (upstream <c>load_glossary</c>); used only when the glossary is enabled.
+    /// Safe to call while other threads normalize: they see the old or the new term set, never a partial one.</summary>
     public void LoadGlossary(IEnumerable<KeyValuePair<string, IndexTtsGlossaryTerm>> terms)
     {
         ArgumentNullException.ThrowIfNull(terms);
-        foreach (KeyValuePair<string, IndexTtsGlossaryTerm> term in terms)
+        lock (_glossaryLock)
         {
-            int existing = _glossary.FindIndex(kv => kv.Key == term.Key);
-            if (existing >= 0) _glossary[existing] = term;
-            else _glossary.Add(term);
+            List<KeyValuePair<string, IndexTtsGlossaryTerm>> merged = [.. Volatile.Read(ref _glossary)];
+            foreach (KeyValuePair<string, IndexTtsGlossaryTerm> term in terms)
+            {
+                int existing = merged.FindIndex(kv => kv.Key == term.Key);
+                if (existing >= 0) merged[existing] = term;
+                else merged.Add(term);
+            }
+            Volatile.Write(ref _glossary, [.. merged]);
         }
     }
 
@@ -120,8 +127,8 @@ public sealed partial class IndexTtsFrontNormalizer
 
     private string ApplyGlossary(string text, bool chinese)
     {
-        if (_glossary.Count == 0) return text;
-        List<KeyValuePair<string, IndexTtsGlossaryTerm>> sorted = [.. _glossary];
+        KeyValuePair<string, IndexTtsGlossaryTerm>[] sorted = Volatile.Read(ref _glossary);
+        if (sorted.Length == 0) return text;
         // List.Sort is unstable; OrderByDescending keeps insertion order for equal lengths, like Python's sorted().
         foreach (KeyValuePair<string, IndexTtsGlossaryTerm> term in sorted.OrderByDescending(static kv => kv.Key.Length))
         {
