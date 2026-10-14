@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: a shared end-of-generation gate for autoregressive audio decoders.** A decoder that samples its stop token on step 0 produces zero tokens, which downstream decoders cannot turn into audio. `StopGate` (`Sampling/StopGate.cs`) writes `-inf` into the stop ids' logits until a floor is reached, before the draw, so top-k, top-p and greedy all honor it; the floor is `max(MinTokens, target-text-tokens × MinTokenTextRatio)`. CosyVoice 2 moves from its count-shrink to the helper (reference `min_token_text_ratio = 2`, target text only), and the gate is applied to GPT-SoVITS (reference floor 11, from `t2s_model.py`), Spark-TTS, Breeze-TTS2, IndexTTS, IndexTTS-2 and Chatterbox T3 (floor 1 where the reference has no gate). A/B on the live engine against a control build at the same version: CosyVoice 2, Chatterbox, Spark-TTS and GPT-SoVITS produce byte-identical output on an eight-text matrix; the gate never changed a draw there. `StopGateTests` cover the masking, the floor and the open path.
+
 
 - **Fixed: stale expert-cache test read a released lease.** `PinnedExpertsAreNeverEvicted_AndUnpinnedOnesAre` called `pinned.Get` after `Release`, but released leases clear their slots by design (reusable leases, #306). The test now keeps the weights before releasing; the pinned-never-evicted and unpinned-evicted assertions are unchanged.
 - **Fixed: Qwen2 and Qwen3 GGUFs use the Qwen2 pre-tokenizer split.** The GGUF names it `tokenizer.ggml.pre = "qwen2"`, and only `kolibri1` selected the single-digit split. Qwen text tokenized with the GPT-2 split, 6-8% more tokens on the same text (the 4K benchmark prompt came out at 4,036 against llama.cpp's 3,742). The Qwen2 split now applies to both names.
@@ -23,10 +25,6 @@ stable release will require. Dates are UTC.
 - **Fixed: the certification runner reads the .NET 10 SDK's test summary.** `run_class` matched only the classic `Passed!`/`Failed!` line, so a class that passed on this SDK was recorded as `no test summary`. The summary is now parsed by `tests/dsv41-certification-summary.awk`, which reads the `Test Run Successful.` / `Test Run Failed.` block and its totals. `tests/dsv41-certification-summary-test.sh` checks both formats.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
-
-## alpha.365
-
-- **Added: a shared end-of-generation gate for autoregressive audio decoders.** A decoder that samples its stop token on step 0 produces zero tokens, which downstream decoders cannot turn into audio. `StopGate` (`Sampling/StopGate.cs`) writes `-inf` into the stop ids' logits until a floor is reached, before the draw, so top-k, top-p and greedy all honor it; the floor is `max(MinTokens, target-text-tokens × MinTokenTextRatio)`. CosyVoice 2 moves from its count-shrink to the helper (reference `min_token_text_ratio = 2`, target text only), and the gate is applied to GPT-SoVITS (reference floor 11, from `t2s_model.py`), Spark-TTS, Breeze-TTS2, IndexTTS, IndexTTS-2 and Chatterbox T3 (floor 1 where the reference has no gate). A/B on the live engine against a control build at the same version: CosyVoice 2, Chatterbox, Spark-TTS and GPT-SoVITS produce byte-identical output on an eight-text matrix; the gate never changed a draw there. `StopGateTests` cover the masking, the floor and the open path.
 
 ## alpha.364
 
