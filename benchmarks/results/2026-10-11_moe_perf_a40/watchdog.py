@@ -15,6 +15,8 @@ Lease lifecycle (file: ~/.runpod/podkit-leases.json, outside the repo):
   4. Only leased pods are ever stopped. Every pass that finds a leased pod RUNNING and past its max hours POSTs /stop
      again, so a pod the operator restarts from the console is stopped again at the next pass. A pod that is not
      RUNNING is left alone and logged once per status change. stop_requested records the last POST (information only).
+     To keep a pod running past its limit, the operator raises its max_hours in the lease file (or stops the watchdog);
+     there is no other extension path, by design.
 
 Run it on a timer, for example cron every 5 minutes:
 
@@ -241,6 +243,7 @@ def _run_once_locked(api_call, path, now, dry_run, log):
         code, body = api_call("POST", f"/pods/{pid}/stop")
         if 200 <= code < 300:
             rec["stop_requested"] = now.isoformat()
+            rec["last_status"] = "EXITED"   # the pod is being stopped; do not log its next state as a change
             log(f"watchdog: stop requested for {pid} ({rec['name']}), {age:.2f} h old, max {rec['max_hours']} h")
             stopped.append(pid)
         else:
