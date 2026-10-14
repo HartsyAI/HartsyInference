@@ -56,24 +56,35 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
         ThrowIfDisposed();
         if (_projW is null) throw new InvalidOperationException("Wav2Vec2BertExtractor weights not loaded.");
 
-        Tensor stacked = ExtractStackedFeatures(audio16k);
-        return ForwardFromFeatures(backend, stacked);
+        Tensor stacked = ExtractStackedFeatures(audio16k, out int validFrames);
+        if (validFrames < 1)
+        {
+            stacked.Dispose();
+            throw new ArgumentException($"{audio16k.Length} samples at 16 kHz are too short for w2v-bert: it needs two 25 ms fbank frames (560 samples).",
+                nameof(audio16k));
+        }
+        return ForwardFromFeatures(backend, stacked, validFrames);
     }
 
     /// <summary>The encoder half of <see cref="Forward"/> on already-extracted stacked features
-    /// <c>[1, T, 160]</c> (consumed — the tensor is disposed).</summary>
-    internal Tensor ForwardFromFeatures(IBackend backend, Tensor stacked)
+    /// <c>[1, T, 160]</c> (consumed — the tensor is disposed). Frames from <paramref name="validFrames"/> on are
+    /// padding, handled as HF's attention mask does: zeroed after the projection, never attended to and zeroed
+    /// before each convolution module, yet still given an output row.</summary>
+    internal Tensor ForwardFromFeatures(IBackend backend, Tensor stacked, int validFrames)
     {
         int t = (int)stacked.Shape[1];
+        ArgumentOutOfRangeException.ThrowIfLessThan(validFrames, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(validFrames, t);
         Tensor projNormed = new(stacked.Shape, DType.F32);
         backend.LayerNorm(projNormed, stacked, _projLnW!, _projLnB!, _cfg.LayerNormEps);
         stacked.Dispose();
         Tensor hidden = WhisperOps.ProjectLinear(backend, projNormed, _projW!, _projB, 1, t, _cfg.FeatureProjectionInputDim, _cfg.HiddenSize);
         projNormed.Dispose();
+        Wav2Vec2BertConformerLayer.ZeroTail(hidden, validFrames);
 
         foreach (Wav2Vec2BertConformerLayer layer in _layers)
         {
-            Tensor next = layer.Forward(backend, hidden, t);
+            Tensor next = layer.Forward(backend, hidden, t, validFrames);
             hidden.Dispose();
             hidden = next;
         }
@@ -82,10 +93,11 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
 
     /// <summary>Real <c>SeamlessM4TFeatureExtractor.__call__</c>: Kaldi fbank (the extractor's own ×2^15 Kaldi
     /// scaling already matches torchaudio's convention), per-mel-bin zero-mean/unit-variance normalize over time
-    /// (sample variance, ddof=1, +1e-7 epsilon), drop a trailing odd frame, then reshape consecutive frame PAIRS
-    /// into one <c>numMelBins*stride</c>-wide vector (so the 80-bin fbank becomes this model's real 160-dim
-    /// input and the frame rate halves to ~20 ms).</summary>
-    internal Tensor ExtractStackedFeatures(ReadOnlySpan<float> audio16k)
+    /// (sample variance, ddof=1, +1e-7 epsilon), pad an odd frame count with one zero frame
+    /// (<c>pad_to_multiple_of=2</c>), then reshape consecutive frame PAIRS into one <c>numMelBins*stride</c>-wide
+    /// vector (so the 80-bin fbank becomes this model's real 160-dim input and the frame rate halves to ~20 ms).
+    /// <paramref name="validFrames"/> is the unpadded stacked count, HF's <c>attention_mask[:, 1::2]</c>.</summary>
+    internal Tensor ExtractStackedFeatures(ReadOnlySpan<float> audio16k, out int validFrames)
     {
         // The reference feature extractor feeds the fbank 16-bit-integer-scaled samples (`waveform * 2**15`, "Kaldi
         // compliance"). The scale only shifts every log-mel value by a constant — which the per-bin normalization below
@@ -109,15 +121,19 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
             for (int x = 0; x < frames; x++) normed[x, m] = (float)(fbank[x, m] - mean) * invStd;
         }
 
-        int stackedFrames = frames / Stride;
-        Tensor stacked = new(new TensorShape(1, Math.Max(stackedFrames, 0), bins * Stride), DType.F32);
+        validFrames = frames / Stride;
+        int stackedFrames = (frames + Stride - 1) / Stride;
+        Tensor stacked = new(new TensorShape(1, stackedFrames, bins * Stride), DType.F32);
         Span<float> d2 = stacked.AsSpan<float>();
         for (int x = 0; x < stackedFrames; x++)
             for (int s = 0; s < Stride; s++)
                 for (int m = 0; m < bins; m++)
-                    d2[x * bins * Stride + s * bins + m] = normed[x * Stride + s, m];
+                    d2[x * bins * Stride + s * bins + m] = x * Stride + s < frames ? normed[x * Stride + s, m] : 0f;
         return stacked;
     }
+
+    /// <summary><see cref="ExtractStackedFeatures(ReadOnlySpan{float}, out int)"/> without the valid count.</summary>
+    internal Tensor ExtractStackedFeatures(ReadOnlySpan<float> audio16k) => ExtractStackedFeatures(audio16k, out _);
 
     public IEnumerable<Tensor> EnumerateWeights()
     {

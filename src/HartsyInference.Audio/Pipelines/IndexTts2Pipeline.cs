@@ -180,7 +180,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             campplusLoader.Load(campplusPath, recursiveFlatten: true);
             loaders.Add(campplusLoader);
             Dictionary<string, Tensor> campplusWeights = IndexTtsPipeline.ToF32(campplusLoader.GetAllTensors(), converted);
-            camplus = new CamPlusSpeakerEncoder();
+            camplus = new CamPlusSpeakerEncoder(onnxSegmentPooling: false);
             camplus.LoadWeights(campplusWeights);
 
             semanticCodec = new VocosFactorizedCodec(resolved.SemanticCodec);
@@ -268,9 +268,10 @@ public sealed class IndexTts2Pipeline : IDisposable
 
     private const double MaxReferenceSeconds = 15.0;
 
-    /// <summary>Zero crossings of the near-ideal resampler used where the reference's own resampling is librosa's
-    /// <c>soxr_hq</c> (any rate → 22.05 kHz / 16 kHz straight from the file).</summary>
+    /// <summary>Zero crossings and roll-off of the long sinc that stands in for librosa's <c>soxr_hq</c> (any rate →
+    /// 22.05 kHz / 16 kHz straight from the file); the roll-off sits at the centre of soxr's transition band.</summary>
     private const int PrecisionFilterWidth = 64;
+    private const double SoxrHqRolloff = 0.955;
 
     /// <summary>Reproduces the reference's clip resampling chain: <c>librosa.load</c> brings the file to 22.05 kHz
     /// (soxr high quality — approximated by a long sinc), and the 16 kHz copy is
@@ -278,10 +279,17 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// exactly by <see cref="SincResampler"/>).</summary>
     private static (float[] Audio16k, float[] Audio22k) ResampleReference(ReadOnlySpan<float> clip, int sampleRate)
     {
-        float[] audio22k = sampleRate == 22_050 ? clip.ToArray() : SincResampler.Resample(clip, sampleRate, 22_050, PrecisionFilterWidth);
+        float[] audio22k = SoxrHq(clip, sampleRate, 22_050);
         float[] audio16k = SincResampler.Resample(audio22k, 22_050, 16_000);
         return (audio16k, audio22k);
     }
+
+    /// <summary>The reference's emotion-clip load, <c>librosa.load(path, sr=16000)</c>: the file straight to 16 kHz,
+    /// not the 22.05 kHz → 16 kHz chain the speaker path uses.</summary>
+    private static float[] ResampleEmotionClip(ReadOnlySpan<float> clip, int sampleRate) => SoxrHq(clip, sampleRate, 16_000);
+
+    private static float[] SoxrHq(ReadOnlySpan<float> clip, int inRate, int outRate) =>
+        inRate == outRate ? clip.ToArray() : SincResampler.Resample(clip, inRate, outRate, PrecisionFilterWidth, SoxrHqRolloff);
 
     /// <summary>Runs the reference clip through every front-end stage that depends on nothing else and returns the
     /// reusable <see cref="IndexTts2Reference"/> (the reference's <c>cache_*</c> fields). Like the reference, only the
@@ -298,6 +306,7 @@ public sealed class IndexTts2Pipeline : IDisposable
         (float[] audio16k, float[] audio22k) = ResampleReference(clip, referenceSampleRate);
 
         Tensor? spkCondEmb = null, refMel = null, style = null, promptCondition = null, speakerConditioning = null, baseEmoVec = null;
+        Tensor? emoVec = null;
         try
         {
             spkCondEmb = _semanticFeatures.Forward(backend, audio16k);
@@ -312,8 +321,15 @@ public sealed class IndexTts2Pipeline : IDisposable
                 ? _gpt.ComputeSpeakerConditioningConformerPerceiver(backend, spkCondEmb, tSpk)
                 : _gpt.ComputeSpeakerConditioning(backend, style);
             baseEmoVec = _gpt.ComputeEmoVec(backend, spkCondEmb, tSpk);
+            // With no separate emotion clip the reference reloads the speaker's own clip at 16 kHz as the emotion
+            // input and merges with alpha 1: merge_emovec(spk_cond_emb, emo_cond_emb, 1).
+            float[] emoAudio16k = ResampleEmotionClip(clip, referenceSampleRate);
+            using (Tensor emoCondEmb = _semanticFeatures.Forward(backend, emoAudio16k))
+            using (Tensor ownEmoVec = _gpt.ComputeEmoVec(backend, emoCondEmb, (int)emoCondEmb.Shape[1]))
+                emoVec = IndexTts2T2sDecoder.MergeEmoVec(baseEmoVec, ownEmoVec, 1f);
 
-            IndexTts2Reference reference = new(this, spkCondEmb, tSpk, refMel, tRef, style, promptCondition, speakerConditioning, baseEmoVec, audio16k);
+            IndexTts2Reference reference = new(this, spkCondEmb, tSpk, refMel, tRef, style, promptCondition, speakerConditioning, baseEmoVec,
+                emoVec, audio16k);
             if (timings is not null) timings.ReferenceMs += sw.Elapsed.TotalMilliseconds;
             return reference;
         }
@@ -325,6 +341,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             promptCondition?.Dispose();
             speakerConditioning?.Dispose();
             baseEmoVec?.Dispose();
+            emoVec?.Dispose();
             throw;
         }
     }
@@ -471,20 +488,15 @@ public sealed class IndexTts2Pipeline : IDisposable
                 using Tensor emovecMat = _emoLookup.ComputeEmoVecMat(emoVector, reference.Style, opts.UseRandomEmoExemplar, ref rngState);
                 float leftover = 1f - emoVector.Sum();
 
-                // emo_audio_prompt defaults to the speaker's own clip when no external one is given; alpha is
-                // forced to 1.0, so merge_emovec(spk, spk, alpha=1) collapses to the speaker's base vector itself.
-                return (AddScaled(emovecMat, reference.BaseEmoVec, leftover), true);
+                // emo_audio_prompt defaults to the speaker's own clip when no external one is given, with alpha 1.
+                return (AddScaled(emovecMat, reference.EmoVec, leftover), true);
             }
 
-            if (opts.EmoAudioReference is not { } emoRef)
-            {
-                // Speaker's own clip as the emotion reference, alpha forced to 1: merge_emovec(base, base, 1) == base.
-                return (reference.BaseEmoVec, false);
-            }
+            if (opts.EmoAudioReference is not { } emoRef) return (reference.EmoVec, false);
 
             // reference: _load_and_cut_audio(emo_audio_prompt, 15, sr=16000)
             int emoCap = (int)Math.Min(int.MaxValue, MaxReferenceSeconds * emoRef.SampleRate);
-            float[] emoAudio = SincResampler.Resample(emoRef.Audio.AsSpan(0, Math.Min(emoCap, emoRef.Audio.Length)), emoRef.SampleRate, 16_000, PrecisionFilterWidth);
+            float[] emoAudio = ResampleEmotionClip(emoRef.Audio.AsSpan(0, Math.Min(emoCap, emoRef.Audio.Length)), emoRef.SampleRate);
             using Tensor emoCondEmb = _semanticFeatures.Forward(backend, emoAudio);
             using Tensor emoVecFromAudio = _gpt.ComputeEmoVec(backend, emoCondEmb, (int)emoCondEmb.Shape[1]);
             return (HartsyInference.Audio.Models.IndexTts2.IndexTts2T2sDecoder.MergeEmoVec(reference.BaseEmoVec, emoVecFromAudio, opts.EmoAlpha), true);

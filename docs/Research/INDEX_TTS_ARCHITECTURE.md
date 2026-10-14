@@ -261,15 +261,26 @@ compares greedy decoding token for token. Things a listen-only check could not s
 | Decode positions | `GPT2InferenceModel.forward` uses `attention_mask.shape[1] - mel_len` → start token 0, first code 2, then 3, 4… (position 1 skipped) | greedy codes now identical |
 | 2.0 prompt condition | `length_regulator(S_ref)` with `S_ref` the semantic codec's quantized embedding (2.5's `infer_v2_5.py` comments `S_ref` out and uses the w2v-bert feature) | exact |
 | Resampling | file → 22.05 kHz (librosa soxr) → 16 kHz with `torchaudio.transforms.Resample` (sinc_interp_hann, 6 zero crossings, 0.99 roll-off) | 16 kHz signal 3.4% → 6e-5 |
+| soxr stand-in | the file → 22.05 kHz and file → 16 kHz loads are soxr_hq; a 64-crossing sinc with roll-off 0.955 (the middle of soxr's transition band) replaces 0.99 | 24 kHz clip: 22.05 kHz 3.9e-2 → 2.4e-3, direct 16 kHz 2.6e-2 → 1.9e-3; white noise 48/44.1 kHz still ~1e-2 |
+| Emotion clip | `_load_and_cut_audio(path, 15, sr=16000)` (librosa straight to 16 kHz) feeds `emo_cond_emb` even when the emotion clip is the speaker's own; the default vector is `merge_emovec(spk_cond_emb, emo_cond_emb, 1)`, not `get_emovec(spk_cond_emb)` | 2.5 emovec 6.4e-2 → 1.4e-3 |
+| w2v-bert odd frame | `SeamlessM4TFeatureExtractor` pads an odd fbank frame count with a zero frame and masks the last stacked frame (`attention_mask[:, 1::2]`); it is not dropped, so the output has `ceil(frames / 2)` rows | 220 → 221 rows; `emo_cond_emb` 6e-6 |
+| CAM++ context pool | `CAMLayer.seg_pooling` is torch `avg_pool1d(ceil_mode=True)`, which divides the trailing partial 100-frame window by the frames it covers; CosyVoice's ONNX export divides by 100 | style 9e-2 → 5.5e-6 |
 | Repetition penalty | HF applies it to `input_ids`, which are all ones plus the start token → token 1 is penalised from step 0 | codes identical with penalty 10 |
 | `remove_long_silence` | defined, never called | removed |
 | Emotion vector | library path and QwenEmotion path use weights as given; only the WebUI calls `normalize_emo_vec` | opt-in `NormalizeEmoVector` |
 | Segmentation | tokenize the whole text once, then `split_segments` (punctuation pieces, comma/hyphen recursion, merge rules, `quick_streaming_tokens`); 200 ms silence between segments | golden-tested |
 | Text normalization | WeTextProcessing English FST (numbers, dates, money, titles…) then the punctuation map | digits were read as raw digits |
 
-Remaining numeric differences against the reference, all benign: CAM++ style 4e-3 relative (log-floor sensitivity in the
-fbank), the S2Mel DiT estimator 1e-3–4e-3 per step (25-step solve from identical noise: 7.7e-3, cosine 0.99997), BigVGAN
-1.6e-5, everything else ≤ 1e-4. Not implemented: beam search (`num_beams=3`), the reference's default for the GPT.
+Remaining numeric differences against the reference, all benign: the S2Mel DiT estimator 1e-3–4e-3 per step (25-step
+solve from identical noise: 7.7e-3, cosine 0.99997), BigVGAN 1.6e-5, everything else ≤ 1e-4. The 2.0 run's 4e-3 CAM++ style
+error, put down to log-floor sensitivity, predates the context-pool fix and has not been re-measured.
+
+2.5 decode (`IndexTts25GptDecodeParityTests`, dump from `tools/parity/indextts25_gpt_decode_dump.py`): with upstream's
+conditioning, the teacher-forced GPT matches every block, `ln_f` and logit row to ≤ 1.8e-6 relative over 26 and 45
+steps, with no argmax flip. The earlier drift after 6-8 codes came from the conditioning inputs (the last three rows of the
+table). After those fixes, greedy and 3-beam codes from `PrepareReference` on the 24 kHz test clip equal upstream's for
+"Yes." and "Okay, see you." (`IndexTts25BeamParityTests`). The emovec still carries 1.4e-3 from the soxr stand-in, so
+another clip can flip a late near-tie.
 
 Resource note: the reference dump and harness live outside the repo; to regenerate, run the reference's `infer_generator`
 stage by stage on CPU and write each intermediate to safetensors (see the test's remarks for the keys).
