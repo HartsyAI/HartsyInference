@@ -193,6 +193,39 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         Assert.Equal(before + 2, backend.FlashCm2PrefillDispatches);
     }
 
+    /// <summary>A causal prefill whose first query row lies past the keys (<c>qOffset &gt;= kvLen</c>) is refused by the cm2 gate,
+    /// as the decode path refuses it, and takes the scalar kernel: no cm2 dispatch, and the output still matches the CPU reference.</summary>
+    [Theory]
+    [InlineData(16, 8, 64, 64, 64, 64, 0)]    // the first query row is the first row past the 64 keys
+    [InlineData(16, 8, 64, 70, 64, 80, 32)]   // a window over a query offset past the keys
+    public void CausalPrefill_QueryOffsetPastTheKeys_TakesTheScalarPath(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        backend.EnableFlashCm2Prefill = true;
+        float scale = 1f / MathF.Sqrt(d);
+        float[] q = Half(Random(hq * sq * d, 41));
+        float[] k = Half(Random(hkv * kvLen * d, 42));
+        float[] v = Half(Random(hkv * kvLen * d, 43));
+        float[] expected = new float[hq * sq * d];
+        using (Tensor rq = FromHost(new TensorShape(1, hq, sq, d), q))
+        using (Tensor rk = FromHost(new TensorShape(1, hkv, kvLen, d), k))
+        using (Tensor rv = FromHost(new TensorShape(1, hkv, kvLen, d), v))
+        using (Tensor ro = new(new TensorShape(1, hq, sq, d), DType.F32))
+        {
+            AttentionReference.FlashAttention(ro, rq, rk, rv, kvLen, hq / hkv, causal: true, qOffset, scale, slidingWindow: window);
+            ro.AsReadOnlySpan<float>().CopyTo(expected);
+        }
+        using Tensor qt = FromHost(new TensorShape(1, hq, sq, d), q);
+        using Tensor kt = FromHost(new TensorShape(1, hkv, kvLen, d), k);
+        using Tensor vt = FromHost(new TensorShape(1, hkv, kvLen, d), v);
+        using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        long before = backend.FlashCm2PrefillDispatches;
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, hq / hkv, causal: true, qOffset, scale, slidingWindow: window);
+        Assert.Equal(before, backend.FlashCm2PrefillDispatches);
+        Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
+    }
+
     private static float[] Pad(float[] dense, int heads, int len, int cap, int d)
     {
         float[] p = new float[heads * cap * d];

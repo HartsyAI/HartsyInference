@@ -6,13 +6,18 @@ namespace HartsyInference.Vulkan;
 // prefill's last-row slice uses it, so the hidden state is never read back to the host just to pick one row.
 public sealed partial class VulkanBackend
 {
+    /// <summary>Most rows one resident gather copies. Larger gathers take the host path.</summary>
+    private const int MaxResidentGatherRows = 256;
+
     /// <inheritdoc/>
-    /// <remarks>Returns false, changing nothing, unless the input is already on the device and both tensors are F32 with
-    /// in-range rows. The caller then falls back to <see cref="HartsyInference.Core.Backends.IBackend.GatherRows"/>, which
-    /// reads the input on the host and reports bad indices. Not taken while a step graph is captured.</remarks>
+    /// <remarks>Returns false, changing nothing, unless the input is already on the device, both tensors are F32, the rows are
+    /// in range and there are at most <see cref="MaxResidentGatherRows"/> of them. The caller then falls back to
+    /// <see cref="HartsyInference.Core.Backends.IBackend.GatherRows"/>, which reads the input on the host and reports bad
+    /// indices. Not taken while a step graph is captured.</remarks>
     public unsafe bool TryGatherRowsResident(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
     {
-        if (_capturingStepGraph || output.DType != DType.F32 || input.DType != DType.F32 || input.Shape.Rank < 1)
+        if (_capturingStepGraph || output.DType != DType.F32 || input.DType != DType.F32 || input.Shape.Rank < 1
+            || rowIndices.Length > MaxResidentGatherRows)
             return false;
         long width = input.Shape[input.Shape.Rank - 1];
         if (width <= 0 || width > int.MaxValue || output.ElementCount != (long)rowIndices.Length * width)
@@ -31,7 +36,8 @@ public sealed partial class VulkanBackend
         {
             if (rowIndices.Length > 0)
             {
-                VkBufferCopy[] regions = new VkBufferCopy[rowIndices.Length];
+                // The regions live on the stack: the gather is a few rows, so this stays allocation-free.
+                VkBufferCopy* regions = stackalloc VkBufferCopy[rowIndices.Length];
                 for (int m = 0; m < rowIndices.Length; m++)
                 {
                     regions[m] = new VkBufferCopy
@@ -43,8 +49,7 @@ public sealed partial class VulkanBackend
                 }
                 nint cb = _stream.AcquireRecording();
                 VulkanCommandStream.RecordComputeToCopyBarrierOn(cb);
-                fixed (VkBufferCopy* p = regions)
-                    VulkanApi.vkCmdCopyBuffer(cb, src.Handle, outBuf.Handle, (uint)regions.Length, (nint)p);
+                VulkanApi.vkCmdCopyBuffer(cb, src.Handle, outBuf.Handle, (uint)rowIndices.Length, (nint)regions);
                 VulkanCommandStream.RecordCopyToComputeBarrierOn(cb);
             }
             CacheOutput(output, outBuf);

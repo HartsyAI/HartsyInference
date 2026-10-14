@@ -67,7 +67,8 @@ public sealed partial class VulkanBackend
     /// <summary>Causal prefill on <c>sdpa_flash_cm2_causal</c>: the query rows sit at absolute positions <c>qOffset + i</c>,
     /// and the kernel computes the causal (and sliding-window) mask from those positions. No mask is built on the host, held
     /// across layers or uploaded, so a prefill of many layers moves no mask bytes. Returns false (leaving
-    /// <paramref name="output"/> untouched) when the knob is off or the shape gate misses.</summary>
+    /// <paramref name="output"/> untouched) when the knob is off or the shape gate misses. Like the decode path, it needs the
+    /// first query row inside the keys (<c>qOffset &lt; kvLen</c>).</summary>
     private bool TryFlashCm2CausalPrefill(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup,
         int qOffset, float scale, int slidingWindow)
     {
@@ -76,7 +77,7 @@ public sealed partial class VulkanBackend
             return false;
         int hq = (int)query.Shape[1], sq = (int)query.Shape[2], headDim = (int)query.Shape[3];
         if (sq < FlashCm2PrefillMinRows || kvGroup <= 0 || hq % kvGroup != 0 || kvLen <= 0 || kvLen > key.Shape[2]
-            || qOffset < 0 || slidingWindow < 0)
+            || qOffset < 0 || qOffset >= kvLen || slidingWindow < 0)
             return false;
         int hkv = hq / kvGroup;
         if (!CanUseFlashCm2(headDim, hq, hkv, sq, kvLen, mask: null)) return false;
@@ -87,7 +88,7 @@ public sealed partial class VulkanBackend
         long kvCap = key.Shape[2];
         AttnStrides qs = new((uint)headDim, (uint)(sq * headDim), (uint)((long)sq * headDim * hq));
         AttnStrides ks = new((uint)headDim, (uint)(kvCap * headDim), (uint)(kvCap * headDim * hkv));
-        DispatchFlashCm2(output, query, key, value, mask: null, scale, batch: 1, hq, hkv, sq, kvLen, headDim,
+        DispatchFlashCm2Causal(output, query, key, value, scale, batch: 1, hq, hkv, sq, kvLen, headDim,
             qs, ks, ks, qs, new CausalWindow(qOffset, slidingWindow));
         FlashCm2PrefillDispatches++;
         return true;
@@ -119,14 +120,51 @@ public sealed partial class VulkanBackend
     /// position <see cref="QOffset"/> + i, and <see cref="Window"/> 0 means no window.</summary>
     private readonly record struct CausalWindow(int QOffset, int Window);
 
-    /// <summary>Runs <c>sdpa_flash_cm2</c> in F16 over strided Q/K/V/O; strides are in elements. With <paramref name="causal"/>
-    /// set it runs <c>sdpa_flash_cm2_causal</c>, which computes that mask itself, so <paramref name="mask"/> must be null.</summary>
+    /// <summary>Runs <c>sdpa_flash_cm2</c> in F16 over strided Q/K/V/O, or <c>sdpa_flash_cm2_mask</c> when a mask is given. Strides
+    /// are in elements. The causal prefill has its own entry, <see cref="DispatchFlashCm2Causal"/>, so a mask and a causal
+    /// window cannot be passed together.</summary>
     private void DispatchFlashCm2(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        int batch, int hq, int hkv, int sq, int skv, int headDim, AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os,
-        CausalWindow? causal = null)
+        int batch, int hq, int hkv, int sq, int skv, int headDim, AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os)
     {
-        if (causal is not null && mask is not null)
-            throw new ArgumentException("A causal cm2 dispatch computes its own mask and takes no mask buffer.", nameof(mask));
+        Span<byte> pc = stackalloc byte[17 * 4];
+        WriteFlashCm2Common(pc, hq, hkv, sq, skv, scale, qs, ks, vs, os);
+        RunFlashCm2(output, query, key, value, mask, mask is null ? "sdpa_flash_cm2" : "sdpa_flash_cm2_mask", pc,
+            batch, hq, sq, headDim);
+    }
+
+    /// <summary>Runs <c>sdpa_flash_cm2_causal</c>: the kernel computes the causal and sliding-window mask from
+    /// <paramref name="causal"/>, so there is no mask buffer to pass.</summary>
+    private void DispatchFlashCm2Causal(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
+        int batch, int hq, int hkv, int sq, int skv, int headDim, AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os,
+        CausalWindow causal)
+    {
+        Span<byte> pc = stackalloc byte[19 * 4];
+        WriteFlashCm2Common(pc, hq, hkv, sq, skv, scale, qs, ks, vs, os);
+        BinaryWriteUInt(pc, 68, (uint)causal.QOffset);
+        BinaryWriteUInt(pc, 72, (uint)causal.Window);
+        RunFlashCm2(output, query, key, value, null, "sdpa_flash_cm2_causal", pc, batch, hq, sq, headDim);
+    }
+
+    /// <summary>The 17 push-constant words every cm2 kernel reads: head and row counts, the scale and the Q/K/V/O strides.</summary>
+    private static void WriteFlashCm2Common(Span<byte> pc, int hq, int hkv, int sq, int skv, float scale,
+        AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os)
+    {
+        BinaryWriteUInt(pc, 0, (uint)hq);
+        BinaryWriteUInt(pc, 4, (uint)hkv);
+        BinaryWriteUInt(pc, 8, (uint)sq);
+        BinaryWriteUInt(pc, 12, (uint)skv);
+        BinaryWriteFloat(pc, 16, scale);
+        WriteStrides(pc, 20, qs);
+        WriteStrides(pc, 32, ks);
+        WriteStrides(pc, 44, vs);
+        WriteStrides(pc, 56, os);
+    }
+
+    /// <summary>Casts Q/K/V to F16 where they are not, dispatches <paramref name="kernelName"/> over the query row tiles and the
+    /// heads, and casts the output back to its own dtype. <paramref name="mask"/> is bound only for the masked kernel.</summary>
+    private void RunFlashCm2(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, string kernelName,
+        ReadOnlySpan<byte> pc, int batch, int hq, int sq, int headDim)
+    {
         (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, GetBuffer(query), DType.F16);
         (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, GetBuffer(key), DType.F16);
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, GetBuffer(value), DType.F16);
@@ -141,21 +179,7 @@ public sealed partial class VulkanBackend
                 SpecConstant.UInt(11, FlashCm2KeyTile),
                 SpecConstant.UInt(12, (uint)headDim),
             };
-            string kernelName = causal is not null ? "sdpa_flash_cm2_causal" : mask is null ? "sdpa_flash_cm2" : "sdpa_flash_cm2_mask";
             VulkanKernel k = GetKernel(kernelName, mask is null ? 4 : 5, spec);
-            // 17 words as before, plus qOffset and window for the causal variant (zero for the others, which do not read them).
-            Span<byte> pc = stackalloc byte[19 * 4];
-            BinaryWriteUInt(pc, 0, (uint)hq);
-            BinaryWriteUInt(pc, 4, (uint)hkv);
-            BinaryWriteUInt(pc, 8, (uint)sq);
-            BinaryWriteUInt(pc, 12, (uint)skv);
-            BinaryWriteFloat(pc, 16, scale);
-            WriteStrides(pc, 20, qs);
-            WriteStrides(pc, 32, ks);
-            WriteStrides(pc, 44, vs);
-            WriteStrides(pc, 56, os);
-            BinaryWriteUInt(pc, 68, (uint)(causal?.QOffset ?? 0));
-            BinaryWriteUInt(pc, 72, (uint)(causal?.Window ?? 0));
             Span<ulong> bufs = mask is null
                 ? stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, outBuf.Handle }
                 : stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, maskBuf!.Handle, outBuf.Handle };
