@@ -83,7 +83,33 @@ public sealed partial class CosyVoiceTextFrontend(
             return (text, true);
         }
         if (englishNormalizer is not null) text = englishNormalizer(text);
-        return (InflectNumberWords.SpellOutDigitRuns(text), false);
+        return (SpellOutDigitRuns(text), false);
+    }
+
+    /// <summary>Reference <c>spell_out_number</c>: every run of digits becomes inflect's <c>number_to_words</c> reading,
+    /// everything else is kept. Python's <c>str.isdigit</c> also accepts non-ASCII decimal digits, which <c>int()</c>
+    /// reads by value, so those runs are mapped to ASCII first.</summary>
+    internal static string SpellOutDigitRuns(string text)
+    {
+        StringBuilder sb = new(text.Length);
+        int start = -1;
+        for (int i = 0; i <= text.Length; i++)
+        {
+            if (i < text.Length && char.IsDigit(text[i]))
+            {
+                if (start < 0) start = i;
+                continue;
+            }
+            if (start >= 0)
+            {
+                StringBuilder digits = new(i - start);
+                for (int j = start; j < i; j++) digits.Append((char)('0' + (int)char.GetNumericValue(text[j])));
+                sb.Append(InflectNumberWords.NumberToWords(digits.ToString()));
+                start = -1;
+            }
+            if (i < text.Length) sb.Append(text[i]);
+        }
+        return sb.ToString();
     }
 
     /// <summary>Reference <c>split_paragraph</c> with <c>token_max_n=80, token_min_n=60, merge_len=20,

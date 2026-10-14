@@ -28,7 +28,7 @@ public sealed class CosyVoiceFrontendParityTests(ITestOutputHelper output)
     {
         using JsonDocument doc = FrontendParityFixture.Load("cosyvoice_frontend");
         foreach (JsonElement n in doc.RootElement.GetProperty("numbers").EnumerateArray())
-            Assert.Equal(n.GetProperty("out").GetString(), InflectNumberWords.ToWords(n.GetProperty("in").GetString()!));
+            Assert.Equal(n.GetProperty("out").GetString(), InflectNumberWords.NumberToWords(n.GetProperty("in").GetString()!));
     }
 
     [Fact]
