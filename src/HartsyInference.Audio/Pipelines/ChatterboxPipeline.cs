@@ -46,6 +46,10 @@ public sealed class ChatterboxPipeline : IDisposable
         _voiceEncoder = voiceEncoder;
     }
 
+    /// <summary>The CAM++ encoder zero-shot mode needs: upstream S3Gen runs <c>CAMPPlus</c> in PyTorch, so a partial
+    /// context segment divides by the frames it covers, not by CosyVoice's ONNX divisor.</summary>
+    public static CamPlusSpeakerEncoder CreateSpeakerEncoder(int embedDim) => new(embedDim, onnxSegmentPooling: false);
+
     /// <summary>Synthesizes 24 kHz audio for the given T3 text token IDs.
     /// <list type="bullet">
     ///   <item><b>Precomputed mode</b> (default voice): pass <paramref name="refSpeakerEmbed"/> (the 256-d

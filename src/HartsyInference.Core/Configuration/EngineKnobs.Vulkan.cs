@@ -24,7 +24,7 @@ public static partial class EngineKnobs
     /// <remarks>Default ON. Off keeps every causal prefill on the scalar <c>sdpa_flash</c> path, which is also what runs for the shapes the kernel does not serve and on devices without <c>VK_NV_cooperative_matrix2</c>.</remarks>
     public static readonly Knob<bool> VkFlashCm2Prefill =
         Bool("numerics.vkFlashCm2Prefill", true, KnobScope.Construction, KnobDomain.Numerics,
-            "Routes causal LLM prefill attention through the cooperative-matrix-2 flash kernel (F16 Q/K/V, F32 masks); off keeps the scalar sdpa_flash path.");
+            "Routes causal LLM prefill attention through the cooperative-matrix-2 flash kernel (F16 Q/K/V, causal mask computed on the device); off keeps the scalar sdpa_flash path.");
 
     /// <summary>Splits single-row (decode) attention across workgroups and merges the partial softmax states (flash-decoding).</summary>
     /// <remarks>Default ON. Covers <c>FlashAttention</c> and <c>FlashAttentionDev</c> with query length 1, F32 operands, no mask, a head dim the subgroup size divides (at most 4 dims per lane) and a GQA group of at most 8. Prefill (query length above 1) never takes it.</remarks>
