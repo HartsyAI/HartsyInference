@@ -11,6 +11,9 @@ public sealed class StdVectorFst
     private const int MinVectorVersion = 2;
     private const int HasInputSymbols = 1;
     private const int HasOutputSymbols = 2;
+    private const int StateRecordBytes = 12;
+    private const int ArcRecordBytes = 16;
+    private const int MaxInitialArcCapacity = 1 << 24;
 
     private readonly float[] _finals;
     private readonly int[] _arcOffsets;
@@ -118,11 +121,16 @@ public sealed class StdVectorFst
                 throw new InvalidDataException("FSTs with embedded symbol tables are not supported");
             if (stateCount < 0 || stateCount > int.MaxValue - 1 || start < -1 || start >= stateCount)
                 throw new InvalidDataException($"invalid header: start {start}, {stateCount} states");
+            // Every state takes at least a final weight and an arc count; a header claiming more is corrupt.
+            long remaining = stream.CanSeek ? stream.Length - stream.Position : long.MaxValue;
+            if (stateCount > remaining / StateRecordBytes)
+                throw new InvalidDataException($"header claims {stateCount} states but only {remaining} bytes follow");
 
             int states = (int)stateCount;
             float[] finals = new float[states];
             int[] offsets = new int[states + 1];
-            List<StdArc> arcs = new(states * 2);
+            long arcCapacity = Math.Min((long)states * 2, (remaining - (long)states * StateRecordBytes) / ArcRecordBytes);
+            List<StdArc> arcs = new((int)Math.Clamp(arcCapacity, 0, MaxInitialArcCapacity));
             for (int s = 0; s < states; s++)
             {
                 finals[s] = reader.ReadSingle();

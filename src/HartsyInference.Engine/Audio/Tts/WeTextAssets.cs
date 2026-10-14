@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using HartsyInference.Audio.Frontends.WeText;
@@ -20,7 +21,9 @@ internal static class WeTextAssets
     /// <summary>The folder under the audio root the grammars land in.</summary>
     internal const string Folder = "wetext";
 
-    private static readonly Dictionary<string, string> Sha256 = new(StringComparer.Ordinal)
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.Ordinal);
+
+    private static readonly Dictionary<string, string> Sha256 =new(StringComparer.Ordinal)
     {
         ["en/tn/tagger.fst"] = "245e2dc9174cdd007a8e9e50f3339773d1adbbc7535b71cf67478dc1683cc3ec",
         ["en/tn/verbalizer.fst"] = "03155c88f317b2795969e264c19f87faf98b9853d5ac631e419bacdc3b3ee15a",
@@ -33,16 +36,33 @@ internal static class WeTextAssets
     public static async Task<string> EnsureAsync(WeTextLanguage language, bool removeErhua, CancellationToken cancel)
     {
         string directory = AudioModelRoot.SharedFile(Folder);
-        List<string> missing = [.. WeTextNormalizer.RequiredFiles(language, removeErhua)
-            .Where(f => !File.Exists(Path.Combine(directory, f)))];
-        if (missing.Count == 0) return directory;
+        if (Missing(directory, language, removeErhua).Count == 0) return directory;
 
-        string wheel = Path.Combine(directory, Path.GetFileName(WheelUrl));
-        Logs.Info("[Audio][WeText] Downloading the text-normalization grammars (wetext 0.1.8 wheel, 5 MB)...");
-        await AudioFileFetcher.EnsureAsync(WheelUrl, wheel, WheelSha256, cancel).ConfigureAwait(false);
-        await Task.Run(() => Extract(wheel, directory, missing), cancel).ConfigureAwait(false);
-        File.Delete(wheel);
-        return directory;
+        SemaphoreSlim gate = Gates.GetOrAdd(Path.GetFullPath(directory), _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancel).ConfigureAwait(false);
+        try
+        {
+            // Another caller may have extracted them while this one waited.
+            List<string> missing = Missing(directory, language, removeErhua);
+            if (missing.Count == 0) return directory;
+            // A per-call wheel name keeps another process's fetch of the same folder from colliding with this one.
+            string wheel = Path.Combine(directory, $"{Path.GetFileName(WheelUrl)}.{Guid.NewGuid():N}");
+            try
+            {
+                Logs.Info("[Audio][WeText] Downloading the text-normalization grammars (wetext 0.1.8 wheel, 5 MB)...");
+                await AudioFileFetcher.EnsureAsync(WheelUrl, wheel, WheelSha256, cancel).ConfigureAwait(false);
+                await Task.Run(() => Extract(wheel, directory, missing), cancel).ConfigureAwait(false);
+            }
+            finally
+            {
+                File.Delete(wheel);
+            }
+            return directory;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     /// <summary>Extracts any missing grammar and loads the normalizer from them.</summary>
@@ -53,7 +73,10 @@ internal static class WeTextAssets
         return await Task.Run(() => WeTextNormalizer.Load(directory, language, removeErhua), cancel).ConfigureAwait(false);
     }
 
-    // Staged through a .tmp file and moved into place only once its SHA-256 matches.
+    private static List<string> Missing(string directory, WeTextLanguage language, bool removeErhua) =>
+        [.. WeTextNormalizer.RequiredFiles(language, removeErhua).Where(f => !File.Exists(Path.Combine(directory, f)))];
+
+    // Staged through a uniquely named temp file and moved into place only once its SHA-256 matches.
     private static void Extract(string wheel, string directory, List<string> files)
     {
         using ZipArchive zip = ZipFile.OpenRead(wheel);
@@ -62,18 +85,22 @@ internal static class WeTextAssets
             ZipArchiveEntry entry = zip.GetEntry(WheelEntryPrefix + file)
                 ?? throw new InvalidDataException($"{Path.GetFileName(wheel)} has no {WheelEntryPrefix}{file}");
             string target = Path.Combine(directory, file);
-            string temp = target + ".tmp";
+            string temp = $"{target}.{Guid.NewGuid():N}.tmp";
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            entry.ExtractToFile(temp, overwrite: true);
-            byte[] hash;
-            using (FileStream stream = File.OpenRead(temp)) hash = SHA256.HashData(stream);
-            string actual = Convert.ToHexString(hash).ToLowerInvariant();
-            if (actual != Sha256[file])
+            try
+            {
+                entry.ExtractToFile(temp, overwrite: false);
+                byte[] hash;
+                using (FileStream stream = File.OpenRead(temp)) hash = SHA256.HashData(stream);
+                string actual = Convert.ToHexString(hash).ToLowerInvariant();
+                if (actual != Sha256[file])
+                    throw new InvalidDataException($"wetext grammar {file} has SHA-256 {actual}, expected {Sha256[file]}");
+                File.Move(temp, target, overwrite: true);
+            }
+            finally
             {
                 File.Delete(temp);
-                throw new InvalidDataException($"wetext grammar {file} has SHA-256 {actual}, expected {Sha256[file]}");
             }
-            File.Move(temp, target, overwrite: true);
         }
     }
 }

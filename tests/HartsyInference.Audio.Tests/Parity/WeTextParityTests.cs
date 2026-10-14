@@ -42,6 +42,8 @@ public sealed class WeTextParityTests
         }
 
         WeTextNormalizer normalizer = WeTextNormalizer.Load(dir);
+        Assert.False(normalizer.TryNormalize("5\0 cats", out _));
+        Assert.False(normalizer.TryNormalize("5 \ud800 cats", out _));
         int total = 0, matched = 0;
         Dictionary<string, (int Total, int Matched)> perLanguage = [];
         StringBuilder misses = new();
