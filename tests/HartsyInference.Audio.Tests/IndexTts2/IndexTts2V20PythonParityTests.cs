@@ -230,7 +230,7 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
                 using Tensor muT = ToTensor(mu[(half * muChunk)..((half + 1) * muChunk)], 1, t, 512);
                 using Tensor sT = ToTensor(sty[(half * 192)..((half + 1) * 192)], 1, 192);
                 using Tensor est = pipeline.Dit.Estimate(backend, xT, muT, tv, sT, pT);
-                Compare($"DiT estimator step {step} ({(half == 0 ? "cond" : "null")})", ToArray(est), outRef[(half * xChunk)..((half + 1) * xChunk)], 5e-3);
+                Compare($"DiT estimator step {step} ({(half == 0 ? "cond" : "null")})", ToArray(est), outRef[(half * xChunk)..((half + 1) * xChunk)], 1e-4);
             }
         }
 
@@ -372,7 +372,7 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
 
             using CpuBackend backend = new();
             using Tensor mel = cfm.Solve(backend, mu, style, promptX, cfg.DiffusionSteps, cfg.InferenceCfgRate, seed: 0, x0Override: x0, promptLen: tRef);
-            Compare("25-step CFG solve (full mel)", ToArray(mel), c["out"], 2e-2);
+            Compare("25-step CFG solve (full mel)", ToArray(mel), c["out"], 1e-4);
         }
         finally
         {
