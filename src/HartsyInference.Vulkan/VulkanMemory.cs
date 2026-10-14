@@ -487,6 +487,10 @@ public static class VulkanBufferDiagnostics
 /// <summary>Static buffer-creation helper: creates a VkBuffer + binds it to allocator-provided memory.</summary>
 public static class VulkanBufferFactory
 {
+    /// <summary>The <c>VkBuffer</c> size for a storage buffer of <paramref name="requested"/> bytes: rounded up to a whole
+    /// 32-bit word, the size every buffer is created with. Internal so the sizing tests check the size that is created.</summary>
+    internal static ulong VkBufferBytes(ulong requested) => (requested + 3) & ~3UL;
+
     /// <summary>Creates a <c>VkBuffer</c> of the given size/usage and binds allocator-sub-allocated memory to it.</summary>
     public static VulkanBuffer Create(
         nint device,
@@ -504,7 +508,7 @@ public static class VulkanBufferFactory
             // Rounded up to a whole 32-bit word: shaders read storage buffers as uint arrays, and a byte-packed tensor
             // (a GGUF row of 34- or 210-byte blocks) can end mid-word. With the descriptor range at WHOLE_SIZE, that
             // last word is then inside the buffer rather than undefined. The VulkanBuffer keeps the requested size.
-            size = (size + 3) & ~3UL,
+            size = VkBufferBytes(size),
             usage = usage,
             sharingMode = VkSharingMode.Exclusive,
         };
@@ -585,7 +589,7 @@ public static class VulkanBufferFactory
         VkBufferCreateInfo bci = new()
         {
             sType = VkStructureType.BufferCreateInfo,
-            size = (size + 3) & ~3UL,
+            size = VkBufferBytes(size),
             usage = usage,
             sharingMode = VkSharingMode.Exclusive,
         };

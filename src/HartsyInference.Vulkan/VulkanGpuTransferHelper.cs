@@ -119,6 +119,17 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// <inheritdoc/>
     protected override VulkanBuffer AllocateDevice(long bytes) => AllocateDevice((ulong)bytes);
 
+    /// <summary>Device memory for a preloaded weight, sized by <see cref="WeightStorageBytes"/>. Every preloaded weight
+    /// takes this path, quantized tables included (Q8_0 among them), so they all get the slack word.</summary>
+    protected override VulkanBuffer AllocateWeight(long bytes) => AllocateDevice((ulong)WeightStorageBytes(bytes));
+
+    /// <summary>The bytes a preloaded weight of <paramref name="logicalBytes"/> is allocated with: its size rounded up to a
+    /// whole 32-bit word (which <see cref="VulkanBufferFactory"/> does for every buffer), plus one word of slack. A shader
+    /// reads a byte-packed table one 32-bit word at a time, so the slack keeps the last word of an odd-block-count table
+    /// (Q5_0 at 22 bytes, Q6_K at 210) inside the allocation with room to spare. Zero stays zero.</summary>
+    internal static long WeightStorageBytes(long logicalBytes)
+        => logicalBytes == 0 ? 0 : ((logicalBytes + 3) & ~3L) + 4;
+
     /// <summary>True inside a bulk release, which has already drained the stream and is not followed by a flush.</summary>
     private bool _releasingInBulk;
 
@@ -355,6 +366,15 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
             VkMemoryPropertyFlags.DeviceLocal,
             preferred);
     }
+
+    /// <summary>A host-visible, coherent buffer that stays mapped: the host writes it between graph replays and a captured copy
+    /// reads it. Not cached, and freed by its owner with <see cref="FreeDevice"/>.</summary>
+    public VulkanBuffer AllocateHostStaging(ulong byteSize)
+        => VulkanBufferFactory.Create(
+            _device, _allocator, in _memProps,
+            byteSize,
+            VkBufferUsageFlags.StorageBuffer | VkBufferUsageFlags.TransferSrc,
+            VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent);
 
     /// <summary>Releases an op temporary, unless the cache has taken ownership of it since.</summary>
     public void FreeDevice(VulkanBuffer? buffer) => ReleaseIfNotCached(buffer, buffer is null ? 0 : (long)buffer.Size);
