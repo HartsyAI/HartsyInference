@@ -93,6 +93,17 @@ public sealed class TextGenerationPipeline
             return GenerateTp(request, promptIds, sampler, stops, onToken, ct);
         }
 
+        // Graph decode is decided here, before any cache or prefill work, for the one case that must fail rather than fall back: an explicit
+        // request (a request flag or numerics.graphDecode) whose sampling would take the graph, on a model the backend's graph cannot replay
+        // (a sliding window or soft-cap on Vulkan). The implicit default never reaches this throw; it falls through to the eager loop.
+        IGraphDecodable? graphModel = _model as IGraphDecodable;
+        bool graphDecodeExplicit = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
+        DeviceSamplerConfig? deviceSampler = DeviceSamplerFor(request.Sampling);
+        if (graphDecodeExplicit && !request.Sampling.HasJsonConstraint
+            && (request.Sampling.Greedy || (deviceSampler is not null && graphModel?.SupportsDeviceSampling(_backend) == true))
+            && graphModel?.GraphDecodeRefusal(_backend) is { } refusal)
+            throw new NotSupportedException(refusal);
+
         // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation, unless
         // `reuse` already holds one (AcquireCache), in which case its common prefix with `promptIds` is kept —
         // grown by copy when the retained buffer is too small — and only the diverging tail below is prefilled.
@@ -135,8 +146,6 @@ public sealed class TextGenerationPipeline
             // (Vulkan) turns it on by itself for a request long enough to repay it: the first capture in a process builds an F32 copy of the
             // embedding table (0.2 s to 1.4 s on the models measured) and each capture warms one step, which a short reply does not recover.
             // Only the implicit case falls back to the eager loop if the capture fails.
-            IGraphDecodable? graphModel = _model as IGraphDecodable;
-            bool graphDecodeExplicit = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
             bool graphDecodeRequested = request.GraphDecode ?? (EngineKnobs.GraphDecode.Value
                 || (request.MaxTokens >= ImplicitGraphMinTokens && graphModel?.GraphDecodeByDefault(_backend) == true));
             // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
@@ -147,7 +156,6 @@ public sealed class TextGenerationPipeline
             // capture, so per-stage graphs are a measured follow-up, not a default.
             // A sampled (non-greedy) request can replay a graph too when the backend draws on the device: top-k, temperature, top-p and
             // min-p are done there, which covers the common server defaults; anything else (no top-k, a larger k) stays on the host chain.
-            DeviceSamplerConfig? deviceSampler = DeviceSamplerFor(request.Sampling);
             bool useGraphDecode = !request.Sampling.HasJsonConstraint && graphDecodeRequested
                 && graphModel is not null && graphModel.SupportsGraphDecode(_backend)
                 && (request.Sampling.Greedy || (deviceSampler is not null && graphModel.SupportsDeviceSampling(_backend)));

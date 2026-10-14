@@ -17,6 +17,10 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     private readonly TransformerConfig _cfg;
     private readonly Layer[] _layers;
+    // The two attention shapes the graph's device-position attention takes only where LlmGraphDecodeWindowSoftcap is set: a
+    // sliding window in some layer (the per-layer test is the one every call site uses), and an attention logit soft-cap.
+    private readonly bool _usesLocalWindow;
+    private readonly bool _usesWindowOrSoftcap;
     private Tensor? _embed;
     private Tensor? _posEmbed;   // GPT-2/StarCoder absolute position table [maxPos, hidden] (host gather); null otherwise
     private Tensor? _embedNorm, _embedNormBias;   // BLOOM word-embedding LayerNorm (applied before the first block)
@@ -58,6 +62,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         _cfg = cfg;
         _layers = new Layer[cfg.NumLayers];
         for (int i = 0; i < cfg.NumLayers; i++) _layers[i] = new Layer(cfg);
+        _usesLocalWindow = cfg.SlidingWindow > 0 && Enumerable.Range(0, cfg.NumLayers).Any(i => !cfg.IsGlobalLayer(i));
+        _usesWindowOrSoftcap = _usesLocalWindow || cfg.AttnLogitSoftcap > 0f;
     }
 
     // F32 for the host-side embedding gather and the norm/bias vectors. Dequantizes quantized GGUF tensors
@@ -689,7 +695,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         return result;
     }
 
-    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm GQA/RoPE decoder shape (Llama/Qwen/Mistral family), including the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE.</summary>
+    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm GQA/RoPE decoder shape (Llama/Qwen/Mistral family), including the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE. A backend without <see cref="IBackend.LlmGraphDecodeWindowSoftcap"/> (Vulkan) refuses the window and soft-cap, so Gemma-2/3 are false there.</summary>
     /// <remarks>Excludes anything <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, attention sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement (OLMo-2), BLOOM's embedding LayerNorm, Gemma-4's per-layer SWA head dim. Non-1.0 embedding scale (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it once to a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no scale param.</remarks>
     public bool SupportsGraphDecode(IBackend backend)
     {
@@ -702,6 +708,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 $"noRopeGlobal={!_cfg.NoRopeOnGlobalLayers} preNorm={_cfg.NormPlacement == NormPlacement.PreNorm} " +
                 $"embedLn={!_cfg.EmbeddingLayerNorm} kvShared={_cfg.KvSharedFromLayer == 0} " +
                 $"ple={_cfg.PerLayerEmbeddingDim == 0 || _perLayerTokEmbdRaw?.DType == DType.Q5_K} " +
+                $"windowSoftcap={!_usesWindowOrSoftcap || backend.LlmGraphDecodeWindowSoftcap} " +
                 $"(pleDim={_cfg.PerLayerEmbeddingDim} pleRaw={_perLayerTokEmbdRaw?.DType.ToString() ?? "null"})");
         return ok;
     }
@@ -719,12 +726,17 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     private bool SupportsGraphDecodeCore(IBackend backend) =>
+        GraphShapeSupported(backend) && (backend.LlmGraphDecodeWindowSoftcap || !_usesWindowOrSoftcap);
+
+    /// <summary>Every graph-decode condition except the sliding window and soft-cap, which <see cref="SupportsGraphDecodeCore"/> checks against the backend.</summary>
+    private bool GraphShapeSupported(IBackend backend) =>
         backend.LlmGraphDecodeSupported && _cfg.Mla is null && MoeGraphReady(backend) && _cfg.CrossAttnLayers.Count == 0
-        // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are supported
+        // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are CUDA graph-supported
         // as of 2026-07-22: the split-K decode-attention kernel handles window/softcap with a device position,
         // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep
-        // selects the local-theta rope table per layer. Gemma-4's per-layer SWA head-dim (HeadDimSwa) is NOT
-        // supported — the graph rope tables are built at a single head dim.
+        // selects the local-theta rope table per layer. Vulkan's device-position attention takes neither the window
+        // nor the soft-cap, so those two are gated per backend by LlmGraphDecodeWindowSoftcap. Gemma-4's per-layer
+        // SWA head-dim (HeadDimSwa) is NOT supported — the graph rope tables are built at a single head dim.
         && !_cfg.AttnSink
         && _cfg.AlibiMaxBias <= 0f
         && !_cfg.ParallelResidual
@@ -736,6 +748,18 @@ public sealed unsafe class GenericTransformer : IDisposable
         // V-norm, PLE (device-side Q5_K row gather by the device token id), and KV-SHARING (shared layers
         // run a q-only path against the donor layer's cache) are all graph-supported now.
         && (_cfg.PerLayerEmbeddingDim == 0 || _perLayerTokEmbdRaw?.DType == DType.Q5_K);
+
+    /// <summary>The reason an explicit graph-decode request must be refused for this model on <paramref name="backend"/>, or null. Refused only when the sliding window or attention soft-cap is the one thing in the way: every other graph condition holds, so the graph would run here if the backend had that attention shape. Any other blocker keeps the silent eager fallback, and CUDA never refuses.</summary>
+    /// <remarks>Names the architecture (GGUF <c>general.architecture</c>, e.g. <c>gemma2</c>) so the caller can see which model was refused; "this model" when the config was built in code.</remarks>
+    public string? GraphDecodeRefusal(IBackend backend)
+    {
+        if (!_usesWindowOrSoftcap || backend.LlmGraphDecodeWindowSoftcap || !GraphShapeSupported(backend)) return null;
+        string who = string.IsNullOrEmpty(_cfg.Architecture) ? "this model" : _cfg.Architecture;
+        bool both = _usesLocalWindow && _cfg.AttnLogitSoftcap > 0f;
+        string shape = both ? "sliding-window attention and attention logit soft-cap"
+            : _usesLocalWindow ? "sliding-window attention" : "attention logit soft-cap";
+        return $"{who}: {shape} {(both ? "are" : "is")} not supported by the Vulkan decode graph; decode eagerly or use CUDA";
+    }
 
     /// <summary>Ensures the embedding table is GPU-resident and returns it for <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather (untied models normally skip uploading <c>_embed</c> since <see cref="EmbedLookup"/>'s host gather doesn't need it there). When <see cref="TransformerConfig.EmbeddingScale"/> isn't 1.0 (Granite/MiniCPM), returns a separate, lazily-built, pre-scaled GPU copy instead, since the plain <c>_embed</c> table stays unscaled for <see cref="EmbedLookup"/>'s own per-call host scale. Call once before entering a graph-decode session.</summary>
     public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)

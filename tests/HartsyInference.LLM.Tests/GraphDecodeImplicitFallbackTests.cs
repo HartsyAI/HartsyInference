@@ -1,3 +1,4 @@
+using System.Reflection;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
@@ -11,7 +12,9 @@ namespace HartsyInference.LLM.Tests;
 
 /// <summary>Graph decode that a backend turns on by itself must never turn a request that decodes eagerly into an error:
 /// a capture that throws logs and falls back, while a graph the request asked for still reports its failure. The model
-/// here claims graph support and fails every capture; the decode underneath is the real CPU transformer.</summary>
+/// here claims graph support and fails every capture; the decode underneath is the real CPU transformer.
+/// The sliding-window and soft-cap gate (Gemma-2/3 on Vulkan) is at the end: the backend answers only the graph capability queries,
+/// and the real gate and refusal decide what the pipeline and the scheduler do with each request.</summary>
 public sealed class GraphDecodeImplicitFallbackTests
 {
     private static uint _rng = 0xFA11BACu;
@@ -144,6 +147,216 @@ public sealed class GraphDecodeImplicitFallbackTests
         using (model) using (backend)
         {
             pipeline.Generate(Req(TextGenerationPipeline.ImplicitGraphMinTokens - 1, graph: null));
+            Assert.Equal(0, model.CaptureAttempts);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    /// <summary>A backend that answers only the graph-decode capability queries the gate reads. <see cref="ByDefault"/> is the implicit-on policy (Vulkan takes it,
+    /// CUDA keeps the opt-in); <see cref="WindowSoftcap"/> says whether the device attention takes a sliding window and a soft-cap (CUDA does, Vulkan does not).
+    /// Any other member throws, so a test that reaches a device op through it fails loudly instead of passing on a stub value.</summary>
+    private class GraphGateBackend : DispatchProxy
+    {
+        public bool ByDefault { get; set; }
+        public bool WindowSoftcap { get; set; }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            string name = targetMethod!.Name;
+            return name switch
+            {
+                "get_LlmGraphDecodeSupported" => true,
+                "get_LlmGraphDecodeDefault" => ByDefault,
+                "get_LlmGraphDecodeWindowSoftcap" => WindowSoftcap,
+                _ => throw new NotSupportedException($"the graph gate test backend answers only graph capability queries, not {name}"),
+            };
+        }
+    }
+
+    /// <summary>A backend that reports graph decode on, with the given implicit-default policy and window/soft-cap support.</summary>
+    private static IBackend Gate(bool byDefault, bool windowSoftcap)
+    {
+        IBackend backend = DispatchProxy.Create<IBackend, GraphGateBackend>();
+        GraphGateBackend probe = (GraphGateBackend)(object)backend;
+        probe.ByDefault = byDefault;
+        probe.WindowSoftcap = windowSoftcap;
+        return backend;
+    }
+
+    /// <summary>The real model, with the backend the pipeline and the scheduler read graph decisions from set to <paramref name="gate"/>. Every tensor op still runs on
+    /// the inner model's CPU backend, and the gate and the refusal are the real <see cref="GenericTransformer"/> code, asked about <paramref name="gate"/>. A capture always fails and is counted.</summary>
+    private sealed class GateModel(GenericTransformerModel inner, IBackend gate) : IGenerationModel, IGraphDecodable
+    {
+        public int CaptureAttempts { get; private set; }
+
+        public GenerationModelInfo Info => inner.Info;
+        public GenerationCapabilities Capabilities => inner.Capabilities;
+        public IBackend OutputBackend => gate;
+        public ISequenceState CreateSequenceState(SequenceStateOptions options) => inner.CreateSequenceState(options);
+        public Tensor Prefill(in PrefillChunk chunk, ISequenceState state) => inner.Prefill(chunk, state);
+        public Tensor Prefill(in PrefillChunk chunk, ISequenceState state, CancellationToken cancel) => inner.Prefill(chunk, state, cancel);
+        public Tensor DecodeBatch(ReadOnlySpan<int> tokenIds, ISequenceState[] states) => inner.DecodeBatch(tokenIds, states);
+        public Tensor ProjectLogits(Tensor hidden, int rows) => inner.ProjectLogits(hidden, rows);
+        public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits) => inner.EnumerateWeights(includeRedundantSplits);
+        public long EstimateSequenceBytes(int contextTokens) => inner.EstimateSequenceBytes(contextTokens);
+        public CapacitySnapshot Capacity() => inner.Capacity();
+        public void Dispose() => inner.Dispose();
+
+        bool IGraphDecodable.SupportsGraphDecode(IBackend backend) => ((IGraphDecodable)inner).SupportsGraphDecode(backend);
+        bool IGraphDecodable.GraphDecodeByDefault(IBackend backend) => ((IGraphDecodable)inner).GraphDecodeByDefault(backend);
+        string? IGraphDecodable.GraphDecodeRefusal(IBackend backend) => ((IGraphDecodable)inner).GraphDecodeRefusal(backend);
+        bool IGraphDecodable.SupportsDeviceSampling(IBackend backend) => ((IGraphDecodable)inner).SupportsDeviceSampling(backend);
+        void IGraphDecodable.CommitReplayedStep(ISequenceState state) => ((IGraphDecodable)inner).CommitReplayedStep(state);
+
+        GraphDecodeSession IGraphDecodable.CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty, DeviceSamplerConfig? sampler)
+        {
+            CaptureAttempts++;
+            throw new InvalidOperationException("synthetic capture failure (test)");
+        }
+    }
+
+    /// <summary>Gemma-2's attention at test size: a sliding window in the local layers, a soft-cap on the scores, and the final-logit cap.</summary>
+    private static TransformerConfig Gemma2Cfg() => Cfg() with
+    {
+        Architecture = "gemma2", SlidingWindowPattern = 2, SlidingWindow = 4, AttnLogitSoftcap = 50f, FinalLogitSoftcap = 30f,
+    };
+
+    /// <summary>Gemma-3's attention at test size: a sliding window in the local layers and no soft-cap.</summary>
+    private static TransformerConfig Gemma3Cfg() => Cfg() with { Architecture = "gemma3", SlidingWindowPattern = 2, SlidingWindow = 4 };
+
+    private const string VulkanGemma2Refusal =
+        "gemma2: sliding-window attention and attention logit soft-cap are not supported by the Vulkan decode graph; decode eagerly or use CUDA";
+    private const string VulkanGemma3Refusal =
+        "gemma3: sliding-window attention is not supported by the Vulkan decode graph; decode eagerly or use CUDA";
+
+    private static (GateModel Model, TextGenerationPipeline Pipeline, Dictionary<string, Tensor> W, CpuBackend Backend) BuildGated(TransformerConfig cfg, IBackend gate)
+    {
+        Dictionary<string, Tensor> w = Weights(cfg);
+        CpuBackend backend = new();
+        GenericTransformer transformer = new(cfg);
+        transformer.LoadWeights(w, "model");
+        GateModel model = new(new GenericTransformerModel(transformer, backend), gate);
+        return (model, new TextGenerationPipeline(model, new StubTokenizer()), w, backend);
+    }
+
+    [Fact]
+    public void GemmaConfigs_OnVulkan_ReportGraphDecodeUnsupported_AndNameTheRefusal()
+    {
+        IBackend vulkan = Gate(byDefault: true, windowSoftcap: false);
+        using GenericTransformer gemma2 = new(TransformerConfig.Gemma2_2B);
+        using GenericTransformer gemma3 = new(TransformerConfig.Gemma3_1B);
+
+        Assert.False(gemma2.SupportsGraphDecode(vulkan));
+        Assert.False(gemma3.SupportsGraphDecode(vulkan));
+        Assert.Equal(VulkanGemma2Refusal, gemma2.GraphDecodeRefusal(vulkan));
+        Assert.Equal(VulkanGemma3Refusal, gemma3.GraphDecodeRefusal(vulkan));
+    }
+
+    [Fact]
+    public void WindowAndSoftcap_OnlyCountWhereALayerUsesThem()
+    {
+        IBackend vulkan = Gate(byDefault: true, windowSoftcap: false);
+        using GenericTransformer plain = new(Cfg());
+        Assert.True(plain.SupportsGraphDecode(vulkan));
+        Assert.Null(plain.GraphDecodeRefusal(vulkan));
+
+        // With pattern 0 every layer is global, so no layer passes a window to the kernel: Vulkan runs it, as it always did.
+        using GenericTransformer allGlobal = new(Cfg() with { SlidingWindow = 4 });
+        Assert.True(allGlobal.SupportsGraphDecode(vulkan));
+        Assert.Null(allGlobal.GraphDecodeRefusal(vulkan));
+    }
+
+    [Fact]
+    public void GemmaConfigs_OnCudaAndCpu_AreUnchanged()
+    {
+        using GenericTransformer gemma2 = new(TransformerConfig.Gemma2_2B);
+        using GenericTransformer gemma3 = new(TransformerConfig.Gemma3_1B);
+
+        IBackend cuda = Gate(byDefault: false, windowSoftcap: true);
+        Assert.True(gemma2.SupportsGraphDecode(cuda));
+        Assert.True(gemma3.SupportsGraphDecode(cuda));
+        Assert.Null(gemma2.GraphDecodeRefusal(cuda));
+        Assert.Null(gemma3.GraphDecodeRefusal(cuda));
+
+        // The CPU backend reports no graph decode at all, so the same configs stay ineligible and unrefused.
+        using CpuBackend cpu = new();
+        Assert.False(gemma2.SupportsGraphDecode(cpu));
+        Assert.Null(gemma2.GraphDecodeRefusal(cpu));
+    }
+
+    [Theory]
+    [InlineData("gemma2", VulkanGemma2Refusal)]
+    [InlineData("gemma3", VulkanGemma3Refusal)]
+    public void AnExplicitGraph_ForAGemmaShapeOnVulkan_IsRefusedByName_BeforeAnyWork(string arch, string expected)
+    {
+        TransformerConfig cfg = arch == "gemma2" ? Gemma2Cfg() : Gemma3Cfg();
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(cfg, Gate(byDefault: true, windowSoftcap: false));
+        using (model) using (backend)
+        {
+            NotSupportedException ex = Assert.Throws<NotSupportedException>(() => pipeline.Generate(Req(16, graph: true)));
+            Assert.Equal(expected, ex.Message);
+            Assert.Equal(0, model.CaptureAttempts);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public void AnExplicitGraph_ForAGemmaShapeOnCuda_StillReachesTheCapture()
+    {
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: false, windowSoftcap: true));
+        using (model) using (backend)
+        {
+            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => pipeline.Generate(Req(16, graph: true)));
+            Assert.Equal("synthetic capture failure (test)", ex.Message);
+            Assert.Equal(1, model.CaptureAttempts);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public void AnImplicitGraph_ForAGemmaShapeOnVulkan_DecodesEagerly_WithoutAttemptingACapture()
+    {
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: false));
+        using (model) using (backend)
+        {
+            int n = TextGenerationPipeline.ImplicitGraphMinTokens;
+            GenerationResult got = pipeline.Generate(Req(n, graph: null));
+            Assert.Equal(0, model.CaptureAttempts);
+            Assert.Equal(n, got.TokenIds.Count);
+
+            GenerationResult eager = pipeline.Generate(Req(n, graph: false));
+            Assert.Equal(eager.TokenIds, got.TokenIds);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public void AnImplicitGraph_ForAGemmaShapeOnABackendThatSupportsIt_StillTriesTheCapture()
+    {
+        // The control for the test above: the same model and request, on a backend whose device attention takes the window and soft-cap.
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: true));
+        using (model) using (backend)
+        {
+            int n = TextGenerationPipeline.ImplicitGraphMinTokens;
+            GenerationResult got = pipeline.Generate(Req(n, graph: null));
+            Assert.Equal(1, model.CaptureAttempts);
+
+            GenerationResult eager = pipeline.Generate(Req(n, graph: false));
+            Assert.Equal(eager.TokenIds, got.TokenIds);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public async Task AnExplicitGraph_ForAGemmaShapeOnVulkan_FailsAtAdmission_NamingTheRefusal()
+    {
+        (GateModel model, _, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: false));
+        using (model) using (backend)
+        {
+            using DynamicBatchScheduler scheduler = new(model, new DynamicBatchSchedulerTests.StubTokenizer(), pool: null);
+            NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
+                () => scheduler.SubmitAsync(Req(16, graph: true), null, CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.Equal(VulkanGemma2Refusal, ex.Message);
             Assert.Equal(0, model.CaptureAttempts);
         }
         foreach (Tensor t in w.Values) t.Dispose();
