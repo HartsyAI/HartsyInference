@@ -147,7 +147,7 @@ public sealed class CosyVoicePipeline : IDisposable
             promptSpeechTokens = S3GenReference.SpeechTokens(backend, _s3, audio16k);
             spk = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, audio16k);
             ownsSpk = true;
-            promptMel = S3GenReference.FlowMel(audio24k);                             // [1, 80, T]
+            promptMel = S3GenReference.AlignPromptToTokens(ref promptSpeechTokens, S3GenReference.FlowMel(audio24k));   // [1, 80, 2 * tokens]
 
             Logs.Info($"CosyVoice: reference → {promptSpeechTokens.Length} prompt speech tokens + speaker embedding.");
         }
@@ -300,7 +300,7 @@ public sealed class CosyVoicePipeline : IDisposable
         float[] audio24k = S3GenReference.Resample(referenceAudio, referenceSampleRate, 24_000);
         int[] promptSpeechTokens = S3GenReference.SpeechTokens(backend, _s3, audio16k);
         Tensor spk = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, audio16k);
-        Tensor promptMel = S3GenReference.FlowMel(audio24k);
+        Tensor promptMel = S3GenReference.AlignPromptToTokens(ref promptSpeechTokens, S3GenReference.FlowMel(audio24k));
         Logs.Info($"CosyVoice (stream): reference → {promptSpeechTokens.Length} prompt speech tokens + speaker embedding.");
 
         int[] refText = referenceTextTokens ?? [];

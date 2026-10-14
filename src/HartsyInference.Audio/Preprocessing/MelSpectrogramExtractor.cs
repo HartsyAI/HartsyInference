@@ -37,10 +37,14 @@ public sealed class MelSpectrogramExtractor
     /// torch.stft and numpy's rfft do; a size that is not a power of two runs through an <see cref="FftPlan"/>, so its
     /// prime factors must be 2, 3 and 5. Off, NFft is rounded up to a power of two and the frame zero-padded to it,
     /// the layout every preset but Whisper's was validated with.</param>
+    /// <param name="MagnitudeEpsilon">Added to the power before the square root of a magnitude spectrum, as matcha's
+    /// <c>torch.sqrt(spec.pow(2).sum(-1) + 1e-9)</c> does; it lifts near-silent bins above the log floor. A frame that
+    /// reads only padding is then transformed rather than filled with the silent constant.</param>
     public readonly record struct Config(int SampleRate, int NFft, int WinLength, int HopLength, int NMels, double Fmin,
         double Fmax, Normalization Norm, bool DropLastStftFrame, LogBase LogBase, float? LogFloor, float DynamicRangeDb,
         float NormOffset, float NormScale, bool PowerSpectrum, MelScale Scale = MelScale.Slaney, bool SlaneyNorm = true,
-        bool Center = false, bool CenterWindowInFft = false, bool AdditiveLogFloor = false, bool ExactFftSize = false);
+        bool Center = false, bool CenterWindowInFft = false, bool AdditiveLogFloor = false, bool ExactFftSize = false,
+        float MagnitudeEpsilon = 0f);
 
     /// <summary>Whisper preset, the log-mel of OpenAI's <c>log_mel_spectrogram</c> and HF's
     /// <c>WhisperFeatureExtractor</c>: 16 kHz, a 400-point STFT (201 bins) of a periodic Hann window at hop 160,
@@ -65,13 +69,6 @@ public sealed class MelSpectrogramExtractor
         PowerSpectrum: true,
         Center: true,
         ExactFftSize: true);
-
-    /// <summary>The Whisper preset before it matched Whisper: the 400-sample window zero-padded into a 512-point FFT
-    /// (257 bins) and no centering. Only for the S3 speech-tokenizer front-end (<c>S3GenReference</c>), which pads the
-    /// reference itself and must keep its output until it gets its own parity check; new callers use
-    /// <see cref="WhisperConfig"/>.</summary>
-    public static Config WhisperLegacyPow2Config(int nMels = 80)
-        => WhisperConfig(nMels) with { Center = false, ExactFftSize = false };
 
     /// <summary>StyleTTS 2 / Kokoro preset: 24kHz, n_fft=2048, hop=300, win=1200,
     /// 80 mel bins, magnitude spectrum, no normalization.</summary>
@@ -114,8 +111,9 @@ public sealed class MelSpectrogramExtractor
         NormScale: 1f,
         PowerSpectrum: false);
 
-    /// <summary>CosyVoice 2 flow-matching mel conditioning (matcha <c>mel_spectrogram</c>): 24kHz, n_fft=1920,
-    /// hop=480, win=1920, 80 mel bins, fmax=8000, magnitude spectrum, natural log clamped at 1e-5. The reference
+    /// <summary>CosyVoice 2 flow-matching mel conditioning (matcha <c>mel_spectrogram</c>): 24kHz, an exact 1920-point
+    /// STFT, hop=480, win=1920, 80 mel bins, fmax=8000, magnitude spectrum <c>sqrt(power + 1e-9)</c>, natural log
+    /// clamped at 1e-5. The reference
     /// reflect-pads the audio by <c>(n_fft - hop)/2</c> (center=False); callers should pre-pad to match.</summary>
     public static Config CosyVoice2FlowConfig() => new(
         SampleRate: 24_000,
@@ -132,7 +130,9 @@ public sealed class MelSpectrogramExtractor
         DynamicRangeDb: 0f,
         NormOffset: 0f,
         NormScale: 1f,
-        PowerSpectrum: false);
+        PowerSpectrum: false,
+        ExactFftSize: true,
+        MagnitudeEpsilon: 1e-9f);
 
     /// <summary>F5-TTS / Vocos mel front-end: torchaudio <c>MelSpectrogram(sr=24k, n_fft=1024, hop=256,
     /// win=1024, n_mels=100, power=1, center=True, norm=None, mel_scale="htk")</c> then <c>clamp(1e-5).log()</c>.
@@ -416,7 +416,7 @@ public sealed class MelSpectrogramExtractor
         // Virtual index of the window's first sample: negative or past the signal end means reflected.
         int first = t * _cfg.HopLength - _centerPad + _windowOffset;
         int last = first + _cfg.WinLength - 1;
-        if (ReadsOnlyPadding(first, last, src.Length, signalLength))
+        if (_cfg.MagnitudeEpsilon == 0f && ReadsOnlyPadding(first, last, src.Length, signalLength))
         {
             for (int m = 0; m < _cfg.NMels; m++) output[(long)m * stride + t] = _silent;
             return;
@@ -490,7 +490,7 @@ public sealed class MelSpectrogramExtractor
         else
         {
             for (int k = 0; k < _numBins; k++)
-                power[k] = MathF.Sqrt(re[k] * re[k] + im[k] * im[k]);
+                power[k] = MathF.Sqrt(re[k] * re[k] + im[k] * im[k] + _cfg.MagnitudeEpsilon);
         }
 
         for (int m = 0; m < _cfg.NMels; m++)
