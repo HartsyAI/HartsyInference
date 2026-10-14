@@ -113,12 +113,21 @@ void main() {
     coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator> M = coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator>(NEG_HALF_MAX);
     coopmat<float16_t, gl_ScopeWorkgroup, Bc, Bc, gl_MatrixUseB> ones = coopmat<float16_t, gl_ScopeWorkgroup, Bc, Bc, gl_MatrixUseB>(1.0);
 #if CAUSAL == 1
+    // Causal key tiles outside [jLo, jHi) are masked for every row of this query tile. Their score tiles are all -inf, so
+    // they add P = 0, L += 0, O *= 1 and leave the running max alone: skipping them gives the same result as visiting them.
+    // No key past the last visible one, min(last row, skv - 1), is needed. With a window, no key below the first row's
+    // window start, qBase + 1 - window, is visible to any row.
     uint qBase = pc.qOffset + qTile * Br;
-#endif
-
+    uint lastKey = min(qBase + Br - 1u, pc.skv - 1u);
+    uint jHi = lastKey / Bc + 1u;
+    uint jLo = (pc.window > 0u && qBase + 1u > pc.window) ? (qBase + 1u - pc.window) / Bc : 0u;
+    [[dont_unroll]]
+    for (uint j = jLo; j < jHi; j++) {
+#else
     uint tiles = (pc.skv + Bc - 1) / Bc;
     [[dont_unroll]]
     for (uint j = 0; j < tiles; j++) {
+#endif
         coopmat<float16_t, gl_ScopeWorkgroup, D, Bc, gl_MatrixUseB> Kt;
         coopMatLoadTensorNV(Kt, k_data, kOff, sliceTensorLayoutNV(layoutK, j * Bc, Bc, 0, D), viewTranspose);
         coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator> S = coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator>(0.0);
