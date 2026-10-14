@@ -33,7 +33,7 @@ public sealed class VulkanBackendSmokeTests
         if (!VulkanAvailable())
             return;
         using VulkanInstance instance = new();
-        using VulkanDevice device = VulkanDevice.Create(instance);
+        using VulkanDevice device = VulkanTestDevice.CreateDevice(instance);
         Assert.NotNull(device.Capabilities.DeviceName);
         Assert.True(device.Capabilities.SubgroupSize >= 4 && device.Capabilities.SubgroupSize <= 128);
         Assert.True(device.Capabilities.MaxComputeWorkGroupInvocations >= 128);

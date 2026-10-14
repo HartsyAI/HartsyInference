@@ -42,7 +42,7 @@ confirmed run, and the two attempts failed on absent weights rather than on the 
 CPU reference on an RTX 3060 through Vulkan only. No AMD hardware evidence has been collected, so none of it is certified on AMD, and nothing
 is wired into a model. The expert cache is host-staged with no streaming cache, and native block-scaled GEMM is Unsupported on Vulkan.
 
-**Nothing about AMD or Intel.** Every row is NVIDIA-Vulkan on an RTX 4090. No AMD or Intel GPU exists on this
+**Nothing about AMD or Intel.** Every row is NVIDIA Vulkan. The LLM rows that name a card were measured on an RTX 3060 (Vulkan device 1), not the RTX 4090; the other rows do not say which card. No AMD or Intel GPU exists on this
 machine; llvmpipe covers small-subgroup correctness and is not evidence about either vendor's driver. That is
 ROADMAP §3's remaining hardware item.
 
