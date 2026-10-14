@@ -163,4 +163,56 @@ public sealed class TextPlacementPlannerTests
         TextPlacementDemand demand = TextPlacementDemandReader.FromHeader(tensors, _ => null, 1, false, false);
         Assert.Equal(DType.Q8_0.ComputeByteCount(1024 * 256), demand.DenseBytes);
     }
+
+    /// <summary>An 8B-class dense model at a 32K context: 8 GB of weights, 32 layers of 8 KV heads at 128, and a 4096 hidden width with a
+    /// 14336 FFN. Its prefill of a full 32K prompt holds about 11 GB of F32 activations on the device.</summary>
+    private static TextPlacementDemand Dense8BAt32K()
+    {
+        TextTensorInfo[] tensors = [new("blk.0.ffn_down.weight", DType.F16, 4L * Gb)];   // 8 GB of F16 weights
+        Dictionary<string, long> arch = new()
+        {
+            ["block_count"] = 32, ["attention.head_count"] = 32, ["attention.head_count_kv"] = 8, ["embedding_length"] = 4096,
+            ["feed_forward_length"] = 14336,
+        };
+        return TextPlacementDemandReader.FromHeader(tensors, k => arch.TryGetValue(k, out long v) ? v : null,
+            contextTokens: 32768, includeRedundantSplits: false, kvF16: true);
+    }
+
+    [Fact]
+    public void Header_CountsPrefillActivationsAtTheContext()
+    {
+        TextPlacementDemand demand = Dense8BAt32K();
+        // (8 x hidden 4096 + 4 x FFN 14336) F32 values per prompt token.
+        Assert.Equal((4096L * 8 + 14336L * 4) * sizeof(float), demand.PrefillBytesPerToken);
+        Assert.Equal(demand.PrefillBytesPerToken * 32768, demand.PrefillBytes);
+        Assert.Equal(demand.DenseBytes + demand.KvBytes + demand.PrefillBytes, demand.TotalBytes);
+    }
+
+    [Fact]
+    public void Gpu_RefusesALongContextWhosePrefillWouldNotFit_ThoughWeightsAndKvDo()
+    {
+        TextPlacementDemand demand = Dense8BAt32K();
+        // The old check: weights, KV and the reserve alone. A 16 GB card passes it, so a load would be approved.
+        long oldNeed = demand.DenseBytes + demand.KvBytes + TextPlacementPlanner.ReserveBytes;
+        TextPlacementDevice card = Card("cuda:0", 16);
+        Assert.True(oldNeed <= card.FreeBytes, "the weights, KV cache and reserve alone fit this card");
+
+        // The full prefill of a 32K prompt does not: about 11.8 GB of activations on top of 12 GB.
+        TextPlacement plan = TextPlacementPlanner.Plan(demand, [card], null, TextPlacementMode.Gpu);
+        Assert.False(plan.Feasible);
+        Assert.True(plan.RequiredBytes > card.FreeBytes);
+        Assert.True(plan.RequiredBytes >= oldNeed + demand.PrefillBytes);
+        Assert.Contains("needs", plan.Reason);
+    }
+
+    [Fact]
+    public void Gpu_AdmitsAShorterContextWhosePrefillFits()
+    {
+        TextPlacementDemand demand = Dense8BAt32K() with { ContextTokens = 4096 };
+        TextPlacementDevice card = Card("cuda:0", 16);
+        TextPlacement plan = TextPlacementPlanner.Plan(demand, [card], null, TextPlacementMode.Gpu);
+        Assert.True(plan.Feasible);
+        Assert.Equal(["cuda:0"], plan.Devices);
+        Assert.True(plan.RequiredBytes <= card.FreeBytes);
+    }
 }

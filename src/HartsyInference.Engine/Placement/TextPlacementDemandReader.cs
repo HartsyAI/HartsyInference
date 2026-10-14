@@ -68,7 +68,13 @@ public static class TextPlacementDemandReader
         long keyLength = archValue("attention.key_length") ?? (heads > 0 ? hidden / heads : 0);
         long valueLength = archValue("attention.value_length") ?? keyLength;
         long kvPerToken = layers * kvHeads * (keyLength + valueLength) * (kvF16 ? 2 : 4);
-        return new TextPlacementDemand(dense, experts, layers, kvPerToken, contextTokens)
+        // Prefill runs the whole prompt in one pass (GenerationCapabilities.MaxPrefillChunk defaults to unbounded), so its F32
+        // activations scale with the prompt: the residual, normed input, Q/K/V and attention output, and the FFN gate, up,
+        // activation and down. A MoE token runs expert_used_count experts, each with expert_feed_forward_length.
+        long ffnWidth = Math.Max(archValue("feed_forward_length") ?? 0,
+            (archValue("expert_feed_forward_length") ?? 0) * Math.Max(1, archValue("expert_used_count") ?? 1));
+        long prefillPerToken = (hidden * 8 + ffnWidth * 4) * sizeof(float);
+        return new TextPlacementDemand(dense, experts, layers, kvPerToken, contextTokens, prefillPerToken)
         {
             ExpertsHostRunnable = hostReason is null,
             ExpertsHostReason = hostReason,

@@ -39,8 +39,10 @@ public static class TextPlacementModes
 /// <param name="LayerCount">Transformer layers, for a layer split.</param>
 /// <param name="KvBytesPerToken">KV-cache bytes one token adds across every layer.</param>
 /// <param name="ContextTokens">Tokens the KV cache is sized for.</param>
+/// <param name="PrefillBytesPerToken">Activation bytes one prompt token holds during prefill, when the whole prompt runs as one pass
+/// (the residual, the normalized input, the attention and FFN intermediates). Zero when unknown.</param>
 public readonly record struct TextPlacementDemand(long DenseBytes, long ExpertBytes, int LayerCount, long KvBytesPerToken,
-    int ContextTokens)
+    int ContextTokens, long PrefillBytesPerToken = 0)
 {
     /// <summary>Whether the model has routed experts to offload.</summary>
     public bool IsMoe => ExpertBytes > 0;
@@ -48,8 +50,12 @@ public readonly record struct TextPlacementDemand(long DenseBytes, long ExpertBy
     /// <summary>KV-cache bytes for the whole context.</summary>
     public long KvBytes => KvBytesPerToken * ContextTokens;
 
+    /// <summary>Prefill activation bytes at the full context. A prompt as long as the context runs in one prefill pass, and its
+    /// activations are live on the device while the KV cache fills, so they count beside the cache rather than after it.</summary>
+    public long PrefillBytes => PrefillBytesPerToken * ContextTokens;
+
     /// <summary>Everything the model needs on one device.</summary>
-    public long TotalBytes => DenseBytes + ExpertBytes + KvBytes;
+    public long TotalBytes => DenseBytes + ExpertBytes + KvBytes + PrefillBytes;
 
     /// <summary>Whether the CPU can run the routed experts in place: every expert tensor in a format the packed CPU kernels read,
     /// with widths that fit its blocks. Offload needs it; the other placements do not.</summary>
@@ -167,7 +173,7 @@ public static class TextPlacementPlanner
 
     private static TextPlacement Offload(TextPlacementDemand demand, TextPlacementDevice device, long? hostFreeBytes)
     {
-        long fixedNeed = demand.DenseBytes + demand.KvBytes + ReserveBytes;
+        long fixedNeed = demand.DenseBytes + demand.KvBytes + demand.PrefillBytes + ReserveBytes;
         if (!demand.IsMoe)
         {
             return new TextPlacement(TextPlacementMode.Offload, false, [device.Device], 0, fixedNeed, device.FreeBytes,
