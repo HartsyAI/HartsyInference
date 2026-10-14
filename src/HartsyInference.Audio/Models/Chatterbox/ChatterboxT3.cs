@@ -120,6 +120,7 @@ public sealed unsafe class ChatterboxT3 : IDisposable
             if (useCfg)
                 for (int v = 0; v < vocab; v++)
                     logits[v] += cfgWeight * (logits[v] - logitsUncond![v]);
+            _cfg.EosGate.Apply(logits, tokens.Count, 0, _cfg.StopSpeechToken);
             if (_cfg.RepetitionPenalty != 1f)
                 foreach (int tok in seen)
                     logits[tok] = logits[tok] > 0 ? logits[tok] / _cfg.RepetitionPenalty : logits[tok] * _cfg.RepetitionPenalty;
