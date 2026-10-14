@@ -169,12 +169,14 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // GPU, drain the deferred-free list, then release any fully-empty slab blocks back to the
         // device. Mirrors CudaMemory.Allocate's retry path — and is the same work TrimMemoryPool asks
         // for at a phase boundary, so it is spelled once.
-        // Reuse frees still pending on the timeline before growing the pool: wait for the oldest only while the
-        // pending bytes could cover the request, so the host stays ahead of the GPU otherwise.
+        // Reuse frees that have already completed before growing the pool. Frees still pending on the timeline are waited
+        // for only once they exceed PendingFreeSlackBytes: a smaller backlog grows the pool instead, so the host does not
+        // block on the GPU for a few layers' transients (the wait was a submit plus a full drain of the timeline).
         _allocator.OnNeedSpace = (size, memoryType) =>
         {
             if (_stream.ReclaimCompleted(memoryType)) return true;
-            if (_stream.PendingFreeBytes(memoryType) < size) return false;
+            ulong pending = _stream.PendingFreeBytes(memoryType);
+            if (pending < size || pending <= PendingFreeSlackBytes) return false;
             (bool reclaimed, bool submitted) = _stream.ReclaimOldestPending(memoryType);
             if (submitted) _dispatchesSinceSubmit = 0;
             return reclaimed;
@@ -289,6 +291,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     #region Helpers
 
     private const uint LocalX1D = 256;
+
+    /// <summary>Bytes of pending device frees the allocator may leave pending, growing its pool instead of waiting on the
+    /// GPU for them (see <c>OnNeedSpace</c> in the constructor). 256 MiB covers a layer's transients at 4K on the models here.</summary>
+    private const ulong PendingFreeSlackBytes = 256UL << 20;
 
     /// <summary>Default spec-constant set for 1D-dispatch kernels (local_x = <see cref="LocalX1D"/>, local_y = local_z = 1).</summary>
     private static readonly SpecConstant[] _default1DSpec =
@@ -2557,8 +2563,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             using OpScope _op = EnterOp();
             if (causal && TryFlashCm2CausalPrefill(output, query, key, value, kvLen, kvGroup, qOffset, scale, slidingWindow))
                 return;
-            // Not the cm2 path: no later layer of this prefill needs the cached host mask, so release it (see _prefillMask).
-            ReleasePrefillMask();
             DispatchFlashAttention(output, query, key, value, mask: null, scale, causal, qOffset, slidingWindow, skv: kvLen, kvGroup);
             return;
         }
@@ -4735,8 +4739,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // Host-staged decode rows are not cached, so the cache will not free them: the stream is idle, release them here.
         foreach (VulkanBuffer row in _decodeRows.Values) row.Dispose();
         _decodeRows.Clear();
-        _prefillMask?.Dispose();
-        _prefillMask = null;
         // Dump profiling data (no-op when HARTSYINFERENCE_VK_PROFILE is unset) before tearing down
         // anything that the per-op records reference (op names are strings only, but flush before
         // we lose the device just to be tidy).

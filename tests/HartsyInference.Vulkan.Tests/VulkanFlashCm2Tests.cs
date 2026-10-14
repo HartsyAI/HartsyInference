@@ -81,6 +81,12 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [InlineData(32, 8, 64, 70, 200, 130, 0, 0)]  // chunked prefill: query rows at offset 130 over 200 keys
     [InlineData(16, 8, 64, 90, 90, 0, 32, 0)]    // sliding window 32
     [InlineData(16, 8, 64, 150, 150, 0, 48, 9)]  // window plus capacity padding plus a partial tile
+    [InlineData(32, 8, 64, 100, 300, 200, 32, 0)]  // chunk at offset 200 over 300 keys, window 32 across key tiles
+    [InlineData(16, 8, 64, 70, 200, 130, 48, 0)]   // chunk at offset 130, window 48 spanning a tile boundary
+    [InlineData(14, 2, 64, 65, 65, 0, 0, 0)]       // one row past a 64-row tile, full causal
+    [InlineData(8, 8, 128, 127, 127, 0, 32, 0)]    // head dim 128, window 32, odd length
+    [InlineData(16, 8, 64, 64, 64, 0, 48, 0)]      // exact tile multiples with a window
+    [InlineData(16, 8, 64, 200, 200, 0, 0, 0)]     // full causal over a prompt that is not a tile multiple
     public void CausalPrefill_MatchesReference(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad) =>
         CausalPrefillMatchesReference(flashCm2: true, hq, hkv, d, sq, kvLen, qOffset, window, pad);
 
@@ -129,12 +135,11 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
     }
 
-    /// <summary>A prefill whose host mask would be above the cap takes the scalar kernel: no cm2 dispatch and no mask
-    /// retained. The shape is 8193 query rows by 8192 keys, one row past the 8K cap. Its first 64 rows are checked against
-    /// the reference for a 64-row prefill over the same keys, which is exact for causal attention and keeps the CPU
-    /// reference cheap.</summary>
+    /// <summary>A prefill above the shape bound takes the scalar kernel: no cm2 dispatch. The shape is 8193 query rows by 8192
+    /// keys, one row past the 8K bound. Its first 64 rows are checked against the reference for a 64-row prefill over the
+    /// same keys, which is exact for causal attention and keeps the CPU reference cheap.</summary>
     [Fact]
-    public void CausalPrefill_AboveTheMaskCap_TakesTheScalarPath_AndRetainsNoMask()
+    public void CausalPrefill_AboveTheShapeBound_TakesTheScalarPath()
     {
         if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = VulkanTestDevice.Create();
@@ -160,14 +165,13 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         long before = backend.FlashCm2PrefillDispatches;
         backend.FlashAttention(ot, qt, kt, vt, kvLen, hq / hkv, causal: true, 0, scale, slidingWindow: 0);
         Assert.Equal(before, backend.FlashCm2PrefillDispatches);
-        Assert.Equal(0L, backend.FlashCm2RetainedMaskBytes);
         Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>().Slice(0, hq * check * d)) < Tolerance);
     }
 
-    /// <summary>The cached host mask is held across a prefill's cm2 layers and released by the next attention call that does
-    /// not take the cm2 path, such as a decode step.</summary>
+    /// <summary>The causal mask is computed inside the kernel, so every layer of a prefill takes the cm2 path on the same
+    /// inputs and no host mask is built or kept. A decode step (one query row) still takes the scalar kernel.</summary>
     [Fact]
-    public void CausalPrefill_MaskIsHeldAcrossLayers_AndReleasedByTheNextDecodeCall()
+    public void CausalPrefill_TakesCm2OnEveryLayer_AndDecodeStillTakesTheScalarPath()
     {
         if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = VulkanTestDevice.Create();
@@ -178,16 +182,15 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         using Tensor kt = FromHost(new TensorShape(1, hkv, kvLen, d), Half(Random(hkv * kvLen * d, 32)));
         using Tensor vt = FromHost(new TensorShape(1, hkv, kvLen, d), Half(Random(hkv * kvLen * d, 33)));
         using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        long before = backend.FlashCm2PrefillDispatches;
         backend.FlashAttention(ot, qt, kt, vt, kvLen, 1, causal: true, 0, scale, slidingWindow: 0);
-        Assert.Equal(4L * sq * kvLen, backend.FlashCm2RetainedMaskBytes);
-        // The next layer of the same prefill reuses the mask.
         backend.FlashAttention(ot, qt, kt, vt, kvLen, 1, causal: true, 0, scale, slidingWindow: 0);
-        Assert.Equal(4L * sq * kvLen, backend.FlashCm2RetainedMaskBytes);
-        // A decode step (one query row) does not take the cm2 path, so the mask is released.
+        Assert.Equal(before + 2, backend.FlashCm2PrefillDispatches);
+        // A decode step (one query row) does not take the cm2 path.
         using Tensor q1 = FromHost(new TensorShape(1, hq, 1, d), Half(Random(hq * d, 34)));
         using Tensor o1 = new(new TensorShape(1, hq, 1, d), DType.F32);
         backend.FlashAttention(o1, q1, kt, vt, kvLen, 1, causal: true, kvLen - 1, scale, slidingWindow: 0);
-        Assert.Equal(0L, backend.FlashCm2RetainedMaskBytes);
+        Assert.Equal(before + 2, backend.FlashCm2PrefillDispatches);
     }
 
     private static float[] Pad(float[] dense, int heads, int len, int cap, int d)

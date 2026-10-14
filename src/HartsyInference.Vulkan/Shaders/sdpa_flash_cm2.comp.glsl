@@ -20,6 +20,14 @@
 #define HAS_MASK 0
 #endif
 
+// CAUSAL=1 builds the causal (and sliding-window) variant. The additive mask is computed here from the absolute query
+// position and the key column, so no mask buffer is bound and nothing is uploaded: a masked element is -inf and a visible
+// one is unchanged, the same values the host-built mask held. qOffset is the absolute position of query row 0 and
+// window 0 means no sliding window.
+#ifndef CAUSAL
+#define CAUSAL 0
+#endif
+
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 10) const uint Br = 64;
@@ -46,15 +54,31 @@ layout(push_constant) uniform Push {
     uint kRow; uint kHead; uint kBatch;
     uint vRow; uint vHead; uint vBatch;
     uint oRow; uint oHead; uint oBatch;
+#if CAUSAL == 1
+    uint qOffset; uint window;
+#endif
 } pc;
 
 #define NEG_HALF_MAX (-1.7014117e38)
+// -inf, not NEG_HALF_MAX, for a masked score: a key tile that is entirely masked then gives P = exp(-inf) = 0 instead of
+// exp(0) = 1, so a row whose first tiles lie before a sliding window accumulates nothing from them.
+#define NEG_INF (uintBitsToFloat(0xff800000u))
 
 float maxReduce(const in float x, const in float y) { return max(x, y); }
 float smearReduce(const in float x, const in float y) { return x; }
 float expElem(const in uint r, const in uint c, const in float e) { return exp(e); }
 float maxElem(const in uint r, const in uint c, const in float a, const in float b) { return max(a, b); }
 float maskKeys(const in uint r, const in uint c, const in float e, const in uint validCols) { return c < validCols ? e : NEG_HALF_MAX; }
+#if CAUSAL == 1
+// r, c: row and column inside the score tile; qBase: absolute position of the tile's row 0; kBase: the tile's first key column.
+float causalMask(const in uint r, const in uint c, const in float e, const in uint qBase, const in uint kBase,
+                 const in uint window, const in uint validKeys) {
+    uint q = qBase + r;
+    uint k = kBase + c;
+    bool visible = k < validKeys && k <= q && (window == 0u || k + window > q);
+    return visible ? e : NEG_INF;
+}
+#endif
 
 void main() {
     uint qTile = gl_WorkGroupID.x;
@@ -88,6 +112,9 @@ void main() {
     coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator> L = coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator>(0.0);
     coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator> M = coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator>(NEG_HALF_MAX);
     coopmat<float16_t, gl_ScopeWorkgroup, Bc, Bc, gl_MatrixUseB> ones = coopmat<float16_t, gl_ScopeWorkgroup, Bc, Bc, gl_MatrixUseB>(1.0);
+#if CAUSAL == 1
+    uint qBase = pc.qOffset + qTile * Br;
+#endif
 
     uint tiles = (pc.skv + Bc - 1) / Bc;
     [[dont_unroll]]
@@ -97,6 +124,9 @@ void main() {
         coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator> S = coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator>(0.0);
         S = coopMatMulAdd(Qm, Kt, S);
         S *= coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator>(pc.scale);
+#if CAUSAL == 1
+        coopMatPerElementNV(S, S, causalMask, qBase, j * Bc, pc.window, pc.skv);
+#endif
 #if HAS_MASK == 1
         tensorLayoutNV<2, gl_CooperativeMatrixClampModeConstantNV> layoutM = createTensorLayoutNV(2, gl_CooperativeMatrixClampModeConstantNV);
         layoutM = setTensorLayoutDimensionNV(layoutM, pc.sq, pc.skv);
