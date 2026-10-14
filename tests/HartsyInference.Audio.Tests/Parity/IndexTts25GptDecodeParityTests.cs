@@ -140,7 +140,7 @@ public sealed class IndexTts25GptDecodeParityTests(ITestOutputHelper output)
         Check("CAM++ style (PrepareReference)", reference.Style, "style", 1e-4);
         Check("spk_emb_proj (PrepareReference)", reference.SpeakerConditioning, "spk_proj", 1e-4);
         Check("spk_cond_emb (PrepareReference)", reference.SpkCondEmb, "spk_cond_emb", 1e-4);
-        Check("emovec (PrepareReference)", reference.EmoVec, "emovec", 5e-3);
+        Check("emovec (PrepareReference)", reference.GetEmoVec(backend), "emovec", 5e-3);
         Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
     }
 
