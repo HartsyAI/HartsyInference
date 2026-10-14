@@ -67,7 +67,7 @@ internal static class ChatterboxModel
             ChatterboxT3 t3 = new ChatterboxT3(config);
             CosyVoiceFlow flow = new CosyVoiceFlow(cosy);
             HiFTNetVocoder vocoder = new HiFTNetVocoder(cosy.Hift);
-            CamPlusSpeakerEncoder speakerEncoder = new CamPlusSpeakerEncoder(cosy.Flow.SpeakerEmbedDim);
+            CamPlusSpeakerEncoder speakerEncoder = ChatterboxPipeline.CreateSpeakerEncoder(cosy.Flow.SpeakerEmbedDim);
             S3Tokenizer s3Tokenizer = new S3Tokenizer();
             ChatterboxVoiceEncoder voiceEncoder = new ChatterboxVoiceEncoder();
             ChatterboxPipeline pipeline = new ChatterboxPipeline(config, t3, flow, vocoder, speakerEncoder, s3Tokenizer, voiceEncoder);
