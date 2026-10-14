@@ -111,7 +111,8 @@ public sealed class VulkanLeakTests
     public unsafe void Vulkan_UncachedFp8Casts_ReachSteadyStateWithoutDriverAllocations()
     {
         if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new() { CacheWeightCasts = false };
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        backend.CacheWeightCasts = false;
         const int Rows = 256, Dim = 4096;   // the F16 cast of a 4096² weight is 32 MB, in the dedicated tier
         using Tensor weightF32 = new(new TensorShape(Dim, Dim), DType.F32);
         float* wp = (float*)weightF32.DataPointer;
