@@ -47,6 +47,7 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
     public const string DefaultSystemPrompt = "You are a helpful assistant.";
 
     private readonly Tokenizer _tokenizer;
+    private readonly Lazy<GgufTokenizer> _exact;
     private int _disposed;
 
     /// <summary>Creates a Qwen2 tokenizer from the embedded Qwen3 vocab/merges (identical base BPE for Qwen2.5; only the chat conventions differ, which this class owns).</summary>
@@ -55,6 +56,9 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         using Stream vocabStream = EmbeddedTokenizerResources.OpenQwen3Vocab();
         using Stream mergesStream = EmbeddedTokenizerResources.OpenQwen3Merges();
         _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+        _exact = new Lazy<GgufTokenizer>(static () => EmbeddedTokenizerResources.HasQwen3TokenizerJson
+            ? Qwen3Tokenizer.EmbeddedExactTokenizer.Value
+            : throw new InvalidOperationException("The embedded Qwen tokenizer.json is required for exact encoding."));
     }
 
     /// <summary>Creates a Qwen2 tokenizer from <c>vocab.json</c> and <c>merges.txt</c> files (e.g. the ones shipped inside a Lance checkpoint folder).</summary>
@@ -63,6 +67,8 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         using Stream vocabStream = File.OpenRead(vocabPath);
         using Stream mergesStream = File.OpenRead(mergesPath);
         _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+        // The checkpoint's own vocabulary with Qwen's split rules: its merges can differ from the embedded Qwen3 set.
+        _exact = new Lazy<GgufTokenizer>(() => QwenBpe.FromFiles(vocabPath, mergesPath));
     }
 
     /// <summary>Encodes raw text to BPE token ids — no template, no special tokens, no padding.</summary>
@@ -84,6 +90,45 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
     {
         ThrowIfDisposed();
         return _tokenizer.EncodeToIds(ByteLevelCodec.Encode(text));
+    }
+
+    /// <summary>Hugging Face-exact encode of raw text with Qwen's split regex and NFC normalization, so hyphenated words,
+    /// space-before-punctuation and CJK text tokenize as <c>transformers.AutoTokenizer</c> does. Uses this instance's
+    /// <c>vocab.json</c>/<c>merges.txt</c> when it was built from files, otherwise the embedded Qwen <c>tokenizer.json</c>. Literals in <paramref name="specialTokens"/> are
+    /// split out first (longest match wins) and mapped to their ids, mirroring <c>add_special_tokens</c>; no other
+    /// added-token literal is recognized. <see cref="EncodeRawByteLevel"/> keeps its existing behavior for its callers.</summary>
+    /// <exception cref="InvalidOperationException">Built without files and the embedded Qwen <c>tokenizer.json</c> is not available.</exception>
+    public int[] EncodeExact(string text, IReadOnlyDictionary<string, int>? specialTokens = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(text);
+        GgufTokenizer exact = _exact.Value;
+        string normalized = text.IsNormalized(System.Text.NormalizationForm.FormC) ? text : text.Normalize(System.Text.NormalizationForm.FormC);
+        if (specialTokens is null || specialTokens.Count == 0) return exact.Encode(normalized, addSpecial: false);
+
+        string[] literals = [.. specialTokens.Keys.OrderByDescending(static k => k.Length)];
+        HashSet<char> starts = [.. literals.Where(static l => l.Length > 0).Select(static l => l[0])];
+        List<int> ids = new(normalized.Length / 3 + 4);
+        int start = 0;
+        int i = 0;
+        while (i < normalized.Length)
+        {
+            string? hit = null;
+            if (starts.Contains(normalized[i]))
+                foreach (string lit in literals)
+                    if (string.CompareOrdinal(normalized, i, lit, 0, lit.Length) == 0) { hit = lit; break; }
+            if (hit is null)
+            {
+                i++;
+                continue;
+            }
+            if (i > start) ids.AddRange(exact.Encode(normalized[start..i], addSpecial: false));
+            ids.Add(specialTokens[hit]);
+            i += hit.Length;
+            start = i;
+        }
+        if (start < normalized.Length) ids.AddRange(exact.Encode(normalized[start..], addSpecial: false));
+        return [.. ids];
     }
 
     /// <summary>Decodes token ids back to text. Control tokens (id ≥ <see cref="EndOfTextId"/>) are dropped, and the GPT-2 byte-level mapping is reversed via <see cref="ByteLevelCodec"/> (so spaces render correctly instead of leaking <c>Ġ</c>).</summary>
