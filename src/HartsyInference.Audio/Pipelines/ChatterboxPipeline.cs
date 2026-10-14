@@ -62,7 +62,7 @@ public sealed class ChatterboxPipeline : IDisposable
         float exaggeration = 0.5f, int seed = 0, Tensor? flowSpeakerEmbed = null,
         ReadOnlySpan<float> referenceAudio = default, int referenceSampleRate = 0,
         Action<GenerationProgress>? progress = null, ReadOnlySpan<int> t3PromptSpeechTokens = default,
-        float cfgWeight = 0f)
+        float cfgWeight = 0f, ReadOnlySpan<int> flowPromptTokens = default, Tensor? flowPromptMel = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(backend);
@@ -71,9 +71,11 @@ public sealed class ChatterboxPipeline : IDisposable
         progress?.Invoke(new GenerationProgress(0, 3, 0));
 
         // Resolve conditioning: either derived from the raw reference clip (zero-shot) or passed in (precomputed).
-        int[] promptSpeechTokens = [];
+        int[] promptSpeechTokens = flowPromptTokens.ToArray();
         ReadOnlySpan<int> t3Prompt = t3PromptSpeechTokens;
         Tensor? promptMel = null;
+        if (!flowPromptTokens.IsEmpty && (flowPromptMel is null || flowPromptMel.Shape[2] != 2L * flowPromptTokens.Length))
+            throw new ArgumentException("flowPromptMel must be [1, 80, 2 * flowPromptTokens.Length] when prompt tokens are given.", nameof(flowPromptMel));
         Tensor? veEmbed = refSpeakerEmbed;
         Tensor? flowSpk = flowSpeakerEmbed;
         bool ownsVe = false, ownsFlowSpk = false;
@@ -130,7 +132,8 @@ public sealed class ChatterboxPipeline : IDisposable
         progress?.Invoke(new GenerationProgress(1, 3, sw.Elapsed.TotalMilliseconds));
 
         // Stage 2: S3Gen flow — speech tokens → mel (CosyVoice-identical conditional flow matching).
-        Tensor mel = _flow.Inference(backend, speechTokens.ToArray(), promptSpeechTokens, promptMel, flowSpk, seed);
+        int[] flowTokens = DropInvalidSpeechTokens(speechTokens, _cfg.StartSpeechToken, _cfg.S3CodebookSize);
+        Tensor mel = _flow.Inference(backend, flowTokens, promptSpeechTokens, promptMel ?? flowPromptMel, flowSpk, seed);
         if (ownsFlowSpk) flowSpk.Dispose();
         promptMel?.Dispose();
         double flowDoneMs = sw.Elapsed.TotalMilliseconds;
@@ -198,6 +201,19 @@ public sealed class ChatterboxPipeline : IDisposable
         _s3?.Dispose();
         _voiceEncoder?.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Upstream tts.py runs <c>drop_invalid_tokens</c> (everything up to a start-of-speech token goes) and then
+    /// keeps only real S3 codes (<c>speech_tokens &lt; 6561</c>) before S3Gen.</summary>
+    internal static int[] DropInvalidSpeechTokens(List<int> tokens, int startSpeechToken, int codebookSize)
+    {
+        int start = tokens.IndexOf(startSpeechToken) + 1;
+        List<int> kept = new(tokens.Count - start);
+        for (int i = start; i < tokens.Count; i++)
+        {
+            if ((uint)tokens[i] < (uint)codebookSize) kept.Add(tokens[i]);
+        }
+        return kept.ToArray();
     }
 
     private static bool HasPrefix(IReadOnlyDictionary<string, Tensor> w, string prefix)

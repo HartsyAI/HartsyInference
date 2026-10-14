@@ -15,6 +15,10 @@ namespace HartsyInference.Audio.Models.Chatterbox;
 /// (temp / top-p / min-p / repetition penalty).</summary>
 public sealed unsafe class ChatterboxT3 : IDisposable
 {
+    // Upstream T3.inference embeds the start-of-speech token twice at speech position 0: prepare_input_embeds already
+    // ends with initial_speech_tokens (t3.py:258-267) and t3.py:305-313 appends another bos_embed.
+    private const int UpstreamPrefillBosCount = 2;
+
     private readonly ChatterboxConfig _cfg;
     private readonly Qwen2Model _backbone;
     private readonly ChatterboxPerceiver _perceiver = new();
@@ -100,15 +104,65 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         float exaggeration, int maxNew, int seed = 0, ReadOnlySpan<int> promptSpeechTokens = default, float cfgWeight = 0f)
     {
         if (_textEmb is null) throw new InvalidOperationException("ChatterboxT3 not loaded.");
-        int h = _cfg.T3.HiddenSize;
         bool useCfg = cfgWeight > 0f;
+        int vocab = _cfg.SpeechVocab;
+        using DecodeState state = Prefill(backend, textTokens, speakerEmbed, exaggeration, promptSpeechTokens, useCfg,
+            UpstreamPrefillBosCount, maxNew);
+        uint rng = DeterministicRng.Seed(seed);
+        List<int> tokens = new(maxNew);
+        // t3.py:316 starts generated_ids at the BOS token, so the repetition penalty covers it from step 0.
+        HashSet<int> seen = [_cfg.StartSpeechToken];
+        float[] logits = new float[vocab];
+        float[]? logitsUncond = useCfg ? new float[vocab] : null;
+        for (int step = 0; step < maxNew; step++)
+        {
+            state.Logits(backend, logits, logitsUncond);
+            if (useCfg)
+                for (int v = 0; v < vocab; v++)
+                    logits[v] += cfgWeight * (logits[v] - logitsUncond![v]);
+            if (_cfg.RepetitionPenalty != 1f)
+                foreach (int tok in seen)
+                    logits[tok] = logits[tok] > 0 ? logits[tok] / _cfg.RepetitionPenalty : logits[tok] * _cfg.RepetitionPenalty;
+            int next = NucleusSampler.Draw(logits, vocab, _cfg.Temperature, 0, _cfg.TopP, ref rng, -1, _cfg.MinP);
+
+            if (next == _cfg.StopSpeechToken) break;
+            tokens.Add(next); seen.Add(next);
+            if (!state.Step(backend, next, tokens.Count)) break;
+        }
+        return tokens;
+    }
+
+    /// <summary>Raw speech-head logits <c>[steps, 2, SpeechVocab]</c> (row 0 conditional, row 1 the CFG
+    /// unconditional stream) before every step when <paramref name="forcedTokens"/> are fed in order: the
+    /// teacher-forced view of <see cref="GenerateSpeechTokens"/> that parity tests compare against upstream.</summary>
+    internal float[] TeacherForcedLogits(IBackend backend, ReadOnlySpan<int> textTokens, Tensor speakerEmbed,
+        float exaggeration, ReadOnlySpan<int> promptSpeechTokens, ReadOnlySpan<int> forcedTokens,
+        int bosCount = UpstreamPrefillBosCount)
+    {
+        if (_textEmb is null) throw new InvalidOperationException("ChatterboxT3 not loaded.");
+        int vocab = _cfg.SpeechVocab;
+        int steps = forcedTokens.Length + 1;
+        float[] result = new float[steps * 2 * vocab];
+        using DecodeState state = Prefill(backend, textTokens, speakerEmbed, exaggeration, promptSpeechTokens, true,
+            bosCount, forcedTokens.Length);
+        for (int step = 0; step < steps; step++)
+        {
+            state.Logits(backend, result.AsSpan(step * 2 * vocab, vocab), result.AsSpan((step * 2 + 1) * vocab, vocab));
+            if (step < forcedTokens.Length) state.Step(backend, forcedTokens[step], step + 1);
+        }
+        return result;
+    }
+
+    /// <summary>Builds <c>[cond] ++ [text+pos] ++ bosCount x [speechStart+pos0]</c> (the uncond stream zeroes only the
+    /// text token embedding) and runs the prefill forward of each stream.</summary>
+    private DecodeState Prefill(IBackend backend, ReadOnlySpan<int> textTokens, Tensor speakerEmbed, float exaggeration,
+        ReadOnlySpan<int> promptSpeechTokens, bool useCfg, int bosCount, int maxNew)
+    {
+        int h = _cfg.T3.HiddenSize;
         Tensor cond = BuildCond(backend, speakerEmbed, exaggeration, promptSpeechTokens);
         int condLen = (int)cond.Shape[1];
         int tt = textTokens.Length;
-
-        // Prefill embeds = [cond] ++ [text+pos] ++ [speechStart+pos0]. The uncond stream is byte-identical
-        // except the text region keeps its position embedding but zeroes the token embedding.
-        int prefill = condLen + tt + 1;
+        int prefill = condLen + tt + bosCount;
         Tensor embeds = new(new TensorShape(1, prefill, h), DType.F32);
         Tensor? embedsUncond = useCfg ? new Tensor(new TensorShape(1, prefill, h), DType.F32) : null;
         float* ep = (float*)embeds.DataPointer;
@@ -121,56 +175,21 @@ public sealed unsafe class ChatterboxT3 : IDisposable
             AddEmbPlusPos(ep + (long)(condLen + i) * h, _textEmb!, textTokens[i], _textPos!, i, h);
             if (useCfg) AddPosOnly(eup + (long)(condLen + i) * h, _textPos!, i, h);
         }
-        AddEmbPlusPos(ep + (long)(condLen + tt) * h, _speechEmb!, _cfg.StartSpeechToken, _speechPos!, 0, h);
-        if (useCfg) AddEmbPlusPos(eup + (long)(condLen + tt) * h, _speechEmb!, _cfg.StartSpeechToken, _speechPos!, 0, h);
+        for (int b = 0; b < bosCount; b++)
+        {
+            long row = (long)(condLen + tt + b) * h;
+            AddEmbPlusPos(ep + row, _speechEmb!, _cfg.StartSpeechToken, _speechPos!, 0, h);
+            if (useCfg) AddEmbPlusPos(eup + row, _speechEmb!, _cfg.StartSpeechToken, _speechPos!, 0, h);
+        }
 
         int cacheCap = Math.Min(_cfg.T3.MaxPositionEmbeddings, prefill + maxNew + 4);
-        using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
-        using IKvCache? cacheUncond = useCfg ? _backbone.CreateDecodeCache(cacheCap) : null;
-        uint rng = DeterministicRng.Seed(seed);
-        List<int> tokens = new(maxNew);
-        HashSet<int> seen = new();
-
+        IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
+        IKvCache? cacheUncond = useCfg ? _backbone.CreateDecodeCache(cacheCap) : null;
         Tensor hidden = _backbone.ForwardEmbeds(backend, embeds, 1, prefill, 0, cache);
         embeds.Dispose();
         Tensor? hiddenUncond = useCfg ? _backbone.ForwardEmbeds(backend, embedsUncond!, 1, prefill, 0, cacheUncond!) : null;
         embedsUncond?.Dispose();
-        for (int step = 0; step < maxNew; step++)
-        {
-            Tensor last = SliceLast(hidden, h); hidden.Dispose();
-            Tensor logitsT = WhisperOps.ProjectLinear(backend, last, _speechHead!, null, 1, 1, h, _cfg.SpeechVocab);
-            last.Dispose();
-            Span<float> logits = new((void*)logitsT.DataPointer, _cfg.SpeechVocab);
-            if (useCfg)
-            {
-                Tensor lastU = SliceLast(hiddenUncond!, h); hiddenUncond!.Dispose();
-                Tensor logitsUncondT = WhisperOps.ProjectLinear(backend, lastU, _speechHead!, null, 1, 1, h, _cfg.SpeechVocab);
-                lastU.Dispose();
-                Span<float> logitsUncond = new((void*)logitsUncondT.DataPointer, _cfg.SpeechVocab);
-                for (int v = 0; v < _cfg.SpeechVocab; v++)
-                    logits[v] += cfgWeight * (logits[v] - logitsUncond[v]);
-                logitsUncondT.Dispose();
-            }
-            if (_cfg.RepetitionPenalty != 1f)
-                foreach (int tok in seen)
-                    logits[tok] = logits[tok] > 0 ? logits[tok] / _cfg.RepetitionPenalty : logits[tok] * _cfg.RepetitionPenalty;
-            int next = NucleusSampler.Draw(logits, _cfg.SpeechVocab, _cfg.Temperature, 0, _cfg.TopP, ref rng, -1, _cfg.MinP);
-            logitsT.Dispose();
-
-            if (next == _cfg.StopSpeechToken) break;
-            tokens.Add(next); seen.Add(next);
-
-            Tensor step1 = new(new TensorShape(1, 1, h), DType.F32);
-            AddEmbPlusPos((float*)step1.DataPointer, _speechEmb!, next, _speechPos!, tokens.Count, h);
-            hidden = _backbone.ForwardEmbeds(backend, step1, 1, 1, cache.CurrentLength, cache);
-            if (useCfg)
-                hiddenUncond = _backbone.ForwardEmbeds(backend, step1, 1, 1, cacheUncond!.CurrentLength, cacheUncond);
-            step1.Dispose();
-            if (cache.CurrentLength >= cacheCap - 2) break;
-        }
-        hidden.Dispose();
-        hiddenUncond?.Dispose();
-        return tokens;
+        return new DecodeState(this, cache, cacheUncond, hidden, hiddenUncond, cacheCap);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -195,12 +214,16 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         for (int i = 0; i < h; i++) dst[i] = pr[i];
     }
 
-    private static Tensor SliceLast(Tensor hidden, int h)
+    private void ProjectLast(IBackend backend, Tensor hidden, Span<float> dst)
     {
+        int h = _cfg.T3.HiddenSize;
         int t = (int)hidden.Shape[1];
         Tensor last = new(new TensorShape(1, 1, h), DType.F32);
         Buffer.MemoryCopy((float*)hidden.DataPointer + (long)(t - 1) * h, (void*)last.DataPointer, h * 4, h * 4);
-        return last;
+        Tensor logits = WhisperOps.ProjectLinear(backend, last, _speechHead!, null, 1, 1, h, _cfg.SpeechVocab);
+        last.Dispose();
+        new ReadOnlySpan<float>((void*)logits.DataPointer, _cfg.SpeechVocab).CopyTo(dst);
+        logits.Dispose();
     }
 
     public void Dispose()
@@ -209,5 +232,46 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         _backbone.Dispose();
         _perceiver.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>The cond (and optional CFG uncond) KV caches plus the last hidden state of each stream.</summary>
+    private sealed class DecodeState(ChatterboxT3 owner, IKvCache cache, IKvCache? cacheUncond, Tensor hidden,
+        Tensor? hiddenUncond, int cacheCap) : IDisposable
+    {
+        private Tensor _hidden = hidden;
+        private Tensor? _hiddenUncond = hiddenUncond;
+
+        /// <summary>Projects the last position of each stream through the speech head.</summary>
+        public void Logits(IBackend backend, Span<float> cond, Span<float> uncond)
+        {
+            owner.ProjectLast(backend, _hidden, cond);
+            if (_hiddenUncond is not null && !uncond.IsEmpty) owner.ProjectLast(backend, _hiddenUncond, uncond);
+        }
+
+        /// <summary>Feeds <paramref name="token"/> at speech position <paramref name="speechPos"/> to every stream;
+        /// false once the cache is full.</summary>
+        public bool Step(IBackend backend, int token, int speechPos)
+        {
+            int h = owner._cfg.T3.HiddenSize;
+            Tensor step1 = new(new TensorShape(1, 1, h), DType.F32);
+            AddEmbPlusPos((float*)step1.DataPointer, owner._speechEmb!, token, owner._speechPos!, speechPos, h);
+            _hidden.Dispose();
+            _hidden = owner._backbone.ForwardEmbeds(backend, step1, 1, 1, cache.CurrentLength, cache);
+            if (cacheUncond is not null)
+            {
+                _hiddenUncond!.Dispose();
+                _hiddenUncond = owner._backbone.ForwardEmbeds(backend, step1, 1, 1, cacheUncond.CurrentLength, cacheUncond);
+            }
+            step1.Dispose();
+            return cache.CurrentLength < cacheCap - 2;
+        }
+
+        public void Dispose()
+        {
+            _hidden.Dispose();
+            _hiddenUncond?.Dispose();
+            cache.Dispose();
+            cacheUncond?.Dispose();
+        }
     }
 }
