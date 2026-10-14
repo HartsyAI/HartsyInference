@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.CosyVoice;
+using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -26,5 +27,13 @@ public sealed class CamPlusContextPoolTests
         Assert.Equal(mean + 49.5f, p[99], 4);
         Assert.Equal(mean + trailingSegmentMean, p[100], 4);
         Assert.Equal(mean + trailingSegmentMean, p[t - 1], 4);
+    }
+
+    /// <summary>Chatterbox's upstream runs <c>CAMPPlus</c> in PyTorch; the encoder its loader builds must use that divisor.</summary>
+    [Fact]
+    public void ChatterboxSpeakerEncoder_UsesTheTorchDivisor()
+    {
+        using CamPlusSpeakerEncoder encoder = ChatterboxPipeline.CreateSpeakerEncoder(192);
+        Assert.False(encoder.OnnxSegmentPooling);
     }
 }
