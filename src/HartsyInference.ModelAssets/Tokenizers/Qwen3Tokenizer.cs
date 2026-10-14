@@ -15,7 +15,7 @@ public sealed class Qwen3Tokenizer : IDisposable
     /// <summary>End-of-sequence token id (<c>&lt;|im_end|&gt;</c>).</summary>
     public const int EosTokenId = 151645;
 
-    private static readonly Lazy<GgufTokenizer> EmbeddedExactTokenizer = new(() =>
+    internal static readonly Lazy<GgufTokenizer> EmbeddedExactTokenizer = new(() =>
     {
         using Stream jsonStream = EmbeddedTokenizerResources.OpenQwen3TokenizerJson();
         return HfTokenizerJson.LoadByteLevelBpe(jsonStream);
