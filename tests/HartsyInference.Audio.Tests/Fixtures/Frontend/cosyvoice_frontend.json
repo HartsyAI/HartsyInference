@@ -20,6 +20,30 @@
   "[lipsmack]": 151661,
   "[mn]": 151662
  },
+ "tn_raw": {
+  "Yes.": "Yes.",
+  "Okay, see you.": "Okay, see you.",
+  "The weather is nice today, so we might take a walk.": "The weather is nice today, so we might take a walk.",
+  "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.": "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+  "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.": "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+  "On March 3rd, 2026 at 4:30 PM, 1,250 people paid $99.95 each.": "On the third of march, twenty twenty six at four thirty PM, thousand two hundred and fifty people paid ninety nine point nine five dollars each.",
+  "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+  "No no no no no no no no no no no no.": "No no no no no no no no no no no no.",
+  "The quick brown fox jumps over the lazy dog near the river bank.": "The quick brown fox jumps over the lazy dog near the river bank.",
+  "Dr. Smith lives at 221B Baker St. and earns 12% more in 1999.": "doctor Smith lives at two hundred twenty one B Baker St. and earns twelve percent more in nineteen ninety nine.",
+  "No final punctuation here": "No final punctuation here",
+  "Leading and trailing spaces.": "Leading and trailing spaces.",
+  "He said \"stop.\" Then he left.": "He said \"stop.\" Then he left.",
+  "Room 101 has 3 chairs, 12 desks and 1000 pens.": "Room one hundred and one has three chairs, twelve desks and ten hundred pens.",
+  "Call 555-0199 before 9 or after 21.": "Call five hundred and fifty five-oh one hundred and ninety nine before nine or after twenty one.",
+  "First sentence. Second one! Third one? Fourth; fifth: sixth.": "First sentence. Second one! Third one? Fourth; fifth: sixth.",
+  "It is 50/50 whether the 2nd or 3rd option wins on 12/25.": "It is fifty fiftieths whether the second or third option wins on twelve twenty fifths.",
+  "今天是2026年3月3日，天气很好。": "今天是二零二六年三月三日，天气很好。",
+  "我有3个苹果和12个橘子，一共15个水果。": "我有三个苹果和十二个橘子，一共十五个水果。",
+  "这是一个很长的句子，用来测试分段逻辑是否和参考实现一致。第二句也在这里。第三句话结束了！": "这是一个很长的句子，用来测试分段逻辑是否和参考实现一致。第二句也在这里。第三句话结束了！",
+  "Mixed 中文 and English 文本 123.": "Mixed 中文 and English 文本 一百二十三.",
+  "Breathe [breath] then laugh [laughter] and <strong>stress</strong> this.": "Breathe [breath] then laugh [laughter] and <strong>stress</strong> this."
+ },
  "numbers": [
   {
    "in": "0",

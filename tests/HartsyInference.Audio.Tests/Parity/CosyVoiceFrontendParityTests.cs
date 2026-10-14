@@ -43,6 +43,25 @@ public sealed class CosyVoiceFrontendParityTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>The full reference path with wetext 0.0.4 normalization. The FST normalizer is injected as a lookup of
+    /// the outputs wetext produced for the same inputs, so everything around it (spell-out, split, Chinese rewrites)
+    /// is checked exactly; the WeText runtime has its own parity tests.</summary>
+    [Fact]
+    public void NormalizedPath_WithReferenceFstOutputs_MatchesReference()
+    {
+        using JsonDocument doc = FrontendParityFixture.Load("cosyvoice_frontend");
+        Dictionary<string, string> tnRaw = [];
+        foreach (JsonProperty p in doc.RootElement.GetProperty("tn_raw").EnumerateObject()) tnRaw[p.Name] = p.Value.GetString()!;
+        string Lookup(string s) => tnRaw.TryGetValue(s, out string? v) ? v : throw new KeyNotFoundException($"No reference FST output for '{s}'.");
+        CosyVoiceTextFrontend frontend = new(static s => Embedded.EncodeExact(s, CosyVoiceTextFrontend.SpecialTokens).Length, Lookup, Lookup);
+        foreach (JsonElement c in doc.RootElement.GetProperty("cases").EnumerateArray())
+        {
+            string text = c.GetProperty("text").GetString()!;
+            Assert.Equal(c.GetProperty("tn_normalized").GetString(), frontend.Normalize(text));
+            Assert.Equal(FrontendParityFixture.Strings(c.GetProperty("tn_segments")), frontend.Segments(text));
+        }
+    }
+
     [Fact]
     [Trait("Category", "Integration")]
     public void SegmentTokenIds_MatchReferenceTokenizer()

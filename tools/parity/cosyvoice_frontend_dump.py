@@ -10,6 +10,13 @@ import sys
 COSY, TOK, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, COSY)
 
+# wetext 0.0.4 calls ModelScope's snapshot_download on every Normalizer() even when the FSTs are cached, and the
+# ModelScope API rate-limits; point it at the local snapshot when one exists so runs are reproducible offline.
+import os as _os
+import modelscope as _modelscope
+_WETEXT_CACHE = _os.path.expanduser("~/.cache/modelscope/models/pengzhendong--wetext/snapshots/master")
+if _os.path.isdir(_WETEXT_CACHE):
+    _modelscope.snapshot_download = lambda *a, **k: _WETEXT_CACHE
 import inflect  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 from wetext import Normalizer  # noqa: E402
@@ -34,6 +41,9 @@ except Exception as e:  # FSTs unavailable (wetext 0.0.4 fetches them from Model
 encode = lambda s: tok([s])["input_ids"][0]  # CosyVoice2Tokenizer.encode
 
 
+TN_RAW = {}  # input passed to the FST normalizer -> its output, so tests can inject the normalizer as a lookup
+
+
 def normalize(text, use_tn):
     """cosyvoice/cli/frontend.py text_normalize (non-ttsfrd), returning (normalized, segments)."""
     if ('<|' in text and '|>' in text) or text == '':
@@ -41,7 +51,8 @@ def normalize(text, use_tn):
     text = text.strip()
     if contains_chinese(text):
         if use_tn:
-            text = zh_tn.normalize(text)
+            TN_RAW[text] = zh_tn.normalize(text)
+            text = TN_RAW[text]
         text = text.replace("\n", "")
         text = replace_blank(text)
         text = replace_corner_mark(text)
@@ -52,7 +63,8 @@ def normalize(text, use_tn):
         segs = list(split_paragraph(text, encode, "zh", token_max_n=80, token_min_n=60, merge_len=20, comma_split=False))
     else:
         if use_tn:
-            text = en_tn.normalize(text)
+            TN_RAW[text] = en_tn.normalize(text)
+            text = TN_RAW[text]
         text = spell_out_number(text, inf)
         segs = list(split_paragraph(text, encode, "en", token_max_n=80, token_min_n=60, merge_len=20, comma_split=False))
     return text, [s for s in segs if not is_only_punctuation(s)]
@@ -89,6 +101,7 @@ for t in texts:
                   "tn_normalized": tn_norm, "tn_segments": tn_segs,
                   "tn_segment_ids": [encode(s) for s in tn_segs] if tn_segs is not None else None, "plain_segment_ids": [encode(s) for s in plain_segs]})
 json.dump({"special_tokens": {t: tok.convert_tokens_to_ids(t) for t in SPECIALS},
+           "tn_raw": TN_RAW,
            "numbers": [{"in": n, "out": inf.number_to_words(n)} for n in numbers], "cases": cases},
           open(OUT, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 print(f"wrote {len(numbers)} numbers, {len(cases)} cases -> {OUT}")
