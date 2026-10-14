@@ -270,7 +270,7 @@ Real-weight e2e in pure C#. **Swarm e2e word-correct 2026-07-13** — earlier "c
 
 ### Spark-TTS-0.5B
 
-Real-weight e2e bit-exact, fully in-engine (controllable mode): LM logits corr 1.0 (top-1 100%), greedy tokens 32/32 global + 179/179 semantic match Python, BiCodec wav corr 1.0 (factorized VQ, FSQ d-vector, AdaLN PreNet all corr 1.0). `SparkTtsPipeline.LoadFromDirectory`/`LoadAsync` + `SynthesizeControllable(text, gender, pitch, speed)`; `SparkTtsTokenizer` reuses the shared BPE + ByteLevelCodec. Zero-shot cloning would need the BiCodec encoder side (wav2vec2 + ECAPA), not built.
+Real-weight e2e bit-exact, fully in-engine (controllable mode): LM logits corr 1.0 (top-1 100%), greedy tokens 32/32 global + 179/179 semantic match Python, BiCodec wav corr 1.0 (factorized VQ, FSQ d-vector, AdaLN PreNet all corr 1.0). `SparkTtsPipeline.LoadFromDirectory`/`LoadAsync` + `SynthesizeControllable(text, gender, pitch, speed)`; `SparkTtsTokenizer` runs NFC + the Qwen2 split regex over `GgufTokenizer`; 33/33 upstream prompts (8 texts, controllable and zero-shot) tokenize identically (`SparkTtsPromptParityTests`). Sampling follows HF `generate` (temperature, then top-k, then top-p over the top-k set). The engine always runs controllable mode; a reference clip is ignored. Zero-shot cloning would need the BiCodec encoder side (wav2vec2 + ECAPA), not built; `BuildZeroShotPrompt` mirrors `process_prompt` for when it is.
 
 ### Dia-1.6B
 

@@ -115,7 +115,9 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
         Tensor hidden = RunBody(promptEmbeds, promptLen, 0, cache);
         promptEmbeds.Dispose();
 
-        for (int step = 0; step < maxTokens; step++)
+        // Reference length cap: max_len = target_text_len × max_token_text_ratio, never above the caller's cap.
+        int maxLen = Math.Min(maxTokens, (int)(textTokens.Length * _cfg.Sampling.MaxTokenTextRatio));
+        for (int step = 0; step < maxLen; step++)
         {
             int t = (int)hidden.Shape[1];
             Tensor last = VibeVoiceOps.SliceLastFrame(hidden, h);
