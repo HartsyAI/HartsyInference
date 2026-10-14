@@ -58,7 +58,7 @@ internal static class IndexTtsModel
         IndexTtsOptions options = new()
         {
             Seed = unchecked((ulong)job.Seed),
-            Temperature = job.Temperature.HasValue ? (float)job.Temperature.Value : 0.8f,
+            Temperature = job.Temperature.HasValue ? (float)job.Temperature.Value : 1.0f,
             TopK = job.TopK ?? 30,
             MaxMelTokens = job.MaxTokens,
         };

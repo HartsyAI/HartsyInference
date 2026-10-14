@@ -425,7 +425,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     }
 
     /// <summary>The text's segments as GPT text-id arrays, through the upstream frontend of the loaded version.</summary>
-    private List<int[]> SegmentText(string text, IndexTts2Options opts)
+    internal List<int[]> SegmentText(string text, IndexTts2Options opts)
     {
         ArgumentNullException.ThrowIfNull(text);
         if (_spm is not null)
@@ -441,7 +441,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// vector's own leftover weight (<c>emovec_mat + (1-sum(weights))*emovec</c>, weights exactly as given unless
     /// <see cref="IndexTts2Options.NormalizeEmoVector"/>); otherwise an explicit or implicit (defaults to the
     /// speaker's own clip, alpha forced to 1) audio reference goes straight through <c>merge_emovec</c>.</summary>
-    private (Tensor EmoVec, bool Owned) ResolveEmotion(IBackend backend, IndexTts2Options opts, string text, IndexTts2Reference reference, IndexTts2Timings timings)
+    internal (Tensor EmoVec, bool Owned) ResolveEmotion(IBackend backend, IndexTts2Options opts, string text, IndexTts2Reference reference, IndexTts2Timings timings)
     {
         Stopwatch sw = Stopwatch.StartNew();
         try
@@ -591,6 +591,9 @@ public sealed class IndexTts2Pipeline : IDisposable
             TopP = opts.TopP,
             RepetitionPenalty = opts.RepetitionPenalty,
             MaxMelTokens = opts.MaxMelTokens ?? 1_500,
+            NumBeams = opts.NumBeams,
+            DoSample = opts.DoSample,
+            LengthPenalty = opts.LengthPenalty,
         };
         return _gpt.Generate(backend, reference.SpeakerConditioning, emoVec, textIds, langId, gptOpts, ref rngState);
     }
