@@ -35,7 +35,9 @@ internal static class FstOneBest
     }
 
     // Composed states are (input position, rule state) pairs numbered in discovery order; the sequence filter never
-    // leaves state 0 because the acceptor has no epsilons, so rule epsilon-input arcs advance alone.
+    // leaves state 0 because the acceptor has no epsilons, so rule epsilon-input arcs advance alone. Arcs come out in
+    // rule file order whether the rule is input-label sorted (matcher on the rule: epsilons, then the label's run) or
+    // not (matcher on the acceptor, rule arcs scanned in order); both orders were checked against kaldifst 1.8.1.
     private static Graph Compose(StdVectorFst fst, ReadOnlySpan<int> input)
     {
         Dictionary<long, int> ids = [];

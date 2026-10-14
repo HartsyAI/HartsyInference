@@ -4,7 +4,8 @@ namespace HartsyInference.Audio.Frontends.WeText;
 
 /// <summary>An immutable OpenFst <c>VectorFst&lt;StdArc&gt;</c> read from its binary file: per-state final weights and
 /// arcs in file order. Input-label sortedness and acyclicity are computed on load, as OpenFst does when it converts a
-/// loaded vector FST to the <c>ConstFst</c> kaldifst composes against; both decide composition and queue order.</summary>
+/// loaded vector FST to the <c>ConstFst</c> kaldifst composes against. Acyclicity decides the shortest-path queue;
+/// sortedness picks OpenFst's compose matcher but leaves the composed arc order unchanged.</summary>
 public sealed class StdVectorFst
 {
     private const int Magic = 2125659606;

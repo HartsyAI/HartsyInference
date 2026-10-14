@@ -108,6 +108,7 @@ public sealed class WeTextNormalizer
     /// <c>Normalizer.verbalize</c>).</summary>
     public string Verbalize(string tagged, WeTextLanguage language)
     {
+        // Normalize passes the language it tagged with; Auto here only serves direct callers holding tagged text.
         WeTextLanguage concrete = Concrete(language, tagged);
         return Rewriters(concrete).Verbalizer.Rewrite(WeTextTokenParser.Reorder(tagged, concrete));
     }
