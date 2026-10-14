@@ -72,8 +72,13 @@ internal static class GptSoVitsModel
                 // Reference clip → 16 kHz (HuBERT) + 32 kHz (1025-bin linear spectrogram for the speaker embedding).
                 float[] reference16k = AudioClipCodec.DecodeMono(job.Reference, 16_000);
                 float[] reference32k = AudioClipCodec.DecodeMono(job.Reference, 32_000);
-                Tensor referencePcm = new Tensor(new TensorShape(1, 1, reference16k.Length), DType.F32);
-                reference16k.AsSpan().CopyTo(referencePcm.AsSpan<float>());
+                // Upstream TTS._set_prompt_semantic appends int(sampling_rate × 0.3) zeros, sized at the model's 32 kHz
+                // rate, to the 16 kHz clip before HuBERT: 0.6 s of silence at 16 kHz.
+                int hubertLength = reference16k.Length + pipeline.SampleRate * 3 / 10;
+                Tensor referencePcm = new Tensor(new TensorShape(1, 1, hubertLength), DType.F32);
+                Span<float> hubertInput = referencePcm.AsSpan<float>();
+                reference16k.AsSpan().CopyTo(hubertInput);
+                hubertInput[reference16k.Length..].Clear();
                 Tensor referenceSpec = LinearSpectrogram.Extract(reference32k, 2048, 640);
                 int specFrames = (int)referenceSpec.Shape[2];
 
@@ -95,7 +100,7 @@ internal static class GptSoVitsModel
                         int[] targetIds = GptSoVitsSymbols.ToSequence(segments[i].Phones);
                         int[] allIds = [.. referenceIds, .. targetIds];
                         using Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
-                        float[] fragment = pipeline.Generate(backend, referencePcm, reference16k.Length, referenceSpec,
+                        float[] fragment = pipeline.Generate(backend, referencePcm, hubertLength, referenceSpec,
                             specFrames, allIds, zeroBert, targetIds, seed: job.Seed == 0 ? 0 : job.Seed + i);
                         AppendPeakLimited(output, fragment);
                         output.AddRange(new float[gap]);
