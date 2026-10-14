@@ -96,6 +96,36 @@ public sealed class VoiceTurnPipelineTests
     }
 
     [Fact]
+    public async Task ARemoteToolResultIsRecordedOnceAndNotDispatchedAgain()
+    {
+        // A remote assistant runs its own tools and relays call and result; the session's registry is empty.
+        ScriptedTextService text = new ScriptedTextService()
+            .Round(ScriptedTextService.Text("Let me check the time. "), ScriptedTextService.Call("call_0", "get_time"),
+                ScriptedTextService.ToolResult("call_0", "get_time", "12:30", index: 1), ScriptedTextService.Text("It is half past twelve."),
+                new TextChunk { Kind = TextChunkKind.Result, Text = "Let me check the time. It is half past twelve." },
+                ScriptedTextService.Stop(StopReason.Stop))
+            .Reply("You are welcome, goodbye.");
+        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text);
+        harness.Session.PushDtmf('1');
+        await harness.TurnCompletedAsync(1);
+
+        Assert.Single(text.Requests);
+        VoiceAgentEvent result = Assert.Single(harness.Events, e => e.Kind == VoiceAgentEventKind.ToolResult);
+        Assert.Equal("12:30", result.Text);
+        Assert.Equal("call_0", result.ToolCall!.Id);
+        Assert.Equal(["Let me check the time.", "It is half past twelve."], harness.Speech.Synthesized);
+
+        harness.Session.PushDtmf('2');
+        await harness.TurnCompletedAsync(2);
+        IReadOnlyList<TextMessage> second = text.Requests.Last().Messages;
+        Assert.Equal([TextRole.System, TextRole.User, TextRole.Assistant, TextRole.Tool, TextRole.Assistant, TextRole.User],
+            second.Select(m => m.Role));
+        Assert.Equal("call_0", Assert.Single(second[2].ToolCalls!).Id);
+        Assert.Equal("12:30", second[3].Content);
+        Assert.Equal("It is half past twelve.", second[4].Content);
+    }
+
+    [Fact]
     public async Task AnUtteranceIsRecognizedOnTheGpuThreadAndAnsweredWithEveryMetricLogged()
     {
         List<string> log = [];

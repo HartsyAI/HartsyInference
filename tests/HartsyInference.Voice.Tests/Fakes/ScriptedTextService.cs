@@ -46,6 +46,15 @@ internal sealed class ScriptedTextService : ITextService
     public static TextChunk Call(string id, string name, string arguments = "{}") =>
         new() { Kind = TextChunkKind.NativeToolCall, ToolCallIndex = 0, ToolCall = new NativeToolCall { Id = id, Name = name, Arguments = arguments } };
 
+    /// <summary>A result the stream reports for a call it already ran, as a remote assistant relays one.</summary>
+    public static TextChunk ToolResult(string id, string name, string result, int index = 0) => new()
+    {
+        Kind = TextChunkKind.ToolResult,
+        Text = result,
+        ToolCallIndex = index,
+        ToolCall = new NativeToolCall { Id = id, Name = name, Arguments = "{}" },
+    };
+
     public static TextChunk Stop(StopReason reason, string? text = null) => new() { Kind = TextChunkKind.StopReason, Stop = reason, Text = text };
 
     public async IAsyncEnumerable<TextChunk> StreamAsync(ModelSpec spec, TextRequest request, [EnumeratorCancellation] CancellationToken cancel = default)

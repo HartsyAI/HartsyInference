@@ -119,6 +119,15 @@ and `ToolLoopOptions`. The run is single-use and exposes `Conversation`, `ToolRe
 dispatched and its result is what the model reads. Calls dispatch on any non-error stop, so a plain `Stop` with a call
 still runs it.
 
+A stream that runs its tools itself (AudioLab's `RemoteTextService` relaying an LLMAssistant turn) reports each call's
+`ToolResult` after the call. The loop treats such a call as pre-resolved: the result maps to the oldest call of that
+round that arrived with the same id and has no result yet (so it follows the call's repaired id), streams once where it
+arrived under the loop's own result index, and is recorded instead of dispatched. Each relayed result closes the
+assistant turn before it, so the conversation reads assistant (text, resolved calls), tool results, then the text after
+them. A round whose calls were all pre-resolved ends the run with the stream's stop, as a round without calls does;
+calls left without a result are dispatched and the model is asked again. A relayed result that matches no open call is
+dropped.
+
 Dispatch errors are results, not exceptions: an unknown tool or a throwing handler yields
 `{"error": "…"}` (exception type and message) for the model to read; cancellation propagates. That text is meant
 for the model and the host; a host relaying tool results to a remote end user should rewrite it. An `Error` or
