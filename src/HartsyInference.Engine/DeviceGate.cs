@@ -97,6 +97,38 @@ public static class DeviceGate
         return new MultiReleaser(acquired);
     }
 
+    /// <summary>As <see cref="AcquireAll"/>, giving up once <paramref name="timeout"/> has passed in total. Returns
+    /// false, holding nothing, when some slot was still taken at that point.</summary>
+    public static bool TryAcquireAll(IEnumerable<IBackend?> backends, TimeSpan timeout, out IDisposable held)
+    {
+        held = _noop;
+        if (_concurrent)
+        {
+            return true;
+        }
+        List<int> ordinals = SortedDistinct(CudaOrdinalsOf(backends));
+        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        List<SemaphoreSlim> acquired = new(ordinals.Count);
+        foreach (int ordinal in ordinals)
+        {
+            SemaphoreSlim gate = _gates.GetOrAdd(ordinal, static _ => new SemaphoreSlim(1, 1));
+            if (!gate.Wait(TimeSpan.FromMilliseconds(Math.Max(0, deadline - Environment.TickCount64))))
+            {
+                for (int i = acquired.Count - 1; i >= 0; i--)
+                {
+                    acquired[i].Release();
+                }
+                return false;
+            }
+            acquired.Add(gate);
+        }
+        if (acquired.Count > 0)
+        {
+            held = new MultiReleaser(acquired);
+        }
+        return true;
+    }
+
     /// <summary>Ordinal-list form of <see cref="AcquireAll"/> (negatives = CPU, ignored).</summary>
     public static IDisposable AcquireAllOrdinals(IEnumerable<int> ordinals, CancellationToken cancel = default)
     {

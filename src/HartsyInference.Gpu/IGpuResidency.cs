@@ -17,6 +17,17 @@ public interface IGpuResidency : IDisposable
     /// others. Every instance therefore gets a distinct key.</para></summary>
     nint BindingKey { get; }
 
+    /// <summary>The lock that makes the cache's bookkeeping single-threaded: the owning backend holds it across every
+    /// op, and a tensor's sync or dispose callback takes it before touching the cache. A whole-cache release is an
+    /// op, so it can never interleave with another thread's lookup.</summary>
+    /// <remarks>Reentrant. Hold one backend's lock while taking another's only from a thread that no other thread
+    /// can be waiting on in the opposite order.</remarks>
+    object ExclusiveLock { get; }
+
+    /// <summary>Set when a lookup found the cache's collections corrupted. The backend releases every cached
+    /// allocation at the start of its next op, so the request that found it fails and later ones do not.</summary>
+    bool ResetPending { get; }
+
     /// <summary>Device-to-host syncs performed since <see cref="ResetD2hSyncCount"/>. A step that is fully
     /// GPU-resident reports zero; anything above that is a host round-trip somebody did not intend.</summary>
     long D2hSyncCount { get; }
