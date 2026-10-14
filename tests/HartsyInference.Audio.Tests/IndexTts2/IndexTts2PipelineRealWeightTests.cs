@@ -42,7 +42,7 @@ public sealed class IndexTts2PipelineRealWeightTests(ITestOutputHelper output)
         string feat1 = Path.Combine(v25Dir, "feat1.pt"), feat2 = Path.Combine(v25Dir, "feat2.pt");
         bool haveFeat = File.Exists(feat1) && File.Exists(feat2);
         using IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
-            tiktokenPath, gptPath, s2melPath, codecPath, w2vBertPath, statsPath, campplusPath, bigVganPath,
+            tiktokenPath, gptPath, s2melPath, codecPath, w2vBertPath, statsPath, campplusPath, bigVganPath, IndexTtsTestNormalizers.Resolve(),
             feat1Path: haveFeat ? feat1 : null, feat2Path: haveFeat ? feat2 : null);
 
         WavFile.DecodedAudio refAudio = WavFile.Read(refWavPath);

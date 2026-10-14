@@ -227,11 +227,16 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
         // HF's repetition penalty sees the reference's whole `input_ids`: `prepare_gpt_inputs` builds them as all-ones
         // plus the trailing start-mel token, so token 1 is penalised from the first step exactly like a generated one.
         HashSet<int> seenForPenalty = [FakePromptToken, StartMelToken];
-        using (Tensor textEmb = EmbedTextWithPositionAndLang(wrappedTextIds, Mode == IndexTts2SpeakerConditioning.Campplus ? langId : null, h))
-        using (Tensor prefix = Concat(conds, textEmb, condLen, textLen, h))
-        using (IKvCache cache = _gpt.CreateCache())
+        using Tensor textEmb = EmbedTextWithPositionAndLang(wrappedTextIds, Mode == IndexTts2SpeakerConditioning.Campplus ? langId : null, h);
+        using Tensor prefix = Concat(conds, textEmb, condLen, textLen, h);
+        conds.Dispose();
+        if (options.NumBeams > 1)
         {
-            conds.Dispose();
+            generated.AddRange(GenerateBeams(backend, prefix, cap, options, ref rngState));
+        }
+        else
+        {
+            using IKvCache cache = _gpt.CreateCache();
             _gpt.Forward(backend, prefix, nonCausal: false, cache, positionsApplied: true).Dispose();
 
             int prevToken = StartMelToken;
@@ -254,6 +259,72 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
         if (generated.Count == 0)
             throw new InvalidOperationException("IndexTTS-2 generated zero semantic codes (immediate stop token).");
         return [.. generated];
+    }
+
+    /// <summary>Teacher-forced decode for parity checks: prefills the same prefix as <see cref="Generate"/>, then feeds
+    /// the start token and <paramref name="codes"/> one cached step at a time, returning each step's raw mel-head
+    /// logits (step <c>s</c> predicts <c>codes[s]</c>). <paramref name="tap"/> receives (step, block, hidden) for every
+    /// block output and (step, NumLayers, hidden) for the backbone's <c>ln_f</c> output; the tensors are borrowed.</summary>
+    internal float[][] TeacherForce(IBackend backend, Tensor speakerConditioning, Tensor emoVec, int[] textTokenIds, int? langId,
+        int[] codes, Action<int, int, Tensor>? tap)
+    {
+        ThrowIfDisposed();
+        int h = _cfg.Hidden;
+        (Tensor conds, int condLen) = BuildConditioning(speakerConditioning, emoVec, h);
+        int[] wrappedTextIds = new int[textTokenIds.Length + 2];
+        wrappedTextIds[0] = StartTextToken;
+        Array.Copy(textTokenIds, 0, wrappedTextIds, 1, textTokenIds.Length);
+        wrappedTextIds[^1] = StopTextToken;
+        using Tensor textEmb = EmbedTextWithPositionAndLang(wrappedTextIds, Mode == IndexTts2SpeakerConditioning.Campplus ? langId : null, h);
+        using Tensor prefix = Concat(conds, textEmb, condLen, wrappedTextIds.Length, h);
+        conds.Dispose();
+        using IKvCache cache = _gpt.CreateCache();
+        _gpt.Forward(backend, prefix, nonCausal: false, cache, positionsApplied: true).Dispose();
+        float[][] logits = new float[codes.Length][];
+        for (int step = 0; step < codes.Length; step++)
+        {
+            int s = step;
+            int token = step == 0 ? StartMelToken : codes[step - 1];
+            using Tensor stepInput = EmbedOneWithPosition(token, _melEmbed!, _melPos!, MelPositionAtStep(step), h);
+            using Tensor hiddenStep = _gpt.ForwardStep(backend, stepInput, cache, positionsApplied: true,
+                tap is null ? null : (layer, x) => tap(s, layer, x));
+            tap?.Invoke(step, _cfg.NumLayers, hiddenStep);
+            using Tensor normedStep = new(hiddenStep.Shape, DType.F32);
+            backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
+            using Tensor stepLogits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
+            logits[step] = stepLogits.AsSpan<float>().ToArray();
+        }
+        return logits;
+    }
+
+    /// <summary>Upstream's default decode: HF beam search (beam sampling when <see cref="IndexTtsOptions.DoSample"/>)
+    /// over the mel head, returning the best beam's codes without the stop token.</summary>
+    private int[] GenerateBeams(IBackend backend, Tensor prefix, int cap, IndexTtsOptions options, ref uint rngState)
+    {
+        int h = _cfg.Hidden;
+        BeamSearchSettings settings = new()
+        {
+            NumBeams = options.NumBeams,
+            MaxNewTokens = cap,
+            EosToken = StopMelToken,
+            DoSample = options.DoSample && options.Temperature > 0f,
+            Temperature = options.Temperature,
+            TopK = options.TopK,
+            TopP = options.TopP,
+            RepetitionPenalty = options.RepetitionPenalty,
+            LengthPenalty = options.LengthPenalty,
+            MinNewTokens = EosGate.MinTokens,
+        };
+        using GptBeamDecoder beams = new(backend, _gpt, options.NumBeams, prefix,
+            (token, step) => EmbedOneWithPosition(token, _melEmbed!, _melPos!, MelPositionAtStep(step), h),
+            hidden =>
+            {
+                using Tensor normed = new(hidden.Shape, DType.F32);
+                backend.LayerNorm(normed, hidden, _finalNormW!, _finalNormB!, 1e-5f);
+                return WhisperOps.ProjectLinear(backend, normed, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
+            });
+        int[] tokens = BeamSearch.Generate(beams, settings, [FakePromptToken, StartMelToken], StartMelToken, NumMelCodes, ref rngState);
+        return tokens.Length > 0 && tokens[^1] == StopMelToken ? tokens[..^1] : tokens;
     }
 
     /// <summary>Assembles the GPT's conditioning prefix for the loaded <see cref="Mode"/>.</summary>
@@ -408,7 +479,7 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
                 span[id] = v > 0 ? v / penalty : v * penalty;
             }
         }
-        return options.Temperature <= 0f
+        return options.Temperature <= 0f || !options.DoSample
             ? LogitSampling.ArgMax(span)
             : NucleusSampler.Draw(span, n, options.Temperature, options.TopK, options.TopP, ref rngState);
     }

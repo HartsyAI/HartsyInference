@@ -40,8 +40,9 @@ internal static class IndexTtsModel
                     new AudioModelFile(GptFile),
                 ], "tts", ct: cancel).ConfigureAwait(false);
 
+            IndexTtsFstNormalizers textNormalizers = await IndexTtsTextNormalizers.LoadAsync(cancel).ConfigureAwait(false);
             IndexTtsPipeline pipeline = await IndexTtsPipeline.LoadAsync(
-                fetched[TokenizerFile], fetched[GptFile], fetched[BigVganFile], cfg: null, cancel).ConfigureAwait(false);
+                fetched[TokenizerFile], fetched[GptFile], fetched[BigVganFile], cfg: null, textNormalizers, cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][IndexTTS] Loaded {Repo} (IndexTTS-1.5, zero-shot cloning, 24 kHz).");
 
             return new TtsRunner(24_000, (backend, job) => Synthesize(pipeline, backend, job), pipeline);
@@ -57,7 +58,7 @@ internal static class IndexTtsModel
         IndexTtsOptions options = new()
         {
             Seed = unchecked((ulong)job.Seed),
-            Temperature = job.Temperature.HasValue ? (float)job.Temperature.Value : 0.8f,
+            Temperature = job.Temperature.HasValue ? (float)job.Temperature.Value : 1.0f,
             TopK = job.TopK ?? 30,
             MaxMelTokens = job.MaxTokens,
         };
