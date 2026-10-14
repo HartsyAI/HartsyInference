@@ -167,7 +167,7 @@ The gain is the host share: it is largest where the GPU time per token is smalle
 
 Output: the 128 tokens are identical to `origin/main` on all five models in all 15 runs of each (granite stops on its end token before 128; the others run to the length limit). A repetition penalty of 1.15 on Llama gives the same text before and after, and a sampled run (temperature 0.8) takes the eager loop, since Vulkan has no device sampler (step 7).
 
-**One-time cost, and why the default needs 512 tokens.** The first capture in a process builds and uploads the F32 embedding table and warms a step. Extra wall time of a fresh `hartsy text` run with the graph (8 new tokens) over eager, and the tokens the graph needs to repay it at its per-token saving:
+**One-time cost, and why the default needs 512 tokens.** The first capture in a process uploads the embedding table (F32 for every dtype except Q8_0, Q5_0, Q4_K and Q6_K, which are gathered quantized) and warms a step. The per-model numbers in the two paragraphs below supersede the first-capture column of this table for Llama, Qwen2.5, granite and Qwen3-4B. Extra wall time of a fresh `hartsy text` run with the graph (8 new tokens) over eager, and the tokens the graph needs to repay it at its per-token saving:
 
 | Model | One-time wall cost | Saving per token | Break-even |
 |---|---|---|---|
@@ -177,9 +177,65 @@ Output: the 128 tokens are identical to `origin/main` on all five models in all 
 | OLMoE-1B-7B | 0.37 s | 1.5 ms | about 255 |
 | Qwen3-4B Q4_K_M | 1.39 s | 3.0 ms | about 460 |
 
-So a one-shot 128-token CLI run is slower in wall time with the graph on Llama and Qwen3 (the reported tok/s does not show it), which is why the implicit default applies only to requests of at least `TextGenerationPipeline.ImplicitGraphMinTokens` (512) new tokens; a long-lived host that wants it always sets `numerics.graphDecode`, and then pays the cost once per model. Replaying a graph in a process that already holds the table costs only the warm step and the recording. Building the table from the quantized weights on the device, or gathering from the quantized table, would remove both this cost and the VRAM below; it is not done.
+So a one-shot 128-token CLI run is slower in wall time with the graph on the models that still gather from an F32 table (Llama, Qwen2.5, granite and Qwen3-4B no longer do, since their tables are gathered quantized; the reported tok/s does not show the cost), which is why the implicit default applies only to requests of at least `TextGenerationPipeline.ImplicitGraphMinTokens` (512) new tokens; a long-lived host that wants it always sets `numerics.graphDecode`, and then pays the cost once per model. Replaying a graph in a process that already holds the table costs only the warm step and the recording. Gathering from the quantized table removed the Llama cost (below) and, with the Q5_0 and Q6_K kernels, the F32 copy for Qwen2.5, granite and Qwen3-4B; building the F32 table on the device for the remaining dtypes is not done.
 
-**VRAM is the F32 embedding table, not the graph.** Graph decode gathers the token's row on the device, so it keeps an F32 copy of the embedding table (`vocab * hidden * 4`: Llama 1.05 GB, Qwen3-4B 1.56 GB, Qwen2.5-0.5B 0.54 GB, OLMoE 0.41 GB, granite twice 0.2 GB because its embedding scale needs a pre-scaled copy). Each model's growth matches its table size to within a few MiB, which leaves no room for retained intermediates beyond that. A quantized-table gather would remove the growth; it is not done.
+**The graph gathers a Q8_0 or Q4_K embedding table from its quantized form.** The graph used to keep an F32 copy of the embedding table (`vocab * hidden * 4`), which was the whole VRAM growth of the graph and most of its first-capture cost. For a Q8_0 or Q4_K table the on-device gather (`embed_gather_quant_q8_0` / `embed_gather_quant_q4_k`) dequantizes one row straight from the quantized table with the codec's arithmetic and applies the embedding scale, so no F32 copy is made. The Q5_0 and Q6_K kernels came later (below); every other dtype keeps the F32 path, and so does CUDA. Measured on the RTX 3060 (`-b vulkan:1`, `origin/main` built fresh, this branch built fresh), graph decode, 8-token runs, fresh process, 3 interleaved reps:
+
+| Model (embed dtype) | Graph VRAM before / after (MiB, per-process peak) | Eager VRAM, branch (MiB) | First-capture cost before / after (s, graph8 minus eager8, median) |
+|---|---|---|---|
+| Llama-3.2-1B (Q8_0, tied) | 3144 / 2144 | 2014 to 2144 | 1.00 / 0.15 |
+| Qwen2.5-0.5B (Q5_0, untied) | 1136 / 1134 | 598 to 614 | 0.46 / 0.52 (F32 path, unchanged) |
+| granite-3.0-1B-a400m (Q6_K, tied) | 1224 / 1224 | 829 | 0.25 / 0.10 (F32 path, unchanged) |
+
+The graph's own overhead on Llama is within the eager run-to-run range (the 128-token peaks are 2144 MiB for both eager and graph). Qwen and granite are not Q8_0 or Q4_K tables, so their numbers only show that nothing moved; the F32 copy still costs about 0.5 GB on Qwen (its untied F32 table) and 0.2 GB on granite. The Q4_K kernel's only real-model check is OLMoE-1B-7B (untied Q4_K table), in the five-model text check below. The 128-token text is byte-identical between eager and graph, and between `origin/main` and this branch, on all three models. Break-even and `ImplicitGraphMinTokens` are not re-measured here; with the Llama first-capture cost gone, the 512-token default is conservative and should be re-measured before it changes.
+
+**The graph gathers Q5_0 and Q6_K embedding tables too.** `embed_gather_quant_q5_0` and `embed_gather_quant_q6_k` are the same one-element-per-thread gather as the Q8_0 and Q4_K kernels. Each element follows its codec's operation order (`d * (q - 16)` for Q5_0; `(d * sc) * q` for Q6_K, whose FP16 scale is the last two bytes of the 210-byte super-block) and then takes the embedding scale. `EmbedGatherQuantDecodeStep_MatchesCpuDequantBitExact` covers both formats (rows 0, 1, 42 and vocab-1; scales 1 and 12; compared as bit patterns), and all eight cases pass on the RTX 3060. The affected models are Qwen2.5-0.5B Q4_K_M (`token_embd` Q5_0, untied), granite-3.0-1b-a400m Q4_K_M (Q6_K, tied) and Qwen3-4B Q4_K_M (Q6_K, tied).
+
+Measured on the RTX 3060 (`-b vulkan:1`), `origin/main` at 9f8994a3 built fresh against this branch, interleaved, 128-token greedy runs, 3 reps. VRAM is the per-process peak from `nvidia-smi --query-compute-apps` filtered by pid, sampled every 200 ms.
+
+| Model (token_embd) | Eager, main / branch (MiB) | Graph, main (MiB) | Graph, branch (MiB) | Branch graph minus eager (MiB) |
+|---|---|---|---|---|
+| Qwen2.5-0.5B Q4_K_M (Q5_0, untied) | 614 / 616 | 1136 | 706 | +90 |
+| granite-3.0-1b-a400m Q4_K_M (Q6_K, tied) | 837 / 837 | 1224 | 839 | +2 |
+| Qwen3-4B Q4_K_M (Q6_K, tied) | 3946 / 3946 | 5432 | 3949 | +3 |
+| Llama-3.2-1B Q8_0 (tied, control) | 2144 / 2144 | 2144 | 2144 | 0 |
+| OLMoE-1B-7B Q4_K_M (Q4_K, untied, control) | 4150 / 4150 | 4208 | 4208 | +58 |
+
+granite and Qwen3-4B now sit within 3 MiB of eager. Qwen2.5 is 90 MiB above it, which misses a 50 MiB target; the next paragraph says why. OLMoE already carried the same kind of cost on `origin/main`.
+
+**An untied quantized table costs its own size on the graph path.** Eager gathers `token_embd` on the host and never uploads it for an untied model, so a device gather has to upload the quantized table. Qwen2.5-0.5B's Q5_0 table is 151936 × 28 blocks × 22 bytes, about 89 MiB, which is the +90 above; OLMoE's Q4_K table (50304 × 8 super-blocks × 144 bytes, about 55 MiB) is the +58 that `origin/main` has had since #393. Removing that upload means dequantizing the one needed row on the host into a host-visible buffer that the captured step reads: one submit per token and no table on the device. That was the follow-up for this step, and it is done below.
+
+**Untied quantized tables are staged from the host, not uploaded.** Graph decode keeps an untied quantized `token_embd` on the host. Before each replay the host writes the step's embedding row into a mapped, coherent buffer (`IBackend.AllocDecodeEmbedRow`, `WriteDecodeEmbedRow`), and the captured step copies it into the embedding tensor (`EmbedStagedRowDecodeStep`). The row is the host F32 table row times the embedding scale, which is `EmbedLookup`'s arithmetic bit for bit. The host F32 copy already exists for eager decode, so no per-step dequantization runs. Each replay embeds the token the previous replay sampled, as before, and the submit count per token is unchanged. Tied tables keep the device gather, and CUDA is unchanged (its backend reports `StagesDecodeEmbedRows` false).
+
+Measured on the RTX 3060 (`-b vulkan:1`) against the device-table build (1f923240, same tree otherwise): 128-token greedy runs, 3 reps, medians. VRAM is the per-process peak from `nvidia-smi`, filtered by pid.
+
+| Model (token_embd) | Eager VRAM (MiB) | Graph VRAM before → after (MiB) | Graph tok/s before → after | Text, eager vs graph |
+|---|---|---|---|---|
+| Qwen2.5-0.5B Q4_K_M (Q5_0, untied) | 616 | 706 → 616 | 186.1 → 203.5 | identical (12 runs) |
+| OLMoE-1B-7B Q4_K_M (Q4_K, untied) | 4150 | 4208 → 4153 | 165.8 → 164.5 | identical (12 runs) |
+| granite-3.0-1b-a400m Q4_K_M (Q6_K, tied, unchanged) | 837 | 839 → 839 | 264.0 → 260.3 | identical (12 runs) |
+| Qwen3-4B Q4_K_M (Q6_K, tied, unchanged) | 3946 | 3949 → 3949 | 57.4 → 57.5 | identical (12 runs) |
+| Llama-3.2-1B Q8_0 (tied, unchanged) | 2148 | 2148 → 2148 | 153.0 → 152.0 | identical (12 runs) |
+
+The Qwen2.5 bar holds: the graph is at eager VRAM (0 MiB over, against a 50 MiB target), and the 128-token text is identical to eager on all five models, across both builds. First capture (8-token wall clock, graph minus eager, median of 3 pairs, seconds; before → after): Qwen2.5 +0.005 → −0.002, OLMoE −0.003 → −0.005, granite −0.012 → −0.002, Qwen3-4B +0.040 → +0.058, Llama −0.250 → +0.010. Single pairs vary by about ±0.3 s on this card, so none of these is a measured change; the capture cost does not regress. Eager decode rates vary widely while other GPU work shares the card, so the graph rates are the reported figures; the differences are within their ranges.
+
+Covered on CPU: `GraphDecodeEmbedRow` equals `EmbedLookup` bit for bit at scales 1 and 12, and a `GraphDecodeSession` writes each replay's row before its launch, for the token the previous replay sampled. Covered on the GPU: `VulkanLlmGraphDecodeTests` runs an untied Q8_0 and an untied Q5_0 table through the staged path and requires the eager greedy tokens.
+
+First-capture cost, the wall clock of a fresh 8-token process, graph minus eager, paired within each arm and rep (seconds). The 3-pair median is the measure this step was asked to report; the 7-pair column is the same measure over more pairs.
+
+| Model | Main, 3 pairs | Branch, 3 pairs | Main, 7 pairs | Branch, 7 pairs |
+|---|---|---|---|---|
+| Qwen2.5-0.5B Q4_K_M (Q5_0, untied) | 0.83 | 0.03 | 0.72 | 0.28 |
+| granite-3.0-1b-a400m Q4_K_M (Q6_K, tied) | 0.11 | 0.01 | 0.24 | -0.04 |
+| Qwen3-4B Q4_K_M (Q6_K, tied) | 1.57 | -0.12 | 1.45 | -0.04 |
+| Llama-3.2-1B Q8_0 (control, path unchanged) | 0.05 | -0.03 | 0.05 | -0.03 |
+| OLMoE-1B-7B Q4_K_M (control, path unchanged) | 0.24 | 0.00 | not run | not run |
+
+Single pairs on the unchanged Llama path range from -0.24 to +0.18 s, so this method does not resolve differences below about 0.25 s. Qwen3-4B's first capture loses the 1.56 GB F32 upload, about 1.5 s. Qwen2.5's drop is clearer on the 3-pair median than on the 7-pair one. granite's is within the noise.
+
+The 128-token greedy text is identical between eager and graph, and between `origin/main` and this branch, on all five models (Llama-3.2-1B Q8_0, Qwen2.5-0.5B, granite, OLMoE-1B-7B, Qwen3-4B), in all 12 runs of each (2 builds, 2 modes, 3 reps); every run stopped on the length limit. OLMoE's Q4_K table is the real-model case for the Q4_K kernel.
+
+Decode rate, the CLI's `decode_tok_s` for the graph: Qwen2.5 217.3 on `origin/main` and 216.5 on this branch (3 reps); Qwen3-4B 58.2 and 58.0 (3 reps); granite 269.4 and 262.9 (7 reps; the ranges, 267.5 to 272.2 and 261.4 to 274.4, overlap, so the 2% is not resolved). Eager runs are unchanged within their run-to-run spread.
 
 **Gates and what the graph refuses.** `IBackend.LlmGraphDecodeSupported` (push descriptors and the `numerics.vkLlmGraph` kill-switch) is separate from `GraphDecodeSupported`, which stays false: the SSM, CSM and MusicGen paths gate on that one and were never validated against a Vulkan capture. `LlmGraphDecodeDefault` makes graph decode the default for requests of 512 or more new tokens that do not ask either way; an explicit `GraphDecode`/`numerics.graphDecode` still throws on a capture failure, a default one logs a warning and decodes eagerly. The dynamic-batch scheduler keeps its explicit opt-in. Shapes the device-position kernels do not cover fail at capture instead of attending over zero keys: an F16 KV cache (`vram.kvF16`), a sliding window or soft-cap (Gemma-2/3), and head dims above `FlashMaxHeadDim`; each of those then takes the eager loop. Capture needs every weight resident (a miss throws), which the decode preload provides.
 
@@ -196,6 +252,29 @@ So a one-shot 128-token CLI run is slower in wall time with the graph on Llama a
 | Qwen3-4B Q4_K_M | 40.5 | 45.4 | yes |
 
 Speculation only pays on repetitive text: this prompt repeats a sentence, and for Qwen3-4B and OLMoE the speculative run (45.4 and 139.5) is still not faster than plain greedy with the graph (58.4 and 168.7) or even without it (47.2 and 135.8), so speculative decode stays opt-in (`numerics.specDecode`) and is not combined with the graph (the pipeline picks the graph when both apply).
+
+## Causal prefill attention: measured result
+
+Before this change a causal `FlashAttention` call, which every prompt makes, reached only the scalar `sdpa_flash_f32`; the cooperative-matrix-2 gate lived on the non-causal `ScaledDotProductAttention` entry points. `numerics.vkFlashCm2Prefill`, on by default, routes causal prefill of 64 or more query rows through `sdpa_flash_cm2_mask` when the shape fits: batch 1, head dimension 64 or 128, F32 Q/K/V, no softcap, sink or ALiBi, and a device with `VK_NV_cooperative_matrix2`, and a host mask of at most 256 MiB (`4 * sq * kvLen` bytes; `FlashCm2PrefillPolicy`). The causal and sliding-window mask is one host-built F32 tile, reused across the layers of one prefill on the host and released by the first attention call that does not take the cm2 path. Decode (one query row) and chunks under 64 rows stay on the scalar kernel, and `numerics.vkFlashCm2Prefill=0` keeps every prefill on it.
+
+Evidence, RTX 3060 (`-b vulkan:1`), prompt about 750 tokens, 128 greedy tokens. Prefill is the wall time of the long prompt with one new token minus the wall time of the prompt "Hi" with one new token. Median of 3 interleaved reps, flag off then on. The first run of each model includes a cold cache, so the medians are the numbers to quote. The card is shared, so wall times are noisy.
+
+| Model | Prefill off | Prefill on | Text, off vs on | Text vs CPU backend |
+|---|---|---|---|---|
+| Llama-3.2-1B Q8_0 | 1.94 s | 0.22 s | identical | identical |
+| Qwen2.5-0.5B Q4_K_M | 1.27 s | 0.16 s | identical | identical |
+| granite-3.0-1b-a400m Q4_K_M | 1.38 s | 0.39 s | identical | identical |
+| OLMoE-1B-7B Q4_K_M | 2.03 s | 0.69 s | differ | on: equal, 105 words; off: diverges at character 362 |
+| Qwen3-4B Q4_K_M | 6.65 s | 0.74 s | identical | identical |
+
+Decode tokens per second is unchanged within noise. On OLMoE the scalar path was the less correct of the two, so the default change moves that model's output toward the CPU reference.
+
+Parity: `VulkanFlashCm2Tests.CausalPrefill_MatchesReference` (8 cases on the cm2 kernel, asserting that the dispatch counter moved) and `CausalPrefill_FlagOff_UsesScalarPath_MatchesReference` (3 cases on the scalar path, asserting that no cm2 dispatch ran). Both compare against a double-precision CPU reference within 1e-3.
+
+Open:
+
+- The mask is not cached on the device. `DispatchFlashCm2` calls `GetBuffer(mask)`, which goes through `GpuResidencyCache.CopyToDevice`: a host tensor that is neither a cached weight nor a cached activation gets a fresh transient upload, and Vulkan does not override the promote-on-miss hook. Each layer therefore uploads the mask again: 2.25 MB a layer at 750 tokens, and `4 * sq * kvLen` bytes a layer in general (64 MiB at 4K, 256 MiB at 8K, 4 GiB at 32K). The cap keeps any prefill above 8K off this path. The follow-up is a device-side mask with no host upload, which is the proper fix. Not done here, because it changes the dispatch path these numbers were measured on. Raised by the Codex review of #394.
+- Nothing above 750 tokens has been measured on this path.
 
 ## Plan, in order
 
@@ -247,7 +326,7 @@ stack as a flat run of blocks), then one cooperative-matrix GEMM per active expe
 CUDA does. `MoeCombinePairs` is the pair-map variant of `moe_combine` plus the shared row. Prefill is where the F16 cache
 question of step 2 bites: a layer's three stacks are 260 MB as Q4_K/Q6_K and about 1 GB as F16 for OLMoE.
 
-**6. Command-buffer reuse for LLM decode. Done: `CaptureGraph`/`LaunchGraph`/`DisposeGraph` on Vulkan record a decode step onto its own command buffer and replay it with one fence-waited submit per token; on by default for greedy decode, with an eager fallback; results below.** "Default" means greedy only: a sampled request (temperature, top-k or top-p) decodes eagerly, because there is no device sampler yet. The original plan:
+**6. Command-buffer reuse for LLM decode. Done: `CaptureGraph`/`LaunchGraph`/`DisposeGraph` on Vulkan record a decode step onto its own command buffer and replay it with one fence-waited submit per token; on by default for greedy decode, with an eager fallback; results below.** "Default" means greedy only: a sampled request (temperature, top-k or top-p) decodes eagerly, because there is no device sampler yet. A sliding-window or soft-cap model (Gemma-2/3) is refused before capture on Vulkan: the implicit default decodes it eagerly, and an explicit request fails naming the model and the reason. The original plan:
 `VulkanStepGraph` is the Vulkan counterpart of a
 CUDA graph, so the equivalent of `CaptureDecodeGraph` is: warm up one step so every weight and scratch buffer is resident
 (capture refuses a cache miss), record the step against push descriptors with the device position and token id buffers the

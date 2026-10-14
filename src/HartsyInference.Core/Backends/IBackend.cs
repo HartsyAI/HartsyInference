@@ -1658,6 +1658,9 @@ public partial interface IBackend : IDisposable
     /// <summary>True when text-LLM graph decode should be used without being asked for (<c>numerics.graphDecode</c> / a request's <c>GraphDecode</c>): the backend measured it faster than its eager loop for every model it supports. Applies to requests of at least 512 new tokens (the first capture in a process costs 0.2 s to 1.4 s); a failed capture then falls back to eager instead of failing the request. CUDA keeps the explicit opt-in.</summary>
     bool LlmGraphDecodeDefault => false;
 
+    /// <summary>True when the text-LLM graph's device-position attention takes a sliding window and an attention logit soft-cap (the Gemma-2/3 shapes). CUDA does. A backend that returns false refuses those models from the graph: they decode eagerly, and an explicit graph request for them fails with the reason (<c>GenericTransformer.GraphDecodeRefusal</c>).</summary>
+    bool LlmGraphDecodeWindowSoftcap => true;
+
     /// <summary>Allocates a persistent 2-int device buffer {kvLen, qOffset} (0 = unsupported); free with <see cref="FreeDevicePos"/>.</summary>
     ulong AllocDevicePos() => 0;
 
@@ -2146,6 +2149,34 @@ public partial interface IBackend : IDisposable
     /// <remarks>Scaled by sqrt(ple); only the CUDA backend implements this (graph decode is backend-gated), the default throws.</remarks>
     void PleGatherDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
         => throw new NotSupportedException("PleGatherDecodeStep requires a graph-decode-capable backend.");
+
+    /// <summary>True when <see cref="EmbedGatherQuantDecodeStep"/> can gather a quantized embed table of <paramref name="tableBytes"/> bytes, so graph decode keeps the QUANTIZED table on device instead of an F32 copy. Other backends (and tables too big for one device storage-buffer range) keep the F32 <see cref="EmbedGatherDecodeStep"/> path.</summary>
+    bool CanGatherQuantEmbed(long tableBytes) => false;
+
+    /// <summary>Graph-decode embed gather that dequantizes one row of a quantized (Q8_0, Q5_0, Q4_K or Q6_K) table on device, then multiplies by <paramref name="scale"/> (1.0 = no scale).</summary>
+    /// <remarks>Only backends reporting <see cref="CanGatherQuantEmbed"/> true for a table implement this; the default throws.</remarks>
+    void EmbedGatherQuantDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
+        => throw new NotSupportedException("EmbedGatherQuantDecodeStep requires a backend whose CanGatherQuantEmbed accepts the table.");
+
+    /// <summary>True when graph decode can take its step embedding from a host-written row (see <see cref="AllocDecodeEmbedRow"/>).
+    /// An UNTIED quantized embed table then needs no device copy at all: the host row is the eager lookup's row, written before each replay.</summary>
+    bool StagesDecodeEmbedRows => false;
+
+    /// <summary>Allocates a host-visible row of <paramref name="hidden"/> F32 values that graph decode copies its embedding from; returns its handle. Outside any capture.</summary>
+    ulong AllocDecodeEmbedRow(int hidden)
+        => throw new NotSupportedException("AllocDecodeEmbedRow requires a backend whose StagesDecodeEmbedRows is true.");
+
+    /// <summary>Writes <paramref name="count"/> F32 values at <paramref name="row"/> into a row from <see cref="AllocDecodeEmbedRow"/>. Call between graph replays, after the previous replay has completed.</summary>
+    void WriteDecodeEmbedRow(ulong handle, nint row, int count)
+        => throw new NotSupportedException("WriteDecodeEmbedRow requires a backend whose StagesDecodeEmbedRows is true.");
+
+    /// <summary>Graph capture only: records the copy of row <paramref name="handle"/> into <paramref name="output"/> ([1,1,hidden] F32) as the step's first op,
+    /// so every replay embeds the row written before it.</summary>
+    void EmbedStagedRowDecodeStep(Tensor output, ulong handle)
+        => throw new NotSupportedException("EmbedStagedRowDecodeStep requires a backend whose StagesDecodeEmbedRows is true.");
+
+    /// <summary>Frees a row from <see cref="AllocDecodeEmbedRow"/>.</summary>
+    void FreeDecodeEmbedRow(ulong handle) { }
 
     /// <summary>Qwen3.5 SSM decode step (seq=1), part 1: causal depthwise conv step + SiLU + q/k/v split + per-head L2 norms.</summary>
     /// <remarks><paramref name="history"/> is the device-persistent conv ring, shifted in place. CUDA-only (graph-capable backends).</remarks>

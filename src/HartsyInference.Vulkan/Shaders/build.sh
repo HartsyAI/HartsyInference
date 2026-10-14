@@ -144,6 +144,10 @@ SINGLE_KERNELS=(
     dequant_q6_k
     dequant_iq4_xs
     embed_gather_decode
+    embed_gather_quant_q8_0
+    embed_gather_quant_q5_0
+    embed_gather_quant_q4_k
+    embed_gather_quant_q6_k
     argmax_lastdim
     history_append
     repetition_penalty

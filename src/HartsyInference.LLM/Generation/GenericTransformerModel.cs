@@ -144,6 +144,9 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
 
     bool IGraphDecodable.SupportsGraphDecode(IBackend backend) => !Staged && _transformer.SupportsGraphDecode(backend);
 
+    // A layer-split model is refused by staging, not by the attention shape, so its explicit request keeps the eager fallback.
+    string? IGraphDecodable.GraphDecodeRefusal(IBackend backend) => Staged ? null : _transformer.GraphDecodeRefusal(backend);
+
     GraphDecodeSession IGraphDecodable.CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty, DeviceSamplerConfig? sampler)
     {
         if (state is not FixedKvCache cache)
@@ -170,20 +173,27 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         ulong history = _backend.AllocDeviceHistory(cache.MaxSequenceLength);
         ulong historyCount = _backend.AllocDeviceCounter();
         ulong rng = sampler is { } cfg0 ? _backend.AllocDeviceRng(cfg0.Seed, cfg0.TopK) : 0;
+        // An untied quantized table embeds from a host-staged row (GenericTransformer.StagesGraphDecodeEmbedRows); the row is
+        // allocated inside the try so a failed capture frees it.
+        bool stagedRow = _transformer.StagesGraphDecodeEmbedRows(_backend);
+        ulong embedRow = 0;
         object? graph = null;
         try
         {
+            if (stagedRow) embedRow = _backend.AllocDecodeEmbedRow(cfg.HiddenSize);
             _backend.WriteDeviceTokenId(deviceTokenId, firstToken);
             _backend.WriteDevicePos(devicePos, pos + 1, pos);
             _backend.WriteDeviceCounter(historyCount, 0);
             graph = _backend.CaptureGraph(() =>
                 _transformer.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos,
-                    deviceTokenId, history, historyCount, repetitionPenalty, sampler, rng));
-            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos, rng);
+                    deviceTokenId, history, historyCount, repetitionPenalty, sampler, rng, embedRow));
+            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos, rng,
+                embedRow, cfg.HiddenSize, firstToken, stagedRow ? _transformer : null);
         }
         catch
         {
             if (graph is not null) _backend.DisposeGraph(graph);
+            _backend.FreeDecodeEmbedRow(embedRow);
             _backend.FreeDevicePos(devicePos);
             _backend.FreeDeviceTokenId(deviceTokenId);
             _backend.FreeDeviceHistory(history);
@@ -207,12 +217,12 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
     {
         try
         {
-            // 2 GB base plus the F32 embed table graph decode later materializes, reserved only for graph-eligible
-            // models: reserving it for graph-excluded ones halved their eager decode (91.7 -> 48.8 tok/s).
-            TransformerConfig cfg = _transformer.Config;
+            // 2 GB base plus the embed table graph decode later adds (the F32 copy, or nothing extra for a quantized table
+            // it gathers in place), reserved only for graph-eligible models: reserving it for graph-excluded ones halved
+            // their eager decode (91.7 -> 48.8 tok/s).
             long headroom = 2L << 30;
             if (_transformer.SupportsGraphDecode(_backend))
-                headroom += (long)cfg.VocabSize * cfg.HiddenSize * sizeof(float);
+                headroom += _transformer.GraphDecodeEmbedExtraBytes(_backend);
             // No extra prefill slack: it pushed weights out of the budget and unresident weights bake per-token
             // PCIe memcpy nodes into a captured graph (GLM 43.8 -> 27.9 tok/s).
             if (Staged)

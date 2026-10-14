@@ -15,6 +15,9 @@ internal interface IGraphDecodable
     /// <summary>True when graph decode should run without being asked for on <paramref name="backend"/> (see <c>IBackend.LlmGraphDecodeDefault</c>).</summary>
     bool GraphDecodeByDefault(IBackend backend) => backend.LlmGraphDecodeDefault;
 
+    /// <summary>Why an explicit graph-decode request must be refused on <paramref name="backend"/> (the model's attention shape is one the backend's graph cannot run), or null when the request may proceed. The pipeline and the batch scheduler fail such a request with this message before any work, instead of failing inside the capture.</summary>
+    string? GraphDecodeRefusal(IBackend backend) => null;
+
     /// <summary>True when the captured step can draw tokens on the device (<paramref name="sampler"/> given to <see cref="CaptureDecodeGraph"/>) on <paramref name="backend"/>.</summary>
     bool SupportsDeviceSampling(IBackend backend) => false;
 

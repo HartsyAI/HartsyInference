@@ -23,7 +23,7 @@ public sealed class VulkanDescriptorPoolTests
             _out.WriteLine("SKIPPED: no Vulkan device");
             return;
         }
-        using VulkanDevice device = VulkanDevice.Create(instance);
+        using VulkanDevice device = VulkanTestDevice.CreateDevice(instance);
         using VulkanCommandStream stream = new(device.Handle, device.ComputeQueue, device.Capabilities.ComputeQueueFamilyIndex);
         using VulkanDescriptorManager pools = new(device.Handle, stream);
         ulong layout = pools.GetSetLayout(1);
