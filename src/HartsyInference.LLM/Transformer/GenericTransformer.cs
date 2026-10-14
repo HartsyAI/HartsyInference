@@ -40,7 +40,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     // graph-decode gather kernel (see EnsureEmbedResidentForGraphDecode) — EmbedGatherDecodeStep has no scale
     // parameter, unlike EmbedLookup's host gather which multiplies per call.
     private Tensor? _graphDecodeEmbedScaled;
-    // The QUANTIZED embed table (Q8_0 or Q4_K) as loaded. Graph decode gathers it directly on backends that report
+    // The QUANTIZED embed table (Q8_0, Q5_0, Q4_K or Q6_K) as loaded. Graph decode gathers it directly on backends that report
     // CanGatherQuantEmbed, so no F32 device copy is made. For a tied model this is the same tensor as
     // _lmHeadQuant (no extra upload). Null for every other dtype, which keeps the F32 gather path.
     private Tensor? _embedGatherQuant;
@@ -179,7 +179,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         // as a BF16 fused GEMV. (Qwen 151k×1024 quant head was ~28% of decode time — same fix, quant dtype.)
         if (_cfg.TieWordEmbeddings && (embedRaw.DType.IsQuantized || embedRaw.DType == DType.BF16 || embedRaw.DType == DType.F16))
             _lmHeadQuant = embedRaw;
-        if (embedRaw.DType == DType.Q8_0 || embedRaw.DType == DType.Q4_K) _embedGatherQuant = embedRaw;
+        if (embedRaw.DType == DType.Q8_0 || embedRaw.DType == DType.Q5_0 || embedRaw.DType == DType.Q4_K || embedRaw.DType == DType.Q6_K)
+            _embedGatherQuant = embedRaw;
         if (_cfg.AbsolutePositionEmbeddings) _posEmbed = EnsureF32(w[$"{prefix}.embed_positions.weight"]);
         if (_cfg.EmbeddingLayerNorm)
         {
@@ -690,7 +691,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the pre-norm GQA/RoPE decoder shape (Llama/Qwen/Mistral family), including the Gemma-2/3 trio of sliding-window attention, attention-logit soft-cap, and dual local/global RoPE.</summary>
-    /// <remarks>Excludes anything <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, attention sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement (OLMo-2), BLOOM's embedding LayerNorm, Gemma-4's per-layer SWA head dim. Non-1.0 embedding scale (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it once to a dedicated GPU copy of the embed table, since the graph-decode gather kernel itself has no scale param.</remarks>
+    /// <remarks>Excludes anything <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, attention sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement (OLMo-2), BLOOM's embedding LayerNorm, Gemma-4's per-layer SWA head dim. Non-1.0 embedding scale (Gemma/Granite/MiniCPM) is NOT excluded — <see cref="EnsureEmbedResidentForGraphDecode"/> pre-applies it once to a dedicated GPU copy of an F32 embed table; a quantized table is scaled by its gather kernel on device.</remarks>
     public bool SupportsGraphDecode(IBackend backend)
     {
         bool ok = SupportsGraphDecodeCore(backend);
@@ -741,8 +742,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)
     {
         ThrowIfDisposed();
-        // Q8_0/Q4_K tables stay quantized on device and are gathered by the backend (no F32 copy). Other dtypes, and
-        // backends without the quantized gather, take the F32 path below unchanged.
+        // Q8_0, Q5_0, Q4_K and Q6_K tables stay quantized on device and are gathered by the backend (no F32 copy).
+        // Other dtypes, and backends without the quantized gather, take the F32 path below unchanged.
         if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
         {
             backend.PreloadWeights([quant]);
@@ -763,8 +764,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// fits the device's uint32 byte addressing.</summary>
     private bool QuantEmbedGatherFits(IBackend backend, Tensor quant)
     {
-        int block = quant.DType == DType.Q8_0 ? 32 : 256;
-        int blockBytes = quant.DType == DType.Q8_0 ? 34 : 144;
+        int block = quant.DType.BlockElementCount;
+        int blockBytes = quant.DType.BlockByteSize;
         if (_cfg.HiddenSize % block != 0) return false;
         long rows = quant.ElementCount / _cfg.HiddenSize;
         long rowBytes = (long)(_cfg.HiddenSize / block) * blockBytes;

@@ -2150,7 +2150,7 @@ public partial interface IBackend : IDisposable
     /// <summary>True when <see cref="EmbedGatherQuantDecodeStep"/> can gather a quantized embed table of <paramref name="tableBytes"/> bytes, so graph decode keeps the QUANTIZED table on device instead of an F32 copy. Other backends (and tables too big for one device storage-buffer range) keep the F32 <see cref="EmbedGatherDecodeStep"/> path.</summary>
     bool CanGatherQuantEmbed(long tableBytes) => false;
 
-    /// <summary>Graph-decode embed gather that dequantizes one row of a quantized (Q8_0/Q4_K) table on device, then multiplies by <paramref name="scale"/> (1.0 = no scale).</summary>
+    /// <summary>Graph-decode embed gather that dequantizes one row of a quantized (Q8_0, Q5_0, Q4_K or Q6_K) table on device, then multiplies by <paramref name="scale"/> (1.0 = no scale).</summary>
     /// <remarks>Only backends reporting <see cref="CanGatherQuantEmbed"/> true for a table implement this; the default throws.</remarks>
     void EmbedGatherQuantDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
         => throw new NotSupportedException("EmbedGatherQuantDecodeStep requires a backend whose CanGatherQuantEmbed accepts the table.");

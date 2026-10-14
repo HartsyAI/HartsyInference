@@ -4105,7 +4105,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <inheritdoc/>
     public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
 
-    /// <summary>Quantized (Q8_0/Q4_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>. The whole table is one storage-buffer descriptor, so it must fit <c>maxStorageBufferRange</c> (128 MB on llvmpipe, 4 GB on NVIDIA).</summary>
+    /// <summary>Quantized (Q8_0/Q5_0/Q4_K/Q6_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>. The whole table is one storage-buffer descriptor, so it must fit <c>maxStorageBufferRange</c> (128 MB on llvmpipe, 4 GB on NVIDIA).</summary>
     public bool CanGatherQuantEmbed(long tableBytes) => tableBytes <= Vk.MaxStorageBufferRange;
 
     /// <summary>One captured LLM decode step: its own command buffer and the buffers its capture retained.</summary>
@@ -4375,16 +4375,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Graph-decode gather that dequantizes one row of a Q8_0 or Q4_K table on device (no F32 copy), then scales it by <paramref name="scale"/>.</summary>
-    /// <remarks>Row bytes are computed in uint on the device, so the table must stay under 4 GB; the transformer checks that before choosing this path. Hidden must be a whole number of blocks (32 for Q8_0, 256 for Q4_K).</remarks>
+    /// <summary>Graph-decode gather that dequantizes one row of a Q8_0, Q5_0, Q4_K or Q6_K table on device (no F32 copy), then scales it by <paramref name="scale"/>.</summary>
+    /// <remarks>Row bytes are computed in uint on the device, so the table must stay under 4 GB; the transformer checks that before choosing this path. Hidden must be a whole number of blocks (32 for Q8_0 and Q5_0, 256 for Q4_K and Q6_K).</remarks>
     public void EmbedGatherQuantDecodeStep(Tensor output, Tensor quantTable, float scale, ulong tokenId)
     {
         using OpScope _op = EnterOp();
-        bool q8 = quantTable.DType == DType.Q8_0;
-        if (!q8 && quantTable.DType != DType.Q4_K)
-            throw new NotSupportedException($"EmbedGatherQuantDecodeStep supports Q8_0 and Q4_K tables, not {quantTable.DType}.");
-        int block = q8 ? 32 : 256;
-        string shader = q8 ? "embed_gather_quant_q8_0" : "embed_gather_quant_q4_k";
+        string shader = quantTable.DType == DType.Q8_0 ? "embed_gather_quant_q8_0"
+            : quantTable.DType == DType.Q5_0 ? "embed_gather_quant_q5_0"
+            : quantTable.DType == DType.Q4_K ? "embed_gather_quant_q4_k"
+            : quantTable.DType == DType.Q6_K ? "embed_gather_quant_q6_k"
+            : throw new NotSupportedException($"EmbedGatherQuantDecodeStep supports Q8_0, Q5_0, Q4_K and Q6_K tables, not {quantTable.DType}.");
+        int block = quantTable.DType.BlockElementCount;
         if (tokenId == 0 || !_scalarBuffers.TryGetValue(tokenId, out VulkanBuffer? tokBuf) || output.DType != DType.F32)
         {
             throw new NotSupportedException("EmbedGatherQuantDecodeStep requires an F32 output and a valid device token-id buffer.");
