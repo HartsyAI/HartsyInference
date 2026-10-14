@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Sampling;
+
 namespace HartsyInference.Audio.Models.GptSoVits;
 
 /// <summary>Configuration for GPT-SoVITS stage 1 — the T2S (text→semantic) AR GPT (`Text2SemanticDecoder`).
