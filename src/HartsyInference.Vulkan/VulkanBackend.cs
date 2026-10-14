@@ -2559,6 +2559,13 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                 return;
             // Not the cm2 path: no later layer of this prefill needs the cached host mask, so release it (see _prefillMask).
             ReleasePrefillMask();
+            // A single query row (decode) takes the flash-decoding pair; the same contract checks as the scalar path apply.
+            if (kvLen >= 1 && kvLen <= key.Shape[2] && qOffset >= 0 && slidingWindow >= 0 && (!causal || qOffset < kvLen)
+                && CanUseFlashDecode(output, query, key, value, kvGroup))
+            {
+                DispatchFlashDecode(output, query, key, value, scale, causal, qOffset, slidingWindow, kvLen, kvGroup, devicePos: 0);
+                return;
+            }
             DispatchFlashAttention(output, query, key, value, mask: null, scale, causal, qOffset, slidingWindow, skv: kvLen, kvGroup);
             return;
         }
@@ -4669,19 +4676,29 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         int headDim = (int)query.Shape[query.Shape.Rank - 1];
         if (devicePos != 0 && _scalarBuffers.ContainsKey(devicePos)
-            && softcap == 0f && slidingWindow == 0 && headDim <= FlashMaxHeadDim
+            && softcap == 0f && headDim <= FlashMaxHeadDim
             && query.DType == DType.F32 && key.DType == DType.F32 && value.DType == DType.F32 && output.DType == DType.F32)
         {
             using OpScope _op = EnterOp();
-            DispatchFlashAttentionDev(output, query, key, value, scale, causal, kvGroup, devicePos);
-            return;
+            // A single query row takes the flash-decoding pair, which handles a sliding window as well.
+            if (CanUseFlashDecode(output, query, key, value, kvGroup))
+            {
+                DispatchFlashDecode(output, query, key, value, scale, causal, qOffset: 0, slidingWindow, kvLen: 0, kvGroup, devicePos);
+                return;
+            }
+            if (slidingWindow == 0)
+            {
+                DispatchFlashAttentionDev(output, query, key, value, scale, causal, kvGroup, devicePos);
+                return;
+            }
         }
         // The eager path is correct only if kvLen/qOffset are the real values. With a valid device position the caller
-        // passed placeholders, so a shape this kernel excludes (sliding window, softcap, large head dim, non-F32)
-        // has nothing correct to fall back to and fails loudly instead of attending over zero keys.
+        // passed placeholders, so a shape this kernel excludes (softcap, large head dim, non-F32, or a window outside
+        // the single-row kernel) has nothing correct to fall back to and fails loudly instead of attending over zero keys.
         if (devicePos != 0 && _scalarBuffers.ContainsKey(devicePos))
-            throw new NotSupportedException("FlashAttentionDev on Vulkan covers F32 attention without a sliding window or soft-cap and with head dim <= "
-                + $"{FlashMaxHeadDim}; got headDim={headDim}, softcap={softcap}, window={slidingWindow}, dtype={query.DType}. Leave graph decode off for this model.");
+            throw new NotSupportedException("FlashAttentionDev on Vulkan covers F32 attention without a soft-cap and with head dim <= "
+                + $"{FlashMaxHeadDim}; a sliding window needs a single query row whose head dim the subgroup divides into at most 4 dims per lane. "
+                + $"Got headDim={headDim}, softcap={softcap}, window={slidingWindow}, dtype={query.DType}. Leave graph decode off for this model.");
         FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
     }
 
