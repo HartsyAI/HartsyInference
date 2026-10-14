@@ -106,12 +106,14 @@ public sealed class SparkTtsPipeline : IDisposable
         StringBuilder sb = new(64 + globalTokens.Count * 24 + (promptSemanticTokens?.Count ?? 0) * 26);
         sb.Append("<|task_tts|><|start_content|>").Append(promptText).Append(text).Append("<|end_content|>");
         sb.Append("<|start_global_token|>");
-        foreach (int id in globalTokens) sb.Append("<|bicodec_global_").Append(id.ToString(CultureInfo.InvariantCulture)).Append("|>");
+        foreach (int id in globalTokens)
+            sb.Append("<|bicodec_global_").Append(id.ToString(CultureInfo.InvariantCulture)).Append("|>");
         sb.Append("<|end_global_token|>");
         if (promptText is not null)
         {
             sb.Append("<|start_semantic_token|>");
-            foreach (int id in promptSemanticTokens!) sb.Append("<|bicodec_semantic_").Append(id.ToString(CultureInfo.InvariantCulture)).Append("|>");
+            foreach (int id in promptSemanticTokens!)
+                sb.Append("<|bicodec_semantic_").Append(id.ToString(CultureInfo.InvariantCulture)).Append("|>");
         }
         return sb.ToString();
     }

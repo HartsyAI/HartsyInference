@@ -84,5 +84,39 @@ public sealed unsafe class SparkTtsLmParityTests(ITestOutputHelper output)
         Assert.Equal(Ints(r.GetProperty("semantic")), semantic);
     }
 
+    /// <summary>Sampled generation (upstream defaults) on the repeated-"no" line must end on its own: upstream
+    /// stops after 150 to 235 semantic tokens on seeds 0 to 2 (CPU F32, cap 1500). Opt in with
+    /// <c>HARTSY_SPARK_SAMPLED=1</c>; each seed is a full CPU generation.</summary>
+    [Fact]
+    [Trait("Category", "Slow")]
+    public void SampledRepeatedWords_StopsLikeUpstream()
+    {
+        string? root = Environment.GetEnvironmentVariable("HARTSY_SPARK_DIR");
+        string weights = Path.Combine(root ?? string.Empty, "LLM", "model.safetensors");
+        if (Environment.GetEnvironmentVariable("HARTSY_SPARK_SAMPLED") != "1" || !File.Exists(weights)) return;
+        using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "Fixtures", "SparkTts", "spark_prompt_ids.json")));
+        int[] prompt = doc.RootElement.GetProperty("cases").EnumerateArray()
+            .First(c => c.GetProperty("mode").GetString() == "controllable"
+                && c.GetProperty("text").GetString()!.StartsWith("No no", StringComparison.Ordinal))
+            .GetProperty("ids").EnumerateArray().Select(x => x.GetInt32()).ToArray();
+        SparkTtsConfig cfg = SparkTtsConfig.V0_5B;
+        using SafeTensorsLoader loader = new();
+        loader.Load(weights);
+        using CpuBackend backend = new();
+        using SparkTtsLm lm = new(cfg);
+        lm.LoadWeights(loader.GetAllTensors());
+        int seeds = int.TryParse(Environment.GetEnvironmentVariable("HARTSY_SPARK_SEEDS"), out int n) ? n : 3;
+        List<int> counts = [];
+        for (int seed = 0; seed < seeds; seed++)
+        {
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            (List<int> global, List<int> semantic) = lm.GenerateAudioTokens(backend, prompt, 1500, seed);
+            output.WriteLine($"seed {seed}: {global.Count} global + {semantic.Count} semantic in {sw.Elapsed.TotalSeconds:F1}s");
+            counts.Add(semantic.Count);
+        }
+        Assert.All(counts, c => Assert.InRange(c, 1, 600));
+    }
+
     private static int[] Ints(JsonElement e) => e.EnumerateArray().Select(x => x.GetInt32()).ToArray();
 }

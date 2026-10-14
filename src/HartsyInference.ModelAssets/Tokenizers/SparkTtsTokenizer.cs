@@ -13,7 +13,8 @@ public sealed class SparkTtsTokenizer
 
     private readonly GgufTokenizer _tokenizer;
 
-    /// <summary>Builds from the Spark <c>LLM/</c> directory files: <c>vocab.json</c>, <c>merges.txt</c>, <c>added_tokens.json</c> (a <c>{ "&lt;|token|&gt;": id }</c> map).</summary>
+    /// <summary>Builds from the Spark <c>LLM/</c> directory files: <c>vocab.json</c>, <c>merges.txt</c> and
+    /// <c>added_tokens.json</c> (a <c>{ "&lt;|token|&gt;": id }</c> map).</summary>
     public SparkTtsTokenizer(string vocabPath, string mergesPath, string addedTokensPath)
     {
         Dictionary<int, string> byId = new(180_000);
