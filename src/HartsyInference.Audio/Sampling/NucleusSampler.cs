@@ -36,7 +36,7 @@ public static class NucleusSampler
         // mathematically identical — softmax is monotonic, so top-K by logit == top-K by probability, and the
         // multinomial walk over the renormalized kept set only depends on the kept logits' relative exp weights
         // (the full-vocab softmax denominator cancels in the renormalization). Only the top-p / min-p thresholds
-        // (which compare against absolute probabilities) need the full denominator, computed on demand below.
+        // (which compare against absolute probabilities) need a denominator: full-vocab, or the top-k set with topPOverTopK.
         if (k < count && k <= 1024)
         {
             Span<int> ki = stackalloc int[k];
