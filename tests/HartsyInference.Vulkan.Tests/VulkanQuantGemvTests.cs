@@ -110,6 +110,15 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         yield return new object[] { "Q4_0", 257, 1024, 13, true };
         yield return new object[] { "Q5_0", 129, 896, 9, false };
         yield return new object[] { "Q5_K", 513, 1024, 16, false };
+        // The split-aware shader: a single row (the live guard of a workgroup with dead rows), rows short of a workgroup
+        // (N not a multiple of 4 rows per workgroup, or of 1 row per workgroup for Q5_0), units short of a subgroup (K=32 for
+        // Q5_0 leaves one unit per split part), and the 16-row cap with bias through the shared-memory sum.
+        yield return new object[] { "Q8_0", 1, 2048, 1, false };
+        yield return new object[] { "Q8_0", 6, 96, 2, true };
+        yield return new object[] { "Q4_K", 2, 1024, 16, true };
+        yield return new object[] { "Q6_K", 6, 512, 3, false };
+        yield return new object[] { "Q5_0", 3, 32, 2, false };
+        yield return new object[] { "Q5_0", 5, 96, 16, true };
     }
 
     internal static DType Named(string name) => name switch

@@ -58,6 +58,12 @@ public sealed partial class VulkanBackend
         }
     }
 
+    /// <summary>Subgroups that share one output row in <c>gemv_quant</c> (its <c>SPLIT</c>): 1 gives a subgroup per row (no
+    /// barrier), more sums the row's parts through shared memory. Q5_0 takes 4: its unit decode is the cost, and a row spread
+    /// over four subgroups measured 20 to 25% faster than a subgroup per row (<c>VulkanGemvBenchmark</c>); the other formats
+    /// measured faster with a subgroup per row.</summary>
+    internal static uint GemvSplit(DType dtype) => dtype == DType.Q5_0 ? 4u : 1u;
+
     /// <summary>Work units per block as <c>gemv_quant_unit.glsl</c> cuts them (<c>UNITS_PER_BLOCK</c>).</summary>
     internal static int GemvUnitsPerBlock(DType dtype) =>
         dtype == DType.F32 ? 1 : dtype == DType.Q8_0 ? 8 : dtype == DType.Q4_0 || dtype == DType.Q5_0 ? 4 : 16;
@@ -84,20 +90,19 @@ public sealed partial class VulkanBackend
         if (m < 1 || m > QuantGemvMaxRows)
             throw new ArgumentOutOfRangeException(nameof(m), $"gemv_quant takes 1..{QuantGemvMaxRows} activation rows; got {m}.");
 
-        // A lane per work unit up to 128, never below a subgroup; units per block as the shader cuts them.
-        long units = (long)k / GemvBlockElements(dtype) * GemvUnitsPerBlock(dtype);
+        // A 128-lane workgroup holds 128 / subgroupSize / split rows: `split` subgroups share one row (GemvSplit), and the
+        // shader sums their parts through shared memory when split is above 1.
         uint subgroup = Math.Max(1u, Vk.SubgroupSize);
-        uint wg = subgroup;
-        // Lane r writes activation row r's total, so the workgroup has at least M lanes.
-        while (wg < 128 && (wg < units || wg < m)) wg *= 2;
-        // The shader sums one partial per subgroup through 32 shared slots per activation row.
-        wg = Math.Min(wg, 32 * subgroup);
+        uint wg = 128u;
+        uint split = Math.Min(GemvSplit(dtype), Math.Max(1u, wg / subgroup));
+        uint rowsPerWg = Math.Max(1u, wg / subgroup / split);
 
         VulkanKernel kernel = GetKernel(shader, storageBufferCount: 4, new SpecConstant[]
         {
             SpecConstant.UInt(0, wg),
             SpecConstant.Bool(1, bias != 0),
             SpecConstant.UInt(2, (uint)m),
+            SpecConstant.UInt(3, split),
         });
         Span<byte> raw = stackalloc byte[8];
         PushConstants pc = new(raw);
@@ -105,9 +110,12 @@ public sealed partial class VulkanBackend
         pc.U32((uint)k);
         // HAS_BIAS=false never reads binding 3; the output stands in so the layout stays four buffers.
         Span<ulong> bufs = stackalloc ulong[] { weight, x, output, bias != 0 ? bias : output };
+        // ceil(N / rowsPerWg) workgroups; a vocabulary-sized N exceeds the 65535 a grid dimension is guaranteed, so the grid
+        // is two-dimensional past that, and the shader's row guard drops the rows past N.
         const uint MaxGroupsPerDim = 65535;
-        uint gx = (uint)Math.Min(n, MaxGroupsPerDim);
-        uint gy = (uint)((n + gx - 1) / gx);
+        long groups = ((long)n + rowsPerWg - 1) / rowsPerWg;
+        uint gx = (uint)Math.Min(groups, MaxGroupsPerDim);
+        uint gy = (uint)((groups + gx - 1) / gx);
         Dispatch(kernel, bufs, pc.Written, gx, gy, 1);
         _quantGemvCount++;
     }
