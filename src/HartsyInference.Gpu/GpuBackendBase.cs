@@ -24,6 +24,8 @@ namespace HartsyInference.Gpu;
 public abstract class GpuBackendBase
 {
     private int _opDepth;
+    private volatile bool _refusingOps;
+    private volatile int _disposingThread;
     private int _dispatchesThisOp;
     private int _disposed;
 
@@ -51,7 +53,11 @@ public abstract class GpuBackendBase
     /// <summary>Opens an op scope. Dispose it — <c>using OpScope _ = EnterOp();</c> — at the end of the op.</summary>
     /// <remarks>Nesting is expected and only the OUTERMOST scope does the work: an op built out of other ops must
     /// not drain or sweep in the middle of itself, because the buffers it would reclaim are the ones its own later
-    /// dispatches still read.</remarks>
+    /// dispatches still read.
+    ///
+    /// <para>Every scope holds the residency cache's exclusive lock (<see cref="IGpuResidency.EnterExclusive"/>), so
+    /// ops on one backend never overlap across threads. The release paths below are ops too: a full release issued on one
+    /// thread waits for another thread's op to finish instead of emptying the cache under its lookups.</para></remarks>
     protected OpScope EnterOp([CallerMemberName] string opName = "") => new(this, opName);
 
     /// <summary>Called on entering an op at ANY depth, before <see cref="OnOpBegin"/>.</summary>
@@ -84,38 +90,66 @@ public abstract class GpuBackendBase
         {
             _backend = backend;
             _opName = opName;
-            _startTicks = backend.ProfilingEnabled ? Stopwatch.GetTimestamp() : 0;
-            // Every depth, before anything else: binding identity is not the same question as reclaiming buffers.
-            // A backend that resolves its state ambiently must bind on re-entry too, because an op that called into
-            // ANOTHER instance mid-op comes back to find that instance bound.
-            backend.OnOpEnter(opName);
-            if (backend._opDepth == 0)
+            // First, before the depth is read: the depth and everything the scope touches belong to whichever
+            // thread holds the lock.
+            backend.Residency.EnterExclusive();
+            try
             {
-                backend._dispatchesThisOp = 0;
-                backend.OnOpBegin(opName);
-                // A tensor finalized rather than disposed cannot free its device buffer from the finalizer thread,
-                // which has no business touching a device context, so the work was queued. This is the safe point
-                // that runs it, on the owning thread.
-                backend.Residency.DrainFinalizerCleanup();
-                // Every previous op's finally has run by now, so anything a rebind displaced and nobody claimed is
-                // provably ownerless. Reclaiming it here is what makes the non-in-place case safe.
-                backend.Residency.SweepOrphans();
+                if (backend._opDepth == 0 && backend._refusingOps
+                    && backend._disposingThread != Environment.CurrentManagedThreadId)
+                {
+                    throw new ObjectDisposedException(backend.GetType().Name,
+                        "This backend is being torn down; the job still running on it was stopped at its next op.");
+                }
+                _startTicks = backend.ProfilingEnabled ? Stopwatch.GetTimestamp() : 0;
+                // Every depth, before anything else: binding identity is not the same question as reclaiming
+                // buffers. A backend that resolves its state ambiently must bind on re-entry too, because an op that
+                // called into ANOTHER instance mid-op comes back to find that instance bound.
+                backend.OnOpEnter(opName);
+                if (backend._opDepth == 0)
+                {
+                    backend._dispatchesThisOp = 0;
+                    if (backend.Residency.ResetPending)
+                    {
+                        backend.ResetCorruptedResidency();
+                    }
+                    backend.OnOpBegin(opName);
+                    // A tensor finalized rather than disposed cannot free its device buffer from the finalizer
+                    // thread, which has no business touching a device context, so the work was queued. This is the
+                    // safe point that runs it, on the owning thread.
+                    backend.Residency.DrainFinalizerCleanup();
+                    // Every previous op's finally has run by now, so anything a rebind displaced and nobody claimed
+                    // is provably ownerless. Reclaiming it here is what makes the non-in-place case safe.
+                    backend.Residency.SweepOrphans();
+                }
+                backend._opDepth++;
             }
-            backend._opDepth++;
+            catch
+            {
+                backend.Residency.ExitExclusive();
+                throw;
+            }
         }
 
         public void Dispose()
         {
-            _backend._opDepth--;
-            if (_backend._opDepth != 0)
+            try
             {
-                return;
+                _backend._opDepth--;
+                if (_backend._opDepth != 0)
+                {
+                    return;
+                }
+                int dispatches = _backend._dispatchesThisOp;
+                _backend.OnOpEnd(_opName, dispatches);
+                if (_startTicks != 0)
+                {
+                    _backend.OnOpRecorded(_opName, Stopwatch.GetTimestamp() - _startTicks, dispatches);
+                }
             }
-            int dispatches = _backend._dispatchesThisOp;
-            _backend.OnOpEnd(_opName, dispatches);
-            if (_startTicks != 0)
+            finally
             {
-                _backend.OnOpRecorded(_opName, Stopwatch.GetTimestamp() - _startTicks, dispatches);
+                _backend.Residency.ExitExclusive();
             }
         }
     }
@@ -270,12 +304,8 @@ public abstract class GpuBackendBase
     public void FreeAllDeviceMemory()
     {
         using OpScope _ = EnterOp();
-        Exception? failure = null;
         long freeBefore = Probe();
-        Attempt(OnActivationsFreeing);
-        Attempt(Residency.FreeAllCached);
-        Attempt(OnAllDeviceMemoryFreed);
-        Attempt(TrimMemoryPoolCore);
+        Exception? failure = ReleaseAllCore();
         long freeAfter = Probe();
         if (freeBefore >= 0 && freeAfter >= 0)
         {
@@ -293,11 +323,51 @@ public abstract class GpuBackendBase
             try { return GetVramInfo().FreeBytes; }
             catch (Exception ex) { Logs.Debug($"[{GetType().Name}] VRAM probe failed: {ex.Message}"); return -1; }
         }
+    }
+
+    /// <summary>The steps of <see cref="FreeAllDeviceMemory"/>, each run even if an earlier one failed. Returns the
+    /// first failure. Caller holds the op scope.</summary>
+    private Exception? ReleaseAllCore()
+    {
+        Exception? failure = null;
+        Attempt(OnActivationsFreeing);
+        Attempt(Residency.FreeAllCached);
+        Attempt(OnAllDeviceMemoryFreed);
+        Attempt(TrimMemoryPoolCore);
+        return failure;
 
         void Attempt(Action step)
         {
             try { step(); }
             catch (Exception ex) { failure ??= ex; }
+        }
+    }
+
+    /// <summary>Releases everything a corrupted residency cache held, at the start of the op after the one that
+    /// found the corruption.</summary>
+    /// <remarks>At depth 1, where <see cref="FreeAllDeviceMemory"/> runs the same steps, so a hook that calls another
+    /// op does not re-enter this. A failure is logged rather than thrown: the cache is empty either way, and the op
+    /// that triggered the reset belongs to a request that had nothing to do with the corruption.</remarks>
+    private void ResetCorruptedResidency()
+    {
+        _opDepth = 1;
+        try
+        {
+            Exception? failure = ReleaseAllCore();
+            if (failure is null)
+            {
+                Logs.Warning($"[{GetType().Name}] Reset the device residency cache after it was found corrupted; "
+                    + "cached weights upload again on first use.");
+            }
+            else
+            {
+                Logs.Error($"[{GetType().Name}] Resetting the corrupted device residency cache did not release "
+                    + "everything; the cache itself is empty again.", failure);
+            }
+        }
+        finally
+        {
+            _opDepth = 0;
         }
     }
 
@@ -312,6 +382,11 @@ public abstract class GpuBackendBase
     /// cache and workspaces, a side table keyed by weight.</remarks>
     protected virtual void OnAllDeviceMemoryFreed() { }
 
+    /// <summary>Makes every op that starts from now on throw <see cref="ObjectDisposedException"/>; the op in flight
+    /// finishes. Called ahead of a teardown that could not wait for a job to end, so the job fails at its next op
+    /// instead of running against memory the teardown frees.</summary>
+    public void RefuseNewOps() => _refusingOps = true;
+
     /// <summary>Idempotent teardown.</summary>
     /// <remarks>Idempotent because a backend is disposed from more than one place in practice — a pipeline's
     /// <c>finally</c> and a test's <c>using</c> reaching the same object — and the second call must be a no-op
@@ -325,7 +400,18 @@ public abstract class GpuBackendBase
         }
         try
         {
-            DisposeCore();
+            // Under the cache lock, like an op, so teardown waits for another thread's op in flight instead of
+            // emptying the cache under it. Teardown's own ops stay allowed after RefuseNewOps.
+            Residency.EnterExclusive();
+            try
+            {
+                _disposingThread = Environment.CurrentManagedThreadId;
+                DisposeCore();
+            }
+            finally
+            {
+                Residency.ExitExclusive();
+            }
         }
         finally
         {
