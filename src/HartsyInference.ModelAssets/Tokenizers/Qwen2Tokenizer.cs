@@ -107,14 +107,16 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         if (specialTokens is null || specialTokens.Count == 0) return exact.Encode(normalized, addSpecial: false);
 
         string[] literals = [.. specialTokens.Keys.OrderByDescending(static k => k.Length)];
+        HashSet<char> starts = [.. literals.Where(static l => l.Length > 0).Select(static l => l[0])];
         List<int> ids = new(normalized.Length / 3 + 4);
         int start = 0;
         int i = 0;
         while (i < normalized.Length)
         {
             string? hit = null;
-            foreach (string lit in literals)
-                if (string.CompareOrdinal(normalized, i, lit, 0, lit.Length) == 0) { hit = lit; break; }
+            if (starts.Contains(normalized[i]))
+                foreach (string lit in literals)
+                    if (string.CompareOrdinal(normalized, i, lit, 0, lit.Length) == 0) { hit = lit; break; }
             if (hit is null)
             {
                 i++;

@@ -31,8 +31,11 @@ public readonly record struct StopGate(int MinTokens, float MinTokenTextRatio = 
     }
 
     /// <summary>Single-stop convenience for <see cref="Apply(Span{float}, int, int, ReadOnlySpan{int})"/>.</summary>
-    public void Apply(Span<float> logits, int generated, int targetTextTokens, int stopId) =>
-        Apply(logits, generated, targetTextTokens, [stopId]);
+    public void Apply(Span<float> logits, int generated, int targetTextTokens, int stopId)
+    {
+        if (AllowStop(generated, targetTextTokens)) return;
+        Suppress(logits, [stopId]);
+    }
 
     /// <summary>Writes -inf into each stop id's logit. A stop id outside <paramref name="logits"/> can never be drawn
     /// from that head, so there is nothing to mask and it is skipped.</summary>

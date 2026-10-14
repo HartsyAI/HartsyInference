@@ -110,6 +110,10 @@ internal static class CosyVoiceModel
                         "CosyVoice 2 is zero-shot — it needs a voice reference. Supply a short WAV clip as the request's reference.");
                 }
                 List<int[]> segments = [.. frontend.Segments(job.Text).Select(Encode).Where(static ids => ids.Length > 0)];
+                if (segments.Count == 0)
+                {
+                    throw new InvalidOperationException("CosyVoice 2 found nothing to speak in the text.");
+                }
                 int[] reference = string.IsNullOrWhiteSpace(job.RefText) ? [] : Encode(frontend.Normalize(job.RefText));
                 return (segments, reference);
             }

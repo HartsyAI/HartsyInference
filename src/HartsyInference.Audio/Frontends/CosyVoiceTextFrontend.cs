@@ -163,7 +163,15 @@ public sealed partial class CosyVoiceTextFrontend(
         return final;
     }
 
-    private int Length(string s, bool chinese) => chinese ? s.Length : _countTokens(s);
+    // Python's len counts code points, not UTF-16 units; they differ for astral characters (CJK Ext-B, emoji).
+    private int Length(string s, bool chinese) => chinese ? CodePoints(s) : _countTokens(s);
+
+    private static int CodePoints(string s)
+    {
+        int n = 0;
+        foreach (Rune _ in s.EnumerateRunes()) n++;
+        return n;
+    }
 
     // Reference replace_blank: drop a space unless both neighbours are non-space ASCII.
     private static string ReplaceBlank(string text)
@@ -177,8 +185,9 @@ public sealed partial class CosyVoiceTextFrontend(
                 sb.Append(c);
                 continue;
             }
-            // Python's text[i + 1] / text[i - 1]: i - 1 wraps to the last char at i == 0, and i + 1 past the end raises;
-            // a trailing space cannot occur here because the input was stripped.
+            // Python's text[i + 1] / text[i - 1]: i - 1 wraps to the last char at i == 0, and i + 1 past the end raises
+            // IndexError (the Chinese normalizer can leave a trailing space). Drop that space instead of failing.
+            if (i + 1 >= text.Length) continue;
             char next = text[i + 1];
             char prev = text[i == 0 ? text.Length - 1 : i - 1];
             if (next < 128 && next != ' ' && prev < 128 && prev != ' ') sb.Append(c);

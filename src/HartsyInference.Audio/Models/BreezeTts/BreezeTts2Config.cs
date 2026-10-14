@@ -1,5 +1,5 @@
-using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Models.Codecs.Mimi;
+using HartsyInference.Audio.Sampling;
 
 namespace HartsyInference.Audio.Models.BreezeTts;
 

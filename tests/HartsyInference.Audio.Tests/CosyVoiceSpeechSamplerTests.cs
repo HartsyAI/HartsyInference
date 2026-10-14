@@ -6,14 +6,14 @@ using Xunit;
 namespace HartsyInference.Audio.Tests;
 
 /// <summary>CPU-only checks for the end-of-speech gate in <see cref="SpeechSampler"/>: with EOS dominant the
-/// unrestricted draw returns it, and <c>ignoreEos</c> must never return it. Covers the top-k fast path and
-/// the full-distribution path (<c>TopK = 0</c>).</summary>
+/// unrestricted draw returns it, and a closed <see cref="StopGate"/> must never return it until its floor is reached.
+/// Covers the top-k fast path and the full-distribution path (<c>TopK = 0</c>).</summary>
 public sealed unsafe class CosyVoiceSpeechSamplerTests
 {
     private const int EosToken = 4;     // candidates [0, 4] inclusive; index 4 is end-of-speech
-    private const int Vocab = 6;
+    private const int Vocab = 6;        // extra decoder rows above EOS are never sampled
     private static readonly StopGate Gate = new(MinTokens: 0, MinTokenTextRatio: 2f);
-    private const int TargetText = 5;   // floor = 10 speech tokens        // extra decoder rows above EOS are never sampled
+    private const int TargetText = 5;   // floor = 10 speech tokens
 
     private static Tensor EosDominantLogits()
     {

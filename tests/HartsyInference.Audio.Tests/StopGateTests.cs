@@ -49,4 +49,25 @@ public sealed class StopGateTests
         Assert.Equal(0f, logits[0]);
         Assert.Equal(3f, logits[1]);
     }
+
+    [Fact]
+    public void SingleStopId_ClosedThenOpen()
+    {
+        StopGate gate = new(MinTokens: 2);
+        float[] closed = [1f, 2f, 3f];
+        gate.Apply(closed, generated: 1, targetTextTokens: 0, stopId: 2);
+        Assert.Equal(float.NegativeInfinity, closed[2]);
+
+        float[] open = [1f, 2f, 3f];
+        gate.Apply(open, generated: 2, targetTextTokens: 0, stopId: 2);
+        Assert.Equal(3f, open[2]);
+    }
+
+    [Fact]
+    public void RatioFloor_OpensAtTextTokensTimesRatio()
+    {
+        StopGate gate = new(MinTokens: 0, MinTokenTextRatio: 2f);
+        Assert.False(gate.AllowStop(generated: 9, targetTextTokens: 5));
+        Assert.True(gate.AllowStop(generated: 10, targetTextTokens: 5));
+    }
 }
