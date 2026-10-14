@@ -4116,6 +4116,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <remarks>Records the step onto a private command buffer without executing it (the first <see cref="LaunchGraph"/> runs it), so the chained token buffer is not advanced by capture. The caller warms every weight and scratch buffer first; a cache miss during capture throws.</remarks>
     public object? CaptureGraph(Action recordWork)
     {
+        System.Diagnostics.Debug.Assert(!_capturingStepGraph, "CaptureGraph is not reentrant: a nested capture would overwrite the saved graph and the capture flags.");
         if (!StepGraphSupported) return null;
         DrainStream();
         VulkanStepGraph graph = new(_vkDevice.Handle, _vkDevice.ComputeQueue, Vk.ComputeQueueFamilyIndex);
