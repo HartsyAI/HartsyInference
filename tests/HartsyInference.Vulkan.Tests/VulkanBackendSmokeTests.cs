@@ -33,7 +33,7 @@ public sealed class VulkanBackendSmokeTests
         if (!VulkanAvailable())
             return;
         using VulkanInstance instance = new();
-        using VulkanDevice device = VulkanDevice.Create(instance);
+        using VulkanDevice device = VulkanTestDevice.CreateDevice(instance);
         Assert.NotNull(device.Capabilities.DeviceName);
         Assert.True(device.Capabilities.SubgroupSize >= 4 && device.Capabilities.SubgroupSize <= 128);
         Assert.True(device.Capabilities.MaxComputeWorkGroupInvocations >= 128);
@@ -52,7 +52,7 @@ public sealed class VulkanBackendSmokeTests
         if (!VulkanAvailable())
             return;
 
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         Tensor a = new(new TensorShape(64), DType.F32);
         Tensor b = new(new TensorShape(64), DType.F32);
         Tensor c = new(new TensorShape(64), DType.F32);
@@ -75,7 +75,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int B = 2, T = 3, D = 16;
 
         Tensor x = new(new TensorShape(B, T, D), DType.F32);
@@ -118,7 +118,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 3, M = 4, K = 5, N = 6;
         Tensor a = new(new TensorShape(B, M, K), DType.F32);
@@ -166,7 +166,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor fp8 = new(new TensorShape(256), DType.F8E4M3);
         Span<byte> bytes = fp8.AsSpan<byte>();
@@ -214,7 +214,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int B = 2, T = 3, D = 16;
 
         Tensor x = new(new TensorShape(B, T, D), DType.F32);
@@ -249,7 +249,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, H = 24, S = 64, D = 128;   // smaller S than full Flux for test speed
         Tensor q = new(new TensorShape(B, H, S, D), DType.F32);
@@ -319,7 +319,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         // 1280 = max Flux Schnell sequence length (256 T5 + 1024 image tokens)
         const int M = 1280, K = 3072, N = 3072;
@@ -394,7 +394,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_CopyInto_PreservesDstAddress_MatchesCpu_DeviceSrc()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         // dst mirrors the real usage (Krea2Transformer's _tembFixed/_graphVelocity): a plain, never-preloaded
         // tensor whose device buffer CopyInto itself materializes on first use. Pre-caching dst as a WEIGHT
@@ -455,7 +455,7 @@ public sealed class VulkanBackendSmokeTests
     public void StepGraph_TrivialCapture_ReplaysWithFreshDataAcrossThreeSteps()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.StepGraphSupported) return;   // push descriptors unavailable on this device/driver
 
         const int n = 64;
@@ -537,7 +537,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_CfgEulerStep_MatchesCpu_PreservesZAddress()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int n = 200;
         TensorShape shape = new(n);
@@ -611,7 +611,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int M = 256, K = 512, N = 256;   // multiples of 16 → coopmat fast path
         Tensor input = new(new TensorShape(M, K), DType.F16);
@@ -683,7 +683,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Linear_FP8Weight_NonUnitScaleFactor_MatchesCpu(int M, int K, int N, float scale)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16) return;
         // This checks the F16-cast path's scale folding per element; the fp8 Linear quantizes the activation, checked below.
         backend.EnableFp8Linear = false;
@@ -765,7 +765,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_SwiGlu_TwoFp8ScaledWeights_UncachedCasts_MatchesCpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16) return;
         backend.CacheWeightCasts = false;
 
@@ -874,7 +874,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable()) return;
         KnobStore.Set(EngineKnobs.VkProfile, true);
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         KnobStore.Clear(EngineKnobs.VkProfile);
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
         // This test specifically exercises coopmat1's partial-M kernel — coopmat2 (default ON since
@@ -933,7 +933,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable()) return;
         KnobStore.Set(EngineKnobs.VkProfile, true);
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         KnobStore.Clear(EngineKnobs.VkProfile);
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
         // Specifically checking coopmat1's own engagement — coopmat2 (default ON since 2026-07-31) would
@@ -977,7 +977,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16) return;
 
         // Realistic shapes. Random Gaussian to look like real activations/weights.
@@ -1026,7 +1026,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, H = 2, Sq = 16, Skv = 64, D = 64;
         using Tensor q = new(new TensorShape(B, H, Sq, D), DType.F32);
@@ -1066,7 +1066,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, H = 2, Sq = 16, Skv = 64, D = 64;
         using Tensor q = new(new TensorShape(B, H, Sq, D), DType.F32);
@@ -1086,7 +1086,7 @@ public sealed class VulkanBackendSmokeTests
     {
         if (!VulkanAvailable())
             return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int M = 16, K = 8, N = 12;
         Tensor a = new(new TensorShape(M, K), DType.F32);
@@ -1123,7 +1123,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Mul_Matches_Cpu_F16()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16) return;
 
         Tensor a = new(new TensorShape(64), DType.F16);
@@ -1147,7 +1147,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Gelu_Matches_Cpu_TanhApprox()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor x = new(new TensorShape(64), DType.F32);
         Tensor y = new(new TensorShape(64), DType.F32);
@@ -1170,7 +1170,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Permute0213_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         // [B, S, H, D] → [B, H, S, D]
         const int B = 2, S = 6, H = 4, D = 8;
@@ -1200,7 +1200,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_BroadcastAdd_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         // hidden[B, C, spatial] += bias[C]   (channel broadcast)
         const int B = 2, C = 4, Spatial = 16;
@@ -1237,7 +1237,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_GroupNorm_Matches_Cpu_Sd15Shape()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, C = 320, H = 16, W = 16, Groups = 32;
         Tensor x = new(new TensorShape(B, C, H, W), DType.F32);
@@ -1297,7 +1297,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_GroupNormSilu_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, C = 64, H = 8, W = 8, Groups = 8;
         Tensor x = new(new TensorShape(B, C, H, W), DType.F32);
@@ -1353,7 +1353,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_SDPA_LongSequence_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, H = 4, S = 512, D = 64;
         Tensor q = new(new TensorShape(B, H, S, D), DType.F32);
@@ -1410,7 +1410,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Conv2D_3x3_Pad1_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, Cin = 4, Cout = 8, H = 16, W = 16, Kh = 3, Kw = 3;
         Tensor input = new(new TensorShape(B, Cin, H, W), DType.F32);
@@ -1468,7 +1468,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Conv2D_Batched_MatchesPerImage(int maxColTileBytes)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (maxColTileBytes > 0) backend.Conv2DMaxColTileBytes = (ulong)maxColTileBytes;
 
         const int B = 3, Cin = 4, Cout = 6, H = 12, W = 10, Kh = 3, Kw = 3;
@@ -1529,7 +1529,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_DtypeFallbacks_DoNotRecurse()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         // WanRmsNormChannel: F16 takes the non-F32 branch.
         Tensor f16In = new(new TensorShape(1, 4, 2, 2), DType.F16);
@@ -1567,7 +1567,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Conv2D_TiledPath_MatchesUntiled()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, Cin = 3, Cout = 5, H = 10, W = 10, Kh = 3, Kw = 3;
         // gemmK=27, fullN=100: 4 bytes/elem * 27 * 1 col ≈ 108 bytes/col → tileN clamps to 1,
@@ -1617,7 +1617,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_UpsampleNearest_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int B = 1, C = 2, H = 4, W = 4;
         Tensor x = new(new TensorShape(B, C, H, W), DType.F32);
@@ -1644,7 +1644,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_UpsampleBilinear_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         // Small input where we can hand-check a couple of interior values.
         const int B = 1, C = 1, H = 4, W = 4;
@@ -1677,7 +1677,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Cast_F32_To_F16_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16) return;
 
         Tensor src = new(new TensorShape(128), DType.F32);
@@ -1707,7 +1707,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Linear_Bf16Weight_MatchesCpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int M = 8, K = 64, N = 8;
         Tensor input = new(new TensorShape(M, K), DType.F32);
@@ -1755,7 +1755,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Linear_Bf16Bias_MatchesCpu(int M)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int K = 64, N = 8;
         Tensor input = new(new TensorShape(M, K), DType.F32);
@@ -1811,7 +1811,7 @@ public sealed class VulkanBackendSmokeTests
     public unsafe void Backend_AffineBroadcastLastDim_MatchesCpu(bool useF16, bool scaleOnly)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (useF16 && !backend.Capabilities.SupportsF16) return;
 
         const int B = 2, seqLen = 5, C = 16;
@@ -1881,7 +1881,7 @@ public sealed class VulkanBackendSmokeTests
     public unsafe void Backend_WanRopeInterleaved_MatchesCpu(bool useF16)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (useF16 && !backend.Capabilities.SupportsF16) return;
 
         const int seqLen = 6, heads = 3, headDim = 8;
@@ -1955,7 +1955,7 @@ public sealed class VulkanBackendSmokeTests
     public unsafe void Backend_RepeatKvHeads_MatchesCpu(bool useF16)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (useF16 && !backend.Capabilities.SupportsF16) return;
 
         const int batch = 2, kvHeads = 3, groupSize = 4, seqLen = 5, headDim = 8;
@@ -2021,7 +2021,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_WanRmsNormChannel_MatchesCpu(bool hasGamma)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int batch = 2, c = 6, h = 3, w = 4;
         const float eps = 1e-12f;
@@ -2070,7 +2070,7 @@ public sealed class VulkanBackendSmokeTests
     public unsafe void Backend_GatedResidualLastDim_MatchesCpu(bool useF16)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (useF16 && !backend.Capabilities.SupportsF16) return;
 
         const int B = 2, seqLen = 5, C = 16;
@@ -2139,7 +2139,7 @@ public sealed class VulkanBackendSmokeTests
     public unsafe void Backend_SliceRows_MatchesCpu(bool useF16)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (useF16 && !backend.Capabilities.SupportsF16) return;
 
         const int totalRows = 10, rowOffset = 4, tailRows = 6, dim = 8;
@@ -2195,7 +2195,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_MaxPool2D_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int N = 1, C = 2, H = 5, W = 5, kH = 3, kW = 3, stride = 2, pad = 1;
         const int oH = 3, oW = 3; // (5 + 2*1 - 3)/2 + 1 = 3
@@ -2239,7 +2239,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Conv2dDepthwise_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int N = 1, C = 3, H = 6, W = 6, kH = 3, kW = 3, stride = 1, pad = 1;
         const int oH = 6, oW = 6;
@@ -2285,7 +2285,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Conv1d_Grouped_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int N = 1, cIn = 4, cOut = 4, tIn = 10, kernel = 3, stride = 1, padLeft = 1, padRight = 1, dilation = 1, groups = 2;
         const int tOut = 10; // (10 + 1 + 1 - 3)/1 + 1
@@ -2331,7 +2331,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_ConvTranspose1d_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int N = 1, cIn = 3, cOut = 2, tIn = 6, kernel = 4, stride = 2, padLeft = 1, padRight = 1, dilation = 1, groups = 1;
         const int tOut = 12; // (tIn-1)*stride + dilation*(kernel-1) + 1 - padLeft - padRight = 5*2+3+1-2 = 12
@@ -2373,7 +2373,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_ConvTranspose1d_GroupsGreaterThanOne_Throws()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor x = new(new TensorShape(1, 4, 6), DType.F32);
         Tensor w = new(new TensorShape(4, 1, 3), DType.F32);
@@ -2389,7 +2389,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Snake_Vanilla_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int N = 1, C = 3, T = 8;
         Tensor x = new(new TensorShape(N, C, T), DType.F32);
@@ -2426,7 +2426,7 @@ public sealed class VulkanBackendSmokeTests
     public void GetD2hSyncCount_TracksLazyActivationReads()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         backend.ResetD2hSyncCount();
         Assert.Equal(0, backend.GetD2hSyncCount());
 
@@ -2460,7 +2460,7 @@ public sealed class VulkanBackendSmokeTests
     public void GetD2hSyncCount_Concat_StaysGpuResident()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor a = new(new TensorShape(8), DType.F32);
         Tensor b = new(new TensorShape(8), DType.F32);
@@ -2495,7 +2495,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_Concat_NonLeadingDim_BatchGreaterThanOne_MatchesCpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int batch = 3, s1 = 4, s2 = 5, hidden = 6;
         Tensor a = new(new TensorShape(batch, s1, hidden), DType.F32);
@@ -2532,7 +2532,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_ApplyRope_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int batch = 1, seqLen = 3, numHeads = 2, headDim = 8, half = headDim / 2;
         Tensor q = new(new TensorShape(batch, seqLen, numHeads, headDim), DType.F32);
@@ -2582,7 +2582,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_KvCacheAppend_Matches_Cpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int heads = 3, maxSeq = 16, headDim = 4, tNew = 5, offset = 7;
         Tensor buffer = new(new TensorShape(1, heads, maxSeq, headDim), DType.F32);
@@ -2611,7 +2611,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_CopyTo_GpuResidentSource_StaysDeviceSideAndMatchesCpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int n = 64;
         Tensor x = new(new TensorShape(n), DType.F32);
@@ -2640,7 +2640,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_CopyTo_HostOnlySource_FallsBackToMemcpy()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int n = 32;
         Tensor src = new(new TensorShape(n), DType.F32);
@@ -2733,7 +2733,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_FlashAttention_Causal_MatchesCpu()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int batch = 1, hq = 4, hkv = 4, sq = 20, skv = 20, headDim = 64;
         float scale = 1f / MathF.Sqrt(headDim);
@@ -2763,7 +2763,7 @@ public sealed class VulkanBackendSmokeTests
         // Simulates a decode step against a KV cache: the K/V buffers are over-allocated to maxSeq,
         // only the first kvLen positions are valid, and hq/hkv > 1 (GQA).
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int batch = 1, hq = 8, hkv = 2, sq = 1, maxSeq = 32, kvLen = 9, headDim = 32;
         float scale = 1f / MathF.Sqrt(headDim);
@@ -2813,7 +2813,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_ScaledDotProductAttention_HeadDim128Boundary_MatchesCpu(int headDim)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int batch = 1, hq = 8, hkv = 2, seqLen = 48;   // GQA, self-attention (sq==skv)
         float scale = 1f / MathF.Sqrt(headDim);
@@ -2850,7 +2850,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_FlashAttention_WanVideoScale_CompletesWithoutOom()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         // Software rendering (llvmpipe) takes HOURS on this shape (measured: still running after 2.85
         // CPU-hours, killed) — this test proves no-OOM/finite-output on real hardware, not something
         // llvmpipe's correctness-only role needs to cover. Skip rather than hang the whole suite.
@@ -2917,7 +2917,7 @@ public sealed class VulkanBackendSmokeTests
     public unsafe void Backend_DequantizeToF32_MatchesGgufDequantizer(string dtypeName)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         DType dtype = dtypeName switch
         {
@@ -2994,7 +2994,7 @@ public sealed class VulkanBackendSmokeTests
     public void Backend_CoopMat2_MatchesCpu(int M, int K, int N, bool hasBias)
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix2) return;
 
         Tensor input = new(new TensorShape(M, K), DType.F16);

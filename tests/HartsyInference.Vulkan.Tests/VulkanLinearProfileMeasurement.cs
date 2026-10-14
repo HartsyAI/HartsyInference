@@ -23,7 +23,7 @@ public sealed class VulkanLinearProfileMeasurement
         const int M = 1024, K = 3072, N = 12288;   // Flux DiT FFN expand, diffusion-scale M
         const int iters = 60;
 
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor input = new(new TensorShape(M, K), DType.F16);
         Tensor weight = new(new TensorShape(N, K), DType.F8E4M3);   // Flux Schnell ships FP8 weights
@@ -56,7 +56,7 @@ public sealed class VulkanLinearProfileMeasurement
         const int M = 16, K = 64, N = 64;   // coopmat-eligible, negligible compute
         const int iters = 2000;
 
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor weight = new(new TensorShape(N, K), DType.F16);
         Tensor bias = new(new TensorShape(N), DType.F16);
@@ -103,7 +103,7 @@ public sealed class VulkanLinearProfileMeasurement
         // IBackend-typed (not VulkanBackend) so the default-interface-method ops below (SliceLastDim,
         // ApplyRope, KvCacheAppend, GluActivate — none overridden in VulkanBackend, see class doc) actually
         // resolve: C# only dispatches default interface methods through the interface type.
-        using IBackend backend = new VulkanBackend();
+        using IBackend backend = VulkanTestDevice.Create();
 
         Tensor x = new(new TensorShape(1, 1, hidden), DType.F32);
         Tensor normW = new(new TensorShape(hidden), DType.F32);

@@ -65,7 +65,7 @@ public sealed class VulkanBatchEquivalenceTests(ITestOutputHelper output)
     public void CfgEulerStep_Matches_The_Reference_Across_Repeated_InPlace_Steps()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         // Through the interface: CpuBackend does not declare CfgEulerStep, so this is the managed
         // default body itself — the numerical reference, not another override.
         using Cpu.CpuBackend cpuBackend = new();
@@ -105,7 +105,7 @@ public sealed class VulkanBatchEquivalenceTests(ITestOutputHelper output)
     public void Ops_Give_The_Same_Answer_For_An_Image_In_A_Batch_As_Alone()
     {
         if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int B = 2, C = 32, H = 16, W = 16;
         int spatial = C * H * W;
         List<(string, float)> results = new();

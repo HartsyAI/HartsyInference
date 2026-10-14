@@ -34,13 +34,15 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 Four modalities have a working Vulkan path today: image, LLM, vision and audio. Video is the one with no
 confirmed run, and the two attempts failed on absent weights rather than on the backend.
 
+**Causal prefill attention is on by default (RTX 3060).** A prompt of about 750 tokens prefills in 0.22 s against 1.94 s on Llama-3.2-1B Q8_0, and in 0.74 s against 6.65 s on Qwen3-4B Q4_K_M; the greedy text matches the scalar path on four models, and OLMoE matches the CPU backend with the flag on. Every number and the open items are in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md).
+
 ## What this does not establish
 
 **DeepSeek-V4.1-Flash primitives (PR 24b).** The MoE, HC, latent-attention, quantizer and recipe-dequant shaders are parity-tested against the
 CPU reference on an RTX 3060 through Vulkan only. No AMD hardware evidence has been collected, so none of it is certified on AMD, and nothing
 is wired into a model. The expert cache is host-staged with no streaming cache, and native block-scaled GEMM is Unsupported on Vulkan.
 
-**Nothing about AMD or Intel.** Every row is NVIDIA-Vulkan on an RTX 4090. No AMD or Intel GPU exists on this
+**Nothing about AMD or Intel.** Every row is NVIDIA Vulkan. The LLM rows that name a card were measured on an RTX 3060 (Vulkan device 1), not the RTX 4090; the other rows do not say which card. No AMD or Intel GPU exists on this
 machine; llvmpipe covers small-subgroup correctness and is not evidence about either vendor's driver. That is
 ROADMAP §3's remaining hardware item.
 

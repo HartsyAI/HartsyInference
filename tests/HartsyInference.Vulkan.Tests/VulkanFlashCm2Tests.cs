@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vulkan;
 using Xunit;
@@ -24,9 +25,9 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [InlineData(1, 6, 3, 65, 129, 64, true)]
     public void HeadMajor_MatchesReference(int batch, int hq, int hkv, int sq, int skv, int d, bool masked)
     {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.SupportsTokenMajorGqaAttention) return;
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorGqaAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
         float[] q = Half(Random(batch * hq * sq * d, 1));
         float[] k = Half(Random(batch * hkv * skv * d, 2));
         float[] v = Half(Random(batch * hkv * skv * d, 3));
@@ -49,9 +50,9 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [InlineData(4, 2, 70, 96, false)]
     public void TokenMajorGqa_MatchesReference(int hq, int hkv, int s, int d, bool masked)
     {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.SupportsTokenMajorGqaAttention) return;
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorGqaAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
         float[] q = Half(Random(hq * s * d, 5));
         float[] k = Half(Random(hkv * s * d, 6));
         float[] v = Half(Random(hkv * s * d, 7));
@@ -66,6 +67,137 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         using Tensor ot = new(new TensorShape(s, hq * d), DType.F32);
         backend.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mt, hq, hkv, d, scale, allowF16: true);
         Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
+    }
+
+    /// <summary>Causal prefill through <c>FlashAttention</c> (the path LLM prefill takes) on the cm2 kernel against the
+    /// CPU reference. K/V live in a buffer whose sequence capacity exceeds kvLen, as a KV cache does, so the
+    /// head stride comes from the capacity while the attended length comes from kvLen.</summary>
+    [Theory]
+    [InlineData(16, 8, 64, 77, 77, 0, 0, 0)]     // granite-3.0-1b: GQA 2, d 64, tile tail
+    [InlineData(14, 2, 64, 100, 100, 0, 0, 0)]   // Qwen2.5-0.5B: GQA 7, d 64
+    [InlineData(32, 8, 128, 130, 130, 0, 0, 0)]  // Qwen3-4B class: GQA 4, d 128
+    [InlineData(16, 16, 128, 96, 96, 0, 0, 0)]   // OLMoE-1B-7B: MHA, d 128
+    [InlineData(32, 8, 64, 70, 70, 0, 0, 17)]    // Llama-3.2-1B: GQA 4, d 64, capacity > kvLen
+    [InlineData(32, 8, 64, 70, 200, 130, 0, 0)]  // chunked prefill: query rows at offset 130 over 200 keys
+    [InlineData(16, 8, 64, 90, 90, 0, 32, 0)]    // sliding window 32
+    [InlineData(16, 8, 64, 150, 150, 0, 48, 9)]  // window plus capacity padding plus a partial tile
+    public void CausalPrefill_MatchesReference(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad) =>
+        CausalPrefillMatchesReference(flashCm2: true, hq, hkv, d, sq, kvLen, qOffset, window, pad);
+
+    /// <summary>The scalar causal path, which <c>numerics.vkFlashCm2Prefill=0</c> keeps for every prefill: the same
+    /// reference, on the shapes that cover GQA 7, a chunk at a query offset, and a window over capacity padding.
+    /// No cm2 dispatch may run.</summary>
+    [Theory]
+    [InlineData(14, 2, 64, 100, 100, 0, 0, 0)]   // Qwen2.5-0.5B: GQA 7, d 64
+    [InlineData(32, 8, 64, 70, 200, 130, 0, 0)]  // chunked prefill: query rows at offset 130 over 200 keys
+    [InlineData(16, 8, 64, 150, 150, 0, 48, 9)]  // window plus capacity padding plus a partial tile
+    public void CausalPrefill_FlagOff_UsesScalarPath_MatchesReference(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad) =>
+        CausalPrefillMatchesReference(flashCm2: false, hq, hkv, d, sq, kvLen, qOffset, window, pad);
+
+    /// <summary>Shared body of the two causal theories: the CPU reference, FlashAttention on the backend that
+    /// <c>HARTSY_TEST_VULKAN_DEVICE</c> names (or the default), and a check that the cm2 kernel ran exactly when the flag is on.</summary>
+    private void CausalPrefillMatchesReference(bool flashCm2, int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (flashCm2 && !backend.SupportsTokenMajorGqaAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        backend.EnableFlashCm2Prefill = flashCm2;
+        float scale = 1f / MathF.Sqrt(d);
+        float[] q = Half(Random(hq * sq * d, 11));
+        float[] k = Half(Random(hkv * kvLen * d, 12));
+        float[] v = Half(Random(hkv * kvLen * d, 13));
+        float[] expected = new float[hq * sq * d];
+        using (Tensor rq = FromHost(new TensorShape(1, hq, sq, d), q))
+        using (Tensor rk = FromHost(new TensorShape(1, hkv, kvLen, d), k))
+        using (Tensor rv = FromHost(new TensorShape(1, hkv, kvLen, d), v))
+        using (Tensor ro = new(new TensorShape(1, hq, sq, d), DType.F32))
+        {
+            AttentionReference.FlashAttention(ro, rq, rk, rv, kvLen, hq / hkv, causal: true, qOffset, scale,
+                slidingWindow: window);
+            ro.AsReadOnlySpan<float>().CopyTo(expected);
+        }
+        int cap = kvLen + pad;
+        float[] kPadded = Pad(k, hkv, kvLen, cap, d);
+        float[] vPadded = Pad(v, hkv, kvLen, cap, d);
+        using Tensor qt = FromHost(new TensorShape(1, hq, sq, d), q);
+        using Tensor kt = FromHost(new TensorShape(1, hkv, cap, d), kPadded);
+        using Tensor vt = FromHost(new TensorShape(1, hkv, cap, d), vPadded);
+        using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        long before = backend.FlashCm2PrefillDispatches;
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, hq / hkv, causal: true, qOffset, scale, slidingWindow: window);
+        Assert.Equal(before + (flashCm2 ? 1 : 0), backend.FlashCm2PrefillDispatches);
+        Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
+    }
+
+    /// <summary>A prefill whose host mask would be above the cap takes the scalar kernel: no cm2 dispatch and no mask
+    /// retained. The shape is 8193 query rows by 8192 keys, one row past the 8K cap. Its first 64 rows are checked against
+    /// the reference for a 64-row prefill over the same keys, which is exact for causal attention and keeps the CPU
+    /// reference cheap.</summary>
+    [Fact]
+    public void CausalPrefill_AboveTheMaskCap_TakesTheScalarPath_AndRetainsNoMask()
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        backend.EnableFlashCm2Prefill = true;
+        const int hq = 1, hkv = 1, d = 64, sq = 8193, kvLen = 8192, check = 64;
+        float scale = 1f / MathF.Sqrt(d);
+        float[] q = Half(Random(hq * sq * d, 21));
+        float[] k = Half(Random(hkv * kvLen * d, 22));
+        float[] v = Half(Random(hkv * kvLen * d, 23));
+        float[] expected = new float[hq * check * d];
+        using (Tensor rq = FromHost(new TensorShape(1, hq, check, d), q.AsSpan(0, hq * check * d).ToArray()))
+        using (Tensor rk = FromHost(new TensorShape(1, hkv, kvLen, d), k))
+        using (Tensor rv = FromHost(new TensorShape(1, hkv, kvLen, d), v))
+        using (Tensor ro = new(new TensorShape(1, hq, check, d), DType.F32))
+        {
+            AttentionReference.FlashAttention(ro, rq, rk, rv, kvLen, hq / hkv, causal: true, 0, scale, slidingWindow: 0);
+            ro.AsReadOnlySpan<float>().CopyTo(expected);
+        }
+        using Tensor qt = FromHost(new TensorShape(1, hq, sq, d), q);
+        using Tensor kt = FromHost(new TensorShape(1, hkv, kvLen, d), k);
+        using Tensor vt = FromHost(new TensorShape(1, hkv, kvLen, d), v);
+        using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        long before = backend.FlashCm2PrefillDispatches;
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, hq / hkv, causal: true, 0, scale, slidingWindow: 0);
+        Assert.Equal(before, backend.FlashCm2PrefillDispatches);
+        Assert.Equal(0L, backend.FlashCm2RetainedMaskBytes);
+        Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>().Slice(0, hq * check * d)) < Tolerance);
+    }
+
+    /// <summary>The cached host mask is held across a prefill's cm2 layers and released by the next attention call that does
+    /// not take the cm2 path, such as a decode step.</summary>
+    [Fact]
+    public void CausalPrefill_MaskIsHeldAcrossLayers_AndReleasedByTheNextDecodeCall()
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        backend.EnableFlashCm2Prefill = true;
+        const int hq = 2, hkv = 2, d = 64, sq = 128, kvLen = 128;
+        float scale = 1f / MathF.Sqrt(d);
+        using Tensor qt = FromHost(new TensorShape(1, hq, sq, d), Half(Random(hq * sq * d, 31)));
+        using Tensor kt = FromHost(new TensorShape(1, hkv, kvLen, d), Half(Random(hkv * kvLen * d, 32)));
+        using Tensor vt = FromHost(new TensorShape(1, hkv, kvLen, d), Half(Random(hkv * kvLen * d, 33)));
+        using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, 1, causal: true, 0, scale, slidingWindow: 0);
+        Assert.Equal(4L * sq * kvLen, backend.FlashCm2RetainedMaskBytes);
+        // The next layer of the same prefill reuses the mask.
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, 1, causal: true, 0, scale, slidingWindow: 0);
+        Assert.Equal(4L * sq * kvLen, backend.FlashCm2RetainedMaskBytes);
+        // A decode step (one query row) does not take the cm2 path, so the mask is released.
+        using Tensor q1 = FromHost(new TensorShape(1, hq, 1, d), Half(Random(hq * d, 34)));
+        using Tensor o1 = new(new TensorShape(1, hq, 1, d), DType.F32);
+        backend.FlashAttention(o1, q1, kt, vt, kvLen, 1, causal: true, kvLen - 1, scale, slidingWindow: 0);
+        Assert.Equal(0L, backend.FlashCm2RetainedMaskBytes);
+    }
+
+    private static float[] Pad(float[] dense, int heads, int len, int cap, int d)
+    {
+        float[] p = new float[heads * cap * d];
+        for (int h = 0; h < heads; h++)
+        {
+            Array.Copy(dense, h * len * d, p, h * cap * d, len * d);
+        }
+        return p;
     }
 
     private double MaxError(float[] expected, ReadOnlySpan<float> actual)

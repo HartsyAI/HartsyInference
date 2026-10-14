@@ -2555,6 +2555,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         if (softcap == 0f && sink is null && alibiSlopes is null && headDim <= FlashMaxHeadDim)
         {
             using OpScope _op = EnterOp();
+            if (causal && TryFlashCm2CausalPrefill(output, query, key, value, kvLen, kvGroup, qOffset, scale, slidingWindow))
+                return;
+            // Not the cm2 path: no later layer of this prefill needs the cached host mask, so release it (see _prefillMask).
+            ReleasePrefillMask();
             DispatchFlashAttention(output, query, key, value, mask: null, scale, causal, qOffset, slidingWindow, skv: kvLen, kvGroup);
             return;
         }
@@ -4665,6 +4669,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         _disposed = true;
         try { _stream.WaitIdleHost(); }
         catch (Exception ex) { Logs.Warning($"Vulkan Dispose: WaitIdleHost failed, continuing teardown: {ex}"); }
+        _prefillMask?.Dispose();
+        _prefillMask = null;
         // Dump profiling data (no-op when HARTSYINFERENCE_VK_PROFILE is unset) before tearing down
         // anything that the per-op records reference (op names are strings only, but flush before
         // we lose the device just to be tidy).
