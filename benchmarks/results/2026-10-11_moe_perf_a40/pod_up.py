@@ -8,7 +8,7 @@ usage: pod_up.py [name] [--max-hours H]
 import argparse, json, os, pathlib, subprocess, sys, time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from watchdog import DEFAULT_MAX_HOURS, api, record_lease  # noqa: E402  (same kit dir; no key is copied to the pod)
+from watchdog import DEFAULT_MAX_HOURS, api, check_max_hours, record_lease  # noqa: E402  (same kit dir; no key is copied to the pod)
 
 KEY = str(pathlib.Path.home() / ".ssh/runpod_blackwell")
 KIT = pathlib.Path(__file__).resolve().parent   # holds bootstrap.sh, scripts/, cfg/, prompts/
@@ -17,6 +17,10 @@ ap = argparse.ArgumentParser()
 ap.add_argument("name", nargs="?", default="dsv41-perf-a40-t3")
 ap.add_argument("--max-hours", type=float, default=float(os.environ.get("PODKIT_MAX_HOURS", DEFAULT_MAX_HOURS)))
 args = ap.parse_args()
+try:
+    args.max_hours = check_max_hours(args.max_hours)   # before the create request: a bad value must not leave a pod without a lease
+except ValueError as e:
+    sys.exit(f"refusing to rent a pod: {e}")
 name = args.name
 pub = pathlib.Path(KEY + ".pub").read_text().strip()
 body = {"name": name, "imageName": "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404", "gpuTypeIds": ["NVIDIA A40"], "gpuCount": 1,

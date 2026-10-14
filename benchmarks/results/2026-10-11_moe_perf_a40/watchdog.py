@@ -16,7 +16,7 @@ usage: watchdog.py --once | --loop [--interval SEC]   [--dry-run]   [--leases PA
 Limitation: it acts only while the operator machine is awake and cron (or the loop) runs. A machine that is off cannot
 stop anything; the RunPod console remains the fallback.
 """
-import argparse, contextlib, datetime as dt, json, os, pathlib, subprocess, sys, time
+import argparse, contextlib, datetime as dt, json, math, os, pathlib, subprocess, sys, time
 
 try:
     import fcntl
@@ -27,11 +27,21 @@ API = "https://rest.runpod.io/v1"
 CURLRC = pathlib.Path.home() / ".runpod/curlrc"
 LEASES = pathlib.Path.home() / ".runpod/podkit-leases.json"
 DEFAULT_MAX_HOURS = 6.0
+REQUEST_TIMEOUT_S = 60
+
+
+def check_max_hours(value):
+    """Return the lifetime as a float, or raise ValueError. Checked before a pod is rented, not after."""
+    h = float(value)
+    if not (math.isfinite(h) and h > 0):
+        raise ValueError(f"max hours must be a finite number above 0; got {value!r}")
+    return h
 
 
 def api(method, path, body=None, curlrc=CURLRC):
     """One RunPod REST call through curl, so the API key stays in the curlrc file. Returns (http_code, parsed_body_or_text)."""
-    cmd = ["curl", "-s", "--config", str(curlrc), "-X", method, API + path, "-w", "\n%{http_code}"]
+    # --max-time bounds a stalled connection: the lease lock is held across run_once's calls, so a hang here would block every writer.
+    cmd = ["curl", "-s", "--max-time", str(REQUEST_TIMEOUT_S), "--config", str(curlrc), "-X", method, API + path, "-w", "\n%{http_code}"]
     if body is not None:
         cmd += ["-d", json.dumps(body)]
     out = subprocess.run(cmd, capture_output=True, text=True).stdout
@@ -75,14 +85,13 @@ def save_leases(leases, path=LEASES):
 
 def record_lease(pod_id, name, max_hours, path=LEASES, now=None):
     """Called by pod_up.py right after POST /pods succeeds, before the wait loop, so a failed bring-up still has a lease."""
-    if max_hours <= 0:
-        raise ValueError("max_hours must be positive")
+    max_hours = check_max_hours(max_hours)
     with _lease_lock(path):
         leases = load_leases(path)
         leases[pod_id] = {
             "name": name,
             "started": (now or dt.datetime.now(dt.timezone.utc)).isoformat(),
-            "max_hours": float(max_hours),
+            "max_hours": max_hours,
             "stop_requested": None,
         }
         save_leases(leases, path)

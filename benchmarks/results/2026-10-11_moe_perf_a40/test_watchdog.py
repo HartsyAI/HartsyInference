@@ -50,9 +50,23 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(rec["started"], T0.isoformat())
         self.assertIsNone(rec["stop_requested"])
 
-    def test_record_lease_rejects_nonpositive(self):
-        with self.assertRaises(ValueError):
-            watchdog.record_lease("p1", "x", 0, path=self.leases)
+    def test_record_lease_rejects_nonpositive_or_nonfinite(self):
+        for bad in (0, -1, float("nan"), float("inf"), "soon"):
+            with self.assertRaises(ValueError):
+                watchdog.record_lease("p1", "x", bad, path=self.leases)
+        self.assertEqual(watchdog.load_leases(self.leases), {})
+
+    def test_check_max_hours_accepts_positive_finite(self):
+        self.assertEqual(watchdog.check_max_hours("2.5"), 2.5)
+
+    def test_curl_calls_are_time_bounded(self):
+        import unittest.mock as um
+        with um.patch.object(watchdog.subprocess, "run") as run:
+            run.return_value.stdout = "{}\n200"
+            watchdog.api("GET", "/pods")
+        cmd = run.call_args[0][0]
+        self.assertIn("--max-time", cmd)
+        self.assertEqual(cmd[cmd.index("--max-time") + 1], str(watchdog.REQUEST_TIMEOUT_S))
 
     def test_stops_only_running_pods_past_max(self):
         self.lease("old", 7)          # 7 h old, max 6: due
