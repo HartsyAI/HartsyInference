@@ -111,9 +111,10 @@ internal static class GptSoVitsModel
                     using Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
                     // Deliberate deviation: upstream seeds once per run, so its fragments draw from one continuing
                     // RNG stream. The engine seeds each fragment as Seed + i (segment 0 keeps the request seed), which
-                    // stays reproducible per seed without reusing one stream start for every fragment.
+                    // stays reproducible per seed without reusing one stream start for every fragment. An unset seed
+                    // (0) is sampled as seed 0, as before, so it gets 0, 1, 2, ... too.
                     float[] fragment = pipeline.Generate(backend, referencePcm, hubertLength, referenceSpec,
-                        specFrames, allIds, zeroBert, targetIds, seed: job.Seed == 0 ? 0 : job.Seed + i);
+                        specFrames, allIds, zeroBert, targetIds, seed: unchecked(job.Seed + i));
                     AppendPeakLimited(output, fragment);
                     output.AddRange(new float[gap]);
                 }
