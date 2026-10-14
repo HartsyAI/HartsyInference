@@ -77,25 +77,48 @@ internal static class GptSoVitsModel
                 Tensor referenceSpec = LinearSpectrogram.Extract(reference32k, 2048, 640);
                 int specFrames = (int)referenceSpec.Shape[2];
 
-                // English G2P → phoneme ids; the s1 text span is ref + target, BERT is zero for the English path.
-                int[] referenceIds = GptSoVitsSymbols.ToSequence(GptSoVitsFrontend.CleanText(job.RefText, "en").Phones);
-                int[] targetIds = GptSoVitsSymbols.ToSequence(GptSoVitsFrontend.CleanText(job.Text, "en").Phones);
-                int[] allIds = [.. referenceIds, .. targetIds];
-                Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
+                // Upstream TTS.run: the target is cut (four sentences per segment), each segment is synthesized after
+                // the reference transcript's phones (s1 text span = ref + segment, zero BERT on the English path), and
+                // the fragments are joined with 0.3 s of silence after each.
+                int[] referenceIds = GptSoVitsSymbols.ToSequence(GptSoVitsTextSegmenter.PrepareEnglishPrompt(job.RefText).Phones);
+                List<GptSoVitsTextSegment> segments = GptSoVitsTextSegmenter.PrepareEnglish(job.Text);
+                if (segments.Count == 0)
+                {
+                    throw new InvalidOperationException("GPT-SoVITS found nothing to speak in the text.");
+                }
+                int gap = pipeline.SampleRate * 3 / 10;
+                List<float> output = [];
                 try
                 {
-                    return pipeline.Generate(backend, referencePcm, reference16k.Length, referenceSpec, specFrames,
-                        allIds, zeroBert, targetIds, seed: job.Seed);
+                    for (int i = 0; i < segments.Count; i++)
+                    {
+                        int[] targetIds = GptSoVitsSymbols.ToSequence(segments[i].Phones);
+                        int[] allIds = [.. referenceIds, .. targetIds];
+                        using Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
+                        float[] fragment = pipeline.Generate(backend, referencePcm, reference16k.Length, referenceSpec,
+                            specFrames, allIds, zeroBert, targetIds, seed: job.Seed == 0 ? 0 : job.Seed + i);
+                        AppendPeakLimited(output, fragment);
+                        output.AddRange(new float[gap]);
+                    }
+                    return [.. output];
                 }
                 finally
                 {
                     referencePcm.Dispose();
                     referenceSpec.Dispose();
-                    zeroBert.Dispose();
                 }
             }, keep);
         },
     };
+
+    /// <summary>Appends <paramref name="fragment"/>, scaled down to peak 1 when it clips (upstream audio_postprocess).</summary>
+    private static void AppendPeakLimited(List<float> output, float[] fragment)
+    {
+        float peak = 0f;
+        foreach (float s in fragment) peak = MathF.Max(peak, MathF.Abs(s));
+        float divisor = peak > 1f ? peak : 1f;
+        foreach (float s in fragment) output.Add(s / divisor);
+    }
 
     /// <summary>GPT-SoVITS v2 SoVITS (VITS) config — resblock "1", upsample product 640 hop, 32 kHz output.</summary>
     private static VitsConfig V2Config() => new VitsConfig

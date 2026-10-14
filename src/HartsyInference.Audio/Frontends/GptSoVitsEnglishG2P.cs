@@ -1,120 +1,167 @@
-using System.Collections.Generic;
-using System.IO;
-using System.Reflection;
-using System.Text;
+using System.Text.RegularExpressions;
 
 namespace HartsyInference.Audio.Frontends;
 
-/// <summary>GPT-SoVITS English (en) G2P: maps English text to the model's ARPAbet phoneme symbols (the
-/// stress-marked set in <see cref="GptSoVitsSymbols"/>). Words are looked up in the embedded CMUdict
-/// (<c>cmudict.rep</c>); short out-of-vocabulary tokens fall back to letter-by-letter spelling and possessive
-/// <c>'s</c> splitting (the deterministic part of upstream <c>en_G2p.qryword</c>).
-///
-/// <para><b>Coverage:</b> CMUdict (~125k words) covers the vast majority of text. Longer OOV words that
-/// upstream resolves with the g2p_en neural LTS, and POS-based homograph disambiguation, are accuracy
-/// refinements not yet ported — such words are letter-spelled or skipped, never producing a non-symbol.</para></summary>
-public static class GptSoVitsEnglishG2P
+/// <summary>GPT-SoVITS English (en) G2P: upstream <c>text/english.py</c>. Text is normalized
+/// (<see cref="GptSoVitsEnglishNormalizer"/>), split with NLTK's TweetTokenizer rules and POS-tagged
+/// (<see cref="PerceptronPosTagger"/>); each word then takes the first of: punctuation as itself, single letters,
+/// g2p_en homographs by tag, GPT-SoVITS's merged CMU dictionary (<c>cmudict.rep</c> + <c>cmudict-fast.rep</c> +
+/// <c>engdict-hot.rep</c>), the name dictionary for title-case words, letter spelling up to three letters, the
+/// possessive rule, <see cref="WordSegmenter"/> compounds, and the g2p_en neural letter-to-sound model
+/// (<see cref="G2pEnLetterToSound"/>). Output phones are filtered to the v2 symbol set as upstream does.</summary>
+public static partial class GptSoVitsEnglishG2P
 {
-    private const string DictResource = "HartsyInference.Audio.Frontends.Resources.cmudict.rep";
-    private static readonly Dictionary<string, string[]> _cmu = LoadDict();
+    private static readonly Lazy<Dictionary<string, string[]>> Cmu = new(() => LoadDict("gptsovits_en_dict.txt.gz"));
+    private static readonly Lazy<Dictionary<string, string[]>> Names = new(() => LoadDict("gptsovits_en_names.txt.gz"));
+    private static readonly Lazy<Dictionary<string, Homograph>> Homographs = new(LoadHomographs);
+    private static readonly HashSet<string> DroppedPhones = new(StringComparer.Ordinal) { " ", "<pad>", "UW", "</s>", "<s>" };
 
-    private static Dictionary<string, string[]> LoadDict()
-    {
-        Dictionary<string, string[]> dict = new(130_000);
-        Assembly asm = typeof(GptSoVitsEnglishG2P).Assembly;
-        using Stream? s = asm.GetManifestResourceStream(DictResource)
-            ?? throw new InvalidOperationException($"Embedded resource '{DictResource}' is missing.");
-        using StreamReader reader = new(s, Encoding.UTF8);
-        string? line;
-        int idx = 0;
-        while ((line = reader.ReadLine()) is not null)
-        {
-            idx++;
-            if (idx < 57) continue;     // skip the CMUdict license header (read_dict_new)
-            int sep = line.IndexOf("  ", System.StringComparison.Ordinal);
-            if (sep <= 0) continue;
-            string word = line[..sep].ToLowerInvariant();
-            string[] phones = line[(sep + 2)..].Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
-            dict.TryAdd(word, phones);
-        }
-        return dict;
-    }
-
-    /// <summary>Converts English text to ARPAbet phoneme symbols. Tokenizes into words and punctuation; every
-    /// emitted phone is guaranteed to be in the model symbol set.</summary>
+    /// <summary>Upstream <c>clean_text(text, "en")</c> phones: normalize, phonemize, and prefix a comma when fewer than
+    /// four phones result.</summary>
     public static List<string> G2P(string text)
     {
-        // Spoken form first: CMUdict has no entries for digits, so numbers, dates and currency would otherwise fall
-        // through to the letter-spelling fallback. Same normalizer the IndexTTS frontends use.
-        text = HartsyInference.Audio.Pipelines.EnglishSpokenForm.Expand(text);
-        List<string> phones = [];
-        foreach (string token in Tokenize(text))
-        {
-            if (token.Length == 1 && PinyinPhonemizer.IsPunctuation(token))
-            {
-                phones.Add(token);
-                continue;
-            }
-            foreach (string ph in QueryWord(token))
-                if (GptSoVitsSymbols.IdOf(ph) >= 0) phones.Add(ph);
-        }
-        // Upstream: pad short utterances so the model has enough context.
+        List<string> phones = Phonemize(Normalize(text));
         if (phones.Count < 4) phones.Insert(0, ",");
         return phones;
     }
 
-    /// <summary>Word → ARPAbet phones: CMUdict lookup, then the deterministic OOV fallbacks (possessive split,
-    /// letter-spelling for short tokens).</summary>
-    private static IEnumerable<string> QueryWord(string oWord)
+    /// <summary>Upstream <c>english.text_normalize</c>; the text the phones are read from.</summary>
+    public static string Normalize(string text) => GptSoVitsEnglishNormalizer.TextNormalize(text);
+
+    /// <summary>Upstream <c>english.g2p</c> on already-normalized text: every phone is a v2 symbol.</summary>
+    public static List<string> Phonemize(string normalizedText)
+    {
+        ArgumentNullException.ThrowIfNull(normalizedText);
+        List<string> words = Tokenize(normalizedText);
+        string[] tags = words.Count == 0 ? [] : PerceptronPosTagger.English.Tag(words);
+        List<string> phones = [];
+        for (int i = 0; i < words.Count; i++)
+        {
+            foreach (string ph in WordPhones(words[i], tags[i]))
+            {
+                if (DroppedPhones.Contains(ph)) continue;
+                string p = ph == "<unk>" ? "UNK" : ph;
+                if (GptSoVitsSymbols.IdOf(p) >= 0) phones.Add(p);
+                else if (p == "'") phones.Add("-");
+            }
+        }
+        return phones;
+    }
+
+    /// <summary>NLTK <c>TweetTokenizer().tokenize</c> restricted to what survives normalization (letters, space and
+    /// <c>'.,?!-</c>): bare domains ("example.com"), words with inner apostrophes or hyphens, other word runs, and
+    /// single punctuation marks.</summary>
+    internal static List<string> Tokenize(string text)
+    {
+        List<string> tokens = [];
+        foreach (Match m in TweetTokenRegex().Matches(text)) tokens.Add(m.Value);
+        return tokens;
+    }
+
+    // en_G2p.__call__ per token.
+    private static IReadOnlyList<string> WordPhones(string oWord, string pos)
     {
         string word = oWord.ToLowerInvariant();
-        if (word.Length > 1 && _cmu.TryGetValue(word, out string[]? p)) return p;
+        if (!HasAsciiLower(word)) return [word];
+        if (word.Length == 1) return oWord == "A" ? ["EY1"] : Cmu.Value[word];
+        if (Homographs.Value.TryGetValue(word, out Homograph h))
+        {
+            if (pos.StartsWith(h.Pos, StringComparison.Ordinal)) return h.First;
+            if (pos.Length < h.Pos.Length && h.Pos.StartsWith(pos, StringComparison.Ordinal)) return h.First;
+            return h.Second;
+        }
+        return QueryWord(oWord);
+    }
 
+    // en_G2p.qryword.
+    private static IReadOnlyList<string> QueryWord(string oWord)
+    {
+        string word = oWord.ToLowerInvariant();
+        if (word.Length > 1 && Cmu.Value.TryGetValue(word, out string[]? known)) return known;
+        if (IsTitle(oWord) && Names.Value.TryGetValue(word, out string[]? name)) return name;
         if (word.Length <= 3)
         {
-            List<string> phones = [];
+            List<string> letters = [];
             foreach (char w in word)
             {
-                if (w == 'a') phones.Add("EY1");
-                else if (!char.IsLetter(w)) phones.Add(w.ToString());
-                else if (_cmu.TryGetValue(w.ToString(), out string[]? lp)) phones.AddRange(lp);
+                if (w == 'a') letters.Add("EY1");
+                else if (!char.IsLetter(w)) letters.Add(w.ToString());
+                else letters.AddRange(Cmu.Value[w.ToString()]);
             }
-            return phones;
+            return letters;
         }
-        if (word.EndsWith("'s", System.StringComparison.Ordinal))
+        if (PossessiveRegex().IsMatch(word))
         {
             List<string> phones = [.. QueryWord(word[..^2])];
-            // 's voicing follows the final phone (S after unvoiced, Z otherwise) — approximate with Z.
-            if (phones.Count > 0) phones.Add(phones[^1] is "T" or "P" or "K" or "F" or "TH" ? "S" : "Z");
+            string last = phones.Count > 0 ? phones[^1] : "";
+            if (last is "P" or "T" or "K" or "F" or "TH" or "HH") phones.Add("S");
+            else if (last is "S" or "Z" or "SH" or "ZH" or "CH" or "JH") phones.AddRange(["AH0", "Z"]);
+            else phones.Add("Z");
             return phones;
         }
-        return [];     // long OOV: would use the g2p_en neural LTS (not yet ported)
+        List<string> parts = WordSegmenter.English.Segment(word);
+        if (parts.Count == 1) return G2pEnLetterToSound.English.Predict(word);
+        List<string> joined = [];
+        foreach (string part in parts) joined.AddRange(QueryWord(part));
+        return joined;
     }
 
-    /// <summary>Splits text into lowercase word tokens and single-character punctuation (normalized to the
-    /// symbol set). Whitespace and unsupported characters are dropped.</summary>
-    private static IEnumerable<string> Tokenize(string text)
+    private static bool HasAsciiLower(string word)
     {
-        StringBuilder word = new();
-        foreach (char ch in text)
-        {
-            if (char.IsLetter(ch) || ch == '\'')
-            {
-                word.Append(ch);
-                continue;
-            }
-            if (word.Length > 0) { yield return word.ToString(); word.Clear(); }
-            string? punct = ch switch
-            {
-                '.' or ';' => ".",
-                ',' => ",",
-                '!' => "!",
-                '?' => "?",
-                '-' => "-",
-                _ => null,
-            };
-            if (punct is not null) yield return punct;
-        }
-        if (word.Length > 0) yield return word.ToString();
+        foreach (char ch in word)
+            if (ch is >= 'a' and <= 'z') return true;
+        return false;
     }
+
+    // Python str.istitle(): upper/title-case letters only after uncased characters, lower-case only after cased ones.
+    private static bool IsTitle(string s)
+    {
+        bool cased = false, previousCased = false;
+        foreach (char ch in s)
+        {
+            if (char.IsUpper(ch))
+            {
+                if (previousCased) return false;
+                previousCased = cased = true;
+            }
+            else if (char.IsLower(ch))
+            {
+                if (!previousCased) return false;
+                previousCased = cased = true;
+            }
+            else previousCased = false;
+        }
+        return cased;
+    }
+
+    private static Dictionary<string, string[]> LoadDict(string resource)
+    {
+        Dictionary<string, string[]> dict = new(StringComparer.Ordinal);
+        foreach (string line in EmbeddedTextResource.ReadLines(resource))
+        {
+            int tab = line.IndexOf('\t', StringComparison.Ordinal);
+            dict[line[..tab]] = line[(tab + 1)..].Split(' ');
+        }
+        return dict;
+    }
+
+    private static Dictionary<string, Homograph> LoadHomographs()
+    {
+        Dictionary<string, Homograph> dict = new(StringComparer.Ordinal);
+        foreach (string line in EmbeddedTextResource.ReadLines("gptsovits_en_homographs.txt.gz"))
+        {
+            string[] f = line.Split('|');
+            dict[f[0]] = new Homograph(f[1].Split(' '), f[2].Split(' '), f[3]);
+        }
+        return dict;
+    }
+
+    [GeneratedRegex(@"^([a-z]+)('s)$")]
+    private static partial Regex PossessiveRegex();
+
+    [GeneratedRegex(@"(?<!@)[a-z0-9]+(?:[.\-][a-z0-9]+){0,126}[.](?:[a-z]{2,13})\b/?(?!@)|[^\W\d_](?:[^\W\d_]|['\-_])+[^\W\d_]|[\w_]+|\.(?:\s*\.)+|\S",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TweetTokenRegex();
+
+    private readonly record struct Homograph(string[] First, string[] Second, string Pos);
 }
