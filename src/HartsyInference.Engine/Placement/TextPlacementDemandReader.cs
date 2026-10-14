@@ -68,11 +68,45 @@ public static class TextPlacementDemandReader
         long keyLength = archValue("attention.key_length") ?? (heads > 0 ? hidden / heads : 0);
         long valueLength = archValue("attention.value_length") ?? keyLength;
         long kvPerToken = layers * kvHeads * (keyLength + valueLength) * (kvF16 ? 2 : 4);
-        return new TextPlacementDemand(dense, experts, layers, kvPerToken, contextTokens)
+        long prefillPerToken = PrefillBytesPerToken(tensors, archValue, hidden, layers, heads, kvHeads, keyLength, valueLength);
+        return new TextPlacementDemand(dense, experts, layers, kvPerToken, contextTokens, prefillPerToken)
         {
             ExpertsHostRunnable = hostReason is null,
             ExpertsHostReason = hostReason,
         };
+    }
+
+    /// <summary>F32 activation bytes one prompt token holds during prefill, which runs the whole prompt in one pass
+    /// (<c>GenerationCapabilities.MaxPrefillChunk</c> defaults to unbounded). Four hidden-wide buffers (residual, normed input,
+    /// attention and FFN inputs), the attention intermediates (Q, K, V and the attention output, at the widths the MLA path uses
+    /// for <c>deepseek2</c>), and the FFN intermediates at the widest layer: a dense FFN's gate, up, activation and down, or a
+    /// MoE token's experts. The widest FFN comes from the tensor headers, since a model may vary it by layer (Gemma-4). Gemma-4's
+    /// per-layer embeddings are built for the whole prompt before the first layer and held across the layers: the direct gather,
+    /// the projection and the per-layer results, each a token by per-layer-width by layer count, so three of them at the peak.</summary>
+    private static long PrefillBytesPerToken(IReadOnlyCollection<TextTensorInfo> tensors, Func<string, long?> archValue,
+        long hidden, long layers, long heads, long kvHeads, long keyLength, long valueLength)
+    {
+        bool mla = archValue("attention.key_length_mla") is not null;
+        long keyWidth = archValue("attention.key_length_mla") ?? keyLength;
+        long valueWidth = archValue("attention.value_length_mla") ?? valueLength;
+        long attnKvHeads = mla ? heads : kvHeads;
+        long attnWidth = heads * keyWidth + attnKvHeads * keyWidth + attnKvHeads * valueWidth + heads * valueWidth;
+
+        long ffnWidth = Math.Max(archValue("feed_forward_length") ?? 0,
+            (archValue("expert_feed_forward_length") ?? 0) * Math.Max(1, archValue("expert_used_count") ?? 1));
+        if (hidden > 0)
+        {
+            foreach (TextTensorInfo t in tensors)
+            {
+                if (t.Name.Contains("_exps.", StringComparison.Ordinal)) continue;
+                // The shared expert (ffn_*_shexp) runs beside the routed experts in the same layer, so its width counts too.
+                if (t.Name.EndsWith(".ffn_up.weight", StringComparison.Ordinal) || t.Name.EndsWith(".ffn_gate.weight", StringComparison.Ordinal)
+                    || t.Name.EndsWith(".ffn_up_shexp.weight", StringComparison.Ordinal) || t.Name.EndsWith(".ffn_gate_shexp.weight", StringComparison.Ordinal))
+                    ffnWidth = Math.Max(ffnWidth, t.Elements / hidden);
+            }
+        }
+        long pleWidth = archValue("embedding_length_per_layer_input") ?? 0;
+        return (hidden * 4 + attnWidth + ffnWidth * 4 + 3 * pleWidth * layers) * sizeof(float);
     }
 
     /// <summary>Why the packed CPU kernels cannot run this model's experts in place, or null when they can: every <c>*_exps</c>
