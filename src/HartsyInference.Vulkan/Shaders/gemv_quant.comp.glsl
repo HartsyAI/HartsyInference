@@ -11,7 +11,8 @@
 //              workgroup holds ROWS_PER_WG rows (its subgroups). Best where a lane's loads are the cost (memory-bound formats).
 //   SPLIT > 1: SPLIT subgroups share a row and sum through shared memory, with one barrier. Best where a unit's decode is the
 //              cost (Q5_0's bit unpacking), since more lanes work on one row.
-// Each lane unrolls four units per step, so four units' loads are in flight rather than each waited on in turn.
+// A subgroup-per-row lane unrolls four units per step, so four units' loads are in flight rather than each waited on in turn;
+// a split row takes one unit per step (see the main loop).
 // Plain float math: each unit dequantizes in registers and accumulates its dot per activation row. The integer dot-product
 // variant (dotPacked4x8 against an int8 activation, as the CUDA dp4a kernels do) is a follow-up; the distro glslang cannot
 // compile it.
@@ -72,11 +73,15 @@ void main() {
 
     if (live) {
         uint u = part * sg + lane;
-        for (; u + 3u * stride < units; u += 4u * stride) {
-            accumulateUnit(u, rowBase, K4, 0u);
-            accumulateUnit(u + stride, rowBase, K4, 0u);
-            accumulateUnit(u + 2u * stride, rowBase, K4, 0u);
-            accumulateUnit(u + 3u * stride, rowBase, K4, 0u);
+        // Four units per step for a subgroup per row (SPLIT 1). A split row takes one unit per step: its unrolled form measured
+        // slower on Q5_0, the split format, in the decode profile.
+        if (SPLIT == 1u) {
+            for (; u + 3u * stride < units; u += 4u * stride) {
+                accumulateUnit(u, rowBase, K4, 0u);
+                accumulateUnit(u + stride, rowBase, K4, 0u);
+                accumulateUnit(u + 2u * stride, rowBase, K4, 0u);
+                accumulateUnit(u + 3u * stride, rowBase, K4, 0u);
+            }
         }
         for (; u < units; u += stride) accumulateUnit(u, rowBase, K4, 0u);
     }
