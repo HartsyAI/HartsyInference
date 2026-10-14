@@ -72,9 +72,9 @@ public sealed class ResidencyReleaseRaceTests
 
     /// <summary>A tensor disposed on another thread reaches the cache through its binding callback, outside any op.
     /// It must not touch the cache while another thread's op is inside it, and it must not wait either: the release
-    /// is queued and runs at the cache's next op.</summary>
+    /// is queued and runs as the op lets go of the cache, with no later op needed.</summary>
     [Fact]
-    public void A_Dispose_During_Another_Threads_Op_Is_Deferred_To_The_Next_Op()
+    public void A_Dispose_During_Another_Threads_Op_Runs_When_That_Op_Ends()
     {
         using FakeBackend backend = new();
         using Tensor weight = NewTensor();
@@ -93,7 +93,6 @@ public sealed class ResidencyReleaseRaceTests
         backend.Cache.ResumeUploads();
         Assert.True(op.Join(Generous));
         Assert.Equal(1, cachedAfterDispose);
-        backend.RunOp(() => { });
         Assert.Equal(0, backend.Cache.ActivationCountForTest);
     }
 
@@ -161,6 +160,80 @@ public sealed class ResidencyReleaseRaceTests
         foreach (Tensor weight in weights)
         {
             weight.Dispose();
+        }
+    }
+
+    /// <summary>Two backends whose ops each read the other's device-resident tensor from host at once would wait on
+    /// each other's lock forever. One of them must fail instead, and the other finish.</summary>
+    [Fact]
+    public void Cross_Backend_Host_Reads_In_Opposite_Directions_Do_Not_Deadlock()
+    {
+        using FakeBackend first = new();
+        using FakeBackend second = new();
+        using Tensor onFirst = NewTensor();
+        using Tensor onSecond = NewTensor();
+        first.RunOp(() => first.Cache.CacheActivation(onFirst, first.Cache.AllocateForTest(Size(onFirst)), Size(onFirst)));
+        second.RunOp(() =>
+            second.Cache.CacheActivation(onSecond, second.Cache.AllocateForTest(Size(onSecond)), Size(onSecond)));
+        using Barrier bothInside = new(2);
+
+        Worker a = Worker.Start(() => first.RunOp(() =>
+        {
+            bothInside.SignalAndWait();
+            ReadHost(onSecond);
+        }));
+        Worker b = Worker.Start(() => second.RunOp(() =>
+        {
+            bothInside.SignalAndWait();
+            ReadHost(onFirst);
+        }));
+
+        (bool finished, Exception? failure) left = JoinCapturing(a);
+        (bool finished, Exception? failure) right = JoinCapturing(b);
+        Assert.True(left.finished && right.finished, "Two cross-backend host reads deadlocked.");
+        Assert.True(left.failure is not null || right.failure is not null);
+        Assert.IsType<ResidencyLockCycleException>(left.failure ?? right.failure);
+    }
+
+    /// <summary>After <see cref="GpuBackendBase.RefuseNewOps"/> the op in flight finishes and the next one fails
+    /// cleanly, which is how a teardown that could not wait stops a job before freeing its memory.</summary>
+    [Fact]
+    public void Refusing_New_Ops_Lets_The_Op_In_Flight_Finish_And_Fails_The_Next()
+    {
+        using FakeBackend backend = new();
+        using Tensor weight = NewTensor();
+        backend.Cache.PauseUploads();
+        Worker op = Worker.Start(() => backend.RunOp(() => backend.Cache.CopyToDevice(weight)));
+        Assert.True(backend.Cache.UploadEntered.Wait(Generous));
+
+        backend.RefuseNewOps();
+        backend.Cache.ResumeUploads();
+
+        Assert.True(op.Join(Generous));
+        Assert.Throws<ObjectDisposedException>(() => backend.RunOp(() => { }));
+    }
+
+    /// <summary>Corruption is recognised even where <see cref="Exception.TargetSite"/> is unavailable, as in a trimmed
+    /// or AOT build, when the failing block called nothing but the cache's own collections.</summary>
+    [Fact]
+    public void Corruption_Is_Recognised_Without_A_Target_Site_From_A_Collection_Call()
+    {
+        InvalidOperationException unthrown = new("Operations that change non-concurrent collections ...");
+        Assert.Null(unthrown.TargetSite);
+
+        Assert.True(GpuResidencyCache<FakeCache.Buffer>.IsCorruption(unthrown, collectionCallsOnly: true));
+        Assert.False(GpuResidencyCache<FakeCache.Buffer>.IsCorruption(unthrown));
+    }
+
+    private static (bool Finished, Exception? Failure) JoinCapturing(Worker worker)
+    {
+        try
+        {
+            return (worker.Join(Generous), null);
+        }
+        catch (InvalidOperationException ex) when (ex.InnerException is not null)
+        {
+            return (true, ex.InnerException);
         }
     }
 

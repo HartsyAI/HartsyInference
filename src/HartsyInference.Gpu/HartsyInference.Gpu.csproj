@@ -10,4 +10,8 @@
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Gpu.Tests" />
+  </ItemGroup>
+
 </Project>

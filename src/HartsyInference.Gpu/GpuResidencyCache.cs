@@ -81,9 +81,9 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// raise on a cache whose collections are otherwise valid.</summary>
     private const string ConcurrentUseThrower = "ThrowInvalidOperationException_ConcurrentOperationsNotSupported";
 
-    private readonly object _exclusive = new();
+    private readonly ResidencyLock _exclusive = new();
 
-    /// <summary>Releases and demotions that found another thread inside the cache, run at its next op.</summary>
+    /// <summary>Releases and demotions that found another thread inside the cache, run once it lets go.</summary>
     private readonly ConcurrentQueue<(Tensor Tensor, Callback Kind)> _deferredCallbacks = new();
     private long _hits;
     private long _misses;
@@ -92,7 +92,35 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     private volatile bool _resetPending;
 
     /// <inheritdoc/>
-    public object ExclusiveLock => _exclusive;
+    public void EnterExclusive() => _exclusive.Enter();
+
+    /// <inheritdoc/>
+    public void ExitExclusive()
+    {
+        if (!_exclusive.Exit())
+        {
+            return;
+        }
+        // A release queued after the last drain but before the exit would otherwise wait for the next op, which on an
+        // idle backend may never come. Retake the lock only while it is free, so this never blocks.
+        while (!_deferredCallbacks.IsEmpty && _exclusive.TryEnter())
+        {
+            try
+            {
+                RunDeferredCallbacks();
+            }
+            catch (InvalidOperationException ex)
+            {
+                // A queued release belongs to a tensor its owner already let go of; failing the unrelated caller that
+                // happened to let go of the lock would report it in the wrong place. A corruption is flagged anyway.
+                Logs.Warning($"[{GetType().Name}] A queued tensor release failed: {ex.Message}");
+            }
+            finally
+            {
+                _exclusive.Exit();
+            }
+        }
+    }
 
     /// <inheritdoc/>
     public bool ResetPending => _resetPending;
@@ -227,7 +255,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
                 return true;
             }
         }
-        catch (InvalidOperationException ex) when (IsCorruption(ex))
+        catch (InvalidOperationException ex) when (IsCorruption(ex, collectionCallsOnly: true))
         {
             throw Corrupted(ex);
         }
@@ -236,7 +264,13 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     }
 
     /// <summary>Whether <paramref name="error"/> is a collection reporting that concurrent use broke it.</summary>
-    private static bool IsCorruption(InvalidOperationException error) => error.TargetSite?.Name == ConcurrentUseThrower;
+    /// <param name="collectionCallsOnly">The failing block made no call but on the cache's own collections. Their
+    /// lookups and updates throw <see cref="InvalidOperationException"/> for nothing else, so the error needs no
+    /// further identification, which matters where <see cref="Exception.TargetSite"/> is unavailable (trimmed or
+    /// AOT builds without that metadata). Elsewhere a hook may throw the same type for its own reasons, and only the
+    /// collection's throw helper identifies the error.</param>
+    internal static bool IsCorruption(InvalidOperationException error, bool collectionCallsOnly = false) =>
+        collectionCallsOnly || error.TargetSite?.Name == ConcurrentUseThrower;
 
     /// <summary>Flags the cache for a full release at the backend's next op and returns the error that fails this
     /// one. A bucket chain that concurrent use broke stays broken: without the reset every later lookup would throw
@@ -348,13 +382,13 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <summary>Host code touched a tensor this cache promoted on its own initiative: give up the device copy.</summary>
     private void DemotePromotedWeight(Tensor tensor) => RunCallback(tensor, Callback.Demote);
 
-    /// <summary>Runs a tensor callback under <see cref="ExclusiveLock"/>, so it never interleaves with another
-    /// thread's op on this cache.</summary>
-    /// <remarks>A host read needs the bytes now, so it waits for the op in flight. A release or a demotion only gives
-    /// up a device copy, so when another thread holds the cache it is queued for this cache's next op instead:
-    /// waiting there could deadlock two backends whose ops each touch a tensor the other one holds. The lock comes
-    /// before <see cref="TryEnterCallback"/>, so a retiring backend that drains claimed callbacks while holding the
-    /// lock never waits on one blocked behind it.</remarks>
+    /// <summary>Runs a tensor callback under the exclusive lock, so it never interleaves with another thread's op on
+    /// this cache.</summary>
+    /// <remarks>A host read needs the bytes now, so it waits for the op in flight; a wait that would close a cycle
+    /// with another backend's thread throws instead (see <see cref="ResidencyLock"/>). A release or a demotion only
+    /// gives up a device copy, so when another thread holds the cache it is queued and runs as soon as the lock is
+    /// free, by whichever thread then finds it so. The lock comes before <see cref="TryEnterCallback"/>, so a retiring
+    /// backend that drains claimed callbacks while holding the lock never waits on one blocked behind it.</remarks>
     private void RunCallback(Tensor tensor, Callback kind)
     {
         // Disposal first, before any collection is touched: this callback was planted on a tensor that can outlive
@@ -365,11 +399,17 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
         if (kind == Callback.Sync)
         {
-            Monitor.Enter(_exclusive);
+            _exclusive.Enter();
         }
-        else if (!Monitor.TryEnter(_exclusive))
+        else if (!_exclusive.TryEnter())
         {
             _deferredCallbacks.Enqueue((tensor, kind));
+            // The holder may have let go between the failed attempt and the enqueue, after its own last look at the
+            // queue; then nobody else would run this until the next op.
+            if (_exclusive.TryEnter())
+            {
+                ExitExclusive();
+            }
             return;
         }
         try
@@ -404,7 +444,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
         finally
         {
-            Monitor.Exit(_exclusive);
+            ExitExclusive();
         }
     }
 
@@ -661,7 +701,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             // The caller did own this one after all, so the sweep must not free it a second time.
             PendingOrphans.Remove(buffer);
         }
-        catch (InvalidOperationException ex) when (IsCorruption(ex))
+        catch (InvalidOperationException ex) when (IsCorruption(ex, collectionCallsOnly: true))
         {
             throw Corrupted(ex);
         }
@@ -900,6 +940,12 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     public void DrainFinalizerCleanup()
     {
         Tensor.DrainPendingFinalizerGpuCleanup(BindingKey);
+        RunDeferredCallbacks();
+    }
+
+    /// <summary>Runs the queued releases and demotions. The caller holds the exclusive lock.</summary>
+    private void RunDeferredCallbacks()
+    {
         while (_deferredCallbacks.TryDequeue(out (Tensor Tensor, Callback Kind) deferred))
         {
             RunCallback(deferred.Tensor, deferred.Kind);

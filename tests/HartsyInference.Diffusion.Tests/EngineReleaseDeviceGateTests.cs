@@ -68,6 +68,22 @@ public sealed class EngineReleaseDeviceGateTests
         Assert.Equal(1, device.FreeAllCalls);
     }
 
+    /// <summary>A teardown that cannot wait for a job stops the job at its next op before it disposes the backend,
+    /// instead of freeing device memory under it.</summary>
+    [Fact]
+    public void Teardown_StopsAJobThatOutlastsTheWait_BeforeDisposingTheBackend()
+    {
+        IBackend backend = GateRecordingBackend.Create(ordinal: 9103, out GateRecordingBackend device);
+        InferenceEngine engine = new(backend, "cuda:9103") { DeviceReleaseWait = TimeSpan.FromMilliseconds(100) };
+
+        using (DeviceGate.AcquireForCudaOrdinal(9103))
+        {
+            engine.Dispose();
+        }
+
+        Assert.Equal(["RefuseNewOps", "Dispose"], device.Lifecycle);
+    }
+
     /// <summary>A GPU-looking backend that records when the engine asks it to release everything.</summary>
     public class GateRecordingBackend : DispatchProxy
     {
@@ -81,6 +97,9 @@ public sealed class EngineReleaseDeviceGateTests
         public int FreeAllCalls => Volatile.Read(ref _freeAllCalls);
 
         public int FreeAllDuringJob => Volatile.Read(ref _freeAllDuringJob);
+
+        /// <summary>The refusal and disposal calls, in order.</summary>
+        public List<string> Lifecycle { get; } = [];
 
         public static IBackend Create(int ordinal, out GateRecordingBackend fake)
         {
@@ -108,7 +127,13 @@ public sealed class EngineReleaseDeviceGateTests
                     return null;
                 case nameof(IBackend.FreeActivations):
                 case nameof(IBackend.TrimMemoryPool):
+                    return null;
+                case nameof(IBackend.RefuseNewOps):
                 case nameof(IDisposable.Dispose):
+                    lock (Lifecycle)
+                    {
+                        Lifecycle.Add(targetMethod.Name);
+                    }
                     return null;
                 default:
                     throw new NotSupportedException($"{targetMethod.Name} is not reachable from an engine release.");

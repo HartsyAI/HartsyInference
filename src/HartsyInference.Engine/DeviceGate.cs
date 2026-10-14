@@ -102,31 +102,7 @@ public static class DeviceGate
     public static bool TryAcquireAll(IEnumerable<IBackend?> backends, TimeSpan timeout, out IDisposable held)
     {
         held = _noop;
-        if (_concurrent)
-        {
-            return true;
-        }
-        List<int> ordinals = SortedDistinct(CudaOrdinalsOf(backends));
-        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
-        List<SemaphoreSlim> acquired = new(ordinals.Count);
-        foreach (int ordinal in ordinals)
-        {
-            SemaphoreSlim gate = _gates.GetOrAdd(ordinal, static _ => new SemaphoreSlim(1, 1));
-            if (!gate.Wait(TimeSpan.FromMilliseconds(Math.Max(0, deadline - Environment.TickCount64))))
-            {
-                for (int i = acquired.Count - 1; i >= 0; i--)
-                {
-                    acquired[i].Release();
-                }
-                return false;
-            }
-            acquired.Add(gate);
-        }
-        if (acquired.Count > 0)
-        {
-            held = new MultiReleaser(acquired);
-        }
-        return true;
+        return _concurrent || TryAcquireSorted(SortedDistinct(CudaOrdinalsOf(backends)), timeout, default, out held);
     }
 
     /// <summary>Ordinal-list form of <see cref="AcquireAll"/> (negatives = CPU, ignored).</summary>
@@ -136,30 +112,52 @@ public static class DeviceGate
         {
             return _noop;
         }
-        List<int> sorted = SortedDistinct(ordinals);
+        TryAcquireSorted(SortedDistinct(ordinals), Timeout.InfiniteTimeSpan, cancel, out IDisposable held);
+        return held;
+    }
+
+    /// <summary>Takes the slots for <paramref name="sorted"/> in ascending order, giving up when
+    /// <paramref name="timeout"/> has passed in total (infinite waits for good). Returns false holding nothing on a
+    /// timeout; on a cancellation releases what it took and throws.</summary>
+    private static bool TryAcquireSorted(List<int> sorted, TimeSpan timeout, CancellationToken cancel,
+        out IDisposable held)
+    {
+        held = _noop;
         if (sorted.Count == 0)
         {
-            return _noop;
+            return true;
         }
+        bool infinite = timeout == Timeout.InfiniteTimeSpan;
+        long deadline = infinite ? 0 : Environment.TickCount64 + (long)timeout.TotalMilliseconds;
         List<SemaphoreSlim> acquired = new(sorted.Count);
+        bool complete = false;
         try
         {
             foreach (int ordinal in sorted)
             {
                 SemaphoreSlim gate = _gates.GetOrAdd(ordinal, static _ => new SemaphoreSlim(1, 1));
-                gate.Wait(cancel);
+                TimeSpan wait = infinite ? Timeout.InfiniteTimeSpan
+                    : TimeSpan.FromMilliseconds(Math.Max(0, deadline - Environment.TickCount64));
+                if (!gate.Wait(wait, cancel))
+                {
+                    return false;
+                }
                 acquired.Add(gate);
             }
+            complete = true;
         }
-        catch
+        finally
         {
-            for (int i = acquired.Count - 1; i >= 0; i--)
+            if (!complete)
             {
-                acquired[i].Release();
+                for (int i = acquired.Count - 1; i >= 0; i--)
+                {
+                    acquired[i].Release();
+                }
             }
-            throw;
         }
-        return new MultiReleaser(acquired);
+        held = new MultiReleaser(acquired);
+        return true;
     }
 
     private static IEnumerable<int> CudaOrdinalsOf(IEnumerable<IBackend?> backends)

@@ -17,12 +17,16 @@ public interface IGpuResidency : IDisposable
     /// others. Every instance therefore gets a distinct key.</para></summary>
     nint BindingKey { get; }
 
-    /// <summary>The lock that makes the cache's bookkeeping single-threaded: the owning backend holds it across every
-    /// op, and a tensor's sync or dispose callback takes it before touching the cache. A whole-cache release is an
-    /// op, so it can never interleave with another thread's lookup.</summary>
-    /// <remarks>Reentrant. Hold one backend's lock while taking another's only from a thread that no other thread
-    /// can be waiting on in the opposite order.</remarks>
-    object ExclusiveLock { get; }
+    /// <summary>Takes the lock that makes the cache's bookkeeping single-threaded. The owning backend holds it across
+    /// every op and its own disposal, and a tensor callback takes it before touching the cache, so a whole-cache
+    /// release can never interleave with another thread's lookup.</summary>
+    /// <remarks>Reentrant. A wait that would close a cycle with another thread's wait throws
+    /// <see cref="ResidencyLockCycleException"/>; see <see cref="ResidencyLock"/>.</remarks>
+    void EnterExclusive();
+
+    /// <summary>Releases one <see cref="EnterExclusive"/>. Releasing the last hold first runs the tensor releases
+    /// that arrived from other threads while it was held, so an idle backend does not keep them queued.</summary>
+    void ExitExclusive();
 
     /// <summary>Set when a lookup found the cache's collections corrupted. The backend releases every cached
     /// allocation at the start of its next op, so the request that found it fails and later ones do not.</summary>

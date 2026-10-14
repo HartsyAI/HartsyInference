@@ -24,6 +24,8 @@ namespace HartsyInference.Gpu;
 public abstract class GpuBackendBase
 {
     private int _opDepth;
+    private volatile bool _refusingOps;
+    private volatile int _disposingThread;
     private int _dispatchesThisOp;
     private int _disposed;
 
@@ -53,8 +55,8 @@ public abstract class GpuBackendBase
     /// not drain or sweep in the middle of itself, because the buffers it would reclaim are the ones its own later
     /// dispatches still read.
     ///
-    /// <para>Every scope holds the residency cache's <see cref="IGpuResidency.ExclusiveLock"/>, so ops on one
-    /// backend never overlap across threads. The release paths below are ops too: a full release issued on one
+    /// <para>Every scope holds the residency cache's exclusive lock (<see cref="IGpuResidency.EnterExclusive"/>), so
+    /// ops on one backend never overlap across threads. The release paths below are ops too: a full release issued on one
     /// thread waits for another thread's op to finish instead of emptying the cache under its lookups.</para></remarks>
     protected OpScope EnterOp([CallerMemberName] string opName = "") => new(this, opName);
 
@@ -83,7 +85,6 @@ public abstract class GpuBackendBase
         private readonly GpuBackendBase _backend;
         private readonly string _opName;
         private readonly long _startTicks;
-        private readonly object _exclusive;
 
         internal OpScope(GpuBackendBase backend, string opName)
         {
@@ -91,10 +92,15 @@ public abstract class GpuBackendBase
             _opName = opName;
             // First, before the depth is read: the depth and everything the scope touches belong to whichever
             // thread holds the lock.
-            _exclusive = backend.Residency.ExclusiveLock;
-            Monitor.Enter(_exclusive);
+            backend.Residency.EnterExclusive();
             try
             {
+                if (backend._opDepth == 0 && backend._refusingOps
+                    && backend._disposingThread != Environment.CurrentManagedThreadId)
+                {
+                    throw new ObjectDisposedException(backend.GetType().Name,
+                        "This backend is being torn down; the job still running on it was stopped at its next op.");
+                }
                 _startTicks = backend.ProfilingEnabled ? Stopwatch.GetTimestamp() : 0;
                 // Every depth, before anything else: binding identity is not the same question as reclaiming
                 // buffers. A backend that resolves its state ambiently must bind on re-entry too, because an op that
@@ -120,7 +126,7 @@ public abstract class GpuBackendBase
             }
             catch
             {
-                Monitor.Exit(_exclusive);
+                backend.Residency.ExitExclusive();
                 throw;
             }
         }
@@ -143,7 +149,7 @@ public abstract class GpuBackendBase
             }
             finally
             {
-                Monitor.Exit(_exclusive);
+                _backend.Residency.ExitExclusive();
             }
         }
     }
@@ -376,6 +382,11 @@ public abstract class GpuBackendBase
     /// cache and workspaces, a side table keyed by weight.</remarks>
     protected virtual void OnAllDeviceMemoryFreed() { }
 
+    /// <summary>Makes every op that starts from now on throw <see cref="ObjectDisposedException"/>; the op in flight
+    /// finishes. Called ahead of a teardown that could not wait for a job to end, so the job fails at its next op
+    /// instead of running against memory the teardown frees.</summary>
+    public void RefuseNewOps() => _refusingOps = true;
+
     /// <summary>Idempotent teardown.</summary>
     /// <remarks>Idempotent because a backend is disposed from more than one place in practice — a pipeline's
     /// <c>finally</c> and a test's <c>using</c> reaching the same object — and the second call must be a no-op
@@ -390,10 +401,16 @@ public abstract class GpuBackendBase
         try
         {
             // Under the cache lock, like an op, so teardown waits for another thread's op in flight instead of
-            // emptying the cache under it. That op's next entry then finds the backend gone.
-            lock (Residency.ExclusiveLock)
+            // emptying the cache under it. Teardown's own ops stay allowed after RefuseNewOps.
+            Residency.EnterExclusive();
+            try
             {
+                _disposingThread = Environment.CurrentManagedThreadId;
                 DisposeCore();
+            }
+            finally
+            {
+                Residency.ExitExclusive();
             }
         }
         finally
