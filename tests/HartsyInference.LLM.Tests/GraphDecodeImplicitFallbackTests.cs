@@ -13,6 +13,7 @@ namespace HartsyInference.LLM.Tests;
 /// <summary>Graph decode that a backend turns on by itself must never turn a request that decodes eagerly into an error:
 /// a capture that throws logs and falls back, while a graph the request asked for still reports its failure. The model
 /// here claims graph support and fails every capture; the decode underneath is the real CPU transformer.
+/// The implicit threshold is the backend's own (<c>IBackend.LlmGraphDecodeDefaultMinTokens</c>): 512 on the CPU and CUDA, 128 on Vulkan.
 /// The sliding-window and soft-cap gate (Gemma-2/3 on Vulkan) is at the end: the backend answers only the graph capability queries,
 /// and the real gate and refusal decide what the pipeline and the scheduler do with each request.</summary>
 public sealed class GraphDecodeImplicitFallbackTests
@@ -116,7 +117,7 @@ public sealed class GraphDecodeImplicitFallbackTests
         (FailingGraphModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = Build();
         using (model) using (backend)
         {
-            int n = TextGenerationPipeline.ImplicitGraphMinTokens;
+            int n = ((IBackend)backend).LlmGraphDecodeDefaultMinTokens;
             GenerationResult got = pipeline.Generate(Req(n, graph: null));
             Assert.Equal(1, model.CaptureAttempts);
             Assert.Equal(n, got.TokenIds.Count);
@@ -146,19 +147,24 @@ public sealed class GraphDecodeImplicitFallbackTests
         (FailingGraphModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = Build();
         using (model) using (backend)
         {
-            pipeline.Generate(Req(TextGenerationPipeline.ImplicitGraphMinTokens - 1, graph: null));
+            pipeline.Generate(Req(((IBackend)backend).LlmGraphDecodeDefaultMinTokens - 1, graph: null));
             Assert.Equal(0, model.CaptureAttempts);
         }
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
+    /// <summary>The implicit graph threshold per backend: 512 for CUDA and the CPU, which were not measured lower; 128 for Vulkan, measured on the RTX 3060.</summary>
+    private const int DefaultMinTokens = 512;
+    private const int VulkanMinTokens = 128;
+
     /// <summary>A backend that answers only the graph-decode capability queries the gate reads. <see cref="ByDefault"/> is the implicit-on policy (Vulkan takes it,
-    /// CUDA keeps the opt-in); <see cref="WindowSoftcap"/> says whether the device attention takes a sliding window and a soft-cap (CUDA does, Vulkan does not).
-    /// Any other member throws, so a test that reaches a device op through it fails loudly instead of passing on a stub value.</summary>
+    /// CUDA keeps the opt-in); <see cref="WindowSoftcap"/> says whether the device attention takes a sliding window and a soft-cap (CUDA does, Vulkan does not);
+    /// <see cref="MinTokens"/> is the implicit threshold it reports. Any other member throws, so a test that reaches a device op through it fails loudly instead of passing on a stub value.</summary>
     private class GraphGateBackend : DispatchProxy
     {
         public bool ByDefault { get; set; }
         public bool WindowSoftcap { get; set; }
+        public int MinTokens { get; set; }
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
@@ -167,19 +173,21 @@ public sealed class GraphDecodeImplicitFallbackTests
             {
                 "get_LlmGraphDecodeSupported" => true,
                 "get_LlmGraphDecodeDefault" => ByDefault,
+                "get_LlmGraphDecodeDefaultMinTokens" => MinTokens,
                 "get_LlmGraphDecodeWindowSoftcap" => WindowSoftcap,
                 _ => throw new NotSupportedException($"the graph gate test backend answers only graph capability queries, not {name}"),
             };
         }
     }
 
-    /// <summary>A backend that reports graph decode on, with the given implicit-default policy and window/soft-cap support.</summary>
-    private static IBackend Gate(bool byDefault, bool windowSoftcap)
+    /// <summary>A backend that reports graph decode on, with the given implicit-default policy, window/soft-cap support and implicit threshold.</summary>
+    private static IBackend Gate(bool byDefault, bool windowSoftcap, int minTokens)
     {
         IBackend backend = DispatchProxy.Create<IBackend, GraphGateBackend>();
         GraphGateBackend probe = (GraphGateBackend)(object)backend;
         probe.ByDefault = byDefault;
         probe.WindowSoftcap = windowSoftcap;
+        probe.MinTokens = minTokens;
         return backend;
     }
 
@@ -240,9 +248,64 @@ public sealed class GraphDecodeImplicitFallbackTests
     }
 
     [Fact]
+    public void TheCpuBackend_KeepsTheImplicitGraphThresholdAt512()
+    {
+        using CpuBackend cpu = new();
+        Assert.False(((IBackend)cpu).LlmGraphDecodeDefault);
+        Assert.Equal(DefaultMinTokens, ((IBackend)cpu).LlmGraphDecodeDefaultMinTokens);
+    }
+
+    [Fact]
+    public void VulkanShape_ImplicitGraphStartsAt128Tokens_AndNotBelow()
+    {
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Cfg(), Gate(byDefault: true, windowSoftcap: false, minTokens: VulkanMinTokens));
+        using (model) using (backend)
+        {
+            pipeline.Generate(Req(VulkanMinTokens - 1, graph: null));
+            Assert.Equal(0, model.CaptureAttempts);
+
+            GenerationResult got = pipeline.Generate(Req(VulkanMinTokens, graph: null));
+            Assert.Equal(1, model.CaptureAttempts);   // the capture fails, and the request still decodes eagerly
+
+            GenerationResult eager = pipeline.Generate(Req(VulkanMinTokens, graph: false));
+            Assert.Equal(eager.TokenIds, got.TokenIds);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public void ImplicitGraph_ReadsTheBackendsOwnThreshold_At512()
+    {
+        // A backend that defaults on at 512 must not start at 128: the gate reads the backend's value, not a constant.
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Cfg(), Gate(byDefault: true, windowSoftcap: true, minTokens: DefaultMinTokens));
+        using (model) using (backend)
+        {
+            pipeline.Generate(Req(DefaultMinTokens - 1, graph: null));
+            Assert.Equal(0, model.CaptureAttempts);
+
+            pipeline.Generate(Req(DefaultMinTokens, graph: null));
+            Assert.Equal(1, model.CaptureAttempts);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public void ImplicitGraph_OnABackendThatDoesNotDefaultIt_StaysOptIn_AtAnyLength()
+    {
+        // CUDA's shape: graph decode is opt-in there, so a 512-token request never tries the capture on its own.
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Cfg(), Gate(byDefault: false, windowSoftcap: true, minTokens: DefaultMinTokens));
+        using (model) using (backend)
+        {
+            pipeline.Generate(Req(DefaultMinTokens, graph: null));
+            Assert.Equal(0, model.CaptureAttempts);
+        }
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
     public void GemmaConfigs_OnVulkan_ReportGraphDecodeUnsupported_AndNameTheRefusal()
     {
-        IBackend vulkan = Gate(byDefault: true, windowSoftcap: false);
+        IBackend vulkan = Gate(byDefault: true, windowSoftcap: false, minTokens: VulkanMinTokens);
         using GenericTransformer gemma2 = new(TransformerConfig.Gemma2_2B);
         using GenericTransformer gemma3 = new(TransformerConfig.Gemma3_1B);
 
@@ -255,7 +318,7 @@ public sealed class GraphDecodeImplicitFallbackTests
     [Fact]
     public void WindowAndSoftcap_OnlyCountWhereALayerUsesThem()
     {
-        IBackend vulkan = Gate(byDefault: true, windowSoftcap: false);
+        IBackend vulkan = Gate(byDefault: true, windowSoftcap: false, minTokens: VulkanMinTokens);
         using GenericTransformer plain = new(Cfg());
         Assert.True(plain.SupportsGraphDecode(vulkan));
         Assert.Null(plain.GraphDecodeRefusal(vulkan));
@@ -272,7 +335,7 @@ public sealed class GraphDecodeImplicitFallbackTests
         using GenericTransformer gemma2 = new(TransformerConfig.Gemma2_2B);
         using GenericTransformer gemma3 = new(TransformerConfig.Gemma3_1B);
 
-        IBackend cuda = Gate(byDefault: false, windowSoftcap: true);
+        IBackend cuda = Gate(byDefault: false, windowSoftcap: true, minTokens: DefaultMinTokens);
         Assert.True(gemma2.SupportsGraphDecode(cuda));
         Assert.True(gemma3.SupportsGraphDecode(cuda));
         Assert.Null(gemma2.GraphDecodeRefusal(cuda));
@@ -290,7 +353,7 @@ public sealed class GraphDecodeImplicitFallbackTests
     public void AnExplicitGraph_ForAGemmaShapeOnVulkan_IsRefusedByName_BeforeAnyWork(string arch, string expected)
     {
         TransformerConfig cfg = arch == "gemma2" ? Gemma2Cfg() : Gemma3Cfg();
-        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(cfg, Gate(byDefault: true, windowSoftcap: false));
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(cfg, Gate(byDefault: true, windowSoftcap: false, minTokens: VulkanMinTokens));
         using (model) using (backend)
         {
             NotSupportedException ex = Assert.Throws<NotSupportedException>(() => pipeline.Generate(Req(16, graph: true)));
@@ -303,7 +366,7 @@ public sealed class GraphDecodeImplicitFallbackTests
     [Fact]
     public void AnExplicitGraph_ForAGemmaShapeOnCuda_StillReachesTheCapture()
     {
-        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: false, windowSoftcap: true));
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: false, windowSoftcap: true, minTokens: DefaultMinTokens));
         using (model) using (backend)
         {
             InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => pipeline.Generate(Req(16, graph: true)));
@@ -316,10 +379,10 @@ public sealed class GraphDecodeImplicitFallbackTests
     [Fact]
     public void AnImplicitGraph_ForAGemmaShapeOnVulkan_DecodesEagerly_WithoutAttemptingACapture()
     {
-        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: false));
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: false, minTokens: VulkanMinTokens));
         using (model) using (backend)
         {
-            int n = TextGenerationPipeline.ImplicitGraphMinTokens;
+            int n = VulkanMinTokens;
             GenerationResult got = pipeline.Generate(Req(n, graph: null));
             Assert.Equal(0, model.CaptureAttempts);
             Assert.Equal(n, got.TokenIds.Count);
@@ -334,10 +397,10 @@ public sealed class GraphDecodeImplicitFallbackTests
     public void AnImplicitGraph_ForAGemmaShapeOnABackendThatSupportsIt_StillTriesTheCapture()
     {
         // The control for the test above: the same model and request, on a backend whose device attention takes the window and soft-cap.
-        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: true));
+        (GateModel model, TextGenerationPipeline pipeline, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: true, minTokens: DefaultMinTokens));
         using (model) using (backend)
         {
-            int n = TextGenerationPipeline.ImplicitGraphMinTokens;
+            int n = DefaultMinTokens;
             GenerationResult got = pipeline.Generate(Req(n, graph: null));
             Assert.Equal(1, model.CaptureAttempts);
 
@@ -350,7 +413,7 @@ public sealed class GraphDecodeImplicitFallbackTests
     [Fact]
     public async Task AnExplicitGraph_ForAGemmaShapeOnVulkan_FailsAtAdmission_NamingTheRefusal()
     {
-        (GateModel model, _, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: false));
+        (GateModel model, _, Dictionary<string, Tensor> w, CpuBackend backend) = BuildGated(Gemma2Cfg(), Gate(byDefault: true, windowSoftcap: false, minTokens: VulkanMinTokens));
         using (model) using (backend)
         {
             using DynamicBatchScheduler scheduler = new(model, new DynamicBatchSchedulerTests.StubTokenizer(), pool: null);

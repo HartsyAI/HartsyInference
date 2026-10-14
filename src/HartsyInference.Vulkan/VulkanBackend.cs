@@ -4110,6 +4110,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
 
     /// <inheritdoc/>
+    /// <remarks>128, measured on the RTX 3060 (docs/VULKAN_MOE_PLAN.md, step 6): a 128-token greedy run with the graph is faster
+    /// than eager on wall clock for all five measured models, the first capture included, and the text is identical. The first
+    /// capture gathers a quantized embedding table on the device, so it costs 0.01 s to 0.21 s there.</remarks>
+    public int LlmGraphDecodeDefaultMinTokens => 128;
+
+    /// <inheritdoc/>
     /// <remarks>False: <c>FlashAttentionDev</c> throws for a sliding window or a soft-cap while a device position is set, and a window/soft-cap kernel is out of scope. Gemma-2/3 therefore decode eagerly here.</remarks>
     public bool LlmGraphDecodeWindowSoftcap => false;
 
