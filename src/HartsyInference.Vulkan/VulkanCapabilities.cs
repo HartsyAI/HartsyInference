@@ -42,6 +42,10 @@ public sealed class VulkanCapabilities
     /// <summary>Largest subgroup size the device can be configured for via subgroup-size control.</summary>
     public required uint MaxSubgroupSize { get; init; }
 
+    /// <summary>Compute units (NVIDIA SMs, AMD CUs) from a vendor extension; 0 when the device does not report them.
+    /// The flash-decode split count is derived from it (see <c>FlashDecodeGeometry</c>).</summary>
+    public uint ComputeUnits { get; init; }
+
     /// <summary>Subgroup operation categories the device's shaders can use (arithmetic, shuffle, ballot, etc.).</summary>
     public required VkSubgroupFeatureFlags SubgroupOps { get; init; }
 

@@ -286,6 +286,40 @@ public struct VkPhysicalDeviceSubgroupSizeControlProperties
     public VkShaderStageFlags requiredSubgroupSizeStages;
 }
 
+/// <summary>VK_NV_shader_sm_builtins properties: <c>shaderSMCount</c> is the streaming-multiprocessor count (the compute units).
+/// Queried through the pNext chain of <c>vkGetPhysicalDeviceProperties2</c>, only when the device advertises the extension.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct VkPhysicalDeviceShaderSMBuiltinsPropertiesNV
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint shaderSMCount;
+    public uint shaderWarpsPerSM;
+}
+
+/// <summary>VK_AMD_shader_core_properties properties, declared in full so the driver never writes past the struct.
+/// Compute units = shaderEngineCount x shaderArraysPerEngineCount x computeUnitsPerShaderArray.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct VkPhysicalDeviceShaderCorePropertiesAMD
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint shaderEngineCount;
+    public uint shaderArraysPerEngineCount;
+    public uint computeUnitsPerShaderArray;
+    public uint simdPerComputeUnit;
+    public uint wavefrontsPerSimd;
+    public uint wavefrontSize;
+    public uint sgprsPerSimd;
+    public uint minSgprAllocation;
+    public uint maxSgprAllocation;
+    public uint sgprAllocationGranularity;
+    public uint vgprsPerSimd;
+    public uint minVgprAllocation;
+    public uint maxVgprAllocation;
+    public uint vgprAllocationGranularity;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct VkPhysicalDeviceVulkan11Features
 {

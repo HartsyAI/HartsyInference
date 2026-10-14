@@ -26,6 +26,12 @@ public static partial class EngineKnobs
         Bool("numerics.vkFlashCm2Prefill", true, KnobScope.Construction, KnobDomain.Numerics,
             "Routes causal LLM prefill attention through the cooperative-matrix-2 flash kernel (F16 Q/K/V, F32 masks); off keeps the scalar sdpa_flash path.");
 
+    /// <summary>Splits single-row (decode) attention across workgroups and merges the partial softmax states (flash-decoding).</summary>
+    /// <remarks>Default ON. Covers <c>FlashAttention</c> and <c>FlashAttentionDev</c> with query length 1, F32 operands, no mask, a head dim the subgroup size divides (at most 4 dims per lane) and a GQA group of at most 8. Prefill (query length above 1) never takes it.</remarks>
+    public static readonly Knob<bool> VkFlashDecodeSplit =
+        Bool("numerics.vkFlashDecodeSplit", true, KnobScope.Construction, KnobDomain.Numerics,
+            "Splits single-row (decode) attention across workgroups and merges the partial softmax states; off keeps decode on the scalar sdpa_flash path.");
+
     /// <summary>Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.</summary>
     public static readonly Knob<bool> VkInt8 =
         Bool("numerics.vkInt8", false, KnobScope.Construction, KnobDomain.Numerics,

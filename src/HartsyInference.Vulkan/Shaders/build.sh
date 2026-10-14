@@ -233,6 +233,14 @@ compile_one "rope_decode_step" -DINTERLEAVED=1 -- "_interleaved_f32"
 # F32-only (decode-graph state is F32).
 compile_one "sdpa_flash" -DUSE_FP16=0 -DHAS_DEVICE_POS=1 -- "_dev_f32"
 
+# Flash-decoding for one query row (FlashAttention / FlashAttentionDev with query length 1): pass 1 splits the key
+# range across workgroups, pass 2 merges the live splits. HAS_DEVICE_POS reads kvLen/qOffset from the device position
+# buffer (graph decode) instead of push constants. F32-only; the scalar sdpa_flash path keeps every other shape.
+compile_one "sdpa_flash_decode_split" -DHAS_DEVICE_POS=0 -- ""
+compile_one "sdpa_flash_decode_split" -DHAS_DEVICE_POS=1 -- "_dev"
+compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=0 -- ""
+compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=1 -- "_dev"
+
 if [[ "${#FAILED[@]}" -gt 0 ]]; then
     echo >&2
     echo "error: ${#FAILED[@]} kernel(s) did not build with $GLSLANG:" >&2
