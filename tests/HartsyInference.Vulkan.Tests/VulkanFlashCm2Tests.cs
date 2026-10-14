@@ -25,9 +25,9 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [InlineData(1, 6, 3, 65, 129, 64, true)]
     public void HeadMajor_MatchesReference(int batch, int hq, int hkv, int sq, int skv, int d, bool masked)
     {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.SupportsTokenMajorGqaAttention) return;
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorGqaAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
         float[] q = Half(Random(batch * hq * sq * d, 1));
         float[] k = Half(Random(batch * hkv * skv * d, 2));
         float[] v = Half(Random(batch * hkv * skv * d, 3));
@@ -50,9 +50,9 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [InlineData(4, 2, 70, 96, false)]
     public void TokenMajorGqa_MatchesReference(int hq, int hkv, int s, int d, bool masked)
     {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.SupportsTokenMajorGqaAttention) return;
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorGqaAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
         float[] q = Half(Random(hq * s * d, 5));
         float[] k = Half(Random(hkv * s * d, 6));
         float[] v = Half(Random(hkv * s * d, 7));
@@ -81,12 +81,27 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [InlineData(32, 8, 64, 70, 200, 130, 0, 0)]  // chunked prefill: query rows at offset 130 over 200 keys
     [InlineData(16, 8, 64, 90, 90, 0, 32, 0)]    // sliding window 32
     [InlineData(16, 8, 64, 150, 150, 0, 48, 9)]  // window plus capacity padding plus a partial tile
-    public void CausalPrefill_MatchesReference(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad)
+    public void CausalPrefill_MatchesReference(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad) =>
+        CausalPrefillMatchesReference(flashCm2: true, hq, hkv, d, sq, kvLen, qOffset, window, pad);
+
+    /// <summary>The scalar causal path, which <c>numerics.vkFlashCm2Prefill=0</c> keeps for every prefill: the same
+    /// reference, on the shapes that cover GQA 7, a chunk at a query offset, and a window over capacity padding.
+    /// No cm2 dispatch may run.</summary>
+    [Theory]
+    [InlineData(14, 2, 64, 100, 100, 0, 0, 0)]   // Qwen2.5-0.5B: GQA 7, d 64
+    [InlineData(32, 8, 64, 70, 200, 130, 0, 0)]  // chunked prefill: query rows at offset 130 over 200 keys
+    [InlineData(16, 8, 64, 150, 150, 0, 48, 9)]  // window plus capacity padding plus a partial tile
+    public void CausalPrefill_FlagOff_UsesScalarPath_MatchesReference(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad) =>
+        CausalPrefillMatchesReference(flashCm2: false, hq, hkv, d, sq, kvLen, qOffset, window, pad);
+
+    /// <summary>Shared body of the two causal theories: the CPU reference, FlashAttention on the backend that
+    /// <c>HARTSY_TEST_VULKAN_DEVICE</c> names (or the default), and a check that the cm2 kernel ran exactly when the flag is on.</summary>
+    private void CausalPrefillMatchesReference(bool flashCm2, int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad)
     {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new(deviceOrdinal: 1); // raw ordinal 1 = RTX 3060 (probe); 0 = RTX 4090, never use
-        if (!backend.SupportsTokenMajorGqaAttention) return;
-        backend.EnableFlashCm2Prefill = true;
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (flashCm2 && !backend.SupportsTokenMajorGqaAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        backend.EnableFlashCm2Prefill = flashCm2;
         float scale = 1f / MathF.Sqrt(d);
         float[] q = Half(Random(hq * sq * d, 11));
         float[] k = Half(Random(hkv * kvLen * d, 12));
@@ -110,7 +125,7 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
         long before = backend.FlashCm2PrefillDispatches;
         backend.FlashAttention(ot, qt, kt, vt, kvLen, hq / hkv, causal: true, qOffset, scale, slidingWindow: window);
-        Assert.Equal(before + 1, backend.FlashCm2PrefillDispatches);
+        Assert.Equal(before + (flashCm2 ? 1 : 0), backend.FlashCm2PrefillDispatches);
         Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
     }
 

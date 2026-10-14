@@ -32,7 +32,7 @@ public sealed class VulkanCrossVendorTests
     public unsafe void LayerNorm_LargeDim_AllSubgroupsHaveData_MatchesCpu()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         _out.WriteLine($"Device: {backend.Vk.DeviceName}, subgroup={backend.Vk.SubgroupSize}");
 
         // D=1024 with the norm local_size (256) means every thread (and thus every subgroup)
@@ -79,7 +79,7 @@ public sealed class VulkanCrossVendorTests
     public unsafe void RmsNorm_LargeDim_AllSubgroupsHaveData_MatchesCpu()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         _out.WriteLine($"Device: {backend.Vk.DeviceName}, subgroup={backend.Vk.SubgroupSize}");
 
         // Single-accumulator (sum of squares) strided-fold variant.

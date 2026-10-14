@@ -34,6 +34,8 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 Four modalities have a working Vulkan path today: image, LLM, vision and audio. Video is the one with no
 confirmed run, and the two attempts failed on absent weights rather than on the backend.
 
+**Causal prefill attention is on by default (RTX 3060).** A prompt of about 750 tokens prefills in 0.22 s against 1.94 s on Llama-3.2-1B Q8_0, and in 0.74 s against 6.65 s on Qwen3-4B Q4_K_M; the greedy text matches the scalar path on four models, and OLMoE matches the CPU backend with the flag on. Every number and the open items are in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md).
+
 ## What this does not establish
 
 **DeepSeek-V4.1-Flash primitives (PR 24b).** The MoE, HC, latent-attention, quantizer and recipe-dequant shaders are parity-tested against the

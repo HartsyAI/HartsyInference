@@ -28,7 +28,7 @@ public sealed class VulkanLeakTests
     public void Vulkan_100Iter_DeviceMemory_Returns_To_Baseline()
     {
         if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         const int M = 64, K = 256, N = 64;
         const int Iterations = 100;
@@ -67,7 +67,7 @@ public sealed class VulkanLeakTests
     public void Vulkan_100Iter_LargeTransient_PoolsInsteadOfReallocating()
     {
         if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         // >= DedicatedThreshold (16 MB): 1,310,720 elements * 4 bytes = ~5.24 MB is too small; use a
         // shape whose F32 buffer is unambiguously in the dedicated tier.
@@ -140,7 +140,7 @@ public sealed class VulkanLeakTests
         if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
         Task run = Task.Run(() =>
         {
-            using VulkanBackend backend = new();
+            using VulkanBackend backend = VulkanTestDevice.Create();
             const int Rows = 1280, Cols = 4096;   // 20 MB, the dedicated tier
             using Tensor x = new(new TensorShape(Rows, Cols), DType.F32);
             backend.PreloadWeights([x]);
@@ -190,7 +190,7 @@ public sealed class VulkanLeakTests
     public void Vulkan_CoopmatPartialM_Krea2Shape_DoesNotLeak()
     {
         if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix)
         {
             _output.WriteLine("SKIPPED: no F16/coopmat support");
