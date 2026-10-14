@@ -80,10 +80,10 @@ public sealed class WeTextNormalizer
             return true;
         }
         WeTextLanguage language = Resolve(text);
-        string tagged = Tag(text, language);
-        if (tagged.Length == 0) return false;
         try
         {
+            string tagged = Tag(text, language);
+            if (tagged.Length == 0) return false;
             normalized = Verbalize(tagged, language);
             return true;
         }
