@@ -11,7 +11,7 @@ usage: pod_up.py [name] [--max-hours H]
 import argparse, json, os, pathlib, secrets, subprocess, sys, time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from watchdog import CREATE_TIMEOUT_S, DEFAULT_MAX_HOURS, api, bind_lease, check_max_hours, reserve_lease  # noqa: E402  (same kit dir; no key is copied to the pod)
+from watchdog import CREATE_TIMEOUT_S, DEFAULT_MAX_HOURS, api, bind_lease, check_max_hours, drop_pending, reserve_lease  # noqa: E402  (same kit dir; no key is copied to the pod)
 
 KEY = str(pathlib.Path.home() / ".ssh/runpod_blackwell")
 KIT = pathlib.Path(__file__).resolve().parent   # holds bootstrap.sh, scripts/, cfg/, prompts/
@@ -36,7 +36,10 @@ except ValueError as e:
     sys.exit(f"refusing to rent a pod: {e}")
 code, pod = api("POST", "/pods", body, timeout=CREATE_TIMEOUT_S)
 if code >= 300 or not isinstance(pod, dict) or "id" not in pod:
-    # The pending lease stays: if RunPod did create the pod, the watchdog finds it by pod_name and stops it at max hours.
+    if 400 <= code < 500:
+        drop_pending(pod_name)   # a definitive refusal (no capacity, bad request): no pod exists, so no lease is needed
+        sys.exit(f"create refused HTTP {code}: {pod}")
+    # Timeout, 5xx or unreadable reply: a pod may exist. The pending lease stays; the watchdog finds it by pod_name.
     sys.exit(f"create failed HTTP {code}: {pod} (pending lease {pod_name} left for the watchdog to resolve)")
 pid = pod["id"]
 print("POD_ID", pid, f"max_hours={args.max_hours}", flush=True)

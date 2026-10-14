@@ -23,6 +23,9 @@ Run it on a timer, for example cron every 5 minutes:
 usage: watchdog.py --once | --loop [--interval SEC]   [--dry-run]   [--leases PATH]
 
 A corrupt lease file is never overwritten: the pass logs the error and exits nonzero, and pod_up.py refuses to rent.
+A pass holds the lease lock while it calls RunPod (up to 60 s per call), so a pod_up.py run started during a pass waits
+for it; that is a delayed bring-up, never an unprotected pod.
+
 Limitation: it acts only while the operator machine is awake and cron (or the loop) runs. A machine that is off cannot
 stop anything; the RunPod console remains the fallback.
 """
@@ -130,6 +133,14 @@ def reserve_lease(pod_name, max_hours, path=LEASES, now=None):
     return key
 
 
+def drop_pending(pod_name, path=LEASES):
+    """pod_up.py calls this on a definitive 4xx create failure (no pod was made), so no stale pending lease is left."""
+    with _lease_lock(path):
+        leases = load_leases(path)
+        if leases.pop(PENDING + pod_name, None) is not None:
+            save_leases(leases, path)
+
+
 def bind_lease(pod_name, pod_id, path=LEASES):
     """Moves a pending lease to the pod id. If this write fails, the next pass binds the pod by its unique name."""
     key = PENDING + pod_name
@@ -197,15 +208,26 @@ def _run_once_locked(api_call, path, now, dry_run, log):
 
     for pid in [k for k in leases if not k.startswith(PENDING)]:
         rec = leases[pid]
-        if pid not in live and _age_h(rec, now) > VANISH_GRACE_H:
+        if pid in live:
+            rec.pop("missing_since", None)
+            continue
+        # Absent from the listing: drop the lease only after it has been CONTINUOUSLY absent for the grace period, so a
+        # single listing that omits a running pod cannot cost it its auto-stop.
+        if rec.get("missing_since") is None:
+            rec["missing_since"] = now.isoformat()
+            continue
+        if (now - _parse_time(rec["missing_since"])).total_seconds() / 3600.0 > VANISH_GRACE_H:
             # Terminated or deleted by someone else: the lease no longer protects anything.
             if not rec.get("stop_requested"):
-                log(f"watchdog: {pid} is no longer listed; dropping its lease")
+                log(f"watchdog: {pid} has been absent from the listing for over {VANISH_GRACE_H} h; dropping its lease")
             leases.pop(pid)
 
     stopped = []
     for pid in pods_due(leases, now):
-        if pid not in live or live[pid].get("desiredStatus") != "RUNNING":
+        if pid not in live:
+            continue   # absent this pass: keep the lease, decide on a later pass
+        if live[pid].get("desiredStatus") != "RUNNING":
+            log(f"watchdog: {pid} ({leases[pid]['name']}) is past its max hours but {live[pid].get('desiredStatus')}; not stopping, will check again")
             continue
         rec = leases[pid]
         age = _age_h(rec, now)
@@ -238,8 +260,8 @@ def main(argv=None):
     while True:
         try:
             run_once(api, args.leases, dry_run=args.dry_run, log=ts)
-        except ValueError as e:   # corrupt lease file: nothing was written
-            ts(f"watchdog: {e}")
+        except Exception as e:   # a corrupt lease file writes nothing; one bad pass must not end --loop
+            ts(f"watchdog: pass failed: {type(e).__name__}: {e}")
             if not args.loop:
                 return 2
         if not args.loop:

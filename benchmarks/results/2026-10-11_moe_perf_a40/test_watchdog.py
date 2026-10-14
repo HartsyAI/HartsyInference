@@ -149,12 +149,46 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(stub.stops(), [])
         self.assertIn("cannot list pods", self.logs[-1])
 
-    def test_vanished_pod_is_dropped_only_after_the_listing_grace(self):
+    def test_vanished_pod_is_dropped_only_after_continuous_absence(self):
         self.bound("gone", 0.5)
         watchdog.run_once(StubRunPod([]), self.leases, now=T0, log=self.log)
-        self.assertIn("gone", watchdog.load_leases(self.leases))      # listing lag: kept
-        watchdog.run_once(StubRunPod([]), self.leases, now=T0 + dt.timedelta(hours=1), log=self.log)
+        self.assertIn("gone", watchdog.load_leases(self.leases))      # first missing pass: kept
+        watchdog.run_once(StubRunPod([]), self.leases, now=T0 + dt.timedelta(hours=0.5), log=self.log)
+        self.assertIn("gone", watchdog.load_leases(self.leases))      # still inside the grace
+        watchdog.run_once(StubRunPod([]), self.leases, now=T0 + dt.timedelta(hours=1.5), log=self.log)
         self.assertNotIn("gone", watchdog.load_leases(self.leases))
+
+    def test_one_missing_listing_does_not_cost_an_old_running_pod_its_stop(self):
+        # Codex P1: a pod older than the grace must not be dropped on the first pass that omits it.
+        self.bound("p", 7)
+        watchdog.run_once(StubRunPod([]), self.leases, now=T0, log=self.log)            # one omitted listing
+        self.assertIn("p", watchdog.load_leases(self.leases))
+        stub = StubRunPod([{"id": "p", "desiredStatus": "RUNNING"}])                   # pod is listed again
+        self.assertEqual(watchdog.run_once(stub, self.leases, now=T0 + dt.timedelta(minutes=5), log=self.log), ["p"])
+        self.assertEqual(stub.stops(), ["/pods/p/stop"])
+
+    def test_missing_since_resets_when_the_pod_reappears(self):
+        self.bound("p", 2)
+        watchdog.run_once(StubRunPod([]), self.leases, now=T0, log=self.log)
+        watchdog.run_once(StubRunPod([{"id": "p", "desiredStatus": "RUNNING"}]), self.leases, now=T0 + dt.timedelta(minutes=10), log=self.log)
+        self.assertNotIn("missing_since", watchdog.load_leases(self.leases)["p"])
+        watchdog.run_once(StubRunPod([]), self.leases, now=T0 + dt.timedelta(hours=2), log=self.log)
+        self.assertIn("p", watchdog.load_leases(self.leases))     # a new absence starts a new grace
+
+    def test_due_pod_that_is_not_running_is_logged_not_stopped(self):
+        self.bound("p", 7)
+        stub = StubRunPod([{"id": "p", "desiredStatus": "EXITED"}])
+        self.assertEqual(watchdog.run_once(stub, self.leases, now=T0, log=self.log), [])
+        self.assertEqual(stub.stops(), [])
+        self.assertTrue(any("not stopping" in m for m in self.logs))
+
+    def test_drop_pending_removes_only_that_reservation(self):
+        self.pending("kit-a", 0)
+        self.pending("kit-b", 0)
+        watchdog.drop_pending("kit-a", path=self.leases)
+        leases = watchdog.load_leases(self.leases)
+        self.assertNotIn(watchdog.PENDING + "kit-a", leases)
+        self.assertIn(watchdog.PENDING + "kit-b", leases)
 
     def test_dry_run_posts_nothing_and_keeps_leases(self):
         self.bound("p", 7)
