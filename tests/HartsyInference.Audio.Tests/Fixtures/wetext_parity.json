@@ -1,0 +1,1724 @@
+{
+ "wetext": "0.0.4",
+ "fst_sha256": {
+  "en/tn/tagger.fst": "245e2dc9174cdd007a8e9e50f3339773d1adbbc7535b71cf67478dc1683cc3ec",
+  "en/tn/verbalizer.fst": "03155c88f317b2795969e264c19f87faf98b9853d5ac631e419bacdc3b3ee15a",
+  "zh/tn/tagger.fst": "cf341314c51f7ce59049f3b2c42f0ce8fd71e6d08d4d6969613aad384a5e2ae8",
+  "zh/tn/verbalizer.fst": "5a13cd679dd54637d12d2bd1bd33ee2165d91c867e14468c93195af02256e5da"
+ },
+ "entries": [
+  {
+   "text": "On March 3rd, 2026 at 4:30 PM, 1,250 people paid $99.95 each.",
+   "lang": "en",
+   "tagged": "w { v: \"On\" } date { month: \"March\" day: \"3rd\" year: \", 2026\" } w { v: \"at\" } time { hours: \"4\" minutes: \"30\" suffix: \"PM\" } p { v: \", \" } cardinal { integer: \"1,250\" } w { v: \"people\" } w { v: \"paid\" } money { currency_maj: \"$\" integer_part: \"99\"  fractional_part: \"95\" } w { v: \"each\" } p { v: \".\" }",
+   "output": "On the third of march, twenty twenty six at four thirty PM, thousand two hundred and fifty people paid ninety nine point nine five dollars each."
+  },
+  {
+   "text": "Dr. Smith lives at 221B Baker St. and earns 12% more in 1999.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Dr.\" } w { v: \"Smith\" } w { v: \"lives\" } w { v: \"at\" } serial { name: \"221B\" } w { v: \"Baker\" } w { v: \"St\" } p { v: \". \" } w { v: \"and\" } w { v: \"earns\" } measure { integer: \"12\" units: \"%\" } w { v: \"more\" } w { v: \"in\" } date { year: \"1999\" } p { v: \".\" }",
+   "output": "doctor Smith lives at two hundred twenty one B Baker St. and earns twelve percent more in nineteen ninety nine."
+  },
+  {
+   "text": "The meeting is on 2024-05-06.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"meeting\" } w { v: \"is\" } w { v: \"on\" } date { year: \"2024\" month: \"05\" day: \"06\" } p { v: \".\" }",
+   "output": "The meeting is on the sixth of may twenty twenty four."
+  },
+  {
+   "text": "She was born on 12/25/1990.",
+   "lang": "en",
+   "tagged": "w { v: \"She\" } w { v: \"was\" } w { v: \"born\" } w { v: \"on\" } date { month: \"12\" day: \"25\" year: \"1990\" } p { v: \".\" }",
+   "output": "She was born on the twenty fifth of december nineteen ninety."
+  },
+  {
+   "text": "Today is Jan. 1, 2000.",
+   "lang": "en",
+   "tagged": "w { v: \"Today\" } w { v: \"is\" } date { month: \"Jan.\" day: \"1\" year: \", 2000\" } p { v: \".\" }",
+   "output": "Today is the first of january, two thousand."
+  },
+  {
+   "text": "The treaty was signed on 4 July 1776.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"treaty\" } w { v: \"was\" } w { v: \"signed\" } w { v: \"on\" } date { day: \"4\"  month: \"July\" year: \" 1776\" } p { v: \".\" }",
+   "output": "The treaty was signed on the fourth of july seventeen seventy six."
+  },
+  {
+   "text": "We moved here in the 1980s.",
+   "lang": "en",
+   "tagged": "w { v: \"We\" } w { v: \"moved\" } w { v: \"here\" } w { v: \"in\" } w { v: \"the\" } measure { integer: \"1980\" units: \"s\" } p { v: \".\" }",
+   "output": "We moved here in the one thousand nine hundred and eighty seconds."
+  },
+  {
+   "text": "It happened in the '90s.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"happened\" } w { v: \"in\" } w { v: \"the\" } date { year: \"'90s\" } p { v: \".\" }",
+   "output": "It happened in the nineties."
+  },
+  {
+   "text": "The 21st century began in 2001.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } ordinal { integer: \"21st\" } w { v: \"century\" } w { v: \"began\" } w { v: \"in\" } date { year: \"2001\" } p { v: \".\" }",
+   "output": "The twenty first century began in two thousand one."
+  },
+  {
+   "text": "He finished 1st, she finished 2nd and they finished 3rd.",
+   "lang": "en",
+   "tagged": "w { v: \"He\" } w { v: \"finished\" } ordinal { integer: \"1st\" } p { v: \", \" } w { v: \"she\" } w { v: \"finished\" } ordinal { integer: \"2nd\" } w { v: \"and\" } w { v: \"they\" } w { v: \"finished\" } ordinal { integer: \"3rd\" } p { v: \".\" }",
+   "output": "He finished first, she finished second and they finished third."
+  },
+  {
+   "text": "This is the 100th anniversary.",
+   "lang": "en",
+   "tagged": "w { v: \"This\" } w { v: \"is\" } w { v: \"the\" } ordinal { integer: \"100th\" } w { v: \"anniversary\" } p { v: \".\" }",
+   "output": "This is the one hundredth anniversary."
+  },
+  {
+   "text": "The 4th of July is a holiday.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } ordinal { integer: \"4th\" } w { v: \"of\" } w { v: \"July\" } w { v: \"is\" } w { v: \"a\" } w { v: \"holiday\" } p { v: \".\" }",
+   "output": "The fourth of July is a holiday."
+  },
+  {
+   "text": "Queen Elizabeth II reigned for 70 years.",
+   "lang": "en",
+   "tagged": "w { v: \"Queen\" } w { v: \"Elizabeth\" } w { v: \"II\" } w { v: \"reigned\" } w { v: \"for\" } cardinal { integer: \"70\" } w { v: \"years\" } p { v: \".\" }",
+   "output": "Queen Elizabeth II reigned for seventy years."
+  },
+  {
+   "text": "Chapter 11 starts on page 304.",
+   "lang": "en",
+   "tagged": "w { v: \"Chapter\" } cardinal { integer: \"11\" } w { v: \"starts\" } w { v: \"on\" } w { v: \"page\" } cardinal { integer: \"304\" } p { v: \".\" }",
+   "output": "Chapter eleven starts on page three hundred and four."
+  },
+  {
+   "text": "World War 2 ended in 1945.",
+   "lang": "en",
+   "tagged": "w { v: \"World\" } w { v: \"War\" } cardinal { integer: \"2\" } w { v: \"ended\" } w { v: \"in\" } date { year: \"1945\" } p { v: \".\" }",
+   "output": "World War two ended in nineteen forty five."
+  },
+  {
+   "text": "The year 2000 problem was overblown.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"year\" } date { year: \"2000\" } w { v: \"problem\" } w { v: \"was\" } w { v: \"overblown\" } p { v: \".\" }",
+   "output": "The year two thousand problem was overblown."
+  },
+  {
+   "text": "In 1066 the Normans arrived.",
+   "lang": "en",
+   "tagged": "w { v: \"In\" } date { year: \"1066\" } w { v: \"the\" } w { v: \"Normans\" } w { v: \"arrived\" } p { v: \".\" }",
+   "output": "In ten sixty six the Normans arrived."
+  },
+  {
+   "text": "The company was founded in 1905 and sold in 2010.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"company\" } w { v: \"was\" } w { v: \"founded\" } w { v: \"in\" } date { year: \"1905\" } w { v: \"and\" } w { v: \"sold\" } w { v: \"in\" } date { year: \"2010\" } p { v: \".\" }",
+   "output": "The company was founded in nineteen zero five and sold in twenty ten."
+  },
+  {
+   "text": "The deadline is Friday, October 13, 2023.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"deadline\" } w { v: \"is\" } w { v: \"Friday\" } p { v: \", \" } date { month: \"October\" day: \"13\" year: \", 2023\" } p { v: \".\" }",
+   "output": "The deadline is Friday, the thirteenth of october, twenty twenty three."
+  },
+  {
+   "text": "Sept 11 2001 changed everything.",
+   "lang": "en",
+   "tagged": "date { month: \"Sept\" day: \"11\" year: \" 2001\" } w { v: \"changed\" } w { v: \"everything\" } p { v: \".\" }",
+   "output": "the eleventh of september two thousand one changed everything."
+  },
+  {
+   "text": "Meet me at 10am tomorrow.",
+   "lang": "en",
+   "tagged": "w { v: \"Meet\" } w { v: \"me\" } w { v: \"at\" } time { hours: \"10\" suffix: \"am\" } w { v: \"tomorrow\" } p { v: \".\" }",
+   "output": "Meet me at ten AM tomorrow."
+  },
+  {
+   "text": "The train leaves at 7:45 a.m. sharp.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"train\" } w { v: \"leaves\" } w { v: \"at\" } time { hours: \"7\" minutes: \"45\" suffix: \"a.m.\" } w { v: \"sharp\" } p { v: \".\" }",
+   "output": "The train leaves at seven forty five AM sharp."
+  },
+  {
+   "text": "Dinner is at 6:30 pm.",
+   "lang": "en",
+   "tagged": "w { v: \"Dinner\" } w { v: \"is\" } w { v: \"at\" } time { hours: \"6\" minutes: \"30\" suffix: \"pm\" } p { v: \".\" }",
+   "output": "Dinner is at six thirty PM."
+  },
+  {
+   "text": "The store opens at 09:00 and closes at 21:30.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"store\" } w { v: \"opens\" } w { v: \"at\" } time { hours: \"09\" minutes: \"00\" } w { v: \"and\" } w { v: \"closes\" } w { v: \"at\" } time { hours: \"21\" minutes: \"30\" } p { v: \".\" }",
+   "output": "The store opens at nine o'clock and closes at twenty one thirty."
+  },
+  {
+   "text": "It is 12:00 noon.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"is\" } time { hours: \"12\" minutes: \"00\" } w { v: \"noon\" } p { v: \".\" }",
+   "output": "It is twelve o'clock noon."
+  },
+  {
+   "text": "The launch is at 3:15:20 PM.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"launch\" } w { v: \"is\" } w { v: \"at\" } time { hours: \"3\" minutes: \"15\" seconds: \"20\" suffix: \"PM\" } p { v: \".\" }",
+   "output": "The launch is at three hours fifteen minutes and twenty seconds PM."
+  },
+  {
+   "text": "Wake up at 5 o'clock.",
+   "lang": "en",
+   "tagged": "w { v: \"Wake\" } w { v: \"up\" } w { v: \"at\" } cardinal { integer: \"5\" } w { v: \"o\" } p { v: \"'\" } w { v: \"clock\" } p { v: \".\" }",
+   "output": "Wake up at five o'clock."
+  },
+  {
+   "text": "The show runs from 8 to 10 PM.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"show\" } w { v: \"runs\" } w { v: \"from\" } cardinal { integer: \"8\" } w { v: \"to\" } time { hours: \"10\" suffix: \"PM\" } p { v: \".\" }",
+   "output": "The show runs from eight to ten PM."
+  },
+  {
+   "text": "It costs $5.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"costs\" } money { currency_maj: \"$\" integer_part: \"5\" } p { v: \".\" }",
+   "output": "It costs five dollars."
+  },
+  {
+   "text": "The house sold for $1,250,000.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"house\" } w { v: \"sold\" } w { v: \"for\" } money { currency_maj: \"$\" integer_part: \"1,250,000\" } p { v: \".\" }",
+   "output": "The house sold for one million two hundred fifty thousand dollars."
+  },
+  {
+   "text": "A coffee is $3.50 here.",
+   "lang": "en",
+   "tagged": "w { v: \"A\" } w { v: \"coffee\" } w { v: \"is\" } money { currency_maj: \"$\" integer_part: \"3\"  fractional_part: \"50\" } w { v: \"here\" } p { v: \".\" }",
+   "output": "A coffee is three point five dollars here."
+  },
+  {
+   "text": "They raised $2 million last year.",
+   "lang": "en",
+   "tagged": "w { v: \"They\" } w { v: \"raised\" } money { currency_maj: \"$\" integer_part: \"2\" quantity: \"million\" } w { v: \"last\" } w { v: \"year\" } p { v: \".\" }",
+   "output": "They raised two million dollars last year."
+  },
+  {
+   "text": "The budget is $4.5 billion.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"budget\" } w { v: \"is\" } money { currency_maj: \"$\" integer_part: \"4\"  fractional_part: \"5\" quantity: \"billion\" } p { v: \".\" }",
+   "output": "The budget is four point five billion dollars."
+  },
+  {
+   "text": "It costs €45 or £30.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"costs\" } money { currency_maj: \"€\" integer_part: \"45\" } w { v: \"or\" } money { currency_maj: \"£\" integer_part: \"30\" } p { v: \".\" }",
+   "output": "It costs forty five euros or thirty pounds."
+  },
+  {
+   "text": "The fee is 50 cents.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"fee\" } w { v: \"is\" } cardinal { integer: \"50\" } w { v: \"cents\" } p { v: \".\" }",
+   "output": "The fee is fifty cents."
+  },
+  {
+   "text": "He owes me $0.99.",
+   "lang": "en",
+   "tagged": "w { v: \"He\" } w { v: \"owes\" } w { v: \"me\" } money { currency_maj: \"$\" integer_part: \"0\"  fractional_part: \"99\" } p { v: \".\" }",
+   "output": "He owes me zero point nine nine dollars."
+  },
+  {
+   "text": "Tickets cost $12.00 each.",
+   "lang": "en",
+   "tagged": "w { v: \"Tickets\" } w { v: \"cost\" } money { currency_maj: \"$\" integer_part: \"12\" fractional_part: \"00\" } w { v: \"each\" } p { v: \".\" }",
+   "output": "Tickets cost twelve dollars each."
+  },
+  {
+   "text": "The prize was ¥1000.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"prize\" } w { v: \"was\" } money { currency_maj: \"¥\" integer_part: \"1000\" } p { v: \".\" }",
+   "output": "The prize was thousand yen."
+  },
+  {
+   "text": "Revenue hit $3.2B in Q4.",
+   "lang": "en",
+   "tagged": "w { v: \"Revenue\" } w { v: \"hit\" } money { currency_maj: \"$\" integer_part: \"3\"  fractional_part: \"2\" quantity: \"B\" } w { v: \"in\" } serial { name: \"Q4\" } p { v: \".\" }",
+   "output": "Revenue hit three point two billion dollars in Q four."
+  },
+  {
+   "text": "I paid USD 20 for it.",
+   "lang": "en",
+   "tagged": "w { v: \"I\" } w { v: \"paid\" } w { v: \"USD\" } cardinal { integer: \"20\" } w { v: \"for\" } w { v: \"it\" } p { v: \".\" }",
+   "output": "I paid USD twenty for it."
+  },
+  {
+   "text": "Sales grew by 15%.",
+   "lang": "en",
+   "tagged": "w { v: \"Sales\" } w { v: \"grew\" } w { v: \"by\" } measure { integer: \"15\" units: \"%\" } p { v: \".\" }",
+   "output": "Sales grew by fifteen percent."
+  },
+  {
+   "text": "Only 0.5% of users clicked.",
+   "lang": "en",
+   "tagged": "w { v: \"Only\" } measure { integer_part: \"0\"  fractional_part: \"5\" units: \"%\" } w { v: \"of\" } w { v: \"users\" } w { v: \"clicked\" } p { v: \".\" }",
+   "output": "Only zero point five percent of users clicked."
+  },
+  {
+   "text": "The rate is 3.75 percent.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"rate\" } w { v: \"is\" } decimal { integer_part: \"3\"  fractional_part: \"75\" } w { v: \"percent\" } p { v: \".\" }",
+   "output": "The rate is three point seven five percent."
+  },
+  {
+   "text": "Pi is about 3.14159.",
+   "lang": "en",
+   "tagged": "w { v: \"Pi\" } w { v: \"is\" } w { v: \"about\" } decimal { integer_part: \"3\"  fractional_part: \"14159\" } p { v: \".\" }",
+   "output": "Pi is about three point one four one five nine."
+  },
+  {
+   "text": "Add 1/2 cup of sugar.",
+   "lang": "en",
+   "tagged": "w { v: \"Add\" } fraction { numerator: \"1\" denominator: \"2\" } w { v: \"cup\" } w { v: \"of\" } w { v: \"sugar\" } p { v: \".\" }",
+   "output": "Add one half cup of sugar."
+  },
+  {
+   "text": "About 2/3 of the class passed.",
+   "lang": "en",
+   "tagged": "w { v: \"About\" } fraction { numerator: \"2\" denominator: \"3\" } w { v: \"of\" } w { v: \"the\" } w { v: \"class\" } w { v: \"passed\" } p { v: \".\" }",
+   "output": "About two thirds of the class passed."
+  },
+  {
+   "text": "The value is -42.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"value\" } w { v: \"is\" } cardinal { negative: \"-\" integer: \"42\" } p { v: \".\" }",
+   "output": "The value is negative forty two."
+  },
+  {
+   "text": "The temperature is -3.5 degrees.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"temperature\" } w { v: \"is\" } decimal { negative: \"-\" integer_part: \"3\"  fractional_part: \"5\" } w { v: \"degrees\" } p { v: \".\" }",
+   "output": "The temperature is minus three point five degrees."
+  },
+  {
+   "text": "Multiply by 1.5 and divide by 0.25.",
+   "lang": "en",
+   "tagged": "w { v: \"Multiply\" } w { v: \"by\" } decimal { integer_part: \"1\"  fractional_part: \"5\" } w { v: \"and\" } w { v: \"divide\" } w { v: \"by\" } decimal { integer_part: \"0\"  fractional_part: \"25\" } p { v: \".\" }",
+   "output": "Multiply by one point five and divide by zero point two five."
+  },
+  {
+   "text": "The score was 7 to 3.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"score\" } w { v: \"was\" } cardinal { integer: \"7\" } w { v: \"to\" } cardinal { integer: \"3\" } p { v: \".\" }",
+   "output": "The score was seven to three."
+  },
+  {
+   "text": "The odds are 1 in 1,000,000.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"odds\" } w { v: \"are\" } cardinal { integer: \"1\" } w { v: \"in\" } cardinal { integer: \"1,000,000\" } p { v: \".\" }",
+   "output": "The odds are one in one million."
+  },
+  {
+   "text": "A ratio of 16:9 is common.",
+   "lang": "en",
+   "tagged": "w { v: \"A\" } w { v: \"ratio\" } w { v: \"of\" } range { value: \"16:9\" } w { v: \"is\" } w { v: \"common\" } p { v: \".\" }",
+   "output": "A ratio of sixteen to nine is common."
+  },
+  {
+   "text": "I have 2 cats and 3 dogs.",
+   "lang": "en",
+   "tagged": "w { v: \"I\" } w { v: \"have\" } cardinal { integer: \"2\" } w { v: \"cats\" } w { v: \"and\" } cardinal { integer: \"3\" } w { v: \"dogs\" } p { v: \".\" }",
+   "output": "I have two cats and three dogs."
+  },
+  {
+   "text": "There are 7 days in a week.",
+   "lang": "en",
+   "tagged": "w { v: \"There\" } w { v: \"are\" } cardinal { integer: \"7\" } w { v: \"days\" } w { v: \"in\" } w { v: \"a\" } w { v: \"week\" } p { v: \".\" }",
+   "output": "There are seven days in a week."
+  },
+  {
+   "text": "He counted to 100.",
+   "lang": "en",
+   "tagged": "w { v: \"He\" } w { v: \"counted\" } w { v: \"to\" } cardinal { integer: \"100\" } p { v: \".\" }",
+   "output": "He counted to one hundred."
+  },
+  {
+   "text": "The population is 8,000,000,000.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"population\" } w { v: \"is\" } cardinal { integer: \"8,000,000,000\" } p { v: \".\" }",
+   "output": "The population is eight billion."
+  },
+  {
+   "text": "Room 101 is empty.",
+   "lang": "en",
+   "tagged": "w { v: \"Room\" } cardinal { integer: \"101\" } w { v: \"is\" } w { v: \"empty\" } p { v: \".\" }",
+   "output": "Room one hundred and one is empty."
+  },
+  {
+   "text": "Bus 42 is late.",
+   "lang": "en",
+   "tagged": "w { v: \"Bus\" } cardinal { integer: \"42\" } w { v: \"is\" } w { v: \"late\" } p { v: \".\" }",
+   "output": "Bus forty two is late."
+  },
+  {
+   "text": "She scored 0 points.",
+   "lang": "en",
+   "tagged": "w { v: \"She\" } w { v: \"scored\" } cardinal { integer: \"0\" } w { v: \"points\" } p { v: \".\" }",
+   "output": "She scored zero points."
+  },
+  {
+   "text": "It weighs 1000 kilograms.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"weighs\" } date { year: \"1000\" } w { v: \"kilograms\" } p { v: \".\" }",
+   "output": "It weighs ten hundred kilograms."
+  },
+  {
+   "text": "We need 12 eggs, 3 apples and 1 loaf.",
+   "lang": "en",
+   "tagged": "w { v: \"We\" } w { v: \"need\" } cardinal { integer: \"12\" } w { v: \"eggs\" } p { v: \", \" } cardinal { integer: \"3\" } w { v: \"apples\" } w { v: \"and\" } cardinal { integer: \"1\" } w { v: \"loaf\" } p { v: \".\" }",
+   "output": "We need twelve eggs, three apples and one loaf."
+  },
+  {
+   "text": "The answer is 42.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"answer\" } w { v: \"is\" } cardinal { integer: \"42\" } p { v: \".\" }",
+   "output": "The answer is forty two."
+  },
+  {
+   "text": "Flight 815 departed late.",
+   "lang": "en",
+   "tagged": "w { v: \"Flight\" } cardinal { integer: \"815\" } w { v: \"departed\" } w { v: \"late\" } p { v: \".\" }",
+   "output": "Flight eight hundred and fifteen departed late."
+  },
+  {
+   "text": "There were 365 entries.",
+   "lang": "en",
+   "tagged": "w { v: \"There\" } w { v: \"were\" } cardinal { integer: \"365\" } w { v: \"entries\" } p { v: \".\" }",
+   "output": "There were three hundred and sixty five entries."
+  },
+  {
+   "text": "Version 2 is better than version 1.",
+   "lang": "en",
+   "tagged": "w { v: \"Version\" } cardinal { integer: \"2\" } w { v: \"is\" } w { v: \"better\" } w { v: \"than\" } w { v: \"version\" } cardinal { integer: \"1\" } p { v: \".\" }",
+   "output": "Version two is better than version one."
+  },
+  {
+   "text": "Number 9, number 9.",
+   "lang": "en",
+   "tagged": "w { v: \"Number\" } cardinal { integer: \"9\" } p { v: \", \" } w { v: \"number\" } cardinal { integer: \"9\" } p { v: \".\" }",
+   "output": "Number nine, number nine."
+  },
+  {
+   "text": "The code is 007.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"code\" } w { v: \"is\" } cardinal { integer: \"007\" } p { v: \".\" }",
+   "output": "The code is oh oh seven."
+  },
+  {
+   "text": "Add 15 and 27 to get 42.",
+   "lang": "en",
+   "tagged": "w { v: \"Add\" } cardinal { integer: \"15\" } w { v: \"and\" } cardinal { integer: \"27\" } w { v: \"to\" } w { v: \"get\" } cardinal { integer: \"42\" } p { v: \".\" }",
+   "output": "Add fifteen and twenty seven to get forty two."
+  },
+  {
+   "text": "Read pages 10-20 tonight.",
+   "lang": "en",
+   "tagged": "w { v: \"Read\" } w { v: \"pages\" } range { value: \"10-20\" } w { v: \"tonight\" } p { v: \".\" }",
+   "output": "Read pages ten to twenty tonight."
+  },
+  {
+   "text": "The years 1914-1918 were brutal.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"years\" } range { value: \"1914-1918\" } w { v: \"were\" } w { v: \"brutal\" } p { v: \".\" }",
+   "output": "The years one thousand nine hundred and fourteen to one thousand nine hundred and eighteen were brutal."
+  },
+  {
+   "text": "Ages 5 to 12 are welcome.",
+   "lang": "en",
+   "tagged": "w { v: \"Ages\" } cardinal { integer: \"5\" } w { v: \"to\" } cardinal { integer: \"12\" } w { v: \"are\" } w { v: \"welcome\" } p { v: \".\" }",
+   "output": "Ages five to twelve are welcome."
+  },
+  {
+   "text": "Open 9-5 Monday to Friday.",
+   "lang": "en",
+   "tagged": "w { v: \"Open\" } range { value: \"9-5\" } w { v: \"Monday\" } w { v: \"to\" } w { v: \"Friday\" } p { v: \".\" }",
+   "output": "Open nine to five Monday to Friday."
+  },
+  {
+   "text": "It lasted 2-3 weeks.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"lasted\" } range { value: \"2-3\" } w { v: \"weeks\" } p { v: \".\" }",
+   "output": "It lasted two to three weeks."
+  },
+  {
+   "text": "Call me at 555-123-4567 tomorrow.",
+   "lang": "en",
+   "tagged": "w { v: \"Call\" } w { v: \"me\" } w { v: \"at\" } telephone { number_part: \"555-123-4567\" } w { v: \"tomorrow\" } p { v: \".\" }",
+   "output": "Call me at five five five, one two three, four five six seven tomorrow."
+  },
+  {
+   "text": "My number is (555) 987-6543.",
+   "lang": "en",
+   "tagged": "w { v: \"My\" } w { v: \"number\" } w { v: \"is\" } telephone { number_part: \"(555) 987-6543\" } p { v: \".\" }",
+   "output": "My number is five five five, nine eight seven, six five four three."
+  },
+  {
+   "text": "Dial +1 800 555 0199 for help.",
+   "lang": "en",
+   "tagged": "",
+   "output": null,
+   "error": "AssertionError"
+  },
+  {
+   "text": "Call 911 in an emergency.",
+   "lang": "en",
+   "tagged": "w { v: \"Call\" } cardinal { integer: \"911\" } w { v: \"in\" } w { v: \"an\" } w { v: \"emergency\" } p { v: \".\" }",
+   "output": "Call nine hundred and eleven in an emergency."
+  },
+  {
+   "text": "The zip code is 90210.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"zip\" } w { v: \"code\" } w { v: \"is\" } cardinal { integer: \"90210\" } p { v: \".\" }",
+   "output": "The zip code is ninety thousand two hundred and ten."
+  },
+  {
+   "text": "My PIN is 4821.",
+   "lang": "en",
+   "tagged": "w { v: \"My\" } w { v: \"PIN\" } w { v: \"is\" } cardinal { integer: \"4821\" } p { v: \".\" }",
+   "output": "My PIN is four thousand eight hundred and twenty one."
+  },
+  {
+   "text": "Order #12345 has shipped.",
+   "lang": "en",
+   "tagged": "",
+   "output": null,
+   "error": "AssertionError"
+  },
+  {
+   "text": "Use code ABC123 at checkout.",
+   "lang": "en",
+   "tagged": "w { v: \"Use\" } w { v: \"code\" } serial { name: \"ABC123\" } w { v: \"at\" } w { v: \"checkout\" } p { v: \".\" }",
+   "output": "Use code ABC one hundred twenty three at checkout."
+  },
+  {
+   "text": "The IP is 192.168.1.1.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } telephone { country_code: \"IP is\" number_part: \"192.168.1.1\" } p { v: \".\" }",
+   "output": "The IP is one nine two dot one six eight dot one dot one."
+  },
+  {
+   "text": "Visit www.example.com for 20 tips.",
+   "lang": "en",
+   "tagged": "w { v: \"Visit\" } electronic { protocol: \"www.\" domain: \"example.com\" } w { v: \"for\" } cardinal { integer: \"20\" } w { v: \"tips\" } p { v: \".\" }",
+   "output": "Visit WWW dot example dot com for twenty tips."
+  },
+  {
+   "text": "Email me at john.doe99@example.com today.",
+   "lang": "en",
+   "tagged": "w { v: \"Email\" } w { v: \"me\" } w { v: \"at\" } electronic { username: \"john.doe99\" domain: \"example.com\" } w { v: \"today\" } p { v: \".\" }",
+   "output": "Email me at john dot doe ninety nine at example dot com today."
+  },
+  {
+   "text": "The ISBN is 978-3-16-148410-0.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"ISBN\" } w { v: \"is\" } serial { name: \"978-3-16-148410-0\" } p { v: \".\" }",
+   "output": "The ISBN is nine hundred seventy eight-three-sixteen-one four eight four one oh-zero."
+  },
+  {
+   "text": "The box is 5 cm wide.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"box\" } w { v: \"is\" } measure { integer: \"5\" units: \"cm\" } w { v: \"wide\" } p { v: \".\" }",
+   "output": "The box is five centimeters wide."
+  },
+  {
+   "text": "He ran 10 km in 45 minutes.",
+   "lang": "en",
+   "tagged": "w { v: \"He\" } w { v: \"ran\" } measure { integer: \"10\" units: \"km\" } w { v: \"in\" } cardinal { integer: \"45\" } w { v: \"minutes\" } p { v: \".\" }",
+   "output": "He ran ten kilometers in forty five minutes."
+  },
+  {
+   "text": "The bottle holds 500 ml.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"bottle\" } w { v: \"holds\" } measure { integer: \"500\" units: \"ml\" } p { v: \".\" }",
+   "output": "The bottle holds five hundred milliliters."
+  },
+  {
+   "text": "It is 6 ft 2 in tall.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"is\" } measure { integer: \"6\" units: \"ft\" } cardinal { integer: \"2\" } w { v: \"in\" } w { v: \"tall\" } p { v: \".\" }",
+   "output": "It is six feet two in tall."
+  },
+  {
+   "text": "The car does 60 mph.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"car\" } w { v: \"does\" } measure { integer: \"60\" units: \"mph\" } p { v: \".\" }",
+   "output": "The car does sixty miles per hour."
+  },
+  {
+   "text": "Set the oven to 350°F.",
+   "lang": "en",
+   "tagged": "w { v: \"Set\" } w { v: \"the\" } w { v: \"oven\" } w { v: \"to\" } measure { integer: \"350\" units: \"°F\" } p { v: \".\" }",
+   "output": "Set the oven to three hundred and fifty degrees Fahrenheit."
+  },
+  {
+   "text": "It was 25°C outside.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"was\" } measure { integer: \"25\" units: \"°C\" } w { v: \"outside\" } p { v: \".\" }",
+   "output": "It was twenty five degrees Celsius outside."
+  },
+  {
+   "text": "The file is 4 GB.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"file\" } w { v: \"is\" } measure { integer: \"4\" units: \"GB\" } p { v: \".\" }",
+   "output": "The file is four gigabytes."
+  },
+  {
+   "text": "The CPU runs at 3.6 GHz.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"CPU\" } w { v: \"runs\" } w { v: \"at\" } measure { integer_part: \"3\"  fractional_part: \"6\" units: \"GHz\" } p { v: \".\" }",
+   "output": "The CPU runs at three point six gigahertz."
+  },
+  {
+   "text": "Add 200 g of flour.",
+   "lang": "en",
+   "tagged": "w { v: \"Add\" } measure { integer: \"200\" units: \"g\" } w { v: \"of\" } w { v: \"flour\" } p { v: \".\" }",
+   "output": "Add two hundred grams of flour."
+  },
+  {
+   "text": "The road is 3 mi long.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"road\" } w { v: \"is\" } measure { integer: \"3\" units: \"mi\" } w { v: \"long\" } p { v: \".\" }",
+   "output": "The road is three miles long."
+  },
+  {
+   "text": "It weighs 150 lbs.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } w { v: \"weighs\" } measure { integer: \"150\" units: \"lbs\" } p { v: \".\" }",
+   "output": "It weighs one hundred and fifty pounds."
+  },
+  {
+   "text": "The screen is 27 inches.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"screen\" } w { v: \"is\" } cardinal { integer: \"27\" } w { v: \"inches\" } p { v: \".\" }",
+   "output": "The screen is twenty seven inches."
+  },
+  {
+   "text": "The pool is 50 m long.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"pool\" } w { v: \"is\" } measure { integer: \"50\" units: \"m\" } w { v: \"long\" } p { v: \".\" }",
+   "output": "The pool is fifty minutes long."
+  },
+  {
+   "text": "Download speed is 100 Mbps.",
+   "lang": "en",
+   "tagged": "w { v: \"Download\" } w { v: \"speed\" } w { v: \"is\" } measure { integer: \"100\" units: \"Mbps\" } p { v: \".\" }",
+   "output": "Download speed is one hundred megabits per second."
+  },
+  {
+   "text": "The dose is 5 mg per day.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"dose\" } w { v: \"is\" } measure { integer: \"5\" units: \"mg\" } w { v: \"per\" } w { v: \"day\" } p { v: \".\" }",
+   "output": "The dose is five milligrams per day."
+  },
+  {
+   "text": "The plot is 2 ha.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"plot\" } w { v: \"is\" } measure { integer: \"2\" units: \"ha\" } p { v: \".\" }",
+   "output": "The plot is two hectares."
+  },
+  {
+   "text": "He is 180cm tall.",
+   "lang": "en",
+   "tagged": "w { v: \"He\" } w { v: \"is\" } measure { integer: \"180\" units: \"cm\" } w { v: \"tall\" } p { v: \".\" }",
+   "output": "He is one hundred and eighty centimeters tall."
+  },
+  {
+   "text": "Mr. Jones met Mrs. Brown at 5.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Mr.\" } w { v: \"Jones\" } w { v: \"met\" } whitelist { name: \"Mrs.\" } w { v: \"Brown\" } w { v: \"at\" } cardinal { integer: \"5\" } p { v: \".\" }",
+   "output": "Mister Jones met Misses Brown at five."
+  },
+  {
+   "text": "Ms. Lee has 3 kids.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Ms.\" } w { v: \"Lee\" } w { v: \"has\" } cardinal { integer: \"3\" } w { v: \"kids\" } p { v: \".\" }",
+   "output": "Miss Lee has three kids."
+  },
+  {
+   "text": "Dr. Who has 13 doctors.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Dr.\" } w { v: \"Who\" } w { v: \"has\" } cardinal { integer: \"13\" } w { v: \"doctors\" } p { v: \".\" }",
+   "output": "doctor Who has thirteen doctors."
+  },
+  {
+   "text": "St. Louis has 300,000 people.",
+   "lang": "en",
+   "tagged": "w { v: \"St\" } p { v: \". \" } w { v: \"Louis\" } w { v: \"has\" } cardinal { integer: \"300,000\" } w { v: \"people\" } p { v: \".\" }",
+   "output": "St. Louis has three hundred thousand people."
+  },
+  {
+   "text": "Prof. Adams teaches 4 classes.",
+   "lang": "en",
+   "tagged": "w { v: \"Prof\" } p { v: \". \" } w { v: \"Adams\" } w { v: \"teaches\" } cardinal { integer: \"4\" } w { v: \"classes\" } p { v: \".\" }",
+   "output": "Prof. Adams teaches four classes."
+  },
+  {
+   "text": "Lt. Dan lost 2 legs.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Lt.\" } w { v: \"Dan\" } w { v: \"lost\" } cardinal { integer: \"2\" } w { v: \"legs\" } p { v: \".\" }",
+   "output": "lieutenant Dan lost two legs."
+  },
+  {
+   "text": "Mt. Everest is 8,849 m high.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Mt.\" } w { v: \"Everest\" } w { v: \"is\" } measure { integer: \"8,849\" units: \"m\" } w { v: \"high\" } p { v: \".\" }",
+   "output": "Mount Everest is eight thousand eight hundred and forty nine minutes high."
+  },
+  {
+   "text": "Apt. 4B is upstairs.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Apt.\" } serial { name: \"4B\" } w { v: \"is\" } w { v: \"upstairs\" } p { v: \".\" }",
+   "output": "Apartment four B is upstairs."
+  },
+  {
+   "text": "The U.S. has 50 states.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } whitelist { name: \"U.S.\" } w { v: \"has\" } cardinal { integer: \"50\" } w { v: \"states\" } p { v: \".\" }",
+   "output": "The US has fifty states."
+  },
+  {
+   "text": "The U.K. joined in 1973.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } whitelist { name: \"U.K.\" } w { v: \"joined\" } w { v: \"in\" } date { year: \"1973\" } p { v: \".\" }",
+   "output": "The UK joined in nineteen seventy three."
+  },
+  {
+   "text": "Jr. and Sr. are 2 suffixes.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Jr.\" } w { v: \"and\" } w { v: \"Sr\" } p { v: \". \" } w { v: \"are\" } cardinal { integer: \"2\" } w { v: \"suffixes\" } p { v: \".\" }",
+   "output": "junior and Sr. are two suffixes."
+  },
+  {
+   "text": "Ave. 5 is closed.",
+   "lang": "en",
+   "tagged": "w { v: \"Ave\" } p { v: \". \" } cardinal { integer: \"5\" } w { v: \"is\" } w { v: \"closed\" } p { v: \".\" }",
+   "output": "Ave. five is closed."
+  },
+  {
+   "text": "Gen. Grant won in 1865.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Gen.\" } w { v: \"Grant\" } w { v: \"won\" } w { v: \"in\" } date { year: \"1865\" } p { v: \".\" }",
+   "output": "general Grant won in eighteen sixty five."
+  },
+  {
+   "text": "Capt. Hook lost 1 hand.",
+   "lang": "en",
+   "tagged": "whitelist { name: \"Capt.\" } w { v: \"Hook\" } w { v: \"lost\" } cardinal { integer: \"1\" } w { v: \"hand\" } p { v: \".\" }",
+   "output": "captain Hook lost one hand."
+  },
+  {
+   "text": "See fig. 3 and vol. 2.",
+   "lang": "en",
+   "tagged": "w { v: \"See\" } w { v: \"fig\" } p { v: \". \" } cardinal { integer: \"3\" } w { v: \"and\" } w { v: \"vol\" } p { v: \". \" } cardinal { integer: \"2\" } p { v: \".\" }",
+   "output": "See fig. three and vol. two."
+  },
+  {
+   "text": "Etc. and e.g. are 2 abbreviations.",
+   "lang": "en",
+   "tagged": "w { v: \"Etc\" } p { v: \". \" } w { v: \"and\" } w { v: \"e\" } p { v: \".\" } w { v: \"g\" } p { v: \". \" } w { v: \"are\" } cardinal { integer: \"2\" } w { v: \"abbreviations\" } p { v: \".\" }",
+   "output": "Etc. and e.g. are two abbreviations."
+  },
+  {
+   "text": "NASA launched 3 rockets.",
+   "lang": "en",
+   "tagged": "w { v: \"NASA\" } w { v: \"launched\" } cardinal { integer: \"3\" } w { v: \"rockets\" } p { v: \".\" }",
+   "output": "NASA launched three rockets."
+  },
+  {
+   "text": "The FBI and CIA employ 1000s.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"FBI\" } w { v: \"and\" } w { v: \"CIA\" } w { v: \"employ\" } date { year: \"1000s\" } p { v: \".\" }",
+   "output": "The FBI and CIA employ one thousands."
+  },
+  {
+   "text": "Tom & Jerry aired in 1940.",
+   "lang": "en",
+   "tagged": "w { v: \"Tom\" } whitelist { name: \"&\" } w { v: \"Jerry\" } w { v: \"aired\" } w { v: \"in\" } date { year: \"1940\" } p { v: \".\" }",
+   "output": "Tom and Jerry aired in nineteen forty."
+  },
+  {
+   "text": "Use # 5 for this.",
+   "lang": "en",
+   "tagged": "w { v: \"Use\" } whitelist { name: \"#\" } cardinal { integer: \"5\" } w { v: \"for\" } w { v: \"this\" } p { v: \".\" }",
+   "output": "Use number five for this."
+  },
+  {
+   "text": "The cost is 5 + 3 = 8.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"cost\" } w { v: \"is\" } measure { units: \"math\" integer: \"5 + 3 = 8\" } p { v: \".\" }",
+   "output": "The cost is five plus three equals eight."
+  },
+  {
+   "text": "10 > 5 and 3 < 4.",
+   "lang": "en",
+   "tagged": "cardinal { integer: \"10\" } p { v: \" > \" } cardinal { integer: \"5\" } w { v: \"and\" } cardinal { integer: \"3\" } p { v: \" < \" } cardinal { integer: \"4\" } p { v: \".\" }",
+   "output": "ten > five and three < four."
+  },
+  {
+   "text": "Rate: 5/10 stars.",
+   "lang": "en",
+   "tagged": "w { v: \"Rate\" } p { v: \": \" } fraction { numerator: \"5\" denominator: \"10\" } w { v: \"stars\" } p { v: \".\" }",
+   "output": "Rate: five tenths stars."
+  },
+  {
+   "text": "Win 100% of the time.",
+   "lang": "en",
+   "tagged": "w { v: \"Win\" } measure { integer: \"100\" units: \"%\" } w { v: \"of\" } w { v: \"the\" } w { v: \"time\" } p { v: \".\" }",
+   "output": "Win one hundred percent of the time."
+  },
+  {
+   "text": "Item @ $5 each.",
+   "lang": "en",
+   "tagged": "w { v: \"Item\" } whitelist { name: \"@\" } money { currency_maj: \"$\" integer_part: \"5\" } w { v: \"each\" } p { v: \".\" }",
+   "output": "Item at five dollars each."
+  },
+  {
+   "text": "Mix A & B at 50:50.",
+   "lang": "en",
+   "tagged": "w { v: \"Mix\" } w { v: \"A\" } whitelist { name: \"&\" } w { v: \"B\" } w { v: \"at\" } range { value: \"50:50\" } p { v: \".\" }",
+   "output": "Mix A and B at fifty to fifty."
+  },
+  {
+   "text": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok? 3",
+   "lang": "en",
+   "tagged": "w { v: \"Wait\" } p { v: \"... \" } w { v: \"what\" } p { v: \"?! \" } w { v: \"No\" } p { v: \" -- \" } w { v: \"really\" } p { v: \"; \" } p { v: \"(\" } w { v: \"yes\" } p { v: \"), \" } p { v: \"'\" } w { v: \"quoted\" } p { v: \"' \" } whitelist { name: \"&\" } p { v: \" \\\"\" } w { v: \"double\" } p { v: \"\\\" \" } p { v: \"-- \" } w { v: \"ok\" } p { v: \"? \" } cardinal { integer: \"3\" }",
+   "output": "Wait... what?! No -- really; (yes), 'quoted' and \"double\" -- ok? three"
+  },
+  {
+   "text": "He said \"I have 3 cats\" twice.",
+   "lang": "en",
+   "tagged": "w { v: \"He\" } w { v: \"said\" } p { v: \" \\\"\" } w { v: \"I\" } w { v: \"have\" } cardinal { integer: \"3\" } w { v: \"cats\" } p { v: \"\\\" \" } w { v: \"twice\" } p { v: \".\" }",
+   "output": "He said \"I have three cats\" twice."
+  },
+  {
+   "text": "It's 'version 2' now.",
+   "lang": "en",
+   "tagged": "w { v: \"It\" } p { v: \"'\" } w { v: \"s\" } p { v: \" '\" } w { v: \"version\" } cardinal { integer: \"2\" } p { v: \"' \" } w { v: \"now\" } p { v: \".\" }",
+   "output": "It's 'version two' now."
+  },
+  {
+   "text": "The 'big' 5 companies.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } p { v: \" '\" } w { v: \"big\" } p { v: \"' \" } cardinal { integer: \"5\" } w { v: \"companies\" } p { v: \".\" }",
+   "output": "The 'big' five companies."
+  },
+  {
+   "text": "*Note: 3 items left.*",
+   "lang": "en",
+   "tagged": "serial { name: \"*Note\" } p { v: \": \" } cardinal { integer: \"3\" } w { v: \"items\" } w { v: \"left\" } p { v: \".\" } whitelist { name: \"*\" }",
+   "output": "asterisk Note: three items left.asterisk"
+  },
+  {
+   "text": "Path is C:\\Users\\5.",
+   "lang": "en",
+   "tagged": "w { v: \"Path\" } w { v: \"is\" } w { v: \"C\" } p { v: \":\\\\\" } w { v: \"Users\" } p { v: \"\\\\\" } cardinal { integer: \"5\" } p { v: \".\" }",
+   "output": "Path is C:\\Users\\five."
+  },
+  {
+   "text": "Use_snake_case 5 times.",
+   "lang": "en",
+   "tagged": "serial { name: \"Use_snake_case\" } cardinal { integer: \"5\" } w { v: \"times\" } p { v: \".\" }",
+   "output": "Use underscore snake underscore case five times."
+  },
+  {
+   "text": "a/b testing with 2 groups.",
+   "lang": "en",
+   "tagged": "w { v: \"a/b\" } w { v: \"testing\" } w { v: \"with\" } cardinal { integer: \"2\" } w { v: \"groups\" } p { v: \".\" }",
+   "output": "a/b testing with two groups."
+  },
+  {
+   "text": "~10 people came.",
+   "lang": "en",
+   "tagged": "range { value: \"~10\" } w { v: \"people\" } w { v: \"came\" } p { v: \".\" }",
+   "output": "approximatelyten people came."
+  },
+  {
+   "text": "The price went from $5 to $7 (+40%).",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"price\" } w { v: \"went\" } w { v: \"from\" } money { currency_maj: \"$\" integer_part: \"5\" } w { v: \"to\" } money { currency_maj: \"$\" integer_part: \"7\" } p { v: \" (\" } serial { name: \"+40%\" } p { v: \").\" }",
+   "output": "The price went from five dollars to seven dollars (plus forty percent)."
+  },
+  {
+   "text": "THE YEAR 2024 IS HERE.",
+   "lang": "en",
+   "tagged": "w { v: \"THE\" } w { v: \"YEAR\" } date { year: \"2024\" } w { v: \"IS\" } w { v: \"HERE\" } p { v: \".\" }",
+   "output": "THE YEAR twenty twenty four IS HERE."
+  },
+  {
+   "text": "Top 10 Tips For 2025!",
+   "lang": "en",
+   "tagged": "w { v: \"Top\" } cardinal { integer: \"10\" } w { v: \"Tips\" } w { v: \"For\" } date { year: \"2025\" } p { v: \"!\" }",
+   "output": "Top ten Tips For twenty twenty five!"
+  },
+  {
+   "text": "iPhone 15 Pro Max costs $1199.",
+   "lang": "en",
+   "tagged": "w { v: \"iPhone\" } cardinal { integer: \"15\" } w { v: \"Pro\" } w { v: \"Max\" } w { v: \"costs\" } money { currency_maj: \"$\" integer_part: \"1199\" } p { v: \".\" }",
+   "output": "iPhone fifteen Pro Max costs thousand one hundred and ninety nine dollars."
+  },
+  {
+   "text": "COVID-19 started in 2019.",
+   "lang": "en",
+   "tagged": "serial { name: \"COVID-19\" } w { v: \"started\" } w { v: \"in\" } date { year: \"2019\" } p { v: \".\" }",
+   "output": "COVID-nineteen started in twenty nineteen."
+  },
+  {
+   "text": "Windows 11 replaced Windows 10.",
+   "lang": "en",
+   "tagged": "w { v: \"Windows\" } cardinal { integer: \"11\" } w { v: \"replaced\" } w { v: \"Windows\" } cardinal { integer: \"10\" } p { v: \".\" }",
+   "output": "Windows eleven replaced Windows ten."
+  },
+  {
+   "text": "MP3 files and MP4 videos.",
+   "lang": "en",
+   "tagged": "serial { name: \"MP3\" } w { v: \"files\" } w { v: \"and\" } serial { name: \"MP4\" } w { v: \"videos\" } p { v: \".\" }",
+   "output": "MP three files and MP four videos."
+  },
+  {
+   "text": "The F-35 flies at Mach 1.6.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } serial { name: \"F-35\" } w { v: \"flies\" } w { v: \"at\" } w { v: \"Mach\" } decimal { integer_part: \"1\"  fractional_part: \"6\" } p { v: \".\" }",
+   "output": "The F-thirty five flies at Mach one point six."
+  },
+  {
+   "text": "Area 51 is in Nevada.",
+   "lang": "en",
+   "tagged": "w { v: \"Area\" } cardinal { integer: \"51\" } w { v: \"is\" } w { v: \"in\" } w { v: \"Nevada\" } p { v: \".\" }",
+   "output": "Area fifty one is in Nevada."
+  },
+  {
+   "text": "Agent 47 is fictional.",
+   "lang": "en",
+   "tagged": "w { v: \"Agent\" } cardinal { integer: \"47\" } w { v: \"is\" } w { v: \"fictional\" } p { v: \".\" }",
+   "output": "Agent forty seven is fictional."
+  },
+  {
+   "text": "R2-D2 and C-3PO are droids.",
+   "lang": "en",
+   "tagged": "serial { name: \"R2-D2\" } w { v: \"and\" } serial { name: \"C-3PO\" } w { v: \"are\" } w { v: \"droids\" } p { v: \".\" }",
+   "output": "R two-D two and C-three PO are droids."
+  },
+  {
+   "text": "The 3D printer made 5 parts.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } serial { name: \"3D\" } w { v: \"printer\" } w { v: \"made\" } cardinal { integer: \"5\" } w { v: \"parts\" } p { v: \".\" }",
+   "output": "The three D printer made five parts."
+  },
+  {
+   "text": "Use 4K resolution at 60fps.",
+   "lang": "en",
+   "tagged": "w { v: \"Use\" } serial { name: \"4K\" } w { v: \"resolution\" } w { v: \"at\" } serial { name: \"60fps\" } p { v: \".\" }",
+   "output": "Use four K resolution at sixty fps."
+  },
+  {
+   "text": "Formula 1 races are fast.",
+   "lang": "en",
+   "tagged": "w { v: \"Formula\" } cardinal { integer: \"1\" } w { v: \"races\" } w { v: \"are\" } w { v: \"fast\" } p { v: \".\" }",
+   "output": "Formula one races are fast."
+  },
+  {
+   "text": "B2B and B2C markets grew 12%.",
+   "lang": "en",
+   "tagged": "serial { name: \"B2B\" } w { v: \"and\" } serial { name: \"B2C\" } w { v: \"markets\" } w { v: \"grew\" } measure { integer: \"12\" units: \"%\" } p { v: \".\" }",
+   "output": "B two B and B two C markets grew twelve percent."
+  },
+  {
+   "text": "Studio 54 opened in 1977.",
+   "lang": "en",
+   "tagged": "w { v: \"Studio\" } cardinal { integer: \"54\" } w { v: \"opened\" } w { v: \"in\" } date { year: \"1977\" } p { v: \".\" }",
+   "output": "Studio fifty four opened in nineteen seventy seven."
+  },
+  {
+   "text": "Yes.",
+   "lang": "en",
+   "tagged": null,
+   "output": "Yes."
+  },
+  {
+   "text": "Okay, see you.",
+   "lang": "en",
+   "tagged": null,
+   "output": "Okay, see you."
+  },
+  {
+   "text": "The quick brown fox jumps over the lazy dog near the river bank.",
+   "lang": "en",
+   "tagged": null,
+   "output": "The quick brown fox jumps over the lazy dog near the river bank."
+  },
+  {
+   "text": "Dr. Smith is here.",
+   "lang": "en",
+   "tagged": null,
+   "output": "Dr. Smith is here."
+  },
+  {
+   "text": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+   "lang": "en",
+   "tagged": null,
+   "output": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?"
+  },
+  {
+   "text": "No no no no no no no no no no no no.",
+   "lang": "en",
+   "tagged": null,
+   "output": "No no no no no no no no no no no no."
+  },
+  {
+   "text": "Mr. and Mrs. Smith went to St. Paul.",
+   "lang": "en",
+   "tagged": null,
+   "output": "Mr. and Mrs. Smith went to St. Paul."
+  },
+  {
+   "text": "I can't believe it's not butter!",
+   "lang": "en",
+   "tagged": null,
+   "output": "I can't believe it's not butter!"
+  },
+  {
+   "text": "  3 cats  ",
+   "lang": "en",
+   "tagged": "cardinal { integer: \"3\" } w { v: \"cats\" }",
+   "output": "three cats"
+  },
+  {
+   "text": "Line one 1\tand tab 2.",
+   "lang": "en",
+   "tagged": "w { v: \"Line\" } w { v: \"one\" } cardinal { integer: \"1\" } w { v: \"and\" } w { v: \"tab\" } cardinal { integer: \"2\" } p { v: \".\" }",
+   "output": "Line one one and tab two."
+  },
+  {
+   "text": "Ends with a number 7",
+   "lang": "en",
+   "tagged": "w { v: \"Ends\" } w { v: \"with\" } w { v: \"a\" } w { v: \"number\" } cardinal { integer: \"7\" }",
+   "output": "Ends with a number seven"
+  },
+  {
+   "text": "8",
+   "lang": "en",
+   "tagged": "cardinal { integer: \"8\" }",
+   "output": "eight"
+  },
+  {
+   "text": "12345",
+   "lang": "en",
+   "tagged": "cardinal { integer: \"12345\" }",
+   "output": "twelve thousand three hundred and forty five"
+  },
+  {
+   "text": "1.5",
+   "lang": "en",
+   "tagged": "decimal { integer_part: \"1\"  fractional_part: \"5\" }",
+   "output": "one point five"
+  },
+  {
+   "text": "$100",
+   "lang": "en",
+   "tagged": "money { currency_maj: \"$\" integer_part: \"100\" }",
+   "output": "one hundred dollars"
+  },
+  {
+   "text": "50%",
+   "lang": "en",
+   "tagged": "measure { integer: \"50\" units: \"%\" }",
+   "output": "fifty percent"
+  },
+  {
+   "text": "2nd",
+   "lang": "en",
+   "tagged": "ordinal { integer: \"2nd\" }",
+   "output": "second"
+  },
+  {
+   "text": "In 2023, about 4.5 million visitors spent an average of $250 over 3.2 days.",
+   "lang": "en",
+   "tagged": "w { v: \"In\" } date { year: \"2023\" } p { v: \", \" } w { v: \"about\" } decimal { integer_part: \"4\"  fractional_part: \"5\" quantity: \"million\" } w { v: \"visitors\" } w { v: \"spent\" } w { v: \"an\" } w { v: \"average\" } w { v: \"of\" } money { currency_maj: \"$\" integer_part: \"250\" } w { v: \"over\" } decimal { integer_part: \"3\"  fractional_part: \"2\" } w { v: \"days\" } p { v: \".\" }",
+   "output": "In twenty twenty three, about four point five million visitors spent an average of two hundred and fifty dollars over three point two days."
+  },
+  {
+   "text": "The recipe needs 2 eggs, 1/4 cup milk, and 350 g of flour at 180°C for 25 minutes.",
+   "lang": "en",
+   "tagged": "w { v: \"The\" } w { v: \"recipe\" } w { v: \"needs\" } cardinal { integer: \"2\" } w { v: \"eggs\" } p { v: \", \" } fraction { numerator: \"1\" denominator: \"4\" } w { v: \"cup\" } w { v: \"milk\" } p { v: \", \" } w { v: \"and\" } measure { integer: \"350\" units: \"g\" } w { v: \"of\" } w { v: \"flour\" } w { v: \"at\" } measure { integer: \"180\" units: \"°C\" } w { v: \"for\" } cardinal { integer: \"25\" } w { v: \"minutes\" } p { v: \".\" }",
+   "output": "The recipe needs two eggs, one quarter cup milk, and three hundred and fifty grams of flour at one hundred and eighty degrees Celsius for twenty five minutes."
+  },
+  {
+   "text": "Between 9:00 and 17:00, 1,024 calls came in, 12% more than on 3/14/2023.",
+   "lang": "en",
+   "tagged": "w { v: \"Between\" } time { hours: \"9\" minutes: \"00\" } w { v: \"and\" } time { hours: \"17\" minutes: \"00\" } p { v: \", \" } cardinal { integer: \"1,024\" } w { v: \"calls\" } w { v: \"came\" } w { v: \"in\" } p { v: \", \" } measure { integer: \"12\" units: \"%\" } w { v: \"more\" } w { v: \"than\" } w { v: \"on\" } date { month: \"3\" day: \"14\" year: \"2023\" } p { v: \".\" }",
+   "output": "Between nine o'clock and seventeen o'clock, thousand and twenty four calls came in, twelve percent more than on the fourteenth of march twenty twenty three."
+  },
+  {
+   "text": "Unit 7, 1600 Pennsylvania Ave., Washington, DC 20500.",
+   "lang": "en",
+   "tagged": "w { v: \"Unit\" } cardinal { integer: \"7\" } p { v: \", \" } measure { units: \"address\" integer: \"1600 Pennsylvania Ave\" } p { v: \"., \" } w { v: \"Washington\" } p { v: \", \" } w { v: \"DC\" } cardinal { integer: \"20500\" } p { v: \".\" }",
+   "output": "Unit seven, one thousand six hundred Pennsylvania Avenue., Washington, DC twenty thousand five hundred."
+  },
+  {
+   "text": "Patients aged 65+ make up 18.5% of the 2.1 million total.",
+   "lang": "en",
+   "tagged": "",
+   "output": null,
+   "error": "AssertionError"
+  },
+  {
+   "text": "今天是2024年5月6日，气温25℃。",
+   "lang": "zh",
+   "tagged": "char { value: \"今\" } char { value: \"天\" } char { value: \"是\" } measure { value: \"2024年\" } measure { value: \"5月\" } measure { value: \"6日\" } char { value: \"，\" } char { value: \"气\" } char { value: \"温\" } measure { value: \"25℃\" } char { value: \"。\" }",
+   "output": "今天是二零二四年五月六日，气温二十五摄氏度。"
+  },
+  {
+   "text": "这件衣服售价¥199.5元。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"件\" } char { value: \"衣\" } char { value: \"服\" } char { value: \"售\" } char { value: \"价\" } money { currency: \"¥\" value: \"1\" } measure { value: \"99.5元\" } char { value: \"。\" }",
+   "output": "这件衣服售价一元九十九点五元。"
+  },
+  {
+   "text": "我的电话是13812345678。",
+   "lang": "zh",
+   "tagged": "char { value: \"我\" } char { value: \"的\" } char { value: \"电\" } char { value: \"话\" } char { value: \"是\" } cardinal { value: \"13812345678\" } char { value: \"。\" }",
+   "output": "我的电话是幺三八幺二三四五六七八。"
+  },
+  {
+   "text": "比分是3:2，时间是下午3点15分。",
+   "lang": "zh",
+   "tagged": "char { value: \"比\" } char { value: \"分\" } char { value: \"是\" } math { value: \"3:2\" } char { value: \"，\" } char { value: \"时\" } char { value: \"间\" } char { value: \"是\" } char { value: \"下\" } char { value: \"午\" } math { value: \"3\" } char { value: \"点\" } measure { value: \"15分\" } char { value: \"。\" }",
+   "output": "比分是三比二，时间是下午三点十五分。"
+  },
+  {
+   "text": "他跑了1.5公里，用了12分30秒。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"跑\" } char { value: \"了\" } measure { value: \"1.5公里\" } char { value: \"，\" } char { value: \"用\" } char { value: \"了\" } measure { value: \"12分\" } measure { value: \"30秒\" } char { value: \"。\" }",
+   "output": "他跑了一点五公里，用了十二分三十秒。"
+  },
+  {
+   "text": "大约有50%的人同意，1/3的人反对。",
+   "lang": "zh",
+   "tagged": "char { value: \"大\" } char { value: \"约\" } char { value: \"有\" } cardinal { value: \"50%\" } char { value: \"的\" } char { value: \"人\" } char { value: \"同\" } char { value: \"意\" } char { value: \"，\" } fraction { numerator: \"1\" denominator: \"3\" } char { value: \"的\" } char { value: \"人\" } char { value: \"反\" } char { value: \"对\" } char { value: \"。\" }",
+   "output": "大约有百分之五十的人同意，三分之一的人反对。"
+  },
+  {
+   "text": "第1名获得了10000元奖金。",
+   "lang": "zh",
+   "tagged": "char { value: \"第\" } measure { value: \"1名\" } char { value: \"获\" } char { value: \"得\" } char { value: \"了\" } measure { value: \"10000元\" } char { value: \"奖\" } char { value: \"金\" } char { value: \"。\" }",
+   "output": "第一名获得了一万元奖金。"
+  },
+  {
+   "text": "会议定于2023年12月31日举行。",
+   "lang": "zh",
+   "tagged": "char { value: \"会\" } char { value: \"议\" } char { value: \"定\" } char { value: \"于\" } measure { value: \"2023年\" } measure { value: \"12月\" } measure { value: \"31日\" } char { value: \"举\" } char { value: \"行\" } char { value: \"。\" }",
+   "output": "会议定于二零二三年十二月三十一日举行。"
+  },
+  {
+   "text": "现在是早上8:30。",
+   "lang": "zh",
+   "tagged": "char { value: \"现\" } char { value: \"在\" } char { value: \"是\" } char { value: \"早\" } char { value: \"上\" } time { hour: \"8\" minute: \"30\" } char { value: \"。\" }",
+   "output": "现在是早上八点三十分。"
+  },
+  {
+   "text": "晚上10点见。",
+   "lang": "zh",
+   "tagged": "char { value: \"晚\" } char { value: \"上\" } math { value: \"10\" } char { value: \"点\" } char { value: \"见\" } char { value: \"。\" }",
+   "output": "晚上十点见。"
+  },
+  {
+   "text": "1949年10月1日，中华人民共和国成立。",
+   "lang": "zh",
+   "tagged": "measure { value: \"1949年\" } measure { value: \"10月\" } measure { value: \"1日\" } char { value: \"，\" } char { value: \"中\" } char { value: \"华\" } char { value: \"人\" } char { value: \"民\" } char { value: \"共\" } char { value: \"和\" } char { value: \"国\" } char { value: \"成\" } char { value: \"立\" } char { value: \"。\" }",
+   "output": "一九四九年十月一日，中华人民共和国成立。"
+  },
+  {
+   "text": "他今年18岁。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"今\" } char { value: \"年\" } measure { value: \"18岁\" } char { value: \"。\" }",
+   "output": "他今年十八岁。"
+  },
+  {
+   "text": "这本书有365页。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"本\" } char { value: \"书\" } char { value: \"有\" } measure { value: \"365页\" } char { value: \"。\" }",
+   "output": "这本书有三百六十五页。"
+  },
+  {
+   "text": "价格是3.5元一斤。",
+   "lang": "zh",
+   "tagged": "char { value: \"价\" } char { value: \"格\" } char { value: \"是\" } measure { value: \"3.5元\" } char { value: \"一\" } char { value: \"斤\" } char { value: \"。\" }",
+   "output": "价格是三点五元一斤。"
+  },
+  {
+   "text": "我们班有45个学生。",
+   "lang": "zh",
+   "tagged": "char { value: \"我\" } char { value: \"们\" } char { value: \"班\" } char { value: \"有\" } measure { value: \"45个\" } char { value: \"学\" } char { value: \"生\" } char { value: \"。\" }",
+   "output": "我们班有四十五个学生。"
+  },
+  {
+   "text": "温度降到了-5℃。",
+   "lang": "zh",
+   "tagged": "char { value: \"温\" } char { value: \"度\" } char { value: \"降\" } char { value: \"到\" } char { value: \"了\" } measure { value: \"-5℃\" } char { value: \"。\" }",
+   "output": "温度降到了负五摄氏度。"
+  },
+  {
+   "text": "增长了12.5%。",
+   "lang": "zh",
+   "tagged": "char { value: \"增\" } char { value: \"长\" } char { value: \"了\" } cardinal { value: \"12.5%\" } char { value: \"。\" }",
+   "output": "增长了百分之十二点五。"
+  },
+  {
+   "text": "身高175cm，体重70kg。",
+   "lang": "zh",
+   "tagged": "char { value: \"身\" } char { value: \"高\" } measure { value: \"175cm\" } char { value: \"，\" } char { value: \"体\" } char { value: \"重\" } measure { value: \"70kg\" } char { value: \"。\" }",
+   "output": "身高一百七十五厘米，体重七十千克。"
+  },
+  {
+   "text": "距离是100km。",
+   "lang": "zh",
+   "tagged": "char { value: \"距\" } char { value: \"离\" } char { value: \"是\" } measure { value: \"100km\" } char { value: \"。\" }",
+   "output": "距离是一百公里。"
+  },
+  {
+   "text": "请拨打110报警。",
+   "lang": "zh",
+   "tagged": "char { value: \"请\" } char { value: \"拨\" } char { value: \"打\" } cardinal { value: \"110\" } char { value: \"报\" } char { value: \"警\" } char { value: \"。\" }",
+   "output": "请拨打幺幺零报警。"
+  },
+  {
+   "text": "邮编是100084。",
+   "lang": "zh",
+   "tagged": "char { value: \"邮\" } char { value: \"编\" } char { value: \"是\" } math { value: \"100084\" } char { value: \"。\" }",
+   "output": "邮编是十万零八十四。"
+  },
+  {
+   "text": "他住在3楼302室。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"住\" } char { value: \"在\" } math { value: \"3\" } char { value: \"楼\" } math { value: \"302\" } char { value: \"室\" } char { value: \"。\" }",
+   "output": "他住在三楼三百零二室。"
+  },
+  {
+   "text": "第2章第3节。",
+   "lang": "zh",
+   "tagged": "char { value: \"第\" } math { value: \"2\" } char { value: \"章\" } char { value: \"第\" } math { value: \"3\" } char { value: \"节\" } char { value: \"。\" }",
+   "output": "第二章第三节。"
+  },
+  {
+   "text": "2/5的人选择了A。",
+   "lang": "zh",
+   "tagged": "fraction { numerator: \"2\" denominator: \"5\" } char { value: \"的\" } char { value: \"人\" } char { value: \"选\" } char { value: \"择\" } char { value: \"了\" } char { value: \"A\" } char { value: \"。\" }",
+   "output": "五分之二的人选择了A。"
+  },
+  {
+   "text": "这台电脑重2.3千克。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"台\" } char { value: \"电\" } char { value: \"脑\" } char { value: \"重\" } measure { value: \"2.3千\" } char { value: \"克\" } char { value: \"。\" }",
+   "output": "这台电脑重二点三千克。"
+  },
+  {
+   "text": "股价上涨了0.75元。",
+   "lang": "zh",
+   "tagged": "char { value: \"股\" } char { value: \"价\" } char { value: \"上\" } char { value: \"涨\" } char { value: \"了\" } measure { value: \"0.75元\" } char { value: \"。\" }",
+   "output": "股价上涨了零点七五元。"
+  },
+  {
+   "text": "我花了1,000元。",
+   "lang": "zh",
+   "tagged": "char { value: \"我\" } char { value: \"花\" } char { value: \"了\" } measure { value: \"1,000元\" } char { value: \"。\" }",
+   "output": "我花了一千元。"
+  },
+  {
+   "text": "全国有14亿人口。",
+   "lang": "zh",
+   "tagged": "char { value: \"全\" } char { value: \"国\" } char { value: \"有\" } measure { value: \"14亿\" } char { value: \"人\" } char { value: \"口\" } char { value: \"。\" }",
+   "output": "全国有十四亿人口。"
+  },
+  {
+   "text": "他在2008年北京奥运会上获得了3枚金牌。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"在\" } measure { value: \"2008年\" } char { value: \"北\" } char { value: \"京\" } char { value: \"奥\" } char { value: \"运\" } char { value: \"会\" } char { value: \"上\" } char { value: \"获\" } char { value: \"得\" } char { value: \"了\" } math { value: \"3\" } char { value: \"枚\" } char { value: \"金\" } char { value: \"牌\" } char { value: \"。\" }",
+   "output": "他在二零零八年北京奥运会上获得了三枚金牌。"
+  },
+  {
+   "text": "下午2:45开会。",
+   "lang": "zh",
+   "tagged": "char { value: \"下\" } char { value: \"午\" } time { hour: \"2\" minute: \"45\" } char { value: \"开\" } char { value: \"会\" } char { value: \"。\" }",
+   "output": "下午两点四十五分开会。"
+  },
+  {
+   "text": "时间是23:59:59。",
+   "lang": "zh",
+   "tagged": "char { value: \"时\" } char { value: \"间\" } char { value: \"是\" } time { hour: \"23\" minute: \"59\" second: \"59\" } char { value: \"。\" }",
+   "output": "时间是二十三点五十九分五十九秒。"
+  },
+  {
+   "text": "1+1=2。",
+   "lang": "en",
+   "tagged": "measure { units: \"math\" integer: \"1+1=2\" } p { v: \"。\" }",
+   "output": "one plus one equals two。"
+  },
+  {
+   "text": "5-3=2。",
+   "lang": "en",
+   "tagged": "measure { units: \"math\" integer: \"5-3=2\" } p { v: \"。\" }",
+   "output": "five minus three equals two。"
+  },
+  {
+   "text": "3×4=12。",
+   "lang": "en",
+   "tagged": "measure { units: \"math\" integer: \"3×4=12\" } p { v: \"。\" }",
+   "output": "three times four equals twelve。"
+  },
+  {
+   "text": "10÷2=5。",
+   "lang": "en",
+   "tagged": "measure { units: \"math\" integer: \"10÷2=5\" } p { v: \"。\" }",
+   "output": "ten divided two equals five。"
+  },
+  {
+   "text": "这辆车时速120公里。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"辆\" } char { value: \"车\" } char { value: \"时\" } char { value: \"速\" } measure { value: \"120公里\" } char { value: \"。\" }",
+   "output": "这辆车时速一百二十公里。"
+  },
+  {
+   "text": "约有1万人参加。",
+   "lang": "zh",
+   "tagged": "char { value: \"约\" } char { value: \"有\" } measure { value: \"1万\" } char { value: \"人\" } char { value: \"参\" } char { value: \"加\" } char { value: \"。\" }",
+   "output": "约有一万人参加。"
+  },
+  {
+   "text": "第100位顾客。",
+   "lang": "zh",
+   "tagged": "char { value: \"第\" } measure { value: \"100位\" } char { value: \"顾\" } char { value: \"客\" } char { value: \"。\" }",
+   "output": "第一百位顾客。"
+  },
+  {
+   "text": "这是第3次了。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"是\" } char { value: \"第\" } math { value: \"3\" } char { value: \"次\" } char { value: \"了\" } char { value: \"。\" }",
+   "output": "这是第三次了。"
+  },
+  {
+   "text": "门牌号是88号。",
+   "lang": "zh",
+   "tagged": "char { value: \"门\" } char { value: \"牌\" } char { value: \"号\" } char { value: \"是\" } measure { value: \"88号\" } char { value: \"。\" }",
+   "output": "门牌号是八十八号。"
+  },
+  {
+   "text": "密码是0000。",
+   "lang": "zh",
+   "tagged": "char { value: \"密\" } char { value: \"码\" } char { value: \"是\" } math { value: \"0\" } math { value: \"0\" } math { value: \"0\" } math { value: \"0\" } char { value: \"。\" }",
+   "output": "密码是零零零零。"
+  },
+  {
+   "text": "房间号是0815。",
+   "lang": "zh",
+   "tagged": "char { value: \"房\" } char { value: \"间\" } char { value: \"号\" } char { value: \"是\" } math { value: \"0\" } math { value: \"815\" } char { value: \"。\" }",
+   "output": "房间号是零八百一十五。"
+  },
+  {
+   "text": "我买了2斤苹果。",
+   "lang": "zh",
+   "tagged": "char { value: \"我\" } char { value: \"买\" } char { value: \"了\" } measure { value: \"2斤\" } char { value: \"苹\" } char { value: \"果\" } char { value: \"。\" }",
+   "output": "我买了两斤苹果。"
+  },
+  {
+   "text": "这瓶水500毫升。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"瓶\" } char { value: \"水\" } measure { value: \"500毫\" } char { value: \"升\" } char { value: \"。\" }",
+   "output": "这瓶水五百毫升。"
+  },
+  {
+   "text": "他考了98.5分。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"考\" } char { value: \"了\" } measure { value: \"98.5分\" } char { value: \"。\" }",
+   "output": "他考了九十八点五分。"
+  },
+  {
+   "text": "利率是4.35%。",
+   "lang": "zh",
+   "tagged": "char { value: \"利\" } char { value: \"率\" } char { value: \"是\" } cardinal { value: \"4.35%\" } char { value: \"。\" }",
+   "output": "利率是百分之四点三五。"
+  },
+  {
+   "text": "价格从100元涨到120元。",
+   "lang": "zh",
+   "tagged": "char { value: \"价\" } char { value: \"格\" } char { value: \"从\" } measure { value: \"100元\" } char { value: \"涨\" } char { value: \"到\" } measure { value: \"120元\" } char { value: \"。\" }",
+   "output": "价格从一百元涨到一百二十元。"
+  },
+  {
+   "text": "2020-2022年疫情严重。",
+   "lang": "zh",
+   "tagged": "measure { value: \"2020-2022年\" } char { value: \"疫\" } char { value: \"情\" } char { value: \"严\" } char { value: \"重\" } char { value: \"。\" }",
+   "output": "二零二零到二零二二年疫情严重。"
+  },
+  {
+   "text": "年龄在18-25岁之间。",
+   "lang": "zh",
+   "tagged": "char { value: \"年\" } char { value: \"龄\" } char { value: \"在\" } measure { value: \"18-25岁\" } char { value: \"之\" } char { value: \"间\" } char { value: \"。\" }",
+   "output": "年龄在十八到二十五岁之间。"
+  },
+  {
+   "text": "请在3-5个工作日内完成。",
+   "lang": "zh",
+   "tagged": "char { value: \"请\" } char { value: \"在\" } measure { value: \"3-5个\" } char { value: \"工\" } char { value: \"作\" } char { value: \"日\" } char { value: \"内\" } char { value: \"完\" } char { value: \"成\" } char { value: \"。\" }",
+   "output": "请在三到五个工作日内完成。"
+  },
+  {
+   "text": "QQ号是123456789。",
+   "lang": "zh",
+   "tagged": "char { value: \"Q\" } char { value: \"Q\" } char { value: \"号\" } char { value: \"是\" } math { value: \"123456789\" } char { value: \"。\" }",
+   "output": "QQ号是一亿二千三百四十五万六千七百八十九。"
+  },
+  {
+   "text": "身份证号是110101199003071234。",
+   "lang": "zh",
+   "tagged": "char { value: \"身\" } char { value: \"份\" } char { value: \"证\" } char { value: \"号\" } char { value: \"是\" } cardinal { value: \"11010119900\" } math { value: \"3071234\" } char { value: \"。\" }",
+   "output": "身份证号是幺幺零幺零幺幺九九零零三百零七万一千二百三十四。"
+  },
+  {
+   "text": "车牌号是京A12345。",
+   "lang": "zh",
+   "tagged": "char { value: \"车\" } char { value: \"牌\" } char { value: \"号\" } char { value: \"是\" } char { value: \"京\" } char { value: \"A\" } cardinal { value: \"12345\" } char { value: \"。\" }",
+   "output": "车牌号是京A幺二三四五。"
+  },
+  {
+   "text": "我有3个苹果和2个香蕉。",
+   "lang": "zh",
+   "tagged": "char { value: \"我\" } char { value: \"有\" } measure { value: \"3个\" } char { value: \"苹\" } char { value: \"果\" } char { value: \"和\" } measure { value: \"2个\" } char { value: \"香\" } char { value: \"蕉\" } char { value: \"。\" }",
+   "output": "我有三个苹果和两个香蕉。"
+  },
+  {
+   "text": "一共是¥88.88。",
+   "lang": "zh",
+   "tagged": "char { value: \"一\" } char { value: \"共\" } char { value: \"是\" } money { currency: \"¥\" value: \"88.88\" } char { value: \"。\" }",
+   "output": "一共是八十八点八八元。"
+  },
+  {
+   "text": "这件事发生在1998年。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"件\" } char { value: \"事\" } char { value: \"发\" } char { value: \"生\" } char { value: \"在\" } measure { value: \"1998年\" } char { value: \"。\" }",
+   "output": "这件事发生在一九九八年。"
+  },
+  {
+   "text": "她出生于1995年3月8日。",
+   "lang": "zh",
+   "tagged": "char { value: \"她\" } char { value: \"出\" } char { value: \"生\" } char { value: \"于\" } measure { value: \"1995年\" } measure { value: \"3月\" } measure { value: \"8日\" } char { value: \"。\" }",
+   "output": "她出生于一九九五年三月八日。"
+  },
+  {
+   "text": "今天星期3。",
+   "lang": "zh",
+   "tagged": "char { value: \"今\" } char { value: \"天\" } char { value: \"星\" } char { value: \"期\" } math { value: \"3\" } char { value: \"。\" }",
+   "output": "今天星期三。"
+  },
+  {
+   "text": "2点了，该走了。",
+   "lang": "zh",
+   "tagged": "math { value: \"2\" } char { value: \"点\" } char { value: \"了\" } char { value: \"，\" } char { value: \"该\" } char { value: \"走\" } char { value: \"了\" } char { value: \"。\" }",
+   "output": "二点了，该走了。"
+  },
+  {
+   "text": "12点整。",
+   "lang": "zh",
+   "tagged": "math { value: \"12\" } char { value: \"点\" } char { value: \"整\" } char { value: \"。\" }",
+   "output": "十二点整。"
+  },
+  {
+   "text": "5分钟后出发。",
+   "lang": "zh",
+   "tagged": "measure { value: \"5分\" } char { value: \"钟\" } char { value: \"后\" } char { value: \"出\" } char { value: \"发\" } char { value: \"。\" }",
+   "output": "五分钟后出发。"
+  },
+  {
+   "text": "等了30秒。",
+   "lang": "zh",
+   "tagged": "char { value: \"等\" } char { value: \"了\" } measure { value: \"30秒\" } char { value: \"。\" }",
+   "output": "等了三十秒。"
+  },
+  {
+   "text": "他跑了42.195公里。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"跑\" } char { value: \"了\" } measure { value: \"42.195公里\" } char { value: \"。\" }",
+   "output": "他跑了四十二点一九五公里。"
+  },
+  {
+   "text": "电压是220V。",
+   "lang": "zh",
+   "tagged": "char { value: \"电\" } char { value: \"压\" } char { value: \"是\" } math { value: \"220\" } char { value: \"V\" } char { value: \"。\" }",
+   "output": "电压是两百二十V。"
+  },
+  {
+   "text": "功率是1500W。",
+   "lang": "zh",
+   "tagged": "char { value: \"功\" } char { value: \"率\" } char { value: \"是\" } math { value: \"1500\" } char { value: \"W\" } char { value: \"。\" }",
+   "output": "功率是一千五百W。"
+  },
+  {
+   "text": "屏幕是6.1英寸。",
+   "lang": "zh",
+   "tagged": "char { value: \"屏\" } char { value: \"幕\" } char { value: \"是\" } math { value: \"6.1\" } char { value: \"英\" } char { value: \"寸\" } char { value: \"。\" }",
+   "output": "屏幕是六点一英寸。"
+  },
+  {
+   "text": "内存是16GB。",
+   "lang": "zh",
+   "tagged": "char { value: \"内\" } char { value: \"存\" } char { value: \"是\" } math { value: \"16\" } char { value: \"G\" } char { value: \"B\" } char { value: \"。\" }",
+   "output": "内存是十六GB。"
+  },
+  {
+   "text": "网速是100Mbps。",
+   "lang": "zh",
+   "tagged": "char { value: \"网\" } char { value: \"速\" } char { value: \"是\" } math { value: \"100\" } char { value: \"M\" } char { value: \"b\" } char { value: \"p\" } char { value: \"s\" } char { value: \"。\" }",
+   "output": "网速是一百Mbps。"
+  },
+  {
+   "text": "这里海拔3000米。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"里\" } char { value: \"海\" } char { value: \"拔\" } measure { value: \"3000米\" } char { value: \"。\" }",
+   "output": "这里海拔三千米。"
+  },
+  {
+   "text": "面积是120平方米。",
+   "lang": "zh",
+   "tagged": "char { value: \"面\" } char { value: \"积\" } char { value: \"是\" } measure { value: \"120平方\" } char { value: \"米\" } char { value: \"。\" }",
+   "output": "面积是一百二十平方米。"
+  },
+  {
+   "text": "体积是2立方米。",
+   "lang": "zh",
+   "tagged": "char { value: \"体\" } char { value: \"积\" } char { value: \"是\" } measure { value: \"2立方\" } char { value: \"米\" } char { value: \"。\" }",
+   "output": "体积是两立方米。"
+  },
+  {
+   "text": "他喝了3杯咖啡。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"喝\" } char { value: \"了\" } measure { value: \"3杯\" } char { value: \"咖\" } char { value: \"啡\" } char { value: \"。\" }",
+   "output": "他喝了三杯咖啡。"
+  },
+  {
+   "text": "买了10本书。",
+   "lang": "zh",
+   "tagged": "char { value: \"买\" } char { value: \"了\" } measure { value: \"10本\" } char { value: \"书\" } char { value: \"。\" }",
+   "output": "买了十本书。"
+  },
+  {
+   "text": "第一名是007号选手。",
+   "lang": "zh",
+   "tagged": "char { value: \"第\" } char { value: \"一\" } char { value: \"名\" } char { value: \"是\" } math { value: \"0\" } math { value: \"0\" } measure { value: \"7号\" } char { value: \"选\" } char { value: \"手\" } char { value: \"。\" }",
+   "output": "第一名是零零七号选手。"
+  },
+  {
+   "text": "比赛结果是2:1。",
+   "lang": "zh",
+   "tagged": "char { value: \"比\" } char { value: \"赛\" } char { value: \"结\" } char { value: \"果\" } char { value: \"是\" } math { value: \"2:1\" } char { value: \"。\" }",
+   "output": "比赛结果是二比一。"
+  },
+  {
+   "text": "零下10度。",
+   "lang": "zh",
+   "tagged": "char { value: \"零\" } char { value: \"下\" } measure { value: \"10度\" } char { value: \"。\" }",
+   "output": "零下十度。"
+  },
+  {
+   "text": "这台机器有99.9%的准确率。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"台\" } char { value: \"机\" } char { value: \"器\" } char { value: \"有\" } cardinal { value: \"99.9%\" } char { value: \"的\" } char { value: \"准\" } char { value: \"确\" } char { value: \"率\" } char { value: \"。\" }",
+   "output": "这台机器有百分之九十九点九的准确率。"
+  },
+  {
+   "text": "预计2030年完成。",
+   "lang": "zh",
+   "tagged": "char { value: \"预\" } char { value: \"计\" } measure { value: \"2030年\" } char { value: \"完\" } char { value: \"成\" } char { value: \"。\" }",
+   "output": "预计二零三零年完成。"
+  },
+  {
+   "text": "公元前221年秦统一六国。",
+   "lang": "zh",
+   "tagged": "char { value: \"公\" } char { value: \"元\" } char { value: \"前\" } math { value: \"221\" } char { value: \"年\" } char { value: \"秦\" } char { value: \"统\" } char { value: \"一\" } char { value: \"六\" } char { value: \"国\" } char { value: \"。\" }",
+   "output": "公元前两百二十一年秦统一六国。"
+  },
+  {
+   "text": "他有1/4的英国血统。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"有\" } fraction { numerator: \"1\" denominator: \"4\" } char { value: \"的\" } char { value: \"英\" } char { value: \"国\" } char { value: \"血\" } char { value: \"统\" } char { value: \"。\" }",
+   "output": "他有四分之一的英国血统。"
+  },
+  {
+   "text": "增加了3倍。",
+   "lang": "zh",
+   "tagged": "char { value: \"增\" } char { value: \"加\" } char { value: \"了\" } math { value: \"3\" } char { value: \"倍\" } char { value: \"。\" }",
+   "output": "增加了三倍。"
+  },
+  {
+   "text": "约0.5公斤。",
+   "lang": "zh",
+   "tagged": "math { value: \"约0.5\" } char { value: \"公\" } char { value: \"斤\" } char { value: \"。\" }",
+   "output": "约零点五公斤。"
+  },
+  {
+   "text": "每人200元。",
+   "lang": "zh",
+   "tagged": "char { value: \"每\" } char { value: \"人\" } measure { value: \"200元\" } char { value: \"。\" }",
+   "output": "每人两百元。"
+  },
+  {
+   "text": "共计12,345,678元。",
+   "lang": "zh",
+   "tagged": "char { value: \"共\" } char { value: \"计\" } measure { value: \"12,345,678元\" } char { value: \"。\" }",
+   "output": "共计一千二百三十四万五千六百七十八元。"
+  },
+  {
+   "text": "第3季度营收增长15%。",
+   "lang": "zh",
+   "tagged": "char { value: \"第\" } measure { value: \"3季\" } char { value: \"度\" } char { value: \"营\" } char { value: \"收\" } char { value: \"增\" } char { value: \"长\" } cardinal { value: \"15%\" } char { value: \"。\" }",
+   "output": "第三季度营收增长百分之十五。"
+  },
+  {
+   "text": "2024年第1季度。",
+   "lang": "zh",
+   "tagged": "measure { value: \"2024年\" } char { value: \"第\" } measure { value: \"1季\" } char { value: \"度\" } char { value: \"。\" }",
+   "output": "二零二四年第一季度。"
+  },
+  {
+   "text": "我在2楼等你。",
+   "lang": "zh",
+   "tagged": "char { value: \"我\" } char { value: \"在\" } math { value: \"2\" } char { value: \"楼\" } char { value: \"等\" } char { value: \"你\" } char { value: \"。\" }",
+   "output": "我在二楼等你。"
+  },
+  {
+   "text": "这是iPhone 15。",
+   "lang": "zh",
+   "tagged": "char { value: \"这\" } char { value: \"是\" } char { value: \"i\" } char { value: \"P\" } char { value: \"h\" } char { value: \"o\" } char { value: \"n\" } char { value: \"e\" } char { value: \" \" } math { value: \"15\" } char { value: \"。\" }",
+   "output": "这是iPhone 十五。"
+  },
+  {
+   "text": "他的成绩是A+，排名第5。",
+   "lang": "zh",
+   "tagged": "char { value: \"他\" } char { value: \"的\" } char { value: \"成\" } char { value: \"绩\" } char { value: \"是\" } char { value: \"A\" } char { value: \"+\" } char { value: \"，\" } char { value: \"排\" } char { value: \"名\" } char { value: \"第\" } math { value: \"5\" } char { value: \"。\" }",
+   "output": "他的成绩是A+，排名第五。"
+  },
+  {
+   "text": "Windows 11系统。",
+   "lang": "zh",
+   "tagged": "char { value: \"W\" } char { value: \"i\" } char { value: \"n\" } char { value: \"d\" } char { value: \"o\" } char { value: \"w\" } char { value: \"s\" } char { value: \" \" } math { value: \"11\" } char { value: \"系\" } char { value: \"统\" } char { value: \"。\" }",
+   "output": "Windows 十一系统。"
+  },
+  {
+   "text": "5G网络覆盖了90%的城市。",
+   "lang": "zh",
+   "tagged": "math { value: \"5\" } char { value: \"G\" } char { value: \"网\" } char { value: \"络\" } char { value: \"覆\" } char { value: \"盖\" } char { value: \"了\" } cardinal { value: \"90%\" } char { value: \"的\" } char { value: \"城\" } char { value: \"市\" } char { value: \"。\" }",
+   "output": "五G网络覆盖了百分之九十的城市。"
+  },
+  {
+   "text": "COVID-19疫情始于2019年。",
+   "lang": "zh",
+   "tagged": "char { value: \"C\" } char { value: \"O\" } char { value: \"V\" } char { value: \"I\" } char { value: \"D\" } math { value: \"-19\" } char { value: \"疫\" } char { value: \"情\" } char { value: \"始\" } char { value: \"于\" } measure { value: \"2019年\" } char { value: \"。\" }",
+   "output": "COVID负十九疫情始于二零一九年。"
+  },
+  {
+   "text": "开了2个小时的会。",
+   "lang": "zh",
+   "tagged": "char { value: \"开\" } char { value: \"了\" } measure { value: \"2个\" } char { value: \"小\" } char { value: \"时\" } char { value: \"的\" } char { value: \"会\" } char { value: \"。\" }",
+   "output": "开了两个小时的会。"
+  },
+  {
+   "text": "早上6点起床，晚上11点睡觉。",
+   "lang": "zh",
+   "tagged": "char { value: \"早\" } char { value: \"上\" } math { value: \"6\" } char { value: \"点\" } char { value: \"起\" } char { value: \"床\" } char { value: \"，\" } char { value: \"晚\" } char { value: \"上\" } math { value: \"11\" } char { value: \"点\" } char { value: \"睡\" } char { value: \"觉\" } char { value: \"。\" }",
+   "output": "早上六点起床，晚上十一点睡觉。"
+  },
+  {
+   "text": "两个人花了300块钱。",
+   "lang": "zh",
+   "tagged": "char { value: \"两\" } char { value: \"个\" } char { value: \"人\" } char { value: \"花\" } char { value: \"了\" } measure { value: \"300块\" } char { value: \"钱\" } char { value: \"。\" }",
+   "output": "两个人花了三百块钱。"
+  },
+  {
+   "text": "儿子今年3岁了，喜欢玩儿。",
+   "lang": "zh",
+   "tagged": "whitelist { value: \"儿子\" } char { value: \"今\" } char { value: \"年\" } measure { value: \"3岁\" } char { value: \"了\" } char { value: \"，\" } char { value: \"喜\" } char { value: \"欢\" } char { value: \"玩\" } whitelist { erhua: \"儿\" } char { value: \"。\" }",
+   "output": "儿子今年三岁了，喜欢玩儿。"
+  },
+  {
+   "text": "哪儿有5块钱？",
+   "lang": "zh",
+   "tagged": "char { value: \"哪\" } whitelist { erhua: \"儿\" } char { value: \"有\" } measure { value: \"5块\" } char { value: \"钱\" } char { value: \"？\" }",
+   "output": "哪儿有五块钱？"
+  },
+  {
+   "text": "我有一个苹果。",
+   "lang": "zh",
+   "tagged": null,
+   "output": "我有一个苹果。"
+  },
+  {
+   "text": "今天天气很好。",
+   "lang": "zh",
+   "tagged": null,
+   "output": "今天天气很好。"
+  },
+  {
+   "text": "你好，世界！",
+   "lang": "zh",
+   "tagged": null,
+   "output": "你好，世界！"
+  },
+  {
+   "text": "  我有3本书  ",
+   "lang": "zh",
+   "tagged": "char { value: \" \" } char { value: \" \" } char { value: \"我\" } char { value: \"有\" } measure { value: \"3本\" } char { value: \"书\" } char { value: \" \" } char { value: \" \" }",
+   "output": "  我有三本书  "
+  },
+  {
+   "text": "1998",
+   "lang": "en",
+   "tagged": "date { year: \"1998\" }",
+   "output": "nineteen ninety eight"
+  },
+  {
+   "text": "3.14",
+   "lang": "en",
+   "tagged": "decimal { integer_part: \"3\"  fractional_part: \"14\" }",
+   "output": "three point one four"
+  },
+  {
+   "text": "50%",
+   "lang": "en",
+   "tagged": "measure { integer: \"50\" units: \"%\" }",
+   "output": "fifty percent"
+  },
+  {
+   "text": "100元",
+   "lang": "zh",
+   "tagged": "measure { value: \"100元\" }",
+   "output": "一百元"
+  },
+  {
+   "text": "Python3.12版本发布了。",
+   "lang": "zh",
+   "tagged": "char { value: \"P\" } char { value: \"y\" } char { value: \"t\" } char { value: \"h\" } char { value: \"o\" } char { value: \"n\" } math { value: \"3.12\" } char { value: \"版\" } char { value: \"本\" } char { value: \"发\" } char { value: \"布\" } char { value: \"了\" } char { value: \"。\" }",
+   "output": "Python三点一二版本发布了。"
+  },
+  {
+   "text": "我们约在3:00 PM见面。",
+   "lang": "zh",
+   "tagged": "char { value: \"我\" } char { value: \"们\" } char { value: \"约\" } char { value: \"在\" } time { hour: \"3\" minute: \"00\" noon: \"PM\" } char { value: \"见\" } char { value: \"面\" } char { value: \"。\" }",
+   "output": "我们约在下午三点见面。"
+  },
+  {
+   "text": "价格是$99。",
+   "lang": "zh",
+   "tagged": "char { value: \"价\" } char { value: \"格\" } char { value: \"是\" } money { currency: \"$\" value: \"99\" } char { value: \"。\" }",
+   "output": "价格是九十九美元。"
+  },
+  {
+   "text": "温度是36.5°C。",
+   "lang": "zh",
+   "tagged": "char { value: \"温\" } char { value: \"度\" } char { value: \"是\" } measure { value: \"36.5°C\" } char { value: \"。\" }",
+   "output": "温度是三十六点五摄氏度。"
+  }
+ ]
+}
