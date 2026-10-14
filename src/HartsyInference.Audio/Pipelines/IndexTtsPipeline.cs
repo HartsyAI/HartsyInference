@@ -170,7 +170,10 @@ public sealed class IndexTtsPipeline : IDisposable
 
         // Validate + segment text (cheap, no tensor allocation) before computing the reference mel, so a rejected
         // prompt never leaves an undisposed Tensor behind.
-        List<int[]> segments = SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment, EncodeNormalized);
+        // Same English spoken-form normalization as IndexTTS-2: without it digits and abbreviations reach the
+        // tokenizer unexpanded and garble numbers. A single character is passed through untouched (reference parity).
+        string spoken = text.Trim().Length == 1 ? text : IndexTts2TextNormalizer.Normalize(text);
+        List<int[]> segments = SplitIntoTokenSegments(spoken, DefaultMaxTextTokensPerSegment, EncodeNormalized);
         if (segments.Count == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
         int totalTokens = 0;
         foreach (int[] seg in segments) totalTokens += seg.Length;

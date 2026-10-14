@@ -24,6 +24,10 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.362
+
+- **Fixed: IndexTTS-1.5 and IndexTTS-2.5 garbled numbers, dates and currency.** Only the IndexTTS-2.0 path ran the English spoken-form normalizer. The 2.5 (tiktoken) path and the 1.5 path passed digits and abbreviations straight to the tokenizer, so "On March 3rd, 2026 at 4:30 PM, $99.95" came out as unrelated words. Both paths now run the same normalization as 2.0. A regression test checks that dates, times and currency expand to spoken words.
+
 ## alpha.361
 
 - **Changed: a sliding-window or soft-cap model is refused from the Vulkan decode graph before capture.** Gemma-2 and Gemma-3 use a sliding window in their local layers, and Gemma-2 also soft-caps the attention scores; the Vulkan device-position attention takes neither. The implicit graph default now decodes them eagerly without attempting a capture, so the warmup and the table uploads of a failed capture are no longer spent first. An explicit `--graph-decode` or `numerics.graphDecode` fails with `NotSupportedException` (HTTP 501 on the API) naming the architecture and the reason, instead of an internal throw from `FlashAttentionDev`. CUDA and CPU are unchanged.

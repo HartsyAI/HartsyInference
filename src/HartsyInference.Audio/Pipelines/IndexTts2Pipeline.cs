@@ -420,7 +420,13 @@ public sealed class IndexTts2Pipeline : IDisposable
     private List<int[]> SegmentText(string text, IndexTts2Options opts)
     {
         ArgumentNullException.ThrowIfNull(text);
-        if (_spm is null) return IndexTtsPipeline.SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment, EncodeNormalized);
+        if (_spm is null)
+        {
+            // IndexTTS-2.5 (tiktoken) takes the same English spoken-form normalization as 2.0. Without it digits and
+            // abbreviations reach the tokenizer unexpanded, which garbles numbers ("2026", "4:30", "$99.95").
+            string spoken = text.Trim().Length == 1 ? text : IndexTts2TextNormalizer.Normalize(text);
+            return IndexTtsPipeline.SplitIntoTokenSegments(spoken, DefaultMaxTextTokensPerSegment, EncodeNormalized);
+        }
 
         string prepared = text.Trim().Length == 1 ? text : IndexTtsTextNormalizer.InjectCjkBoundaries(IndexTts2TextNormalizer.Normalize(text));
         if (prepared.Length == 0) return [];
