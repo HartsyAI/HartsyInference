@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: opt-in cooperative-matrix-2 causal prefill attention.** `numerics.vkFlashCm2Prefill` (default off) routes causal `FlashAttention` prefill (64+ query rows, no softcap/sink/ALiBi) through `sdpa_flash_cm2_mask` with a host-built causal and sliding-window F32 mask. Parity-tested on the RTX 3060 against the CPU reference for GQA 1/2/4/7, d 64/128, query offsets, windows and capacity padding. Median 750-token prefill (5 interleaved runs, RTX 3060): OLMoE-1B-7B Q4_K_M 1.74 s to 0.58 s; granite-3.0-1b-a400m 1.18 s to 0.37 s (noisy, shared card). 128-token greedy text identical to the CPU backend on both models.
+
 
 - **Fixed: stale expert-cache test read a released lease.** `PinnedExpertsAreNeverEvicted_AndUnpinnedOnesAre` called `pinned.Get` after `Release`, but released leases clear their slots by design (reusable leases, #306). The test now keeps the weights before releasing; the pinned-never-evicted and unpinned-evicted assertions are unchanged.
 - **Fixed: Qwen2 and Qwen3 GGUFs use the Qwen2 pre-tokenizer split.** The GGUF names it `tokenizer.ggml.pre = "qwen2"`, and only `kolibri1` selected the single-digit split. Qwen text tokenized with the GPT-2 split, 6-8% more tokens on the same text (the 4K benchmark prompt came out at 4,036 against llama.cpp's 3,742). The Qwen2 split now applies to both names.

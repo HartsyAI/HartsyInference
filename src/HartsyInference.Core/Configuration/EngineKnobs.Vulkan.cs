@@ -20,6 +20,11 @@ public static partial class EngineKnobs
         Bool("numerics.vkDisableCoopmat", false, KnobScope.Construction, KnobDomain.Numerics,
             "Force-disables the cooperative-matrix matmul path so GEMMs fall back to the scalar shaders.");
 
+    /// <summary>Routes causal LLM prefill attention (<c>FlashAttention</c> with <c>causal: true</c>, at least 64 query rows) through the cooperative-matrix-2 flash kernel instead of the scalar <c>sdpa_flash</c>, with the causal and sliding-window masks materialized as one F32 tile.</summary>
+    public static readonly Knob<bool> VkFlashCm2Prefill =
+        Bool("numerics.vkFlashCm2Prefill", false, KnobScope.Construction, KnobDomain.Numerics,
+            "Routes causal LLM prefill attention through the cooperative-matrix-2 flash kernel (F16 Q/K/V, F32 masks) instead of the scalar sdpa_flash.");
+
     /// <summary>Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.</summary>
     public static readonly Knob<bool> VkInt8 =
         Bool("numerics.vkInt8", false, KnobScope.Construction, KnobDomain.Numerics,

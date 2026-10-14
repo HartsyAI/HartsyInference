@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vulkan;
 using Xunit;
@@ -66,6 +67,61 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         using Tensor ot = new(new TensorShape(s, hq * d), DType.F32);
         backend.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mt, hq, hkv, d, scale, allowF16: true);
         Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
+    }
+
+    /// <summary>Causal prefill through <c>FlashAttention</c> (the path LLM prefill takes) on the cm2 kernel against the
+    /// CPU reference. K/V live in a buffer whose sequence capacity exceeds kvLen, as a KV cache does, so the
+    /// head stride comes from the capacity while the attended length comes from kvLen.</summary>
+    [Theory]
+    [InlineData(16, 8, 64, 77, 77, 0, 0, 0)]     // granite-3.0-1b: GQA 2, d 64, tile tail
+    [InlineData(14, 2, 64, 100, 100, 0, 0, 0)]   // Qwen2.5-0.5B: GQA 7, d 64
+    [InlineData(32, 8, 128, 130, 130, 0, 0, 0)]  // Qwen3-4B class: GQA 4, d 128
+    [InlineData(16, 16, 128, 96, 96, 0, 0, 0)]   // OLMoE-1B-7B: MHA, d 128
+    [InlineData(32, 8, 64, 70, 70, 0, 0, 17)]    // Llama-3.2-1B: GQA 4, d 64, capacity > kvLen
+    [InlineData(32, 8, 64, 70, 200, 130, 0, 0)]  // chunked prefill: query rows at offset 130 over 200 keys
+    [InlineData(16, 8, 64, 90, 90, 0, 32, 0)]    // sliding window 32
+    [InlineData(16, 8, 64, 150, 150, 0, 48, 9)]  // window plus capacity padding plus a partial tile
+    public void CausalPrefill_MatchesReference(int hq, int hkv, int d, int sq, int kvLen, int qOffset, int window, int pad)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new(deviceOrdinal: 1); // raw ordinal 1 = RTX 3060 (probe); 0 = RTX 4090, never use
+        if (!backend.SupportsTokenMajorGqaAttention) return;
+        backend.EnableFlashCm2Prefill = true;
+        float scale = 1f / MathF.Sqrt(d);
+        float[] q = Half(Random(hq * sq * d, 11));
+        float[] k = Half(Random(hkv * kvLen * d, 12));
+        float[] v = Half(Random(hkv * kvLen * d, 13));
+        float[] expected = new float[hq * sq * d];
+        using (Tensor rq = FromHost(new TensorShape(1, hq, sq, d), q))
+        using (Tensor rk = FromHost(new TensorShape(1, hkv, kvLen, d), k))
+        using (Tensor rv = FromHost(new TensorShape(1, hkv, kvLen, d), v))
+        using (Tensor ro = new(new TensorShape(1, hq, sq, d), DType.F32))
+        {
+            AttentionReference.FlashAttention(ro, rq, rk, rv, kvLen, hq / hkv, causal: true, qOffset, scale,
+                slidingWindow: window);
+            ro.AsReadOnlySpan<float>().CopyTo(expected);
+        }
+        int cap = kvLen + pad;
+        float[] kPadded = Pad(k, hkv, kvLen, cap, d);
+        float[] vPadded = Pad(v, hkv, kvLen, cap, d);
+        using Tensor qt = FromHost(new TensorShape(1, hq, sq, d), q);
+        using Tensor kt = FromHost(new TensorShape(1, hkv, cap, d), kPadded);
+        using Tensor vt = FromHost(new TensorShape(1, hkv, cap, d), vPadded);
+        using Tensor ot = new(new TensorShape(1, hq, sq, d), DType.F32);
+        long before = backend.FlashCm2PrefillDispatches;
+        backend.FlashAttention(ot, qt, kt, vt, kvLen, hq / hkv, causal: true, qOffset, scale, slidingWindow: window);
+        Assert.Equal(before + 1, backend.FlashCm2PrefillDispatches);
+        Assert.True(MaxError(expected, ot.AsReadOnlySpan<float>()) < Tolerance);
+    }
+
+    private static float[] Pad(float[] dense, int heads, int len, int cap, int d)
+    {
+        float[] p = new float[heads * cap * d];
+        for (int h = 0; h < heads; h++)
+        {
+            Array.Copy(dense, h * len * d, p, h * cap * d, len * d);
+        }
+        return p;
     }
 
     private double MaxError(float[] expected, ReadOnlySpan<float> actual)
