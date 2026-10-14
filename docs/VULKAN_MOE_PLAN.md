@@ -183,7 +183,7 @@ So a one-shot 128-token CLI run is slower in wall time with the graph on the mod
 
 | Model (embed dtype) | Graph VRAM before / after (MiB, per-process peak) | Eager VRAM, branch (MiB) | First-capture cost before / after (s, graph8 minus eager8, median) |
 |---|---|---|---|
-| Llama-3.2-1B (Q8_0, tied) | 3144 / 2144 | 2078 to 2144 | 0.90 / 0.02 |
+| Llama-3.2-1B (Q8_0, tied) | 3144 / 2144 | 2014 to 2144 | 1.00 / 0.15 |
 | Qwen2.5-0.5B (Q5_0, untied) | 1136 / 1134 | 598 to 614 | 0.46 / 0.52 (F32 path, unchanged) |
 | granite-3.0-1B-a400m (Q6_K, tied) | 1224 / 1224 | 829 | 0.25 / 0.10 (F32 path, unchanged) |
 

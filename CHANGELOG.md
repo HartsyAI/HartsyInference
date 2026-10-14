@@ -26,7 +26,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.359
 
-- **Changed: Vulkan graph decode gathers a Q8_0 or Q4_K embedding table from its quantized form.** The decode step kept an F32 copy of the embedding table on the device (`vocab * hidden * 4`) and built it on the first capture. On Vulkan, a Q8_0 or Q4_K table is now dequantized one row at a time on the device (`embed_gather_quant_q8_0` / `embed_gather_quant_q4_k`), with the codec's arithmetic and the embedding scale, so no F32 copy is made. On Llama-3.2-1B Q8_0 the graph's per-process VRAM falls from 3144 to 2144 MiB, matching eager, and its first capture from about 0.9 s to under 0.1 s. Every other quantized dtype keeps the F32 path, and so does CUDA. Qwen2.5-0.5B (Q5_0) and granite-3.0-1B (Q6_K) are unchanged. The 128-token greedy text is identical to eager and to `origin/main`.
+- **Changed: Vulkan graph decode gathers a Q8_0 or Q4_K embedding table from its quantized form.** The decode step kept an F32 copy of the embedding table on the device (`vocab * hidden * 4`) and built it on the first capture. On Vulkan, a Q8_0 or Q4_K table is now dequantized one row at a time on the device (`embed_gather_quant_q8_0` / `embed_gather_quant_q4_k`), with the codec's arithmetic and the embedding scale, so no F32 copy is made. On Llama-3.2-1B Q8_0 the graph's per-process VRAM falls from 3144 to 2144 MiB, matching eager, and its first-capture cost from about 1.0 s to about 0.15 s. Every other quantized dtype keeps the F32 path, and so does CUDA. Qwen2.5-0.5B (Q5_0) and granite-3.0-1B (Q6_K) are unchanged. The 128-token greedy text is identical to eager and to `origin/main`.
 
 ## alpha.358
 
