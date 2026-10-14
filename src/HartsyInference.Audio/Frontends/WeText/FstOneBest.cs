@@ -117,6 +117,8 @@ internal static class FstOneBest
         bool lifo = false;
         if (!ruleAcyclic)
         {
+            // ComposeProperties never carries kUnweighted, so AutoQueue's SccQueueType scans the arcs of the composed,
+            // connected FST; final weights and branches Connect pruned do not count (checked against kaldifst 1.8.1).
             bool unweighted = true;
             foreach (float w in graph.Weight)
                 if (w != 0f && w != float.PositiveInfinity) unweighted = false;

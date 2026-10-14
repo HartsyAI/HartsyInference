@@ -69,7 +69,9 @@ public sealed class WeTextNormalizer
         return Verbalize(Tag(text, language), language);
     }
 
-    /// <summary><see cref="Normalize"/>, returning false instead of throwing where the Python package raises.</summary>
+    /// <summary><see cref="Normalize"/>, returning false instead of throwing where the Python package raises (no tagger
+    /// path, malformed tags, output that is not UTF-8) and for text the FSTs cannot take: a lone surrogate, which has
+    /// no UTF-8 form, or a NUL character, which the byte-labelled FSTs would read as epsilon.</summary>
     public bool TryNormalize(string text, [NotNullWhen(true)] out string? normalized)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -91,8 +93,9 @@ public sealed class WeTextNormalizer
         {
             return false;
         }
-        catch (DecoderFallbackException)
+        catch (ArgumentException)
         {
+            // The NUL rejection, plus strict UTF-8's Encoder/DecoderFallbackException, which derive from it.
             return false;
         }
     }

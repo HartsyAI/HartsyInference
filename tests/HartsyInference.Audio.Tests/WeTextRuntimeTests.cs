@@ -54,6 +54,10 @@ public sealed class WeTextRuntimeTests
         Assert.Throws<InvalidDataException>(() => StdVectorFst.Read(new MemoryStream(Serialize(0, [0f], [[]], "const"))));
         Assert.Throws<InvalidDataException>(() => StdVectorFst.Read(new MemoryStream(
             Serialize(0, [0f], [[new StdArc(1, 1, 0f, 7)]]))));
+        Assert.Throws<InvalidDataException>(() => StdVectorFst.Read(new MemoryStream(
+            Serialize(0, [0f], [[]], claimedStates: int.MaxValue - 1))));
+        Assert.Throws<InvalidDataException>(() => StdVectorFst.Read(new MemoryStream(
+            Serialize(0, [0f], [[]], claimedStates: 2))));
     }
 
     // Rule text in AT&T order "src dst ilabel olabel weight"; final lines "state weight". Input is always "a".
@@ -65,6 +69,10 @@ public sealed class WeTextRuntimeTests
     [InlineData("0 1 97 120 0|0 2 97 121 0|1 2 0 112 0|1 3 0 113 0|2 3 0 114 0|4 4 122 122 0|3 0", "yr")]
     [InlineData("0 1 97 120 0|0 2 97 121 0|1 2 0 112 0|1 3 0 113 0|2 3 0 114 0.5|4 4 122 122 0|3 0", "xq")]
     [InlineData("0 1 0 120 0|0 2 97 121 0|1 2 97 122 0|3 3 122 122 0|2 0", "y")]
+    // Still LIFO: a weighted branch Connect prunes, or a non-zero final weight, does not make the composition weighted.
+    [InlineData("0 1 97 120 0|0 2 97 121 0|1 2 0 112 0|1 3 0 113 0|2 3 0 114 0|4 4 122 122 0|0 5 97 122 1|3 0", "yr")]
+    [InlineData("0 1 97 120 0|0 2 97 121 0|1 2 0 112 0|1 3 0 113 0|2 3 0 114 0|4 4 122 122 0|1 5 0 122 2.5|3 0", "yr")]
+    [InlineData("0 1 97 120 0|0 2 97 121 0|1 2 0 112 0|1 3 0 113 0|2 3 0 114 0|4 4 122 122 0|3 0.5", "yr")]
     [InlineData("0 1 98 120 0|1 0", "")]
     public void Rewrite_BreaksTiesLikeKaldifst(string rule, string expected)
     {
@@ -149,7 +157,8 @@ public sealed class WeTextRuntimeTests
 
     // OpenFst binary layout: header (magic, type, arc type, version, flags, properties, start, states, arcs), then per
     // state the final weight, the arc count and each arc as ilabel, olabel, weight, nextstate.
-    private static byte[] Serialize(long start, float[] finals, StdArc[][] arcs, string fstType = "vector")
+    private static byte[] Serialize(long start, float[] finals, StdArc[][] arcs, string fstType = "vector",
+        long? claimedStates = null)
     {
         MemoryStream stream = new();
         using (BinaryWriter writer = new(stream, Encoding.ASCII, leaveOpen: true))
@@ -163,7 +172,7 @@ public sealed class WeTextRuntimeTests
             writer.Write(0);
             writer.Write(3UL);
             writer.Write(start);
-            writer.Write((long)finals.Length);
+            writer.Write(claimedStates ?? finals.Length);
             writer.Write(0L);
             for (int s = 0; s < finals.Length; s++)
             {
