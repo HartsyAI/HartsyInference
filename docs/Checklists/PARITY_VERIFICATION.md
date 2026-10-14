@@ -361,3 +361,5 @@ Real bugs surfaced by the parity loop — kept here so the patterns repeat-catch
 - **Build:** audio with `-m:1`; tests crash under xunit parallel → run sequentially
   (`-- xUnit.ParallelizeTestCollections=false`). Reuse a model cache via `HARTSYINFERENCE_MODEL_CACHE`.
 - **Never** commit/push — the user does all git manually.
+
+GPT-SoVITS English frontend: re-run `tools/parity/gptsovits_frontend_dump.py --stress 3000` (3000 seeded random lines, not in CI) whenever the pinned upstream commit or any pinned frontend package (g2p_en, nltk, inflect, wordsegment) changes, and regenerate the fixture.

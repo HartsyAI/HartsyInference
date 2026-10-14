@@ -86,7 +86,16 @@ internal static class GptSoVitsModel
                 // the reference transcript's phones (s1 text span = ref + segment, zero BERT on the English path), and
                 // the fragments are joined with 0.3 s of silence after each.
                 int[] referenceIds = GptSoVitsSymbols.ToSequence(GptSoVitsTextSegmenter.PrepareEnglishPrompt(job.RefText).Phones);
-                List<GptSoVitsTextSegment> segments = GptSoVitsTextSegmenter.PrepareEnglish(job.Text);
+                List<GptSoVitsTextSegment> segments;
+                try
+                {
+                    segments = GptSoVitsTextSegmenter.PrepareEnglish(job.Text);
+                }
+                catch (ArgumentException e)
+                {
+                    // Upstream asserts on punctuation- or whitespace-only text; surface it as the same request error.
+                    throw new InvalidOperationException("GPT-SoVITS found nothing to speak in the text.", e);
+                }
                 if (segments.Count == 0)
                 {
                     throw new InvalidOperationException("GPT-SoVITS found nothing to speak in the text.");

@@ -10,7 +10,9 @@ namespace HartsyInference.Audio.Frontends;
 /// numbers via inflect), strips accents and every character outside <c> A-Za-z'.,?!-</c>, splits capitals and
 /// collapses punctuation runs. The rules are reproduced as written, including readings a general normalizer would
 /// not choose ("4:30 PM" → "four thirty a.m. P M", "1990s" → "nineteen ninety seconds"): the model was trained on
-/// this text.</summary>
+/// this text. Not shared with <see cref="HartsyInference.Audio.Pipelines.EnglishSpokenForm"/>: upstream's readings differ (and some
+/// are quirky, such as "1,250" → "twelve fifty"), and the model was trained on upstream's output, so this follows upstream
+/// exactly rather than a single engine-wide convention.</summary>
 public static partial class GptSoVitsEnglishNormalizer
 {
     // Upstream builds this map's pattern with re.escape over the keys, so the two bracketed keys only match their own

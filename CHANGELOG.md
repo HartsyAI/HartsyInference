@@ -8,8 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Fixed: GPT-SoVITS English text frontend now matches upstream exactly.** Numbers, dates and currency were letter-spelled ("March R.D. at PM"). The English path now reproduces upstream's normalizer (`GptSoVitsEnglishNormalizer` with an exact inflect port), tokenizer, POS-tagged homographs, merged dictionaries, word segmentation and the g2p_en letter-to-sound model, and the engine cuts long text into segments joined by 0.3 s silences as upstream does. Parity tests: 119/119 corpus lines, 3000/3000 random lines.
-
+- **Fixed: GPT-SoVITS English text frontend now matches upstream exactly.** Numbers, dates and currency were letter-spelled ("March R.D. at PM"). The English path now reproduces upstream's normalizer (`GptSoVitsEnglishNormalizer` with an exact inflect port), tokenizer, POS-tagged homographs, merged dictionaries, word segmentation and the g2p_en letter-to-sound model, and the engine cuts long text into segments joined by 0.3 s silences as upstream does. Parity tests: 119/119 corpus lines, 3000/3000 random lines. The HuBERT reference input is padded as upstream does. Adds about 10 MB of embedded gzip frontend data (dictionaries, POS tagger, word segmenter and letter-to-sound model) to `HartsyInference.Audio`.
 
 - **Fixed: stale expert-cache test read a released lease.** `PinnedExpertsAreNeverEvicted_AndUnpinnedOnesAre` called `pinned.Get` after `Release`, but released leases clear their slots by design (reusable leases, #306). The test now keeps the weights before releasing; the pinned-never-evicted and unpinned-evicted assertions are unchanged.
 - **Fixed: Qwen2 and Qwen3 GGUFs use the Qwen2 pre-tokenizer split.** The GGUF names it `tokenizer.ggml.pre = "qwen2"`, and only `kolibri1` selected the single-digit split. Qwen text tokenized with the GPT-2 split, 6-8% more tokens on the same text (the 4K benchmark prompt came out at 4,036 against llama.cpp's 3,742). The Qwen2 split now applies to both names.
@@ -341,7 +340,6 @@ stable release will require. Dates are UTC.
 
 - **Added: deployments, and a drain that unloads in order.** `ITextService.DeployAsync` loads a model onto its device as a named deployment, without generating anything. `Deployments` lists them, and `Capacity(id)` reports the device's active and queued sequences and its KV pages (pages, not bytes). A deployment's state moves only along the transitions the state machine allows: Loading, Ready, Degraded, Draining, Failed, Unloaded. Unloading a model now cancels the scheduler's waiting requests first; they fail with `SchedulerStoppedException` (503). Only then does the unload wait for the sequences already decoding, which run to their end. If that wait times out, the model stays resident and its scheduler takes requests again. A deployment is recorded as Unloaded where its model is freed (an unload, a request that loads another model on its device, or `AlwaysFreeMemory`), so `Deployments` and `Capacity` report the same state. A deploy onto a device leaves the device's current deployment Ready until the new model is in place, and one cancelled while it waits for the device is recorded as Failed. Of two overlapping deploys of one id, only the later completes the record; the earlier loads nothing once overtaken and reports the record as it stands. With no scheduler resident, `Capacity` reports 0 active, queued and concurrent sequences. The API sets each request's tenant from the caller's identity (`local` when auth is off), and the client never sets it. Covered by state-machine tests, a drain test (the waiting requests fail, the admitted one finishes, nothing new is admitted), tenant tests, and V4.1-fixture tests through `TextService`: an unload that times out on a lease keeps serving, overlapping deploys of one id, a deploy waiting on the device, and `Capacity` agreeing with `Deployments` after an unload and after a reload. Not in this change: `ListPackagesAsync`, which needs the package discovery in the 19 stack, and deployments over the wire, which come with PR 19d. One deployment holds a device at a time: deploying onto a device replaces its model.
 
-
 ## alpha.305
 
 - **Changed: the scheduler admits requests by KV pages, in FIFO order, instead of failing them when the pool is full.** A request reserves its whole prompt-plus-budget footprint at admission, so an admitted sequence never runs out of pages mid-decode. A request that does not fit waits its turn. A request larger than the whole pool is refused with 400, as is one whose budget no sequence can hold (a negative or overflowing `max_tokens`), on any model. A solo sequence, which gets its own fixed KV cache, is still charged its pages and refused above the pool size like any other. A full waiting queue (64 by default) refuses the next submission with 429 and `Retry-After: 1`. A cancelled request leaves the queue at the next admission pass, wherever it stands, so it stops counting toward that bound. A request that an admission pass leaves waiting is told its place in the queue once, as a status chunk; a request admitted at once is told nothing. A pool-less model (the V4.1 host) decodes at most four sequences at once. With `vram.continuousBatching` on, the API no longer queues text requests itself. Each pipeline request takes a slot in the server's shared queue, bounded like an HTTP request (429 when full), and each GPU round of a scheduled request waits its turn in the same queue, so LLM and image work never overlap on a device. A streamed request that finds the queue full, scheduled or pipeline, gets an error event, not a 429; the non-streamed path returns 429. Covered by tests for the queue bound, FIFO waiting under pool pressure (outputs equal to solo runs), the oversized refusal, an `int.MaxValue` budget refused with nothing reserved (pooled and pool-less), a cancelled waiter behind the head leaving before the head is admitted, queue positions (none for a request admitted at once), the pool-less cap, and the 429 mapping. Not in this change: the slow-consumer channel and its stop reason, and the status frames on the wire (PR 19d).
@@ -447,7 +445,6 @@ stable release will require. Dates are UTC.
   experts it plans on, returned as a lease, so they cannot be evicted before the layer runs; it uploads nothing, and a policy may
   not place a missing expert on the GPU. Every routed (token, slot) pair is counted once. It is allocation-free once warm: the caller owns
   the scratch, the output, the miss list and a reusable lease, and `AcquireResident` binds that lease without allocating. The GPU execution, the CPU kernels and the cross-device combine are not in this change and need the test rig.
-
 
 ## alpha.286
 
@@ -560,7 +557,6 @@ No code change beyond the version.
   hidden states and logits. Nothing is compared to upstream on the real weights yet, so no support-matrix row is Verified and the
   catalog entry stays Structural.
 - **Changed: BF16 weights are widened in parallel by row** (a 129,280-row head window took 21 s single-threaded for one token).
-
 
 ## alpha.279
 
@@ -2362,7 +2358,6 @@ compared token for token. Earlier checks only listened to the output, so these d
   the runtime now holds its generation lock for the whole Kokoro stream, where the old text-split loop released it
   between chunks.
 
-
 ## alpha.218
 
 - **Audio eviction keeps the incoming model.** `AudioRuntime`'s memory-pressure sweep compared the prefixed job key
@@ -3773,7 +3768,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   struct and C# will throw it away — and it raises the op depth permanently, so every later op is treated as
   nested: no finalizer drain, no orphan sweep, no flush.
 
-
 ## alpha.138
 
 - **The conv half of the LoRA merge is verified against a real adapter.** Rank-4 convolution support has existed
@@ -3795,7 +3789,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   skipped, and the 49 convs are inside that UNet count.
 - The adapter is Pony-trained, which is irrelevant to what is being shown: it shares SDXL's UNet and kohya's key
   grammar, and the claim is that the conv path resolves and fits, not that the output looks like anything.
-
 
 ## alpha.137
 
@@ -4287,7 +4280,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   dispatched, wrote the device buffer and returned without rebinding, so a later host read got the untouched host
   copy and the op looked like it did nothing — a 3.3 absolute error against the reference, versus 2e-7 after.
 
-
 ## alpha.121
 
 - **The fp8 quantize path leaked every weight it wrote.** It worked out what it owned by rescanning the whole
@@ -4339,7 +4331,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   and a dim that is not a multiple of the subgroup, since the cross-subgroup fold is where a norm like this goes
   wrong on small-subgroup hardware. Max absolute error 1.4e-6 in F32, 4.9e-4 in F16 — the latter being F16's own
   precision rather than a disagreement.
-
 
 ## alpha.118
 
@@ -5750,7 +5741,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   identical probabilities.
 - **`tools/convert_silero_onnx.py`** emits the safetensors form and, with `--verify`, checks the export against
   onnxruntime end to end (1.25e-6 max abs over 343 chunks).
-
 
 ### Fixed
 - **End-of-speech waited for the silence window twice.** The utterance clock was driven by
