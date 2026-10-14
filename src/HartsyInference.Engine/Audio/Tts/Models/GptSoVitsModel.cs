@@ -69,19 +69,7 @@ internal static class GptSoVitsModel
                         "GPT-SoVITS needs the reference transcript — the exact words spoken in the reference clip.");
                 }
 
-                // Reference clip → 16 kHz (HuBERT) + 32 kHz (1025-bin linear spectrogram for the speaker embedding).
-                float[] reference16k = AudioClipCodec.DecodeMono(job.Reference, 16_000);
-                float[] reference32k = AudioClipCodec.DecodeMono(job.Reference, 32_000);
-                // Upstream TTS._set_prompt_semantic appends int(sampling_rate × 0.3) zeros, sized at the model's 32 kHz
-                // rate, to the 16 kHz clip before HuBERT: 0.6 s of silence at 16 kHz.
-                int hubertLength = reference16k.Length + pipeline.SampleRate * 3 / 10;
-                Tensor referencePcm = new Tensor(new TensorShape(1, 1, hubertLength), DType.F32);
-                Span<float> hubertInput = referencePcm.AsSpan<float>();
-                reference16k.AsSpan().CopyTo(hubertInput);
-                hubertInput[reference16k.Length..].Clear();
-                Tensor referenceSpec = LinearSpectrogram.Extract(reference32k, 2048, 640);
-                int specFrames = (int)referenceSpec.Shape[2];
-
+                // Cut and phonemize the text before allocating the reference tensors, so a text error leaks nothing.
                 // Upstream TTS.run: the target is cut (four sentences per segment), each segment is synthesized after
                 // the reference transcript's phones (s1 text span = ref + segment, zero BERT on the English path), and
                 // the fragments are joined with 0.3 s of silence after each.
@@ -100,27 +88,36 @@ internal static class GptSoVitsModel
                 {
                     throw new InvalidOperationException("GPT-SoVITS found nothing to speak in the text.");
                 }
+
+                // Reference clip → 16 kHz (HuBERT) + 32 kHz (1025-bin linear spectrogram for the speaker embedding).
+                float[] reference16k = AudioClipCodec.DecodeMono(job.Reference, 16_000);
+                float[] reference32k = AudioClipCodec.DecodeMono(job.Reference, 32_000);
+                // Upstream TTS._set_prompt_semantic appends int(sampling_rate × 0.3) zeros, sized at the model's 32 kHz
+                // rate, to the 16 kHz clip before HuBERT: 0.6 s of silence at 16 kHz.
+                int hubertLength = reference16k.Length + pipeline.SampleRate * 3 / 10;
+                using Tensor referencePcm = new Tensor(new TensorShape(1, 1, hubertLength), DType.F32);
+                Span<float> hubertInput = referencePcm.AsSpan<float>();
+                reference16k.AsSpan().CopyTo(hubertInput);
+                hubertInput[reference16k.Length..].Clear();
+                using Tensor referenceSpec = LinearSpectrogram.Extract(reference32k, 2048, 640);
+                int specFrames = (int)referenceSpec.Shape[2];
+
                 int gap = pipeline.SampleRate * 3 / 10;
                 List<float> output = [];
-                try
+                for (int i = 0; i < segments.Count; i++)
                 {
-                    for (int i = 0; i < segments.Count; i++)
-                    {
-                        int[] targetIds = GptSoVitsSymbols.ToSequence(segments[i].Phones);
-                        int[] allIds = [.. referenceIds, .. targetIds];
-                        using Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
-                        float[] fragment = pipeline.Generate(backend, referencePcm, hubertLength, referenceSpec,
-                            specFrames, allIds, zeroBert, targetIds, seed: job.Seed == 0 ? 0 : job.Seed + i);
-                        AppendPeakLimited(output, fragment);
-                        output.AddRange(new float[gap]);
-                    }
-                    return [.. output];
+                    int[] targetIds = GptSoVitsSymbols.ToSequence(segments[i].Phones);
+                    int[] allIds = [.. referenceIds, .. targetIds];
+                    using Tensor zeroBert = new Tensor(new TensorShape(1024, allIds.Length), DType.F32);
+                    // Deliberate deviation: upstream seeds once per run, so its fragments draw from one continuing
+                    // RNG stream. The engine seeds each fragment as Seed + i (segment 0 keeps the request seed), which
+                    // stays reproducible per seed without reusing one stream start for every fragment.
+                    float[] fragment = pipeline.Generate(backend, referencePcm, hubertLength, referenceSpec,
+                        specFrames, allIds, zeroBert, targetIds, seed: job.Seed == 0 ? 0 : job.Seed + i);
+                    AppendPeakLimited(output, fragment);
+                    output.AddRange(new float[gap]);
                 }
-                finally
-                {
-                    referencePcm.Dispose();
-                    referenceSpec.Dispose();
-                }
+                return [.. output];
             }, keep);
         },
     };
