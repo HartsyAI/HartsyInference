@@ -400,6 +400,12 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 head.Completion.TrySetException(refusal);
                 continue;
             }
+            if (GraphRefusal(head.Request) is { } graphRefusal)
+            {
+                RemoveHead(head);
+                head.Completion.TrySetException(graphRefusal);
+                continue;
+            }
             if (active.Count >= _maxActive) return;
             if (_pool is not null && _reservedPages + pages > _pool.MaxPages) return;
 
@@ -515,6 +521,14 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// <summary>The pages a sequence of this many prompt tokens and generation budget can grow to, at <paramref name="pageSize"/> tokens a page. Long arithmetic, so a huge
     /// budget gives a huge count instead of wrapping to a small or negative one that would pass the pool checks.</summary>
     private static long PagesFor(int promptTokens, int maxTokens, int pageSize) => ((long)promptTokens + maxTokens + 1 + pageSize - 1) / pageSize;
+
+    /// <summary>The refusal for an explicit graph-decode request this model cannot replay on the backend (a sliding window or soft-cap the backend's graph lacks), or null. It is not an
+    /// <see cref="ArgumentException"/>: the request is valid and the backend cannot serve it, so the API answers 501. It applies whether or not the request would be admitted solo,
+    /// because the backend is the reason, not the load. The greedy and no-JSON conditions mirror <see cref="AdmitAndPrefill"/>'s graph eligibility, the only sampling this graph serves.</summary>
+    private NotSupportedException? GraphRefusal(GenerationRequest request) =>
+        (request.GraphDecode ?? EngineKnobs.GraphDecode.Value) && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
+            && _graphModel?.GraphDecodeRefusal(_backend) is { } reason
+            ? new NotSupportedException(reason) : null;
 
     /// <summary>Why a request can never be admitted, or null when it can wait its turn: a negative budget, a sequence longer than any state can hold, or on a pooled model a
     /// page count that is not positive or exceeds the whole pool. Each is the caller's to fix, so it is an <see cref="ArgumentException"/>, which the API answers with 400.</summary>

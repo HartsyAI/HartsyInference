@@ -255,7 +255,7 @@ stack as a flat run of blocks), then one cooperative-matrix GEMM per active expe
 CUDA does. `MoeCombinePairs` is the pair-map variant of `moe_combine` plus the shared row. Prefill is where the F16 cache
 question of step 2 bites: a layer's three stacks are 260 MB as Q4_K/Q6_K and about 1 GB as F16 for OLMoE.
 
-**6. Command-buffer reuse for LLM decode. Done: `CaptureGraph`/`LaunchGraph`/`DisposeGraph` on Vulkan record a decode step onto its own command buffer and replay it with one fence-waited submit per token; on by default for greedy decode, with an eager fallback; results below.** "Default" means greedy only: a sampled request (temperature, top-k or top-p) decodes eagerly, because there is no device sampler yet. The original plan:
+**6. Command-buffer reuse for LLM decode. Done: `CaptureGraph`/`LaunchGraph`/`DisposeGraph` on Vulkan record a decode step onto its own command buffer and replay it with one fence-waited submit per token; on by default for greedy decode, with an eager fallback; results below.** "Default" means greedy only: a sampled request (temperature, top-k or top-p) decodes eagerly, because there is no device sampler yet. A sliding-window or soft-cap model (Gemma-2/3) is refused before capture on Vulkan: the implicit default decodes it eagerly, and an explicit request fails naming the model and the reason. The original plan:
 `VulkanStepGraph` is the Vulkan counterpart of a
 CUDA graph, so the equivalent of `CaptureDecodeGraph` is: warm up one step so every weight and scratch buffer is resident
 (capture refuses a cache miss), record the step against push descriptors with the device position and token id buffers the

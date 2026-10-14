@@ -265,6 +265,9 @@ public sealed record TransformerConfig
     /// <summary>Final-logit soft-cap (Gemma-2 = 30): output logits are capped via <c>cap·tanh(logit/cap)</c>; 0 (default) disables it.</summary>
     public float FinalLogitSoftcap { get; init; }
 
+    /// <summary>The checkpoint's architecture name (GGUF <c>general.architecture</c>, e.g. <c>gemma2</c>); null for a config built in code. Names the model in a graph-decode refusal.</summary>
+    public string? Architecture { get; init; }
+
     /// <summary>Explicit per-layer global/local override (Gemma-4: GGUF stores <c>attention.sliding_window_pattern</c> as a real per-layer bool array, not a broadcast period); null (default) falls back to <see cref="SlidingWindowPattern"/>'s modulo period — every other architecture.</summary>
     public IReadOnlyList<bool>? GlobalLayers { get; init; }
 
@@ -376,7 +379,7 @@ public sealed record TransformerConfig
         RopeTheta = 1_000_000f, RmsNormEps = 1e-6f, AttentionBias = false, QkNorm = true, TieWordEmbeddings = true,
         Activation = ActivationKind.GeluTanh, SandwichNorm = true, RmsNormAddOne = true,
         EmbeddingScale = 33.941124f /* sqrt(1152) */, QueryPreAttnScalar = 256f,
-        RopeLocalTheta = 10_000f, SlidingWindowPattern = 6, SlidingWindow = 512,
+        RopeLocalTheta = 10_000f, SlidingWindowPattern = 6, SlidingWindow = 512, Architecture = "gemma3",
     };
 
     /// <summary>Gemma-2-2B-it: head_dim 256, GQA (8/4), GeGLU, sandwich + (1+w) norms, embedding scale √2304, attn/final logit soft-cap (50/30), alternating sliding window (pattern 2, window 4096), single RoPE 10k.</summary>
@@ -388,6 +391,6 @@ public sealed record TransformerConfig
         Activation = ActivationKind.GeluTanh, SandwichNorm = true, RmsNormAddOne = true,
         EmbeddingScale = 48f /* sqrt(2304) */, QueryPreAttnScalar = 256f,
         SlidingWindowPattern = 2, SlidingWindow = 4_096,
-        AttnLogitSoftcap = 50f, FinalLogitSoftcap = 30f,
+        AttnLogitSoftcap = 50f, FinalLogitSoftcap = 30f, Architecture = "gemma2",
     };
 }

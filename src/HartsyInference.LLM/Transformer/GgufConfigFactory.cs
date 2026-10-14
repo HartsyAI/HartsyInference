@@ -350,6 +350,7 @@ public static class GgufConfigFactory
             // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
             NoRopeOnGlobalLayers = arch is "cohere2" or "kolibri1",
             RopeLocalTheta = localTheta,
+            Architecture = arch,
             SlidingWindow = swWindow,
             SlidingWindowPattern = swPattern,
             AttnLogitSoftcap = attnCap,
