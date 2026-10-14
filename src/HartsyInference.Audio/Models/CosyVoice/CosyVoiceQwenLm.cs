@@ -123,7 +123,9 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
             Tensor logits = WhisperOps.ProjectLinear(headBackend, last, _llmDecoderW!, _llmDecoderB, 1, 1, h, _speechVocab);
             last.Dispose();
 
-            int next = sampler.Sample(logits, generated);
+            // EOS is suppressed until the target text has produced MinTokenTextRatio speech tokens per text token.
+            bool ignoreEos = generated.Count < textTokens.Length * _cfg.Sampling.MinTokenTextRatio;
+            int next = sampler.Sample(logits, generated, ignoreEos);
             logits.Dispose();
             if (next == _eosSpeechToken) break;
             generated.Add(next);

@@ -163,6 +163,14 @@ public sealed class CosyVoicePipeline : IDisposable
         int[] refText = referenceTextTokens ?? [];
         List<int> speechTokens = _lm.GenerateSpeechTokens(backend, textTokenIds, refText, promptSpeechTokens, seed: seed);
         Logs.Info($"CosyVoice: LM emitted {speechTokens.Count} speech tokens in {sw.ElapsedMilliseconds}ms.");
+        if (speechTokens.Count == 0)
+        {
+            // Nothing to flow/vocode: return silence instead of handing the flow an empty token batch.
+            if (ownsSpk) spk.Dispose();
+            promptMel?.Dispose();
+            Logs.Warning("CosyVoice: LM produced no speech tokens; returning empty audio.");
+            return [];
+        }
 
         Tensor mel = _flow.Inference(backend, speechTokens.ToArray(), promptSpeechTokens, promptMel, spk, seed, chunkCausalSize);
         if (ownsSpk) spk.Dispose();
@@ -312,6 +320,7 @@ public sealed class CosyVoicePipeline : IDisposable
         void FlushChunk(bool isFinal)
         {
             int end = allTokens.Count;
+            if (end == 0) return;   // LM emitted no speech tokens: nothing to flow or vocode.
             if (end == lastFlushedCount && !isFinal) return;
             int windowStart = Math.Max(0, end - windowSizeTokens);
             int[] windowTokens = allTokens.GetRange(windowStart, end - windowStart).ToArray();
