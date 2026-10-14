@@ -1,32 +1,52 @@
 #!/usr/bin/env python3
 """Rent an A40 on RunPod, wait for SSH, copy this kit over and start bootstrap.sh in the background.
-usage: pod_up.py [name]      prints POD_ID, SSH host/port; run `ssh ... tail -f /root/baseline/logs/bootstrap.log` to follow.
-Stop the pod with: curl -s --config ~/.runpod/curlrc -X POST https://rest.runpod.io/v1/pods/<id>/stop"""
-import json, pathlib, subprocess, sys, time
+usage: pod_up.py [name] [--max-hours H]
+  prints POD_ID, SSH host/port; run `ssh ... tail -f /root/baseline/logs/bootstrap.log` to follow.
+  The pod is recorded in the operator's lease file (~/.runpod/podkit-leases.json) with its max lifetime (default 6 h,
+  or PODKIT_MAX_HOURS). Run watchdog.py on a timer (see its docstring); it POSTs /stop once a leased pod is older than that.
+  The lease is written before the create request, under a unique pod name (<name>-<hex>), so a timed-out create still
+  leaves something the watchdog can find. The pod never gets an API key. Manual stop:
+  curl -s --config ~/.runpod/curlrc -X POST https://rest.runpod.io/v1/pods/<id>/stop
+  On Windows the lease lock is not enforced: run one pod_up.py or watchdog.py at a time there."""
+import argparse, json, os, pathlib, secrets, subprocess, sys, time
 
-API = "https://rest.runpod.io/v1"
-CURLRC = str(pathlib.Path.home() / ".runpod/curlrc")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from watchdog import CREATE_TIMEOUT_S, DEFAULT_MAX_HOURS, api, bind_lease, check_max_hours, drop_pending, reserve_lease  # noqa: E402  (same kit dir; no key is copied to the pod)
+
 KEY = str(pathlib.Path.home() / ".ssh/runpod_blackwell")
 KIT = pathlib.Path(__file__).resolve().parent   # holds bootstrap.sh, scripts/, cfg/, prompts/
 
-def api(method, path, body=None):
-    cmd = ["curl", "-s", "--config", CURLRC, "-X", method, API + path, "-w", "\n%{http_code}"]
-    if body is not None:
-        cmd += ["-d", json.dumps(body)]
-    out = subprocess.run(cmd, capture_output=True, text=True).stdout
-    text, _, code = out.rpartition("\n")
-    return int(code), (json.loads(text) if text.strip().startswith(("{", "[")) else text)
-
-name = sys.argv[1] if len(sys.argv) > 1 else "dsv41-perf-a40-t3"
+ap = argparse.ArgumentParser()
+ap.add_argument("name", nargs="?", default="dsv41-perf-a40-t3")
+ap.add_argument("--max-hours", type=float, default=float(os.environ.get("PODKIT_MAX_HOURS", DEFAULT_MAX_HOURS)))
+args = ap.parse_args()
+try:
+    args.max_hours = check_max_hours(args.max_hours)   # before the create request: a bad value must not leave a pod without a lease
+except ValueError as e:
+    sys.exit(f"refusing to rent a pod: {e}")
+name = args.name
+pod_name = f"{name}-{secrets.token_hex(3)}"
 pub = pathlib.Path(KEY + ".pub").read_text().strip()
-body = {"name": name, "imageName": "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404", "gpuTypeIds": ["NVIDIA A40"], "gpuCount": 1,
+body = {"name": pod_name, "imageName": "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404", "gpuTypeIds": ["NVIDIA A40"], "gpuCount": 1,
         "cloudType": "SECURE", "containerDiskInGb": 160, "volumeInGb": 20, "volumeMountPath": "/workspace", "ports": ["22/tcp"],
         "env": {"PUBLIC_KEY": pub}}
-code, pod = api("POST", "/pods", body)
+try:
+    reserve_lease(pod_name, args.max_hours)   # before the create request: a lease-file failure must not leave a billable pod
+except ValueError as e:
+    sys.exit(f"refusing to rent a pod: {e}")
+code, pod = api("POST", "/pods", body, timeout=CREATE_TIMEOUT_S)
 if code >= 300 or not isinstance(pod, dict) or "id" not in pod:
-    sys.exit(f"create failed HTTP {code}: {pod}")
+    if 400 <= code < 500 and code != 408:   # 408 is ambiguous (the server may have acted), so it keeps the lease
+        drop_pending(pod_name)   # a definitive refusal (no capacity, bad request): no pod exists, so no lease is needed
+        sys.exit(f"create refused HTTP {code}: {pod}")
+    # Timeout, 5xx or unreadable reply: a pod may exist. The pending lease stays; the watchdog finds it by pod_name.
+    sys.exit(f"create failed HTTP {code}: {pod} (pending lease {pod_name} left for the watchdog to resolve)")
 pid = pod["id"]
-print("POD_ID", pid, flush=True)
+print("POD_ID", pid, f"max_hours={args.max_hours}", flush=True)
+try:
+    bind_lease(pod_name, pid)
+except (OSError, ValueError) as e:
+    print(f"WARNING: could not bind lease to {pid} ({e}); the watchdog will bind it by name {pod_name}", flush=True)
 host = port = None
 for _ in range(120):
     time.sleep(10)
