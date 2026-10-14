@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Models.Chatterbox;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Pipelines;
@@ -80,16 +81,19 @@ internal static class ChatterboxModel
             Tensor referenceSpeaker = Flatten(conds["t3.speaker_emb"], config.SpeakerEmbedDim);
             Tensor flowSpeaker = conds["gen.embedding"];
             int[] promptSpeechTokens = ToInts(conds["t3.cond_prompt_speech_tokens"]);
+            // Upstream s3gen.inference(ref_dict=conds.gen) also conditions the flow on the default voice's prompt.
+            int[] flowPromptTokens = ToInts(conds["gen.prompt_token"]);
+            Tensor flowPromptMel = ChannelMajor(conds["gen.prompt_feat"]);
 
             using Stream tokenizerStream = File.OpenRead(tokenizerPath);
             ChatterboxEnTokenizer tokenizer = new ChatterboxEnTokenizer(tokenizerStream);
             Logs.Info("[Audio][Chatterbox] Loaded ResembleAI/chatterbox (T3 + S3Gen + HiFTNet, 24 kHz, default voice).");
 
             IDisposable?[] keep = [pipeline, t3, flow, vocoder, speakerEncoder, s3Tokenizer, voiceEncoder,
-                t3Loader, s3Loader, veLoader, condsLoader, referenceSpeaker];
+                t3Loader, s3Loader, veLoader, condsLoader, referenceSpeaker, flowPromptMel];
             return new TtsRunner(config.SampleRate, (backend, job) =>
             {
-                int[] textTokens = tokenizer.EncodeWithStartStop(job.Text);
+                int[] textTokens = tokenizer.EncodeWithStartStop(ChatterboxTextNormalizer.Normalize(job.Text));
                 float exaggeration = job.Exaggeration.HasValue ? (float)job.Exaggeration.Value : config.Exaggeration;
                 float cfgWeight = job.CfgScale.HasValue ? (float)job.CfgScale.Value : config.CfgWeight;
                 if (job.ReferenceMono24k is not null && job.ReferenceMono24k.Length > 0)
@@ -98,7 +102,8 @@ internal static class ChatterboxModel
                         referenceAudio: job.ReferenceMono24k, referenceSampleRate: 24_000, cfgWeight: cfgWeight);
                 }
                 return pipeline.Synthesize(backend, textTokens, referenceSpeaker, exaggeration, job.Seed,
-                    flowSpeakerEmbed: flowSpeaker, t3PromptSpeechTokens: promptSpeechTokens, cfgWeight: cfgWeight);
+                    flowSpeakerEmbed: flowSpeaker, t3PromptSpeechTokens: promptSpeechTokens, cfgWeight: cfgWeight,
+                    flowPromptTokens: flowPromptTokens, flowPromptMel: flowPromptMel);
             }, keep);
         },
     };
@@ -109,6 +114,24 @@ internal static class ChatterboxModel
         Tensor flat = new Tensor(new TensorShape(count), DType.F32);
         source.AsSpan<float>()[..count].CopyTo(flat.AsSpan<float>());
         return flat;
+    }
+
+    /// <summary>Copies the frame-major <c>[1, T, mel]</c> prompt feature into the channel-major <c>[1, mel, T]</c> the flow
+    /// takes (once, at load).</summary>
+    private static Tensor ChannelMajor(Tensor frameMajor)
+    {
+        int frames = (int)frameMajor.Shape[1], bins = (int)frameMajor.Shape[2];
+        Tensor result = new Tensor(new TensorShape(1, bins, frames), DType.F32);
+        ReadOnlySpan<float> src = frameMajor.AsSpan<float>();
+        Span<float> dst = result.AsSpan<float>();
+        for (int t = 0; t < frames; t++)
+        {
+            for (int b = 0; b < bins; b++)
+            {
+                dst[b * frames + t] = src[t * bins + b];
+            }
+        }
+        return result;
     }
 
     /// <summary>Reads an int64 token tensor as the <c>int[]</c> the T3 takes.</summary>
