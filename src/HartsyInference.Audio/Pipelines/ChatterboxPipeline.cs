@@ -227,10 +227,20 @@ public sealed class ChatterboxPipeline : IDisposable
             throw new InvalidOperationException("embed_ref needs a CamPlusSpeakerEncoder and an S3Tokenizer.");
         float[] ref16 = SincResampler.Resample(ref24, S3GenSampleRate, S3TokenizerSampleRate);
         Tensor mel = S3GenReference.FlowMel(ref24);
-        Tensor speaker = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, ref16);
-        int[] tokens = S3GenReference.SpeechTokens(backend, _s3, ref16);
-        int half = (int)mel.Shape[2] / 2;
-        return (tokens.Length > half ? tokens[..half] : tokens, mel, speaker);
+        Tensor? speaker = null;
+        try
+        {
+            speaker = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, ref16);
+            int[] tokens = S3GenReference.SpeechTokens(backend, _s3, ref16);
+            int half = (int)mel.Shape[2] / 2;
+            return (tokens.Length > half ? tokens[..half] : tokens, mel, speaker);
+        }
+        catch
+        {
+            speaker?.Dispose();
+            mel.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Upstream S3Gen's <c>trim_fade</c> on the head of every output: <c>sr / 50</c> samples zeroed, then a raised-cosine

@@ -30,6 +30,21 @@ public sealed class ChatterboxZeroShotFrontendTests
     }
 
     [Theory]
+    [InlineData(150, 0)]
+    [InlineData(200, 1)]
+    [InlineData(300, 1)]
+    [InlineData(480, 3)]
+    public void S3TokenizerMel_ShortClipsFrameAsTorchStft(int samples, int frames)
+    {
+        // torch.stft(center=True) gives 1 + len // 160 frames and the last is dropped; a clip at or under the 200-sample
+        // pad (where torch's reflect pad would refuse) still frames without throwing.
+        float[] y = Signal(0, samples, 0, 0);
+        float[,] mel = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(128)).Compute(y);
+        Assert.Equal(frames, mel.GetLength(1));
+        foreach (float v in mel) Assert.True(float.IsFinite(v));
+    }
+
+    [Theory]
     [InlineData(1, 1, 160)]
     [InlineData(160, 1, 160)]
     [InlineData(200, 1, 160)]

@@ -1029,7 +1029,7 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   Chatterbox matched to 1e-4 on the first and was off by 15 on the second; all of it came from the reference front
   ends (S3 tokenizer and flow mels at rounded FFT sizes, the voice encoder's missing silence trim and partial step).
   Upstream's own two resamplers flip about a sixth of a clip's S3 tokens against each other, so compare tokens on
-  upstream's 16 kHz samples, not on the engine's resample.
+  upstream's 16 kHz samples; from the engine's resample, exact T3 prompt tokens are not expected.
 - **A default-precision A/B can sit below its floor on TF32 rounding alone — run a full-F32 arm before calling it a
   regression.** StyleTTS 2's prosody predictor is recurrent, so moving one GEMV from TF32 to exact F32 moved a
   15-word clone to log-spectral correlation 0.976 against the old build (identical length and transcripts); the old

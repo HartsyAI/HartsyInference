@@ -113,8 +113,8 @@ public sealed class MelSpectrogramExtractor
 
     /// <summary>CosyVoice 2 flow-matching mel conditioning (matcha <c>mel_spectrogram</c>): 24kHz, an exact 1920-point
     /// STFT, hop=480, win=1920, 80 mel bins, fmax=8000, magnitude spectrum <c>sqrt(power + 1e-9)</c>, natural log
-    /// clamped at 1e-5. The reference
-    /// reflect-pads the audio by <c>(n_fft - hop)/2</c> (center=False); callers should pre-pad to match.</summary>
+    /// clamped at 1e-5. The reference reflect-pads the audio by <c>(n_fft - hop)/2</c> (center=False); callers should
+    /// pre-pad to match.</summary>
     public static Config CosyVoice2FlowConfig() => new(
         SampleRate: 24_000,
         NFft: 1_920,
