@@ -74,6 +74,9 @@ public sealed class WeTextRuntimeTests
     [InlineData("0 1 97 120 0|0 2 97 121 0|1 2 0 112 0|1 3 0 113 0|2 3 0 114 0|4 4 122 122 0|1 5 0 122 2.5|3 0", "yr")]
     [InlineData("0 1 97 120 0|0 2 97 121 0|1 2 0 112 0|1 3 0 113 0|2 3 0 114 0|4 4 122 122 0|3 0.5", "yr")]
     [InlineData("0 1 98 120 0|1 0", "")]
+    // Composed arcs keep rule file order: an unsorted rule (label arc first) and its sorted twin pick differently.
+    [InlineData("0 1 97 120 1|0 2 0 121 0.5|2 3 97 122 0.5|1 0|3 0", "yz")]
+    [InlineData("0 2 0 121 0.5|0 1 97 120 1|2 3 97 122 0.5|1 0|3 0", "x")]
     public void Rewrite_BreaksTiesLikeKaldifst(string rule, string expected)
     {
         Assert.Equal(expected, new FstTextRewriter(Compile(rule)).Rewrite("a"));

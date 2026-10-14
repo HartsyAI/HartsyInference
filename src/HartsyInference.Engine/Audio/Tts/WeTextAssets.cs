@@ -23,7 +23,7 @@ internal static class WeTextAssets
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.Ordinal);
 
-    private static readonly Dictionary<string, string> Sha256 =new(StringComparer.Ordinal)
+    private static readonly Dictionary<string, string> Sha256 = new(StringComparer.Ordinal)
     {
         ["en/tn/tagger.fst"] = "245e2dc9174cdd007a8e9e50f3339773d1adbbc7535b71cf67478dc1683cc3ec",
         ["en/tn/verbalizer.fst"] = "03155c88f317b2795969e264c19f87faf98b9853d5ac631e419bacdc3b3ee15a",
@@ -51,7 +51,9 @@ internal static class WeTextAssets
             {
                 Logs.Info("[Audio][WeText] Downloading the text-normalization grammars (wetext 0.1.8 wheel, 5 MB)...");
                 await AudioFileFetcher.EnsureAsync(WheelUrl, wheel, WheelSha256, cancel).ConfigureAwait(false);
-                await Task.Run(() => Extract(wheel, directory, missing), cancel).ConfigureAwait(false);
+                // Every absent grammar, not just this language's, so a later call never fetches the wheel again.
+                List<string> absent = [.. Sha256.Keys.Where(f => !File.Exists(Path.Combine(directory, f)))];
+                await Task.Run(() => Extract(wheel, directory, absent), cancel).ConfigureAwait(false);
             }
             finally
             {
