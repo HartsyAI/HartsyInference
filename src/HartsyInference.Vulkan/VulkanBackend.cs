@@ -4105,6 +4105,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <inheritdoc/>
     public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
 
+    /// <summary>Quantized (Q8_0/Q4_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>.</summary>
+    public bool LlmGraphDecodeQuantEmbed => true;
+
     /// <summary>One captured LLM decode step: its own command buffer and the buffers its capture retained.</summary>
     private sealed class CapturedLlmGraph(VulkanStepGraph graph, List<VulkanBuffer> retained)
     {
@@ -4366,6 +4369,44 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan EmbedGatherDecodeStep dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Graph-decode gather that dequantizes one row of a Q8_0 or Q4_K table on device (no F32 copy), then scales it by <paramref name="scale"/>.</summary>
+    /// <remarks>Row bytes are computed in uint on the device, so the table must stay under 4 GB; the transformer checks that before choosing this path. Hidden must be a whole number of blocks (32 for Q8_0, 256 for Q4_K).</remarks>
+    public void EmbedGatherQuantDecodeStep(Tensor output, Tensor quantTable, float scale, ulong tokenId)
+    {
+        using OpScope _op = EnterOp();
+        bool q8 = quantTable.DType == DType.Q8_0;
+        if (!q8 && quantTable.DType != DType.Q4_K)
+            throw new NotSupportedException($"EmbedGatherQuantDecodeStep supports Q8_0 and Q4_K tables, not {quantTable.DType}.");
+        int block = q8 ? 32 : 256;
+        string shader = q8 ? "embed_gather_quant_q8_0" : "embed_gather_quant_q4_k";
+        if (tokenId == 0 || !_scalarBuffers.TryGetValue(tokenId, out VulkanBuffer? tokBuf) || output.DType != DType.F32)
+        {
+            throw new NotSupportedException("EmbedGatherQuantDecodeStep requires an F32 output and a valid device token-id buffer.");
+        }
+        int hidden = (int)output.ElementCount;
+        if (hidden % block != 0)
+            throw new NotSupportedException($"EmbedGatherQuantDecodeStep: hidden {hidden} is not a multiple of the {quantTable.DType} block ({block}).");
+        VulkanBuffer tableBuf = GetBuffer(quantTable);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            VulkanKernel k = GetKernel(shader, 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[8];
+            BinaryWriteUInt(pc, 0, (uint)hidden);
+            BinaryWriteUInt(pc, 4, BitConverter.SingleToUInt32Bits(scale));
+            Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, tableBuf.Handle, tokBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(hidden, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan EmbedGatherQuantDecodeStep dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }

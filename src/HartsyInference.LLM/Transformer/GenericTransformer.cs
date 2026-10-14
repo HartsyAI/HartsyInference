@@ -40,6 +40,10 @@ public sealed unsafe class GenericTransformer : IDisposable
     // graph-decode gather kernel (see EnsureEmbedResidentForGraphDecode) — EmbedGatherDecodeStep has no scale
     // parameter, unlike EmbedLookup's host gather which multiplies per call.
     private Tensor? _graphDecodeEmbedScaled;
+    // The QUANTIZED embed table (Q8_0 or Q4_K) as loaded. Graph decode gathers it directly on backends that report
+    // LlmGraphDecodeQuantEmbed, so no F32 device copy is made. For a tied model this is the same tensor as
+    // _lmHeadQuant (no extra upload). Null for every other dtype, which keeps the F32 gather path.
+    private Tensor? _embedGatherQuant;
     // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
     // layer (each layer additionally has its own gate/proj/post-norm — see Layer). Null when PerLayerEmbeddingDim=0.
     private Tensor? _perLayerTokEmbd, _perLayerModelProj, _perLayerProjNorm;
@@ -175,6 +179,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         // as a BF16 fused GEMV. (Qwen 151k×1024 quant head was ~28% of decode time — same fix, quant dtype.)
         if (_cfg.TieWordEmbeddings && (embedRaw.DType.IsQuantized || embedRaw.DType == DType.BF16 || embedRaw.DType == DType.F16))
             _lmHeadQuant = embedRaw;
+        if (embedRaw.DType == DType.Q8_0 || embedRaw.DType == DType.Q4_K) _embedGatherQuant = embedRaw;
         if (_cfg.AbsolutePositionEmbeddings) _posEmbed = EnsureF32(w[$"{prefix}.embed_positions.weight"]);
         if (_cfg.EmbeddingLayerNorm)
         {
@@ -736,6 +741,13 @@ public sealed unsafe class GenericTransformer : IDisposable
     public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)
     {
         ThrowIfDisposed();
+        // Q8_0/Q4_K tables stay quantized on device and are gathered by the backend (no F32 copy). Other dtypes, and
+        // backends without the quantized gather, take the F32 path below unchanged.
+        if (_embedGatherQuant is { } quant && backend.LlmGraphDecodeQuantEmbed && QuantEmbedGatherFits(quant))
+        {
+            backend.PreloadWeights([quant]);
+            return quant;
+        }
         backend.PreloadWeights([_embed!]);
         if (_cfg.EmbeddingScale == 1f) return _embed!;
         if (_graphDecodeEmbedScaled is null)
@@ -744,6 +756,17 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.Scale(_graphDecodeEmbedScaled, _embed!, _cfg.EmbeddingScale);
         }
         return _graphDecodeEmbedScaled;
+    }
+
+    /// <summary>True when the quantized embed table is block-aligned for its row width and every row offset fits the device's uint32 byte addressing.</summary>
+    private bool QuantEmbedGatherFits(Tensor quant)
+    {
+        int block = quant.DType == DType.Q8_0 ? 32 : 256;
+        int blockBytes = quant.DType == DType.Q8_0 ? 34 : 144;
+        if (_cfg.HiddenSize % block != 0) return false;
+        long rows = quant.ElementCount / _cfg.HiddenSize;
+        long rowBytes = (long)(_cfg.HiddenSize / block) * blockBytes;
+        return rows * rowBytes <= uint.MaxValue;
     }
 
     /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>
@@ -794,7 +817,12 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (applyRepPenalty) backend.AppendTokenHistoryStep(history, historyCount, deviceTokenId);
 
         Tensor embeds = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
-        backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
+        // A quantized table (EnsureEmbedResidentForGraphDecode's gated path) is dequantized and scaled on device here;
+        // an F32 table was already pre-scaled, so it takes the plain gather.
+        if (embedTable.DType.IsQuantized)
+            backend.EmbedGatherQuantDecodeStep(embeds, embedTable, _cfg.EmbeddingScale, deviceTokenId);
+        else
+            backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
 
         // Gemma-4 PLE (graph flavor of ComputePerLayerInputs): device Q5_K row gather by the device token
         // id replaces the host gather; the projected path and per-layer mixing use the same ops in the same
@@ -1119,7 +1147,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null;
+        _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null; _embedGatherQuant = null;
         _perLayerTokEmbd = null; _perLayerModelProj = null; _perLayerProjNorm = null;
         _graphDecodeEmbedScaled?.Dispose(); _graphDecodeEmbedScaled = null;
     }

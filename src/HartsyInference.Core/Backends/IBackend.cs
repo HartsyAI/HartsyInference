@@ -2147,6 +2147,14 @@ public partial interface IBackend : IDisposable
     void PleGatherDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
         => throw new NotSupportedException("PleGatherDecodeStep requires a graph-decode-capable backend.");
 
+    /// <summary>True when <see cref="EmbedGatherQuantDecodeStep"/> is implemented, so graph decode can gather the QUANTIZED embed table (Q8_0/Q4_K) on device instead of keeping an F32 copy. Other backends keep the F32 <see cref="EmbedGatherDecodeStep"/> path.</summary>
+    bool LlmGraphDecodeQuantEmbed => false;
+
+    /// <summary>Graph-decode embed gather that dequantizes one row of a quantized (Q8_0/Q4_K) table on device, then multiplies by <paramref name="scale"/> (1.0 = no scale).</summary>
+    /// <remarks>Only backends reporting <see cref="LlmGraphDecodeQuantEmbed"/> implement this; the default throws.</remarks>
+    void EmbedGatherQuantDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
+        => throw new NotSupportedException("EmbedGatherQuantDecodeStep requires a backend reporting LlmGraphDecodeQuantEmbed.");
+
     /// <summary>Qwen3.5 SSM decode step (seq=1), part 1: causal depthwise conv step + SiLU + q/k/v split + per-head L2 norms.</summary>
     /// <remarks><paramref name="history"/> is the device-persistent conv ring, shifted in place. CUDA-only (graph-capable backends).</remarks>
     void SsmConvSplitStep(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
