@@ -314,13 +314,33 @@ public sealed class ToolLoopV2Tests
         Assert.Equal(["a", "b"], results.Select(c => c.ToolCall!.Id));
         Assert.Equal(["remote", "local"], results.Select(c => c.Text));
         Assert.Equal([0, 1], results.Select(c => c.ToolCallIndex!.Value));
+        // b was issued in the same turn as a, so it is recorded there; the text after a's result is the next turn.
         IReadOnlyList<TextMessage> second = rounds.Requests[1].Messages;
-        Assert.Equal([TextRole.User, TextRole.Assistant, TextRole.Tool, TextRole.Assistant, TextRole.Tool], second.Select(m => m.Role));
-        Assert.Equal("a", Assert.Single(second[1].ToolCalls!).Id);
-        Assert.Equal("remote", second[2].Content);
-        Assert.Equal("Half done.", second[3].Content);
-        Assert.Equal("b", Assert.Single(second[3].ToolCalls!).Id);
-        Assert.Equal("local", second[4].Content);
+        Assert.Equal([TextRole.User, TextRole.Assistant, TextRole.Tool, TextRole.Tool, TextRole.Assistant], second.Select(m => m.Role));
+        Assert.Equal(["a", "b"], second[1].ToolCalls!.Select(c => c.Id));
+        Assert.Equal(["remote", "local"], [second[2].Content, second[3].Content]);
+        Assert.Equal(["a", "b"], [second[2].ToolCallId!, second[3].ToolCallId!]);
+        Assert.Equal("Half done.", second[4].Content);
+        Assert.Null(second[4].ToolCalls);
+    }
+
+    [Fact]
+    public async Task AnUnresolvedCallKeepsItsPlaceAheadOfALaterResolvedOne()
+    {
+        Rounds rounds = new([Text("One. "), Call("a", "get_time"), Call("b", "get_time"), Relayed("b", "remote"), Text("Two. "),
+            Call("c", "get_time"), Relayed("c", "remote c"), Stop(StopReason.ToolCall)], [Text("Done."), Stop(StopReason.Stop)]);
+        ToolRegistry tools = new ToolRegistry().Add("get_time", "time", "{}", (_, _) => Task.FromResult("local"));
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), tools);
+        await Collect(run);
+        IReadOnlyList<TextMessage> second = rounds.Requests[1].Messages;
+        Assert.Equal([TextRole.User, TextRole.Assistant, TextRole.Tool, TextRole.Tool, TextRole.Assistant, TextRole.Tool],
+            second.Select(m => m.Role));
+        Assert.Equal("One. ", second[1].Content);
+        Assert.Equal(["a", "b"], second[1].ToolCalls!.Select(c => c.Id));
+        Assert.Equal(["local", "remote"], [second[2].Content, second[3].Content]);
+        Assert.Equal("Two. ", second[4].Content);
+        Assert.Equal("c", Assert.Single(second[4].ToolCalls!).Id);
+        Assert.Equal("remote c", second[5].Content);
     }
 
     [Fact]
@@ -368,13 +388,41 @@ public sealed class ToolLoopV2Tests
     }
 
     [Fact]
-    public async Task AFailedRoundKeepsItsRelayedResultsOutOfTheConversation()
+    public async Task AFailedRoundKeepsTheResultsItRelayedButNotItsPartialText()
     {
-        Rounds rounds = new([Text("Checking. "), Call("c1", "get_time"), Relayed("c1", "14:05"), Text("It is"), Stop(StopReason.Error)]);
+        Rounds rounds = new([Text("Checking. "), Call("c1", "get_time"), Relayed("c1", "14:05"), Text("It is"), Call("c2", "get_time"),
+            Stop(StopReason.Error)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry());
+        List<TextChunk> chunks = await Collect(run);
+        Assert.Equal("14:05", Assert.Single(chunks, c => c.Kind == TextChunkKind.ToolResult).Text);
+        Assert.Equal([TextRole.User, TextRole.Assistant, TextRole.Tool], run.Conversation.Select(m => m.Role));
+        Assert.Equal("Checking. ", run.Conversation[1].Content);
+        Assert.Equal("c1", Assert.Single(run.Conversation[1].ToolCalls!).Id);
+        Assert.Equal("c1", Assert.Single(run.ToolResults).Call.Id);
+        Assert.Equal(StopReason.Error, run.Stop);
+    }
+
+    [Fact]
+    public async Task AllPreResolvedEndsWithAPlainStopEvenAfterAToolCallStop()
+    {
+        Rounds rounds = new([Call("c1", "get_time"), Relayed("c1", "14:05"), Text("It is 14:05."), Stop(StopReason.ToolCall)]);
+        ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry());
+        List<TextChunk> chunks = await Collect(run);
+        Assert.Equal(1, run.Rounds);
+        Assert.Equal(StopReason.Stop, run.Stop);
+        Assert.Equal(StopReason.Stop, Assert.Single(chunks, c => c.Kind == TextChunkKind.StopReason).Stop);
+    }
+
+    [Theory]
+    [InlineData("Checking. It is 14:05 UTC.", "Checking. ", "It is 14:05 UTC.")]
+    [InlineData("Checking now. It is 14:05.", "Checking. ", "It is 14:05.")]
+    public async Task ARoundResultNeverRepeatsTextAClosedTurnRecorded(string final, string firstTurn, string lastTurn)
+    {
+        Rounds rounds = new([Text("Checking. "), Call("c1", "get_time"), Relayed("c1", "14:05"), Text("It is 14:05."),
+            new TextChunk { Kind = TextChunkKind.Result, Text = final }, Stop(StopReason.Stop)]);
         ToolLoopRun run = ToolLoop.Create(rounds.Stream, Request(), new ToolRegistry());
         await Collect(run);
-        Assert.Equal([TextRole.User], run.Conversation.Select(m => m.Role));
-        Assert.Empty(run.ToolResults);
-        Assert.Equal(StopReason.Error, run.Stop);
+        Assert.Equal([firstTurn, lastTurn], run.Conversation.Where(m => m.Role == TextRole.Assistant).Select(m => m.Content));
+        Assert.Equal(final, run.VisibleText);
     }
 }

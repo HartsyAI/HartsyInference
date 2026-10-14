@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text;
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 
@@ -56,18 +57,23 @@ public sealed class ToolLoopRun
     /// <see cref="TextChunkKind.Result"/> replaces its already-streamed deltas in <see cref="VisibleText"/> and the final
     /// result when the two differ. A gate or dispatcher failure becomes that call's error result. An <see
     /// cref="StopReason.Error"/> or <see cref="StopReason.Cancelled"/> stop is relayed and
-    /// ends the run without a final result; that round's partial text and relayed results stay out of <see
-    /// cref="Conversation"/> and <see cref="ToolResults"/>, since the turn did not complete.
+    /// ends the run without a final result; that round's partial text stays out of <see cref="Conversation"/>, since
+    /// the turn did not complete, but the results it relayed stay in (see below).
     /// <para>Pre-resolved calls: a stream that runs its tools itself (a remote assistant) relays each result as a <see
     /// cref="TextChunkKind.ToolResult"/> after its call. The result belongs to the oldest call of the round that arrived
     /// with the same id and has no result yet, so it follows that call's repaired id; it streams once, where it arrived,
-    /// under the loop's own result index. A relayed result that matches no such call is dropped. Each relayed result
-    /// closes the assistant turn before it: the conversation gets that turn's text with its resolved calls, then their
-    /// results, and the text after them starts the next turn, the shape the stream itself went through. A round whose
-    /// calls were all pre-resolved already holds its final answer, so it ends the run like a round without calls, with
-    /// the stream's own stop reason. Calls left without a result are dispatched as usual, recorded with the round's
-    /// trailing text, and the model is asked again. A round <see cref="TextChunkKind.Result"/> that does not begin with
-    /// the text already recorded ahead of a relayed result becomes the whole trailing turn.</para></remarks>
+    /// under the loop's own result index. A relayed result that matches no such call is logged and dropped. A relayed
+    /// result for a call of the open assistant turn closes that turn at the next text or call, so the conversation reads
+    /// each turn's text with every call issued in it, in arrival order, then those calls' results, then the next turn:
+    /// the shape the stream went through, and the one <c>VoiceAgentSession</c> records from the same chunks. A call
+    /// without a relayed result is dispatched after the round and recorded in the turn that issued it, then the model is
+    /// asked again. A round whose calls were all pre-resolved already holds its final answer, so it ends the run like a
+    /// round without calls, reporting <see cref="StopReason.Stop"/> where the stream said <see cref="StopReason.ToolCall"/>.
+    /// The tool exchanges of an <see cref="StopReason.Error"/> or <see cref="StopReason.Cancelled"/> round that relayed
+    /// results are recorded through its last relayed result, since those calls did run and their results were streamed;
+    /// its text after that and its unresolved calls are not. A round <see cref="TextChunkKind.Result"/> replaces the text
+    /// of the closed turns only where it extends them; otherwise those turns keep their streamed text, the open turn keeps
+    /// its streamed text too, and only <see cref="VisibleText"/> takes the result.</para></remarks>
     public async IAsyncEnumerable<TextChunk> RunAsync([EnumeratorCancellation] CancellationToken cancel = default)
     {
         if (_started) throw new InvalidOperationException("A tool loop runs once; create a new one for another run.");
@@ -128,10 +134,16 @@ public sealed class ToolLoopRun
                         }
                         break;
                     case TextChunkKind.ToolResult:
-                        // A result the stream relays for a call it ran itself; one naming no open call has nowhere to belong.
-                        if (chunk.ToolCall is { } relayed && calls.Resolve(relayed.Id ?? "", chunk.Text ?? "") is { } resolved)
+                        // A result the stream relays for a call it ran itself.
+                        string wireId = chunk.ToolCall?.Id ?? "";
+                        if (calls.Resolve(wireId, chunk.Text ?? "") is { } resolved)
                         {
                             yield return chunk with { ToolCall = resolved, ToolCallIndex = resultIndex++ };
+                        }
+                        else
+                        {
+                            Logs.Warning("[ToolLoop] Dropped a relayed tool result for id '" + wireId + "' (" + (chunk.ToolCall?.Name ?? "no call")
+                                + "): no call of this round with that id is waiting for a result.");
                         }
                         break;
                     case TextChunkKind.Result:
@@ -143,9 +155,9 @@ public sealed class ToolLoopRun
                             // A stream that reports its text only at the end still gets that text into the turn and the stream.
                             yield return new TextChunk { Kind = TextChunkKind.Chunk, Text = chunk.Text };
                         }
-                        // The round's result is authoritative over its deltas (a provider may correct them), so it replaces them.
-                        roundText.Clear().Append(chunk.Text);
-                        calls.OnTextReplaced(chunk.Text);
+                        // The round's result is authoritative over its deltas (a provider may correct them), so it replaces them;
+                        // text already recorded in closed turns is replaced only where the result extends it.
+                        if (calls.Extends(chunk.Text)) roundText.Clear().Append(chunk.Text);
                         visible.Length = roundStart;
                         visible.Append(chunk.Text);
                         break;
@@ -153,6 +165,9 @@ public sealed class ToolLoopRun
                         stop = chunk.Stop ?? StopReason.Stop;
                         if (stop is StopReason.Error or StopReason.Cancelled)
                         {
+                            // Relayed calls did run, and their results already streamed.
+                            _conversation.AddRange(calls.Messages(roundText, throughLastRelayed: true));
+                            _results.AddRange(calls.Relayed);
                             Stop = stop;
                             VisibleText = visible.ToString();
                             yield return chunk;
@@ -164,25 +179,24 @@ public sealed class ToolLoopRun
                         break;
                 }
             }
-            Stop = stop;
             VisibleText = visible.ToString();
-            if (calls.HasRelayed) calls.CloseTurn(roundText);
-            _conversation.AddRange(calls.Closed);
-            _results.AddRange(calls.ClosedResults);
-            string tail = roundText.ToString(calls.TextStart, roundText.Length - calls.TextStart);
-            List<NativeToolCall> open = calls.Open;
+            _results.AddRange(calls.Relayed);
+            List<NativeToolCall> open = calls.Unresolved();
             if (open.Count == 0)
             {
-                // The final answer belongs to the conversation a host reuses for the next turn.
-                if (tail.Length > 0) _conversation.Add(new TextMessage { Role = TextRole.Assistant, Content = tail });
+                // The final answer belongs to the conversation a host reuses for the next turn. Pre-resolved calls leave
+                // nothing to run, so a tool-call stop is a plain one.
+                _conversation.AddRange(calls.Messages(roundText, throughLastRelayed: false));
+                if (stop == StopReason.ToolCall && calls.Relayed.Count > 0) stop = StopReason.Stop;
+                Stop = stop;
                 yield return new TextChunk { Kind = TextChunkKind.Result, Text = VisibleText };
                 yield return new TextChunk { Kind = TextChunkKind.StopReason, Stop = stop };
                 yield break;
             }
             if (round == _options.MaxRounds)
             {
-                // The turn's text stays in the conversation; its calls do not, since they were never dispatched and have no results.
-                if (tail.Length > 0) _conversation.Add(new TextMessage { Role = TextRole.Assistant, Content = tail });
+                // The turn's text stays in the conversation; its open calls do not, since they were never dispatched.
+                _conversation.AddRange(calls.Messages(roundText, throughLastRelayed: false));
                 Stop = StopReason.ToolCall;
                 yield return new TextChunk
                 {
@@ -194,14 +208,15 @@ public sealed class ToolLoopRun
                 yield return new TextChunk { Kind = TextChunkKind.StopReason, Stop = StopReason.ToolCall };
                 yield break;
             }
-            _conversation.Add(new TextMessage { Role = TextRole.Assistant, Content = tail, ToolCalls = open });
+            Stop = stop;
             foreach (NativeToolCall call in open)
             {
                 string result = await DispatchAsync(call, cancel).ConfigureAwait(false);
-                _conversation.Add(new TextMessage { Role = TextRole.Tool, Content = result, ToolCallId = call.Id, Name = call.Name });
+                calls.Complete(call, result);
                 _results.Add((call, result));
                 yield return new TextChunk { Kind = TextChunkKind.ToolResult, Text = result, ToolCall = call, ToolCallIndex = resultIndex++ };
             }
+            _conversation.AddRange(calls.Messages(roundText, throughLastRelayed: false));
         }
     }
 
@@ -249,65 +264,128 @@ public sealed class ToolLoopRun
     /// <summary>One round's calls, split into assistant turns by the results the stream relays for calls it ran itself.</summary>
     private sealed class RoundCalls
     {
-        private readonly Dictionary<string, Queue<NativeToolCall>> _openByWireId = new(StringComparer.Ordinal);
-        private readonly List<(NativeToolCall Call, string Result)> _relayed = [];
+        private readonly Dictionary<string, Queue<Slot>> _waitingByWireId = new(StringComparer.Ordinal);
+        private readonly List<Turn> _turns = [new Turn(0)];
         private string _closedText = "";
 
-        /// <summary>Calls without a result yet, in arrival order.</summary>
-        public List<NativeToolCall> Open { get; } = [];
-
-        /// <summary>The closed turns: each one's assistant message, then its relayed results.</summary>
-        public List<TextMessage> Closed { get; } = [];
-
-        /// <summary>The closed turns' calls with their relayed results, in arrival order.</summary>
-        public List<(NativeToolCall Call, string Result)> ClosedResults { get; } = [];
+        /// <summary>The relayed results with their calls, in arrival order.</summary>
+        public List<(NativeToolCall Call, string Result)> Relayed { get; } = [];
 
         /// <summary>Where the open turn's text starts in the round's text.</summary>
-        public int TextStart { get; private set; }
+        public int TextStart => _turns[^1].TextStart;
 
-        /// <summary>The open turn has relayed results, so the next text or call starts a new turn.</summary>
-        public bool HasRelayed => _relayed.Count > 0;
+        /// <summary>A call of the open turn has a relayed result, so the next text or call starts a new turn.</summary>
+        public bool HasRelayed => _turns[^1].Relayed;
 
-        /// <summary>Opens <paramref name="call"/>, repaired from the id it arrived with.</summary>
+        /// <summary>Records <paramref name="call"/>, repaired from the id it arrived with, in the open turn.</summary>
         public void Add(string wireId, NativeToolCall call)
         {
-            Open.Add(call);
-            if (!_openByWireId.TryGetValue(wireId, out Queue<NativeToolCall>? queue)) _openByWireId[wireId] = queue = new();
-            queue.Enqueue(call);
+            Slot slot = new(call);
+            _turns[^1].Calls.Add(slot);
+            if (!_waitingByWireId.TryGetValue(wireId, out Queue<Slot>? queue)) _waitingByWireId[wireId] = queue = new();
+            queue.Enqueue(slot);
         }
 
-        /// <summary>Resolves the oldest open call that arrived with <paramref name="wireId"/>; null when there is none.</summary>
+        /// <summary>Resolves the oldest waiting call that arrived with <paramref name="wireId"/>; null when there is none.</summary>
         public NativeToolCall? Resolve(string wireId, string result)
         {
-            if (!_openByWireId.TryGetValue(wireId, out Queue<NativeToolCall>? queue) || queue.Count == 0) return null;
-            NativeToolCall call = queue.Dequeue();
-            Open.Remove(call);
-            _relayed.Add((call, result));
-            return call;
+            if (!_waitingByWireId.TryGetValue(wireId, out Queue<Slot>? queue) || queue.Count == 0) return null;
+            Slot slot = queue.Dequeue();
+            slot.Result = result;
+            Relayed.Add((slot.Call, result));
+            Turn open = _turns[^1];
+            if (open.Calls.Contains(slot)) open.Relayed = true;
+            return slot.Call;
         }
 
-        /// <summary>Records the open turn's text with its resolved calls, then their results; open calls stay open.</summary>
+        /// <summary>Records a dispatched call's result.</summary>
+        public void Complete(NativeToolCall call, string result)
+        {
+            foreach (Turn turn in _turns)
+            {
+                foreach (Slot slot in turn.Calls)
+                {
+                    if (ReferenceEquals(slot.Call, call)) slot.Result = result;
+                }
+            }
+        }
+
+        /// <summary>Calls without a result, in arrival order.</summary>
+        public List<NativeToolCall> Unresolved()
+        {
+            List<NativeToolCall> open = [];
+            foreach (Turn turn in _turns)
+            {
+                foreach (Slot slot in turn.Calls)
+                {
+                    if (slot.Result is null) open.Add(slot.Call);
+                }
+            }
+            return open;
+        }
+
+        /// <summary>Ends the open turn at the round's current text and opens the next.</summary>
         public void CloseTurn(StringBuilder roundText)
         {
-            List<NativeToolCall> resolved = new(_relayed.Count);
-            foreach ((NativeToolCall call, string _) in _relayed) resolved.Add(call);
-            string text = roundText.ToString(TextStart, roundText.Length - TextStart);
-            Closed.Add(new TextMessage { Role = TextRole.Assistant, Content = text, ToolCalls = resolved });
-            foreach ((NativeToolCall call, string result) in _relayed)
-            {
-                Closed.Add(new TextMessage { Role = TextRole.Tool, Content = result, ToolCallId = call.Id, Name = call.Name });
-                ClosedResults.Add((call, result));
-            }
-            _relayed.Clear();
-            TextStart = roundText.Length;
+            Turn closing = _turns[^1];
+            closing.Text = roundText.ToString(closing.TextStart, roundText.Length - closing.TextStart);
             _closedText = roundText.ToString();
+            _turns.Add(new Turn(roundText.Length));
         }
 
-        /// <summary>The round's text was replaced by its result; a result that no longer extends the recorded turns is
-        /// all trailing text.</summary>
-        public void OnTextReplaced(string text)
+        /// <summary>Whether <paramref name="text"/> keeps the closed turns' text as its start.</summary>
+        public bool Extends(string text) => text.StartsWith(_closedText, StringComparison.Ordinal);
+
+        /// <summary>Each turn's assistant message with its calls that have a result, then those results; with <paramref
+        /// name="throughLastRelayed"/>, only the turns up to the last one holding a relayed result.</summary>
+        public List<TextMessage> Messages(StringBuilder roundText, bool throughLastRelayed)
         {
-            if (!text.StartsWith(_closedText, StringComparison.Ordinal)) TextStart = 0;
+            int last = _turns.Count - 1;
+            if (throughLastRelayed)
+            {
+                while (last >= 0 && !_turns[last].Calls.Exists(slot => slot.Result is not null)) last--;
+            }
+            List<TextMessage> messages = [];
+            for (int t = 0; t <= last; t++)
+            {
+                Turn turn = _turns[t];
+                string text = turn.Text ?? roundText.ToString(turn.TextStart, roundText.Length - turn.TextStart);
+                List<NativeToolCall> resolved = [];
+                foreach (Slot slot in turn.Calls)
+                {
+                    if (slot.Result is not null) resolved.Add(slot.Call);
+                }
+                if (text.Length == 0 && resolved.Count == 0) continue;
+                messages.Add(new TextMessage { Role = TextRole.Assistant, Content = text, ToolCalls = resolved.Count > 0 ? resolved : null });
+                foreach (Slot slot in turn.Calls)
+                {
+                    if (slot.Result is { } result)
+                    {
+                        messages.Add(new TextMessage { Role = TextRole.Tool, Content = result, ToolCallId = slot.Call.Id, Name = slot.Call.Name });
+                    }
+                }
+            }
+            return messages;
+        }
+
+        /// <summary>One call and, once it has one, its result.</summary>
+        private sealed class Slot(NativeToolCall call)
+        {
+            public NativeToolCall Call { get; } = call;
+
+            public string? Result { get; set; }
+        }
+
+        /// <summary>One assistant turn: where its text starts, its text once closed, and the calls issued in it.</summary>
+        private sealed class Turn(int textStart)
+        {
+            public int TextStart { get; } = textStart;
+
+            public string? Text { get; set; }
+
+            public List<Slot> Calls { get; } = [];
+
+            public bool Relayed { get; set; }
         }
     }
 }
