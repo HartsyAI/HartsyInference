@@ -55,13 +55,12 @@ GEMM dtype path are the untested suspects.
 **Step-graph decode covers a subset.** Greedy text-LLM decode replays a recorded step (`--graph-decode`, or by default for requests of 512 or more
 new tokens; kill-switch `numerics.vkLlmGraph`; `GraphDecodeSupported` still off). An F16 KV cache, a sliding window or soft-cap (Gemma-2/3) and head dims above the flash
 kernel's limit are refused at capture and decode eagerly; sampled decode is eager (no device sampler), so the "default" graph decode above means greedy requests only; the SSM, CSM and
-MusicGen graph paths have no Vulkan capture evidence.
+MusicGen graph paths have no Vulkan capture evidence. Capture keeps an F32 copy of the embedding table on the device
+(1.05 GB for Llama-3.2-1B, 1.56 GB for Qwen3-4B). Details in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6.
 
 **Untested on Vulkan (no device evidence yet).** These paths compile and are wired, but no run has covered them:
 - The coopmat-1 only path (`HasCooperativeMatrix` without coopmat2): no recorded run has exercised the grouped and dense GEMM paths with coopmat-1 on and coopmat2 off.
 - Non-NVIDIA devices (AMD, Intel, Apple/MoltenVK): only the RTX 3060 and 4090 have been run.
 - SSM (Qwen3.5 and Mamba/RWKV), CSM and MusicGen graph paths: `GraphDecodeSupported` is off, so these run eagerly and their device-position paths have no capture run.
- Capture keeps an F32 copy of the embedding table on the device
-(1.05 GB for Llama-3.2-1B, 1.56 GB for Qwen3-4B). Details in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6.
 
 **Not speed.** A `runs` verdict says nothing about how long it took relative to CUDA; the scoreboard carries that.
