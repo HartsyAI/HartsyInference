@@ -123,14 +123,15 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
     {
         using GenericTransformer model = new(cfg);
         model.LoadWeights(w, "model");
+        // Expert banks must be placed as groups before any forward: a group with one member already resident is refused whole,
+        // and MoeExpertsResident (the device-routed stage) then stays false.
+        b.PreloadWeightGroups(model.EnumerateWeightGroups(includeRedundantSplits: false));
         const int maxLen = 48, prefill = 5;
         using FixedKvCache ce = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxLen);
         using FixedKvCache cg = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxLen);
         int[] prompt = [3, 17, 5, 41, 9];
         model.Forward(b, prompt, 0, ce).Dispose();
         model.Forward(b, prompt, 0, cg).Dispose();
-        // Expert banks must be placed as groups: the device-routed MoE stage needs MoeExpertsResident to hold.
-        b.PreloadWeightGroups(model.EnumerateWeightGroups(includeRedundantSplits: false));
         // Checked after the preload: the MoE gate asks whether the expert banks are resident on the device.
         Assert.True(model.SupportsGraphDecode(b), "the model must be eligible for the decode graph");
         (Tensor cos, Tensor sin) = model.EnsureRopeTableForGraphDecode(b, maxLen);

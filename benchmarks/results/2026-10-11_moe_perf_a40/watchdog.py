@@ -16,7 +16,12 @@ usage: watchdog.py --once | --loop [--interval SEC]   [--dry-run]   [--leases PA
 Limitation: it acts only while the operator machine is awake and cron (or the loop) runs. A machine that is off cannot
 stop anything; the RunPod console remains the fallback.
 """
-import argparse, datetime as dt, json, pathlib, subprocess, sys, time
+import argparse, contextlib, datetime as dt, json, os, pathlib, subprocess, sys, time
+
+try:
+    import fcntl
+except ImportError:  # Windows: no advisory lock; run one writer at a time there
+    fcntl = None
 
 API = "https://rest.runpod.io/v1"
 CURLRC = pathlib.Path.home() / ".runpod/curlrc"
@@ -38,6 +43,21 @@ def api(method, path, body=None, curlrc=CURLRC):
     return code, (json.loads(text) if text.strip().startswith(("{", "[")) else text)
 
 
+@contextlib.contextmanager
+def _lease_lock(path):
+    """Exclusive lock over a whole read-modify-write of the lease file, so pod_up.py and a watchdog pass cannot overwrite each other."""
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(p) + ".lock", "a+") as fh:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 def load_leases(path=LEASES):
     p = pathlib.Path(path)
     if not p.exists():
@@ -48,7 +68,7 @@ def load_leases(path=LEASES):
 def save_leases(leases, path=LEASES):
     p = pathlib.Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(leases, indent=2, sort_keys=True))
     tmp.replace(p)
 
@@ -57,14 +77,15 @@ def record_lease(pod_id, name, max_hours, path=LEASES, now=None):
     """Called by pod_up.py right after POST /pods succeeds, before the wait loop, so a failed bring-up still has a lease."""
     if max_hours <= 0:
         raise ValueError("max_hours must be positive")
-    leases = load_leases(path)
-    leases[pod_id] = {
-        "name": name,
-        "started": (now or dt.datetime.now(dt.timezone.utc)).isoformat(),
-        "max_hours": float(max_hours),
-        "stop_requested": None,
-    }
-    save_leases(leases, path)
+    with _lease_lock(path):
+        leases = load_leases(path)
+        leases[pod_id] = {
+            "name": name,
+            "started": (now or dt.datetime.now(dt.timezone.utc)).isoformat(),
+            "max_hours": float(max_hours),
+            "stop_requested": None,
+        }
+        save_leases(leases, path)
     return leases[pod_id]
 
 
@@ -86,7 +107,13 @@ def pods_due(leases, now):
 
 
 def run_once(api_call, path=LEASES, now=None, dry_run=False, log=print):
-    """One watchdog pass. api_call(method, path, body=None) -> (code, body). Returns the list of pod ids it stopped (or would stop)."""
+    """One watchdog pass. api_call(method, path, body=None) -> (code, body). Returns the list of pod ids it stopped (or would stop).
+    The whole pass holds the lease lock, so a pod recorded during the pass is never overwritten by the save at its end."""
+    with _lease_lock(path):
+        return _run_once_locked(api_call, path, now, dry_run, log)
+
+
+def _run_once_locked(api_call, path, now, dry_run, log):
     now = now or dt.datetime.now(dt.timezone.utc)
     leases = load_leases(path)
     if not leases:
