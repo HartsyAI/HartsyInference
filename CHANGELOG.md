@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: GPT-SoVITS English text frontend now matches upstream exactly.** Numbers, dates and currency were letter-spelled ("March R.D. at PM"). The English path now reproduces upstream's normalizer (`GptSoVitsEnglishNormalizer` with an exact inflect port), tokenizer, POS-tagged homographs, merged dictionaries, word segmentation and the g2p_en letter-to-sound model, and the engine cuts long text into segments joined by 0.3 s silences as upstream does. Parity tests: 119/119 corpus lines, 3000/3000 random lines.
+
 
 - **Fixed: stale expert-cache test read a released lease.** `PinnedExpertsAreNeverEvicted_AndUnpinnedOnesAre` called `pinned.Get` after `Release`, but released leases clear their slots by design (reusable leases, #306). The test now keeps the weights before releasing; the pinned-never-evicted and unpinned-evicted assertions are unchanged.
 - **Fixed: Qwen2 and Qwen3 GGUFs use the Qwen2 pre-tokenizer split.** The GGUF names it `tokenizer.ggml.pre = "qwen2"`, and only `kolibri1` selected the single-digit split. Qwen text tokenized with the GPT-2 split, 6-8% more tokens on the same text (the 4K benchmark prompt came out at 4,036 against llama.cpp's 3,742). The Qwen2 split now applies to both names.
@@ -26,7 +28,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.364
 
-- **Fixed: GPT-SoVITS spoke numbers, dates and currency as garbage.** The English G2P had no number normalization. CMUdict has no digit entries, so "2026", "4:30" and "$99.95" fell through to the letter-spelling fallback and came out as nonsense ("March R.D. at PM"). The English path now runs the same spoken-form normalizer the IndexTTS frontends use. Regression tests compare digit input with its normalized form and check that no unknown phones are emitted for digits.
+- **Changed: Vulkan text-LLM graph decode is the default from 128 new tokens, not 512.** A greedy, non-JSON request of 128 to 511 new tokens on Vulkan now replays the recorded step graph without asking for it. The threshold is `IBackend.LlmGraphDecodeDefaultMinTokens`: Vulkan overrides it to 128, and every other backend keeps 512, since nothing was measured for them. Explicit `--graph-decode` / `numerics.graphDecode` and the kill switch `numerics.vkLlmGraph` behave as before. A request that sets speculative decoding explicitly at 128 to 511 tokens on Vulkan now takes graph decode instead, as it already did at 512 and up, because graph decode wins the tie. It supersedes the 512-token default recorded under alpha.362 below. On the RTX 3060, 128-token decode is 17 to 33 percent faster on all five measured models with identical text; whole-process wall is 6 to 15 percent lower on Qwen2.5, OLMoE and Qwen3-4B and unchanged on granite and Llama against eager (details in `docs/VULKAN_MOE_PLAN.md`, step 6).
 
 ## alpha.363
 

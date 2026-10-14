@@ -52,9 +52,6 @@ public sealed class TextGenerationPipeline
         _stopIds = [.. tokenizer.StopIds];
     }
 
-    /// <summary>Fewest <see cref="GenerationRequest.MaxTokens"/> for which a backend's default-on graph decode is used. A fresh process pays 0.2 s to 1.4 s once (the F32 embedding table) before the graph saves 1.5 ms to 5.5 ms a token, so the break-even is 37 to 460 tokens; shorter requests, and any process that wants it always, say so with <c>GraphDecode</c> or <c>numerics.graphDecode</c>.</summary>
-    internal const int ImplicitGraphMinTokens = 512;
-
     /// <summary>Generates text for <paramref name="request"/>, invoking <paramref name="onToken"/> per produced token; cancelling via <paramref name="ct"/> stops between layers during the prompt prefill and between tokens during decode, and throws, discarding already-produced tokens (rely on <paramref name="onToken"/> for partial output, which still fires for every token generated before cancellation is observed).</summary>
     public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null, CancellationToken ct = default)
         => Generate(request, reuse: null, onToken, ct);
@@ -143,11 +140,11 @@ public sealed class TextGenerationPipeline
             // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
             // cross-attention/sliding-window models fall through to the verified default loop unchanged.
             // A request or the knob asks for it explicitly. Otherwise a backend whose graph is validated and faster than its eager loop
-            // (Vulkan) turns it on by itself for a request long enough to repay it: the first capture in a process builds an F32 copy of the
-            // embedding table (0.2 s to 1.4 s on the models measured) and each capture warms one step, which a short reply does not recover.
-            // Only the implicit case falls back to the eager loop if the capture fails.
+            // (Vulkan) turns it on by itself for a request of at least its own IBackend.LlmGraphDecodeDefaultMinTokens new tokens (128 on
+            // Vulkan, 512 everywhere else): the first capture in a process costs 0.01 s to 0.21 s on the models measured, and each capture
+            // warms one step, so a short reply does not win that back. Only the implicit case falls back to the eager loop if the capture fails.
             bool graphDecodeRequested = request.GraphDecode ?? (EngineKnobs.GraphDecode.Value
-                || (request.MaxTokens >= ImplicitGraphMinTokens && graphModel?.GraphDecodeByDefault(_backend) == true));
+                || (request.MaxTokens >= _backend.LlmGraphDecodeDefaultMinTokens && graphModel?.GraphDecodeByDefault(_backend) == true));
             // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
             // including any JSON grammar step — so combining the two would silently produce unconstrained output.
             // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
