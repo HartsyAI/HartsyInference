@@ -52,6 +52,21 @@ public sealed class IndexTts2ReferenceLazyEmoVecTests
     }
 
     [Fact]
+    public void FailedBuild_LeavesTheReferenceUsable_AndRetries()
+    {
+        int calls = 0;
+        using CpuBackend backend = new();
+        using IndexTts2Reference reference = CreateReference(_ =>
+        {
+            if (++calls == 1) throw new InvalidOperationException("first build fails");
+            return Filled(1, 1280, 2f);
+        });
+        Assert.Throws<InvalidOperationException>(() => reference.GetEmoVec(backend));
+        Assert.Equal(2f, reference.GetEmoVec(backend).AsSpan<float>()[0]);
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
     public void ConcurrentFirstCalls_BuildOnce()
     {
         int calls = 0;

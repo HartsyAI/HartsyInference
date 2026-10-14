@@ -51,7 +51,9 @@ public sealed class IndexTts2Reference : IDisposable
     public double Seconds => Audio16k.Length / 16_000.0;
 
     /// <summary>The emotion vector with no separate emotion clip, from the speaker's clip reloaded at 16 kHz. Built on
-    /// first call and cached, so a reference only ever used with its own emotion clip skips that w2v-bert pass.</summary>
+    /// first call and cached, so a reference only ever used with its own emotion clip skips that w2v-bert pass. Like the
+    /// reference's other tensors, it is built on the first caller's backend and reused for every later call; a build
+    /// that throws leaves the reference as it was, and the next call retries.</summary>
     internal Tensor GetEmoVec(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -74,15 +76,16 @@ public sealed class IndexTts2Reference : IDisposable
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        SpkCondEmb.Dispose();
-        RefMel.Dispose();
-        Style.Dispose();
-        PromptCondition.Dispose();
-        SpeakerConditioning.Dispose();
-        BaseEmoVec.Dispose();
+        // Under the lock so a build in flight, which reads BaseEmoVec, finishes before anything is freed.
         lock (_emoVecLock)
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            SpkCondEmb.Dispose();
+            RefMel.Dispose();
+            Style.Dispose();
+            PromptCondition.Dispose();
+            SpeakerConditioning.Dispose();
+            BaseEmoVec.Dispose();
             _emoVec?.Dispose();
             _emoVec = null;
             _emoVecFactory = null;
