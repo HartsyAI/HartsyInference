@@ -247,12 +247,19 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
             using Tensor cacheF16 = new(new TensorShape(1, 2, 8, 16), DType.F16);
             using Tensor kv = new(new TensorShape(1, 2, 1, 16), DType.F32);
             Assert.Throws<NotSupportedException>(() => b.KvCacheAppendDev(cacheF16, kv, 0, pos));
-            // Sliding-window attention is outside the device-position kernel.
+            // Soft-capped attention is outside the device-position kernels.
             using Tensor q = new(new TensorShape(1, 4, 1, 16), DType.F32);
             using Tensor k = new(new TensorShape(1, 2, 8, 16), DType.F32);
             using Tensor v = new(new TensorShape(1, 2, 8, 16), DType.F32);
             using Tensor o = new(new TensorShape(1, 4, 1, 16), DType.F32);
-            Assert.Throws<NotSupportedException>(() => b.FlashAttentionDev(o, q, k, v, 0, 2, true, 0, 0.25f, pos, 0f, 4));
+            Assert.Throws<NotSupportedException>(() => b.FlashAttentionDev(o, q, k, v, 0, 2, true, 0, 0.25f, pos, 0.5f, 0));
+            // A sliding window needs the single-row flash-decoding kernel, whose head dim a subgroup size must divide.
+            // Head dim 10 divides into no power-of-two subgroup of 4 or more, so the window is refused on any device.
+            using Tensor q10 = new(new TensorShape(1, 4, 1, 10), DType.F32);
+            using Tensor k10 = new(new TensorShape(1, 2, 8, 10), DType.F32);
+            using Tensor v10 = new(new TensorShape(1, 2, 8, 10), DType.F32);
+            using Tensor o10 = new(new TensorShape(1, 4, 1, 10), DType.F32);
+            Assert.Throws<NotSupportedException>(() => b.FlashAttentionDev(o10, q10, k10, v10, 0, 2, true, 0, 0.25f, pos, 0f, 4));
         }
         finally { b.FreeDevicePos(pos); }
     }

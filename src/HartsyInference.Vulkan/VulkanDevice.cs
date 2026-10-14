@@ -272,6 +272,7 @@ public sealed class VulkanDevice : IDisposable
             MinSubgroupSize = sgsControlProps.minSubgroupSize == 0 ? subgroupProps.subgroupSize : sgsControlProps.minSubgroupSize,
             MaxSubgroupSize = sgsControlProps.maxSubgroupSize == 0 ? subgroupProps.subgroupSize : sgsControlProps.maxSubgroupSize,
             SubgroupOps = subgroupProps.supportedOperations,
+            ComputeUnits = QueryComputeUnits(pd),
 
             MaxComputeSharedMemoryBytes = props2.properties.limits.maxComputeSharedMemorySize,
             MaxComputeWorkGroupInvocations = props2.properties.limits.maxComputeWorkGroupInvocations,
@@ -356,6 +357,51 @@ public sealed class VulkanDevice : IDisposable
             return (budget, push, coop, coop2, float8);
         }
         finally { Marshal.FreeHGlobal(block); }
+    }
+
+    /// <summary>Compute units the device reports through a vendor extension, or 0 when none does (the flash-decode split
+    /// count then falls back to a conservative default). NVIDIA: <c>VK_NV_shader_sm_builtins</c>, <c>shaderSMCount</c>.
+    /// AMD: <c>VK_AMD_shader_core_properties</c>, shader engines x arrays per engine x CUs per array. Each struct is
+    /// chained only when the device advertises its extension.</summary>
+    private static unsafe uint QueryComputeUnits(nint pd)
+    {
+        uint count = 0;
+        if (VulkanApi.vkEnumerateDeviceExtensionProperties(pd, 0, ref count, 0) != VkResult.Success || count == 0)
+            return 0;
+
+        int sz = sizeof(VkExtensionProperties);
+        nint block = Marshal.AllocHGlobal((int)count * sz);
+        bool nvSm = false, amdCore = false;
+        try
+        {
+            if (VulkanApi.vkEnumerateDeviceExtensionProperties(pd, 0, ref count, block) != VkResult.Success)
+                return 0;
+            byte* p = (byte*)block;
+            for (uint i = 0; i < count; i++)
+            {
+                VkExtensionProperties* ext = (VkExtensionProperties*)(p + i * sz);
+                string name = ReadFixedString(ext->extensionName, 256);
+                if (name == "VK_NV_shader_sm_builtins") nvSm = true;
+                else if (name == "VK_AMD_shader_core_properties") amdCore = true;
+            }
+        }
+        finally { Marshal.FreeHGlobal(block); }
+
+        if (nvSm)
+        {
+            VkPhysicalDeviceShaderSMBuiltinsPropertiesNV sm = new() { sType = (VkStructureType)1000154001 };
+            VkPhysicalDeviceProperties2 smProps2 = new() { sType = VkStructureType.PhysicalDeviceProperties2, pNext = (nint)(&sm) };
+            VulkanApi.vkGetPhysicalDeviceProperties2(pd, ref smProps2);
+            if (sm.shaderSMCount != 0) return sm.shaderSMCount;
+        }
+        if (amdCore)
+        {
+            VkPhysicalDeviceShaderCorePropertiesAMD core = new() { sType = (VkStructureType)1000185000 };
+            VkPhysicalDeviceProperties2 coreProps2 = new() { sType = VkStructureType.PhysicalDeviceProperties2, pNext = (nint)(&core) };
+            VulkanApi.vkGetPhysicalDeviceProperties2(pd, ref coreProps2);
+            return core.shaderEngineCount * core.shaderArraysPerEngineCount * core.computeUnitsPerShaderArray;
+        }
+        return 0;
     }
 
     /// <summary>Confirms the device's enumerated cooperative-matrix configurations include the one the <c>matmul_coopmat</c> shader uses: 16x16x16, FP16 A and B, FP32 accumulate (C and Result), subgroup scope, non-saturating. The property query is a physical-device extension command, so it is loaded via <c>vkGetInstanceProcAddr</c>.</summary>
