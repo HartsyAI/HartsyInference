@@ -367,6 +367,15 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
             preferred);
     }
 
+    /// <summary>A host-visible, coherent buffer that stays mapped: the host writes it between graph replays and a captured copy
+    /// reads it. Not cached, and freed by its owner with <see cref="FreeDevice"/>.</summary>
+    public VulkanBuffer AllocateHostStaging(ulong byteSize)
+        => VulkanBufferFactory.Create(
+            _device, _allocator, in _memProps,
+            byteSize,
+            VkBufferUsageFlags.StorageBuffer | VkBufferUsageFlags.TransferSrc,
+            VkMemoryPropertyFlags.HostVisible | VkMemoryPropertyFlags.HostCoherent);
+
     /// <summary>Releases an op temporary, unless the cache has taken ownership of it since.</summary>
     public void FreeDevice(VulkanBuffer? buffer) => ReleaseIfNotCached(buffer, buffer is null ? 0 : (long)buffer.Size);
 

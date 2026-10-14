@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
@@ -9,7 +10,7 @@ namespace HartsyInference.LLM.Transformer;
 
 /// <summary>Config-driven dense decoder transformer — the reusable spine for LLM text generation: one forward path serves Qwen2, Qwen3, and Llama-lineage models, the differences (QKV bias, per-head Q/K RMSNorm, decoupled head dimension, tied head) being <see cref="TransformerConfig"/> flags.</summary>
 /// <remarks>Built for full GPU residency: every op is an <see cref="IBackend"/> call, no activation is read on the host mid-forward, weights are the raw loaded tensors (stable references) handed to <see cref="IBackend.PreloadWeights"/> so each uploads once and every projection hits the weight cache, and K/V grow on-device via <see cref="KvCache"/>. Validated against the per-family reference decoders. Scope: batch = 1, F32, pre-norm + SwiGLU + causal attention.</remarks>
-public sealed unsafe class GenericTransformer : IDisposable
+public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM.Generation.IGraphDecodeRowSource
 {
     /// <summary>Layers a cancellable forward lets the device have in flight: two keeps the next layer queued behind the
     /// running one, so the bound costs no device time, while a stop leaves at most that much to drain.</summary>
@@ -48,6 +49,11 @@ public sealed unsafe class GenericTransformer : IDisposable
     // CanGatherQuantEmbed, so no F32 device copy is made. For a tied model this is the same tensor as
     // _lmHeadQuant (no extra upload). Null for every other dtype, which keeps the F32 gather path.
     private Tensor? _embedGatherQuant;
+    // An untied quantized embed table is never uploaded: graph decode embeds from a host row written before each replay
+    // (see StagesGraphDecodeEmbedRows). _embed holds the same values on the host, and that is where the row is read from.
+    private bool _embedRowsStaged;
+    // Native scratch for the scaled row (embedding scale != 1), reused across steps.
+    private float* _embedRowScratch;
     // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
     // layer (each layer additionally has its own gate/proj/post-norm — see Layer). Null when PerLayerEmbeddingDim=0.
     private Tensor? _perLayerTokEmbd, _perLayerModelProj, _perLayerProjNorm;
@@ -187,6 +193,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             _lmHeadQuant = embedRaw;
         if (embedRaw.DType == DType.Q8_0 || embedRaw.DType == DType.Q5_0 || embedRaw.DType == DType.Q4_K || embedRaw.DType == DType.Q6_K)
             _embedGatherQuant = embedRaw;
+        // An untied quantized table is staged from the host row instead of uploaded for the gather (the Qwen2.5 Q5_0 table is 89 MiB).
+        _embedRowsStaged = !_cfg.TieWordEmbeddings && embedRaw.DType.IsQuantized;
         if (_cfg.AbsolutePositionEmbeddings) _posEmbed = EnsureF32(w[$"{prefix}.embed_positions.weight"]);
         if (_cfg.EmbeddingLayerNorm)
         {
@@ -766,6 +774,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)
     {
         ThrowIfDisposed();
+        // An untied quantized table is never uploaded: graph decode embeds from the host row (StagesGraphDecodeEmbedRows).
+        if (StagesGraphDecodeEmbedRows(backend)) return _embed!;
         // Q8_0, Q5_0, Q4_K and Q6_K tables stay quantized on device and are gathered by the backend (no F32 copy).
         // Other dtypes, and backends without the quantized gather, take the F32 path below unchanged.
         if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
@@ -801,6 +811,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// quantized table (uploaded only for the gather), and the F32 copy's size otherwise.</summary>
     public long GraphDecodeEmbedExtraBytes(IBackend backend)
     {
+        // A staged row lives in host-visible memory and is a few KB: nothing is added to the device.
+        if (StagesGraphDecodeEmbedRows(backend)) return 0;
         if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
             return ReferenceEquals(quant, _lmHeadQuant) ? 0 : Tensor.ComputeByteSize(quant.Shape, quant.DType);
         return (long)_cfg.VocabSize * _cfg.HiddenSize * sizeof(float);
@@ -847,16 +859,22 @@ public sealed unsafe class GenericTransformer : IDisposable
     public void ForwardGraphDecodeStep(IBackend backend, Tensor embedTable, IKvCache cache,
         Tensor cosTable, Tensor sinTable, ulong devicePos, ulong deviceTokenId,
         ulong history = 0, ulong historyCount = 0, float repetitionPenalty = 1.0f,
-        HartsyInference.LLM.Generation.DeviceSamplerConfig? sampler = null, ulong rngState = 0)
+        HartsyInference.LLM.Generation.DeviceSamplerConfig? sampler = null, ulong rngState = 0, ulong embedRow = 0)
     {
         ThrowIfDisposed();
         bool applyRepPenalty = repetitionPenalty != 1.0f && history != 0 && historyCount != 0;
         if (applyRepPenalty) backend.AppendTokenHistoryStep(history, historyCount, deviceTokenId);
 
         Tensor embeds = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
+        // An untied quantized table is never on the device: the step copies the row the host staged for the token it embeds.
+        if (StagesGraphDecodeEmbedRows(backend))
+        {
+            if (embedRow == 0) throw new InvalidOperationException("An untied quantized embed table needs its staged embedding row to graph-decode.");
+            backend.EmbedStagedRowDecodeStep(embeds, embedRow);
+        }
         // A quantized table (EnsureEmbedResidentForGraphDecode's gated path) is dequantized and scaled on device here;
         // an F32 table was already pre-scaled, so it takes the plain gather.
-        if (embedTable.DType.IsQuantized)
+        else if (embedTable.DType.IsQuantized)
             backend.EmbedGatherQuantDecodeStep(embeds, embedTable, _cfg.EmbeddingScale, deviceTokenId);
         else
             backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
@@ -1093,6 +1111,27 @@ public sealed unsafe class GenericTransformer : IDisposable
         return logits;
     }
 
+    /// <summary>True when graph decode takes this model's embedding from a host row written before each replay: an untied
+    /// quantized embed table, which then has no device copy at all (eager has never uploaded it). Needs a backend that stages rows.</summary>
+    public bool StagesGraphDecodeEmbedRows(IBackend backend) => _embedRowsStaged && backend.StagesDecodeEmbedRows;
+
+    /// <summary>The embedding row graph decode writes into its step input for <paramref name="tokenId"/>: the host F32 table row
+    /// times the embedding scale, which is <see cref="EmbedLookup"/>'s arithmetic bit for bit. Valid until the next call.</summary>
+    public unsafe nint GraphDecodeEmbedRow(int tokenId)
+    {
+        ThrowIfDisposed();
+        if ((uint)tokenId >= (uint)_cfg.VocabSize)
+            throw new ArgumentException($"token id {tokenId} out of range [0, {_cfg.VocabSize}).", nameof(tokenId));
+        int h = _cfg.HiddenSize;
+        float* row = (float*)_embed!.DataPointer + (long)tokenId * h;
+        if (_cfg.EmbeddingScale == 1f) return (nint)row;
+        if (_embedRowScratch is null)
+            _embedRowScratch = (float*)NativeMemory.AlignedAlloc((nuint)(h * sizeof(float)), 64);
+        float scale = _cfg.EmbeddingScale;
+        for (int i = 0; i < h; i++) _embedRowScratch[i] = row[i] * scale;
+        return (nint)_embedRowScratch;
+    }
+
     /// <summary>Host embedding gather into <paramref name="output"/> <c>[1, T, hidden]</c>.</summary>
     public void EmbedLookup(Tensor output, ReadOnlySpan<int> tokenIds)
     {
@@ -1187,6 +1226,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null; _embedGatherQuant = null;
         _perLayerTokEmbd = null; _perLayerModelProj = null; _perLayerProjNorm = null;
         _graphDecodeEmbedScaled?.Dispose(); _graphDecodeEmbedScaled = null;
+        if (_embedRowScratch is not null) { NativeMemory.AlignedFree(_embedRowScratch); _embedRowScratch = null; }
     }
 
     /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual → RMSNorm → SwiGLU → residual; all <see cref="IBackend"/> ops.</summary>

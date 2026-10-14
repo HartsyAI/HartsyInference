@@ -4213,6 +4213,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Backs every "persistent 1-int/N-int device control buffer" handle below: <see cref="VulkanBuffer.Handle"/> (a raw VkBuffer u64, mirroring CUDA's raw-CUdeviceptr-as-ulong convention) keyed back to the owning buffer so it can be freed, written (mapped-or-staged), or read (D2H) by handle alone.</summary>
     private readonly Dictionary<ulong, VulkanBuffer> _scalarBuffers = new();
 
+    /// <summary>Host-visible rows that graph decode copies its step embedding from (<see cref="AllocDecodeEmbedRow"/>), keyed by handle.</summary>
+    private readonly Dictionary<ulong, VulkanBuffer> _decodeRows = new();
+
     /// <summary>Capacity (element count) of each <see cref="AllocDeviceHistory"/> buffer, since <see cref="AppendTokenHistoryStep"/>'s IBackend signature carries only the handle, not the size.</summary>
     private readonly Dictionary<ulong, int> _historyCapacity = new();
 
@@ -4275,6 +4278,60 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public void FreeDeviceTokenId(ulong handle) => FreeScalarBuffer(handle);
 
     public int ReadDeviceTokenId(ulong handle) => ReadScalarBufferInt(handle);
+
+    // ── Host-staged decode embedding (untied quantized embed tables) ────────────────────────────────────
+    // The graph's step input is a copy of a host row. The host writes the row into a mapped, coherent buffer between
+    // replays; LaunchGraph waits on its fence, so the previous replay has finished reading the row by then.
+
+    /// <inheritdoc/>
+    public bool StagesDecodeEmbedRows => LlmGraphDecodeSupported;
+
+    /// <inheritdoc/>
+    public ulong AllocDecodeEmbedRow(int hidden)
+    {
+        VulkanBuffer row = _xfer.AllocateHostStaging((ulong)Math.Max(1, hidden) * (ulong)sizeof(float));
+        _decodeRows[row.Handle] = row;
+        return row.Handle;
+    }
+
+    /// <inheritdoc/>
+    public unsafe void WriteDecodeEmbedRow(ulong handle, nint row, int count)
+    {
+        if (!_decodeRows.TryGetValue(handle, out VulkanBuffer? buf))
+            throw new NotSupportedException("WriteDecodeEmbedRow called with an unallocated row.");
+        ulong bytes = (ulong)count * (ulong)sizeof(float);
+        if (bytes != buf.Size)
+            throw new ArgumentException($"A {count}-value embedding does not fit the {buf.Size / (ulong)sizeof(float)}-value row.", nameof(count));
+        if (buf.MappedPointer == 0)
+            throw new NotSupportedException("The decode embedding row is not host-mapped.");
+        Buffer.MemoryCopy((void*)row, (void*)buf.MappedPointer, (long)buf.Size, (long)bytes);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Mirrors <see cref="CopyInto"/>'s capture branch: the copy lands on the step graph's own command buffer, so it replays
+    /// with every launch, and the output binding is retained with the graph.</remarks>
+    public void EmbedStagedRowDecodeStep(Tensor output, ulong handle)
+    {
+        if (!_capturingStepGraph)
+            throw new NotSupportedException("EmbedStagedRowDecodeStep records a copy into the captured graph; it runs only inside CaptureGraph.");
+        if (!_decodeRows.TryGetValue(handle, out VulkanBuffer? rowBuf))
+            throw new NotSupportedException("EmbedStagedRowDecodeStep called with an unallocated row.");
+        ulong bytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        if (output.DType != DType.F32 || bytes != rowBuf.Size)
+            throw new ArgumentException("EmbedStagedRowDecodeStep needs an F32 output the size of its row.", nameof(output));
+        VulkanBuffer outBuf = _xfer.AllocateDevice(bytes);
+        VulkanCommandStream.RecordCopyAndBarrierOn(_stepGraph!.RecordingBuffer, rowBuf.Handle, outBuf.Handle, bytes,
+            postStage: VkPipelineStageFlags2.ComputeShader,
+            postAccess: VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
+        CacheOutput(output, outBuf);
+    }
+
+    /// <inheritdoc/>
+    public void FreeDecodeEmbedRow(ulong handle)
+    {
+        if (handle == 0) return;
+        if (_decodeRows.Remove(handle, out VulkanBuffer? row)) _xfer.FreeDevice(row);
+    }
 
     // ── RoPE table build + decode-step apply ────────────────────────────────────────────────────────────
 
@@ -4666,6 +4723,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         _disposed = true;
         try { _stream.WaitIdleHost(); }
         catch (Exception ex) { Logs.Warning($"Vulkan Dispose: WaitIdleHost failed, continuing teardown: {ex}"); }
+        // Host-staged decode rows are not cached, so the cache will not free them: the stream is idle, release them here.
+        foreach (VulkanBuffer row in _decodeRows.Values) row.Dispose();
+        _decodeRows.Clear();
         // Dump profiling data (no-op when HARTSYINFERENCE_VK_PROFILE is unset) before tearing down
         // anything that the per-op records reference (op names are strings only, but flush before
         // we lose the device just to be tidy).

@@ -2158,6 +2158,26 @@ public partial interface IBackend : IDisposable
     void EmbedGatherQuantDecodeStep(Tensor output, Tensor quantTable, float scale, ulong deviceTokenId)
         => throw new NotSupportedException("EmbedGatherQuantDecodeStep requires a backend whose CanGatherQuantEmbed accepts the table.");
 
+    /// <summary>True when graph decode can take its step embedding from a host-written row (see <see cref="AllocDecodeEmbedRow"/>).
+    /// An UNTIED quantized embed table then needs no device copy at all: the host row is the eager lookup's row, written before each replay.</summary>
+    bool StagesDecodeEmbedRows => false;
+
+    /// <summary>Allocates a host-visible row of <paramref name="hidden"/> F32 values that graph decode copies its embedding from; returns its handle. Outside any capture.</summary>
+    ulong AllocDecodeEmbedRow(int hidden)
+        => throw new NotSupportedException("AllocDecodeEmbedRow requires a backend whose StagesDecodeEmbedRows is true.");
+
+    /// <summary>Writes <paramref name="count"/> F32 values at <paramref name="row"/> into a row from <see cref="AllocDecodeEmbedRow"/>. Call between graph replays, after the previous replay has completed.</summary>
+    void WriteDecodeEmbedRow(ulong handle, nint row, int count)
+        => throw new NotSupportedException("WriteDecodeEmbedRow requires a backend whose StagesDecodeEmbedRows is true.");
+
+    /// <summary>Graph capture only: records the copy of row <paramref name="handle"/> into <paramref name="output"/> ([1,1,hidden] F32) as the step's first op,
+    /// so every replay embeds the row written before it.</summary>
+    void EmbedStagedRowDecodeStep(Tensor output, ulong handle)
+        => throw new NotSupportedException("EmbedStagedRowDecodeStep requires a backend whose StagesDecodeEmbedRows is true.");
+
+    /// <summary>Frees a row from <see cref="AllocDecodeEmbedRow"/>.</summary>
+    void FreeDecodeEmbedRow(ulong handle) { }
+
     /// <summary>Qwen3.5 SSM decode step (seq=1), part 1: causal depthwise conv step + SiLU + q/k/v split + per-head L2 norms.</summary>
     /// <remarks><paramref name="history"/> is the device-persistent conv ring, shifted in place. CUDA-only (graph-capable backends).</remarks>
     void SsmConvSplitStep(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
