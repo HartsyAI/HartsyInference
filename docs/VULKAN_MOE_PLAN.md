@@ -278,7 +278,7 @@ Open after this change, not covered by it: (1) where the non-decode part of a 12
 
 ## Causal prefill attention: measured result
 
-Before this change a causal `FlashAttention` call, which every prompt makes, reached only the scalar `sdpa_flash_f32`; the cooperative-matrix-2 gate lived on the non-causal `ScaledDotProductAttention` entry points. `numerics.vkFlashCm2Prefill`, on by default, routes causal prefill of 64 or more query rows through `sdpa_flash_cm2_mask` when the shape fits: batch 1, head dimension 64 or 128, F32 Q/K/V, no softcap, sink or ALiBi, and a device with `VK_NV_cooperative_matrix2`, and a host mask of at most 256 MiB (`4 * sq * kvLen` bytes; `FlashCm2PrefillPolicy`). The causal and sliding-window mask is one host-built F32 tile, reused across the layers of one prefill on the host and released by the first attention call that does not take the cm2 path. Decode (one query row) and chunks under 64 rows stay on the scalar kernel, and `numerics.vkFlashCm2Prefill=0` keeps every prefill on it.
+Before this change a causal `FlashAttention` call, which every prompt makes, reached only the scalar `sdpa_flash_f32`; the cooperative-matrix-2 gate lived on the non-causal `ScaledDotProductAttention` entry points. `numerics.vkFlashCm2Prefill`, on by default, routes causal prefill of 64 or more query rows through the cooperative-matrix-2 kernel when the shape fits: batch 1, head dimension 64 or 128, F32 Q/K/V, no softcap, sink or ALiBi, a device with `VK_NV_cooperative_matrix2`, and `4 * sq * kvLen` at most 256 MiB (a shape bound, `FlashCm2PrefillPolicy`). The causal and sliding-window mask is computed inside the kernel (`sdpa_flash_cm2_causal`, a `CAUSAL=1` build of `sdpa_flash_cm2`) from the query position and the key column, so nothing is built on the host or uploaded. Key tiles that every row of a query tile masks are skipped. Decode (one query row) and chunks under 64 rows stay on the scalar kernel, and `numerics.vkFlashCm2Prefill=0` keeps every prefill on it.
 
 Evidence, RTX 3060 (`-b vulkan:1`), prompt about 750 tokens, 128 greedy tokens. Prefill is the wall time of the long prompt with one new token minus the wall time of the prompt "Hi" with one new token. Median of 3 interleaved reps, flag off then on. The first run of each model includes a cold cache, so the medians are the numbers to quote. The card is shared, so wall times are noisy.
 
@@ -296,8 +296,8 @@ Parity: `VulkanFlashCm2Tests.CausalPrefill_MatchesReference` (8 cases on the cm2
 
 Open:
 
-- The mask is not cached on the device. `DispatchFlashCm2` calls `GetBuffer(mask)`, which goes through `GpuResidencyCache.CopyToDevice`: a host tensor that is neither a cached weight nor a cached activation gets a fresh transient upload, and Vulkan does not override the promote-on-miss hook. Each layer therefore uploads the mask again: 2.25 MB a layer at 750 tokens, and `4 * sq * kvLen` bytes a layer in general (64 MiB at 4K, 256 MiB at 8K, 4 GiB at 32K). The cap keeps any prefill above 8K off this path. The follow-up is a device-side mask with no host upload, which is the proper fix. Not done here, because it changes the dispatch path these numbers were measured on. Raised by the Codex review of #394.
-- Nothing above 750 tokens has been measured on this path.
+- Done in PR #411: the per-layer mask upload is gone. Before, `DispatchFlashCm2` uploaded a host mask of `4 * sq * kvLen` bytes on every layer (64 MiB per layer at 4K, about 1.5 GiB per granite prefill), raised by the Codex review of #394. The mask is now computed in the kernel, and the causal variant also skips key tiles that every row masks.
+- The 4K prefill is measured in PR #411 (granite, OLMoE, Qwen3-4B, 3060 and 4090). Above 8K the scalar kernel still runs: lifting the bound changes which kernel longer prompts run and needs a numerics check at 16K first.
 
 ## Plan, in order
 

@@ -204,6 +204,10 @@ done
 # sdpa_flash_cm2 with an F32 [Sq,Skv] additive mask; HAS_MASK adds a binding, so it is its own module.
 compile_one "sdpa_flash_cm2" -DHAS_MASK=1 -- "_mask"
 
+# sdpa_flash_cm2 with the causal and sliding-window mask computed in the shader from qOffset and window; CAUSAL adds
+# the two push constants and the mask expression, and binds no mask buffer, so it is its own module.
+compile_one "sdpa_flash_cm2" -DCAUSAL=1 -- "_causal"
+
 # snake-beta (BigVGAN-v2): USE_BETA gates a #if-compiled binding, not a spec constant, so it
 # needs its own SPIR-V module distinct from the vanilla-snake build above.
 compile_one "snake" -DUSE_FP16=0 -DUSE_BETA=1 -- "_beta_f32"
