@@ -6,11 +6,6 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.356
-
-
-- **Changed: Vulkan graph decode gathers a Q8_0 or Q4_K embedding table from its quantized form.** The decode step kept an F32 copy of the embedding table on the device (`vocab * hidden * 4`) and built it on the first capture. On Vulkan, a Q8_0 or Q4_K table is now dequantized one row at a time on the device (`embed_gather_quant_q8_0` / `embed_gather_quant_q4_k`), with the codec's arithmetic and the embedding scale, so no F32 copy is made. On Llama-3.2-1B Q8_0 the graph's per-process VRAM falls from 3144 to 2144 MiB, matching eager, and its first capture from about 0.9 s to under 0.1 s. Every other quantized dtype keeps the F32 path, and so does CUDA. Qwen2.5-0.5B (Q5_0) and granite-3.0-1B (Q6_K) are unchanged. The 128-token greedy text is identical to eager and to `origin/main`.
-
 ## Unreleased
 
 
@@ -28,6 +23,10 @@ stable release will require. Dates are UTC.
 - **Fixed: the certification runner reads the .NET 10 SDK's test summary.** `run_class` matched only the classic `Passed!`/`Failed!` line, so a class that passed on this SDK was recorded as `no test summary`. The summary is now parsed by `tests/dsv41-certification-summary.awk`, which reads the `Test Run Successful.` / `Test Run Failed.` block and its totals. `tests/dsv41-certification-summary-test.sh` checks both formats.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
+
+## alpha.357
+
+- **Changed: Vulkan graph decode gathers a Q8_0 or Q4_K embedding table from its quantized form.** The decode step kept an F32 copy of the embedding table on the device (`vocab * hidden * 4`) and built it on the first capture. On Vulkan, a Q8_0 or Q4_K table is now dequantized one row at a time on the device (`embed_gather_quant_q8_0` / `embed_gather_quant_q4_k`), with the codec's arithmetic and the embedding scale, so no F32 copy is made. On Llama-3.2-1B Q8_0 the graph's per-process VRAM falls from 3144 to 2144 MiB, matching eager, and its first capture from about 0.9 s to under 0.1 s. Every other quantized dtype keeps the F32 path, and so does CUDA. Qwen2.5-0.5B (Q5_0) and granite-3.0-1B (Q6_K) are unchanged. The 128-token greedy text is identical to eager and to `origin/main`.
 
 ## alpha.356
 
