@@ -164,7 +164,7 @@ public sealed class ResidencyReleaseRaceTests
     }
 
     /// <summary>Two backends whose ops each read the other's device-resident tensor from host at once would wait on
-    /// each other's lock forever. One of them must fail instead, and the other finish.</summary>
+    /// each other's lock forever. Exactly one of them must fail instead, and the other finish its read.</summary>
     [Fact]
     public void Cross_Backend_Host_Reads_In_Opposite_Directions_Do_Not_Deadlock()
     {
@@ -191,8 +191,12 @@ public sealed class ResidencyReleaseRaceTests
         (bool finished, Exception? failure) left = JoinCapturing(a);
         (bool finished, Exception? failure) right = JoinCapturing(b);
         Assert.True(left.finished && right.finished, "Two cross-backend host reads deadlocked.");
-        Assert.True(left.failure is not null || right.failure is not null);
+        Assert.True(left.failure is null != (right.failure is null), "Exactly one side should yield.");
         Assert.IsType<ResidencyLockCycleException>(left.failure ?? right.failure);
+        // The side that kept waiting completed its read, so its tensor's device copy is gone.
+        int synced = (left.failure is null ? 1 : 0) + (right.failure is null ? 1 : 0);
+        Assert.Equal(1, synced);
+        Assert.Equal(1, first.Cache.ActivationCountForTest + second.Cache.ActivationCountForTest);
     }
 
     /// <summary>After <see cref="GpuBackendBase.RefuseNewOps"/> the op in flight finishes and the next one fails
@@ -223,6 +227,21 @@ public sealed class ResidencyReleaseRaceTests
 
         Assert.True(GpuResidencyCache<FakeCache.Buffer>.IsCorruption(unthrown, collectionCallsOnly: true));
         Assert.False(GpuResidencyCache<FakeCache.Buffer>.IsCorruption(unthrown));
+    }
+
+    /// <summary>A release from a thread that does not hold the lock is refused and leaves the holder's state alone.</summary>
+    [Fact]
+    public void Releasing_A_Residency_Lock_Not_Held_Throws_And_Changes_Nothing()
+    {
+        ResidencyLock residency = new();
+        residency.Enter();
+        Worker stranger = Worker.Start(() => Assert.Throws<SynchronizationLockException>(() => residency.Exit()));
+        Assert.True(stranger.Join(Generous));
+
+        Assert.True(residency.IsHeldByCurrentThread);
+        Assert.True(residency.Exit());
+        Assert.False(residency.IsHeldByCurrentThread);
+        Assert.Throws<SynchronizationLockException>(() => residency.Exit());
     }
 
     private static (bool Finished, Exception? Failure) JoinCapturing(Worker worker)

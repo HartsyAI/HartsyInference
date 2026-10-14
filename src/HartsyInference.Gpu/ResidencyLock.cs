@@ -7,9 +7,16 @@ namespace HartsyInference.Gpu;
 /// <para>An op on one backend can need another backend's cache: a host read of a tensor resident there syncs it
 /// under that cache's lock. Two threads doing that in opposite directions at once each hold one lock and wait on the
 /// other, and no global order can prevent it, because each already holds its own lock when the need arises. So a
-/// blocked waiter records what it waits for, follows the chain of owners, and throws
-/// <see cref="ResidencyLockCycleException"/> when the chain leads back to itself. The request on that thread fails;
-/// the other one proceeds.</para></summary>
+/// blocked waiter records what it waits for and follows the chain of owners. When the chain leads back to itself,
+/// exactly one thread in the cycle yields: the one with the largest managed thread id throws
+/// <see cref="ResidencyLockCycleException"/>, its request fails and unwinds, and the others keep waiting and then get
+/// their locks.</para>
+///
+/// <para>Only waits made through <see cref="Enter"/> are followed. A cycle that passes through any other lock (the
+/// engine's <c>DeviceGate</c>, a service lock, a monitor) is not detected. None exists today: the residency lock is
+/// taken only inside a backend op, a tensor callback or a backend dispose, none of which reaches engine code, and the
+/// engine disposes a backend while holding the device gate, never the other way round. So the order is always the
+/// device gate first, then the residency lock.</para></summary>
 public sealed class ResidencyLock
 {
     /// <summary>How long a blocked waiter sleeps between cycle checks.</summary>
@@ -44,9 +51,10 @@ public sealed class ResidencyLock
             while (!Monitor.TryEnter(_sync, CheckInterval))
             {
                 // Twice in a row, so a chain read while another thread was between acquiring and unregistering
-                // cannot fail a request that was about to proceed.
-                bool cycle = LeadsBackTo(self);
-                if (cycle && cycleSeen)
+                // cannot fail a request that was about to proceed. Every thread in the cycle sees the same members,
+                // so the largest id yields and the rest wait for it to unwind.
+                bool cycle = LeadsBackTo(self, out int largest);
+                if (cycle && cycleSeen && largest == self)
                 {
                     throw new ResidencyLockCycleException();
                 }
@@ -72,8 +80,14 @@ public sealed class ResidencyLock
     }
 
     /// <summary>Releases one hold. Returns true when this was the last one, so the lock is now free.</summary>
+    /// <exception cref="SynchronizationLockException">The calling thread does not hold the lock; nothing is
+    /// changed.</exception>
     public bool Exit()
     {
+        if (!Monitor.IsEntered(_sync))
+        {
+            throw new SynchronizationLockException("The residency lock was released by a thread that does not hold it.");
+        }
         bool last = --_depth == 0;
         if (last)
         {
@@ -92,9 +106,10 @@ public sealed class ResidencyLock
     }
 
     /// <summary>Whether this lock's owner waits, directly or through other owners, on a lock <paramref name="self"/>
-    /// holds.</summary>
-    private bool LeadsBackTo(int self)
+    /// holds; <paramref name="largest"/> is the largest thread id in that chain, <paramref name="self"/> included.</summary>
+    private bool LeadsBackTo(int self, out int largest)
     {
+        largest = self;
         ResidencyLock current = this;
         for (int hop = 0; hop < MaxHops; hop++)
         {
@@ -107,6 +122,7 @@ public sealed class ResidencyLock
             {
                 return true;
             }
+            largest = Math.Max(largest, owner);
             if (!_waiting.TryGetValue(owner, out ResidencyLock? next))
             {
                 return false;
