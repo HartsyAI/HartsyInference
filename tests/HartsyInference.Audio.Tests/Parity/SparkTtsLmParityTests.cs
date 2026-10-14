@@ -50,11 +50,11 @@ public sealed unsafe class SparkTtsLmParityTests(ITestOutputHelper output)
         float maxTopDiff = 0f;
         using (IKvCache cache = model.CreateDecodeCache(prompt.Length + expectedIds.Length + 8))
         {
-            Tensor hidden = model.Forward(backend, prompt, batch: 1, posStart: 0, cache);
+            Tensor? hidden = model.Forward(backend, prompt, batch: 1, posStart: 0, cache);
             for (int step = 0; step < expectedIds.Length; step++)
             {
-                Tensor last = VibeVoiceOps.SliceLastFrame(hidden, cfg.Llm.HiddenSize);
-                hidden.Dispose();
+                Tensor last = VibeVoiceOps.SliceLastFrame(hidden!, cfg.Llm.HiddenSize);
+                hidden!.Dispose();
                 using Tensor logits = model.ProjectLogits(backend, last, batch: 1, t: 1);
                 last.Dispose();
                 ReadOnlySpan<float> l = new((void*)logits.DataPointer, vocab);
@@ -66,10 +66,12 @@ public sealed unsafe class SparkTtsLmParityTests(ITestOutputHelper output)
                 float best = float.NegativeInfinity;
                 for (int i = 0; i < vocab; i++) if (l[i] > best) { best = l[i]; next = i; }
                 ids.Add(next);
-                // Teacher-force upstream's token so one divergence does not cascade.
-                hidden = model.Forward(backend, [expectedIds[step]], batch: 1, posStart: cache.CurrentLength, cache);
+                // Teacher-force upstream's token so one divergence does not cascade; the last step needs no successor.
+                hidden = step + 1 < expectedIds.Length
+                    ? model.Forward(backend, [expectedIds[step]], batch: 1, posStart: cache.CurrentLength, cache)
+                    : null;
             }
-            hidden.Dispose();
+            hidden?.Dispose();
         }
         int match = 0;
         for (int i = 0; i < expectedIds.Length; i++) if (ids[i] == expectedIds[i]) match++;

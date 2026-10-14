@@ -14,7 +14,10 @@ public sealed class SparkTtsTokenizer
     private readonly GgufTokenizer _tokenizer;
 
     /// <summary>Builds from the Spark <c>LLM/</c> directory files: <c>vocab.json</c>, <c>merges.txt</c> and
-    /// <c>added_tokens.json</c> (a <c>{ "&lt;|token|&gt;": id }</c> map).</summary>
+    /// <c>added_tokens.json</c> (a <c>{ "&lt;|token|&gt;": id }</c> map). Every added token, <c>&lt;|…|&gt;</c> or not,
+    /// is typed control: it is matched atomically before BPE, as HF does, and a decode through the shared core skips it.</summary>
+    /// <exception cref="InvalidDataException">An id is assigned twice across the two maps, or <c>0..maxId</c> has a
+    /// gap; a partial or mismatched checkpoint fails to load rather than tokenizing against a shifted table.</exception>
     public SparkTtsTokenizer(string vocabPath, string mergesPath, string addedTokensPath)
     {
         Dictionary<int, string> byId = new(180_000);
