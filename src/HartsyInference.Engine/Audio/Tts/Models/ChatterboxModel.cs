@@ -67,8 +67,7 @@ internal static class ChatterboxModel
             ChatterboxT3 t3 = new ChatterboxT3(config);
             CosyVoiceFlow flow = new CosyVoiceFlow(cosy);
             HiFTNetVocoder vocoder = new HiFTNetVocoder(cosy.Hift);
-            // Upstream S3Gen runs CAMPPlus in PyTorch, not CosyVoice's campplus.onnx: torch context-pool divisor.
-            CamPlusSpeakerEncoder speakerEncoder = new CamPlusSpeakerEncoder(cosy.Flow.SpeakerEmbedDim, onnxSegmentPooling: false);
+            CamPlusSpeakerEncoder speakerEncoder = ChatterboxPipeline.CreateSpeakerEncoder(cosy.Flow.SpeakerEmbedDim);
             S3Tokenizer s3Tokenizer = new S3Tokenizer();
             ChatterboxVoiceEncoder voiceEncoder = new ChatterboxVoiceEncoder();
             ChatterboxPipeline pipeline = new ChatterboxPipeline(config, t3, flow, vocoder, speakerEncoder, s3Tokenizer, voiceEncoder);

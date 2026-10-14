@@ -48,6 +48,7 @@ public sealed class CamPlusSegmentPoolParityTests(ITestOutputHelper output)
         output.WriteLine($"{key}: upstream fbank relRMS {encoderErr:E2}, C# fbank relRMS {frontErr:E2}, other runtime {otherErr:E2}");
         Assert.True(encoderErr < 1e-4, $"{key} from the upstream fbank: relRMS {encoderErr:E2}");
         Assert.True(frontErr < 1e-3, $"{key} from the clip: relRMS {frontErr:E2}");
+        Assert.True(otherErr > 1e-2, $"the two divisors agree to {otherErr:E2}: the clip has no partial context segment");
     }
 
     private static double RelRms(ReadOnlySpan<float> got, ReadOnlySpan<float> want)

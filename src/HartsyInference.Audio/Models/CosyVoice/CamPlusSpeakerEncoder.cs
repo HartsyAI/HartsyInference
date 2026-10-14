@@ -54,6 +54,9 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
         _onnxSegmentPooling = onnxSegmentPooling;
     }
 
+    /// <summary>The partial-segment divisor this encoder was built with (see the constructor).</summary>
+    internal bool OnnxSegmentPooling => _onnxSegmentPooling;
+
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
