@@ -306,7 +306,6 @@ public sealed class IndexTts2Pipeline : IDisposable
         (float[] audio16k, float[] audio22k) = ResampleReference(clip, referenceSampleRate);
 
         Tensor? spkCondEmb = null, refMel = null, style = null, promptCondition = null, speakerConditioning = null, baseEmoVec = null;
-        Tensor? emoVec = null;
         try
         {
             spkCondEmb = _semanticFeatures.Forward(backend, audio16k);
@@ -321,15 +320,10 @@ public sealed class IndexTts2Pipeline : IDisposable
                 ? _gpt.ComputeSpeakerConditioningConformerPerceiver(backend, spkCondEmb, tSpk)
                 : _gpt.ComputeSpeakerConditioning(backend, style);
             baseEmoVec = _gpt.ComputeEmoVec(backend, spkCondEmb, tSpk);
-            // With no separate emotion clip the reference reloads the speaker's own clip at 16 kHz as the emotion
-            // input and merges with alpha 1: merge_emovec(spk_cond_emb, emo_cond_emb, 1).
-            float[] emoAudio16k = ResampleEmotionClip(clip, referenceSampleRate);
-            using (Tensor emoCondEmb = _semanticFeatures.Forward(backend, emoAudio16k))
-            using (Tensor ownEmoVec = _gpt.ComputeEmoVec(backend, emoCondEmb, (int)emoCondEmb.Shape[1]))
-                emoVec = IndexTts2T2sDecoder.MergeEmoVec(baseEmoVec, ownEmoVec, 1f);
-
+            Tensor baseForDefault = baseEmoVec;
+            float[] emotionClip = clip.ToArray();
             IndexTts2Reference reference = new(this, spkCondEmb, tSpk, refMel, tRef, style, promptCondition, speakerConditioning, baseEmoVec,
-                emoVec, audio16k);
+                b => ComputeDefaultEmoVec(b, baseForDefault, emotionClip, referenceSampleRate), audio16k);
             if (timings is not null) timings.ReferenceMs += sw.Elapsed.TotalMilliseconds;
             return reference;
         }
@@ -341,9 +335,19 @@ public sealed class IndexTts2Pipeline : IDisposable
             promptCondition?.Dispose();
             speakerConditioning?.Dispose();
             baseEmoVec?.Dispose();
-            emoVec?.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The emotion vector with no separate emotion clip: upstream reloads the speaker's own clip at 16 kHz as
+    /// the emotion input and merges with alpha 1, <c>merge_emovec(spk_cond_emb, emo_cond_emb, 1)</c>.</summary>
+    private Tensor ComputeDefaultEmoVec(IBackend backend, Tensor baseEmoVec, float[] clip, int sampleRate)
+    {
+        ThrowIfDisposed();
+        float[] emoAudio16k = ResampleEmotionClip(clip, sampleRate);
+        using Tensor emoCondEmb = _semanticFeatures.Forward(backend, emoAudio16k);
+        using Tensor ownEmoVec = _gpt.ComputeEmoVec(backend, emoCondEmb, (int)emoCondEmb.Shape[1]);
+        return IndexTts2T2sDecoder.MergeEmoVec(baseEmoVec, ownEmoVec, 1f);
     }
 
     /// <summary>The S2Mel prompt condition, <c>length_regulator(content, ylens=Tref)</c>. The two checkpoints feed it
@@ -489,10 +493,10 @@ public sealed class IndexTts2Pipeline : IDisposable
                 float leftover = 1f - emoVector.Sum();
 
                 // emo_audio_prompt defaults to the speaker's own clip when no external one is given, with alpha 1.
-                return (AddScaled(emovecMat, reference.EmoVec, leftover), true);
+                return (AddScaled(emovecMat, reference.GetEmoVec(backend), leftover), true);
             }
 
-            if (opts.EmoAudioReference is not { } emoRef) return (reference.EmoVec, false);
+            if (opts.EmoAudioReference is not { } emoRef) return (reference.GetEmoVec(backend), false);
 
             // reference: _load_and_cut_audio(emo_audio_prompt, 15, sr=16000)
             int emoCap = (int)Math.Min(int.MaxValue, MaxReferenceSeconds * emoRef.SampleRate);
