@@ -23,6 +23,15 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
         catch { return false; }
     }
 
+    /// <summary>The implicit graph threshold is the Vulkan override (128, measured on the RTX 3060); the interface default of 512 applies to every other backend.</summary>
+    [Fact]
+    public void ImplicitGraphDefault_StartsAtTheMeasured128Tokens()
+    {
+        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        Assert.Equal(128, ((IBackend)backend).LlmGraphDecodeDefaultMinTokens);
+    }
+
     private uint _rng = 0xC0FFEEu;
     private float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.4f; }
     private Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
