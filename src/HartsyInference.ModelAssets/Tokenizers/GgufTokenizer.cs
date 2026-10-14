@@ -8,6 +8,11 @@ namespace HartsyInference.ModelAssets.Tokenizers;
 /// <para>Implements GPT-2/Llama byte-level BPE directly (regex pre-tokenization → byte-level remap → rank-based pair merges → vocab lookup) rather than going through a general tokenizer library, so word-boundary spaces and newline runs encode correctly (matching llama.cpp). Special/control tokens (type CONTROL or USER_DEFINED) are split out before BPE so a rendered chat template's literals map to their ids, and skipped on decode. Byte-level reversal via <see cref="ByteLevelCodec"/>.</para></summary>
 public sealed class GgufTokenizer : ILlmTokenizer
 {
+    /// <summary>Qwen2 split regex (HF Qwen2 <c>tokenizer.json</c>, llama.cpp QWEN2): case-insensitive contractions,
+    /// single digits, punctuation runs that keep one leading space, newline-aware whitespace.</summary>
+    public const string Qwen2PreTokenRegex =
+        @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
     private const int TypeControl = 3;
     private const int TypeUserDefined = 4;
 

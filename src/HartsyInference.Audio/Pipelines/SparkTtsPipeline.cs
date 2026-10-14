@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Text;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.SparkTts;
 using HartsyInference.Core.Backends;
@@ -89,6 +91,31 @@ public sealed class SparkTtsPipeline : IDisposable
         int s = Math.Max(0, Array.IndexOf(Levels, speed.ToLowerInvariant()));
         return $"<|task_controllable_tts|><|start_content|>{text}<|end_content|>" +
                $"<|start_style_label|><|gender_{g}|><|pitch_label_{p}|><|speed_label_{s}|><|end_style_label|>";
+    }
+
+    /// <summary>Builds the zero-shot clone prompt string (mirrors <c>cli/SparkTTS.py::process_prompt</c>) from a
+    /// reference clip's BiCodec global tokens and, when its transcript is given, its semantic tokens. Upstream joins
+    /// the transcript and the text with no separator.</summary>
+    public static string BuildZeroShotPrompt(string text, IReadOnlyList<int> globalTokens, string? promptText = null,
+        IReadOnlyList<int>? promptSemanticTokens = null)
+    {
+        ArgumentNullException.ThrowIfNull(globalTokens);
+        if (promptText is not null && promptSemanticTokens is null)
+            throw new ArgumentException("A prompt transcript needs the reference clip's semantic tokens.",
+                nameof(promptSemanticTokens));
+        StringBuilder sb = new(64 + globalTokens.Count * 24 + (promptSemanticTokens?.Count ?? 0) * 26);
+        sb.Append("<|task_tts|><|start_content|>").Append(promptText).Append(text).Append("<|end_content|>");
+        sb.Append("<|start_global_token|>");
+        foreach (int id in globalTokens)
+            sb.Append("<|bicodec_global_").Append(id.ToString(CultureInfo.InvariantCulture)).Append("|>");
+        sb.Append("<|end_global_token|>");
+        if (promptText is not null)
+        {
+            sb.Append("<|start_semantic_token|>");
+            foreach (int id in promptSemanticTokens!)
+                sb.Append("<|bicodec_semantic_").Append(id.ToString(CultureInfo.InvariantCulture)).Append("|>");
+        }
+        return sb.ToString();
     }
 
     /// <summary>Synthesizes a 16 kHz waveform from text + a coarse style, entirely in-engine: builds the
