@@ -29,7 +29,7 @@ public sealed class VulkanInt8GemmTests
     public unsafe void MatMulInt8_MatchesExactIntegerReference(int M, int K, int N)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasInt8DotProduct)
         {
             _out.WriteLine($"SKIPPED: {backend.Vk.DeviceName} has no integer dot-product support");
@@ -80,7 +80,7 @@ public sealed class VulkanInt8GemmTests
     public unsafe void MatMulInt8_QuantizedWeights_ApproximatesFloatMatmul(int M, int K, int N)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasInt8DotProduct) { _out.WriteLine("SKIPPED: no int8 dot"); return; }
 
         // Random FP activations and weights with per-row magnitude variation, so per-row scaling
@@ -140,7 +140,7 @@ public sealed class VulkanInt8GemmTests
     public unsafe void MatMulInt8_RejectsUnalignedK()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasInt8DotProduct) { _out.WriteLine("SKIPPED: no int8 dot"); return; }
 
         Tensor a = new(new TensorShape(16, 18), DType.I8);  // K=18 not a multiple of 4
@@ -170,7 +170,7 @@ public sealed class VulkanInt8GemmTests
     public unsafe void Backend_Linear_Int8OptIn_ApproximatesF32Reference(int M, int K, int N)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasInt8DotProduct) { _out.WriteLine("SKIPPED: no int8 dot"); return; }
 
         Tensor input = new(new TensorShape(M, K), DType.F32);
@@ -241,7 +241,7 @@ public sealed class VulkanInt8GemmTests
     public unsafe void Backend_Linear_Int8OptIn_BiasSurvivesDownstreamGpuConsumption()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasInt8DotProduct) { _out.WriteLine("SKIPPED: no int8 dot"); return; }
         backend.EnableInt8Linear = true;
 
@@ -289,7 +289,7 @@ public sealed class VulkanInt8GemmTests
     public void Backend_Linear_Int8OptIn_DefaultsOff()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         Assert.False(backend.EnableInt8Linear, "EnableInt8Linear must default to off unless HARTSYINFERENCE_VK_INT8=1 is set.");
     }
 
@@ -300,7 +300,7 @@ public sealed class VulkanInt8GemmTests
     public unsafe void Backend_Linear_Int8OptIn_FallsBackWhenKNotMultipleOfFour()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasInt8DotProduct) { _out.WriteLine("SKIPPED: no int8 dot"); return; }
         backend.EnableInt8Linear = true;
 

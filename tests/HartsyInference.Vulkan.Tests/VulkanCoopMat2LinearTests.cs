@@ -35,7 +35,7 @@ public sealed class VulkanCoopMat2LinearTests
     public void Backend_Linear_CoopMat2OptIn_DefaultsOn()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         Assert.True(backend.EnableCoopMat2, "EnableCoopMat2 must default to on unless HARTSYINFERENCE_VK_COOPMAT2=0 is set.");
     }
 
@@ -53,7 +53,7 @@ public sealed class VulkanCoopMat2LinearTests
     public void Backend_Linear_CoopMat2OptIn_EngagesAndMatchesF32Reference(int M, int K, int N, bool hasBias)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix2)
         {
             _out.WriteLine("SKIPPED: no F16/coopmat2 support");
@@ -112,7 +112,7 @@ public sealed class VulkanCoopMat2LinearTests
     public void Backend_MatMul_CoopMat2OptIn_FallsThroughForUnsupportedTranspose()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix2)
         {
             _out.WriteLine("SKIPPED: no F16/coopmat2 support");

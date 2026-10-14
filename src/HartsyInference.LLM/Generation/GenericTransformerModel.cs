@@ -173,20 +173,27 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         ulong history = _backend.AllocDeviceHistory(cache.MaxSequenceLength);
         ulong historyCount = _backend.AllocDeviceCounter();
         ulong rng = sampler is { } cfg0 ? _backend.AllocDeviceRng(cfg0.Seed, cfg0.TopK) : 0;
+        // An untied quantized table embeds from a host-staged row (GenericTransformer.StagesGraphDecodeEmbedRows); the row is
+        // allocated inside the try so a failed capture frees it.
+        bool stagedRow = _transformer.StagesGraphDecodeEmbedRows(_backend);
+        ulong embedRow = 0;
         object? graph = null;
         try
         {
+            if (stagedRow) embedRow = _backend.AllocDecodeEmbedRow(cfg.HiddenSize);
             _backend.WriteDeviceTokenId(deviceTokenId, firstToken);
             _backend.WriteDevicePos(devicePos, pos + 1, pos);
             _backend.WriteDeviceCounter(historyCount, 0);
             graph = _backend.CaptureGraph(() =>
                 _transformer.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos,
-                    deviceTokenId, history, historyCount, repetitionPenalty, sampler, rng));
-            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos, rng);
+                    deviceTokenId, history, historyCount, repetitionPenalty, sampler, rng, embedRow));
+            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos, rng,
+                embedRow, cfg.HiddenSize, firstToken, stagedRow ? _transformer : null);
         }
         catch
         {
             if (graph is not null) _backend.DisposeGraph(graph);
+            _backend.FreeDecodeEmbedRow(embedRow);
             _backend.FreeDevicePos(devicePos);
             _backend.FreeDeviceTokenId(deviceTokenId);
             _backend.FreeDeviceHistory(history);

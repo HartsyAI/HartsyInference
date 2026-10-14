@@ -31,7 +31,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void RopeApplyDecodeStep_MatchesCpuReference(int maxPos, int headDim, int rotaryDim, bool interleaved)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int numHeads = 4;
         const int position = 17;
 
@@ -91,7 +91,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void EmbedGatherDecodeStep_GathersCorrectRow()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int vocab = 37, hidden = 64, tokenId = 19;
 
         Tensor embed = new(new TensorShape(vocab, hidden), DType.F32);
@@ -119,7 +119,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void ArgMaxInto_MatchesCpuArgmax(int c)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
 
         Tensor logits = new(new TensorShape(1, c), DType.F32);
         ulong tokBuf = backend.AllocDeviceTokenId();
@@ -148,7 +148,7 @@ public sealed class VulkanDecodeGraphTests
     public void AppendTokenHistoryStep_AppendsEachDistinctTokenOnce()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int capacity = 8;
 
         ulong history = backend.AllocDeviceHistory(capacity);
@@ -184,7 +184,7 @@ public sealed class VulkanDecodeGraphTests
     public void ApplyRepetitionPenaltyStep_MatchesHfConventionWithRepeats()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int vocab = 32;
         const float penalty = 1.3f;
         int[] tokens = { 3, 10, 3, 3, 25 };   // token 3 repeats 3x — penalized once
@@ -239,7 +239,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void KvCacheAppendDev_UsesDevicePositionNotHostOffset()
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int heads = 2, maxSeq = 8, headDim = 4;
 
         Tensor cache = new(new TensorShape(1, heads, maxSeq, headDim), DType.F32);
@@ -292,7 +292,7 @@ public sealed class VulkanDecodeGraphTests
     public unsafe void FlashAttentionDev_MatchesCpuReference(int priorLen)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         const int batch = 1, hq = 8, hkv = 2, sq = 1, maxSeq = 32, headDim = 32;
         int kvLen = priorLen + 1;   // this step's own K/V was already appended before attending
         float scale = 1f / MathF.Sqrt(headDim);
@@ -340,10 +340,13 @@ public sealed class VulkanDecodeGraphTests
         for (long i = 0; i < bytes; i++) p[i] = (byte)rng.Next(256);
         long blocks = elems / dtype.BlockElementCount;
         int blockBytes = (int)(bytes / blocks);
+        // Where the block's FP16 scale sits: first in every format except Q6_K, whose d is the last two bytes of its
+        // 210-byte super-block (after ql, qh and the sixteen int8 scales).
+        int dOffset = dtype == DType.Q6_K ? 208 : 0;
         for (long b = 0; b < blocks; b++)
         {
             byte* bb = p + b * blockBytes;
-            VulkanQuantGemvTests.WriteHalf(bb, (float)Math.Pow(2, -20 + 17 * rng.NextDouble()));
+            VulkanQuantGemvTests.WriteHalf(bb + dOffset, (float)Math.Pow(2, -20 + 17 * rng.NextDouble()));
             if (dtype == DType.Q4_K)
                 VulkanQuantGemvTests.WriteHalf(bb + 2, (float)Math.Pow(2, -20 + 17 * rng.NextDouble()));
         }
@@ -353,12 +356,23 @@ public sealed class VulkanDecodeGraphTests
     [Theory]
     [InlineData("Q8_0", 1f, 128)]
     [InlineData("Q8_0", 12f, 128)]
+    [InlineData("Q5_0", 1f, 128)]
+    [InlineData("Q5_0", 12f, 128)]
     [InlineData("Q4_K", 1f, 512)]
     [InlineData("Q4_K", 12f, 512)]
+    [InlineData("Q6_K", 1f, 512)]
+    [InlineData("Q6_K", 12f, 512)]
     public unsafe void EmbedGatherQuantDecodeStep_MatchesCpuDequantBitExact(string dtypeName, float scale, int hidden)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
-        DType dtype = dtypeName == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
+        DType dtype = dtypeName switch
+        {
+            "Q8_0" => DType.Q8_0,
+            "Q5_0" => DType.Q5_0,
+            "Q4_K" => DType.Q4_K,
+            "Q6_K" => DType.Q6_K,
+            _ => throw new ArgumentException($"no gather parity case for {dtypeName}", nameof(dtypeName)),
+        };
         using VulkanBackend backend = VulkanTestDevice.Create();
         const int vocab = 97;
         using Tensor table = SmallScaleQuantTable(dtype, vocab, hidden, seed: hidden + dtypeName.Length);

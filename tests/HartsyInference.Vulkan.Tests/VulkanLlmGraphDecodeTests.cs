@@ -23,6 +23,15 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
         catch { return false; }
     }
 
+    /// <summary>The implicit graph threshold is the Vulkan override (128, measured on the RTX 3060); the interface default of 512 applies to every other backend.</summary>
+    [Fact]
+    public void ImplicitGraphDefault_StartsAtTheMeasured128Tokens()
+    {
+        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        Assert.Equal(128, ((IBackend)backend).LlmGraphDecodeDefaultMinTokens);
+    }
+
     private uint _rng = 0xC0FFEEu;
     private float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.4f; }
     private Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
@@ -66,6 +75,58 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
         _out.WriteLine("graph: " + string.Join(",", graph));
         Assert.Equal(eager, graph);
         foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    /// <summary>An untied quantized embed table never reaches the device under graph decode: the step embeds from the host row
+    /// written before each replay. The greedy tokens must match the eager loop, which reads the same host table.</summary>
+    [Theory]
+    [InlineData("Q8_0")]
+    [InlineData("Q5_0")]
+    public void GraphDecode_UntiedQuantizedEmbed_StagedRow_MatchesEagerGreedyLoop(string dtypeName)
+    {
+        if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        IBackend b = backend;
+        if (!b.LlmGraphDecodeSupported) { _out.WriteLine("SKIPPED: push descriptors unavailable"); return; }
+
+        TransformerConfig cfg = new()
+        {
+            HiddenSize = 64, NumLayers = 2, NumHeads = 4, NumKvHeads = 2, HeadDim = 16,
+            IntermediateSize = 96, VocabSize = 80, MaxPositionEmbeddings = 256, TieWordEmbeddings = false,
+        };
+        Dictionary<string, Tensor> w = Weights(cfg, bias: false, qkNorm: false);
+        w["model.embed_tokens.weight"].Dispose();
+        w["model.embed_tokens.weight"] = dtypeName == "Q8_0"
+            ? GgufQuantizer.Quantize(F2(cfg.VocabSize, cfg.HiddenSize), DType.Q8_0)
+            : RandomQ5_0(cfg.VocabSize, cfg.HiddenSize, seed: 7);
+        w["lm_head.weight"] = F2(cfg.VocabSize, cfg.HiddenSize);
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model", "lm_head.weight");
+        Assert.True(model.SupportsGraphDecode(b));
+        Assert.True(model.StagesGraphDecodeEmbedRows(b));
+
+        const int maxLen = 96, steps = 40;
+        int[] prompt = [3, 17, 5, 41, 9];
+        List<int> eager = RunEager(b, model, cfg, prompt, maxLen, steps);
+        List<int> graph = RunGraph(b, model, cfg, prompt, maxLen, steps);
+        _out.WriteLine("eager: " + string.Join(",", eager));
+        _out.WriteLine("graph: " + string.Join(",", graph));
+        Assert.Equal(eager, graph);
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    /// <summary>A random Q5_0 table with block scales in [2^-6, 2^-3]: real blocks and real scales, so the rows carry signal.</summary>
+    private static unsafe Tensor RandomQ5_0(int rows, int cols, int seed)
+    {
+        Tensor t = new(new TensorShape(rows, cols), DType.Q5_0);
+        long bytes = DType.Q5_0.ComputeByteCount((long)rows * cols);
+        byte* p = (byte*)t.DataPointer;
+        Random rng = new(seed);
+        for (long i = 0; i < bytes; i++) p[i] = (byte)rng.Next(256);
+        long blocks = bytes / DType.Q5_0.BlockByteSize;
+        for (long blk = 0; blk < blocks; blk++)
+            VulkanQuantGemvTests.WriteHalf(p + blk * DType.Q5_0.BlockByteSize, (float)Math.Pow(2, -6 + 3 * rng.NextDouble()));
+        return t;
     }
 
     /// <summary>The token-level loop above can settle into a repeated token and hide a wrong layer, so this compares the continuous post-norm hidden of every step (distinct random input embeddings, advancing positions) between the eager forward and the replayed graph.</summary>
@@ -239,6 +300,9 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
         }
         b.PreloadWeights(model.EnumerateWeights(includeRedundantSplits: false).ToList());
         Tensor embed = model.EnsureEmbedResidentForGraphDecode(b);
+        // An untied quantized table embeds from a host-staged row, written before each replay as the session does.
+        bool staged = model.StagesGraphDecodeEmbedRows(b);
+        ulong embedRow = staged ? b.AllocDecodeEmbedRow(cfg.HiddenSize) : 0;
         (Tensor cos, Tensor sin) = model.EnsureRopeTableForGraphDecode(b, maxLen);
         ulong devicePos = b.AllocDevicePos();
         ulong tokenId = b.AllocDeviceTokenId();
@@ -251,12 +315,14 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
             b.WriteDeviceTokenId(tokenId, first);
             b.WriteDevicePos(devicePos, pos + 1, pos);
             b.WriteDeviceCounter(historyCount, 0);
-            graph = b.CaptureGraph(() => model.ForwardGraphDecodeStep(b, embed, cache, cos, sin, devicePos, tokenId, history, historyCount, 1.0f));
+            graph = b.CaptureGraph(() => model.ForwardGraphDecodeStep(b, embed, cache, cos, sin, devicePos, tokenId, history, historyCount, 1.0f,
+                embedRow: embedRow));
             Assert.NotNull(graph);
             int next = first;
             for (int s = 0; s < steps; s++)
             {
                 outTokens.Add(next);
+                if (staged) b.WriteDecodeEmbedRow(embedRow, model.GraphDecodeEmbedRow(next), cfg.HiddenSize);
                 b.LaunchGraph(graph!);
                 next = b.ReadDeviceTokenId(tokenId);
                 pos++;
@@ -270,6 +336,7 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
             b.FreeDeviceTokenId(tokenId);
             b.FreeDeviceHistory(history);
             b.FreeDeviceCounter(historyCount);
+            b.FreeDecodeEmbedRow(embedRow);
         }
         return outTokens;
     }

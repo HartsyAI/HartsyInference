@@ -33,13 +33,13 @@ public sealed class VulkanPipelineCacheTests
 
         // First, scrub any existing cache so the test exercises the cold-build path.
         string cachePath;
-        using (VulkanBackend probe = new())
+        using (VulkanBackend probe = VulkanTestDevice.Create())
             cachePath = probe.PipelineCachePath;
         if (File.Exists(cachePath)) File.Delete(cachePath);
         Assert.False(File.Exists(cachePath), $"Pre-condition: cache should be absent at {cachePath}");
 
         // First backend: build a few kernels then dispose. Persist on disposal should write the cache.
-        using (VulkanBackend backend = new())
+        using (VulkanBackend backend = VulkanTestDevice.Create())
         {
             BuildAFewKernels(backend);
             // Dispose-on-leave will persist via VulkanPipelineCache.Dispose -> Persist.
@@ -53,7 +53,7 @@ public sealed class VulkanPipelineCacheTests
         // Second backend: load the cache, build the same kernels, dispose. Cache size should
         // be ≥ firstSize (driver may add new entries; never shrinks if all entries are still valid).
         int reloadedBytes;
-        using (VulkanBackend backend = new())
+        using (VulkanBackend backend = VulkanTestDevice.Create())
         {
             reloadedBytes = backend.PipelineCacheInitialDataBytes;
             BuildAFewKernels(backend);

@@ -34,13 +34,15 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 Four modalities have a working Vulkan path today: image, LLM, vision and audio. Video is the one with no
 confirmed run, and the two attempts failed on absent weights rather than on the backend.
 
+**Causal prefill attention is on by default (RTX 3060).** A prompt of about 750 tokens prefills in 0.22 s against 1.94 s on Llama-3.2-1B Q8_0, and in 0.74 s against 6.65 s on Qwen3-4B Q4_K_M; the greedy text matches the scalar path on four models, and OLMoE matches the CPU backend with the flag on. Every number and the open items are in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md).
+
 ## What this does not establish
 
 **DeepSeek-V4.1-Flash primitives (PR 24b).** The MoE, HC, latent-attention, quantizer and recipe-dequant shaders are parity-tested against the
 CPU reference on an RTX 3060 through Vulkan only. No AMD hardware evidence has been collected, so none of it is certified on AMD, and nothing
 is wired into a model. The expert cache is host-staged with no streaming cache, and native block-scaled GEMM is Unsupported on Vulkan.
 
-**Nothing about AMD or Intel.** Every row is NVIDIA-Vulkan on an RTX 4090. No AMD or Intel GPU exists on this
+**Nothing about AMD or Intel.** Every row is NVIDIA Vulkan. The LLM rows that name a card were measured on an RTX 3060 (Vulkan device 1), not the RTX 4090; the other rows do not say which card. No AMD or Intel GPU exists on this
 machine; llvmpipe covers small-subgroup correctness and is not evidence about either vendor's driver. That is
 ROADMAP §3's remaining hardware item.
 
@@ -52,10 +54,10 @@ For calibration: a real precision change *inside* CUDA costs ~2% SSIM over 20 st
 cross-backend gap is ~44%. So the residual is larger than rounding and remains unexplained; attention and the
 GEMM dtype path are the untested suspects.
 
-**Step-graph decode covers a subset.** Greedy text-LLM decode replays a recorded step (`--graph-decode`, or by default for requests of 512 or more
+**Step-graph decode covers a subset.** Greedy text-LLM decode replays a recorded step (`--graph-decode`, or by default for requests of 128 or more
 new tokens; kill-switch `numerics.vkLlmGraph`; `GraphDecodeSupported` still off). An F16 KV cache and head dims above the flash
 kernel's limit are refused at capture and decode eagerly. A sliding window or soft-cap (Gemma-2/3) is refused before capture: the implicit default decodes eagerly, and an explicit `--graph-decode` fails with the model and the reason (`NotSupportedException`, HTTP 501 on the API); CUDA runs both in the graph. Sampled decode is eager (no device sampler), so the "default" graph decode above means greedy requests only; the SSM, CSM and
-MusicGen graph paths have no Vulkan capture evidence. Capture gathers a Q8_0 or Q4_K embedding table from its quantized form on the device; every other dtype keeps an F32 copy of the table (1.56 GB for Qwen3-4B, 0.54 GB for Qwen2.5-0.5B, which is untied with a Q5_0 table). Details in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6.
+MusicGen graph paths have no Vulkan capture evidence. Capture gathers a Q8_0, Q5_0, Q4_K or Q6_K embedding table from its quantized form on the device, so those tables keep no F32 copy (Qwen3-4B's 1.56 GB copy is gone); every other dtype keeps an F32 copy of the table. An untied quantized table is not uploaded: graph decode embeds from a host-staged row written before each replay, so untied quantized models keep no table on the device (Qwen2.5-0.5B's graph VRAM is at eager, and OLMoE's is 3 MiB over). Details in [VULKAN_MOE_PLAN.md](../VULKAN_MOE_PLAN.md), step 6.
 
 **Untested on Vulkan (no device evidence yet).** These paths compile and are wired, but no run has covered them:
 - The coopmat-1 only path (`HasCooperativeMatrix` without coopmat2): no recorded run has exercised the grouped and dense GEMM paths with coopmat-1 on and coopmat2 off.

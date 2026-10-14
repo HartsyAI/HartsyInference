@@ -69,6 +69,88 @@ public sealed class TestTierLintTests
             + "commit the fixtures under a gitignore exception:\n  " + string.Join("\n  ", violations));
     }
 
+    // The Vulkan device pin only holds if every backend a test opens goes through VulkanTestDevice. A bare constructor, a
+    // target-typed new(), or a one-argument VulkanDevice.Create takes the default picker, which on the dev box is the RTX
+    // 4090 (device 0), so a run pinned to the 3060 would still touch the other card.
+    private static readonly Regex TargetTypedVulkanBackend = new(
+        @"\bVulkanBackend\b\s*\??\s+[A-Za-z_]\w*\s*=\s*new\s*\(\s*\)", RegexOptions.Compiled);
+    private static readonly Regex NewVulkanBackend = new(@"\bnew\s+VulkanBackend\s*\(\s*\)", RegexOptions.Compiled);
+    private static readonly Regex CreateVulkanNull = new(@"\bCreateVulkan\s*\(\s*null\s*\)", RegexOptions.Compiled);
+    private static readonly Regex VulkanDeviceCreate = new(@"\bVulkanDevice\.Create\s*\(", RegexOptions.Compiled);
+    // An explicit ordinal 0 is the same card as the default picker on the dev box, so it is flagged too.
+    private static readonly Regex TargetTypedVulkanBackendOrdinalZero = new(
+        @"\bVulkanBackend\b\s*\??\s+[A-Za-z_]\w*\s*=\s*new\s*\(\s*0\s*[,)]", RegexOptions.Compiled);
+    private static readonly Regex NewVulkanBackendOrdinalZero = new(@"\bnew\s+VulkanBackend\s*\(\s*0\s*[,)]", RegexOptions.Compiled);
+
+    [Fact]
+    public void Tests_OpenEveryVulkanBackendThroughTheDeviceHelper()
+    {
+        List<string> violations = new();
+        string testsRoot = Path.Combine(RepoRoot.Path, "tests");
+        foreach (string file in Directory.EnumerateFiles(testsRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            if (Path.GetFileName(file) == "VulkanTestDevice.cs"
+                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
+                || file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"))
+                continue;
+            string body = BlankComments(File.ReadAllText(file));
+            foreach (string use in DefaultPickerUses(body))
+                violations.Add($"{Path.GetRelativePath(RepoRoot.Path, file)}: {use}");
+        }
+        violations.Sort(StringComparer.Ordinal);
+        Assert.True(violations.Count == 0,
+            "These test files open a Vulkan backend on the default picker, so HARTSY_TEST_VULKAN_DEVICE does not pin it "
+            + "(on the dev box the default is the RTX 4090). Open it with VulkanTestDevice.Create() or "
+            + "VulkanTestDevice.CreateDevice(instance) instead:\n  " + string.Join("\n  ", violations));
+    }
+
+    /// <summary>Default-picker constructions in comment-free source, as "line N: what". Matching runs over the whole file,
+    /// so a target-typed new() split across lines is still found.</summary>
+    private static IEnumerable<string> DefaultPickerUses(string body)
+    {
+        foreach (Match m in TargetTypedVulkanBackend.Matches(body))
+            yield return $"line {LineOf(body, m.Index)}: target-typed new() for VulkanBackend";
+        foreach (Match m in NewVulkanBackend.Matches(body))
+            yield return $"line {LineOf(body, m.Index)}: VulkanBackend constructed with no ordinal";
+        foreach (Match m in CreateVulkanNull.Matches(body))
+            yield return $"line {LineOf(body, m.Index)}: CreateVulkan with a null ordinal";
+        foreach (Match m in TargetTypedVulkanBackendOrdinalZero.Matches(body))
+            yield return $"line {LineOf(body, m.Index)}: target-typed new(0, ...) for VulkanBackend";
+        foreach (Match m in NewVulkanBackendOrdinalZero.Matches(body))
+            yield return $"line {LineOf(body, m.Index)}: VulkanBackend constructed on explicit ordinal 0";
+        foreach (Match m in VulkanDeviceCreate.Matches(body))
+        {
+            if (ArgumentCount(body, m.Index + m.Length) == 1)
+                yield return $"line {LineOf(body, m.Index)}: VulkanDevice.Create with one argument";
+        }
+    }
+
+    /// <summary>Top-level argument count of the call whose opening parenthesis is just before <paramref name="start"/>.</summary>
+    private static int ArgumentCount(string body, int start)
+    {
+        int depth = 1, commas = 0;
+        for (int i = start; i < body.Length && depth > 0; i++)
+        {
+            char c = body[i];
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',' && depth == 1) commas++;
+        }
+        return commas + 1;
+    }
+
+    private static int LineOf(string body, int index)
+    {
+        int line = 1;
+        for (int i = 0; i < index; i++)
+            if (body[i] == '\n') line++;
+        return line;
+    }
+
+    /// <summary>Blanks comments in place and keeps every newline, so the line numbers reported match the file.</summary>
+    private static string BlankComments(string source) =>
+        Regex.Replace(source, @"/\*.*?\*/|//[^\n]*", m => Regex.Replace(m.Value, @"[^\n]", " "), RegexOptions.Singleline);
+
     private List<string> ScanUntaggedUnitFiles(Func<string, string, bool> isViolation)
     {
         string testsRoot = Path.Combine(RepoRoot.Path, "tests");

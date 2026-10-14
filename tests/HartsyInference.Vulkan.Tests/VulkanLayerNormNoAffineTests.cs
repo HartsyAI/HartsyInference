@@ -52,7 +52,7 @@ public sealed class VulkanLayerNormNoAffineTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         TensorShape shape = new(rows, dim);
         using Tensor input = Random(shape, seed: 11, DType.F32);
@@ -83,7 +83,7 @@ public sealed class VulkanLayerNormNoAffineTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         TensorShape shape = new(2, 512);
         using Tensor input = Random(shape, seed: 23, DType.F16);
         using Tensor actual = new(shape, DType.F16);
@@ -120,7 +120,7 @@ public sealed class VulkanLayerNormNoAffineTests
     {
         try
         {
-            using VulkanBackend probe = new(0, SpirvDir());
+            using VulkanBackend probe = VulkanTestDevice.Create(SpirvDir());
             reason = null;
             return true;
         }

@@ -22,7 +22,7 @@ public sealed class VulkanGemmThroughputBenchmark(ITestOutputHelper output)
     {
         try { using VulkanInstance i = new(); if (i.EnumeratePhysicalDevices().Length == 0) return; }
         catch { return; }
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = VulkanTestDevice.Create();
         using Tensor a = Filled(new TensorShape(m, k), 1);
         using Tensor w = Filled(new TensorShape(n, k), 2);
         using Tensor o = new(new TensorShape(m, n), DType.F16);

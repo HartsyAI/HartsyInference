@@ -2555,6 +2555,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         if (softcap == 0f && sink is null && alibiSlopes is null && headDim <= FlashMaxHeadDim)
         {
             using OpScope _op = EnterOp();
+            if (causal && TryFlashCm2CausalPrefill(output, query, key, value, kvLen, kvGroup, qOffset, scale, slidingWindow))
+                return;
+            // Not the cm2 path: no later layer of this prefill needs the cached host mask, so release it (see _prefillMask).
+            ReleasePrefillMask();
             DispatchFlashAttention(output, query, key, value, mask: null, scale, causal, qOffset, slidingWindow, skv: kvLen, kvGroup);
             return;
         }
@@ -4106,10 +4110,15 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public bool LlmGraphDecodeDefault => LlmGraphDecodeSupported;
 
     /// <inheritdoc/>
+    /// <remarks>128, measured on the RTX 3060 (docs/VULKAN_MOE_PLAN.md, step 6): at 128 new tokens the graph decodes 17 to 33 percent
+    /// faster than eager on all five measured models, with identical text, and the first capture costs 0.01 s to 0.21 s there.</remarks>
+    public int LlmGraphDecodeDefaultMinTokens => 128;
+
+    /// <inheritdoc/>
     /// <remarks>False: <c>FlashAttentionDev</c> throws for a sliding window or a soft-cap while a device position is set, and a window/soft-cap kernel is out of scope. Gemma-2/3 therefore decode eagerly here.</remarks>
     public bool LlmGraphDecodeWindowSoftcap => false;
 
-    /// <summary>Quantized (Q8_0/Q4_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>. The whole table is one storage-buffer descriptor, so it must fit <c>maxStorageBufferRange</c> (128 MB on llvmpipe, 4 GB on NVIDIA).</summary>
+    /// <summary>Quantized (Q8_0/Q5_0/Q4_K/Q6_K) embed gather for graph decode; see <see cref="EmbedGatherQuantDecodeStep"/>. The whole table is one storage-buffer descriptor, so it must fit <c>maxStorageBufferRange</c> (128 MB on llvmpipe, 4 GB on NVIDIA).</summary>
     public bool CanGatherQuantEmbed(long tableBytes) => tableBytes <= Vk.MaxStorageBufferRange;
 
     /// <summary>One captured LLM decode step: its own command buffer and the buffers its capture retained.</summary>
@@ -4213,6 +4222,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Backs every "persistent 1-int/N-int device control buffer" handle below: <see cref="VulkanBuffer.Handle"/> (a raw VkBuffer u64, mirroring CUDA's raw-CUdeviceptr-as-ulong convention) keyed back to the owning buffer so it can be freed, written (mapped-or-staged), or read (D2H) by handle alone.</summary>
     private readonly Dictionary<ulong, VulkanBuffer> _scalarBuffers = new();
 
+    /// <summary>Host-visible rows that graph decode copies its step embedding from (<see cref="AllocDecodeEmbedRow"/>), keyed by handle.</summary>
+    private readonly Dictionary<ulong, VulkanBuffer> _decodeRows = new();
+
     /// <summary>Capacity (element count) of each <see cref="AllocDeviceHistory"/> buffer, since <see cref="AppendTokenHistoryStep"/>'s IBackend signature carries only the handle, not the size.</summary>
     private readonly Dictionary<ulong, int> _historyCapacity = new();
 
@@ -4275,6 +4287,60 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public void FreeDeviceTokenId(ulong handle) => FreeScalarBuffer(handle);
 
     public int ReadDeviceTokenId(ulong handle) => ReadScalarBufferInt(handle);
+
+    // ── Host-staged decode embedding (untied quantized embed tables) ────────────────────────────────────
+    // The graph's step input is a copy of a host row. The host writes the row into a mapped, coherent buffer between
+    // replays; LaunchGraph waits on its fence, so the previous replay has finished reading the row by then.
+
+    /// <inheritdoc/>
+    public bool StagesDecodeEmbedRows => LlmGraphDecodeSupported;
+
+    /// <inheritdoc/>
+    public ulong AllocDecodeEmbedRow(int hidden)
+    {
+        VulkanBuffer row = _xfer.AllocateHostStaging((ulong)Math.Max(1, hidden) * (ulong)sizeof(float));
+        _decodeRows[row.Handle] = row;
+        return row.Handle;
+    }
+
+    /// <inheritdoc/>
+    public unsafe void WriteDecodeEmbedRow(ulong handle, nint row, int count)
+    {
+        if (!_decodeRows.TryGetValue(handle, out VulkanBuffer? buf))
+            throw new NotSupportedException("WriteDecodeEmbedRow called with an unallocated row.");
+        ulong bytes = (ulong)count * (ulong)sizeof(float);
+        if (bytes != buf.Size)
+            throw new ArgumentException($"A {count}-value embedding does not fit the {buf.Size / (ulong)sizeof(float)}-value row.", nameof(count));
+        if (buf.MappedPointer == 0)
+            throw new NotSupportedException("The decode embedding row is not host-mapped.");
+        Buffer.MemoryCopy((void*)row, (void*)buf.MappedPointer, (long)buf.Size, (long)bytes);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Mirrors <see cref="CopyInto"/>'s capture branch: the copy lands on the step graph's own command buffer, so it replays
+    /// with every launch, and the output binding is retained with the graph.</remarks>
+    public void EmbedStagedRowDecodeStep(Tensor output, ulong handle)
+    {
+        if (!_capturingStepGraph)
+            throw new NotSupportedException("EmbedStagedRowDecodeStep records a copy into the captured graph; it runs only inside CaptureGraph.");
+        if (!_decodeRows.TryGetValue(handle, out VulkanBuffer? rowBuf))
+            throw new NotSupportedException("EmbedStagedRowDecodeStep called with an unallocated row.");
+        ulong bytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        if (output.DType != DType.F32 || bytes != rowBuf.Size)
+            throw new ArgumentException("EmbedStagedRowDecodeStep needs an F32 output the size of its row.", nameof(output));
+        VulkanBuffer outBuf = _xfer.AllocateDevice(bytes);
+        VulkanCommandStream.RecordCopyAndBarrierOn(_stepGraph!.RecordingBuffer, rowBuf.Handle, outBuf.Handle, bytes,
+            postStage: VkPipelineStageFlags2.ComputeShader,
+            postAccess: VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
+        CacheOutput(output, outBuf);
+    }
+
+    /// <inheritdoc/>
+    public void FreeDecodeEmbedRow(ulong handle)
+    {
+        if (handle == 0) return;
+        if (_decodeRows.Remove(handle, out VulkanBuffer? row)) _xfer.FreeDevice(row);
+    }
 
     // ── RoPE table build + decode-step apply ────────────────────────────────────────────────────────────
 
@@ -4379,16 +4445,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Graph-decode gather that dequantizes one row of a Q8_0 or Q4_K table on device (no F32 copy), then scales it by <paramref name="scale"/>.</summary>
-    /// <remarks>Row bytes are computed in uint on the device, so the table must stay under 4 GB; the transformer checks that before choosing this path. Hidden must be a whole number of blocks (32 for Q8_0, 256 for Q4_K).</remarks>
+    /// <summary>Graph-decode gather that dequantizes one row of a Q8_0, Q5_0, Q4_K or Q6_K table on device (no F32 copy), then scales it by <paramref name="scale"/>.</summary>
+    /// <remarks>Row bytes are computed in uint on the device, so the table must stay under 4 GB; the transformer checks that before choosing this path. Hidden must be a whole number of blocks (32 for Q8_0 and Q5_0, 256 for Q4_K and Q6_K).</remarks>
     public void EmbedGatherQuantDecodeStep(Tensor output, Tensor quantTable, float scale, ulong tokenId)
     {
         using OpScope _op = EnterOp();
-        bool q8 = quantTable.DType == DType.Q8_0;
-        if (!q8 && quantTable.DType != DType.Q4_K)
-            throw new NotSupportedException($"EmbedGatherQuantDecodeStep supports Q8_0 and Q4_K tables, not {quantTable.DType}.");
-        int block = q8 ? 32 : 256;
-        string shader = q8 ? "embed_gather_quant_q8_0" : "embed_gather_quant_q4_k";
+        string shader = quantTable.DType == DType.Q8_0 ? "embed_gather_quant_q8_0"
+            : quantTable.DType == DType.Q5_0 ? "embed_gather_quant_q5_0"
+            : quantTable.DType == DType.Q4_K ? "embed_gather_quant_q4_k"
+            : quantTable.DType == DType.Q6_K ? "embed_gather_quant_q6_k"
+            : throw new NotSupportedException($"EmbedGatherQuantDecodeStep supports Q8_0, Q5_0, Q4_K and Q6_K tables, not {quantTable.DType}.");
+        int block = quantTable.DType.BlockElementCount;
         if (tokenId == 0 || !_scalarBuffers.TryGetValue(tokenId, out VulkanBuffer? tokBuf) || output.DType != DType.F32)
         {
             throw new NotSupportedException("EmbedGatherQuantDecodeStep requires an F32 output and a valid device token-id buffer.");
@@ -4665,6 +4732,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         _disposed = true;
         try { _stream.WaitIdleHost(); }
         catch (Exception ex) { Logs.Warning($"Vulkan Dispose: WaitIdleHost failed, continuing teardown: {ex}"); }
+        // Host-staged decode rows are not cached, so the cache will not free them: the stream is idle, release them here.
+        foreach (VulkanBuffer row in _decodeRows.Values) row.Dispose();
+        _decodeRows.Clear();
+        _prefillMask?.Dispose();
+        _prefillMask = null;
         // Dump profiling data (no-op when HARTSYINFERENCE_VK_PROFILE is unset) before tearing down
         // anything that the per-op records reference (op names are strings only, but flush before
         // we lose the device just to be tidy).
