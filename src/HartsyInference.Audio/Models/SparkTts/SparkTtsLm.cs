@@ -71,7 +71,8 @@ public sealed unsafe class SparkTtsLm : IDisposable
             }
             else
             {
-                next = NucleusSampler.Draw(logitSpan, vocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+                next = NucleusSampler.Draw(logitSpan, vocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng,
+                    topPOverTopK: true);
             }
             logits.Dispose();
 

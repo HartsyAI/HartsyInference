@@ -20,9 +20,11 @@ public static class NucleusSampler
     /// <summary>Draws one token index in <c>[0, count)</c> from <paramref name="logits"/>. Applies
     /// temperature, softmax, top-k and top-p filtering, then samples with the supplied RNG state.
     /// <paramref name="maskToken"/> (if in range) is forced to zero probability — used for ancestral /
-    /// repetition re-rolls. Deterministic for a fixed RNG state.</summary>
+    /// repetition re-rolls. Deterministic for a fixed RNG state. <paramref name="topPOverTopK"/> measures top-p and
+    /// min-p against the distribution renormalized over the top-k set, as HF <c>generate</c> chains
+    /// <c>TopKLogitsWarper</c> → <c>TopPLogitsWarper</c>; the default measures them against the full-vocab softmax.</summary>
     public static int Draw(Span<float> logits, int count, float temperature, int topK, float topP,
-        ref uint rng, int maskToken = -1, float minP = 0f)
+        ref uint rng, int maskToken = -1, float minP = 0f, bool topPOverTopK = false)
     {
         float temp = temperature > 0 ? temperature : 1f;
         float invTemp = 1f / temp;
@@ -34,7 +36,7 @@ public static class NucleusSampler
         // mathematically identical — softmax is monotonic, so top-K by logit == top-K by probability, and the
         // multinomial walk over the renormalized kept set only depends on the kept logits' relative exp weights
         // (the full-vocab softmax denominator cancels in the renormalization). Only the top-p / min-p thresholds
-        // (which compare against absolute probabilities) need the full denominator, computed on demand below.
+        // (which compare against absolute probabilities) need a denominator: full-vocab, or the top-k set with topPOverTopK.
         if (k < count && k <= 1024)
         {
             Span<int> ki = stackalloc int[k];
@@ -68,7 +70,9 @@ public static class NucleusSampler
             float invZ = 0f;
             if (needZ)
             {
-                double z = 0; for (int i = 0; i < count; i++) { if (i == maskToken) continue; z += MathF.Exp(logits[i] * invTemp - gmax); }
+                double z = 0;
+                if (topPOverTopK) { for (int rank = 0; rank < n; rank++) z += MathF.Exp(kv[rank] - gmax); }
+                else { for (int i = 0; i < count; i++) { if (i == maskToken) continue; z += MathF.Exp(logits[i] * invTemp - gmax); } }
                 invZ = (float)(1.0 / z);
             }
             float minPThreshold = minP > 0f ? minP * (MathF.Exp(kv[0] - gmax) * invZ) : 0f;
@@ -121,6 +125,12 @@ public static class NucleusSampler
         // `order[rank]` for that value's original token id, instead of the old `probs[order[rank]]`.
         for (int i = 0; i < count; i++) order[i] = i;
         SortHelpers.SortDescendingByValue(probs, order, count);
+        if (topPOverTopK && k < count)
+        {
+            float topKSum = 0f;
+            for (int rank = 0; rank < k; rank++) topKSum += probs[rank];
+            if (topKSum > 0f) { float invK = 1f / topKSum; for (int rank = 0; rank < k; rank++) probs[rank] *= invK; }
+        }
         float minPThresholdF = minP > 0f ? minP * probs[0] : 0f;
         float cumulativeF = 0f;
         int keepF = 0;
