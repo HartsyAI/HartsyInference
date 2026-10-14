@@ -77,6 +77,10 @@ public sealed class TestTierLintTests
     private static readonly Regex NewVulkanBackend = new(@"\bnew\s+VulkanBackend\s*\(\s*\)", RegexOptions.Compiled);
     private static readonly Regex CreateVulkanNull = new(@"\bCreateVulkan\s*\(\s*null\s*\)", RegexOptions.Compiled);
     private static readonly Regex VulkanDeviceCreate = new(@"\bVulkanDevice\.Create\s*\(", RegexOptions.Compiled);
+    // An explicit ordinal 0 is the same card as the default picker on the dev box, so it is flagged too.
+    private static readonly Regex TargetTypedVulkanBackendOrdinalZero = new(
+        @"\bVulkanBackend\b\s*\??\s+[A-Za-z_]\w*\s*=\s*new\s*\(\s*0\s*[,)]", RegexOptions.Compiled);
+    private static readonly Regex NewVulkanBackendOrdinalZero = new(@"\bnew\s+VulkanBackend\s*\(\s*0\s*[,)]", RegexOptions.Compiled);
 
     [Fact]
     public void Tests_OpenEveryVulkanBackendThroughTheDeviceHelper()
@@ -110,6 +114,10 @@ public sealed class TestTierLintTests
             yield return $"line {LineOf(body, m.Index)}: VulkanBackend constructed with no ordinal";
         foreach (Match m in CreateVulkanNull.Matches(body))
             yield return $"line {LineOf(body, m.Index)}: CreateVulkan with a null ordinal";
+        foreach (Match m in TargetTypedVulkanBackendOrdinalZero.Matches(body))
+            yield return $"line {LineOf(body, m.Index)}: target-typed new(0, ...) for VulkanBackend";
+        foreach (Match m in NewVulkanBackendOrdinalZero.Matches(body))
+            yield return $"line {LineOf(body, m.Index)}: VulkanBackend constructed on explicit ordinal 0";
         foreach (Match m in VulkanDeviceCreate.Matches(body))
         {
             if (ArgumentCount(body, m.Index + m.Length) == 1)

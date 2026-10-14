@@ -46,7 +46,7 @@ public sealed class VulkanQkvSplitNormTests
             return;
         }
         int w = heads * headDim;
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
 
         // Off-centre input: a norm that dropped the scale or used the wrong denominator still looks plausible on
@@ -86,7 +86,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         TensorShape shape = new(batch, seqLen, dim);
         using Tensor input = Filled(shape, seed: 31, centre: 0.7);
@@ -116,7 +116,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         TensorShape shape = new(batch, seqLen, heads, headDim);
         using Tensor gpuX = Filled(shape, seed: 41, centre: 0.3);
@@ -144,7 +144,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         using Tensor proj = Filled(new TensorShape(batch, 4 * dim), seed: 51, centre: 0.2);
         TensorShape outShape = new(batch, dim);
@@ -181,7 +181,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         const int tableRows = 2;
         using Tensor input = Filled(new TensorShape(rows, dim), seed: 61, centre: 0.5);
@@ -214,7 +214,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         const int tableRows = 3;
         using Tensor residual = Filled(new TensorShape(rows, dim), seed: 71, centre: 0.2);
@@ -251,7 +251,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         int seq = hPacked * wPacked;
         int patchVolume = channels * patch * patch;
@@ -284,7 +284,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         TensorShape shape = new(4, 257);           // not a multiple of the workgroup
         using Tensor input = new(shape, DType.F32);
@@ -320,7 +320,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         const int batch = 2, channels = 5, timeDim = 33;
         using Tensor input = Filled(new TensorShape(batch, channels, timeDim), seed: 92);
@@ -345,7 +345,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         using Tensor proj = Filled(new TensorShape(rows, 2 * inner), seed: 94, centre: 1.5);
         using Tensor got = new(new TensorShape(rows, inner), DType.F32);
@@ -369,7 +369,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         using Tensor x = Filled(new TensorShape(count), seed: 101);
         using Tensor y = Filled(new TensorShape(count), seed: 102);
@@ -396,7 +396,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         const int batch = 1, cOut = 4, tOut = 3, h = 5, w = 7;
         using Tensor bias = Filled(new TensorShape(cOut), seed: 103);
@@ -424,7 +424,7 @@ public sealed class VulkanQkvSplitNormTests
             _output.WriteLine($"SKIPPED: {reason}");
             return;
         }
-        using VulkanBackend gpu = new(0, SpirvDir());
+        using VulkanBackend gpu = VulkanTestDevice.Create(SpirvDir());
         IBackend cpu = new CpuBackend();
         const int batch = 2, depth = 3, inH = 4, inW = 5;
         int cIn = cOut * ratio * ratio;
@@ -463,7 +463,7 @@ public sealed class VulkanQkvSplitNormTests
     {
         try
         {
-            using VulkanBackend probe = new(0, SpirvDir());
+            using VulkanBackend probe = VulkanTestDevice.Create(SpirvDir());
             reason = null;
             return true;
         }
