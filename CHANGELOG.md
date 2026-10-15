@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.370
+
 - **Fixed: ZipVoice phonemizes with the American `en-us` voice.** The pipeline built its phonemizer for espeak's British `en` voice, so the model was fed phonemes it never trained on (`əʊ` for `oʊ`, non-rhotic vowels); upstream's tokenizer runs piper_phonemize on `en-us`. Word agreement with upstream's tokens on a 137-line corpus rose from 58% to 94%. The same mistake was fixed for Piper on 2026-07-13. Gate rows 04 and 05, which misheard words before (mean WER 0.067 and 0.091), now transcribe word-perfect on every take, as upstream's do, and generated durations match upstream's within a median 3.5%.
 - **Fixed: ZipVoice reads clauses, marks and symbols as upstream's tokenizer does.** piper_phonemize phonemizes clause by clause and puts no space before a mark or after `. ! ?`; an ellipsis ends a clause silently and a spaced dash becomes a `;`. Symbols are single code points, where the engine split on grapheme clusters and dropped `n̩` and `ɑ̃`. Numbers, currency, fractions and abbreviations go through upstream's `EnglishTextNormalizer`, and `[tags]` pass through as single tokens.
 - **Fixed: ZipVoice prepares the reference as upstream does.** Pauses over one second inside the clip and silence over 100 ms at its edges are cut with pydub's rules, 200 ms of silence is appended and a quiet clip is lifted to RMS 0.1. The mel floors the log at 1e-7 and keeps lhotse's frame count, and the target length is predicted in float32 as torch does.
