@@ -3,7 +3,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Thin tokenizer wrapper for VibeVoice. Encodes with <see cref="Qwen3Tokenizer"/>'s exact tokenizer.json path (Qwen's split regex and added-token table), since Qwen2.5 and Qwen3 share the same 151 936-entry byte-level BPE vocab.</summary>
+/// <summary>Thin tokenizer wrapper for VibeVoice. Encodes with <see cref="Qwen2Tokenizer.EncodeExact"/> over the Qwen2.5
+/// base vocabulary, which gives the same ids as upstream's Qwen2.5 tokenizer for plain text.</summary>
 /// <remarks>
 /// <para>This class exists for two reasons:
 /// <list type="number">
@@ -32,13 +33,13 @@ public sealed class VibeVoiceTokenizer : IDisposable
     /// <summary>Negative-prompt sentinel used by the streaming-0.5B CFG path (<c>&lt;|image_pad|&gt;</c>, ID 151 655); reserved for that variant only.</summary>
     public const int ImagePadTokenId = 151_655;
 
-    private readonly Qwen3Tokenizer _qwen;
+    private readonly Qwen2Tokenizer _qwen;
     private readonly Tokenizer _bpe;
     private int _disposed;
 
     public VibeVoiceTokenizer()
     {
-        _qwen = new Qwen3Tokenizer();
+        _qwen = Qwen2Tokenizer.CreateBaseVocabulary();
         using Stream vocab = EmbeddedTokenizerResources.OpenQwen3Vocab();
         using Stream merges = EmbeddedTokenizerResources.OpenQwen3Merges();
         _bpe = BpeTokenizer.Create(vocab, merges);
@@ -48,12 +49,9 @@ public sealed class VibeVoiceTokenizer : IDisposable
     public int[] Encode(string text)
     {
         ThrowIfDisposed();
-        // Qwen's split regex must run before BPE: a two-file BPE over the whole string merges across word
-        // boundaries that the upstream tokenizer keeps apart, which shifted the prompt by several tokens.
-        IReadOnlyList<int> ids = _qwen.EncodeRaw(text);
-        int[] result = new int[ids.Count];
-        for (int i = 0; i < ids.Count; i++) result[i] = ids[i];
-        return result;
+        // No added-token literal is recognized. "<think>" is a Qwen3-only token, so upstream Qwen2.5 encodes it as
+        // ordinary characters, and the same must hold here.
+        return _qwen.EncodeExact(text);
     }
 
     /// <summary>Decodes a token-id sequence back to text; useful for logging the prompt the LM actually received.</summary>

@@ -12,24 +12,34 @@ public static class QwenBpe
     /// engine's single copy lives on <see cref="GgufTokenizer.Qwen2PreTokenRegex"/>.</summary>
     public const string SplitPattern = GgufTokenizer.Qwen2PreTokenRegex;
 
-    /// <summary>Loads the BPE. Ids missing from <c>vocab.json</c> (added tokens) get <c>&lt;|unused_N|&gt;</c> placeholder
-    /// names that no merge produces; callers map their own added-token literals before encoding.</summary>
+    /// <summary>Loads the BPE from a checkpoint's <c>vocab.json</c> and <c>merges.txt</c>. Ids missing from <c>vocab.json</c>
+    /// (added tokens) get <c>&lt;|unused_N|&gt;</c> placeholder names that no merge produces; callers map their own
+    /// added-token literals before encoding.</summary>
     public static GgufTokenizer FromFiles(string vocabJsonPath, string mergesPath)
     {
+        using Stream vocab = File.OpenRead(vocabJsonPath);
+        using Stream merges = File.OpenRead(mergesPath);
+        return FromStreams(vocab, merges);
+    }
+
+    /// <summary>Loads the BPE from <c>vocab.json</c> and <c>merges.txt</c> streams, with the same contract as
+    /// <see cref="FromFiles"/>. The result has no added-token table, so a literal such as <c>&lt;think&gt;</c> encodes as
+    /// ordinary characters. The caller keeps ownership of both streams.</summary>
+    public static GgufTokenizer FromStreams(Stream vocabJson, Stream mergesTxt)
+    {
         Dictionary<string, int> vocab = new(StringComparer.Ordinal);
-        using (Stream s = File.OpenRead(vocabJsonPath))
-        using (JsonDocument doc = JsonDocument.Parse(s))
+        using (JsonDocument doc = JsonDocument.Parse(vocabJson))
         {
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
-                throw new InvalidDataException($"{vocabJsonPath} is not a token-to-id object");
+                throw new InvalidDataException("vocab.json is not a token-to-id object");
             foreach (JsonProperty entry in doc.RootElement.EnumerateObject())
             {
                 int id = entry.Value.GetInt32();
-                if (id < 0) throw new InvalidDataException($"{vocabJsonPath}: negative id {id} for '{entry.Name}'");
+                if (id < 0) throw new InvalidDataException($"vocab.json has negative id {id} for '{entry.Name}'");
                 vocab[entry.Name] = id;
             }
         }
-        if (vocab.Count == 0) throw new InvalidDataException($"Empty vocabulary: {vocabJsonPath}");
+        if (vocab.Count == 0) throw new InvalidDataException("vocab.json is empty");
         int size = 0;
         foreach (int id in vocab.Values) if (id + 1 > size) size = id + 1;
         string[] tokens = new string[size];
@@ -37,10 +47,14 @@ public static class QwenBpe
         foreach (KeyValuePair<string, int> kv in vocab) tokens[kv.Value] = kv.Key;
 
         List<string> merges = [];
-        foreach (string line in File.ReadLines(mergesPath))
+        using (StreamReader reader = new(mergesTxt, leaveOpen: true))
         {
-            if (line.Length == 0 || line.StartsWith("#version", StringComparison.Ordinal)) continue;
-            merges.Add(line);
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                if (line.Length == 0 || line.StartsWith("#version", StringComparison.Ordinal)) continue;
+                merges.Add(line);
+            }
         }
         return new GgufTokenizer(tokens, [.. merges], tokenType: null, bosId: null, eosId: null, preTokenizerRegex: SplitPattern);
     }
