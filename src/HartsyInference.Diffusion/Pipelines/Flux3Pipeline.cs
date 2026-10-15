@@ -89,75 +89,86 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         bool guided = !_config.FlowMap && CfgHelper.IsGuidanceActive(cfg);
         if (guided && negative is null)
             throw new ArgumentException("Guided FLUX.3 sampling needs the negative prompt's tokens.", nameof(negative));
+        // Everything that can refuse the request resolves before anything is allocated.
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(
+            MathF.Exp(request.SigmaShift ?? Flux3Config.ReferenceTimeShiftMu));
+        scheduler.SetTimesteps(steps);
+        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, Family, startsFromNoisedInit: plan.StartStep > 0);
         Logs.Info($"{Family} Klein{(_config.FlowMap ? " distilled" : "")}: {imgW}x{imgH}, {steps} steps, "
             + $"cfg={(guided ? cfg : 1f)}, refs={referenceImages?.Count ?? 0}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        Tensor condText = EncodePrompt(prompt, PromptCache.Cond);
-        Tensor? uncondText = guided ? EncodePrompt(negative!, PromptCache.Uncond) : null;
-        Tensor? weightedCond = prompt.IsWeighted ? CondTokenWeights.Apply(Backend, condText, null, prompt.Tokens).Cond : null;
-        Tensor? weightedUncond = guided && negative!.IsWeighted ? CondTokenWeights.Apply(Backend, uncondText!, null, negative.Tokens).Cond : null;
-        (Tensor? referenceTokens, List<(int Height, int Width)> referenceShapes) = EncodeReferences(referenceImages);
-        Flux3ConditionInput condInput = new Flux3ConditionInput(weightedCond ?? condText, referenceTokens, referenceShapes);
-        Flux3ConditionInput? uncondInput = guided
-            ? new Flux3ConditionInput(weightedUncond ?? uncondText!, referenceTokens, referenceShapes) : null;
-
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(
-            MathF.Exp(request.SigmaShift ?? Flux3Config.ReferenceTimeShiftMu));
-        scheduler.SetTimesteps(steps);
-        TensorShape packedShape = new TensorShape(1, patH * patW, _config.InChannels);
         bool masked = plan.MaskPixel is not null;
-        (Tensor latent, Tensor? sourceTokens) = BuildInitialLatent(request, scheduler, patH, patW, seed, plan.StartStep, masked);
+        Tensor? latent = null;
+        Tensor? sourceTokens = null;
         Tensor? packedMask = null;
-        if (masked)
-        {
-            int latH = imgH / 8, latW = imgW / 8;
-            using Tensor latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(plan.MaskPixel!, latH, latW);
-            packedMask = MaskBlendUtilities.PackLatentMask2x2(latentMask, latH, latW);
-        }
-
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
-        _ditResident = true;
-        Flux3ConditionStates? condStates = _config.FlowMap ? null : _transformer.PrecomputeConditioning(Backend, condInput);
-        Flux3ConditionStates? uncondStates = _config.FlowMap || !guided ? null : _transformer.PrecomputeConditioning(Backend, uncondInput!);
+        Tensor? referenceTokens = null;
+        Tensor? weightedCond = null;
+        Tensor? weightedUncond = null;
+        Flux3ConditionStates? condStates = null;
+        Flux3ConditionStates? uncondStates = null;
         try
         {
-            ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, Family, startsFromNoisedInit: plan.StartStep > 0);
-            (_, string? sigmaSchedule) = SamplerRegistry.SplitCompound(request.Scheduler);
-            if (_config.FlowMap && sigmaSchedule is not null)
+            Tensor condText = EncodePrompt(prompt, PromptCache.Cond);
+            Tensor? uncondText = guided ? EncodePrompt(negative!, PromptCache.Uncond) : null;
+
+            // VAE-encoder phase: references and the init image under one preload, released before the DiT loads. Every
+            // output is read back by the host-side packing ops, so the activation reclaim drops nothing still in use.
+            bool encodes = hasReferences || request is ImageToImageRequest;
+            List<(int Height, int Width)> referenceShapes;
+            if (encodes)
+                Backend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
+            try
             {
-                throw new NotSupportedException("The step-distilled FLUX.3 build embeds the sigma each step jumps to, which a "
-                    + "re-spaced sigma schedule moves off the family grid. Drop the schedule suffix.");
+                (referenceTokens, referenceShapes) = EncodeReferences(referenceImages);
+                (latent, sourceTokens) = BuildInitialLatent(request, scheduler, patH, patW, seed, plan.StartStep, masked);
             }
-            float[] grid = scheduler.Sigmas();
+            finally
+            {
+                if (encodes)
+                {
+                    Backend.Sync();
+                    Backend.FreeWeights(_vaeEncoder!.EnumerateWeights());
+                    Backend.FreeActivations();
+                }
+            }
+
+            weightedCond = prompt.IsWeighted ? CondTokenWeights.Apply(Backend, condText, null, prompt.Tokens).Cond : null;
+            weightedUncond = guided && negative!.IsWeighted ? CondTokenWeights.Apply(Backend, uncondText!, null, negative.Tokens).Cond : null;
+            Flux3ConditionInput condInput = new Flux3ConditionInput(weightedCond ?? condText, referenceTokens, referenceShapes);
+            Flux3ConditionInput? uncondInput = guided
+                ? new Flux3ConditionInput(weightedUncond ?? uncondText!, referenceTokens, referenceShapes) : null;
+            if (masked)
+            {
+                int latH = imgH / 8, latW = imgW / 8;
+                using Tensor latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(plan.MaskPixel!, latH, latW);
+                packedMask = MaskBlendUtilities.PackLatentMask2x2(latentMask, latH, latW);
+            }
+
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            _ditResident = true;
+            condStates = _config.FlowMap ? null : _transformer.PrecomputeConditioning(Backend, condInput);
+            uncondStates = _config.FlowMap || !guided ? null : _transformer.PrecomputeConditioning(Backend, uncondInput!);
             float[] timestepTable = scheduler.Timesteps.ToArray();
-            Tensor Predict(Tensor x, float sigma, int stepIndex, out Tensor? uncond)
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(PredictionType.FlowVelocity, (x, sigma, stepIndex) =>
             {
                 float t = stepIndex < steps && sigma == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex] / 1000f : sigma;
-                float? target = _config.FlowMap ? NextGridSigma(grid, sigma) : null;
+                float? target = _config.FlowMap ? NextScheduleSigma(sampler.Sigmas, sigma) : null;
                 Tensor cond = _transformer.Forward(Backend, x, patH, patW, t, condInput, condStates, target);
-                uncond = guided ? _transformer.Forward(Backend, x, patH, patW, t, uncondInput!, uncondStates, target) : null;
-                return cond;
-            }
+                if (!guided)
+                    return new DenoisePrediction(cond, cond);
+                Tensor uncond = _transformer.Forward(Backend, x, patH, patW, t, uncondInput!, uncondStates, target);
+                return new DenoisePrediction(cond, uncond, cfg);
+            });
 
             for (int i = plan.StartStep; i < steps; i++)
             {
                 Stopwatch stepSw = Stopwatch.StartNew();
-                if (!masked)
-                {
-                    DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(PredictionType.FlowVelocity, (x, s, index) =>
-                    {
-                        Tensor cond = Predict(x, s, index, out Tensor? uncond);
-                        return uncond is null ? new DenoisePrediction(cond, cond) : new DenoisePrediction(cond, uncond, cfg);
-                    });
-                    if (i == plan.StartStep)
-                        sampler.Reset(latent.Shape);
-                    sampler.Step(Backend, latent, predictor, i);
-                }
-                else
-                {
-                    latent = MaskedStep(latent, sourceTokens!, packedMask!, scheduler, Predict, i, steps, cfg, seed, packedShape, patH, patW);
-                }
+                if (i == plan.StartStep)
+                    sampler.Reset(latent.Shape);
+                sampler.Step(Backend, latent, predictor, i);
+                if (masked)
+                    BlendSource(latent, sourceTokens!, packedMask!, sampler.Sigmas[i + 1], seed + i + 1, patH, patW);
                 stepSw.Stop();
                 Logs.Debug($"{Family} step {i + 1}/{steps} done in {stepSw.ElapsedMilliseconds}ms");
                 if (onProgress is not null)
@@ -171,6 +182,11 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                     });
                 }
             }
+        }
+        catch
+        {
+            latent?.Dispose();
+            throw;
         }
         finally
         {
@@ -188,15 +204,24 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
         }
-        Tensor vaeLatent = Flux2LatentOps.FromPackedTokens(latent, patH, patW, _bnMean, _bnVar, _bnEps,
-            _config.VaeLatentChannels, _config.PatchSize);
-        latent.Dispose();
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeLatent);
-        vaeLatent.Dispose();
-        if (masked && ((ImageToImageRequest)request).RecompositeAtEnd)
-            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, plan.MaskPixel!);
-        byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
-        image.Dispose();
+        Tensor vaeLatent;
+        using (Tensor finalLatent = latent)
+        {
+            vaeLatent = Flux2LatentOps.FromPackedTokens(finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                _config.VaeLatentChannels, _config.PatchSize);
+        }
+        Tensor image;
+        using (vaeLatent)
+        {
+            image = _vaeDecoder.DecodeTiled(Backend, vaeLatent);
+        }
+        byte[] rgb;
+        using (image)
+        {
+            if (masked && ((ImageToImageRequest)request).RecompositeAtEnd)
+                MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, plan.MaskPixel!);
+            rgb = ImagePostProcessor.TensorToRgbBytes(image);
+        }
         Backend.FreeActivations();
         Logs.Info($"{Family} generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgb, imgW, imgH, seed);
@@ -209,7 +234,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
     /// is evicted first because the encoder and a resident DiT need not fit together.</summary>
     private Tensor EncodePrompt(Flux3PromptTokens prompt, int slot)
     {
-        if (_promptCache.TryGet(slot, prompt.Tokens.Tokens, out Tensor? cached))
+        if (_promptCache.TryGet(slot, prompt, out Tensor? cached))
             return cached!;
         if (_ditResident)
         {
@@ -230,7 +255,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         Backend.FreeActivations();
         if (hidden.Shape[2] != _config.ContextInDim)
             throw new HartsyInferenceException($"FLUX.3 text features are {hidden.Shape[2]} wide; the transformer expects {_config.ContextInDim}.");
-        _promptCache.Store(slot, prompt.Tokens.Tokens, hidden);
+        _promptCache.Store(slot, prompt, hidden);
         return hidden;
     }
 
@@ -294,76 +319,67 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         return (noised, null);
     }
 
-    /// <summary>Masked inpaint runs the host step so the packed blend can keep the unmasked region on the source's
-    /// trajectory: the source is re-noised at the next sigma (and is clean after the last step).</summary>
-    private Tensor MaskedStep(Tensor latent, Tensor source, Tensor packedMask, FlowMatchEulerDiscreteScheduler scheduler,
-        PredictFn predict, int step, int steps, float cfg, int seed, TensorShape packedShape, int patH, int patW)
+    /// <summary>Holds the unmasked region on the source's own trajectory after a sampler step: the source is re-noised
+    /// at <paramref name="sigma"/>, the level the sampler just reached (clean after the last step), and blended in under
+    /// the mask. The latent comes to the host first, so the next forward uploads the blended values rather than the
+    /// step's device copy.</summary>
+    private void BlendSource(Tensor latent, Tensor source, Tensor packedMask, float sigma, int noiseSeed, int patH, int patW)
     {
-        float sigma = scheduler.Timesteps[step] / 1000f;
-        Tensor cond = predict(latent, scheduler.SigmaAt(step), step, out Tensor? uncond);
-        Tensor velocity = cond;
-        if (uncond is not null)
+        Backend.OffloadActivation(latent);
+        if (sigma <= 0f)
         {
-            velocity = CfgHelper.ApplyCfg(uncond, cond, cfg);
-            cond.Dispose();
-            uncond.Dispose();
+            MaskBlendUtilities.BlendPackedInPlace(latent, source, packedMask);
+            return;
         }
-        Tensor next = new Tensor(packedShape, DType.F32);
-        scheduler.Step(next, velocity, latent, step);
-        velocity.Dispose();
-        latent.Dispose();
-        Tensor noisedSource = source;
-        if (step + 1 < steps)
-        {
-            using Tensor freshNoise = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, patH, patW), seed + step + 1);
-            using Tensor freshPacked = Flux2LatentOps.Pack(freshNoise);
-            noisedSource = new Tensor(packedShape, DType.F32);
-            scheduler.AddNoise(noisedSource, source, freshPacked, step + 1);
-        }
-        MaskBlendUtilities.BlendPackedInPlace(next, noisedSource, packedMask);
-        if (!ReferenceEquals(noisedSource, source))
-            noisedSource.Dispose();
-        Logs.Debug($"{Family} masked step at sigma {sigma:F4}");
-        return next;
+        using Tensor freshNoise = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, patH, patW), noiseSeed);
+        using Tensor freshPacked = Flux2LatentOps.Pack(freshNoise);
+        using Tensor noisedSource = new Tensor(latent.Shape, DType.F32);
+        FlowMatchEulerDiscreteScheduler.AddNoiseAtSigma(noisedSource, source, freshPacked, sigma);
+        MaskBlendUtilities.BlendPackedInPlace(latent, noisedSource, packedMask);
     }
 
-    /// <summary>The sigma after the grid entry nearest <paramref name="sigma"/> (ComfyUI's flow-map target rule).</summary>
-    private static float NextGridSigma(float[] grid, float sigma)
+    /// <summary>The flow map's jump target: the sigma after the schedule entry nearest <paramref name="sigma"/>. This is
+    /// ComfyUI's rule over <c>sample_sigmas</c>, the schedule the sampler actually runs, so a sub-step evaluation
+    /// (Heun's corrector, a midpoint) and a re-spaced schedule both get the target ComfyUI gives them.</summary>
+    public static float NextScheduleSigma(IReadOnlyList<float> schedule, float sigma)
     {
+        ArgumentNullException.ThrowIfNull(schedule);
         int nearest = 0;
         float best = float.MaxValue;
-        for (int i = 0; i < grid.Length; i++)
+        for (int i = 0; i < schedule.Count; i++)
         {
-            float distance = MathF.Abs(grid[i] - sigma);
+            float distance = MathF.Abs(schedule[i] - sigma);
             if (distance < best)
             {
                 best = distance;
                 nearest = i;
             }
         }
-        return grid[Math.Min(nearest + 1, grid.Length - 1)];
+        return schedule[Math.Min(nearest + 1, schedule.Count - 1)];
     }
 
-    private delegate Tensor PredictFn(Tensor x, float sigma, int stepIndex, out Tensor? uncond);
-
-    /// <summary>The last encoded conditional and unconditional prompts, keyed by their ids.</summary>
+    /// <summary>The last encoded conditional and unconditional prompts, keyed by their ids and how many of them are
+    /// real: the padding mask is part of the encoding. Weights are applied after encoding, so they are not.</summary>
     private sealed class PromptCache : IDisposable
     {
         public const int Cond = 0;
         public const int Uncond = 1;
         private readonly int[]?[] _keys = new int[]?[2];
+        private readonly int[] _validLengths = new int[2];
         private readonly Tensor?[] _values = new Tensor?[2];
 
-        public bool TryGet(int slot, int[] key, out Tensor? value)
+        public bool TryGet(int slot, Flux3PromptTokens prompt, out Tensor? value)
         {
-            value = _keys[slot] is int[] cached && cached.AsSpan().SequenceEqual(key) ? _values[slot] : null;
+            value = _keys[slot] is int[] cached && _validLengths[slot] == prompt.ValidLength
+                && cached.AsSpan().SequenceEqual(prompt.Tokens.Tokens) ? _values[slot] : null;
             return value is not null;
         }
 
-        public void Store(int slot, int[] key, Tensor value)
+        public void Store(int slot, Flux3PromptTokens prompt, Tensor value)
         {
             _values[slot]?.Dispose();
-            _keys[slot] = (int[])key.Clone();
+            _keys[slot] = (int[])prompt.Tokens.Tokens.Clone();
+            _validLengths[slot] = prompt.ValidLength;
             _values[slot] = value;
         }
 

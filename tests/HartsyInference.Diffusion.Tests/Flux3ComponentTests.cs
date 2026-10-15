@@ -4,7 +4,10 @@ using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
+using HartsyInference.Diffusion.Sampling;
+using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes.Image;
@@ -177,6 +180,42 @@ public sealed unsafe class Flux3ComponentTests
         ResolvedModelVariant hinted = ModelVariantResolver.Classify(Flux3Variants.Catalog, CheckpointProbe.Empty, ["distilled"]);
         Assert.True(hinted.Is(Flux3Variants.Base));
         Assert.Equal(Flux3Recipe.DistilledDefaults, new Flux3Recipe().DefaultsFor(structural));
+    }
+
+    [Theory]
+    // On-grid steps jump to the next entry; the terminal sigma has nowhere further to go.
+    [InlineData(1.0f, 0.75f)]
+    [InlineData(0.75f, 0.4f)]
+    [InlineData(0.0f, 0.0f)]
+    // A sub-step evaluation (Heun's corrector at sigma_next, a midpoint) takes the entry nearest it, as ComfyUI does.
+    [InlineData(0.6f, 0.4f)]
+    [InlineData(0.55f, 0.1f)]
+    public void NextScheduleSigma_FollowsComfyFlowMapTargetRule(float sigma, float expected)
+    {
+        float[] schedule = [1.0f, 0.75f, 0.4f, 0.1f, 0.0f];
+        Assert.Equal(expected, Flux3Pipeline.NextScheduleSigma(schedule, sigma));
+    }
+
+    [Fact]
+    public void NextScheduleSigma_ReadsTheSamplersOwnSchedule()
+    {
+        // A re-spaced schedule: the target is its next entry, not the family grid's.
+        ISampler sampler = SamplerRegistry.Create("euler", [1.0f, 0.9f, 0.3f, 0.0f], seed: 0, options: null);
+        Assert.Equal(0.3f, Flux3Pipeline.NextScheduleSigma(sampler.Sigmas, 0.9f));
+    }
+
+    [Fact]
+    public void AddNoiseAtSigma_MatchesTheIndexedAddNoise()
+    {
+        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(6.93f);
+        scheduler.SetTimesteps(4);
+        using Tensor sample = Fill(new TensorShape(1, 3, 2), i => i * 0.5f);
+        using Tensor noise = Fill(new TensorShape(1, 3, 2), i => 1f - i);
+        using Tensor indexed = new Tensor(sample.Shape, DType.F32);
+        using Tensor explicitSigma = new Tensor(sample.Shape, DType.F32);
+        scheduler.AddNoise(indexed, sample, noise, 2);
+        FlowMatchEulerDiscreteScheduler.AddNoiseAtSigma(explicitSigma, sample, noise, scheduler.Sigmas()[2]);
+        Assert.Equal(indexed.AsReadOnlySpan<float>().ToArray(), explicitSigma.AsReadOnlySpan<float>().ToArray());
     }
 
     private static Tensor Fill(TensorShape shape, Func<int, float> value)

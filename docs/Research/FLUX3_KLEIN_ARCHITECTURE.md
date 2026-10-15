@@ -42,8 +42,9 @@ instruction editing with up to 10 reference images, and native layout boxes, in 
   reference k `(0, 0.5·r, 0.5·c, −1−k)`, text i `(0, 0, 0, i)`.
 - Time: `time_in` MLPEmbedder over the 256-wide sinusoid of 1000·σ (cos first). Final layer: Flux `LastLayer`,
   `[shift, scale]` order.
-- Step-distilled build = flow map: `ref_time_in` embeds the sigma the step jumps to (the schedule's next sigma after
-  the entry nearest the current one) and adds it to every time vector, so the conditioning streams are per step.
+- Step-distilled build = flow map: `ref_time_in` embeds the sigma the step jumps to and adds it to every time vector,
+  so the conditioning streams are per step. The target is the entry after the one nearest the current sigma in
+  `sample_sigmas`, the schedule the sampler actually runs (re-spaced or not), for sub-step evaluations too.
 
 ## Sampling
 

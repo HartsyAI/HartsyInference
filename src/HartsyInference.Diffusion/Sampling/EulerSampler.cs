@@ -29,6 +29,9 @@ public sealed class EulerSampler : ISampler
     /// <inheritdoc/>
     public int StepCount => _sigmas.Length - 1;
 
+    /// <inheritdoc/>
+    public IReadOnlyList<float> Sigmas => _sigmas;
+
     /// <summary>Creates the sampler over a resolved sigma array (length <c>steps + 1</c>, ending at 0).</summary>
     public EulerSampler(float[] sigmas)
     {

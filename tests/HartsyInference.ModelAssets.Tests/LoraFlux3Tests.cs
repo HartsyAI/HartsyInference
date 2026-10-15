@@ -43,6 +43,10 @@ public sealed unsafe class LoraFlux3Tests(ITestOutputHelper output) : IDisposabl
         Assert.Equal(LoraFormat.DiffusersFlux, LoraFormatDetector.Detect(Descriptors(
             "transformer.single_transformer_blocks.0.attn.to_q.lora_A.weight",
             "transformer.single_transformer_blocks.0.proj_mlp.lora_A.weight")));
+        // Flux.2's final norm shares diffusers' `norm_out.linear` name, so it is no evidence either.
+        Assert.Equal(LoraFormat.DiffusersFlux, LoraFormatDetector.Detect(Descriptors(
+            "transformer.norm_out.linear.lora_A.weight",
+            "transformer.single_transformer_blocks.0.attn.to_qkv_mlp_proj.lora_A.weight")));
         Assert.Equal(LoraFormat.ComfyBflDit, LoraFormatDetector.Detect(Descriptors(
             "diffusion_model.single_blocks.3.linear1.lora_down.weight")));
         Assert.Equal(LoraFormat.KohyaFlux, LoraFormatDetector.Detect(Descriptors(
