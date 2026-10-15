@@ -1,0 +1,3883 @@
+{
+ "source": {
+  "zipvoice": "2f7326f",
+  "piper_phonemize": "1.5.0",
+  "pydub": "0.25.1",
+  "inflect": "7.5.0"
+ },
+ "lines": [
+  {
+   "text": "Yes.",
+   "punct": "Yes.",
+   "segments": [
+    [
+     "Yes.",
+     "en"
+    ]
+   ],
+   "norm": "Yes.",
+   "tokens": "jˈɛs.",
+   "ntok": 5,
+   "ids": "22,120,61,31,10"
+  },
+  {
+   "text": "Okay, see you.",
+   "punct": "Okay, see you.",
+   "segments": [
+    [
+     "Okay, see you.",
+     "en"
+    ]
+   ],
+   "norm": "Okay, see you.",
+   "tokens": "oʊkˈeɪ, sˈiː juː.",
+   "ntok": 17,
+   "ids": "27,100,23,120,18,74,8,3,31,120,21,122,3,22,33,122,10"
+  },
+  {
+   "text": "The weather is nice today, so we might take a walk.",
+   "punct": "The weather is nice today, so we might take a walk.",
+   "segments": [
+    [
+     "The weather is nice today, so we might take a walk.",
+     "en"
+    ]
+   ],
+   "norm": "The weather is nice today, so we might take a walk.",
+   "tokens": "ðə wˈɛðɚɹ ɪz nˈaɪs tədˈeɪ, sˌoʊ wiː mˌaɪt tˈeɪk ɐ wˈɔːk.",
+   "ntok": 56,
+   "ids": "41,59,3,35,120,61,41,60,88,3,74,38,3,26,120,14,74,31,3,32,59,17,120,18,74,8,3,31,121,27,100,3,35,21,122,3,25,121,14,74,32,3,32,120,18,74,23,3,50,3,35,120,54,122,23,10"
+  },
+  {
+   "text": "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+   "punct": "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+   "segments": [
+    [
+     "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+     "en"
+    ]
+   ],
+   "norm": "After the meeting ended, the team gathered in the kitchen to talk about the new product launch, the budget, and the schedule for the coming quarter.",
+   "tokens": "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ðə bˈʌdʒɪt, ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ.",
+   "ntok": 147,
+   "ids": "120,39,19,32,60,3,41,59,3,25,120,21,122,92,74,44,3,120,61,26,17,128,17,8,3,41,59,3,32,120,21,122,25,3,66,120,39,41,60,17,3,74,26,41,59,3,23,120,74,32,96,59,26,3,32,59,3,32,120,54,122,23,3,50,15,121,14,100,32,3,41,59,3,26,120,33,122,3,28,88,120,51,122,17,102,23,32,3,24,120,51,122,26,32,96,8,3,41,59,3,15,120,102,17,108,74,32,8,3,39,26,17,3,41,59,3,31,23,120,61,17,108,33,122,24,3,19,60,41,59,3,23,120,102,25,74,44,3,23,35,120,54,122,88,92,60,10"
+  },
+  {
+   "text": "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+   "punct": "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+   "segments": [
+    [
+     "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+     "en"
+    ]
+   ],
+   "norm": "Our water bill arrived late this month, so I called the office to ask why. The clerk said a meter reading was missed in March. She promised to fix the record and send a corrected statement within two weeks. I thanked her, hung up, and wrote the date on my calendar so I would remember to check. Last time this happened it took three phone calls, so I am hoping this one goes faster.",
+   "tokens": "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.aɪ θˈæŋkt hɜː, hˈʌŋ ˈʌp, ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ.",
+   "ntok": 400,
+   "ids": "121,14,100,60,3,35,120,54,122,92,60,3,15,120,74,24,3,60,88,120,14,74,34,17,3,24,120,18,74,32,3,41,74,31,3,25,120,102,26,126,8,3,31,121,27,100,3,14,74,3,23,120,54,122,24,17,3,41,74,3,120,51,122,19,74,31,3,32,100,3,120,39,31,23,3,35,120,14,74,10,41,59,3,23,24,120,62,122,23,3,31,120,61,17,3,50,3,25,120,21,122,92,60,3,88,120,21,122,17,74,44,3,35,102,38,3,25,120,74,31,32,3,74,26,3,25,120,51,122,88,32,96,10,96,21,122,3,28,88,120,51,122,25,74,31,32,3,32,59,3,19,120,74,23,31,3,41,59,3,88,120,61,23,60,17,3,39,26,17,3,31,120,61,26,17,3,50,3,23,60,88,120,61,23,32,128,17,3,31,32,120,18,74,32,25,59,26,32,3,35,74,41,121,74,26,3,32,120,33,122,3,35,120,21,122,23,31,10,14,74,3,126,120,39,44,23,32,3,20,62,122,8,3,20,120,102,44,3,120,102,28,8,3,39,26,17,3,88,120,27,100,32,3,41,59,3,17,120,18,74,32,3,121,54,26,3,25,14,74,3,23,120,39,24,59,26,17,60,3,31,121,27,100,3,14,74,3,35,100,17,3,88,128,25,120,61,25,15,60,3,32,59,3,32,96,120,61,23,10,24,120,39,31,32,3,32,120,14,74,25,3,41,74,31,3,20,120,39,28,59,26,17,3,74,32,3,32,120,100,23,3,126,88,120,21,122,3,19,120,27,100,26,3,23,120,54,122,24,38,8,3,31,121,27,100,3,14,74,50,25,3,20,120,27,100,28,74,44,3,41,120,74,31,35,121,102,26,3,66,27,100,38,3,19,120,39,31,32,60,10"
+  },
+  {
+   "text": "On March 3rd, 2026 at 4:30 PM, 1,250 people paid $99.95 each.",
+   "punct": "On March 3rd, 2026 at 4:30 PM, 1,250 people paid $99.95 each.",
+   "segments": [
+    [
+     "On March 3rd, 2026 at 4:30 PM, 1,250 people paid $99.95 each.",
+     "en"
+    ]
+   ],
+   "norm": "On March  third ,  twenty twenty-six  at  four : thirty  PM,  twelve fifty  people paid   ninety-nine  dollars,  ninety-five  cents  each.",
+   "tokens": "ˌɔn mˈɑːɹtʃ θˈɜːd, twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: θˈɜːɾi pˌiːˈɛm, twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ.",
+   "ntok": 142,
+   "ids": "121,54,26,3,25,120,51,122,88,32,96,3,126,120,62,122,17,8,3,32,35,120,61,26,32,21,3,32,35,120,61,26,32,21,31,120,74,23,31,3,39,32,3,19,120,27,122,88,11,3,126,120,62,122,92,21,3,28,121,21,122,120,61,25,8,3,32,35,120,61,24,34,3,19,120,74,19,32,21,3,28,120,21,122,28,59,24,3,28,120,18,74,17,3,26,120,14,74,26,32,21,26,120,14,74,26,3,17,120,51,122,24,60,38,8,3,26,120,14,74,26,32,21,19,120,14,74,34,3,31,120,61,26,32,31,3,120,21,122,32,96,10"
+  },
+  {
+   "text": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+   "punct": "Wait... what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+   "segments": [
+    [
+     "Wait… what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+     "en"
+    ]
+   ],
+   "norm": "Wait… what?! No -- really; (yes), 'quoted' & \"double\" -- ok?",
+   "tokens": "wˈeɪtwˌʌt?nˈoʊ ɹˈiəli; jˈɛs, kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?",
+   "ntok": 57,
+   "ids": "35,120,18,74,32,35,121,102,32,13,26,120,27,100,3,88,120,21,59,24,21,12,3,22,120,61,31,8,3,23,35,120,27,100,92,128,17,3,39,26,17,3,17,120,102,15,59,24,3,121,27,100,23,120,18,74,13"
+  },
+  {
+   "text": "No no no no no no no no no no no no.",
+   "punct": "No no no no no no no no no no no no.",
+   "segments": [
+    [
+     "No no no no no no no no no no no no.",
+     "en"
+    ]
+   ],
+   "norm": "No no no no no no no no no no no no.",
+   "tokens": "nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ nˈoʊ.",
+   "ntok": 60,
+   "ids": "26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,3,26,120,27,100,10"
+  },
+  {
+   "text": "The quick brown fox jumps over the lazy dog near the river bank.",
+   "punct": "The quick brown fox jumps over the lazy dog near the river bank.",
+   "segments": [
+    [
+     "The quick brown fox jumps over the lazy dog near the river bank.",
+     "en"
+    ]
+   ],
+   "norm": "The quick brown fox jumps over the lazy dog near the river bank.",
+   "tokens": "ðə kwˈɪk bɹˈaʊn fˈɑːks dʒˈʌmps ˌoʊvɚ ðə lˈeɪzi dˈɑːɡ nˌɪɹ ðə ɹˈɪvɚ bˈæŋk.",
+   "ntok": 73,
+   "ids": "41,59,3,23,35,120,74,23,3,15,88,120,14,100,26,3,19,120,51,122,23,31,3,17,108,120,102,25,28,31,3,121,27,100,34,60,3,41,59,3,24,120,18,74,38,21,3,17,120,51,122,66,3,26,121,74,88,3,41,59,3,88,120,74,34,60,3,15,120,39,44,23,10"
+  },
+  {
+   "text": "I have 3 cats and 12 dogs.",
+   "punct": "I have 3 cats and 12 dogs.",
+   "segments": [
+    [
+     "I have 3 cats and 12 dogs.",
+     "en"
+    ]
+   ],
+   "norm": "I have  three  cats and  twelve  dogs.",
+   "tokens": "aɪ hæv θɹˈiː kˈæts ænd twˈɛlv dˈɑːɡz.",
+   "ntok": 37,
+   "ids": "14,74,3,20,39,34,3,126,88,120,21,122,3,23,120,39,32,31,3,39,26,17,3,32,35,120,61,24,34,3,17,120,51,122,66,38,10"
+  },
+  {
+   "text": "There were 0 errors and 1 warning.",
+   "punct": "There were 0 errors and 1 warning.",
+   "segments": [
+    [
+     "There were 0 errors and 1 warning.",
+     "en"
+    ]
+   ],
+   "norm": "There were  zero  errors and  one  warning.",
+   "tokens": "ðɛɹwˌɜː zˈiəɹoʊ ˈɛɹɚz ænd wˈʌn wˈɔːɹnɪŋ.",
+   "ntok": 40,
+   "ids": "41,61,88,35,121,62,122,3,38,120,21,59,88,27,100,3,120,61,88,60,38,3,39,26,17,3,35,120,102,26,3,35,120,54,122,88,26,74,44,10"
+  },
+  {
+   "text": "The population is 1234567.",
+   "punct": "The population is 1234567.",
+   "segments": [
+    [
+     "The population is 1234567.",
+     "en"
+    ]
+   ],
+   "norm": "The population is  one million, two hundred thirty-four thousand, five hundred sixty-seven .",
+   "tokens": "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən.",
+   "ntok": 100,
+   "ids": "41,59,3,28,121,51,122,28,22,100,24,120,18,74,96,59,26,3,74,38,3,35,120,102,26,3,25,120,74,24,21,59,26,8,3,32,120,33,122,3,20,120,102,26,17,88,74,17,3,126,120,62,122,92,21,19,120,27,122,88,3,126,120,14,100,38,59,26,17,8,3,19,120,14,74,34,3,20,120,102,26,17,88,74,17,3,31,120,74,23,31,32,21,31,120,61,34,59,26,10"
+  },
+  {
+   "text": "He was born in 1999 and moved in 2005.",
+   "punct": "He was born in 1999 and moved in 2005.",
+   "segments": [
+    [
+     "He was born in 1999 and moved in 2005.",
+     "en"
+    ]
+   ],
+   "norm": "He was born in  nineteen ninety-nine  and moved in  two thousand five .",
+   "tokens": "hiː wʌz bˈɔːɹn ɪn nˈaɪntiːn nˈaɪntinˈaɪn ænd mˈuːvd ɪn tˈuː θˈaʊzənd fˈaɪv.",
+   "ntok": 75,
+   "ids": "20,21,122,3,35,102,38,3,15,120,54,122,88,26,3,74,26,3,26,120,14,74,26,32,21,122,26,3,26,120,14,74,26,32,21,26,120,14,74,26,3,39,26,17,3,25,120,33,122,34,17,3,74,26,3,32,120,33,122,3,126,120,14,100,38,59,26,17,3,19,120,14,74,34,10"
+  },
+  {
+   "text": "In 2000 the company had 2010 employees.",
+   "punct": "In 2000 the company had 2010 employees.",
+   "segments": [
+    [
+     "In 2000 the company had 2010 employees.",
+     "en"
+    ]
+   ],
+   "norm": "In  two thousand  the company had  twenty ten  employees.",
+   "tokens": "ɪn tˈuː θˈaʊzənd ðə kˈʌmpəni hæd twˈɛnti tˈɛn ɛmplˈɔɪiːz.",
+   "ntok": 57,
+   "ids": "74,26,3,32,120,33,122,3,126,120,14,100,38,59,26,17,3,41,59,3,23,120,102,25,28,59,26,21,3,20,39,17,3,32,35,120,61,26,32,21,3,32,120,61,26,3,61,25,28,24,120,54,74,21,122,38,10"
+  },
+  {
+   "text": "The year 1066 changed everything; so did 1900.",
+   "punct": "The year 1066 changed everything; so did 1900.",
+   "segments": [
+    [
+     "The year 1066 changed everything; so did 1900.",
+     "en"
+    ]
+   ],
+   "norm": "The year  ten sixty-six  changed everything; so did  nineteen hundred .",
+   "tokens": "ðə jˈɪɹ tˈɛn sˈɪkstisˈɪks tʃˈeɪndʒd ˈɛvɹɪθˌɪŋ; sˌoʊ dˈɪd nˈaɪntiːn hˈʌndɹɪd.",
+   "ntok": 76,
+   "ids": "41,59,3,22,120,74,88,3,32,120,61,26,3,31,120,74,23,31,32,21,31,120,74,23,31,3,32,96,120,18,74,26,17,108,17,3,120,61,34,88,74,126,121,74,44,12,3,31,121,27,100,3,17,120,74,17,3,26,120,14,74,26,32,21,122,26,3,20,120,102,26,17,88,74,17,10"
+  },
+  {
+   "text": "Chapter 7 starts on page 101.",
+   "punct": "Chapter 7 starts on page 101.",
+   "segments": [
+    [
+     "Chapter 7 starts on page 101.",
+     "en"
+    ]
+   ],
+   "norm": "Chapter  seven  starts on page  one hundred one .",
+   "tokens": "tʃˈæptɚ sˈɛvən stˈɑːɹts ˌɔn pˈeɪdʒ wˈʌn hˈʌndɹɪd wˌʌn.",
+   "ntok": 54,
+   "ids": "32,96,120,39,28,32,60,3,31,120,61,34,59,26,3,31,32,120,51,122,88,32,31,3,121,54,26,3,28,120,18,74,17,108,3,35,120,102,26,3,20,120,102,26,17,88,74,17,3,35,121,102,26,10"
+  },
+  {
+   "text": "It costs $5 or $1.50 or $0.99 today.",
+   "punct": "It costs $5 or $1.50 or $0.99 today.",
+   "segments": [
+    [
+     "It costs $5 or $1.50 or $0.99 today.",
+     "en"
+    ]
+   ],
+   "norm": "It costs   five  dollars  or   one  dollar,  fifty  cents  or   ninety-nine  cents  today.",
+   "tokens": "ɪt kˈɔsts fˈaɪv dˈɑːlɚz ɔːɹ wˈʌn dˈɑːlɚ, fˈɪfti sˈɛnts ɔːɹ nˈaɪntinˈaɪn sˈɛnts tədˈeɪ.",
+   "ntok": 86,
+   "ids": "74,32,3,23,120,54,31,32,31,3,19,120,14,74,34,3,17,120,51,122,24,60,38,3,54,122,88,3,35,120,102,26,3,17,120,51,122,24,60,8,3,19,120,74,19,32,21,3,31,120,61,26,32,31,3,54,122,88,3,26,120,14,74,26,32,21,26,120,14,74,26,3,31,120,61,26,32,31,3,32,59,17,120,18,74,10"
+  },
+  {
+   "text": "The book costs 12$ and the pen 3.5$.",
+   "punct": "The book costs 12$ and the pen 3.5$.",
+   "segments": [
+    [
+     "The book costs 12$ and the pen 3.5$.",
+     "en"
+    ]
+   ],
+   "norm": "The book costs  twelve $ and the pen  three  point  five $.",
+   "tokens": "ðə bˈʊk kˈɔsts twˈɛlv dˈɑːlɚ ænd ðə pˈɛn θɹˈiː pˈɔɪnt fˈaɪv dˈɑːlɚ.",
+   "ntok": 67,
+   "ids": "41,59,3,15,120,100,23,3,23,120,54,31,32,31,3,32,35,120,61,24,34,3,17,120,51,122,24,60,3,39,26,17,3,41,59,3,28,120,61,26,3,126,88,120,21,122,3,28,120,54,74,26,32,3,19,120,14,74,34,3,17,120,51,122,24,60,10"
+  },
+  {
+   "text": "We paid £7.14 for tea and £1 for milk.",
+   "punct": "We paid £7.14 for tea and £1 for milk.",
+   "segments": [
+    [
+     "We paid £7.14 for tea and £1 for milk.",
+     "en"
+    ]
+   ],
+   "norm": "We paid  seven  pounds. fourteen  for tea and  one  pounds for milk.",
+   "tokens": "wiː pˈeɪd sˈɛvən pˈaʊndz fˈoːɹtiːn fɔːɹ tˈiː ænd wˈʌn pˈaʊndz fɔːɹ mˈɪlk.",
+   "ntok": 73,
+   "ids": "35,21,122,3,28,120,18,74,17,3,31,120,61,34,59,26,3,28,120,14,100,26,17,38,3,19,120,27,122,88,32,21,122,26,3,19,54,122,88,3,32,120,21,122,3,39,26,17,3,35,120,102,26,3,28,120,14,100,26,17,38,3,19,54,122,88,3,25,120,74,24,23,10"
+  },
+  {
+   "text": "Meet me at 13:30 or 4:00 tomorrow.",
+   "punct": "Meet me at 13:30 or 4:00 tomorrow.",
+   "segments": [
+    [
+     "Meet me at 13:30 or 4:00 tomorrow.",
+     "en"
+    ]
+   ],
+   "norm": "Meet me at  thirteen : thirty  or  four : zero  tomorrow.",
+   "tokens": "mˈiːt mˌiː æt θˈɜːtiːn: θˈɜːɾi ɔːɹ fˈoːɹ: zˈiəɹoʊ təmˈɑːɹoʊ.",
+   "ntok": 60,
+   "ids": "25,120,21,122,32,3,25,121,21,122,3,39,32,3,126,120,62,122,32,21,122,26,11,3,126,120,62,122,92,21,3,54,122,88,3,19,120,27,122,88,11,3,38,120,21,59,88,27,100,3,32,59,25,120,51,122,88,27,100,10"
+  },
+  {
+   "text": "The train leaves at 12:05 and arrives at 23:59.",
+   "punct": "The train leaves at 12:05 and arrives at 23:59.",
+   "segments": [
+    [
+     "The train leaves at 12:05 and arrives at 23:59.",
+     "en"
+    ]
+   ],
+   "norm": "The train leaves at  twelve : five  and arrives at  twenty-three : fifty-nine .",
+   "tokens": "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: fˈɪftinˈaɪn.",
+   "ntok": 75,
+   "ids": "41,59,3,32,88,120,18,74,26,3,24,120,21,122,34,38,3,39,32,3,32,35,120,61,24,34,11,3,19,120,14,74,34,3,39,26,17,3,60,88,120,14,74,34,38,3,39,32,3,32,35,120,61,26,32,21,126,88,120,21,122,11,3,19,120,74,19,32,21,26,120,14,74,26,10"
+  },
+  {
+   "text": "Run 5km then walk 2.5m and rest 10min.",
+   "punct": "Run 5km then walk 2.5m and rest 10min.",
+   "segments": [
+    [
+     "Run 5km then walk 2.5m and rest 10min.",
+     "en"
+    ]
+   ],
+   "norm": "Run  five km then walk  two  point  five m and rest  ten min.",
+   "tokens": "ɹˈʌn fˈaɪv kˌeɪˈɛm ðˈɛn wˈɔːk tˈuː pˈɔɪnt fˈaɪv ˈɛm ænd ɹˈɛst tˈɛn mˈɪn.",
+   "ntok": 72,
+   "ids": "88,120,102,26,3,19,120,14,74,34,3,23,121,18,74,120,61,25,3,41,120,61,26,3,35,120,54,122,23,3,32,120,33,122,3,28,120,54,74,26,32,3,19,120,14,74,34,3,120,61,25,3,39,26,17,3,88,120,61,31,32,3,32,120,61,26,3,25,120,74,26,10"
+  },
+  {
+   "text": "The car drove 60km/h for 1h.",
+   "punct": "The car drove 60km/h for 1h.",
+   "segments": [
+    [
+     "The car drove 60km/h for 1h.",
+     "en"
+    ]
+   ],
+   "norm": "The car drove  sixty km/h for  one h.",
+   "tokens": "ðə kˈɑːɹ dɹˈoʊv sˈɪksti kˌeɪˈɛm slˈæʃ ˈeɪtʃ fɔːɹ wˈʌn ˈeɪtʃ.",
+   "ntok": 60,
+   "ids": "41,59,3,23,120,51,122,88,3,17,88,120,27,100,34,3,31,120,74,23,31,32,21,3,23,121,18,74,120,61,25,3,31,24,120,39,96,3,120,18,74,32,96,3,19,54,122,88,3,35,120,102,26,3,120,18,74,32,96,10"
+  },
+  {
+   "text": "Add 2tbsp of sugar and 1tsp of salt.",
+   "punct": "Add 2tbsp of sugar and 1tsp of salt.",
+   "segments": [
+    [
+     "Add 2tbsp of sugar and 1tsp of salt.",
+     "en"
+    ]
+   ],
+   "norm": "Add  two tbsp of sugar and  one tsp of salt.",
+   "tokens": "ˈæd tˈuː tˈeɪbəlspˌuːn ʌv ʃˈʊɡɚ ænd wˈʌn tˌiːˌɛspˈiː ʌv sˈɔlt.",
+   "ntok": 62,
+   "ids": "120,39,17,3,32,120,33,122,3,32,120,18,74,15,59,24,31,28,121,33,122,26,3,102,34,3,96,120,100,66,60,3,39,26,17,3,35,120,102,26,3,32,121,21,122,121,61,31,28,120,21,122,3,102,34,3,31,120,54,24,32,10"
+  },
+  {
+   "text": "It was -19°C outside, or 4°F.",
+   "punct": "It was -19°C outside, or 4°F.",
+   "segments": [
+    [
+     "It was -19°C outside, or 4°F.",
+     "en"
+    ]
+   ],
+   "norm": "It was - nineteen °C outside, or  four °F.",
+   "tokens": "ɪt wʌz nˈaɪntiːn dᵻɡɹˈiːz sˈiː aʊtsˈaɪd, ɔːɹ fˈoːɹ dᵻɡɹˈiːz ˈɛf.",
+   "ntok": 64,
+   "ids": "74,32,3,35,102,38,3,26,120,14,74,26,32,21,122,26,3,17,128,66,88,120,21,122,38,3,31,120,21,122,3,14,100,32,31,120,14,74,17,8,3,54,122,88,3,19,120,27,122,88,3,17,128,66,88,120,21,122,38,3,120,61,19,10"
+  },
+  {
+   "text": "Pi is about 3.14159 and e is 2.718.",
+   "punct": "Pi is about 3.14159 and e is 2.718.",
+   "segments": [
+    [
+     "Pi is about 3.14159 and e is 2.718.",
+     "en"
+    ]
+   ],
+   "norm": "Pi is about  three  point  fourteen thousand, one hundred fifty-nine  and e is  two  point  seven hundred eighteen .",
+   "tokens": "pˈaɪ ɪz ɐbˌaʊt θɹˈiː pˈɔɪnt fˈoːɹtiːn θˈaʊzənd, wˈʌn hˈʌndɹɪd fˈɪftinˈaɪn ænd ˈiː ɪz tˈuː pˈɔɪnt sˈɛvən hˈʌndɹɪd ˈeɪtiːn.",
+   "ntok": 121,
+   "ids": "28,120,14,74,3,74,38,3,50,15,121,14,100,32,3,126,88,120,21,122,3,28,120,54,74,26,32,3,19,120,27,122,88,32,21,122,26,3,126,120,14,100,38,59,26,17,8,3,35,120,102,26,3,20,120,102,26,17,88,74,17,3,19,120,74,19,32,21,26,120,14,74,26,3,39,26,17,3,120,21,122,3,74,38,3,32,120,33,122,3,28,120,54,74,26,32,3,31,120,61,34,59,26,3,20,120,102,26,17,88,74,17,3,120,18,74,32,21,122,26,10"
+  },
+  {
+   "text": "Mix 1/2 cup with 3/4 cup and 2/3 spoon.",
+   "punct": "Mix 1/2 cup with 3/4 cup and 2/3 spoon.",
+   "segments": [
+    [
+     "Mix 1/2 cup with 3/4 cup and 2/3 spoon.",
+     "en"
+    ]
+   ],
+   "norm": "Mix  one half  cup with  three quarters  cup and  two third  spoon.",
+   "tokens": "mˈɪks wˈʌn hˈæf kˈʌp wɪð θɹˈiː kwˈɔːɹɾɚz kˈʌp ænd tˈuː θˈɜːd spˈuːn.",
+   "ntok": 68,
+   "ids": "25,120,74,23,31,3,35,120,102,26,3,20,120,39,19,3,23,120,102,28,3,35,74,41,3,126,88,120,21,122,3,23,35,120,54,122,88,92,60,38,3,23,120,102,28,3,39,26,17,3,32,120,33,122,3,126,120,62,122,17,3,31,28,120,33,122,26,10"
+  },
+  {
+   "text": "Take 5/6 of it, or 3/2 of the rest, or 6/1.",
+   "punct": "Take 5/6 of it, or 3/2 of the rest, or 6/1.",
+   "segments": [
+    [
+     "Take 5/6 of it, or 3/2 of the rest, or 6/1.",
+     "en"
+    ]
+   ],
+   "norm": "Take  five sixth  of it, or  three halves  of the rest, or  six first .",
+   "tokens": "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ɔːɹ sˈɪks fˈɜːst.",
+   "ntok": 71,
+   "ids": "32,120,18,74,23,3,19,120,14,74,34,3,31,120,74,23,31,126,3,102,34,3,74,32,8,3,54,122,88,3,126,88,120,21,122,3,20,120,39,34,38,3,102,34,41,59,3,88,120,61,31,32,8,3,54,122,88,3,31,120,74,23,31,3,19,120,62,122,31,32,10"
+  },
+  {
+   "text": "She finished 1st, he was 22nd, and they were 103rd.",
+   "punct": "She finished 1st, he was 22nd, and they were 103rd.",
+   "segments": [
+    [
+     "She finished 1st, he was 22nd, and they were 103rd.",
+     "en"
+    ]
+   ],
+   "norm": "She finished  first , he was  twenty-second , and they were  one hundred and third .",
+   "tokens": "ʃiː fˈɪnɪʃt fˈɜːst, hiː wʌz twˈɛntisˈɛkənd, ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd.",
+   "ntok": 80,
+   "ids": "96,21,122,3,19,120,74,26,74,96,32,3,19,120,62,122,31,32,8,3,20,21,122,3,35,102,38,3,32,35,120,61,26,32,21,31,120,61,23,59,26,17,8,3,39,26,17,3,41,18,74,3,35,62,122,3,35,120,102,26,3,20,120,102,26,17,88,74,17,3,39,26,17,3,126,120,62,122,17,10"
+  },
+  {
+   "text": "Lists: 1. apples 2. pears 3. plums",
+   "punct": "Lists: 1. apples 2. pears 3. plums.",
+   "segments": [
+    [
+     "Lists: 1. apples 2. pears 3. plums.",
+     "en"
+    ]
+   ],
+   "norm": "Lists:  one . apples  two . pears  three . plums.",
+   "tokens": "lˈɪsts: wˈʌn dˈɑːt ˈæpəlz tˈuː dˈɑːt pˈɛɹz θɹˈiː dˈɑːt plˈʌmz.",
+   "ntok": 62,
+   "ids": "24,120,74,31,32,31,11,3,35,120,102,26,3,17,120,51,122,32,3,120,39,28,59,24,38,3,32,120,33,122,3,17,120,51,122,32,3,28,120,61,88,38,3,126,88,120,21,122,3,17,120,51,122,32,3,28,24,120,102,25,38,10"
+  },
+  {
+   "text": "The score was 3 - 2 and 5 + 5 = 10.",
+   "punct": "The score was 3 - 2 and 5 + 5 = 10.",
+   "segments": [
+    [
+     "The score was 3 - 2 and 5 + 5 = 10.",
+     "en"
+    ]
+   ],
+   "norm": "The score was  three  -  two  and  five  +  five  =  ten .",
+   "tokens": "ðə skˈoːɹ wʌz θɹˈiː tˈuː ænd fˈaɪv plˈʌs fˈaɪv ˈiːkwəlz tˈɛn.",
+   "ntok": 61,
+   "ids": "41,59,3,31,23,120,27,122,88,3,35,102,38,3,126,88,120,21,122,3,32,120,33,122,3,39,26,17,3,19,120,14,74,34,3,28,24,120,102,31,3,19,120,14,74,34,3,120,21,122,23,35,59,24,38,3,32,120,61,26,10"
+  },
+  {
+   "text": "Growth hit 45% this year, up from 7%.",
+   "punct": "Growth hit 45% this year, up from 7%.",
+   "segments": [
+    [
+     "Growth hit 45% this year, up from 7%.",
+     "en"
+    ]
+   ],
+   "norm": "Growth hit  forty-five  percent  this year, up from  seven  percent .",
+   "tokens": "ɡɹˈoʊθ hˈɪt fˈɔːɹɾifˈaɪv pɚsˈɛnt ðɪs jˈɪɹ, ˌʌp fɹʌm sˈɛvən pɚsˈɛnt.",
+   "ntok": 67,
+   "ids": "66,88,120,27,100,126,3,20,120,74,32,3,19,120,54,122,88,92,21,19,120,14,74,34,3,28,60,31,120,61,26,32,3,41,74,31,3,22,120,74,88,8,3,121,102,28,3,19,88,102,25,3,31,120,61,34,59,26,3,28,60,31,120,61,26,32,10"
+  },
+  {
+   "text": "Call 555 0199 or dial 911.",
+   "punct": "Call 555 0199 or dial 911.",
+   "segments": [
+    [
+     "Call 555 0199 or dial 911.",
+     "en"
+    ]
+   ],
+   "norm": "Call  five hundred fifty-five   one hundred ninety-nine  or dial  nine hundred eleven .",
+   "tokens": "kˈɔːl fˈaɪv hˈʌndɹɪd fˈɪftifˈaɪv wˈʌn hˈʌndɹɪd nˈaɪntinˈaɪn ɔːɹ dˈaɪəl nˈaɪn hˈʌndɹɪd ᵻlˈɛvən.",
+   "ntok": 94,
+   "ids": "23,120,54,122,24,3,19,120,14,74,34,3,20,120,102,26,17,88,74,17,3,19,120,74,19,32,21,19,120,14,74,34,3,35,120,102,26,3,20,120,102,26,17,88,74,17,3,26,120,14,74,26,32,21,26,120,14,74,26,3,54,122,88,3,17,120,14,74,59,24,3,26,120,14,74,26,3,20,120,102,26,17,88,74,17,3,128,24,120,61,34,59,26,10"
+  },
+  {
+   "text": "The 1990s were loud and the 80s were louder.",
+   "punct": "The 1990s were loud and the 80s were louder.",
+   "segments": [
+    [
+     "The 1990s were loud and the 80s were louder.",
+     "en"
+    ]
+   ],
+   "norm": "The  nineteen ninety s were loud and the  eighty s were louder.",
+   "tokens": "ðə nˈaɪntiːn nˈaɪnti ˈɛs wɜː lˈaʊd ænd ðɪ ˈeɪɾi ˈɛs wɜː lˈaʊdɚ.",
+   "ntok": 63,
+   "ids": "41,59,3,26,120,14,74,26,32,21,122,26,3,26,120,14,74,26,32,21,3,120,61,31,3,35,62,122,3,24,120,14,100,17,3,39,26,17,3,41,74,3,120,18,74,92,21,3,120,61,31,3,35,62,122,3,24,120,14,100,17,60,10"
+  },
+  {
+   "text": "Version 2.0 beats version 10.5 easily.",
+   "punct": "Version 2.0 beats version 10.5 easily.",
+   "segments": [
+    [
+     "Version 2.0 beats version 10.5 easily.",
+     "en"
+    ]
+   ],
+   "norm": "Version  two  point  zero  beats version  ten  point  five  easily.",
+   "tokens": "vˈɜːʒən tˈuː pˈɔɪnt zˈiəɹoʊ bˈiːts vˈɜːʒən tˈɛn pˈɔɪnt fˈaɪv ˈiːzili.",
+   "ntok": 69,
+   "ids": "34,120,62,122,108,59,26,3,32,120,33,122,3,28,120,54,74,26,32,3,38,120,21,59,88,27,100,3,15,120,21,122,32,31,3,34,120,62,122,108,59,26,3,32,120,61,26,3,28,120,54,74,26,32,3,19,120,14,74,34,3,120,21,122,38,21,24,21,10"
+  },
+  {
+   "text": "He scored 100 points in 48 minutes.",
+   "punct": "He scored 100 points in 48 minutes.",
+   "segments": [
+    [
+     "He scored 100 points in 48 minutes.",
+     "en"
+    ]
+   ],
+   "norm": "He scored  one hundred  points in  forty-eight  minutes.",
+   "tokens": "hiː skˈoːɹd wˈʌn hˈʌndɹɪd pˈɔɪnts ɪn fˈɔːɹɾiˈeɪt mˈɪnɪts.",
+   "ntok": 57,
+   "ids": "20,21,122,3,31,23,120,27,122,88,17,3,35,120,102,26,3,20,120,102,26,17,88,74,17,3,28,120,54,74,26,32,31,3,74,26,3,19,120,54,122,88,92,21,120,18,74,32,3,25,120,74,26,74,32,31,10"
+  },
+  {
+   "text": "The distance is 3,000,000 meters.",
+   "punct": "The distance is 3,000,000 meters.",
+   "segments": [
+    [
+     "The distance is 3,000,000 meters.",
+     "en"
+    ]
+   ],
+   "norm": "The distance is  three million  meters.",
+   "tokens": "ðə dˈɪstəns ɪz θɹˈiː mˈɪliən mˈiːɾɚz.",
+   "ntok": 37,
+   "ids": "41,59,3,17,120,74,31,32,59,26,31,3,74,38,3,126,88,120,21,122,3,25,120,74,24,21,59,26,3,25,120,21,122,92,60,38,10"
+  },
+  {
+   "text": "Room 404 is on floor 4.",
+   "punct": "Room 404 is on floor 4.",
+   "segments": [
+    [
+     "Room 404 is on floor 4.",
+     "en"
+    ]
+   ],
+   "norm": "Room  four hundred four  is on floor  four .",
+   "tokens": "ɹˈuːm fˈoːɹ hˈʌndɹɪd fˈoːɹ ɪz ˌɔn flˈoːɹ fˈoːɹ.",
+   "ntok": 47,
+   "ids": "88,120,33,122,25,3,19,120,27,122,88,3,20,120,102,26,17,88,74,17,3,19,120,27,122,88,3,74,38,3,121,54,26,3,19,24,120,27,122,88,3,19,120,27,122,88,10"
+  },
+  {
+   "text": "We need 7 tables for 45 guests at 6 pm.",
+   "punct": "We need 7 tables for 45 guests at 6 pm.",
+   "segments": [
+    [
+     "We need 7 tables for 45 guests at 6 pm.",
+     "en"
+    ]
+   ],
+   "norm": "We need  seven  tables for  forty-five  guests at  six  pm.",
+   "tokens": "wiː nˈiːd sˈɛvən tˈeɪbəlz fɔːɹ fˈɔːɹɾifˈaɪv ɡˈɛsts æt sˈɪks pˌiːˈɛm.",
+   "ntok": 68,
+   "ids": "35,21,122,3,26,120,21,122,17,3,31,120,61,34,59,26,3,32,120,18,74,15,59,24,38,3,19,54,122,88,3,19,120,54,122,88,92,21,19,120,14,74,34,3,66,120,61,31,32,31,3,39,32,3,31,120,74,23,31,3,28,121,21,122,120,61,25,10"
+  },
+  {
+   "text": "Dr. Smith met Mr. Jones and Mrs. Brown on St. James St.",
+   "punct": "Dr. Smith met Mr. Jones and Mrs. Brown on St. James St.",
+   "segments": [
+    [
+     "Dr. Smith met Mr. Jones and Mrs. Brown on St. James St.",
+     "en"
+    ]
+   ],
+   "norm": "doctor. Smith met mister. Jones and misess. Brown on saint. James saint.",
+   "tokens": "dˈɑːktɚ.smˈɪθ mˈɛt mˈɪstɚ.dʒˈoʊnz ænd mɪsˈɛs.bɹˈaʊn ˌɔn sˈeɪnt.dʒˈeɪmz sˈeɪnt.",
+   "ntok": 78,
+   "ids": "17,120,51,122,23,32,60,10,31,25,120,74,126,3,25,120,61,32,3,25,120,74,31,32,60,10,17,108,120,27,100,26,38,3,39,26,17,3,25,74,31,120,61,31,10,15,88,120,14,100,26,3,121,54,26,3,31,120,18,74,26,32,10,17,108,120,18,74,25,38,3,31,120,18,74,26,32,10"
+  },
+  {
+   "text": "The NASA and FBI agents spoke to the CEO of IBM.",
+   "punct": "The NASA and FBI agents spoke to the CEO of IBM.",
+   "segments": [
+    [
+     "The NASA and FBI agents spoke to the CEO of IBM.",
+     "en"
+    ]
+   ],
+   "norm": "The NASA and FBI agents spoke to the CEO of IBM.",
+   "tokens": "ðə nˈæsɐ ænd ˌɛfbˌiːˈaɪ ˈeɪdʒənts spˈoʊk tə ðə sˌiːˌiːˈoʊ ʌv ˌaɪbˌiːˈɛm.",
+   "ntok": 72,
+   "ids": "41,59,3,26,120,39,31,50,3,39,26,17,3,121,61,19,15,121,21,122,120,14,74,3,120,18,74,17,108,59,26,32,31,3,31,28,120,27,100,23,3,32,59,3,41,59,3,31,121,21,122,121,21,122,120,27,100,3,102,34,3,121,14,74,15,121,21,122,120,61,25,10"
+  },
+  {
+   "text": "I used an AI tool on my iOS device and my PC.",
+   "punct": "I used an AI tool on my iOS device and my PC.",
+   "segments": [
+    [
+     "I used an AI tool on my iOS device and my PC.",
+     "en"
+    ]
+   ],
+   "norm": "I used an AI tool on my iOS device and my PC.",
+   "tokens": "aɪ jˈuːzd ɐn ˌeɪˈaɪ tˈuːl ˌɔn maɪ ˈaɪ ˌoʊˈɛs dɪvˈaɪs ænd maɪ pˌiːsˈiː.",
+   "ntok": 70,
+   "ids": "14,74,3,22,120,33,122,38,17,3,50,26,3,121,18,74,120,14,74,3,32,120,33,122,24,3,121,54,26,3,25,14,74,3,120,14,74,3,121,27,100,120,61,31,3,17,74,34,120,14,74,31,3,39,26,17,3,25,14,74,3,28,121,21,122,31,120,21,122,10"
+  },
+  {
+   "text": "The USA, the UK, and the EU signed the deal.",
+   "punct": "The USA, the UK, and the EU signed the deal.",
+   "segments": [
+    [
+     "The USA, the UK, and the EU signed the deal.",
+     "en"
+    ]
+   ],
+   "norm": "The USA, the UK, and the EU signed the deal.",
+   "tokens": "ðə jˌuːˌɛsˈeɪ, ðə jˌuːkˈeɪ, ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl.",
+   "ntok": 59,
+   "ids": "41,59,3,22,121,33,122,121,61,31,120,18,74,8,3,41,59,3,22,121,33,122,23,120,18,74,8,3,39,26,17,3,41,74,3,121,21,122,22,120,33,122,3,31,120,14,74,26,17,3,41,59,3,17,120,21,122,24,10"
+  },
+  {
+   "text": "e.g. this one, i.e. that one.",
+   "punct": "e.g. this one, i.e. that one.",
+   "segments": [
+    [
+     "e.g. this one, i.e. that one.",
+     "en"
+    ]
+   ],
+   "norm": "e.g. this one, i.e. that one.",
+   "tokens": "fˌɔːɹɛɡzˈæmpəl ðˈɪswˌʌn, ˌaɪˈiː ðˈætwˌʌn.",
+   "ntok": 41,
+   "ids": "19,121,54,122,88,61,66,38,120,39,25,28,59,24,3,41,120,74,31,35,121,102,26,8,3,121,14,74,120,21,122,3,41,120,39,32,35,121,102,26,10"
+  },
+  {
+   "text": "Use JSON with conda and ChatGPT.",
+   "punct": "Use JSON with conda and ChatGPT.",
+   "segments": [
+    [
+     "Use JSON with conda and ChatGPT.",
+     "en"
+    ]
+   ],
+   "norm": "Use JSON with conda and ChatGPT.",
+   "tokens": "jˈuːs dʒˈeɪsˈɑːn wɪð kˈɑːndə ænd tʃˈæt dʒˌiːpˌiːtˈiː.",
+   "ntok": 53,
+   "ids": "22,120,33,122,31,3,17,108,120,18,74,31,120,51,122,26,3,35,74,41,3,23,120,51,122,26,17,59,3,39,26,17,3,32,96,120,39,32,3,17,108,121,21,122,28,121,21,122,32,120,21,122,10"
+  },
+  {
+   "text": "McDonald's and iPhone and YouTube are brands.",
+   "punct": "McDonald's and iPhone and YouTube are brands.",
+   "segments": [
+    [
+     "McDonald's and iPhone and YouTube are brands.",
+     "en"
+    ]
+   ],
+   "norm": "McDonald's and iPhone and YouTube are brands.",
+   "tokens": "mək dˈɑːnəldz ænd ˈaɪ fˈoʊn ænd juː tˈuːb ɑːɹ bɹˈændz.",
+   "ntok": 54,
+   "ids": "25,59,23,3,17,120,51,122,26,59,24,17,38,3,39,26,17,3,120,14,74,3,19,120,27,100,26,3,39,26,17,3,22,33,122,3,32,120,33,122,15,3,51,122,88,3,15,88,120,39,26,17,38,10"
+  },
+  {
+   "text": "OK, the ASAP request came from HR via email.",
+   "punct": "OK, the ASAP request came from HR via email.",
+   "segments": [
+    [
+     "OK, the ASAP request came from HR via email.",
+     "en"
+    ]
+   ],
+   "norm": "OK, the ASAP request came from HR via email.",
+   "tokens": "ˌoʊkˈeɪ, ðɪ ˌeɪˌɛsˌeɪpˈiː ɹᵻkwˈɛst kˈeɪm fɹʌm ˌeɪtʃˈɑːɹ vˈaɪəɹ ˈiːmeɪl.",
+   "ntok": 71,
+   "ids": "121,27,100,23,120,18,74,8,3,41,74,3,121,18,74,121,61,31,121,18,74,28,120,21,122,3,88,128,23,35,120,61,31,32,3,23,120,18,74,25,3,19,88,102,25,3,121,18,74,32,96,120,51,122,88,3,34,120,14,74,59,88,3,120,21,122,25,18,74,24,10"
+  },
+  {
+   "text": "A is the first letter and a is an article.",
+   "punct": "A is the first letter and a is an article.",
+   "segments": [
+    [
+     "A is the first letter and a is an article.",
+     "en"
+    ]
+   ],
+   "norm": "A is the first letter and a is an article.",
+   "tokens": "ɐ ɪz ðə fˈɜːst lˈɛɾɚ ænd ɐ ɪz ɐn ˈɑːɹɾɪkəl.",
+   "ntok": 43,
+   "ids": "50,3,74,38,3,41,59,3,19,120,62,122,31,32,3,24,120,61,92,60,3,39,26,17,3,50,3,74,38,3,50,26,3,120,51,122,88,92,74,23,59,24,10"
+  },
+  {
+   "text": "I am here, and I said A, B, and C.",
+   "punct": "I am here, and I said A, B, and C.",
+   "segments": [
+    [
+     "I am here, and I said A, B, and C.",
+     "en"
+    ]
+   ],
+   "norm": "I am here, and I said A, B, and C.",
+   "tokens": "aɪɐm hˈɪɹ, ænd aɪ sˈɛd ˈeɪ, bˈiː, ænd sˈiː.",
+   "ntok": 43,
+   "ids": "14,74,50,25,3,20,120,74,88,8,3,39,26,17,3,14,74,3,31,120,61,17,3,120,18,74,8,3,15,120,21,122,8,3,39,26,17,3,31,120,21,122,10"
+  },
+  {
+   "text": "The TV and the DVD were in the den.",
+   "punct": "The TV and the DVD were in the den.",
+   "segments": [
+    [
+     "The TV and the DVD were in the den.",
+     "en"
+    ]
+   ],
+   "norm": "The TV and the DVD were in the den.",
+   "tokens": "ðə tˌiːvˈiː ænd ðə dˌiːvˌiːdˈiː wɜːɹ ɪnðə dˈɛn.",
+   "ntok": 47,
+   "ids": "41,59,3,32,121,21,122,34,120,21,122,3,39,26,17,3,41,59,3,17,121,21,122,34,121,21,122,17,120,21,122,3,35,62,122,88,3,74,26,41,59,3,17,120,61,26,10"
+  },
+  {
+   "text": "I don't think you're right, but we'll see.",
+   "punct": "I don't think you're right, but we'll see.",
+   "segments": [
+    [
+     "I don't think you're right, but we'll see.",
+     "en"
+    ]
+   ],
+   "norm": "I don't think you're right, but we'll see.",
+   "tokens": "aɪ dˈoʊnt θˈɪŋk jʊɹ ɹˈaɪt, bˌʌt wiːl sˈiː.",
+   "ntok": 42,
+   "ids": "14,74,3,17,120,27,100,26,32,3,126,120,74,44,23,3,22,100,88,3,88,120,14,74,32,8,3,15,121,102,32,3,35,21,122,24,3,31,120,21,122,10"
+  },
+  {
+   "text": "She can't go because they've already left.",
+   "punct": "She can't go because they've already left.",
+   "segments": [
+    [
+     "She can't go because they've already left.",
+     "en"
+    ]
+   ],
+   "norm": "She can't go because they've already left.",
+   "tokens": "ʃiː kˈænt ɡˌoʊ bɪkˈʌz ðeɪv ɔːlɹˌɛdi lˈɛft.",
+   "ntok": 42,
+   "ids": "96,21,122,3,23,120,39,26,32,3,66,121,27,100,3,15,74,23,120,102,38,3,41,18,74,34,3,54,122,24,88,121,61,17,21,3,24,120,61,19,32,10"
+  },
+  {
+   "text": "It's the dog's bone and the boss's chair.",
+   "punct": "It's the dog's bone and the boss's chair.",
+   "segments": [
+    [
+     "It's the dog's bone and the boss's chair.",
+     "en"
+    ]
+   ],
+   "norm": "It's the dog's bone and the boss's chair.",
+   "tokens": "ɪts ðə dˈɑːɡz bˈoʊn ænd ðə bˈɔsᵻz tʃˈɛɹ.",
+   "ntok": 40,
+   "ids": "74,32,31,3,41,59,3,17,120,51,122,66,38,3,15,120,27,100,26,3,39,26,17,3,41,59,3,15,120,54,31,128,38,3,32,96,120,61,88,10"
+  },
+  {
+   "text": "The church's bell and the judge's ruling.",
+   "punct": "The church's bell and the judge's ruling.",
+   "segments": [
+    [
+     "The church's bell and the judge's ruling.",
+     "en"
+    ]
+   ],
+   "norm": "The church's bell and the judge's ruling.",
+   "tokens": "ðə tʃˈɜːtʃɪz bˈɛl ænd ðə dʒˈʌdʒᵻz ɹˈuːlɪŋ.",
+   "ntok": 42,
+   "ids": "41,59,3,32,96,120,62,122,32,96,74,38,3,15,120,61,24,3,39,26,17,3,41,59,3,17,108,120,102,17,108,128,38,3,88,120,33,122,24,74,44,10"
+  },
+  {
+   "text": "Chris's car and James's house and the cat's toy.",
+   "punct": "Chris's car and James's house and the cat's toy.",
+   "segments": [
+    [
+     "Chris's car and James's house and the cat's toy.",
+     "en"
+    ]
+   ],
+   "norm": "Chris's car and James's house and the cat's toy.",
+   "tokens": "kɹˈɪsᵻz kˈɑːɹ ænd dʒˈeɪmzᵻz hˈaʊs ænd ðə kˈæts tˈɔɪ.",
+   "ntok": 52,
+   "ids": "23,88,120,74,31,128,38,3,23,120,51,122,88,3,39,26,17,3,17,108,120,18,74,25,38,128,38,3,20,120,14,100,31,3,39,26,17,3,41,59,3,23,120,39,32,31,3,32,120,54,74,10"
+  },
+  {
+   "text": "Let's go, y'all, it's o'clock time.",
+   "punct": "Let's go, y'all, it's o'clock time.",
+   "segments": [
+    [
+     "Let's go, y'all, it's o'clock time.",
+     "en"
+    ]
+   ],
+   "norm": "Let's go, y'all, it's o'clock time.",
+   "tokens": "lˈɛts ɡˈoʊ, jˈɔːl, ɪts əklˈɑːk tˈaɪm.",
+   "ntok": 37,
+   "ids": "24,120,61,32,31,3,66,120,27,100,8,3,22,120,54,122,24,8,3,74,32,31,3,59,23,24,120,51,122,23,3,32,120,14,74,25,10"
+  },
+  {
+   "text": "The kids' toys and the students' books.",
+   "punct": "The kids' toys and the students' books.",
+   "segments": [
+    [
+     "The kids' toys and the students' books.",
+     "en"
+    ]
+   ],
+   "norm": "The kids' toys and the students' books.",
+   "tokens": "ðə kˈɪdz tˈɔɪz ænd ðə stˈuːdənts bˈʊks.",
+   "ntok": 39,
+   "ids": "41,59,3,23,120,74,17,38,3,32,120,54,74,38,3,39,26,17,3,41,59,3,31,32,120,33,122,17,59,26,32,31,3,15,120,100,23,31,10"
+  },
+  {
+   "text": "Microsoft's revenue and Zelenskyy's speech.",
+   "punct": "Microsoft's revenue and Zelenskyy's speech.",
+   "segments": [
+    [
+     "Microsoft's revenue and Zelenskyy's speech.",
+     "en"
+    ]
+   ],
+   "norm": "Microsoft's revenue and Zelenskyy's speech.",
+   "tokens": "mˈaɪkɹəsˌɑːfts ɹˈɛvənˌuː ænd zˈɛlənskɪiz spˈiːtʃ.",
+   "ntok": 49,
+   "ids": "25,120,14,74,23,88,59,31,121,51,122,19,32,31,3,88,120,61,34,59,26,121,33,122,3,39,26,17,3,38,120,61,24,59,26,31,23,74,21,38,3,31,28,120,21,122,32,96,10"
+  },
+  {
+   "text": "I read the book yesterday and I will read it again.",
+   "punct": "I read the book yesterday and I will read it again.",
+   "segments": [
+    [
+     "I read the book yesterday and I will read it again.",
+     "en"
+    ]
+   ],
+   "norm": "I read the book yesterday and I will read it again.",
+   "tokens": "aɪ ɹˈiːd ðə bˈʊk jˈɛstɚdˌeɪ ænd aɪ wɪl ɹˈiːd ɪɾ ɐɡˈɛn.",
+   "ntok": 54,
+   "ids": "14,74,3,88,120,21,122,17,3,41,59,3,15,120,100,23,3,22,120,61,31,32,60,17,121,18,74,3,39,26,17,3,14,74,3,35,74,24,3,88,120,21,122,17,3,74,92,3,50,66,120,61,26,10"
+  },
+  {
+   "text": "Please record the record for me.",
+   "punct": "Please record the record for me.",
+   "segments": [
+    [
+     "Please record the record for me.",
+     "en"
+    ]
+   ],
+   "norm": "Please record the record for me.",
+   "tokens": "plˈiːz ɹˈɛkɚd ðə ɹˈɛkɚd fɔːɹ mˌiː.",
+   "ntok": 34,
+   "ids": "28,24,120,21,122,38,3,88,120,61,23,60,17,3,41,59,3,88,120,61,23,60,17,3,19,54,122,88,3,25,121,21,122,10"
+  },
+  {
+   "text": "We live here, and the show is live.",
+   "punct": "We live here, and the show is live.",
+   "segments": [
+    [
+     "We live here, and the show is live.",
+     "en"
+    ]
+   ],
+   "norm": "We live here, and the show is live.",
+   "tokens": "wiː lˈɪv hˈɪɹ, ænd ðə ʃˈoʊ ɪz lˈaɪv.",
+   "ntok": 36,
+   "ids": "35,21,122,3,24,120,74,34,3,20,120,74,88,8,3,39,26,17,3,41,59,3,96,120,27,100,3,74,38,3,24,120,14,74,34,10"
+  },
+  {
+   "text": "Lead the team to the lead mine.",
+   "punct": "Lead the team to the lead mine.",
+   "segments": [
+    [
+     "Lead the team to the lead mine.",
+     "en"
+    ]
+   ],
+   "norm": "Lead the team to the lead mine.",
+   "tokens": "lˈiːd ðə tˈiːm tə ðə lˈiːd mˈaɪn.",
+   "ntok": 33,
+   "ids": "24,120,21,122,17,3,41,59,3,32,120,21,122,25,3,32,59,3,41,59,3,24,120,21,122,17,3,25,120,14,74,26,10"
+  },
+  {
+   "text": "Close the door, the store is close.",
+   "punct": "Close the door, the store is close.",
+   "segments": [
+    [
+     "Close the door, the store is close.",
+     "en"
+    ]
+   ],
+   "norm": "Close the door, the store is close.",
+   "tokens": "klˈoʊs ðə dˈoːɹ, ðə stˈoːɹ ɪz klˈoʊs.",
+   "ntok": 37,
+   "ids": "23,24,120,27,100,31,3,41,59,3,17,120,27,122,88,8,3,41,59,3,31,32,120,27,122,88,3,74,38,3,23,24,120,27,100,31,10"
+  },
+  {
+   "text": "I refuse to collect the refuse around here.",
+   "punct": "I refuse to collect the refuse around here.",
+   "segments": [
+    [
+     "I refuse to collect the refuse around here.",
+     "en"
+    ]
+   ],
+   "norm": "I refuse to collect the refuse around here.",
+   "tokens": "aɪ ɹᵻfjˈuːz tə kəlˈɛkt ðə ɹˈɛfjuːs ɚɹˈaʊnd hˈɪɹ.",
+   "ntok": 48,
+   "ids": "14,74,3,88,128,19,22,120,33,122,38,3,32,59,3,23,59,24,120,61,23,32,3,41,59,3,88,120,61,19,22,33,122,31,3,60,88,120,14,100,26,17,3,20,120,74,88,10"
+  },
+  {
+   "text": "The wind will wind the clock.",
+   "punct": "The wind will wind the clock.",
+   "segments": [
+    [
+     "The wind will wind the clock.",
+     "en"
+    ]
+   ],
+   "norm": "The wind will wind the clock.",
+   "tokens": "ðə wˈɪnd wɪl wˈaɪnd ðə klˈɑːk.",
+   "ntok": 30,
+   "ids": "41,59,3,35,120,74,26,17,3,35,74,24,3,35,120,14,74,26,17,3,41,59,3,23,24,120,51,122,23,10"
+  },
+  {
+   "text": "Present the present to the president.",
+   "punct": "Present the present to the president.",
+   "segments": [
+    [
+     "Present the present to the president.",
+     "en"
+    ]
+   ],
+   "norm": "Present the present to the president.",
+   "tokens": "pɹˈɛzənt ðə pɹˈɛzənt tə ðə pɹˈɛzɪdənt.",
+   "ntok": 38,
+   "ids": "28,88,120,61,38,59,26,32,3,41,59,3,28,88,120,61,38,59,26,32,3,32,59,3,41,59,3,28,88,120,61,38,74,17,59,26,32,10"
+  },
+  {
+   "text": "Does he like the does in the forest?",
+   "punct": "Does he like the does in the forest?",
+   "segments": [
+    [
+     "Does he like the does in the forest?",
+     "en"
+    ]
+   ],
+   "norm": "Does he like the does in the forest?",
+   "tokens": "dˈʌz hiː lˈaɪk ðə dˈʌz ɪnðə fˈɔːɹɪst?",
+   "ntok": 37,
+   "ids": "17,120,102,38,3,20,21,122,3,24,120,14,74,23,3,41,59,3,17,120,102,38,3,74,26,41,59,3,19,120,54,122,88,74,31,32,13"
+  },
+  {
+   "text": "The bass player caught a bass.",
+   "punct": "The bass player caught a bass.",
+   "segments": [
+    [
+     "The bass player caught a bass.",
+     "en"
+    ]
+   ],
+   "norm": "The bass player caught a bass.",
+   "tokens": "ðə bˈeɪs plˈeɪɚ kˈɔːt ɐ bˈeɪs.",
+   "ntok": 30,
+   "ids": "41,59,3,15,120,18,74,31,3,28,24,120,18,74,60,3,23,120,54,122,32,3,50,3,15,120,18,74,31,10"
+  },
+  {
+   "text": "This is a complex problem in a complex.",
+   "punct": "This is a complex problem in a complex.",
+   "segments": [
+    [
+     "This is a complex problem in a complex.",
+     "en"
+    ]
+   ],
+   "norm": "This is a complex problem in a complex.",
+   "tokens": "ðɪs ɪz ɐ kˈɑːmplɛks pɹˈɑːbləm ɪn ɐ kˈɑːmplɛks.",
+   "ntok": 46,
+   "ids": "41,74,31,3,74,38,3,50,3,23,120,51,122,25,28,24,61,23,31,3,28,88,120,51,122,15,24,59,25,3,74,26,3,50,3,23,120,51,122,25,28,24,61,23,31,10"
+  },
+  {
+   "text": "Use the tool; the use is clear.",
+   "punct": "Use the tool; the use is clear.",
+   "segments": [
+    [
+     "Use the tool; the use is clear.",
+     "en"
+    ]
+   ],
+   "norm": "Use the tool; the use is clear.",
+   "tokens": "jˈuːs ðə tˈuːl; ðə jˈuːs ɪz klˈɪɹ.",
+   "ntok": 34,
+   "ids": "22,120,33,122,31,3,41,59,3,32,120,33,122,24,12,3,41,59,3,22,120,33,122,31,3,74,38,3,23,24,120,74,88,10"
+  },
+  {
+   "text": "They object to the object.",
+   "punct": "They object to the object.",
+   "segments": [
+    [
+     "They object to the object.",
+     "en"
+    ]
+   ],
+   "norm": "They object to the object.",
+   "tokens": "ðeɪ ɑːbdʒˈɛkt tə ðɪ ˈɑːbdʒɛkt.",
+   "ntok": 30,
+   "ids": "41,18,74,3,51,122,15,17,108,120,61,23,32,3,32,59,3,41,74,3,120,51,122,15,17,108,61,23,32,10"
+  },
+  {
+   "text": "He wound the wound with a bandage.",
+   "punct": "He wound the wound with a bandage.",
+   "segments": [
+    [
+     "He wound the wound with a bandage.",
+     "en"
+    ]
+   ],
+   "norm": "He wound the wound with a bandage.",
+   "tokens": "hiː wˈuːnd ðə wˈuːnd wɪð ɐ bˈændɪdʒ.",
+   "ntok": 36,
+   "ids": "20,21,122,3,35,120,33,122,26,17,3,41,59,3,35,120,33,122,26,17,3,35,74,41,3,50,3,15,120,39,26,17,74,17,108,10"
+  },
+  {
+   "text": "I will permit you to get a permit.",
+   "punct": "I will permit you to get a permit.",
+   "segments": [
+    [
+     "I will permit you to get a permit.",
+     "en"
+    ]
+   ],
+   "norm": "I will permit you to get a permit.",
+   "tokens": "aɪ wɪl pɚmˈɪt juː tə ɡɛt ɐ pˈɜːmɪt.",
+   "ntok": 35,
+   "ids": "14,74,3,35,74,24,3,28,60,25,120,74,32,3,22,33,122,3,32,59,3,66,61,32,3,50,3,28,120,62,122,25,74,32,10"
+  },
+  {
+   "text": "The flibbertigibbet quizzed the zorblax.",
+   "punct": "The flibbertigibbet quizzed the zorblax.",
+   "segments": [
+    [
+     "The flibbertigibbet quizzed the zorblax.",
+     "en"
+    ]
+   ],
+   "norm": "The flibbertigibbet quizzed the zorblax.",
+   "tokens": "ðə flˈɪbɚtˌɪdʒəbbɪt kwˈɪzd ðə zˈoːɹblæks.",
+   "ntok": 41,
+   "ids": "41,59,3,19,24,120,74,15,60,32,121,74,17,108,59,15,15,74,32,3,23,35,120,74,38,17,3,41,59,3,38,120,27,122,88,15,24,39,23,31,10"
+  },
+  {
+   "text": "Supercalifragilisticexpialidocious is long.",
+   "punct": "Supercalifragilisticexpialidocious is long.",
+   "segments": [
+    [
+     "Supercalifragilisticexpialidocious is long.",
+     "en"
+    ]
+   ],
+   "norm": "Supercalifragilisticexpialidocious is long.",
+   "tokens": "sˌuːpɚkˌælɪfɹˌædʒɪlˌɪstaɪskspˌɪɐlɪdˈoʊʃəs ɪz lˈɔŋ.",
+   "ntok": 50,
+   "ids": "31,121,33,122,28,60,23,121,39,24,74,19,88,121,39,17,108,74,24,121,74,31,32,14,74,31,23,31,28,121,74,50,24,74,17,120,27,100,96,59,31,3,74,38,3,24,120,54,44,10"
+  },
+  {
+   "text": "Kubernetes and Tensorflow run on Nvidia hardware.",
+   "punct": "Kubernetes and Tensorflow run on Nvidia hardware.",
+   "segments": [
+    [
+     "Kubernetes and Tensorflow run on Nvidia hardware.",
+     "en"
+    ]
+   ],
+   "norm": "Kubernetes and Tensorflow run on Nvidia hardware.",
+   "tokens": "kˌuːbɚnˈɛɾiːz ænd tˈɛnsoːɹflˌoʊ ɹˈʌn ˌɔn ˈɛnvˈɪdiə hˈɑːɹdwɛɹ.",
+   "ntok": 61,
+   "ids": "23,121,33,122,15,60,26,120,61,92,21,122,38,3,39,26,17,3,32,120,61,26,31,27,122,88,19,24,121,27,100,3,88,120,102,26,3,121,54,26,3,120,61,26,34,120,74,17,21,59,3,20,120,51,122,88,17,35,61,88,10"
+  },
+  {
+   "text": "The xylophonist played arpeggios.",
+   "punct": "The xylophonist played arpeggios.",
+   "segments": [
+    [
+     "The xylophonist played arpeggios.",
+     "en"
+    ]
+   ],
+   "norm": "The xylophonist played arpeggios.",
+   "tokens": "ðə zaɪlˈɑːfənˌɪst plˈeɪd ɑːɹpˈɛɡɪˌoʊz.",
+   "ntok": 38,
+   "ids": "41,59,3,38,14,74,24,120,51,122,19,59,26,121,74,31,32,3,28,24,120,18,74,17,3,51,122,88,28,120,61,66,74,121,27,100,38,10"
+  },
+  {
+   "text": "Grzegorz and Siobhan visited Reykjavik.",
+   "punct": "Grzegorz and Siobhan visited Reykjavik.",
+   "segments": [
+    [
+     "Grzegorz and Siobhan visited Reykjavik.",
+     "en"
+    ]
+   ],
+   "norm": "Grzegorz and Siobhan visited Reykjavik.",
+   "tokens": "dʒˌiːˈɑːɹzˈɛɡoːɹz ænd ʃɪvˈɔːn vˈɪzɪɾᵻd ɹˈeɪkdʒɐvˌɪk.",
+   "ntok": 52,
+   "ids": "17,108,121,21,122,120,51,122,88,38,120,61,66,27,122,88,38,3,39,26,17,3,96,74,34,120,54,122,26,3,34,120,74,38,74,92,128,17,3,88,120,18,74,23,17,108,50,34,121,74,23,10"
+  },
+  {
+   "text": "We bought a smartwatch and a dashcam.",
+   "punct": "We bought a smartwatch and a dashcam.",
+   "segments": [
+    [
+     "We bought a smartwatch and a dashcam.",
+     "en"
+    ]
+   ],
+   "norm": "We bought a smartwatch and a dashcam.",
+   "tokens": "wiː bˈɔːt ɐ smˈɑːɹtwɑːtʃ ænd ɐ dˈæʃkæm.",
+   "ntok": 39,
+   "ids": "35,21,122,3,15,120,54,122,32,3,50,3,31,25,120,51,122,88,32,35,51,122,32,96,3,39,26,17,3,50,3,17,120,39,96,23,39,25,10"
+  },
+  {
+   "text": "Blorptastic snazzlefrump wibblewobble.",
+   "punct": "Blorptastic snazzlefrump wibblewobble.",
+   "segments": [
+    [
+     "Blorptastic snazzlefrump wibblewobble.",
+     "en"
+    ]
+   ],
+   "norm": "Blorptastic snazzlefrump wibblewobble.",
+   "tokens": "bloːɹptˈeɪstɪk snˈæzəlfɹˌʌmp wˈɪbəlwˌɑːbəl.",
+   "ntok": 43,
+   "ids": "15,24,27,122,88,28,32,120,18,74,31,32,74,23,3,31,26,120,39,38,59,24,19,88,121,102,25,28,3,35,120,74,15,59,24,35,121,51,122,15,59,24,10"
+  },
+  {
+   "text": "Her name is Anneliese and his is Thaddeus.",
+   "punct": "Her name is Anneliese and his is Thaddeus.",
+   "segments": [
+    [
+     "Her name is Anneliese and his is Thaddeus.",
+     "en"
+    ]
+   ],
+   "norm": "Her name is Anneliese and his is Thaddeus.",
+   "tokens": "hɜː nˈeɪm ɪz ˈænɪlˌɪs ænd hɪz ɪz θˈædɪəs.",
+   "ntok": 41,
+   "ids": "20,62,122,3,26,120,18,74,25,3,74,38,3,120,39,26,74,24,121,74,31,3,39,26,17,3,20,74,38,3,74,38,3,126,120,39,17,74,59,31,10"
+  },
+  {
+   "text": "This is a state-of-the-art, well-known, up-to-date tool.",
+   "punct": "This is a state-of-the-art, well-known, up-to-date tool.",
+   "segments": [
+    [
+     "This is a state-of-the-art, well-known, up-to-date tool.",
+     "en"
+    ]
+   ],
+   "norm": "This is a state-of-the-art, well-known, up-to-date tool.",
+   "tokens": "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, wˈɛlnˈoʊn, ˌʌptədˈeɪt tˈuːl.",
+   "ntok": 54,
+   "ids": "41,74,31,3,74,38,3,50,3,31,32,120,18,74,92,102,34,41,74,120,51,122,88,32,8,3,35,120,61,24,26,120,27,100,26,8,3,121,102,28,32,59,17,120,18,74,32,3,32,120,33,122,24,10"
+  },
+  {
+   "text": "My mother-in-law has a twenty-one-year-old cat.",
+   "punct": "My mother-in-law has a twenty-one-year-old cat.",
+   "segments": [
+    [
+     "My mother-in-law has a twenty-one-year-old cat.",
+     "en"
+    ]
+   ],
+   "norm": "My mother-in-law has a twenty-one-year-old cat.",
+   "tokens": "maɪ mˈʌðɚɹɪnlˈɔː hɐz ɐ twˈɛntiwˈʌnjˈɪɹˈoʊld kˈæt.",
+   "ntok": 49,
+   "ids": "25,14,74,3,25,120,102,41,60,88,74,26,24,120,54,122,3,20,50,38,3,50,3,32,35,120,61,26,32,21,35,120,102,26,22,120,74,88,120,27,100,24,17,3,23,120,39,32,10"
+  },
+  {
+   "text": "It was a long-term, high-quality, cost-effective plan.",
+   "punct": "It was a long-term, high-quality, cost-effective plan.",
+   "segments": [
+    [
+     "It was a long-term, high-quality, cost-effective plan.",
+     "en"
+    ]
+   ],
+   "norm": "It was a long-term, high-quality, cost-effective plan.",
+   "tokens": "ɪt wʌzɐ lˈɔŋtˈɜːm, hˈaɪkwˈɔlᵻɾi, kˈɔstɪfˈɛktɪv plˈæn.",
+   "ntok": 53,
+   "ids": "74,32,3,35,102,38,50,3,24,120,54,44,32,120,62,122,25,8,3,20,120,14,74,23,35,120,54,24,128,92,21,8,3,23,120,54,31,32,74,19,120,61,23,32,74,34,3,28,24,120,39,26,10"
+  },
+  {
+   "text": "The e-mail was re-sent by the co-op.",
+   "punct": "The e-mail was re-sent by the co-op.",
+   "segments": [
+    [
+     "The e-mail was re-sent by the co-op.",
+     "en"
+    ]
+   ],
+   "norm": "The e-mail was re-sent by the company-op.",
+   "tokens": "ðɪ ˈiːmˈeɪl wʌz ɹˌiːsˈɛnt baɪ ðə kˈʌmpəniˈɑːp.",
+   "ntok": 46,
+   "ids": "41,74,3,120,21,122,25,120,18,74,24,3,35,102,38,3,88,121,21,122,31,120,61,26,32,3,15,14,74,3,41,59,3,23,120,102,25,28,59,26,21,120,51,122,28,10"
+  },
+  {
+   "text": "A self-driving car took the x-ray.",
+   "punct": "A self-driving car took the x-ray.",
+   "segments": [
+    [
+     "A self-driving car took the x-ray.",
+     "en"
+    ]
+   ],
+   "norm": "A self-driving car took the x-ray.",
+   "tokens": "ɐ sˈɛlfdɹˈaɪvɪŋ kˈɑːɹ tˈʊk ðɪ ˈɛksɹˈeɪ.",
+   "ntok": 39,
+   "ids": "50,3,31,120,61,24,19,17,88,120,14,74,34,74,44,3,23,120,51,122,88,3,32,120,100,23,3,41,74,3,120,61,23,31,88,120,18,74,10"
+  },
+  {
+   "text": "Hello!!! Is anyone there???",
+   "punct": "Hello!!! Is anyone there???",
+   "segments": [
+    [
+     "Hello!!! Is anyone there???",
+     "en"
+    ]
+   ],
+   "norm": "Hello!!! Is anyone there???",
+   "tokens": "həlˈoʊ!ɪz ˈɛnɪwˌʌn ðˈɛɹ?",
+   "ntok": 24,
+   "ids": "20,59,24,120,27,100,4,74,38,3,120,61,26,74,35,121,102,26,3,41,120,61,88,13"
+  },
+  {
+   "text": "What?! Really?! No way!!",
+   "punct": "What?! Really?! No way!!",
+   "segments": [
+    [
+     "What?! Really?! No way!!",
+     "en"
+    ]
+   ],
+   "norm": "What?! Really?! No way!!",
+   "tokens": "wˌʌt?ɹˈiəli?nˈoʊ wˈeɪ!",
+   "ntok": 22,
+   "ids": "35,121,102,32,13,88,120,21,59,24,21,13,26,120,27,100,3,35,120,18,74,4"
+  },
+  {
+   "text": "Well... I guess... maybe.",
+   "punct": "Well... I guess... maybe.",
+   "segments": [
+    [
+     "Well… I guess… maybe.",
+     "en"
+    ]
+   ],
+   "norm": "Well… I guess… maybe.",
+   "tokens": "wˈɛlaɪ ɡˈɛsmˈeɪbiː.",
+   "ntok": 19,
+   "ids": "35,120,61,24,14,74,3,66,120,61,31,25,120,18,74,15,21,122,10"
+  },
+  {
+   "text": "Stop -- please -- stop.",
+   "punct": "Stop -- please -- stop.",
+   "segments": [
+    [
+     "Stop -- please -- stop.",
+     "en"
+    ]
+   ],
+   "norm": "Stop -- please -- stop.",
+   "tokens": "stˈɑːp plˈiːz stˈɑːp.",
+   "ntok": 21,
+   "ids": "31,32,120,51,122,28,3,28,24,120,21,122,38,3,31,32,120,51,122,28,10"
+  },
+  {
+   "text": "He said, \"Go home.\"",
+   "punct": "He said, \"Go home.\".",
+   "segments": [
+    [
+     "He said, \"Go home.\".",
+     "en"
+    ]
+   ],
+   "norm": "He said, \"Go home.\".",
+   "tokens": "hiː sˈɛd, ɡˌoʊ hˈoʊm.",
+   "ntok": 21,
+   "ids": "20,21,122,3,31,120,61,17,8,3,66,121,27,100,3,20,120,27,100,25,10"
+  },
+  {
+   "text": "She whispered: 'leave now'.",
+   "punct": "She whispered: 'leave now'.",
+   "segments": [
+    [
+     "She whispered: 'leave now'.",
+     "en"
+    ]
+   ],
+   "norm": "She whispered: 'leave now'.",
+   "tokens": "ʃiː wˈɪspɚd: lˈiːv nˈaʊ.",
+   "ntok": 24,
+   "ids": "96,21,122,3,35,120,74,31,28,60,17,11,3,24,120,21,122,34,3,26,120,14,100,10"
+  },
+  {
+   "text": "Items: one; two; three.",
+   "punct": "Items: one; two; three.",
+   "segments": [
+    [
+     "Items: one; two; three.",
+     "en"
+    ]
+   ],
+   "norm": "Items: one; two; three.",
+   "tokens": "ˈaɪɾəmz: wˌʌn; tˈuː; θɹˈiː.",
+   "ntok": 27,
+   "ids": "120,14,74,92,59,25,38,11,3,35,121,102,26,12,3,32,120,33,122,12,3,126,88,120,21,122,10"
+  },
+  {
+   "text": "(Parenthetical remark) then more text.",
+   "punct": "(Parenthetical remark) then more text.",
+   "segments": [
+    [
+     "(Parenthetical remark) then more text.",
+     "en"
+    ]
+   ],
+   "norm": "(Parenthetical remark) then more text.",
+   "tokens": "pɚɹənθˈɛɾɪkəl ɹᵻmˈɑːɹk ðˈɛn mˈoːɹ tˈɛkst.",
+   "ntok": 41,
+   "ids": "28,60,88,59,26,126,120,61,92,74,23,59,24,3,88,128,25,120,51,122,88,23,3,41,120,61,26,3,25,120,27,122,88,3,32,120,61,23,31,32,10"
+  },
+  {
+   "text": "Rock & roll & blues.",
+   "punct": "Rock & roll & blues.",
+   "segments": [
+    [
+     "Rock & roll & blues.",
+     "en"
+    ]
+   ],
+   "norm": "Rock & roll & blues.",
+   "tokens": "ɹˈɑːk ænd ɹˈoʊl ænd blˈuːz.",
+   "ntok": 27,
+   "ids": "88,120,51,122,23,3,39,26,17,3,88,120,27,100,24,3,39,26,17,3,15,24,120,33,122,38,10"
+  },
+  {
+   "text": "Hi, there , friend .",
+   "punct": "Hi, there , friend .",
+   "segments": [
+    [
+     "Hi, there , friend .",
+     "en"
+    ]
+   ],
+   "norm": "Hi, there , friend .",
+   "tokens": "hˈaɪ, ðˈɛɹ, fɹˈɛnd.",
+   "ntok": 19,
+   "ids": "20,120,14,74,8,3,41,120,61,88,8,3,19,88,120,61,26,17,10"
+  },
+  {
+   "text": "“Smart quotes” and ‘single ones’ and don’t.",
+   "punct": "“Smart quotes” and ‘single ones’ and don’t.",
+   "segments": [
+    [
+     "\"Smart quotes\" and 'single ones' and don't.",
+     "en"
+    ]
+   ],
+   "norm": "\"Smart quotes\" and 'single ones' and don't.",
+   "tokens": "smˈɑːɹt kwˈoʊts ænd sˈɪŋɡəl wˈʌnz ænd dˈoʊnt.",
+   "ntok": 45,
+   "ids": "31,25,120,51,122,88,32,3,23,35,120,27,100,32,31,3,39,26,17,3,31,120,74,44,66,59,24,3,35,120,102,26,38,3,39,26,17,3,17,120,27,100,26,32,10"
+  },
+  {
+   "text": "The café served crème brûlée naïvely.",
+   "punct": "The café served crème brûlée naïvely.",
+   "segments": [
+    [
+     "The café served crème brûlée naïvely.",
+     "en"
+    ]
+   ],
+   "norm": "The café served crème brûlée naïvely.",
+   "tokens": "ðə kæfˈeɪ sˈɜːvd kɹˈɛm bɹuːlˈeɪ naɪˈiːvli.",
+   "ntok": 42,
+   "ids": "41,59,3,23,39,19,120,18,74,3,31,120,62,122,34,17,3,23,88,120,61,25,3,15,88,33,122,24,120,18,74,3,26,14,74,120,21,122,34,24,21,10"
+  },
+  {
+   "text": "Email me at test@example.com or #hashtag.",
+   "punct": "Email me at test@example.com or #hashtag.",
+   "segments": [
+    [
+     "Email me at test@example.com or #hashtag.",
+     "en"
+    ]
+   ],
+   "norm": "Email me at test@example.com or #hashtag.",
+   "tokens": "ˈiːmeɪl mˌiː æt tˈɛst æt ɛɡzˈæmpəl dˈɑːt kˈɑːm ɔːɹ hˈæʃ hˈæʃtæɡ.",
+   "ntok": 64,
+   "ids": "120,21,122,25,18,74,24,3,25,121,21,122,3,39,32,3,32,120,61,31,32,3,39,32,3,61,66,38,120,39,25,28,59,24,3,17,120,51,122,32,3,23,120,51,122,25,3,54,122,88,3,20,120,39,96,3,20,120,39,96,32,39,66,10"
+  },
+  {
+   "text": "Wow… that’s amazing—truly.",
+   "punct": "Wow… that’s amazing—truly.",
+   "segments": [
+    [
+     "Wow… that's amazing—truly.",
+     "en"
+    ]
+   ],
+   "norm": "Wow… that's amazing—truly.",
+   "tokens": "wˈaʊðæts ɐmˈeɪzɪŋ tɹˈuːli.",
+   "ntok": 26,
+   "ids": "35,120,14,100,41,39,32,31,3,50,25,120,18,74,38,74,44,3,32,88,120,33,122,24,21,10"
+  },
+  {
+   "text": "Tabs\tand\nnewlines here.",
+   "punct": "Tabs\tand newlines here.",
+   "segments": [
+    [
+     "Tabs\tand newlines here.",
+     "en"
+    ]
+   ],
+   "norm": "Tabs\tand newlines here.",
+   "tokens": "tˈæbz ænd nˈuːlaɪnz hˈɪɹ.",
+   "ntok": 25,
+   "ids": "32,120,39,15,38,3,39,26,17,3,26,120,33,122,24,14,74,26,38,3,20,120,74,88,10"
+  },
+  {
+   "text": "   leading and trailing spaces   ",
+   "punct": "leading and trailing spaces.",
+   "segments": [
+    [
+     "leading and trailing spaces.",
+     "en"
+    ]
+   ],
+   "norm": "leading and trailing spaces.",
+   "tokens": "lˈiːdɪŋ ænd tɹˈeɪlɪŋ spˈeɪsᵻz.",
+   "ntok": 30,
+   "ids": "24,120,21,122,17,74,44,3,39,26,17,3,32,88,120,18,74,24,74,44,3,31,28,120,18,74,31,128,38,10"
+  },
+  {
+   "text": "Hi.",
+   "punct": "Hi.",
+   "segments": [
+    [
+     "Hi.",
+     "en"
+    ]
+   ],
+   "norm": "Hi.",
+   "tokens": "hˈaɪ.",
+   "ntok": 5,
+   "ids": "20,120,14,74,10"
+  },
+  {
+   "text": "Go!",
+   "punct": "Go!",
+   "segments": [
+    [
+     "Go!",
+     "en"
+    ]
+   ],
+   "norm": "Go!",
+   "tokens": "ɡˈoʊ!",
+   "ntok": 5,
+   "ids": "66,120,27,100,4"
+  },
+  {
+   "text": "Yes",
+   "punct": "Yes.",
+   "segments": [
+    [
+     "Yes.",
+     "en"
+    ]
+   ],
+   "norm": "Yes.",
+   "tokens": "jˈɛs.",
+   "ntok": 5,
+   "ids": "22,120,61,31,10"
+  },
+  {
+   "text": "Oh?",
+   "punct": "Oh?",
+   "segments": [
+    [
+     "Oh?",
+     "en"
+    ]
+   ],
+   "norm": "Oh?",
+   "tokens": "ˈoʊ?",
+   "ntok": 4,
+   "ids": "120,27,100,13"
+  },
+  {
+   "text": "A.",
+   "punct": "A.",
+   "segments": [
+    [
+     "A.",
+     "en"
+    ]
+   ],
+   "norm": "A.",
+   "tokens": "ˈeɪ.",
+   "ntok": 4,
+   "ids": "120,18,74,10"
+  },
+  {
+   "text": "Hmm.",
+   "punct": "Hmm.",
+   "segments": [
+    [
+     "Hmm.",
+     "en"
+    ]
+   ],
+   "norm": "Hmm.",
+   "tokens": "həm.",
+   "ntok": 4,
+   "ids": "20,59,25,10"
+  },
+  {
+   "text": "Ok",
+   "punct": "Ok.",
+   "segments": [
+    [
+     "Ok.",
+     "en"
+    ]
+   ],
+   "norm": "Ok.",
+   "tokens": "ˌoʊkˈeɪ.",
+   "ntok": 8,
+   "ids": "121,27,100,23,120,18,74,10"
+  },
+  {
+   "text": "When the sun rose over the hills, the farmers walked out to the fields and began their work.",
+   "punct": "When the sun rose over the hills, the farmers walked out to the fields and began their work.",
+   "segments": [
+    [
+     "When the sun rose over the hills, the farmers walked out to the fields and began their work.",
+     "en"
+    ]
+   ],
+   "norm": "When the sun rose over the hills, the farmers walked out to the fields and began their work.",
+   "tokens": "wˌɛn ðə sˈʌn ɹˈoʊz ˌoʊvɚ ðə hˈɪlz, ðə fˈɑːɹmɚz wˈɔːkt ˈaʊt tə ðə fˈiːldz ænd bɪɡˈæn ðɛɹ wˈɜːk.",
+   "ntok": 94,
+   "ids": "35,121,61,26,3,41,59,3,31,120,102,26,3,88,120,27,100,38,3,121,27,100,34,60,3,41,59,3,20,120,74,24,38,8,3,41,59,3,19,120,51,122,88,25,60,38,3,35,120,54,122,23,32,3,120,14,100,32,3,32,59,3,41,59,3,19,120,21,122,24,17,38,3,39,26,17,3,15,74,66,120,39,26,3,41,61,88,3,35,120,62,122,23,10"
+  },
+  {
+   "text": "Programming languages like Python, Java, and Rust each have their strengths.",
+   "punct": "Programming languages like Python, Java, and Rust each have their strengths.",
+   "segments": [
+    [
+     "Programming languages like Python, Java, and Rust each have their strengths.",
+     "en"
+    ]
+   ],
+   "norm": "Programming languages like Python, Java, and Rust each have their strengths.",
+   "tokens": "pɹˈoʊɡɹæmɪŋ lˈæŋɡwɪdʒᵻz lˈaɪk pˈaɪθən, dʒˈɑːvə, ænd ɹˈʌst ˈiːtʃ hæv ðɛɹ stɹˈɛŋθs.",
+   "ntok": 81,
+   "ids": "28,88,120,27,100,66,88,39,25,74,44,3,24,120,39,44,66,35,74,17,108,128,38,3,24,120,14,74,23,3,28,120,14,74,126,59,26,8,3,17,108,120,51,122,34,59,8,3,39,26,17,3,88,120,102,31,32,3,120,21,122,32,96,3,20,39,34,3,41,61,88,3,31,32,88,120,61,44,126,31,10"
+  },
+  {
+   "text": "The museum, which opened in 1887, holds over 2500 paintings and 300 sculptures.",
+   "punct": "The museum, which opened in 1887, holds over 2500 paintings and 300 sculptures.",
+   "segments": [
+    [
+     "The museum, which opened in 1887, holds over 2500 paintings and 300 sculptures.",
+     "en"
+    ]
+   ],
+   "norm": "The museum, which opened in  eighteen eighty-seven , holds over  twenty-five hundred  paintings and  three hundred  sculptures.",
+   "tokens": "ðə mjuːzˈiəm, wˌɪtʃ ˈoʊpənd ɪn ˈeɪtiːn ˈeɪɾisˈɛvən, hˈoʊldz ˌoʊvɚ twˈɛntifˈaɪv hˈʌndɹɪd pˈeɪntɪŋz ænd θɹˈiː hˈʌndɹɪd skˈʌlptʃɚz.",
+   "ntok": 128,
+   "ids": "41,59,3,25,22,33,122,38,120,21,59,25,8,3,35,121,74,32,96,3,120,27,100,28,59,26,17,3,74,26,3,120,18,74,32,21,122,26,3,120,18,74,92,21,31,120,61,34,59,26,8,3,20,120,27,100,24,17,38,3,121,27,100,34,60,3,32,35,120,61,26,32,21,19,120,14,74,34,3,20,120,102,26,17,88,74,17,3,28,120,18,74,26,32,74,44,38,3,39,26,17,3,126,88,120,21,122,3,20,120,102,26,17,88,74,17,3,31,23,120,102,24,28,32,96,60,38,10"
+  },
+  {
+   "text": "If you can't find the answer, ask a friend, a teacher, or a librarian.",
+   "punct": "If you can't find the answer, ask a friend, a teacher, or a librarian.",
+   "segments": [
+    [
+     "If you can't find the answer, ask a friend, a teacher, or a librarian.",
+     "en"
+    ]
+   ],
+   "norm": "If you can't find the answer, ask a friend, a teacher, or a librarian.",
+   "tokens": "ɪf juː kˈænt fˈaɪnd ðɪ ˈænsɚ, ˈæsk ɐ fɹˈɛnd, ɐ tˈiːtʃɚ, ɔːɹ ɐ laɪbɹˈɛɹiən.",
+   "ntok": 74,
+   "ids": "74,19,3,22,33,122,3,23,120,39,26,32,3,19,120,14,74,26,17,3,41,74,3,120,39,26,31,60,8,3,120,39,31,23,3,50,3,19,88,120,61,26,17,8,3,50,3,32,120,21,122,32,96,60,8,3,54,122,88,3,50,3,24,14,74,15,88,120,61,88,21,59,26,10"
+  },
+  {
+   "text": "Thunderstorms are expected tonight, with winds up to 40 mph.",
+   "punct": "Thunderstorms are expected tonight, with winds up to 40 mph.",
+   "segments": [
+    [
+     "Thunderstorms are expected tonight, with winds up to 40 mph.",
+     "en"
+    ]
+   ],
+   "norm": "Thunderstorms are expected tonight, with winds up to  forty  mph.",
+   "tokens": "θˈʌndɚstˌoːɹmz ɑːɹ ɛkspˈɛktᵻd tənˈaɪt, wɪð wˈaɪndz ˈʌp tə fˈɔːɹɾi ˌɛmpˌiːˈeɪtʃ.",
+   "ntok": 79,
+   "ids": "126,120,102,26,17,60,31,32,121,27,122,88,25,38,3,51,122,88,3,61,23,31,28,120,61,23,32,128,17,3,32,59,26,120,14,74,32,8,3,35,74,41,3,35,120,14,74,26,17,38,3,120,102,28,3,32,59,3,19,120,54,122,88,92,21,3,121,61,25,28,121,21,122,120,18,74,32,96,10"
+  },
+  {
+   "text": "He looked at me and said, it's never too late to start again.",
+   "punct": "He looked at me and said, it's never too late to start again.",
+   "segments": [
+    [
+     "He looked at me and said, it's never too late to start again.",
+     "en"
+    ]
+   ],
+   "norm": "He looked at me and said, it's never too late to start again.",
+   "tokens": "hiː lˈʊkt æt mˌiː ænd sˈɛd, ɪts nˈɛvɚ tˈuː lˈeɪt tə stˈɑːɹt ɐɡˈɛn.",
+   "ntok": 66,
+   "ids": "20,21,122,3,24,120,100,23,32,3,39,32,3,25,121,21,122,3,39,26,17,3,31,120,61,17,8,3,74,32,31,3,26,120,61,34,60,3,32,120,33,122,3,24,120,18,74,32,3,32,59,3,31,32,120,51,122,88,32,3,50,66,120,61,26,10"
+  },
+  {
+   "text": "Our flight was delayed by 2 hours, so we read books at gate B12.",
+   "punct": "Our flight was delayed by 2 hours, so we read books at gate B12.",
+   "segments": [
+    [
+     "Our flight was delayed by 2 hours, so we read books at gate B12.",
+     "en"
+    ]
+   ],
+   "norm": "Our flight was delayed by  two  hours, so we read books at gate B twelve .",
+   "tokens": "ˌaʊɚ flˈaɪt wʌz dᵻlˈeɪd baɪ tˈuː ˈaʊɚz, sˌoʊ wiː ɹˈiːd bˈʊks æt ɡˈeɪt bˈiː twˈɛlv.",
+   "ntok": 82,
+   "ids": "121,14,100,60,3,19,24,120,14,74,32,3,35,102,38,3,17,128,24,120,18,74,17,3,15,14,74,3,32,120,33,122,3,120,14,100,60,38,8,3,31,121,27,100,3,35,21,122,3,88,120,21,122,17,3,15,120,100,23,31,3,39,32,3,66,120,18,74,32,3,15,120,21,122,3,32,35,120,61,24,34,10"
+  },
+  {
+   "text": "The quick brown fox jumps over the lazy dog, again and again and again.",
+   "punct": "The quick brown fox jumps over the lazy dog, again and again and again.",
+   "segments": [
+    [
+     "The quick brown fox jumps over the lazy dog, again and again and again.",
+     "en"
+    ]
+   ],
+   "norm": "The quick brown fox jumps over the lazy dog, again and again and again.",
+   "tokens": "ðə kwˈɪk bɹˈaʊn fˈɑːks dʒˈʌmps ˌoʊvɚ ðə lˈeɪzi dˈɑːɡ, ɐɡˈɛn ænd ɐɡˈɛn ænd ɐɡˈɛn.",
+   "ntok": 80,
+   "ids": "41,59,3,23,35,120,74,23,3,15,88,120,14,100,26,3,19,120,51,122,23,31,3,17,108,120,102,25,28,31,3,121,27,100,34,60,3,41,59,3,24,120,18,74,38,21,3,17,120,51,122,66,8,3,50,66,120,61,26,3,39,26,17,3,50,66,120,61,26,3,39,26,17,3,50,66,120,61,26,10"
+  },
+  {
+   "text": "Is this the real life? Is this just fantasy?",
+   "punct": "Is this the real life? Is this just fantasy?",
+   "segments": [
+    [
+     "Is this the real life? Is this just fantasy?",
+     "en"
+    ]
+   ],
+   "norm": "Is this the real life? Is this just fantasy?",
+   "tokens": "ɪz ðɪs ðə ɹˈiːəl lˈaɪf?ɪz ðɪs dʒˈʌst fˈæntəsi?",
+   "ntok": 46,
+   "ids": "74,38,3,41,74,31,3,41,59,3,88,120,21,122,59,24,3,24,120,14,74,19,13,74,38,3,41,74,31,3,17,108,120,102,31,32,3,19,120,39,26,32,59,31,21,13"
+  },
+  {
+   "text": "Doctors recommend 8 hours of sleep and 2 liters of water a day.",
+   "punct": "Doctors recommend 8 hours of sleep and 2 liters of water a day.",
+   "segments": [
+    [
+     "Doctors recommend 8 hours of sleep and 2 liters of water a day.",
+     "en"
+    ]
+   ],
+   "norm": "Doctors recommend  eight  hours of sleep and  two  liters of water a day.",
+   "tokens": "dˈɑːktɚz ɹˌɛkəmˈɛnd ˈeɪt ˈaʊɚz ʌv slˈiːp ænd tˈuː lˈiːɾɚz ʌv wˈɔːɾɚɹ ɐ dˈeɪ.",
+   "ntok": 76,
+   "ids": "17,120,51,122,23,32,60,38,3,88,121,61,23,59,25,120,61,26,17,3,120,18,74,32,3,120,14,100,60,38,3,102,34,3,31,24,120,21,122,28,3,39,26,17,3,32,120,33,122,3,24,120,21,122,92,60,38,3,102,34,3,35,120,54,122,92,60,88,3,50,3,17,120,18,74,10"
+  },
+  {
+   "text": "The button on the little bottle is a cache of garçon food at the restaurant.",
+   "punct": "The button on the little bottle is a cache of garçon food at the restaurant.",
+   "segments": [
+    [
+     "The button on the little bottle is a cache of garçon food at the restaurant.",
+     "en"
+    ]
+   ],
+   "norm": "The button on the little bottle is a cache of garçon food at the restaurant.",
+   "tokens": "ðə bˈʌʔn̩ ɔnðə lˈɪɾəl bˈɑːɾəl ɪz ɐ kˈæʃ ʌv ɡˈɑːɹsɑːn fˈuːd æt ðə ɹˈɛstɹɑːnt.",
+   "ntok": 76,
+   "ids": "41,59,3,15,120,102,109,26,144,3,54,26,41,59,3,24,120,74,92,59,24,3,15,120,51,122,92,59,24,3,74,38,3,50,3,23,120,39,96,3,102,34,3,66,120,51,122,88,31,51,122,26,3,19,120,33,122,17,3,39,32,3,41,59,3,88,120,61,31,32,88,51,122,26,32,10"
+  },
+  {
+   "text": "He ate a croissant and some fiancé-style entrée, then called the human.",
+   "punct": "He ate a croissant and some fiancé-style entrée, then called the human.",
+   "segments": [
+    [
+     "He ate a croissant and some fiancé-style entrée, then called the human.",
+     "en"
+    ]
+   ],
+   "norm": "He ate a croissant and some fiancé-style entrée, then called the human.",
+   "tokens": "hiː ˈeɪt ɐ kwˈɑːsɑ̃ ænd sˌʌm fiˈɑːnsˈeɪstˈaɪl ɛntɹˈeɪ, ðˈɛn kˈɔːld ðə hjˈuːmən.",
+   "ntok": 79,
+   "ids": "20,21,122,3,120,18,74,32,3,50,3,23,35,120,51,122,31,51,141,3,39,26,17,3,31,121,102,25,3,19,21,120,51,122,26,31,120,18,74,31,32,120,14,74,24,3,61,26,32,88,120,18,74,8,3,41,120,61,26,3,23,120,54,122,24,17,3,41,59,3,20,22,120,33,122,25,59,26,10"
+  },
+  {
+   "text": "Please give me a piece of cake, a bottle of water, and a kitten.",
+   "punct": "Please give me a piece of cake, a bottle of water, and a kitten.",
+   "segments": [
+    [
+     "Please give me a piece of cake, a bottle of water, and a kitten.",
+     "en"
+    ]
+   ],
+   "norm": "Please give me a piece of cake, a bottle of water, and a kitten.",
+   "tokens": "plˈiːz ɡˈɪv mˌiː ɐ pˈiːs ʌv kˈeɪk, ɐ bˈɑːɾəl ʌv wˈɔːɾɚ, ænd ɐ kˈɪʔn̩.",
+   "ntok": 69,
+   "ids": "28,24,120,21,122,38,3,66,120,74,34,3,25,121,21,122,3,50,3,28,120,21,122,31,3,102,34,3,23,120,18,74,23,8,3,50,3,15,120,51,122,92,59,24,3,102,34,3,35,120,54,122,92,60,8,3,39,26,17,3,50,3,23,120,74,109,26,144,10"
+  },
+  {
+   "text": "Hello [laughs] there, bold text.",
+   "punct": "Hello [laughs] there, bold text.",
+   "segments": [
+    [
+     "Hello ",
+     "en"
+    ],
+    [
+     "[laughs]",
+     "tag"
+    ],
+    [
+     " there, bold text.",
+     "en"
+    ]
+   ],
+   "norm": null,
+   "tokens": "həlˈoʊ[laughs]ðˈɛɹ, bˈoʊld tˈɛkst.",
+   "ntok": 27,
+   "ids": "20,59,24,120,27,100,41,120,61,88,8,3,15,120,27,100,24,17,3,32,120,61,23,31,32,10"
+  },
+  {
+   "text": "Hello [S1] how are you? [S2] Fine, thanks.",
+   "punct": "Hello [S1] how are you? [S2] Fine, thanks.",
+   "segments": [
+    [
+     "Hello ",
+     "en"
+    ],
+    [
+     "[S1]",
+     "tag"
+    ],
+    [
+     " how are you? ",
+     "en"
+    ],
+    [
+     "[S2]",
+     "tag"
+    ],
+    [
+     " Fine, thanks.",
+     "en"
+    ]
+   ],
+   "norm": null,
+   "tokens": "həlˈoʊ[S1]hˈaʊ ɑːɹ juː?[S2]fˈaɪn, θˈæŋks.",
+   "ntok": 35,
+   "ids": "20,59,24,120,27,100,20,120,14,100,3,51,122,88,3,22,33,122,13,19,120,14,74,26,8,3,126,120,39,44,23,31,10"
+  },
+  {
+   "text": "Is 42 the answer? 3.14 is pi, and I am 100% sure about $1,234.56 and £5.",
+   "punct": "Is 42 the answer? 3.14 is pi, and I am 100% sure about $1,234.56 and £5.",
+   "segments": [
+    [
+     "Is 42 the answer? 3.14 is pi, and I am 100% sure about $1,234.56 and £5.",
+     "en"
+    ]
+   ],
+   "norm": "Is  forty-two  the answer?  three  point  fourteen  is pi, and I am  one hundred  percent  sure about   twelve thirty-four  dollars,  fifty-six  cents  and  five  pounds.",
+   "tokens": "ɪz fˈɔːɹɾitˈuː ðɪ ˈænsɚ?θɹˈiː pˈɔɪnt fˈoːɹtiːn ɪz pˈaɪ, ænd aɪɐm wˈʌn hˈʌndɹɪd pɚsˈɛnt ʃˈʊɹ ɐbˌaʊt twˈɛlv θˈɜːɾifˈoːɹ dˈɑːlɚz, fˈɪftisˈɪks sˈɛnts ænd fˈaɪv pˈaʊndz.",
+   "ntok": 164,
+   "ids": "74,38,3,19,120,54,122,88,92,21,32,120,33,122,3,41,74,3,120,39,26,31,60,13,126,88,120,21,122,3,28,120,54,74,26,32,3,19,120,27,122,88,32,21,122,26,3,74,38,3,28,120,14,74,8,3,39,26,17,3,14,74,50,25,3,35,120,102,26,3,20,120,102,26,17,88,74,17,3,28,60,31,120,61,26,32,3,96,120,100,88,3,50,15,121,14,100,32,3,32,35,120,61,24,34,3,126,120,62,122,92,21,19,120,27,122,88,3,17,120,51,122,24,60,38,8,3,19,120,74,19,32,21,31,120,74,23,31,3,31,120,61,26,32,31,3,39,26,17,3,19,120,14,74,34,3,28,120,14,100,26,17,38,10"
+  },
+  {
+   "text": "On 12/25 we had 1/2 a cake, 3/4 of a pie, and the 2nd, 3rd, 4th, 21st and 100th place.",
+   "punct": "On 12/25 we had 1/2 a cake, 3/4 of a pie, and the 2nd, 3rd, 4th, 21st and 100th place.",
+   "segments": [
+    [
+     "On 12/25 we had 1/2 a cake, 3/4 of a pie, and the 2nd, 3rd, 4th, 21st and 100th place.",
+     "en"
+    ]
+   ],
+   "norm": "On  twelve twenty-fifth  we had  one half  a cake,  three quarters  of a pie, and the  second ,  third ,  fourth ,  twenty-first  and  one hundredth  place.",
+   "tokens": "ˌɔn twˈɛlv twˈɛntifˈɪfθ wiː hæd wˈʌn hˈæf ɐ kˈeɪk, θɹˈiː kwˈɔːɹɾɚz əvə pˈaɪ, ænd ðə sˈɛkənd, θˈɜːd, fˈoːɹθ, twˈɛntifˈɜːst ænd wˈʌn hˈʌndɹədθ plˈeɪs.",
+   "ntok": 148,
+   "ids": "121,54,26,3,32,35,120,61,24,34,3,32,35,120,61,26,32,21,19,120,74,19,126,3,35,21,122,3,20,39,17,3,35,120,102,26,3,20,120,39,19,3,50,3,23,120,18,74,23,8,3,126,88,120,21,122,3,23,35,120,54,122,88,92,60,38,3,59,34,59,3,28,120,14,74,8,3,39,26,17,3,41,59,3,31,120,61,23,59,26,17,8,3,126,120,62,122,17,8,3,19,120,27,122,88,126,8,3,32,35,120,61,26,32,21,19,120,62,122,31,32,3,39,26,17,3,35,120,102,26,3,20,120,102,26,17,88,59,17,126,3,28,24,120,18,74,31,10"
+  },
+  {
+   "text": "Mrs. Smith and Mr. Jones met Dr. Brown, Capt. Hook, Lt. Dan, Gen. Lee, Col. Mustard, Rev. Green and Sgt. Pepper.",
+   "punct": "Mrs. Smith and Mr. Jones met Dr. Brown, Capt. Hook, Lt. Dan, Gen. Lee, Col. Mustard, Rev. Green and Sgt. Pepper.",
+   "segments": [
+    [
+     "Mrs. Smith and Mr. Jones met Dr. Brown, Capt. Hook, Lt. Dan, Gen. Lee, Col. Mustard, Rev. Green and Sgt. Pepper.",
+     "en"
+    ]
+   ],
+   "norm": "misess. Smith and mister. Jones met doctor. Brown, captain. Hook, lieutenant. Dan, general. Lee, colonel. Mustard, reverend. Green and sergeant. Pepper.",
+   "tokens": "mɪsˈɛs.smˈɪθ ænd mˈɪstɚ.dʒˈoʊnz mˈɛt dˈɑːktɚ.bɹˈaʊn, kˈæptɪn.hˈʊk, luːtˈɛnənt.dˈæn, dʒˈɛnɚɹəl.lˈiː, kˈɜːnəl.mˈʌstɚd, ɹˈɛvɚɹˌɛnd.ɡɹˈiːn ænd sˈɑːɹdʒənt.pˈɛpɚ.",
+   "ntok": 156,
+   "ids": "25,74,31,120,61,31,10,31,25,120,74,126,3,39,26,17,3,25,120,74,31,32,60,10,17,108,120,27,100,26,38,3,25,120,61,32,3,17,120,51,122,23,32,60,10,15,88,120,14,100,26,8,3,23,120,39,28,32,74,26,10,20,120,100,23,8,3,24,33,122,32,120,61,26,59,26,32,10,17,120,39,26,8,3,17,108,120,61,26,60,88,59,24,10,24,120,21,122,8,3,23,120,62,122,26,59,24,10,25,120,102,31,32,60,17,8,3,88,120,61,34,60,88,121,61,26,17,10,66,88,120,21,122,26,3,39,26,17,3,31,120,51,122,88,17,108,59,26,32,10,28,120,61,28,60,10"
+  },
+  {
+   "text": "The Hon. Judge, Esq., of Acme Co. Ltd., Jr., met St. Louis, etc. btw.",
+   "punct": "The Hon. Judge, Esq., of Acme Co. Ltd., Jr., met St. Louis, etc. btw.",
+   "segments": [
+    [
+     "The Hon. Judge, Esq., of Acme Co. Ltd., Jr., met St. Louis, etc. btw.",
+     "en"
+    ]
+   ],
+   "norm": "The honorable. Judge, esquire., of Acme company. limited., junior., met saint. Louis, et cetera. by the way.",
+   "tokens": "ðɪ ˈɑːnɚɹəbəl.dʒˈʌdʒ, ɛskwˈaɪɚɹ ʌv ˈækmi kˈʌmpəni lˈɪmɪɾᵻd dʒˈuːnjɚ mˈɛt sˈeɪnt.lˈuːi, ˈɛt sˈɛɾɚɹə baɪ ðə wˈeɪ.",
+   "ntok": 111,
+   "ids": "41,74,3,120,51,122,26,60,88,59,15,59,24,10,17,108,120,102,17,108,8,3,61,31,23,35,120,14,74,60,88,3,102,34,3,120,39,23,25,21,3,23,120,102,25,28,59,26,21,3,24,120,74,25,74,92,128,17,3,17,108,120,33,122,26,22,60,3,25,120,61,32,3,31,120,18,74,26,32,10,24,120,33,122,21,8,3,120,61,32,3,31,120,61,92,60,88,59,3,15,14,74,3,41,59,3,35,120,18,74,10"
+  },
+  {
+   "text": "The years 2005, 2000, 1900, 1066 and 1999 were different; 2010 too.",
+   "punct": "The years 2005, 2000, 1900, 1066 and 1999 were different; 2010 too.",
+   "segments": [
+    [
+     "The years 2005, 2000, 1900, 1066 and 1999 were different; 2010 too.",
+     "en"
+    ]
+   ],
+   "norm": "The years  two thousand five ,  two thousand ,  nineteen hundred ,  ten sixty-six  and  nineteen ninety-nine  were different;  twenty ten  too.",
+   "tokens": "ðə jˈɪɹz tˈuː θˈaʊzənd fˈaɪv, tˈuː θˈaʊzənd, nˈaɪntiːn hˈʌndɹɪd, tˈɛn sˈɪkstisˈɪks ænd nˈaɪntiːn nˈaɪntinˈaɪn wɜː dˈɪfɹənt; twˈɛnti tˈɛn tˈuː.",
+   "ntok": 142,
+   "ids": "41,59,3,22,120,74,88,38,3,32,120,33,122,3,126,120,14,100,38,59,26,17,3,19,120,14,74,34,8,3,32,120,33,122,3,126,120,14,100,38,59,26,17,8,3,26,120,14,74,26,32,21,122,26,3,20,120,102,26,17,88,74,17,8,3,32,120,61,26,3,31,120,74,23,31,32,21,31,120,74,23,31,3,39,26,17,3,26,120,14,74,26,32,21,122,26,3,26,120,14,74,26,32,21,26,120,14,74,26,3,35,62,122,3,17,120,74,19,88,59,26,32,12,3,32,35,120,61,26,32,21,3,32,120,61,26,3,32,120,33,122,10"
+  },
+  {
+   "text": "I have 1,000 apples and 2,500,000 oranges, 12345 pears, and 0 bananas.",
+   "punct": "I have 1,000 apples and 2,500,000 oranges, 12345 pears, and 0 bananas.",
+   "segments": [
+    [
+     "I have 1,000 apples and 2,500,000 oranges, 12345 pears, and 0 bananas.",
+     "en"
+    ]
+   ],
+   "norm": "I have  one thousand  apples and  two million, five hundred thousand  oranges,  twelve thousand, three hundred forty-five  pears, and  zero  bananas.",
+   "tokens": "aɪ hæv wˈʌn θˈaʊzənd ˈæpəlz ænd tˈuː mˈɪliən, fˈaɪv hˈʌndɹɪd θˈaʊzənd ˈɔɹɪndʒᵻz, twˈɛlv θˈaʊzənd, θɹˈiː hˈʌndɹɪd fˈɔːɹɾifˈaɪv pˈɛɹz, ænd zˈiəɹoʊ bɐnˈænəz.",
+   "ntok": 154,
+   "ids": "14,74,3,20,39,34,3,35,120,102,26,3,126,120,14,100,38,59,26,17,3,120,39,28,59,24,38,3,39,26,17,3,32,120,33,122,3,25,120,74,24,21,59,26,8,3,19,120,14,74,34,3,20,120,102,26,17,88,74,17,3,126,120,14,100,38,59,26,17,3,120,54,88,74,26,17,108,128,38,8,3,32,35,120,61,24,34,3,126,120,14,100,38,59,26,17,8,3,126,88,120,21,122,3,20,120,102,26,17,88,74,17,3,19,120,54,122,88,92,21,19,120,14,74,34,3,28,120,61,88,38,8,3,39,26,17,3,38,120,21,59,88,27,100,3,15,50,26,120,39,26,59,38,10"
+  },
+  {
+   "text": "42",
+   "punct": "42.",
+   "segments": [
+    [
+     "42.",
+     "other"
+    ]
+   ],
+   "norm": null,
+   "tokens": "",
+   "ntok": 0,
+   "ids": ""
+  },
+  {
+   "text": "!!!",
+   "punct": "!!!",
+   "segments": [
+    [
+     "!!!",
+     "other"
+    ]
+   ],
+   "norm": null,
+   "tokens": "",
+   "ntok": 0,
+   "ids": ""
+  },
+  {
+   "text": "Ellipsis… and three dots... and a dash — and an en dash – here.",
+   "punct": "Ellipsis… and three dots... and a dash — and an en dash – here.",
+   "segments": [
+    [
+     "Ellipsis… and three dots… and a dash — and an en dash – here.",
+     "en"
+    ]
+   ],
+   "norm": "Ellipsis… and three dots… and a dash — and an en dash – here.",
+   "tokens": "ɪlˈɪpsɪsænd θɹˈiː dˈɑːtsænd ɐ dˈæʃ; ænd ɐn ˈɛn dˈæʃ; hˈɪɹ.",
+   "ntok": 58,
+   "ids": "74,24,120,74,28,31,74,31,39,26,17,3,126,88,120,21,122,3,17,120,51,122,32,31,39,26,17,3,50,3,17,120,39,96,12,3,39,26,17,3,50,26,3,120,61,26,3,17,120,39,96,12,3,20,120,74,88,10"
+  },
+  {
+   "text": "He said (quietly) that \"it works\", didn't he?",
+   "punct": "He said (quietly) that \"it works\", didn't he?",
+   "segments": [
+    [
+     "He said (quietly) that \"it works\", didn't he?",
+     "en"
+    ]
+   ],
+   "norm": "He said (quietly) that \"it works\", didn't he?",
+   "tokens": "hiː sˈɛd kwˈaɪətli ðæt ɪt wˈɜːks, dˈɪdnt hiː?",
+   "ntok": 45,
+   "ids": "20,21,122,3,31,120,61,17,3,23,35,120,14,74,59,32,24,21,3,41,39,32,3,74,32,3,35,120,62,122,23,31,8,3,17,120,74,17,26,32,3,20,21,122,13"
+  },
+  {
+   "text": "Hello, world. How are you today? I'm fine! Really; truly: yes.",
+   "punct": "Hello, world. How are you today? I'm fine! Really; truly: yes.",
+   "segments": [
+    [
+     "Hello, world. How are you today? I'm fine! Really; truly: yes.",
+     "en"
+    ]
+   ],
+   "norm": "Hello, world. How are you today? I'm fine! Really; truly: yes.",
+   "tokens": "həlˈoʊ, wˈɜːld.hˌaʊ ɑːɹ juː tədˈeɪ?aɪm fˈaɪn!ɹˈiəli; tɹˈuːli: jˈɛs.",
+   "ntok": 67,
+   "ids": "20,59,24,120,27,100,8,3,35,120,62,122,24,17,10,20,121,14,100,3,51,122,88,3,22,33,122,3,32,59,17,120,18,74,13,14,74,25,3,19,120,14,74,26,4,88,120,21,59,24,21,12,3,32,88,120,33,122,24,21,11,3,22,120,61,31,10"
+  },
+  {
+   "text": "Wait.  Two  spaces   and a final one. ",
+   "punct": "Wait.  Two  spaces   and a final one.",
+   "segments": [
+    [
+     "Wait.  Two  spaces   and a final one.",
+     "en"
+    ]
+   ],
+   "norm": "Wait.  Two  spaces   and a final one.",
+   "tokens": "wˈeɪt.tˈuː spˈeɪsᵻz ænd ɐ fˈaɪnəl wˌʌn.",
+   "ntok": 39,
+   "ids": "35,120,18,74,32,10,32,120,33,122,3,31,28,120,18,74,31,128,38,3,39,26,17,3,50,3,19,120,14,74,26,59,24,3,35,121,102,26,10"
+  },
+  {
+   "text": "A very long sentence without any punctuation at all that just keeps going and going so that the chunker has to deal with a budget smaller than the sentence itself and keep it whole",
+   "punct": "A very long sentence without any punctuation at all that just keeps going and going so that the chunker has to deal with a budget smaller than the sentence itself and keep it whole.",
+   "segments": [
+    [
+     "A very long sentence without any punctuation at all that just keeps going and going so that the chunker has to deal with a budget smaller than the sentence itself and keep it whole.",
+     "en"
+    ]
+   ],
+   "norm": "A very long sentence without any punctuation at all that just keeps going and going so that the chunker has to deal with a budget smaller than the sentence itself and keep it whole.",
+   "tokens": "ɐ vˈɛɹi lˈɔŋ sˈɛntəns wɪðˌaʊt ˌɛni pˌʌŋktʃuːˈeɪʃən æɾ ˈɔːl ðæt dʒˈʌst kˈiːps ɡˌoʊɪŋ ænd ɡˌoʊɪŋ sˌoʊ ðætðə tʃˈʌŋkɚ hɐz tə dˈiːl wɪð ɐ bˈʌdʒɪt smˈɔːlɚ ðɐn ðə sˈɛntəns ɪtsˈɛlf ænd kˈiːp ɪt hˈoʊl.",
+   "ntok": 192,
+   "ids": "50,3,34,120,61,88,21,3,24,120,54,44,3,31,120,61,26,32,59,26,31,3,35,74,41,121,14,100,32,3,121,61,26,21,3,28,121,102,44,23,32,96,33,122,120,18,74,96,59,26,3,39,92,3,120,54,122,24,3,41,39,32,3,17,108,120,102,31,32,3,23,120,21,122,28,31,3,66,121,27,100,74,44,3,39,26,17,3,66,121,27,100,74,44,3,31,121,27,100,3,41,39,32,41,59,3,32,96,120,102,44,23,60,3,20,50,38,3,32,59,3,17,120,21,122,24,3,35,74,41,3,50,3,15,120,102,17,108,74,32,3,31,25,120,54,122,24,60,3,41,50,26,3,41,59,3,31,120,61,26,32,59,26,31,3,74,32,31,120,61,24,19,3,39,26,17,3,23,120,21,122,28,3,74,32,3,20,120,27,100,24,10"
+  }
+ ],
+ "lexicon": {
+  "cat": "kˈæt",
+  "dog": "dˈɑːɡ",
+  "fox": "fˈɑːks",
+  "bird": "bˈɜːd",
+  "tree": "tɹˈiː"
+ },
+ "clauses": [
+  {
+   "text": "fox?! tree cat fox)",
+   "tokens": "fˈɑːks?tɹˈiː kˈæt fˈɑːks"
+  },
+  {
+   "text": "Tree? tree!\" cat? dog Fox bird!\"",
+   "tokens": "tɹˈiː?tɹˈiː!kˈæt?dˈɑːɡ fˈɑːks bˈɜːd!"
+  },
+  {
+   "text": "Tree; cat cat (tree – dog.)",
+   "tokens": "tɹˈiː; kˈæt kˈæt tɹˈiː; dˈɑːɡ."
+  },
+  {
+   "text": "tree!! cat, Dog: cat?! fox!! cat?! dog, \"",
+   "tokens": "tɹˈiː!kˈæt, dˈɑːɡ: kˈæt?fˈɑːks!kˈæt?dˈɑːɡ, "
+  },
+  {
+   "text": "fox - dog,\" dog, Fox cat - bird? Tree.\" tree?!",
+   "tokens": "fˈɑːks dˈɑːɡ, dˈɑːɡ, fˈɑːks kˈæt bˈɜːd?tɹˈiː.tɹˈiː?"
+  },
+  {
+   "text": "fox Fox. fox!! tree) Tree!",
+   "tokens": "fˈɑːks fˈɑːks fˈɑːks!tɹˈiː tɹˈiː!"
+  },
+  {
+   "text": "dog – cat,\" Tree.\" Dog - tree (Dog: Dog - bird),",
+   "tokens": "dˈɑːɡ; kˈæt, tɹˈiː.dˈɑːɡ tɹˈiː dˈɑːɡ: dˈɑːɡ bˈɜːd, "
+  },
+  {
+   "text": "cat Dog, \"Dog -- cat; dog… bird... Dog dog?\"",
+   "tokens": "kˈæt dˈɑːɡ, dˈɑːɡ kˈæt; dˈɑːɡbˈɜːddˈɑːɡ dˈɑːɡ?"
+  },
+  {
+   "text": "Dog, \"Fox -- Fox - bird, \"tree fox?\" bird), bird!\"",
+   "tokens": "dˈɑːɡ, fˈɑːks fˈɑːks bˈɜːd, tɹˈiː fˈɑːks?bˈɜːd, bˈɜːd!"
+  },
+  {
+   "text": "Dog. dog.\" dog; \"Tree?",
+   "tokens": "dˈɑːɡ dˈɑːɡ.dˈɑːɡ; tɹˈiː?"
+  },
+  {
+   "text": "dog) cat. Tree,\" Fox — Dog dog; tree — dog - Tree.)",
+   "tokens": "dˈɑːɡ kˈæt.tɹˈiː, fˈɑːks; dˈɑːɡ dˈɑːɡ; tɹˈiː; dˈɑːɡ tɹˈiː."
+  },
+  {
+   "text": "bird, cat) cat.\" Dog - cat! fox)",
+   "tokens": "bˈɜːd, kˈæt kˈæt.dˈɑːɡ kˈæt!fˈɑːks"
+  },
+  {
+   "text": "cat: Dog Dog… tree: Dog, \"Dog!",
+   "tokens": "kˈæt: dˈɑːɡ dˈɑːɡtɹˈiː: dˈɑːɡ, dˈɑːɡ!"
+  },
+  {
+   "text": "cat. tree, \"fox; Dog?\"",
+   "tokens": "kˈæt tɹˈiː, fˈɑːks; dˈɑːɡ?"
+  },
+  {
+   "text": "tree… cat Tree Fox (",
+   "tokens": "tɹˈiːkˈæt tɹˈiː fˈɑːks"
+  },
+  {
+   "text": "Dog!! fox: tree!! bird Fox —",
+   "tokens": "dˈɑːɡ!fˈɑːks: tɹˈiː!bˈɜːd fˈɑːks; "
+  },
+  {
+   "text": "Dog… Tree.\" bird; \"tree, \"dog -- bird, \"",
+   "tokens": "dˈɑːɡtɹˈiː.bˈɜːd; tɹˈiː, dˈɑːɡ bˈɜːd, "
+  },
+  {
+   "text": "Tree? dog bird? Dog...",
+   "tokens": "tɹˈiː?dˈɑːɡ bˈɜːd?dˈɑːɡ"
+  },
+  {
+   "text": "dog!! dog… dog — bird dog dog - Dog bird.\"",
+   "tokens": "dˈɑːɡ!dˈɑːɡdˈɑːɡ; bˈɜːd dˈɑːɡ dˈɑːɡ dˈɑːɡ bˈɜːd."
+  },
+  {
+   "text": "Tree - fox), Tree; Dog!\" tree?! tree, fox - fox… Dog:",
+   "tokens": "tɹˈiː fˈɑːks, tɹˈiː; dˈɑːɡ!tɹˈiː?tɹˈiː, fˈɑːks fˈɑːksdˈɑːɡ: "
+  },
+  {
+   "text": "tree -- Dog (cat; \"fox – Tree.\" fox!! fox),",
+   "tokens": "tɹˈiː dˈɑːɡ kˈæt; fˈɑːks; tɹˈiː.fˈɑːks!fˈɑːks, "
+  },
+  {
+   "text": "fox) Dog cat?\" dog!\" dog, tree cat, \"",
+   "tokens": "fˈɑːks dˈɑːɡ kˈæt?dˈɑːɡ!dˈɑːɡ, tɹˈiː kˈæt, "
+  },
+  {
+   "text": "cat,\" dog (tree? tree) dog — dog!! tree…",
+   "tokens": "kˈæt, dˈɑːɡ tɹˈiː?tɹˈiː dˈɑːɡ; dˈɑːɡ!tɹˈiː"
+  },
+  {
+   "text": "fox -- fox… bird – dog – cat -- Fox -- tree; bird, Tree.\"",
+   "tokens": "fˈɑːks fˈɑːksbˈɜːd; dˈɑːɡ; kˈæt fˈɑːks tɹˈiː; bˈɜːd, tɹˈiː."
+  },
+  {
+   "text": "cat?! dog (bird.\" dog Tree! dog?\"",
+   "tokens": "kˈæt?dˈɑːɡ bˈɜːd.dˈɑːɡ tɹˈiː!dˈɑːɡ?"
+  },
+  {
+   "text": "tree - Fox (Dog, Dog - cat.\" Dog: Tree...",
+   "tokens": "tɹˈiː fˈɑːks dˈɑːɡ, dˈɑːɡ kˈæt.dˈɑːɡ: tɹˈiː"
+  },
+  {
+   "text": "Dog - cat; Tree... tree Tree, fox (",
+   "tokens": "dˈɑːɡ kˈæt; tɹˈiːtɹˈiː tɹˈiː, fˈɑːks"
+  },
+  {
+   "text": "tree,\" cat: Dog, \"dog. dog),",
+   "tokens": "tɹˈiː, kˈæt: dˈɑːɡ, dˈɑːɡ dˈɑːɡ, "
+  },
+  {
+   "text": "fox!! cat, tree — Fox!",
+   "tokens": "fˈɑːks!kˈæt, tɹˈiː; fˈɑːks!"
+  },
+  {
+   "text": "bird; \"fox?\" dog: Dog: dog — Dog.",
+   "tokens": "bˈɜːd; fˈɑːks?dˈɑːɡ: dˈɑːɡ: dˈɑːɡ; dˈɑːɡ."
+  },
+  {
+   "text": "Dog – dog; \"Fox!\"",
+   "tokens": "dˈɑːɡ; dˈɑːɡ; fˈɑːks!"
+  },
+  {
+   "text": "tree! Fox... cat Tree! bird?\"",
+   "tokens": "tɹˈiː!fˈɑːkskˈæt tɹˈiː!bˈɜːd?"
+  },
+  {
+   "text": "Dog?! bird, \"tree,\" bird (Dog... Tree.",
+   "tokens": "dˈɑːɡ?bˈɜːd, tɹˈiː, bˈɜːd dˈɑːɡtɹˈiː."
+  },
+  {
+   "text": "dog Fox,\" Tree? cat… Fox:",
+   "tokens": "dˈɑːɡ fˈɑːks, tɹˈiː?kˈætfˈɑːks: "
+  },
+  {
+   "text": "fox; \"dog -- Tree? cat!! Fox tree Tree… Dog? Tree…",
+   "tokens": "fˈɑːks; dˈɑːɡ tɹˈiː?kˈæt!fˈɑːks tɹˈiː tɹˈiːdˈɑːɡ?tɹˈiː"
+  },
+  {
+   "text": "bird, \"Tree; Tree, \"dog (Fox, \"Dog... Fox, \"fox... tree?\"",
+   "tokens": "bˈɜːd, tɹˈiː; tɹˈiː, dˈɑːɡ fˈɑːks, dˈɑːɡfˈɑːks, fˈɑːkstɹˈiː?"
+  },
+  {
+   "text": "Dog – Dog dog; tree (bird, fox dog --",
+   "tokens": "dˈɑːɡ; dˈɑːɡ dˈɑːɡ; tɹˈiː bˈɜːd, fˈɑːks dˈɑːɡ"
+  },
+  {
+   "text": "tree) Fox!\" Tree!\" dog",
+   "tokens": "tɹˈiː fˈɑːks!tɹˈiː!dˈɑːɡ"
+  },
+  {
+   "text": "tree,\" tree fox — Dog; \"bird?\"",
+   "tokens": "tɹˈiː, tɹˈiː fˈɑːks; dˈɑːɡ; bˈɜːd?"
+  },
+  {
+   "text": "dog. tree), Fox! Dog.\" Tree -- tree)",
+   "tokens": "dˈɑːɡ tɹˈiː, fˈɑːks!dˈɑːɡ.tɹˈiː tɹˈiː"
+  },
+  {
+   "text": "dog -- Tree?\" Dog?",
+   "tokens": "dˈɑːɡ tɹˈiː?dˈɑːɡ?"
+  },
+  {
+   "text": "Fox -- Tree. dog Tree cat), Tree),",
+   "tokens": "fˈɑːks tɹˈiː dˈɑːɡ tɹˈiː kˈæt, tɹˈiː, "
+  },
+  {
+   "text": "Dog), cat, \"tree – Dog, \"",
+   "tokens": "dˈɑːɡ, kˈæt, tɹˈiː; dˈɑːɡ, "
+  },
+  {
+   "text": "Fox, \"bird?! fox! dog -",
+   "tokens": "fˈɑːks, bˈɜːd?fˈɑːks!dˈɑːɡ"
+  },
+  {
+   "text": "Dog -- bird?\" Fox – Tree?\"",
+   "tokens": "dˈɑːɡ bˈɜːd?fˈɑːks; tɹˈiː?"
+  },
+  {
+   "text": "tree?! Fox -- Tree) bird?! Dog — dog; \"bird: bird; \"Fox.\"",
+   "tokens": "tɹˈiː?fˈɑːks tɹˈiː bˈɜːd?dˈɑːɡ; dˈɑːɡ; bˈɜːd: bˈɜːd; fˈɑːks."
+  },
+  {
+   "text": "fox. Dog; \"Fox tree, \"Dog;",
+   "tokens": "fˈɑːks.dˈɑːɡ; fˈɑːks tɹˈiː, dˈɑːɡ; "
+  },
+  {
+   "text": "dog!! Dog – bird), bird.\" Dog?\" fox!! cat Fox,\"",
+   "tokens": "dˈɑːɡ!dˈɑːɡ; bˈɜːd, bˈɜːd.dˈɑːɡ?fˈɑːks!kˈæt fˈɑːks, "
+  },
+  {
+   "text": "bird? bird. bird (cat Dog?\" Dog (Tree... Dog; \"",
+   "tokens": "bˈɜːd?bˈɜːd bˈɜːd kˈæt dˈɑːɡ?dˈɑːɡ tɹˈiːdˈɑːɡ; "
+  },
+  {
+   "text": "fox fox tree!",
+   "tokens": "fˈɑːks fˈɑːks tɹˈiː!"
+  },
+  {
+   "text": "bird!! dog… Tree! Tree? fox: cat — Tree.\" Dog... tree -",
+   "tokens": "bˈɜːd!dˈɑːɡtɹˈiː!tɹˈiː?fˈɑːks: kˈæt; tɹˈiː.dˈɑːɡtɹˈiː"
+  },
+  {
+   "text": "cat? Tree… bird…",
+   "tokens": "kˈæt?tɹˈiːbˈɜːd"
+  },
+  {
+   "text": "bird) bird -- cat! cat — fox) Fox Fox,\" Fox, Dog?\"",
+   "tokens": "bˈɜːd bˈɜːd kˈæt!kˈæt; fˈɑːks fˈɑːks fˈɑːks, fˈɑːks, dˈɑːɡ?"
+  },
+  {
+   "text": "cat?! Dog? Tree - Fox – bird?! Fox?\" tree,\"",
+   "tokens": "kˈæt?dˈɑːɡ?tɹˈiː fˈɑːks; bˈɜːd?fˈɑːks?tɹˈiː, "
+  },
+  {
+   "text": "bird — Dog!\" dog dog! dog?! fox), Fox.\" Tree Fox.",
+   "tokens": "bˈɜːd; dˈɑːɡ!dˈɑːɡ dˈɑːɡ!dˈɑːɡ?fˈɑːks, fˈɑːks.tɹˈiː fˈɑːks."
+  },
+  {
+   "text": "cat -- Tree – Dog. fox… cat?! dog? Fox!!",
+   "tokens": "kˈæt tɹˈiː; dˈɑːɡ fˈɑːkskˈæt?dˈɑːɡ?fˈɑːks!"
+  },
+  {
+   "text": "fox), Fox. bird, \"fox; \"bird!",
+   "tokens": "fˈɑːks, fˈɑːks bˈɜːd, fˈɑːks; bˈɜːd!"
+  },
+  {
+   "text": "cat; Tree… bird?",
+   "tokens": "kˈæt; tɹˈiːbˈɜːd?"
+  },
+  {
+   "text": "bird.\" bird. fox... Fox --",
+   "tokens": "bˈɜːd.bˈɜːd fˈɑːksfˈɑːks"
+  },
+  {
+   "text": "fox tree… Fox...",
+   "tokens": "fˈɑːks tɹˈiːfˈɑːks"
+  },
+  {
+   "text": "Dog bird?! cat! tree: tree. cat.\"",
+   "tokens": "dˈɑːɡ bˈɜːd?kˈæt!tɹˈiː: tɹˈiː kˈæt."
+  },
+  {
+   "text": "cat -- tree?! Tree?\" Tree; \"",
+   "tokens": "kˈæt tɹˈiː?tɹˈiː?tɹˈiː; "
+  },
+  {
+   "text": "bird) cat. Fox!! dog dog -- tree.\" Dog… cat Fox),",
+   "tokens": "bˈɜːd kˈæt.fˈɑːks!dˈɑːɡ dˈɑːɡ tɹˈiː.dˈɑːɡkˈæt fˈɑːks, "
+  },
+  {
+   "text": "Dog, Dog.\" Tree), dog (Tree! fox, \"dog (",
+   "tokens": "dˈɑːɡ, dˈɑːɡ.tɹˈiː, dˈɑːɡ tɹˈiː!fˈɑːks, dˈɑːɡ"
+  },
+  {
+   "text": "Dog, \"Tree? tree) tree: Tree! tree dog?",
+   "tokens": "dˈɑːɡ, tɹˈiː?tɹˈiː tɹˈiː: tɹˈiː!tɹˈiː dˈɑːɡ?"
+  },
+  {
+   "text": "Tree (bird. Fox) Tree Dog (bird tree?! fox. Dog.)",
+   "tokens": "tɹˈiː bˈɜːd.fˈɑːks tɹˈiː dˈɑːɡ bˈɜːd tɹˈiː?fˈɑːks.dˈɑːɡ."
+  },
+  {
+   "text": "cat, \"Fox? cat; dog… Dog… fox, Dog?\" Tree),",
+   "tokens": "kˈæt, fˈɑːks?kˈæt; dˈɑːɡdˈɑːɡfˈɑːks, dˈɑːɡ?tɹˈiː, "
+  },
+  {
+   "text": "Tree: dog: dog? Fox, \"tree... Dog fox,",
+   "tokens": "tɹˈiː: dˈɑːɡ: dˈɑːɡ?fˈɑːks, tɹˈiːdˈɑːɡ fˈɑːks, "
+  },
+  {
+   "text": "Tree; \"bird… cat... tree, Tree -- dog) Fox — tree),",
+   "tokens": "tɹˈiː; bˈɜːdkˈættɹˈiː, tɹˈiː dˈɑːɡ fˈɑːks; tɹˈiː, "
+  },
+  {
+   "text": "cat?! Fox,\" Tree — Dog...",
+   "tokens": "kˈæt?fˈɑːks, tɹˈiː; dˈɑːɡ"
+  },
+  {
+   "text": "cat... Dog! Tree… dog Tree),",
+   "tokens": "kˈætdˈɑːɡ!tɹˈiːdˈɑːɡ tɹˈiː, "
+  },
+  {
+   "text": "tree,\" Fox.\" tree, \"cat, \"Tree – cat…",
+   "tokens": "tɹˈiː, fˈɑːks.tɹˈiː, kˈæt, tɹˈiː; kˈæt"
+  },
+  {
+   "text": "fox... Tree Tree!! tree) cat -- tree,",
+   "tokens": "fˈɑːkstɹˈiː tɹˈiː!tɹˈiː kˈæt tɹˈiː, "
+  },
+  {
+   "text": "fox,\" dog; bird... fox: bird (Tree —",
+   "tokens": "fˈɑːks, dˈɑːɡ; bˈɜːdfˈɑːks: bˈɜːd tɹˈiː; "
+  },
+  {
+   "text": "Dog bird), Tree!",
+   "tokens": "dˈɑːɡ bˈɜːd, tɹˈiː!"
+  },
+  {
+   "text": "tree – fox, \"cat, Dog!\" cat; \"",
+   "tokens": "tɹˈiː; fˈɑːks, kˈæt, dˈɑːɡ!kˈæt; "
+  },
+  {
+   "text": "Fox), cat bird) Tree.\"",
+   "tokens": "fˈɑːks, kˈæt bˈɜːd tɹˈiː."
+  },
+  {
+   "text": "cat? tree Fox bird!\" Dog. bird… fox!! Tree;",
+   "tokens": "kˈæt?tɹˈiː fˈɑːks bˈɜːd!dˈɑːɡ bˈɜːdfˈɑːks!tɹˈiː; "
+  },
+  {
+   "text": "Tree… fox! fox… Tree…",
+   "tokens": "tɹˈiːfˈɑːks!fˈɑːkstɹˈiː"
+  },
+  {
+   "text": "tree (fox - tree. cat... fox: Fox.\" tree (Dog;",
+   "tokens": "tɹˈiː fˈɑːks tɹˈiː kˈætfˈɑːks: fˈɑːks.tɹˈiː dˈɑːɡ; "
+  },
+  {
+   "text": "dog, \"cat!! tree Tree,\"",
+   "tokens": "dˈɑːɡ, kˈæt!tɹˈiː tɹˈiː, "
+  },
+  {
+   "text": "Dog, \"dog fox?",
+   "tokens": "dˈɑːɡ, dˈɑːɡ fˈɑːks?"
+  },
+  {
+   "text": "tree Tree,\" Fox) tree... dog…",
+   "tokens": "tɹˈiː tɹˈiː, fˈɑːks tɹˈiːdˈɑːɡ"
+  },
+  {
+   "text": "tree - Dog... tree - dog, \"cat; bird (",
+   "tokens": "tɹˈiː dˈɑːɡtɹˈiː dˈɑːɡ, kˈæt; bˈɜːd"
+  },
+  {
+   "text": "dog dog (cat. tree!",
+   "tokens": "dˈɑːɡ dˈɑːɡ kˈæt tɹˈiː!"
+  },
+  {
+   "text": "bird? fox), tree.\" tree!\" bird - Fox…",
+   "tokens": "bˈɜːd?fˈɑːks, tɹˈiː.tɹˈiː!bˈɜːd fˈɑːks"
+  },
+  {
+   "text": "bird? fox cat!! bird!\" Dog? fox,",
+   "tokens": "bˈɜːd?fˈɑːks kˈæt!bˈɜːd!dˈɑːɡ?fˈɑːks, "
+  },
+  {
+   "text": "Dog, \"cat?\" bird cat.\" tree?\" fox?\" Dog -- Tree)",
+   "tokens": "dˈɑːɡ, kˈæt?bˈɜːd kˈæt.tɹˈiː?fˈɑːks?dˈɑːɡ tɹˈiː"
+  },
+  {
+   "text": "fox (cat.\" bird… fox fox dog!\" fox…",
+   "tokens": "fˈɑːks kˈæt.bˈɜːdfˈɑːks fˈɑːks dˈɑːɡ!fˈɑːks"
+  },
+  {
+   "text": "Fox, \"dog), tree,\" Tree! Fox (Dog; \"Dog? cat!! bird.",
+   "tokens": "fˈɑːks, dˈɑːɡ, tɹˈiː, tɹˈiː!fˈɑːks dˈɑːɡ; dˈɑːɡ?kˈæt!bˈɜːd."
+  },
+  {
+   "text": "tree fox), cat) cat? dog cat?",
+   "tokens": "tɹˈiː fˈɑːks, kˈæt kˈæt?dˈɑːɡ kˈæt?"
+  },
+  {
+   "text": "tree, \"cat?! dog, cat...",
+   "tokens": "tɹˈiː, kˈæt?dˈɑːɡ, kˈæt"
+  },
+  {
+   "text": "cat. dog... cat?",
+   "tokens": "kˈæt dˈɑːɡkˈæt?"
+  },
+  {
+   "text": "bird? tree cat,",
+   "tokens": "bˈɜːd?tɹˈiː kˈæt, "
+  },
+  {
+   "text": "dog - Dog... cat...",
+   "tokens": "dˈɑːɡ dˈɑːɡkˈæt"
+  },
+  {
+   "text": "Fox!! Tree?! Fox - fox —",
+   "tokens": "fˈɑːks!tɹˈiː?fˈɑːks fˈɑːks; "
+  },
+  {
+   "text": "Tree,\" Dog dog!",
+   "tokens": "tɹˈiː, dˈɑːɡ dˈɑːɡ!"
+  },
+  {
+   "text": "cat — tree; dog.\" Fox, Fox; \"tree?",
+   "tokens": "kˈæt; tɹˈiː; dˈɑːɡ.fˈɑːks, fˈɑːks; tɹˈiː?"
+  },
+  {
+   "text": "fox — bird,\" Dog?\" bird tree,\" Tree - cat! bird –",
+   "tokens": "fˈɑːks; bˈɜːd, dˈɑːɡ?bˈɜːd tɹˈiː, tɹˈiː kˈæt!bˈɜːd; "
+  },
+  {
+   "text": "bird fox Dog – Fox -- Dog… Fox!\" fox — fox!! cat.)",
+   "tokens": "bˈɜːd fˈɑːks dˈɑːɡ; fˈɑːks dˈɑːɡfˈɑːks!fˈɑːks; fˈɑːks!kˈæt."
+  },
+  {
+   "text": "Dog; Dog cat, \"cat -- cat)",
+   "tokens": "dˈɑːɡ; dˈɑːɡ kˈæt, kˈæt kˈæt"
+  },
+  {
+   "text": "Fox.\" dog! bird; Dog,\"",
+   "tokens": "fˈɑːks.dˈɑːɡ!bˈɜːd; dˈɑːɡ, "
+  },
+  {
+   "text": "Dog!! Tree, \"dog; \"fox... dog: bird; \"dog -- Fox:",
+   "tokens": "dˈɑːɡ!tɹˈiː, dˈɑːɡ; fˈɑːksdˈɑːɡ: bˈɜːd; dˈɑːɡ fˈɑːks: "
+  },
+  {
+   "text": "Fox tree: tree… bird?\" dog. bird) bird; \"fox!",
+   "tokens": "fˈɑːks tɹˈiː: tɹˈiːbˈɜːd?dˈɑːɡ bˈɜːd bˈɜːd; fˈɑːks!"
+  },
+  {
+   "text": "Fox), bird -- bird.\" dog. tree?\" dog (",
+   "tokens": "fˈɑːks, bˈɜːd bˈɜːd.dˈɑːɡ tɹˈiː?dˈɑːɡ"
+  },
+  {
+   "text": "dog,\" tree?\" Dog dog - dog?\"",
+   "tokens": "dˈɑːɡ, tɹˈiː?dˈɑːɡ dˈɑːɡ dˈɑːɡ?"
+  },
+  {
+   "text": "Tree dog Fox. bird; dog?\" Dog (fox; \"dog -",
+   "tokens": "tɹˈiː dˈɑːɡ fˈɑːks bˈɜːd; dˈɑːɡ?dˈɑːɡ fˈɑːks; dˈɑːɡ"
+  },
+  {
+   "text": "fox; tree - fox Dog Tree! fox), Tree! fox...",
+   "tokens": "fˈɑːks; tɹˈiː fˈɑːks dˈɑːɡ tɹˈiː!fˈɑːks, tɹˈiː!fˈɑːks"
+  },
+  {
+   "text": "cat, tree!\" cat bird -- bird bird…",
+   "tokens": "kˈæt, tɹˈiː!kˈæt bˈɜːd bˈɜːd bˈɜːd"
+  },
+  {
+   "text": "Dog, \"Tree bird!!",
+   "tokens": "dˈɑːɡ, tɹˈiː bˈɜːd!"
+  },
+  {
+   "text": "Tree — tree), Fox dog – dog?!",
+   "tokens": "tɹˈiː; tɹˈiː, fˈɑːks dˈɑːɡ; dˈɑːɡ?"
+  },
+  {
+   "text": "dog — cat!! Fox… fox Tree; Dog.\" Dog,",
+   "tokens": "dˈɑːɡ; kˈæt!fˈɑːksfˈɑːks tɹˈiː; dˈɑːɡ.dˈɑːɡ, "
+  },
+  {
+   "text": "Fox) Tree. Fox; Fox cat), Dog — Dog, fox?",
+   "tokens": "fˈɑːks tɹˈiː.fˈɑːks; fˈɑːks kˈæt, dˈɑːɡ; dˈɑːɡ, fˈɑːks?"
+  },
+  {
+   "text": "cat (bird; Dog,\"",
+   "tokens": "kˈæt bˈɜːd; dˈɑːɡ, "
+  },
+  {
+   "text": "Dog Tree!! Tree?! dog – Dog cat) fox, dog; Fox...",
+   "tokens": "dˈɑːɡ tɹˈiː!tɹˈiː?dˈɑːɡ; dˈɑːɡ kˈæt fˈɑːks, dˈɑːɡ; fˈɑːks"
+  },
+  {
+   "text": "fox. fox: dog cat, Tree dog,\" Tree:",
+   "tokens": "fˈɑːks fˈɑːks: dˈɑːɡ kˈæt, tɹˈiː dˈɑːɡ, tɹˈiː: "
+  },
+  {
+   "text": "dog?! cat; Fox bird — fox? Tree — Tree --",
+   "tokens": "dˈɑːɡ?kˈæt; fˈɑːks bˈɜːd; fˈɑːks?tɹˈiː; tɹˈiː"
+  },
+  {
+   "text": "Tree,\" fox; \"dog -- Dog; Tree, \"bird?",
+   "tokens": "tɹˈiː, fˈɑːks; dˈɑːɡ dˈɑːɡ; tɹˈiː, bˈɜːd?"
+  },
+  {
+   "text": "fox? bird; bird)",
+   "tokens": "fˈɑːks?bˈɜːd; bˈɜːd"
+  },
+  {
+   "text": "Tree, \"dog; \"tree!! bird: Tree? dog:",
+   "tokens": "tɹˈiː, dˈɑːɡ; tɹˈiː!bˈɜːd: tɹˈiː?dˈɑːɡ: "
+  }
+ ],
+ "add_punctuation": [
+  {
+   "in": "Hello",
+   "out": "Hello."
+  },
+  {
+   "in": "Hello.",
+   "out": "Hello."
+  },
+  {
+   "in": "Hello…",
+   "out": "Hello…."
+  },
+  {
+   "in": "Hi!  ",
+   "out": "Hi!"
+  },
+  {
+   "in": "  Hi ",
+   "out": "Hi."
+  },
+  {
+   "in": "What?!",
+   "out": "What?!"
+  },
+  {
+   "in": "wow;",
+   "out": "wow;"
+  },
+  {
+   "in": "done:",
+   "out": "done:"
+  },
+  {
+   "in": "",
+   "out": null
+  },
+  {
+   "in": "   ",
+   "out": null
+  }
+ ],
+ "chunks": [
+  {
+   "line": 3,
+   "max": -3,
+   "chunks": [
+    "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ",
+    "ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ",
+    "ðə bˈʌdʒɪt, ",
+    "ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ."
+   ]
+  },
+  {
+   "line": 3,
+   "max": 0,
+   "chunks": [
+    "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ",
+    "ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ",
+    "ðə bˈʌdʒɪt, ",
+    "ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ."
+   ]
+  },
+  {
+   "line": 3,
+   "max": 1,
+   "chunks": [
+    "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ",
+    "ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ",
+    "ðə bˈʌdʒɪt, ",
+    "ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ."
+   ]
+  },
+  {
+   "line": 3,
+   "max": 7,
+   "chunks": [
+    "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ",
+    "ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ",
+    "ðə bˈʌdʒɪt, ",
+    "ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ."
+   ]
+  },
+  {
+   "line": 3,
+   "max": 25,
+   "chunks": [
+    "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ",
+    "ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ",
+    "ðə bˈʌdʒɪt, ",
+    "ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ."
+   ]
+  },
+  {
+   "line": 3,
+   "max": 60,
+   "chunks": [
+    "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ",
+    "ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ",
+    "ðə bˈʌdʒɪt, ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ."
+   ]
+  },
+  {
+   "line": 3,
+   "max": 150,
+   "chunks": [
+    "ˈæftɚ ðə mˈiːɾɪŋ ˈɛndᵻd, ðə tˈiːm ɡˈæðɚd ɪnðə kˈɪtʃən tə tˈɔːk ɐbˌaʊt ðə nˈuː pɹˈɑːdʌkt lˈɑːntʃ, ðə bˈʌdʒɪt, ænd ðə skˈɛdʒuːl fɚðə kˈʌmɪŋ kwˈɔːɹɾɚ."
+   ]
+  },
+  {
+   "line": 4,
+   "max": -3,
+   "chunks": [
+    "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, ",
+    "sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.",
+    "ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.",
+    "ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.",
+    "aɪ θˈæŋkt hɜː, ",
+    "hˈʌŋ ˈʌp, ",
+    "ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.",
+    "lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, ",
+    "sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ."
+   ]
+  },
+  {
+   "line": 4,
+   "max": 0,
+   "chunks": [
+    "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, ",
+    "sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.",
+    "ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.",
+    "ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.",
+    "aɪ θˈæŋkt hɜː, ",
+    "hˈʌŋ ˈʌp, ",
+    "ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.",
+    "lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, ",
+    "sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ."
+   ]
+  },
+  {
+   "line": 4,
+   "max": 1,
+   "chunks": [
+    "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, ",
+    "sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.",
+    "ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.",
+    "ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.",
+    "aɪ θˈæŋkt hɜː, ",
+    "hˈʌŋ ˈʌp, ",
+    "ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.",
+    "lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, ",
+    "sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ."
+   ]
+  },
+  {
+   "line": 4,
+   "max": 7,
+   "chunks": [
+    "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, ",
+    "sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.",
+    "ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.",
+    "ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.",
+    "aɪ θˈæŋkt hɜː, ",
+    "hˈʌŋ ˈʌp, ",
+    "ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.",
+    "lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, ",
+    "sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ."
+   ]
+  },
+  {
+   "line": 4,
+   "max": 25,
+   "chunks": [
+    "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, ",
+    "sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.",
+    "ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.",
+    "ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.",
+    "aɪ θˈæŋkt hɜː, hˈʌŋ ˈʌp, ",
+    "ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.",
+    "lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, ",
+    "sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ."
+   ]
+  },
+  {
+   "line": 4,
+   "max": 60,
+   "chunks": [
+    "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, ",
+    "sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.",
+    "ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.",
+    "ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.",
+    "aɪ θˈæŋkt hɜː, hˈʌŋ ˈʌp, ",
+    "ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.",
+    "lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, ",
+    "sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ."
+   ]
+  },
+  {
+   "line": 4,
+   "max": 150,
+   "chunks": [
+    "ˌaʊɚ wˈɔːɾɚ bˈɪl ɚɹˈaɪvd lˈeɪt ðɪs mˈʌnθ, sˌoʊ aɪ kˈɔːld ðɪ ˈɑːfɪs tʊ ˈæsk wˈaɪ.ðə klˈɜːk sˈɛd ɐ mˈiːɾɚ ɹˈiːdɪŋ wʌz mˈɪst ɪn mˈɑːɹtʃ.",
+    "ʃiː pɹˈɑːmɪst tə fˈɪks ðə ɹˈɛkɚd ænd sˈɛnd ɐ kɚɹˈɛktᵻd stˈeɪtmənt wɪðˌɪn tˈuː wˈiːks.aɪ θˈæŋkt hɜː, hˈʌŋ ˈʌp, ",
+    "ænd ɹˈoʊt ðə dˈeɪt ˌɔn maɪ kˈæləndɚ sˌoʊ aɪ wʊd ɹᵻmˈɛmbɚ tə tʃˈɛk.lˈæst tˈaɪm ðɪs hˈæpənd ɪt tˈʊk θɹˈiː fˈoʊn kˈɔːlz, ",
+    "sˌoʊ aɪɐm hˈoʊpɪŋ ðˈɪswˌʌn ɡoʊz fˈæstɚ."
+   ]
+  },
+  {
+   "line": 5,
+   "max": -3,
+   "chunks": [
+    "ˌɔn mˈɑːɹtʃ θˈɜːd, ",
+    "twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: ",
+    "θˈɜːɾi pˌiːˈɛm, ",
+    "twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, ",
+    "nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ."
+   ]
+  },
+  {
+   "line": 5,
+   "max": 0,
+   "chunks": [
+    "ˌɔn mˈɑːɹtʃ θˈɜːd, ",
+    "twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: ",
+    "θˈɜːɾi pˌiːˈɛm, ",
+    "twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, ",
+    "nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ."
+   ]
+  },
+  {
+   "line": 5,
+   "max": 1,
+   "chunks": [
+    "ˌɔn mˈɑːɹtʃ θˈɜːd, ",
+    "twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: ",
+    "θˈɜːɾi pˌiːˈɛm, ",
+    "twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, ",
+    "nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ."
+   ]
+  },
+  {
+   "line": 5,
+   "max": 7,
+   "chunks": [
+    "ˌɔn mˈɑːɹtʃ θˈɜːd, ",
+    "twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: ",
+    "θˈɜːɾi pˌiːˈɛm, ",
+    "twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, ",
+    "nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ."
+   ]
+  },
+  {
+   "line": 5,
+   "max": 25,
+   "chunks": [
+    "ˌɔn mˈɑːɹtʃ θˈɜːd, ",
+    "twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: ",
+    "θˈɜːɾi pˌiːˈɛm, ",
+    "twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, ",
+    "nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ."
+   ]
+  },
+  {
+   "line": 5,
+   "max": 60,
+   "chunks": [
+    "ˌɔn mˈɑːɹtʃ θˈɜːd, twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: ",
+    "θˈɜːɾi pˌiːˈɛm, ",
+    "twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, ",
+    "nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ."
+   ]
+  },
+  {
+   "line": 5,
+   "max": 150,
+   "chunks": [
+    "ˌɔn mˈɑːɹtʃ θˈɜːd, twˈɛnti twˈɛntisˈɪks æt fˈoːɹ: θˈɜːɾi pˌiːˈɛm, twˈɛlv fˈɪfti pˈiːpəl pˈeɪd nˈaɪntinˈaɪn dˈɑːlɚz, nˈaɪntifˈaɪv sˈɛnts ˈiːtʃ."
+   ]
+  },
+  {
+   "line": 6,
+   "max": -3,
+   "chunks": [
+    "wˈeɪtwˌʌt?",
+    "nˈoʊ ɹˈiəli; ",
+    "jˈɛs, ",
+    "kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?"
+   ]
+  },
+  {
+   "line": 6,
+   "max": 0,
+   "chunks": [
+    "wˈeɪtwˌʌt?",
+    "nˈoʊ ɹˈiəli; ",
+    "jˈɛs, ",
+    "kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?"
+   ]
+  },
+  {
+   "line": 6,
+   "max": 1,
+   "chunks": [
+    "wˈeɪtwˌʌt?",
+    "nˈoʊ ɹˈiəli; ",
+    "jˈɛs, ",
+    "kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?"
+   ]
+  },
+  {
+   "line": 6,
+   "max": 7,
+   "chunks": [
+    "wˈeɪtwˌʌt?",
+    "nˈoʊ ɹˈiəli; ",
+    "jˈɛs, ",
+    "kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?"
+   ]
+  },
+  {
+   "line": 6,
+   "max": 25,
+   "chunks": [
+    "wˈeɪtwˌʌt?nˈoʊ ɹˈiəli; ",
+    "jˈɛs, ",
+    "kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?"
+   ]
+  },
+  {
+   "line": 6,
+   "max": 60,
+   "chunks": [
+    "wˈeɪtwˌʌt?nˈoʊ ɹˈiəli; jˈɛs, kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?"
+   ]
+  },
+  {
+   "line": 6,
+   "max": 150,
+   "chunks": [
+    "wˈeɪtwˌʌt?nˈoʊ ɹˈiəli; jˈɛs, kwˈoʊɾᵻd ænd dˈʌbəl ˌoʊkˈeɪ?"
+   ]
+  },
+  {
+   "line": 11,
+   "max": -3,
+   "chunks": [
+    "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, ",
+    "tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, ",
+    "fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən."
+   ]
+  },
+  {
+   "line": 11,
+   "max": 0,
+   "chunks": [
+    "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, ",
+    "tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, ",
+    "fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən."
+   ]
+  },
+  {
+   "line": 11,
+   "max": 1,
+   "chunks": [
+    "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, ",
+    "tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, ",
+    "fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən."
+   ]
+  },
+  {
+   "line": 11,
+   "max": 7,
+   "chunks": [
+    "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, ",
+    "tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, ",
+    "fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən."
+   ]
+  },
+  {
+   "line": 11,
+   "max": 25,
+   "chunks": [
+    "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, ",
+    "tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, ",
+    "fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən."
+   ]
+  },
+  {
+   "line": 11,
+   "max": 60,
+   "chunks": [
+    "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, ",
+    "tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, ",
+    "fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən."
+   ]
+  },
+  {
+   "line": 11,
+   "max": 150,
+   "chunks": [
+    "ðə pˌɑːpjʊlˈeɪʃən ɪz wˈʌn mˈɪliən, tˈuː hˈʌndɹɪd θˈɜːɾifˈoːɹ θˈaʊzənd, fˈaɪv hˈʌndɹɪd sˈɪkstisˈɛvən."
+   ]
+  },
+  {
+   "line": 19,
+   "max": -3,
+   "chunks": [
+    "mˈiːt mˌiː æt θˈɜːtiːn: ",
+    "θˈɜːɾi ɔːɹ fˈoːɹ: ",
+    "zˈiəɹoʊ təmˈɑːɹoʊ."
+   ]
+  },
+  {
+   "line": 19,
+   "max": 0,
+   "chunks": [
+    "mˈiːt mˌiː æt θˈɜːtiːn: ",
+    "θˈɜːɾi ɔːɹ fˈoːɹ: ",
+    "zˈiəɹoʊ təmˈɑːɹoʊ."
+   ]
+  },
+  {
+   "line": 19,
+   "max": 1,
+   "chunks": [
+    "mˈiːt mˌiː æt θˈɜːtiːn: ",
+    "θˈɜːɾi ɔːɹ fˈoːɹ: ",
+    "zˈiəɹoʊ təmˈɑːɹoʊ."
+   ]
+  },
+  {
+   "line": 19,
+   "max": 7,
+   "chunks": [
+    "mˈiːt mˌiː æt θˈɜːtiːn: ",
+    "θˈɜːɾi ɔːɹ fˈoːɹ: ",
+    "zˈiəɹoʊ təmˈɑːɹoʊ."
+   ]
+  },
+  {
+   "line": 19,
+   "max": 25,
+   "chunks": [
+    "mˈiːt mˌiː æt θˈɜːtiːn: ",
+    "θˈɜːɾi ɔːɹ fˈoːɹ: ",
+    "zˈiəɹoʊ təmˈɑːɹoʊ."
+   ]
+  },
+  {
+   "line": 19,
+   "max": 60,
+   "chunks": [
+    "mˈiːt mˌiː æt θˈɜːtiːn: θˈɜːɾi ɔːɹ fˈoːɹ: zˈiəɹoʊ təmˈɑːɹoʊ."
+   ]
+  },
+  {
+   "line": 19,
+   "max": 150,
+   "chunks": [
+    "mˈiːt mˌiː æt θˈɜːtiːn: θˈɜːɾi ɔːɹ fˈoːɹ: zˈiəɹoʊ təmˈɑːɹoʊ."
+   ]
+  },
+  {
+   "line": 20,
+   "max": -3,
+   "chunks": [
+    "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: ",
+    "fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: ",
+    "fˈɪftinˈaɪn."
+   ]
+  },
+  {
+   "line": 20,
+   "max": 0,
+   "chunks": [
+    "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: ",
+    "fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: ",
+    "fˈɪftinˈaɪn."
+   ]
+  },
+  {
+   "line": 20,
+   "max": 1,
+   "chunks": [
+    "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: ",
+    "fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: ",
+    "fˈɪftinˈaɪn."
+   ]
+  },
+  {
+   "line": 20,
+   "max": 7,
+   "chunks": [
+    "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: ",
+    "fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: ",
+    "fˈɪftinˈaɪn."
+   ]
+  },
+  {
+   "line": 20,
+   "max": 25,
+   "chunks": [
+    "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: ",
+    "fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: ",
+    "fˈɪftinˈaɪn."
+   ]
+  },
+  {
+   "line": 20,
+   "max": 60,
+   "chunks": [
+    "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: ",
+    "fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: fˈɪftinˈaɪn."
+   ]
+  },
+  {
+   "line": 20,
+   "max": 150,
+   "chunks": [
+    "ðə tɹˈeɪn lˈiːvz æt twˈɛlv: fˈaɪv ænd ɚɹˈaɪvz æt twˈɛntiθɹˈiː: fˈɪftinˈaɪn."
+   ]
+  },
+  {
+   "line": 27,
+   "max": -3,
+   "chunks": [
+    "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ",
+    "ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ",
+    "ɔːɹ sˈɪks fˈɜːst."
+   ]
+  },
+  {
+   "line": 27,
+   "max": 0,
+   "chunks": [
+    "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ",
+    "ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ",
+    "ɔːɹ sˈɪks fˈɜːst."
+   ]
+  },
+  {
+   "line": 27,
+   "max": 1,
+   "chunks": [
+    "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ",
+    "ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ",
+    "ɔːɹ sˈɪks fˈɜːst."
+   ]
+  },
+  {
+   "line": 27,
+   "max": 7,
+   "chunks": [
+    "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ",
+    "ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ",
+    "ɔːɹ sˈɪks fˈɜːst."
+   ]
+  },
+  {
+   "line": 27,
+   "max": 25,
+   "chunks": [
+    "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ",
+    "ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ",
+    "ɔːɹ sˈɪks fˈɜːst."
+   ]
+  },
+  {
+   "line": 27,
+   "max": 60,
+   "chunks": [
+    "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ",
+    "ɔːɹ sˈɪks fˈɜːst."
+   ]
+  },
+  {
+   "line": 27,
+   "max": 150,
+   "chunks": [
+    "tˈeɪk fˈaɪv sˈɪksθ ʌv ɪt, ɔːɹ θɹˈiː hˈævz ʌvðə ɹˈɛst, ɔːɹ sˈɪks fˈɜːst."
+   ]
+  },
+  {
+   "line": 28,
+   "max": -3,
+   "chunks": [
+    "ʃiː fˈɪnɪʃt fˈɜːst, ",
+    "hiː wʌz twˈɛntisˈɛkənd, ",
+    "ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd."
+   ]
+  },
+  {
+   "line": 28,
+   "max": 0,
+   "chunks": [
+    "ʃiː fˈɪnɪʃt fˈɜːst, ",
+    "hiː wʌz twˈɛntisˈɛkənd, ",
+    "ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd."
+   ]
+  },
+  {
+   "line": 28,
+   "max": 1,
+   "chunks": [
+    "ʃiː fˈɪnɪʃt fˈɜːst, ",
+    "hiː wʌz twˈɛntisˈɛkənd, ",
+    "ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd."
+   ]
+  },
+  {
+   "line": 28,
+   "max": 7,
+   "chunks": [
+    "ʃiː fˈɪnɪʃt fˈɜːst, ",
+    "hiː wʌz twˈɛntisˈɛkənd, ",
+    "ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd."
+   ]
+  },
+  {
+   "line": 28,
+   "max": 25,
+   "chunks": [
+    "ʃiː fˈɪnɪʃt fˈɜːst, ",
+    "hiː wʌz twˈɛntisˈɛkənd, ",
+    "ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd."
+   ]
+  },
+  {
+   "line": 28,
+   "max": 60,
+   "chunks": [
+    "ʃiː fˈɪnɪʃt fˈɜːst, hiː wʌz twˈɛntisˈɛkənd, ",
+    "ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd."
+   ]
+  },
+  {
+   "line": 28,
+   "max": 150,
+   "chunks": [
+    "ʃiː fˈɪnɪʃt fˈɜːst, hiː wʌz twˈɛntisˈɛkənd, ænd ðeɪ wɜː wˈʌn hˈʌndɹɪd ænd θˈɜːd."
+   ]
+  },
+  {
+   "line": 39,
+   "max": -3,
+   "chunks": [
+    "dˈɑːktɚ.",
+    "smˈɪθ mˈɛt mˈɪstɚ.",
+    "dʒˈoʊnz ænd mɪsˈɛs.",
+    "bɹˈaʊn ˌɔn sˈeɪnt.",
+    "dʒˈeɪmz sˈeɪnt."
+   ]
+  },
+  {
+   "line": 39,
+   "max": 0,
+   "chunks": [
+    "dˈɑːktɚ.",
+    "smˈɪθ mˈɛt mˈɪstɚ.",
+    "dʒˈoʊnz ænd mɪsˈɛs.",
+    "bɹˈaʊn ˌɔn sˈeɪnt.",
+    "dʒˈeɪmz sˈeɪnt."
+   ]
+  },
+  {
+   "line": 39,
+   "max": 1,
+   "chunks": [
+    "dˈɑːktɚ.",
+    "smˈɪθ mˈɛt mˈɪstɚ.",
+    "dʒˈoʊnz ænd mɪsˈɛs.",
+    "bɹˈaʊn ˌɔn sˈeɪnt.",
+    "dʒˈeɪmz sˈeɪnt."
+   ]
+  },
+  {
+   "line": 39,
+   "max": 7,
+   "chunks": [
+    "dˈɑːktɚ.",
+    "smˈɪθ mˈɛt mˈɪstɚ.",
+    "dʒˈoʊnz ænd mɪsˈɛs.",
+    "bɹˈaʊn ˌɔn sˈeɪnt.",
+    "dʒˈeɪmz sˈeɪnt."
+   ]
+  },
+  {
+   "line": 39,
+   "max": 25,
+   "chunks": [
+    "dˈɑːktɚ.",
+    "smˈɪθ mˈɛt mˈɪstɚ.",
+    "dʒˈoʊnz ænd mɪsˈɛs.",
+    "bɹˈaʊn ˌɔn sˈeɪnt.",
+    "dʒˈeɪmz sˈeɪnt."
+   ]
+  },
+  {
+   "line": 39,
+   "max": 60,
+   "chunks": [
+    "dˈɑːktɚ.smˈɪθ mˈɛt mˈɪstɚ.dʒˈoʊnz ænd mɪsˈɛs.",
+    "bɹˈaʊn ˌɔn sˈeɪnt.dʒˈeɪmz sˈeɪnt."
+   ]
+  },
+  {
+   "line": 39,
+   "max": 150,
+   "chunks": [
+    "dˈɑːktɚ.smˈɪθ mˈɛt mˈɪstɚ.dʒˈoʊnz ænd mɪsˈɛs.bɹˈaʊn ˌɔn sˈeɪnt.dʒˈeɪmz sˈeɪnt."
+   ]
+  },
+  {
+   "line": 42,
+   "max": -3,
+   "chunks": [
+    "ðə jˌuːˌɛsˈeɪ, ",
+    "ðə jˌuːkˈeɪ, ",
+    "ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl."
+   ]
+  },
+  {
+   "line": 42,
+   "max": 0,
+   "chunks": [
+    "ðə jˌuːˌɛsˈeɪ, ",
+    "ðə jˌuːkˈeɪ, ",
+    "ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl."
+   ]
+  },
+  {
+   "line": 42,
+   "max": 1,
+   "chunks": [
+    "ðə jˌuːˌɛsˈeɪ, ",
+    "ðə jˌuːkˈeɪ, ",
+    "ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl."
+   ]
+  },
+  {
+   "line": 42,
+   "max": 7,
+   "chunks": [
+    "ðə jˌuːˌɛsˈeɪ, ",
+    "ðə jˌuːkˈeɪ, ",
+    "ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl."
+   ]
+  },
+  {
+   "line": 42,
+   "max": 25,
+   "chunks": [
+    "ðə jˌuːˌɛsˈeɪ, ",
+    "ðə jˌuːkˈeɪ, ",
+    "ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl."
+   ]
+  },
+  {
+   "line": 42,
+   "max": 60,
+   "chunks": [
+    "ðə jˌuːˌɛsˈeɪ, ðə jˌuːkˈeɪ, ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl."
+   ]
+  },
+  {
+   "line": 42,
+   "max": 150,
+   "chunks": [
+    "ðə jˌuːˌɛsˈeɪ, ðə jˌuːkˈeɪ, ænd ðɪ ˌiːjˈuː sˈaɪnd ðə dˈiːl."
+   ]
+  },
+  {
+   "line": 48,
+   "max": -3,
+   "chunks": [
+    "aɪɐm hˈɪɹ, ",
+    "ænd aɪ sˈɛd ˈeɪ, ",
+    "bˈiː, ",
+    "ænd sˈiː."
+   ]
+  },
+  {
+   "line": 48,
+   "max": 0,
+   "chunks": [
+    "aɪɐm hˈɪɹ, ",
+    "ænd aɪ sˈɛd ˈeɪ, ",
+    "bˈiː, ",
+    "ænd sˈiː."
+   ]
+  },
+  {
+   "line": 48,
+   "max": 1,
+   "chunks": [
+    "aɪɐm hˈɪɹ, ",
+    "ænd aɪ sˈɛd ˈeɪ, ",
+    "bˈiː, ",
+    "ænd sˈiː."
+   ]
+  },
+  {
+   "line": 48,
+   "max": 7,
+   "chunks": [
+    "aɪɐm hˈɪɹ, ",
+    "ænd aɪ sˈɛd ˈeɪ, ",
+    "bˈiː, ",
+    "ænd sˈiː."
+   ]
+  },
+  {
+   "line": 48,
+   "max": 25,
+   "chunks": [
+    "aɪɐm hˈɪɹ, ",
+    "ænd aɪ sˈɛd ˈeɪ, bˈiː, ",
+    "ænd sˈiː."
+   ]
+  },
+  {
+   "line": 48,
+   "max": 60,
+   "chunks": [
+    "aɪɐm hˈɪɹ, ænd aɪ sˈɛd ˈeɪ, bˈiː, ænd sˈiː."
+   ]
+  },
+  {
+   "line": 48,
+   "max": 150,
+   "chunks": [
+    "aɪɐm hˈɪɹ, ænd aɪ sˈɛd ˈeɪ, bˈiː, ænd sˈiː."
+   ]
+  },
+  {
+   "line": 55,
+   "max": -3,
+   "chunks": [
+    "lˈɛts ɡˈoʊ, ",
+    "jˈɔːl, ",
+    "ɪts əklˈɑːk tˈaɪm."
+   ]
+  },
+  {
+   "line": 55,
+   "max": 0,
+   "chunks": [
+    "lˈɛts ɡˈoʊ, ",
+    "jˈɔːl, ",
+    "ɪts əklˈɑːk tˈaɪm."
+   ]
+  },
+  {
+   "line": 55,
+   "max": 1,
+   "chunks": [
+    "lˈɛts ɡˈoʊ, ",
+    "jˈɔːl, ",
+    "ɪts əklˈɑːk tˈaɪm."
+   ]
+  },
+  {
+   "line": 55,
+   "max": 7,
+   "chunks": [
+    "lˈɛts ɡˈoʊ, ",
+    "jˈɔːl, ",
+    "ɪts əklˈɑːk tˈaɪm."
+   ]
+  },
+  {
+   "line": 55,
+   "max": 25,
+   "chunks": [
+    "lˈɛts ɡˈoʊ, jˈɔːl, ",
+    "ɪts əklˈɑːk tˈaɪm."
+   ]
+  },
+  {
+   "line": 55,
+   "max": 60,
+   "chunks": [
+    "lˈɛts ɡˈoʊ, jˈɔːl, ɪts əklˈɑːk tˈaɪm."
+   ]
+  },
+  {
+   "line": 55,
+   "max": 150,
+   "chunks": [
+    "lˈɛts ɡˈoʊ, jˈɔːl, ɪts əklˈɑːk tˈaɪm."
+   ]
+  },
+  {
+   "line": 81,
+   "max": -3,
+   "chunks": [
+    "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, ",
+    "wˈɛlnˈoʊn, ",
+    "ˌʌptədˈeɪt tˈuːl."
+   ]
+  },
+  {
+   "line": 81,
+   "max": 0,
+   "chunks": [
+    "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, ",
+    "wˈɛlnˈoʊn, ",
+    "ˌʌptədˈeɪt tˈuːl."
+   ]
+  },
+  {
+   "line": 81,
+   "max": 1,
+   "chunks": [
+    "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, ",
+    "wˈɛlnˈoʊn, ",
+    "ˌʌptədˈeɪt tˈuːl."
+   ]
+  },
+  {
+   "line": 81,
+   "max": 7,
+   "chunks": [
+    "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, ",
+    "wˈɛlnˈoʊn, ",
+    "ˌʌptədˈeɪt tˈuːl."
+   ]
+  },
+  {
+   "line": 81,
+   "max": 25,
+   "chunks": [
+    "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, ",
+    "wˈɛlnˈoʊn, ",
+    "ˌʌptədˈeɪt tˈuːl."
+   ]
+  },
+  {
+   "line": 81,
+   "max": 60,
+   "chunks": [
+    "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, wˈɛlnˈoʊn, ˌʌptədˈeɪt tˈuːl."
+   ]
+  },
+  {
+   "line": 81,
+   "max": 150,
+   "chunks": [
+    "ðɪs ɪz ɐ stˈeɪɾʌvðɪˈɑːɹt, wˈɛlnˈoʊn, ˌʌptədˈeɪt tˈuːl."
+   ]
+  },
+  {
+   "line": 83,
+   "max": -3,
+   "chunks": [
+    "ɪt wʌzɐ lˈɔŋtˈɜːm, ",
+    "hˈaɪkwˈɔlᵻɾi, ",
+    "kˈɔstɪfˈɛktɪv plˈæn."
+   ]
+  },
+  {
+   "line": 83,
+   "max": 0,
+   "chunks": [
+    "ɪt wʌzɐ lˈɔŋtˈɜːm, ",
+    "hˈaɪkwˈɔlᵻɾi, ",
+    "kˈɔstɪfˈɛktɪv plˈæn."
+   ]
+  },
+  {
+   "line": 83,
+   "max": 1,
+   "chunks": [
+    "ɪt wʌzɐ lˈɔŋtˈɜːm, ",
+    "hˈaɪkwˈɔlᵻɾi, ",
+    "kˈɔstɪfˈɛktɪv plˈæn."
+   ]
+  },
+  {
+   "line": 83,
+   "max": 7,
+   "chunks": [
+    "ɪt wʌzɐ lˈɔŋtˈɜːm, ",
+    "hˈaɪkwˈɔlᵻɾi, ",
+    "kˈɔstɪfˈɛktɪv plˈæn."
+   ]
+  },
+  {
+   "line": 83,
+   "max": 25,
+   "chunks": [
+    "ɪt wʌzɐ lˈɔŋtˈɜːm, ",
+    "hˈaɪkwˈɔlᵻɾi, ",
+    "kˈɔstɪfˈɛktɪv plˈæn."
+   ]
+  },
+  {
+   "line": 83,
+   "max": 60,
+   "chunks": [
+    "ɪt wʌzɐ lˈɔŋtˈɜːm, hˈaɪkwˈɔlᵻɾi, kˈɔstɪfˈɛktɪv plˈæn."
+   ]
+  },
+  {
+   "line": 83,
+   "max": 150,
+   "chunks": [
+    "ɪt wʌzɐ lˈɔŋtˈɜːm, hˈaɪkwˈɔlᵻɾi, kˈɔstɪfˈɛktɪv plˈæn."
+   ]
+  },
+  {
+   "line": 87,
+   "max": -3,
+   "chunks": [
+    "wˌʌt?",
+    "ɹˈiəli?",
+    "nˈoʊ wˈeɪ!"
+   ]
+  },
+  {
+   "line": 87,
+   "max": 0,
+   "chunks": [
+    "wˌʌt?",
+    "ɹˈiəli?",
+    "nˈoʊ wˈeɪ!"
+   ]
+  },
+  {
+   "line": 87,
+   "max": 1,
+   "chunks": [
+    "wˌʌt?",
+    "ɹˈiəli?",
+    "nˈoʊ wˈeɪ!"
+   ]
+  },
+  {
+   "line": 87,
+   "max": 7,
+   "chunks": [
+    "wˌʌt?",
+    "ɹˈiəli?",
+    "nˈoʊ wˈeɪ!"
+   ]
+  },
+  {
+   "line": 87,
+   "max": 25,
+   "chunks": [
+    "wˌʌt?ɹˈiəli?nˈoʊ wˈeɪ!"
+   ]
+  },
+  {
+   "line": 87,
+   "max": 60,
+   "chunks": [
+    "wˌʌt?ɹˈiəli?nˈoʊ wˈeɪ!"
+   ]
+  },
+  {
+   "line": 87,
+   "max": 150,
+   "chunks": [
+    "wˌʌt?ɹˈiəli?nˈoʊ wˈeɪ!"
+   ]
+  }
+ ],
+ "crossfade": [
+  {
+   "name": "three",
+   "lens": [
+    40,
+    6,
+    25
+   ],
+   "fade": 0.1,
+   "sr": 100,
+   "out": [
+    -0.5,
+    -0.3246445655822754,
+    -0.1492891013622284,
+    0.026066362857818604,
+    0.2014217972755432,
+    0.3767772316932678,
+    -0.4478673040866852,
+    -0.2725118398666382,
+    -0.09715640544891357,
+    0.07819902896881104,
+    0.2535545229911804,
+    0.42890995740890503,
+    -0.39573460817337036,
+    -0.22037914395332336,
+    -0.045023709535598755,
+    0.13033175468444824,
+    0.30568718910217285,
+    0.48104268312454224,
+    -0.34360188245773315,
+    -0.16824644804000854,
+    0.0071089863777160645,
+    0.18246448040008545,
+    0.35781991481781006,
+    -0.46682465076446533,
+    -0.2914692163467407,
+    -0.11611375212669373,
+    0.05924171209335327,
+    0.23459714651107788,
+    0.4099525809288025,
+    -0.4146919250488281,
+    -0.23933649063110352,
+    -0.09768299758434296,
+    0.043970488011837006,
+    0.18562403321266174,
+    0.3272775113582611,
+    0.07040545344352722,
+    -0.32053709030151367,
+    -0.31221696734428406,
+    -0.14907845854759216,
+    0.03554505109786987,
+    0.21090048551559448,
+    0.3862559199333191,
+    -0.4383886158466339,
+    -0.2630331814289093,
+    -0.0876777172088623,
+    0.0876777172088623,
+    0.2630331516265869,
+    0.4383886456489563,
+    -0.3862559199333191,
+    -0.21090048551559448,
+    -0.035545021295547485,
+    0.1398104429244995,
+    0.3151658773422241,
+    0.49052131175994873,
+    -0.3341232240200043
+   ]
+  },
+  {
+   "name": "single",
+   "lens": [
+    50
+   ],
+   "fade": 0.1,
+   "sr": 100,
+   "out": [
+    -0.5,
+    -0.3246445655822754,
+    -0.1492891013622284,
+    0.026066362857818604,
+    0.2014217972755432,
+    0.3767772316932678,
+    -0.4478673040866852,
+    -0.2725118398666382,
+    -0.09715640544891357,
+    0.07819902896881104,
+    0.2535545229911804,
+    0.42890995740890503,
+    -0.39573460817337036,
+    -0.22037914395332336,
+    -0.045023709535598755,
+    0.13033175468444824,
+    0.30568718910217285,
+    0.48104268312454224,
+    -0.34360188245773315,
+    -0.16824644804000854,
+    0.0071089863777160645,
+    0.18246448040008545,
+    0.35781991481781006,
+    -0.46682465076446533,
+    -0.2914692163467407,
+    -0.11611375212669373,
+    0.05924171209335327,
+    0.23459714651107788,
+    0.4099525809288025,
+    -0.4146919250488281,
+    -0.23933649063110352,
+    -0.0639810562133789,
+    0.1113743782043457,
+    0.2867298722267151,
+    0.4620853066444397,
+    -0.3625592589378357,
+    -0.1872037947177887,
+    -0.0118483304977417,
+    0.1635071039199829,
+    0.3388625383377075,
+    -0.4857819974422455,
+    -0.3104265332221985,
+    -0.13507109880447388,
+    0.04028433561325073,
+    0.21563982963562012,
+    0.3909952640533447,
+    -0.43364930152893066,
+    -0.25829383730888367,
+    -0.08293840289115906,
+    0.09241706132888794
+   ]
+  },
+  {
+   "name": "short_pair",
+   "lens": [
+    3,
+    3
+   ],
+   "fade": 0.1,
+   "sr": 100,
+   "out": [
+    -0.5,
+    -0.08530807495117188,
+    0.329383909702301
+   ]
+  },
+  {
+   "name": "exact_fade",
+   "lens": [
+    10,
+    5
+   ],
+   "fade": 0.1,
+   "sr": 100,
+   "out": [
+    -0.5,
+    -0.3246445655822754,
+    -0.1492891013622284,
+    0.026066362857818604,
+    0.2014217972755432,
+    0.3767772316932678,
+    -0.2973933815956116,
+    0.02843603491783142,
+    -0.395734578371048,
+    -0.31990522146224976
+   ]
+  },
+  {
+   "name": "empty_first",
+   "lens": [
+    0,
+    7,
+    4
+   ],
+   "fade": 0.1,
+   "sr": 100,
+   "out": [
+    -0.02132701873779297,
+    0.15402841567993164,
+    0.329383909702301,
+    -0.49526065587997437,
+    -0.3357030153274536,
+    -0.17614534497261047,
+    -0.016587674617767334
+   ]
+  },
+  {
+   "name": "no_fade",
+   "lens": [
+    8,
+    8
+   ],
+   "fade": 0.0,
+   "sr": 100,
+   "out": [
+    -0.5,
+    -0.3246445655822754,
+    -0.1492891013622284,
+    0.026066362857818604,
+    0.2014217972755432,
+    0.3767772316932678,
+    -0.4478673040866852,
+    -0.2725118398666382,
+    -0.02132701873779297,
+    0.15402841567993164,
+    0.329383909702301,
+    -0.49526065587997437,
+    -0.31990522146224976,
+    -0.14454975724220276,
+    0.03080570697784424,
+    0.20616114139556885
+   ]
+  }
+ ],
+ "silence": [
+  {
+   "name": "edge_basic",
+   "spec": "S50 L100 S50",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 48000,
+   "out_len": 28800,
+   "sha1": "4af21a33cfd28584ba9e2a7a3859ee17710c6afd"
+  },
+  {
+   "name": "edge_short_kept",
+   "spec": "S5 L100 S5",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 26400,
+   "out_len": 26400,
+   "sha1": "a7d964f6707bb6cba7e40005c677448d41f662e9"
+  },
+  {
+   "name": "edge_asymmetric",
+   "spec": "S13 L40 S77",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 31200,
+   "out_len": 14400,
+   "sha1": "8ca4ede3f4b720b7d03531f925441269bdc33fb4"
+  },
+  {
+   "name": "prompt_basic",
+   "spec": "S50 L300 S50",
+   "only_edge": false,
+   "trail": 200,
+   "in_len": 96000,
+   "out_len": 81598,
+   "sha1": "643c134976f6e8e5f28589b8acab4aeaa70222f5"
+  },
+  {
+   "name": "pause_1500",
+   "spec": "S20 L100 S150 L100 S20",
+   "only_edge": false,
+   "trail": 200,
+   "in_len": 93600,
+   "out_len": 93598,
+   "sha1": "f6451c81f10c10f7c38cb54803eb18ab4eefa808"
+  },
+  {
+   "name": "pause_3500",
+   "spec": "S20 L100 S350 L100 S20",
+   "only_edge": false,
+   "trail": 0,
+   "in_len": 141600,
+   "out_len": 100800,
+   "sha1": "f6a94d422028221cbbac58c29bcb18256c46841e"
+  },
+  {
+   "name": "pause_2000",
+   "spec": "L100 S200 L100",
+   "only_edge": false,
+   "trail": 0,
+   "in_len": 96000,
+   "out_len": 96000,
+   "sha1": "e009fb267bf456605b74302671cc4537f0dc9ecb"
+  },
+  {
+   "name": "pause_1000",
+   "spec": "L100 S100 L100",
+   "only_edge": false,
+   "trail": 0,
+   "in_len": 72000,
+   "out_len": 72000,
+   "sha1": "0dd6454bff105f74463198e6cefd91b2fa8e837a"
+  },
+  {
+   "name": "pause_990",
+   "spec": "L100 S99 L100",
+   "only_edge": false,
+   "trail": 0,
+   "in_len": 71760,
+   "out_len": 71760,
+   "sha1": "2546d2ebe4782b1f63b7154963d399ba1239713b"
+  },
+  {
+   "name": "pause_1010",
+   "spec": "L100 S101 L100",
+   "only_edge": false,
+   "trail": 0,
+   "in_len": 72240,
+   "out_len": 72240,
+   "sha1": "ad338c53d3d16f5b845c7637776e5e8b8413f31e"
+  },
+  {
+   "name": "pause_1990",
+   "spec": "L100 S199 L100",
+   "only_edge": false,
+   "trail": 0,
+   "in_len": 95760,
+   "out_len": 95760,
+   "sha1": "49f3ec49aaa15acded53f0fc95b98f9f6ade8f1b"
+  },
+  {
+   "name": "two_pauses",
+   "spec": "S30 L50 S300 L50 S120 L50 S30",
+   "only_edge": false,
+   "trail": 0,
+   "in_len": 151200,
+   "out_len": 117600,
+   "sha1": "600a7444439561348eb015b8aec8910398ba9f1d"
+  },
+  {
+   "name": "threshold_edges",
+   "spec": "S30 U10 L40 T10 V10 S20",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 28800,
+   "out_len": 16800,
+   "sha1": "21366fefdfa3d8998ef1f1c061399a33f9e870fe"
+  },
+  {
+   "name": "threshold_integer_rms",
+   "spec": "V40 L50 V40",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 31200,
+   "out_len": 16800,
+   "sha1": "c8c59dd0325a6df19f566531a71b76b4ba8245e5"
+  },
+  {
+   "name": "all_silent",
+   "spec": "S300",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 72000,
+   "out_len": 2400,
+   "sha1": "87a68e0578e3ce969993f7a129644986a4b341ea"
+  },
+  {
+   "name": "odd_length_down",
+   "spec": "S20 L100 R5",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 28805,
+   "out_len": 26400,
+   "sha1": "48c80ddb4d2c39b6aced6663e6b3cb98dc2e57f6"
+  },
+  {
+   "name": "odd_length_up",
+   "spec": "S20 L100 R15",
+   "only_edge": true,
+   "trail": 0,
+   "in_len": 28815,
+   "out_len": 26424,
+   "sha1": "880e255febf42f3f122c329e5c7267a08feae4e3"
+  },
+  {
+   "name": "trail_only",
+   "spec": "L100",
+   "only_edge": true,
+   "trail": 333,
+   "in_len": 24000,
+   "out_len": 31990,
+   "sha1": "2553149b289eb7e28084a944c74191aae4686b9d"
+  }
+ ]
+}

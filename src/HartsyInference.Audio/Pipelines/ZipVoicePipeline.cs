@@ -1,10 +1,12 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Audio.Models.ZipVoice;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -15,14 +17,15 @@ namespace HartsyInference.Audio.Pipelines;
 /// <summary>ZipVoice (k2-fsa/ZipVoice) zero-shot voice-clone pipeline: flow-matching Euler sampling under a
 /// <c>ZipformerModel</c> (fm_decoder + text_encoder), vocoded via the shared <see cref="Vocos"/> port
 /// (same <c>vocos-mel-24khz</c> family F5-TTS already uses in this engine). English-only (see
-/// <see cref="ZipVoiceTokenizer"/>); does not implement upstream's long-text chunking — very long text may
-/// exceed the model's effectively-trained span.
+/// <see cref="ZipVoiceTokenizer"/>). Follows <c>infer_zipvoice.py:generate_sentence</c>: the prompt is stripped of long
+/// silences and normalized, the text is split at sentence punctuation into chunks that fit a 25 s window with the
+/// prompt, each chunk is sampled and vocoded, and the waves are cross-faded and trimmed at the edges.
 ///
-/// <para>Pipeline shape (matches <c>ZipVoice.sample</c> + <c>infer_zipvoice.py:generate_sentence</c>):
+/// <para>Per chunk (matches <c>ZipVoice.sample</c>):
 /// <code>
 /// promptMel   = mel_extract(ref_wav) * feat_scale             # [1, T_ref, 100], channels-last
-/// jointTokens = tokenize(ref_text) + tokenize(target_text)
-/// targetT     = ceil(T_ref / len(promptTokens) * len(targetTokens) / speed)
+/// jointTokens = tokenize(ref_text) + tokenize(chunk)
+/// targetT     = ceil(T_ref / len(promptTokens) * len(chunkTokens) / speed)
 /// totalT      = T_ref + targetT
 /// textHidden  = text_encoder(embed(jointTokens + [pad]))
 /// textCond    = gather(textHidden, avg_upsample_index(len(jointTokens), totalT))
@@ -37,6 +40,12 @@ namespace HartsyInference.Audio.Pipelines;
 /// </code></para></summary>
 public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
 {
+    private const float TargetRms = 0.1f;
+    private const float MinimumPromptRms = 1e-6f;
+    private const int PromptTrailSilenceMs = 200;
+    private const double ChunkWindowSeconds = 25.0;
+    private const double CrossFadeSeconds = 0.1;
+
     private readonly ZipVoiceConfig _cfg;
     private readonly ZipVoiceModel _model;
     private readonly Vocos _vocos;
@@ -75,13 +84,14 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         vocos.LoadWeights(vocosLoader.GetAllTensors());
 
         ZipVoiceTokenizer tokenizer = ZipVoiceTokenizer.FromFile(tokensPath.Result);
-        EspeakPhonemizer phonemizer = EspeakPhonemizer.FromCache("en");
+        EspeakPhonemizer phonemizer = EspeakPhonemizer.FromCache(ZipVoiceTokenizer.EspeakLanguage);
 
         return new ZipVoicePipeline(resolved, model, vocos, tokenizer, phonemizer, modelLoader, vocosLoader);
     }
 
     /// <summary>Clones the voice in <paramref name="refAudio"/> (any sample rate, resampled to 24 kHz) reading
-    /// <paramref name="refText"/>, to speak <paramref name="targetText"/>.</summary>
+    /// <paramref name="refText"/>, to speak <paramref name="targetText"/>. Each chunk of a long text is seeded with
+    /// <see cref="ZipVoiceOptions.Seed"/> plus its index.</summary>
     public float[] GenerateFromAudio(IBackend backend, ReadOnlySpan<float> refAudio, int sampleRate,
         string refText, string targetText, ZipVoiceOptions? options = null)
     {
@@ -91,100 +101,103 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         // Upstream VocosFbank: log(clamp(mel, 1e-7)). The F5 config's 1e-5 floor is F5's, not ZipVoice's.
         MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig() with { LogFloor = 1e-7f };
         int sr = melCfg.SampleRate;
-        float[] mono24k = sampleRate == sr ? refAudio.ToArray() : Resampler.Create(sampleRate, sr).Resample(refAudio);
+        float[] prompt = sampleRate == sr ? refAudio.ToArray() : Resampler.Create(sampleRate, sr).Resample(refAudio);
+        prompt = PydubSilence.RemoveSilence(prompt, sr, onlyEdge: false, PromptTrailSilenceMs);
 
-        // Upstream generate_sentence order: remove_silence(only_edge=False, trail_sil=200), then rms_norm.
-        mono24k = RemoveSilenceEdges(mono24k, sr, keepMs: 100, thresholdDb: -50f);
-        mono24k = AppendSilence(mono24k, sr, 200);
-
-        const float targetRms = 0.1f;
-        float promptRms = Rms(mono24k);
-        if (promptRms > 1e-6f && promptRms < targetRms)
+        float promptRms = Rms(prompt);
+        if (promptRms <= MinimumPromptRms) throw new InvalidOperationException("ZipVoice: the reference audio is silent.");
+        bool quietPrompt = promptRms < TargetRms;
+        if (quietPrompt)
         {
-            float g = targetRms / promptRms;
-            for (int i = 0; i < mono24k.Length; i++) mono24k[i] *= g;
+            float gain = TargetRms / promptRms;
+            for (int i = 0; i < prompt.Length; i++) prompt[i] *= gain;
         }
+        double promptSeconds = prompt.Length / (double)sr;
+        if (promptSeconds > 20) Logs.Warning($"[ZipVoice] The reference is {promptSeconds:0.#} s; a clip of a few seconds works best.");
+        else if (promptSeconds > 10) Logs.Warning($"[ZipVoice] The reference is {promptSeconds:0.#} s; long references slow generation and can lower quality.");
 
-        MelSpectrogramExtractor extractor = new(melCfg);
-        float[,] melData = extractor.Compute(mono24k);   // [nMels, T], natural-log
-        // Upstream truncates the mel to lhotse's compute_num_frames(duration) = (N + hop/2) / hop frames, which is one
-        // fewer than the centred STFT yields for most lengths; the clamp only guards inputs shorter than one hop.
-        int tRef = Math.Min(melData.GetLength(1), (mono24k.Length + melCfg.HopLength / 2) / melCfg.HopLength);
-        Tensor promptMel = ToChannelsLastScaled(melData, tRef, _cfg.FeatDim, _cfg.FeatScale);
+        float[,] melData = new MelSpectrogramExtractor(melCfg).Compute(prompt);   // [nMels, T], natural-log
+        // Upstream cuts the mel to lhotse's (N + hop/2) / hop frames, one fewer than the centred STFT gives for most lengths.
+        int tRef = Math.Min(melData.GetLength(1), (prompt.Length + melCfg.HopLength / 2) / melCfg.HopLength);
+        using Tensor promptMel = ToChannelsLastScaled(melData, tRef, _cfg.FeatDim, _cfg.FeatScale);
 
-        int[] promptTokens = _tokenizer.Encode(refText, _phonemizer);
-        int[] targetTokens = _tokenizer.Encode(targetText, _phonemizer);
-        if (promptTokens.Length == 0 || targetTokens.Length == 0)
+        IReadOnlyList<string> promptSymbols = _tokenizer.Tokenize(ZipVoiceTokenizer.AddPunctuation(refText), _phonemizer);
+        IReadOnlyList<string> targetSymbols = _tokenizer.Tokenize(ZipVoiceTokenizer.AddPunctuation(targetText), _phonemizer);
+        int[] promptIds = _tokenizer.ToIds(promptSymbols);
+        if (promptIds.Length == 0 || targetSymbols.Count == 0)
             throw new InvalidOperationException("ZipVoice: reference or target text phonemized to zero tokens.");
 
-        int[] joint = new int[promptTokens.Length + targetTokens.Length];
-        Array.Copy(promptTokens, joint, promptTokens.Length);
-        Array.Copy(targetTokens, 0, joint, promptTokens.Length, targetTokens.Length);
-
-        int targetFrames = ZipVoiceModel.PredictTargetFrames(tRef, promptTokens.Length, targetTokens.Length, opts.Speed);
-        int totalFrames = tRef + targetFrames;
-
-        Tensor textHidden = _model.EmbedAndEncodeText(backend, joint, _tokenizer.PadId);
-        int[] frameToTokenIndex = ZipVoiceModel.BuildFrameToTokenIndex(joint.Length, totalFrames);
-        Tensor textCondition = _model.GatherTextCondition(textHidden, frameToTokenIndex);
-        textHidden.Dispose();
-
+        // Upstream budgets each chunk so prompt plus speech fill about 25 s, counting symbols before the vocabulary lookup.
+        double tokenSeconds = promptSeconds / (promptSymbols.Count * opts.Speed);
+        int maxTokens = (int)((ChunkWindowSeconds - promptSeconds) / tokenSeconds);
+        List<List<string>> chunks = ZipVoiceTextChunker.Chunk(targetSymbols, maxTokens);
         if (EngineKnobs.ZipvoiceDebug.Value)
         {
-            int avg = joint.Length > 0 ? totalFrames / joint.Length : 0;
-            int impliedPromptBoundary = avg * promptTokens.Length;
-            HartsyInference.Core.Logging.Logs.Info(
-                $"[ZipVoice debug] tRef={tRef} promptTokens.Length={promptTokens.Length} targetTokens.Length={targetTokens.Length} "
-                + $"joint.Length={joint.Length} targetFrames={targetFrames} totalFrames={totalFrames} avg={avg} "
-                + $"impliedPromptBoundary(avg*promptTokenCount)={impliedPromptBoundary} delta(impliedPromptBoundary-tRef)={impliedPromptBoundary - tRef}");
-            HartsyInference.Core.Logging.Logs.Info(
-                $"[ZipVoice debug] refText phonemized ipa=\"{_phonemizer.PhonemizeToIpa(ZipVoiceTokenizer.NormalizePunctuation(refText), "en-us", preservePunctuation: true)}\"");
-            HartsyInference.Core.Logging.Logs.Info(
-                $"[ZipVoice debug] targetText phonemized ipa=\"{_phonemizer.PhonemizeToIpa(ZipVoiceTokenizer.NormalizePunctuation(targetText), "en-us", preservePunctuation: true)}\"");
-            // Where does frameToTokenIndex cross from a prompt-token index (< promptTokens.Length) to a
-            // target-token index (>= promptTokens.Length)? Compare against the real audio boundary tRef.
-            int firstTargetTokenFrame = Array.FindIndex(frameToTokenIndex, idx => idx >= promptTokens.Length);
-            HartsyInference.Core.Logging.Logs.Info(
-                $"[ZipVoice debug] firstFrameWithTargetTokenConditioning={firstTargetTokenFrame} (vs real tRef={tRef}); "
-                + $"frames [tRef, firstFrameWithTargetTokenConditioning) still get PROMPT-token text conditioning "
-                + $"despite speechCondition being zero there = {Math.Max(0, firstTargetTokenFrame - tRef)} frames of drift");
+            Logs.Info($"[ZipVoice debug] tRef={tRef} promptTokens={promptIds.Length} targetSymbols={targetSymbols.Count} "
+                + $"maxTokens={maxTokens} chunks={chunks.Count}");
         }
 
-        Tensor speechCondition = BuildSpeechCondition(promptMel, tRef, totalFrames, _cfg.FeatDim);
-        promptMel.Dispose();
-
-        backend.PreloadWeights(_model.EnumerateWeights());
-        Tensor x1;
+        List<Tensor> mels = new(chunks.Count);
         try
         {
-            x1 = RunEulerSampling(backend, textCondition, speechCondition, totalFrames, opts);
+            backend.PreloadWeights(_model.EnumerateWeights());
+            try
+            {
+                for (int c = 0; c < chunks.Count; c++)
+                {
+                    int[] ids = _tokenizer.ToIds(chunks[c]);
+                    if (ids.Length > 0) mels.Add(SampleMel(backend, promptMel, tRef, promptIds, ids, opts, opts.Seed + (ulong)c));
+                }
+            }
+            finally { backend.FreeWeights(_model.EnumerateWeights()); }
+            if (mels.Count == 0) throw new InvalidOperationException("ZipVoice: the text phonemized to zero tokens.");
+
+            List<float[]> waves = new(mels.Count);
+            foreach (Tensor mel in mels) waves.Add(Vocode(backend, mel, quietPrompt ? promptRms / TargetRms : 1f));
+            float[] speech = PydubSilence.RemoveSilence(WaveCrossFade.Join(waves, (int)(CrossFadeSeconds * sr)), sr, onlyEdge: true, 0);
+            if (speech.Length == 0) throw new InvalidOperationException("ZipVoice: the generated speech is silent.");
+            return speech;
         }
-        finally { backend.FreeWeights(_model.EnumerateWeights()); }
-        textCondition.Dispose();
-        speechCondition.Dispose();
-
-        Tensor generated = SliceFrames(x1, tRef, targetFrames, _cfg.FeatDim, 1.0f / _cfg.FeatScale);
-        x1.Dispose();
-
-        Tensor melChannelsFirst = new(new TensorShape(1, _cfg.FeatDim, targetFrames), DType.F32);
-        backend.Transpose2D(melChannelsFirst, generated, targetFrames, _cfg.FeatDim);
-        generated.Dispose();
-
-        float[] audio = _vocos.Forward(backend, melChannelsFirst);
-        melChannelsFirst.Dispose();
-
-        if (promptRms > 1e-6f && promptRms < targetRms)
+        finally
         {
-            float g = promptRms / targetRms;
-            for (int i = 0; i < audio.Length; i++) audio[i] *= g;
+            foreach (Tensor mel in mels) mel.Dispose();
         }
+    }
+
+    /// <summary>Samples one chunk's mel, <c>[1, featDim, frames]</c>, given the shared prompt.</summary>
+    private Tensor SampleMel(IBackend backend, Tensor promptMel, int tRef, int[] promptIds, int[] chunkIds,
+        ZipVoiceOptions opts, ulong seed)
+    {
+        int[] joint = new int[promptIds.Length + chunkIds.Length];
+        promptIds.CopyTo(joint, 0);
+        chunkIds.CopyTo(joint, promptIds.Length);
+        int targetFrames = ZipVoiceModel.PredictTargetFrames(tRef, promptIds.Length, chunkIds.Length, opts.Speed);
+        int totalFrames = tRef + targetFrames;
+
+        using Tensor textHidden = _model.EmbedAndEncodeText(backend, joint, _tokenizer.PadId);
+        using Tensor textCondition = _model.GatherTextCondition(textHidden, ZipVoiceModel.BuildFrameToTokenIndex(joint.Length, totalFrames));
+        using Tensor speechCondition = BuildSpeechCondition(promptMel, tRef, totalFrames, _cfg.FeatDim);
+        using Tensor x1 = RunEulerSampling(backend, textCondition, speechCondition, totalFrames, opts, seed);
+        using Tensor generated = SliceFrames(x1, tRef, targetFrames, _cfg.FeatDim, 1.0f / _cfg.FeatScale);
+
+        Tensor mel = new(new TensorShape(1, _cfg.FeatDim, targetFrames), DType.F32);
+        backend.Transpose2D(mel, generated, targetFrames, _cfg.FeatDim);
+        return mel;
+    }
+
+    // Upstream clamps the vocoder output to [-1, 1] before scaling a quiet prompt's loudness back in.
+    private float[] Vocode(IBackend backend, Tensor mel, float gain)
+    {
+        float[] audio = _vocos.Forward(backend, mel);
+        for (int i = 0; i < audio.Length; i++) audio[i] = Math.Clamp(audio[i], -1f, 1f) * gain;
         return audio;
     }
 
-    private Tensor RunEulerSampling(IBackend backend, Tensor textCondition, Tensor speechCondition, int totalFrames, ZipVoiceOptions opts)
+    private Tensor RunEulerSampling(IBackend backend, Tensor textCondition, Tensor speechCondition, int totalFrames,
+        ZipVoiceOptions opts, ulong seed)
     {
         int featDim = _cfg.FeatDim;
-        Tensor x = BuildNoise(featDim, totalFrames, opts.Seed);
+        Tensor x = BuildNoise(featDim, totalFrames, seed);
         Tensor zeroText = new(new TensorShape(1, totalFrames, featDim), DType.F32);   // zero-initialized
         Tensor zeroSpeech = new(new TensorShape(1, totalFrames, featDim), DType.F32);
 
@@ -333,48 +346,6 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         double sumSq = 0.0;
         for (int i = 0; i < x.Length; i++) sumSq += (double)x[i] * x[i];
         return x.Length > 0 ? (float)Math.Sqrt(sumSq / x.Length) : 0f;
-    }
-
-    /// <summary>Upstream <c>remove_silence_edges</c> (pydub): drops leading and trailing silence beyond
-    /// <paramref name="keepMs"/>, measured in 10 ms chunks, where a chunk is silent below <paramref name="thresholdDb"/>
-    /// dBFS (full scale = 1.0). Upstream's internal-pause split (<c>remove_silence(only_edge=False)</c>) is not ported.</summary>
-    internal static float[] RemoveSilenceEdges(float[] x, int sr, int keepMs, float thresholdDb)
-    {
-        int chunk = Math.Max(1, sr / 100);
-        int keep = keepMs * sr / 1000;
-        int from = Math.Max(0, LeadingSilence(x, 0, x.Length, chunk, thresholdDb) - keep);
-        int to = x.Length - Math.Max(0, TrailingSilence(x, from, x.Length, chunk, thresholdDb) - keep);
-        return to <= from ? [] : x[from..to];
-    }
-
-    /// <summary>Upstream <c>remove_silence</c>'s <c>trail_sil</c>: appends <paramref name="ms"/> of digital silence.</summary>
-    internal static float[] AppendSilence(float[] x, int sr, int ms)
-    {
-        float[] outp = new float[x.Length + sr * ms / 1000];
-        Array.Copy(x, outp, x.Length);
-        return outp;
-    }
-
-    private static int LeadingSilence(float[] x, int from, int to, int chunk, float thresholdDb)
-    {
-        int i = from;
-        while (i < to && ChunkDbfs(x, i, Math.Min(to, i + chunk)) < thresholdDb) i += chunk;
-        return Math.Min(i, to) - from;
-    }
-
-    private static int TrailingSilence(float[] x, int from, int to, int chunk, float thresholdDb)
-    {
-        int i = to;
-        while (i > from && ChunkDbfs(x, Math.Max(from, i - chunk), i) < thresholdDb) i -= chunk;
-        return to - Math.Max(i, from);
-    }
-
-    private static double ChunkDbfs(float[] x, int start, int end)
-    {
-        double sumSq = 0.0;
-        for (int i = start; i < end; i++) sumSq += (double)x[i] * x[i];
-        double rms = Math.Sqrt(sumSq / Math.Max(1, end - start));
-        return rms == 0.0 ? double.NegativeInfinity : 20.0 * Math.Log10(rms);
     }
 
     private void ThrowIfDisposed()

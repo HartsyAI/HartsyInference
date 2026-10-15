@@ -1,21 +1,20 @@
-using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using HartsyInference.Audio.Phonemizer;
 using HartsyInference.Audio.Phonemizer.Espeak;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Models.ZipVoice;
 
-/// <summary>Ports ZipVoice's <c>EmiliaTokenizer.tokenize_EN</c> (English-only — this port does not implement
-/// the Chinese/pinyin branch, which needs jieba + pypinyin word segmentation with no equivalent in this
-/// engine). Upstream calls <c>piper_phonemize.phonemize_espeak(text, "en-us")</c> then flattens per-word
-/// phoneme-symbol lists into one token stream; the real checkpoint's <c>tokens.txt</c> vocab is single
-/// Unicode-codepoint IPA symbols plus punctuation/space/BOS/EOS/pad markers. This port uses the engine's own
-/// pure-C# espeak-ng phonemizer (<see cref="EspeakPhonemizer.PhonemizeToIpa(string,string,bool)"/>, same
-/// underlying espeak engine piper_phonemize wraps) with prosody punctuation preserved, then splits the
-/// resulting IPA string into individual Unicode text elements and maps each through <c>tokens.txt</c>,
-/// silently skipping any out-of-vocabulary symbol (matches upstream's <c>tokens_to_token_ids</c>).</summary>
-public sealed class ZipVoiceTokenizer
+/// <summary>Ports ZipVoice's <c>EmiliaTokenizer</c> for English text: <c>map_punctuations</c>, segmentation into text and
+/// <c>[tag]</c> spans, the <see cref="ZipVoiceEnglishNormalizer"/> rules, and piper_phonemize's clause-by-clause espeak
+/// phonemization with its marks, split into single Unicode code points and looked up in the checkpoint's
+/// <c>tokens.txt</c>, where unknown symbols are skipped. Chinese and pinyin need jieba and pypinyin and are not ported.</summary>
+public sealed partial class ZipVoiceTokenizer
 {
+    /// <summary>The espeak voice upstream phonemizes with; the British <c>en</c> voice yields phonemes the model never saw.</summary>
+    public const string EspeakLanguage = "en-us";
+
     private readonly Dictionary<string, int> _token2id;
 
     public int PadId { get; }
@@ -44,37 +43,152 @@ public sealed class ZipVoiceTokenizer
         return new ZipVoiceTokenizer(map);
     }
 
-    /// <summary>Basic ASCII/CJK-punctuation normalization mirroring upstream <c>map_punctuations</c> (fullwidth
-    /// punctuation → ASCII, ellipsis variants → <c>…</c>). English-only, so the CJK punctuation cases are
-    /// mostly inert but cheap to keep for mixed-input robustness.</summary>
+    /// <summary>Upstream <c>map_punctuations</c>: full-width punctuation to ASCII, curly quotes to straight, ellipsis variants to <c>…</c>.</summary>
     public static string NormalizePunctuation(string text) => text
         .Replace('，', ',').Replace('。', '.').Replace('！', '!').Replace('？', '?')
         .Replace('；', ';').Replace('：', ':').Replace('、', ',')
         .Replace('‘', '\'').Replace('’', '\'').Replace('“', '"').Replace('”', '"')
         .Replace("⋯", "…").Replace("···", "…").Replace("・・・", "…").Replace("...", "…");
 
-    /// <summary>Text → token ids, via espeak IPA phonemization + per-codepoint vocab lookup.
-    /// <paramref name="phonemizer"/> is typically <see cref="EspeakPhonemizer.FromCache"/>.</summary>
-    public int[] Encode(string text, EspeakPhonemizer phonemizer, string language = "en-us")
+    /// <summary>Upstream <c>add_punctuation</c>: trims the text and ends it with a period when it ends with no sentence mark.</summary>
+    public static string AddPunctuation(string text)
     {
-        string ipa = FlattenLikeUpstream(phonemizer.PhonemizeToIpa(NormalizePunctuation(text), language, preservePunctuation: true));
-        List<int> ids = new();
-        TextElementEnumerator e = StringInfo.GetTextElementEnumerator(ipa);
-        while (e.MoveNext())
+        string trimmed = text.Trim();
+        if (trimmed.Length == 0) throw new ArgumentException("ZipVoice text is empty.", nameof(text));
+        return ZipVoiceTextChunker.SentencePunctuation.Contains(trimmed[^1]) ? trimmed : trimmed + ".";
+    }
+
+    /// <summary>Text to token symbols, before the vocabulary lookup: what upstream's <c>texts_to_tokens</c> returns.</summary>
+    public IReadOnlyList<string> Tokenize(string text, IPhonemizer phonemizer, string language = EspeakLanguage)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(phonemizer);
+        List<string> tokens = new();
+        // Upstream's segmenter drops newlines, which glues the words either side; here they read as spaces.
+        foreach ((string segment, SegmentKind kind) in Segment(NormalizePunctuation(text.Replace('\n', ' '))))
         {
-            string sym = (string)e.Current;
-            if (_token2id.TryGetValue(sym, out int id)) ids.Add(id);
+            switch (kind)
+            {
+                case SegmentKind.English:
+                    tokens.AddRange(Symbols(phonemizer, ZipVoiceEnglishNormalizer.Normalize(segment), language));
+                    break;
+                case SegmentKind.Tag:
+                    tokens.Add(segment);
+                    break;
+                case SegmentKind.Chinese:
+                    throw new NotSupportedException("ZipVoice's Chinese front end needs jieba and pypinyin and is not ported; use English text.");
+            }
+        }
+        return tokens;
+    }
+
+    /// <summary>Token symbols to ids; a symbol missing from the vocabulary is skipped, as upstream's <c>tokens_to_token_ids</c> does.</summary>
+    public int[] ToIds(IEnumerable<string> tokens)
+    {
+        List<int> ids = new();
+        foreach (string token in tokens)
+        {
+            if (_token2id.TryGetValue(token, out int id)) ids.Add(id);
         }
         return [.. ids];
     }
 
-    private static readonly Regex SpaceBeforePunctuation = new(@"\s+(?=[.,!?;:])", RegexOptions.Compiled);
-    private static readonly Regex SpaceAfterSentenceEnd = new(@"(?<=[.!?])\s+", RegexOptions.Compiled);
+    /// <summary>Text to token ids: <see cref="Tokenize"/> then <see cref="ToIds"/>.</summary>
+    public int[] Encode(string text, IPhonemizer phonemizer, string language = EspeakLanguage) =>
+        ToIds(Tokenize(text, phonemizer, language));
 
-    /// <summary>Upstream joins espeak's per-sentence symbol lists with no separator and keeps each punctuation mark
-    /// attached to the word before it: no space before <c>. , ! ? ; :</c>, and no space after a sentence end
-    /// (<c>. ! ?</c>). The preserved-punctuation output puts a space in each of those places, which shifts every
-    /// later token id. Word spaces after <c>, ; :</c> stay, as upstream keeps them.</summary>
-    internal static string FlattenLikeUpstream(string ipa) =>
-        SpaceAfterSentenceEnd.Replace(SpaceBeforePunctuation.Replace(ipa, ""), "");
+    // piper_phonemize: each clause is decomposed (NFD), a mark follows it, and `, ; :` add a space; clauses join with nothing.
+    private static List<string> Symbols(IPhonemizer phonemizer, string text, string language)
+    {
+        StringBuilder phonemes = new();
+        foreach (EspeakClause clause in EspeakClauseReader.Read(text))
+        {
+            if (string.IsNullOrWhiteSpace(clause.Text)) continue;
+            string ipa = phonemizer.PhonemizeToIpa(clause.Text, language).Trim();
+            if (ipa.Length == 0) continue;
+            phonemes.Append(ipa.Normalize(NormalizationForm.FormD));
+            if (clause.Mark == '\0') continue;
+            phonemes.Append(clause.Mark);
+            if (clause.Mark is ',' or ';' or ':') phonemes.Append(' ');
+        }
+        List<string> symbols = new();
+        foreach (Rune rune in phonemes.ToString().EnumerateRunes()) symbols.Add(rune.ToString());
+        return symbols;
+    }
+
+    // Upstream get_segment + split_segments: a letter starts an English run that digits, spaces and punctuation join;
+    // <...> spans are pinyin, which a bracketed tag or an English run separates.
+    private static List<(string Text, SegmentKind Kind)> Segment(string text)
+    {
+        List<(string, SegmentKind)> runs = new();
+        StringBuilder run = new();
+        SegmentKind kind = SegmentKind.Other;
+        bool first = true;
+        foreach (Match part in Parts().Matches(text))
+        {
+            SegmentKind type = TypeOf(part.Value);
+            if (first || kind == SegmentKind.Other)
+            {
+                run.Append(part.Value);
+                kind = type;
+            }
+            else if (type == kind || type == SegmentKind.Other)
+            {
+                run.Append(part.Value);
+            }
+            else
+            {
+                runs.Add((run.ToString(), kind));
+                run.Clear().Append(part.Value);
+                kind = type;
+            }
+            first = false;
+        }
+        runs.Add((run.ToString(), kind));
+
+        List<(string Text, SegmentKind Kind)> segments = new();
+        foreach ((string runText, SegmentKind runKind) in runs)
+        {
+            foreach (string piece in Spans().Split(runText))
+            {
+                if (piece.Length == 0) continue;
+                if (piece[0] == '<' && piece[^1] == '>') Logs.Warning($"[ZipVoice] Skipped pinyin span '{piece}'.");
+                else if (piece[0] == '[' && piece[^1] == ']') segments.Add((piece, SegmentKind.Tag));
+                else if (runKind != SegmentKind.Chinese) segments.Add((piece, runKind));
+                else if (HasChinese(piece)) segments.Add((piece, SegmentKind.Chinese));
+            }
+        }
+        return segments;
+    }
+
+    private static SegmentKind TypeOf(string part)
+    {
+        if (part.Length == 1 && part[0] is >= '一' and <= '龥') return SegmentKind.Chinese;
+        if (part[0] == '<' && part[^1] == '>') return SegmentKind.Chinese;
+        return part.Length == 1 && part[0] is ((>= 'A' and <= 'Z') or (>= 'a' and <= 'z')) ? SegmentKind.English : SegmentKind.Other;
+    }
+
+    private static bool HasChinese(string text)
+    {
+        foreach (char c in text)
+        {
+            if (c is >= '一' and <= '龥') return true;
+        }
+        return false;
+    }
+
+    // A single character, or a <...> / [...] span read as one part.
+    [GeneratedRegex(@"[<\[].*?[>\]]|.")]
+    private static partial Regex Parts();
+
+    [GeneratedRegex(@"([<\[].*?[>\]])")]
+    private static partial Regex Spans();
+
+    private enum SegmentKind
+    {
+        English,
+        Chinese,
+        Other,
+        Tag,
+    }
 }
