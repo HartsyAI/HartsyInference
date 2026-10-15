@@ -31,17 +31,11 @@ public sealed class SpeechService : ISpeechService
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
         TtsTarget target = ResolveTarget(spec, request.Voice);
-        return SynthesizeCoreAsync(target, request, cancel);
-    }
-
-    /// <summary>Materializes and validates the reference before the job is queued, so a request the model cannot clone from never takes the device gate or evicts a resident model.</summary>
-    private async Task<AudioResult> SynthesizeCoreAsync(TtsTarget target, SpeechRequest request, CancellationToken cancel)
-    {
-        (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
-        try
+        ValidateReference(target.Descriptor, request.Reference);
+        return _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
         {
-            ValidateReference(target.Descriptor, referenceMono);
-            return await _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
+            (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
+            try
             {
                 ct.ThrowIfCancellationRequested();
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
@@ -68,12 +62,12 @@ public sealed class SpeechService : ISpeechService
                         ["seed"] = request.Seed.ToString(CultureInfo.InvariantCulture),
                     },
                 };
-            }, cancel, stageBackends: target.StageBackends).ConfigureAwait(false);
-        }
-        finally
-        {
-            DeleteTempReference(referenceWavPath);
-        }
+            }
+            finally
+            {
+                DeleteTempReference(referenceWavPath);
+            }
+        }, cancel, stageBackends: target.StageBackends);
     }
 
     /// <inheritdoc/>
@@ -214,6 +208,17 @@ public sealed class SpeechService : ISpeechService
             Logs.Verbose($"[Audio][TTS] Synthesized {seconds:0.0}s @ {runner.SampleRate} Hz in {Environment.TickCount64 - started}ms (single-chunk fallback, no streaming support).");
             yield return new AudioChunk(samples, runner.SampleRate, Channels: 1, StartSampleOffset: 0);
         }
+    }
+
+    /// <summary>Lets the model family reject the request's reference before its job is queued. Only a family with a
+    /// validator pays for the decode, and the samples are dropped after the check so nothing is held while it waits.</summary>
+    internal static void ValidateReference(TtsModelDescriptor descriptor, AudioClip? reference)
+    {
+        if (descriptor.ValidateReference is null || reference is null || reference.Data.Length == 0)
+        {
+            return;
+        }
+        descriptor.ValidateReference(AudioClipCodec.DecodeMono(reference, ReferenceSampleRate));
     }
 
     /// <summary>Lets the model family reject the materialized reference before its weights are loaded.</summary>
