@@ -73,6 +73,7 @@ Desktop.ini
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClip/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClap/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyStyle/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/Flux3/*.safetensors
 *.gguf
 *.ckpt
 *.pt

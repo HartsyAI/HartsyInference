@@ -8,6 +8,12 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.370
+
+- **Added: FLUX.3 Klein, full and step-distilled.** Black Forest Labs' 5.6B model loads from the ComfyUI single files (bf16, fp8, int8 and NVFP4 builds, fused or split `qkv`) as family `flux3`, SwarmUI class `flux.3-klein`. It covers text-to-image, img2img, inpaint, up to 10 reference images (`<ref_image_N>`), and prompt regions sent as ComfyUI's layout table. The step-distilled build is detected from its `ref_time_in` weights and runs as a flow map, with each step conditioned on the sigma it jumps to; defaults are 25 steps at CFG 3.5 for the full build and 15 steps at CFG 1 for the distilled one. The text encoder is the Qwen3-VL-4B file Krea 2 already uses. A tiny-config forward matches ComfyUI's own FLUX.3 module to 5e-6 on the guided, two-reference and flow-map paths. It has not been run on the real weights yet, which are gated.
+- **Added: FLUX.3 LoRAs in diffusers, ComfyUI and kohya names.** SimpleTuner's PEFT files, such as `terminusresearch/flux-3-klein-image-distilled-lora-extract`, use the diffusers module names, which the engine maps onto the checkpoint's own names. Diffusers' `norm_out.linear` rows are reordered to the checkpoint's `[shift, scale]`, and an adapter on a fused `qkv` is split over the separate Q, K and V projections. That extract approximates the step distillation without its `ref_time_in`, so it is meant for the full build, with steps and CFG set by hand.
+- **Changed: Flux.2, Lens and Krea 2 share their Flux.2-VAE latent code.** Packing, patchify, the BatchNorm latent normalization, VAE loading and side-model resolution moved into shared helpers with FLUX.3. The math is unchanged; output should be identical.
+
 ## alpha.369
 
 - **Fixed: NeuTTS-Air tokenizes its prompt as upstream does and keeps punctuation in the phonemes.** The prompt mapped bytes before Qwen's split regex, so each IPA letter outside ASCII (`ð`, `æ`, `θ`) split into two tokens where upstream keeps one, and phonemization dropped the `,` and `.` marks. Gate sentences 02-05 went from mean WER 0.231 to 0.018 (upstream 0.003).
