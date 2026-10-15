@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: F5-TTS and AuK speak a generation under 10 UTF-8 bytes at upstream's short-text speed.** Upstream drops the duration speed to 0.3 for such a generation (`_infer_basic`, `_f5_local_speed`); the engine used the reference ratio alone, so "Yes." against a 3.6 s reference came out as 0.2 s of silence. The ratio now counts UTF-8 bytes and truncates as upstream does, which also moves some longer generations by a frame.
+
 ## alpha.368
 
 - **Fixed: the CosyVoice 2 and Chatterbox S3Gen flow solves on upstream's cosine time grid.** Both configure `t_scheduler: 'cosine'`, so the Euler steps sit at `1 − cos(t·π/2)` over `linspace(0, 1, 11)`: short steps near the noise, long ones near the mel. `ConditionalCfm` stepped a uniform grid. From the same noise, the same tokens and the same prompt, its mel was off by up to 2.5 against upstream and louder: an 8-token Chatterbox "Yes." peaked at 0.99 against upstream's 0.33-0.87 over six noise draws. On the cosine grid the mel matches upstream to 1.1e-5. `CosyVoiceFlowConfig.CosineTimeSchedule` (default on) selects it; IndexTTS-2's S2Mel CFM keeps the uniform grid its upstream uses. Every CosyVoice 2 and Chatterbox output changes. Checked by `ChatterboxZeroShotParityTests` (flow from upstream's dumped noise) and the CPU-lane `CfmTimeGrid_CosineMatchesTorchAndLinearStaysUniform`.

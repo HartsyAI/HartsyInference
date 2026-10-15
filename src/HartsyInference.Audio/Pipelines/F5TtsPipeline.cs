@@ -1,3 +1,4 @@
+using System.Text;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.F5Tts;
@@ -118,7 +119,8 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         string refNorm = NormalizeRefText(refText);
         bool profG = EngineKnobs.F5Profile.Value;
         System.Diagnostics.Stopwatch gsw = System.Diagnostics.Stopwatch.StartNew();
-        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText), options);
+        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText),
+            Encoding.UTF8.GetByteCount(refNorm), Encoding.UTF8.GetByteCount(targetText), options);
         if (profG) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] DiT sample loop: {gsw.Elapsed.TotalMilliseconds:0}ms"); gsw.Restart(); }
         // DEBUG: dump the pre-vocoder mel [1,melDim,T] to localize DiT-vs-vocoder (F5_DUMP_MEL=path).
         string? melPath = EngineKnobs.F5DumpMel.Value;
@@ -231,7 +233,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     /// (pre-vocoder). Mirrors <c>CFM.sample</c>: the reference region evolves freely under the fixed masked
     /// conditioning and is sliced off at the end (so no per-step anchoring is needed). <paramref name="initialNoise"/>
     /// injects a deterministic <c>[1, mel_dim, T_total]</c> noise tensor (else a seeded Gaussian is built).</summary>
-    public Tensor GenerateMel(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds,
+    public Tensor GenerateMel(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds, int refBytes, int genBytes,
         F5TtsOptions? options = null, Tensor? initialNoise = null)
     {
         ThrowIfDisposed();
@@ -250,9 +252,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
 
         int tRef = (int)refMel.Shape[2];
 
-        // Duration heuristic: target frames = ref_frames * len(target_text) / len(ref_text) / speed.
-        int tTarget = (int)Math.Round((double)tRef * targetIds.Length / Math.Max(1, refIds.Length) / opts.Speed);
-        if (tTarget < 1) tTarget = 1;
+        int tTarget = Math.Max(1, F5Duration.TargetFrames(tRef, refBytes, genBytes, opts.Speed));
         int tTotal = initialNoise is not null ? (int)initialNoise.Shape[2] : tRef + tTarget;
 
         // step_cond: [ref_mel, zeros] along time — the masked conditioning held fixed across all steps.

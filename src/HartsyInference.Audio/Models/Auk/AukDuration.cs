@@ -1,4 +1,5 @@
 using System.Text;
+using HartsyInference.Audio.Models.F5Tts;
 
 namespace HartsyInference.Audio.Models.Auk;
 
@@ -13,7 +14,7 @@ public static class AukDuration
         return Math.Max(1, (int)Math.Ceiling(seconds * sampleRate / hop - 1e-3));
     }
 
-    /// <summary>Resolves seconds with this precedence, with or without a reference clip: an explicit duration always wins (over the clip length, the text-length heuristic and <paramref name="speed"/>, as upstream <c>get_gen_duration</c> does); else <c>refSeconds·bytes(genText)/bytes(refText)/speed</c>; else the reference length; else throws.</summary>
+    /// <summary>Resolves seconds with this precedence, with or without a reference clip: an explicit duration always wins (over the clip length, the text-length heuristic and <paramref name="speed"/>, as upstream <c>get_gen_duration</c> does); else <c>refSeconds·bytes(genText)/bytes(refText)/</c><see cref="F5Duration.LocalSpeed"/>; else the reference length; else throws.</summary>
     public static double ResolveSeconds(double? seconds, string? genText, string? refText, double? refSeconds, double speed = 1.0)
     {
         if (!(speed > 0) || !double.IsFinite(speed)) throw new ArgumentOutOfRangeException(nameof(speed), "Speed must be positive.");
@@ -28,7 +29,8 @@ public static class AukDuration
         }
         if (!(refSeconds.Value > 0) || !double.IsFinite(refSeconds.Value)) throw new ArgumentOutOfRangeException(nameof(refSeconds));
         if (string.IsNullOrEmpty(genText) || string.IsNullOrEmpty(refText)) return refSeconds.Value;
-        return refSeconds.Value * Encoding.UTF8.GetByteCount(genText) / Encoding.UTF8.GetByteCount(refText) / speed;
+        int genBytes = Encoding.UTF8.GetByteCount(genText);
+        return refSeconds.Value * genBytes / Encoding.UTF8.GetByteCount(refText) / F5Duration.LocalSpeed(genBytes, speed);
     }
 
     /// <summary>Convenience: <see cref="ResolveSeconds"/> then <see cref="Frames"/>.</summary>
