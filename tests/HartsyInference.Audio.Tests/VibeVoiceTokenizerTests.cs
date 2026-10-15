@@ -19,4 +19,14 @@ public sealed class VibeVoiceTokenizerTests
         Assert.Equal(ordinary, ids);
         Assert.Equal(exact.EncodeExact("<think>"), ids);
     }
+
+    [Fact]
+    public void ToolCallLiteral_EncodesToItsQwen25AddedTokenId()
+    {
+        using VibeVoiceTokenizer tokenizer = new();
+
+        // <tool_call> is a Qwen2.5 added token (151657), and upstream Qwen2.5-VL maps it to that id.
+        int[] toolCall = [151657];
+        Assert.Equal(toolCall, tokenizer.Encode("<tool_call>"));
+    }
 }
