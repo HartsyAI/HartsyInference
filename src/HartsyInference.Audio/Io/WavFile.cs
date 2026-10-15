@@ -39,8 +39,9 @@ public static class WavFile
         }
     }
 
-    /// <summary>Reads a WAV's duration from its headers alone, without allocating samples. False for anything the headers
-    /// cannot size: not RIFF/WAVE, no <c>fmt </c> or <c>data</c> chunk, or a streaming data size of 0 or 0xFFFFFFFF.</summary>
+    /// <summary>Reads a WAV's duration from its headers alone, without allocating samples. It is the declared data size, the
+    /// length <see cref="Read(Stream)"/> allocates even when the payload is shorter. False for anything the headers cannot
+    /// size: not RIFF/WAVE, no <c>fmt </c> or <c>data</c> chunk, or a streaming data size of 0 or 0xFFFFFFFF.</summary>
     public static bool TryReadDurationSeconds(ReadOnlySpan<byte> bytes, out double seconds)
     {
         seconds = 0;
@@ -74,7 +75,7 @@ public static class WavFile
                 {
                     return false;
                 }
-                seconds = Math.Min(size, bytes.Length - body) / (double)frameBytes / fmt.Value.SampleRate;
+                seconds = size / (double)frameBytes / fmt.Value.SampleRate;
                 return true;
             }
             long next = body + (long)size + (size & 1);

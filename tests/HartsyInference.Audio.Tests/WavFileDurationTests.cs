@@ -28,11 +28,13 @@ public sealed class WavFileDurationTests
     }
 
     [Fact]
-    public void ATruncatedData_ReportsWhatIsThere()
+    public void ATruncatedData_ReportsTheDeclaredLength()
     {
         byte[] wav = Wav(24_000, 48_000);
-        Assert.True(WavFile.TryReadDurationSeconds(wav[..(44 + 24_000 * 2)], out double seconds));
-        Assert.Equal(1.0, seconds, 3);
+        byte[] truncated = wav[..(44 + 24_000 * 2)];
+        Assert.True(WavFile.TryReadDurationSeconds(truncated, out double seconds));
+        Assert.Equal(2.0, seconds, 3);
+        Assert.Equal(48_000, WavFile.Read(new MemoryStream(truncated)).Length);
     }
 
     [Fact]
