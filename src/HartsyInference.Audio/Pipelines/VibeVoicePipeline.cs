@@ -276,6 +276,7 @@ public sealed class VibeVoicePipeline : IDisposable
         //    overwritten by acoustic_connector(voice_latent[k]) at speech-mask positions.
         using Tensor prefillEmbeds = BuildPrefillEmbeds(backend, prep, voiceLatents);
         Trace(trace, "prefill_embeds", prefillEmbeds);
+        if (trace is not null) TraceVoiceConnected(trace, prefillEmbeds, prep.SpeechInputMask);
         foreach (Tensor v in voiceLatents) v.Dispose();
 
         // 4. Prefill the LM with these embeddings.
@@ -480,6 +481,28 @@ public sealed class VibeVoicePipeline : IDisposable
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
+
+    /// <summary>Reports the voice-prompt rows of the prefill embeds: the acoustic connector's output at the speech-mask
+    /// positions, in order (the rows upstream returns as acoustic_connector(features)[speech_masks]).</summary>
+    private static unsafe void TraceVoiceConnected(VibeVoiceStageTrace trace, Tensor prefillEmbeds, bool[] speechInputMask)
+    {
+        int hidden = (int)prefillEmbeds.Shape[2];
+        int rowCount = 0;
+        for (int i = 0; i < speechInputMask.Length; i++)
+        {
+            if (speechInputMask[i]) rowCount++;
+        }
+        float[] connected = new float[rowCount * hidden];
+        float* src = (float*)prefillEmbeds.DataPointer;
+        int row = 0;
+        for (int i = 0; i < speechInputMask.Length; i++)
+        {
+            if (!speechInputMask[i]) continue;
+            new ReadOnlySpan<float>(src + (long)i * hidden, hidden).CopyTo(connected.AsSpan(row * hidden, hidden));
+            row++;
+        }
+        trace("voice_connected", connected);
+    }
 
     private unsafe Tensor EncodeVoicePcm(IBackend backend, float[] pcm, int latentCount)
     {
