@@ -65,7 +65,7 @@ Qwen-MoE shared-expert path is unit-test-verified against an HF reference (no 14
 | **GPT-OSS 20B / 120B** | Per-head **attention sinks** built (CPU+CUDA, PTX recompiled) & **slice-verified** (`FlashAttentionTests.Flash_Sink_*`); `gpt-oss` arch/mapper/config wired. MoE + o200k tokenizer reused. MXFP4 tensor-type decode added 2026-07-22 (`DType.MXFP4`/`Codec_MXFP4`) — the load-time crash every public checkpoint hit is fixed. e2e 20B+ still deferred (VRAM, not an engine gap anymore). |
 | **Llama-3.2-Vision-11B (mllama)** | ✅ **VERIFIED e2e on the 3060** (leafspark Q4_K_M + mmproj-F16, low-VRAM): red circle→"red", blue square→"a blue square with a white outline…". ([details](#llama-32-vision-11b-mllama)) |
 | **Gemma-4 31B-dense / 26B-A4B-MoE** | Same `gemma4` arch/config/forward path as the verified E2B row above — the 26B-A4B variant additionally exercises `ParallelDenseMoeBranch` (routed-expert FFN running IN PARALLEL WITH the dense/"shared" branch, each own pre/post norm, summed — a genuinely different pattern from every other MoE arch here, which fuses a shared expert into the router output instead) and `ComputeRouterLogits`'s separately-normalized router input. ([details](#gemma-4-31b-dense--26b-a4b-moe)) |
-| **Muse Spark Open** (`muse-spark`, 816B-A42B, text) | 🔧 Text decoder built and checked on synthetic weights only: GGUFs from llama.cpp's muse-spark converter (every quant type it writes) and HF checkpoints load; logits match transformers on every quant, reasoning and `<atem:invoke>` tool calls are parsed. Not run on the real checkpoint; no GPU measurement. ([details](#muse-spark-open)) |
+| **Muse Spark Open** (`muse-spark`, 816B-A42B, text) | 🔧 Text decoder built and checked on synthetic weights only: GGUFs from llama.cpp's muse-spark converter load (every quant type it writes); logits match transformers on every quant, reasoning and `<atem:invoke>` tool calls are parsed. HF-format weights map only through the library API: the engine does not load a Muse Spark HF directory. Not run on the real checkpoint; no GPU measurement. ([details](#muse-spark-open)) |
 
 ## VLMs (vision-language) — mixed verification
 
@@ -189,6 +189,8 @@ Evidence is on synthetic weights ([parity](PARITY_VERIFICATION.md)). Gaps:
 - CPU speed, small random model, 4 threads (`llama-bench` pp512/tg128): engine 1.7-1.9k tok/s prefill and 70-75 tok/s
   decode on every quant; llama.cpp 10.8-13.5k prefill, 147 (F32) to 270 (Q8_0) decode. The 202k-row LM head is 11.5 of
   the engine's 15.8 ms per token.
+- The engine loads Muse Spark from GGUF only. `MuseSparkHfConfig` and `MuseSparkCheckpointMapper` map HF-format weights as a library
+  API, but `HfTextDirectoryLoader` still accepts only DeepSeek-V4.1 and refuses a Muse Spark directory.
 - Not wired: the vision and audio towers, the request's numeric `ReasoningEffort` (the template defaults to `xhigh`),
   tensor parallelism (refused), the HF NVFP4 checkpoint format and GGUFs converted from it with ggml's NVFP4 type (40).
 

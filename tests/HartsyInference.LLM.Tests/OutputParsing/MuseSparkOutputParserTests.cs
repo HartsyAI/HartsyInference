@@ -125,6 +125,33 @@ public sealed class MuseSparkOutputParserTests
         Assert.Equal("""{"u":"null","n":null}""", Assert.Single(result.ToolCalls).ArgumentsJson);
     }
 
+    [Theory]
+    [InlineData("Paris is the capital.")]
+    [InlineData("Paris is the capital.<|end_of_text|>")]
+    [InlineData("Paris is the capital.<|eot|>")]
+    public void TextWithoutAHeader_IsShownAsContent(string completion)
+    {
+        (ParsedAssistant result, ReplayedTurn replay) = Parse(completion, 1);
+
+        Assert.Equal("Paris is the capital.", result.Content);
+        Assert.True(result.Malformed);
+        Assert.Equal(1, replay.Stops);
+    }
+
+    [Theory]
+    [InlineData(" to=se")]
+    [InlineData(" assist")]
+    [InlineData("")]
+    public void HeaderCutOffByTheLengthLimit_StartsNoMessage(string completion)
+    {
+        (ParsedAssistant result, ReplayedTurn replay) = Parse(completion, 1);
+
+        Assert.Equal("", result.Content);
+        Assert.Equal("", result.Reasoning);
+        Assert.False(result.Malformed);
+        Assert.Equal(1, replay.Stops);
+    }
+
     [Fact]
     public void TruncatedReasoning_IsCompletedNotMalformed()
     {

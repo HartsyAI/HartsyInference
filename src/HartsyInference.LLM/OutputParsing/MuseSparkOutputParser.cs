@@ -119,9 +119,9 @@ public sealed partial class MuseSparkOutputParser : IOutputParser
             }
             if (_inHeader)
             {
-                // A header waits for its <|message|>; one that runs on means the model left the format, so its text is shown, not lost.
-                if (_pending.Length <= MaxHeaderChars) return;
-                Flag(sink, "Message header has no <|message|>");
+                // A header waits for its <|message|>; text that outgrows one, or ends the stream unlike one, left the format and is shown.
+                if (_pending.Length <= MaxHeaderChars && (!final || IsHeaderText(_pending))) return;
+                Flag(sink, "Text without a message header");
                 _inHeader = false;
                 _channel = Channel.Content;
                 continue;
@@ -152,7 +152,15 @@ public sealed partial class MuseSparkOutputParser : IOutputParser
                     _betweenMessages = true;
                     return;
                 default:
-                    if (before.Trim().Length > 0) Flag(sink, $"Turn ended inside message header '{before}'");
+                    if (IsHeaderText(before))
+                    {
+                        if (before.Trim().Length > 0) Flag(sink, $"Turn ended inside message header '{before}'");
+                    }
+                    else
+                    {
+                        Flag(sink, "Text without a message header");
+                        AppendContent(before, sink);
+                    }
                     EndTurn(sink);
                     return;
             }
@@ -183,6 +191,15 @@ public sealed partial class MuseSparkOutputParser : IOutputParser
                 EndTurn(sink);
                 return;
         }
+    }
+
+    /// <summary>True when <paramref name="text"/> is a message header or the start of one: a role or recipient, or a prefix of either, so a
+    /// header the length limit cut off is told apart from answer text written without one.</summary>
+    private static bool IsHeaderText(string text)
+    {
+        string t = text.TrimStart();
+        return t.StartsWith(RecipientPrefix, StringComparison.Ordinal) || t.StartsWith(AssistantRole, StringComparison.Ordinal)
+            || RecipientPrefix.StartsWith(t, StringComparison.Ordinal) || AssistantRole.StartsWith(t, StringComparison.Ordinal);
     }
 
     /// <summary>Starts the message whose header (the text between <c>&lt;|start|&gt;</c> and <c>&lt;|message|&gt;</c>) is <paramref name="header"/>. The
