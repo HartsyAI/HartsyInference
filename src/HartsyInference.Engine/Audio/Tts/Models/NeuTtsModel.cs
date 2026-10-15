@@ -4,7 +4,6 @@ using HartsyInference.Audio.Models.NeuTts;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Audio.Phonemizer;
 using HartsyInference.Audio.Phonemizer.Espeak;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -49,14 +48,15 @@ internal static class NeuTtsModel
             }
             // Upstream phonemizes with espeak-ng (en-us, with_stress, preserve_punctuation); raw text is
             // out-of-distribution and produces garble.
-            IPhonemizer phonemizer = EspeakPhonemizer.FromCache(EspeakLanguage);
+            EspeakPhonemizer phonemizer = EspeakPhonemizer.FromCache(EspeakLanguage);
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
             Logs.Info($"[Audio][NeuTTS] Loaded neuphonic/neutts-air (Qwen2.5-0.5B + NeuCodec, 24 kHz; cloning "
                 + $"{(encoder is null ? "unavailable — X-Codec2 encoder port pending" : "when a reference is supplied")}).");
 
-            // Mirrors upstream _to_phones: phonemize, then whitespace-normalize.
+            // Mirrors upstream _to_phones: phonemize with punctuation kept, then whitespace-normalize.
             string Phones(string text) =>
-                string.Join(' ', phonemizer.PhonemizeToIpa(text, EspeakLanguage).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+                string.Join(' ', phonemizer.PhonemizeToIpa(text, EspeakLanguage, preservePunctuation: true)
+                    .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
             IDisposable?[] keep = encoder is null ? [pipeline, tokenizer, .. backboneLoaders, .. codecLoaders]
                 : [pipeline, encoder, tokenizer, .. backboneLoaders, .. codecLoaders];
@@ -82,7 +82,7 @@ internal static class NeuTtsModel
                         phones = $"{Phones(job.RefText)} {phones}";   // upstream joins ref + target phones with " "
                     }
                 }
-                int[] promptPrefix = NeuTtsPromptBuilder.BuildPromptPrefix(config, tokenizer.EncodeRawByteLevel, phones);
+                int[] promptPrefix = NeuTtsPromptBuilder.BuildPromptPrefix(config, text => tokenizer.EncodeExact(text), phones);
                 return pipeline.Synthesize(backend, promptPrefix, referenceCodes, seed: job.Seed);
             }, keep);
         },

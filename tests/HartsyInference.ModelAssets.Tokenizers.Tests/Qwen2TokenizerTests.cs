@@ -81,4 +81,12 @@ public sealed class Qwen2TokenizerTests
         Assert.Equal("<|im_end|>", System.Text.Encoding.UTF8.GetString(tok.TokenBytes(Qwen2Tokenizer.ImEndId, includeSpecial: true)!));
         Assert.Empty(tok.TokenBytes(Qwen2Tokenizer.ImEndId, includeSpecial: false)!);
     }
+
+    [Fact]
+    public void EncodeExact_KeepsEthAsTheSingleHfToken()
+    {
+        // Byte mapping before the split regex turns the two UTF-8 bytes of "ð" into two tokens; HF maps it to one.
+        using Qwen2Tokenizer tok = new();
+        Assert.Equal([67700], tok.EncodeExact("ð"));
+    }
 }
