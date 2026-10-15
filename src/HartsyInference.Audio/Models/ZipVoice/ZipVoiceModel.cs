@@ -51,7 +51,7 @@ public sealed class ZipVoiceModel : IDisposable
     /// <summary>Predicted TARGET-region frame count (upstream <c>duration="predict"</c>): the reference audio's
     /// measured frames-per-token rate, scaled by the target token count and <paramref name="speed"/>.</summary>
     public static int PredictTargetFrames(int promptFrames, int promptTokenCount, int targetTokenCount, float speed)
-        => (int)Math.Ceiling((double)promptFrames / promptTokenCount * targetTokenCount / Math.Max(1e-6f, speed));
+        => (int)MathF.Ceiling((float)promptFrames / promptTokenCount * targetTokenCount / Math.Max(1e-6f, speed));
 
     /// <summary>Embeds the joint (prompt+target) token sequence with an appended pad token, then runs the
     /// text_encoder. Returns <c>[1, L+1, feat_dim]</c> per-token hidden states (index <c>L</c> is the pad

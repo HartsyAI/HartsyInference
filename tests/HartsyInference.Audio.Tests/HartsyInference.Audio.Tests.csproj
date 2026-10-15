@@ -41,6 +41,7 @@
     <None Include="Fixtures\SparkTts\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\wetext_parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\chatterbox_frontend_parity.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\zipvoice_frontend_parity.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
