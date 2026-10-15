@@ -8,11 +8,20 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.370
+## alpha.371
 
 - **Added: FLUX.3 Klein, full and step-distilled.** Black Forest Labs' 5.6B model loads from the ComfyUI single files (bf16, fp8, int8 and NVFP4 builds, fused or split `qkv`) as family `flux3`, SwarmUI class `flux.3-klein`. It covers text-to-image, img2img, inpaint, up to 10 reference images (`<ref_image_N>`), and prompt regions sent as ComfyUI's layout table. The step-distilled build is detected from its `ref_time_in` weights and runs as a flow map, with each step conditioned on the sigma it jumps to; defaults are 25 steps at CFG 3.5 for the full build and 15 steps at CFG 1 for the distilled one. The text encoder is the Qwen3-VL-4B file Krea 2 already uses. A tiny-config forward matches ComfyUI's own FLUX.3 module to 5e-6 on the guided, two-reference and flow-map paths. It has not been run on the real weights yet, which are gated.
 - **Added: FLUX.3 LoRAs in diffusers, ComfyUI and kohya names.** SimpleTuner's PEFT files, such as `terminusresearch/flux-3-klein-image-distilled-lora-extract`, use the diffusers module names, which the engine maps onto the checkpoint's own names. Diffusers' `norm_out.linear` rows are reordered to the checkpoint's `[shift, scale]`, and an adapter on a fused `qkv` is split over the separate Q, K and V projections. That extract approximates the step distillation without its `ref_time_in`, so it is meant for the full build, with steps and CFG set by hand.
 - **Changed: Flux.2, Lens and Krea 2 share their Flux.2-VAE latent code.** Packing, patchify, the BatchNorm latent normalization, VAE loading and side-model resolution moved into shared helpers with FLUX.3. The math is unchanged; output should be identical.
+
+## alpha.370
+
+- **Fixed: ZipVoice phonemizes with the American `en-us` voice.** The pipeline built its phonemizer for espeak's British `en` voice, so the model was fed phonemes it never trained on (`əʊ` for `oʊ`, non-rhotic vowels); upstream's tokenizer runs piper_phonemize on `en-us`. Word agreement with upstream's tokens on a 137-line corpus rose from 58% to 94%. The same mistake was fixed for Piper on 2026-07-13. Gate rows 04 and 05, which misheard words before (mean WER 0.067 and 0.091), now transcribe word-perfect on every take, as upstream's do, and generated durations match upstream's within a median 3.5%.
+- **Fixed: ZipVoice reads clauses, marks and symbols as upstream's tokenizer does.** piper_phonemize phonemizes clause by clause and puts no space before a mark or after `. ! ?`; an ellipsis ends a clause silently and a spaced dash becomes a `;`. Symbols are single code points, where the engine split on grapheme clusters and dropped `n̩` and `ɑ̃`. Numbers, currency, fractions and abbreviations go through upstream's `EnglishTextNormalizer`, and `[tags]` pass through as single tokens.
+- **Fixed: ZipVoice prepares the reference as upstream does.** Pauses over one second inside the clip and silence over 100 ms at its edges are cut with pydub's rules, 200 ms of silence is appended and a quiet clip is lifted to RMS 0.1. The mel floors the log at 1e-7 and keeps lhotse's frame count, and the target length is predicted in float32 as torch does.
+- **Added: ZipVoice generates long text in upstream's chunks.** The text is split after sentence punctuation into chunks that fill about 25 s with the reference; each is sampled with its own seed, vocoded, cross-faded for 0.1 s and trimmed at the edges. Before, the whole text ran as one sample.
+- **Changed: ZipVoice fails clearly on Chinese text and on a silent reference.** Chinese needs jieba and pypinyin, which are not ported, and used to be read as English; a silent reference divided by zero.
+- **Changed: CosyVoice 2 refuses a voice reference longer than 20 s and says why.** The LM is prompted with the whole clip. From about 24 s the engine returned a few seconds of babble or only the first sentence of the text, and the official CosyVoice 2 does the same on the same clips (the prompt's speech tokens, mel and speaker embedding already match it), so this is a model limit, not an engine fault. A reference over 20 s now fails before any weights are touched with a message that names the limit and the fix; one over 15 s logs a warning. Clips of 5 to 15 s clone cleanly.
 
 ## alpha.369
 
