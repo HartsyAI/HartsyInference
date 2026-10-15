@@ -8,7 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Fixed: VibeVoice tokenizes scripts with Qwen's split regex.** The engine ran byte-level BPE over the whole prompt, so merges crossed word boundaries and "Yes." became 82 tokens instead of upstream's 77. It now uses the exact Qwen tokenizer path that `Qwen3Tokenizer` already provides.
+## alpha.369
+
+- **Fixed: NeuTTS-Air tokenizes its prompt as upstream does and keeps punctuation in the phonemes.** The prompt mapped bytes before Qwen's split regex, so each IPA letter outside ASCII (`ð`, `æ`, `θ`) split into two tokens where upstream keeps one, and phonemization dropped the `,` and `.` marks. Gate sentences 02-05 went from mean WER 0.231 to 0.018 (upstream 0.003).
+- **Fixed: VibeVoice tokenizes scripts with Qwen's split regex.** The engine ran byte-level BPE over the whole prompt, so merges crossed word boundaries and "Yes." became 82 tokens instead of upstream's 77. It now uses the exact Qwen2.5 path, `Qwen2Tokenizer.EncodeExact` over the Qwen2.5 base vocabulary and its 22 added tokens: `<tool_call>` maps to 151657 as upstream does, and Qwen3-only literals such as `<think>` stay ordinary text.
 - **Fixed: VibeVoice keeps the leading space on each script turn.** Upstream's parser prepends one space to every turn's text, so the prompt reads " Speaker 0: Yes."; the engine dropped that space.
 - **Fixed: VibeVoice's acoustic codec uses the exact GELU.** The ConvNeXt feed-forward used the tanh approximation where upstream uses erf, which moved the voice-prompt latents by 1.5e-3 relative.
 - **Fixed: VibeVoice diffusion takes second-order DPM-Solver steps as upstream does.** The engine dropped to first order on the penultimate step; upstream does not at solver order 2, and the first frame's latent was 4.9e-2 off before the fix.
