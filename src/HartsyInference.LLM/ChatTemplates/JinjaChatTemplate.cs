@@ -12,6 +12,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
 {
     private readonly JinjaEngine _engine;
     private readonly string _toolRole;
+    private readonly bool _prependBos;
 
     public string Name => "jinja";
 
@@ -19,11 +20,15 @@ public sealed class JinjaChatTemplate : IChatTemplate
     public string? Source { get; }
 
     /// <summary>Compiles the model's chat-template source.</summary>
-    public JinjaChatTemplate(string chatTemplate)
+    /// <param name="chatTemplate">The Jinja source.</param>
+    /// <param name="prependBos">Starts every encoded prompt with the tokenizer's BOS when the render does not already begin with it: the
+    /// GGUF <c>add_bos_token</c> contract llama.cpp applies to a template that leaves BOS to the tokenizer (Muse Spark).</param>
+    public JinjaChatTemplate(string chatTemplate, bool prependBos = false)
     {
         ArgumentNullException.ThrowIfNull(chatTemplate);
         _engine = new JinjaEngine(chatTemplate);
         Source = chatTemplate;
+        _prependBos = prependBos;
         // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
         // Only a template whose parsed expressions compare the role to "observation" is remapped (a comment, text or string literal
         // naming it is not an expression), and a template that also compares the role to "tool" keeps the tool role.
@@ -70,7 +75,8 @@ public sealed class JinjaChatTemplate : IChatTemplate
         }
         // The template emits the bos_token literal itself, so don't double-add specials beyond literal matching.
         // Message content is escaped against the tokenizer's control literals, so only the template's own literals become ids here.
-        return SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer);
+        int[] ids = SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer);
+        return _prependBos && tokenizer.BosId is int bos && (ids.Length == 0 || ids[0] != bos) ? [bos, .. ids] : ids;
     }
 
     /// <summary>Renders the conversation through the model's Jinja template; an unset <paramref name="enableThinking"/> leaves <c>enable_thinking</c> undefined so <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of being forced off.</summary>

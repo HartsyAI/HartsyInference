@@ -130,7 +130,9 @@ public sealed class GgufLanguageModel : IDisposable
             return ChatMlOrRaw();
         }
 
-        try { return new JinjaChatTemplate(chatTemplate); }
+        // llama.cpp adds BOS once for a model whose GGUF asks for it; a template that never names bos_token relies on that.
+        bool prependBos = meta.GetBool("tokenizer.ggml.add_bos_token", false) && !chatTemplate.Contains("bos_token", StringComparison.Ordinal);
+        try { return new JinjaChatTemplate(chatTemplate, prependBos); }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[WRN] GGUF: chat template did not compile ({ex.Message}); falling back (raw completion / embeddings still work).");
