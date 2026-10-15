@@ -17,20 +17,21 @@ public sealed class MelSpectrogramExactnessTests
     [
         ["whisper80", MelSpectrogramExtractor.WhisperConfig()],
         ["whisper128", MelSpectrogramExtractor.WhisperConfig(128)],
-        ["whisperLegacyPow2_128", MelSpectrogramExtractor.WhisperLegacyPow2Config(128)],
+        // The 400-sample window zero-padded into a 512-point FFT, uncentered: the rounded-FFT layout.
+        ["whisperPow2_128", MelSpectrogramExtractor.WhisperConfig(128) with { Center = false, ExactFftSize = false }],
         ["kokoro24k", MelSpectrogramExtractor.Kokoro24kConfig()],
         ["cosyvoice2flow", MelSpectrogramExtractor.CosyVoice2FlowConfig()],
         ["f5vocos", MelSpectrogramExtractor.F5VocosConfig()],
         ["zonos16k", MelSpectrogramExtractor.Zonos16kConfig()],
         ["hifigan22k", MelSpectrogramExtractor.HifiGan22kConfig()],
-        ["rawAmplitude", MelSpectrogramExtractor.WhisperLegacyPow2Config() with
+        ["rawAmplitude", MelSpectrogramExtractor.WhisperConfig() with
         {
-            Norm = MelSpectrogramExtractor.Normalization.None, LogBase = MelSpectrogramExtractor.LogBase.None, PowerSpectrum = false,
+            Center = false, ExactFftSize = false, Norm = MelSpectrogramExtractor.Normalization.None, LogBase = MelSpectrogramExtractor.LogBase.None, PowerSpectrum = false,
         }],
-        // ChatterboxVoiceEncoder's inline front end: centered, rounded to 512 points, raw power mel.
+        // ChatterboxVoiceEncoder's inline front end: centered exact 400-point STFT, raw power mel.
         ["chatterboxVoiceEncoder", new MelSpectrogramExtractor.Config(16_000, 400, 400, 160, 40, 0.0, 8_000.0,
             MelSpectrogramExtractor.Normalization.None, false, MelSpectrogramExtractor.LogBase.None, null, 0f, 0f, 1f, true,
-            Center: true)],
+            Center: true, ExactFftSize: true)],
     ];
 
     [Theory]
@@ -144,7 +145,7 @@ public sealed class MelSpectrogramExactnessTests
         }
         float[] power = new float[numBins];
         for (int k = 0; k < numBins; k++)
-            power[k] = cfg.PowerSpectrum ? re[k] * re[k] + im[k] * im[k] : MathF.Sqrt(re[k] * re[k] + im[k] * im[k]);
+            power[k] = cfg.PowerSpectrum ? re[k] * re[k] + im[k] * im[k] : MathF.Sqrt(re[k] * re[k] + im[k] * im[k] + cfg.MagnitudeEpsilon);
         float[] column = new float[cfg.NMels];
         float floor = cfg.LogFloor ?? 1e-10f;
         for (int m = 0; m < cfg.NMels; m++)

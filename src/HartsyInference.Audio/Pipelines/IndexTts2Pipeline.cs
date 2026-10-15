@@ -268,11 +268,6 @@ public sealed class IndexTts2Pipeline : IDisposable
 
     private const double MaxReferenceSeconds = 15.0;
 
-    /// <summary>Zero crossings and roll-off of the long sinc that stands in for librosa's <c>soxr_hq</c> (any rate →
-    /// 22.05 kHz / 16 kHz straight from the file); the roll-off sits at the centre of soxr's transition band.</summary>
-    private const int PrecisionFilterWidth = 64;
-    private const double SoxrHqRolloff = 0.955;
-
     /// <summary>Reproduces the reference's clip resampling chain: <c>librosa.load</c> brings the file to 22.05 kHz
     /// (soxr high quality — approximated by a long sinc), and the 16 kHz copy is
     /// <c>torchaudio.transforms.Resample(22050, 16000)</c> OF THAT 22.05 kHz signal (torchaudio defaults, reproduced
@@ -289,7 +284,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     internal static float[] ResampleEmotionClip(ReadOnlySpan<float> clip, int sampleRate) => SoxrHq(clip, sampleRate, 16_000);
 
     private static float[] SoxrHq(ReadOnlySpan<float> clip, int inRate, int outRate) =>
-        inRate == outRate ? clip.ToArray() : SincResampler.Resample(clip, inRate, outRate, PrecisionFilterWidth, SoxrHqRolloff);
+        SincResampler.ResampleSoxrHqStandIn(clip, inRate, outRate);
 
     /// <summary>Runs the reference clip through every front-end stage that depends on nothing else and returns the
     /// reusable <see cref="IndexTts2Reference"/> (the reference's <c>cache_*</c> fields). Like the reference, only the

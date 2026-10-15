@@ -105,6 +105,10 @@ public sealed record CosyVoiceFlowConfig
 
     /// <summary>Classifier-free-guidance weight (<c>inference_cfg_rate</c>).</summary>
     public float CfgRate { get; init; } = 0.7f;
+
+    /// <summary>Solver times warped by <c>1 − cos(t·π/2)</c> (<c>cfm_params.t_scheduler: 'cosine'</c> in CosyVoice 2's
+    /// yaml and Chatterbox's S3Gen config) instead of a uniform grid.</summary>
+    public bool CosineTimeSchedule { get; init; } = true;
 }
 
 /// <summary>HiFTNet vocoder config (mel → 24 kHz waveform). Harmonic-plus-noise source filter + iSTFT output stage — structurally the same family as the Kokoro iSTFTNet decoder, with an added internal F0 predictor feeding the sinusoidal source.</summary>

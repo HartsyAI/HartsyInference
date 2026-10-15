@@ -16,10 +16,14 @@ public sealed unsafe class ChatterboxVoiceEncoder : IDisposable
     private const int Hidden = 256;
     private const int Layers = 3;
 
-    // voice_encoder.py inference defaults: 160-frame partials, 50% overlap, 80% minimum tail coverage.
+    // voice_encoder.py: 160-frame partials, 80% minimum tail coverage. embeds_from_wavs passes Resemble's rate=1.3, so
+    // get_frame_step gives round((16000 / 1.3) / 160) = 77 frames between partials, not the 50%-overlap 80.
     private const int PartialFrames = 160;
-    private const int PartialStep = 80;
+    private const int PartialStep = 77;
     private const double MinCoverage = 0.8;
+
+    // embeds_from_wavs trims leading and trailing silence with librosa.effects.trim(top_db=20) before the mel.
+    private const float TrimTopDb = 20f;
 
     private readonly UnidirectionalLstm _lstm;
     private Tensor? _projW, _projB;
@@ -60,13 +64,16 @@ public sealed unsafe class ChatterboxVoiceEncoder : IDisposable
     }
 
     /// <summary>Embeds a full 16 kHz reference utterance → L2-normalized <c>[1, 256]</c> speaker embedding,
-    /// replicating upstream <c>VoiceEncoder.inference</c>: raw power-mel front-end (librosa n_fft 400 / hop 160 /
-    /// Slaney 40 bins / fmax 8 kHz / <c>mel_type="amp"</c>, no log), sliced into 160-frame partials at 50%
-    /// overlap (zero-padded to full coverage when the ≥80%-covered tail earns an extra window), each embedded by
-    /// <see cref="Forward"/>, then mean-pooled and re-normalized.</summary>
+    /// replicating upstream <c>VoiceEncoder.embeds_from_wavs</c>: leading and trailing silence trimmed at 20 dB, raw
+    /// power-mel front-end (librosa: exact 400-point centered STFT / hop 160 / Slaney 40 bins / fmax 8 kHz /
+    /// <c>mel_type="amp"</c>, no log), sliced into 160-frame partials 77 frames apart (zero-padded to full coverage when
+    /// the ≥80%-covered tail earns an extra window), each embedded by <see cref="Forward"/>, then mean-pooled and
+    /// re-normalized.</summary>
     public Tensor EmbedUtterance(IBackend backend, ReadOnlySpan<float> audio16k)
     {
         if (audio16k.IsEmpty) throw new ArgumentException("Reference audio must be non-empty.", nameof(audio16k));
+        (int start, int end) = SilenceTrim.Bounds(audio16k, TrimTopDb);
+        if (end > start) audio16k = audio16k[start..end];
         MelSpectrogramExtractor extractor = new(new MelSpectrogramExtractor.Config(
             SampleRate: 16_000,
             NFft: 400,
@@ -83,17 +90,12 @@ public sealed unsafe class ChatterboxVoiceEncoder : IDisposable
             NormOffset: 0f,
             NormScale: 1f,
             PowerSpectrum: true,
-            Center: true));
+            Center: true,
+            ExactFftSize: true));
         float[,] mel = extractor.Compute(audio16k);          // [40, frames]
         int frames = mel.GetLength(1);
 
-        // get_num_wins: n_wins = (frames - 160 + 80) / 80; the remainder tail earns one more window when it
-        // covers ≥ 80% of a partial (counting the 80 frames shared with the previous window).
-        int span = Math.Max(frames - PartialFrames + PartialStep, 0);
-        int nWins = span / PartialStep;
-        int remainder = span % PartialStep;
-        if (nWins == 0 || (remainder + (PartialFrames - PartialStep)) / (double)PartialFrames >= MinCoverage) nWins++;
-        int target = PartialFrames + PartialStep * (nWins - 1);
+        (int nWins, int target) = PartialWindows(frames);
 
         double[] sum = new double[Hidden];
         for (int wi = 0; wi < nWins; wi++)
@@ -125,6 +127,18 @@ public sealed unsafe class ChatterboxVoiceEncoder : IDisposable
         float inv = (float)(1.0 / (Math.Sqrt(norm) + 1e-8));
         for (int i = 0; i < Hidden; i++) rp[i] *= inv;
         return result;
+    }
+
+    /// <summary><c>get_num_wins</c>: how many partials cover <paramref name="frames"/> mel frames and the padded or
+    /// truncated length they span. The tail earns one more window when it covers at least 80% of a partial, counting the
+    /// frames it shares with the previous window.</summary>
+    internal static (int Count, int Target) PartialWindows(int frames)
+    {
+        int span = Math.Max(frames - PartialFrames + PartialStep, 0);
+        int count = span / PartialStep;
+        int remainder = span % PartialStep;
+        if (count == 0 || (remainder + (PartialFrames - PartialStep)) / (double)PartialFrames >= MinCoverage) count++;
+        return (count, PartialFrames + PartialStep * (count - 1));
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

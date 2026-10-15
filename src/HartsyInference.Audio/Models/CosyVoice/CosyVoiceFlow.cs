@@ -31,7 +31,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     {
         _cfg = cfg;
         _estimator = new CausalConditionalDecoder(cfg.Flow);
-        _cfm = new ConditionalCfm(_estimator, cfg.Flow.MelBins);
+        _cfm = new ConditionalCfm(_estimator, cfg.Flow.MelBins, cfg.Flow.CosineTimeSchedule);
         _encoder = new UpsampleConformerEncoder(cfg.Flow.EncoderOutputSize, cfg.Flow.EncoderNumHeads,
             cfg.Flow.EncoderNumPreBlocks, cfg.Flow.EncoderNumPostBlocks);
     }
@@ -107,12 +107,19 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         // The solve produces mel for the whole [prompt ++ target] token span (the prompt region is pinned to the
         // reference mel via `cond`). The reference returns only the generated tail — trim the prompt frames so the
         // vocoder doesn't replay the reference clip before the target speech.
-        int promptFrames = Math.Min(promptSpeechTokens.Length * UpsampleConformerEncoder.TokenMelRatio, tMel);
+        int promptFrames = Math.Min(PromptFrames(promptSpeechTokens.Length, promptMel), tMel);
         if (promptFrames <= 0) return outMel;
         Tensor tail = TrimPromptFrames(outMel, mel, tMel, promptFrames);
         outMel.Dispose();
         return tail;
     }
+
+    /// <summary>Frames of the prompt region the solve's output starts with. Upstream <c>flow.inference</c> drops
+    /// <c>mel_len1 = prompt_feat.shape[1]</c> frames, the prompt mel's own length: Chatterbox's <c>embed_ref</c> trims
+    /// only the tokens when the mel runs one frame past twice their count, so trimming by tokens would leave a frame
+    /// pinned to the reference at the head of the output. Without a prompt mel it is the tokens' span.</summary>
+    internal static int PromptFrames(int promptTokens, Tensor? promptMel)
+        => promptMel is not null ? (int)promptMel.Shape[2] : promptTokens * UpsampleConformerEncoder.TokenMelRatio;
 
     /// <summary>Returns a fresh <c>[1, mel, tMel-promptFrames]</c> holding the generated tail of a channels-first mel, dropping the leading prompt region.</summary>
     private static Tensor TrimPromptFrames(Tensor full, int mel, int tMel, int promptFrames)

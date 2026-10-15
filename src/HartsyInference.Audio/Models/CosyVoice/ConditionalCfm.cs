@@ -9,7 +9,7 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 ///
 /// <code>
 ///   x = x0
-///   for each Euler step (t over linspace(0, 1, N+1)):
+///   for each Euler step (t over the time grid; dt = t[k+1] − t[k]):
 ///     v  = estimator(x, mu, t, spk, cond)
 ///     if cfg &gt; 0:
 ///       v0 = estimator(x, 0,  t, 0,   0)        // unconditional
@@ -19,11 +19,29 @@ namespace HartsyInference.Audio.Models.CosyVoice;
 /// </code>
 ///
 /// <para>Vanilla Euler — no sway-sampling / omega-shift (the mel operating dimension is small). NFE 10,
-/// CFG 0.7 by default. Deterministic for a fixed seed.</para></remarks>
-public sealed unsafe class ConditionalCfm(ICfmEstimator estimator, int melBins)
+/// CFG 0.7 by default. Deterministic for a fixed seed.</para>
+///
+/// <para>The time grid is <c>linspace(0, 1, N+1)</c>, or with <paramref name="cosineSchedule"/> upstream's
+/// <c>t_scheduler == 'cosine'</c> warp <c>1 − cos(t·π/2)</c>, which CosyVoice 2 and Chatterbox S3Gen both configure
+/// (small steps near the noise end, large ones near the data end). IndexTTS-2's S2Mel CFM keeps the linear grid.</para></remarks>
+public sealed unsafe class ConditionalCfm(ICfmEstimator estimator, int melBins, bool cosineSchedule = false)
 {
     private readonly ICfmEstimator _estimator = estimator;
     private readonly int _melBins = melBins;
+    private readonly bool _cosineSchedule = cosineSchedule;
+
+    /// <summary>The <c>numSteps + 1</c> solver times from 0 to 1: <c>linspace(0, 1, n+1)</c>, warped by
+    /// <c>1 − cos(t·π/2)</c> when the cosine schedule is on.</summary>
+    internal static float[] TimeGrid(int numSteps, bool cosine)
+    {
+        float[] grid = new float[numSteps + 1];
+        for (int k = 0; k <= numSteps; k++)
+        {
+            float t = (float)k / numSteps;
+            grid[k] = cosine ? 1f - MathF.Cos(t * 0.5f * MathF.PI) : t;
+        }
+        return grid;
+    }
 
     /// <summary>Solves the flow ODE to produce a mel <c>[1, melBins, T]</c>.</summary>
     /// <remarks><paramref name="mu"/> is the
@@ -55,8 +73,7 @@ public sealed unsafe class ConditionalCfm(ICfmEstimator estimator, int melBins)
         Tensor x = x0Override is not null ? CopyTensor(x0Override) : RandNormal(_melBins, t, seed);
         if (promptLen > 0) ZeroPrefix(x, promptLen);
 
-        // t_span = linspace(0, 1, numSteps + 1); uniform dt.
-        float dt = 1f / numSteps;
+        float[] grid = TimeGrid(numSteps, _cosineSchedule);
         Tensor? zMu = null, zSpk = null, zCond = null;
         if (cfgRate > 0f)
         {
@@ -67,7 +84,8 @@ public sealed unsafe class ConditionalCfm(ICfmEstimator estimator, int melBins)
 
         for (int step = 0; step < numSteps; step++)
         {
-            float tNow = step * dt;
+            float tNow = grid[step];
+            float dt = grid[step + 1] - grid[step];
             Tensor v = _estimator.Estimate(backend, x, mu, tNow, spk, cond, attnMask);
             if (cfgRate > 0f)
             {
