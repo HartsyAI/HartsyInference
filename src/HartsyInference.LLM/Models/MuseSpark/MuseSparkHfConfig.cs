@@ -63,7 +63,8 @@ public sealed record MuseSparkHfConfig
                 bool nope = layerTheta == 0d;
                 if (nope != global[i] || (!nope && Math.Abs(layerTheta - theta) > theta * 1e-6))
                     throw new NotSupportedException(
-                        $"Layer {i}: RoPE theta {layerTheta} on a {(global[i] ? "full" : "sliding")}-attention layer; Muse Spark runs RoPE (global theta) on exactly the sliding layers.");
+                        $"Layer {i}: RoPE theta {layerTheta} on a {(global[i] ? "full" : "sliding")}-attention layer; "
+                        + "Muse Spark runs RoPE (global theta) on exactly the sliding layers.");
             }
         }
 
@@ -75,7 +76,8 @@ public sealed record MuseSparkHfConfig
             for (int i = firstDense; i < mlpTypes.Length; i++)
             {
                 if (mlpTypes[i] != "sparse")
-                    throw new NotSupportedException($"Layer {i} is a '{mlpTypes[i]}' MLP after the first sparse layer; only a leading dense block is supported.");
+                    throw new NotSupportedException(
+                        $"Layer {i} is a '{mlpTypes[i]}' MLP after the first sparse layer; only a leading dense block is supported.");
             }
         }
 

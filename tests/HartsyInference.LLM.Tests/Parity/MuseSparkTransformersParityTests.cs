@@ -92,7 +92,8 @@ public sealed unsafe class MuseSparkTransformersParityTests
             float d = MathF.Abs(want[i] - got[i]);
             if (d > worst) { worst = d; worstAt = i; }
         }
-        Assert.True(worst < Tolerance, $"rows [{firstRow}, {firstRow + rows}): max |Δ| = {worst} at row {firstRow + worstAt / vocab}, vocab {worstAt % vocab}");
+        Assert.True(worst < Tolerance,
+            $"rows [{firstRow}, {firstRow + rows}): max |Δ| = {worst} at row {firstRow + worstAt / vocab}, vocab {worstAt % vocab}");
     }
 
     /// <summary>The fixture's weights mapped and loaded on the CPU backend, with the reference ids and logits.</summary>

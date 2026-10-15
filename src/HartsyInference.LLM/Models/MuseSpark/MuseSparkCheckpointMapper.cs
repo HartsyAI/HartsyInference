@@ -14,7 +14,8 @@ public static class MuseSparkCheckpointMapper
     /// <summary>The reference's floor on <c>alpha²</c> of a residual gate.</summary>
     public const float ResidualGateEps = 1e-3f;
 
-    private static readonly string[] OffsetNorms = ["input_layernorm.weight", "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight"];
+    private static readonly string[] OffsetNorms =
+        ["input_layernorm.weight", "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight"];
 
     /// <summary>Returns the transformer's weight dictionary (prefix <c>model</c>, head <c>lm_head.weight</c>) for <paramref name="hf"/>, a
     /// <c>MuseSparkForConditionalGeneration</c> (<c>model.language_model.*</c>) or bare text-model (<c>model.*</c>) state dict.</summary>
@@ -58,7 +59,8 @@ public static class MuseSparkCheckpointMapper
             w[$"{to}.mlp.post_expert_proj.weight"] = Pass($"{from}.mlp.post_expert_proj.weight");
             w[$"{to}.mlp.pre_expert_norm.weight"] = AddOne(hf[$"{from}.mlp.pre_expert_norm.weight"]);
             w[$"{to}.mlp.post_expert_norm.weight"] = AddOne(hf[$"{from}.mlp.experts.post_expert_norm.weight"]);
-            SplitExperts(w, Pass($"{from}.mlp.experts.gate_up_proj"), Pass($"{from}.mlp.experts.down_proj"), to, moe, moe.ExpertWidth(cfg.HiddenSize));
+            SplitExperts(w, Pass($"{from}.mlp.experts.gate_up_proj"), Pass($"{from}.mlp.experts.down_proj"), to, moe,
+                moe.ExpertWidth(cfg.HiddenSize));
         }
         return w;
     }
