@@ -10,13 +10,6 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <c>text_encoders.</c> trees are left to their own loaders; any other unrecognized key is refused rather than dropped.</summary>
 public static class Flux3CheckpointConverter
 {
-    /// <summary>Top-level module prefixes a FLUX.3 transformer carries.</summary>
-    private static readonly string[] TransformerRoots =
-    [
-        "emb_in.", "txt_in.", "time_in.", "ref_time_in.", "early_stream_modulations.", "single_stream_modulations.",
-        "content_mode_blocks.", "txt_mode_blocks.", "single_blocks.", "final_layer.",
-    ];
-
     /// <summary>Component trees an all-in-one file may bundle, which belong to other loaders.</summary>
     private static readonly string[] BundledRoots = ["vae.", "text_encoders.", "first_stage_model.", "conditioner."];
 
@@ -49,7 +42,7 @@ public static class Flux3CheckpointConverter
             string key = CheckpointConvertUtils.StripTransformerPrefix(entry.Key);
             if (StartsWithAny(key, BundledRoots))
                 continue;
-            if (!StartsWithAny(key, TransformerRoots))
+            if (!Flux3KeyNames.IsBfl(key))
                 throw new NotSupportedException($"FLUX.3 checkpoint key '{entry.Key}' is not part of the FLUX.3 transformer.");
             ConvertKey(key, entry.Value, output);
         }
@@ -60,14 +53,14 @@ public static class Flux3CheckpointConverter
 
     private static void ConvertKey(string key, Tensor tensor, Dictionary<string, Tensor> output)
     {
-        const string fusedSuffix = ".qkv.weight";
+        const string fusedSuffix = "." + Flux3KeyNames.FusedQkvLeaf + ".weight";
         if (key.EndsWith(fusedSuffix, StringComparison.Ordinal))
         {
             if (tensor.Shape.Rank != 2 || tensor.Shape[0] % 3 != 0)
                 throw new InvalidDataException($"FLUX.3 fused '{key}' has shape {tensor.Shape}; expected [3·D, D].");
             string blockPrefix = key[..^fusedSuffix.Length];
             CheckpointConvertUtils.SplitQkvWeight(tensor, (int)(tensor.Shape[0] / 3), blockPrefix,
-                "q_proj", "k_proj", "v_proj", output);
+                Flux3KeyNames.SplitQkvLeaves[0], Flux3KeyNames.SplitQkvLeaves[1], Flux3KeyNames.SplitQkvLeaves[2], output);
             return;
         }
         if (key.EndsWith("_norm.scale", StringComparison.Ordinal))

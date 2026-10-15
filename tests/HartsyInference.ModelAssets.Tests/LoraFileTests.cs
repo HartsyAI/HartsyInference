@@ -224,6 +224,39 @@ public sealed class LoraFileTests : IDisposable
     }
 
     [Fact]
+    public unsafe void Load_KohyaFlux_SingleLinear1_Splits4Ways_IntoConsecutiveUpRows()
+    {
+        const int hidden = 8;
+        const int rank = 2;
+        float[] up = new float[7 * hidden * rank];
+        for (int i = 0; i < up.Length; i++) up[i] = i;
+        Dictionary<string, (DType, long[], float[])> tensors = new()
+        {
+            ["lora_unet_single_blocks_1_linear1.lora_down.weight"] = (DType.F32, [rank, hidden], new float[rank * hidden]),
+            ["lora_unet_single_blocks_1_linear1.lora_up.weight"] = (DType.F32, [7 * hidden, rank], up),
+        };
+        string path = CreateSafeTensorsFile(_tempDir, "kohya_linear1", tensors);
+
+        using LoraFile file = LoraFile.Load(path);
+
+        Assert.Equal(LoraFormat.KohyaFlux, file.Format);
+        (string Key, long Rows, long FirstRow)[] expected =
+        [
+            ("single_transformer_blocks.1.attn.to_q.weight", hidden, 0),
+            ("single_transformer_blocks.1.attn.to_k.weight", hidden, hidden),
+            ("single_transformer_blocks.1.attn.to_v.weight", hidden, 2 * hidden),
+            ("single_transformer_blocks.1.proj_mlp.weight", 4 * hidden, 3 * hidden),
+        ];
+        Assert.Equal(expected.Length, file.Layers.Count);
+        foreach ((string key, long rows, long firstRow) in expected)
+        {
+            LoraLayer layer = file.Layers.Single(l => l.TargetKey == key);
+            Assert.Equal(new TensorShape(rows, rank), layer.LoraUp.Shape);
+            Assert.Equal(firstRow * rank, ((float*)layer.LoraUp.DataPointer)[0]);
+        }
+    }
+
+    [Fact]
     public void Load_AiToolkitFlux_PreservesCompoundKeys_AndDefaultsAlphaToRank()
     {
         const int hidden = 3072;

@@ -174,66 +174,43 @@ public static class KohyaFluxMapper
         group.Assign(role, loader.GetTensor(sourceKey));
     }
 
-    private static unsafe void AddFusedSplit(SafeTensorsLoader loader, string sourceKey, LoraRole role, string[] canonicalKeys, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups, int splitWays)
+    private static void AddFusedSplit(SafeTensorsLoader loader, string sourceKey, LoraRole role, string[] canonicalKeys, Dictionary<(LoraTarget, string), LoraGroupBuffer> groups, int splitWays)
     {
-        // Fused QKV / linear1: lora_down is shared across all splits, lora_up is split along dim 0,
-        // alpha is shared. Slices of lora_up borrow from the same mmap region.
+        // Fused QKV / linear1: lora_down and alpha are shared across all splits, lora_up is cut along dim 0 into
+        // views on the same mmap region.
         Tensor source = loader.GetTensor(sourceKey);
-
-        if (role is not (LoraRole.Down or LoraRole.Up or LoraRole.Alpha))
-        {
-            // Splitting a LyCORIS factor across a fused projection is not the same operation per decomposition
-            // (a LoHa factor row-slices, a Kronecker factor does not), so it is refused by name rather than guessed.
-            Logs.Warning($"Kohya Flux LoRA key '{sourceKey}' carries a {role} matrix on a FUSED projection, which "
-                + "this mapper cannot split; skipping.");
-            return;
-        }
-
-        if (role == LoraRole.Up)
-        {
-            if (source.Shape.Rank != 2)
-                throw new HartsyInferenceException($"Kohya Flux fused up matrix '{sourceKey}' must be 2D, got rank {source.Shape.Rank}.");
-            long totalOut = source.Shape[0];
-            long rank = source.Shape[1];
-            if (totalOut % splitWays != 0 && splitWays == 3)
-                throw new HartsyInferenceException($"Kohya Flux fused QKV up matrix '{sourceKey}' shape[0]={totalOut} not divisible by 3.");
-            long sliceOut;
-            long[] sliceOuts;
-            if (splitWays == 3)
-            {
-                sliceOut = totalOut / 3;
-                sliceOuts = [sliceOut, sliceOut, sliceOut];
-            }
-            else if (splitWays == 4)
-            {
-                // Flux single-block linear1: [Q | K | V | proj_mlp] with hidden=H, mlp_inner=4H
-                // total = 3H + 4H = 7H
-                if (totalOut % 7 != 0)
-                    throw new HartsyInferenceException($"Kohya Flux fused linear1 up matrix '{sourceKey}' shape[0]={totalOut} not divisible by 7 (expected hidden + 4*hidden Q/K/V/mlp split).");
-                long h = totalOut / 7;
-                sliceOuts = [h, h, h, 4 * h];
-            }
-            else throw new InvalidOperationException();
-
-            int elemSize = source.DType.SizeInBytes;
-            long offset = 0;
-            for (int s = 0; s < splitWays; s++)
-            {
-                long elements = sliceOuts[s] * rank;
-                byte* slicePtr = (byte*)source.DataPointer + offset * elemSize;
-                Tensor slice = new(slicePtr, new TensorShape(sliceOuts[s], rank), source.DType);
-                LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, LoraTarget.Transformer, canonicalKeys[s], sourceKey);
-                group.Up = slice;
-                offset += elements;
-            }
-            return;
-        }
-
-        // Down and Alpha: shared across all canonical keys
+        long[] rows = role == LoraRole.Up ? FusedRowCounts(sourceKey, source, splitWays) : new long[splitWays];
+        (string CanonicalKey, long Rows)[] slices = new (string CanonicalKey, long Rows)[splitWays];
         for (int s = 0; s < splitWays; s++)
         {
-            LoraGroupBuffer group = LoraGroupBuffer.GetOrCreate(groups, LoraTarget.Transformer, canonicalKeys[s], sourceKey);
-            group.Assign(role, source);
+            slices[s] = (canonicalKeys[s], rows[s]);
         }
+        if (!LoraGroupBuffer.AssignFusedRows(groups, LoraTarget.Transformer, slices, sourceKey, role, source))
+        {
+            Logs.Warning($"Kohya Flux LoRA key '{sourceKey}' carries a {role} matrix on a FUSED projection, which "
+                + "this mapper cannot split; skipping.");
+        }
+    }
+
+    /// <summary>Row counts of each split in a fused up matrix: equal thirds for QKV, and <c>[H, H, H, 4H]</c> for the
+    /// single-block linear1 (Flux mlp_ratio is fixed at 4, so its rows total 7H).</summary>
+    private static long[] FusedRowCounts(string sourceKey, Tensor up, int splitWays)
+    {
+        if (up.Shape.Rank != 2)
+            throw new HartsyInferenceException($"Kohya Flux fused up matrix '{sourceKey}' must be 2D, got rank {up.Shape.Rank}.");
+        long totalOut = up.Shape[0];
+        if (splitWays == 3)
+        {
+            if (totalOut % 3 != 0)
+                throw new HartsyInferenceException($"Kohya Flux fused QKV up matrix '{sourceKey}' shape[0]={totalOut} not divisible by 3.");
+            long third = totalOut / 3;
+            return [third, third, third];
+        }
+        if (splitWays != 4)
+            throw new InvalidOperationException($"Kohya Flux fused split of {splitWays} ways is not a Flux layout.");
+        if (totalOut % 7 != 0)
+            throw new HartsyInferenceException($"Kohya Flux fused linear1 up matrix '{sourceKey}' shape[0]={totalOut} not divisible by 7 (expected hidden + 4*hidden Q/K/V/mlp split).");
+        long hidden = totalOut / 7;
+        return [hidden, hidden, hidden, 4 * hidden];
     }
 }
