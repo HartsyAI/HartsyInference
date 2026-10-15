@@ -3,7 +3,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Models.VibeVoice;
 
-/// <summary>Thin tokenizer wrapper for VibeVoice, reusing <see cref="Qwen3Tokenizer"/>'s embedded vocab.json / merges.txt since Qwen2.5 and Qwen3 share the same 151 936-entry byte-level BPE vocab.</summary>
+/// <summary>Thin tokenizer wrapper for VibeVoice. Encodes with <see cref="Qwen2Tokenizer.EncodeExact"/> over the Qwen2.5
+/// base vocabulary and the Qwen2.5 added-token table, which gives the same ids as upstream's Qwen2.5 tokenizer.</summary>
 /// <remarks>
 /// <para>This class exists for two reasons:
 /// <list type="number">
@@ -32,11 +33,27 @@ public sealed class VibeVoiceTokenizer : IDisposable
     /// <summary>Negative-prompt sentinel used by the streaming-0.5B CFG path (<c>&lt;|image_pad|&gt;</c>, ID 151 655); reserved for that variant only.</summary>
     public const int ImagePadTokenId = 151_655;
 
+    /// <summary>The 22 added tokens of the Qwen2.5 tokenizer.json (ids 151643 to 151664). <c>Encode</c> recognizes exactly
+    /// these literals; Qwen3-only ones such as <c>&lt;think&gt;</c> are absent, so they encode as ordinary text.</summary>
+    private static readonly IReadOnlyDictionary<string, int> Qwen25AddedTokens = new Dictionary<string, int>(StringComparer.Ordinal)
+    {
+        ["<|endoftext|>"] = 151643, ["<|im_start|>"] = 151644, ["<|im_end|>"] = 151645,
+        ["<|object_ref_start|>"] = 151646, ["<|object_ref_end|>"] = 151647, ["<|box_start|>"] = 151648,
+        ["<|box_end|>"] = 151649, ["<|quad_start|>"] = 151650, ["<|quad_end|>"] = 151651,
+        ["<|vision_start|>"] = 151652, ["<|vision_end|>"] = 151653, ["<|vision_pad|>"] = 151654,
+        ["<|image_pad|>"] = 151655, ["<|video_pad|>"] = 151656, ["<tool_call>"] = 151657,
+        ["</tool_call>"] = 151658, ["<|fim_prefix|>"] = 151659, ["<|fim_middle|>"] = 151660,
+        ["<|fim_suffix|>"] = 151661, ["<|fim_pad|>"] = 151662, ["<|repo_name|>"] = 151663,
+        ["<|file_sep|>"] = 151664,
+    };
+
+    private readonly Qwen2Tokenizer _qwen;
     private readonly Tokenizer _bpe;
     private int _disposed;
 
     public VibeVoiceTokenizer()
     {
+        _qwen = Qwen2Tokenizer.CreateBaseVocabulary();
         using Stream vocab = EmbeddedTokenizerResources.OpenQwen3Vocab();
         using Stream merges = EmbeddedTokenizerResources.OpenQwen3Merges();
         _bpe = BpeTokenizer.Create(vocab, merges);
@@ -46,14 +63,9 @@ public sealed class VibeVoiceTokenizer : IDisposable
     public int[] Encode(string text)
     {
         ThrowIfDisposed();
-        // ML.Tokenizers' BpeTokenizer.Create(vocab, merges) does NOT apply the GPT-2 byte-level
-        // pre-tokenizer, so it drops leading spaces (" Speaker" -> "Speaker") instead of matching the
-        // Ġ-prefixed vocab keys ("ĠSpeaker"). Pre-encode into GPT-2 byte space so the prompt tokens
-        // match Qwen2.5 exactly — otherwise the LM never sees the real script text and free-runs.
-        IReadOnlyList<int> ids = _bpe.EncodeToIds(ByteLevelCodec.Encode(text));
-        int[] result = new int[ids.Count];
-        for (int i = 0; i < ids.Count; i++) result[i] = ids[i];
-        return result;
+        // Recognizes exactly the Qwen2.5 added tokens, as upstream's tokenizer does. Qwen3-only literals such as
+        // <think> are not in the table, so they encode as ordinary text.
+        return _qwen.EncodeExact(text, Qwen25AddedTokens);
     }
 
     /// <summary>Decodes a token-id sequence back to text; useful for logging the prompt the LM actually received.</summary>
@@ -74,6 +86,7 @@ public sealed class VibeVoiceTokenizer : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _qwen.Dispose();
         // Microsoft.ML.Tokenizers BpeTokenizer doesn't implement IDisposable in our version;
         // the underlying streams were already closed in the ctor. Nothing else to free.
     }

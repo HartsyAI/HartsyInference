@@ -91,6 +91,13 @@ public sealed class VibeVoicePipeline : IDisposable
             AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "config.json", category: "tts", ct: ct))
             .ConfigureAwait(false);
 
+        return LoadFromDirectory(repoDir);
+    }
+
+    /// <summary>Wires VibeVoice-1.5B from an already-downloaded repo directory (safetensors shards plus config.json).
+    /// Never touches the network; <see cref="LoadAsync"/> downloads first.</summary>
+    internal static VibeVoicePipeline LoadFromDirectory(string repoDir)
+    {
         VibeVoiceConfig cfg = VibeVoiceConfig.V15B;
         Qwen2Config lmCfg = Qwen2Config.Qwen25_1_5B;
 
@@ -162,6 +169,14 @@ public sealed class VibeVoicePipeline : IDisposable
         return audio;
     }
 
+    /// <summary>Parity-test seam: the production generation loop, reporting each stage to <paramref name="trace"/>.</summary>
+    internal void SynthesizeTraced(IBackend backend, IReadOnlyList<string> lines, IReadOnlyList<string> voiceWavPaths,
+        int maxNewTokens, int seed, double? cfgScale, int? diffusionSteps, VibeVoiceStageTrace trace)
+    {
+        SynthesizeCore(backend, lines, voiceWavPaths, maxNewTokens, null, 0.95f, 0.95f, seed, cfgScale, diffusionSteps,
+            _ => { }, trace);
+    }
+
     /// <summary>Streaming counterpart to <see cref="Synthesize"/>: runs the identical generation loop (same
     /// <see cref="SynthesizeCore"/>, same numerics) on a background thread, but hands each decoded chunk to
     /// the caller as soon as it's produced instead of buffering to the end — the acoustic VAE already decodes
@@ -221,7 +236,8 @@ public sealed class VibeVoicePipeline : IDisposable
     /// caller for the accumulate-to-end non-streaming path).</summary>
     private unsafe void SynthesizeCore(IBackend backend, IReadOnlyList<string> lines,
         IReadOnlyList<string> voiceWavPaths, int maxNewTokens, IProgress<int>? progress,
-        float temperature, float topP, int seed, double? cfgScale, int? diffusionSteps, Action<float[]> onChunk)
+        float temperature, float topP, int seed, double? cfgScale, int? diffusionSteps, Action<float[]> onChunk,
+        VibeVoiceStageTrace? trace = null)
     {
         ThrowIfDisposed();
         _runCfgScale = cfgScale is > 0 ? (float)cfgScale.Value : _cfg.CfgScale;
@@ -250,18 +266,23 @@ public sealed class VibeVoicePipeline : IDisposable
         Tensor[] voiceLatents = new Tensor[prep.Voices.Length];
         for (int i = 0; i < prep.Voices.Length; i++)
             voiceLatents[i] = EncodeVoicePcm(backend, prep.Voices[i].Pcm, prep.Voices[i].LatentCount);
+        if (voiceLatents.Length > 0) Trace(trace, "voice_mean", voiceLatents[0]);
 
         // 2. Apply the learned normalization: features = (latent + bias) * scaling.
         for (int i = 0; i < voiceLatents.Length; i++) NormalizeLatentInPlace(voiceLatents[i], _speechScalingFactor, _speechBiasFactor);
+        if (voiceLatents.Length > 0) Trace(trace, "voice_norm", voiceLatents[0]);
 
         // 3. Build the prefill embeds: lookup embed_tokens(token_id) by default,
         //    overwritten by acoustic_connector(voice_latent[k]) at speech-mask positions.
         using Tensor prefillEmbeds = BuildPrefillEmbeds(backend, prep, voiceLatents);
+        Trace(trace, "prefill_embeds", prefillEmbeds);
+        if (trace is not null) TraceVoiceConnected(trace, prefillEmbeds, prep.SpeechInputMask);
         foreach (Tensor v in voiceLatents) v.Dispose();
 
         // 4. Prefill the LM with these embeddings.
         using Tensor prefillHidden = _lm.ForwardEmbeds(backend, prefillEmbeds, batch: 1, t: promptLen,
             posStart: 0, kvCache);
+        Trace(trace, "prefill_hidden", prefillHidden);
         // prefillHidden shape: [1, promptLen, hidden]. We need the LAST-position hidden
         // state — that's the LM's read-out at the trailing <|vision_start|> cursor and is
         // used to condition the first diffusion step.
@@ -282,12 +303,14 @@ public sealed class VibeVoicePipeline : IDisposable
         // emitted token is a speech_diffusion. Slice last frame of prefillHidden.
         using Tensor _lastHiddenWarm = SliceLastFrame(prefillHidden, _lmCfg.HiddenSize);
         Tensor? lastHidden = CopyOf(_lastHiddenWarm);
+        Trace(trace, "cond_1", lastHidden!);
         // Negative-stream conditioning hidden state. Lazily primed (by forwarding a lone
         // speech_start through negKvCache) at the first diffusion token after each reset.
         Tensor? negLastHidden = null;
         try
         {
             int prevToken = VibeVoiceTokenizer.SpeechStartTokenId;     // last token in the prompt template
+            int frame = 0;  // diffusion frames emitted so far; stage names are 1-based
             for (int step = 0; step < maxNewTokens; step++)
             {
                 // Project the last hidden state to logits, mask to the constrained vocab,
@@ -322,6 +345,7 @@ public sealed class VibeVoicePipeline : IDisposable
 
                 if (nextToken == VibeVoiceTokenizer.SpeechDiffusionTokenId)
                 {
+                    frame++;
                     // ── Diffusion sub-loop ──────────────────────────────────
                     // Positive condition is the LM's last hidden state at this position.
                     using Tensor cond = ExpandTo3D(lastHidden!, _lmCfg.HiddenSize);
@@ -337,25 +361,30 @@ public sealed class VibeVoicePipeline : IDisposable
                             Tensor negInit = _lm.Forward(backend, startTok, batch: 1, posStart: negKvCache.CurrentLength, negKvCache);
                             negLastHidden = SliceLastFrame(negInit, _lmCfg.HiddenSize);
                             negInit.Dispose();
+                            if (trace is not null) Trace(trace, $"neg_hidden_{frame}", negLastHidden!);
                         }
                         negCond = ExpandTo3D(negLastHidden!, _lmCfg.HiddenSize);
                     }
 
                     // Run 20 DDPM steps, v-prediction, cosine, CFG-combined cond/uncond.
                     Tensor noiseLatent = SampleNoise(_cfg.AcousticVaeDim, ref noiseRng);
+                    if (trace is not null) Trace(trace, $"noise_{frame}", noiseLatent);
                     Tensor denoised = DenoiseLatent(backend, _diffusionHead, _runSteps, _runCfgScale, noiseLatent,
-                        cond, negCond, _cfg.AcousticVaeDim, _lmCfg.HiddenSize);
+                        cond, negCond, _cfg.AcousticVaeDim, _lmCfg.HiddenSize, frame, trace);
+                    if (trace is not null) Trace(trace, $"z_{frame}", denoised);
                     negCond?.Dispose();
                     noiseLatent.Dispose();
 
                     // Un-normalize: raw_latent = latent / scaling - bias.
                     UnnormalizeLatentInPlace(denoised, _speechScalingFactor, _speechBiasFactor);
+                    if (trace is not null) Trace(trace, $"raw_{frame}", denoised);
 
                     // Decode one frame (1 latent) through the acoustic VAE → 3200 samples.
                     // Stream through the persistent acoustic cache so this frame's decode
                     // sees the prior frames' receptive-field tail.
                     using Tensor frameAudio = _acoustic.Decode(backend, denoised, batch: 1, acousticCache, sampleIndices);
                     float[] chunk = TensorToPcm(frameAudio);
+                    if (trace is not null) trace($"frame_{frame}", chunk);
                     onChunk(chunk);
 
                     // Build next-step embed: acoustic_connector(latent) + semantic_connector(sem_features).
@@ -371,11 +400,17 @@ public sealed class VibeVoicePipeline : IDisposable
                         // semantic features must be continuous with prior frames, else the
                         // LM's next-step conditioning drifts.
                         using Tensor semFeat = _semantic.Encode(backend, pcmTensor, batch: 1, tPcm: chunk.Length, semanticCache!, sampleIndices);
+                        if (trace is not null) Trace(trace, $"sem_{frame}", semFeat);
                         semanticEmbed = _semanticConnector.Forward(backend, semFeat, batch: 1, seqLen: 1);
                     }
                     latentNormalized.Dispose();
 
                     // Combine into a single [1, 1, hidden] embed and run one LM step.
+                    if (trace is not null)
+                    {
+                        Trace(trace, $"acoustic_embed_{frame}", acousticEmbed);
+                        if (semanticEmbed is not null) Trace(trace, $"semantic_embed_{frame}", semanticEmbed);
+                    }
                     using Tensor stepEmbed = AddEmbeds(acousticEmbed, semanticEmbed);
                     acousticEmbed.Dispose();
                     semanticEmbed?.Dispose();
@@ -385,6 +420,7 @@ public sealed class VibeVoicePipeline : IDisposable
                     lastHidden = SliceLastFrame(newHidden, _lmCfg.HiddenSize);
                     newHidden.Dispose();
 
+                    if (trace is not null) Trace(trace, $"cond_{frame + 1}", lastHidden!);
                     // Advance the negative stream in lockstep on the SAME diffusion embed
                     // (upstream feeds both streams identical inputs_embeds), so its next-token
                     // hidden reflects the same acoustic history minus the text/voice context.
@@ -394,6 +430,7 @@ public sealed class VibeVoicePipeline : IDisposable
                         negLastHidden!.Dispose();
                         negLastHidden = SliceLastFrame(negNew, _lmCfg.HiddenSize);
                         negNew.Dispose();
+                        if (trace is not null) Trace(trace, $"neg_hidden_{frame + 1}", negLastHidden!);
                     }
                 }
                 else
@@ -444,6 +481,28 @@ public sealed class VibeVoicePipeline : IDisposable
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
+
+    /// <summary>Reports the voice-prompt rows of the prefill embeds: the acoustic connector's output at the speech-mask
+    /// positions, in order (the rows upstream returns as acoustic_connector(features)[speech_masks]).</summary>
+    private static unsafe void TraceVoiceConnected(VibeVoiceStageTrace trace, Tensor prefillEmbeds, bool[] speechInputMask)
+    {
+        int hidden = (int)prefillEmbeds.Shape[2];
+        int rowCount = 0;
+        for (int i = 0; i < speechInputMask.Length; i++)
+        {
+            if (speechInputMask[i]) rowCount++;
+        }
+        float[] connected = new float[rowCount * hidden];
+        float* src = (float*)prefillEmbeds.DataPointer;
+        int row = 0;
+        for (int i = 0; i < speechInputMask.Length; i++)
+        {
+            if (!speechInputMask[i]) continue;
+            new ReadOnlySpan<float>(src + (long)i * hidden, hidden).CopyTo(connected.AsSpan(row * hidden, hidden));
+            row++;
+        }
+        trace("voice_connected", connected);
+    }
 
     private unsafe Tensor EncodeVoicePcm(IBackend backend, float[] pcm, int latentCount)
     {

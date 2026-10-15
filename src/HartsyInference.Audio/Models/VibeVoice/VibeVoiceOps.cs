@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -181,11 +182,21 @@ internal static unsafe class VibeVoiceOps
         return *(float*)f.DataPointer;
     }
 
+    /// <summary>Reports a stage to the parity seam as flat float32; a null trace returns immediately.</summary>
+    internal static unsafe void Trace(VibeVoiceStageTrace? trace, string stage, Tensor t)
+    {
+        if (trace is null) return;
+        trace(stage, new ReadOnlySpan<float>((float*)t.DataPointer, checked((int)t.ElementCount)));
+    }
+
     /// <summary>Runs the CFG-batched DDPM denoise loop shared by every VibeVoice variant: batches the conditional/unconditional halves into one N=2 head forward per step (the head is FFN-only, no cross-frame mixing, so each row is exactly its own pass), combining as <c>eps = uncond + cfg_scale·(cond−uncond)</c>.</summary>
     /// <param name="negCond">Null, or <paramref name="cfgScale"/> == 1, runs single-stream (no CFG).</param>
     /// <returns>An owned tensor the caller disposes.</returns>
+    /// <param name="frame">Diffusion frame index (1-based) used only to name trace stages.</param>
+    /// <param name="trace">Optional parity seam; receives the speech latent after each scheduler step.</param>
     public static Tensor DenoiseLatent(IBackend backend, VibeVoiceDiffusionHead diffusionHead, int numSteps,
-        float cfgScale, Tensor noiseLatent, Tensor cond, Tensor? negCond, int latentDim, int hiddenDim)
+        float cfgScale, Tensor noiseLatent, Tensor cond, Tensor? negCond, int latentDim, int hiddenDim,
+        int frame = 0, VibeVoiceStageTrace? trace = null)
     {
         using VibeVoiceCosineDpmSolver scheduler = new();
         scheduler.SetTimesteps(numSteps);
@@ -224,6 +235,7 @@ internal static unsafe class VibeVoiceOps
             if (ownsSpeech) speech.Dispose();
             speech = next;
             ownsSpeech = true;
+            if (trace is not null) Trace(trace, $"denoise_{frame}_step{step + 1}", speech);
         }
         condB?.Dispose();
 

@@ -61,6 +61,31 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
             : throw new InvalidOperationException("The embedded Qwen tokenizer.json is required for exact encoding."));
     }
 
+    /// <summary>Qwen2.5 base vocabulary with Qwen's split regex and NFC, and no added-token table: <see cref="EncodeExact"/>
+    /// on the result recognizes no literal, so text such as <c>&lt;think&gt;</c> encodes as ordinary characters.</summary>
+    public static Qwen2Tokenizer CreateBaseVocabulary()
+    {
+        GgufTokenizer exact;
+        using (Stream vocab = EmbeddedTokenizerResources.OpenQwen3Vocab())
+        using (Stream merges = EmbeddedTokenizerResources.OpenQwen3Merges())
+        {
+            exact = QwenBpe.FromStreams(vocab, merges);
+        }
+        Tokenizer bpe;
+        using (Stream vocab = EmbeddedTokenizerResources.OpenQwen3Vocab())
+        using (Stream merges = EmbeddedTokenizerResources.OpenQwen3Merges())
+        {
+            bpe = BpeTokenizer.Create(vocab, merges);
+        }
+        return new Qwen2Tokenizer(bpe, exact);
+    }
+
+    private Qwen2Tokenizer(Tokenizer tokenizer, GgufTokenizer exact)
+    {
+        _tokenizer = tokenizer;
+        _exact = new Lazy<GgufTokenizer>(exact);
+    }
+
     /// <summary>Creates a Qwen2 tokenizer from <c>vocab.json</c> and <c>merges.txt</c> files (e.g. the ones shipped inside a Lance checkpoint folder).</summary>
     public Qwen2Tokenizer(string vocabPath, string mergesPath)
     {
