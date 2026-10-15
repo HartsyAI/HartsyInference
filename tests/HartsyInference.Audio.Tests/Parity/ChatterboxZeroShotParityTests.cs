@@ -17,14 +17,17 @@ namespace HartsyInference.Audio.Tests;
 
 /// <summary>Chatterbox zero-shot conditioning on the CPU backend against upstream <c>prepare_conditionals</c>, from
 /// tools/parity/chatterbox_zeroshot_dump.py (directory in <c>CHATTERBOX_ZS_REF_DIR</c>). Upstream makes the 16 kHz copy
-/// the voice encoder and the T3 prompt tokens see with librosa's soxr_hq, which has no port, so that path is checked on
-/// upstream's own 16 kHz samples; S3Gen's <c>embed_ref</c> path runs from the 24 kHz clip through the engine's
-/// resampler. Teacher-forced T3 logits with the engine-derived conditioning close the loop.</summary>
+/// the voice encoder and the T3 prompt tokens see with librosa's soxr_hq, which has no port, so that path is checked
+/// exactly on upstream's own 16 kHz samples and to a 95% token floor through the engine's long-sinc stand-in. S3Gen's
+/// <c>embed_ref</c> path runs from the 24 kHz clip through the engine's resampler. The S3Gen flow runs from upstream's
+/// own noise, and teacher-forced T3 logits with the engine-derived conditioning close the loop.</summary>
 public sealed class ChatterboxZeroShotParityTests
 {
     private const float LogitTolerance = 2e-3f;
     private const float PromptMelTolerance = 1e-3f;
+    private const float FlowMelTolerance = 1e-3f;
     private const double MinCosine = 0.9999;
+    private const double MinStandInTokenShare = 0.95;
 
     private readonly ITestOutputHelper _out;
 
@@ -55,7 +58,8 @@ public sealed class ChatterboxZeroShotParityTests
         foreach (KeyValuePair<string, Tensor> kv in veLoader.GetAllTensors()) merged["ve." + kv.Key] = kv.Value;
         ChatterboxT3 t3 = new(cfg);
         ChatterboxVoiceEncoder voiceEncoder = new();
-        using ChatterboxPipeline pipeline = new(cfg, t3, new CosyVoiceFlow(cosy), new HiFTNetVocoder(cosy.Hift),
+        CosyVoiceFlow flow = new(cosy);
+        using ChatterboxPipeline pipeline = new(cfg, t3, flow, new HiFTNetVocoder(cosy.Hift),
             ChatterboxPipeline.CreateSpeakerEncoder(cosy.Flow.SpeakerEmbedDim), new S3Tokenizer(), voiceEncoder);
         pipeline.LoadWeights(merged);
 
@@ -71,8 +75,22 @@ public sealed class ChatterboxZeroShotParityTests
         report.AppendLine($"voice encoder cos {veCos:F6}; T3 cond tokens {Matches(condTokens, wantCond)}");
         ok &= veCos >= MinCosine && condTokens.AsSpan().SequenceEqual(wantCond);
 
-        // embed_ref from the 24 kHz clip.
+        // The same from the 24 kHz clip through the soxr stand-in. Upstream's torchaudio and soxr copies agree on 93/111
+        // of these tokens, so the floor sits well above that.
         float[] ref24 = ReadF32(refDir, "ref24.f32");
+        float[] ref16Engine = ChatterboxPipeline.ResampleFullReference(ref24);
+        using (Tensor veEngine = voiceEncoder.EmbedUtterance(backend, ref16Engine))
+        {
+            int[] engineCond = pipeline.T3CondPromptTokens(backend, ref16Engine);
+            double veEngineCos = Cosine(veEngine.AsSpan<float>(), ReadF32(refDir, "ve.f32"));
+            int same = 0;
+            for (int i = 0; i < Math.Min(engineCond.Length, wantCond.Length); i++) if (engineCond[i] == wantCond[i]) same++;
+            report.AppendLine($"from the clip via the soxr stand-in: 16 kHz max|d| {MaxDiff(ref16Engine, ref16):G4}, voice encoder cos "
+                + $"{veEngineCos:F6}, T3 cond tokens {Matches(engineCond, wantCond)}");
+            ok &= veEngineCos >= MinCosine && engineCond.Length == wantCond.Length && same >= MinStandInTokenShare * wantCond.Length;
+        }
+
+        // embed_ref from the 24 kHz clip.
         (int[] promptTokens, Tensor promptMel, Tensor xvec) = pipeline.EmbedReference(backend, ref24);
         using (promptMel)
         using (xvec)
@@ -82,6 +100,20 @@ public sealed class ChatterboxZeroShotParityTests
             double xvecCos = Cosine(xvec.AsSpan<float>(), ReadF32(refDir, "gen_xvec.f32"));
             report.AppendLine($"embed_ref: prompt tokens {Matches(promptTokens, wantPrompt)}, prompt mel max|d| {melDiff:G4}, x-vector cos {xvecCos:F6}");
             ok &= promptTokens.AsSpan().SequenceEqual(wantPrompt) && melDiff <= PromptMelTolerance && xvecCos >= MinCosine;
+
+            // S3Gen flow from upstream's own noise: the solver's time grid, CFG and prompt trim end to end.
+            using JsonDocument flowMeta = JsonDocument.Parse(File.ReadAllText(meta));
+            int[] flowTokens = flowMeta.RootElement.GetProperty("flow_tokens").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+            float[] z = ReadF32(refDir, "flow_z.f32");
+            float[] wantFeat = ReadF32(refDir, "flow_feat.f32");
+            using Tensor x0 = new(new TensorShape(1, 80, z.Length / 80), DType.F32);
+            z.CopyTo(x0.AsSpan<float>());
+            using Tensor feat = flow.Inference(backend, flowTokens, promptTokens, promptMel, xvec, 0, null, x0);
+            ReadOnlySpan<float> gotFeat = feat.AsSpan<float>();
+            float featDiff = gotFeat.Length == wantFeat.Length ? 0f : float.PositiveInfinity;
+            for (int i = 0; i < Math.Min(gotFeat.Length, wantFeat.Length); i++) featDiff = MathF.Max(featDiff, MathF.Abs(gotFeat[i] - wantFeat[i]));
+            report.AppendLine($"flow from upstream noise: {feat.Shape[2]} frames (upstream {wantFeat.Length / 80}), mel max|d| {featDiff:G4}");
+            ok &= featDiff <= FlowMelTolerance;
         }
 
         // Teacher-forced T3 logits with the engine-derived conditioning.
@@ -113,6 +145,13 @@ public sealed class ChatterboxZeroShotParityTests
         float maxAbs = 0f;
         for (int f = 0; f < frames; f++)
             for (int b = 0; b < bins; b++) maxAbs = MathF.Max(maxAbs, MathF.Abs(got[b * frames + f] - timeMajor[f * bins + b]));
+        return maxAbs;
+    }
+
+    private static float MaxDiff(float[] a, float[] b)
+    {
+        float maxAbs = a.Length == b.Length ? 0f : float.PositiveInfinity;
+        for (int i = 0; i < Math.Min(a.Length, b.Length); i++) maxAbs = MathF.Max(maxAbs, MathF.Abs(a[i] - b[i]));
         return maxAbs;
     }
 

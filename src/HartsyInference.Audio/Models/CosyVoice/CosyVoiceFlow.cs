@@ -31,7 +31,7 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
     {
         _cfg = cfg;
         _estimator = new CausalConditionalDecoder(cfg.Flow);
-        _cfm = new ConditionalCfm(_estimator, cfg.Flow.MelBins);
+        _cfm = new ConditionalCfm(_estimator, cfg.Flow.MelBins, cfg.Flow.CosineTimeSchedule);
         _encoder = new UpsampleConformerEncoder(cfg.Flow.EncoderOutputSize, cfg.Flow.EncoderNumHeads,
             cfg.Flow.EncoderNumPreBlocks, cfg.Flow.EncoderNumPostBlocks);
     }

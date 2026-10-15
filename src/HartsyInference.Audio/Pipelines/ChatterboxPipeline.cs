@@ -204,10 +204,10 @@ public sealed class ChatterboxPipeline : IDisposable
     }
 
     /// <summary>The full-length 16 kHz reference the voice encoder and the T3 prompt tokens see. Upstream makes it with
-    /// librosa's soxr_hq, which has no port here; torchaudio's filter (<see cref="SincResampler"/>), the one upstream's
-    /// own <c>embed_ref</c> uses, stands in. The two flip a share of the prompt tokens upstream too.</summary>
+    /// librosa's soxr_hq, which has no port; the long-sinc stand-in (<see cref="SincResampler.ResampleSoxrHqStandIn"/>)
+    /// approximates it. These tokens are sensitive to the filter: upstream's own two resamplers disagree on a sixth of them.</summary>
     internal static float[] ResampleFullReference(ReadOnlySpan<float> ref24) =>
-        SincResampler.Resample(ref24, S3GenSampleRate, S3TokenizerSampleRate);
+        SincResampler.ResampleSoxrHqStandIn(ref24, S3GenSampleRate, S3TokenizerSampleRate);
 
     /// <summary>T3's cond-prompt speech tokens: the first <c>ENC_COND_LEN</c> (6 s) of the 16 kHz reference, at most
     /// <c>speech_cond_prompt_len</c> tokens.</summary>

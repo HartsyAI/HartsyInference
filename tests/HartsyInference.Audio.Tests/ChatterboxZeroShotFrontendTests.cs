@@ -8,7 +8,7 @@ using Xunit;
 namespace HartsyInference.Audio.Tests;
 
 /// <summary>CPU-lane checks of the zero-shot conditioning pieces Chatterbox and CosyVoice 2 take from upstream: librosa's
-/// silence trim, the voice encoder's partial windows, the flow's prompt trim, CosyVoice's prompt alignment and S3Gen's
+/// silence trim, the voice encoder's partial windows, the flow solver's time grid, the flow's prompt trim, CosyVoice's prompt alignment and S3Gen's
 /// output fade. Expected values come from librosa 0.11, chatterbox <c>voice_encoder.py</c> and torch.</summary>
 public sealed class ChatterboxZeroShotFrontendTests
 {
@@ -56,6 +56,19 @@ public sealed class ChatterboxZeroShotFrontendTests
     [InlineData(1000, 12, 1007)]
     public void VoiceEncoderPartials_UseResembleRateStep(int frames, int count, int target) =>
         Assert.Equal((count, target), ChatterboxVoiceEncoder.PartialWindows(frames));
+
+    [Fact]
+    public void CfmTimeGrid_CosineMatchesTorchAndLinearStaysUniform()
+    {
+        float[] torchCosine = [0f, 0.012311637f, 0.04894346f, 0.10899347f, 0.190983f, 0.29289323f, 0.4122148f, 0.5460095f,
+            0.69098306f, 0.8435655f, 1f];
+        float[] cosine = ConditionalCfm.TimeGrid(10, cosine: true);
+        Assert.Equal(torchCosine.Length, cosine.Length);
+        for (int i = 0; i < cosine.Length; i++) Assert.Equal(torchCosine[i], cosine[i], 1e-6f);
+        float[] linear = ConditionalCfm.TimeGrid(10, cosine: false);
+        for (int i = 0; i < linear.Length; i++) Assert.Equal(i / 10f, linear[i], 1e-7f);
+        Assert.True(CosyVoiceConfig.V2_0_5B.Flow.CosineTimeSchedule);
+    }
 
     [Fact]
     public void FlowPromptFrames_FollowThePromptMelLength()

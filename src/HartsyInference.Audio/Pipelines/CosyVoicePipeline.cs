@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
@@ -140,14 +141,8 @@ public sealed class CosyVoicePipeline : IDisposable
             if (_s3 is null || _speakerEncoder is null)
                 throw new InvalidOperationException("Zero-shot mode requires both an S3Tokenizer and a CamPlusSpeakerEncoder.");
 
-            // Each input encoder was trained on a different acoustic feature; compute them independently.
-            float[] audio16k = S3GenReference.Resample(referenceAudio, referenceSampleRate, 16_000);
-            float[] audio24k = S3GenReference.Resample(referenceAudio, referenceSampleRate, 24_000);
-
-            promptSpeechTokens = S3GenReference.SpeechTokens(backend, _s3, audio16k);
-            spk = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, audio16k);
+            (promptSpeechTokens, promptMel, spk) = ZeroShotPrompt(backend, referenceAudio, referenceSampleRate);
             ownsSpk = true;
-            promptMel = S3GenReference.AlignPromptToTokens(ref promptSpeechTokens, S3GenReference.FlowMel(audio24k));   // [1, 80, 2 * tokens]
 
             Logs.Info($"CosyVoice: reference → {promptSpeechTokens.Length} prompt speech tokens + speaker embedding.");
         }
@@ -296,11 +291,7 @@ public sealed class CosyVoicePipeline : IDisposable
         if (_s3 is null || _speakerEncoder is null)
             throw new InvalidOperationException("Zero-shot streaming requires both an S3Tokenizer and a CamPlusSpeakerEncoder.");
 
-        float[] audio16k = S3GenReference.Resample(referenceAudio, referenceSampleRate, 16_000);
-        float[] audio24k = S3GenReference.Resample(referenceAudio, referenceSampleRate, 24_000);
-        int[] promptSpeechTokens = S3GenReference.SpeechTokens(backend, _s3, audio16k);
-        Tensor spk = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, audio16k);
-        Tensor promptMel = S3GenReference.AlignPromptToTokens(ref promptSpeechTokens, S3GenReference.FlowMel(audio24k));
+        (int[] promptSpeechTokens, Tensor promptMel, Tensor spk) = ZeroShotPrompt(backend, referenceAudio, referenceSampleRate);
         Logs.Info($"CosyVoice (stream): reference → {promptSpeechTokens.Length} prompt speech tokens + speaker embedding.");
 
         int[] refText = referenceTextTokens ?? [];
@@ -346,6 +337,38 @@ public sealed class CosyVoicePipeline : IDisposable
         fullNoise.Dispose();
         spk.Dispose();
         promptMel.Dispose();
+    }
+
+    /// <summary>Upstream <c>frontend_zero_shot</c>'s prompt: <c>load_wav</c> resamples the clip with torchaudio's
+    /// <c>Resample</c> (reproduced by <see cref="SincResampler"/>) to 16 kHz for the speech tokens and the CAM++ embedding
+    /// and to 24 kHz for the flow's prompt mel, then the tokens and the mel are cut to <c>min(frames / 2, tokens)</c>.
+    /// Each extractor runs on a different acoustic feature, so they are computed independently.</summary>
+    private (int[] Tokens, Tensor Mel, Tensor Speaker) ZeroShotPrompt(IBackend backend, ReadOnlySpan<float> referenceAudio,
+        int referenceSampleRate)
+    {
+        if (_s3 is null || _speakerEncoder is null)
+            throw new InvalidOperationException("Zero-shot mode requires both an S3Tokenizer and a CamPlusSpeakerEncoder.");
+        return ZeroShotPrompt(backend, _s3, _speakerEncoder, referenceAudio, referenceSampleRate);
+    }
+
+    /// <inheritdoc cref="ZeroShotPrompt(IBackend, ReadOnlySpan{float}, int)"/>
+    internal static (int[] Tokens, Tensor Mel, Tensor Speaker) ZeroShotPrompt(IBackend backend, S3Tokenizer s3,
+        CamPlusSpeakerEncoder speakerEncoder, ReadOnlySpan<float> referenceAudio, int referenceSampleRate)
+    {
+        float[] audio16k = SincResampler.Resample(referenceAudio, referenceSampleRate, 16_000);
+        float[] audio24k = SincResampler.Resample(referenceAudio, referenceSampleRate, 24_000);
+        int[] tokens = S3GenReference.SpeechTokens(backend, s3, audio16k);
+        Tensor speaker = S3GenReference.SpeakerEmbedding(backend, speakerEncoder, audio16k);
+        try
+        {
+            Tensor mel = S3GenReference.AlignPromptToTokens(ref tokens, S3GenReference.FlowMel(audio24k));   // [1, 80, 2 * tokens]
+            return (tokens, mel, speaker);
+        }
+        catch
+        {
+            speaker.Dispose();
+            throw;
+        }
     }
 
     public void Dispose()

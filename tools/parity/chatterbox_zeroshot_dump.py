@@ -14,7 +14,9 @@ Writes into <out_dir>:
   gen_prompt_feat_tm.f32  float32 [frames, 80] embed_ref prompt mel (time-major)
   gen_xvec.f32            float32 [192] CAM++ x-vector
   tf_<n>.f32              float32 [steps, 2, 8194] raw cond/uncond speech logits, steps = len(forced) + 1
-  meta.json               shapes, and per tf_<n> the text and forced tokens
+  flow_z.f32              float32 [80, prompt + 2 * len(FLOW_TOKENS)] the CFM's initial noise for FLOW_TOKENS
+  flow_feat.f32           float32 [80, frames] S3Gen flow_inference output mel for FLOW_TOKENS from that noise
+  meta.json               shapes, per tf_<n> the text and forced tokens, and the flow tokens
 
     python tools/parity/chatterbox_zeroshot_dump.py <chatterbox ckpt dir> <reference.wav> <out_dir>
 
@@ -39,6 +41,7 @@ except ImportError:
     stub.PerthImplicitWatermarker = lambda: types.SimpleNamespace(apply_watermark=lambda wav, sample_rate=None: wav)
     sys.modules["perth"] = stub
 
+import chatterbox.models.s3gen.flow_matching as flow_matching
 from chatterbox.models.s3gen import S3Gen
 from chatterbox.models.t3 import T3
 from chatterbox.models.tokenizers import EnTokenizer
@@ -56,6 +59,28 @@ FORCED = [
                         3975, 2112, 3648, 4671, 6373, 6379, 2979, 314, 566, 3481, 4858, 4606, 3146, 3143, 461, 716,
                         2861, 3589, 4215, 4296, 4299, 6486, 6405]),
 ]
+# An 8-token "Yes." sample: short outputs show solver-schedule errors as a loudness jump.
+FLOW_TOKENS = [1760, 4299, 1030, 2139, 2550, 5021, 5055, 5431]
+
+
+def flow_with_noise(model: ChatterboxTTS) -> tuple:
+    """S3Gen flow_inference on FLOW_TOKENS, capturing the noise CausalConditionalCFM draws."""
+    captured = {}
+    draw = torch.randn_like
+
+    def capture(x, *args, **kwargs):
+        z = draw(x, *args, **kwargs)
+        captured.setdefault("z", z.clone())
+        return z
+
+    flow_matching.torch.randn_like = capture
+    try:
+        torch.manual_seed(0)
+        feat = model.s3gen.flow_inference(speech_tokens=torch.tensor(FLOW_TOKENS), ref_dict=model.conds.gen, finalize=True)
+    finally:
+        flow_matching.torch.randn_like = draw
+    feat = feat[0] if isinstance(feat, tuple) else feat
+    return captured["z"][0], feat[0]
 
 
 def load_model(ckpt: Path) -> ChatterboxTTS:
@@ -119,6 +144,10 @@ def main() -> None:
         logits, ids = teacher_forced(model, text, forced)
         f32(f"tf_{n}", logits)
         meta["tf"][f"tf_{n}"] = dict(text=text, ids=ids, forced=forced)
+    z, feat = flow_with_noise(model)
+    f32("flow_z", z)
+    f32("flow_feat", feat)
+    meta["flow_tokens"] = FLOW_TOKENS
     with open(os.path.join(out, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)
     print(json.dumps({k: v for k, v in meta.items() if k != "tf"}))
