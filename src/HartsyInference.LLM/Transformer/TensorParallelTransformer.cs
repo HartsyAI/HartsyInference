@@ -67,6 +67,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         if (cfg.SlidingWindow > 0) unsupported.Add("sliding-window attention");
         if (cfg.NoRopeOnGlobalLayers) unsupported.Add("NoPE global layers");
         if (cfg.ResidualMultiplier != 1f) unsupported.Add("residual multiplier");
+        if (cfg.UsesGatedResidualBlock) unsupported.Add("gated residual block (Muse Spark)");
         if (unsupported.Count > 0)
         {
             throw new NotSupportedException(

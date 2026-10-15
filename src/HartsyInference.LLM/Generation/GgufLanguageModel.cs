@@ -344,7 +344,7 @@ public sealed class GgufLanguageModel : IDisposable
     internal static void SplitStackedExperts(Dictionary<string, Tensor> w, TransformerConfig cfg)
     {
         int e = cfg.Moe!.NumExperts;
-        int hidden = cfg.HiddenSize;
+        int hidden = cfg.Moe.ExpertWidth(cfg.HiddenSize);
         int inter = cfg.Moe.MoeIntermediateSize;
         for (int i = 0; i < cfg.NumLayers; i++)
         {

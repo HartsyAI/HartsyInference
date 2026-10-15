@@ -27,6 +27,8 @@ public static class GgufKeyMapperRegistry
         Register(r, new Glm4KeyMapper());
         Register(r, new DeepSeekKeyMapper());
         Register(r, new KolibriKeyMapper());
+        // Muse Spark before Llama: its residual-gate keys sit on top of the llama-family signature.
+        Register(r, new MuseSparkKeyMapper());
         // mllama before llama: its cross_attn_* keys are a strict superset of the llama-family signature.
         Register(r, new MllamaKeyMapper());
         Register(r, new LlamaKeyMapper());

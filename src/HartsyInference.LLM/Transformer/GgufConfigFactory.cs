@@ -78,6 +78,9 @@ public static class GgufConfigFactory
         // against at implementation time — verify empirically against a real checkpoint before trusting output).
         bool isGemma4 = arch == "gemma4";
         bool isKolibri1 = arch == "kolibri1";
+        // Muse Spark (Meta Muse Spark Open, llama.cpp muse-spark): sandwich norms with a weightless post-attention norm and an
+        // input-scaled post-FFN norm, gated attention output, residual gates, NoPE full-attention layers, and a latent MoE.
+        bool isMuseSpark = arch == "muse-spark";
         int perLayerEmbedDim = isGemma4 ? (int)metadata.GetUInt32($"{arch}.embedding_length_per_layer_input", 0u) : 0;
         // Gemma-4's mobile-oriented E2B/E4B variants (Gemma-3n lineage) skip computing K/V on their last N
         // layers entirely, reusing an earlier "donor" layer's cache slot instead (see TransformerConfig.KvDonorLayer
@@ -99,7 +102,7 @@ public static class GgufConfigFactory
         // period every other sliding-window architecture here uses — read it directly rather than guessing a
         // period from a single scalar (a bool array silently misread as a scalar UINT32 defaults to 0, which
         // made every layer read back as "global" and corrupted per-layer head-dim sizing).
-        bool[]? swaArray = isGemma4 || isKolibri1
+        bool[]? swaArray = isGemma4 || isKolibri1 || isMuseSpark
             ? metadata.GetBoolArray($"{arch}.attention.sliding_window_pattern") : null;
         bool[]? globalLayers = swaArray is { Length: > 0 } ? new bool[decoderLayers] : null;
         if (globalLayers is not null)
@@ -107,7 +110,7 @@ public static class GgufConfigFactory
         // GLM-4 (LLM_ARCH_GLM4, 0414 lineage): Gemma-style sandwich norm but RMSNorm + QKV biases + fused gate/up
         // FFN + partial RoPE + NORM (interleaved) rope. The fused gate/up is split in GgufLanguageModel.
         bool isGlm4 = arch == "glm4";
-        bool sandwich = (isGemma || isGlm4 || isKolibri1)
+        bool sandwich = (isGemma || isGlm4 || isKolibri1 || isMuseSpark)
             && weights.ContainsKey("model.layers.0.post_feedforward_layernorm.weight");
         float embScale = isGemma ? (float)Math.Sqrt(hidden) : 1f;
         // Gemma-4 hardcodes attention scaling to 1.0 (no query_pre_attn_scalar) — forcing QueryPreAttnScalar=1
@@ -115,7 +118,7 @@ public static class GgufConfigFactory
         float queryPreAttn = isGemma4 ? 1f : metadata.GetFloat32($"{arch}.attention.query_pre_attn_scalar", 0f);
         // Gemma-3's local (SWA) RoPE base is `rope.local_freq_base`; Gemma-4 renamed the key to `rope.freq_base_swa`.
         float localTheta = isGemma3 ? metadata.GetFloat32($"{arch}.rope.local_freq_base", 10_000f)
-            : isGemma4 ? metadata.GetFloat32($"{arch}.rope.freq_base_swa", ropeTheta) : 0f;
+            : isGemma4 || isMuseSpark ? metadata.GetFloat32($"{arch}.rope.freq_base_swa", ropeTheta) : 0f;
         int swWindow = (int)metadata.GetUInt32($"{arch}.attention.sliding_window", 0u);
         // Sliding-window layer cadence. GPT-OSS alternates SWA every other layer (period 2); Gemma-3 = 5 local : 1
         // global (6); Gemma-2 alternates (2); Cohere2 = 3 local : 1 global (4). 0 = all-global. Gemma-4 always
@@ -124,7 +127,9 @@ public static class GgufConfigFactory
         int swPattern = (int)metadata.GetUInt32($"{arch}.attention.sliding_window_pattern",
             isGemma3 ? 6u : isGemma2 ? 2u : arch == "cohere2" ? 4u : arch is "gpt-oss" or "gptoss" ? 2u : 0u);
         float attnCap = isGemma2 ? metadata.GetFloat32($"{arch}.attn_logit_softcapping", 0f) : 0f;
-        float finalCap = isGemma2 || isGemma4 ? metadata.GetFloat32($"{arch}.final_logit_softcapping", 0f) : 0f;
+        float finalCap = isGemma2 || isGemma4 || isMuseSpark ? metadata.GetFloat32($"{arch}.final_logit_softcapping", 0f) : 0f;
+        // Muse Spark's post-attention, post-FFN and per-expert norms use their own epsilon (1e-8 on the released checkpoint).
+        float postNormEps = isMuseSpark ? metadata.GetFloat32($"{arch}.post_norm_epsilon", rmsEps) : 0f;
 
         // Granite: scalar multipliers (embedding/attention/residual/logit). Granite shares the llama tensor
         // dialect; these knobs are all no-ops (1/standard) for other archs.
@@ -184,7 +189,7 @@ public static class GgufConfigFactory
             crossAttnLayers = b.ToImmutable();
         }
         float logitScale = isGraniteLike ? metadata.GetFloat32($"{arch}.logit_scale", 1f)
-            : isCohere ? 1f / metadata.GetFloat32($"{arch}.logit_scale", 1f)
+            : isCohere || isMuseSpark ? 1f / metadata.GetFloat32($"{arch}.logit_scale", 1f)
             : 1f;
 
         // DeepSeek-V2/V3 (deepseek2) Multi-head Latent Attention: head_dim (key_length) is the full qk dim
@@ -225,7 +230,7 @@ public static class GgufConfigFactory
                 AttnScale = mlaScale,
             };
         }
-        float expertWeightsScale = isDeepseek ? metadata.GetFloat32($"{arch}.expert_weights_scale", 1f) : 1f;
+        float expertWeightsScale = isDeepseek || isMuseSpark ? metadata.GetFloat32($"{arch}.expert_weights_scale", 1f) : 1f;
 
         // Mixture-of-Experts: the spine already implements the routed FFN; wire it from the GGUF expert metadata.
         // The stacked per-expert tensors are split downstream (GgufLanguageModel). Covers Mixtral / Qwen-MoE /
@@ -295,6 +300,11 @@ public static class GgufConfigFactory
                 // Gemma-4's MoE branch uses GeGLU (tanh-GELU), matching its dense FFN; every other MoE arch here
                 // (Mixtral/Qwen-MoE/OLMoE/DeepSeek) uses SwiGLU (the record default).
                 Activation = isGemma4 ? ActivationKind.GeluTanh : ActivationKind.Silu,
+                // Muse Spark runs its experts in a narrower latent space entered through ffn_latent_down/ffn_pre_exp_norm.
+                LatentSize = (int)metadata.GetUInt32($"{arch}.moe_latent_size", 0u),
+                LatentNormEps = rmsEps,
+                PostExpertNorm = weights.ContainsKey("model.layers.0.mlp.post_expert_norm.weight"),
+                PostExpertNormEps = postNormEps > 0f ? postNormEps : rmsEps,
             };
         }
 
@@ -323,7 +333,7 @@ public static class GgufConfigFactory
             //     (interleaved adjacent pairs 2i,2i+1) reproduces HF rotate_half → we must apply Interleaved.
             //   - qwen2/qwen3: no permute, ggml uses NEOX rope (split-half pairs i,i+half) → SplitHalf.
             // Using the wrong pairing leaves attention rotating mismatched dimensions → coherent-looking garbage.
-            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" or "minicpm" or "glm4" or "granite" or "granitemoe" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
+            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" or "minicpm" or "glm4" or "granite" or "granitemoe" or "muse-spark" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
             RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
             // Activation: Gemma/GPT-2/BLOOM = tanh-approx GELU; Nemotron = squared ReLU; everything else SwiGLU SiLU.
@@ -348,7 +358,7 @@ public static class GgufConfigFactory
             AlibiSlopes = alibiMaxBias > 0f ? TransformerConfig.ComputeAlibiSlopes(heads, alibiMaxBias) : System.Array.Empty<float>(),
             ParallelResidual = isCohere || gptneoxParallel,
             // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
-            NoRopeOnGlobalLayers = arch is "cohere2" or "kolibri1",
+            NoRopeOnGlobalLayers = arch is "cohere2" or "kolibri1" or "muse-spark",
             RopeLocalTheta = localTheta,
             Architecture = arch,
             SlidingWindow = swWindow,
@@ -365,6 +375,13 @@ public static class GgufConfigFactory
             HeadDimSwa = headDimSwa,
             RotaryDimSwa = rotaryDimSwa,
             GlobalLayers = globalLayers,
+            EmbeddingRmsNorm = isMuseSpark,
+            AttnHeadOutputNorm = isMuseSpark,
+            AttnOutputGate = isMuseSpark && weights.ContainsKey("model.layers.0.self_attn.gate_proj.weight"),
+            PostAttnNormWeightless = isMuseSpark,
+            PostFfnNormScalesInput = isMuseSpark,
+            PostNormEps = postNormEps,
+            ResidualGates = isMuseSpark && weights.ContainsKey("model.layers.0.post_attention_residual_gate.alpha"),
         };
     }
 
