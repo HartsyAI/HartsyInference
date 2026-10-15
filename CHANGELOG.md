@@ -8,7 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Fixed: F5-TTS and AuK speak a generation under 10 UTF-8 bytes at upstream's short-text speed.** Upstream drops the duration speed to 0.3 for such a generation (`_infer_basic`, `_f5_local_speed`); the engine used the reference ratio alone, so "Yes." against a 3.6 s reference came out as 0.2 s of silence. The ratio now counts UTF-8 bytes and truncates as upstream does, which also moves some longer generations by a frame.
+- **Fixed: F5-TTS and AuK speak a generation under 10 UTF-8 bytes at upstream's short-text speed.** Upstream drops the duration speed to 0.3 for such a generation (`_infer_basic`, `_f5_local_speed`); the engine used the reference ratio alone, so "Yes." against a 3.6 s reference came out as 0.2 s of silence.
+- **Fixed: F5-TTS counts the reference text as upstream does, so generations no longer run about 1.5% long.** `infer_batch_process` adds a second space after a reference text that ends in ASCII, and the duration ratio and the joint text both include it; the ratio now counts UTF-8 bytes and truncates the frame count as upstream does.
 
 ## alpha.368
 

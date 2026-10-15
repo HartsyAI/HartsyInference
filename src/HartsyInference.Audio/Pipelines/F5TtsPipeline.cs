@@ -117,6 +117,8 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // Upstream forces ref_text to end with ". " so the joint char stream (ref_text + gen_text) aligns at the
         // boundary and len(ref_text) in the duration ratio is correct; without it the tempo drifts.
         string refNorm = NormalizeRefText(refText);
+        // Upstream infer_batch_process adds another space after a 1-byte ending; the joint stream and the ratio count it.
+        if (refNorm.Length > 0 && refNorm[^1] < 0x80) refNorm += " ";
         bool profG = EngineKnobs.F5Profile.Value;
         System.Diagnostics.Stopwatch gsw = System.Diagnostics.Stopwatch.StartNew();
         Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText),

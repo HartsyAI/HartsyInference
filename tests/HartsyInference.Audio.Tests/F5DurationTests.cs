@@ -3,8 +3,8 @@ using Xunit;
 
 namespace HartsyInference.Audio.Tests;
 
-/// <summary>Unit tests for the F5 duration heuristic. The frame expectations are upstream F5's mel lengths for the sweep's
-/// reference clip (336 frames, 65 UTF-8 bytes of reference text).</summary>
+/// <summary>Unit tests for the F5 duration heuristic. The expectations are upstream F5's mel lengths for the sweep's
+/// reference clip: 341 reference frames and 66 bytes of reference text (the ". " plus upstream's extra space).</summary>
 public sealed class F5DurationTests
 {
     [Theory]
@@ -20,7 +20,8 @@ public sealed class F5DurationTests
 
     [Theory]
     [InlineData(4, 68)]
+    [InlineData(14, 72)]
     [InlineData(51, 263)]
     public void TargetFrames_MatchUpstreamOnTheSweepReference(int genBytes, int expected)
-        => Assert.Equal(expected, F5Duration.TargetFrames(336, 65, genBytes, 1.0));
+        => Assert.Equal(expected, F5Duration.TargetFrames(341, 66, genBytes, 1.0));
 }
