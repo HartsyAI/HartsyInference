@@ -179,6 +179,7 @@ CLAUSE_SEPS = [
 ]
 CLAUSE_ENDS = ["", ".", "?", "!", "…", "...", ",", ".\"", "?\"", ")", ".)"]
 CLAUSE_CASES = 120
+DURATION_CASES = 400
 
 SAMPLE_RATE = 24000
 BLOCK = SAMPLE_RATE // 100
@@ -334,6 +335,15 @@ def main():
 
     from piper_phonemize import phonemize_espeak
 
+    durations = []
+    drng = random.Random(20261016)
+    for _ in range(DURATION_CASES):
+        frames, prompt_tokens, tokens = drng.randint(40, 1600), drng.randint(3, 160), drng.randint(1, 600)
+        speed = drng.choice([1.0, 1.0, 0.8, 1.2, 1.5, 0.5])
+        frames_t, prompt_t, tokens_t = (torch.tensor([v], dtype=torch.int64) for v in (frames, prompt_tokens, tokens))
+        target = int(torch.ceil(frames_t / prompt_t * tokens_t / speed).to(dtype=torch.int64)[0])
+        durations.append({"frames": frames, "prompt_tokens": prompt_tokens, "tokens": tokens, "speed": speed, "target": target})
+
     lexicon = {}
     for word in CLAUSE_WORDS:
         lexicon[word.lower()] = "".join("".join(s) for s in phonemize_espeak(word.lower(), "en-us"))
@@ -353,6 +363,7 @@ def main():
             "inflect": importlib.metadata.version("inflect"),
         },
         "lines": lines,
+        "durations": durations,
         "lexicon": lexicon,
         "clauses": clauses,
         "add_punctuation": punctuation,
@@ -362,7 +373,7 @@ def main():
     }
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(fixture, f, ensure_ascii=False, indent=1)
-    print(f"{len(lines)} lines, {len(clauses)} clause cases, {len(chunks)} chunk cases, {len(crossfade)} cross-fades, "
+    print(f"{len(lines)} lines, {len(durations)} durations, {len(clauses)} clause cases, {len(chunks)} chunk cases, {len(crossfade)} cross-fades, "
           f"{len(silence)} silence cases")
 
 

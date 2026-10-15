@@ -63,6 +63,20 @@ public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void TargetFrames_MatchUpstreamFloat32Arithmetic()
+    {
+        int total = 0;
+        foreach (JsonElement entry in ZipVoiceFixture.Root.GetProperty("durations").EnumerateArray())
+        {
+            total++;
+            int got = ZipVoiceModel.PredictTargetFrames(entry.GetProperty("frames").GetInt32(), entry.GetProperty("prompt_tokens").GetInt32(),
+                entry.GetProperty("tokens").GetInt32(), (float)entry.GetProperty("speed").GetDouble());
+            Assert.Equal(entry.GetProperty("target").GetInt32(), got);
+        }
+        Assert.True(total >= 400, $"fixture has only {total} duration cases");
+    }
+
+    [Fact]
     public void Clauses_MatchPiperPhonemizeFromALexicon()
     {
         Dictionary<string, string> lexicon = ZipVoiceFixture.Root.GetProperty("lexicon").EnumerateObject()
