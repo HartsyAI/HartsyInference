@@ -30,11 +30,15 @@ public sealed class ZipVoiceTokenizerTests
         Assert.Equal("kˈæt dˈɑːɡ.", string.Concat(tokenizer.Tokenize("cat\ndog.", Phonemizer)));
     }
 
-    [Fact]
-    public void ChineseText_IsRejected()
+    [Theory]
+    [InlineData("cat \u4f60\u597d dog.")]
+    [InlineData("cat \u3400 dog.")]
+    [InlineData("cat \ud840\udc00 dog.")]
+    [InlineData("cat \uf900 dog.")]
+    public void HanText_IsRejectedInEveryBlock(string text)
     {
         ZipVoiceTokenizer tokenizer = ZipVoiceFixture.PadOnlyTokenizer();
-        Assert.Throws<NotSupportedException>(() => tokenizer.Tokenize("cat 你好 dog.", Phonemizer));
+        Assert.Throws<NotSupportedException>(() => tokenizer.Tokenize(text, Phonemizer));
     }
 
     [Fact]

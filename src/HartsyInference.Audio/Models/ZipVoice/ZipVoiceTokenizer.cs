@@ -63,6 +63,8 @@ public sealed partial class ZipVoiceTokenizer
     {
         ArgumentNullException.ThrowIfNull(text);
         ArgumentNullException.ThrowIfNull(phonemizer);
+        if (ContainsHan(text))
+            throw new NotSupportedException("ZipVoice's Chinese front end needs jieba and pypinyin; use English text.");
         List<string> tokens = new();
         // Upstream's segmenter drops newlines, which glues the words either side; here they read as spaces.
         foreach ((string segment, SegmentKind kind) in Segment(NormalizePunctuation(text.Replace('\n', ' '))))
@@ -75,8 +77,6 @@ public sealed partial class ZipVoiceTokenizer
                 case SegmentKind.Tag:
                     tokens.Add(segment);
                     break;
-                case SegmentKind.Chinese:
-                    throw new NotSupportedException("ZipVoice's Chinese front end needs jieba and pypinyin; use English text.");
             }
         }
         return tokens;
@@ -159,8 +159,7 @@ public sealed partial class ZipVoiceTokenizer
                 if (piece.Length == 0) continue;
                 if (piece[0] == '<' && piece[^1] == '>') Logs.Warning($"[ZipVoice] Skipped pinyin span '{piece}'.");
                 else if (piece[0] == '[' && piece[^1] == ']') segments.Add((piece, SegmentKind.Tag));
-                else if (runKind != SegmentKind.Chinese) segments.Add((piece, runKind));
-                else if (HasChinese(piece)) segments.Add((piece, SegmentKind.Chinese));
+                else if (runKind != SegmentKind.Pinyin) segments.Add((piece, runKind));
             }
         }
         return segments;
@@ -168,16 +167,17 @@ public sealed partial class ZipVoiceTokenizer
 
     private static SegmentKind TypeOf(string part)
     {
-        if (part.Length == 1 && part[0] is >= '\u4e00' and <= '\u9fa5') return SegmentKind.Chinese;
-        if (part[0] == '<' && part[^1] == '>') return SegmentKind.Chinese;
+        if (part[0] == '<' && part[^1] == '>') return SegmentKind.Pinyin;
         return part.Length == 1 && part[0] is ((>= 'A' and <= 'Z') or (>= 'a' and <= 'z')) ? SegmentKind.English : SegmentKind.Other;
     }
 
-    private static bool HasChinese(string text)
+    // Upstream's is_chinese stops at U+9FA5; every Han block is refused here so none is phonemized as English.
+    private static bool ContainsHan(string text)
     {
-        foreach (char c in text)
+        foreach (Rune rune in text.EnumerateRunes())
         {
-            if (c is >= '\u4e00' and <= '\u9fa5') return true;
+            if (rune.Value is (>= 0x3400 and <= 0x4DBF) or (>= 0x4E00 and <= 0x9FFF) or (>= 0xF900 and <= 0xFAFF)
+                or (>= 0x20000 and <= 0x323AF)) return true;
         }
         return false;
     }
@@ -192,7 +192,7 @@ public sealed partial class ZipVoiceTokenizer
     private enum SegmentKind
     {
         English,
-        Chinese,
+        Pinyin,
         Other,
         Tag,
     }
