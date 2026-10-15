@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: VibeVoice tokenizes scripts with Qwen's split regex.** The engine ran byte-level BPE over the whole prompt, so merges crossed word boundaries and "Yes." became 82 tokens instead of upstream's 77. It now uses the exact Qwen tokenizer path that `Qwen3Tokenizer` already provides.
+- **Fixed: VibeVoice keeps the leading space on each script turn.** Upstream's parser prepends one space to every turn's text, so the prompt reads " Speaker 0: Yes."; the engine dropped that space.
+- **Fixed: VibeVoice's acoustic codec uses the exact GELU.** The ConvNeXt feed-forward used the tanh approximation where upstream uses erf, which moved the voice-prompt latents by 1.5e-3 relative.
+- **Fixed: VibeVoice diffusion takes second-order DPM-Solver steps as upstream does.** The engine dropped to first order on the penultimate step; upstream does not at solver order 2, and the first frame's latent was 4.9e-2 off before the fix.
 - **Fixed: F5-TTS and AuK speak a generation under 10 UTF-8 bytes at upstream's short-text speed.** Upstream drops the duration speed to 0.3 for such a generation (`_infer_basic`, `_f5_local_speed`); the engine used the reference ratio alone, so "Yes." against a 3.6 s reference came out as 0.2 s of silence.
 - **Fixed: F5-TTS counts the reference text as upstream does, so generations no longer run about 1.5% long.** `infer_batch_process` adds a second space after a reference text that ends in ASCII, and the duration ratio and the joint text both include it; the ratio now counts UTF-8 bytes and truncates the frame count as upstream does.
 - **Fixed: F5-TTS generates long text in upstream's chunks and cross-fades them.** A target longer than upstream's `max_chars` (`infer_process`, from the reference's UTF-8 bytes and seconds) is split as `chunk_text` splits it. Each chunk gets its own duration (`_infer_basic`) and seed `seed + index`, and the waves are joined with the 0.15 s linear cross-fade. Text that fits one chunk is generated exactly as before. Before this, a 400-byte paragraph ran about 1.3% longer than upstream and did not reproduce upstream's per-chunk timing.

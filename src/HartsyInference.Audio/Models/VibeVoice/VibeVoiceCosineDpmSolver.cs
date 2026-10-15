@@ -119,11 +119,10 @@ public sealed class VibeVoiceCosineDpmSolver : IDisposable
         (float alphaNext, float sigmaNext) = InterpolateAlphaSigma(nextT);
         float lambdaNext = nextT > 0f ? (float)(Math.Log(alphaNext) - Math.Log(sigmaNext)) : 1e6f;
 
-        // lower_order_final: the final step must be first-order — the zero final sigma makes
-        // lambda_next → ∞, so the second-order d1 coefficient (h / h_prev) would explode.
-        // (HF also drops to first order on the 2nd-to-last step for short (<15) schedules.)
-        bool lowerOrder = stepIndex == _timesteps.Length - 1
-            || (stepIndex == _timesteps.Length - 2 && _timesteps.Length < 15);
+        // lower_order_final: the final step is first-order because its zero sigma makes lambda_next infinite.
+        // Upstream's penultimate-step rule never fires at solver_order 2 (dpm_solver.py:1005 takes the
+        // second-order branch for any solver_order == 2), so only the first and final steps differ from it.
+        bool lowerOrder = stepIndex == _timesteps.Length - 1;
 
         Tensor output;
         if (_prevX0 is null || _prevStepIndex != stepIndex - 1 || lowerOrder)

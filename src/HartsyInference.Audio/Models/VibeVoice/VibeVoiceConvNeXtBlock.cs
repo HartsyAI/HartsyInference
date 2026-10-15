@@ -113,7 +113,8 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
         Tensor up = WhisperOps.ProjectLinear(backend, cl, _ffn1W!, _ffn1B, batch, t, _dim, _ffnDim);
         cl.Dispose();
         Tensor act = new(up.Shape, DType.F32);
-        backend.Gelu(act, up);
+        // Exact erf GELU, matching upstream's ACT2FN["gelu"]; IBackend.Gelu is the tanh approximation.
+        backend.GeluErf(act, up);
         up.Dispose();
         Tensor down = WhisperOps.ProjectLinear(backend, act, _ffn2W!, _ffn2B, batch, t, _ffnDim, _dim);
         act.Dispose();

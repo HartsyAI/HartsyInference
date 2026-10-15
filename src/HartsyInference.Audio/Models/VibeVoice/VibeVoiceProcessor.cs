@@ -88,9 +88,8 @@ public sealed class VibeVoiceProcessor(VibeVoiceTokenizer tokenizer)
             AppendText(tokens, mask, "\n");
         }
 
-        // Text input section. Upstream formats this as f" Speaker {id}:{text}\n" with NO
-        // space after the colon (the parsed text already has its leading space stripped),
-        // so " Speaker 0:Hello" — matching that exactly keeps the BPE tokens identical.
+        // Text input section. Upstream's _parse_script keeps one leading space on every turn's text
+        // (vibevoice_processor.py:612), so the line reads " Speaker 0: Hello" and the BPE tokens match.
         AppendText(tokens, mask, TextHeader + "\n");
         foreach (Turn turn in turns)
             AppendText(tokens, mask, $" Speaker {turn.SpeakerIndex}:{turn.Text}\n");
@@ -131,16 +130,19 @@ public sealed class VibeVoiceProcessor(VibeVoiceTokenizer tokenizer)
             {
                 int spk = int.Parse(m.Groups[1].Value);
                 if (spk >= numSpeakers) spk %= numSpeakers;
-                result[i] = new Turn(spk, m.Groups[2].Value);
+                result[i] = new Turn(spk, TurnText(m.Groups[2].Value));
             }
             else
             {
-                result[i] = new Turn(rr % numSpeakers, lines[i]);
+                result[i] = new Turn(rr % numSpeakers, TurnText(lines[i]));
                 rr++;
             }
         }
         return result;
     }
+
+    /// <summary>The text of one turn as upstream stores it: a single leading space, surrounding whitespace removed.</summary>
+    private static string TurnText(string text) => " " + text.Trim();
 
     /// <summary>In-place normalize a PCM buffer to <see cref="TargetDbFs"/> dBFS.</summary>
     private static void NormalizeDbFsInPlace(float[] pcm)
