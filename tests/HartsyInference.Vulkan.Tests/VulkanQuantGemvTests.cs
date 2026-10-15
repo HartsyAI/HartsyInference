@@ -110,6 +110,15 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         yield return new object[] { "Q4_0", 257, 1024, 13, true };
         yield return new object[] { "Q5_0", 129, 896, 9, false };
         yield return new object[] { "Q5_K", 513, 1024, 16, false };
+        // The split-aware shader: a single row (the live guard of a workgroup with dead rows), rows short of a workgroup
+        // (N not a multiple of 4 rows per workgroup, or of 1 row per workgroup for Q5_0), units short of a subgroup (K=32 for
+        // Q5_0 leaves one unit per split part), and the 16-row cap with bias through the shared-memory sum.
+        yield return new object[] { "Q8_0", 1, 2048, 1, false };
+        yield return new object[] { "Q8_0", 6, 96, 2, true };
+        yield return new object[] { "Q4_K", 2, 1024, 16, true };
+        yield return new object[] { "Q6_K", 6, 512, 3, false };
+        yield return new object[] { "Q5_0", 3, 32, 2, false };
+        yield return new object[] { "Q5_0", 5, 96, 16, true };
     }
 
     internal static DType Named(string name) => name switch
@@ -143,6 +152,40 @@ public sealed unsafe class VulkanQuantGemvTests(ITestOutputHelper log)
         float[] got = ReadF32(o);
         Assert.Equal(before + 1, vk.QuantGemvCount);
         AssertClose(expected, mag, got, 2e-5, $"{type} N={n} K={k} M={m} bias={withBias}");
+    }
+
+    /// <summary>The split of the <c>gemv_quant</c> shader (subgroups per output row) takes the requested value, clamped to the
+    /// workgroup's subgroups. Split 2 and split 4 run on the 32-wide RTX 3060; a split of 4 on a two-subgroup workgroup clamps to
+    /// 2. Each runs the reference check with bias, and the split the dispatch used is read back.</summary>
+    [Theory]
+    [InlineData("Q5_0", 2051, 896, 1, 1u, 1u)]
+    [InlineData("Q5_0", 2051, 896, 1, 2u, 2u)]
+    [InlineData("Q5_0", 2051, 896, 3, 4u, 4u)]
+    [InlineData("Q8_0", 4097, 2048, 2, 2u, 2u)]
+    [InlineData("Q8_0", 4097, 2048, 2, 4u, 4u)]
+    [InlineData("Q6_K", 2051, 2048, 3, 4u, 4u)]
+    [InlineData("Q4_K", 1025, 1024, 1, 4u, 2u)]
+    public void Split_OverrideRunsTheRequestedSplitAndMatchesHostDequant(string type, int n, int k, int m, uint requested, uint wantSplit)
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        if (vk.Vk.SubgroupSize != 32) { log.WriteLine($"SKIPPED: subgroup size {vk.Vk.SubgroupSize}; the split cases are written for 32-wide subgroups"); return; }
+        log.WriteLine($"device: {vk.Vk.DeviceName}");
+        DType dtype = Named(type);
+        using Tensor w = RandomQuant(dtype, n, k, seed: n * 31 + k + (int)requested);
+        float[] x = Random(m * k, seed: k + m, scale: 1f);
+        float[] bias = Random(n, seed: n + 5, scale: 0.5f);
+        (float[] expected, float[] mag) = Reference(w, x, bias, n, k, m);
+        using Tensor xt = F32(x, 1, m, k);
+        using Tensor bt = F32(bias, n);
+        using Tensor o = EmptyF32(1, m, n);
+        vk.QuantGemvSplitOverride = requested;
+        long before = vk.QuantGemvCount;
+        vk.Linear(o, xt, w, bt);
+        float[] got = ReadF32(o);
+        Assert.Equal(before + 1, vk.QuantGemvCount);
+        Assert.Equal(wantSplit, vk.LastQuantGemvSplit);
+        AssertClose(expected, mag, got, 2e-5, $"{type} N={n} K={k} M={m} requested split {requested} ran {vk.LastQuantGemvSplit}");
     }
 
     /// <summary>An F32 weight (a MoE router matrix) at decode M takes the same shader through the F32 decoder.</summary>

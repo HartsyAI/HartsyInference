@@ -16,9 +16,9 @@ namespace HartsyInference.Audio.Tests.IndexTts2;
 /// condition, speaker latents, emotion vector, a sampled code sequence and everything derived from it, plus the S2Mel
 /// estimator's inputs/outputs at three diffusion steps). Each C# stage is fed the reference's own input and its output
 /// compared with the reference's, so one stage's error never hides or inflates another's. Gated on
-/// <c>INDEXTTS2_PARITY_DIR</c> (holding <c>case1_b3.safetensors</c>, optionally <c>greedy1.safetensors</c> and the
-/// original <c>alex_ref.wav</c> as <c>ref.wav</c>) plus the same real-weight environment as
-/// <see cref="IndexTts2V20PipelineRealWeightTests"/>.</summary>
+/// <c>INDEXTTS2_PARITY_DIR</c> (<c>case1_b3</c>, <c>greedy1</c>, <c>decode1</c> and <c>cfm1.safetensors</c> from
+/// tools/parity/indextts20_parity_dump.py, recorded on the clip in <c>INDEXTTS2_REF_WAV</c>) plus the same real-weight
+/// environment as <see cref="IndexTts2V20PipelineRealWeightTests"/>.</summary>
 [Trait("Category", "Integration")]
 public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
 {
@@ -105,18 +105,22 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
             w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!, IndexTtsTestNormalizers.Resolve(),
             feat1Path: Path.Combine(v20Dir, "feat1.pt"), feat2Path: Path.Combine(v20Dir, "feat2.pt"), cfg: IndexTts2Config.V2_0);
 
-        // 0. Resampling: the C# resamplers against librosa(22.05k)+torchaudio(16k) on the same clip.
+        // 0. Resampling: the pipeline's resamplers against librosa (22.05 kHz; 16 kHz for the emotion clip) and
+        // torchaudio (22.05 kHz -> 16 kHz) on the same clip.
         WavFile.DecodedAudio wav = WavFile.Read(refWavPath!);
         float[] clip = wav.Channels[0];
         output.WriteLine($"reference clip: {clip.Length / (double)wav.SampleRate:F2}s @ {wav.SampleRate} Hz");
         ReadOnlySpan<float> capped = clip.AsSpan(0, Math.Min(clip.Length, 15 * wav.SampleRate));
-        float[] r22 = SincResampler.Resample(capped, wav.SampleRate, 22_050, 64);
-        float[] r16 = SincResampler.Resample(r22, 22_050, 16_000);
+        (float[] r16, float[] r22) = IndexTts2Pipeline.ResampleReference(capped, wav.SampleRate);
         float[] py16 = d["audio16k"];
-        Compare("resample 22.05k", r22.AsSpan(0, Math.Min(r22.Length, d["audio22k"].Length)).ToArray(), d["audio22k"].AsSpan(0, Math.Min(r22.Length, d["audio22k"].Length)).ToArray(), 0.02);
+        Compare("resample 22.05k", r22.AsSpan(0, Math.Min(r22.Length, d["audio22k"].Length)).ToArray(), d["audio22k"].AsSpan(0, Math.Min(r22.Length, d["audio22k"].Length)).ToArray(), 1e-2);
         int n16 = Math.Min(r16.Length, py16.Length);
         output.WriteLine($"audio16k length: C# {r16.Length} vs reference {py16.Length}");
-        Compare("resample 16k (overlap)", r16[..n16], py16[..n16], 0.02);
+        Compare("resample 16k (overlap)", r16[..n16], py16[..n16], 1e-2);
+        float[] emo16 = IndexTts2Pipeline.ResampleEmotionClip(capped, wav.SampleRate), pyEmo16 = d["emo_audio16k"];
+        int nEmo = Math.Min(emo16.Length, pyEmo16.Length);
+        output.WriteLine($"emo_audio16k length: C# {emo16.Length} vs reference {pyEmo16.Length}");
+        Compare("resample emotion 16k (overlap)", emo16[..nEmo], pyEmo16[..nEmo], 1e-2);
 
         // 1a. SeamlessM4T-style front end (Kaldi fbank, per-bin normalization, frame-pair stacking).
         float[] a16 = py16;
@@ -124,6 +128,7 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
         {
             Assert.Equal(d.Shape("input_features")[0], feats.Shape[1]);
             Compare("w2v-bert input features", ToArray(feats), d["input_features"], 5e-3);
+            output.WriteLine($"w2v-bert stacked frames: {feats.Shape[1]} (an odd fbank count pads the last one)");
         }
 
         // 1. w2v-bert feature from the reference's own 16 kHz audio.
@@ -171,6 +176,28 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
         using Tensor baseEmo = pipeline.Gpt.ComputeEmoVec(backend, spkPy, (int)tSpk);
         Compare("base emotion vector", ToArray(baseEmo), d["emovec_base"], 5e-3);
 
+        // 6b. Default emotion (no emotion clip): the speaker clip reloaded at 16 kHz, merged with alpha 1.
+        using (Tensor emoFeat = pipeline.SemanticFeatures.Forward(backend, pyEmo16))
+        {
+            Compare("w2v-bert emo_cond_emb", ToArray(emoFeat), d["emo_cond_emb"], 2e-3);
+            using Tensor emoOwn = pipeline.Gpt.ComputeEmoVec(backend, emoFeat, (int)emoFeat.Shape[1]);
+            using Tensor merged = IndexTts2T2sDecoder.MergeEmoVec(baseEmo, emoOwn, 1f);
+            Compare("default emotion vector", ToArray(merged), d["emovec"], 5e-3);
+        }
+
+        // 6c. The pipeline's own PrepareReference on the clip (C# resamplers included) and its default emotion.
+        using (IndexTts2Reference reference = pipeline.PrepareReference(backend, clip, wav.SampleRate))
+        {
+            Compare("spk_cond_emb (PrepareReference)", ToArray(reference.SpkCondEmb), d["spk_cond_emb"], 2e-3);
+            Compare("CAM++ style (PrepareReference)", ToArray(reference.Style), d["style"], 1e-2);
+            Compare("reference mel (PrepareReference)", ToArray(reference.RefMel), d["ref_mel"], 2e-2);
+            Compare("prompt condition (PrepareReference)", ToArray(reference.PromptCondition), d["prompt_condition"], 1e-2);
+            Compare("speaker latents (PrepareReference)", ToArray(reference.SpeakerConditioning), d["spk_latent"], 1e-2);
+            (Tensor emoVec, bool owned) = pipeline.ResolveEmotion(backend, new IndexTts2Options(), "", reference, new IndexTts2Timings());
+            Compare("default emotion vector (PrepareReference)", ToArray(emoVec), d["emovec"], 1e-2);
+            if (owned) emoVec.Dispose();
+        }
+
         // 7. Second GPT pass + gpt_layer on the reference's sampled codes, and the codebook embedding.
         int[] codes = [.. d["seg0_codes"].Select(static c => (int)c)];
         int[] textIds = [.. d["seg0_text_ids"].Select(static c => (int)c)];
@@ -203,7 +230,7 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
                 using Tensor muT = ToTensor(mu[(half * muChunk)..((half + 1) * muChunk)], 1, t, 512);
                 using Tensor sT = ToTensor(sty[(half * 192)..((half + 1) * 192)], 1, 192);
                 using Tensor est = pipeline.Dit.Estimate(backend, xT, muT, tv, sT, pT);
-                Compare($"DiT estimator step {step} ({(half == 0 ? "cond" : "null")})", ToArray(est), outRef[(half * xChunk)..((half + 1) * xChunk)], 5e-3);
+                Compare($"DiT estimator step {step} ({(half == 0 ? "cond" : "null")})", ToArray(est), outRef[(half * xChunk)..((half + 1) * xChunk)], 1e-4);
             }
         }
 
@@ -251,13 +278,61 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
             // The reference list stops at the stop token (excluded) or at the 400-token cap.
             uint rng = 1;
             int[] got = pipeline.Gpt.Generate(backend, latents, emovec, textIds, null,
-                new HartsyInference.Audio.Pipelines.IndexTtsOptions { Temperature = 0f, RepetitionPenalty = penalty, MaxMelTokens = 400 }, ref rng);
+                new HartsyInference.Audio.Pipelines.IndexTtsOptions { NumBeams = 1, DoSample = false, RepetitionPenalty = penalty, MaxMelTokens = 400 }, ref rng);
             int common = 0;
             while (common < Math.Min(got.Length, want.Length) && got[common] == want[common]) common++;
             output.WriteLine($"{key}: C# {got.Length} codes, reference {want.Length} codes, identical prefix {common}");
             Assert.True(common >= Math.Min(got.Length, want.Length) * 0.97 || common == got.Length,
                 $"{key}: greedy decode diverges from the reference at token {common} (C# {got.Length}, reference {want.Length}).");
         }
+    }
+
+    /// <summary>Upstream's greedy codes (repetition penalty 1) teacher-forced through the C# GPT one cached step at a
+    /// time from upstream's own speaker latents and emotion vector: every block output, <c>ln_f</c> and the mel-head
+    /// logits per step, and the argmax.</summary>
+    [Fact]
+    public async Task TeacherForcedDecode_MatchesTheReference()
+    {
+        string? parityDir = Environment.GetEnvironmentVariable("INDEXTTS2_PARITY_DIR");
+        string? v20Dir = Environment.GetEnvironmentVariable("INDEXTTS2_V20_DIR");
+        string? codecPath = Environment.GetEnvironmentVariable("INDEXTTS2_MASKGCT_CODEC_PATH");
+        string? w2vBertPath = Environment.GetEnvironmentVariable("INDEXTTS2_W2VBERT_SAFETENSORS_PATH");
+        string? campplusPath = Environment.GetEnvironmentVariable("INDEXTTS2_CAMPPLUS_PATH");
+        string? bigVganPath = Environment.GetEnvironmentVariable("INDEXTTS2_BIGVGAN_PT_PATH");
+        if (string.IsNullOrEmpty(parityDir) || !File.Exists(Path.Combine(parityDir, "decode1.safetensors"))) { output.WriteLine("decode1.safetensors missing — skip."); return; }
+        if (string.IsNullOrEmpty(v20Dir) || !Directory.Exists(v20Dir)) { output.WriteLine("INDEXTTS2_V20_DIR missing — skip."); return; }
+        foreach (string? p in new[] { codecPath, w2vBertPath, campplusPath, bigVganPath })
+            if (string.IsNullOrEmpty(p) || !File.Exists(p)) { output.WriteLine("auxiliary checkpoint missing — skip."); return; }
+
+        Dump d = LoadDump(Path.Combine(parityDir, "case1_b3.safetensors"));
+        Dump t = LoadDump(Path.Combine(parityDir, "decode1.safetensors"));
+        using CpuBackend backend = new();
+        using IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
+            Path.Combine(v20Dir, "bpe.model"), Path.Combine(v20Dir, "gpt.pth"), Path.Combine(v20Dir, "s2mel.pth"), codecPath!,
+            w2vBertPath!, Path.Combine(v20Dir, "wav2vec2bert_stats.pt"), campplusPath!, bigVganPath!, IndexTtsTestNormalizers.Resolve(), cfg: IndexTts2Config.V2_0);
+
+        int[] textIds = [.. d["seg0_text_ids"].Select(static c => (int)c)];
+        int[] codes = [.. t["codes"].Select(static c => (int)c)];
+        using Tensor latents = ToTensor(d["spk_latent"], 1, 32, 1280);
+        using Tensor emovec = ToTensor(d["emovec"], 1, 1280);
+        int layers = IndexTts2Config.V2_0.Gpt.NumLayers;
+        double worstHidden = 0;
+        float[][] logits = pipeline.Gpt.TeacherForce(backend, latents, emovec, textIds, null, codes, (step, layer, x) =>
+        {
+            float[] want = t[layer == layers ? $"step{step}_lnf" : $"step{step}_block{layer}"];
+            worstHidden = Math.Max(worstHidden, Compare($"step {step} {(layer == layers ? "ln_f" : "block " + layer)}", ToArray(x), want, 1e-4).RelRms);
+        });
+        int firstFlip = -1;
+        for (int s = 0; s < codes.Length; s++)
+        {
+            Compare($"step {s} logits", logits[s], t[$"step{s}_logits"], 1e-4);
+            int pick = 0;
+            for (int i = 1; i < logits[s].Length; i++) if (logits[s][i] > logits[s][pick]) pick = i;
+            if (pick != codes[s] && firstFlip < 0) firstFlip = s;
+        }
+        output.WriteLine($"worst hidden relRMS {worstHidden:E2}, first argmax flip {firstFlip}");
+        Assert.True(firstFlip < 0, $"argmax differs from upstream's greedy code at step {firstFlip}.");
+        Assert.True(_failures.Count == 0, string.Join(Environment.NewLine, _failures));
     }
 
     /// <summary>The whole 25-step CFG Euler solve from the reference's own initial noise (the C# solver accepts an
@@ -297,7 +372,7 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
 
             using CpuBackend backend = new();
             using Tensor mel = cfm.Solve(backend, mu, style, promptX, cfg.DiffusionSteps, cfg.InferenceCfgRate, seed: 0, x0Override: x0, promptLen: tRef);
-            Compare("25-step CFG solve (full mel)", ToArray(mel), c["out"], 2e-2);
+            Compare("25-step CFG solve (full mel)", ToArray(mel), c["out"], 1e-4);
         }
         finally
         {
