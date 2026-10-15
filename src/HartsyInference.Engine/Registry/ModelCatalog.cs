@@ -588,6 +588,20 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "flux3", Modality = img, DisplayName = "FLUX.3 Klein", Architecture = "per-mode + joint DiT, flow-matching",
+                Status = vp,
+                // Not CliDrivable yet: the transformer lives in BFL's gated flux-3-image-klein-comfy repository (accept the
+                // FLUX Kommunity License), whose file layout is pinned once a real-weight run reads it — pass the full
+                // (flux3_image_klein_*) or step-distilled (flux3_image_klein_sd_*) file with --model-path until then.
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    SideModels.Qwen3VL_4B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "chroma", Modality = img, DisplayName = "Chroma", Architecture = "Flux-derivative DiT", Status = ok,
                 // `hartsy image -m chroma` re-verified 2026-07-21: the terse prompt "an astronaut riding a horse"
                 // reproducibly yields an off-prompt vintage/sepia rider-in-a-hat (weak compound-subject binding at

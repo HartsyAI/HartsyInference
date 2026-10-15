@@ -23,6 +23,10 @@ public readonly record struct GenerationDefaults(int Steps, float CfgScale, int 
     public static GenerationDefaults FluxSchnell => new(4, 3.5f, 1024, 1024);
     /// <summary>Flux.2 dev / Klein: 50 steps, guidance 4.0, 1024².</summary>
     public static GenerationDefaults Flux2 => new(50, 4.0f, 1024, 1024);
+    /// <summary>FLUX.3 Klein (ComfyUI template): 25 steps, true-cfg 3.5, 1024².</summary>
+    public static GenerationDefaults Flux3 => new(25, 3.5f, 1024, 1024);
+    /// <summary>FLUX.3 Klein step-distilled (ComfyUI template): 15 steps (4–16), cfg 1, 1024².</summary>
+    public static GenerationDefaults Flux3Distilled => new(15, 1.0f, 1024, 1024);
     /// <summary>Z-Image Turbo: 8 steps, cfg 1.0, 1024².</summary>
     public static GenerationDefaults ZImageTurbo => new(8, 1.0f, 1024, 1024);
 

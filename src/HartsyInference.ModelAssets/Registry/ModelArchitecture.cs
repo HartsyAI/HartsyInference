@@ -24,6 +24,9 @@ public enum ModelArchitecture
     /// <summary>Flux.2 (single-stream modulation keys, e.g. <c>double_stream_modulation_img</c>).</summary>
     Flux2,
 
+    /// <summary>FLUX.3 Klein (per-mode <c>content_mode_blocks</c> + joint <c>single_stream_modulations</c>).</summary>
+    Flux3,
+
     /// <summary>AuraFlow (<c>double_layers</c> / <c>single_layers</c>).</summary>
     AuraFlow,
 

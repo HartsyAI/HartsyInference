@@ -134,8 +134,10 @@ internal static unsafe class TextEncoderTensorHelpers
         return output;
     }
 
-    /// <summary>Additive attention mask: query <c>i</c> may attend key <c>j</c> when <c>i - window &lt; j &lt;= i</c>; pass <see cref="int.MaxValue"/> for plain causal attention. Uses -1e30 rather than -inf to avoid NaN in mixed-precision softmax.</summary>
-    internal static Tensor BuildCausalMask(int seqLen, int window)
+    /// <summary>Additive attention mask: query <c>i</c> may attend key <c>j</c> when <c>i - window &lt; j &lt;= i</c> and
+    /// <c>j &lt; keyLimit</c>; pass <see cref="int.MaxValue"/> for plain causal attention and no key padding. Uses -1e30
+    /// rather than -inf to avoid NaN in mixed-precision softmax.</summary>
+    internal static Tensor BuildCausalMask(int seqLen, int window, int keyLimit = int.MaxValue)
     {
         const float negInf = -1e30f;
         Tensor mask = new(new TensorShape(seqLen, seqLen), DType.F32);
@@ -144,11 +146,21 @@ internal static unsafe class TextEncoderTensorHelpers
         {
             for (int j = 0; j < seqLen; j++)
             {
-                bool blocked = j > i || (window != int.MaxValue && j <= i - window);
+                bool blocked = j > i || j >= keyLimit || (window != int.MaxValue && j <= i - window);
                 p[(long)i * seqLen + j] = blocked ? negInf : 0f;
             }
         }
         return mask;
+    }
+
+    /// <summary>Gathers one row of a split-half RoPE table <c>[positions, half]</c> per token, so tokens can take
+    /// arbitrary rotary positions (e.g. <see cref="TextEncoderPadding"/>) through the position-indexed table contract.</summary>
+    internal static float[] GatherRopeRows(float[] halfTable, int half, int seqLen, Func<int, int> positionOf)
+    {
+        float[] gathered = new float[(long)seqLen * half];
+        for (int s = 0; s < seqLen; s++)
+            Array.Copy(halfTable, (long)positionOf(s) * half, gathered, (long)s * half, half);
+        return gathered;
     }
 
     /// <summary>Expands a cached split-half table <c>[S, D/2]</c> to the backend RoPE contract <c>[B, S, D]</c>, duplicating each frequency into both vector halves and each batch row.</summary>
