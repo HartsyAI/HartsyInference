@@ -278,6 +278,7 @@ public sealed partial class MuseSparkOutputParser : IOutputParser
             foreach (Match p in ParameterRegex().Matches(invokeBody))
             {
                 string name = WebUtility.HtmlDecode(p.Groups[1].Value);
+                // The template entity-escapes names (esc_attr) but writes values raw, as llama.cpp reads them back.
                 string raw = p.Groups[2].Value;
                 json.WritePropertyName(name);
                 bool? isString = schema is not null && schema.TryGetValue(name, out bool s) ? s : null;

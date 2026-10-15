@@ -130,8 +130,8 @@ public sealed class GgufLanguageModel : IDisposable
             return ChatMlOrRaw();
         }
 
-        // llama.cpp adds BOS once for a model whose GGUF asks for it; a template that never names bos_token relies on that.
-        bool prependBos = meta.GetBool("tokenizer.ggml.add_bos_token", false) && !chatTemplate.Contains("bos_token", StringComparison.Ordinal);
+        // llama.cpp strips a BOS the template rendered first, then its tokenizer adds one, so such a prompt starts with exactly one.
+        bool prependBos = meta.GetBool("tokenizer.ggml.add_bos_token", false);
         try { return new JinjaChatTemplate(chatTemplate, prependBos); }
         catch (Exception ex)
         {

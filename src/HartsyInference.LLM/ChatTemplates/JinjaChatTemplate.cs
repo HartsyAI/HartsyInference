@@ -21,8 +21,8 @@ public sealed class JinjaChatTemplate : IChatTemplate
 
     /// <summary>Compiles the model's chat-template source.</summary>
     /// <param name="chatTemplate">The Jinja source.</param>
-    /// <param name="prependBos">Starts every encoded prompt with the tokenizer's BOS when the render does not already begin with it: the
-    /// GGUF <c>add_bos_token</c> contract llama.cpp applies to a template that leaves BOS to the tokenizer (Muse Spark).</param>
+    /// <param name="prependBos">Starts every encoded prompt with exactly one tokenizer BOS, adding it when the render does not begin with
+    /// it: the GGUF <c>add_bos_token</c> contract as llama.cpp applies it, whether or not the template writes <c>bos_token</c>.</param>
     public JinjaChatTemplate(string chatTemplate, bool prependBos = false)
     {
         ArgumentNullException.ThrowIfNull(chatTemplate);
