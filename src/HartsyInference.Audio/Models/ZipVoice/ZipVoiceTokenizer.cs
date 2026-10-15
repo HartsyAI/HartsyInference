@@ -97,6 +97,10 @@ public sealed partial class ZipVoiceTokenizer
     public int[] Encode(string text, IPhonemizer phonemizer, string language = EspeakLanguage) =>
         ToIds(Tokenize(text, phonemizer, language));
 
+    /// <summary>The published overload for the bundled espeak port; same as the <see cref="IPhonemizer"/> one.</summary>
+    public int[] Encode(string text, EspeakPhonemizer phonemizer, string language = EspeakLanguage) =>
+        Encode(text, (IPhonemizer)phonemizer, language);
+
     // piper_phonemize: each clause is decomposed (NFD), a mark follows it, and `, ; :` add a space; clauses join with nothing.
     private static List<string> Symbols(IPhonemizer phonemizer, string text, string language)
     {
