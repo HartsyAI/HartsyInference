@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Changed: CosyVoice 2 refuses a voice reference longer than 20 s and says why.** The LM is prompted with the whole clip. From about 24 s the engine returned a few seconds of babble or only the first sentence of the text, and the official CosyVoice 2 does the same on the same clips (the prompt's speech tokens, mel and speaker embedding already match it), so this is a model limit, not an engine fault. A reference over 20 s now fails before any weights are touched with a message that names the limit and the fix; one over 15 s logs a warning. Clips of 5 to 15 s clone cleanly.
+
 ## alpha.369
 
 - **Fixed: NeuTTS-Air tokenizes its prompt as upstream does and keeps punctuation in the phonemes.** The prompt mapped bytes before Qwen's split regex, so each IPA letter outside ASCII (`ð`, `æ`, `θ`) split into two tokens where upstream keeps one, and phonemization dropped the `,` and `.` marks. Gate sentences 02-05 went from mean WER 0.231 to 0.018 (upstream 0.003).
