@@ -15,7 +15,7 @@ namespace HartsyInference.Engine.Services;
 public sealed class SpeechService : ISpeechService
 {
     /// <summary>Voice references are decoded at 24 kHz — the rate the cloning models expect.</summary>
-    private const int ReferenceSampleRate = 24_000;
+    internal const int ReferenceSampleRate = 24_000;
 
     private readonly InferenceEngine _engine;
 
@@ -37,6 +37,7 @@ public sealed class SpeechService : ISpeechService
             try
             {
                 ct.ThrowIfCancellationRequested();
+                ValidateReference(target.Descriptor, referenceMono);
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
                     .GetOrLoadAsync(target.Key, token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token), ct)
                     .ConfigureAwait(false);
@@ -165,6 +166,7 @@ public sealed class SpeechService : ISpeechService
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
+            ValidateReference(target.Descriptor, referenceMono);
             TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, cancel);
             await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(target.Backend, Job(target),
                 ct => StreamWork(target, job, ct), cancel, target.StageBackends).ConfigureAwait(false))
@@ -205,6 +207,15 @@ public sealed class SpeechService : ISpeechService
             double seconds = AudioClipCodec.Seconds(samples.Length, runner.SampleRate);
             Logs.Verbose($"[Audio][TTS] Synthesized {seconds:0.0}s @ {runner.SampleRate} Hz in {Environment.TickCount64 - started}ms (single-chunk fallback, no streaming support).");
             yield return new AudioChunk(samples, runner.SampleRate, Channels: 1, StartSampleOffset: 0);
+        }
+    }
+
+    /// <summary>Lets the model family reject the materialized reference before its weights are loaded.</summary>
+    internal static void ValidateReference(TtsModelDescriptor descriptor, float[]? referenceMono)
+    {
+        if (referenceMono is { Length: > 0 })
+        {
+            descriptor.ValidateReference?.Invoke(referenceMono);
         }
     }
 

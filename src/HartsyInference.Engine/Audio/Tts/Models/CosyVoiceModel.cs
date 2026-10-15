@@ -9,6 +9,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Services;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -45,6 +46,7 @@ internal static class CosyVoiceModel
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
         ResolveFiles = (_, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>(ModelFiles),
+        ValidateReference = reference => CosyVoiceReferenceGuard.Check(reference.Length, SpeechService.ReferenceSampleRate),
         LoadAsync = async (context, _, cancel) =>
         {
             IReadOnlyDictionary<string, string> fetched = await AudioModelCache

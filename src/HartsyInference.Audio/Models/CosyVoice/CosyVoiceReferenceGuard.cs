@@ -3,13 +3,13 @@ using HartsyInference.Core.Logging;
 namespace HartsyInference.Audio.Models.CosyVoice;
 
 /// <summary>Rejects a voice reference too long for CosyVoice 2's LM prompt and warns about a long one.</summary>
-internal static class CosyVoiceReferenceGuard
+public static class CosyVoiceReferenceGuard
 {
-    internal const double WarnSeconds = 15.0;
-    internal const double MaxSeconds = 20.0;
+    public const double WarnSeconds = 15.0;
+    public const double MaxSeconds = 20.0;
 
     /// <summary>Throws above <see cref="MaxSeconds"/>, warns above <see cref="WarnSeconds"/>; a missing reference passes.</summary>
-    internal static void Check(int sampleCount, int sampleRate)
+    public static void Check(int sampleCount, int sampleRate)
     {
         if (sampleCount <= 0 || sampleRate <= 0)
         {
