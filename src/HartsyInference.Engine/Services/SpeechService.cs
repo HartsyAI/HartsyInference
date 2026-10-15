@@ -15,7 +15,7 @@ namespace HartsyInference.Engine.Services;
 public sealed class SpeechService : ISpeechService
 {
     /// <summary>Voice references are decoded at 24 kHz — the rate the cloning models expect.</summary>
-    private const int ReferenceSampleRate = 24_000;
+    internal const int ReferenceSampleRate = 24_000;
 
     private readonly InferenceEngine _engine;
 
@@ -31,6 +31,7 @@ public sealed class SpeechService : ISpeechService
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
         TtsTarget target = ResolveTarget(spec, request.Voice);
+        ValidateReference(target.Descriptor, request.Reference);
         return _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
         {
             (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
@@ -165,6 +166,7 @@ public sealed class SpeechService : ISpeechService
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
+            ValidateReference(target.Descriptor, referenceMono);
             TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, cancel);
             await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(target.Backend, Job(target),
                 ct => StreamWork(target, job, ct), cancel, target.StageBackends).ConfigureAwait(false))
@@ -205,6 +207,29 @@ public sealed class SpeechService : ISpeechService
             double seconds = AudioClipCodec.Seconds(samples.Length, runner.SampleRate);
             Logs.Verbose($"[Audio][TTS] Synthesized {seconds:0.0}s @ {runner.SampleRate} Hz in {Environment.TickCount64 - started}ms (single-chunk fallback, no streaming support).");
             yield return new AudioChunk(samples, runner.SampleRate, Channels: 1, StartSampleOffset: 0);
+        }
+    }
+
+    /// <summary>Lets the model family reject the request's reference before its job is queued, from the WAV header alone so the
+    /// samples are never allocated. A clip whose length the header cannot give is left to the checks inside the job.</summary>
+    internal static void ValidateReference(TtsModelDescriptor descriptor, AudioClip? reference)
+    {
+        if (descriptor.ValidateReferenceSeconds is null || reference is null || reference.Data.Length == 0)
+        {
+            return;
+        }
+        if (WavFile.TryReadDurationSeconds(reference.Data, out double seconds))
+        {
+            descriptor.ValidateReferenceSeconds(seconds);
+        }
+    }
+
+    /// <summary>The same check on a reference that is already decoded, for the streaming path.</summary>
+    internal static void ValidateReference(TtsModelDescriptor descriptor, float[]? referenceMono)
+    {
+        if (referenceMono is { Length: > 0 })
+        {
+            descriptor.ValidateReferenceSeconds?.Invoke(referenceMono.Length / (double)ReferenceSampleRate);
         }
     }
 

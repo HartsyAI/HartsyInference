@@ -32,22 +32,22 @@ per provider). Upstream comparisons used the same oracle, the same reference cli
 | Qwen3-TTS | 0.6B-Base | 0.005 | not re-run | pass |
 | Qwen3-TTS | 1.7B-VoiceDesign | 0.005 | not re-run | pass |
 | Qwen3-TTS | 0.6B-CustomVoice | 0.002 | not re-run | pass |
-| Qwen3-TTS | 1.7B-CustomVoice | 0.072 | BLOCKED: needs HF config files | open |
+| Qwen3-TTS | 1.7B-CustomVoice | 0.072 | qwen-tts 0.1.1, 0.095 ([follow-up](2026-10-15_tts_audit_followup.md)) | PARITY |
 | Spark-TTS | 0.5B | 0.001 | not re-run | pass |
 | StyleTTS2 | libritts | 0.000 | not re-run | pass |
 | Zonos | transformer | 0.001 | not re-run | pass |
 | AuK | base | 0.000 | not re-run | pass |
 | AuK | flash | 0.007 | not re-run | FIXED (PR #419) |
 | Breeze TTS 2 | breeze-tts-2 | 0.017 | not re-run | pass |
-| Kyutai TTS | 1.6b-en-fr | 0.067 | BLOCKED: needs HF config file | open |
+| Kyutai TTS | 1.6b-en-fr | 0.061 (12 seeds) | moshi 0.2.13, 0.118 ([follow-up](2026-10-15_tts_audit_followup.md)) | PARITY |
 | Orpheus | 3b | 0.068 | not re-run | pass |
 | F5-TTS | v1-base | 0.017 (after PR #419) | upstream F5, same seeds | FIXED (PR #419, #421) |
 | NeuTTS | air | 0.018 on 02-05 (after PR #420) | upstream 0.003 on 02-05 | FIXED (PR #420) |
 | VibeVoice | 1.5b | 0.073 (after PR #422) | upstream native 0.117 | FIXED (PR #422) |
-| Bark | default | 0.255 | upstream 0.920 raw, 0.345 capped | PARITY (stochastic) |
+| Bark | default | 0.240 (12 seeds) | HF `BarkModel` with the hub generation config, 0.228 ([follow-up](2026-10-15_tts_audit_followup.md)) | PARITY (stochastic) |
 | Chatterbox | default | 0.200 (all from `Yes.`) | 6/16 exact on `Yes.` for both | PARITY |
 | Dia | 1.6b | 0.753 (01-03 fail, 04-05 0.000) | documented 2026-10-01 upstream A/B | PARITY on in-contract text |
-| ZipVoice | base | 0.132 | BLOCKED: needs GitHub clone | open |
+| ZipVoice | base | rows 02-05 0.000 (after PR #426) | k2-fsa/ZipVoice 2f7326f, rows 02-05 0.000 | FIXED (PR #426) |
 | VibeVoice-Realtime | 0.5B (engine id) | not generating | n/a | known gap |
 
 ## Fixes (all merged to main)
@@ -65,12 +65,14 @@ per provider). Upstream comparisons used the same oracle, the same reference cli
   1.573 to 0.073 (upstream native 0.117). Real-time factor unchanged within noise against published alpha.368;
   peak Swarm VRAM 13,124 MiB on both builds.
 
+## Follow-up
+
+The Kyutai, Qwen3 CustomVoice, Bark and ZipVoice upstream runs are in
+[2026-10-15_tts_audit_followup.md](2026-10-15_tts_audit_followup.md). CosyVoice 2 cloning from a long reference is
+recorded in [2026-10-15_cosyvoice2_long_reference_test.md](2026-10-15_cosyvoice2_long_reference_test.md).
+
 ## Open
 
-- Kyutai and Qwen3 CustomVoice upstream runs need small config files from Hugging Face (`kyutai/tts-1.6b-en_fr`
-  `config.json`; the Qwen3-TTS CustomVoice config and tokenizer files). Not fetched; awaiting approval.
-- ZipVoice upstream needs `github.com/k2-fsa/ZipVoice` (source) and the k2 phonemizer wheel. Not fetched;
-  awaiting approval.
 - VibeVoice-Realtime-0.5B is an engine id only. It cannot generate: the released checkpoint ships a decode-only
   acoustic VAE, and the upstream per-speaker voice caches need a deserializer that does not exist.
 - VibeVoice segment-boundary negative-stream reset (`VibeVoicePipeline.cs` 314-338 and 399-407 against upstream

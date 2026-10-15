@@ -39,6 +39,55 @@ public static class WavFile
         }
     }
 
+    /// <summary>Reads a WAV's duration from its headers alone, without allocating samples. It is the declared data size, the
+    /// length <see cref="Read(Stream)"/> allocates even when the payload is shorter. False for anything the headers cannot
+    /// size: not RIFF/WAVE, no <c>fmt </c> or <c>data</c> chunk, or a streaming data size of 0 or 0xFFFFFFFF.</summary>
+    public static bool TryReadDurationSeconds(ReadOnlySpan<byte> bytes, out double seconds)
+    {
+        seconds = 0;
+        if (bytes.Length < 12 || !bytes[..4].SequenceEqual("RIFF"u8) || !bytes[8..12].SequenceEqual("WAVE"u8))
+        {
+            return false;
+        }
+        WaveFormat? fmt = null;
+        int position = 12;
+        while (position + 8 <= bytes.Length)
+        {
+            ReadOnlySpan<byte> id = bytes.Slice(position, 4);
+            uint size = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(position + 4)..]);
+            int body = position + 8;
+            if (id.SequenceEqual("fmt "u8))
+            {
+                if (size < 16 || body + (long)size > bytes.Length)
+                {
+                    return false;
+                }
+                fmt = WaveFormat.Parse(bytes.Slice(body, (int)size));
+            }
+            else if (id.SequenceEqual("data"u8))
+            {
+                if (fmt is null || size is 0 or uint.MaxValue)
+                {
+                    return false;
+                }
+                int frameBytes = fmt.Value.NumChannels * (fmt.Value.BitsPerSample / 8);
+                if (frameBytes <= 0 || fmt.Value.SampleRate <= 0)
+                {
+                    return false;
+                }
+                seconds = size / (double)frameBytes / fmt.Value.SampleRate;
+                return true;
+            }
+            long next = body + (long)size + (size & 1);
+            if (next > bytes.Length)
+            {
+                return false;
+            }
+            position = (int)next;
+        }
+        return false;
+    }
+
     /// <summary>Reads a WAV file from disk. Throws <see cref="InvalidDataException"/>
     /// if the file is not a recognized PCM/IEEE-float WAV.</summary>
     public static DecodedAudio Read(string path)

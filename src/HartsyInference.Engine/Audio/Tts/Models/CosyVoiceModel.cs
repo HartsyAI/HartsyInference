@@ -45,6 +45,7 @@ internal static class CosyVoiceModel
     {
         ResolveRepo = variant => (variant ?? string.Empty).Contains('/', StringComparison.Ordinal) ? variant! : Repo,
         ResolveFiles = (_, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>(ModelFiles),
+        ValidateReferenceSeconds = CosyVoiceReferenceGuard.CheckSeconds,
         LoadAsync = async (context, _, cancel) =>
         {
             IReadOnlyDictionary<string, string> fetched = await AudioModelCache
