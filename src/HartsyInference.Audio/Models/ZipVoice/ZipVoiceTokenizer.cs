@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using HartsyInference.Audio.Phonemizer;
 using HartsyInference.Audio.Phonemizer.Espeak;
 
@@ -56,7 +57,7 @@ public sealed class ZipVoiceTokenizer
     /// <paramref name="phonemizer"/> is typically <see cref="EspeakPhonemizer.FromCache"/>.</summary>
     public int[] Encode(string text, EspeakPhonemizer phonemizer, string language = "en-us")
     {
-        string ipa = phonemizer.PhonemizeToIpa(NormalizePunctuation(text), language, preservePunctuation: true);
+        string ipa = FlattenLikeUpstream(phonemizer.PhonemizeToIpa(NormalizePunctuation(text), language, preservePunctuation: true));
         List<int> ids = new();
         TextElementEnumerator e = StringInfo.GetTextElementEnumerator(ipa);
         while (e.MoveNext())
@@ -66,4 +67,14 @@ public sealed class ZipVoiceTokenizer
         }
         return [.. ids];
     }
+
+    private static readonly Regex SpaceBeforePunctuation = new(@"\s+(?=[.,!?;:])", RegexOptions.Compiled);
+    private static readonly Regex SpaceAfterSentenceEnd = new(@"(?<=[.!?])\s+", RegexOptions.Compiled);
+
+    /// <summary>Upstream joins espeak's per-sentence symbol lists with no separator and keeps each punctuation mark
+    /// attached to the word before it: no space before <c>. , ! ? ; :</c>, and no space after a sentence end
+    /// (<c>. ! ?</c>). The preserved-punctuation output puts a space in each of those places, which shifts every
+    /// later token id. Word spaces after <c>, ; :</c> stay, as upstream keeps them.</summary>
+    internal static string FlattenLikeUpstream(string ipa) =>
+        SpaceAfterSentenceEnd.Replace(SpaceBeforePunctuation.Replace(ipa, ""), "");
 }

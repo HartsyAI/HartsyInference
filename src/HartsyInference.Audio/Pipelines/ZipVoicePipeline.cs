@@ -88,9 +88,14 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         ThrowIfDisposed();
         ZipVoiceOptions opts = options ?? new ZipVoiceOptions();
 
-        MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig();
+        // Upstream VocosFbank: log(clamp(mel, 1e-7)). The F5 config's 1e-5 floor is F5's, not ZipVoice's.
+        MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig() with { LogFloor = 1e-7f };
         int sr = melCfg.SampleRate;
         float[] mono24k = sampleRate == sr ? refAudio.ToArray() : Resampler.Create(sampleRate, sr).Resample(refAudio);
+
+        // Upstream generate_sentence order: remove_silence(only_edge=False, trail_sil=200), then rms_norm.
+        mono24k = RemoveSilenceEdges(mono24k, sr, keepMs: 100, thresholdDb: -50f);
+        mono24k = AppendSilence(mono24k, sr, 200);
 
         const float targetRms = 0.1f;
         float promptRms = Rms(mono24k);
@@ -99,11 +104,12 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
             float g = targetRms / promptRms;
             for (int i = 0; i < mono24k.Length; i++) mono24k[i] *= g;
         }
-        mono24k = TrimEdgeSilence(mono24k, sr);
 
         MelSpectrogramExtractor extractor = new(melCfg);
         float[,] melData = extractor.Compute(mono24k);   // [nMels, T], natural-log
-        int tRef = melData.GetLength(1);
+        // Upstream truncates the mel to lhotse's compute_num_frames(duration) = (N + hop/2) / hop frames, which is one
+        // fewer than the centred STFT yields for most lengths; the clamp only guards inputs shorter than one hop.
+        int tRef = Math.Min(melData.GetLength(1), (mono24k.Length + melCfg.HopLength / 2) / melCfg.HopLength);
         Tensor promptMel = ToChannelsLastScaled(melData, tRef, _cfg.FeatDim, _cfg.FeatScale);
 
         int[] promptTokens = _tokenizer.Encode(refText, _phonemizer);
@@ -329,33 +335,46 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         return x.Length > 0 ? (float)Math.Sqrt(sumSq / x.Length) : 0f;
     }
 
-    private static float[] TrimEdgeSilence(float[] x, int sr)
+    /// <summary>Upstream <c>remove_silence_edges</c> (pydub): drops leading and trailing silence beyond
+    /// <paramref name="keepMs"/>, measured in 10 ms chunks, where a chunk is silent below <paramref name="thresholdDb"/>
+    /// dBFS (full scale = 1.0). Upstream's internal-pause split (<c>remove_silence(only_edge=False)</c>) is not ported.</summary>
+    internal static float[] RemoveSilenceEdges(float[] x, int sr, int keepMs, float thresholdDb)
     {
-        int win = Math.Max(1, sr / 50);
-        int nWin = x.Length / win;
-        if (nWin < 4) return x;
-        float[] rms = new float[nWin];
-        float maxRms = 0f;
-        for (int wi = 0; wi < nWin; wi++)
-        {
-            double s = 0; int off = wi * win;
-            for (int i = 0; i < win; i++) { float v = x[off + i]; s += (double)v * v; }
-            rms[wi] = (float)Math.Sqrt(s / win);
-            if (rms[wi] > maxRms) maxRms = rms[wi];
-        }
-        if (maxRms < 1e-4f) return x;
-        float thresh = 0.08f * maxRms;
-        int first = 0; while (first < nWin && rms[first] < thresh) first++;
-        int last = nWin - 1; while (last > first && rms[last] < thresh) last--;
-        if (first == 0 && last == nWin - 1) return x;
-        int margin = sr / 20;
-        int start = Math.Max(0, first * win - margin);
-        int end = Math.Min(x.Length, (last + 1) * win + margin);
-        int len = end - start;
-        if (len <= 0 || len >= x.Length) return x;
-        float[] outp = new float[len];
-        Array.Copy(x, start, outp, 0, len);
+        int chunk = Math.Max(1, sr / 100);
+        int keep = keepMs * sr / 1000;
+        int from = Math.Max(0, LeadingSilence(x, 0, x.Length, chunk, thresholdDb) - keep);
+        int to = x.Length - Math.Max(0, TrailingSilence(x, from, x.Length, chunk, thresholdDb) - keep);
+        return to <= from ? [] : x[from..to];
+    }
+
+    /// <summary>Upstream <c>remove_silence</c>'s <c>trail_sil</c>: appends <paramref name="ms"/> of digital silence.</summary>
+    internal static float[] AppendSilence(float[] x, int sr, int ms)
+    {
+        float[] outp = new float[x.Length + sr * ms / 1000];
+        Array.Copy(x, outp, x.Length);
         return outp;
+    }
+
+    private static int LeadingSilence(float[] x, int from, int to, int chunk, float thresholdDb)
+    {
+        int i = from;
+        while (i < to && ChunkDbfs(x, i, Math.Min(to, i + chunk)) < thresholdDb) i += chunk;
+        return Math.Min(i, to) - from;
+    }
+
+    private static int TrailingSilence(float[] x, int from, int to, int chunk, float thresholdDb)
+    {
+        int i = to;
+        while (i > from && ChunkDbfs(x, Math.Max(from, i - chunk), i) < thresholdDb) i -= chunk;
+        return to - Math.Max(i, from);
+    }
+
+    private static double ChunkDbfs(float[] x, int start, int end)
+    {
+        double sumSq = 0.0;
+        for (int i = start; i < end; i++) sumSq += (double)x[i] * x[i];
+        double rms = Math.Sqrt(sumSq / Math.Max(1, end - start));
+        return rms == 0.0 ? double.NegativeInfinity : 20.0 * Math.Log10(rms);
     }
 
     private void ThrowIfDisposed()
