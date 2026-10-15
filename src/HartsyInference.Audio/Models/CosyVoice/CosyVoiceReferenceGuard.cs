@@ -15,7 +15,12 @@ public static class CosyVoiceReferenceGuard
         {
             return;
         }
-        double seconds = sampleCount / (double)sampleRate;
+        CheckSeconds(sampleCount / (double)sampleRate);
+    }
+
+    /// <summary>The same check on a reference length already known in seconds, for callers that read it from a header.</summary>
+    public static void CheckSeconds(double seconds)
+    {
         if (seconds > MaxSeconds)
         {
             throw new InvalidOperationException(

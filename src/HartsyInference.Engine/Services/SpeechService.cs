@@ -210,23 +210,26 @@ public sealed class SpeechService : ISpeechService
         }
     }
 
-    /// <summary>Lets the model family reject the request's reference before its job is queued. Only a family with a
-    /// validator pays for the decode, and the samples are dropped after the check so nothing is held while it waits.</summary>
+    /// <summary>Lets the model family reject the request's reference before its job is queued, from the WAV header alone so the
+    /// samples are never allocated. A clip whose length the header cannot give is left to the checks inside the job.</summary>
     internal static void ValidateReference(TtsModelDescriptor descriptor, AudioClip? reference)
     {
-        if (descriptor.ValidateReference is null || reference is null || reference.Data.Length == 0)
+        if (descriptor.ValidateReferenceSeconds is null || reference is null || reference.Data.Length == 0)
         {
             return;
         }
-        descriptor.ValidateReference(AudioClipCodec.DecodeMono(reference, ReferenceSampleRate));
+        if (WavFile.TryReadDurationSeconds(reference.Data, out double seconds))
+        {
+            descriptor.ValidateReferenceSeconds(seconds);
+        }
     }
 
-    /// <summary>Lets the model family reject the materialized reference before its weights are loaded.</summary>
+    /// <summary>The same check on a reference that is already decoded, for the streaming path.</summary>
     internal static void ValidateReference(TtsModelDescriptor descriptor, float[]? referenceMono)
     {
         if (referenceMono is { Length: > 0 })
         {
-            descriptor.ValidateReference?.Invoke(referenceMono);
+            descriptor.ValidateReferenceSeconds?.Invoke(referenceMono.Length / (double)ReferenceSampleRate);
         }
     }
 

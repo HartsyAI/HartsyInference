@@ -46,6 +46,15 @@ public sealed class CosyVoiceReferenceValidationTests
     }
 
     [Fact]
-    public void AFamilyWithoutAValidator_DoesNotDecodeTheReference() =>
+    public void AClipTheHeaderCannotSize_IsLeftToTheJob()
+    {
+        byte[] wav = AudioClipCodec.EncodeWav(new float[22 * Rate], null, Rate);
+        BitConverter.GetBytes(uint.MaxValue).CopyTo(wav, 40);
+        SpeechService.ValidateReference(TtsCatalog.Resolve("cosyvoice"), new AudioClip { Data = wav, Format = "wav" });
+        SpeechService.ValidateReference(TtsCatalog.Resolve("cosyvoice"), new AudioClip { Data = [1, 2, 3] });
+    }
+
+    [Fact]
+    public void AFamilyWithoutAValidator_DoesNotReadTheReference() =>
         SpeechService.ValidateReference(TtsCatalog.Resolve("auk"), new AudioClip { Data = [1, 2, 3] });
 }
