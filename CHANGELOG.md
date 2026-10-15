@@ -13,6 +13,7 @@ stable release will require. Dates are UTC.
 - **Fixed: ZipVoice prepares the reference as upstream does.** Pauses over one second inside the clip and silence over 100 ms at its edges are cut with pydub's rules, 200 ms of silence is appended and a quiet clip is lifted to RMS 0.1. The mel floors the log at 1e-7 and keeps lhotse's frame count, and the target length is predicted in float32 as torch does.
 - **Added: ZipVoice generates long text in upstream's chunks.** The text is split after sentence punctuation into chunks that fill about 25 s with the reference; each is sampled with its own seed, vocoded, cross-faded for 0.1 s and trimmed at the edges. Before, the whole text ran as one sample.
 - **Changed: ZipVoice fails clearly on Chinese text and on a silent reference.** Chinese needs jieba and pypinyin, which are not ported, and used to be read as English; a silent reference divided by zero.
+- **Changed: CosyVoice 2 refuses a voice reference longer than 20 s and says why.** The LM is prompted with the whole clip. From about 24 s the engine returned a few seconds of babble or only the first sentence of the text, and the official CosyVoice 2 does the same on the same clips (the prompt's speech tokens, mel and speaker embedding already match it), so this is a model limit, not an engine fault. A reference over 20 s now fails before any weights are touched with a message that names the limit and the fix; one over 15 s logs a warning. Clips of 5 to 15 s clone cleanly.
 
 ## alpha.369
 

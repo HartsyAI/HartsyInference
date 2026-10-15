@@ -64,6 +64,7 @@ public sealed class CosyVoicePipeline : IDisposable
         int? chunkCausalSize = null)
     {
         ThrowIfDisposed();
+        CosyVoiceReferenceGuard.Check(referenceAudio.Length, referenceSampleRate);
         Stopwatch sw = Stopwatch.StartNew();
 
         // Full-F32 GEMM across the whole pipeline. The Qwen speech-token LM is autoregressive, and TF32's ~1e-3
@@ -235,6 +236,7 @@ public sealed class CosyVoicePipeline : IDisposable
         ThrowIfDisposed();
         if (referenceAudio is null || referenceAudio.Length == 0)
             throw new ArgumentException("CosyVoice 2 streaming is zero-shot — provide referenceAudio.", nameof(referenceAudio));
+        CosyVoiceReferenceGuard.Check(referenceAudio.Length, referenceSampleRate);
 
         using HighPrecisionGemmScope gemmScope = new(backend, _lm.Placement);
 

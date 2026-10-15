@@ -11,6 +11,11 @@ internal sealed class TtsModelDescriptor
     /// <summary>Loads the model (downloading on first use) into a uniform runner. The context carries the primary backend plus the shard placement CosyVoice's Qwen2 LM consumes; every other TTS family ignores it.</summary>
     internal required Func<TtsLoadContext, string, CancellationToken, Task<ITtsRunner>> LoadAsync { get; init; }
 
+    /// <summary>Checks the length of the request's voice reference before the job is queued and throws when this family cannot
+    /// clone from it, so a rejected request never takes the device gate, evicts a model or pays the download and load. Null
+    /// when any length is acceptable.</summary>
+    internal Action<double>? ValidateReferenceSeconds { get; init; }
+
     /// <summary>True when the requested VOICE selects which weights to load (Piper ships one .onnx per voice), so the voice must take part in the cache key and be passed as the load variant. False for models whose single checkpoint carries every voice.</summary>
     internal bool VoiceSelectsWeights { get; init; }
 
