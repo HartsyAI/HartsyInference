@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Chatterbox;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Core.Backends;
@@ -24,6 +25,9 @@ namespace HartsyInference.Audio.Pipelines;
 /// token IDs, matching the token-IDs-in convention of the other HartsyInference audio pipelines.</para></summary>
 public sealed class ChatterboxPipeline : IDisposable
 {
+    private const int S3GenSampleRate = 24_000;
+    private const int S3TokenizerSampleRate = 16_000;
+
     private readonly ChatterboxConfig _cfg;
     private readonly ChatterboxT3 _t3;
     private readonly CosyVoiceFlow _flow;
@@ -45,6 +49,10 @@ public sealed class ChatterboxPipeline : IDisposable
         _s3 = s3;
         _voiceEncoder = voiceEncoder;
     }
+
+    /// <summary>The CAM++ encoder zero-shot mode needs: upstream S3Gen runs <c>CAMPPlus</c> in PyTorch, so a partial
+    /// context segment divides by the frames it covers, not by CosyVoice's ONNX divisor.</summary>
+    public static CamPlusSpeakerEncoder CreateSpeakerEncoder(int embedDim) => new(embedDim, onnxSegmentPooling: false);
 
     /// <summary>Synthesizes 24 kHz audio for the given T3 text token IDs.
     /// <list type="bullet">
@@ -88,12 +96,10 @@ public sealed class ChatterboxPipeline : IDisposable
             if (_speakerEncoder is null || _s3 is null)
                 throw new InvalidOperationException("Zero-shot mode requires a CamPlusSpeakerEncoder and an S3Tokenizer to be attached.");
 
-            // prepare_conditionals: the voice encoder and T3 prompt tokenization see the full-length 16 kHz
-            // reference; S3Gen's embed_ref sees the first 10 s (and derives its own 16 kHz copy from that).
-            float[] ref16Full = S3GenReference.Resample(referenceAudio, referenceSampleRate, 16_000);
-            ReadOnlySpan<float> refDec = referenceAudio[..Math.Min(referenceAudio.Length, _cfg.S3GenCondSeconds * referenceSampleRate)];
-            float[] ref24Dec = S3GenReference.Resample(refDec, referenceSampleRate, 24_000);
-            float[] ref16Dec = S3GenReference.Resample(refDec, referenceSampleRate, 16_000);
+            // prepare_conditionals: the reference is loaded at 24 kHz; the voice encoder and T3 prompt tokenization see
+            // a full-length 16 kHz copy, S3Gen's embed_ref the first 10 s at 24 kHz.
+            float[] ref24 = S3GenReference.Resample(referenceAudio, referenceSampleRate, S3GenSampleRate);
+            float[] ref16Full = ResampleFullReference(ref24);
 
             if (veEmbed is null)
             {
@@ -102,20 +108,11 @@ public sealed class ChatterboxPipeline : IDisposable
                 veEmbed = _voiceEncoder.EmbedUtterance(backend, ref16Full);
                 ownsVe = true;
             }
-            if (t3Prompt.IsEmpty)
-            {
-                int encSamples = Math.Min(ref16Full.Length, _cfg.T3CondSeconds * 16_000);
-                int[] condTokens = S3GenReference.SpeechTokens(backend, _s3, ref16Full.AsSpan(0, encSamples));
-                t3Prompt = condTokens.Length > _cfg.SpeechCondPromptLen ? condTokens[.._cfg.SpeechCondPromptLen] : condTokens;
-            }
+            if (t3Prompt.IsEmpty) t3Prompt = T3CondPromptTokens(backend, ref16Full);
 
-            promptSpeechTokens = S3GenReference.SpeechTokens(backend, _s3, ref16Dec);
-            flowSpk = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, ref16Dec);
+            (promptSpeechTokens, promptMel, flowSpk) = EmbedReference(backend,
+                ref24.AsSpan(0, Math.Min(ref24.Length, _cfg.S3GenCondSeconds * S3GenSampleRate)));
             ownsFlowSpk = true;
-            promptMel = S3GenReference.FlowMel(ref24Dec);
-            // embed_ref invariant: mel_len == 2 * token_len (50 Hz mel vs 25 Hz tokens); trim tokens to match.
-            int melFrames = (int)promptMel.Shape[2];
-            if (promptSpeechTokens.Length > melFrames / 2) promptSpeechTokens = promptSpeechTokens[..(melFrames / 2)];
             Logs.Info($"Chatterbox: reference → VE embedding + {t3Prompt.Length} T3 cond tokens + {promptSpeechTokens.Length} flow prompt tokens.");
         }
         else if (flowSpk is null)
@@ -144,6 +141,7 @@ public sealed class ChatterboxPipeline : IDisposable
         // Stage 3: HiFTNet vocoder — mel → 24 kHz waveform.
         float[] audio = _vocoder.Forward(backend, mel);
         mel.Dispose();
+        ApplyTrimFade(audio, _cfg.SampleRate);
         Logs.Debug($"Chatterbox: HiFT vocoder in {sw.Elapsed.TotalMilliseconds - flowDoneMs:F1}ms.");
 
         sw.Stop();
@@ -203,6 +201,61 @@ public sealed class ChatterboxPipeline : IDisposable
         _s3?.Dispose();
         _voiceEncoder?.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>The full-length 16 kHz reference the voice encoder and the T3 prompt tokens see. Upstream makes it with
+    /// librosa's soxr_hq, which has no port; the long-sinc stand-in (<see cref="SincResampler.ResampleSoxrHqStandIn"/>)
+    /// approximates it. These tokens are sensitive to the filter: upstream's own two resamplers disagree on a sixth of them.</summary>
+    internal static float[] ResampleFullReference(ReadOnlySpan<float> ref24) =>
+        SincResampler.ResampleSoxrHqStandIn(ref24, S3GenSampleRate, S3TokenizerSampleRate);
+
+    /// <summary>T3's cond-prompt speech tokens: the first <c>ENC_COND_LEN</c> (6 s) of the 16 kHz reference, at most
+    /// <c>speech_cond_prompt_len</c> tokens.</summary>
+    internal int[] T3CondPromptTokens(IBackend backend, ReadOnlySpan<float> ref16)
+    {
+        if (_s3 is null) throw new InvalidOperationException("T3 prompt tokens need an S3Tokenizer.");
+        int[] tokens = S3GenReference.SpeechTokens(backend, _s3, ref16[..Math.Min(ref16.Length, _cfg.T3CondSeconds * S3TokenizerSampleRate)]);
+        return tokens.Length > _cfg.SpeechCondPromptLen ? tokens[.._cfg.SpeechCondPromptLen] : tokens;
+    }
+
+    /// <summary>S3Gen <c>embed_ref</c> on a 24 kHz reference: the flow prompt mel from the 24 kHz audio, then torchaudio's
+    /// 16 kHz copy for the CAM++ x-vector and the prompt speech tokens. When the mel is not twice the token count the
+    /// tokens are cut to <c>mel_len // 2</c> and the mel is kept whole, as upstream does.</summary>
+    internal (int[] Tokens, Tensor Mel, Tensor Speaker) EmbedReference(IBackend backend, ReadOnlySpan<float> ref24)
+    {
+        if (_speakerEncoder is null || _s3 is null)
+            throw new InvalidOperationException("embed_ref needs a CamPlusSpeakerEncoder and an S3Tokenizer.");
+        float[] ref16 = SincResampler.Resample(ref24, S3GenSampleRate, S3TokenizerSampleRate);
+        Tensor mel = S3GenReference.FlowMel(ref24);
+        Tensor? speaker = null;
+        try
+        {
+            speaker = S3GenReference.SpeakerEmbedding(backend, _speakerEncoder, ref16);
+            int[] tokens = S3GenReference.SpeechTokens(backend, _s3, ref16);
+            int half = (int)mel.Shape[2] / 2;
+            return (tokens.Length > half ? tokens[..half] : tokens, mel, speaker);
+        }
+        catch
+        {
+            speaker?.Dispose();
+            mel.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Upstream S3Gen's <c>trim_fade</c> on the head of every output: <c>sr / 50</c> samples zeroed, then a raised-cosine
+    /// fade-in over the next <c>sr / 50</c> (<c>(cos(linspace(π, 0, n)) + 1) / 2</c>), which hides reference spill-over
+    /// at the prompt boundary.</summary>
+    internal static void ApplyTrimFade(Span<float> audio, int sampleRate)
+    {
+        int n = sampleRate / 50;
+        int zeroed = Math.Min(n, audio.Length);
+        audio[..zeroed].Clear();
+        for (int i = 0; i < n && n + i < audio.Length; i++)
+        {
+            double t = n > 1 ? Math.PI - Math.PI * i / (n - 1) : 0.0;
+            audio[n + i] *= (float)((Math.Cos(t) + 1.0) / 2.0);
+        }
     }
 
     /// <summary>Upstream tts.py runs <c>drop_invalid_tokens</c> (everything up to a start-of-speech token goes) and then

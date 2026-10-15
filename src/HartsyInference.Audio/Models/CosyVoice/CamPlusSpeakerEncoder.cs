@@ -45,14 +45,17 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
     private Tensor? _denseW; private Bn _denseBn = new();
 
     /// <param name="onnxSegmentPooling">How the CAM context pool averages a trailing partial 100-frame segment: true
-    /// divides by the full segment length, as the <c>campplus.onnx</c> export CosyVoice 2 deploys does; false divides
-    /// by the frames it covers, as PyTorch <c>avg_pool1d(ceil_mode=True)</c> in upstream <c>CAMPPlus</c> does
-    /// (IndexTTS-2).</param>
+    /// divides by the full segment length, as CosyVoice 2's <c>campplus.onnx</c> does under its optimizing ONNX Runtime
+    /// session; false divides by the frames it covers, as PyTorch <c>avg_pool1d(ceil_mode=True)</c> in upstream
+    /// <c>CAMPPlus</c> does (IndexTTS-2, Chatterbox).</param>
     public CamPlusSpeakerEncoder(int embedDim = 192, bool onnxSegmentPooling = true)
     {
         _embedDim = embedDim;
         _onnxSegmentPooling = onnxSegmentPooling;
     }
+
+    /// <summary>The partial-segment divisor this encoder was built with (see the constructor).</summary>
+    internal bool OnnxSegmentPooling => _onnxSegmentPooling;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {

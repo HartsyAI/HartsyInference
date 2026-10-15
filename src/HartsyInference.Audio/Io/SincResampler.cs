@@ -10,6 +10,17 @@ namespace HartsyInference.Audio.Io;
 /// by a few percent of waveform energy.</summary>
 public static class SincResampler
 {
+    /// <summary>Zero crossings and roll-off of the long sinc that stands in for librosa's default <c>soxr_hq</c>
+    /// resampler, which has no port; the roll-off sits at the centre of soxr's transition band.</summary>
+    public const int SoxrHqFilterWidth = 64;
+    public const double SoxrHqRolloff = 0.955;
+
+    /// <summary>The stand-in for <c>librosa.resample(res_type="soxr_hq")</c> (also <c>librosa.load(sr=...)</c>): a
+    /// <see cref="SoxrHqFilterWidth"/>-crossing sinc rolled off at <see cref="SoxrHqRolloff"/>. Pass-through copy when
+    /// the rates match.</summary>
+    public static float[] ResampleSoxrHqStandIn(ReadOnlySpan<float> input, int inRate, int outRate) =>
+        inRate == outRate ? input.ToArray() : Resample(input, inRate, outRate, SoxrHqFilterWidth, SoxrHqRolloff);
+
     /// <summary>The torchaudio defaults: 6 zero crossings, 0.99 roll-off.</summary>
     public const int DefaultLowpassFilterWidth = 6;
     public const double DefaultRolloff = 0.99;

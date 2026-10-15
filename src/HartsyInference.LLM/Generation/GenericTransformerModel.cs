@@ -96,8 +96,11 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
 
         // Sampling reads one row, so slicing BEFORE the head projection skips (t-1)/t of the vocab GEMM and makes
         // the projection t=1, which takes the fused quantized GEMV path instead of dequant + cuBLAS.
+        // A device-resident hidden state is sliced on the device. The host copy of the whole [t, hidden] tensor, and the
+        // stream drain it forces, happen only when the backend cannot gather on the device.
         Tensor lastHidden = new(new TensorShape(1, 1, Info.HiddenSize), DType.F32);
-        _backend.GatherRows(lastHidden, hidden, [t - 1]);
+        if (!_backend.TryGatherRowsResident(lastHidden, hidden, [t - 1]))
+            _backend.GatherRows(lastHidden, hidden, [t - 1]);
         hidden.Dispose();
         return lastHidden;
     }

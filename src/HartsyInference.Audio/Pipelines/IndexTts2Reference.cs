@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Pipelines;
@@ -21,15 +22,18 @@ public sealed class IndexTts2Reference : IDisposable
     /// <summary><c>get_emovec(spk_cond_emb)</c>: the base an external emotion clip is merged against.</summary>
     internal Tensor BaseEmoVec { get; }
 
-    /// <summary>The emotion vector with no separate emotion clip, from the speaker's clip reloaded at 16 kHz.</summary>
-    internal Tensor EmoVec { get; }
     internal float[] Audio16k { get; }
+    private readonly object _emoVecLock = new();
+    private Func<IBackend, Tensor>? _emoVecFactory;
+    private Tensor? _emoVec;
     private int _disposed;
 
+    /// <param name="emoVecFactory">Builds the default emotion vector (see <see cref="GetEmoVec"/>) on first need; the
+    /// reference owns what it returns.</param>
     internal IndexTts2Reference(IndexTts2Pipeline owner, Tensor spkCondEmb, int tSpk, Tensor refMel, int tRef, Tensor style,
-        Tensor promptCondition, Tensor speakerConditioning, Tensor baseEmoVec, Tensor emoVec, float[] audio16k)
+        Tensor promptCondition, Tensor speakerConditioning, Tensor baseEmoVec, Func<IBackend, Tensor> emoVecFactory, float[] audio16k)
     {
-        EmoVec = emoVec;
+        ArgumentNullException.ThrowIfNull(emoVecFactory);
         Owner = owner;
         SpkCondEmb = spkCondEmb;
         TSpk = tSpk;
@@ -39,11 +43,31 @@ public sealed class IndexTts2Reference : IDisposable
         PromptCondition = promptCondition;
         SpeakerConditioning = speakerConditioning;
         BaseEmoVec = baseEmoVec;
+        _emoVecFactory = emoVecFactory;
         Audio16k = audio16k;
     }
 
     /// <summary>Seconds of reference audio the clip contributed (after the 15 s cap).</summary>
     public double Seconds => Audio16k.Length / 16_000.0;
+
+    /// <summary>The emotion vector with no separate emotion clip, from the speaker's clip reloaded at 16 kHz. Built on
+    /// first call and cached, so a reference only ever used with its own emotion clip skips that w2v-bert pass. Like the
+    /// reference's other tensors, it is built on the first caller's backend and reused for every later call; a build
+    /// that throws leaves the reference as it was, and the next call retries.</summary>
+    internal Tensor GetEmoVec(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        lock (_emoVecLock)
+        {
+            ThrowIfDisposed();
+            if (_emoVec is null)
+            {
+                _emoVec = _emoVecFactory!(backend);
+                _emoVecFactory = null;
+            }
+            return _emoVec;
+        }
+    }
 
     internal void ThrowIfDisposed()
     {
@@ -52,14 +76,20 @@ public sealed class IndexTts2Reference : IDisposable
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        SpkCondEmb.Dispose();
-        RefMel.Dispose();
-        Style.Dispose();
-        PromptCondition.Dispose();
-        SpeakerConditioning.Dispose();
-        BaseEmoVec.Dispose();
-        EmoVec.Dispose();
+        // Under the lock so a build in flight, which reads BaseEmoVec, finishes before anything is freed.
+        lock (_emoVecLock)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            SpkCondEmb.Dispose();
+            RefMel.Dispose();
+            Style.Dispose();
+            PromptCondition.Dispose();
+            SpeakerConditioning.Dispose();
+            BaseEmoVec.Dispose();
+            _emoVec?.Dispose();
+            _emoVec = null;
+            _emoVecFactory = null;
+        }
         GC.SuppressFinalize(this);
     }
 }

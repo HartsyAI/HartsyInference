@@ -12,13 +12,14 @@ public static class S3GenReference
     public static float[] Resample(ReadOnlySpan<float> audio, int inRate, int outRate)
         => inRate == outRate ? audio.ToArray() : Resampler.Create(inRate, outRate).Resample(audio);
 
-    /// <summary>Tokenizes a 16 kHz reference into 25 Hz S3 speech tokens via the Whisper-style 128-bin log-mel front-end (center=True → reflect-pad n_fft/2).</summary>
+    /// <summary>Tokenizes a 16 kHz reference into 25 Hz S3 speech tokens. The front-end is Whisper's 128-bin log-mel
+    /// exactly (400-point centered STFT, last frame dropped): CosyVoice 2's frontend calls
+    /// <c>whisper.log_mel_spectrogram</c> and Chatterbox's <c>S3Tokenizer.log_mel_spectrogram</c> is the same transform.
+    /// A 512-point FFT here flipped about a fifth of the tokens of a real reference.</summary>
     public static int[] SpeechTokens(IBackend backend, S3Tokenizer s3, ReadOnlySpan<float> audio16k)
     {
-        // The pre-parity 512-point layout keeps CosyVoice 2's and Chatterbox's tokens unchanged until they get their own check.
-        MelSpectrogramExtractor s3Mel = new(MelSpectrogramExtractor.WhisperLegacyPow2Config(128));
-        float[] centered = ReflectPad(audio16k, s3Mel.Configuration.NFft / 2);
-        using Tensor feat = ChannelMajorTensor(s3Mel.Compute(centered));            // [1, 128, T]
+        MelSpectrogramExtractor s3Mel = new(MelSpectrogramExtractor.WhisperConfig(128));
+        using Tensor feat = ChannelMajorTensor(s3Mel.Compute(audio16k));            // [1, 128, T]
         return s3.Forward(backend, feat);
     }
 
@@ -37,6 +38,25 @@ public static class S3GenReference
         MelSpectrogramExtractor.Config fc = flowMelExt.Configuration;
         float[] centered = ReflectPad(audio24k, (fc.NFft - fc.HopLength) / 2);
         return ChannelMajorTensor(flowMelExt.Compute(centered));
+    }
+
+    /// <summary>CosyVoice 2's frontend alignment of the prompt: <c>token_len = min(frames / 2, tokens)</c>, then both the
+    /// tokens and the mel are cut to it (<c>frontend_zero_shot</c>), so the flow's prompt region is exactly twice the token
+    /// count. Takes ownership of <paramref name="promptMel"/> and returns the mel to use.</summary>
+    public static Tensor AlignPromptToTokens(ref int[] tokens, Tensor promptMel)
+    {
+        int frames = (int)promptMel.Shape[2];
+        int tokenLen = Math.Min(frames / 2, tokens.Length);
+        if (tokenLen < tokens.Length) tokens = tokens[..tokenLen];
+        int keep = 2 * tokenLen;
+        if (keep == frames) return promptMel;
+        int bins = (int)promptMel.Shape[1];
+        Tensor cut = new(new TensorShape(1, bins, keep), DType.F32);
+        ReadOnlySpan<float> src = promptMel.AsSpan<float>();
+        Span<float> dst = cut.AsSpan<float>();
+        for (int b = 0; b < bins; b++) src.Slice(b * frames, keep).CopyTo(dst.Slice(b * keep, keep));
+        promptMel.Dispose();
+        return cut;
     }
 
     /// <summary>Reflect padding that leaves a reference shorter than the pad width unpadded — the flow mel
