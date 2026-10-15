@@ -111,18 +111,28 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     ///
     /// <para>The sample loop is numerically validated against <c>CFM.sample</c> (generated mel corr 1.0). The
     /// produced audio is at the vocoder's native scale; F5's reference pipeline additionally rescales it to the
-    /// reference clip's loudness (out of scope here).</para></summary>
+    /// reference clip's loudness (out of scope here).</para>
+    /// <para>Text longer than upstream's <c>max_chars</c> is split as <c>chunk_text</c> splits it and joined with the
+    /// upstream cross-fade; text that fits one chunk takes the single-pass path.</para></summary>
     public float[] Generate(IBackend backend, Tensor refMel, string refText, string targetText, F5TtsOptions? options = null)
     {
         // Upstream forces ref_text to end with ". " so the joint char stream (ref_text + gen_text) aligns at the
         // boundary and len(ref_text) in the duration ratio is correct; without it the tempo drifts.
         string refNorm = NormalizeRefText(refText);
+        int refNormBytes = Encoding.UTF8.GetByteCount(refNorm);
         // Upstream infer_batch_process adds another space after a 1-byte ending; the joint stream and the ratio count it.
         if (refNorm.Length > 0 && refNorm[^1] < 0x80) refNorm += " ";
+        F5TtsOptions opts = options ?? new F5TtsOptions();
+        int[] refIds = _tokenizer.Encode(refNorm);
+        int refBytes = Encoding.UTF8.GetByteCount(refNorm);
+        IReadOnlyList<string> chunks = PlanChunks(refMel, refNormBytes, targetText, opts.Speed);
+        if (chunks.Count > 1) return VocodeChunks(backend, refMel, refIds, refBytes, chunks, opts);
+
+        // Keeps the caller's text, not chunk_text's normalized copy, so a one-chunk text matches the unchunked output.
         bool profG = EngineKnobs.F5Profile.Value;
         System.Diagnostics.Stopwatch gsw = System.Diagnostics.Stopwatch.StartNew();
-        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText),
-            Encoding.UTF8.GetByteCount(refNorm), Encoding.UTF8.GetByteCount(targetText), options);
+        Tensor mel = GenerateMel(backend, refMel, refIds, _tokenizer.Encode(targetText),
+            refBytes, Encoding.UTF8.GetByteCount(targetText), opts);
         if (profG) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] DiT sample loop: {gsw.Elapsed.TotalMilliseconds:0}ms"); gsw.Restart(); }
         // DEBUG: dump the pre-vocoder mel [1,melDim,T] to localize DiT-vs-vocoder (F5_DUMP_MEL=path).
         string? melPath = EngineKnobs.F5DumpMel.Value;
@@ -221,6 +231,42 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         float[] outp = new float[len];
         Array.Copy(x, start, outp, 0, len);
         return outp;
+    }
+
+    /// <summary>Upstream's non-empty chunks for this reference. A reference with no frames or
+    /// no text is never split.</summary>
+    private static IReadOnlyList<string> PlanChunks(Tensor refMel, int refNormBytes, string targetText, float speed)
+    {
+        int refFrames = (int)refMel.Shape[2];
+        if (refFrames == 0 || refNormBytes == 0) return [targetText];
+        MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig();
+        double refSeconds = (double)refFrames * melCfg.HopLength / melCfg.SampleRate;
+        List<string> chunks = new();
+        int maxChars = F5TextChunker.MaxChars(refNormBytes, refSeconds, speed);
+        foreach (string chunk in F5TextChunker.Chunk(targetText, maxChars))
+        {
+            if (chunk.Length > 0) chunks.Add(chunk);
+        }
+        return chunks;
+    }
+
+    /// <summary>Generates each chunk's mel and wave in order, then joins the waves with the upstream cross-fade.
+    /// Chunks run one after another: the DiT text cache and weight pinning are per-pipeline state.</summary>
+    private float[] VocodeChunks(IBackend backend, Tensor refMel, int[] refIds, int refBytes,
+        IReadOnlyList<string> chunks, F5TtsOptions opts)
+    {
+        List<float[]> waves = new(chunks.Count);
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            // Upstream seeds no chunk; seed + index keeps runs reproducible, and chunk 0 uses the single-pass seed.
+            F5TtsOptions chunkOpts = opts with { Seed = opts.Seed + (ulong)i };
+            string chunk = chunks[i];
+            Tensor mel = GenerateMel(backend, refMel, refIds, _tokenizer.Encode(chunk),
+                refBytes, Encoding.UTF8.GetByteCount(chunk), chunkOpts);
+            waves.Add(_vocos.Forward(backend, mel));
+            mel.Dispose();
+        }
+        return F5TextChunker.CrossFade(waves, F5TextChunker.CrossFadeSamples(VocosConfig.Mel24k.SampleRate));
     }
 
     private static string NormalizeRefText(string refText)
