@@ -1,3 +1,4 @@
+using System.Text;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.F5Tts;
@@ -116,9 +117,12 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // Upstream forces ref_text to end with ". " so the joint char stream (ref_text + gen_text) aligns at the
         // boundary and len(ref_text) in the duration ratio is correct; without it the tempo drifts.
         string refNorm = NormalizeRefText(refText);
+        // Upstream infer_batch_process adds another space after a 1-byte ending; the joint stream and the ratio count it.
+        if (refNorm.Length > 0 && refNorm[^1] < 0x80) refNorm += " ";
         bool profG = EngineKnobs.F5Profile.Value;
         System.Diagnostics.Stopwatch gsw = System.Diagnostics.Stopwatch.StartNew();
-        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText), options);
+        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText),
+            Encoding.UTF8.GetByteCount(refNorm), Encoding.UTF8.GetByteCount(targetText), options);
         if (profG) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] DiT sample loop: {gsw.Elapsed.TotalMilliseconds:0}ms"); gsw.Restart(); }
         // DEBUG: dump the pre-vocoder mel [1,melDim,T] to localize DiT-vs-vocoder (F5_DUMP_MEL=path).
         string? melPath = EngineKnobs.F5DumpMel.Value;
@@ -234,8 +238,28 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     public Tensor GenerateMel(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds,
         F5TtsOptions? options = null, Tensor? initialNoise = null)
     {
-        ThrowIfDisposed();
         F5TtsOptions opts = options ?? new F5TtsOptions();
+        // Token counts stand in for bytes; this is the published duration rule, kept for existing callers.
+        int tRef = (int)refMel.Shape[2];
+        int tTarget = Math.Max(1, (int)Math.Round((double)tRef * targetIds.Length / Math.Max(1, refIds.Length) / opts.Speed));
+        return GenerateMelCore(backend, refMel, refIds, targetIds, tTarget, opts, initialNoise);
+    }
+
+    /// <summary>Byte-aware form of <c>GenerateMel</c>: the duration ratio uses the UTF-8 byte counts of the texts behind the ids.</summary>
+    /// <param name="refBytes">UTF-8 bytes of the reference text behind <paramref name="refIds"/>.</param>
+    /// <param name="genBytes">UTF-8 bytes of the target text behind <paramref name="targetIds"/>.</param>
+    public Tensor GenerateMel(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds, int refBytes, int genBytes,
+        F5TtsOptions? options = null, Tensor? initialNoise = null)
+    {
+        F5TtsOptions opts = options ?? new F5TtsOptions();
+        int tTarget = Math.Max(1, F5Duration.TargetFrames((int)refMel.Shape[2], refBytes, genBytes, opts.Speed));
+        return GenerateMelCore(backend, refMel, refIds, targetIds, tTarget, opts, initialNoise);
+    }
+
+    private Tensor GenerateMelCore(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds, int tTarget,
+        F5TtsOptions opts, Tensor? initialNoise)
+    {
+        ThrowIfDisposed();
         if (EngineKnobs.F5DumpMel.Value is not null)
         {
             long rn = refMel.ElementCount; double rs = 0, rs2 = 0, rmn = double.MaxValue, rmx = double.MinValue;
@@ -249,11 +273,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         }
 
         int tRef = (int)refMel.Shape[2];
-
-        // Duration heuristic: target frames = ref_frames * len(target_text) / len(ref_text) / speed.
-        int tTarget = (int)Math.Round((double)tRef * targetIds.Length / Math.Max(1, refIds.Length) / opts.Speed);
-        if (tTarget < 1) tTarget = 1;
-        int tTotal = initialNoise is not null ? (int)initialNoise.Shape[2] : tRef + tTarget;
+        int tTotal =initialNoise is not null ? (int)initialNoise.Shape[2] : tRef + tTarget;
 
         // step_cond: [ref_mel, zeros] along time — the masked conditioning held fixed across all steps.
         Tensor condMel = ConcatRefAndZeros(refMel, tTotal - tRef, _cfg.MelDim);

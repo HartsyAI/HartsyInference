@@ -26,4 +26,14 @@ public sealed class AukDurationTests
     public void ExplicitSeconds_MustBePositiveEvenWithAReferenceClip(double seconds)
         => Assert.Throws<ArgumentOutOfRangeException>(() => AukDuration.ResolveSeconds(seconds, "a", "b", 10.0));
 
+    [Fact]
+    public void ShortZeroShotText_UsesF5ShortTextSpeed()
+        => Assert.Equal(3.584 * 4 / 65.0 / 0.3,
+            AukDuration.ResolveSeconds(null, "Yes.", "The quick brown fox jumps over the lazy dog near the river bank. ", 3.584), 9);
+
+    [Fact]
+    public void ZeroShotText_AtTenBytes_KeepsUserSpeed()
+        => Assert.Equal(3.584 * 10 / 65.0 / 0.8,
+            AukDuration.ResolveSeconds(null, "abcdefghij", "The quick brown fox jumps over the lazy dog near the river bank. ", 3.584, 0.8), 9);
+
 }
