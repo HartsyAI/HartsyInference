@@ -31,13 +31,19 @@ public sealed class SpeechService : ISpeechService
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
         TtsTarget target = ResolveTarget(spec, request.Voice);
-        return _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
+        return SynthesizeCoreAsync(target, request, cancel);
+    }
+
+    /// <summary>Materializes and validates the reference before the job is queued, so a request the model cannot clone from never takes the device gate or evicts a resident model.</summary>
+    private async Task<AudioResult> SynthesizeCoreAsync(TtsTarget target, SpeechRequest request, CancellationToken cancel)
+    {
+        (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
+        try
         {
-            (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
-            try
+            ValidateReference(target.Descriptor, referenceMono);
+            return await _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
             {
                 ct.ThrowIfCancellationRequested();
-                ValidateReference(target.Descriptor, referenceMono);
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
                     .GetOrLoadAsync(target.Key, token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token), ct)
                     .ConfigureAwait(false);
@@ -62,12 +68,12 @@ public sealed class SpeechService : ISpeechService
                         ["seed"] = request.Seed.ToString(CultureInfo.InvariantCulture),
                     },
                 };
-            }
-            finally
-            {
-                DeleteTempReference(referenceWavPath);
-            }
-        }, cancel, stageBackends: target.StageBackends);
+            }, cancel, stageBackends: target.StageBackends).ConfigureAwait(false);
+        }
+        finally
+        {
+            DeleteTempReference(referenceWavPath);
+        }
     }
 
     /// <inheritdoc/>
