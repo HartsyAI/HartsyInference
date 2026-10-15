@@ -256,16 +256,25 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         IReadOnlyList<string> chunks, F5TtsOptions opts)
     {
         List<float[]> waves = new(chunks.Count);
-        for (int i = 0; i < chunks.Count; i++)
+        int tRef = (int)refMel.Shape[2];
+        // The DiT stays pinned across all chunks, including their vocoding, and is freed once at the end.
+        backend.PreloadWeights(_dit.EnumerateWeights());
+        try
         {
-            // Upstream seeds no chunk; seed + index keeps runs reproducible, and chunk 0 uses the single-pass seed.
-            F5TtsOptions chunkOpts = opts with { Seed = opts.Seed + (ulong)i };
-            string chunk = chunks[i];
-            Tensor mel = GenerateMel(backend, refMel, refIds, _tokenizer.Encode(chunk),
-                refBytes, Encoding.UTF8.GetByteCount(chunk), chunkOpts);
-            waves.Add(_vocos.Forward(backend, mel));
-            mel.Dispose();
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                // Upstream seeds no chunk; seed + index keeps runs reproducible, and chunk 0 uses the single-pass seed.
+                F5TtsOptions chunkOpts = opts with { Seed = opts.Seed + (ulong)i };
+                string chunk = chunks[i];
+                int genBytes = Encoding.UTF8.GetByteCount(chunk);
+                int tTarget = Math.Max(1, F5Duration.TargetFrames(tRef, refBytes, genBytes, opts.Speed));
+                Tensor mel = GenerateMelCore(backend, refMel, refIds, _tokenizer.Encode(chunk), tTarget, chunkOpts,
+                    initialNoise: null, weightsHeld: true);
+                waves.Add(_vocos.Forward(backend, mel));
+                mel.Dispose();
+            }
         }
+        finally { backend.FreeWeights(_dit.EnumerateWeights()); }
         return F5TextChunker.CrossFade(waves, F5TextChunker.CrossFadeSamples(VocosConfig.Mel24k.SampleRate));
     }
 
@@ -303,7 +312,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     }
 
     private Tensor GenerateMelCore(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds, int tTarget,
-        F5TtsOptions opts, Tensor? initialNoise)
+        F5TtsOptions opts, Tensor? initialNoise, bool weightsHeld = false)
     {
         ThrowIfDisposed();
         if (EngineKnobs.F5DumpMel.Value is not null)
@@ -332,7 +341,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // Pin the DiT weights VRAM-resident for the whole sample loop (32 forwards for 16 steps × CFG). Without
         // this the CUDA path streams every weight from host each forward — the audio stack's lazy auto-promote
         // loses its headroom gate to the transient pool, so weights never promote (no-op on CPU).
-        backend.PreloadWeights(_dit.EnumerateWeights());
+        if (!weightsHeld) backend.PreloadWeights(_dit.EnumerateWeights());
         _dit.ResetTextCache();   // text embedding is cached across steps; clear any prior generation's entry
         try
         {
@@ -353,7 +362,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
             condMel.Dispose();
             return targetMel;
         }
-        finally { backend.FreeWeights(_dit.EnumerateWeights()); }
+        finally { if (!weightsHeld) backend.FreeWeights(_dit.EnumerateWeights()); }
     }
 
     private static unsafe Tensor ConcatRefAndZeros(Tensor refMel, int tTarget, int melDim)
