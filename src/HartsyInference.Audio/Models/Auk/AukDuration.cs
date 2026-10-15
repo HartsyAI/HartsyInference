@@ -14,7 +14,7 @@ public static class AukDuration
         return Math.Max(1, (int)Math.Ceiling(seconds * sampleRate / hop - 1e-3));
     }
 
-    /// <summary>Resolves seconds with this precedence, with or without a reference clip: an explicit duration always wins (over the clip length, the text-length heuristic and <paramref name="speed"/>, as upstream <c>get_gen_duration</c> does); else <c>refSeconds·bytes(genText)/bytes(refText)/</c><see cref="F5Duration.LocalSpeed"/>; else the reference length; else throws.</summary>
+    /// <summary>Resolves seconds with this precedence, with or without a reference clip: an explicit duration always wins (over the clip length, the text-length heuristic and <paramref name="speed"/>, as upstream <c>get_gen_duration</c> does); else <c>refSeconds·bytes(genText)/bytes(refText)/</c><see cref="F5Duration.LocalSpeed"/> (short generations ignore <paramref name="speed"/>, as upstream does); else the reference length; else throws.</summary>
     public static double ResolveSeconds(double? seconds, string? genText, string? refText, double? refSeconds, double speed = 1.0)
     {
         if (!(speed > 0) || !double.IsFinite(speed)) throw new ArgumentOutOfRangeException(nameof(speed), "Speed must be positive.");
