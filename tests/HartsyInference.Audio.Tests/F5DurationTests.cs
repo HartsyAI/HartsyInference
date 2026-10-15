@@ -24,4 +24,8 @@ public sealed class F5DurationTests
     [InlineData(51, 263)]
     public void TargetFrames_MatchUpstreamOnTheSweepReference(int genBytes, int expected)
         => Assert.Equal(expected, F5Duration.TargetFrames(341, 66, genBytes, 1.0));
+
+    [Fact]
+    public void TargetFrames_EmptyReferenceDividesByOne()
+        => Assert.Equal(341 * 51, F5Duration.TargetFrames(341, 0, 51, 1.0));
 }

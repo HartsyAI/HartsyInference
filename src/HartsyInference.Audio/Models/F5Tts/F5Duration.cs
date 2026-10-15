@@ -12,7 +12,7 @@ public static class F5Duration
     /// <summary>Speed divisor for a generation of <paramref name="genBytes"/> UTF-8 bytes.</summary>
     public static double LocalSpeed(int genBytes, double speed) => genBytes < ShortTextByteThreshold ? ShortTextSpeed : speed;
 
-    /// <summary>Target mel frames: reference frames scaled by the UTF-8 length ratio, truncated.</summary>
+    /// <summary>Target mel frames: reference frames scaled by the UTF-8 length ratio, truncated; an empty reference divides by one.</summary>
     public static int TargetFrames(int refFrames, int refBytes, int genBytes, double speed)
-        => (int)(refFrames / (double)refBytes * genBytes / LocalSpeed(genBytes, speed));
+        => (int)(refFrames / (double)Math.Max(1, refBytes) * genBytes / LocalSpeed(genBytes, speed));
 }
