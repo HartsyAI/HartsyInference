@@ -36,6 +36,16 @@ public static class FeatureImaging
         return dst;
     }
 
+    /// <summary>Aspect-preserving rescale to <paramref name="targetArea"/> pixels, each side snapped to a multiple of
+    /// <paramref name="multiple"/> (ComfyUI's <c>sqrt(total / (w·h))</c> scale, same banker's rounding).</summary>
+    public static (int Width, int Height) ScaleToArea(int width, int height, int targetArea, int multiple)
+    {
+        double scale = Math.Sqrt(targetArea / ((double)width * height));
+        int scaledW = Math.Max(multiple, (int)Math.Round(width * scale / multiple) * multiple);
+        int scaledH = Math.Max(multiple, (int)Math.Round(height * scale / multiple) * multiple);
+        return (scaledW, scaledH);
+    }
+
     /// <summary>Bicubic-resizes an image and collapses it to a single-channel L8 buffer via ITU-R BT.709 luminance — the right semantic when a mask arrives as a colored paint layer.</summary>
     public static byte[] ResizeGrayscale(ImageData image, int width, int height)
     {

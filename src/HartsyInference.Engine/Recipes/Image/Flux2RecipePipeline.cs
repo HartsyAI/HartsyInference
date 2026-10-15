@@ -153,7 +153,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         }
         (int[] prefix, int[] suffix) = _qwenTokenizer!.ChatTemplateIds();
         WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, _qwenTokenizer.EncodeRaw, prefix, suffix);
-        return PadToWindow(built, _qwenTokenizer.MaxLength, _qwenTokenizer.PadTokenId);
+        return built.Truncate(_qwenTokenizer.MaxLength).PadTo(_qwenTokenizer.MaxLength, _qwenTokenizer.PadTokenId);
     }
 
     /// <summary>Builds Flux.2 Dev conditioning ids: <c>&lt;s&gt;[SYSTEM_PROMPT]sys[/SYSTEM_PROMPT][INST]prompt[/INST]</c>. Special markers are spliced as raw ids (BOS=1, [SYSTEM_PROMPT]=17, [/SYSTEM_PROMPT]=18, [INST]=3, [/INST]=4) around byte-level BPE segments — special strings are pre-token boundaries in the HF reference, so segment-wise encoding is id-exact. No EOS (ComfyUI <c>has_end_token=False</c>). The byte-level map is per-byte, so encoding each emphasis span separately concatenates to the same string the whole-prompt call would have produced.</summary>
@@ -165,23 +165,6 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         prefix.Add(3);
         return WeightedTokenBuilder.Build(spans, text => tokenizer.EncodeRaw(ByteLevelCodec.Encode(text)),
             CollectionsMarshal.AsSpan(prefix), [4]);
-    }
-
-    /// <summary>Right-pads (or truncates) to the tokenizer's fixed window the way <see cref="Qwen3Tokenizer.EncodeChat"/>
-    /// does, carrying the weights with the ids — pad rows weigh 1, and a truncation that cut only the ids would shift
-    /// every emphasis off its own word.</summary>
-    private static WeightedTokenSequence PadToWindow(WeightedTokenSequence sequence, int window, int padId)
-    {
-        int[] tokens = new int[window];
-        float[] weights = Ones(window);
-        int real = Math.Min(sequence.Tokens.Length, window);
-        Array.Copy(sequence.Tokens, tokens, real);
-        Array.Copy(sequence.Weights, weights, real);
-        for (int i = real; i < window; i++)
-        {
-            tokens[i] = padId;
-        }
-        return new WeightedTokenSequence(tokens, weights) { UniformWeight = sequence.UniformWeight };
     }
 
     private static float[] Ones(int length)
