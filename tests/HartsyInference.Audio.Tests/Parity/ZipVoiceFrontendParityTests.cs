@@ -9,9 +9,9 @@ using Xunit.Abstractions;
 namespace HartsyInference.Audio.Tests.Parity;
 
 /// <summary>ZipVoice's text front end against upstream on the corpus in <c>Fixtures/zipvoice_frontend_parity.json</c> (from
-/// tools/parity/zipvoice_frontend_dump.py, which runs upstream's own EmiliaTokenizer, EnglishTextNormalizer, add_punctuation and
-/// chunk_tokens_punctuation): sentence punctuation, number and abbreviation normalization, the token chunker, and the clause
-/// structure of piper_phonemize's output from a word lexicon. The token symbols from the real espeak data need that data.</summary>
+/// tools/parity/zipvoice_frontend_dump.py, which runs upstream's own tokenizer, normalizer and chunker): sentence punctuation,
+/// number and abbreviation normalization, the token chunker, the target length, and the clause structure of piper_phonemize's
+/// output from a word lexicon. The token symbols from the real espeak data need that data.</summary>
 public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
 {
     [Fact]
@@ -21,8 +21,10 @@ public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
         {
             string input = entry.GetProperty("in").GetString()!;
             JsonElement expected = entry.GetProperty("out");
-            if (expected.ValueKind == JsonValueKind.Null) Assert.Throws<ArgumentException>(() => ZipVoiceTokenizer.AddPunctuation(input));
-            else Assert.Equal(expected.GetString(), ZipVoiceTokenizer.AddPunctuation(input));
+            if (expected.ValueKind == JsonValueKind.Null)
+                Assert.Throws<ArgumentException>(() => ZipVoiceTokenizer.AddPunctuation(input));
+            else
+                Assert.Equal(expected.GetString(), ZipVoiceTokenizer.AddPunctuation(input));
         }
     }
 
@@ -52,11 +54,15 @@ public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
         foreach (JsonElement entry in ZipVoiceFixture.Root.GetProperty("chunks").EnumerateArray())
         {
             total++;
-            List<string> tokens = Symbols(lines[entry.GetProperty("line").GetInt32()].GetProperty("tokens").GetString()!);
+            int line = entry.GetProperty("line").GetInt32();
             int budget = entry.GetProperty("max").GetInt32();
+            List<string> tokens = Symbols(lines[line].GetProperty("tokens").GetString()!);
             string[] want = entry.GetProperty("chunks").EnumerateArray().Select(e => e.GetString()!).ToArray();
+
             string[] got = ZipVoiceTextChunker.Chunk(tokens, budget).Select(c => string.Concat(c)).ToArray();
-            if (!got.SequenceEqual(want)) misses.AppendLine($"line {entry.GetProperty("line").GetInt32()} budget {budget}: want {want.Length} chunks, got {got.Length}");
+
+            if (!got.SequenceEqual(want))
+                misses.AppendLine($"line {line} budget {budget}: want {want.Length} chunks, got {got.Length}");
         }
         Assert.True(total >= 100, $"fixture has only {total} chunk cases");
         Assert.True(misses.Length == 0, misses.ToString());
@@ -69,8 +75,9 @@ public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
         foreach (JsonElement entry in ZipVoiceFixture.Root.GetProperty("durations").EnumerateArray())
         {
             total++;
-            int got = ZipVoiceModel.PredictTargetFrames(entry.GetProperty("frames").GetInt32(), entry.GetProperty("prompt_tokens").GetInt32(),
-                entry.GetProperty("tokens").GetInt32(), (float)entry.GetProperty("speed").GetDouble());
+            int got = ZipVoiceModel.PredictTargetFrames(entry.GetProperty("frames").GetInt32(),
+                entry.GetProperty("prompt_tokens").GetInt32(), entry.GetProperty("tokens").GetInt32(),
+                (float)entry.GetProperty("speed").GetDouble());
             Assert.Equal(entry.GetProperty("target").GetInt32(), got);
         }
         Assert.True(total >= 400, $"fixture has only {total} duration cases");
@@ -101,7 +108,8 @@ public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
     [Trait("Category", "Integration")]
     public void Tokens_AgreeWithUpstreamOnEspeakData()
     {
-        string phontab = EspeakPhonemizer.TryFindDataDirectory(out string? dataDir) ? Path.Combine(dataDir, "phontab") : "espeak-ng-data";
+        string phontab = EspeakPhonemizer.TryFindDataDirectory(out string? dataDir)
+            ? Path.Combine(dataDir, "phontab") : "espeak-ng-data";
         if (!RealWeightGate.Require(output.WriteLine, phontab)) return;
 
         EspeakPhonemizer phonemizer = EspeakPhonemizer.FromDataDirectory(dataDir!, ZipVoiceTokenizer.EspeakLanguage);
@@ -124,7 +132,7 @@ public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
         output.WriteLine($"{exact}/{lines} lines exact, {matched}/{words} = {rate:P1} of words agree\n{misses}");
         Assert.True(lines >= 130, $"fixture has only {lines} lines");
         // The cached espeak data and port read some words differently from piper's build (acronyms, symbols, a few
-        // vowels); a wrong voice, as the British one, falls to about 58%.
+        // vowels); the British voice, which the pipeline once loaded, agrees on about 58%.
         Assert.True(rate >= 0.92, $"{matched}/{words} = {rate:P1} of words agree\n{misses}");
     }
 
@@ -132,7 +140,8 @@ public sealed class ZipVoiceFrontendParityTests(ITestOutputHelper output)
     {
         char[] separators = [' ', '.', ',', ';', ':', '!', '?'];
         Dictionary<string, int> remaining = new();
-        foreach (string word in got.Split(separators, StringSplitOptions.RemoveEmptyEntries)) remaining[word] = remaining.GetValueOrDefault(word) + 1;
+        foreach (string word in got.Split(separators, StringSplitOptions.RemoveEmptyEntries))
+            remaining[word] = remaining.GetValueOrDefault(word) + 1;
         int total = 0, agreed = 0;
         foreach (string word in want.Split(separators, StringSplitOptions.RemoveEmptyEntries))
         {

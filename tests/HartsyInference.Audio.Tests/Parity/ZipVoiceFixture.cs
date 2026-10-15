@@ -4,7 +4,7 @@ using HartsyInference.Audio.Phonemizer;
 
 namespace HartsyInference.Audio.Tests.Parity;
 
-/// <summary>The upstream dump in <c>Fixtures/zipvoice_frontend_parity.json</c> and the stand-ins the ZipVoice frontend tests share.</summary>
+/// <summary>The upstream dump in <c>Fixtures/zipvoice_frontend_parity.json</c> and the stand-ins the ZipVoice tests share.</summary>
 internal static class ZipVoiceFixture
 {
     private static readonly Lazy<JsonDocument> Document = new(() => JsonDocument.Parse(File.ReadAllText(
@@ -12,7 +12,7 @@ internal static class ZipVoiceFixture
 
     internal static JsonElement Root => Document.Value.RootElement;
 
-    /// <summary>A tokenizer whose vocabulary holds only the pad symbol; <see cref="ZipVoiceTokenizer.Tokenize"/> needs no more.</summary>
+    /// <summary>A tokenizer whose vocabulary holds only the pad symbol, which is all <c>Tokenize</c> needs.</summary>
     internal static ZipVoiceTokenizer PadOnlyTokenizer()
     {
         string path = Path.Combine(Path.GetTempPath(), $"zipvoice_tokens_{Guid.NewGuid():N}.txt");
@@ -27,7 +27,7 @@ internal static class ZipVoiceFixture
         }
     }
 
-    /// <summary>Phonemizes each word from a lexicon and joins them with spaces, so only the clause structure is under test.</summary>
+    /// <summary>Phonemizes each word from a lexicon and joins them with spaces, so only the clause structure is tested.</summary>
     internal sealed class LexiconPhonemizer(IReadOnlyDictionary<string, string> lexicon) : IPhonemizer
     {
         public string PhonemizeToIpa(string text, string language)
@@ -41,8 +41,10 @@ internal static class ZipVoiceFixture
             return string.Join(' ', words);
         }
 
-        public IReadOnlyList<string> PhonemizeToMnemonics(string text, string language) => throw new NotSupportedException();
+        public IReadOnlyList<string> PhonemizeToMnemonics(string text, string language) =>
+            throw new NotSupportedException();
 
-        public int[] PhonemizeToIds(string text, string language, PhonemeIdMap idMap) => throw new NotSupportedException();
+        public int[] PhonemizeToIds(string text, string language, PhonemeIdMap idMap) =>
+            throw new NotSupportedException();
     }
 }

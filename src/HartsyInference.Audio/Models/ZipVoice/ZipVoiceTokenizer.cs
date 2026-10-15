@@ -43,7 +43,7 @@ public sealed partial class ZipVoiceTokenizer
         return new ZipVoiceTokenizer(map);
     }
 
-    /// <summary>Upstream <c>map_punctuations</c>: full-width punctuation to ASCII, curly quotes to straight, ellipsis variants to <c>…</c>.</summary>
+    /// <summary>Upstream <c>map_punctuations</c>: full-width marks to ASCII, curly quotes to straight, ellipses to <c>…</c>.</summary>
     public static string NormalizePunctuation(string text) => text
         .Replace('，', ',').Replace('。', '.').Replace('！', '!').Replace('？', '?')
         .Replace('；', ';').Replace('：', ':').Replace('、', ',')
@@ -76,13 +76,13 @@ public sealed partial class ZipVoiceTokenizer
                     tokens.Add(segment);
                     break;
                 case SegmentKind.Chinese:
-                    throw new NotSupportedException("ZipVoice's Chinese front end needs jieba and pypinyin and is not ported; use English text.");
+                    throw new NotSupportedException("ZipVoice's Chinese front end needs jieba and pypinyin; use English text.");
             }
         }
         return tokens;
     }
 
-    /// <summary>Token symbols to ids; a symbol missing from the vocabulary is skipped, as upstream's <c>tokens_to_token_ids</c> does.</summary>
+    /// <summary>Token symbols to ids; a symbol missing from the vocabulary is skipped, as upstream does.</summary>
     public int[] ToIds(IEnumerable<string> tokens)
     {
         List<int> ids = new();

@@ -101,20 +101,9 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         // Upstream VocosFbank: log(clamp(mel, 1e-7)). The F5 config's 1e-5 floor is F5's, not ZipVoice's.
         MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig() with { LogFloor = 1e-7f };
         int sr = melCfg.SampleRate;
-        float[] prompt = sampleRate == sr ? refAudio.ToArray() : Resampler.Create(sampleRate, sr).Resample(refAudio);
-        prompt = PydubSilence.RemoveSilence(prompt, sr, onlyEdge: false, PromptTrailSilenceMs);
-
-        float promptRms = Rms(prompt);
-        if (promptRms <= MinimumPromptRms) throw new InvalidOperationException("ZipVoice: the reference audio is silent.");
+        (float[] prompt, float promptRms) = PreparePrompt(refAudio, sampleRate, sr);
         bool quietPrompt = promptRms < TargetRms;
-        if (quietPrompt)
-        {
-            float gain = TargetRms / promptRms;
-            for (int i = 0; i < prompt.Length; i++) prompt[i] *= gain;
-        }
-        double promptSeconds = prompt.Length / (double)sr;
-        if (promptSeconds > 20) Logs.Warning($"[ZipVoice] The reference is {promptSeconds:0.#} s; a clip of a few seconds works best.");
-        else if (promptSeconds > 10) Logs.Warning($"[ZipVoice] The reference is {promptSeconds:0.#} s; long references slow generation and can lower quality.");
+        WarnIfLong(prompt.Length / (double)sr);
 
         float[,] melData = new MelSpectrogramExtractor(melCfg).Compute(prompt);   // [nMels, T], natural-log
         // Upstream cuts the mel to lhotse's (N + hop/2) / hop frames, one fewer than the centred STFT gives for most lengths.
@@ -128,6 +117,7 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
             throw new InvalidOperationException("ZipVoice: reference or target text phonemized to zero tokens.");
 
         // Upstream budgets each chunk so prompt plus speech fill about 25 s, counting symbols before the vocabulary lookup.
+        double promptSeconds = prompt.Length / (double)sr;
         double tokenSeconds = promptSeconds / (promptSymbols.Count * opts.Speed);
         int maxTokens = (int)((ChunkWindowSeconds - promptSeconds) / tokenSeconds);
         List<List<string>> chunks = ZipVoiceTextChunker.Chunk(targetSymbols, maxTokens);
@@ -164,6 +154,27 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         }
     }
 
+    // Upstream order: strip long and edge silences and add the trailing silence, then lift a quiet prompt to the target RMS.
+    private static (float[] Audio, float Rms) PreparePrompt(ReadOnlySpan<float> refAudio, int sampleRate, int targetRate)
+    {
+        float[] audio = sampleRate == targetRate ? refAudio.ToArray() : Resampler.Create(sampleRate, targetRate).Resample(refAudio);
+        audio = PydubSilence.RemoveSilence(audio, targetRate, onlyEdge: false, PromptTrailSilenceMs);
+        float rms = Rms(audio);
+        if (rms <= MinimumPromptRms) throw new InvalidOperationException("ZipVoice: the reference audio is silent.");
+        if (rms < TargetRms)
+        {
+            float gain = TargetRms / rms;
+            for (int i = 0; i < audio.Length; i++) audio[i] *= gain;
+        }
+        return (audio, rms);
+    }
+
+    private static void WarnIfLong(double seconds)
+    {
+        if (seconds > 20) Logs.Warning($"[ZipVoice] The reference is {seconds:0.#} s; a clip of a few seconds works best.");
+        else if (seconds > 10) Logs.Warning($"[ZipVoice] The reference is {seconds:0.#} s; long ones slow generation and can lower quality.");
+    }
+
     /// <summary>Samples one chunk's mel, <c>[1, featDim, frames]</c>, given the shared prompt.</summary>
     private Tensor SampleMel(IBackend backend, Tensor promptMel, int tRef, int[] promptIds, int[] chunkIds,
         ZipVoiceOptions opts, ulong seed)
@@ -175,7 +186,8 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
         int totalFrames = tRef + targetFrames;
 
         using Tensor textHidden = _model.EmbedAndEncodeText(backend, joint, _tokenizer.PadId);
-        using Tensor textCondition = _model.GatherTextCondition(textHidden, ZipVoiceModel.BuildFrameToTokenIndex(joint.Length, totalFrames));
+        int[] frameToToken = ZipVoiceModel.BuildFrameToTokenIndex(joint.Length, totalFrames);
+        using Tensor textCondition = _model.GatherTextCondition(textHidden, frameToToken);
         using Tensor speechCondition = BuildSpeechCondition(promptMel, tRef, totalFrames, _cfg.FeatDim);
         using Tensor x1 = RunEulerSampling(backend, textCondition, speechCondition, totalFrames, opts, seed);
         using Tensor generated = SliceFrames(x1, tRef, targetFrames, _cfg.FeatDim, 1.0f / _cfg.FeatScale);

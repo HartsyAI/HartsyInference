@@ -5,10 +5,9 @@ using Xunit;
 
 namespace HartsyInference.Audio.Tests.Parity;
 
-/// <summary>ZipVoice's audio post-processing against upstream (fixture from tools/parity/zipvoice_frontend_dump.py): the 0.1 s
-/// cross-fade of <c>cross_fade_concat</c> and pydub's <c>remove_silence</c> on synthetic signals built from the same specs,
-/// where a spec is blocks of 10 ms (S silent, L loud, T and U just under and over the -50 dBFS threshold, V a mix whose
-/// float RMS is over it and integer RMS under it) or raw loud samples (R).</summary>
+/// <summary>ZipVoice's cross-fade and pydub <c>remove_silence</c> against upstream (fixture from
+/// tools/parity/zipvoice_frontend_dump.py). A silence spec is blocks of 10 ms (S silent, L loud, T and U just under and over
+/// the -50 dBFS threshold, V a mix whose float RMS is over it and integer RMS under it) or raw loud samples (R).</summary>
 public sealed class ZipVoiceAudioParityTests
 {
     private const int SampleRate = 24000;
@@ -19,15 +18,17 @@ public sealed class ZipVoiceAudioParityTests
     {
         foreach (JsonElement entry in ZipVoiceFixture.Root.GetProperty("crossfade").EnumerateArray())
         {
-            int sr = entry.GetProperty("sr").GetInt32();
-            List<float[]> waves = new();
-            int index = 0;
-            foreach (JsonElement length in entry.GetProperty("lens").EnumerateArray()) waves.Add(Wave(index++, length.GetInt32()));
-            float[] got = WaveCrossFade.Join(waves, (int)(entry.GetProperty("fade").GetDouble() * sr));
-            float[] want = entry.GetProperty("out").EnumerateArray().Select(e => (float)e.GetDouble()).ToArray();
             string name = entry.GetProperty("name").GetString()!;
+            List<float[]> waves = new();
+            foreach (JsonElement length in entry.GetProperty("lens").EnumerateArray()) waves.Add(Wave(waves.Count, length.GetInt32()));
+            int fadeSamples = (int)(entry.GetProperty("fade").GetDouble() * entry.GetProperty("sr").GetInt32());
+
+            float[] got = WaveCrossFade.Join(waves, fadeSamples);
+
+            float[] want = entry.GetProperty("out").EnumerateArray().Select(e => (float)e.GetDouble()).ToArray();
             Assert.True(got.Length == want.Length, $"{name}: want {want.Length} samples, got {got.Length}");
-            for (int i = 0; i < want.Length; i++) Assert.True(Math.Abs(got[i] - want[i]) < 1e-6f, $"{name}[{i}]: want {want[i]}, got {got[i]}");
+            for (int i = 0; i < want.Length; i++)
+                Assert.True(Math.Abs(got[i] - want[i]) < 1e-6f, $"{name}[{i}]: want {want[i]}, got {got[i]}");
         }
     }
 
@@ -39,14 +40,14 @@ public sealed class ZipVoiceAudioParityTests
             string name = entry.GetProperty("name").GetString()!;
             short[] pcm = Signal(entry.GetProperty("spec").GetString()!);
             Assert.Equal(entry.GetProperty("in_len").GetInt32(), pcm.Length);
-            float[] input = pcm.Select(s => s / 32768f).ToArray();
+            bool onlyEdge = entry.GetProperty("only_edge").GetBoolean();
 
-            float[] got = PydubSilence.RemoveSilence(input, SampleRate, entry.GetProperty("only_edge").GetBoolean(), entry.GetProperty("trail").GetInt32());
+            float[] got = PydubSilence.RemoveSilence(pcm.Select(s => s / 32768f).ToArray(), SampleRate, onlyEdge,
+                entry.GetProperty("trail").GetInt32());
 
-            Assert.True(got.Length == entry.GetProperty("out_len").GetInt32(), $"{name}: want {entry.GetProperty("out_len").GetInt32()} samples, got {got.Length}");
-            byte[] bytes = new byte[got.Length * 2];
-            for (int i = 0; i < got.Length; i++) BitConverter.TryWriteBytes(bytes.AsSpan(i * 2), (short)MathF.Round(got[i] * 32768f));
-            Assert.Equal(entry.GetProperty("sha1").GetString(), Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant());
+            int wantLength = entry.GetProperty("out_len").GetInt32();
+            Assert.True(got.Length == wantLength, $"{name}: want {wantLength} samples, got {got.Length}");
+            Assert.Equal(entry.GetProperty("sha1").GetString(), Sha1(got));
         }
     }
 
@@ -58,6 +59,13 @@ public sealed class ZipVoiceAudioParityTests
     [InlineData(1000, 23998)]
     public void TrailingSilence_IsPydubsElevenKilohertzSilenceResampledTo24k(int ms, int expected) =>
         Assert.Equal(expected, PydubSilence.ResampledSilenceFrames(ms, SampleRate));
+
+    private static string Sha1(float[] samples)
+    {
+        byte[] bytes = new byte[samples.Length * 2];
+        for (int i = 0; i < samples.Length; i++) BitConverter.TryWriteBytes(bytes.AsSpan(i * 2), (short)MathF.Round(samples[i] * 32768f));
+        return Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+    }
 
     private static float[] Wave(int index, int length)
     {

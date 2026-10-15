@@ -83,7 +83,7 @@ internal static partial class ZipVoiceEnglishNormalizer
             if (year == 2000) return " two thousand ";
             if (year > 2000 && year < 2010) return $" two thousand {Words(year % 100)} ";
             if (year % 100 == 0) return $" {Words(year / 100)} hundred ";
-            string grouped = InflectNumberWords.NumberToWords(year.ToString(CultureInfo.InvariantCulture), group: 2, andword: "", zero: "oh");
+            string grouped = InflectNumberWords.NumberToWords(year.ToString(CultureInfo.InvariantCulture), 2, "", "oh");
             return " " + grouped.Replace(", ", " ", StringComparison.Ordinal) + " ";
         }
         return " " + InflectNumberWords.NumberToWords(value.ToString(CultureInfo.InvariantCulture), andword: "") + " ";
