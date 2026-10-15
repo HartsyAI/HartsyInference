@@ -97,6 +97,7 @@ public sealed class ZipVoicePipeline : IAudioPipeline, IDisposable
     {
         ThrowIfDisposed();
         ZipVoiceOptions opts = options ?? new ZipVoiceOptions();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(opts.Speed);
 
         // Upstream VocosFbank: log(clamp(mel, 1e-7)). The F5 config's 1e-5 floor is F5's, not ZipVoice's.
         MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig() with { LogFloor = 1e-7f };
