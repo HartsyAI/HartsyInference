@@ -32,10 +32,14 @@ public sealed class ToolSchemaTests
     [InlineData("""{"items":{"type":"string"}}""", false)]
     [InlineData("""{"$ref":"#/$defs/Name"}""", true)]
     [InlineData("""{"$ref":"#/$defs/Loop"}""", false)]
+    [InlineData("""{"$ref":"#/$defs/Pair/1"}""", true)]
+    [InlineData("""{"$ref":"#/$defs/Pair/0"}""", false)]
+    [InlineData("""{"$ref":"#/$defs/Pair/2"}""", false)]
     [InlineData("""{"$ref":"https://example.com/remote"}""", false)]
     public void MayBeString_FollowsLlamaCpp(string schema, bool expected)
     {
-        using JsonDocument root = JsonDocument.Parse("""{"$defs":{"Name":{"type":"string"},"Loop":{"$ref":"#/$defs/Loop"}}}""");
+        using JsonDocument root = JsonDocument.Parse(
+            """{"$defs":{"Name":{"type":"string"},"Loop":{"$ref":"#/$defs/Loop"},"Pair":[{"type":"integer"},{"type":"string"}]}}""");
         using JsonDocument node = JsonDocument.Parse(schema);
 
         Assert.Equal(expected, ToolSchema.MayBeString(node.RootElement, root.RootElement));

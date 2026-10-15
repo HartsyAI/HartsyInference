@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace HartsyInference.LLM.ChatTemplates;
@@ -136,7 +137,8 @@ public static class ToolSchema
         return constrained ? Admits.String : Admits.NoString;
     }
 
-    /// <summary>Follows a local JSON pointer (<c>#/$defs/Name</c>) from <paramref name="root"/>; remote references do not resolve.</summary>
+    /// <summary>Follows a local JSON pointer (<c>#/$defs/Name</c>, <c>#/anyOf/1</c>) from <paramref name="root"/> through object keys and array
+    /// indices, as llama.cpp's <c>resolve_ref</c> does; remote references do not resolve.</summary>
     private static bool TryResolve(JsonElement root, string reference, out JsonElement target)
     {
         target = root;
@@ -144,7 +146,19 @@ public static class ToolSchema
         foreach (string raw in reference[1..].Split('/', StringSplitOptions.RemoveEmptyEntries))
         {
             string segment = raw.Replace("~1", "/", StringComparison.Ordinal).Replace("~0", "~", StringComparison.Ordinal);
-            if (target.ValueKind != JsonValueKind.Object || !target.TryGetProperty(segment, out target)) return false;
+            if (target.ValueKind == JsonValueKind.Object && target.TryGetProperty(segment, out JsonElement child))
+            {
+                target = child;
+            }
+            else if (target.ValueKind == JsonValueKind.Array && int.TryParse(segment, NumberStyles.None, CultureInfo.InvariantCulture, out int index)
+                && index < target.GetArrayLength())
+            {
+                target = target[index];
+            }
+            else
+            {
+                return false;
+            }
         }
         return true;
     }
