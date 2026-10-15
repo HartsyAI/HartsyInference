@@ -237,7 +237,13 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     /// injects a deterministic <c>[1, mel_dim, T_total]</c> noise tensor (else a seeded Gaussian is built).</summary>
     public Tensor GenerateMel(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds,
         F5TtsOptions? options = null, Tensor? initialNoise = null)
-        => GenerateMel(backend, refMel, refIds, targetIds, refIds.Length, targetIds.Length, options, initialNoise);
+    {
+        F5TtsOptions opts = options ?? new F5TtsOptions();
+        // Token counts stand in for bytes; this is the published duration rule, kept for existing callers.
+        int tRef = (int)refMel.Shape[2];
+        int tTarget = Math.Max(1, (int)Math.Round((double)tRef * targetIds.Length / Math.Max(1, refIds.Length) / opts.Speed));
+        return GenerateMelCore(backend, refMel, refIds, targetIds, tTarget, opts, initialNoise);
+    }
 
     /// <summary>Byte-aware form of <c>GenerateMel</c>: the duration ratio uses the UTF-8 byte counts of the texts behind the ids.</summary>
     /// <param name="refBytes">UTF-8 bytes of the reference text behind <paramref name="refIds"/>.</param>
@@ -245,8 +251,15 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     public Tensor GenerateMel(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds, int refBytes, int genBytes,
         F5TtsOptions? options = null, Tensor? initialNoise = null)
     {
-        ThrowIfDisposed();
         F5TtsOptions opts = options ?? new F5TtsOptions();
+        int tTarget = Math.Max(1, F5Duration.TargetFrames((int)refMel.Shape[2], refBytes, genBytes, opts.Speed));
+        return GenerateMelCore(backend, refMel, refIds, targetIds, tTarget, opts, initialNoise);
+    }
+
+    private Tensor GenerateMelCore(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds, int tTarget,
+        F5TtsOptions opts, Tensor? initialNoise)
+    {
+        ThrowIfDisposed();
         if (EngineKnobs.F5DumpMel.Value is not null)
         {
             long rn = refMel.ElementCount; double rs = 0, rs2 = 0, rmn = double.MaxValue, rmx = double.MinValue;
@@ -260,9 +273,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         }
 
         int tRef = (int)refMel.Shape[2];
-
-        int tTarget = Math.Max(1, F5Duration.TargetFrames(tRef, refBytes, genBytes, opts.Speed));
-        int tTotal = initialNoise is not null ? (int)initialNoise.Shape[2] : tRef + tTarget;
+        int tTotal =initialNoise is not null ? (int)initialNoise.Shape[2] : tRef + tTarget;
 
         // step_cond: [ref_mel, zeros] along time — the masked conditioning held fixed across all steps.
         Tensor condMel = ConcatRefAndZeros(refMel, tTotal - tRef, _cfg.MelDim);
