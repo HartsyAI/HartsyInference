@@ -26,7 +26,7 @@ internal static partial class ZipVoiceEnglishNormalizer
         text = Fraction().Replace(text, ExpandFraction);
         text = DecimalNumber().Replace(text, m => m.Groups[1].Value.Replace(".", " point ", StringComparison.Ordinal));
         text = Percent().Replace(text, m => m.Groups[1].Value.Replace("%", " percent ", StringComparison.Ordinal));
-        text = Ordinal().Replace(text, m => " " + InflectNumberWords.NumberToWords(m.Value) + " ");
+        text = Ordinal().Replace(text, m => " " + SpellOut(m.Value) + " ");
         return Number().Replace(text, ExpandNumber);
     }
 
@@ -67,10 +67,10 @@ internal static partial class ZipVoiceEnglishNormalizer
         BigInteger denominator = BigInteger.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
         if (numerator.IsOne && denominator == 2) return " one half ";
         if (numerator.IsOne && denominator == 4) return " one quarter ";
-        string numeratorWords = InflectNumberWords.NumberToWords(numerator.ToString(CultureInfo.InvariantCulture));
+        string numeratorWords = SpellOut(numerator.ToString(CultureInfo.InvariantCulture));
         if (denominator == 2) return $" {numeratorWords} halves ";
         if (denominator == 4) return $" {numeratorWords} quarters ";
-        string denominatorWords = InflectNumberWords.NumberToWords(denominator.ToString(CultureInfo.InvariantCulture));
+        string denominatorWords = SpellOut(denominator.ToString(CultureInfo.InvariantCulture));
         return $" {numeratorWords} {InflectNumberWords.Ordinal(denominatorWords)} ";
     }
 
@@ -83,13 +83,26 @@ internal static partial class ZipVoiceEnglishNormalizer
             if (year == 2000) return " two thousand ";
             if (year > 2000 && year < 2010) return $" two thousand {Words(year % 100)} ";
             if (year % 100 == 0) return $" {Words(year / 100)} hundred ";
-            string grouped = InflectNumberWords.NumberToWords(year.ToString(CultureInfo.InvariantCulture), 2, "", "oh");
+            string grouped = SpellOut(year.ToString(CultureInfo.InvariantCulture), 2, "", "oh");
             return " " + grouped.Replace(", ", " ", StringComparison.Ordinal) + " ";
         }
-        return " " + InflectNumberWords.NumberToWords(value.ToString(CultureInfo.InvariantCulture), andword: "") + " ";
+        return " " + SpellOut(value.ToString(CultureInfo.InvariantCulture), andword: "") + " ";
     }
 
-    private static string Words(int number) => InflectNumberWords.NumberToWords(number.ToString(CultureInfo.InvariantCulture));
+    private static string Words(int number) => SpellOut(number.ToString(CultureInfo.InvariantCulture));
+
+    // inflect raises past the decillions and upstream then loses the whole text; the digits are kept here.
+    private static string SpellOut(string digits, int group = 0, string andword = "and", string zero = "zero")
+    {
+        try
+        {
+            return InflectNumberWords.NumberToWords(digits, group, andword, zero);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return digits;
+        }
+    }
 
     [GeneratedRegex(@"([0-9][0-9,]+[0-9])")]
     private static partial Regex CommaNumber();

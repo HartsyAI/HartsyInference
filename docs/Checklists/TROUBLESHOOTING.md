@@ -980,6 +980,19 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   look into the next word, entries depend on position (`$atend`), the previous word (`$noun`/`$verb`) or the
   following words (multi-word entries), and `$u+` words are stressed only at the end of a clause.
   `EspeakSentenceParityTests` covers this.
+- **espeak voice must be the model's own:** `EspeakPhonemizer.FromCache("en")` is the British voice, and the
+  language argument of `PhonemizeToIpa` is ignored once the phonemizer is built. ZipVoice loaded `en` and fed the
+  model phonemes it never trained on (word agreement with upstream's tokens 58%, 94% with `en-us`); Piper had the
+  same bug. Compare tokens through the pipeline's own phonemizer, not one a test builds.
+- **piper_phonemize is clause-by-clause, not text-by-text:** each clause is phonemized alone and followed by its
+  mark (`. ? !` bare, `, ; :` plus a space), clauses join with nothing, a period before a lowercase word is an
+  abbreviation dot, an ellipsis ends a clause with no mark and a spaced dash becomes `;`. Regex-flattening the
+  engine's punctuation-preserving output only matches on plain prose; `EspeakClauseReader` follows the rules.
+  Symbols are single code points after NFD, so grapheme-cluster splitting drops `n̩` and `ɑ̃`.
+- **pydub silence rules (ZipVoice, upstream F5):** RMS is `audioop.rms` on 16-bit samples, truncated to an integer
+  (so a chunk at 103.8 is quiet), positions are whole milliseconds with `len()` rounded half to even (a slice can
+  cut up to 12 samples off the tail or pad zeros), and `AudioSegment.silent` is built at 11.025 kHz then resampled,
+  which drops the last two frames (200 ms becomes 4,798 samples at 24 kHz). `PydubSilence` reproduces all of it.
 - **F5-TTS:** ConvNeXt filler-tail masking; ×1000 timestep sinusoid scale; erf-GELU stem vs tanh-GELU FFN.
 - **Fish-Speech:** the fast depth-LM must take the **PRE-norm** slow hidden (`norm_fastlayer_input=False`).
 - **espeak `MatchRule` RULE_PRE OOB:** indexed past the per-word buffer start on words like "Americans" —

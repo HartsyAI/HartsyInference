@@ -102,6 +102,7 @@ public sealed partial class ZipVoiceTokenizer
         Encode(text, (IPhonemizer)phonemizer, language);
 
     // piper_phonemize: each clause is decomposed (NFD), a mark follows it, and `, ; :` add a space; clauses join with nothing.
+    // NFD does nothing under invariant globalization (SwarmUI's), which only matters for precomposed letters en-us never emits.
     private static List<string> Symbols(IPhonemizer phonemizer, string text, string language)
     {
         StringBuilder phonemes = new();
@@ -120,8 +121,8 @@ public sealed partial class ZipVoiceTokenizer
         return symbols;
     }
 
-    // Upstream get_segment + split_segments: a letter starts an English run that digits, spaces and punctuation join;
-    // <...> spans are pinyin, which a bracketed tag or an English run separates.
+    // Upstream get_segment + split_segments: ASCII letters make English runs that digits, spaces and punctuation join;
+    // a <...> span is pinyin (skipped, it needs pypinyin) and a [...] span is a single tag token.
     private static List<(string Text, SegmentKind Kind)> Segment(string text)
     {
         List<(string, SegmentKind)> runs = new();
@@ -167,7 +168,7 @@ public sealed partial class ZipVoiceTokenizer
 
     private static SegmentKind TypeOf(string part)
     {
-        if (part.Length == 1 && part[0] is >= '一' and <= '龥') return SegmentKind.Chinese;
+        if (part.Length == 1 && part[0] is >= '\u4e00' and <= '\u9fa5') return SegmentKind.Chinese;
         if (part[0] == '<' && part[^1] == '>') return SegmentKind.Chinese;
         return part.Length == 1 && part[0] is ((>= 'A' and <= 'Z') or (>= 'a' and <= 'z')) ? SegmentKind.English : SegmentKind.Other;
     }
@@ -176,7 +177,7 @@ public sealed partial class ZipVoiceTokenizer
     {
         foreach (char c in text)
         {
-            if (c is >= '一' and <= '龥') return true;
+            if (c is >= '\u4e00' and <= '\u9fa5') return true;
         }
         return false;
     }
