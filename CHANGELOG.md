@@ -10,6 +10,7 @@ stable release will require. Dates are UTC.
 
 - **Fixed: F5-TTS and AuK speak a generation under 10 UTF-8 bytes at upstream's short-text speed.** Upstream drops the duration speed to 0.3 for such a generation (`_infer_basic`, `_f5_local_speed`); the engine used the reference ratio alone, so "Yes." against a 3.6 s reference came out as 0.2 s of silence.
 - **Fixed: F5-TTS counts the reference text as upstream does, so generations no longer run about 1.5% long.** `infer_batch_process` adds a second space after a reference text that ends in ASCII, and the duration ratio and the joint text both include it; the ratio now counts UTF-8 bytes and truncates the frame count as upstream does.
+- **Fixed: F5-TTS generates long text in upstream's chunks and cross-fades them.** A target longer than upstream's `max_chars` (`infer_process`, from the reference's UTF-8 bytes and seconds) is split as `chunk_text` splits it. Each chunk gets its own duration (`_infer_basic`) and seed `seed + index`, and the waves are joined with the 0.15 s linear cross-fade. Text that fits one chunk is generated exactly as before. Before this, a 400-byte paragraph ran about 1.3% longer than upstream and did not reproduce upstream's per-chunk timing.
 
 ## alpha.368
 
