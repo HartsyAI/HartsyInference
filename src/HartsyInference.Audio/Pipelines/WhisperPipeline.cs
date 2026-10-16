@@ -41,6 +41,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     private readonly WhisperTokenizer _tokenizer;
     private readonly MelSpectrogramExtractor _melExtractor;
     private readonly SafeTensorsLoader _loader;
+    private readonly WhisperDecodeSuppression _suppression;
     private int _disposed;
 
     /// <summary>Name of the loaded model (HF repo id).</summary>
@@ -55,7 +56,8 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         WhisperEncoder encoder,
         WhisperDecoder decoder,
         WhisperTokenizer tokenizer,
-        SafeTensorsLoader loader)
+        SafeTensorsLoader loader,
+        WhisperDecodeSuppression suppression)
     {
         ModelName = modelName;
         _cfg = cfg;
@@ -63,6 +65,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         _decoder = decoder;
         _tokenizer = tokenizer;
         _loader = loader;
+        _suppression = suppression;
         _melExtractor = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(cfg.NumMelBins));
     }
 
@@ -111,7 +114,10 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 
         WhisperTokenizer tokenizer = new(repoDir);
         RequireSameLayout(resolvedCfg, tokenizer, repoDir);
-        return new WhisperPipeline(hfRepoId, resolvedCfg, encoder, decoder, tokenizer, loader);
+        WhisperDecodeSuppression suppression = fetched.TryGetValue("generation_config.json", out string? generationConfig)
+            ? WhisperDecodeSuppression.Load(generationConfig)
+            : WhisperDecodeSuppression.None;
+        return new WhisperPipeline(hfRepoId, resolvedCfg, encoder, decoder, tokenizer, loader, suppression);
     }
 
     /// <summary>Convenience: transcribe a WAV file. Auto-resamples to 16 kHz and
@@ -283,7 +289,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         // Run the prompt through the decoder in a single pass — the logits at the last
         // prompt position are the distribution we sample our first text token from.
         Tensor logits = _decoder.DecodeStep(backend, prompt, state);
-        int nextToken = ArgMaxIgnoringSpecial(logits, _tokenizer, timer);
+        int nextToken = ArgMaxIgnoringSpecial(logits, _tokenizer, firstStep: true, timer);
         logits.Dispose();
         timer?.Accumulate("step.argmax");
         timer?.Mark("prompt");
@@ -298,7 +304,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             // Feed only the new token forward; the cache holds everything prior.
             singleBuf[0] = nextToken;
             Tensor stepLogits = _decoder.DecodeStep(backend, singleBuf, state);
-            nextToken = ArgMaxIgnoringSpecial(stepLogits, _tokenizer, timer);
+            nextToken = ArgMaxIgnoringSpecial(stepLogits, _tokenizer, firstStep: false, timer);
             stepLogits.Dispose();
             timer?.Accumulate("step.argmax");
         }
@@ -307,14 +313,14 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         return generated;
     }
 
-    /// <summary>Greedy argmax with the standard Whisper suppress list applied. We
-    /// mask the prompt special tokens (SOT, language tags, task tokens, no-timestamps,
-    /// no-speech) so they can't be emitted mid-stream; otherwise the model often
-    /// re-emits its own start tokens and freezes the decode. The full OpenAI suppress
-    /// list (~99 entries including punctuation heuristics) lands with temperature
-    /// fallback later. Ids come from the tokenizer, not the config — only it knows
-    /// whether this checkpoint uses the v3 (100-language) or the English-only layout.</summary>
-    private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer, StageTimer? timer)
+    /// <summary>Greedy argmax with the Whisper suppression applied. We mask the prompt special tokens (SOT, language
+    /// tags, task tokens, no-timestamps, no-speech) so they can't be emitted mid-stream; otherwise the model often
+    /// re-emits its own start tokens and freezes the decode. Then the checkpoint's own <c>suppress_tokens</c> (every
+    /// step) and <c>begin_suppress_tokens</c> (first step) from its <c>generation_config.json</c>, as Hugging Face
+    /// applies them; the non-speech symbols in that list are what stop a sung passage decoding to <c>♪♪♪</c>. Ids
+    /// come from the tokenizer, not the config — only it knows whether this checkpoint uses the v3 (100-language)
+    /// or the English-only layout.</summary>
+    private unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer, bool firstStep, StageTimer? timer)
     {
         int vocab = (int)logits.Shape[logits.Shape.Rank - 1];
         float* p = (float*)logits.DataPointer;
@@ -324,6 +330,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             if (id < vocab) p[id] = float.NegativeInfinity;
         if (tokenizer.NoSpeechId < vocab) p[tokenizer.NoSpeechId] = float.NegativeInfinity;
         if (tokenizer.NoTimestampsId < vocab) p[tokenizer.NoTimestampsId] = float.NegativeInfinity;
+        _suppression.Apply(new Span<float>(p, vocab), firstStep);
 
         int best = 0;
         float bestV = float.NegativeInfinity;
