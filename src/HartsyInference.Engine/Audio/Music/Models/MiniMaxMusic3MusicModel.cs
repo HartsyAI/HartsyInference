@@ -186,6 +186,9 @@ internal static class MiniMaxMusic3MusicModel
             Tensor[] chunks;
             try
             {
+                // Candidate fix for the flow upload from the mapped cache: read the mapping ahead of the upload.
+                bool willNeed = (ditCast as SafeTensorsLoader)?.AdviseWillNeed() ?? false;
+                Logs.Info($"[Audio][MiniMaxMusic3] Flow transformer mapping advised WillNeed: {willNeed}.");
                 long uploadStart = Environment.TickCount64;
                 backend.PreloadWeights(conditionEncoder.EnumerateWeights());
                 backend.PreloadWeights(dit.EnumerateWeights());

@@ -77,6 +77,14 @@ public sealed class SafeTensorsLoader : IDisposable
         return tensors;
     }
 
+    /// <summary>Asks the kernel to read the whole mapping ahead of use (MADV_WILLNEED). Returns false where the hint is refused;
+    /// it is never load-bearing.</summary>
+    public bool AdviseWillNeed()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        return _handle is { } handle && handle.Advise(0, handle.ByteLength, HartsyInference.Core.Memory.MmapAdvice.WillNeed);
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
