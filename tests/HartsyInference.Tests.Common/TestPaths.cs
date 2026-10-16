@@ -459,6 +459,10 @@ public static class TestPaths
             Path.Combine(ModelsDir, "llm", "qwen25", "qwen2.5-0.5b-instruct-q4_k_m.gguf"),
             Path.Combine(ModelsDir, "llm", "qwen2.5-0.5b-instruct-q4_k_m.gguf"));
 
+        /// <summary>The small random Muse Spark checkpoint from <c>tests/python-reference/make_muse_spark_small_gguf.py</c>: its llama.cpp
+        /// GGUFs in every quantization, the transformers reference logits, the per-quant dequantized references and llama.cpp's logits.</summary>
+        public static string MuseSparkSmallDir => Resolve("MUSE_SPARK_SMALL_DIR", Path.Combine(ModelsDir, "llm", "muse-spark-small"));
+
         /// <summary>Qwen3-32B, Q4_K_M GGUF (~19.8 GB). Too large for a single 24 GB consumer card once driver
         /// overhead and KV/activations are counted — the layer-split tok/s oracle.</summary>
         public static string Qwen3_32BQ4KM => Resolve("QWEN3_32B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-32B-Q4_K_M.gguf"));

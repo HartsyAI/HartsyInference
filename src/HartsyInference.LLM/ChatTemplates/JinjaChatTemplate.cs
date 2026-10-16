@@ -12,6 +12,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
 {
     private readonly JinjaEngine _engine;
     private readonly string _toolRole;
+    private readonly bool _prependBos;
 
     public string Name => "jinja";
 
@@ -19,11 +20,15 @@ public sealed class JinjaChatTemplate : IChatTemplate
     public string? Source { get; }
 
     /// <summary>Compiles the model's chat-template source.</summary>
-    public JinjaChatTemplate(string chatTemplate)
+    /// <param name="chatTemplate">The Jinja source.</param>
+    /// <param name="prependBos">Starts every encoded prompt with exactly one tokenizer BOS, adding it when the render does not begin with
+    /// it: the GGUF <c>add_bos_token</c> contract as llama.cpp applies it, whether or not the template writes <c>bos_token</c>.</param>
+    public JinjaChatTemplate(string chatTemplate, bool prependBos = false)
     {
         ArgumentNullException.ThrowIfNull(chatTemplate);
         _engine = new JinjaEngine(chatTemplate);
         Source = chatTemplate;
+        _prependBos = prependBos;
         // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
         // Only a template whose parsed expressions compare the role to "observation" is remapped (a comment, text or string literal
         // naming it is not an expression), and a template that also compares the role to "tool" keeps the tool role.
@@ -66,12 +71,16 @@ public sealed class JinjaChatTemplate : IChatTemplate
             // to ChatML rather than failing the whole generation; if the tokenizer has no ChatML control tokens
             // either, that Encode call throws its own clear error instead of this one.
             Console.Error.WriteLine($"[WRN] GGUF: chat template failed to render ({ex.Message}); falling back to ChatML for this request.");
-            return new ChatMlTemplate().Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools);
+            return WithBos(tokenizer, new ChatMlTemplate().Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools));
         }
         // The template emits the bos_token literal itself, so don't double-add specials beyond literal matching.
         // Message content is escaped against the tokenizer's control literals, so only the template's own literals become ids here.
-        return SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer);
+        return WithBos(tokenizer, SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer));
     }
+
+    /// <summary>The prompt <paramref name="ids"/> starting with exactly one BOS when this template was built with <c>prependBos</c>.</summary>
+    private int[] WithBos(ILlmTokenizer tokenizer, int[] ids)
+        => _prependBos && tokenizer.BosId is int bos && (ids.Length == 0 || ids[0] != bos) ? [bos, .. ids] : ids;
 
     /// <summary>Renders the conversation through the model's Jinja template; an unset <paramref name="enableThinking"/> leaves <c>enable_thinking</c> undefined so <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of being forced off.</summary>
     private string Render(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking,

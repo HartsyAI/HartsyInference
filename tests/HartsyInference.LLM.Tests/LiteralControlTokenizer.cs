@@ -44,7 +44,7 @@ internal sealed class LiteralControlTokenizer : ILlmTokenizer
 
     public int? SpecialId(string token) => Array.IndexOf(Specials, token) is int i and >= 0 ? 1000 + i : null;
 
-    public int? BosId => null;
+    public int? BosId => IdOf(Bos);
 
     public int? EosId => null;
 

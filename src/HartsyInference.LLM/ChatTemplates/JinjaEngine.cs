@@ -218,7 +218,23 @@ public sealed class JinjaEngine
     /// <summary>A <c>{% for x in seq %}</c> loop, optionally with Jinja's inline filter clause (<c>{% for x in seq if cond %}</c>); <c>loop.index</c>/<c>loop.length</c>/etc. reflect the FILTERED count, matching real Jinja — the filter narrows the sequence before iteration starts, it isn't a per-item skip inside a still-full-length loop.</summary>
     internal sealed class ForNode(string var, Expr seq, List<Node> body, Expr? filter = null) : Node
     {
+        // `for k, v in d.items()` unpacks each item into the comma-separated names.
+        private readonly string[] _names = [.. var.Split(',', StringSplitOptions.TrimEntries)];
+
         public override IEnumerable<Expr> Exprs => filter is null ? [seq] : [seq, filter];
+
+        private void Bind(Scope scope, object? item)
+        {
+            if (_names.Length == 1)
+            {
+                scope.Set(var, item);
+                return;
+            }
+            List<object?> parts = Values.AsList(item);
+            if (parts.Count != _names.Length)
+                throw new InvalidOperationException($"Jinja for: cannot unpack {parts.Count} values into {_names.Length} names.");
+            for (int i = 0; i < _names.Length; i++) scope.Set(_names[i], parts[i]);
+        }
         public override IEnumerable<Node> Children => body;
         public override void Render(StringBuilder sb, Scope scope)
         {
@@ -230,14 +246,14 @@ public sealed class JinjaEngine
                 foreach (object? item in raw)
                 {
                     Scope probe = scope.Child();
-                    probe.Set(var, item);
+                    Bind(probe, item);
                     if (Values.Truthy(filter.Eval(probe))) items.Add(item);
                 }
             }
             for (int idx = 0; idx < items.Count; idx++)
             {
                 Scope child = scope.Child();
-                child.Set(var, items[idx]);
+                Bind(child, items[idx]);
                 child.Set("loop", new Dictionary<string, object?>
                 {
                     ["index0"] = (long)idx, ["index"] = (long)(idx + 1),
