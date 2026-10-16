@@ -1177,7 +1177,7 @@ public static class ModelCatalog
             {
                 // Fish Audio S2 Pro: Dual-AR (36L slow + 4L fast over 10 codebooks) + ModifiedDAC decoder. Fish Audio
                 // Research License (non-commercial). Components match the official code; one real-weight CPU run transcribed
-                // word-exact (Whisper base.en). Reference-voice cloning needs the clip's exact transcript; no GPU/Swarm run yet.
+                // word-exact (Whisper base.en). Reference-voice cloning needs the clip's exact transcript; one short live Swarm run (2026-10-06); no GPU run yet.
                 Id = "fishaudio", Modality = tts, DisplayName = "Fish Audio S2 Pro", Architecture = "Dual-AR + ModifiedDAC", Status = vp,
                 CliDrivable = true, // `hartsy speak -m fishaudio`
                 Assets = new ModelAsset[]
