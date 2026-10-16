@@ -6,6 +6,10 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: Whisper decodes a sung passage to its words instead of music-note symbols.** The greedy decoder now applies the checkpoint's own `suppress_tokens` (every step) and `begin_suppress_tokens` (first step) from its `generation_config.json`, as Hugging Face does. Without them a sung clip came back as `♪♪♪`, which the HF defaults transcribe to its words. Checkpoints with no such file decode as before.
+
 ## alpha.374
 
 - **Added: a streamed speech take returns its turns.** `ISpeechService.SynthesizeStreamAsync` has an overload taking `onTurns`, which receives the turns a one-shot synthesis returns as `AudioResult.Turns`. It is called once, before the stream ends. A streamed Fish Audio Drama 3 take can now be revised like a one-shot take; before, the stream returned audio only.
