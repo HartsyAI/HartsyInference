@@ -133,38 +133,33 @@ public sealed unsafe class CsmModel : IDisposable
         return outT;
     }
 
-    // Keep F32/BF16 tables as loaded (no F32 duplication); anything else casts up once.
+    // Keep F32/BF16/F16 tables as stored: widening a GGUF F16 or checkpoint table to F32 costs its full size in host RAM.
     private static Tensor KeepF32OrBf16(Tensor t) =>
-        t.DType == DType.F32 || t.DType == DType.BF16 ? t : t.CastTo(DType.F32);
+        t.DType == DType.F32 || t.DType == DType.BF16 || t.DType == DType.F16 ? t : t.CastTo(DType.F32);
 
-    // dst = table[id] as F32 (row-clamped; table F32 or BF16).
-    private static void CopyRowF32(Tensor table, int id, float* dst, int h)
+    // dst = table[id] as F32 (row-clamped; table F32, BF16 or F16).
+    private static void CopyRowF32(Tensor table, int id, float* dst, int h) => ReadEmbedRow(table, id, dst, h, accumulate: false);
+
+    // dst += table[id] as F32 (row-clamped; table F32, BF16 or F16).
+    private static void AddRowF32(Tensor table, int id, float* dst, int h) => ReadEmbedRow(table, id, dst, h, accumulate: true);
+
+    private static void ReadEmbedRow(Tensor table, int id, float* dst, int h, bool accumulate)
     {
         long off = (long)Math.Clamp(id, 0, (int)table.Shape[0] - 1) * h;
         if (table.DType == DType.BF16)
         {
             ushort* row = (ushort*)table.DataPointer + off;
-            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; dst[c] = *(float*)&b; }
+            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; float v = *(float*)&b; dst[c] = accumulate ? dst[c] + v : v; }
         }
-        else
+        else if (table.DType == DType.F16)
         {
-            Buffer.MemoryCopy((float*)table.DataPointer + off, dst, h * 4L, h * 4L);
-        }
-    }
-
-    // dst += table[id] as F32 (row-clamped; table F32 or BF16).
-    private static void AddRowF32(Tensor table, int id, float* dst, int h)
-    {
-        long off = (long)Math.Clamp(id, 0, (int)table.Shape[0] - 1) * h;
-        if (table.DType == DType.BF16)
-        {
-            ushort* row = (ushort*)table.DataPointer + off;
-            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; dst[c] += *(float*)&b; }
+            Half* row = (Half*)table.DataPointer + off;
+            for (int c = 0; c < h; c++) { float v = (float)row[c]; dst[c] = accumulate ? dst[c] + v : v; }
         }
         else
         {
             float* row = (float*)table.DataPointer + off;
-            for (int c = 0; c < h; c++) dst[c] += row[c];
+            for (int c = 0; c < h; c++) dst[c] = accumulate ? dst[c] + row[c] : row[c];
         }
     }
 

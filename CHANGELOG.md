@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: HeartMuLa's quantized load keeps about 2 GB less host RAM.** The audio-embedding split borrows the
+  checkpoint's rows instead of widening all eight codebook tables to F32, the quantized embed tables stay F16 rather
+  than being widened at load, and the transposed audio heads are released once the GGUF cache owns the weights.
+  Peak anonymous RSS on a 30 s q8 song fell from 5.5 GB to 3.1 GB with bit-identical output.
+
 ## alpha.374
 
 - **Added: a streamed speech take returns its turns.** `ISpeechService.SynthesizeStreamAsync` has an overload taking `onTurns`, which receives the turns a one-shot synthesis returns as `AudioResult.Turns`. It is called once, before the stream ends. A streamed Fish Audio Drama 3 take can now be revised like a one-shot take; before, the stream returned audio only.

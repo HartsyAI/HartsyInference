@@ -39,11 +39,17 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     /// match the engine-layout quant policy.</para></summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string? quant = null, string? cacheGgufPath = null)
     {
-        Dictionary<string, Tensor> remapped = HeartMulaCheckpointConverter.Remap(w, _cfg);
+        List<Tensor> ownedSplits = [];
+        Dictionary<string, Tensor> remapped = HeartMulaCheckpointConverter.Remap(w, _cfg, ownedSplits);
         if (!string.IsNullOrEmpty(quant) && !string.IsNullOrEmpty(cacheGgufPath) && CsmWeightCache.ResolveQuant(quant) is not null)
         {
             (IReadOnlyDictionary<string, Tensor> qWeights, GgufLoader? loader) = CsmWeightCache.LoadQuantized(remapped, cacheGgufPath, quant);
             _quantCacheLoader = loader;
+            // The transposed heads were only the quantizer's source; the cache owns the quantized copies from here.
+            foreach (Tensor split in ownedSplits)
+            {
+                split.Dispose();
+            }
             _lm.LoadWeights(qWeights);
         }
         else
