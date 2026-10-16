@@ -217,6 +217,12 @@ public sealed unsafe class CsmModel : IDisposable
         internal FixedKvCache? DepthUncond;
         internal GraphStream? DepthCondGraph;
         internal GraphStream? DepthUncondGraph;
+        // Device-resident frame tail (DecodeFrameTailDevice), decided once per generation: one token buffer per codebook and
+        // the device sampler's RNG, released with the session.
+        internal bool? DeviceFrame;
+        internal ulong[]? DeviceCodes;
+        internal ulong DeviceRng;
+        internal IBackend? DeviceBackend;
         private int _disposed;
 
         internal DecodeSession(FixedKvCache backbone, FixedKvCache? uncond)
@@ -235,6 +241,18 @@ public sealed unsafe class CsmModel : IDisposable
             DualGraph?.Dispose();
             DepthCondGraph?.Dispose();
             DepthUncondGraph?.Dispose();
+            if (DeviceBackend is { } deviceBackend)
+            {
+                try
+                {
+                    if (DeviceCodes is { } codes)
+                    {
+                        foreach (ulong token in codes) deviceBackend.FreeDeviceTokenId(token);
+                    }
+                    if (DeviceRng != 0) deviceBackend.FreeDeviceRng(DeviceRng);
+                }
+                catch (Exception ex) { Logs.Warning($"[CSM] Device frame buffers failed to free during cleanup (continuing): {ex.Message}"); }
+            }
             try { DepthCond?.Dispose(); }
             catch (Exception ex) { Logs.Warning($"[CSM] Depth KV dispose failed during cleanup (continuing): {ex.Message}"); }
             try { DepthUncond?.Dispose(); }
@@ -472,6 +490,11 @@ public sealed unsafe class CsmModel : IDisposable
         int bh = _cfg.Backbone.HiddenSize;
         int dh = _cfg.Decoder.HiddenSize;
 
+        if (graphEnabled && session is not null && (session.DeviceFrame ??= PrepareDeviceFrame(backend, tk, rng, session)))
+        {
+            return DecodeFrameTailDevice(backend, last, uLast, temp, tk, tp, cfgScale, session);
+        }
+
         // codebook 0 from the backbone head.
         Tensor c0Logits = WhisperOps.ProjectLinear(backend, last, _c0Head!, bias: null, 1, 1, bh, _cfg.AudioVocab);
         if (useCfg) CombineCfg(backend, c0Logits, uLast!, _c0Head!, bh, cfgScale);
@@ -602,7 +625,24 @@ public sealed unsafe class CsmModel : IDisposable
         Tensor embed = EmbedRow(table, id);                                              // [1,1,bh] host-built
         Tensor decInput = WhisperOps.ProjectLinear(backend, embed, _projW!, bias: null, 1, 1, bh, dh);
         embed.Dispose();
+        return DepthStepGraphProjected(backend, decInput, dh, cache, ref gs);
+    }
 
+    /// <summary>Gather-fed <see cref="DepthStepGraph"/>: the codebook embedding is gathered on the device from its token
+    /// buffer, so the depth step after a draw needs no host read.</summary>
+    private Tensor DepthStepGraphGather(IBackend backend, Tensor table, ulong token, int bh, int dh, FixedKvCache cache, ref GraphStream? gs)
+    {
+        Tensor embed = new(new TensorShape(1, 1, bh), DType.F32);
+        backend.EmbedGatherDecodeStep(embed, table, token);
+        Tensor decInput = WhisperOps.ProjectLinear(backend, embed, _projW!, bias: null, 1, 1, bh, dh);
+        embed.Dispose();
+        return DepthStepGraphProjected(backend, decInput, dh, cache, ref gs);
+    }
+
+    /// <summary>Steps the depth decoder's captured graph on an already projected input and returns a fresh last hidden;
+    /// disposes <paramref name="decInput"/>.</summary>
+    private Tensor DepthStepGraphProjected(IBackend backend, Tensor decInput, int dh, FixedKvCache cache, ref GraphStream? gs)
+    {
         gs ??= new GraphStream(backend, dh);
         int pos = cache.CurrentLength;
         backend.CopyInto(gs.InEmbed, decInput);                 // refresh fixed input OUTSIDE capture
@@ -633,6 +673,148 @@ public sealed unsafe class CsmModel : IDisposable
         Tensor dLast = new(new TensorShape(1, 1, dh), DType.F32);
         backend.CopyInto(dLast, gs.OutHidden);
         return dLast;
+    }
+
+    /// <summary>Decides once per generation whether the frame tail runs on the device: the depth steps need the graph path,
+    /// the device sampler must cover the top-k, and every audio table must be gatherable. Preloads the tables (a gather
+    /// against an unloaded table would upload per call) and allocates the per-codebook token buffers and the device RNG.</summary>
+    private bool PrepareDeviceFrame(IBackend backend, int topK, uint rng, DecodeSession session)
+    {
+        if (!EngineKnobs.CsmDeviceFrame.Value || !backend.DeviceSamplingSupported || topK < 1 || topK > backend.DeviceSamplingMaxTopK
+            || !_decoder.SupportsGraphDecode(backend))
+        {
+            return false;
+        }
+        List<Tensor> tables = new(_audioEmbed.Length);
+        foreach (Tensor? table in _audioEmbed)
+        {
+            if (table is null || !(table.DType == DType.F32 || table.DType == DType.BF16 || table.DType == DType.F16))
+            {
+                return false;
+            }
+            tables.Add(table);
+        }
+        backend.PreloadWeights(tables);
+        session.DeviceCodes = new ulong[_cfg.NumCodebooks];
+        for (int cb = 0; cb < session.DeviceCodes.Length; cb++)
+        {
+            session.DeviceCodes[cb] = backend.AllocDeviceTokenId();
+        }
+        session.DeviceRng = backend.AllocDeviceRng(((ulong)rng << 32) | 0x9E3779B9ul, topK);
+        session.DeviceBackend = backend;
+        return true;
+    }
+
+    /// <summary>Device-resident frame tail. The codebook logits, the CFG blend, the draws and the depth embeddings stay on
+    /// the device, and the codes are read back once the frame is enqueued, so the host waits once per frame instead of
+    /// once per codebook. Consumes <paramref name="last"/> and <paramref name="uLast"/>.</summary>
+    private int[] DecodeFrameTailDevice(IBackend backend, Tensor last, Tensor? uLast, float temp, int tk, float tp,
+        float cfgScale, DecodeSession session)
+    {
+        int bh = _cfg.Backbone.HiddenSize;
+        int dh = _cfg.Decoder.HiddenSize;
+        int vocab = _cfg.AudioVocab;
+        bool useCfg = cfgScale != 1f && uLast is not null;
+        ulong[] tokens = session.DeviceCodes!;
+        ulong rngState = session.DeviceRng;
+        int maxDec = _cfg.NumCodebooks + 1;
+
+        session.DepthCond ??= new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+        FixedKvCache dCache = session.DepthCond;
+        dCache.Reset();
+        FixedKvCache? uCache = null;
+        if (useCfg)
+        {
+            session.DepthUncond ??= new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+            uCache = session.DepthUncond;
+            uCache.Reset();
+        }
+
+        Tensor? dLast = null;
+        Tensor? uDLast = null;
+        try
+        {
+            using (Tensor c0Logits = WhisperOps.ProjectLinear(backend, last, _c0Head!, bias: null, 1, 1, bh, vocab))
+            using (Tensor? uC0Logits = useCfg ? WhisperOps.ProjectLinear(backend, uLast!, _c0Head!, bias: null, 1, 1, bh, vocab) : null)
+            {
+                SampleCodebook(backend, c0Logits, uC0Logits, cfgScale, vocab, temp, tk, tp, tokens[0], rngState);
+            }
+            dLast = DepthPrefillDevice(backend, last, tokens[0], bh, dh, dCache);
+            if (useCfg)
+            {
+                uDLast = DepthPrefillDevice(backend, uLast!, tokens[0], bh, dh, uCache!);
+            }
+
+            for (int cb = 1; cb < _cfg.NumCodebooks; cb++)
+            {
+                Tensor cbLogits = WhisperOps.ProjectLinear(backend, dLast!, _audioHead[cb - 1]!, bias: null, 1, 1, dh, vocab);
+                Tensor? uCbLogits = useCfg ? WhisperOps.ProjectLinear(backend, uDLast!, _audioHead[cb - 1]!, bias: null, 1, 1, dh, vocab) : null;
+                dLast!.Dispose();
+                dLast = null;
+                uDLast?.Dispose();
+                uDLast = null;
+                SampleCodebook(backend, cbLogits, uCbLogits, cfgScale, vocab, temp, tk, tp, tokens[cb], rngState);
+                cbLogits.Dispose();
+                uCbLogits?.Dispose();
+                if (cb < _cfg.NumCodebooks - 1)
+                {
+                    dLast = DepthStepGraphGather(backend, _audioEmbed[cb]!, tokens[cb], bh, dh, dCache, ref session.DepthCondGraph);
+                    if (useCfg)
+                    {
+                        uDLast = DepthStepGraphGather(backend, _audioEmbed[cb]!, tokens[cb], bh, dh, uCache!, ref session.DepthUncondGraph);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            dLast?.Dispose();
+            uDLast?.Dispose();
+            last.Dispose();
+            uLast?.Dispose();
+        }
+
+        int[] frame = new int[_cfg.NumCodebooks];
+        for (int cb = 0; cb < frame.Length; cb++)
+        {
+            frame[cb] = backend.ReadDeviceTokenId(tokens[cb]);
+        }
+        return frame;
+    }
+
+    /// <summary>Device twin of <see cref="DepthPrefill"/>: the decoder prefix is <c>[anchor, embed_0(c0)]</c>, with the
+    /// codebook-0 embedding gathered from its token buffer.</summary>
+    private Tensor DepthPrefillDevice(IBackend backend, Tensor anchor, ulong c0Token, int bh, int dh, FixedKvCache cache)
+    {
+        Tensor embed = new(new TensorShape(1, 1, bh), DType.F32);
+        backend.EmbedGatherDecodeStep(embed, _audioEmbed[0]!, c0Token);
+        Tensor curr = new(new TensorShape(1, 2, bh), DType.F32);
+        backend.Concat(curr, [anchor, embed], 1);
+        embed.Dispose();
+        Tensor decInput = WhisperOps.ProjectLinear(backend, curr, _projW!, bias: null, 1, 2, bh, dh);
+        curr.Dispose();
+        Tensor dHidden = _decoder.ForwardEmbeds(backend, decInput, 1, 2, 0, cache);
+        decInput.Dispose();
+        Tensor dLast = SliceLast(dHidden, dh);
+        dHidden.Dispose();
+        return dLast;
+    }
+
+    /// <summary>Draws one codebook on the device. The guided logits <c>u + g·(c − u)</c> are built as
+    /// <c>0 + 1·(g·c + (1 − g)·u)</c> by <see cref="IBackend.CfgEulerStep"/> (the same value to rounding), and the device
+    /// sampler's draw is written into <paramref name="token"/>.</summary>
+    private static void SampleCodebook(IBackend backend, Tensor condLogits, Tensor? uncondLogits, float cfgScale, int vocab,
+        float temp, int topK, float topP, ulong token, ulong rngState)
+    {
+        if (uncondLogits is null)
+        {
+            backend.SampleTopKInto(token, condLogits, topK, temp, topP, 0f, rngState);
+            return;
+        }
+        using Tensor guided = new(new TensorShape(1, 1, vocab), DType.F32);
+        backend.Fill(guided, 0f);
+        backend.CfgEulerStep(guided, condLogits, uncondLogits, cfgScale, 1f);
+        backend.SampleTopKInto(token, guided, topK, temp, topP, 0f, rngState);
     }
 
     /// <summary>CFG-combines <paramref name="condLogits"/> in place with the uncond head projection of

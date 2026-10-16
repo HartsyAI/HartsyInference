@@ -156,6 +156,7 @@ public sealed partial class CudaKernels : IDisposable
     // ── Language-model (decoder LLM) glue Module + handles ───────────────
     private readonly CudaModule _lmF32Module;
     private readonly CudaModule _lmHistoryModule;
+    private readonly CudaModule _lmEmbedGatherModule;
     private readonly nint _lmRepeatKvF32;
     private readonly nint _lmKvAppendF32;
     private readonly nint _lmKvAppendF16;
@@ -185,6 +186,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _lmRopeDecodeSplitHalf;
     private readonly nint _lmRopeDecodeInterleaved;
     private readonly nint _lmEmbedGatherDecodeF32;
+    private readonly nint _lmEmbedGatherDecodeF16;
+    private readonly nint _lmEmbedGatherDecodeBF16;
     private readonly nint _lmHistoryAppendDistinct;
     private readonly nint _lmRepetitionPenaltyF32;
     private readonly nint _lmKvSliceTimeF32;
@@ -1069,6 +1072,10 @@ public sealed partial class CudaKernels : IDisposable
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
         _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
         _lmEmbedGatherDecodeF32 = _lmF32Module.GetFunction("lm_embed_gather_decode_f32");
+        // Half/bfloat16 table gathers sit in their own module, so the hand-tuned lm_f32 PTX is not rebuilt for them.
+        _lmEmbedGatherModule = LoadOwnedModule(Ptx("lm_embed_gather"));
+        _lmEmbedGatherDecodeF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_f16");
+        _lmEmbedGatherDecodeBF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_bf16");
         // The distinct-history append lives in its own module so the hand-tuned lm_f32 PTX is not rebuilt for it.
         _lmHistoryModule = LoadOwnedModule(Ptx("lm_history_f32"));
         _lmHistoryAppendDistinct = _lmHistoryModule.GetFunction("lm_history_append_distinct");
@@ -3896,6 +3903,19 @@ public sealed partial class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &embArg; args[2] = &tokArg; args[3] = &hiddenArg;
         uint gridDim = (uint)(((uint)hidden + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmEmbedGatherDecodeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Device-indexed gather from a half- or bfloat16-stored table into an F32 row (lm_embed_gather.cu).</summary>
+    public unsafe void LaunchEmbedGatherDecodeTable(ulong output, ulong embedTable, ulong tokenId, int hidden, bool bf16, nint stream)
+    {
+        nint function = bf16 ? _lmEmbedGatherDecodeBF16 : _lmEmbedGatherDecodeF16;
+        if (function == 0) throw new InvalidOperationException("lm_embed_gather.ptx not present in the Ptx folder.");
+        ulong outArg = output, embArg = embedTable, tokArg = tokenId;
+        uint hiddenArg = (uint)hidden;
+        void** args = stackalloc void*[4];
+        args[0] = &outArg; args[1] = &embArg; args[2] = &tokArg; args[3] = &hiddenArg;
+        uint gridDim = (uint)(((uint)hidden + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(function, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Graph-capture decode: appends the current device token id into the repetition-penalty history buffer and increments its counter. Fixed 1×1×1 launch — capturable.</summary>

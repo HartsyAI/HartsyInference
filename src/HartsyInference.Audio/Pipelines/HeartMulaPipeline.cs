@@ -17,6 +17,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     private readonly CsmModel _lm;
     private readonly HeartCodecDecoder _codec;
     private GgufLoader? _quantCacheLoader;   // owns the mmap of the disk-quantized LM weights (kept alive)
+    private IReadOnlyDictionary<string, Tensor>? _borrowedSource;
     private int _disposed;
 
     public HeartMulaPipeline(HeartMulaConfig cfg)
@@ -54,6 +55,8 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         }
         else
         {
+            // The audio-embedding tables are borrowed views of these tensors, so the source outlives the language model.
+            _borrowedSource = w;
             _lm.LoadWeights(remapped);
         }
     }
