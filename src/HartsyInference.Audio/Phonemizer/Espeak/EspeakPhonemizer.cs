@@ -15,12 +15,12 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakPhonemeTable _phon;
     private readonly EspeakIpaMap _ipa;
     private readonly EspeakVoiceVariant _variant;
-    // EspeakLetterNames holds the American letter names, so it spells only English voices.
+    // EspeakLetterNames holds the American letter names, so it spells only the en-us voice.
     private readonly bool _spellsLetters;
     private readonly EspeakPhonemeList? _plist;
     private readonly EspeakPhonemeRenderer? _renderer;
 
-    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakLanguageOptions options, IReadOnlyList<(string From, string To)> replacements, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index)
+    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakLanguageOptions options, IReadOnlyList<(string From, string To)> replacements, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index, bool spellsLetters)
     {
         _lookup = lookup;
         _rules = rules;
@@ -30,7 +30,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         _phon = phon;
         _ipa = ipa;
         _variant = variant;
-        _spellsLetters = variant.DictName == "en";
+        _spellsLetters = spellsLetters;
         if (index is not null)
         {
             // Exact allophone + IPA path: run espeak's phoneme-program VM over the clause phoneme list.
@@ -122,7 +122,8 @@ public sealed class EspeakPhonemizer : IPhonemizer
                 phon,
                 EspeakIpaMap.Load(variant.PhonemeTable),
                 variant,
-                index);
+                index,
+                spellsLetters: language.Equals("en-us", StringComparison.OrdinalIgnoreCase));
         }
         catch (Exception ex) when (ex is not HartsyInferenceException)
         {

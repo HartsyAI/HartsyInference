@@ -24,6 +24,15 @@ public sealed class EspeakLetterSpellingTests
         Assert.DoesNotContain("pˌiːsˈiː", spanish.PhonemizeToIpa("PC", "es"));
     }
 
+    [Fact]
+    public void BritishVoice_DoesNotSpellWithAmericanLetterNames()
+    {
+        // The American name of z is "zee"; British English reads the same letter as "zed".
+        if (!EspeakPhonemizer.TryFindDataDirectory(out string? dataDir) || dataDir is null) return;
+        EspeakPhonemizer british = EspeakPhonemizer.FromDataDirectory(dataDir, "en-gb");
+        Assert.DoesNotContain("zˈiː", british.PhonemizeToIpa("NZ", "en-gb"));
+    }
+
     [Theory]
         [InlineData("AI", "ˌeɪˈaɪ")]
         [InlineData("PC", "pˌiːsˈiː")]
