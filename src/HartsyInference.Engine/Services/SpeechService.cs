@@ -222,6 +222,10 @@ public sealed class SpeechService : ISpeechService
     /// samples are never allocated. A clip whose length the header cannot give is left to the checks inside the job.</summary>
     internal static void ValidateReference(TtsModelDescriptor descriptor, AudioClip? reference)
     {
+        if (reference is { Data.Length: > 0 })
+        {
+            RejectIfNoReferences(descriptor);
+        }
         if (descriptor.ValidateReferenceSeconds is null || reference is null || reference.Data.Length == 0)
         {
             return;
@@ -237,7 +241,18 @@ public sealed class SpeechService : ISpeechService
     {
         if (referenceMono is { Length: > 0 })
         {
+            RejectIfNoReferences(descriptor);
             descriptor.ValidateReferenceSeconds?.Invoke(referenceMono.Length / (double)ReferenceSampleRate);
+        }
+    }
+
+    /// <summary>Refuses a reference outright for a family that takes none. It runs before any container is parsed, so a clip the
+    /// WAV header cannot measure is refused too.</summary>
+    private static void RejectIfNoReferences(TtsModelDescriptor descriptor)
+    {
+        if (descriptor.ReferenceRejection is { } reason)
+        {
+            throw new NotSupportedException(reason);
         }
     }
 

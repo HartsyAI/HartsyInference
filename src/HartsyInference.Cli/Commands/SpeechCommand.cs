@@ -84,6 +84,7 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         public string? RefText { get; init; }
 
         /// <summary>A JSON file of voice references, for models that clone from several (Fish Audio Drama 3).</summary>
+        // Spectre markup: a single '[' opens a style tag, so the brackets of the JSON example in the description are doubled.
         [CommandOption("--references")]
         [Description("JSON file of voice references, one per speaker: [[{\"text\": transcript, \"audio\": \"clip.wav\"}]] (Fish Audio Drama 3).")]
         public string? References { get; init; }
