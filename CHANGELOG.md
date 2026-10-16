@@ -6,6 +6,10 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: Kokoro's Hindi voices read Latin words, as espeak-ng does.** Hindi's script has no Latin letter rules, so an English word in Hindi text phonemized to nothing. An English sentence through `hf_*` or `hm_*` reached the model as about half a second of near-silence (espeak-ng 1.52 reads those words with its English dictionary). Latin-script words in Hindi text now phonemize with the English voice, and Devanagari runs keep the Hindi voice. Output for Hindi text without Latin letters is unchanged. The other Kokoro languages are unchanged; French still drops the English words espeak-ng switches for.
+
 ## alpha.374
 
 - **Added: a streamed speech take returns its turns.** `ISpeechService.SynthesizeStreamAsync` has an overload taking `onTurns`, which receives the turns a one-shot synthesis returns as `AudioResult.Turns`. It is called once, before the stream ends. A streamed Fish Audio Drama 3 take can now be revised like a one-shot take; before, the stream returned audio only.

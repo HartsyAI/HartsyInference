@@ -18,13 +18,18 @@ public sealed partial class KokoroEspeakG2P
     ];
 
     private readonly EspeakPhonemizer _espeak;
+    private readonly EspeakPhonemizer? _latin;
 
     /// <summary>Wraps an espeak phonemizer built for the Kokoro language (<c>es</c>, <c>fr-fr</c>, <c>hi</c>,
-    /// <c>it</c> or <c>pt-br</c>).</summary>
-    public KokoroEspeakG2P(EspeakPhonemizer espeak)
+    /// <c>it</c> or <c>pt-br</c>). <paramref name="latin"/> is the English phonemizer for Latin-script words, given
+    /// only for Hindi, whose script has no Latin letter rules: espeak-ng reads those words with its English dictionary
+    /// (the spans its <c>(en)</c> language-switch flags mark, which misaki's <c>remove-flags</c> drops). Without it
+    /// such words phonemize to nothing.</summary>
+    public KokoroEspeakG2P(EspeakPhonemizer espeak, EspeakPhonemizer? latin = null)
     {
         ArgumentNullException.ThrowIfNull(espeak);
         _espeak = espeak;
+        _latin = latin;
     }
 
     /// <summary>The phoneme string Kokoro takes for <paramref name="text"/>.</summary>
@@ -50,7 +55,23 @@ public sealed partial class KokoroEspeakG2P
     private void AppendClause(StringBuilder sb, string clause)
     {
         if (string.IsNullOrWhiteSpace(clause)) return;
-        sb.Append(_espeak.PhonemizeTied(clause.Trim(), '^'));
+        if (_latin is null || !clause.Any(char.IsAsciiLetter))
+        {
+            sb.Append(_espeak.PhonemizeTied(clause.Trim(), '^'));
+            return;
+        }
+        // Each run of words in one script goes to its own phonemizer, so the Latin words read as English.
+        string[] words = clause.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < words.Length;)
+        {
+            bool latin = words[i].Any(char.IsAsciiLetter);
+            int end = i;
+            while (end < words.Length && words[end].Any(char.IsAsciiLetter) == latin) end++;
+            if (sb.Length > 0 && sb[^1] != ' ') sb.Append(' ');
+            EspeakPhonemizer phonemizer = latin ? _latin! : _espeak;
+            sb.Append(phonemizer.PhonemizeTied(string.Join(' ', words, i, end - i), '^'));
+            i = end;
+        }
     }
 
     // phonemizer's default marks, each run with the whitespace around it.
