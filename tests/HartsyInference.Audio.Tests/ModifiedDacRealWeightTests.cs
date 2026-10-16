@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -17,11 +18,14 @@ public sealed unsafe class ModifiedDacRealWeightTests(ITestOutputHelper output)
 {
     private static float[] Read(Tensor t) => new ReadOnlySpan<float>((void*)t.DataPointer, (int)t.ElementCount).ToArray();
 
+    private static string Under(string dir, string file) => dir.Length > 0 ? Path.Combine(dir, file) : $"HARTSY_FISH_S2_CODEC_DIR is unset ({file})";
+
     [Fact]
     public void RealS2Codec_MatchesOfficialImplementation()
     {
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_CODEC_DIR");
-        if (string.IsNullOrEmpty(dir)) return;
+        string dir = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_CODEC_DIR") ?? string.Empty;
+        if (!RealWeightGate.Require(output.WriteLine, Under(dir, "codec.safetensors"), Under(dir, "s2_codec_reference.safetensors")))
+            return;
 
         using SafeTensorsLoader codec = new();
         codec.Load(Path.Combine(dir, "codec.safetensors"));
@@ -51,12 +55,14 @@ public sealed unsafe class ModifiedDacRealWeightTests(ITestOutputHelper output)
     [Fact]
     public void RealS2Codec_EncodesLikeTheOfficialImplementation()
     {
-        string? dir = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_CODEC_DIR");
-        if (string.IsNullOrEmpty(dir)) return;
+        string dir = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_CODEC_DIR") ?? string.Empty;
+        if (!RealWeightGate.Require(output.WriteLine, Under(dir, "s2_codec_reference.safetensors"))) return;
 
         using SafeTensorsLoader reference = new();
         reference.Load(Path.Combine(dir, "s2_codec_reference.safetensors"));
-        if (!reference.Descriptors.ContainsKey("enc_codes")) return;
+        // A reference dump without enc_codes is stale, not a pass: regenerate it with tools/fish_audio/modded_dac_reference.py.
+        Assert.True(reference.Descriptors.ContainsKey("enc_codes"),
+            "s2_codec_reference.safetensors has no enc_codes; regenerate it with tools/fish_audio/modded_dac_reference.py.");
         using SafeTensorsLoader codec = new();
         codec.Load(Path.Combine(dir, "codec.safetensors"));
         Dictionary<string, Tensor> weights = new();
