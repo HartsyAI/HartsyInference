@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -10,7 +11,8 @@ namespace HartsyInference.LLM.Tests;
 
 /// <summary>The tiny Qwen3.5 trunk of <see cref="Qwen35HuggingFaceParityTests"/> on every GPU backend: its gated-DeltaNet
 /// layers prefill through the device conv and delta-rule kernels, so this ties those kernels to transformers' own
-/// hidden states, once in a single pass and once fed in chunks that carry the state between calls.</summary>
+/// hidden states, once in a single pass and once fed in chunks that carry the state between calls, and again with
+/// <c>numerics.ssmDevicePrefill</c> off, where the same layers run the host reference between the device projections.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed unsafe class Qwen35PrefillGpuParityTests(ITestOutputHelper output)
 {
@@ -20,15 +22,18 @@ public sealed unsafe class Qwen35PrefillGpuParityTests(ITestOutputHelper output)
     {
         foreach (object[] kind in BackendGate.GpuKinds)
         {
-            yield return [kind[0], 0];
-            yield return [kind[0], 3];
+            yield return [kind[0], 0, true];
+            yield return [kind[0], 3, true];
+            yield return [kind[0], 0, false];
+            yield return [kind[0], 3, false];
         }
     }
 
     /// <param name="chunk">Tokens per prefill call; 0 runs the whole prompt in one call.</param>
+    /// <param name="devicePrefill">The <c>numerics.ssmDevicePrefill</c> setting.</param>
     [Theory]
     [MemberData(nameof(Cases))]
-    public void HiddenStates_MatchTransformers(string kind, int chunk)
+    public void HiddenStates_MatchTransformers(string kind, int chunk, bool devicePrefill)
     {
         if (!BackendGate.TryOpen(kind, output.WriteLine, out IBackend? gpu)) return;
         using IBackend backend = gpu!;
@@ -44,13 +49,22 @@ public sealed unsafe class Qwen35PrefillGpuParityTests(ITestOutputHelper output)
         Qwen35HfConfig cfg = Qwen35HfConfig.FromJson(File.ReadAllText(Path.Combine(Dir, "qwen35_tiny_config.json")));
 
         using Qwen35Model model = Qwen35Model.FromHuggingFace(weights, cfg, maxSequenceLength: 64);
-        float[] got = chunk == 0 ? model.ForwardHiddenStates(backend, ids) : Chunked(model, backend, ids, chunk);
+        KnobStore.Set(EngineKnobs.SsmDevicePrefill, devicePrefill);
+        float[] got;
+        try
+        {
+            got = chunk == 0 ? model.ForwardHiddenStates(backend, ids) : Chunked(model, backend, ids, chunk);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.SsmDevicePrefill);
+        }
 
         ReadOnlySpan<float> expected = new((void*)want.DataPointer, (int)want.ElementCount);
         Assert.Equal(expected.Length, got.Length);
         float worst = 0;
         for (int i = 0; i < got.Length; i++) worst = MathF.Max(worst, MathF.Abs(expected[i] - got[i]));
-        output.WriteLine($"{kind}, chunk {chunk}: max |Δ| = {worst:E3}");
+        output.WriteLine($"{kind}, chunk {chunk}, device prefill {devicePrefill}: max |Δ| = {worst:E3}");
         Assert.True(worst < 2e-3f, $"max |Δ| = {worst} on {kind}");
     }
 

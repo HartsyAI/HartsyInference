@@ -823,56 +823,68 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         string p = $"blk.{i}";
         TensorShape flat = new(1, seq, d);
 
-        Tensor xn = new(flat, DType.F32);
-        backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
-        Tensor qkvMixed = new(new TensorShape(1, seq, ConvDim), DType.F32);
-        backend.Linear(qkvMixed, xn, W($"{p}.attn_qkv.weight"), null);
-        Tensor z = new(new TensorShape(1, seq, ValueDim), DType.F32);
-        backend.Linear(z, xn, W($"{p}.attn_gate.weight"), null);
-        Tensor betaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32);
-        backend.Linear(betaRaw, xn, W($"{p}.ssm_beta.weight"), null);
-        Tensor alphaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32);
-        backend.Linear(alphaRaw, xn, W($"{p}.ssm_alpha.weight"), null);
-        xn.Dispose();
-
-        // q *= 1/sqrt(S_k) after the L2 norm — llama.cpp's build_delta_net_autoregressive applies it right before the
-        // recurrence. Missing it scales the readout ~sqrt(HeadKDim)x too large, compounding across every linear layer.
-        Tensor q = new(new TensorShape(seq, KeyDim), DType.F32);
-        Tensor k = new(new TensorShape(seq, KeyDim), DType.F32);
-        Tensor v = new(new TensorShape(seq, ValueDim), DType.F32);
-        Tensor oT = new(new TensorShape(1, seq, ValueDim), DType.F32);
-        float qScale = 1f / MathF.Sqrt(HeadKDim);
-        if (EngineKnobs.SsmDevicePrefill.Value)
+        // Scoped so a throwing backend op leaves no device tensor behind; each scope ends where the old code disposed.
+        using Tensor afterAttn = new(flat, DType.F32);
+        using (Tensor oT = new(new TensorShape(1, seq, ValueDim), DType.F32))
         {
-            backend.SsmConvSplitPrefill(q, k, v, qkvMixed, _convHistT[i]!, W($"{p}.ssm_conv1d.weight"),
-                ConvKernel, NumKHeads, HeadKDim, NumVHeads, HeadVDim, Eps, qScale);
-            backend.SsmDeltaPrefill(oT, _deltaStateT[i]!, q, k, v, z, alphaRaw, betaRaw, W($"{p}.ssm_dt.bias"), W($"{p}.ssm_a"),
-                W($"{p}.ssm_norm.weight"), NumVHeads, HeadVDim, HeadKDim, KHeadsPerVHead, Eps);
+            using (Tensor qkvMixed = new(new TensorShape(1, seq, ConvDim), DType.F32), z = new(new TensorShape(1, seq, ValueDim), DType.F32),
+                betaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32), alphaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32))
+            {
+                using (Tensor xn = new(flat, DType.F32))
+                {
+                    backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
+                    backend.Linear(qkvMixed, xn, W($"{p}.attn_qkv.weight"), null);
+                    backend.Linear(z, xn, W($"{p}.attn_gate.weight"), null);
+                    backend.Linear(betaRaw, xn, W($"{p}.ssm_beta.weight"), null);
+                    backend.Linear(alphaRaw, xn, W($"{p}.ssm_alpha.weight"), null);
+                }
+
+                // q *= 1/sqrt(S_k) after the L2 norm — llama.cpp's build_delta_net_autoregressive applies it right before the
+                // recurrence. Missing it scales the readout ~sqrt(HeadKDim)x too large, compounding across every linear layer.
+                using Tensor q = new(new TensorShape(seq, KeyDim), DType.F32);
+                using Tensor k = new(new TensorShape(seq, KeyDim), DType.F32);
+                using Tensor v = new(new TensorShape(seq, ValueDim), DType.F32);
+                float qScale = 1f / MathF.Sqrt(HeadKDim);
+                if (EngineKnobs.SsmDevicePrefill.Value)
+                {
+                    backend.SsmConvSplitPrefill(q, k, v, qkvMixed, _convHistT[i]!, W($"{p}.ssm_conv1d.weight"),
+                        ConvKernel, NumKHeads, HeadKDim, NumVHeads, HeadVDim, Eps, qScale);
+                    backend.SsmDeltaPrefill(oT, _deltaStateT[i]!, q, k, v, z, alphaRaw, betaRaw, W($"{p}.ssm_dt.bias"), W($"{p}.ssm_a"),
+                        W($"{p}.ssm_norm.weight"), NumVHeads, HeadVDim, HeadKDim, KHeadsPerVHead, Eps);
+                }
+                else
+                {
+                    GatedDeltaNetReference.ConvSplit(q, k, v, qkvMixed, _convHistT[i]!, W($"{p}.ssm_conv1d.weight"),
+                        ConvKernel, NumKHeads, HeadKDim, NumVHeads, HeadVDim, Eps, qScale);
+                    GatedDeltaNetReference.DeltaScan(oT, _deltaStateT[i]!, q, k, v, z, alphaRaw, betaRaw, W($"{p}.ssm_dt.bias"), W($"{p}.ssm_a"),
+                        W($"{p}.ssm_norm.weight"), NumVHeads, HeadVDim, HeadKDim, KHeadsPerVHead, Eps);
+                }
+            }
+            using Tensor attnOut = new(flat, DType.F32);
+            backend.Linear(attnOut, oT, W($"{p}.ssm_out.weight"), null);
+            backend.Add(afterAttn, hIn, attnOut);
         }
-        else
+
+        Tensor ffnOut;
+        using (Tensor preFfn = new(flat, DType.F32))
         {
-            GatedDeltaNetReference.ConvSplit(q, k, v, qkvMixed, _convHistT[i]!, W($"{p}.ssm_conv1d.weight"),
-                ConvKernel, NumKHeads, HeadKDim, NumVHeads, HeadVDim, Eps, qScale);
-            GatedDeltaNetReference.DeltaScan(oT, _deltaStateT[i]!, q, k, v, z, alphaRaw, betaRaw, W($"{p}.ssm_dt.bias"), W($"{p}.ssm_a"),
-                W($"{p}.ssm_norm.weight"), NumVHeads, HeadVDim, HeadKDim, KHeadsPerVHead, Eps);
+            backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
+            ffnOut = Ffn(backend, preFfn, p, i, seq);
         }
-        qkvMixed.Dispose(); q.Dispose(); k.Dispose(); v.Dispose(); z.Dispose(); alphaRaw.Dispose(); betaRaw.Dispose();
-
-        Tensor attnOut = new(flat, DType.F32);
-        backend.Linear(attnOut, oT, W($"{p}.ssm_out.weight"), null);
-        oT.Dispose();
-        Tensor afterAttn = new(flat, DType.F32);
-        backend.Add(afterAttn, hIn, attnOut);
-        attnOut.Dispose();
-
-        Tensor preFfn = new(flat, DType.F32);
-        backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
-        Tensor ffnOut = Ffn(backend, preFfn, p, i, seq);
-        preFfn.Dispose();
-        Tensor result = new(flat, DType.F32);
-        backend.Add(result, afterAttn, ffnOut);
-        afterAttn.Dispose(); ffnOut.Dispose();
-        return result;
+        using (ffnOut)
+        {
+            Tensor result = new(flat, DType.F32);
+            try
+            {
+                backend.Add(result, afterAttn, ffnOut);
+                return result;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
+        }
     }
 
     /// <summary>Per-layer FFN dispatch: the routed MoE block on a qwen35moe layer, else the dense SwiGLU.</summary>

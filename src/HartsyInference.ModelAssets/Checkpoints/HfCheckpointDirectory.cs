@@ -1,4 +1,5 @@
 using System.Text.Json;
+using HartsyInference.Core.IO;
 using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.ModelAssets.Checkpoints;
@@ -57,29 +58,24 @@ public static class HfCheckpointDirectory
 
     /// <summary>The safetensors files that make up the checkpoint in <paramref name="directory"/>: every shard a
     /// <c>*.safetensors.index.json</c> names (transformers' <c>model.</c> or diffusers'
-    /// <c>diffusion_pytorch_model.</c> index), else every <c>.safetensors</c> file, in name order.</summary>
+    /// <c>diffusion_pytorch_model.</c> index; a canonical index wins over a variant one such as <c>.fp16.</c>), else
+    /// every <c>.safetensors</c> file, in name order.</summary>
     /// <exception cref="FileNotFoundException">The directory holds no weights, or an index names a missing shard.</exception>
     public static IReadOnlyList<string> WeightFiles(string directory)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
         string root = Path.GetFullPath(directory);
-        string? index = FindIndex(root);
+        string? index = Indexes(root).FirstOrDefault();
         if (index is null)
         {
             string[] files = [.. Directory.EnumerateFiles(root, "*.safetensors").Order(StringComparer.Ordinal)];
             return files.Length > 0 ? files : throw new FileNotFoundException($"'{root}' holds no .safetensors weights.");
         }
-        SortedSet<string> shards = new(ReadWeightMap(index, root).Values, StringComparer.Ordinal);
-        foreach (string shard in shards)
-        {
-            if (!File.Exists(shard))
-                throw new FileNotFoundException($"'{Path.GetFileName(index)}' names a shard that is not on disk.", shard);
-        }
-        return [.. shards];
+        return Shards(index, ReadWeightMap(index, root));
     }
 
     /// <summary>The files holding the checkpoint <paramref name="path"/> names: a folder's <see cref="WeightFiles"/>, and
-    /// for a file, the whole shard set when its folder's index names it (so picking any one shard of a diffusers
+    /// for a file, the whole shard set of the index in its folder that names it (so picking any one shard of a diffusers
     /// component loads all of them), else the file alone.</summary>
     public static IReadOnlyList<string> CheckpointFiles(string path)
     {
@@ -87,26 +83,16 @@ public static class HfCheckpointDirectory
         if (Directory.Exists(path))
             return WeightFiles(path);
         string file = Path.GetFullPath(path);
-        string? folder = Path.GetDirectoryName(file);
-        string? index = folder is null ? null : FindIndex(folder);
-        if (index is null || !ReadWeightMap(index, folder!).ContainsValue(file))
-            return [file];
-        return WeightFiles(folder!);
+        return IndexNaming(file) is { } found ? Shards(found.Index, found.Map) : [file];
     }
 
     /// <summary>Every tensor name the shard index of the checkpoint holding <paramref name="file"/> maps, or null when
-    /// its folder has no index naming it. Lets a caller see the whole key set of a sharded checkpoint without opening a
+    /// no index in its folder names it. Lets a caller see the whole key set of a sharded checkpoint without opening a
     /// shard: the signature of a model whose distinctive tensors land in different shards.</summary>
     public static IReadOnlyCollection<string>? IndexedTensorNames(string file)
     {
         ArgumentException.ThrowIfNullOrEmpty(file);
-        string full = Path.GetFullPath(file);
-        string? folder = Path.GetDirectoryName(full);
-        string? index = folder is null ? null : FindIndex(folder);
-        if (index is null)
-            return null;
-        Dictionary<string, string> map = ReadWeightMap(index, folder!);
-        return map.ContainsValue(full) ? map.Keys : null;
+        return IndexNaming(Path.GetFullPath(file))?.Map.Keys;
     }
 
     /// <summary>The root of a diffusers pipeline folder around <paramref name="path"/>: the path itself when it is a
@@ -129,8 +115,43 @@ public static class HfCheckpointDirectory
         return null;
     }
 
-    private static string? FindIndex(string root) =>
-        Directory.EnumerateFiles(root, "*.safetensors.index.json").Order(StringComparer.Ordinal).FirstOrDefault();
+    /// <summary>The folder's shard indexes, canonical ones (<c>{stem}.safetensors.index.json</c> with a dot-free stem)
+    /// before variants such as <c>diffusion_pytorch_model.fp16.safetensors.index.json</c>, each group in name order.</summary>
+    private static IEnumerable<string> Indexes(string root)
+    {
+        const string suffix = ".safetensors.index.json";
+        return Directory.EnumerateFiles(root, "*" + suffix)
+            .OrderBy(index => Path.GetFileName(index)[..^suffix.Length].Contains('.'))
+            .ThenBy(index => index, StringComparer.Ordinal);
+    }
+
+    /// <summary>The index in <paramref name="file"/>'s folder whose weight map names it, with that map; null for none.
+    /// The file is matched the way the filesystem matches names, so a path typed in another case still finds its set.</summary>
+    private static (string Index, Dictionary<string, string> Map)? IndexNaming(string file)
+    {
+        string? folder = Path.GetDirectoryName(file);
+        if (folder is null)
+            return null;
+        foreach (string index in Indexes(folder))
+        {
+            Dictionary<string, string> map = ReadWeightMap(index, folder);
+            if (map.Values.Contains(file, CaseInsensitivePath.PathComparer))
+                return (index, map);
+        }
+        return null;
+    }
+
+    /// <summary>The distinct shards <paramref name="map"/> names, in name order, refusing one that is not on disk.</summary>
+    private static string[] Shards(string index, Dictionary<string, string> map)
+    {
+        string[] shards = [.. map.Values.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+        foreach (string shard in shards)
+        {
+            if (!File.Exists(shard))
+                throw new FileNotFoundException($"'{Path.GetFileName(index)}' names a shard that is not on disk.", shard);
+        }
+        return shards;
+    }
 
     /// <summary>The index's <c>weight_map</c> as tensor name → absolute shard path, refusing a shard outside its folder.</summary>
     private static Dictionary<string, string> ReadWeightMap(string index, string root)

@@ -147,6 +147,23 @@ public sealed unsafe class MossImageAssetTests : IDisposable
         Assert.Contains("shared_block_modulation.weight", probe.Keys);
     }
 
+    /// <summary>Diffusers repos may ship a variant index (<c>.fp16.</c>) beside the canonical one: a folder resolves to the
+    /// canonical set, and a shard resolves to the set of whichever index names it.</summary>
+    [Fact]
+    public void CheckpointFiles_PicksTheCanonicalIndex_AndTheIndexThatNamesAShard()
+    {
+        (string transformer, string[] shards) = WriteShardedTransformer("MOSS-Image-Variants");
+        string variant = Path.Combine(transformer, "diffusion_pytorch_model.fp16.safetensors");
+        SafeTensorsWriter.Save(variant, new Dictionary<string, Tensor> { ["video_embedder.bias"] = Filled([Hidden], _ => 0f) });
+        File.WriteAllText(Path.Combine(transformer, "diffusion_pytorch_model.fp16.safetensors.index.json"),
+            "{\"weight_map\": {\"video_embedder.bias\": \"diffusion_pytorch_model.fp16.safetensors\"}}");
+
+        Assert.Equal(shards, HfCheckpointDirectory.WeightFiles(transformer));
+        Assert.Equal(shards, HfCheckpointDirectory.CheckpointFiles(shards[1]));
+        Assert.Equal([Path.GetFullPath(variant)], HfCheckpointDirectory.CheckpointFiles(variant));
+        Assert.Equal(["video_embedder.bias"], HfCheckpointDirectory.IndexedTensorNames(variant));
+    }
+
     [Fact]
     public void CheckpointFiles_LeavesAFileNoIndexNamesAlone()
     {
