@@ -19,17 +19,21 @@ public sealed partial class KokoroEspeakG2P
 
     private readonly EspeakPhonemizer _espeak;
     private readonly EspeakPhonemizer? _latin;
+    private readonly Func<string, bool>? _switchesToLatin;
 
     /// <summary>Wraps an espeak phonemizer built for the Kokoro language (<c>es</c>, <c>fr-fr</c>, <c>hi</c>,
-    /// <c>it</c> or <c>pt-br</c>). <paramref name="latin"/> is the English phonemizer for Latin-script words, given
-    /// only for Hindi, whose script has no Latin letter rules: espeak-ng reads those words with its English dictionary
-    /// (the spans its <c>(en)</c> language-switch flags mark, which misaki's <c>remove-flags</c> drops). Without it
-    /// such words phonemize to nothing.</summary>
-    public KokoroEspeakG2P(EspeakPhonemizer espeak, EspeakPhonemizer? latin = null)
+    /// <c>it</c> or <c>pt-br</c>). <paramref name="latin"/> is the English phonemizer that reads the words espeak-ng
+    /// switches to English; without it those words phonemize to nothing (Hindi) or to a blank (French), and misaki's
+    /// <c>remove-flags</c> drops the <c>(en)</c> spans that espeak marks them with. <paramref name="switchesToLatin"/>
+    /// says which words switch. Hindi's script has no Latin letter rules, so every Latin-script word switches there
+    /// (the default); French switches the words espeak's dictionary or rules mark, as
+    /// <see cref="EspeakPhonemizer.SwitchesLanguage"/> reports.</summary>
+    public KokoroEspeakG2P(EspeakPhonemizer espeak, EspeakPhonemizer? latin = null, Func<string, bool>? switchesToLatin = null)
     {
         ArgumentNullException.ThrowIfNull(espeak);
         _espeak = espeak;
         _latin = latin;
+        _switchesToLatin = switchesToLatin;
     }
 
     /// <summary>The phoneme string Kokoro takes for <paramref name="text"/>.</summary>
@@ -55,24 +59,29 @@ public sealed partial class KokoroEspeakG2P
     private void AppendClause(StringBuilder sb, string clause)
     {
         if (string.IsNullOrWhiteSpace(clause)) return;
-        if (_latin is null || !clause.Any(char.IsAsciiLetter))
+        // A clause with no word that switches goes to the phonemizer whole, exactly as before.
+        string[] words = clause.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (_latin is null || !words.Any(IsLatin))
         {
             sb.Append(_espeak.PhonemizeTied(clause.Trim(), '^'));
             return;
         }
-        // Each run of words in one script goes to its own phonemizer, so the Latin words read as English.
-        string[] words = clause.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        // Each run of words that switch, and each run that does not, goes to its own phonemizer, so the switched
+        // words read as English.
         for (int i = 0; i < words.Length;)
         {
-            bool latin = words[i].Any(char.IsAsciiLetter);
+            bool latin = IsLatin(words[i]);
             int end = i;
-            while (end < words.Length && words[end].Any(char.IsAsciiLetter) == latin) end++;
+            while (end < words.Length && IsLatin(words[end]) == latin) end++;
             if (sb.Length > 0 && sb[^1] != ' ') sb.Append(' ');
             EspeakPhonemizer phonemizer = latin ? _latin! : _espeak;
             sb.Append(phonemizer.PhonemizeTied(string.Join(' ', words, i, end - i), '^'));
             i = end;
         }
     }
+
+    // Whether espeak-ng reads the word in English: the predicate given, else any Latin letter in it.
+    private bool IsLatin(string word) => _switchesToLatin?.Invoke(word) ?? word.Any(char.IsAsciiLetter);
 
     // phonemizer's default marks, each run with the whitespace around it.
     [GeneratedRegex(@"(\s*[;:,.!?¡¿—…""«»“”(){}\[\]]+\s*)+")]

@@ -20,6 +20,25 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakPhonemeList? _plist;
     private readonly EspeakPhonemeRenderer? _renderer;
 
+    // espeak-ng's language-switch phoneme (phonSWITCH, code 21 in the espeak-ng-data phoneme tables).
+    private const string LanguageSwitchMnemonic = "_^_";
+    private readonly int _switchCode;
+
+    /// <summary>Whether espeak-ng pronounces <paramref name="word"/> in another language: its dictionary entry, or
+    /// when the dictionary has no pronunciation for it, its letter-to-sound rules, emit the language-switch phoneme.
+    /// The dictionary is consulted first, as espeak's word translation does. The word is read on its own, as
+    /// espeak reads a word in a clause.</summary>
+    public bool SwitchesLanguage(string word)
+    {
+        ArgumentNullException.ThrowIfNull(word);
+        if (_switchCode < 0) return false;
+        string lower = word.ToLowerInvariant();
+        if (_lookup.Lookup(lower, out EspeakLookupResult entry) && entry.Phonemes.Count > 0)
+            return entry.Phonemes.Contains((byte)_switchCode);
+        byte[] buf = BuildBuffer([lower], 0, out int start);
+        return _rules.TranslateRules(buf, start).Contains((byte)_switchCode);
+    }
+
     private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakLanguageOptions options, IReadOnlyList<(string From, string To)> replacements, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index, bool spellsLetters)
     {
         _lookup = lookup;
@@ -31,6 +50,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         _ipa = ipa;
         _variant = variant;
         _spellsLetters = spellsLetters;
+        _switchCode = phon.CodeForText(LanguageSwitchMnemonic);
         if (index is not null)
         {
             // Exact allophone + IPA path: run espeak's phoneme-program VM over the clause phoneme list.

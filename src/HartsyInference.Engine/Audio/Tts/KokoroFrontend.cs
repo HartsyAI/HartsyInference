@@ -80,10 +80,16 @@ internal sealed class KokoroFrontend
         if (EspeakLanguages.TryGetValue(lang, out string? language))
         {
             string data = await EspeakDataInstaller.EnsureAsync(cancel).ConfigureAwait(false);
-            // Hindi's script has no Latin letter rules, so Latin words read with espeak-ng's English dictionary, as
-            // they do under espeak-ng itself. The other espeak languages read Latin letters with their own rules.
-            EspeakPhonemizer? latin = lang == 'h' ? EspeakPhonemizer.FromDataDirectory(data, "en") : null;
-            KokoroEspeakG2P g2p = new(EspeakPhonemizer.FromDataDirectory(data, language), latin);
+            // Hindi's script has no Latin letter rules, so every Latin word reads with espeak-ng's English voice. French
+            // switches only the English words its dictionary or rules mark, and reads the rest with its own rules, as
+            // espeak-ng does. Spanish, Italian and Portuguese read Latin letters with their own rules.
+            EspeakPhonemizer espeak = EspeakPhonemizer.FromDataDirectory(data, language);
+            KokoroEspeakG2P g2p = lang switch
+            {
+                'h' => new KokoroEspeakG2P(espeak, EspeakPhonemizer.FromDataDirectory(data, "en")),
+                'f' => new KokoroEspeakG2P(espeak, EspeakPhonemizer.FromDataDirectory(data, "en"), espeak.SwitchesLanguage),
+                _ => new KokoroEspeakG2P(espeak),
+            };
             return g2p.ToIpa;
         }
         if (lang == 'j')
