@@ -29,7 +29,7 @@ public sealed class MossImageTransformer : IDisposable
     private Tensor? _finalNorm, _finalLinear;
     private Tensor? _latentFixed, _blockRowsFixed, _headRowsFixed;
     private Tensor[] _velocityFixed = [];
-    private bool _hasPackedWeights;
+    private bool _hasBlockQuantizedWeights;
     private int _disposed;
 
     /// <summary>Creates an unloaded transformer for <paramref name="config"/>.</summary>
@@ -70,7 +70,7 @@ public sealed class MossImageTransformer : IDisposable
             _textBlocks[i].LoadWeights(weights, $"text_embedder.blocks.{i}");
         for (int i = 0; i < _blocks.Length; i++)
             _blocks[i].LoadWeights(weights, $"layers.{i}");
-        _hasPackedWeights = EnumerateWeights().Any(static w => w.DType.IsQuantized || w.DType.IsFp8 || w.QuantInfo is not null);
+        _hasBlockQuantizedWeights = EnumerateWeights().Any(static w => w.DType.IsQuantized);
     }
 
     /// <summary>Every weight the transformer reads.</summary>
@@ -179,7 +179,7 @@ public sealed class MossImageTransformer : IDisposable
         backend.CopyInto(_blockRowsFixed, time.Block);
         backend.CopyInto(_headRowsFixed, time.Head);
         EnsureVelocityBuffers(branches.Count, packedLatent.Shape);
-        _graph.Run(backend, this, BranchSignature(branches), () =>
+        _graph.Run(backend, this, BranchSignature(branches), trimBeforeCapture: _hasBlockQuantizedWeights, step: () =>
         {
             using MossImageModulation modulation = MossImageModulation.Split(backend, _blockRowsFixed, _headRowsFixed, _config.HiddenSize);
             for (int i = 0; i < branches.Count; i++)
@@ -227,14 +227,16 @@ public sealed class MossImageTransformer : IDisposable
     public void InvalidateStepGraph(IBackend backend) => _graph.Invalidate(backend, this);
 
     /// <summary>True when <see cref="ForwardBranches"/> would capture on <paramref name="backend"/> given the fixed latent:
-    /// on by default on CUDA for unpacked weights (packed weights dequantize per GEMM, which inflates graph memory),
-    /// opt-in (<c>numerics.ditGraph</c>) otherwise.</summary>
+    /// on by default on CUDA for every weight format, opt-in (<c>numerics.ditGraph</c>) elsewhere. Block-quantized weights
+    /// (GGUF, nvfp4) dequantize transiently per GEMM, so their capture reserves that high-water in the graph pool; Flux.2
+    /// keeps them opt-in because at 32B on 24 GB that reservation OOMs, but MOSS-Image's largest transient is one 5B-model
+    /// projection, so the pool is trimmed before capture instead (and a failed capture still falls back to eager).</summary>
     public bool GraphEligible(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (!backend.StepGraphSupported || _graph.Dead)
             return false;
-        bool defaultOn = backend.Device.IsCuda && !_hasPackedWeights && DitStepGraph.EnabledDefaultOn;
+        bool defaultOn = backend.Device.IsCuda && DitStepGraph.EnabledDefaultOn;
         return defaultOn || DitStepGraph.Enabled;
     }
 

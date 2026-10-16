@@ -29,7 +29,10 @@ public sealed class DitStepGraphSession(string label)
 
     /// <summary>Runs <paramref name="step"/> under signature <paramref name="signature"/>: eagerly while warming up or
     /// dead, recorded on the capture call, replayed after that.</summary>
-    public void Run(IBackend backend, object owner, long signature, Action step)
+    /// <param name="trimBeforeCapture">Hand the eager warm-ups' unused pool reservation back to the driver before
+    /// capture: instantiation reserves the graph's transient high-water on top of it, which matters when weights are
+    /// dequantized per GEMM. Live allocations are untouched.</param>
+    public void Run(IBackend backend, object owner, long signature, Action step, bool trimBeforeCapture = false)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(owner);
@@ -65,6 +68,8 @@ public sealed class DitStepGraphSession(string label)
             step();
             return;
         }
+        if (trimBeforeCapture)
+            backend.TrimMemoryPool();
         backend.StepGraphBegin();
         try
         {
