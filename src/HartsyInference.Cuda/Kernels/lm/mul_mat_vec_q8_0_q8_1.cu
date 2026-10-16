@@ -117,3 +117,117 @@ extern "C" __global__ void mul_mat_vec_q8_0_q8_1_ksplit(
         output[(size_t)m * N + n] = sum;
     }
 }
+
+// Multi-row variants: up to Q8_MB activation rows share one pass over the weight. The decode step's CFG pair runs M=2,
+// and the single-row kernels above read the whole weight once per row. Each row keeps the single-row kernel's exact
+// per-lane sequence and shuffle tree, so every output is bit-identical to a per-row launch of the kernel above.
+// Staging the activation rows in shared memory was measured slower: each block would reload K bytes per row for only
+// a few warps of weight, so the activation traffic outweighs the saved weight pass.
+#define Q8_MB 4
+
+__device__ __forceinline__ void q8_0_q8_1_block_accumulate(
+    float (&acc)[Q8_MB], const unsigned char* __restrict__ wrow, const signed char* __restrict__ xq,
+    const float* __restrict__ xd, int K, int nblk, int mBase, int M, int b, int li)
+{
+    const unsigned char* block = wrow + (size_t)b * BLK_BYTES;
+    const float dw = __half2float(*(const __half*)block);
+    const unsigned short* q16 = (const unsigned short*)(block + 2);
+    const unsigned int w16a = q16[li * 4 + 0];
+    const unsigned int w16b = q16[li * 4 + 1];
+    const unsigned int w16c = q16[li * 4 + 2];
+    const unsigned int w16d = q16[li * 4 + 3];
+    const int wq0 = (int)(w16a | (w16b << 16));
+    const int wq1 = (int)(w16c | (w16d << 16));
+    #pragma unroll
+    for (int j = 0; j < Q8_MB; ++j) {
+        const int m = mBase + j;
+        if (m < M) {
+            const int2 xv = *reinterpret_cast<const int2*>(xq + (size_t)m * K + b * BLK_ELEMS + li * 8);
+            int idot = __dp4a(wq0, xv.x, 0);
+            idot = __dp4a(wq1, xv.y, idot);
+            acc[j] += dw * xd[(size_t)m * nblk + b] * (float)idot;
+        }
+    }
+}
+
+// One warp per output row; grid = (ceil(N / WARPS_PER_BLOCK), ceil(M / Q8_MB)).
+extern "C" __global__ void mul_mat_vec_q8_0_q8_1_mb(
+    float* __restrict__ output,
+    const signed char* __restrict__ xq,
+    const float* __restrict__ xd,
+    const unsigned char* __restrict__ weight,
+    const float* __restrict__ bias,     // may be nullptr
+    int N, int K, int M)
+{
+    const int lane = threadIdx.x;
+    const int n = blockIdx.x * blockDim.y + threadIdx.y;
+    const int mBase = blockIdx.y * Q8_MB;
+    if (n >= N) return;
+    const int nblk = K / BLK_ELEMS;
+    const unsigned char* wrow = weight + (size_t)n * nblk * BLK_BYTES;
+    const int g = lane >> 2;
+    const int li = lane & 3;
+    float acc[Q8_MB];
+    #pragma unroll
+    for (int j = 0; j < Q8_MB; ++j) acc[j] = 0.0f;
+    #pragma unroll 8   // independent weight loads in flight; the adds into acc keep their order
+    for (int b0 = 0; b0 < nblk; b0 += 8) {
+        const int b = b0 + g;
+        if (b < nblk) q8_0_q8_1_block_accumulate(acc, wrow, xq, xd, K, nblk, mBase, M, b, li);
+    }
+    #pragma unroll
+    for (int j = 0; j < Q8_MB; ++j) {
+        float a = acc[j];
+        #pragma unroll
+        for (int o = WARP_SIZE / 2; o > 0; o >>= 1) a += __shfl_down_sync(0xffffffffu, a, o);
+        if (lane == 0 && mBase + j < M) {
+            if (bias != nullptr) a += bias[n];
+            output[(size_t)(mBase + j) * N + n] = a;
+        }
+    }
+}
+
+// Block per output row with a K-split across the block's warps; grid = (N, ceil(M / Q8_MB)).
+extern "C" __global__ void mul_mat_vec_q8_0_q8_1_ksplit_mb(
+    float* __restrict__ output,
+    const signed char* __restrict__ xq,
+    const float* __restrict__ xd,
+    const unsigned char* __restrict__ weight,
+    const float* __restrict__ bias,     // may be nullptr
+    int N, int K, int M)
+{
+    const int lane = threadIdx.x;
+    const int warp = threadIdx.y;
+    const int n = blockIdx.x;
+    const int mBase = blockIdx.y * Q8_MB;
+    if (n >= N) return;
+    const int nblk = K / BLK_ELEMS;
+    const unsigned char* wrow = weight + (size_t)n * nblk * BLK_BYTES;
+    const int g = lane >> 2;
+    const int li = lane & 3;
+    float acc[Q8_MB];
+    #pragma unroll
+    for (int j = 0; j < Q8_MB; ++j) acc[j] = 0.0f;
+    #pragma unroll 8
+    for (int b0 = warp * 8; b0 < nblk; b0 += (int)blockDim.y * 8) {
+        const int b = b0 + g;
+        if (b < nblk) q8_0_q8_1_block_accumulate(acc, wrow, xq, xd, K, nblk, mBase, M, b, li);
+    }
+    __shared__ float partial[Q8_MB][16];
+    #pragma unroll
+    for (int j = 0; j < Q8_MB; ++j) {
+        float a = acc[j];
+        #pragma unroll
+        for (int o = WARP_SIZE / 2; o > 0; o >>= 1) a += __shfl_down_sync(0xffffffffu, a, o);
+        if (lane == 0) partial[j][warp] = a;
+    }
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        for (int j = 0; j < Q8_MB && mBase + j < M; ++j) {
+            float sum = 0.0f;
+            for (int w = 0; w < (int)blockDim.y; ++w) sum += partial[j][w];
+            if (bias != nullptr) sum += bias[n];
+            output[(size_t)(mBase + j) * N + n] = sum;
+        }
+    }
+}

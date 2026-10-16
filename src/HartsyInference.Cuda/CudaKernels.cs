@@ -476,6 +476,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _mulMatVecQ8_0Q8_1Module;
     private readonly nint _mulMatVecQ8_0Q8_1;
     private readonly nint _mulMatVecQ8_0Q8_1Ksplit;
+    private readonly nint _mulMatVecQ8_0Q8_1Mb;
+    private readonly nint _mulMatVecQ8_0Q8_1KsplitMb;
     private readonly CudaModule _mulMatVecQ6KQ8_1Module;
     private readonly nint _mulMatVecQ6KQ8_1;
     private readonly nint _mulMatVecQ6KQ8_1Ksplit;
@@ -1184,6 +1186,8 @@ public sealed partial class CudaKernels : IDisposable
         _mulMatVecQ8_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q8_0_q8_1"));
         _mulMatVecQ8_0Q8_1 = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1");
         _mulMatVecQ8_0Q8_1Ksplit = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_ksplit");
+        _mulMatVecQ8_0Q8_1Mb = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_mb");
+        _mulMatVecQ8_0Q8_1KsplitMb = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_ksplit_mb");
         _mulMatVecQ6KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q6k_q8_1"));
         _mulMatVecQ6KQ8_1 = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1");
         _mulMatVecQ6KQ8_1Ksplit = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1_ksplit");
@@ -4964,7 +4968,38 @@ public sealed partial class CudaKernels : IDisposable
 
     /// <summary>Fused Q8_0 × Q8_1 dp4a matrix-vector product for decode (M small). Q8_0 is symmetric, so only the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ8_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ8_0Q8_1, _mulMatVecQ8_0Q8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
+    {
+        // The multi-row kernels read the weight once for up to Q8_MB rows (lm/mul_mat_vec_q8_0_q8_1.cu); each row keeps the
+        // single-row kernel's arithmetic and reduction order, so the outputs are bit-identical to LaunchMulMatVecQ8_0Q8_1PerRow.
+        const int rowsPerBlock = 4;   // Q8_MB in lm/mul_mat_vec_q8_0_q8_1.cu
+        ulong outA = output, xqA = xq, xdA = xd, wA = weight, bA = bias;
+        int nA = N, kA = K, mA = M;
+        void** args = stackalloc void*[8];
+        args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &wA; args[4] = &bA;
+        args[5] = &nA; args[6] = &kA; args[7] = &mA;
+        uint gridY = (uint)((M + rowsPerBlock - 1) / rowsPerBlock);
+        uint ksplit = GemvKsplitWarps(N, K);
+        if (ksplit > 1)
+        {
+            CudaDriverApi.cuLaunchKernel(_mulMatVecQ8_0Q8_1KsplitMb, (uint)N, gridY, 1, 32, ksplit, 1, 0, stream, (nint)args, 0).ThrowOnError();
+            return;
+        }
+        uint WARPS_PER_BLOCK = (uint)_wpbOverride;
+        uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        CudaDriverApi.cuLaunchKernel(_mulMatVecQ8_0Q8_1Mb, gridX, gridY, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Reference for <see cref="LaunchMulMatVecQ8_0Q8_1"/>: one single-row launch per activation row, over the same weight.</summary>
+    public unsafe void LaunchMulMatVecQ8_0Q8_1PerRow(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    {
+        int nblk = K / 32;
+        for (int m = 0; m < M; m++)
+        {
+            LaunchMulMatVecQ8_1Impl(_mulMatVecQ8_0Q8_1, _mulMatVecQ8_0Q8_1Ksplit,
+                output + (ulong)m * (ulong)N * 4, xq + (ulong)m * (ulong)K, xd + (ulong)m * (ulong)nblk * 4,
+                weight, bias, N, K, 1, stream);
+        }
+    }
 
     /// <summary>Fused Q6_K × Q8_1 dp4a matrix-vector product for decode (M small). Q6_K scales are signed (symmetric), so only the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ6KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)

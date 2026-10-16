@@ -98,21 +98,31 @@ compile_one() {
     fi
 }
 
+# want <kernel>: true when no kernel names were given on the command line, or when this one is named.
+want() {
+    [[ ${#ONLY[@]} -eq 0 ]] && return 0
+    local o
+    for o in "${ONLY[@]}"; do [[ "$o" == "$1" ]] && return 0; done
+    return 1
+}
+
 build_all() {
     INSTALL=true
     INSTALL_TUNED=false
+    local ONLY=()
     local extra_arch=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --no-install)    INSTALL=false; shift ;;
             --install-tuned) INSTALL_TUNED=true; shift ;;
             --arch)          extra_arch="${2#sm_}"; shift 2 ;;
-            *) echo "unknown argument: $1" >&2; exit 2 ;;
+            -*) echo "unknown argument: $1" >&2; exit 2 ;;
+            *)  ONLY+=("$1"); shift ;;
         esac
     done
-    for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && compile_one "$kernel" 80; done
-    for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && compile_one "$kernel" 75; done
-    for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && compile_one "$kernel" 80; done
+    for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
+    for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 75; done
+    for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
     if [[ -n "$extra_arch" ]]; then
         if [[ ! "$extra_arch" =~ [a-z]$ ]]; then
             echo "ERROR: --arch takes a family-specific arch (sm_120a, sm_100a): plain sm_${extra_arch} PTX would replace nothing and load nowhere the baseline does not." >&2
