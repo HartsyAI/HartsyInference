@@ -216,9 +216,9 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     /// <summary>Every loaded weight, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>. The embedding table is excluded: rows are gathered host-side, so uploading all 1.6 GB would be pure waste.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        // Redundant split originals are excluded: the fused projections serve every decode step, so uploading the splits too
-        // only duplicates the device memory of the quantized projections.
-        foreach (Tensor tensor in _backbone.EnumerateWeights(includeRedundantSplits: false))
+        // Redundant split originals stay in the device set. Excluding them changed the output sha and raised the VRAM peak
+        // (measured; see the PR body), so the exclusion was reverted.
+        foreach (Tensor tensor in _backbone.EnumerateWeights(includeRedundantSplits: true))
         {
             yield return tensor;
         }
