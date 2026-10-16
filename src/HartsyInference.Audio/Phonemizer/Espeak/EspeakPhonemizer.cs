@@ -501,6 +501,13 @@ public sealed class EspeakPhonemizer : IPhonemizer
         private const int SufxF = 0x2000;
     }
 
+    private bool HasVowel(List<byte> codes)
+    {
+        foreach (byte code in codes)
+            if (_phon.TryGet(code, out EspeakPhoneme phoneme) && phoneme.Type == EspeakPhoneme.TypeVowel) return true;
+        return false;
+    }
+
     private List<byte> PhonemizeWord(string word, string[] clause, int index, ClauseState state, out int skip)
     {
         skip = 0;
@@ -527,8 +534,8 @@ public sealed class EspeakPhonemizer : IPhonemizer
         else
         {
             if (found) { dflags = r.Flags; state.Flags2 = r.Flags2; } // flag-only entry: keep its flags, use the rules
-            bool spellable = _spellsLetters && EspeakLetterNames.IsSpelled(word, found ? r.Flags : 0);
-            List<byte>? spelled = spellable ? EspeakLetterNames.Spell(word, _phon, _stress) : null;
+            bool flagged = _spellsLetters && EspeakLetterNames.IsSpelledByFlag(word, found ? r.Flags : 0);
+            List<byte>? spelled = flagged ? EspeakLetterNames.Spell(word, _phon, _stress) : null;
             if (spelled is not null)
             {
                 stressed = spelled;
@@ -539,6 +546,16 @@ public sealed class EspeakPhonemizer : IPhonemizer
             {
                 byte[] buf = BuildBuffer(clause, index, out int start);
                 stressed = TranslateByRules(buf, start, ref dflags, where, state);
+                // espeak spells a short letter string whose rules give it no vowel ("lt", "pc"); "st" keeps its vowel.
+                if (_spellsLetters && EspeakLetterNames.IsAbbreviationCandidate(word, found ? r.Flags : 0) && !HasVowel(stressed))
+                {
+                    List<byte>? letters = EspeakLetterNames.Spell(word, _phon, _stress);
+                    if (letters is not null)
+                    {
+                        stressed = letters;
+                        dflags = (dflags & ~FlagFoundAttributes) | FlagFound;
+                    }
+                }
             }
         }
         // Flapping (t/d -> ɾ), voicing assimilation, and vowel reduction are applied data-driven by the phoneme-program

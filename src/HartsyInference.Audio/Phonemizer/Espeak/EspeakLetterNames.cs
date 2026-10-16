@@ -16,26 +16,31 @@ internal static class EspeakLetterNames
     private const uint FlagFound = 0x80000000;
     // Dictionary flag bit 13: set on the flag-only entries of letter strings espeak spells (ok, ai, abc).
     private const uint FlagSpellWord = 0x2000;
-    // Dictionary flag bit 24: an abbreviation entry the rules still read (st is read as sənt).
+    // Dictionary flag bit 24: an abbreviation entry (lt, st) the rules read unless they leave it without a vowel.
     private const uint FlagAbbreviation = 0x01000000;
     private const int SecondaryStress = 3;
 
     // A short all-letter word with no vowel letter cannot be read as a word, so espeak spells it out. Longer words go
     // to the letter-to-sound rules.
-    private const int MaxVowelessLength = 4;
+    private const int MaxSpelledLength = 4;
     private const string VowelLetters = "aeiouyAEIOUY";
 
-    /// <summary>True when espeak spells <paramref name="word"/> out rather than reading it, given that the dictionary
-    /// has no pronunciation for it. <paramref name="dictFlags"/> are the flags of a flag-only dictionary entry (0 when
-    /// the word has no entry): an entry flagged for spelling is spelled, an abbreviation entry is read by the rules, and
-    /// otherwise a short word with no vowel letter is spelled.</summary>
-    public static bool IsSpelled(string word, uint dictFlags)
+    /// <summary>True when espeak spells a letter string outright, without consulting the rules: a flag-only entry with the
+    /// spell-word bit ("ok", "ai"), or a short letter string with no dictionary entry and no vowel letter ("pc", "hr").
+    /// <paramref name="dictFlags"/> are 0 when the word has no entry.</summary>
+    public static bool IsSpelledByFlag(string word, uint dictFlags)
     {
-        if (word.Length < 2 || !word.All(char.IsAsciiLetter)) return false;
-        if ((dictFlags & FlagAbbreviation) != 0) return false;
+        if (!IsLetterString(word)) return false;
         if ((dictFlags & FlagSpellWord) != 0) return true;
-        return word.Length <= MaxVowelessLength && !word.Any(c => VowelLetters.Contains(c));
+        return (dictFlags & FlagAbbreviation) == 0 && word.Length <= MaxSpelledLength && !word.Any(c => VowelLetters.Contains(c));
     }
+
+    /// <summary>True for an abbreviation entry ("lt", "st") the rules read unless they give it no vowel. espeak spells
+    /// "lt" but reads "st" as sənt, so the caller spells the word only when the rules leave it without a vowel.</summary>
+    public static bool IsAbbreviationCandidate(string word, uint dictFlags) =>
+        IsLetterString(word) && word.Length <= MaxSpelledLength && (dictFlags & FlagAbbreviation) != 0;
+
+    private static bool IsLetterString(string word) => word.Length >= 2 && word.All(char.IsAsciiLetter);
 
     /// <summary>Returns the stressed codes for the spelled letters of <paramref name="word"/>, or null when a letter name
     /// is missing from the phoneme table (the caller then falls back to the rules).</summary>
