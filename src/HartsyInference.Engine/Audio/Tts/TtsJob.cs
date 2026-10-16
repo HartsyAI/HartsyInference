@@ -20,6 +20,15 @@ internal sealed record TtsJob
     /// <summary>Temp 24 kHz mono WAV of the reference, for models that take a file path (e.g. VibeVoice).</summary>
     internal string? ReferenceWavPath { get; init; }
 
+    /// <summary>Voice references beyond <see cref="Reference"/> (see <c>SpeechRequest.References</c>); empty when none.</summary>
+    internal IReadOnlyList<SpeechTurn> References { get; init; } = [];
+
+    /// <summary>Earlier turns of the conversation, oldest first (see <c>SpeechRequest.History</c>); empty when none.</summary>
+    internal IReadOnlyList<SpeechTurn> History { get; init; } = [];
+
+    /// <summary>Receives the turns the job produced, for a model that revises takes; null when the caller does not want them.</summary>
+    internal Action<IReadOnlyList<SpeechTurn>>? TurnSink { get; init; }
+
     /// <summary>Built-in voice name; null/empty is the model's default.</summary>
     internal string? Voice { get; init; }
 

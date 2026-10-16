@@ -80,6 +80,12 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// <summary>Where this block's routed experts run: the offload attached to it, or null when every expert runs on the device.</summary>
     public MoeExpertOffload? Offload => _offload;
 
+    /// <summary>Routed experts in this block.</summary>
+    public int NumExperts => _moe.NumExperts;
+
+    /// <summary>Inner width of one routed expert.</summary>
+    public int IntermediateSize => _moe.MoeIntermediateSize;
+
     /// <summary>
     /// Opt-in (default off): routes the routed experts through the heterogeneous runtime. The scheduler plans every expert on
     /// the CPU, <see cref="HostExpertCache"/> holds the layer's F32 weights without copying them, and
@@ -479,12 +485,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     }
 
     /// <summary>The indexed GEMVs read whole quant blocks along the input length, so the hidden and intermediate sizes must be block multiples.</summary>
-    private bool IndexedAlignmentOk()
-    {
-        int align = _gateW[0].DType == DType.Q8_0 ? 32 : 256;
-        int downAlign = _downW[0].DType == DType.Q8_0 ? 32 : 256;
-        return _hidden % align == 0 && _moe.MoeIntermediateSize % downAlign == 0;
-    }
+    private bool IndexedAlignmentOk() =>
+        _hidden % _gateW[0].DType.BlockElementCount == 0 && _moe.MoeIntermediateSize % _downW[0].DType.BlockElementCount == 0;
 
     /// <summary>The routed stage of a large batch with the routing on the device: <see cref="IBackend.MoeRoute"/>, <see cref="IBackend.MoeBuildDispatch"/>
     /// into expert-major order, one read of the E + 1 offsets, the per-expert GEMMs over contiguous row ranges

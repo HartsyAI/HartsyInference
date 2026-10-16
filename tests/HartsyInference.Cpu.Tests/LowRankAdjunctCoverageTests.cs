@@ -61,6 +61,7 @@ public sealed class LowRankAdjunctCoverageTests
         ["RmsNormEmitQ8"] = AdjunctCoverage.NotATarget,
         ["AddRmsNorm"] = AdjunctCoverage.NotATarget,
         ["AddRmsNormEmitQ8"] = AdjunctCoverage.NotATarget,
+        ["MoeCombineAddRmsNormEmitQ8"] = AdjunctCoverage.NotATarget,   // its weight is the RMSNorm's
     };
 
     /// <summary>The [Fact]s below are hand-written, so on their own they only prove the entries someone remembered.

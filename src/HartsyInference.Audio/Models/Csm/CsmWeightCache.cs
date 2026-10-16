@@ -15,17 +15,7 @@ public static class CsmWeightCache
 {
     /// <summary>Resolves a quant mode string (q8_0 / q4_k / q5_k / q6_k, plus aliases) to a backbone DType, or null
     /// (unset / unrecognized → no quantization).</summary>
-    public static DType? ResolveQuant(string? mode)
-    {
-        return mode?.Trim().ToLowerInvariant() switch
-        {
-            "q8_0" or "q8" => DType.Q8_0,
-            "q4_k" or "q4" or "q4_k_m" or "q4_k_s" => DType.Q4_K,
-            "q5_k" or "q5" or "q5_k_m" => DType.Q5_K,
-            "q6_k" or "q6" => DType.Q6_K,
-            _ => null,
-        };
-    }
+    public static DType? ResolveQuant(string? mode) => GgufQuantCache.ResolveQuant(mode);
 
     /// <summary>Loads the CSM/HeartMuLa weights quantized from a disk GGUF cache, converting once (streaming) from
     /// <paramref name="source"/> (a mmap-backed weight dict) if the cache is missing. Returns the (mmap-backed)
@@ -37,31 +27,9 @@ public static class CsmWeightCache
     {
         DType? backbone = ResolveQuant(quant);
         if (backbone is null) return (source, null);
-
-        if (!File.Exists(cacheGgufPath))
-        {
-            Logs.Info($"[HeartMuLa] Quantizing LM to {backbone.Value.Name} → {cacheGgufPath} (one-time, streaming — no OOM)...");
-            Directory.CreateDirectory(Path.GetDirectoryName(cacheGgufPath)!);
-            string tmp = cacheGgufPath + ".tmp";
-            try
-            {
-                GgufQuantizer.ConvertDictionaryToGguf(source, tmp, PolicyFor(backbone.Value), "heartmula");
-                File.Move(tmp, cacheGgufPath, overwrite: true);
-            }
-            catch
-            {
-                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* best-effort cleanup */ }
-                throw;
-            }
-            Logs.Info($"[HeartMuLa] Quantized cache written ({new FileInfo(cacheGgufPath).Length / (1024 * 1024)} MB).");
-        }
-
-        GgufLoader loader = new();
-        loader.Load(cacheGgufPath);
-        // Shapes come back from the source, not the file: the writer emits ggml order, and a raw read of that hands
-        // every projection over transposed (see GgufQuantizer.ReadBack).
-        Dictionary<string, Tensor> weights = GgufQuantizer.ReadBack(loader, source);
-        Logs.Info($"[HeartMuLa] Loaded {backbone.Value.Name} quantized weights from cache ({weights.Count} tensors, {new FileInfo(cacheGgufPath).Length / (1024 * 1024)} MB).");
+        (Dictionary<string, Tensor> weights, GgufLoader loader) =
+            GgufQuantCache.Load(source, cacheGgufPath, PolicyFor(backbone.Value), "heartmula", "[HeartMuLa]");
+        Logs.Info($"[HeartMuLa] Loaded {backbone.Value.Name} quantized weights from cache ({weights.Count} tensors).");
         return (weights, loader);
     }
 

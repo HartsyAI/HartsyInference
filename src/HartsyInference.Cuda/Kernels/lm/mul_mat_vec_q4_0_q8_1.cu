@@ -23,29 +23,18 @@
 #define BLK_BYTES 18
 #define WARP_SIZE 32
 
-extern "C" __global__ void mul_mat_vec_q4_0_q8_1(
-    float* __restrict__ output,
-    const signed char* __restrict__ xq,
-    const float* __restrict__ xd,
-    const unsigned char* __restrict__ weight,
-    const float* __restrict__ bias,     // may be nullptr
-    int N, int K, int M)
+// Per-lane partial dot over block-groups b0Start, b0Start+b0Stride, … (each group = 8 blocks).
+__device__ __forceinline__ float q4_0_q8_1_row_partial(
+    const unsigned char* __restrict__ wrow,
+    const signed char* __restrict__ xqrow,
+    const float* __restrict__ xdrow,
+    int nblk, int b0Start, int b0Stride, int lane)
 {
-    const int lane = threadIdx.x;                          // 0..31
-    const int n = blockIdx.x * blockDim.y + threadIdx.y;   // output row
-    const int m = blockIdx.y;                              // batch row
-    if (n >= N || m >= M) return;
-
-    const int nblk = K / BLK_ELEMS;
-    const unsigned char* wrow = weight + (size_t)n * nblk * BLK_BYTES;
-    const signed char* xqrow = xq + (size_t)m * K;
-    const float* xdrow = xd + (size_t)m * nblk;
-
     const int g = lane >> 2;       // which of 8 blocks this iteration
     const int li = lane & 3;       // which 4-byte nibble chunk within the block
 
     float acc = 0.0f;
-    for (int b0 = 0; b0 < nblk; b0 += 8) {
+    for (int b0 = b0Start; b0 < nblk; b0 += b0Stride) {
         const int b = b0 + g;
         if (b < nblk) {
             const unsigned char* block = wrow + (size_t)b * BLK_BYTES;
@@ -61,6 +50,27 @@ extern "C" __global__ void mul_mat_vec_q4_0_q8_1(
             acc += dw * xdrow[b] * (float)idot;
         }
     }
+    return acc;
+}
+
+extern "C" __global__ void mul_mat_vec_q4_0_q8_1(
+    float* __restrict__ output,
+    const signed char* __restrict__ xq,
+    const float* __restrict__ xd,
+    const unsigned char* __restrict__ weight,
+    const float* __restrict__ bias,     // may be nullptr
+    int N, int K, int M)
+{
+    const int lane = threadIdx.x;                          // 0..31
+    const int n = blockIdx.x * blockDim.y + threadIdx.y;   // output row
+    const int m = blockIdx.y;                              // batch row
+    if (n >= N || m >= M) return;
+
+    const int nblk = K / BLK_ELEMS;
+    float acc = q4_0_q8_1_row_partial(
+        weight + (size_t)n * nblk * BLK_BYTES,
+        xq + (size_t)m * K, xd + (size_t)m * nblk,
+        nblk, 0, 8, lane);
 
     #pragma unroll
     for (int o = WARP_SIZE / 2; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);

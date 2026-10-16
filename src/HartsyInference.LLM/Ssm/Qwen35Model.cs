@@ -1,5 +1,6 @@
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -9,28 +10,89 @@ namespace HartsyInference.LLM.Ssm;
 
 /// <summary>Qwen3.5 (<c>qwen35</c> GGUF arch) — a hybrid decoder, NOT a transformer or a pure recurrent model: most layers are Gated DeltaNet (a delta-rule linear attention), interleaved every <see cref="FullAttentionInterval"/>-th layer with a REGULAR causal self-attention layer (GQA + partial RoPE + KV cache, Qwen3-style QK-norm, plus a fused query+gate projection unique to this arch).</summary>
 /// <remarks>Text-only: the GGUF's 4-section M-RoPE degenerates to a single partial-rotary RoPE (<see cref="RotaryDim"/> = sum of the 4 sections × 2) since every section gets the same position for non-multimodal input. Ported from llama.cpp's <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side, matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</remarks>
-public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable
+public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable, IExpertOffloadTarget
 {
     private readonly GgufModelLoader.LoadedGgufModel? _handle;
     private readonly List<Tensor> _ownedTensors = [];
     private readonly IReadOnlyDictionary<string, Tensor> _w;
+    private bool _headless;   // an untied HuggingFace build whose caller projects the hidden states itself
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
         // Skip the host-only F32 embed copy and the stacked `_exps` tensors (their per-expert views, yielded via the
         // MoE blocks below, are what the Linear path actually uses — preloading the stacked form too would double the
-        // upload). Dense models have no `_exps` keys and no MoE blocks, so this reduces to the original set.
+        // upload). Dense models have no `_exps` keys and no MoE blocks, so this reduces to the original set. With a
+        // separate output head the embedding table is only gathered on the host, so it stays off the device too.
+        bool untiedHead = _headless || Has("output.weight");
         foreach (KeyValuePair<string, Tensor> kv in _w)
-            if (kv.Key != "__embed_f32" && !kv.Key.Contains("_exps", StringComparison.Ordinal)) yield return kv.Value;
+        {
+            if (kv.Key == "__embed_f32" || kv.Key.Contains("_exps", StringComparison.Ordinal)) continue;
+            if (untiedHead && kv.Key == "token_embd.weight") continue;
+            yield return kv.Value;
+        }
         if (_moe is not null)
             foreach (MoeFeedForward? ff in _moe)
                 if (ff is not null)
                     foreach (Tensor t in ff.EnumerateWeights()) yield return t;
     }
 
+    /// <summary><see cref="EnumerateWeights"/> arranged for <see cref="IBackend.PreloadWeightGroups"/>: each MoE layer's routed
+    /// experts as one group per projection, so the device-routed expert kernels find them resident, and every other weight
+    /// as a group of one.</summary>
+    /// <param name="includeExperts">Include the routed experts; false when an expert offload owns their residency.</param>
+    public IEnumerable<IReadOnlyList<Tensor>> EnumerateWeightGroups(bool includeExperts = true)
+    {
+        HashSet<Tensor> grouped = new(ReferenceEqualityComparer.Instance);
+        foreach (MoeFeedForward? ff in _moe)
+        {
+            if (ff is null) continue;
+            foreach (IReadOnlyList<Tensor> group in ff.EnumerateExpertGroups())
+            {
+                foreach (Tensor t in group) grouped.Add(t);
+                if (includeExperts) yield return group;
+            }
+        }
+        foreach (Tensor t in EnumerateWeights())
+        {
+            if (!grouped.Contains(t)) yield return [t];
+        }
+    }
+
+    /// <inheritdoc/>
+    public int ExpertHiddenSize => DModel;
+
+    /// <inheritdoc/>
+    public int ExpertIntermediateSize => Array.Find(_moe, static ff => ff is not null)?.IntermediateSize ?? 0;
+
+    /// <summary>Every routed expert projection of every MoE layer.</summary>
+    public IEnumerable<Tensor> EnumerateExpertWeights()
+    {
+        foreach (MoeFeedForward? ff in _moe)
+        {
+            if (ff is null) continue;
+            foreach (IReadOnlyList<Tensor> group in ff.EnumerateExpertGroups())
+                foreach (Tensor t in group) yield return t;
+        }
+    }
+
+    /// <summary>Routes every MoE layer's experts through <paramref name="offload"/> (see <see cref="MoeFeedForward.AttachOffload"/>);
+    /// returns each MoE layer with its expert count, for seeding the cache.</summary>
+    public IReadOnlyList<(int Layer, int ExpertCount)> AttachExpertOffload(MoeExpertOffload offload)
+    {
+        ArgumentNullException.ThrowIfNull(offload);
+        List<(int, int)> layers = [];
+        for (int i = 0; i < _moe.Length; i++)
+        {
+            if (_moe[i] is not MoeFeedForward ff) continue;
+            ff.AttachOffload(offload, i);
+            layers.Add((i, ff.NumExperts));
+        }
+        return layers;
+    }
+
     private readonly bool[] _isLinear;   // per-layer: true = Gated DeltaNet, false = regular attention
-    // qwen35moe: per-(trunk-)layer MoE FFN (null on a dense-tier model). _isMoe short-circuits the device/graph
-    // decode fast paths (MoE's host-side top-k routing can't live inside a captured CUDA graph).
+    // qwen35moe: per-(trunk-)layer MoE FFN (null on a dense-tier model). _isMoe keeps MoE models off graph decode: the
+    // host-routed experts' top-k read cannot live inside a captured CUDA graph.
     private readonly MoeFeedForward?[] _moe;
     private readonly bool _isMoe;
     /// <inheritdoc/>
@@ -115,6 +177,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     {
         foreach (float[]? h in _convHistory) if (h is not null) Array.Clear(h);
         foreach (float[]? s in _deltaState) if (s is not null) Array.Clear(s);
+        // The zeroed host arrays are now the state; a device mirror from the last generation must not be read back over them.
+        Array.Clear(_stateOnDevice);
         _kvCache.Reset();
         _pos = 0;
     }
@@ -124,9 +188,34 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     {
         int d = DModel;
         float* dp = (float*)dst.DataPointer;
-        float* emb = (float*)W("__embed_f32").DataPointer;
+        // A GGUF load keeps an F32 copy for the gather; a HuggingFace load reads the stored table's rows directly.
+        Tensor table = _w.TryGetValue("__embed_f32", out Tensor? f32) ? f32 : W("token_embd.weight");
         for (int s = 0; s < ids.Count; s++)
-            Buffer.MemoryCopy(emb + (long)ids[s] * d, dp + (long)s * d, (long)d * 4, (long)d * 4);
+        {
+            if ((uint)ids[s] >= (uint)VocabSize) throw new ArgumentOutOfRangeException(nameof(ids), $"Token id {ids[s]} is outside the {VocabSize}-token vocabulary.");
+            CopyEmbeddingRow(table, ids[s], d, dp + (long)s * d);
+        }
+    }
+
+    /// <summary>Runs <paramref name="embeds"/> (<c>[1, seq, DModel]</c> host F32, not consumed) through every layer, continuing the
+    /// carried state, and returns every position's final-norm hidden state <c>[1, seq, DModel]</c> (caller owns).</summary>
+    public Tensor ForwardEmbedsHidden(IBackend backend, Tensor embeds, int seq)
+    {
+        ArgumentNullException.ThrowIfNull(embeds);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seq);
+        if (embeds.ElementCount < (long)seq * DModel) throw new ArgumentException($"Embeddings hold fewer than {seq} rows of {DModel}.", nameof(embeds));
+        int d = DModel;
+        Tensor h = new(new TensorShape(1, seq, d), DType.F32);
+        Buffer.MemoryCopy((void*)embeds.DataPointer, (void*)h.DataPointer, (long)seq * d * 4, (long)seq * d * 4);
+        return RunTrunk(backend, h, seq);
+    }
+
+    /// <summary>Projects <paramref name="rows"/> hidden rows (<c>[1, rows, DModel]</c>) to vocabulary logits <c>[1, rows, VocabSize]</c> (caller owns).</summary>
+    public Tensor ProjectLogits(IBackend backend, Tensor hidden, int rows)
+    {
+        Tensor logits = new(new TensorShape(1, rows, VocabSize), DType.F32);
+        backend.Linear(logits, hidden, HeadWeight, null);
+        return logits;
     }
 
     /// <summary>Maps one qwen35moe layer's raw GGUF MoE tensors to the HF-style names <see cref="MoeFeedForward.LoadWeights"/> expects, splitting the stacked experts into per-expert quant views (reuses the same [E·out, in] flatten + byte-range slice as the transformer path).</summary>
@@ -150,18 +239,11 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         return lw;
     }
 
-    /// <summary>Splits one stacked expert tensor (<c>[E, outDim, inDim]</c> ggml layout → flat <c>[E·outDim, inDim]</c>) into <paramref name="e"/> per-expert <c>[outDim, inDim]</c> quant views keyed by <paramref name="targetFormat"/>; each view is a plain byte-range over the borrowed GGUF mmap — no dequant, no copy.</summary>
+    /// <summary>Splits one stacked GGUF expert tensor into per-expert views (<see cref="StackedExperts.Split"/>); the stacked source stays in <paramref name="w"/>.</summary>
     private static void SplitExpertsInto(Dictionary<string, Tensor> dst, IReadOnlyDictionary<string, Tensor> w,
         string stackedKey, string targetFormat, int e, int outDim, int inDim)
     {
-        if (!w.TryGetValue(stackedKey, out Tensor? stacked)) return;
-        Tensor flat = stacked.Reshape(new TensorShape(e * outDim, inDim));
-        long rowBytes = stacked.DType.ComputeByteCount(inDim);
-        for (int x = 0; x < e; x++)
-        {
-            byte* s = (byte*)flat.DataPointer + (long)x * outDim * rowBytes;
-            dst[targetFormat.Replace("{0}", x.ToString())] = new Tensor((void*)s, new TensorShape(outDim, inDim), stacked.DType, stacked.Device);
-        }
+        if (w.TryGetValue(stackedKey, out Tensor? stacked)) StackedExperts.Split(dst, stacked, targetFormat, e, outDim, inDim);
     }
 
     public static Qwen35Model Load(string ggufPath)
@@ -275,16 +357,15 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
     private Tensor W(string key) => _w[key];
     private bool Has(string key) => _w.ContainsKey(key);
+    private Tensor HeadWeight => _headless ? throw new InvalidOperationException("This Qwen3.5 model was built without an output head.")
+        : Has("output.weight") ? W("output.weight") : W("token_embd.weight");   // tied by default
 
     /// <inheritdoc/>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;
         Tensor h = new(new TensorShape(1, seq, d), DType.F32);
-        float* hp = (float*)h.DataPointer;
-        float* emb = (float*)W("__embed_f32").DataPointer;
-        for (int s = 0; s < seq; s++)
-            Buffer.MemoryCopy(emb + (long)ids[s] * d, hp + (long)s * d, (long)d * 4, (long)d * 4);
+        EmbedLookup(h, ids);
         return ForwardFromHidden(backend, h, seq);
     }
 
@@ -319,6 +400,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         }
         stepCos?.Dispose(); stepSin?.Dispose();
         _pos += seq;
+        _kvCache.AdvanceLength(seq);
 
         Tensor normed = new(new TensorShape(1, seq, d), DType.F32);
         backend.RmsNorm(normed, h, W("output_norm.weight"), Eps);
@@ -334,8 +416,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         Buffer.MemoryCopy((byte*)normed.DataPointer + (long)(seq - 1) * d * 4, (void*)last.DataPointer, (long)d * 4, (long)d * 4);
         normed.Dispose();
         using Tensor logits = new(new TensorShape(1, 1, VocabSize), DType.F32);
-        Tensor headW = Has("output.weight") ? W("output.weight") : W("token_embd.weight");   // tied by default
-        backend.Linear(logits, last, headW, null);
+        backend.Linear(logits, last, HeadWeight, null);
         backend.Sync();
         float[] outv = new float[VocabSize];
         fixed (float* o = outv) Buffer.MemoryCopy((void*)logits.DataPointer, o, (long)VocabSize * 4, (long)VocabSize * 4);
@@ -411,7 +492,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         Tensor preFfn = new(flat, DType.F32);
         backend.AddRmsNormEmitQ8(afterAttn, preFfn, hIn, attnOut, W($"{p}.post_attention_norm.weight"), Eps);
         attnOut.Dispose();
-        Tensor ffnOut = DenseSwiGlu(backend, preFfn, p, 1);
+        Tensor ffnOut = Ffn(backend, preFfn, p, i, 1);
         preFfn.Dispose();
         Tensor result = new(flat, DType.F32);
         backend.Add(result, afterAttn, ffnOut);
@@ -422,8 +503,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// <summary>Regular causal self-attention layer: GQA + partial RoPE + KV cache, Qwen3-style per-head QK-norm, and a fused query+gate projection (wq outputs <c>[query | gate]</c>, double width — the gate sigmoid-gates the attention output before <c>wo</c>, unique to this arch's full-attention layers).</summary>
     private Tensor BlockAttn(IBackend backend, Tensor hIn, int i, int seq, Tensor? stepCos = null, Tensor? stepSin = null)
     {
-        if (seq == 1 && stepCos is not null && backend.GraphDecodeSupported && !_isMoe
-            && EngineKnobs.SsmDeviceStep.Value)
+        if (seq == 1 && stepCos is not null && backend.GraphDecodeSupported && EngineKnobs.SsmDeviceStep.Value)
             return BlockAttnDeviceStep(backend, hIn, i, stepCos, stepSin!);
         int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
         string p = $"blk.{i}";
@@ -587,8 +667,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.RmsNormEmitQ8(normed, h, W("output_norm.weight"), Eps);
         h.Dispose();
         Tensor logits = new(new TensorShape(1, 1, VocabSize), DType.F32);
-        Tensor headW = Has("output.weight") ? W("output.weight") : W("token_embd.weight");
-        backend.Linear(logits, normed, headW, null);
+        backend.Linear(logits, normed, HeadWeight, null);
         normed.Dispose();
         backend.ArgMaxInto(deviceTokenId, logits);
         logits.Dispose();
@@ -662,7 +741,11 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     }
 
     /// <summary>Advances the host position counter after a graph-decode session (the replay loop moved the device position; host bookkeeping must follow for any subsequent prefill).</summary>
-    public void AdvancePosition(int tokens) => _pos += tokens;
+    public void AdvancePosition(int tokens)
+    {
+        _pos += tokens;
+        _kvCache.AdvanceLength(tokens);
+    }
 
     public int CurrentPosition => _pos;
 
@@ -734,7 +817,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         Tensor preFfn = new(flat, DType.F32);
         backend.AddRmsNormEmitQ8(afterAttn, preFfn, hIn, attnOut, W($"{p}.post_attention_norm.weight"), Eps);
         attnOut.Dispose();
-        Tensor mlpOut = DenseSwiGlu(backend, preFfn, p, 1);
+        Tensor mlpOut = Ffn(backend, preFfn, p, i, 1);
         preFfn.Dispose();
         Tensor result = new(flat, DType.F32);
         backend.Add(result, afterAttn, mlpOut);
@@ -745,8 +828,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// <summary>Gated DeltaNet layer: fused QKV projection → causal depthwise Conv1d+SiLU → per-head L2-norm on Q/K → sequential delta-rule recurrence per token → gated RMSNorm(o, silu(z)) → output projection + residual. Linear projections and norms run through <see cref="IBackend"/>; the conv/recurrence/gated-norm run host-side (same split as <see cref="Mamba2Model"/>'s SSD scan).</summary>
     private Tensor BlockLinear(IBackend backend, Tensor hIn, int i, int seq)
     {
-        if (seq == 1 && backend.GraphDecodeSupported && !_isMoe
-            && EngineKnobs.SsmDeviceStep.Value)   // kill-switch
+        if (seq == 1 && backend.GraphDecodeSupported && EngineKnobs.SsmDeviceStep.Value)   // kill-switch
             return BlockLinearDeviceStep(backend, hIn, i);
         EnsureStateOnHost(i);
         int d = DModel;
@@ -933,7 +1015,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
             }
     }
 
-    /// <summary>Per-layer FFN dispatch: the routed MoE block on a qwen35moe layer, else the dense SwiGLU; on MoE models the device/graph decode fast paths are disabled (see the <c>!_isMoe</c> gates), so this only runs the host block path.</summary>
+    /// <summary>Per-layer FFN dispatch: the routed MoE block on a qwen35moe layer, else the dense SwiGLU.</summary>
     private Tensor Ffn(IBackend backend, Tensor preFfn, string p, int layer, int seq)
         => _moe[layer] is { } ff ? ff.Forward(backend, preFfn, seq) : DenseSwiGlu(backend, preFfn, p, seq);
 

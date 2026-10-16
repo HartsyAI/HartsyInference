@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 
 namespace HartsyInference.Audio.Streaming;
@@ -52,6 +53,64 @@ public sealed class AudioStreamer : IDisposable
     /// when the producer calls <see cref="Complete"/>.</summary>
     public IAsyncEnumerable<AudioChunk> ReadAllAsync(CancellationToken cancellationToken = default)
         => _channel.Reader.ReadAllAsync(cancellationToken);
+
+    /// <summary>Streams the mono PCM a synchronous producer hands to its callback: <paramref name="produce"/> runs on a background
+    /// thread, each non-empty buffer it passes becomes one chunk placed after the ones before it, and the stream completes when
+    /// it returns. A producer that throws fails the stream with its own exception. A consumer that stops reading early closes the
+    /// stream, so the producer's next buffer ends it instead of waiting forever on a full queue.</summary>
+    /// <param name="produce">Generates the audio, calling its argument with each new run of samples; the buffers become the chunks'
+    /// own arrays, so it must not reuse them.</param>
+    /// <param name="sampleRate">Sample rate of the PCM.</param>
+    /// <param name="cancel">Stops the consumer and is the token the producer task starts with; the producer observes cancellation
+    /// itself.</param>
+    public static async IAsyncEnumerable<AudioChunk> FromProducer(Action<Action<float[]>> produce, int sampleRate,
+        [EnumeratorCancellation] CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(produce);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sampleRate);
+        using AudioStreamer streamer = new();
+        Task producer = Task.Run(() =>
+        {
+            long offset = 0;
+            try
+            {
+                produce(pcm =>
+                {
+                    if (pcm.Length == 0) return;
+                    streamer.Put(new AudioChunk(pcm, sampleRate, Channels: 1, offset), cancel).AsTask().GetAwaiter().GetResult();
+                    offset += pcm.Length;
+                });
+            }
+            finally
+            {
+                streamer.Complete();
+            }
+        }, cancel);
+        bool drained = false;
+        try
+        {
+            await foreach (AudioChunk chunk in streamer.ReadAllAsync(cancel).ConfigureAwait(false))
+            {
+                yield return chunk;
+            }
+            drained = true;
+        }
+        finally
+        {
+            if (!drained)
+            {
+                streamer.Complete();
+            }
+            try
+            {
+                await producer.ConfigureAwait(false);
+            }
+            catch (ChannelClosedException) when (!drained)
+            {
+                // The consumer stopped reading; the producer's next buffer found the stream closed, which is how it was told.
+            }
+        }
+    }
 
     public void Dispose()
     {

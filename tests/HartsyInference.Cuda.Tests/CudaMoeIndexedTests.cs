@@ -21,6 +21,15 @@ public sealed unsafe class CudaMoeIndexedTests
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.5f; }
     private static Tensor F2(int a, int b) { Tensor t = new(new TensorShape(a, b), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor X(int n, int h) { Tensor t = new(new TensorShape(1, n, h), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand() * 4f; return t; }
+    private static DType ExpertType(string name) => name switch
+    {
+        "Q4_0" => DType.Q4_0,
+        "Q4_K" => DType.Q4_K,
+        "Q6_K" => DType.Q6_K,
+        "Q8_0" => DType.Q8_0,
+        _ => throw new ArgumentOutOfRangeException(nameof(name), name, "No indexed MoE kernel for this expert type."),
+    };
+
     private static Tensor Q(int a, int b, DType type) { using Tensor f = F2(a, b); return GgufQuantizer.Quantize(f, type); }
 
     public static IEnumerable<object[]> Cases()
@@ -30,11 +39,13 @@ public sealed unsafe class CudaMoeIndexedTests
             yield return [n, "Q4_K", "Q4_K", false];
             yield return [n, "Q4_K", "Q6_K", false];   // the Q4_K_M mix: gate/up Q4_K, down Q6_K
             yield return [n, "Q8_0", "Q8_0", false];
+            yield return [n, "Q4_0", "Q4_0", false];   // GPTQ int4 repacked losslessly (Fish Audio Drama 3 int4)
             yield return [n, "Q4_K", "Q6_K", true];    // shared expert with its sigmoid gate (Qwen2-MoE)
         }
         // About 500 rows per expert: past the point where a dense GEMM per expert replaces the grouped call.
         yield return [2000, "Q4_K", "Q6_K", false];
         yield return [2000, "Q8_0", "Q8_0", false];
+        yield return [2000, "Q4_0", "Q4_0", false];
     }
 
     /// <summary>The same comparison with every down projection split across 4 warps per row (the long-K path Mixtral's
@@ -44,6 +55,7 @@ public sealed unsafe class CudaMoeIndexedTests
     [InlineData(1, "Q4_K", "Q4_K")]
     [InlineData(3, "Q4_K", "Q6_K")]
     [InlineData(16, "Q8_0", "Q8_0")]
+    [InlineData(3, "Q4_0", "Q4_0")]
     public void IndexedMoe_KsplitDown_MatchesHostRoutedMoe(int n, string gateUpType, string downType)
     {
         KnobStore.Set(EngineKnobs.GemvKsplit, 4);
@@ -82,8 +94,8 @@ public sealed unsafe class CudaMoeIndexedTests
         string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
         if (!Directory.Exists(ptxDir))
             ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
-        DType gu = gateUpType == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
-        DType down = downType == "Q6_K" ? DType.Q6_K : downType == "Q8_0" ? DType.Q8_0 : DType.Q4_K;
+        DType gu = ExpertType(gateUpType);
+        DType down = ExpertType(downType);
 
         const int hidden = 512, inter = 256, shInter = 256, e = 16, topK = 4;
         MoeConfig moe = new()

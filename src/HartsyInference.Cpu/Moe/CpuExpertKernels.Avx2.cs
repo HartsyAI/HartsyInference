@@ -12,7 +12,7 @@ namespace HartsyInference.Cpu.Moe;
 /// <remarks>
 /// <para><b>Products.</b> Each 32-value block multiplies unsigned weight bytes by signed activation codes with <c>pmaddubsw</c>, then
 /// pairs the 16-bit results with <c>pmaddwd</c>, as llama.cpp's AVX2 kernels do. The 16-bit pairs cannot saturate: unsigned
-/// weights stay at or below 63 (Q4_K 15, Q5_K 31, Q6_K's magnitude 32) and Q8_0 reaches 128 only as a magnitude, against
+/// weights stay at or below 63 (Q4_0 and Q4_K 15, Q5_K 31, Q6_K's magnitude 32) and Q8_0 reaches 128 only as a magnitude, against
 /// activation codes in [-127, 127]. Signed weights (Q6_K after its offset, Q8_0) go through the sign trick,
 /// <c>|w| x sign(a, w)</c>, which equals <c>w x a</c>. Every integer sum is exact.</para>
 /// <para><b>Float order.</b> The scaled block sums are accumulated lane-wise and summed once at the end, so the float result is not
@@ -28,6 +28,7 @@ public static unsafe partial class CpuExpertKernels
     private static float DotRowAvx2(DType dtype, byte* row, sbyte* act, float* actScale, int* actSum, int dim)
     {
         if (dtype == DType.Q8_0) return DotRowQ8Avx2(row, act, actScale, dim);
+        if (dtype == DType.Q4_0) return DotRowQ40Avx2(row, act, actScale, actSum, dim);
         if (dtype == DType.Q6_K) return DotRowQ6KAvx2(row, act, actScale, dim);
         if (dtype == DType.Q5_K) return DotRowQ5KAvx2(row, act, actScale, actSum, dim);
         return DotRowQ4KAvx2(row, act, actScale, actSum, dim);
@@ -65,6 +66,27 @@ public static unsafe partial class CpuExpertKernels
         o[1] = (u2 & kmask2) | (((u0 >> 6) & kmask3) << 4);
         o[2] = mins01;
         o[0] = u0 & kmask1;
+    }
+
+    /// <summary>Q4_0: the low and high nibbles of a block's 16 bytes form one 32-value unsigned vector; the centering on 8 comes off as
+    /// <c>8 · d · Σ a</c> per block, kept apart and subtracted once.</summary>
+    private static float DotRowQ40Avx2(byte* row, sbyte* act, float* actScale, int* actSum, int dim)
+    {
+        Vector256<float> acc = Vector256<float>.Zero;
+        Vector128<byte> lowNibble = Vector128.Create((byte)0x0F);
+        float offset = 0f;
+        int blocks = dim / QuantBlock;
+        for (int b = 0; b < blocks; b++)
+        {
+            byte* block = row + b * Q40BlockBytes;
+            float scale = ReadHalf(block) * actScale[b];
+            Vector128<byte> qs = Sse2.LoadVector128(block + 2);
+            Vector128<byte> lo = Sse2.And(qs, lowNibble);
+            Vector128<byte> hi = Sse2.And(Sse2.ShiftRightLogical(qs.AsUInt16(), 4).AsByte(), lowNibble);
+            acc = Accumulate(acc, Dot32(Vector256.Create(lo, hi), act + b * QuantBlock), Vector256.Create(scale));
+            offset += 8f * scale * actSum[b];
+        }
+        return Vector256.Sum(acc) - offset;
     }
 
     private static float DotRowQ8Avx2(byte* row, sbyte* act, float* actScale, int dim)

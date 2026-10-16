@@ -15,6 +15,10 @@ public sealed record AudioResult
     /// <summary>Sample rate of the rendered audio in Hz.</summary>
     public int SampleRate { get; init; }
 
+    /// <summary>The turns a speech model that revises takes produced (Fish Audio Drama 3): each chunk's text and codes, ready to
+    /// send back as <see cref="SpeechRequest.History"/>. Null for every other model and kind of audio.</summary>
+    public IReadOnlyList<SpeechTurn>? Turns { get; init; }
+
     /// <summary>Free-form metadata surfaced to the caller (model, seed, timing).</summary>
     public IReadOnlyDictionary<string, string> Meta { get; init; } = new Dictionary<string, string>();
 }

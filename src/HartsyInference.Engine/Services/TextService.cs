@@ -1170,38 +1170,14 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>Sets up expert offload for the model just loaded on <paramref name="slot"/>: the dense weights are preloaded, a device
-    /// expert cache of the planned budget holds the routed experts it can, seeded evenly across the layers, and the rest run on the
-    /// CPU. Dequantized weight casts are not cached on this backend: a prefill's casts would otherwise grow into the memory the plan
-    /// gave the expert cache.</summary>
+    /// <summary>Sets up expert offload for the model just loaded on <paramref name="slot"/> (see <see cref="ExpertOffloadSetup.Attach"/>);
+    /// the slot records that weight casts are no longer cached on its backend.</summary>
     private static MoeExpertOffload AttachExpertOffload(TextDeviceSlot slot, IBackend backend, TextPlacement placement, bool preloadRedundantSplits)
     {
         GenericTransformer transformer = slot.Model!.Transformer;
-        TransformerConfig cfg = transformer.Config;
-        if (backend is not CudaBackend cuda)
-            throw new HartsyInferenceException($"Expert offload needs a CUDA backend; this slot runs on {backend.Capabilities.Name}.");
-        backend.CacheWeightCasts = false;
         slot.CacheWeightCastsApplied = false;
-        backend.PreloadWeightGroups(transformer.EnumerateWeightGroups(preloadRedundantSplits, includeExperts: false));
-        List<Tensor> experts = [.. transformer.EnumerateExpertWeights()];
-        MoeExpertOffload offload = CudaMoeOffload.Create(cuda, placement.ExpertBudgetBytes, cfg.HiddenSize, cfg.Moe!.MoeIntermediateSize, experts);
-        try
-        {
-            IReadOnlyList<(int Layer, int ExpertCount)> layers = transformer.AttachExpertOffload(offload);
-            long expertBytes = experts.Sum(static t => t.DType.ComputeByteCount(t.ElementCount));
-            int totalExperts = layers.Sum(static l => l.ExpertCount);
-            long perExpert = Math.Max(1, expertBytes / Math.Max(1, totalExperts));
-            int perLayer = (int)Math.Min(cfg.Moe.NumExperts, placement.ExpertBudgetBytes / perExpert / Math.Max(1, layers.Count));
-            offload.Seed(layers, perLayer);
-            Logs.Info($"[TextService] Expert offload: {ByteFormat.GbF1(placement.ExpertBudgetBytes)} cache, seeded {perLayer} of "
-                + $"{cfg.Moe.NumExperts} experts in each of {layers.Count} layers.");
-            return offload;
-        }
-        catch
-        {
-            offload.Dispose();
-            throw;
-        }
+        return ExpertOffloadSetup.Attach(backend, transformer, transformer.EnumerateWeightGroups(preloadRedundantSplits, includeExperts: false),
+            placement.ExpertBudgetBytes, "[TextService]");
     }
 
     /// <summary>Disposes every backend a slot holds, the last stage's and the others'.</summary>

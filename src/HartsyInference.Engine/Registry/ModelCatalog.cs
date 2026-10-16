@@ -1191,6 +1191,23 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Fish Audio Drama 3: Qwen3.5-MoE 35B-A3B + codebook tower over 10 codebooks + S2's ModifiedDAC. Fish Audio Research
+                // License (non-commercial). `hartsy speak -m fishaudio-drama3` (FP8 experts → Q8_0), `:int4` (GPTQ → Q4_0), `:bf16`
+                // / `:q8` / `:q6` / `:q5` / `:q4` re-quantize once into a disk cache. Matches the official fish_omni modules on a tiny
+                // checkpoint; no real-weight or GPU run yet. The shards are read from the index on first use (their names are pinned
+                // here once a run records them), and the codec comes from S2 Pro when the build does not ship one.
+                Id = "fishaudio-drama3", Modality = tts, DisplayName = "Fish Audio Drama 3", Architecture = "Qwen3.5-MoE + codebook tower + ModifiedDAC",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "fishaudio/drama-3", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/FishAudioDrama3", Role = "transformer index" },
+                    new() { Repo = "fishaudio/drama-3", RepoPath = "config.json", TargetSubdir = "Audio/FishAudioDrama3", Role = "config" },
+                    new() { Repo = "fishaudio/drama-3", RepoPath = "tokenizer.json", TargetSubdir = "Audio/FishAudioDrama3", Role = "tokenizer" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "codec.pth", TargetSubdir = "Audio/FishAudioS2", Role = "codec" },
+                },
+            },
+            new CatalogEntry
+            {
                 // Breeze TTS 2 (BreezeBlue): T5Gemma2 text encoder + Qwen3 backbone + depth decoder + Qwen3-TTS-Tokenizer-12Hz
                 // vocoder. Voice clone / design / direction. Research and non-commercial weights.
                 Id = "breeze", Modality = tts, DisplayName = "Breeze TTS 2", Architecture = "T5Gemma2 + Qwen3 backbone + depth decoder", Status = st,

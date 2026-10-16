@@ -365,29 +365,20 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Splits one fused gate+up stacked expert tensor (flattened to <c>[E·2·inter, inDim]</c>, gate then up per expert, matching ggml <c>build_moe_ffn</c>'s <c>gate_up_exps</c> view split) into per-expert <c>experts.{i}.gate_proj</c>/<c>experts.{i}.up_proj</c> tensors, then removes the stacked source.</summary>
+    /// <summary>Splits one fused gate+up stacked expert tensor into per-expert <c>gate_proj</c>/<c>up_proj</c> views (<see cref="StackedExperts.SplitGateUp"/>), then removes the stacked source.</summary>
     private static void SplitFusedGateUpExperts(Dictionary<string, Tensor> w, string stackedKey,
         string gateFormat, string upFormat, int e, int inter, int inDim)
     {
-        if (!w.TryGetValue(stackedKey, out Tensor? stacked)) return;
-        Tensor flat = stacked.Reshape(new TensorShape(e * 2 * inter, inDim));
-        for (int x = 0; x < e; x++)
-        {
-            w[gateFormat.Replace("{0}", x.ToString())] = SliceRows(flat, x * 2 * inter, inter);
-            w[upFormat.Replace("{0}", x.ToString())] = SliceRows(flat, x * 2 * inter + inter, inter);
-        }
-        w.Remove(stackedKey);
+        if (!w.Remove(stackedKey, out Tensor? stacked)) return;
+        StackedExperts.SplitGateUp(w, stacked, gateFormat, upFormat, e, inter, inDim);
     }
 
-    /// <summary>Splits one stacked expert tensor (flattened to <c>[E·outDim, inDim]</c>) into <paramref name="e"/> per-expert <c>[outDim, inDim]</c> tensors keyed by <paramref name="targetFormat"/> (a <c>{0}</c> expert-index placeholder), then removes the stacked source.</summary>
+    /// <summary>Splits one stacked expert tensor into per-expert <c>[outDim, inDim]</c> views (<see cref="StackedExperts.Split"/>), then removes the stacked source.</summary>
     private static void SplitExperts(Dictionary<string, Tensor> w, string stackedKey, string targetFormat,
         int e, int outDim, int inDim)
     {
-        if (!w.TryGetValue(stackedKey, out Tensor? stacked)) return;
-        Tensor flat = stacked.Reshape(new TensorShape(e * outDim, inDim));
-        for (int x = 0; x < e; x++)
-            w[targetFormat.Replace("{0}", x.ToString())] = SliceRows(flat, x * outDim, outDim);
-        w.Remove(stackedKey);
+        if (!w.Remove(stackedKey, out Tensor? stacked)) return;
+        StackedExperts.Split(w, stacked, targetFormat, e, outDim, inDim);
     }
 
     /// <summary>Views rows <c>[startRow, startRow+numRows)</c> of a rank-2 tensor as a new tensor of the same dtype, rooting the source; a row is contiguous in both float and block-quantized layouts (quant blocks run along the column dim), so this is a plain byte-range copy that works on quantized weights.</summary>

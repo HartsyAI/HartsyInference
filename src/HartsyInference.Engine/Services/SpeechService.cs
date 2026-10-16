@@ -41,7 +41,8 @@ public sealed class SpeechService : ISpeechService
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
                     .GetOrLoadAsync(target.Key, token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token), ct)
                     .ConfigureAwait(false);
-                TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, ct);
+                IReadOnlyList<SpeechTurn>? turns = null;
+                TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, ct) with { TurnSink = produced => turns = produced };
                 long started = Environment.TickCount64;
                 float[] samples = runner.Synthesize(target.Backend, job);
                 if (samples is null || samples.Length == 0)
@@ -56,6 +57,7 @@ public sealed class SpeechService : ISpeechService
                     Format = "wav",
                     DurationSeconds = seconds,
                     SampleRate = runner.SampleRate,
+                    Turns = turns,
                     Meta = new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["model"] = target.Key,
@@ -104,7 +106,8 @@ public sealed class SpeechService : ISpeechService
         string repo = descriptor.ResolveRepo(variant);
         IBackend backend = _engine.Backend;
         TtsLoadContext loadContext = BuildLoadContext(backend);
-        string key = repo + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
+        string tag = descriptor.ResolveCacheTag?.Invoke(variant) ?? "";
+        string key = repo + (tag.Length > 0 ? "|" + tag : "") + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
         IReadOnlyList<IBackend>? stageBackends = loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null;
         // A layer-split load spreads its weights over several devices, so the whole checkpoint is no single device's need.
         Func<long>? estimate = loadContext.IsSharded ? null
@@ -256,6 +259,8 @@ public sealed class SpeechService : ISpeechService
         Text = text,
         RefText = request.RefText,
         Reference = request.Reference,
+        References = request.References ?? [],
+        History = request.History ?? [],
         ReferenceMono24k = referenceMono,
         ReferenceWavPath = referenceWavPath,
         // "default" is a placeholder some callers send, not a real voice name.

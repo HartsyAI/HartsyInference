@@ -8,7 +8,7 @@ namespace HartsyInference.Cpu.Moe;
 
 /// <summary>
 /// Quantized expert kernels for the CPU: one MoE expert <c>down( act(clampGate(Gate·x)) * clampUp(Up·x) )</c> computed
-/// directly on packed Q8_0, Q4_K, Q5_K or Q6_K bytes, for 1 to 8 token rows at once. Each projection may use its own format, as
+/// directly on packed Q8_0, Q4_0, Q4_K, Q5_K or Q6_K bytes, for 1 to 8 token rows at once. Each projection may use its own format, as
 /// a GGUF K-quant mix does (Q4_K_M keeps some down projections in Q6_K).
 ///
 /// <para><b>Layout.</b> Gate and up are <c>[intermediate, hidden]</c> row-major, down is <c>[hidden, intermediate]</c>;
@@ -31,12 +31,13 @@ public static unsafe partial class CpuExpertKernels
     public const int MaxRows = 8;
 
     /// <summary>Whether the kernels read <paramref name="dtype"/>.</summary>
-    public static bool Supports(DType dtype) => dtype == DType.Q8_0 || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K;
+    public static bool Supports(DType dtype) =>
+        dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K;
 
     /// <summary>Runs the expert with every projection in <paramref name="dtype"/>, using AVX2 when the CPU supports it.</summary>
     /// <param name="program">Activation and clamp bounds.</param>
-    /// <param name="dtype">Packed weight dtype: Q8_0, Q4_K, Q5_K or Q6_K.</param>
-    /// <param name="hidden">Model width H; a multiple of 256 for the K-quants and of 32 for Q8_0.</param>
+    /// <param name="dtype">Packed weight dtype: Q8_0, Q4_0, Q4_K, Q5_K or Q6_K.</param>
+    /// <param name="hidden">Model width H; a multiple of 256 for the K-quants and of 32 for Q8_0 and Q4_0.</param>
     /// <param name="intermediate">Expert inner width I; same divisibility as <paramref name="hidden"/>.</param>
     /// <param name="gate">Packed gate matrix, <c>[I, H]</c>.</param>
     /// <param name="up">Packed up matrix, <c>[I, H]</c>.</param>
@@ -244,6 +245,7 @@ public static unsafe partial class CpuExpertKernels
             return acc;
         }
 
+        if (dtype == DType.Q4_0) return DotRowQ40(row, act, actScale, actSum, dim);
         if (dtype == DType.Q6_K) return DotRowQ6K(row, act, actScale, dim);
         if (dtype == DType.Q5_K) return DotRowQ5K(row, act, actScale, actSum, dim);
 
@@ -266,6 +268,21 @@ public static unsafe partial class CpuExpertKernels
                 float sub = d * sc * dot - dmin * mm * actSum[b];
                 acc += actScale[b] * sub;
             }
+        }
+        return acc;
+    }
+
+    /// <summary>Q4_0: 32-value blocks of a half scale and unsigned nibbles (values 0..15 low, 16..31 high) centered on 8, so a block's
+    /// dot is <c>d · (Σ q·a − 8 · Σ a)</c> with the activation block sum already at hand.</summary>
+    private static float DotRowQ40(byte* row, sbyte* act, float* actScale, int* actSum, int dim)
+    {
+        float acc = 0f;
+        int blocks = dim / QuantBlock;
+        for (int b = 0; b < blocks; b++)
+        {
+            byte* block = row + b * Q40BlockBytes;
+            int dot = Q40BlockDotScalar(block + 2, act + b * QuantBlock);
+            acc += ReadHalf(block) * actScale[b] * (dot - 8 * actSum[b]);
         }
         return acc;
     }
@@ -352,7 +369,7 @@ public static unsafe partial class CpuExpertKernels
         foreach (DType dtype in (ReadOnlySpan<DType>)[dtypes.Gate, dtypes.Up, dtypes.Down])
         {
             if (!Supports(dtype))
-                throw new NotSupportedException($"CPU expert kernels run Q8_0, Q4_K, Q5_K and Q6_K, not {dtype.Name}.");
+                throw new NotSupportedException($"CPU expert kernels run Q8_0, Q4_0, Q4_K, Q5_K and Q6_K, not {dtype.Name}.");
             if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0)
                 throw new ArgumentException($"Hidden {hidden} and intermediate {intermediate} must be multiples of {dtype.Name}'s block size.");
         }

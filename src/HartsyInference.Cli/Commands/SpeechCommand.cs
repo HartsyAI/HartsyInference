@@ -53,6 +53,21 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("Transcript of --reference, for models that need it (F5-TTS).")]
         public string? RefText { get; init; }
 
+        /// <summary>A JSON file of voice references, for models that clone from several (Fish Audio Drama 3).</summary>
+        [CommandOption("--references")]
+        [Description("JSON file of voice references, one per speaker: [{\"text\": transcript, \"audio\": \"clip.wav\"}] (Fish Audio Drama 3).")]
+        public string? References { get; init; }
+
+        /// <summary>A JSON file of earlier turns, for models that revise takes (Fish Audio Drama 3).</summary>
+        [CommandOption("--history")]
+        [Description("JSON file of earlier turns, oldest first, as --save-turns writes them; revise a take by passing it back with new direction (Fish Audio Drama 3).")]
+        public string? History { get; init; }
+
+        /// <summary>Where to write the turns the take produced, for a later <c>--history</c>.</summary>
+        [CommandOption("--save-turns")]
+        [Description("Write the take's turns (text and codes) to this JSON file, for a later --history (Fish Audio Drama 3).")]
+        public string? SaveTurns { get; init; }
+
         /// <summary>Expressiveness knob (Chatterbox).</summary>
         [CommandOption("--exaggeration")]
         [Description("Expressiveness (Chatterbox); model default when unset.")]
@@ -128,6 +143,12 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
             parameters.Put("reference", settings.Reference);
         if (settings.RefText is { Length: > 0 })
             parameters.Put("ref-text", settings.RefText);
+        if (settings.References is { Length: > 0 })
+            parameters.Put("references", settings.References);
+        if (settings.History is { Length: > 0 })
+            parameters.Put("history", settings.History);
+        if (settings.SaveTurns is { Length: > 0 })
+            parameters.Put("save-turns", settings.SaveTurns);
         parameters.PutIfSet("exaggeration", settings.Exaggeration);
         parameters.PutIfSet("nfe-step", settings.NfeStep);
         parameters.PutIfSet("cfg-scale", settings.CfgScale);
