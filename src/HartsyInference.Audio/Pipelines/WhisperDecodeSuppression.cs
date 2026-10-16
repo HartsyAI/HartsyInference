@@ -1,4 +1,5 @@
 using System.Text.Json;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Pipelines;
 
@@ -23,14 +24,28 @@ internal sealed class WhisperDecodeSuppression
     /// <summary>Ids masked at the first generated step only (the space and end-of-text, so a decode cannot open empty).</summary>
     public int[] BeginSuppressTokens { get; }
 
-    /// <summary>Reads both lists. A missing file or key yields an empty list for that key, never an error, so a
-    /// hand-built checkpoint directory still loads exactly as it did before this file was consulted.</summary>
+    /// <summary>Reads both lists. A missing key yields an empty list for that key. A file that is not valid JSON, or
+    /// whose root is not an object, falls back to <see cref="None"/> with a warning: a corrupt generation config must
+    /// not stop the model from loading, and decoding without the lists is what it did before this file was read.</summary>
     public static WhisperDecodeSuppression Load(string generationConfigPath)
     {
-        using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(generationConfigPath));
-        return new WhisperDecodeSuppression(
-            ReadIds(document.RootElement, "suppress_tokens"),
-            ReadIds(document.RootElement, "begin_suppress_tokens"));
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(generationConfigPath));
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                Logs.Warning($"Whisper: {generationConfigPath} is not a JSON object; decoding without its suppression lists.");
+                return None;
+            }
+            return new WhisperDecodeSuppression(
+                ReadIds(document.RootElement, "suppress_tokens"),
+                ReadIds(document.RootElement, "begin_suppress_tokens"));
+        }
+        catch (JsonException ex)
+        {
+            Logs.Warning($"Whisper: {generationConfigPath} is not valid JSON ({ex.Message}); decoding without its suppression lists.");
+            return None;
+        }
     }
 
     /// <summary>Masks the suppressed ids in <paramref name="logits"/> to negative infinity, in place. Ids outside the

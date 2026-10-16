@@ -40,6 +40,25 @@ public sealed class WhisperDecodeSuppressionTests : IDisposable
     }
 
     [Fact]
+    public void Load_CorruptJson_FallsBackToNoSuppressionWithoutThrowing()
+    {
+        // A truncated or hand-edited generation_config.json must not stop the model from loading.
+        WhisperDecodeSuppression s = WhisperDecodeSuppression.Load(Write("""{"suppress_tokens": [1, 2,"""));
+
+        Assert.Empty(s.SuppressTokens);
+        Assert.Empty(s.BeginSuppressTokens);
+    }
+
+    [Fact]
+    public void Load_NonObjectRoot_FallsBackToNoSuppressionWithoutThrowing()
+    {
+        WhisperDecodeSuppression s = WhisperDecodeSuppression.Load(Write("""[1, 2, 3]"""));
+
+        Assert.Empty(s.SuppressTokens);
+        Assert.Empty(s.BeginSuppressTokens);
+    }
+
+    [Fact]
     public void Apply_MasksSuppressTokensAtEveryStep_AndBeginTokensOnlyFirst()
     {
         WhisperDecodeSuppression s = new([3], [4]);
