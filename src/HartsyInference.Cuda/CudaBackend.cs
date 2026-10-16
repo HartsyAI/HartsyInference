@@ -10465,6 +10465,34 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         GpuTransferHelper.CacheActivation(output, pOut, outBytes);
     }
 
+    /// <summary>Guided semantic logits over the conditional top-K (lm_cfg_topk_guided.cu); the result is cached as an activation.</summary>
+    public unsafe void CfgTopKGuided(Tensor output, Tensor cond, Tensor uncond, int topK, float guidance)
+    {
+        if (output.DType != DType.F32 || cond.DType != DType.F32 || uncond.DType != DType.F32
+            || cond.ElementCount != uncond.ElementCount || output.ElementCount != cond.ElementCount)
+        {
+            throw new NotSupportedException("CfgTopKGuided requires F32 tensors of equal length.");
+        }
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        int count = checked((int)cond.ElementCount);
+        ulong pCond = GpuTransferHelper.CopyToDevice(cond);
+        ulong pUncond = 0;
+        try
+        {
+            pUncond = GpuTransferHelper.CopyToDevice(uncond);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            ulong pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchCfgTopKGuided(pOut, pCond, pUncond, count, topK, guidance, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCond);
+            GpuTransferHelper.FreeDevice(pUncond);
+        }
+    }
+
     public void ArgMaxInto(ulong outputTokenId, Tensor input)
     {
         if (outputTokenId == 0 || input.DType != DType.F32)

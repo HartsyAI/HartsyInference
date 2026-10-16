@@ -157,6 +157,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _lmF32Module;
     private readonly CudaModule _lmHistoryModule;
     private readonly CudaModule _lmEmbedGatherModule;
+    private readonly CudaModule _lmCfgTopKModule;
+    private readonly nint _lmCfgTopKGuided;
     private readonly nint _lmRepeatKvF32;
     private readonly nint _lmKvAppendF32;
     private readonly nint _lmKvAppendF16;
@@ -1078,6 +1080,8 @@ public sealed partial class CudaKernels : IDisposable
         _lmEmbedGatherModule = LoadOwnedModule(Ptx("lm_embed_gather"));
         _lmEmbedGatherDecodeF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_f16");
         _lmEmbedGatherDecodeBF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_bf16");
+        _lmCfgTopKModule = LoadOwnedModule(Ptx("lm_cfg_topk_guided"));
+        _lmCfgTopKGuided = _lmCfgTopKModule.GetFunction("lm_cfg_topk_guided_f32");
         // The distinct-history append lives in its own module so the hand-tuned lm_f32 PTX is not rebuilt for it.
         _lmHistoryModule = LoadOwnedModule(Ptx("lm_history_f32"));
         _lmHistoryAppendDistinct = _lmHistoryModule.GetFunction("lm_history_append_distinct");
@@ -3907,6 +3911,21 @@ public sealed partial class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &embArg; args[2] = &tokArg; args[3] = &hiddenArg;
         uint gridDim = (uint)(((uint)hidden + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmEmbedGatherDecodeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>MiniMax guided semantic logits: the conditional top-K candidates get <c>u + (c - u)·g</c>, all other entries -inf
+    /// (lm_cfg_topk_guided.cu). One block per row; <paramref name="count"/> is capped at the kernel's 16384-entry mask.</summary>
+    public unsafe void LaunchCfgTopKGuided(ulong output, ulong cond, ulong uncond, int count, int topK, float guidance, nint stream)
+    {
+        if (_lmCfgTopKGuided == 0) throw new InvalidOperationException("lm_cfg_topk_guided.ptx not present in the Ptx folder.");
+        if (count < 1 || count > 16384 || topK < 1 || topK > count)
+            throw new ArgumentOutOfRangeException(nameof(count), $"guided top-K needs 1 <= topK <= count <= 16384; got count={count} topK={topK}.");
+        ulong outArg = output, condArg = cond, uncondArg = uncond;
+        int countArg = count, topKArg = topK;
+        float guidanceArg = guidance;
+        void** args = stackalloc void*[6];
+        args[0] = &outArg; args[1] = &condArg; args[2] = &uncondArg; args[3] = &countArg; args[4] = &topKArg; args[5] = &guidanceArg;
+        CudaDriverApi.cuLaunchKernel(_lmCfgTopKGuided, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Device-indexed gather from a half- or bfloat16-stored table into an F32 row (lm_embed_gather.cu).</summary>
