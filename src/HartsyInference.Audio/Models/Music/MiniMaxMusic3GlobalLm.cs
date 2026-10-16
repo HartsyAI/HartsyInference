@@ -38,7 +38,8 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     private readonly bool _halfPrecisionKv;
     // Off by default: the dual-stream device attention it routes through diverges on high-SM cards (passes on a
     private Tensor? _embedTokens;
-    private Tensor? _semanticHead;
+    private Tensor? _semanticCodes;   // borrowed rows [AudioCodeOffset, +16384) of the mapped head
+    private Tensor? _semanticEnd;     // borrowed row AudioEndTokenId of the mapped head
     private int _disposed;
 
     /// <param name="halfPrecisionKv">Store the KV cache as F16. A five-minute song reaches ~7500 frames, which is ~2.3 GB per branch at F32 and ~4.5 GB across the guided pair — more headroom than the quantized variants have on a 12 GB card. CUDA-only; the CPU path keeps F32, which is also what the parity runs compare.</param>
@@ -80,7 +81,15 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         _backbone.LoadWeightsHeadless(weights, prefix: "model");
         LogRssAnonDiag("lm backbone headless");
         _embedTokens = weights["model.embed_tokens.weight"];
-        _semanticHead = SliceHead(weights["lm_head.weight"]);
+        Tensor head = weights["lm_head.weight"];
+        if (head.Shape[1] != HiddenSize)
+        {
+            throw new ArgumentException($"lm_head must be [vocab, {HiddenSize}], got {head.Shape}.", nameof(weights));
+        }
+        // Borrowed row views of the mapped head: the semantic codes are one contiguous block, and the end-of-audio row sits
+        // before it, so they are two views. No owned F32 copy of the head is made.
+        _semanticCodes = BorrowRows(head, AudioCodeOffset, SemanticVocabSize);
+        _semanticEnd = BorrowRows(head, AudioEndTokenId, 1);
         LogRssAnonDiag("lm semantic head");
     }
 
@@ -192,19 +201,29 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     public Tensor SemanticLogits(IBackend backend, Tensor hidden)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        Tensor logits = new Tensor(new TensorShape((int)hidden.Shape[0], SemanticVocabSize + 1), DType.F32);
-        backend.Linear(logits, hidden, _semanticHead!, null);
+        int rows = (int)hidden.Shape[0];
+        Tensor codes = new Tensor(new TensorShape(rows, SemanticVocabSize), DType.F32);
+        backend.Linear(codes, hidden, _semanticCodes!, null);
+        Tensor end = new Tensor(new TensorShape(rows, 1), DType.F32);
+        backend.Linear(end, hidden, _semanticEnd!, null);
+        Tensor logits = new Tensor(new TensorShape(rows, SemanticVocabSize + 1), DType.F32);
+        backend.Concat(logits, [codes, end], 1);
+        codes.Dispose();
+        end.Dispose();
         return logits;
     }
 
     /// <summary>Every loaded weight, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>. The embedding table is excluded: rows are gathered host-side, so uploading all 1.6 GB would be pure waste.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        foreach (Tensor tensor in _backbone.EnumerateWeights())
+        // Redundant split originals are excluded: the fused projections serve every decode step, so uploading the splits too
+        // only duplicates the device memory of the quantized projections.
+        foreach (Tensor tensor in _backbone.EnumerateWeights(includeRedundantSplits: false))
         {
             yield return tensor;
         }
-        if (_semanticHead is not null) { yield return _semanticHead; }
+        if (_semanticCodes is not null) { yield return _semanticCodes; }
+        if (_semanticEnd is not null) { yield return _semanticEnd; }
     }
 
     public void Dispose()
@@ -213,27 +232,21 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         {
             return;
         }
-        _semanticHead?.Dispose();
-        _semanticHead = null;
+        _semanticCodes?.Dispose();
+        _semanticCodes = null;
+        _semanticEnd?.Dispose();
+        _semanticEnd = null;
         _embedTokens = null;
         _backbone.Dispose();
     }
 
 
-    /// <summary>Copies the 16384 semantic rows plus the end-of-audio row out of the full head, widened to F32 row by row — casting the whole 200000-row head first would transiently cost 3.2 GB to keep 268 MB.</summary>
-    private static Tensor SliceHead(Tensor head)
+    /// <summary>A borrowed view of <paramref name="count"/> consecutive rows of <paramref name="head"/> starting at
+    /// <paramref name="firstRow"/>, in the head's stored dtype. The view shares the mapped memory, so it owns no host bytes.</summary>
+    private static Tensor BorrowRows(Tensor head, int firstRow, int count)
     {
-        if (head.Shape[1] != HiddenSize)
-        {
-            throw new ArgumentException($"lm_head must be [vocab, {HiddenSize}], got {head.Shape}.", nameof(head));
-        }
-        Tensor sliced = new Tensor(new TensorShape(SemanticVocabSize + 1, HiddenSize), DType.F32);
-        Span<float> destination = new Span<float>((float*)sliced.DataPointer, (SemanticVocabSize + 1) * HiddenSize);
-        for (int code = 0; code < SemanticVocabSize; code++)
-        {
-            ReadRow(head, AudioCodeOffset + code, destination.Slice(code * HiddenSize, HiddenSize));
-        }
-        ReadRow(head, AudioEndTokenId, destination.Slice(SemanticVocabSize * HiddenSize, HiddenSize));
-        return sliced;
+        long rowBytes = head.DType.ComputeByteCount(HiddenSize);
+        byte* start = (byte*)head.DataPointer + (firstRow * rowBytes);
+        return new Tensor(start, new TensorShape(count, HiddenSize), head.DType);
     }
 }
