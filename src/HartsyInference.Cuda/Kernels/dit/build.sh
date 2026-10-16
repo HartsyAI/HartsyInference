@@ -11,6 +11,7 @@ KERNELS=(
     "dit_rope"
     "dit_fp8emit"
     "mg3_action"
+    "dit_norm_act"
 )
 
 # shellcheck source=../build_common.sh
