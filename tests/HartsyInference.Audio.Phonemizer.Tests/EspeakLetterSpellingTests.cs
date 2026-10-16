@@ -15,6 +15,15 @@ public sealed class EspeakLetterSpellingTests
         return EspeakPhonemizer.FromDataDirectory(dataDir, "en-us");
     }
 
+    [Fact]
+    public void NonEnglishVoices_DoNotSpellWithAmericanLetterNames()
+    {
+        // The American letter names must not reach another language's dictionary: "PC" is read by the rules there.
+        if (!EspeakPhonemizer.TryFindDataDirectory(out string? dataDir) || dataDir is null) return;
+        EspeakPhonemizer spanish = EspeakPhonemizer.FromDataDirectory(dataDir, "es");
+        Assert.DoesNotContain("pˌiːsˈiː", spanish.PhonemizeToIpa("PC", "es"));
+    }
+
     [Theory]
         [InlineData("AI", "ˌeɪˈaɪ")]
         [InlineData("PC", "pˌiːsˈiː")]

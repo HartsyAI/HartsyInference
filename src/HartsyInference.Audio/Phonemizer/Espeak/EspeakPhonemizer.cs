@@ -15,6 +15,8 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakPhonemeTable _phon;
     private readonly EspeakIpaMap _ipa;
     private readonly EspeakVoiceVariant _variant;
+    // EspeakLetterNames holds the American letter names, so it spells only English voices.
+    private readonly bool _spellsLetters;
     private readonly EspeakPhonemeList? _plist;
     private readonly EspeakPhonemeRenderer? _renderer;
 
@@ -28,6 +30,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         _phon = phon;
         _ipa = ipa;
         _variant = variant;
+        _spellsLetters = variant.DictName == "en";
         if (index is not null)
         {
             // Exact allophone + IPA path: run espeak's phoneme-program VM over the clause phoneme list.
@@ -522,7 +525,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         else
         {
             if (found) { dflags = r.Flags; state.Flags2 = r.Flags2; } // flag-only entry: keep its flags, use the rules
-            bool spellable = EspeakLetterNames.IsSpelled(word, found ? r.Flags : 0);
+            bool spellable = _spellsLetters && EspeakLetterNames.IsSpelled(word, found ? r.Flags : 0);
             List<byte>? spelled = spellable ? EspeakLetterNames.Spell(word, _phon, _stress) : null;
             if (spelled is not null)
             {
