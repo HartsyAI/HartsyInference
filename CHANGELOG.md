@@ -16,7 +16,15 @@ stable release will require. Dates are UTC.
   the codebook draws and the depth-step embeddings resident, and reads each frame's eight codes back once instead of
   once per codebook. The draws use the device sampler, so same-seed songs differ from the host sampler. It is off by
   default until it has a teacher-forced parity check and a host-versus-device distribution check. Frame time on the
-  3060 at q8 is unchanged (about 41 ms per frame).
+  3060 at q8 is the same as the host sampler's.
+- **Changed: the Q8 decode GEMV reads each weight row once for the CFG pair.** `mul_mat_vec_q8_0_q8_1` and its K-split
+  variant accumulate up to four activation rows in one weight pass, with each row's arithmetic and reduction order
+  unchanged, so outputs are bit-identical. HeartMuLa q8 on the 3060 runs at about 32 ms per frame, down from 41. The
+  change is faster on the CFG pair only; single-row calls are unchanged.
+- **Added: Vulkan gathers F16 and BF16 embedding tables.** `EmbedGatherDecodeStep` picks a shader from the table dtype.
+  F32 output is bit-identical to the CUDA kernel.
+- **Fixed: the CUDA PTX build emits ISA 9.0 with any toolchain.** nvcc from CUDA 13 emits 9.3, which the driver cannot
+  JIT, so such kernels are recompiled through nvrtc. A check script fails on any shipped PTX above 9.0.
 
 ## alpha.374
 
