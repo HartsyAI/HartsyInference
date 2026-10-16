@@ -83,9 +83,10 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         return o;
     }
 
-    /// <summary>True when <paramref name="id"/> is a <c>&lt;|semantic:i|&gt;</c> token (or the range is unset).</summary>
-    private bool IsSemantic(int id) => _cfg.SemanticBeginId < 0
-        || (id >= _cfg.SemanticBeginId && id < _cfg.SemanticBeginId + _cfg.CodebookSize);
+    /// <summary>True when <paramref name="id"/> is the semantic row-0 token: the single sentinel when one is set, else a
+    /// <c>&lt;|semantic:i|&gt;</c> id (or any id when the range is unset).</summary>
+    internal bool IsSemantic(int id) => _cfg.SemanticTokenId >= 0 ? id == _cfg.SemanticTokenId
+        : _cfg.SemanticBeginId < 0 || (id >= _cfg.SemanticBeginId && id < _cfg.SemanticBeginId + _cfg.CodebookSize);
 
     /// <summary>Builds the summed input embedding for one frame: <c>text_emb(row0) + Σ codebook_emb(code_i +
     /// i·codebook_size)</c>. Matches upstream <c>BaseTransformer.embed</c>: the codebook sum is ZEROED when row-0
@@ -165,7 +166,7 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         Tensor slowLogits = WhisperOps.ProjectLinear(backend, slowPost, _slowHead!, null, 1, 1, h, _cfg.TextVocab);
         slowPost.Dispose();
         Span<float> sl = new((void*)slowLogits.DataPointer, _cfg.TextVocab);
-        ApplyRepetitionPenalty(sl, recent, 0);
+        if (_cfg.PenalizeSemantic) ApplyRepetitionPenalty(sl, recent, 0);
         int semantic = NucleusSampler.Draw(sl, _cfg.TextVocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
         slowLogits.Dispose();
 

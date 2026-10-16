@@ -267,6 +267,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SsmDeviceStep =
         Bool("numerics.ssmDeviceStep", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for Qwen3.5's on-device single-token step in both the attention and gated-DeltaNet layers.");
 
+    /// <summary>Kill-switch for Qwen3.5's gated-DeltaNet prefill on the backend's conv/recurrence kernels; 0 runs the parallel host reference.</summary>
+    public static readonly Knob<bool> SsmDevicePrefill =
+        Bool("numerics.ssmDevicePrefill", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for Qwen3.5's gated-DeltaNet prefill on the backend's conv/recurrence kernels; 0 runs the parallel host reference.");
+
     /// <summary>0 disables CUDA-graph capture/replay of the SSM (Qwen3.5-class) greedy decode step.</summary>
     public static readonly Knob<bool> SsmGraph =
         Bool("numerics.ssmGraph", true, KnobScope.Runtime, KnobDomain.Numerics, "0 disables CUDA-graph capture/replay of the SSM (Qwen3.5-class) greedy decode step.");

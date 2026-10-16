@@ -41,6 +41,7 @@
     <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Samplers\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Flux3\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\MossImage\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

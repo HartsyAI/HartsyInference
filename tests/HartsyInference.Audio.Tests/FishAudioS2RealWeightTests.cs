@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -19,6 +20,10 @@ public sealed class FishAudioS2RealWeightTests(ITestOutputHelper output)
 {
     private static string? Dir => Environment.GetEnvironmentVariable("HARTSY_FISH_S2_DIR");
 
+    /// <summary>The file under <paramref name="dir"/>. With no directory set, a placeholder that names the variable, so the gate's
+    /// message says what to set (the placeholder does not exist on disk, so the gate reports it missing).</summary>
+    private static string Under(string dir, string file) => dir.Length > 0 ? Path.Combine(dir, file) : $"HARTSY_FISH_S2_DIR is unset ({file})";
+
     private static GgufTokenizer LoadTokenizer(string dir)
     {
         using FileStream json = File.OpenRead(Path.Combine(dir, "tokenizer.json"));
@@ -28,7 +33,8 @@ public sealed class FishAudioS2RealWeightTests(ITestOutputHelper output)
     [Fact]
     public void Tokenizer_MatchesHuggingFaceTokenizers()
     {
-        if (Dir is not { Length: > 0 } dir) return;
+        string dir = Dir ?? string.Empty;
+        if (!RealWeightGate.Require(output.WriteLine, Under(dir, "tokenizer.json"), Under(dir, "ref_ids.json"))) return;
         GgufTokenizer tokenizer = LoadTokenizer(dir);
         using JsonDocument reference = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "ref_ids.json")));
         foreach (JsonElement item in reference.RootElement.EnumerateArray())
@@ -42,7 +48,9 @@ public sealed class FishAudioS2RealWeightTests(ITestOutputHelper output)
     [Fact]
     public void Generate_ProducesSpeechAudio()
     {
-        if (Dir is not { Length: > 0 } dir) return;
+        string dir = Dir ?? string.Empty;
+        if (!RealWeightGate.Require(output.WriteLine, Under(dir, "tokenizer.json"), Under(dir, "model.safetensors.index.json"),
+            Under(dir, "codec.safetensors"))) return;
         GgufTokenizer tokenizer = LoadTokenizer(dir);
 
         Dictionary<string, Tensor> model = new();

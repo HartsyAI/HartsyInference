@@ -27,6 +27,8 @@ public readonly record struct GenerationDefaults(int Steps, float CfgScale, int 
     public static GenerationDefaults Flux3 => new(25, 3.5f, 1024, 1024);
     /// <summary>FLUX.3 Klein step-distilled (ComfyUI template): 15 steps (4–16), cfg 1, 1024².</summary>
     public static GenerationDefaults Flux3Distilled => new(15, 1.0f, 1024, 1024);
+    /// <summary>MOSS-Image (OpenMOSS pipeline): 50 steps, cfg 3, 1024².</summary>
+    public static GenerationDefaults MossImage => new(50, 3.0f, 1024, 1024);
     /// <summary>Z-Image Turbo: 8 steps, cfg 1.0, 1024².</summary>
     public static GenerationDefaults ZImageTurbo => new(8, 1.0f, 1024, 1024);
 

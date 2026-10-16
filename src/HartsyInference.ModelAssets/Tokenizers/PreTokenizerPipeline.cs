@@ -89,6 +89,17 @@ public sealed class PreTokenizerPipeline
             case "Split":
                 stages.Add(ReadSplit(el));
                 break;
+            case "Digits":
+                // Each digit alone (individual_digits) or each digit run, isolated from its neighbours.
+                bool individualDigits = el.TryGetProperty("individual_digits", out JsonElement d) && d.ValueKind == JsonValueKind.True;
+                stages.Add(new SplitStage(individualDigits ? @"\p{N}" : @"\p{N}+", SplitBehavior.Isolated, false));
+                break;
+            case "Punctuation":
+                // HF's Punctuation isolates Unicode P* plus ASCII punctuation (which includes the ASCII symbols $ + < = > ^ ` | ~).
+                // Other symbols (→ € ∑ ©) are not split here; the GPT-2 stage then groups them with their neighbours, as HF does.
+                stages.Add(new SplitStage(@"[\p{P}\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]",
+                    ParseBehavior(el.TryGetProperty("behavior", out JsonElement pb) ? pb.GetString() ?? "Isolated" : "Isolated"), false));
+                break;
             case "ByteLevel":
                 addPrefixSpace |= el.TryGetProperty("add_prefix_space", out JsonElement a) && a.ValueKind == JsonValueKind.True;
                 // HF defaults use_regex to true when absent.
@@ -105,19 +116,20 @@ public sealed class PreTokenizerPipeline
         JsonElement pattern = el.GetProperty("pattern");
         if (!pattern.TryGetProperty("Regex", out JsonElement rx) || rx.GetString() is not string regex)
             throw new NotSupportedException("Split pre-tokenizer patterns other than Regex are not supported.");
-        string behaviorName = el.GetProperty("behavior").GetString() ?? string.Empty;
-        SplitBehavior behavior = behaviorName switch
-        {
-            "Removed" => SplitBehavior.Removed,
-            "Isolated" => SplitBehavior.Isolated,
-            "MergedWithPrevious" => SplitBehavior.MergedWithPrevious,
-            "MergedWithNext" => SplitBehavior.MergedWithNext,
-            "Contiguous" => SplitBehavior.Contiguous,
-            _ => throw new NotSupportedException($"Split behavior '{behaviorName}' is not supported."),
-        };
+        SplitBehavior behavior = ParseBehavior(el.GetProperty("behavior").GetString() ?? string.Empty);
         bool invert = el.TryGetProperty("invert", out JsonElement inv) && inv.ValueKind == JsonValueKind.True;
         return new SplitStage(regex, behavior, invert);
     }
+
+    private static SplitBehavior ParseBehavior(string behaviorName) => behaviorName switch
+    {
+        "Removed" => SplitBehavior.Removed,
+        "Isolated" => SplitBehavior.Isolated,
+        "MergedWithPrevious" => SplitBehavior.MergedWithPrevious,
+        "MergedWithNext" => SplitBehavior.MergedWithNext,
+        "Contiguous" => SplitBehavior.Contiguous,
+        _ => throw new NotSupportedException($"Split behavior '{behaviorName}' is not supported."),
+    };
 
     // Returns the text with each surrogate pair collapsed to a same-category BMP proxy; map[i] is the original offset of proxy index i.
     private static string ToProxy(string text, out int[]? map)

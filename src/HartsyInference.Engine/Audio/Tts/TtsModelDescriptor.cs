@@ -20,6 +20,11 @@ internal sealed class TtsModelDescriptor
     /// when any length is acceptable.</summary>
     internal Action<double>? ValidateReferenceSeconds { get; init; }
 
+    /// <summary>Why this family takes no voice reference at all, or null when it accepts one. Unlike
+    /// <see cref="ValidateReferenceSeconds"/>, this is checked on any reference clip whatever its container, before the job is
+    /// queued, so a clip whose length the WAV header cannot give is still refused.</summary>
+    internal string? ReferenceRejection { get; init; }
+
     /// <summary>True when the requested VOICE selects which weights to load (Piper ships one .onnx per voice), so the voice must take part in the cache key and be passed as the load variant. False for models whose single checkpoint carries every voice.</summary>
     internal bool VoiceSelectsWeights { get; init; }
 

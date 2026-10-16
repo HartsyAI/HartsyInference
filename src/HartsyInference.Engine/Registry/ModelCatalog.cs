@@ -602,6 +602,21 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "moss-image", Modality = img, DisplayName = "MOSS-Image", Architecture = "single-stream DiT, flow-matching",
+                Status = vp,
+                // Not CliDrivable yet: OpenMOSS ships Base and SFT as diffusers folders (transformer/, text_encoder/,
+                // tokenizer/, vae/) whose shard names are pinned once a real-weight run reads them. Pass the folder, any
+                // file inside it, or the ComfyUI export's diffusion_models file with --model-path until then; the
+                // encoder and VAE below are the fallbacks when the checkpoint is not inside a full folder.
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    SideModels.Qwen35_9B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "chroma", Modality = img, DisplayName = "Chroma", Architecture = "Flux-derivative DiT", Status = ok,
                 // `hartsy image -m chroma` re-verified 2026-07-21: the terse prompt "an astronaut riding a horse"
                 // reproducibly yields an off-prompt vintage/sepia rider-in-a-hat (weak compound-subject binding at
@@ -1177,7 +1192,7 @@ public static class ModelCatalog
             {
                 // Fish Audio S2 Pro: Dual-AR (36L slow + 4L fast over 10 codebooks) + ModifiedDAC decoder. Fish Audio
                 // Research License (non-commercial). Components match the official code; one real-weight CPU run transcribed
-                // word-exact (Whisper base.en). Reference-voice cloning needs the clip's exact transcript; no GPU/Swarm run yet.
+                // word-exact (Whisper base.en). Reference-voice cloning needs the clip's exact transcript; one short live Swarm run (2026-10-06); no GPU run yet.
                 Id = "fishaudio", Modality = tts, DisplayName = "Fish Audio S2 Pro", Architecture = "Dual-AR + ModifiedDAC", Status = vp,
                 CliDrivable = true, // `hartsy speak -m fishaudio`
                 Assets = new ModelAsset[]
@@ -1191,8 +1206,9 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                // Fish Audio Drama 3: Qwen3.5-MoE 35B-A3B + codebook tower over 10 codebooks + S2's ModifiedDAC. Fish Audio Research
-                // License (non-commercial). `hartsy speak -m fishaudio-drama3` (FP8 experts → Q8_0), `:int4` (GPTQ → Q4_0), `:bf16`
+                // Fish Audio Drama 3: Qwen3.5-MoE 35B-A3B + codebook tower over 10 codebooks + S2's ModifiedDAC. Fish Audio Community
+                // License v1.0 (commercial use below USD 500k annual revenue; no Hosted Services; no voice imitation without consent).
+                // `hartsy speak -m fishaudio-drama3` (FP8 experts → Q8_0), `:int4` (GPTQ → Q4_0), `:bf16`
                 // / `:q8` / `:q6` / `:q5` / `:q4` re-quantize once into a disk cache. Matches the official fish_omni modules on a tiny
                 // checkpoint; no real-weight or GPU run yet. The shards are read from the index on first use (their names are pinned
                 // here once a run records them), and the codec comes from S2 Pro when the build does not ship one.

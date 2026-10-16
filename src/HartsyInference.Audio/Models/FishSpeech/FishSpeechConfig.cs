@@ -42,6 +42,19 @@ public sealed record FishSpeechConfig
     /// summed, codebook 0 sampled by the fast model).</summary>
     public int SemanticBeginId { get; init; } = -1;
 
+    /// <summary>Single sentinel semantic token (1.4: <c>&lt;|semantic|&gt;</c>, id 5). When ≥ 0, row 0 is semantic only when it
+    /// equals this id, every codebook row is summed for semantic rows only, and the fast model samples all N codebooks
+    /// (no codebook-0 derivation). Upstream <c>llama.py</c> <c>embed</c> and <c>decode_one_token_ar</c>. −1 = unused.</summary>
+    public int SemanticTokenId { get; init; } = -1;
+
+    /// <summary>Whether the repetition penalty also applies to the semantic (row-0) logits. Upstream 1.4 samples row 0 with
+    /// <c>previous_tokens=None</c>, so 1.4 disables it there.</summary>
+    public bool PenalizeSemantic { get; init; } = true;
+
+    /// <summary>Sampled codebook values are one-based: upstream 1.4 <c>generate</c> returns <c>codes = y − 1</c> before the
+    /// codec, with pad 0. The model's embeddings still see the raw sampled values.</summary>
+    public bool OneBasedCodes { get; init; }
+
     // Sampling (upstream generate_long/webui defaults: temp 0.7, top-p 0.7, no top-k, windowed rep penalty).
     public float Temperature { get; init; } = 0.7f;
     public float TopP { get; init; } = 0.7f;
@@ -68,5 +81,8 @@ public sealed record FishSpeechConfig
             Rope = HartsyInference.LLM.Transformer.RopeStyle.Interleaved,
         },
         TextVocab = 32_000,
+        SemanticTokenId = 5,       // <|semantic|> in the 1.4 tokenizer.json added tokens
+        PenalizeSemantic = false,
+        OneBasedCodes = true,
     };
 }
