@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: espeak spells out acronyms and vowel-less abbreviations as piper does.** A word the dictionary does not pronounce is now spelled letter by letter when it has no vowel letter (PC, PM, HR, km, kg, btw, tsp, Blvd) or when its dictionary entry is flagged for spelling (OK, AI, abc), with each letter name stressed as espeak stresses it (AI -> ˌeɪˈaɪ). Before, these were read by letter-to-sound rules (PM -> pəm, km -> kəm). Agreement with piper_phonemize on 673 English words rose from 83.7% to 93.3% (82.0% to 91.7% on the default cache data), and a 404-word held-out set rose from 74.5% to 92.6% (cache 73.5% to 91.6%). No word that matched before stopped matching. Uppercase acronyms with vowels (IBM, CEO, NBA) are still read by the rules.
+
 - F5-TTS reference preparation follows upstream `preprocess_ref_audio_text`: a reference over 12 s is cut at its
   pauses, edge silence is trimmed with pydub's -42 dBFS rule, and a quiet reference's output is scaled back by
   `rms / 0.1`, as upstream does. Verified sample-exact against upstream on 9 cases (`F5ReferenceParityTests`).

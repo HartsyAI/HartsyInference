@@ -15,10 +15,12 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakPhonemeTable _phon;
     private readonly EspeakIpaMap _ipa;
     private readonly EspeakVoiceVariant _variant;
+    // EspeakLetterNames holds the American letter names, so it spells only the en-us voice.
+    private readonly bool _spellsLetters;
     private readonly EspeakPhonemeList? _plist;
     private readonly EspeakPhonemeRenderer? _renderer;
 
-    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakLanguageOptions options, IReadOnlyList<(string From, string To)> replacements, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index)
+    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakLanguageOptions options, IReadOnlyList<(string From, string To)> replacements, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index, bool spellsLetters)
     {
         _lookup = lookup;
         _rules = rules;
@@ -28,6 +30,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         _phon = phon;
         _ipa = ipa;
         _variant = variant;
+        _spellsLetters = spellsLetters;
         if (index is not null)
         {
             // Exact allophone + IPA path: run espeak's phoneme-program VM over the clause phoneme list.
@@ -119,7 +122,8 @@ public sealed class EspeakPhonemizer : IPhonemizer
                 phon,
                 EspeakIpaMap.Load(variant.PhonemeTable),
                 variant,
-                index);
+                index,
+                spellsLetters: language.Equals("en-us", StringComparison.OrdinalIgnoreCase));
         }
         catch (Exception ex) when (ex is not HartsyInferenceException)
         {
@@ -453,6 +457,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
     }
 
     private const uint FlagFound = 0x80000000;
+    private const uint FlagFoundAttributes = 0x40000000;
     private const uint FlagPause1 = 0x10000000;
     private const uint FlagPrePause = 0x100;
     private const byte PhonPause = 9;
@@ -522,8 +527,19 @@ public sealed class EspeakPhonemizer : IPhonemizer
         else
         {
             if (found) { dflags = r.Flags; state.Flags2 = r.Flags2; } // flag-only entry: keep its flags, use the rules
-            byte[] buf = BuildBuffer(clause, index, out int start);
-            stressed = TranslateByRules(buf, start, ref dflags, where, state);
+            bool spellable = _spellsLetters && EspeakLetterNames.IsSpelled(word, found ? r.Flags : 0);
+            List<byte>? spelled = spellable ? EspeakLetterNames.Spell(word, _phon, _stress) : null;
+            if (spelled is not null)
+            {
+                stressed = spelled;
+                // Keep the entry's own attributes (clause stress, pauses, alternates); only the found marker changes.
+                dflags = (dflags & ~FlagFoundAttributes) | FlagFound;
+            }
+            else
+            {
+                byte[] buf = BuildBuffer(clause, index, out int start);
+                stressed = TranslateByRules(buf, start, ref dflags, where, state);
+            }
         }
         // Flapping (t/d -> ɾ), voicing assimilation, and vowel reduction are applied data-driven by the phoneme-program
         // VM during rendering (EspeakPhonemeList), so no separate flap-t post-process is needed.
