@@ -150,6 +150,14 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         return b;
     }
 
+    /// <summary>An all-ones F32 vector of length <paramref name="n"/>: the weight a weightless RMSNorm passes to <see cref="IBackend.RmsNorm"/>.</summary>
+    internal static Tensor Ones(int n)
+    {
+        Tensor ones = new(new TensorShape(n), DType.F32);
+        ones.AsSpan<float>().Fill(1f);
+        return ones;
+    }
+
     /// <summary>Loads a LayerNorm bias (F32) under <paramref name="key"/>, or a zeroed length-<paramref name="n"/> vector when the checkpoint ships none (Cohere has no norm bias; StableLM/GPT-2-lineage do).</summary>
     private static Tensor LoadBiasOrZero(IReadOnlyDictionary<string, Tensor> w, string key, int n)
         => w.TryGetValue(key, out Tensor? b) ? EnsureF32(b) : ZeroBias(n);
@@ -753,6 +761,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         && !_cfg.NoRopeOnGlobalLayers
         && _cfg.NormPlacement == NormPlacement.PreNorm
         && !_cfg.EmbeddingLayerNorm
+        && !_cfg.UsesGatedResidualBlock
         // Gemma-4 (2026-07-23 bring-up): per-layer SWA head dim (dual-DIM rope tables), the weightless
         // V-norm, PLE (device-side Q5_K row gather by the device token id), and KV-SHARING (shared layers
         // run a q-only path against the donor layer's cache) are all graph-supported now.
@@ -1153,6 +1162,19 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             long total = (long)tokenIds.Length * h;
             for (long i = 0; i < total; i++) op[i] *= scale;
         }
+        if (_cfg.EmbeddingRmsNorm)
+        {
+            for (int s = 0; s < tokenIds.Length; s++) RmsNormRowInPlace(new Span<float>(op + (long)s * h, h), _cfg.RmsNormEps);
+        }
+    }
+
+    /// <summary>Weightless RMSNorm of one host row in place, accumulated in double so the row's scale matches the F32 reference to rounding.</summary>
+    private static void RmsNormRowInPlace(Span<float> row, float eps)
+    {
+        double sumSq = 0;
+        foreach (float v in row) sumSq += (double)v * v;
+        float inv = (float)(1.0 / Math.Sqrt(sumSq / row.Length + eps));
+        for (int i = 0; i < row.Length; i++) row[i] *= inv;
     }
 
     /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2/Qwen3/Llama).</summary>
@@ -1288,6 +1310,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         // router's per-channel input scale is pre-multiplied by 1/sqrt(hidden) at load time (see LoadWeights) so
         // a single RmsNorm call against it reproduces llama.cpp's rms_norm→scale(1/√h)→mul(scale) chain exactly.
         private Tensor? _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale;
+        // Muse Spark: the attention output gate projection, the weightless per-head output norm's ones, the residual gates'
+        // per-channel alpha/beta, and the ones the input-scaled post-FFN norm normalizes with.
+        private Tensor? _attnGateW, _headNormOnes, _attnAlpha, _attnBeta, _ffnAlpha, _ffnBeta, _postFfnOnes;
 
         public Layer(TransformerConfig cfg) => _cfg = cfg;
 
@@ -1331,7 +1356,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             {
                 // Gemma layout: input → attn → post_attention_layernorm → +res → pre_feedforward_layernorm →
                 // mlp → post_feedforward_layernorm → +res. The pre-MLP norm reuses the _postNorm slot.
-                _postAttnNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
+                _postAttnNorm = _cfg.PostAttnNormWeightless ? Ones(_cfg.HiddenSize)
+                    : LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
                 _postNorm = LoadNorm(w[$"{prefix}.pre_feedforward_layernorm.weight"], addOne);
                 _postFfnNorm = LoadNorm(w[$"{prefix}.post_feedforward_layernorm.weight"], addOne);
             }
@@ -1438,7 +1464,22 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 _pleProj = w[$"{prefix}.per_layer_proj.weight"];
                 _plePostNorm = LoadNorm(w[$"{prefix}.per_layer_post_norm.weight"], addOne: false);
             }
+            LoadGatedResidualBlock(w, prefix, layerIndex);
             LoadFfn(w, prefix, layerIndex);
+        }
+
+        /// <summary>Loads the Muse Spark block tensors the config asks for: the attention output gate, the residual gates and the
+        /// constant weights of the weightless per-head and input-scaled post-FFN norms.</summary>
+        private void LoadGatedResidualBlock(IReadOnlyDictionary<string, Tensor> w, string prefix, int layerIndex)
+        {
+            if (_cfg.AttnOutputGate) _attnGateW = w[$"{prefix}.self_attn.gate_proj.weight"];
+            if (_cfg.AttnHeadOutputNorm) _headNormOnes = Ones(_cfg.HeadDimFor(layerIndex));
+            if (_cfg.PostFfnNormScalesInput) _postFfnOnes = Ones(_cfg.HiddenSize);
+            if (!_cfg.ResidualGates) return;
+            _attnAlpha = EnsureF32(w[$"{prefix}.post_attention_residual_gate.alpha"]);
+            _attnBeta = EnsureF32(w[$"{prefix}.post_attention_residual_gate.beta"]);
+            _ffnAlpha = EnsureF32(w[$"{prefix}.post_feedforward_residual_gate.alpha"]);
+            _ffnBeta = EnsureF32(w[$"{prefix}.post_feedforward_residual_gate.beta"]);
         }
 
         /// <summary>Reads a single-element tensor's value to the host (Gemma-4's optional per-layer output scale).</summary>
@@ -1672,7 +1713,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 _qkvW, _qkvB, _qkW, _qkB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes,
                 _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj,
                 gluFused ? null : _gateW, _gateB, gluFused ? null : _upW, _upB, _gateUpW, _gateUpB, _downW, _downB,
-                _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
+                _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale,
+                _attnGateW, _headNormOnes, _attnAlpha, _attnBeta, _ffnAlpha, _ffnBeta, _postFfnOnes];
             Tensor?[] redundant = [qkvFused || qkFused ? _qW : null, qkvFused || qkFused ? _kW : null,
                 qkvFused ? _vW : null, gluFused ? _gateW : null, gluFused ? _upW : null];
             foreach (Tensor? t in primary) if (t is not null) yield return t;
@@ -1760,6 +1802,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 v = new(new TensorShape(1, t, hkv, d), DType.F32);
             }
             ProjectQkv(backend, q, k, v, pre, t, hasOwnKv, _cfg.LowVramQuant);
+            Tensor? gate = ProjectAttnGate(backend, pre, t);
             if (!_cfg.ParallelResidual) pre.Dispose();   // parallel residual reuses `pre` for the FFN below
 
             // Gemma-4: weightless RMSNorm on V (v / rms(v), no learned scale — the "weight" is a constant ones
@@ -1849,6 +1892,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
             backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink, window, _alibiSlopes);
             qMh.Dispose();
+            attn = NormHeads(backend, attn);
 
             // hq*d (not _cfg.QDim, which is the GLOBAL head dim) — Gemma-4 local/SWA layers project to a
             // narrower width than global layers, and _oW's own shape (loaded from the checkpoint) already
@@ -1856,6 +1900,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor attnFlat = new(new TensorShape(1, t, hq * d), DType.F32);
             backend.Permute0213(attnFlat, attn, hq, t, d);
             attn.Dispose();
+            attnFlat = GateAttention(backend, attnFlat, gate);
             Tensor attnOut = new(flat, DType.F32);
             Project(backend, attnOut, attnFlat, _oW!, _oB, _cfg.LowVramQuant);
             attnFlat.Dispose();
@@ -1883,8 +1928,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             }
 
             attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);   // Gemma post-attn norm (pre-residual)
-            Tensor afterAttn = new(flat, DType.F32);
-            backend.Add(afterAttn, hidden, attnOut);
+            Tensor afterAttn = ResidualJoin(backend, hidden, attnOut, _attnAlpha, _attnBeta, flat);
             attnOut.Dispose();
 
             Tensor mlpOut;
@@ -1899,9 +1943,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 mlpOut = Mlp(backend, preMlp, t);
             }
 
-            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
-            Tensor result = new(flat, DType.F32);
-            backend.Add(result, afterAttn, mlpOut);
+            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat, _postFfnOnes);   // Gemma post-FFN norm (pre-residual)
+            Tensor result = ResidualJoin(backend, afterAttn, mlpOut, _ffnAlpha, _ffnBeta, flat);
             afterAttn.Dispose(); mlpOut.Dispose();
 
             if (perLayerInput is not null) result = ApplyPerLayerEmbedding(backend, result, perLayerInput, t);
@@ -2477,17 +2520,78 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         }
 
         /// <summary>Post-processes a sublayer output before it is added to the residual stream: Gemma's sandwich RMSNorm (when <paramref name="norm"/> is set) followed by Granite's residual multiplier (when not 1); both are no-ops for plain Qwen/Llama. Consumes/returns the (possibly replaced) tensor.</summary>
-        private Tensor PostSublayer(IBackend backend, Tensor x, Tensor? norm, TensorShape shape)
+        /// <param name="scaleFirstOnes">Muse Spark's input-scaled norm: when set, <paramref name="x"/> is scaled by <paramref name="norm"/> and
+        /// then RMS-normalized against these ones, instead of normalized and then scaled.</param>
+        private Tensor PostSublayer(IBackend backend, Tensor x, Tensor? norm, TensorShape shape, Tensor? scaleFirstOnes = null)
         {
             if (norm is not null)
             {
                 Tensor normed = new(shape, DType.F32);
-                backend.RmsNorm(normed, x, norm, _cfg.RmsNormEps);
+                if (scaleFirstOnes is not null)
+                {
+                    using Tensor scaled = new(shape, DType.F32);
+                    backend.AffineBroadcastLastDim(scaled, x, norm, null);
+                    backend.RmsNorm(normed, scaled, scaleFirstOnes, _cfg.EffPostNormEps);
+                }
+                else
+                {
+                    backend.RmsNorm(normed, x, norm, _cfg.EffPostNormEps);
+                }
                 x.Dispose();
                 x = normed;
             }
             if (_cfg.ResidualMultiplier != 1f) backend.Scale(x, x, _cfg.ResidualMultiplier);
             return x;
+        }
+
+        /// <summary>Joins a sublayer output to the residual stream: a plain add, or Muse Spark's norm-preserving
+        /// <c>alpha ⊙ residual + beta ⊙ sublayer</c> when the layer carries residual gates. Consumes neither input.</summary>
+        private static Tensor ResidualJoin(IBackend backend, Tensor residual, Tensor sublayer, Tensor? alpha, Tensor? beta, TensorShape shape)
+        {
+            Tensor result = new(shape, DType.F32);
+            if (alpha is null)
+            {
+                backend.Add(result, residual, sublayer);
+                return result;
+            }
+            using Tensor scaled = new(shape, DType.F32);
+            backend.AffineBroadcastLastDim(scaled, residual, alpha, null);
+            backend.GatedResidualLastDim(result, scaled, sublayer, beta!);
+            return result;
+        }
+
+        /// <summary>Muse Spark's attention output gate, <c>sigmoid(gate_proj(pre))</c> <c>[1, N, Hq·D]</c>; null when the layer has none.</summary>
+        private Tensor? ProjectAttnGate(IBackend backend, Tensor pre, int n)
+        {
+            if (_attnGateW is null) return null;
+            using Tensor logits = new(new TensorShape(1, n, (int)_attnGateW.Shape[0]), DType.F32);
+            Project(backend, logits, pre, _attnGateW, null, _cfg.LowVramQuant);
+            Tensor gate = new(logits.Shape, DType.F32);
+            backend.Sigmoid(gate, logits);
+            return gate;
+        }
+
+        /// <summary>Multiplies the merged attention output by <paramref name="gate"/>; consumes both and returns the gated output, or
+        /// returns <paramref name="attn"/> unchanged when there is no gate. The two only need the same element order, not the same rank.</summary>
+        private static Tensor GateAttention(IBackend backend, Tensor attn, Tensor? gate)
+        {
+            if (gate is null) return attn;
+            Tensor gated = new(attn.Shape, DType.F32);
+            backend.Mul(gated, attn, gate);
+            attn.Dispose();
+            gate.Dispose();
+            return gated;
+        }
+
+        /// <summary>Muse Spark's weightless per-head RMSNorm over the head dimension (the last dim of <paramref name="attn"/>); consumes
+        /// <paramref name="attn"/> and returns the normalized copy, or returns it unchanged when the layer has no such norm.</summary>
+        private Tensor NormHeads(IBackend backend, Tensor attn)
+        {
+            if (_headNormOnes is null) return attn;
+            Tensor normed = new(attn.Shape, DType.F32);
+            backend.RmsNorm(normed, attn, _headNormOnes, _cfg.RmsNormEps);
+            attn.Dispose();
+            return normed;
         }
 
         /// <summary>Batched decode (one token per sequence): projections/MLP run as a single GEMM over all B tokens; attention is looped per sequence (each token attends only its own KV prefix via the scalar FlashAttention). <paramref name="hidden"/> is <c>[1, B, hidden]</c>.</summary>
@@ -2509,6 +2613,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor k = new(fullNorm ? new TensorShape(1, b, _cfg.KvDim) : new TensorShape(1, b, hkv, d), DType.F32);
             Tensor v = new(new TensorShape(1, b, hkv, d), DType.F32);
             ProjectQkv(backend, q, k, v, pre, b, hasOwnKv: true, _cfg.LowVramQuant);
+            Tensor? gate = ProjectAttnGate(backend, pre, b);
             if (!_cfg.ParallelResidual) pre.Dispose();
 
             if (_cfg.QkNorm)
@@ -2581,6 +2686,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor attnConcat = new(new TensorShape(b, hq, 1, d), DType.F32);
             backend.Concat(attnConcat, segs, dim: 0);
             foreach (Tensor seg in segs) seg.Dispose();
+            attnConcat = GateAttention(backend, NormHeads(backend, attnConcat), gate);
 
             Tensor attnOut = new(flat, DType.F32);   // o_proj reads attnConcat as [B, QDim]
             Project(backend, attnOut, attnConcat, _oW!, _oB, _cfg.LowVramQuant);
@@ -2607,17 +2713,15 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             }
 
             attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
-            Tensor afterAttn = new(flat, DType.F32);
-            backend.Add(afterAttn, hidden, attnOut);
+            Tensor afterAttn = ResidualJoin(backend, hidden, attnOut, _attnAlpha, _attnBeta, flat);
             attnOut.Dispose();
 
             Tensor preMlp = new(flat, DType.F32);
             PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
             Tensor mlpOut = Mlp(backend, preMlp, b);
 
-            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);
-            Tensor result = new(flat, DType.F32);
-            backend.Add(result, afterAttn, mlpOut);
+            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat, _postFfnOnes);
+            Tensor result = ResidualJoin(backend, afterAttn, mlpOut, _ffnAlpha, _ffnBeta, flat);
             afterAttn.Dispose(); mlpOut.Dispose();
             return result;
         }

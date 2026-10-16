@@ -630,7 +630,9 @@ public sealed class TextService : ITextService, IDisposable
         bool injectToolPrompt = ShouldInjectToolPrompt(request, rawCompletion, template);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer, injectToolPrompt);
         long requestId = Interlocked.Increment(ref _requestCounter);
-        bool structured = !rawCompletion && template is ChatTemplateEncoderAdapter;
+        // Muse Spark frames every reply in message headers with a reasoning channel, so its parser runs even without a stream.
+        bool museSpark = !rawCompletion && genRequest.EffectiveMessages() is not null && MuseSparkOutputParser.Handles(template, tokenizer);
+        bool structured = (!rawCompletion && template is ChatTemplateEncoderAdapter) || museSpark;
         ITextStreamFilter? filter = _engine.CreateTextStreamFilter(new TextStreamFilterContext
         {
             Request = request,
@@ -662,7 +664,7 @@ public sealed class TextService : ITextService, IDisposable
         }
         // A structured parser also runs without a stream when the request offers tools: its tool calls are the only way a non-streaming reply can end on a call.
         bool structuredTools = structured && request.Tools is { Count: > 0 };
-        if (sink is not null || filter is not null || structuredTools)
+        if (sink is not null || filter is not null || structuredTools || museSpark)
         {
             run.Parser = CreateParser(template, tokenizer, run.Request, request, rawCompletion, literalIds);
             Action<TextChunk> chunkSink = sink ?? (_ => { });
@@ -743,14 +745,18 @@ public sealed class TextService : ITextService, IDisposable
         public void Dispose() => StopSource?.Dispose();
     }
 
-    /// <summary>The terminal text of a request without a filter. A structured parser's content is the visible text once it has reported calls (the raw decode still holds the markup); the passthrough parser's content is exactly what streamed, including the special literals it was asked to show (reasoning tags), which the raw decode skips.</summary>
+    /// <summary>The terminal text of a request without a filter. A structured parser's content is the visible text once it has reported calls (the raw decode still holds the markup); the passthrough parser's content is exactly what streamed, including the special literals it was asked to show (reasoning tags), which the raw decode skips. A Muse Spark parser's content is always the visible text, since its raw decode also holds the message headers and the reasoning.</summary>
     internal static string FinalText(IOutputParser? parser, int callCount, string decoded)
-        => parser is PassthroughOutputParser || (parser is not null && callCount > 0) ? parser.Result.Content : decoded;
+        => parser is PassthroughOutputParser or MuseSparkOutputParser || (parser is not null && callCount > 0) ? parser.Result.Content : decoded;
 
     /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
     private static IOutputParser CreateParser(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest,
         TextRequest request, bool rawCompletion, IReadOnlySet<int>? literalSpecialIds)
     {
+        if (!rawCompletion && genRequest.EffectiveMessages() is not null && MuseSparkOutputParser.Handles(template, tokenizer))
+        {
+            return new MuseSparkOutputParser(tokenizer, genRequest.Tools);
+        }
         // The parser's initial state must come from the message list the template renders (system prompt included).
         if (!rawCompletion && template is ChatTemplateEncoderAdapter adapter && genRequest.EffectiveMessages() is { } messages)
         {

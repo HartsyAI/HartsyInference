@@ -12,13 +12,17 @@ namespace HartsyInference.LLM.Transformer;
 public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 {
     private readonly MoeConfig _moe = moe;
-    private readonly int _hidden = hiddenSize;
+    private readonly int _modelHidden = hiddenSize;
+    private readonly int _hidden = moe.ExpertWidth(hiddenSize);   // the width the routed experts read and write
     private readonly bool _lowVram = lowVram;
 
     private Tensor _routerW = null!;                 // [E, hidden]
     private Tensor[] _gateW = null!, _upW = null!, _downW = null!;   // per expert
     private Tensor? _shGateW, _shUpW, _shDownW, _shGateScoreW;       // shared expert (optional)
-    private float[]? _correctionBias;                // DeepSeek-V3 e_score_correction_bias [E] (selection only)
+    private float[]? _correctionBias;                // e_score_correction_bias [E] (selection only)
+    private Tensor? _correctionBiasT;                // the same bias as a tensor for the device router
+    private Tensor? _latentDown, _latentNorm, _latentUp;            // Muse Spark latent entry/exit (optional)
+    private Tensor? _postExpertNorm, _postExpertOnes;               // Muse Spark per-expert output norm (optional)
 
     /// <summary>Largest batch the device-resident routed stage serves: every (token, slot) pair reads its expert's rows once, which only
     /// beats the grouped per-expert path while few tokens share an expert.</summary>
@@ -96,15 +100,18 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
         // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
         // llama.cpp keeps router biases F32, so a direct host copy is exact.
+        _correctionBiasT = null;
         if (w.TryGetValue($"{prefix}.mlp.gate.e_score_correction_bias", out Tensor? cb))
         {
             if (cb.DType != DType.F32) throw new NotSupportedException("MoE correction bias must be F32.");
             _correctionBias = HostCopy(cb, _moe.NumExperts);
+            _correctionBiasT = cb;
         }
         else if (_moe.Scoring == MoeScoring.SigmoidLogitAdd)
         {
             throw new InvalidDataException("SigmoidLogitAdd routing requires an e_score_correction_bias tensor.");
         }
+        LoadLatentAndExpertNorm(w, prefix);
         int e = _moe.NumExperts;
         _gateW = new Tensor[e];
         _upW = new Tensor[e];
@@ -127,12 +134,36 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
     }
 
+    /// <summary>Loads the optional latent entry/exit projections and the per-expert output norm the config asks for.</summary>
+    private void LoadLatentAndExpertNorm(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        _latentDown = _latentNorm = _latentUp = _postExpertNorm = _postExpertOnes = null;
+        if (_moe.LatentSize > 0)
+        {
+            if (_moe.SharedExpertIntermediateSize > 0)
+                throw new NotSupportedException("A latent MoE block with a shared expert is not supported: the shared expert's width is ambiguous.");
+            _latentDown = w[$"{prefix}.mlp.pre_expert_proj.weight"];
+            _latentNorm = GenericTransformer.EnsureF32(w[$"{prefix}.mlp.pre_expert_norm.weight"]);
+            _latentUp = w[$"{prefix}.mlp.post_expert_proj.weight"];
+            if (_latentDown.Shape[0] != _hidden || _latentUp.Shape[1] != _hidden)
+                throw new InvalidDataException($"{prefix}: latent projections do not match the configured latent size {_hidden}.");
+        }
+        if (_moe.PostExpertNorm)
+        {
+            _postExpertNorm = GenericTransformer.EnsureF32(w[$"{prefix}.mlp.post_expert_norm.weight"]);
+            _postExpertOnes = GenericTransformer.Ones(_hidden);
+        }
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         yield return _routerW;
         for (int i = 0; i < _gateW.Length; i++) { yield return _gateW[i]; yield return _upW[i]; yield return _downW[i]; }
         if (_shGateW is not null) { yield return _shGateW; yield return _shUpW!; yield return _shDownW!; }
         if (_shGateScoreW is not null) yield return _shGateScoreW;
+        if (_correctionBiasT is not null) yield return _correctionBiasT;
+        if (_latentDown is not null) { yield return _latentDown; yield return _latentNorm!; yield return _latentUp!; }
+        if (_postExpertNorm is not null) { yield return _postExpertNorm; yield return _postExpertOnes!; }
     }
 
     /// <summary>The routed experts' projections as three groups, every expert's gate, then up, then down, each in expert
@@ -154,11 +185,34 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     }
 
     /// <summary>MoE FFN: <paramref name="x"/> <c>[1, N, hidden]</c> → <c>[1, N, hidden]</c>; <paramref name="routerLogits"/> overrides the internal <c>x @ router_weight</c> projection when provided (Gemma-4: the router reads a differently-normalized view of the attention output, computed by the caller) — same <c>[1, N, E]</c> shape either way, not disposed by this call.</summary>
-    public unsafe Tensor Forward(IBackend backend, Tensor x, int n, Tensor? routerLogits = null)
+    /// <remarks>With <see cref="MoeConfig.LatentSize"/> set (Muse Spark) the router still reads the full-width <paramref name="x"/>, while the
+    /// experts read <c>pre_expert_norm(pre_expert_proj(x))</c> and their weighted sum leaves through <c>post_expert_proj</c>.</remarks>
+    public Tensor Forward(IBackend backend, Tensor x, int n, Tensor? routerLogits = null)
+    {
+        if (_latentDown is null) return ForwardRouted(backend, x, n, routerLogits);
+        Tensor? ownLogits = routerLogits is null ? ComputeRouterLogits(backend, x, n) : null;
+        try
+        {
+            using Tensor latent = new(new TensorShape(1, n, _hidden), DType.F32);
+            GenericTransformer.Project(backend, latent, x, _latentDown, null, _lowVram);
+            using Tensor latentNormed = new(latent.Shape, DType.F32);
+            backend.RmsNorm(latentNormed, latent, _latentNorm!, _moe.LatentNormEps);
+            using Tensor expertSum = ForwardRouted(backend, latentNormed, n, routerLogits ?? ownLogits);
+            Tensor output = new(new TensorShape(1, n, _modelHidden), DType.F32);
+            GenericTransformer.Project(backend, output, expertSum, _latentUp!, null, _lowVram);
+            return output;
+        }
+        finally
+        {
+            ownLogits?.Dispose();
+        }
+    }
+
+    /// <summary>The routed stage at the expert width: <paramref name="x"/> <c>[1, N, expert width]</c> in, the weighted expert sum (plus any shared expert) out.</summary>
+    private unsafe Tensor ForwardRouted(IBackend backend, Tensor x, int n, Tensor? routerLogits)
     {
         int e = _moe.NumExperts;
         int topK = _moe.NumExpertsPerTok;
-        int inter = _moe.MoeIntermediateSize;
 
         if (n <= IndexedMaxTokens && CanRunIndexed(backend)) return ForwardIndexed(backend, x, n, routerLogits);
         if (n > IndexedMaxTokens && CanRunGrouped(backend)) return ForwardGrouped(backend, x, n, routerLogits);
@@ -234,12 +288,30 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
             Tensor gathered = new(new TensorShape(1, ne, _hidden), DType.F32);
             backend.GatherRows(gathered, x, idx);
-            Tensor expOut = SwiGlu(backend, gathered, ne, _gateW[ex], _upW[ex], _downW[ex], inter);
+            Tensor expOut = RoutedExpert(backend, gathered, ne, ex);
             gathered.Dispose();
             backend.ScatterAddWeightedRows(output, expOut, idx, wts);
             expOut.Dispose();
         }
         return output;
+    }
+
+    /// <summary>One routed expert over <paramref name="rows"/> gathered tokens, including the per-expert output norm when configured.</summary>
+    private Tensor RoutedExpert(IBackend backend, Tensor x, int rows, int expert) =>
+        NormExpertRows(backend, SwiGlu(backend, x, rows, _gateW[expert], _upW[expert], _downW[expert], _moe.MoeIntermediateSize));
+
+    /// <summary>Muse Spark's per-expert output norm: scales each routed row by <c>post_expert_norm</c>, then RMS-normalizes it. Consumes
+    /// <paramref name="rows"/> and returns the normalized rows; returns <paramref name="rows"/> itself when the block has no such norm.</summary>
+    private Tensor NormExpertRows(IBackend backend, Tensor rows)
+    {
+        if (_postExpertNorm is null) return rows;
+        Tensor scaled = new(rows.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(scaled, rows, _postExpertNorm, null);
+        rows.Dispose();
+        Tensor normed = new(scaled.Shape, DType.F32);
+        backend.RmsNorm(normed, scaled, _postExpertOnes!, _moe.PostExpertNormEps);
+        scaled.Dispose();
+        return normed;
     }
 
     /// <summary>Routed experts under expert offload. The plan pins the experts the device cache holds; each runs on the device exactly as
@@ -296,7 +368,6 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             }
 
             // 2. Device experts: resident ones, and misses large enough to stream.
-            int inter = _moe.MoeIntermediateSize;
             for (int i = 0; i < distinct; i++)
             {
                 ExpertAssignment assignment = _offPlan[i];
@@ -306,7 +377,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 ReadOnlySpan<int> idx = CollectionsMarshal.AsSpan(expertTokens[ex]);
                 Tensor gatheredRows = new(new TensorShape(1, idx.Length, h), DType.F32);
                 backend.GatherRows(gatheredRows, x, idx);
-                Tensor expOut = SwiGlu(backend, gatheredRows, idx.Length, _gateW[ex], _upW[ex], _downW[ex], inter);
+                Tensor expOut = RoutedExpert(backend, gatheredRows, idx.Length, ex);
                 gatheredRows.Dispose();
                 backend.ScatterAddWeightedRows(output, expOut, idx, CollectionsMarshal.AsSpan(expertWeights[ex]));
                 expOut.Dispose();
@@ -340,8 +411,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                     runner.Run(program, a.Key, inBuf.AsSpan(start, length), a.Rows, outBuf.AsSpan(start, length));
                 }
                 // One host tensor carries every CPU expert's output; each expert's rows are a view of it, combined on their own.
-                using Tensor allOut = new(new TensorShape(hostRows, h), DType.F32);
-                outBuf.AsSpan(0, hostRows * h).CopyTo(allOut.AsSpan<float>());
+                Tensor rawOut = new(new TensorShape(hostRows, h), DType.F32);
+                outBuf.AsSpan(0, hostRows * h).CopyTo(rawOut.AsSpan<float>());
+                using Tensor allOut = NormExpertRows(backend, rawOut);
                 for (int j = 0; j < hostExperts; j++)
                 {
                     ExpertAssignment a = plan[hostPlan[j]];
@@ -427,7 +499,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
         Tensor topkIdx = new(new TensorShape(n, k), DType.I32);
         Tensor topkWeight = new(new TensorShape(n, k), DType.F32);
-        backend.MoeRoute(topkIdx, topkWeight, logits, RouteArgs);
+        backend.MoeRoute(topkIdx, topkWeight, logits, RouteArgs, _correctionBiasT);
         ownLogits?.Dispose();
 
         Tensor counts = new(new TensorShape(e), DType.I32);
@@ -444,6 +516,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         int rows = _groupedOffsets[e];
         Tensor expertOut = new(new TensorShape(1, rows, _hidden), DType.F32);
         backend.MoeExpertsGrouped(expertOut, x, perm, _groupedOffsets, _gateW, _upW, _downW, gelu: _moe.Activation == ActivationKind.GeluTanh);
+        expertOut = NormExpertRows(backend, expertOut);
         perm.Dispose();
 
         Tensor? shared = null, sharedGate = null;
@@ -484,7 +557,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// (<see cref="IBackend.MoeCombineAddRmsNormEmitQ8"/>). Null when this layer does not take the device-routed path; the caller then
     /// runs <see cref="Forward"/>.</summary>
     public MoeCombineParts? TryForwardDeferred(IBackend backend, Tensor x)
-        => CanRunIndexed(backend) ? ForwardIndexedParts(backend, x, 1, routerLogits: null) : null;
+        => _latentDown is null && CanRunIndexed(backend) ? ForwardIndexedParts(backend, x, 1, routerLogits: null) : null;
 
     private MoeCombineParts ForwardIndexedParts(IBackend backend, Tensor x, int n, Tensor? routerLogits)
     {
@@ -496,7 +569,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
         Tensor topkIdx = new(new TensorShape(n, k), DType.I32);
         Tensor topkWeight = new(new TensorShape(n, k), DType.F32);
-        backend.MoeRoute(topkIdx, topkWeight, logits, RouteArgs);
+        backend.MoeRoute(topkIdx, topkWeight, logits, RouteArgs, _correctionBiasT);
         ownLogits?.Dispose();
 
         int rows = n * k;
@@ -504,6 +577,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         backend.MoeExpertGateUp(act, x, _gateW, _upW, topkIdx, k, gelu: _moe.Activation == ActivationKind.GeluTanh);
         Tensor slotOut = new(new TensorShape(1, rows, _hidden), DType.F32);
         backend.MoeExpertDown(slotOut, act, _downW, topkIdx, k);
+        slotOut = NormExpertRows(backend, slotOut);
         act.Dispose();
         topkIdx.Dispose();
 
@@ -557,7 +631,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 for (int i = 0; i < e; i++) max = MathF.Max(max, logits[baseOff + i]);
                 float sum = 0f;
                 for (int i = 0; i < e; i++) { float v = MathF.Exp(logits[baseOff + i] - max); weight[i] = v; sum += v; }
-                for (int i = 0; i < e; i++) selection[i] = weight[i] /= sum;
+                for (int i = 0; i < e; i++) selection[i] = (weight[i] /= sum) + (_correctionBias?[i] ?? 0f);
             }
             else
             {
@@ -565,9 +639,10 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 {
                     float logit = logits[baseOff + i];
                     weight[i] = 1f / (1f + MathF.Exp(-logit));
+                    // A selection-only bias moves which experts win, never their weights (HF noaux_tc, llama.cpp exp_probs_b).
                     selection[i] = _moe.Scoring == MoeScoring.SigmoidLogitAdd
                         ? logit + _correctionBias![i]
-                        : weight[i];
+                        : weight[i] + (_correctionBias?[i] ?? 0f);
                 }
             }
 
@@ -652,8 +727,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         {
             int ex = plan[i].Key.Expert;
             int rows = plan[i].Rows;
-            Tensor expOut = new(new TensorShape(1, rows, h), DType.F32);
-            expertOut.AsSpan(offset, rows * h).CopyTo(expOut.AsSpan<float>());
+            Tensor rawOut = new(new TensorShape(1, rows, h), DType.F32);
+            expertOut.AsSpan(offset, rows * h).CopyTo(rawOut.AsSpan<float>());
+            Tensor expOut = NormExpertRows(backend, rawOut);
             backend.ScatterAddWeightedRows(output, expOut, expertTokens[ex].ToArray(), expertWeights[ex].ToArray());
             expOut.Dispose();
             offset += rows * h;

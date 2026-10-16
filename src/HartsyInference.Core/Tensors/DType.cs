@@ -103,7 +103,7 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>i-quant 1-bit M. 256 values / 56 bytes.</summary>
     public static readonly DType IQ1_M = new("IQ1_M", 0, true, 56, 256);
 
-    // ── Ternary (ggml type IDs 31-32) ──────────────────────────────────
+    // ── Ternary (ggml type IDs 34-35) ──────────────────────────────────
 
     /// <summary>Ternary 1.6875-bit. 256 values / 54 bytes.</summary>
     public static readonly DType TQ1_0 = new("TQ1_0", 0, true, 54, 256);
@@ -114,10 +114,14 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>OCP MX microscaling 4-bit (E2M1 codewords + shared E8M0 block scale, ggml type id 39). 32 values / 17 bytes per block: 1-byte power-of-two scale + 16 bytes of packed 4-bit codewords.</summary>
     public static readonly DType MXFP4 = new("MXFP4", 0, true, 17, 32);
 
-    // ── Pack-local (no ggml type ID; GGUF writers refuse it) ───────────
+    // ── Scalar-grid block quants (ggml type IDs 41-42) ─────────────────
 
-    /// <summary>Pack-local 2-bit block quantization, 64 values per block: 2 bytes fp16 scale + 16 bytes of 2-bit codes
-    /// (18 bytes, 2.25 bits per weight). Value = <c>grid[code] * scale</c> with grid <c>{-1, 0, 1, 2}</c>. Used only by expert packs.</summary>
+    /// <summary>1-bit block quantization (ggml type id 41), 128 values per block: 2 bytes fp16 scale + 16 bytes of sign bits
+    /// (18 bytes, 1.125 bits per weight). Value = <c>bit ? scale : -scale</c>.</summary>
+    public static readonly DType Q1_0 = new("Q1_0", 0, true, 18, 128);
+
+    /// <summary>2-bit block quantization (ggml type id 42, also the expert-pack format), 64 values per block: 2 bytes fp16 scale +
+    /// 16 bytes of 2-bit codes (18 bytes, 2.25 bits per weight). Value = <c>grid[code] * scale</c> with grid <c>{-1, 0, 1, 2}</c>.</summary>
     public static readonly DType Q2_0 = new("Q2_0", 0, true, 18, 64);
 
     /// <summary>Signed 8-bit integer.</summary>

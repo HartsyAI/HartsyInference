@@ -211,9 +211,11 @@ public sealed class GgufWriter : IDisposable
         if (dtype == DType.IQ4_XS) return 23;
         if (dtype == DType.IQ1_M) return 29;
         if (dtype == DType.BF16) return 30;
-        if (dtype == DType.TQ1_0) return 31;
-        if (dtype == DType.TQ2_0) return 32;
+        if (dtype == DType.TQ1_0) return 34;
+        if (dtype == DType.TQ2_0) return 35;
         if (dtype == DType.MXFP4) return 39;
+        if (dtype == DType.Q1_0) return 41;
+        if (dtype == DType.Q2_0) return 42;
         throw new ArgumentException($"DType {dtype} has no canonical ggml type ID.", nameof(dtype));
     }
 
