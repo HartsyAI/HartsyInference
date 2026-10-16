@@ -129,7 +129,8 @@ public sealed class GgufLoader : IDisposable
         }
     }
 
-    private static void AddPartTensors(Dictionary<string, GgufTensorDescriptor> target, List<GgufTensorDescriptor> tensors, int part, IReadOnlyList<string> paths)
+    private static void AddPartTensors(
+        Dictionary<string, GgufTensorDescriptor> target, List<GgufTensorDescriptor> tensors, int part, IReadOnlyList<string> paths)
     {
         foreach (GgufTensorDescriptor desc in tensors)
         {
