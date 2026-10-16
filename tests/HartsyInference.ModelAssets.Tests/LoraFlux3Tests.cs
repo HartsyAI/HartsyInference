@@ -110,6 +110,23 @@ public sealed unsafe class LoraFlux3Tests(ITestOutputHelper output) : IDisposabl
     }
 
     [Fact]
+    public void Load_PeftDora_IsRefusedRatherThanAppliedAsPlainLora()
+    {
+        // The magnitude carries no role suffix the vocabulary knows, so without the refusal the A/B pair would load
+        // alone and merge as an ordinary LoRA: wrong weights, no error.
+        Dictionary<string, Tensor> tensors = new()
+        {
+            ["transformer.mode_blocks.image.0.attn.to_q.lora_A.weight"] = Filled(DType.F32, [Rank, Hidden], _ => 0.5f),
+            ["transformer.mode_blocks.image.0.attn.to_q.lora_B.weight"] = Filled(DType.F32, [Hidden, Rank], _ => 0.25f),
+            ["transformer.mode_blocks.image.0.attn.to_q.lora_magnitude_vector.weight"] = Filled(DType.F32, [Hidden], _ => 1f),
+        };
+        string path = Save("peft_dora", tensors);
+
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => LoraFile.Load(path));
+        Assert.Contains("lora_magnitude_vector", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Merge_DiffusersNormOut_LandsWithItsHalvesSwapped()
     {
         // B rows [scale | shift] = [0.25 | 0.75]; A = 0.5 and alpha = rank, so the delta is 2·0.5·B = B.

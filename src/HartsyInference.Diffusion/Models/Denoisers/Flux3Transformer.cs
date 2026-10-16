@@ -117,14 +117,15 @@ public sealed class Flux3Transformer : IDisposable
         ArgumentNullException.ThrowIfNull(input);
         ValidateTarget(targetSigma);
         Tensor zeroVec = TimeVector(backend, 0f, targetSigma);
+        Tensor? text = null;
+        Tensor? references = null;
         try
         {
-            Tensor text = EmbedTokens(backend, input.TextFeatures, _textEmbed!, _config.ContextInDim, "text features");
+            text = EmbedTokens(backend, input.TextFeatures, _textEmbed!, _config.ContextInDim, "text features");
             int textLength = (int)text.Shape[1];
             FluxRope textRope = _textRope.Ensure(textLength, () => Flux3PosEmbed.TextIds(textLength));
             text = RunStack(backend, text, _textBlocks, _earlyModulations[TextMode], zeroVec, textRope);
 
-            Tensor? references = null;
             if (input.ReferenceTokens is not null)
             {
                 ValidateReferences(input);
@@ -134,6 +135,14 @@ public sealed class Flux3Transformer : IDisposable
                 references = RunStack(backend, references, _referenceBlocks, _earlyModulations[ReferenceMode], zeroVec, referenceRope);
             }
             return new Flux3ConditionStates(text, references);
+        }
+        catch
+        {
+            // Ownership passes to the states only once they exist; a stream built before the failure dies here.
+            // RunStack has already freed its own input when it throws, and Dispose is idempotent.
+            text?.Dispose();
+            references?.Dispose();
+            throw;
         }
         finally
         {
@@ -268,17 +277,27 @@ public sealed class Flux3Transformer : IDisposable
         return embedded;
     }
 
+    /// <summary>Runs <paramref name="x"/> through <paramref name="blocks"/>, taking ownership of it: each block's input is
+    /// freed once its output exists, and the current activation is freed if a block throws.</summary>
     private static Tensor RunStack(IBackend backend, Tensor x, Flux3Block[] blocks, AdaLNModulation projection, Tensor vec, FluxRope rope)
     {
-        Tensor[] rows = projection.Forward(backend, vec);
-        using Flux3Modulation modulation = Flux3Modulation.Uniform(rows[0], rows[1], rows[2]);
-        foreach (Flux3Block block in blocks)
+        try
         {
-            Tensor next = block.Forward(backend, x, modulation, rope);
-            x.Dispose();
-            x = next;
+            Tensor[] rows = projection.Forward(backend, vec);
+            using Flux3Modulation modulation = Flux3Modulation.Uniform(rows[0], rows[1], rows[2]);
+            foreach (Flux3Block block in blocks)
+            {
+                Tensor next = block.Forward(backend, x, modulation, rope);
+                x.Dispose();
+                x = next;
+            }
+            return x;
         }
-        return x;
+        catch
+        {
+            x.Dispose();
+            throw;
+        }
     }
 
     private Tensor RunJoint(IBackend backend, Tensor joint, Tensor imageVec, Tensor zeroVec, int[] spanLengths, bool hasReferences,

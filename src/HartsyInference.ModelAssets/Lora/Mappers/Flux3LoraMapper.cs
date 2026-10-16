@@ -30,6 +30,11 @@ public static class Flux3LoraMapper
         Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
         foreach (string key in loader.Descriptors.Keys)
         {
+            if (LoraRoleSuffix.IsPeftDoraMagnitude(key))
+            {
+                throw new NotSupportedException($"FLUX.3 LoRA key '{key}' is a PEFT DoRA magnitude vector. PEFT DoRA "
+                    + "adapters are not supported, and applying their A/B pairs without it would give wrong weights.");
+            }
             if (!LoraRoleSuffix.TryStrip(key, out string root, out LoraRole role))
             {
                 continue;
