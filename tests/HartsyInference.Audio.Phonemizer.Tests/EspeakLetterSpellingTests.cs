@@ -46,6 +46,8 @@ public sealed class EspeakLetterSpellingTests
         [InlineData("ok", "ˌoʊkˈeɪ")]
         [InlineData("btw", "bˌiːtˌiːdˈʌbəljˌuː")]
         [InlineData("th", "tˌiːˈeɪtʃ")]
+        [InlineData("Lt", "ˌɛltˈiː")]
+        [InlineData("lt", "ˌɛltˈiː")]
         [InlineData("HR", "ˌeɪtʃˈɑːɹ")]
         [InlineData("mph", "ˌɛmpˌiːˈeɪtʃ")]
         [InlineData("kg", "kˌeɪdʒˈiː")]
