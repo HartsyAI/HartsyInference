@@ -31,6 +31,7 @@ public sealed class SpeechService : ISpeechService
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
         TtsTarget target = ResolveTarget(spec, request.Voice);
+        RejectUnsupportedReferences(target.Descriptor, request);
         ValidateReference(target.Descriptor, request.Reference);
         return _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
         {
@@ -171,6 +172,7 @@ public sealed class SpeechService : ISpeechService
     private async IAsyncEnumerable<AudioChunk> StreamCore(TtsTarget target, SpeechRequest request, Action<IReadOnlyList<SpeechTurn>>? onTurns,
         [EnumeratorCancellation] CancellationToken cancel)
     {
+        RejectUnsupportedReferences(target.Descriptor, request);
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
@@ -222,6 +224,10 @@ public sealed class SpeechService : ISpeechService
     /// samples are never allocated. A clip whose length the header cannot give is left to the checks inside the job.</summary>
     internal static void ValidateReference(TtsModelDescriptor descriptor, AudioClip? reference)
     {
+        if (reference is { Data.Length: > 0 })
+        {
+            RejectIfNoReferences(descriptor);
+        }
         if (descriptor.ValidateReferenceSeconds is null || reference is null || reference.Data.Length == 0)
         {
             return;
@@ -237,7 +243,32 @@ public sealed class SpeechService : ISpeechService
     {
         if (referenceMono is { Length: > 0 })
         {
+            RejectIfNoReferences(descriptor);
             descriptor.ValidateReferenceSeconds?.Invoke(referenceMono.Length / (double)ReferenceSampleRate);
+        }
+    }
+
+    /// <summary>Refuses a request that carries a voice reference (a clip or a references list) when the family takes none. It runs before
+    /// any clip is decoded or written to a temp file, so the refusal does not depend on the clip's container.</summary>
+    internal static void RejectUnsupportedReferences(TtsModelDescriptor descriptor, SpeechRequest request)
+    {
+        if (descriptor.ReferenceRejection is not { } reason)
+        {
+            return;
+        }
+        if (request.Reference is { Data.Length: > 0 } || request.References is { Count: > 0 })
+        {
+            throw new NotSupportedException(reason);
+        }
+    }
+
+    /// <summary>Refuses a reference outright for a family that takes none. It runs before any container is parsed, so a clip the
+    /// WAV header cannot measure is refused too.</summary>
+    private static void RejectIfNoReferences(TtsModelDescriptor descriptor)
+    {
+        if (descriptor.ReferenceRejection is { } reason)
+        {
+            throw new NotSupportedException(reason);
         }
     }
 

@@ -83,7 +83,7 @@ public sealed unsafe class FishSpeechPipeline : IDisposable
         int t = frames.Count;
         int[,] grid = new int[n, t];
         for (int j = 0; j < t; j++)
-            for (int i = 0; i < n; i++) grid[i, j] = frames[j][i];
+            for (int i = 0; i < n; i++) grid[i, j] = ToCodecIndex(frames[j][i]);
         float[] audio = _codec.Decode(backend, grid, t);
         // Free-running DualAR codes render ~10x quiet vs the reference; peak-normalize as a product step
         // (disabled for parity, which must match the reference's no-gain output). See LoudnessNormalizer.
@@ -112,9 +112,12 @@ public sealed unsafe class FishSpeechPipeline : IDisposable
         int t = frames.Count;
         int[,] grid = new int[n, t];
         for (int j = 0; j < t; j++)
-            for (int i = 0; i < n; i++) grid[i, j] = frames[j][i];
+            for (int i = 0; i < n; i++) grid[i, j] = ToCodecIndex(frames[j][i]);
         return _codec.Decode(backend, grid, t);
     }
+
+    /// <summary>Maps a sampled codebook value to the codec's index: one-based for 1.4 (pad 0 clamps to 0).</summary>
+    private int ToCodecIndex(int code) => _cfg.OneBasedCodes ? Math.Max(code - 1, 0) : code;
 
     public IEnumerable<Tensor> EnumerateWeights()
     {

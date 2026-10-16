@@ -21,7 +21,8 @@ namespace HartsyInference.Engine.Audio;
 /// Qwen3.5-MoE text-to-speech model with a codebook tower over 10 codebooks, decoded by S2's ModifiedDAC codec to 44.1 kHz mono.
 /// Inline <c>[bracket cues]</c> direct the delivery and <c>&lt;|speaker:N|&gt;</c> tags switch speakers. Voices clone from one or
 /// more references (each a transcript with its clip), and a take is revised by sending its returned turns back as history with a
-/// new cue. The weights ship under the Fish Audio Research License (non-commercial).
+/// new cue. The weights ship under the Fish Audio Community License v1.0: commercial use below USD 500k annual revenue, no
+/// Hosted Services at any revenue, and no imitation of a real person's voice without consent.
 ///
 /// <para>The variant picks the build and its precision, joined by <c>+</c>: <c>int4</c> selects the GPTQ release, an
 /// <c>org/repo</c> any other build of the same layout (the unquantized original included), and <c>bf16</c>, <c>q8</c>, <c>q6</c>,

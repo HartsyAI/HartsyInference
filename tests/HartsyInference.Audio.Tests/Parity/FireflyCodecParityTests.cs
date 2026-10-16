@@ -5,6 +5,7 @@ using HartsyInference.Audio.Models.FishSpeech;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -23,9 +24,9 @@ public sealed unsafe class FireflyCodecParityTests
     [Trait("Category", "Integration")]
     public void FireflyDecode_MatchesReference()
     {
-        string? wPath = Environment.GetEnvironmentVariable("FIREFLY_WEIGHTS");
-        string? refP = Environment.GetEnvironmentVariable("FIREFLY_REF");
-        if (string.IsNullOrEmpty(wPath) || !File.Exists(wPath) || string.IsNullOrEmpty(refP) || !File.Exists(refP))
+        string wPath = Environment.GetEnvironmentVariable("FIREFLY_WEIGHTS") is { Length: > 0 } wSet ? wSet : "FIREFLY_WEIGHTS is unset";
+        string refP = Environment.GetEnvironmentVariable("FIREFLY_REF") is { Length: > 0 } rSet ? rSet : "FIREFLY_REF is unset";
+        if (!RealWeightGate.Require(_out.WriteLine, wPath, refP))
             return;
 
         SafeTensorsLoader wl = new(); wl.Load(wPath);

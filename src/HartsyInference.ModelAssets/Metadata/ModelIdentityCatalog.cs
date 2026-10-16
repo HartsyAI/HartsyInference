@@ -172,7 +172,8 @@ public static class ModelIdentityCatalog
             Audio("auk", "auk_tts", "AuK", "Tencent", "mit", "tts"),
             Audio("sparktts", "sparktts_tts", "Spark-TTS", "SparkAudio", "cc-by-nc-sa-4.0", "tts"),
             Audio("fishspeech", "fishspeech_tts", "Fish-Speech 1.5", "Fish Audio", "cc-by-nc-sa-4.0", "tts", "fishaudio/fish-speech-1.5"),
-            // Both under the Fish Audio Research License (non-commercial), which has no HuggingFace license id.
+            // S2 Pro is under the Fish Audio Research License (non-commercial); Drama 3 under the Fish Audio Community License v1.0.
+            // Neither has a HuggingFace license id, so both are "other".
             Audio("fishaudio", "fishaudio_tts", "Fish Audio S2 Pro", "Fish Audio", "other", "tts", "fishaudio/s2-pro"),
             Audio("fishaudio-drama3", "fishaudio_drama3_tts", "Fish Audio Drama 3", "Fish Audio", "other", "tts", "fishaudio/drama-3"),
             Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),
