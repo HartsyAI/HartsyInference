@@ -126,6 +126,10 @@ public static unsafe class GptqInt4Codec
     // A symmetric checkpoint stores one zero for every group and column: 7 under AutoGPTQ's offset-by-one, 8 under GPTQModel v2.
     private static void CheckSymmetricZeros(Tensor qzeros, int groups, int outFeatures)
     {
+        if (qzeros.DType != DType.I32 && qzeros.DType != DType.U32)
+        {
+            throw new ArgumentException($"GPTQ qzeros are packed I32 words, not {qzeros.DType.Name}.", nameof(qzeros));
+        }
         if (qzeros.Shape.Rank != 2 || qzeros.Shape[0] != groups || qzeros.Shape[1] * NibblesPerWord != outFeatures)
         {
             throw new ArgumentException($"GPTQ qzeros of {qzeros.Shape} do not match {groups} groups of {outFeatures} outputs.", nameof(qzeros));
@@ -149,10 +153,16 @@ public static unsafe class GptqInt4Codec
         {
             throw new ArgumentException($"A GPTQ g_idx of {gIdx.ElementCount} entries does not cover {inFeatures} inputs.", nameof(gIdx));
         }
-        ReadOnlySpan<int> order = new((void*)gIdx.DataPointer, inFeatures);
+        // Exporters store the group index as int32 or as torch's default int64.
+        bool wide = gIdx.DType == DType.I64;
+        if (!wide && gIdx.DType != DType.I32)
+        {
+            throw new ArgumentException($"A GPTQ g_idx holds I32 or I64 group indices, not {gIdx.DType.Name}.", nameof(gIdx));
+        }
         for (int i = 0; i < inFeatures; i++)
         {
-            if (order[i] != i / groupSize)
+            long group = wide ? ((long*)gIdx.DataPointer)[i] : ((int*)gIdx.DataPointer)[i];
+            if (group != i / groupSize)
             {
                 throw new NotSupportedException("The GPTQ weight uses activation order (desc_act); it is not supported.");
             }

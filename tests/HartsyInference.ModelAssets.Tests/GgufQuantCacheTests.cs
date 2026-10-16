@@ -56,6 +56,18 @@ public sealed unsafe class GgufQuantCacheTests : IDisposable
             Metadata(1)), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void APartialCacheFromADeadWriter_IsRemoved_AndAWritersOwnTemporaryNeverLingers()
+    {
+        string path = Path.Combine(_dir, "cache.gguf");
+        // Process ids are positive ints well below int.MaxValue on every platform the engine runs on.
+        string abandoned = $"{path}.{int.MaxValue}.{Guid.NewGuid():N}.tmp";
+        File.WriteAllBytes(abandoned, [1, 2, 3]);
+        Open(path, DType.Q8_0, version: 1).Dispose();
+        Assert.False(File.Exists(abandoned));
+        Assert.Equal([Path.GetFileName(path)], Directory.EnumerateFiles(_dir).Select(Path.GetFileName));
+    }
+
     public void Dispose()
     {
         _weight.Dispose();

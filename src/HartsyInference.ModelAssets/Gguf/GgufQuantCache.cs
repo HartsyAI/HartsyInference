@@ -94,6 +94,42 @@ public static class GgufQuantCache
         return cache.Descriptors.Count == count ? null : $"it holds {cache.Descriptors.Count} tensors, expected {count}";
     }
 
+    /// <summary>Deletes temporary files a writer of <paramref name="cachePath"/> left behind when its process died mid-write, so an
+    /// interrupted conversion does not keep its partial file on disk forever. A temporary whose process is still running is left
+    /// alone: it may be writing.</summary>
+    private static void RemoveAbandonedTemporaries(string cachePath, string logTag)
+    {
+        string full = Path.GetFullPath(cachePath);
+        string prefix = Path.GetFileName(full) + ".";
+        foreach (string file in Directory.EnumerateFiles(Path.GetDirectoryName(full)!, prefix + "*.tmp"))
+        {
+            string[] parts = Path.GetFileName(file)[prefix.Length..].Split('.');
+            if (parts.Length != 3 || !int.TryParse(parts[0], out int processId) || IsRunning(processId)) continue;
+            try
+            {
+                File.Delete(file);
+                Logs.Info($"{logTag} Removed the abandoned partial quant cache '{file}'.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Logs.Warning($"{logTag} Could not remove the abandoned partial quant cache '{file}': {ex.Message}");
+            }
+        }
+    }
+
+    private static bool IsRunning(int processId)
+    {
+        try
+        {
+            using System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     private static string MetadataText(object? value) => System.Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "";
 
     private static GgufLoader Map(string cachePath)
@@ -146,7 +182,9 @@ public static class GgufQuantCache
     {
         Logs.Info($"{logTag} Writing the quant cache '{cachePath}' (one time, one tensor at a time)...");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(cachePath))!);
-        string temporary = cachePath + ".tmp";
+        RemoveAbandonedTemporaries(cachePath, logTag);
+        // Each writer has its own file, so two processes first-loading the same cache never write into one another.
+        string temporary = $"{cachePath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
         try
         {
             using (GgufWriter writer = new(temporary))
@@ -163,7 +201,17 @@ public static class GgufQuantCache
                 }
                 writer.Flush();
             }
-            File.Move(temporary, cachePath, overwrite: true);
+            try
+            {
+                File.Move(temporary, cachePath, overwrite: true);
+            }
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && File.Exists(cachePath))
+            {
+                // Another writer finished first and its file is in use (Windows refuses to replace a mapped file): use that one.
+                File.Delete(temporary);
+                Logs.Info($"{logTag} Another load finished the quant cache first; using its file.");
+                return;
+            }
         }
         catch
         {

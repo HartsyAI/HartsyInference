@@ -64,6 +64,35 @@ public sealed unsafe class GptqInt4CodecTests
         }
     }
 
+    [Fact]
+    public void AnInt64GroupIndex_IsReadAsSuch()
+    {
+        (Tensor qweight, Tensor scales, Tensor qzeros, _, _) = Synthetic(0x77777777u, seed: 6);
+        using (qweight) using (scales) using (qzeros)
+        {
+            using Tensor order = new(new TensorShape(In), DType.I64);
+            Span<long> g = order.AsSpan<long>();
+            for (int i = 0; i < In; i++) g[i] = i / Group;
+            GptqInt4Codec.ToQ4_0(qweight, scales, qzeros, order, Group).Dispose();
+            g[In - 1] = 0;
+            Assert.Throws<NotSupportedException>(() => GptqInt4Codec.ToQ4_0(qweight, scales, qzeros, order, Group));
+        }
+    }
+
+    [Fact]
+    public void CompanionsOfAnotherDtype_AreRefusedBeforeTheyAreRead()
+    {
+        (Tensor qweight, Tensor scales, Tensor qzeros, _, _) = Synthetic(0x77777777u, seed: 7);
+        using (qweight) using (scales) using (qzeros)
+        {
+            // The right shapes, but elements narrower than the 32-bit words the reads assume.
+            using Tensor narrowZeros = new(qzeros.Shape, DType.I16);
+            Assert.Throws<ArgumentException>(() => GptqInt4Codec.ToQ4_0(qweight, scales, narrowZeros, null, Group));
+            using Tensor narrowOrder = new(new TensorShape(In), DType.U8);
+            Assert.Throws<ArgumentException>(() => GptqInt4Codec.ToQ4_0(qweight, scales, qzeros, narrowOrder, Group));
+        }
+    }
+
     // qweight packs eight inputs per I32 word along the input axis, lowest nibble first.
     private static (Tensor QWeight, Tensor Scales, Tensor QZeros, int[,] Q, Half[,] S) Synthetic(uint zeroWord, int seed)
     {
