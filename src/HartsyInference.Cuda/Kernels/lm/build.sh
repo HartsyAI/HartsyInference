@@ -35,6 +35,7 @@ KERNELS=(
     "mul_mat_vec_q5k_q8_1"
     "mul_mat_vec_q2k_q8_1"
     "mul_mat_vec_q3k_q8_1"
+    "ssm_prefill_f32"
 )
 # LLM-decode hot paths tuned against llama.cpp: their sources are current and only register allocation differs
 # between toolchains, so a routine rebuild must not overwrite the shipped artifacts (see --install-tuned).

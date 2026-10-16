@@ -167,6 +167,31 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Fraction of the schedule before which Redux is not applied (default 0).")]
         public double? ReduxApplyStart { get; init; }
 
+        /// <summary>Blocks the unconditional branch skips (two-pass skip-layer guidance).</summary>
+        [CommandOption("--slg-uncond-layers")]
+        [Description("Comma-separated blocks (0-indexed) the unconditional branch skips; 'none' turns it off. MOSS-Image only (default 22).")]
+        public string? SlgUncondLayers { get; init; }
+
+        /// <summary>Blocks the three-pass skip-layer guidance branch skips.</summary>
+        [CommandOption("--slg-layers")]
+        [Description("Comma-separated blocks (0-indexed) an extra conditional branch skips for three-pass skip-layer guidance; needs --slg-scale. MOSS-Image only.")]
+        public string? SlgLayers { get; init; }
+
+        /// <summary>Weight of the three-pass skip-layer guidance term.</summary>
+        [CommandOption("--slg-scale")]
+        [Description("Three-pass skip-layer guidance scale (OpenMOSS suggests 3 with --slg-start 0.01). MOSS-Image only.")]
+        public double? SlgScale { get; init; }
+
+        /// <summary>Fraction of the steps where skip-layer guidance starts.</summary>
+        [CommandOption("--slg-start")]
+        [Description("Fraction of the steps where skip-layer guidance starts (default 0).")]
+        public double? SlgStart { get; init; }
+
+        /// <summary>Fraction of the steps where skip-layer guidance stops.</summary>
+        [CommandOption("--slg-stop")]
+        [Description("Fraction of the steps where skip-layer guidance stops, exclusive (default 1).")]
+        public double? SlgStop { get; init; }
+
         /// <summary>Directory to save the image to.</summary>
         /// <summary>Cut the subject out of the finished image with RMBG-1.4, saving a PNG with a real alpha channel.</summary>
         [CommandOption("--remove-background")]
@@ -229,6 +254,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("redux-multiply", settings.ReduxMultiply);
         parameters.PutIfSet("redux-merge", settings.ReduxMerge);
         parameters.PutIfSet("redux-apply-start", settings.ReduxApplyStart);
+        parameters.PutIfSet("slg-uncond-layers", settings.SlgUncondLayers);
+        parameters.PutIfSet("slg-layers", settings.SlgLayers);
+        parameters.PutIfSet("slg-scale", settings.SlgScale);
+        parameters.PutIfSet("slg-start", settings.SlgStart);
+        parameters.PutIfSet("slg-stop", settings.SlgStop);
         parameters.PutIfSet("preview-output", settings.PreviewOutput);
         if (settings.RemoveBackground)
         {

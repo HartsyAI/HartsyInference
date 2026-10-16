@@ -66,6 +66,9 @@ public static class ModelIdentityCatalog
             // One SwarmUI class covers the full and the step-distilled build; the weights tell them apart.
             Image("flux3", "flux.3-klein", "Flux.3 Klein", "Black Forest Labs", "other", "1024x1024",
                 "black-forest-labs/flux-3-image-klein-comfy"),
+            // Base and SFT share the architecture and every sampling default; the variant only names the build.
+            Image("moss-image", "moss-image", "MOSS-Image", "OpenMOSS", "other", "1024x1024",
+                "OpenMOSS-Team/MOSS-Image-Base"),
             Image("chroma", "chroma", "Chroma", "lodestones", "apache-2.0", "1024x1024"),
             Image("chroma-radiance", "chroma-radiance", "Chroma Radiance", "lodestones", "apache-2.0", "1024x1024"),
             // Base, Edit and Edit-2509 are key-for-key identical, so the stamped class is what tells SwarmUI (and the
@@ -169,7 +172,8 @@ public static class ModelIdentityCatalog
             Audio("auk", "auk_tts", "AuK", "Tencent", "mit", "tts"),
             Audio("sparktts", "sparktts_tts", "Spark-TTS", "SparkAudio", "cc-by-nc-sa-4.0", "tts"),
             Audio("fishspeech", "fishspeech_tts", "Fish-Speech 1.5", "Fish Audio", "cc-by-nc-sa-4.0", "tts", "fishaudio/fish-speech-1.5"),
-            // Both under the Fish Audio Research License (non-commercial), which has no HuggingFace license id.
+            // S2 Pro is under the Fish Audio Research License (non-commercial); Drama 3 under the Fish Audio Community License v1.0.
+            // Neither has a HuggingFace license id, so both are "other".
             Audio("fishaudio", "fishaudio_tts", "Fish Audio S2 Pro", "Fish Audio", "other", "tts", "fishaudio/s2-pro"),
             Audio("fishaudio-drama3", "fishaudio_drama3_tts", "Fish Audio Drama 3", "Fish Audio", "other", "tts", "fishaudio/drama-3"),
             Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),

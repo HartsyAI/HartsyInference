@@ -135,6 +135,54 @@ public static class TensorAssert
         }
     }
 
+    /// <summary>Asserts <paramref name="actual"/> agrees with <paramref name="expected"/> as a whole rather than per
+    /// element: relative L2 error at most <paramref name="maxRelL2"/>, and every row of <paramref name="rowLength"/>
+    /// values (a token) at cosine similarity <paramref name="minRowCosine"/> or better. The measure for a real-weight
+    /// port against a reference that ran in another precision, where every element moves a little and only a token
+    /// pointing the wrong way is a bug. Returns both numbers for the log.</summary>
+    public static (double RelL2, double MinRowCosine) Agrees(Tensor actual, Tensor expected, int rowLength, double maxRelL2,
+        double minRowCosine, string? because = null)
+    {
+        ArgumentNullException.ThrowIfNull(actual);
+        ArgumentNullException.ThrowIfNull(expected);
+        if (actual.ElementCount != expected.ElementCount || rowLength <= 0 || expected.ElementCount % rowLength != 0)
+        {
+            throw new InvalidOperationException(
+                $"Cannot compare {actual.Shape} with {expected.Shape} in rows of {rowLength}.{Suffix(because)}");
+        }
+        float[] a = ToF32(actual);
+        float[] e = ToF32(expected);
+        double num = 0, den = 0, worstCosine = 1;
+        int worstRow = -1;
+        for (int row = 0; row < e.Length / rowLength; row++)
+        {
+            double dot = 0, aa = 0, ee = 0;
+            for (int i = row * rowLength; i < (row + 1) * rowLength; i++)
+            {
+                double diff = (double)a[i] - e[i];
+                num += diff * diff;
+                den += (double)e[i] * e[i];
+                dot += (double)a[i] * e[i];
+                aa += (double)a[i] * a[i];
+                ee += (double)e[i] * e[i];
+            }
+            double cosine = aa == 0 && ee == 0 ? 1 : dot / Math.Sqrt(Math.Max(aa * ee, 1e-300));
+            if (!(cosine >= worstCosine))
+            {
+                worstCosine = cosine;
+                worstRow = row;
+            }
+        }
+        double relL2 = Math.Sqrt(num / Math.Max(den, 1e-300));
+        if (!(relL2 <= maxRelL2) || !(worstCosine >= minRowCosine))
+        {
+            throw new InvalidOperationException(
+                $"Tensors disagree: relative L2 {relL2:E3} (limit {maxRelL2:E1}), worst row {worstRow} cosine "
+                + $"{worstCosine:F6} (limit {minRowCosine:F6}).{Suffix(because)}");
+        }
+        return (relL2, worstCosine);
+    }
+
     private static float[] ToF32(Tensor tensor)
     {
         // Comparison is in F32 whatever the storage is: the question is whether the VALUES agree, and two backends
