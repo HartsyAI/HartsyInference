@@ -127,22 +127,8 @@ public sealed class Flux2Recipe : IArchitectureRecipe
 
             // Flux.2 VAE (distinct from Flux.1's ae): 32-channel latent + BatchNorm running stats stored alongside.
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
-            SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-            vaeLoader.Load(vaePath);
-            loaders.Add(vaeLoader);
-            Dictionary<string, Tensor> vaeWeights = vaeLoader.GetAllTensors();
-            if (!vaeWeights.TryGetValue("bn.running_mean", out Tensor? bnMean))
-            {
-                throw new InvalidOperationException(
-                    $"Flux.2 VAE '{Path.GetFileName(vaePath)}' is missing 'bn.running_mean'. Verify this is a Flux.2 VAE, not a Flux.1 ae.safetensors.");
-            }
-            if (!vaeWeights.TryGetValue("bn.running_var", out Tensor? bnVar))
-            {
-                throw new InvalidOperationException($"Flux.2 VAE '{Path.GetFileName(vaePath)}' is missing 'bn.running_var'.");
-            }
-            VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Flux2);
-            vaeDecoder.LoadWeights(vaeWeights);
-            VaeEncoder? vaeEncoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux2, vaeWeights, "Flux2Recipe");
+            Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "Flux2Recipe");
+            loaders.Add(vae);
 
             // Tokenizer: Klein → embedded Qwen3 vocab/merges; Dev → Mistral tekken (HF tokenizer.json).
             Qwen3Tokenizer? qwenTokenizer = null;
@@ -159,8 +145,8 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             }
 
             Flux2Pipeline pipeline = new Flux2Pipeline(
-                context.Backend, encoder, transformer, vaeDecoder, vaeEncoder,
-                bnMean, bnVar, config,
+                context.Backend, encoder, transformer, vae.Decoder, vae.Encoder,
+                vae.BnMean, vae.BnVar, config,
                 hiddenLayers: null,
                 bnEps: 1e-5f);
             Logs.Info($"[Flux2Recipe] Flux.2 ready ({DescribeConfig(config)}).");

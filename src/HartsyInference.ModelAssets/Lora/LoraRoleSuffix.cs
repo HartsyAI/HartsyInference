@@ -50,6 +50,12 @@ public static class LoraRoleSuffix
         return false;
     }
 
+    /// <summary>Whether <paramref name="key"/> is a PEFT DoRA magnitude vector (<c>.lora_magnitude_vector</c>). PEFT's DoRA
+    /// renormalizes differently from the LyCORIS <c>dora_scale</c> this vocabulary carries, and its magnitude is not
+    /// additive, so a consumer refuses the adapter rather than applying its A/B pair alone.</summary>
+    public static bool IsPeftDoraMagnitude(string key) =>
+        key.Contains(".lora_magnitude_vector", StringComparison.Ordinal);
+
     /// <summary>Whether <paramref name="role"/> is a decomposition matrix rather than a scalar companion (<see cref="LoraRole.Alpha"/>, <see cref="LoraRole.DoraScale"/>) or a full-weight delta (<see cref="LoraRole.Diff"/>, <see cref="LoraRole.BiasDiff"/>). Format detection keys on this: a stray alpha or magnitude vector is not by itself evidence that a file is a LoRA for the root it sits on.</summary>
     public static bool IsDecompositionMatrix(LoraRole role) =>
         role is not (LoraRole.Alpha or LoraRole.DoraScale or LoraRole.Diff or LoraRole.BiasDiff);

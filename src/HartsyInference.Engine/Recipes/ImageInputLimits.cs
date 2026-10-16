@@ -7,7 +7,11 @@ namespace HartsyInference.Engine.Recipes;
 /// ControlNet hint images are separate composition objects with their own gates and are not counted here.</remarks>
 /// <param name="MaxImages">Most images (init + references) the family reads. Zero for a text-to-image-only family.</param>
 /// <param name="ReferencesRequireInitImage">True when the family reads only the init image.</param>
-public readonly record struct ImageInputLimits(int MaxImages, bool ReferencesRequireInitImage)
+/// <param name="MaxReferences">Most images the family conditions on as references, counting an init image sent in
+/// <see cref="Img2ImgMode.Reference"/>; null when <paramref name="MaxImages"/> is the only cap. A family that also
+/// denoises an init image reads one image more than it conditions on, which <paramref name="MaxImages"/> alone cannot
+/// say.</param>
+public readonly record struct ImageInputLimits(int MaxImages, bool ReferencesRequireInitImage, int? MaxReferences = null)
 {
     /// <summary>No image input at all: the family is text-to-image only.</summary>
     public static ImageInputLimits TextOnly => new ImageInputLimits(0, false);
@@ -20,9 +24,17 @@ public readonly record struct ImageInputLimits(int MaxImages, bool ReferencesReq
         (supports & (ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit)) != 0 ? SingleInitImage : TextOnly;
 
     /// <summary>Number of images <paramref name="request"/> hands the family: the init image plus every non-null reference.</summary>
-    internal static int CountImages(ImageRequest request)
+    internal static int CountImages(ImageRequest request) =>
+        (request.Img2Img?.InitImage is not null ? 1 : 0) + CountReferenceImages(request);
+
+    /// <summary>Number of images <paramref name="request"/> asks the family to condition on: every non-null reference,
+    /// plus the init image when it is sent in <see cref="Img2ImgMode.Reference"/>.</summary>
+    internal static int CountReferences(ImageRequest request) =>
+        (request.Img2Img is { Mode: Img2ImgMode.Reference, InitImage: not null } ? 1 : 0) + CountReferenceImages(request);
+
+    private static int CountReferenceImages(ImageRequest request)
     {
-        int count = request.Img2Img?.InitImage is not null ? 1 : 0;
+        int count = 0;
         if (request.ReferenceImages is not null)
         {
             foreach (ImageData reference in request.ReferenceImages)
@@ -48,6 +60,12 @@ public readonly record struct ImageInputLimits(int MaxImages, bool ReferencesReq
         if (images > MaxImages)
         {
             return $"Model family '{familyId}' takes at most {MaxImages} input image{(MaxImages == 1 ? "" : "s")}; {images} were supplied.";
+        }
+        int references = CountReferences(request);
+        if (MaxReferences is int maxReferences && references > maxReferences)
+        {
+            return $"Model family '{familyId}' conditions on at most {maxReferences} reference image{(maxReferences == 1 ? "" : "s")}; "
+                + $"{references} were supplied (an init image in Reference mode counts as one).";
         }
         return null;
     }

@@ -223,11 +223,11 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             // Exact inverse of the decode chain below (unpack → BN un-normalize → unpatchify → decode), so the
             // source enters the loop in the same representation the loop integrates in.
             Tensor sourceLatent32 = VaeEncoder!.Encode(Backend, img2imgReq.SourceImage);
-            Tensor sourcePatched = PatchifyLatent(sourceLatent32, _config.InChannels, _config.PatchSize);
+            Tensor sourcePatched = Flux2LatentOps.Patchify(sourceLatent32, _config.InChannels, _config.PatchSize);
             sourceLatent32.Dispose();
-            Tensor sourceBn = ApplyBnNormalize(sourcePatched, _bnMean, _bnVar, _bnEps);
+            Tensor sourceBn = Flux2LatentOps.BnNormalize(sourcePatched, _bnMean, _bnVar, _bnEps);
             sourcePatched.Dispose();
-            Tensor sourcePacked = PackLatent(sourceBn);
+            Tensor sourcePacked = Flux2LatentOps.Pack(sourceBn);
             sourceBn.Dispose();
 
             Tensor noised = new Tensor(packedShape, DType.F32);
@@ -339,10 +339,10 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             if (onProgress is not null)
             {
-                Tensor previewPatched = UnpackLatent(packedLatent, patH, patW);
-                Tensor previewUnnormalized = ApplyBnUnNormalize(previewPatched, _bnMean, _bnVar, _bnEps);
+                Tensor previewPatched = Flux2LatentOps.Unpack(packedLatent, patH, patW);
+                Tensor previewUnnormalized = Flux2LatentOps.BnUnNormalize(previewPatched, _bnMean, _bnVar, _bnEps);
                 previewPatched.Dispose();
-                Tensor previewLatent = UnpatchifyLatent(
+                Tensor previewLatent = Flux2LatentOps.Unpatchify(
                     previewUnnormalized, _config.OutChannels, _config.PatchSize);
                 previewUnnormalized.Dispose();
                 onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -359,15 +359,15 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Backend.FreeWeights(_transformer.EnumerateWeights());
 
         // ── 5. Unpack [B, S, 128] → [B, 128, patH, patW] ──────────
-        Tensor unpackedPatched = UnpackLatent(packedLatent, patH, patW);
+        Tensor unpackedPatched = Flux2LatentOps.Unpack(packedLatent, patH, patW);
         packedLatent.Dispose();
 
         // ── 6. BN un-normalize on the 128-channel patchified latent (per-channel mean/var)──
-        Tensor unBn = ApplyBnUnNormalize(unpackedPatched, _bnMean, _bnVar, _bnEps);
+        Tensor unBn = Flux2LatentOps.BnUnNormalize(unpackedPatched, _bnMean, _bnVar, _bnEps);
         unpackedPatched.Dispose();
 
         // ── 7. 2×2 unpatchify: [B, 128, patH, patW] → [B, 32, latH, latW] ──
-        Tensor latent32 = UnpatchifyLatent(unBn, _config.OutChannels, _config.PatchSize);
+        Tensor latent32 = Flux2LatentOps.Unpatchify(unBn, _config.OutChannels, _config.PatchSize);
         unBn.Dispose();
 
         // ── 8. VAE decode ─────────────────────────────────────────
@@ -512,197 +512,5 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             if (negatives[i].Shape[1] != n0)
                 throw new ArgumentException($"negativeLayers[{i}] seq_len {negatives[i].Shape[1]} disagrees with negativeLayers[0] seq_len {n0}.");
         }
-    }
-
-    /// <summary>Packs <c>[B, C, H, W]</c> to <c>[B, H*W, C]</c> — the exact inverse of <see cref="UnpackLatent"/>.</summary>
-    private static Tensor PackLatent(Tensor latent)
-    {
-        int batch = (int)latent.Shape[0];
-        int channels = (int)latent.Shape[1];
-        int h = (int)latent.Shape[2];
-        int w = (int)latent.Shape[3];
-        int spatial = h * w;
-        Tensor packed = new Tensor(new TensorShape(batch, spatial, channels), DType.F32);
-        float* src = (float*)latent.DataPointer;
-        float* dst = (float*)packed.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < channels; c++)
-            {
-                long srcBase = ((long)b * channels + c) * spatial;
-                for (int s = 0; s < spatial; s++)
-                {
-                    dst[((long)b * spatial + s) * channels + c] = src[srcBase + s];
-                }
-            }
-        }
-        return packed;
-    }
-
-    /// <summary>2x2 spatial patchify: <c>[B, C, H*2, W*2] -> [B, C*4, H, W]</c> — the inverse of <see cref="UnpatchifyLatent"/>, so a source latent enters the loop in the layout the DiT emits.</summary>
-    private static Tensor PatchifyLatent(Tensor input, int outChannels, int patchSize)
-    {
-        int batch = (int)input.Shape[0];
-        int inChannels = (int)input.Shape[1];
-        int h = (int)input.Shape[2];
-        int w = (int)input.Shape[3];
-        int outH = h / patchSize;
-        int outW = w / patchSize;
-        Tensor output = new Tensor(new TensorShape(batch, outChannels, outH, outW), DType.F32);
-        float* src = (float*)input.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < inChannels; c++)
-            {
-                for (int py = 0; py < patchSize; py++)
-                {
-                    for (int px = 0; px < patchSize; px++)
-                    {
-                        int outC = (c * patchSize + py) * patchSize + px;
-                        for (int y = 0; y < outH; y++)
-                        {
-                            for (int x = 0; x < outW; x++)
-                            {
-                                long si = (((long)b * inChannels + c) * h + (y * patchSize + py)) * w + (x * patchSize + px);
-                                long di = (((long)b * outChannels + outC) * outH + y) * outW + x;
-                                dst[di] = src[si];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return output;
-    }
-
-    /// <summary>BN normalize on the 128-channel patchified latent: <c>z = (z - mean) / sqrt(var + eps)</c> per channel — the inverse of <see cref="ApplyBnUnNormalize"/>.</summary>
-    private static Tensor ApplyBnNormalize(Tensor latent, Tensor mean, Tensor var, float eps)
-    {
-        int batch = (int)latent.Shape[0];
-        int channels = (int)latent.Shape[1];
-        int h = (int)latent.Shape[2];
-        int w = (int)latent.Shape[3];
-        int spatial = h * w;
-        Tensor output = new Tensor(latent.Shape, DType.F32);
-        float* src = (float*)latent.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        float* mp = (float*)mean.DataPointer;
-        float* vp = (float*)var.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < channels; c++)
-            {
-                float invStd = 1.0f / MathF.Sqrt(vp[c] + eps);
-                float m = mp[c];
-                long baseIdx = ((long)b * channels + c) * spatial;
-                for (int i = 0; i < spatial; i++)
-                {
-                    dst[baseIdx + i] = (src[baseIdx + i] - m) * invStd;
-                }
-            }
-        }
-        return output;
-    }
-
-    /// <summary>Unpacks [B, S, C] to [B, C, H, W] (no spatial reshuffle — packed dim is already row-major H*W).</summary>
-    private static Tensor UnpackLatent(Tensor packed, int h, int w)
-    {
-        int batch = (int)packed.Shape[0];
-        int channels = (int)packed.Shape[2];
-        int seqLen = h * w;
-        TensorShape outShape = new TensorShape(batch, channels, h, w);
-        Tensor unpacked = new Tensor(outShape, DType.F32);
-        float* inPtr = (float*)packed.DataPointer;
-        float* outPtr = (float*)unpacked.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int y = 0; y < h; y++)
-            {
-                for (int x = 0; x < w; x++)
-                {
-                    int seqIdx = y * w + x;
-                    int inBase = (b * seqLen + seqIdx) * channels;
-                    for (int c = 0; c < channels; c++)
-                    {
-                        int outIdx = ((b * channels + c) * h + y) * w + x;
-                        outPtr[outIdx] = inPtr[inBase + c];
-                    }
-                }
-            }
-        }
-        return unpacked;
-    }
-
-    /// <summary>BN un-normalize on the 128-channel patchified latent: <c>z = z * sqrt(var + eps) + mean</c> per channel. Mean/var must be shape <c>[128]</c>. Matches Flux.2 pipeline's <c>ApplyBnUnNormalize</c> exactly.</summary>
-    private static Tensor ApplyBnUnNormalize(Tensor latent, Tensor mean, Tensor var, float eps)
-    {
-        int batch = (int)latent.Shape[0];
-        int channels = (int)latent.Shape[1];
-        int h = (int)latent.Shape[2];
-        int w = (int)latent.Shape[3];
-        int spatial = h * w;
-        Tensor output = new Tensor(latent.Shape, DType.F32);
-        float* inPtr = (float*)latent.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        float* meanPtr = (float*)mean.DataPointer;
-        float* varPtr = (float*)var.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < channels; c++)
-            {
-                float std = MathF.Sqrt(varPtr[c] + eps);
-                float m = meanPtr[c];
-                int chanBase = (b * channels + c) * spatial;
-                for (int s = 0; s < spatial; s++)
-                    outPtr[chanBase + s] = inPtr[chanBase + s] * std + m;
-            }
-        }
-        return output;
-    }
-
-    /// <summary>2×2 spatial unpatchify: <c>[B, C*4, H, W] → [B, C, H*2, W*2]</c>. Matches Flux.2 pipeline's <c>UnpatchifyLatent</c>.</summary>
-    private static Tensor UnpatchifyLatent(Tensor input, int outChannels, int patchSize)
-    {
-        int batch = (int)input.Shape[0];
-        int inChannels = (int)input.Shape[1];
-        int h = (int)input.Shape[2];
-        int w = (int)input.Shape[3];
-        int outH = h * patchSize;
-        int outW = w * patchSize;
-        if (inChannels != outChannels * patchSize * patchSize)
-            throw new InvalidOperationException(
-                $"UnpatchifyLatent: in_channels ({inChannels}) must equal out_channels * patch² ({outChannels} * {patchSize}² = {outChannels * patchSize * patchSize})");
-
-        TensorShape outShape = new TensorShape(batch, outChannels, outH, outW);
-        Tensor output = new Tensor(outShape, DType.F32);
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < outChannels; c++)
-            {
-                for (int y = 0; y < h; y++)
-                {
-                    for (int x = 0; x < w; x++)
-                    {
-                        for (int py = 0; py < patchSize; py++)
-                        {
-                            for (int px = 0; px < patchSize; px++)
-                            {
-                                int srcChan = c * (patchSize * patchSize) + py * patchSize + px;
-                                int srcIdx = ((b * inChannels + srcChan) * h + y) * w + x;
-                                int oy = y * patchSize + py;
-                                int ox = x * patchSize + px;
-                                int dstIdx = ((b * outChannels + c) * outH + oy) * outW + ox;
-                                outPtr[dstIdx] = inPtr[srcIdx];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return output;
     }
 }

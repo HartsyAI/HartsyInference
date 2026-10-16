@@ -61,7 +61,7 @@ public static class LoraBaker
         {
             // PEFT's DoRA renormalizes differently from the LyCORIS dora_scale LoraDoraDecompose implements; baking its
             // A/B pair alone would silently drop the magnitude, so it is refused.
-            if (key.Contains(".lora_magnitude_vector", StringComparison.Ordinal))
+            if (LoraRoleSuffix.IsPeftDoraMagnitude(key))
                 throw new NotSupportedException($"'{key}' is a PEFT DoRA magnitude vector; baking PEFT DoRA adapters is not supported.");
             if (!LoraRoleSuffix.TryStrip(key, out string root, out LoraRole role))
             {

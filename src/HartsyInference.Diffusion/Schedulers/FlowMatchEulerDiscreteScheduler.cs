@@ -180,9 +180,14 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     }
 
     /// <summary>Adds noise to a clean sample for img2img: noisy = (1 - sigma) * sample + sigma * noise.</summary>
-    public unsafe void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
+    public void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex) =>
+        AddNoiseAtSigma(output, sample, noise, _sigmas[stepIndex]);
+
+    /// <summary>Flow-matching forward noising at an explicit <paramref name="sigma"/>:
+    /// <c>(1 − sigma)·sample + sigma·noise</c>. For a level off this scheduler's grid, such as a sampler's re-spaced
+    /// schedule.</summary>
+    public static unsafe void AddNoiseAtSigma(Tensor output, Tensor sample, Tensor noise, float sigma)
     {
-        float sigma = _sigmas[stepIndex];
         float oneMinusSigma = 1.0f - sigma;
 
         float* samplePtr = (float*)sample.DataPointer;
