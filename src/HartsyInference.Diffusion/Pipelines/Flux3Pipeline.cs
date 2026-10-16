@@ -195,6 +195,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         catch
         {
             latent?.Dispose();
+            ReclaimAfterFailure();
             throw;
         }
         finally
@@ -238,6 +239,22 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
 
     /// <inheritdoc/>
     protected override void DisposeCore() => _promptCache.Dispose();
+
+    /// <summary>After a stage throws mid-op (an OOM, a cancellation, a device error), the temporaries of whatever op was
+    /// running are still in the backend's activation cache. Reclaiming them here covers every block and stage at once,
+    /// so a retry starts from the memory a fresh request would. Best effort: a sticky device error must not mask the
+    /// failure being reported.</summary>
+    private void ReclaimAfterFailure()
+    {
+        try
+        {
+            Backend.FreeActivations();
+        }
+        catch (Exception cleanup)
+        {
+            Logs.Warning($"{Family}: reclaiming activations after a failed generation also failed: {cleanup.Message}");
+        }
+    }
 
     /// <summary>Encodes one prompt through the eight Qwen3-VL taps, reusing the last result for the same ids. The DiT
     /// is evicted first because the encoder and a resident DiT need not fit together.</summary>
