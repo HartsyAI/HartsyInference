@@ -37,6 +37,14 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     /// <summary>Every logical weight, by name.</summary>
     public IReadOnlyDictionary<string, HfQuantWeight> Weights => _weights;
 
+    /// <summary>Names the files the weights come from: each shard's name, size and last write time. A cache built from this
+    /// checkpoint records it, so a replaced shard is noticed even when the new one has the same tensors.</summary>
+    public string SourceIdentity => string.Join(';', _set.Shards.Select(static shard =>
+    {
+        FileInfo file = new(shard.Path);
+        return string.Create(CultureInfo.InvariantCulture, $"{shard.FileName}:{file.Length}:{file.LastWriteTimeUtc.Ticks}");
+    }));
+
     /// <summary>Opens <paramref name="directory"/>'s <c>model.safetensors.index.json</c> shards, or its single <c>model.safetensors</c>.</summary>
     public static HfQuantCheckpoint Open(string directory, int gptqGroupSize = 128, int fp8BlockSize = Fp8BlockF32Codec.DefaultBlock)
     {

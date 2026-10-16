@@ -112,7 +112,8 @@ public sealed class HfQuantCheckpointTests : IDisposable
         {
             Assert.Equal(entries.Count, reopened.Descriptors.Count);
         }
-        Assert.Equal(1, enumerations);
+        // The reopen reads the entries to check the cache against them, but produces none of them again.
+        Assert.Equal(2, enumerations);
         Assert.Equal(entries.Count, produced.Count);
     }
 

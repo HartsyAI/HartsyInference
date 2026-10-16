@@ -36,7 +36,8 @@ public sealed unsafe class FishAudioDrama3Lm : IDisposable
         PrefillChunk = prefillChunk;
         _candidates = Candidates(config);
         _mainHead = CandidateRows(weights.TryGetValue(LmHeadKey, out Tensor? head) ? head
-            : throw new KeyNotFoundException($"The Drama 3 checkpoint has no '{LmHeadKey}'."), _candidates, config.Backbone.HiddenSize);
+            : throw new KeyNotFoundException($"The Drama 3 checkpoint has no '{LmHeadKey}'."), _candidates, config.Backbone.VocabSize,
+            config.Backbone.HiddenSize);
         try
         {
             _backbone = Qwen35Model.FromHuggingFace(weights, config.Backbone, Capacity, BackbonePrefix, lmHeadKey: null);
@@ -277,12 +278,20 @@ public sealed unsafe class FishAudioDrama3Lm : IDisposable
         return ids;
     }
 
-    // Copies the head rows of the candidates into an owned [C, hidden] tensor in the head's own dtype.
-    private static Tensor CandidateRows(Tensor head, int[] candidates, int hidden)
+    // Copies the head rows of the candidates into an owned [C, hidden] tensor in the head's own dtype. The head must have the config's
+    // shape, and every candidate a row in it, before any row is read through a pointer.
+    private static Tensor CandidateRows(Tensor head, int[] candidates, int vocab, int hidden)
     {
-        if (head.Shape.Rank != 2 || head.Shape[1] != hidden)
+        if (head.Shape.Rank != 2 || head.Shape[0] != vocab || head.Shape[1] != hidden)
         {
-            throw new InvalidDataException($"The Drama 3 lm_head is {head.Shape}; expected [vocab, {hidden}].");
+            throw new InvalidDataException($"The Drama 3 lm_head is {head.Shape}; the config expects [{vocab}, {hidden}].");
+        }
+        foreach (int id in candidates)
+        {
+            if ((uint)id >= (uint)vocab)
+            {
+                throw new InvalidDataException($"The Drama 3 config names token {id} (eos or the semantic band), outside its {vocab}-token vocabulary.");
+            }
         }
         long rowBytes = head.DType.ComputeByteCount(hidden);
         Tensor rows = new(new TensorShape(candidates.Length, hidden), head.DType);

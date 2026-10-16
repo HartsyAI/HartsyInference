@@ -126,8 +126,14 @@ public static class FishAudioDrama3Weights
             return (Borrow(checkpoint), checkpoint);
         }
         GgufQuantError error = new();
+        Dictionary<string, object> identity = new(StringComparer.Ordinal)
+        {
+            ["hartsy.drama3.cache_version"] = CacheVersion,
+            ["hartsy.drama3.precision"] = precision.ToString(),
+            ["hartsy.drama3.source"] = checkpoint.SourceIdentity,
+        };
         GgufLoader loader = GgufQuantCache.Open(cachePath, () => CacheEntries(checkpoint, precision, error), "fish-drama3",
-            "[Audio][Drama3]", new Dictionary<string, object> { ["hartsy.drama3.cache_version"] = CacheVersion });
+            "[Audio][Drama3]", identity);
         if (error.Count > 0)
         {
             Logs.Info($"[Audio][Drama3] Re-quantization to {precision}: {error}.");

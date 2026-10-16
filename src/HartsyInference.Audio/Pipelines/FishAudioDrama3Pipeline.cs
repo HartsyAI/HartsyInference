@@ -104,14 +104,14 @@ public sealed class FishAudioDrama3Pipeline : IDisposable
         FishAudioDrama3Lm lm = _lm ?? throw new InvalidOperationException("LoadWeights must run before Synthesize.");
         List<string> chunks = request.SingleChunk ? [request.Text] : FishAudioDrama3Chunking.Split(request.Text);
         if (chunks.Count == 0) chunks = [request.Text];
+        int requested = request.MaxFrames is > 0 ? request.MaxFrames.Value
+            : request.SingleChunk ? FishAudioDrama3Config.DefaultMaxNewFrames : FishAudioDrama3Chunking.ChunkMaxNewFrames;
+        int maxRows = PromptRowLimit(lm.Capacity, requested);
         // Reject bad text in any chunk before generating: failing at a later chunk would waste the earlier ones.
         foreach (string chunk in chunks)
         {
-            int rows = _prompt.Build(chunk, request.References, request.History).GetLength(0);
-            if (rows >= lm.Capacity) throw new ArgumentException($"The prompt has {rows} rows; no room is left to generate.");
+            _prompt.Build(chunk, request.References, request.History, maxRows);
         }
-        int requested = request.MaxFrames is > 0 ? request.MaxFrames.Value
-            : request.SingleChunk ? FishAudioDrama3Config.DefaultMaxNewFrames : FishAudioDrama3Chunking.ChunkMaxNewFrames;
         Logs.Info($"[Audio][Drama3] {chunks.Count} chunk(s), {request.References.Count} reference(s), {request.History.Count} history "
             + $"turn(s), up to {requested} frames per chunk.");
 
@@ -122,7 +122,7 @@ public sealed class FishAudioDrama3Pipeline : IDisposable
         foreach (string chunk in chunks)
         {
             request.Cancel.ThrowIfCancellationRequested();
-            int[,] prompt = _prompt.BuildWithHistory(chunk, request.References, request.History, chunkHistory);
+            int[,] prompt = _prompt.BuildWithHistory(chunk, request.References, request.History, chunkHistory, maxRows);
             StreamState? stream = onAudio is null ? null : new StreamState(this, backend, onAudio);
             FishAudioDrama3Generation generation = lm.Generate(backend, prompt, requested, sampler,
                 stream is null ? null : stream.OnFrame, request.Cancel);
@@ -143,6 +143,15 @@ public sealed class FishAudioDrama3Pipeline : IDisposable
             chunkHistory.Push(turn);
         }
         return new Result([.. audio], turns);
+    }
+
+    /// <summary>Most prompt rows a chunk may take in a model of <paramref name="capacity"/> rows: room is left for the
+    /// <paramref name="requested"/> frames, though never more than half the capacity, and never more than upstream's
+    /// <see cref="FishAudioDrama3Config.MaxPromptRows"/>, which is the limit at the capacity the engine loads with.</summary>
+    public static int PromptRowLimit(int capacity, int requested)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 2);
+        return Math.Min(FishAudioDrama3Config.MaxPromptRows, capacity - Math.Clamp(requested, 1, capacity / 2));
     }
 
     public void Dispose()

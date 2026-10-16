@@ -23,11 +23,14 @@ public sealed class FishAudioDrama3Prompt(Func<string, int[]> encode, FishAudioD
     public int Width => 1 + _config.NumCodebooks;
 
     /// <summary>The prompt rows <c>[rows, Width]</c> for speaking <paramref name="text"/>.</summary>
-    /// <exception cref="FishAudioDrama3PromptTooLongException">The prompt exceeds <see cref="FishAudioDrama3Config.MaxPromptRows"/>.</exception>
-    public int[,] Build(string text, IReadOnlyList<FishAudioDrama3Turn> references, IReadOnlyList<FishAudioDrama3Turn> history)
+    /// <param name="maxRows">Most rows the prompt may hold; <see cref="FishAudioDrama3Config.MaxPromptRows"/> unless the model has less room.</param>
+    /// <exception cref="FishAudioDrama3PromptTooLongException">The prompt exceeds <paramref name="maxRows"/>.</exception>
+    public int[,] Build(string text, IReadOnlyList<FishAudioDrama3Turn> references, IReadOnlyList<FishAudioDrama3Turn> history,
+        int maxRows = FishAudioDrama3Config.MaxPromptRows)
     {
         ArgumentNullException.ThrowIfNull(references);
         ArgumentNullException.ThrowIfNull(history);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxRows);
         FishAudioDrama3Text.Validate(text, "text");
         List<int[]> rows = [];
         Text(rows, "<|im_start|>system\n");
@@ -57,9 +60,9 @@ public sealed class FishAudioDrama3Prompt(Func<string, int[]> encode, FishAudioD
         Text(rows, FishAudioDrama3Text.WithSpeakerTag(text));
         Text(rows, MessageEnd);
         Text(rows, GenerationStart);
-        if (rows.Count > FishAudioDrama3Config.MaxPromptRows)
+        if (rows.Count > maxRows)
         {
-            throw new FishAudioDrama3PromptTooLongException(rows.Count);
+            throw new FishAudioDrama3PromptTooLongException(rows.Count, maxRows);
         }
         int[,] result = new int[rows.Count, Width];
         for (int r = 0; r < rows.Count; r++)
@@ -70,9 +73,10 @@ public sealed class FishAudioDrama3Prompt(Func<string, int[]> encode, FishAudioD
     }
 
     /// <summary>The prompt for one chunk of a long text: the caller's <paramref name="fixedHistory"/> always, then as much of
-    /// <paramref name="chunkHistory"/> as fits, trying its candidates longest first (fish-speech <c>build_drama3_chunk_prompt</c>).</summary>
+    /// <paramref name="chunkHistory"/> as fits in <paramref name="maxRows"/>, trying its candidates longest first (fish-speech
+    /// <c>build_drama3_chunk_prompt</c>).</summary>
     public int[,] BuildWithHistory(string text, IReadOnlyList<FishAudioDrama3Turn> references, IReadOnlyList<FishAudioDrama3Turn> fixedHistory,
-        FishAudioDrama3History chunkHistory)
+        FishAudioDrama3History chunkHistory, int maxRows = FishAudioDrama3Config.MaxPromptRows)
     {
         ArgumentNullException.ThrowIfNull(fixedHistory);
         ArgumentNullException.ThrowIfNull(chunkHistory);
@@ -81,14 +85,14 @@ public sealed class FishAudioDrama3Prompt(Func<string, int[]> encode, FishAudioD
         {
             try
             {
-                return Build(text, references, [.. fixedHistory, .. turns]);
+                return Build(text, references, [.. fixedHistory, .. turns], maxRows);
             }
             catch (FishAudioDrama3PromptTooLongException tooLong)
             {
                 last = tooLong;
             }
         }
-        throw last ?? new FishAudioDrama3PromptTooLongException(0);
+        throw last ?? new FishAudioDrama3PromptTooLongException(0, maxRows);
     }
 
     private void Text(List<int[]> rows, string literal)

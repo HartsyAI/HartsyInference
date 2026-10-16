@@ -106,6 +106,20 @@ public sealed class FishAudioDrama3PromptTests
         Assert.Throws<FishAudioDrama3PromptTooLongException>(() => Prompt().Build("now", [], [new FishAudioDrama3Turn("first", codes)]));
     }
 
+    [Fact]
+    public void AModelWithLessRoom_DropsTheChunkHistoryAtItsOwnLimit()
+    {
+        // The history fits upstream's 8192 rows but not a 600-row limit, so that prompt is built without it.
+        int[,] codes = new int[4, 1000];
+        FishAudioDrama3History history = new();
+        history.Push(new FishAudioDrama3Turn("first", codes));
+        Assert.True(Prompt().BuildWithHistory("now", [], [], history).GetLength(0) > 1000);
+        Assert.True(Prompt().BuildWithHistory("now", [], [], history, maxRows: 600).GetLength(0) < 40);
+        FishAudioDrama3PromptTooLongException tooLong = Assert.Throws<FishAudioDrama3PromptTooLongException>(
+            () => Prompt().Build("now", [], [new FishAudioDrama3Turn("first", codes)], maxRows: 600));
+        Assert.Equal(600, tooLong.Limit);
+    }
+
     private FishAudioDrama3Prompt Prompt() => new(text =>
     {
         _parts.Add(text);

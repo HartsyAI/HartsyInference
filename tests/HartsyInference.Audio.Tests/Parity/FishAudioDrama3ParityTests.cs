@@ -121,6 +121,18 @@ public sealed class FishAudioDrama3ParityTests(ITestOutputHelper output)
         foreach (int code in first.Codes) Assert.InRange(code, 0, config.CodebookSize - 1);
     }
 
+    [Fact]
+    public void AHeadOrConfigFromAnotherBuild_IsRefusedBeforeAnyRowIsRead()
+    {
+        FishAudioDrama3Config config = Config();
+        using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([Path.Combine(Dir, "drama3_tiny.safetensors")]);
+        Dictionary<string, Tensor> weights = FishAudioDrama3Weights.Borrow(checkpoint);
+        using Tensor shortHead = new(new TensorShape(config.Backbone.VocabSize - 1, config.Backbone.HiddenSize), DType.F32);
+        Assert.Throws<InvalidDataException>(() => new FishAudioDrama3Lm(config, new Dictionary<string, Tensor>(weights) { ["lm_head.weight"] = shortHead }));
+        FishAudioDrama3Config eosOutside = config with { EosId = config.Backbone.VocabSize };
+        Assert.Throws<InvalidDataException>(() => new FishAudioDrama3Lm(eosOutside, weights));
+    }
+
     private static FishAudioDrama3Score Score(string file, int prefillChunk, Expected expected)
     {
         FishAudioDrama3Config config = Config();

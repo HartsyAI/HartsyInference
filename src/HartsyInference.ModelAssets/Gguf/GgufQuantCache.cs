@@ -40,29 +40,75 @@ public static class GgufQuantCache
     }
 
     /// <summary>Maps the cache at <paramref name="cachePath"/>, writing it from <paramref name="entries"/> first when it does not
-    /// exist. The file is written beside its final name and moved into place, so an interrupted conversion never leaves a
-    /// cache that looks complete.</summary>
+    /// exist or does not match them. The file is written beside its final name and moved into place, so an interrupted conversion
+    /// never leaves a cache that looks complete. An existing file is reused only when every <paramref name="metadata"/> value and
+    /// the tensor inventory (names, dtypes, element counts) match: a cache left by another version, precision or source checkpoint
+    /// is rebuilt rather than read as this one, since quantization keeps the shapes a later check could catch.</summary>
     public static GgufLoader Open(string cachePath, Func<IEnumerable<GgufCacheEntry>> entries, string architecture, string logTag,
         IDictionary<string, object>? metadata = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(cachePath);
         ArgumentNullException.ThrowIfNull(entries);
-        if (!File.Exists(cachePath))
+        if (File.Exists(cachePath))
         {
-            Write(cachePath, entries(), architecture, logTag, metadata);
+            GgufLoader existing = Map(cachePath);
+            string? mismatch = Mismatch(existing, entries(), metadata);
+            if (mismatch is null)
+            {
+                Logs.Info($"{logTag} Mapped the quant cache '{cachePath}' ({new FileInfo(cachePath).Length / (1024 * 1024)} MB).");
+                return existing;
+            }
+            existing.Dispose();
+            Logs.Warning($"{logTag} The quant cache '{cachePath}' does not match this load ({mismatch}); rebuilding it.");
         }
+        Write(cachePath, entries(), architecture, logTag, metadata);
+        GgufLoader loader = Map(cachePath);
+        Logs.Info($"{logTag} Mapped the quant cache '{cachePath}' ({new FileInfo(cachePath).Length / (1024 * 1024)} MB).");
+        return loader;
+    }
+
+    /// <summary>Why the mapped cache differs from what <paramref name="entries"/> and <paramref name="metadata"/> would write, or null
+    /// when it matches.</summary>
+    public static string? Mismatch(GgufLoader cache, IEnumerable<GgufCacheEntry> entries, IDictionary<string, object>? metadata)
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentNullException.ThrowIfNull(entries);
+        if (metadata is not null)
+        {
+            foreach (KeyValuePair<string, object> kv in metadata)
+            {
+                string expected = MetadataText(kv.Value);
+                string found = cache.Metadata.TryGetValue(kv.Key, out object? value) ? MetadataText(value) : "missing";
+                if (found != expected) return $"{kv.Key} is {found}, expected {expected}";
+            }
+        }
+        int count = 0;
+        foreach (GgufCacheEntry entry in entries)
+        {
+            count++;
+            if (!cache.Descriptors.TryGetValue(entry.Name, out GgufTensorDescriptor? stored)) return $"'{entry.Name}' is missing";
+            if (stored.DType != entry.DType) return $"'{entry.Name}' is {stored.DType.Name}, expected {entry.DType.Name}";
+            if (stored.Shape.ElementCount != entry.Shape.ElementCount)
+                return $"'{entry.Name}' has {stored.Shape.ElementCount} elements, expected {entry.Shape.ElementCount}";
+        }
+        return cache.Descriptors.Count == count ? null : $"it holds {cache.Descriptors.Count} tensors, expected {count}";
+    }
+
+    private static string MetadataText(object? value) => System.Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "";
+
+    private static GgufLoader Map(string cachePath)
+    {
         GgufLoader loader = new();
         try
         {
             loader.Load(cachePath);
+            return loader;
         }
         catch
         {
             loader.Dispose();
             throw;
         }
-        Logs.Info($"{logTag} Mapped the quant cache '{cachePath}' ({new FileInfo(cachePath).Length / (1024 * 1024)} MB).");
-        return loader;
     }
 
     /// <summary>The cache's tensors under the engine-order shapes <paramref name="entries"/> declared (see <see cref="GgufQuantizer.ReadBack"/>).</summary>

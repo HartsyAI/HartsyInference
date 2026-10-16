@@ -68,6 +68,14 @@ public sealed class FishAudioDrama3PipelineTests
         Assert.Fail("No seed produced a take with audio.");
     }
 
+    [Theory]
+    [InlineData(FishAudioDrama3Config.MaxPromptRows + FishAudioDrama3Config.DefaultMaxNewFrames, 600, FishAudioDrama3Config.MaxPromptRows)]
+    [InlineData(FishAudioDrama3Config.MaxPromptRows + FishAudioDrama3Config.DefaultMaxNewFrames, 2048, FishAudioDrama3Config.MaxPromptRows)]
+    [InlineData(2048, 40, 2008)]
+    [InlineData(2048, 5000, 1024)]
+    public void PromptRowLimit_LeavesTheRequestedFramesRoom(int capacity, int requested, int expected) =>
+        Assert.Equal(expected, FishAudioDrama3Pipeline.PromptRowLimit(capacity, requested));
+
     // One id in 3..32 per word: text rows never fall in the semantic band (40..47) or on eos (2), and prompts stay within the tiny
     // model's 256 positions.
     private static int[] Encode(string literal) =>
