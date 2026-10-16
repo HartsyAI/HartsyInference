@@ -42,6 +42,19 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     private int _disposed;
 
     /// <param name="halfPrecisionKv">Store the KV cache as F16. A five-minute song reaches ~7500 frames, which is ~2.3 GB per branch at F32 and ~4.5 GB across the guided pair — more headroom than the quantized variants have on a 12 GB card. CUDA-only; the CPU path keeps F32, which is also what the parity runs compare.</param>
+    /// <summary>Diagnostic: anonymous resident memory at a load milestone.</summary>
+    private static void LogRssAnonDiag(string stage)
+    {
+        foreach (string line in System.IO.File.ReadLines("/proc/self/status"))
+        {
+            if (line.StartsWith("RssAnon:", StringComparison.Ordinal))
+            {
+                HartsyInference.Core.Logging.Logs.Info($"[Audio][MiniMaxMusic3] RssAnon {stage}: {line.AsSpan(8).Trim().ToString()}.");
+                return;
+            }
+        }
+    }
+
     public MiniMaxMusic3GlobalLm(bool halfPrecisionKv = false)
     {
         _halfPrecisionKv = halfPrecisionKv;
@@ -65,8 +78,10 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         _backbone.LoadWeightsHeadless(weights, prefix: "model");
+        LogRssAnonDiag("lm backbone headless");
         _embedTokens = weights["model.embed_tokens.weight"];
         _semanticHead = SliceHead(weights["lm_head.weight"]);
+        LogRssAnonDiag("lm semantic head");
     }
 
     /// <summary>Allocates a decode cache sized for <paramref name="maxSeqLen"/> tokens. One per classifier-free branch; the caller disposes them.</summary>

@@ -134,12 +134,15 @@ internal static class MiniMaxMusic3MusicModel
             MiniMaxMusic3WeightPolicy.PrepareDepthDecoder(depthWeights, repo, depthQuant, out IDisposable? depthQuantCache);
         IReadOnlyDictionary<string, Tensor> preparedDit =
             MiniMaxMusic3WeightPolicy.PrepareTransformer(ditWeights, repo, quant, out IDisposable? ditCast);
+            LogRssAnon("prepare transformer");
         ModelAssets.Lora.LoraStack? loras = ApplyLoras(context, ref preparedLanguage, ref preparedDit);
 
         // The quantized variants are the small-card path, where an F32 KV cache is the difference between
         // a five-minute song fitting and not.
         MiniMaxMusic3GlobalLm languageModel = new MiniMaxMusic3GlobalLm(halfPrecisionKv: quant is not null && context.Backend.Capabilities.SupportsF16);
+        LogRssAnon("before language model LoadWeights");
         languageModel.LoadWeights(preparedLanguage);
+        LogRssAnon("after language model LoadWeights");
         LogRssAnon("language model");
         MiniMaxMusic3DepthDecoder depthDecoder = new MiniMaxMusic3DepthDecoder();
         depthDecoder.LoadWeights(preparedDepth);
