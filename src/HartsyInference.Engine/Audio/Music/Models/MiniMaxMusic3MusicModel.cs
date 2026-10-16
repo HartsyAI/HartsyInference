@@ -186,9 +186,13 @@ internal static class MiniMaxMusic3MusicModel
             Tensor[] chunks;
             try
             {
+                long uploadStart = Environment.TickCount64;
                 backend.PreloadWeights(conditionEncoder.EnumerateWeights());
                 backend.PreloadWeights(dit.EnumerateWeights());
+                long denoiseStart = Environment.TickCount64;
+                Logs.Info($"[Audio][MiniMaxMusic3] Flow weights uploaded in {(denoiseStart - uploadStart) / 1000.0:0.0}s.");
                 chunks = flow.Denoise(frameHiddens, produced, steps, cfgScale, request.Seed, OnStep, ct);
+                Logs.Info($"[Audio][MiniMaxMusic3] Flow denoise took {(Environment.TickCount64 - denoiseStart) / 1000.0:0.0}s.");
             }
             finally
             {
