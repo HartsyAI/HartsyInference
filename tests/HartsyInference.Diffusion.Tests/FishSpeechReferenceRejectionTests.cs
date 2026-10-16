@@ -25,6 +25,20 @@ public sealed class FishSpeechReferenceRejectionTests
         Assert.Throws<NotSupportedException>(() => SpeechService.ValidateReference(FishSpeechModel.Descriptor, new float[480]));
 
     [Fact]
+    public void UndecodableReferenceIsRefusedBeforeItIsDecoded() =>
+        Assert.Throws<NotSupportedException>(() => SpeechService.RejectUnsupportedReferences(FishSpeechModel.Descriptor,
+            new SpeechRequest { Text = "hi", Reference = new AudioClip { Data = NotAWav, Format = "mp3" } }));
+
+    [Fact]
+    public void ReferencesListIsRefused() =>
+        Assert.Throws<NotSupportedException>(() => SpeechService.RejectUnsupportedReferences(FishSpeechModel.Descriptor,
+            new SpeechRequest { Text = "hi", References = [new SpeechTurn { Text = "hello" }] }));
+
+    [Fact]
+    public void RequestWithoutReferencesIsAccepted() =>
+        SpeechService.RejectUnsupportedReferences(FishSpeechModel.Descriptor, new SpeechRequest { Text = "hi" });
+
+    [Fact]
     public void NoReferenceIsAccepted()
     {
         SpeechService.ValidateReference(FishSpeechModel.Descriptor, (AudioClip?)null);

@@ -29,7 +29,7 @@ internal static class FishSpeechModel
         ResolveFiles = (variant, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>(Variant.Parse(variant).Files()),
         // Neither layout clones yet (the Firefly encoder is not ported). Refused before the download and load, whatever the
         // clip's container, instead of being ignored after them.
-        ReferenceRejection = "Fish-Speech voice cloning is not implemented yet (it needs the Firefly encoder). Drop the reference clip, "
+        ReferenceRejection = "Fish-Speech voice cloning is not implemented yet (it needs the Firefly encoder). Remove the voice reference, "
             + "or use a cloning model.",
         LoadAsync = (_, variant, cancel) => LoadAsync(Variant.Parse(variant), cancel),
     };
