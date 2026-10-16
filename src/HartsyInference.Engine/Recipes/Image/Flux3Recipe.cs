@@ -38,8 +38,10 @@ public sealed class Flux3Recipe : IArchitectureRecipe
         | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Lora;
 
     /// <inheritdoc/>
-    /// <remarks>Ten references plus the init image; references stand alone.</remarks>
-    public ImageInputLimits InputLimits => new ImageInputLimits(11, ReferencesRequireInitImage: false);
+    /// <remarks>Ten references, plus an init image that is denoised; an init image in Reference mode is one of the ten.
+    /// References stand alone.</remarks>
+    public ImageInputLimits InputLimits => new ImageInputLimits(Flux3Config.ReferenceImageLimit + 1, ReferencesRequireInitImage: false,
+        MaxReferences: Flux3Config.ReferenceImageLimit);
 
     /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: ComfyUI's <c>Qwen3VLTokenizer</c> passes

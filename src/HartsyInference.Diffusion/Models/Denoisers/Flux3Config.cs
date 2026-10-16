@@ -70,8 +70,11 @@ public sealed record Flux3Config
     /// <summary>Prompt tokens are right-padded to a multiple of this.</summary>
     public int TextPadMultiple { get; init; } = 80;
 
+    /// <summary>The release's reference-image ceiling (ComfyUI's FLUX.3 templates and model card).</summary>
+    public const int ReferenceImageLimit = 10;
+
     /// <summary>Most reference images one generation conditions on.</summary>
-    public int MaxReferenceImages { get; init; } = 10;
+    public int MaxReferenceImages { get; init; } = ReferenceImageLimit;
 
     /// <summary>Derives the configuration from converted transformer weights (see <c>Flux3CheckpointConverter</c>).
     /// Only row counts are read, so packed-quant column layouts cannot skew the result.</summary>

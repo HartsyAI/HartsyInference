@@ -49,6 +49,11 @@ public sealed class Flux3RecipePipeline(Flux3Pipeline pipeline, Qwen3Tokenizer t
 
         Img2ImgMode mode = request.Img2Img?.Mode ?? Img2ImgMode.Auto;
         bool initIsReference = mode == Img2ImgMode.Reference && request.Img2Img is not null;
+        if (initIsReference && request.Inpaint is not null)
+        {
+            throw new InvalidOperationException("FLUX.3 cannot inpaint an init image sent in Reference mode: it conditions "
+                + "on the image instead of denoising it, so the mask would be ignored. Use Auto or Denoise mode to inpaint.");
+        }
         List<ImageData> references = CollectReferences(request, initIsReference);
 
         (string prompt, string? layoutTable) = LayoutPromptBuilder.Split(PromptTagFlattening.Flatten(request.Prompt));
