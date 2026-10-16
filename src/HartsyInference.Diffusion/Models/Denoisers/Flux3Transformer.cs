@@ -167,35 +167,44 @@ public sealed class Flux3Transformer : IDisposable
             throw new ArgumentException(
                 $"FLUX.3 expects a packed latent [1, {imageTokens}, {_config.InChannels}], got {packedLatent.Shape}.", nameof(packedLatent));
         }
-        Flux3ConditionStates? owned = states is null ? PrecomputeConditioning(backend, input, targetSigma) : null;
-        Flux3ConditionStates conditioning = states ?? owned!;
-        Tensor imageVec = TimeVector(backend, sigma, targetSigma);
-        Tensor zeroVec = TimeVector(backend, 0f, targetSigma);
+        // Each intermediate is freed as soon as the next exists; the finally frees whichever were live when a stage threw.
+        // A stack that throws has already freed its own input, and Dispose is idempotent.
+        Flux3ConditionStates? owned = null;
+        Tensor? imageVec = null;
+        Tensor? zeroVec = null;
+        Tensor? image = null;
+        Tensor? joint = null;
+        Tensor? imageRows = null;
         try
         {
-            Tensor image = EmbedTokens(backend, packedLatent, _imageEmbed!, _config.InChannels, "packed latent");
+            owned = states is null ? PrecomputeConditioning(backend, input, targetSigma) : null;
+            Flux3ConditionStates conditioning = states ?? owned!;
+            imageVec = TimeVector(backend, sigma, targetSigma);
+            zeroVec = TimeVector(backend, 0f, targetSigma);
+            image = EmbedTokens(backend, packedLatent, _imageEmbed!, _config.InChannels, "packed latent");
             FluxRope imageRope = _imageRope.Ensure(GridSignature(hPacked, wPacked),
                 () => Flux3PosEmbed.ImageIds(hPacked, wPacked, 0f, _config.ImageRopeScale));
             image = RunStack(backend, image, _imageBlocks, _earlyModulations[ImageMode], imageVec, imageRope);
 
-            Tensor joint = JoinStreams(backend, image, conditioning, out int[] spanLengths);
+            joint = JoinStreams(backend, image, conditioning, out int[] spanLengths);
             image.Dispose();
             int textLength = (int)conditioning.Text.Shape[1];
             long jointSignature = HashCode.Combine(GridSignature(hPacked, wPacked), ReferenceSignature(input.ReferenceShapes), textLength);
             FluxRope jointRope = _jointRope.Ensure(jointSignature, () => BuildJointIds(hPacked, wPacked, input.ReferenceShapes, textLength));
             joint = RunJoint(backend, joint, imageVec, zeroVec, spanLengths, conditioning.References is not null, jointRope);
 
-            Tensor imageRows = new Tensor(new TensorShape(1, imageTokens, _config.HiddenSize), joint.DType);
+            imageRows = new Tensor(new TensorShape(1, imageTokens, _config.HiddenSize), joint.DType);
             backend.SliceRows(imageRows, joint, 0);
             joint.Dispose();
-            Tensor velocity = FinalLayer(backend, imageRows, imageVec);
-            imageRows.Dispose();
-            return velocity;
+            return FinalLayer(backend, imageRows, imageVec);
         }
         finally
         {
-            imageVec.Dispose();
-            zeroVec.Dispose();
+            imageRows?.Dispose();
+            joint?.Dispose();
+            image?.Dispose();
+            imageVec?.Dispose();
+            zeroVec?.Dispose();
             owned?.Dispose();
         }
     }
@@ -300,14 +309,17 @@ public sealed class Flux3Transformer : IDisposable
         }
     }
 
+    /// <summary>Runs the joint stack over <paramref name="joint"/>, taking ownership of it as <see cref="RunStack"/> does:
+    /// each block's input is freed once its output exists, and the current activation is freed if anything throws.</summary>
     private Tensor RunJoint(IBackend backend, Tensor joint, Tensor imageVec, Tensor zeroVec, int[] spanLengths, bool hasReferences,
         FluxRope rope)
     {
-        List<Tensor[]> projected = [_jointModulations[ImageMode].Forward(backend, imageVec)];
-        if (hasReferences) projected.Add(_jointModulations[ReferenceMode].Forward(backend, zeroVec));
-        projected.Add(_jointModulations[TextMode].Forward(backend, zeroVec));
+        List<Tensor[]> projected = new List<Tensor[]>(3);
         try
         {
+            projected.Add(_jointModulations[ImageMode].Forward(backend, imageVec));
+            if (hasReferences) projected.Add(_jointModulations[ReferenceMode].Forward(backend, zeroVec));
+            projected.Add(_jointModulations[TextMode].Forward(backend, zeroVec));
             List<(Tensor Shift, Tensor Scale, Tensor Gate)> rows = new List<(Tensor, Tensor, Tensor)>(projected.Count);
             foreach (Tensor[] triple in projected) rows.Add((triple[0], triple[1], triple[2]));
             using Flux3Modulation modulation = Flux3Modulation.Spans(backend, rows, spanLengths);
@@ -318,6 +330,11 @@ public sealed class Flux3Transformer : IDisposable
                 joint = next;
             }
             return joint;
+        }
+        catch
+        {
+            joint.Dispose();
+            throw;
         }
         finally
         {

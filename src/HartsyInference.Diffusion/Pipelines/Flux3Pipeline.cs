@@ -157,7 +157,16 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                 Tensor cond = _transformer.Forward(Backend, x, patH, patW, t, condInput, condStates, target);
                 if (!guided)
                     return new DenoisePrediction(cond, cond);
-                Tensor uncond = _transformer.Forward(Backend, x, patH, patW, t, uncondInput!, uncondStates, target);
+                Tensor uncond;
+                try
+                {
+                    uncond = _transformer.Forward(Backend, x, patH, patW, t, uncondInput!, uncondStates, target);
+                }
+                catch
+                {
+                    cond.Dispose();
+                    throw;
+                }
                 return new DenoisePrediction(cond, uncond, cfg);
             });
 
