@@ -63,6 +63,7 @@ public static class SamplingCapabilities
         ["krea2"] = FullSeam,
         ["lens"] = FullSeam,
         ["mage-flow"] = FullSeam,
+        ["moss-image"] = FullSeam,
         ["omnigen2"] = FullSeam,
         ["qwen-image"] = FullSeam,
         ["qwen-image-2.1"] = FullSeam,

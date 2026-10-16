@@ -41,4 +41,7 @@ public enum LoraFormat
 
     /// <summary>FLUX.3 in any of its spellings — diffusers/PEFT under <c>transformer.</c> (<c>transformer.mode_blocks.image.0.attn.to_q.lora_A.weight</c>), BFL names under <c>diffusion_model.</c> or bare, or kohya <c>lora_unet_</c> — recognized by the modules only FLUX.3 has.</summary>
     Flux3,
+
+    /// <summary>MOSS-Image in any of its spellings — diffusers/PEFT under <c>transformer.</c>, ComfyUI under <c>diffusion_model.</c>, bare, or kohya <c>lora_unet_</c> — recognized by the modules only MOSS-Image has (<c>layers.{i}.proj.ffn_up_gate</c>, <c>shared_block_modulation</c>, …).</summary>
+    MossImage,
 }

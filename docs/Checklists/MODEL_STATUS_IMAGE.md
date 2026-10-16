@@ -90,6 +90,7 @@ per-model architecture notes and build plans.
 | **Hunyuan Image 2.1** | ✅ **FIRST E2E 07-10** (`44.52-local`): sharp 2048²/20st/cfg3.5 astronaut, warm **~50.0s** (**ComfyUI baseline 48.08 s → 1.04× MATCHED**; 07-18 A/B on `alpha.61`: F16 50.1 s ≈ F32 49.9 s. ([details](#hunyuan-image-21)) |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
 | **FLUX.3 Klein** (5.6B, full + step-distilled) | 🔧 Built 2026-10-15. Text-to-image, img2img, inpaint, up to 10 reference images, the native layout table, and LoRA (diffusers/PEFT, ComfyUI and kohya names). Tiny-config parity against ComfyUI passes; no real-weight or GPU run yet. ([details](#flux3-klein)) |
+| **MOSS-Image** (5B DiT + Qwen3.5-9B, Base + SFT) | 🔧 Built 2026-10-16. Text-to-image, img2img, inpaint, the native layout JSON, two- and three-pass skip-layer guidance, LoRA (PEFT, ComfyUI, kohya names), every weight format through `CheckpointSource` and GGUF, a one-launch CUDA step graph and Vulkan kernels. Tiny-config parity passes on CPU and Vulkan (llvmpipe); no real-weight, CUDA or speed run yet. ([details](#moss-image)) |
 
 ## Edit / image-conditioned variants (🔧 — to download + e2e test)
 
@@ -581,6 +582,27 @@ Architecture and sources: [FLUX3_KLEIN_ARCHITECTURE.md](../Research/FLUX3_KLEIN_
   synthetic smoke tests, converter, LoRA mapping and merge tests. **Not verified:** a real-weight generation, the
   text-encoder taps against ComfyUI, GPU backends, and an A/B of the hoisted Flux.2 latent and VAE code on Flux.2,
   Krea 2 and Lens.
+
+### MOSS-Image
+
+**Built, not yet run on real weights (2026-10-16).** Family id `moss-image` (SwarmUI class `moss-image`). OpenMOSS ships
+Base and SFT as diffusers folders; pass the folder, any file in it, or the ComfyUI export's `diffusion_models` file
+with `--model-path`. The catalog entry downloads only the fallback side models (the Qwen3.5-9B Q8_0 GGUF and the
+Flux.2 VAE), used when the checkpoint is not inside a full folder.
+Architecture and sources: [MOSS_IMAGE_ARCHITECTURE.md](../Research/MOSS_IMAGE_ARCHITECTURE.md).
+
+- **Defaults.** 50 steps, CFG 3, shift 5 on the training-grid schedule, block 22 skipped on the unconditional branch.
+  Request extras `slg.*` and CLI `--slg-*` change the skip and add three-pass SLG.
+- **Layout.** `<region:x,y,w,h> text` parts become OpenMOSS's compiled layout JSON (centre-origin pixel boxes, `yxyx`),
+  the untagged prompt its summary caption. A layout JSON typed as the prompt passes through.
+- **Speed.** The text side is built once per generation, the Qwen3.5 prefill runs on the device, SiTU-GLU and the
+  modulated RMSNorm are fused kernels, and on CUDA all branches of a step replay as one captured graph.
+- **Verified so far:** tiny-config parity against the numpy transcription of OpenMOSS's ComfyUI module on CPU and on
+  Vulkan (llvmpipe), including step-graph replay; the schedule against SGLang's goldens; the device DeltaNet prefill
+  against transformers on a tiny trunk; detection, LoRA, layout, tokenizer and recipe unit tests.
+  **Not verified:** the transcription against the torch module itself (`dump_moss_image_reference.py verify`), the real
+  weights (`dump_moss_image_reference.py real` + `MossImageRealWeightTests`), CUDA, and the speed comparison with the
+  Python pipeline.
 
 ### Qwen-Image-Edit 2511
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Ssm;
 
@@ -135,6 +136,81 @@ public sealed record Qwen35HfConfig
             MaxPositionEmbeddings = Int(t, "max_position_embeddings", 262_144),
         };
     }
+
+    /// <summary>The HF key roots a dense Qwen3.5 text trunk can sit under, most specific first:
+    /// <c>Qwen3_5ForConditionalGeneration</c>, <c>Qwen3_5Model</c>, and a bare text model.</summary>
+    private static readonly string[] LanguageModelPrefixes = ["model.language_model", "language_model", "model"];
+
+    /// <summary>The root a checkpoint's text trunk sits under (the prefix whose <c>embed_tokens.weight</c> it carries).</summary>
+    /// <exception cref="InvalidDataException">No known root holds a token embedding.</exception>
+    public static string LanguageModelPrefix(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        foreach (string prefix in LanguageModelPrefixes)
+        {
+            if (weights.ContainsKey($"{prefix}.embed_tokens.weight"))
+                return prefix;
+        }
+        throw new InvalidDataException("No Qwen3.5 text trunk found: none of model.language_model, language_model or model holds embed_tokens.weight.");
+    }
+
+    /// <summary>Derives a dense Qwen3.5 text config from the weight shapes under <paramref name="prefix"/>, for a
+    /// single-file checkpoint shipped without its <c>config.json</c> (ComfyUI's repackaged text encoders). Layer kinds
+    /// come from which attention each layer carries; head counts from the projection rows over the per-head widths of
+    /// the Q/K norm and the gated norm. What shapes cannot carry takes the family's constants (partial rotary 0.25,
+    /// rope theta 1e7, RMS eps 1e-6, equal key and value widths in the linear layers), which every Qwen3.5 size
+    /// shares (ComfyUI <c>comfy/text_encoders/qwen35.py</c>). MoE checkpoints need their <c>config.json</c>.</summary>
+    public static Qwen35HfConfig FromWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        Tensor embed = Require(weights, $"{prefix}.embed_tokens.weight");
+        int layers = 0;
+        while (weights.ContainsKey($"{prefix}.layers.{layers}.input_layernorm.weight")) layers++;
+        if (layers == 0)
+            throw new InvalidDataException($"No Qwen3.5 layers under '{prefix}'.");
+        if (weights.ContainsKey($"{prefix}.layers.0.mlp.gate.weight"))
+            throw new InvalidDataException("This is a Qwen3.5-MoE checkpoint; its config.json is needed to load it.");
+        bool[] linear = new bool[layers];
+        int fullLayer = -1, linearLayer = -1;
+        for (int i = 0; i < layers; i++)
+        {
+            linear[i] = weights.ContainsKey($"{prefix}.layers.{i}.linear_attn.in_proj_qkv.weight");
+            if (linear[i] && linearLayer < 0) linearLayer = i;
+            if (!linear[i] && fullLayer < 0) fullLayer = i;
+        }
+        if (fullLayer < 0 || linearLayer < 0)
+            throw new InvalidDataException("A Qwen3.5 trunk has both full-attention and Gated DeltaNet layers; this checkpoint lacks one kind.");
+        string sa = $"{prefix}.layers.{fullLayer}.self_attn", la = $"{prefix}.layers.{linearLayer}.linear_attn";
+        int headDim = (int)Require(weights, $"{sa}.q_norm.weight").ElementCount;
+        int valueHeads = (int)Require(weights, $"{la}.in_proj_b.weight").Shape[0];
+        int valueDim = (int)Require(weights, $"{la}.norm.weight").ElementCount;
+        int qkvRows = (int)Require(weights, $"{la}.in_proj_qkv.weight").Shape[0];
+        int keyTotal = (qkvRows - valueHeads * valueDim) / 2;
+        if (keyTotal <= 0 || keyTotal % valueDim != 0)
+            throw new InvalidDataException($"Qwen3.5 in_proj_qkv has {qkvRows} rows, which does not split into keys and {valueHeads}x{valueDim} values.");
+        Tensor conv = Require(weights, $"{la}.conv1d.weight");
+        return new Qwen35HfConfig
+        {
+            HiddenSize = (int)embed.Shape[1],
+            VocabSize = (int)embed.Shape[0],
+            NumLayers = layers,
+            NumHeads = (int)(Require(weights, $"{sa}.q_proj.weight").Shape[0] / (2 * headDim)),
+            NumKvHeads = (int)(Require(weights, $"{sa}.k_proj.weight").Shape[0] / headDim),
+            HeadDim = headDim,
+            FullAttentionInterval = 0,
+            LinearLayers = linear,
+            LinearConvKernel = (int)conv.Shape[conv.Shape.Rank - 1],
+            LinearKeyHeadDim = valueDim,
+            LinearValueHeadDim = valueDim,
+            LinearNumKeyHeads = keyTotal / valueDim,
+            LinearNumValueHeads = valueHeads,
+            TieWordEmbeddings = !weights.ContainsKey("lm_head.weight"),
+        };
+    }
+
+    private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key) =>
+        weights.TryGetValue(key, out Tensor? tensor)
+            ? tensor : throw new InvalidDataException($"The Qwen3.5 checkpoint has no tensor '{key}'.");
 
     private static int Int(JsonElement t, string name, int fallback) =>
         t.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : fallback;

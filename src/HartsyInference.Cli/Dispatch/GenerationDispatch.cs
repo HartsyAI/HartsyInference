@@ -977,6 +977,31 @@ public static class GenerationDispatch
         {
             extra[HartsyInference.Engine.Features.RequestExtras.ReduxApplyStart] = reduxApplyStart;
         }
+        (string Flag, string Key)[] slgLists =
+        [
+            ("slg-uncond-layers", HartsyInference.Engine.Features.RequestExtras.SlgUncondSkipLayers),
+            ("slg-layers", HartsyInference.Engine.Features.RequestExtras.SlgLayers),
+        ];
+        foreach ((string flag, string key) in slgLists)
+        {
+            if (parameters.GetStringOrNull(flag) is { Length: > 0 } layers)
+            {
+                extra[key] = layers;
+            }
+        }
+        (string Flag, string Key)[] slgNumbers =
+        [
+            ("slg-scale", HartsyInference.Engine.Features.RequestExtras.SlgScale),
+            ("slg-start", HartsyInference.Engine.Features.RequestExtras.SlgStart),
+            ("slg-stop", HartsyInference.Engine.Features.RequestExtras.SlgStop),
+        ];
+        foreach ((string flag, string key) in slgNumbers)
+        {
+            if (parameters.GetDoubleOrNull(flag) is { } value)
+            {
+                extra[key] = value;
+            }
+        }
         return extra;
     }
 
