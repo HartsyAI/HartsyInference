@@ -145,6 +145,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Mm3CfgBatch =
         Bool("numerics.mm3CfgBatch", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs MiniMax-Music3's AR CFG cond+uncond rows as one batched step; 0 restores separate passes.");
 
+    /// <summary>Runs MiniMax Music 3's AR loop on the device: the semantic and residual draws, the depth embeddings, the feedback
+    /// and the frame hiddens stay resident, and the end-of-audio check reads codes once per 256 frames. Off keeps the host loop.</summary>
+    public static readonly Knob<bool> Mm3DeviceAr =
+        Bool("numerics.mm3DeviceAr", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs MiniMax Music 3's autoregressive loop on the device (draws, depth, feedback and frame hiddens resident; end-of-audio read once per 256 frames). Changes same-seed output; off keeps the host loop.");
+
     /// <summary>Also quantizes the MiniMax-Music3 depth decoder; off leaves it at checkpoint precision.</summary>
     public static readonly Knob<bool> Mm3DepthQuant =
         Bool("numerics.mm3DepthQuant", true, KnobScope.Construction, KnobDomain.Numerics, "Also quantizes the MiniMax-Music3 depth decoder; off leaves it at checkpoint precision.");

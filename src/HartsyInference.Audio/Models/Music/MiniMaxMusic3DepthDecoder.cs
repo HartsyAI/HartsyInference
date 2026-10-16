@@ -29,6 +29,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
     private readonly List<Tensor> _owned = [];
     private readonly Dictionary<(int Batch, int Steps, int Position), Tensor> _positionRows = new();
     private Tensor? _audioEmbeddings;
+    private Tensor[]? _residualRows;   // borrowed per-codebook views of _audioEmbeddings, for the device loop
     private Tensor? _projection;
     private Tensor? _positionEmbedding;
     private Tensor? _finalNorm;
@@ -52,6 +53,11 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         // The checkpoint is BF16. The embedding tables and the norm weights are read directly rather than through
         // a backend op, so they are widened here; the projections keep their dtype for the matmul path.
         _audioEmbeddings = Widen(weights["audio_embeddings.weight"]);
+        _residualRows = new Tensor[NumCodebooks - 1];
+        for (int index = 1; index < NumCodebooks; index++)
+        {
+            _residualRows[index - 1] = ViewRows(_audioEmbeddings, (index - 1) * AudioVocabSize, AudioVocabSize);
+        }
         _projection = weights["projection.weight"];
         _positionEmbedding = Widen(weights["pos_embedding.weight"]);
         _finalNorm = Widen(weights["norm.weight"]);
@@ -139,6 +145,21 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         Tensor logits = new Tensor(new TensorShape((int)hidden.Shape[0], AudioVocabSize), DType.F32);
         backend.Linear(logits, hidden, _audioHeads[index - 1]!, null);
         return logits;
+    }
+
+    /// <summary>The embedding rows of residual codebook <paramref name="index"/> (1-based) as a borrowed view, so a device gather
+    /// takes the code directly as its row. The device loop preloads these views explicitly.</summary>
+    public Tensor ResidualRows(int index)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(index, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, NumCodebooks);
+        return _residualRows?[index - 1] ?? throw new InvalidOperationException("MiniMax Music 3 depth weights are not loaded.");
+    }
+
+    private static Tensor ViewRows(Tensor table, int firstRow, int count)
+    {
+        float* start = (float*)table.DataPointer + ((long)firstRow * HiddenSize);
+        return new Tensor(start, new TensorShape(count, HiddenSize), DType.F32);
     }
 
     /// <summary>Every loaded weight, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>.</summary>

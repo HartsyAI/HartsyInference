@@ -38,6 +38,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     private readonly bool _halfPrecisionKv;
     // Off by default: the dual-stream device attention it routes through diverges on high-SM cards (passes on a
     private Tensor? _embedTokens;
+    private Tensor? _semanticEmbed;   // borrowed rows [AudioCodeOffset, +16385) of the mapped embedding table, for the device loop
     private Tensor? _semanticCodes;   // borrowed rows [AudioCodeOffset, +16384) of the mapped head
     private Tensor? _semanticEnd;     // borrowed row AudioEndTokenId of the mapped head
     private int _disposed;
@@ -81,6 +82,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         _backbone.LoadWeightsHeadless(weights, prefix: "model");
         LogRssAnonDiag("lm backbone headless");
         _embedTokens = weights["model.embed_tokens.weight"];
+        _semanticEmbed = BorrowRows(_embedTokens, AudioCodeOffset, SemanticVocabSize + 1);
         Tensor head = weights["lm_head.weight"];
         if (head.Shape[1] != HiddenSize)
         {
@@ -212,6 +214,10 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         end.Dispose();
         return logits;
     }
+
+    /// <summary>The semantic embedding rows (codes plus end-of-audio) as a borrowed view of the mapped table. The device loop
+    /// preloads this view explicitly; it is not part of <see cref="EnumerateWeights"/>, so the host path's device set is unchanged.</summary>
+    public Tensor SemanticEmbedRows => _semanticEmbed ?? throw new InvalidOperationException("MiniMax Music 3 weights are not loaded.");
 
     /// <summary>Every loaded weight, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>. The embedding table is excluded: rows are gathered host-side, so uploading all 1.6 GB would be pure waste.</summary>
     public IEnumerable<Tensor> EnumerateWeights()

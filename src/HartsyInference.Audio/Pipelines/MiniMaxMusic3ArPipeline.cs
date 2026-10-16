@@ -111,6 +111,12 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         conditionalPrefill.Dispose();
         unconditionalPrefill.Dispose();
 
+        if (forcedCodes is null && batchCfg && EngineKnobs.Mm3DeviceAr.Value && backend.DeviceSamplingSupported
+            && TopK <= backend.DeviceSamplingMaxTopK)
+        {
+            return GenerateOnDevice(backend, hiddens, conditionalCache, unconditionalCache, depthCache, frameLimit, seed, onFrame, cancel);
+        }
+
         try
         {
             // The first decode only advances the state past <|audio_start|>; its frame is not emitted.
@@ -178,6 +184,278 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
             frames[i].CopyTo(frameHiddens, (long)i * FrameHiddenWidth);
         }
         return (frameHiddens, frames.Count);
+    }
+
+    /// <summary>Frames per end-of-audio batch in the device loop. Frame vectors and codes live on the device until a batch
+    /// is read back, so a batch bounds the device memory and the readbacks.</summary>
+    private const int DeviceFrameRing = 256;
+
+    /// <summary>The device-resident AR loop (opt-in: <c>numerics.mm3DeviceAr</c>). The semantic draw, the six residual draws, the
+    /// depth embeddings, the feedback and the frame hiddens stay on the device. The end-of-audio check reads the codes once per
+    /// <see cref="DeviceFrameRing"/> frames; frames at or after end-of-audio are dropped, so the output matches a per-frame check.
+    /// The draws use the device RNG, so same-seed output differs from the host loop.</summary>
+    private (float[] FrameHiddens, int Frames) GenerateOnDevice(
+        IBackend backend, Tensor hiddens, IKvCache conditionalCache, IKvCache unconditionalCache,
+        MiniMaxMusic3DepthCache depthCache, int frameLimit, int seed, Action<int, int>? onFrame, CancellationToken cancel)
+    {
+        const int codebooks = MiniMaxMusic3DepthDecoder.NumCodebooks;
+        int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
+        int frameWidth = FrameHiddenWidth;
+        Tensor semanticRows = _languageModel.SemanticEmbedRows;
+        ulong rngState = backend.AllocDeviceRng(((ulong)(uint)seed << 32) | 0x9E3779B9ul, TopK);
+        ulong[] tokens = new ulong[DeviceFrameRing * codebooks];
+        List<(int FrameIndex, Tensor Vector)> pending = new List<(int, Tensor)>(DeviceFrameRing);
+        List<float[]> frames = new List<float[]>(Math.Min(frameLimit, 1024));
+        bool ended = false;
+        try
+        {
+            for (int i = 0; i < tokens.Length; i++)
+            {
+                tokens[i] = backend.AllocDeviceTokenId();
+            }
+            backend.PreloadWeights([semanticRows]);
+            for (int index = 1; index < codebooks; index++)
+            {
+                backend.PreloadWeights([_depthDecoder.ResidualRows(index)]);
+            }
+            float feedbackScale = 1f / MathF.Sqrt(codebooks);
+            int cycleStart = 0;
+            for (int frameIndex = 0; frameIndex <= frameLimit && !ended; frameIndex++)
+            {
+                cancel.ThrowIfCancellationRequested();
+                int slot = (frameIndex % DeviceFrameRing) * codebooks;
+
+                // Semantic draw from the guided top-K of the conditional row, then its embedding.
+                DrawSemanticDevice(backend, hiddens, tokens[slot], rngState);
+                Tensor semEmbed = new Tensor(new TensorShape(1, 1, hidden), DType.F32);
+                backend.EmbedGatherDecodeStep(semEmbed, semanticRows, tokens[slot]);
+
+                // The depth decoder over [hidden, semantic embedding] per CFG row, then the residual draws.
+                depthCache.Reset();
+                Tensor frameRow0 = new Tensor(new TensorShape(1, hidden), DType.F32);
+                backend.SliceRows(frameRow0, hiddens, 0);
+                Tensor state = DepthPrefixStates(backend, hiddens, semEmbed, depthCache);
+                Tensor[] parts = new Tensor[codebooks];
+                parts[0] = frameRow0;
+                for (int index = 1; index < codebooks; index++)
+                {
+                    parts[index] = new Tensor(new TensorShape(1, hidden), DType.F32);
+                    backend.SliceRows(parts[index], state, 0);
+                    DrawResidualDevice(backend, state, index, tokens[slot + index], rngState);
+                    if (index < codebooks - 1)
+                    {
+                        state = DepthStepStates(backend, index, tokens[slot + index], depthCache, state);
+                    }
+                }
+                state.Dispose();
+
+                // Frame vector for this frame: the hidden row, then the seven residual states of the conditional row.
+                if (frameIndex > 0)
+                {
+                    Tensor vector = new Tensor(new TensorShape(codebooks, hidden), DType.F32);
+                    backend.Concat(vector, parts, 0);
+                    pending.Add((frameIndex, vector));
+                }
+                foreach (Tensor part in parts)
+                {
+                    part.Dispose();   // Concat copied the parts (or none was needed on frame 0)
+                }
+
+                // Feedback: the semantic embedding plus the residual embeddings, scaled, duplicated for the two CFG rows.
+                Tensor feedbackSum = new Tensor(new TensorShape(1, 1, hidden), DType.F32);
+                backend.Scale(feedbackSum, semEmbed, 1f);
+                semEmbed.Dispose();
+                for (int index = 1; index < codebooks; index++)
+                {
+                    Tensor residual = new Tensor(new TensorShape(1, 1, hidden), DType.F32);
+                    backend.EmbedGatherDecodeStep(residual, _depthDecoder.ResidualRows(index), tokens[slot + index]);
+                    backend.Add(feedbackSum, feedbackSum, residual);
+                    residual.Dispose();
+                }
+                backend.Scale(feedbackSum, feedbackSum, feedbackScale);
+                Tensor feedback = new Tensor(new TensorShape(1, 2, hidden), DType.F32);
+                backend.Concat(feedback, [feedbackSum, feedbackSum], 1);
+                feedbackSum.Dispose();
+                Tensor next = _languageModel.ForwardCfgStep(backend, feedback, conditionalCache, unconditionalCache);
+                feedback.Dispose();
+                hiddens.Dispose();
+                hiddens = next;
+
+                bool batchEnd = (frameIndex + 1) % DeviceFrameRing == 0 || frameIndex == frameLimit;
+                if (batchEnd)
+                {
+                    ended = FlushDeviceBatch(backend, tokens, cycleStart, frameIndex, pending, frames, frameLimit, onFrame, frameWidth);
+                    cycleStart = frameIndex + 1;
+                }
+            }
+        }
+        finally
+        {
+            foreach ((int _, Tensor vector) in pending)
+            {
+                vector.Dispose();
+            }
+            foreach (ulong token in tokens)
+            {
+                if (token != 0) backend.FreeDeviceTokenId(token);
+            }
+            backend.FreeDeviceRng(rngState);
+            backend.FreeWeights([semanticRows]);
+            for (int index = 1; index < codebooks; index++)
+            {
+                backend.FreeWeights([_depthDecoder.ResidualRows(index)]);
+            }
+            hiddens.Dispose();
+        }
+
+        if (frames.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "MiniMax Music 3 generated zero audio frames — the prompt ended generation immediately.");
+        }
+        float[] frameHiddens = new float[(long)frames.Count * frameWidth];
+        for (int i = 0; i < frames.Count; i++)
+        {
+            frames[i].CopyTo(frameHiddens, (long)i * frameWidth);
+        }
+        return (frameHiddens, frames.Count);
+    }
+
+    /// <summary>Guided semantic draw on the device: the conditional row's top-K candidates get the CFG blend, the rest -inf, and
+    /// the device sampler writes the code into <paramref name="token"/>.</summary>
+    private void DrawSemanticDevice(IBackend backend, Tensor hiddens, ulong token, ulong rngState)
+    {
+        int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
+        Tensor condRow = new Tensor(new TensorShape(1, hidden), DType.F32);
+        Tensor uncondRow = new Tensor(new TensorShape(1, hidden), DType.F32);
+        backend.SliceRows(condRow, hiddens, 0);
+        backend.SliceRows(uncondRow, hiddens, 1);
+        Tensor condLogits = _languageModel.SemanticLogits(backend, condRow);
+        Tensor uncondLogits = _languageModel.SemanticLogits(backend, uncondRow);
+        Tensor guided = new Tensor(new TensorShape(1, MiniMaxMusic3GlobalLm.SemanticVocabSize + 1), DType.F32);
+        backend.CfgTopKGuided(guided, condLogits, uncondLogits, TopK, CfgScale);
+        backend.SampleTopKInto(token, guided, TopK, 1f, 1f, 0f, rngState);
+        condRow.Dispose();
+        uncondRow.Dispose();
+        condLogits.Dispose();
+        uncondLogits.Dispose();
+        guided.Dispose();
+    }
+
+    /// <summary>Residual draw of codebook <paramref name="index"/> from the conditional and unconditional rows of the depth head,
+    /// blended as <c>g·c + (1−g)·u</c> by the device (the host forms <c>u + (c−u)·g</c>; the last bit differs).</summary>
+    private void DrawResidualDevice(IBackend backend, Tensor states, int index, ulong token, ulong rngState)
+    {
+        int vocab = MiniMaxMusic3DepthDecoder.AudioVocabSize;
+        Tensor logits = _depthDecoder.Head(backend, index, states);
+        Tensor cond = new Tensor(new TensorShape(1, vocab), DType.F32);
+        Tensor uncond = new Tensor(new TensorShape(1, vocab), DType.F32);
+        backend.SliceRows(cond, logits, 0);
+        backend.SliceRows(uncond, logits, 1);
+        Tensor guided = new Tensor(new TensorShape(1, vocab), DType.F32);
+        backend.Fill(guided, 0f);
+        backend.CfgEulerStep(guided, cond, uncond, CfgScale, 1f);
+        backend.SampleTopKInto(token, guided, TopK, 1f, 1f, 0f, rngState);
+        logits.Dispose();
+        cond.Dispose();
+        uncond.Dispose();
+        guided.Dispose();
+    }
+
+    /// <summary>The depth decoder's prefix for one frame: rows of <c>[hidden, semantic embedding]</c>, projected, forwarded, and the
+    /// last step of each row kept as the states <c>[2, 1, H]</c>.</summary>
+    private Tensor DepthPrefixStates(IBackend backend, Tensor hiddens, Tensor semEmbed, MiniMaxMusic3DepthCache cache)
+    {
+        int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
+        Tensor[] pairs = new Tensor[CfgRows];
+        for (int row = 0; row < CfgRows; row++)
+        {
+            Tensor hiddenRow = new Tensor(new TensorShape(1, 1, hidden), DType.F32);
+            backend.SliceRows(hiddenRow, hiddens, row);
+            pairs[row] = new Tensor(new TensorShape(1, 2, hidden), DType.F32);
+            backend.Concat(pairs[row], [hiddenRow, semEmbed], 1);
+            hiddenRow.Dispose();
+        }
+        Tensor prefix = new Tensor(new TensorShape(CfgRows, 2, hidden), DType.F32);
+        backend.Concat(prefix, pairs, 0);
+        foreach (Tensor pair in pairs)
+        {
+            pair.Dispose();
+        }
+        using Tensor projected = _depthDecoder.Project(backend, prefix);
+        prefix.Dispose();
+        using Tensor block = _depthDecoder.Forward(backend, projected, cache);
+        return LastStepsDevice(backend, block, 2);
+    }
+
+    /// <summary>One residual step: the gathered embedding of <paramref name="token"/> (codebook <paramref name="index"/>) for both CFG
+    /// rows, projected and forwarded; returns the new states. Consumes <paramref name="previous"/>.</summary>
+    private Tensor DepthStepStates(IBackend backend, int index, ulong token, MiniMaxMusic3DepthCache cache, Tensor previous)
+    {
+        int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
+        Tensor embedRow = new Tensor(new TensorShape(1, 1, hidden), DType.F32);
+        backend.EmbedGatherDecodeStep(embedRow, _depthDecoder.ResidualRows(index), token);
+        Tensor embedded = new Tensor(new TensorShape(CfgRows, 1, hidden), DType.F32);
+        backend.Concat(embedded, [embedRow, embedRow], 0);
+        embedRow.Dispose();
+        previous.Dispose();
+        using Tensor projected = _depthDecoder.Project(backend, embedded);
+        embedded.Dispose();
+        return _depthDecoder.Forward(backend, projected, cache);
+    }
+
+    /// <summary>The last step of each CFG row of <paramref name="block"/> <c>[rows, steps, H]</c>, as <c>[rows, 1, H]</c>, on the device.</summary>
+    private static Tensor LastStepsDevice(IBackend backend, Tensor block, int steps)
+    {
+        int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
+        Tensor[] lasts = new Tensor[CfgRows];
+        for (int row = 0; row < CfgRows; row++)
+        {
+            lasts[row] = new Tensor(new TensorShape(1, 1, hidden), DType.F32);
+            backend.SliceRows(lasts[row], block, row * steps + steps - 1);
+        }
+        Tensor states = new Tensor(new TensorShape(CfgRows, 1, hidden), DType.F32);
+        backend.Concat(states, lasts, 0);
+        foreach (Tensor last in lasts)
+        {
+            last.Dispose();
+        }
+        block.Dispose();
+        return states;
+    }
+
+    /// <summary>Reads the codes of one end-of-audio batch (frames <paramref name="from"/>..<paramref name="to"/>), keeps the frames
+    /// before the first end-of-audio, and releases the batch's device vectors. Returns true once the generation is complete.</summary>
+    private bool FlushDeviceBatch(IBackend backend, ulong[] tokens, int from, int to, List<(int FrameIndex, Tensor Vector)> pending,
+        List<float[]> frames, int frameLimit, Action<int, int>? onFrame, int frameWidth)
+    {
+        int endAt = int.MaxValue;
+        for (int frame = from; frame <= to; frame++)
+        {
+            int code = backend.ReadDeviceTokenId(tokens[(frame % DeviceFrameRing) * MiniMaxMusic3DepthDecoder.NumCodebooks]);
+            if (code == MiniMaxMusic3GlobalLm.AudioEndLogitIndex)
+            {
+                endAt = frame;
+                break;
+            }
+        }
+        bool complete = endAt != int.MaxValue;
+        foreach ((int frameIndex, Tensor vector) in pending)
+        {
+            if (frameIndex >= endAt) continue;
+            if (frames.Count >= frameLimit) { complete = true; break; }
+            float[] host = new float[frameWidth];
+            vector.AsReadOnlySpan<float>().Slice(0, frameWidth).CopyTo(host);
+            frames.Add(host);
+            onFrame?.Invoke(frames.Count, frameLimit);
+            if (frames.Count >= frameLimit) { complete = true; break; }
+        }
+        foreach ((int _, Tensor vector) in pending)
+        {
+            vector.Dispose();
+        }
+        pending.Clear();
+        return complete;
     }
 
     public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
