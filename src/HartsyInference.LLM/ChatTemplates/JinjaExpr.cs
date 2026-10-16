@@ -284,7 +284,8 @@ internal sealed class BinaryExpr(string op, Expr left, Expr right) : Expr
             "<=" => Values.ToD(a) <= Values.ToD(b),
             ">=" => Values.ToD(a) >= Values.ToD(b),
             "~" => Values.ToStr(a) + Values.ToStr(b),
-            "+" => Values.IsNum(a) && Values.IsNum(b) ? (object)((long)Values.ToD(a) + (long)Values.ToD(b)) : Values.ToStr(a) + Values.ToStr(b),
+            "+" => a is List<object?> la && b is List<object?> lb ? (object)new List<object?>([.. la, .. lb])
+                : Values.IsNum(a) && Values.IsNum(b) ? (object)((long)Values.ToD(a) + (long)Values.ToD(b)) : Values.ToStr(a) + Values.ToStr(b),
             "-" => (object)((long)Values.ToD(a) - (long)Values.ToD(b)),
             "*" => (object)((long)Values.ToD(a) * (long)Values.ToD(b)),
             "//" => (object)((long)Values.ToD(a) / (long)Values.ToD(b)),
@@ -339,9 +340,29 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
             case "tojson": return Values.ToJson(v);
             case "list": return Values.AsList(v);
             case "string": return Values.ToStr(v);
+            case "replace": return Replace(Values.ToStr(v), args, scope);
             case "default": return Values.Truthy(v) ? v : (args.Count > 0 ? args[0].Eval(scope) : v);
             default: throw new NotSupportedException($"Jinja filter '{name}'");
         }
+    }
+
+    /// <summary>Jinja's <c>replace(old, new[, count])</c>: every occurrence, or only the first <c>count</c> when given (Python <c>str.replace</c>).</summary>
+    private static string Replace(string s, List<Expr> args, JinjaEngine.Scope scope)
+    {
+        if (args.Count < 2) throw new FormatException("Jinja 'replace' filter needs the old and new strings.");
+        string from = Values.ToStr(args[0].Eval(scope)), to = Values.ToStr(args[1].Eval(scope));
+        long count = args.Count > 2 ? (long)Values.ToD(args[2].Eval(scope)) : -1;
+        if (count < 0) return from.Length == 0 ? s : s.Replace(from, to, StringComparison.Ordinal);
+        System.Text.StringBuilder sb = new(s.Length);
+        int at = 0;
+        for (long done = 0; done < count && from.Length > 0; done++)
+        {
+            int hit = s.IndexOf(from, at, StringComparison.Ordinal);
+            if (hit < 0) break;
+            sb.Append(s, at, hit - at).Append(to);
+            at = hit + from.Length;
+        }
+        return sb.Append(s, at, s.Length - at).ToString();
     }
 }
 
@@ -357,6 +378,10 @@ internal sealed class NamedArgExpr(string name, Expr value) : Expr
 
 internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
 {
+    /// <summary>The mapping a dict method was called on; anything else is a template error.</summary>
+    private static Dictionary<string, object?> Mapping(object? target, string method) => target as Dictionary<string, object?>
+        ?? throw new InvalidOperationException($"Jinja '.{method}()' needs a mapping, got {target?.GetType().Name ?? "none"}.");
+
     public Expr Callee => callee;
     public List<Expr> Args => args;
     public override IEnumerable<Expr> Children => [callee, .. args];
@@ -384,6 +409,9 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
                 "replace" => s.Replace(Values.ToStr(Arg(0)), Values.ToStr(Arg(1))),
                 "split" => SplitString(s, Arg(0)),
                 "get" => target is Dictionary<string, object?> d ? (d.TryGetValue(Values.ToStr(Arg(0)), out object? gv) ? gv : Arg(1)) : Arg(1),
+                "items" => Mapping(target, m.Name).Select(kv => (object?)new List<object?> { kv.Key, kv.Value }).ToList(),
+                "keys" => Mapping(target, m.Name).Keys.Cast<object?>().ToList(),
+                "values" => Mapping(target, m.Name).Values.ToList(),
                 _ => throw new NotSupportedException($"Jinja method '{m.Name}'"),
             };
         }
@@ -505,8 +533,14 @@ internal static class ExprParser
             {
                 bool neg = t.TryKeyword("not");
                 string test = t.ReadIdent();
-                // 'is none'/'is not none' may also appear as 'is not none'; 'defined' etc. take no args.
-                e = new IsTestExpr(e, test, neg);
+                // A comparison test reads one argument as Jinja does (a primary with postfix, so `eq(x)` works too) and is the operator.
+                if (IsTestExpr.ComparisonOperator(test) is { } op)
+                {
+                    Expr comparison = new BinaryExpr(op, e, ParsePostfix(t));
+                    e = neg ? new UnaryNotExpr(comparison) : comparison;
+                    continue;
+                }
+                e = new IsTestExpr(e, test, neg, IsTestExpr.TakesArgument(test) ? ParsePostfix(t) : null);
                 continue;
             }
             if (t.TrySymbol("==")) e = new BinaryExpr("==", e, ParseConcat(t));
@@ -647,6 +681,22 @@ internal static class ExprParser
             }
             return new ListLiteralExpr(items);
         }
+        if (t.TrySymbol("{"))
+        {
+            List<(Expr Key, Expr Value)> entries = [];
+            if (!t.TrySymbol("}"))
+            {
+                do
+                {
+                    if (t.PeekSymbol("}")) break;   // a trailing comma, as Python allows
+                    Expr key = ParseTernary(t);
+                    t.ExpectSymbol(":");
+                    entries.Add((key, ParseTernary(t)));
+                } while (t.TrySymbol(","));
+                t.ExpectSymbol("}");
+            }
+            return new DictLiteralExpr(entries);
+        }
         string ident = t.ReadIdent();
         return ident switch
         {
@@ -666,10 +716,39 @@ internal sealed class ListLiteralExpr(List<Expr> items) : Expr
     public override object? Eval(JinjaEngine.Scope scope) => items.Select(e => e.Eval(scope)).ToList();
 }
 
-/// <summary>Jinja <c>is</c> tests (<c>defined</c>, <c>none</c>, <c>string</c>, <c>mapping</c>, <c>iterable</c>, ...), with optional <c>not</c>; <c>defined</c> uses scope membership so a missing variable reads as undefined.</summary>
-internal sealed class IsTestExpr(Expr target, string test, bool negated) : Expr
+/// <summary>A dict literal (<c>{'low': 8, 'high': 256}</c>); keys are stringified like Jinja's, and insertion order is kept.</summary>
+internal sealed class DictLiteralExpr(List<(Expr Key, Expr Value)> entries) : Expr
 {
-    public override IEnumerable<Expr> Children => [target];
+    public override IEnumerable<Expr> Children => entries.SelectMany(e => new[] { e.Key, e.Value });
+
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        Dictionary<string, object?> dict = new(entries.Count);
+        foreach ((Expr key, Expr value) in entries) dict[Values.ToStr(key.Eval(scope))] = value.Eval(scope);
+        return dict;
+    }
+}
+
+/// <summary>Jinja <c>is</c> tests (<c>defined</c>, <c>none</c>, <c>string</c>, <c>mapping</c>, <c>iterable</c>, <c>sameas</c>, ...), with optional <c>not</c>; <c>defined</c> uses scope membership so a missing variable reads as undefined. <paramref name="argument"/> is the operand of a test that takes one.</summary>
+internal sealed class IsTestExpr(Expr target, string test, bool negated, Expr? argument = null) : Expr
+{
+    public override IEnumerable<Expr> Children => argument is null ? [target] : [target, argument];
+
+    /// <summary>The <see cref="BinaryExpr"/> operator a comparison test stands for (<c>x is eq y</c> is <c>x == y</c>), or null.</summary>
+    public static string? ComparisonOperator(string test) => test switch
+    {
+        "eq" or "equalto" => "==",
+        "ne" => "!=",
+        "lt" or "lessthan" => "<",
+        "le" => "<=",
+        "gt" or "greaterthan" => ">",
+        "ge" => ">=",
+        "in" => "in",
+        _ => null,
+    };
+
+    /// <summary>True for the non-comparison tests that read one argument after their name.</summary>
+    public static bool TakesArgument(string test) => test is "sameas" or "divisibleby";
 
     public override object? Eval(JinjaEngine.Scope scope)
     {
@@ -685,15 +764,21 @@ internal sealed class IsTestExpr(Expr target, string test, bool negated) : Expr
             // sequences even though they're iterable). Gemma-4's template checks content is sequence/is string.
             "sequence" => target.Eval(scope) is List<object?> or string,
             "number" => Values.IsNum(target.Eval(scope)),
+            "boolean" => target.Eval(scope) is bool,
             // Jinja2 "is true"/"is false": strict boolean identity, not truthiness — a missing/non-bool value
             // (e.g. EnableThinking left null) is neither, matching Python's `value is True`/`value is False`.
             // Qwen3's own chat template branches on `enable_thinking is false`.
             "true" => target.Eval(scope) is true,
             "false" => target.Eval(scope) is false,
+            // Python identity: none and the two booleans are singletons; any other value is only the same object as itself.
+            "sameas" => SameAs(target.Eval(scope), argument!.Eval(scope)),
+            "divisibleby" => (long)Values.ToD(target.Eval(scope)) % (long)Values.ToD(argument!.Eval(scope)) == 0,
             _ => throw new NotSupportedException($"Jinja 'is {test}' test"),
         };
         return negated ? !result : result;
     }
+
+    private static bool SameAs(object? a, object? b) => a is null || a is bool ? Equals(a, b) : ReferenceEquals(a, b);
 }
 
 /// <summary>Tiny tokenizer for Jinja expression source (identifiers, strings, ints, symbols, keywords).</summary>

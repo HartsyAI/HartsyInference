@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Gguf.Codecs;
 
 namespace HartsyInference.ModelAssets.MoePack;
 
@@ -12,7 +14,8 @@ namespace HartsyInference.ModelAssets.MoePack;
 /// Encoding picks the scale by alternating least squares: start at <c>max|x| / 2</c>, assign each value its nearest grid
 /// point at the fp16-rounded scale, then refit the scale in closed form to those codes. It repeats up to four times and
 /// keeps the candidate with the least squared error, so the stored scale is the best one seen, not the last one fitted.
-/// Blocks that are all zero store scale 0. This format is not a ggml type and no GGUF path reads or writes it.
+/// Blocks that are all zero store scale 0. The blocks are ggml's <c>Q2_0</c> (type id 42) byte for byte, so decoding goes through
+/// the GGUF codec.
 /// </remarks>
 public static class Q2_0Codec
 {
@@ -57,14 +60,12 @@ public static class Q2_0Codec
                 $"Q2_0 data for {rows} x {cols} needs {(long)blocks * BlockBytes} bytes; it holds {packed.Length}.", nameof(packed));
         }
         float[] values = new float[rows * cols];
-        for (int b = 0; b < blocks; b++)
+        unsafe
         {
-            ReadOnlySpan<byte> block = packed.Slice(b * BlockBytes, BlockBytes);
-            float scale = (float)BitConverter.UInt16BitsToHalf(BinaryPrimitives.ReadUInt16LittleEndian(block));
-            for (int i = 0; i < BlockElements; i++)
+            fixed (byte* src = packed)
+            fixed (float* dst = values)
             {
-                int code = (block[2 + (i >> 2)] >> (2 * (i & 3))) & 3;
-                values[b * BlockElements + i] = Grid[code] * scale;
+                GgufCodecRegistry.Get(DType.Q2_0).DequantizeToF32(src, dst, values.Length);
             }
         }
         return values;

@@ -88,6 +88,21 @@ public sealed record MoeConfig
 
     /// <summary>Multiplier applied to the routed-expert weights (DeepSeek-V3 <c>routed_scaling_factor</c>, default 1).</summary>
     public float RoutedScalingFactor { get; init; } = 1f;
+
+    /// <summary>Width the routed experts run at (Muse Spark <c>moe_hidden_size</c>): the block projects the layer input down with <c>pre_expert_proj</c>, RMS-normalizes it with <c>pre_expert_norm</c>, runs the experts there, and projects their sum back up with <c>post_expert_proj</c>. 0 (default) runs the experts at the model width.</summary>
+    public int LatentSize { get; init; }
+
+    /// <summary>Epsilon of the <see cref="LatentSize"/> entry norm (<c>pre_expert_norm</c>).</summary>
+    public float LatentNormEps { get; init; } = 1e-6f;
+
+    /// <summary>Muse Spark's per-expert output norm: each routed row is scaled by <c>post_expert_norm</c> and then RMS-normalized, before its routing weight applies.</summary>
+    public bool PostExpertNorm { get; init; }
+
+    /// <summary>Epsilon of the <see cref="PostExpertNorm"/> RMSNorm.</summary>
+    public float PostExpertNormEps { get; init; } = 1e-6f;
+
+    /// <summary>Width the routed experts read and write: <see cref="LatentSize"/> when set, else <paramref name="hiddenSize"/>.</summary>
+    public int ExpertWidth(int hiddenSize) => LatentSize > 0 ? LatentSize : hiddenSize;
 }
 
 /// <summary>Multi-head Latent Attention (DeepSeek-V2/V3, Kimi-K2): keys/values are compressed to a shared low-rank latent (<see cref="KvLoraRank"/>) plus a small shared RoPE key (<see cref="QkRopeHeadDim"/>), then up-projected per head; queries are either projected directly (<see cref="QLoraRank"/> = 0, DeepSeek-V2-Lite) or themselves compressed/up-projected. Each head's Q/K split into a no-position part (<see cref="QkNopeHeadDim"/>) and a RoPE part; attention scores use the full <see cref="QkHeadDim"/> but value/output use <see cref="VHeadDim"/>.</summary>
@@ -330,6 +345,34 @@ public sealed record TransformerConfig
 
     /// <summary>Gemma-4 MoE layers run the routed-expert FFN and the plain dense (gated) FFN as two INDEPENDENT parallel branches — each reading the same attention output through its own pre-norm, each normed again after its own FFN, then summed — rather than the usual "shared expert fused into the router output" pattern every other MoE architecture here uses. <c>false</c> (default) for everything else.</summary>
     public bool ParallelDenseMoeBranch { get; init; }
+
+    /// <summary>Muse Spark: a weightless RMSNorm (eps <see cref="RmsNormEps"/>) on every token embedding right after the lookup; injected multimodal embeddings are not normalized. <c>false</c> (default) for everything else.</summary>
+    public bool EmbeddingRmsNorm { get; init; }
+
+    /// <summary>Muse Spark: a weightless RMSNorm of each attention head's output (over the head dimension) before the heads are merged.</summary>
+    public bool AttnHeadOutputNorm { get; init; }
+
+    /// <summary>Muse Spark: the merged attention output is multiplied elementwise by <c>sigmoid(gate_proj(x))</c>, where <c>x</c> is the attention's normalized input, before <c>o_proj</c>.</summary>
+    public bool AttnOutputGate { get; init; }
+
+    /// <summary>Muse Spark: the post-attention sandwich norm carries no weight (a plain RMSNorm), so the checkpoint ships no tensor for it.</summary>
+    public bool PostAttnNormWeightless { get; init; }
+
+    /// <summary>Muse Spark: the post-FFN sandwich norm scales its input by the weight first and then RMS-normalizes, the reverse of the usual order.</summary>
+    public bool PostFfnNormScalesInput { get; init; }
+
+    /// <summary>Epsilon of the post-attention and post-FFN sandwich norms, which sit between a sublayer and the residual (Muse Spark <c>post_norm_eps</c>); 0 (default) uses <see cref="RmsNormEps"/>.</summary>
+    public float PostNormEps { get; init; }
+
+    /// <summary>The epsilon the post-sublayer norms use: <see cref="PostNormEps"/> when set, else <see cref="RmsNormEps"/>.</summary>
+    public float EffPostNormEps => PostNormEps > 0f ? PostNormEps : RmsNormEps;
+
+    /// <summary>Muse Spark's norm-preserving residual gates: each sublayer joins the stream as <c>alpha ⊙ residual + beta ⊙ sublayer</c> with learned per-channel <c>alpha</c>/<c>beta</c> (<c>post_attention_residual_gate</c>, <c>post_feedforward_residual_gate</c>) instead of a plain add.</summary>
+    public bool ResidualGates { get; init; }
+
+    /// <summary>True when the layer shape uses any of the Muse Spark block features, none of which the graph-decode, dual-stream or tensor-parallel layer steps implement.</summary>
+    public bool UsesGatedResidualBlock => EmbeddingRmsNorm || AttnHeadOutputNorm || AttnOutputGate || PostAttnNormWeightless
+        || PostFfnNormScalesInput || ResidualGates || Moe is { LatentSize: > 0 } or { PostExpertNorm: true };
 
     /// <summary>Computes the per-head ALiBi slopes (llama.cpp / the original ALiBi paper's geometric schedule): with <c>n2 = 2^floor(log2(nHead))</c>, <c>m0 = 2^(−maxBias/n2)</c>, <c>m1 = 2^(−maxBias/2/n2)</c>, head <c>h</c> gets <c>m0^(h+1)</c> for <c>h &lt; n2</c> else <c>m1^(2(h−n2)+1)</c> (handles non-power-of-two head counts).</summary>
     public static float[] ComputeAlibiSlopes(int nHead, float maxBias)

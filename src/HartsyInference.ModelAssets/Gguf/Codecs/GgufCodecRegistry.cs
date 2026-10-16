@@ -40,6 +40,10 @@ public static class GgufCodecRegistry
         Register(r, new Codec_IQ1_S());
         Register(r, new Codec_IQ1_M());
         Register(r, new Codec_MXFP4());
+        Register(r, new Codec_TQ1_0());
+        Register(r, new Codec_TQ2_0());
+        Register(r, new Codec_Q1_0());
+        Register(r, new Codec_Q2_0());
         return r;
     }
 

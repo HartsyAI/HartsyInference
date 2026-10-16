@@ -34,7 +34,8 @@ public sealed class GgufCodecRegistryTests
     [Fact]
     public void Registry_ThrowsOnUnregisteredDtype()
     {
-        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GgufCodecRegistry.Get(DType.TQ1_0));   // ternary, no codec by decision
+        // Q8_K is ggml's activation-only format, never stored in a file.
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GgufCodecRegistry.Get(DType.Q8_K));
     }
 
     [Fact]

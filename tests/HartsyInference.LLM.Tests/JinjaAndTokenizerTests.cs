@@ -144,4 +144,31 @@ public sealed class JinjaAndTokenizerTests
         Assert.Equal("Hi<think>", tok.Last);
     }
 
+
+    [Theory]
+    [InlineData("{{ x is sameas false }}", "True")]
+    [InlineData("{{ x is not sameas false }}", "False")]
+    [InlineData("{{ y is sameas false }}", "False")]
+    [InlineData("{{ n is sameas none }}", "True")]
+    [InlineData("{{ items is sameas items }}", "True")]
+    [InlineData("{{ 6 is divisibleby 3 }}", "True")]
+    [InlineData("{{ 7 is divisibleby(3) }}", "False")]
+    [InlineData("{{ 2 is eq 2 }}", "True")]
+    [InlineData("{{ 'a' is in items }}", "True")]
+    [InlineData("{{ 3 is not gt 4 }}", "True")]
+    [InlineData("{{ (flags or y is not sameas false) }}", "True")]
+    public void Jinja_TestsWithAnArgument_MatchJinja(string template, string expected)
+    {
+        // Muse Spark's revised template reads `d is sameas false` to tell an explicit False from a missing flag.
+        Dictionary<string, object?> context = new()
+        {
+            ["x"] = false,
+            ["y"] = 0L,
+            ["n"] = null,
+            ["flags"] = false,
+            ["items"] = new List<object?> { "a", "b" },
+        };
+
+        Assert.Equal(expected, new JinjaEngine(template).Render(context));
+    }
 }
