@@ -213,6 +213,7 @@ extern "C" __global__ void mul_mat_vec_q8_0_q8_1_ksplit_mb(
         const int b = b0 + g;
         if (b < nblk) q8_0_q8_1_block_accumulate(acc, wrow, xq, xd, K, nblk, mBase, M, b, li);
     }
+    // One slot per warp: blockDim.y must be at most 16, the cap GemvKsplitWarps imposes on the launch (CudaKernels.cs).
     __shared__ float partial[Q8_MB][16];
     #pragma unroll
     for (int j = 0; j < Q8_MB; ++j) {

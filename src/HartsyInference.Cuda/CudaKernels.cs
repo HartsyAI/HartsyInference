@@ -4981,6 +4981,7 @@ public sealed partial class CudaKernels : IDisposable
         uint ksplit = GemvKsplitWarps(N, K);
         if (ksplit > 1)
         {
+            if (ksplit > 16) throw new InvalidOperationException("mul_mat_vec_q8_0_q8_1_ksplit_mb holds one partial per warp in 16 slots; blockDim.y must be at most 16.");
             CudaDriverApi.cuLaunchKernel(_mulMatVecQ8_0Q8_1KsplitMb, (uint)N, gridY, 1, 32, ksplit, 1, 0, stream, (nint)args, 0).ThrowOnError();
             return;
         }

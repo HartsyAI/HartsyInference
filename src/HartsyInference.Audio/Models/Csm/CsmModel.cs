@@ -247,7 +247,10 @@ public sealed unsafe class CsmModel : IDisposable
                 {
                     if (DeviceCodes is { } codes)
                     {
-                        foreach (ulong token in codes) deviceBackend.FreeDeviceTokenId(token);
+                        foreach (ulong token in codes)
+                        {
+                            if (token != 0) deviceBackend.FreeDeviceTokenId(token);
+                        }
                     }
                     if (DeviceRng != 0) deviceBackend.FreeDeviceRng(DeviceRng);
                 }
@@ -455,13 +458,6 @@ public sealed unsafe class CsmModel : IDisposable
         return last;
     }
 
-    /// <summary>CFG dual-stream flavor of <see cref="BackboneLast"/>: runs cond+uncond as ONE position-aligned
-    /// B=2 backbone step (stacked <c>[1,2,bh]</c> through the session's <see cref="DecodeSession.DualGraph"/> fixed
-    /// buffers), captured once and replayed per frame. Combines both wins: the batched layers read each weight
-    /// matrix ONCE for both rows (the CFG-batch win) AND the ~layers×kernels eager launches collapse into one
-    /// graph replay (the graph win). Warmup frames run the same dual step eagerly through the SAME fixed buffers
-    /// so every weight/cache is device-resident and the buffers are pool-bound before capture. Advances BOTH
-    /// caches by one and returns fresh caller-owned cond/uncond last hiddens (each <c>[1,1,bh]</c>).</summary>
     /// <summary>Stacks the cond and uncond input rows into a fresh host-built <c>[1,2,bh]</c> (row 0 conditional).</summary>
     private static Tensor StackCfgRows(Tensor condNew, Tensor uncondNew, int bh)
     {
@@ -471,7 +467,13 @@ public sealed unsafe class CsmModel : IDisposable
         return stacked;
     }
 
-    /// <summary>Runs the dual graph on a stacked <c>[1,2,bh]</c> input (disposed here) and returns the cond/uncond last hiddens.</summary>
+    /// <summary>CFG dual-stream flavor of <see cref="BackboneLast"/>: runs cond+uncond as ONE position-aligned
+    /// B=2 backbone step (stacked <c>[1,2,bh]</c> through the session's <see cref="DecodeSession.DualGraph"/> fixed
+    /// buffers), captured once and replayed per frame. Combines both wins: the batched layers read each weight
+    /// matrix ONCE for both rows (the CFG-batch win) AND the ~layers×kernels eager launches collapse into one
+    /// graph replay (the graph win). Warmup frames run the same dual step eagerly through the SAME fixed buffers
+    /// so every weight/cache is device-resident and the buffers are pool-bound before capture. Advances BOTH
+    /// caches by one and returns fresh caller-owned cond/uncond last hiddens (each <c>[1,1,bh]</c>).</summary>
     private (Tensor last, Tensor uLast) BackboneLastDual(IBackend backend, DecodeSession session, FixedKvCache uncond,
         Tensor stacked, int bh)
     {
@@ -533,7 +535,7 @@ public sealed unsafe class CsmModel : IDisposable
         int bh = _cfg.Backbone.HiddenSize;
         int dh = _cfg.Decoder.HiddenSize;
 
-        if (graphEnabled && session is not null && (session.DeviceFrame ??= PrepareDeviceFrame(backend, tk, rng, session)))
+        if (graphEnabled && session is not null && (session.DeviceFrame ??= PrepareDeviceFrame(backend, tk, temp, rng, session)))
         {
             return DecodeFrameTailDevice(backend, last, uLast, temp, tk, tp, cfgScale, session);
         }
@@ -721,10 +723,11 @@ public sealed unsafe class CsmModel : IDisposable
     /// <summary>Decides once per generation whether the frame tail runs on the device: the depth steps need the graph path,
     /// the device sampler must cover the top-k, and every audio table must be gatherable. Preloads the tables (a gather
     /// against an unloaded table would upload per call) and allocates the per-codebook token buffers and the device RNG.</summary>
-    private bool PrepareDeviceFrame(IBackend backend, int topK, uint rng, DecodeSession session)
+    private bool PrepareDeviceFrame(IBackend backend, int topK, float temperature, uint rng, DecodeSession session)
     {
-        if (!EngineKnobs.CsmDeviceFrame.Value || !backend.DeviceSamplingSupported || topK < 1 || topK > backend.DeviceSamplingMaxTopK
-            || !_decoder.SupportsGraphDecode(backend))
+        // Greedy (temperature <= 0) stays on the host: the host sampler treats it as 1, and the device sampler is not defined there.
+        if (!EngineKnobs.CsmDeviceFrame.Value || !backend.DeviceSamplingSupported || temperature <= 0f || topK < 1
+            || topK > backend.DeviceSamplingMaxTopK || !_decoder.SupportsGraphDecode(backend))
         {
             return false;
         }
@@ -738,13 +741,15 @@ public sealed unsafe class CsmModel : IDisposable
             tables.Add(table);
         }
         backend.PreloadWeights(tables);
+        // The backend and the handle array are recorded before any allocation, so a throw partway through leaves Dispose
+        // with exactly the handles that exist (zero handles are skipped there).
+        session.DeviceBackend = backend;
         session.DeviceCodes = new ulong[_cfg.NumCodebooks];
         for (int cb = 0; cb < session.DeviceCodes.Length; cb++)
         {
             session.DeviceCodes[cb] = backend.AllocDeviceTokenId();
         }
         session.DeviceRng = backend.AllocDeviceRng(((ulong)rng << 32) | 0x9E3779B9ul, topK);
-        session.DeviceBackend = backend;
         return true;
     }
 
