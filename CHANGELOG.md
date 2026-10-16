@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: espeak spells out acronyms and vowel-less abbreviations as piper does.** A word the dictionary does not pronounce is now spelled letter by letter when it has no vowel letter (PC, PM, HR, km, kg, btw, tsp, Blvd) or when its dictionary entry is flagged for spelling (OK, AI, abc), with each letter name stressed as espeak stresses it (AI -> ˌeɪˈaɪ). Before, these were read by letter-to-sound rules (PM -> pəm, km -> kəm). Agreement with piper_phonemize on 673 English words rose from 83.7% to 93.3% (82.0% to 91.7% on the default cache data), and a 404-word held-out set rose from 74.5% to 92.6% (cache 73.5% to 91.6%). No word that matched before stopped matching. Uppercase acronyms with vowels (IBM, CEO, NBA) are still read by the rules.
+
 ## alpha.370
 
 - **Fixed: ZipVoice phonemizes with the American `en-us` voice.** The pipeline built its phonemizer for espeak's British `en` voice, so the model was fed phonemes it never trained on (`əʊ` for `oʊ`, non-rhotic vowels); upstream's tokenizer runs piper_phonemize on `en-us`. Word agreement with upstream's tokens on a 137-line corpus rose from 58% to 94%. The same mistake was fixed for Piper on 2026-07-13. Gate rows 04 and 05, which misheard words before (mean WER 0.067 and 0.091), now transcribe word-perfect on every take, as upstream's do, and generated durations match upstream's within a median 3.5%.

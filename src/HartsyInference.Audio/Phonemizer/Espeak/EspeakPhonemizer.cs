@@ -522,8 +522,18 @@ public sealed class EspeakPhonemizer : IPhonemizer
         else
         {
             if (found) { dflags = r.Flags; state.Flags2 = r.Flags2; } // flag-only entry: keep its flags, use the rules
-            byte[] buf = BuildBuffer(clause, index, out int start);
-            stressed = TranslateByRules(buf, start, ref dflags, where, state);
+            bool spellable = EspeakLetterNames.IsSpelled(word, found ? r.Flags : 0);
+            List<byte>? spelled = spellable ? EspeakLetterNames.Spell(word, _phon, _stress) : null;
+            if (spelled is not null)
+            {
+                stressed = spelled;
+                dflags = FlagFound;
+            }
+            else
+            {
+                byte[] buf = BuildBuffer(clause, index, out int start);
+                stressed = TranslateByRules(buf, start, ref dflags, where, state);
+            }
         }
         // Flapping (t/d -> ɾ), voicing assimilation, and vowel reduction are applied data-driven by the phoneme-program
         // VM during rendering (EspeakPhonemeList), so no separate flap-t post-process is needed.
