@@ -6,6 +6,10 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Added: split GGUF sets load as one model.** A llama.cpp split (`stem-NNNNN-of-NNNNN.gguf`) is read from any part: every part is mapped, its tensors are indexed together, and the set is checked for completeness, part order and tensor count. The loader used to refuse split files and ask for a `llama-gguf-split` merge.
+
 ## alpha.374
 
 - **Added: a streamed speech take returns its turns.** `ISpeechService.SynthesizeStreamAsync` has an overload taking `onTurns`, which receives the turns a one-shot synthesis returns as `AudioResult.Turns`. It is called once, before the stream ends. A streamed Fish Audio Drama 3 take can now be revised like a one-shot take; before, the stream returned audio only.

@@ -9,7 +9,7 @@ public sealed class GgufLoader : IDisposable
     private const uint GgufMagic = 0x46554747; // "GGUF" bytes 47 47 55 46 read as little-endian uint32
     private const int SupportedVersion = 3;
 
-    private MmapHandle? _handle;
+    private readonly List<MmapHandle> _parts = [];
     private int _disposed;
 
     /// <summary>Parsed metadata from the GGUF header.</summary>
@@ -24,17 +24,65 @@ public sealed class GgufLoader : IDisposable
     /// <summary>GGUF version number.</summary>
     public int Version { get; private set; }
 
-    /// <summary>Loads a GGUF file, parsing the header, metadata, and tensor info.</summary>
-    public unsafe void Load(string filePath)
+    /// <summary>Loads a GGUF file, or every part of a split set, parsing the header, metadata, and tensor info.</summary>
+    public void Load(string filePath)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
-        _handle?.Dispose();
-        _handle = MmapHandle.OpenRead(filePath);
+        ReleaseParts();
         FilePath = filePath;
+        try
+        {
+            MmapHandle given = MmapHandle.OpenRead(filePath);
+            _parts.Add(given);
+            ParsePart(given, filePath, out GgufMetadata givenMetadata, out List<GgufTensorDescriptor> givenTensors);
 
-        byte* ptr = _handle.BasePointer;
-        long remaining = _handle.ByteLength;
+            IReadOnlyList<string> paths = GgufSplitDetector.PartPaths(filePath, givenMetadata);
+            if (paths.Count == 1)
+            {
+                Metadata = givenMetadata;
+                Dictionary<string, GgufTensorDescriptor> single = new(givenTensors.Count);
+                AddPartTensors(single, givenTensors, 0, filePath);
+                Descriptors = single;
+                return;
+            }
+
+            ReleaseParts();
+            LoadSplit(paths);
+        }
+        catch
+        {
+            ReleaseParts();
+            throw;
+        }
+    }
+
+    /// <summary>Maps every part, checks each declares its own position, and indexes the tensors of all parts together.</summary>
+    private void LoadSplit(IReadOnlyList<string> paths)
+    {
+        Dictionary<string, GgufTensorDescriptor> descriptors = new();
+        for (int index = 0; index < paths.Count; index++)
+        {
+            MmapHandle handle = MmapHandle.OpenRead(paths[index]);
+            _parts.Add(handle);
+            ParsePart(handle, paths[index], out GgufMetadata metadata, out List<GgufTensorDescriptor> tensors);
+            GgufSplitDetector.ValidatePart(metadata, paths[index], index, paths.Count);
+            if (index == 0)
+                Metadata = metadata;
+            AddPartTensors(descriptors, tensors, index, paths[index]);
+        }
+
+        if (GgufSplitDetector.DeclaredTensorCount(Metadata) is long declared && declared != descriptors.Count)
+            throw new HartsyInference.Core.Exceptions.UnsupportedModelException(
+                $"split GGUF declares {declared} tensors but its parts hold {descriptors.Count}.", null, "GGUF");
+        Descriptors = descriptors;
+    }
+
+    /// <summary>Reads one file's header, metadata and tensor descriptors. Each descriptor's absolute offset is within that file.</summary>
+    private unsafe void ParsePart(MmapHandle handle, string path, out GgufMetadata metadata, out List<GgufTensorDescriptor> tensors)
+    {
+        byte* ptr = handle.BasePointer;
+        long remaining = handle.ByteLength;
         long offset = 0;
 
         if (remaining < 4)
@@ -56,37 +104,46 @@ public sealed class GgufLoader : IDisposable
         ulong metadataKvCount = *(ulong*)(ptr + offset);
         offset += 8;
 
-        // Parse metadata
-        GgufMetadata metadata = new GgufMetadata();
+        metadata = new GgufMetadata();
         for (ulong i = 0; i < metadataKvCount; i++)
         {
             (string key, object value, long bytesRead) = ReadMetadataKv(ptr + offset, remaining - offset);
             metadata.Add(key, value);
             offset += bytesRead;
         }
-        GgufSplitDetector.ThrowIfSplit(metadata, filePath);
-        Metadata = metadata;
 
-        // Parse tensor infos
-        Dictionary<string, GgufTensorDescriptor> descriptors = new((int)tensorCount);
+        tensors = new List<GgufTensorDescriptor>((int)tensorCount);
         for (ulong i = 0; i < tensorCount; i++)
         {
             (GgufTensorDescriptor desc, long bytesRead) = ReadTensorInfo(ptr + offset, remaining - offset);
-            descriptors[desc.Name] = desc;
+            tensors.Add(desc);
             offset += bytesRead;
         }
 
         // Tensor data starts after alignment padding (typically 32 bytes)
         long alignment = (long)metadata.GetUInt64("general.alignment", 32);
         long dataStart = AlignUp(offset, alignment);
-
-        // Adjust tensor offsets relative to file start
-        foreach (GgufTensorDescriptor desc in descriptors.Values)
+        foreach (GgufTensorDescriptor desc in tensors)
         {
             desc.AbsoluteOffset = dataStart + desc.RelativeOffset;
         }
+    }
 
-        Descriptors = descriptors;
+    private static void AddPartTensors(Dictionary<string, GgufTensorDescriptor> target, List<GgufTensorDescriptor> tensors, int part, string path)
+    {
+        foreach (GgufTensorDescriptor desc in tensors)
+        {
+            desc.Part = part;
+            if (!target.TryAdd(desc.Name, desc))
+                throw new HartsyInference.Core.Exceptions.UnsupportedModelException($"Tensor '{desc.Name}' appears twice in '{path}'.", null, "GGUF");
+        }
+    }
+
+    private void ReleaseParts()
+    {
+        foreach (MmapHandle part in _parts)
+            part.Dispose();
+        _parts.Clear();
     }
 
     /// <summary>Returns a tensor backed by memory-mapped data for the given tensor name. For quantized tensors, call <see cref="GgufDequantizer"/> to convert to F16/F32.</summary>
@@ -94,16 +151,17 @@ public sealed class GgufLoader : IDisposable
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
-        if (_handle is null)
+        if (_parts.Count == 0)
             throw new InvalidOperationException("No GGUF file loaded. Call Load() first.");
 
         if (!Descriptors.TryGetValue(name, out GgufTensorDescriptor? desc))
             throw new KeyNotFoundException($"Tensor '{name}' not found in GGUF file '{FilePath}'.");
 
-        void* dataPtr = _handle.PointerAt(desc.AbsoluteOffset);
+        MmapHandle part = _parts[desc.Part];
+        void* dataPtr = part.PointerAt(desc.AbsoluteOffset);
         Tensor tensor = new Tensor(dataPtr, desc.Shape, desc.DType);
         // Root the mmap against premature GC/finalization while the borrowed pointer is in use (see SafeTensorsLoader).
-        tensor.SetKeepAlive(_handle);
+        tensor.SetKeepAlive(part);
         return tensor;
     }
 
@@ -335,8 +393,7 @@ public sealed class GgufLoader : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
 
-        _handle?.Dispose();
-        _handle = null;
+        ReleaseParts();
     }
 }
 
@@ -357,6 +414,9 @@ public sealed class GgufTensorDescriptor
 
     /// <summary>Offset relative to the start of the data section.</summary>
     public required long RelativeOffset { get; init; }
+
+    /// <summary>Index of the file part that holds this tensor's data; 0 for a single file.</summary>
+    public int Part { get; internal set; }
 
     /// <summary>Absolute offset from file start (set after alignment calculation).</summary>
     public long AbsoluteOffset { get; internal set; }

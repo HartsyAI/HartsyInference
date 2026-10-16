@@ -223,8 +223,6 @@ public static class TextPackageDiscovery
             name = $"{stem}-of-{total:D5}";
             problems.Add($"parts named '{stem}' disagree on the part count ({string.Join(", ", totals)}); each count is listed as its own package");
         }
-        // The loader refuses a split file outright (GgufSplitDetector), so a complete split is still not loadable as it stands.
-        problems.Add("split GGUF: the loader reads single files only; merge the parts with llama-gguf-split first");
 
         IReadOnlyList<string> names = [.. parts.Values.Select(f => Path.GetFileName(f))];
         return new TextModelPackage(
