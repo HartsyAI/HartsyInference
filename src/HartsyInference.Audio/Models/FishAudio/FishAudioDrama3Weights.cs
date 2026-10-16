@@ -60,11 +60,13 @@ public static class FishAudioDrama3Weights
             FishAudioDrama3Precision.Q4_K => attention ? DType.Q6_K : DType.Q4_K,
             _ => throw new ArgumentOutOfRangeException(nameof(precision)),
         };
-        // A block quant never spans rows: a row that is not a whole number of blocks falls back to Q8_0, then to BF16.
+        // A block quant never spans rows: a row that is not a whole number of blocks falls back to Q8_0, then to the stored float
+        // dtype (BF16 for a weight that has none).
         long inDim = weight.Shape[weight.Shape.Rank - 1];
         if (target.IsQuantized && inDim % target.BlockElementCount != 0)
         {
-            target = inDim % DType.Q8_0.BlockElementCount == 0 ? DType.Q8_0 : DType.BF16;
+            target = inDim % DType.Q8_0.BlockElementCount == 0 ? DType.Q8_0
+                : weight.Storage == HfWeightStorage.Plain ? weight.StoredDType : DType.BF16;
         }
         return target;
     }

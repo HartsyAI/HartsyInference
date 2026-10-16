@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
@@ -51,6 +52,58 @@ public sealed class FishAudioDrama3ParityTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Q8Cache_HoldsExactlyTheQuantizedWeights_AndRuns()
+    {
+        using Expected expected = new();
+        string cache = Path.Combine(Path.GetTempPath(), $"hartsy-drama3-q8-{Guid.NewGuid():N}.gguf");
+        List<Tensor> owned = [];
+        try
+        {
+            FishAudioDrama3Config config = Config();
+            using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([Path.Combine(Dir, "drama3_tiny.safetensors")]);
+            HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([Path.Combine(Dir, "drama3_tiny.safetensors")]);
+            Assert.False(FishAudioDrama3Weights.UsesStoredWeights(checkpoint, FishAudioDrama3Precision.Q8_0));
+            (IReadOnlyDictionary<string, Tensor> weights, IDisposable owner) = FishAudioDrama3Weights.Load(checkpoint, FishAudioDrama3Precision.Q8_0, cache);
+            using (owner)
+            {
+                Assert.Equal(DType.Q8_0, weights["model.language_model.layers.0.mlp.experts.1.gate_proj.weight"].DType);
+                Assert.Equal(DType.Q8_0, weights["model.language_model.layers.1.self_attn.q_proj.weight"].DType);
+                Assert.Equal(DType.F32, weights["model.language_model.layers.0.mlp.gate.weight"].DType);
+                Assert.Equal(DType.F32, weights["audio_decoder_mtp.heads.0.weight"].DType);
+                // The CPU backend multiplies F32 only; the engine widens block weights for it the same way.
+                Dictionary<string, Tensor> widened = new(StringComparer.Ordinal);
+                foreach ((string name, Tensor t) in weights)
+                {
+                    using Tensor original = source.Borrow(name);
+                    if (!t.DType.IsQuantized)
+                    {
+                        Assert.True(original.AsReadOnlySpan<float>().SequenceEqual(t.AsReadOnlySpan<float>()), $"{name} {t.Shape} {original.Shape}");
+                        widened[name] = t;
+                        continue;
+                    }
+                    using Tensor requantized = GgufQuantizer.Quantize(original, t.DType);
+                    using Tensor want = GgufDequantizer.Dequantize(requantized, DType.F32);
+                    Tensor got = GgufDequantizer.Dequantize(t, DType.F32);
+                    owned.Add(got);
+                    Assert.True(want.AsReadOnlySpan<float>().SequenceEqual(got.AsReadOnlySpan<float>()), $"{name} {t.Shape} {original.Shape}");
+                    widened[name] = got;
+                }
+                using CpuBackend backend = new();
+                using FishAudioDrama3Lm lm = new(config, widened, capacity: 64);
+                FishAudioDrama3Score score = lm.Score(backend, expected.Prompt(), [expected.Frame("in.frame1"), expected.Frame("in.frame2")]);
+                Assert.All(score.HeadLogits[1], v => Assert.True(float.IsFinite(v)));
+                // Informational: on a random tiny model a near-tied top-2 route flips under any perturbation.
+                output.WriteLine($"Q8_0 vs reference: prompt hidden max |Δ| = {MaxAbs(expected.Read("ref.hidden"), score.PromptHidden):G3}");
+            }
+        }
+        finally
+        {
+            foreach (Tensor t in owned) t.Dispose();
+            File.Delete(cache);
+        }
+    }
+
+    [Fact]
     public void Generate_IsDeterministicPerSeed_AndKeepsCodesInRange()
     {
         using Expected expected = new();
@@ -79,6 +132,13 @@ public sealed class FishAudioDrama3ParityTests(ITestOutputHelper output)
     }
 
     private static FishAudioDrama3Config Config() => FishAudioDrama3Config.FromJson(File.ReadAllText(Path.Combine(Dir, "config.json")));
+
+    private static float MaxAbs(float[] expected, float[] actual)
+    {
+        float worst = 0f;
+        for (int i = 0; i < expected.Length; i++) worst = MathF.Max(worst, MathF.Abs(expected[i] - actual[i]));
+        return worst;
+    }
 
     private static float[] Candidates(float[] logits, int[] candidates) => [.. candidates.Select(id => logits[id])];
 
