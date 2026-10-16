@@ -1191,8 +1191,9 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                // Fish Audio Drama 3: Qwen3.5-MoE 35B-A3B + codebook tower over 10 codebooks + S2's ModifiedDAC. Fish Audio Research
-                // License (non-commercial). `hartsy speak -m fishaudio-drama3` (FP8 experts → Q8_0), `:int4` (GPTQ → Q4_0), `:bf16`
+                // Fish Audio Drama 3: Qwen3.5-MoE 35B-A3B + codebook tower over 10 codebooks + S2's ModifiedDAC. Fish Audio Community
+                // License v1.0 (commercial use below USD 500k annual revenue; no Hosted Services; no voice imitation without consent).
+                // `hartsy speak -m fishaudio-drama3` (FP8 experts → Q8_0), `:int4` (GPTQ → Q4_0), `:bf16`
                 // / `:q8` / `:q6` / `:q5` / `:q4` re-quantize once into a disk cache. Matches the official fish_omni modules on a tiny
                 // checkpoint; no real-weight or GPU run yet. The shards are read from the index on first use (their names are pinned
                 // here once a run records them), and the codec comes from S2 Pro when the build does not ship one.

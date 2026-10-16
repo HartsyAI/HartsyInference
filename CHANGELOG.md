@@ -12,6 +12,7 @@ stable release will require. Dates are UTC.
 - **Added: HF `Digits` and `Punctuation` pre-tokenizer stages.** Digits split one by one (or as runs when `individual_digits` is false). Punctuation isolates Unicode P* and ASCII punctuation; other symbols stay grouped, as HF does. The fish-speech-1.4 tokenizer needs both.
 - **Fixed: Fish-Speech loads the checkpoint it names.** Before, `org/repo` variants were cached under their own key but loaded fish-speech-1.5. Unknown variants now throw instead of silently loading 1.5.
 - **Changed: Fish-Speech rejects voice references.** Fish-Speech 1.5 and 1.4 do not clone yet, since the Firefly encoder is not ported. A request with a reference clip now fails before the download and load. Before, the reference was ignored and the output used the model's default voice.
+- **Fixed: Fish real-weight tests fail when their weights are missing under `HARTSY_REQUIRE_REAL_WEIGHTS=1`.** The Firefly, S2 and ModifiedDAC parity tests returned silently before. A reference dump without `enc_codes` is now a failure, not a pass. The Drama 3 docs cite the Fish Audio Community License v1.0, not the research license.
 
 ## alpha.374
 

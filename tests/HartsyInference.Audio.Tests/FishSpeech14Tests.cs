@@ -83,7 +83,7 @@ public sealed class FishSpeech14TokenizerRealAssetTests(ITestOutputHelper output
     [Fact]
     public void Tokenizer_MatchesHuggingFaceTokenizers()
     {
-        string path = Environment.GetEnvironmentVariable("HARTSY_FISH14_TOKENIZER") ?? string.Empty;
+        string path = Environment.GetEnvironmentVariable("HARTSY_FISH14_TOKENIZER") is { Length: > 0 } p ? p : "HARTSY_FISH14_TOKENIZER is unset";
         if (!RealWeightGate.Require(output.WriteLine, path))
         {
             return;
