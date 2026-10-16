@@ -49,6 +49,20 @@ public static class TestPaths
         public static string DistilledLoraExtract => Resolve("FLUX3_DISTILLED_LORA_PATH", Path.Combine(ModelsDir, "Lora", "Flux3", "flux-3-klein-image-distilled-lora-extract.safetensors"));
     }
 
+    /// <summary>MOSS-Image paths: OpenMOSS's diffusers folders and the real-weight reference
+    /// <c>tests/python-reference/dump_moss_image_reference.py real</c> writes from them.</summary>
+    public static class MossImage
+    {
+        /// <summary>The MOSS-Image-Base folder (transformer/, text_encoder/, tokenizer/, vae/). Override with MOSS_IMAGE_PATH.</summary>
+        public static string Base => Resolve("MOSS_IMAGE_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "MOSS-Image", "MOSS-Image-Base"));
+
+        /// <summary>The MOSS-Image-SFT folder. Override with MOSS_IMAGE_SFT_PATH.</summary>
+        public static string Sft => Resolve("MOSS_IMAGE_SFT_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "MOSS-Image", "MOSS-Image-SFT"));
+
+        /// <summary>The reference dump for <see cref="Base"/>. Override with MOSS_IMAGE_REFERENCE_PATH.</summary>
+        public static string Reference => Resolve("MOSS_IMAGE_REFERENCE_PATH", Path.Combine(OutputDir, "References", "moss_image_base_reference.safetensors"));
+    }
+
     /// <summary>Z-Image family checkpoint paths.</summary>
     public static class ZImage
     {

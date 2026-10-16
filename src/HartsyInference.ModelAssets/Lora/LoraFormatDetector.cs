@@ -28,6 +28,7 @@ public static class LoraFormatDetector
         bool hasZImage = false;
         bool hasDiffusersMiniMaxH3 = false;
         bool hasFlux3 = false;
+        bool hasMossImage = false;
 
         foreach (string key in descriptors.Keys)
         {
@@ -37,6 +38,12 @@ public static class LoraFormatDetector
             if (HasLoraSuffix(key) && Flux3LoraMapper.IsDistinctive(key))
             {
                 hasFlux3 = true;
+            }
+            // MOSS-Image in any spelling. Its ComfyUI wrapper (diffusion_model.layers.N…) would otherwise fall to no arm at
+            // all, and its kohya names to none either; its own modules claim it ahead of the generic arms.
+            if (HasLoraSuffix(key) && MossImageLoraMapper.IsDistinctive(key))
+            {
+                hasMossImage = true;
             }
             // No wrapper prefix at all — the root IS the checkpoint's own key (MiniMax-H3's published Turbo LoRA:
             // `blocks.0.attn.qkv_proj.lora_A.weight`, `token_refiner.blocks.0.mlp.fc1.lora_B.weight`). Recorded
@@ -142,6 +149,7 @@ public static class LoraFormatDetector
         }
 
         if (hasFlux3) return LoraFormat.Flux3;
+        if (hasMossImage) return LoraFormat.MossImage;
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
         if (hasComfyBfl) return LoraFormat.ComfyBflDit;
         if (hasZImage) return LoraFormat.ComfyZImageDit;

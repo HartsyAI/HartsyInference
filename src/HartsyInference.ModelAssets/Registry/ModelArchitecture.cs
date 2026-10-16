@@ -39,4 +39,8 @@ public enum ModelArchitecture
     /// <summary>Qwen-Image 2.1 single-stream DiT (shared modulation + zero-centered text norm). A different
     /// architecture from Qwen-Image v1, which has no rule here and is selected by catalog id.</summary>
     QwenImage21,
+
+    /// <summary>MOSS-Image single-stream DiT (one <c>shared_block_modulation</c> for every joint block, fused
+    /// <c>proj.ffn_up_gate</c> SiTU-GLU feed-forwards, <c>video_head_modulation</c> output head).</summary>
+    MossImage,
 }

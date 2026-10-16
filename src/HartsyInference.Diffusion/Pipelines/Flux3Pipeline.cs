@@ -32,7 +32,10 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
     private readonly Tensor _bnVar;
     private readonly float _bnEps;
     private readonly Flux3Config _config;
-    private readonly PromptCache _promptCache = new PromptCache();
+    private const int CondSlot = 0;
+    private const int UncondSlot = 1;
+
+    private readonly EncodedPromptCache _promptCache = new(2);
     private bool _ditResident;
 
     /// <summary>Creates the pipeline; <paramref name="vaeEncoder"/> is required for img2img, inpaint and references.</summary>
@@ -109,8 +112,8 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         Flux3ConditionStates? uncondStates = null;
         try
         {
-            Tensor condText = EncodePrompt(prompt, PromptCache.Cond);
-            Tensor? uncondText = guided ? EncodePrompt(negative!, PromptCache.Uncond) : null;
+            Tensor condText = EncodePrompt(prompt, CondSlot);
+            Tensor? uncondText = guided ? EncodePrompt(negative!, UncondSlot) : null;
 
             // VAE-encoder phase: references and the init image under one preload, released before the DiT loads. Every
             // output is read back by the host-side packing ops, so the activation reclaim drops nothing still in use.
@@ -268,7 +271,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
     /// is evicted first because the encoder and a resident DiT need not fit together.</summary>
     private Tensor EncodePrompt(Flux3PromptTokens prompt, int slot)
     {
-        if (_promptCache.TryGet(slot, prompt, out Tensor? cached))
+        if (_promptCache.TryGet(slot, prompt.Tokens.Tokens, prompt.ValidLength, out Tensor? cached))
             return cached!;
         if (_ditResident)
         {
@@ -289,7 +292,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         Backend.FreeActivations();
         if (hidden.Shape[2] != _config.ContextInDim)
             throw new HartsyInferenceException($"FLUX.3 text features are {hidden.Shape[2]} wide; the transformer expects {_config.ContextInDim}.");
-        _promptCache.Store(slot, prompt, hidden);
+        _promptCache.Store(slot, prompt.Tokens.Tokens, prompt.ValidLength, hidden);
         return hidden;
     }
 
@@ -390,41 +393,5 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             }
         }
         return schedule[Math.Min(nearest + 1, schedule.Count - 1)];
-    }
-
-    /// <summary>The last encoded conditional and unconditional prompts, keyed by their ids and how many of them are
-    /// real: the padding mask is part of the encoding. Weights are applied after encoding, so they are not.</summary>
-    private sealed class PromptCache : IDisposable
-    {
-        public const int Cond = 0;
-        public const int Uncond = 1;
-        private readonly int[]?[] _keys = new int[]?[2];
-        private readonly int[] _validLengths = new int[2];
-        private readonly Tensor?[] _values = new Tensor?[2];
-
-        public bool TryGet(int slot, Flux3PromptTokens prompt, out Tensor? value)
-        {
-            value = _keys[slot] is int[] cached && _validLengths[slot] == prompt.ValidLength
-                && cached.AsSpan().SequenceEqual(prompt.Tokens.Tokens) ? _values[slot] : null;
-            return value is not null;
-        }
-
-        public void Store(int slot, Flux3PromptTokens prompt, Tensor value)
-        {
-            _values[slot]?.Dispose();
-            _keys[slot] = (int[])prompt.Tokens.Tokens.Clone();
-            _validLengths[slot] = prompt.ValidLength;
-            _values[slot] = value;
-        }
-
-        public void Dispose()
-        {
-            for (int i = 0; i < _values.Length; i++)
-            {
-                _values[i]?.Dispose();
-                _values[i] = null;
-                _keys[i] = null;
-            }
-        }
     }
 }

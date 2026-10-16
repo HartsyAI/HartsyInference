@@ -104,8 +104,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     // _deltaState[i]: the [S_v, S_v] per-head state matrix, flattened [NumVHeads * S_v * S_v].
     private readonly float[]?[] _convHistory;
     private readonly float[]?[] _deltaState;
-    // Device-resident mirrors for the seq=1 decode fast path (lazily created; ping-ponged with the
-    // host arrays at the prefill↔decode boundary — see EnsureStateOnDevice / EnsureStateOnHost).
+    // The state tensors every prefill and decode pass reads and advances in place (lazily created, then resident on
+    // the backend); the host arrays above hold the reset state they are seeded from — see EnsureStateOnDevice.
     private readonly Tensor?[] _convHistT;
     private readonly Tensor?[] _deltaStateT;
     private readonly bool[] _stateOnDevice;
@@ -762,18 +762,6 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         _stateOnDevice[i] = true;
     }
 
-    private unsafe void EnsureStateOnHost(int i)
-    {
-        if (!_stateOnDevice[i]) return;
-        int histLen = (ConvKernel - 1) * ConvDim, stLen = NumVHeads * HeadVDim * HeadVDim;
-        // Reading DataPointer triggers the lazy D2H sync-callback, pulling the device copy down.
-        fixed (float* dst = _convHistory[i])
-            Buffer.MemoryCopy((void*)_convHistT[i]!.DataPointer, dst, (long)histLen * 4, (long)histLen * 4);
-        fixed (float* dst = _deltaState[i])
-            Buffer.MemoryCopy((void*)_deltaStateT[i]!.DataPointer, dst, (long)stLen * 4, (long)stLen * 4);
-        _stateOnDevice[i] = false;
-    }
-
     /// <summary>Device-side seq=1 decode step for a gated-DeltaNet layer — replaces the per-layer host conv/recurrence/gated-norm round-trip (a per-layer Sync + PCIe ping-pong that capped decode at ~26 tok/s). Reductions reorder float sums vs the host loops, so outputs are tolerance-equivalent (dp4a numerics class), not byte-identical.</summary>
     private Tensor BlockLinearDeviceStep(IBackend backend, Tensor hIn, int i)
     {
@@ -825,194 +813,78 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         return result;
     }
 
-    /// <summary>Gated DeltaNet layer: fused QKV projection → causal depthwise Conv1d+SiLU → per-head L2-norm on Q/K → sequential delta-rule recurrence per token → gated RMSNorm(o, silu(z)) → output projection + residual. Linear projections and norms run through <see cref="IBackend"/>; the conv/recurrence/gated-norm run host-side (same split as <see cref="Mamba2Model"/>'s SSD scan).</summary>
+    /// <summary>Gated DeltaNet layer over a token sequence: fused QKV projection → causal depthwise Conv1d+SiLU → per-head L2-norm on Q/K → delta-rule recurrence per token → gated RMSNorm(o, silu(z)) → output projection + residual. The conv and recurrence run as the backend's <see cref="IBackend.SsmConvSplitPrefill"/>/<see cref="IBackend.SsmDeltaPrefill"/> (device kernels on CUDA and Vulkan, the parallel host reference elsewhere) against the layer's carried state, so a prefill never leaves the device; <c>numerics.ssmDevicePrefill=0</c> forces the host reference.</summary>
     private Tensor BlockLinear(IBackend backend, Tensor hIn, int i, int seq)
     {
         if (seq == 1 && backend.GraphDecodeSupported && EngineKnobs.SsmDeviceStep.Value)   // kill-switch
             return BlockLinearDeviceStep(backend, hIn, i);
-        EnsureStateOnHost(i);
+        EnsureStateOnDevice(i);
         int d = DModel;
         string p = $"blk.{i}";
         TensorShape flat = new(1, seq, d);
 
-        Tensor xn = new(flat, DType.F32);
-        backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
-
-        Tensor qkvMixed = new(new TensorShape(1, seq, ConvDim), DType.F32);
-        backend.Linear(qkvMixed, xn, W($"{p}.attn_qkv.weight"), null);
-        Tensor z = new(new TensorShape(1, seq, ValueDim), DType.F32);
-        backend.Linear(z, xn, W($"{p}.attn_gate.weight"), null);
-        Tensor betaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32);
-        backend.Linear(betaRaw, xn, W($"{p}.ssm_beta.weight"), null);
-        Tensor beta = new(betaRaw.Shape, DType.F32);
-        backend.Sigmoid(beta, betaRaw);
-        betaRaw.Dispose();
-        Tensor alphaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32);
-        backend.Linear(alphaRaw, xn, W($"{p}.ssm_alpha.weight"), null);
-        xn.Dispose();
-        backend.Sync();
-
-        int hk = NumKHeads, hv = NumVHeads, sk = HeadKDim, sv = HeadVDim, convDim = ConvDim, k = ConvKernel;
-        int keyDim = KeyDim, valueDim = ValueDim, repeat = KHeadsPerVHead;
-
-        // gate[s,h] = softplus(alpha + dt_bias) * ssm_a  (ssm_a is pre-baked -exp(A_log): negative, so exp(gate)
-        // in (0,1] — a proper input-dependent decay factor, same convention as Mamba2's ssm_a).
-        float* alphaP = (float*)alphaRaw.DataPointer;
-        float* dtBiasP = (float*)W($"{p}.ssm_dt.bias").DataPointer;
-        float* ssmAP = (float*)W($"{p}.ssm_a").DataPointer;
-        float[] gateArr = new float[seq * hv];
-        for (int s = 0; s < seq; s++)
-            for (int hh = 0; hh < hv; hh++)
-            {
-                float av = alphaP[s * hv + hh] + dtBiasP[hh];
-                float softplus = av > 20f ? av : MathF.Log(1f + MathF.Exp(av));
-                gateArr[s * hv + hh] = softplus * ssmAP[hh];
-            }
-        alphaRaw.Dispose();
-
-        float[] betaArr = new float[seq * hv];
-        fixed (float* bp = betaArr) Buffer.MemoryCopy((float*)beta.DataPointer, bp, (long)seq * hv * 4, (long)seq * hv * 4);
-        beta.Dispose();
-
-        // Causal depthwise Conv1d over qkv_mixed (kernel k, left context = the (k-1) rows carried from the
-        // previous call — zero on the very first call after ResetState) + SiLU.
-        float* qkvP = (float*)qkvMixed.DataPointer;
-        float[] history = _convHistory[i]!;
-        float* convW = (float*)W($"{p}.ssm_conv1d.weight").DataPointer;   // [k, convDim], no bias on this arch
-        float[] xc = new float[seq * convDim];
-        for (int s = 0; s < seq; s++)
-            for (int c = 0; c < convDim; c++)
-            {
-                float acc = 0f;
-                for (int j = 0; j < k; j++)
-                {
-                    int combined = s + j;
-                    acc += combined < k - 1 ? convW[c * k + j] * history[combined * convDim + c]
-                        : convW[c * k + j] * qkvP[(long)(combined - (k - 1)) * convDim + c];
-                }
-                xc[s * convDim + c] = acc / (1f + MathF.Exp(-acc));   // SiLU
-            }
-        if (k > 1)
+        // Scoped so a throwing backend op leaves no device tensor behind; each scope ends where the old code disposed.
+        using Tensor afterAttn = new(flat, DType.F32);
+        using (Tensor oT = new(new TensorShape(1, seq, ValueDim), DType.F32))
         {
-            int carry = Math.Min(k - 1, seq);
-            for (int r = 0; r < k - 1 - carry; r++)
-                Array.Copy(history, (r + carry) * convDim, history, r * convDim, convDim);
-            for (int r = 0; r < carry; r++)
-                fixed (float* hp = history)
-                    Buffer.MemoryCopy(qkvP + (long)(seq - carry + r) * convDim, hp + (long)(k - 1 - carry + r) * convDim, convDim * 4L, convDim * 4L);
-        }
-        qkvMixed.Dispose();
-
-        // Split conv output into q [hk*sk], k [hk*sk], v [hv*sv] and L2-normalize q/k per head (no learned scale).
-        float[] qArr = new float[seq * hk * sk], kArr = new float[seq * hk * sk], vArr = new float[seq * hv * sv];
-        for (int s = 0; s < seq; s++)
-        {
-            long b = (long)s * convDim;
-            for (int c = 0; c < keyDim; c++) qArr[s * keyDim + c] = xc[b + c];
-            for (int c = 0; c < keyDim; c++) kArr[s * keyDim + c] = xc[b + keyDim + c];
-            for (int c = 0; c < valueDim; c++) vArr[s * valueDim + c] = xc[b + 2 * keyDim + c];
-        }
-        L2NormalizePerHead(qArr, seq, hk, sk, Eps);
-        L2NormalizePerHead(kArr, seq, hk, sk, Eps);
-
-        // q *= 1/sqrt(S_k) — applied inside llama.cpp's build_delta_net_autoregressive, right before the
-        // recurrence (after L2-norm, not folded into it). Missing this scales the readout ~sqrt(HeadKDim)x too
-        // large, compounding across every linear-attn layer.
-        float qScale = 1f / MathF.Sqrt(sk);
-        for (int idx = 0; idx < qArr.Length; idx++) qArr[idx] *= qScale;
-
-        // Delta-rule recurrence, sequential per token. State is a persistent [hv, sv, sk] tensor per layer
-        // (row = value dim, col = key dim — sv==sk on every known qwen35 checkpoint, but kept general).
-        float[] state = _deltaState[i]!;
-        float[] o = new float[seq * valueDim];
-        Span<float> skRow = stackalloc float[sv];
-        for (int s = 0; s < seq; s++)
-        {
-            for (int h = 0; h < hv; h++)
+            using (Tensor qkvMixed = new(new TensorShape(1, seq, ConvDim), DType.F32), z = new(new TensorShape(1, seq, ValueDim), DType.F32),
+                betaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32), alphaRaw = new(new TensorShape(1, seq, NumVHeads), DType.F32))
             {
-                int kh = h / repeat;
-                long qOff = (long)s * keyDim + kh * sk;
-                long vOff = (long)s * valueDim + h * sv;
-                float gExp = MathF.Exp(gateArr[s * hv + h]);
-                float betaH = betaArr[s * hv + h];
-                long stBase = (long)h * sv * sk;
-
-                for (int idx = 0; idx < sv * sk; idx++) state[stBase + idx] *= gExp;
-
-                for (int row = 0; row < sv; row++)
+                using (Tensor xn = new(flat, DType.F32))
                 {
-                    float acc = 0f;
-                    long rb = stBase + (long)row * sk;
-                    for (int col = 0; col < sk; col++) acc += state[rb + col] * kArr[qOff + col];
-                    skRow[row] = acc;
+                    backend.RmsNorm(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
+                    backend.Linear(qkvMixed, xn, W($"{p}.attn_qkv.weight"), null);
+                    backend.Linear(z, xn, W($"{p}.attn_gate.weight"), null);
+                    backend.Linear(betaRaw, xn, W($"{p}.ssm_beta.weight"), null);
+                    backend.Linear(alphaRaw, xn, W($"{p}.ssm_alpha.weight"), null);
                 }
-                for (int row = 0; row < sv; row++)
+
+                // q *= 1/sqrt(S_k) after the L2 norm — llama.cpp's build_delta_net_autoregressive applies it right before the
+                // recurrence. Missing it scales the readout ~sqrt(HeadKDim)x too large, compounding across every linear layer.
+                using Tensor q = new(new TensorShape(seq, KeyDim), DType.F32);
+                using Tensor k = new(new TensorShape(seq, KeyDim), DType.F32);
+                using Tensor v = new(new TensorShape(seq, ValueDim), DType.F32);
+                float qScale = 1f / MathF.Sqrt(HeadKDim);
+                if (EngineKnobs.SsmDevicePrefill.Value)
                 {
-                    float delta = (vArr[vOff + row] - skRow[row]) * betaH;
-                    long rb = stBase + (long)row * sk;
-                    for (int col = 0; col < sk; col++) state[rb + col] += kArr[qOff + col] * delta;
+                    backend.SsmConvSplitPrefill(q, k, v, qkvMixed, _convHistT[i]!, W($"{p}.ssm_conv1d.weight"),
+                        ConvKernel, NumKHeads, HeadKDim, NumVHeads, HeadVDim, Eps, qScale);
+                    backend.SsmDeltaPrefill(oT, _deltaStateT[i]!, q, k, v, z, alphaRaw, betaRaw, W($"{p}.ssm_dt.bias"), W($"{p}.ssm_a"),
+                        W($"{p}.ssm_norm.weight"), NumVHeads, HeadVDim, HeadKDim, KHeadsPerVHead, Eps);
                 }
-                for (int row = 0; row < sv; row++)
+                else
                 {
-                    float acc = 0f;
-                    long rb = stBase + (long)row * sk;
-                    for (int col = 0; col < sk; col++) acc += state[rb + col] * qArr[qOff + col];
-                    o[vOff + row] = acc;
+                    GatedDeltaNetReference.ConvSplit(q, k, v, qkvMixed, _convHistT[i]!, W($"{p}.ssm_conv1d.weight"),
+                        ConvKernel, NumKHeads, HeadKDim, NumVHeads, HeadVDim, Eps, qScale);
+                    GatedDeltaNetReference.DeltaScan(oT, _deltaStateT[i]!, q, k, v, z, alphaRaw, betaRaw, W($"{p}.ssm_dt.bias"), W($"{p}.ssm_a"),
+                        W($"{p}.ssm_norm.weight"), NumVHeads, HeadVDim, HeadKDim, KHeadsPerVHead, Eps);
                 }
             }
+            using Tensor attnOut = new(flat, DType.F32);
+            backend.Linear(attnOut, oT, W($"{p}.ssm_out.weight"), null);
+            backend.Add(afterAttn, hIn, attnOut);
         }
 
-        // Gated RMSNorm per head: norm(o) FIRST (with the learned ssm_norm weight), THEN elementwise-multiply
-        // by silu(z) — Qwen3.5's own build_norm_gated order (opposite of Mamba2's gate-then-norm).
-        float* normW = (float*)W($"{p}.ssm_norm.weight").DataPointer;   // [sv]
-        float* zP = (float*)z.DataPointer;
-        for (int s = 0; s < seq; s++)
-            for (int h = 0; h < hv; h++)
+        Tensor ffnOut;
+        using (Tensor preFfn = new(flat, DType.F32))
+        {
+            backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
+            ffnOut = Ffn(backend, preFfn, p, i, seq);
+        }
+        using (ffnOut)
+        {
+            Tensor result = new(flat, DType.F32);
+            try
             {
-                long b = (long)s * valueDim + h * sv;
-                float var = 0f;
-                for (int c = 0; c < sv; c++) { float v = o[b + c]; var += v * v; }
-                float inv = 1f / MathF.Sqrt(var / sv + Eps);
-                for (int c = 0; c < sv; c++)
-                {
-                    float normed = o[b + c] * inv * normW[c];
-                    float zv = zP[b + c];
-                    o[b + c] = normed * (zv / (1f + MathF.Exp(-zv)));
-                }
+                backend.Add(result, afterAttn, ffnOut);
+                return result;
             }
-        z.Dispose();
-
-        Tensor oT = new(new TensorShape(1, seq, valueDim), DType.F32);
-        fixed (float* src = o) Buffer.MemoryCopy(src, (void*)oT.DataPointer, (long)seq * valueDim * 4, (long)seq * valueDim * 4);
-        Tensor attnOut = new(flat, DType.F32);
-        backend.Linear(attnOut, oT, W($"{p}.ssm_out.weight"), null);
-        oT.Dispose();
-        Tensor afterAttn = new(flat, DType.F32);
-        backend.Add(afterAttn, hIn, attnOut);
-        attnOut.Dispose();
-
-        Tensor preFfn = new(flat, DType.F32);
-        backend.RmsNorm(preFfn, afterAttn, W($"{p}.post_attention_norm.weight"), Eps);
-        Tensor ffnOut = Ffn(backend, preFfn, p, i, seq);
-        preFfn.Dispose();
-        Tensor result = new(flat, DType.F32);
-        backend.Add(result, afterAttn, ffnOut);
-        afterAttn.Dispose(); ffnOut.Dispose();
-        return result;
-    }
-
-    /// <summary>L2-normalizes each head's <paramref name="dim"/>-wide slice in place (no learned scale — Qwen3.5 applies this to Q/K after the conv, ggml's <c>ggml_l2_norm</c>).</summary>
-    private static void L2NormalizePerHead(float[] arr, int seq, int heads, int dim, float eps)
-    {
-        for (int s = 0; s < seq; s++)
-            for (int h = 0; h < heads; h++)
+            catch
             {
-                long b = (long)s * heads * dim + (long)h * dim;
-                float sumSq = 0f;
-                for (int c = 0; c < dim; c++) sumSq += arr[b + c] * arr[b + c];
-                float inv = 1f / MathF.Sqrt(sumSq + eps);
-                for (int c = 0; c < dim; c++) arr[b + c] *= inv;
+                result.Dispose();
+                throw;
             }
+        }
     }
 
     /// <summary>Per-layer FFN dispatch: the routed MoE block on a qwen35moe layer, else the dense SwiGLU.</summary>

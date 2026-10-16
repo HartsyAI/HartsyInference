@@ -602,6 +602,21 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "moss-image", Modality = img, DisplayName = "MOSS-Image", Architecture = "single-stream DiT, flow-matching",
+                Status = vp,
+                // Not CliDrivable yet: OpenMOSS ships Base and SFT as diffusers folders (transformer/, text_encoder/,
+                // tokenizer/, vae/) whose shard names are pinned once a real-weight run reads them. Pass the folder, any
+                // file inside it, or the ComfyUI export's diffusion_models file with --model-path until then; the
+                // encoder and VAE below are the fallbacks when the checkpoint is not inside a full folder.
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    SideModels.Qwen35_9B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "chroma", Modality = img, DisplayName = "Chroma", Architecture = "Flux-derivative DiT", Status = ok,
                 // `hartsy image -m chroma` re-verified 2026-07-21: the terse prompt "an astronaut riding a horse"
                 // reproducibly yields an off-prompt vintage/sepia rider-in-a-hat (weak compound-subject binding at

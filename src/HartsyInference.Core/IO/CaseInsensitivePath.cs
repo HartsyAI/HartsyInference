@@ -19,6 +19,12 @@ public static class CaseInsensitivePath
     /// <summary>Ambiguous lookups already reported, keyed by the path as spelled, so a repeated lookup logs once.</summary>
     private static readonly ConcurrentDictionary<string, byte> _reportedAmbiguities = new(StringComparer.Ordinal);
 
+    /// <summary>Compares two full paths the way the host filesystem does by default: ignoring case on Windows and macOS,
+    /// ordinally elsewhere. For telling whether two spellings name the same file, e.g. a path the user typed against one a
+    /// manifest lists.</summary>
+    public static StringComparer PathComparer { get; } =
+        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
     /// <summary>The file at <paramref name="relativePath"/> under <paramref name="root"/>, or the path it would be
     /// created at when no file matches.</summary>
     public static string ResolveFile(string root, string relativePath) => Resolve(root, relativePath, EntryKind.File);
