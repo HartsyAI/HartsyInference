@@ -71,13 +71,16 @@ public sealed class JinjaChatTemplate : IChatTemplate
             // to ChatML rather than failing the whole generation; if the tokenizer has no ChatML control tokens
             // either, that Encode call throws its own clear error instead of this one.
             Console.Error.WriteLine($"[WRN] GGUF: chat template failed to render ({ex.Message}); falling back to ChatML for this request.");
-            return new ChatMlTemplate().Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools);
+            return WithBos(tokenizer, new ChatMlTemplate().Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools));
         }
         // The template emits the bos_token literal itself, so don't double-add specials beyond literal matching.
         // Message content is escaped against the tokenizer's control literals, so only the template's own literals become ids here.
-        int[] ids = SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer);
-        return _prependBos && tokenizer.BosId is int bos && (ids.Length == 0 || ids[0] != bos) ? [bos, .. ids] : ids;
+        return WithBos(tokenizer, SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer));
     }
+
+    /// <summary>The prompt <paramref name="ids"/> starting with exactly one BOS when this template was built with <c>prependBos</c>.</summary>
+    private int[] WithBos(ILlmTokenizer tokenizer, int[] ids)
+        => _prependBos && tokenizer.BosId is int bos && (ids.Length == 0 || ids[0] != bos) ? [bos, .. ids] : ids;
 
     /// <summary>Renders the conversation through the model's Jinja template; an unset <paramref name="enableThinking"/> leaves <c>enable_thinking</c> undefined so <c>{% if enable_thinking is defined %}</c> branches fall through to the template's own default instead of being forced off.</summary>
     private string Render(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking,

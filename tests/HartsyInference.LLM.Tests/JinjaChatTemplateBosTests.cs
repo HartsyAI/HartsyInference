@@ -31,6 +31,16 @@ public sealed class JinjaChatTemplateBosTests
         Assert.Equal([Bos, 'h', 'i'], Encode(template, addBos: true));
     }
 
+    [Fact]
+    public void AddBos_AlsoStartsTheChatMlFallbackWithBos()
+    {
+        // A template that fails to render for this conversation falls back to ChatML, which must still honour add_bos_token.
+        int[] ids = Encode("{{ messages[0]['content'] | no_such_filter }}", addBos: true);
+
+        Assert.Equal(Bos, ids[0]);
+        Assert.Equal(LiteralControlTokenizer.IdOf(LiteralControlTokenizer.ImStart), ids[1]);
+    }
+
     [Theory]
     [InlineData("{{ messages[0]['content'] }}")]
     [InlineData("{{ bos_token }}{{ messages[0]['content'] }}")]

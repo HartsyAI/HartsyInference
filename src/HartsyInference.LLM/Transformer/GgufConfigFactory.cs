@@ -303,7 +303,8 @@ public static class GgufConfigFactory
                 // Muse Spark runs its experts in a narrower latent space entered through ffn_latent_down/ffn_pre_exp_norm.
                 LatentSize = (int)metadata.GetUInt32($"{arch}.moe_latent_size", 0u),
                 LatentNormEps = rmsEps,
-                PostExpertNorm = weights.ContainsKey("model.layers.0.mlp.post_expert_norm.weight"),
+                // Read from the first sparse layer: leading dense layers carry no expert norm.
+                PostExpertNorm = weights.ContainsKey($"model.layers.{firstDense}.mlp.post_expert_norm.weight"),
                 PostExpertNormEps = postNormEps > 0f ? postNormEps : rmsEps,
             };
         }
