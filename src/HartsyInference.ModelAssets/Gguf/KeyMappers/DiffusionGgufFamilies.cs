@@ -63,6 +63,9 @@ public static class DiffusionGgufFamilies
         new DiffusionGgufKeyMapper("auraflow",
             [Or(Has("double_layers."), Has("modF."), Has("cond_seq_linear."))]),
         new DiffusionGgufKeyMapper("zimage", [Has("noise_refiner."), Has("context_refiner.")]),
+        // MOSS-Image also broadcasts one modulation across every block, but names it shared_block_modulation and pairs
+        // it with a video_head_modulation output head, which nothing else has.
+        new DiffusionGgufKeyMapper("moss_image", [Has("shared_block_modulation."), Has("video_head_modulation.")]),
         // ERNIE-Image's giveaway is its shared AdaLN modulation: one top-level linear broadcast across all 36 layers.
         new DiffusionGgufKeyMapper("ernie_image",
             [Has("shared_adaLN_modulation."), And(Has("transformer_blocks."), Has(".mlp.gate_proj."))]),

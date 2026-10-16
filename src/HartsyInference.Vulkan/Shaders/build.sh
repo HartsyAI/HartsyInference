@@ -105,6 +105,7 @@ DTYPE_KERNELS=(
     wan_rope_interleaved
     repeat_kv_heads
     gated_residual_last_dim
+    situ_glu
     slice_rows
     fp8_absmax
     quant_e4m3
@@ -170,6 +171,11 @@ SINGLE_KERNELS=(
     act_quant_dequant
     build_window_indices
     rope_interleaved_offset
+    ssm_conv_split_prefill
+    ssm_l2norm_rows
+    ssm_conv_history_update
+    ssm_delta_prefill
+    ssm_gated_norm_prefill
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do
@@ -200,6 +206,13 @@ for moe_kernel in moe_expert_gate_up moe_expert_down; do
     compile_one "$moe_kernel" -DQTYPE=4 -- "_q5_0"
     compile_one "$moe_kernel" -DQTYPE=5 -- "_q5_k"
 done
+
+# rms_norm_modulate: input and output dtypes are independent (an F32 residual stream feeding an F16 branch), so the
+# variants are named <in>[_<out>]: _f32, _f16, and _f32_f16 / _f16_f32 for the mixed pairs.
+compile_one "rms_norm_modulate" -DIN_FP16=0 -DOUT_FP16=0 -- "_f32"
+compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=1 -- "_f16"
+compile_one "rms_norm_modulate" -DIN_FP16=0 -DOUT_FP16=1 -- "_f32_f16"
+compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=0 -- "_f16_f32"
 
 # sdpa_flash_cm2 with an F32 [Sq,Skv] additive mask; HAS_MASK adds a binding, so it is its own module.
 compile_one "sdpa_flash_cm2" -DHAS_MASK=1 -- "_mask"

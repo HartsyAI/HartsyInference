@@ -42,6 +42,10 @@ public sealed class PromptWeightingModeLedgerTests
         // supported_models.py:862 -> flux.Flux3Tokenizer (flux.py:203), a Qwen3VLTokenizer subclass -> disable_weights at
         // qwen3vl.py:189. Nothing is trimmed off the encoder output (the padding is masked, not dropped), so offset 0.
         ["flux3"] = PromptWeightingMode.CondScale,
+        // No ComfyUI core support; OpenMOSS ships its own node (comfyui/moss-image/loaders.py MOSSImageConfig.clip_target
+        // -> text_encoder.MOSSImageTokenizer :5), whose tokenize_with_weights passes disable_weights=True (:17-20). One
+        // arm, and it disables. Nothing is trimmed off the Qwen3.5 output (no padding), so offset 0.
+        ["moss-image"] = PromptWeightingMode.CondScale,
         // supported_models.py:1797 -> pixart_t5.PixArtTokenizer (pixart_t5.py:29) -> T5XXLTokenizer (:24-27), no disable.
         ["chroma"] = PromptWeightingMode.ComfyBlend,
         // supported_models.py:1833 ChromaRadiance(Chroma) adds no clip_target, so it inherits Chroma's T5 stack (:1794-1797).

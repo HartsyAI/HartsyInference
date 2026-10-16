@@ -173,6 +173,32 @@ public static class SideModels
         Sha256 = "4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd"
     };
 
+    /// <summary>Qwen3.5-9B at Q8_0 — MOSS-Image's frozen text encoder (the final normalized hidden state of every prompt
+    /// token), in unsloth's llama.cpp repack of <c>Qwen/Qwen3.5-9B</c>: half the size of the BF16 trunk OpenMOSS ships
+    /// under <c>text_encoder/</c>, and it carries its own tokenizer. A full MOSS-Image folder's BF16 encoder is used
+    /// instead when the checkpoint sits in one. Hash is pinned on the first real-weight run.</summary>
+    public static readonly ModelAsset Qwen35_9B = new ModelAsset
+    {
+        Repo = "unsloth/Qwen3.5-9B-GGUF",
+        RepoPath = "Qwen3.5-9B-Q8_0.gguf",
+        TargetSubdir = "text_encoders",
+        TargetName = "qwen35_9b_q8_0.gguf",
+        Role = "text encoder",
+        Sha256 = null
+    };
+
+    /// <summary>The Qwen3.5 fast tokenizer (248k byte-level BPE vocabulary, chat special tokens), for a Qwen3.5 text
+    /// encoder loaded from safetensors, which carry no tokenizer. Hash is pinned on the first real-weight run.</summary>
+    public static readonly ModelAsset Qwen35Tokenizer = new ModelAsset
+    {
+        Repo = "Qwen/Qwen3.5-9B",
+        RepoPath = "tokenizer.json",
+        TargetSubdir = "Tokenizers/Qwen35",
+        TargetName = "qwen35_tokenizer.json",
+        Role = "tokenizer",
+        Sha256 = null
+    };
+
     /// <summary>Qwen3-VL-4B (fp8_scaled) — Krea 2's, Mage-Flow's and FLUX.3 Klein's text encoder (rope θ=5e6); distinct from the base Qwen3-4B Z-Image / Flux.2 Klein 4B use. Flat filename matches SwarmUI's Comfy <c>RequireClipModel("qwen3vl_4b.safetensors")</c> for file reuse.</summary>
     public static readonly ModelAsset Qwen3VL_4B = new ModelAsset
     {

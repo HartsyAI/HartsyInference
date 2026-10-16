@@ -37,7 +37,10 @@ public sealed class FLiteRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
-        string folderPath = ResolveFolderRoot(context.CheckpointPath, "dit_model", "text_encoder", "vae");
+        string[] components = ["dit_model", "text_encoder", "vae"];
+        string folderPath = HfCheckpointDirectory.FindPipelineRoot(context.CheckpointPath, components)
+            ?? throw new InvalidOperationException($"Could not find any of the expected subfolders [{string.Join(", ", components)}] "
+                + $"by walking up from '{context.CheckpointPath}'. F-Lite requires a diffusers-style folder layout.");
         Logs.Info($"[FLiteRecipe] Loading F-Lite folder: {Path.GetFileName(folderPath)}.");
 
         (FLiteCheckpointConverter.ConvertedWeights converted, IDisposable sources) = FLiteCheckpointConverter.LoadFolder(folderPath);
@@ -83,23 +86,5 @@ public sealed class FLiteRecipe : IArchitectureRecipe
             checkpoint.Dispose();
             throw;
         }
-    }
-
-    /// <summary>Resolves the F-Lite diffusers-folder root from the checkpoint path: if it is already a directory containing one of the expected subfolders it is used directly, otherwise the loader walks up to 3 parent levels from the picked file (mirrors the SwarmUI loader's <c>ResolveFolderRoot</c>).</summary>
-    private static string ResolveFolderRoot(string checkpointPath, params string[] expectedSubfolders)
-    {
-        string? dir = Directory.Exists(checkpointPath) ? checkpointPath : Path.GetDirectoryName(checkpointPath);
-        for (int depth = 0; depth < 4 && dir is not null; depth++)
-        {
-            foreach (string sub in expectedSubfolders)
-            {
-                if (Directory.Exists(Path.Combine(dir, sub)))
-                {
-                    return dir;
-                }
-            }
-            dir = Path.GetDirectoryName(dir);
-        }
-        throw new InvalidOperationException($"Could not find any of the expected subfolders [{string.Join(", ", expectedSubfolders)}] by walking up from '{checkpointPath}'. F-Lite requires a diffusers-style folder layout.");
     }
 }

@@ -54,7 +54,10 @@ public static unsafe class DiTUtils
     /// <param name="batch">Batch size.</param>
     /// <param name="embDim">Embedding dimension (default 256 for SD3/Flux).</param>
     /// <param name="maxPeriod">Maximum period for frequency computation (default 10000).</param>
-    public static void SinusoidalTimestepEmbedding(Tensor output, float timestep, int batch, int embDim = 256, float maxPeriod = 10000.0f)
+    /// <param name="doublePrecision">Computes frequencies and phases in F64 and rounds only the result, for models trained
+    /// that way (MOSS-Image builds <c>maxPeriod^(−i/half)</c> and the phase in float64).</param>
+    public static void SinusoidalTimestepEmbedding(Tensor output, float timestep, int batch, int embDim = 256, float maxPeriod = 10000.0f,
+        bool doublePrecision = false)
     {
         float* outPtr = (float*)output.DataPointer;
         int halfDim = embDim / 2;
@@ -64,6 +67,13 @@ public static unsafe class DiTUtils
             int baseOffset = b * embDim;
             for (int i = 0; i < halfDim; i++)
             {
+                if (doublePrecision)
+                {
+                    double phase = timestep * Math.Pow(maxPeriod, -(double)i / halfDim);
+                    outPtr[baseOffset + i] = (float)Math.Cos(phase);
+                    outPtr[baseOffset + halfDim + i] = (float)Math.Sin(phase);
+                    continue;
+                }
                 float freq = MathF.Exp(-MathF.Log(maxPeriod) * i / halfDim);
                 float angle = timestep * freq;
                 outPtr[baseOffset + i] = MathF.Cos(angle);
