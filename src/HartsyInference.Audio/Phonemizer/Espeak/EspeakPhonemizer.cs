@@ -457,6 +457,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
     }
 
     private const uint FlagFound = 0x80000000;
+    private const uint FlagFoundAttributes = 0x40000000;
     private const uint FlagPause1 = 0x10000000;
     private const uint FlagPrePause = 0x100;
     private const byte PhonPause = 9;
@@ -531,7 +532,8 @@ public sealed class EspeakPhonemizer : IPhonemizer
             if (spelled is not null)
             {
                 stressed = spelled;
-                dflags = FlagFound;
+                // Keep the entry's own attributes (clause stress, pauses, alternates); only the found marker changes.
+                dflags = (dflags & ~FlagFoundAttributes) | FlagFound;
             }
             else
             {
