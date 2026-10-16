@@ -27,6 +27,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
 
     private readonly Layer[] _layers = new Layer[NumLayers];
     private readonly List<Tensor> _owned = [];
+    private readonly Dictionary<(int Batch, int Steps, int Position), Tensor> _positionRows = new();
     private Tensor? _audioEmbeddings;
     private Tensor? _projection;
     private Tensor? _positionEmbedding;
@@ -114,19 +115,10 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         int steps = (int)sequence.Shape[1];
         int position = cache.Length;
 
+        // The position embedding is added on the device against a per-shape table, so the depth step does not read the
+        // sequence back to the host. One float add per element, the same arithmetic as the host loop it replaces.
         Tensor hidden = new Tensor(sequence.Shape, DType.F32);
-        float* destination = (float*)hidden.DataPointer;
-        ReadOnlySpan<float> source = sequence.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> positions = _positionEmbedding!.AsReadOnlySpan<float>();
-        for (int row = 0; row < batch * steps; row++)
-        {
-            int step = position + (row % steps);
-            for (int channel = 0; channel < HiddenSize; channel++)
-            {
-                destination[((long)row * HiddenSize) + channel] =
-                    source[(row * HiddenSize) + channel] + positions[(step * HiddenSize) + channel];
-            }
-        }
+        backend.Add(hidden, sequence, PositionRows(backend, batch, steps, position));
 
         for (int index = 0; index < _layers.Length; index++)
         {
@@ -181,6 +173,29 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
             tensor.Dispose();
         }
         _owned.Clear();
+    }
+
+    /// <summary>The position embedding rows a block of <paramref name="steps"/> steps at <paramref name="position"/> adds, one
+    /// <c>[steps, 4096]</c> row per batch entry, uploaded to the device once and reused for every later call of that shape.</summary>
+    private Tensor PositionRows(IBackend backend, int batch, int steps, int position)
+    {
+        (int Batch, int Steps, int Position) key = (batch, steps, position);
+        if (_positionRows.TryGetValue(key, out Tensor? cached))
+        {
+            return cached;
+        }
+        Tensor rows = new Tensor(new TensorShape(batch, steps, HiddenSize), DType.F32);
+        Span<float> destination = rows.AsSpan<float>();
+        ReadOnlySpan<float> positions = _positionEmbedding!.AsReadOnlySpan<float>();
+        for (int row = 0; row < batch * steps; row++)
+        {
+            int step = position + (row % steps);
+            positions.Slice(step * HiddenSize, HiddenSize).CopyTo(destination.Slice(row * HiddenSize, HiddenSize));
+        }
+        backend.PreloadWeights([rows]);
+        _positionRows[key] = rows;
+        _owned.Add(rows);
+        return rows;
     }
 
     /// <summary>Returns an F32 view of <paramref name="tensor"/>, tracking the cast for disposal when one happens.</summary>
