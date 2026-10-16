@@ -32,7 +32,7 @@ internal static class RecipeRequestMapper
         return narrowed;
     }
 
-    /// <summary>Narrows a Flux-style sigma shift for Flux.2 and Krea 2, where SwarmUI feeds the value to
+    /// <summary>Narrows a Flux-style sigma shift for Flux.2, FLUX.3 and Krea 2, where SwarmUI feeds the value to
     /// <c>ModelSamplingFlux</c> as <c>max_shift</c> (Krea 2 also as <c>base_shift</c>), so it is mu and the scheduler
     /// shift is exp(mu). Zero is a real setting there (shift 1, SwarmUI's minimum), so it is accepted; a negative mu, a
     /// non-finite value and a mu whose exp overflows float are refused by the request field's name.</summary>

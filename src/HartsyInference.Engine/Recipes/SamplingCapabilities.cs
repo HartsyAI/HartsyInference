@@ -56,6 +56,7 @@ public static class SamplingCapabilities
         ["f-lite"] = FullSeam,
         ["flux1"] = FullSeam,
         ["flux2"] = FullSeam,
+        ["flux3"] = FullSeam,
         ["hidream"] = FullSeam,
         ["hunyuan-image"] = FullSeam,
         ["kandinsky5"] = FullSeam,

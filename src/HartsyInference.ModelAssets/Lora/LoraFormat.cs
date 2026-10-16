@@ -38,4 +38,7 @@ public enum LoraFormat
 
     /// <summary>Official LightX MiniMax-H3 Diffusers roots with split Q/K/V and <c>.lora_A.default</c> roles.</summary>
     DiffusersMiniMaxH3,
+
+    /// <summary>FLUX.3 in any of its spellings — diffusers/PEFT under <c>transformer.</c> (<c>transformer.mode_blocks.image.0.attn.to_q.lora_A.weight</c>), BFL names under <c>diffusion_model.</c> or bare, or kohya <c>lora_unet_</c> — recognized by the modules only FLUX.3 has.</summary>
+    Flux3,
 }

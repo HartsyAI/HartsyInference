@@ -28,6 +28,9 @@ public sealed class DpmPlusPlus2MSampler : ISampler
     /// <inheritdoc/>
     public int StepCount => _sigmas.Length - 1;
 
+    /// <inheritdoc/>
+    public IReadOnlyList<float> Sigmas => _sigmas;
+
     /// <summary>Creates the sampler over a resolved sigma array.</summary>
     public DpmPlusPlus2MSampler(float[] sigmas)
     {

@@ -324,7 +324,13 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
     /// Ideogram 4's <c>llm_cond_norm</c>/<c>llm_cond_proj</c> were trained on this order, so feeding tap-major scrambles
     /// every input channel of the projection. For a single tap (<c>K=1</c>) the two layouts are identical.</param>
     /// <returns>F32 tensor of shape <c>[batch, seqLen, layerIndices.Length × hiddenSize]</c>.</returns>
-    public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices, bool interleavedLayout = false)
+    public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices, bool interleavedLayout = false) =>
+        EncodeMultiLayer(backend, tokenIds, layerIndices, interleavedLayout, padding: null);
+
+    /// <summary><see cref="EncodeMultiLayer(IBackend, int[][], int[], bool)"/> for one right-padded prompt whose padding is
+    /// masked as keys and placed at its own rotary position (see <see cref="TextEncoderPadding"/>).</summary>
+    public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices, bool interleavedLayout,
+        TextEncoderPadding? padding)
     {
         ThrowIfDisposed();
         if (layerIndices is null || layerIndices.Length == 0)
@@ -344,14 +350,15 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         if (seqLen > _config.MaxPositionEmbeddings)
             throw new InvalidOperationException(
                 $"Prompt length {seqLen} exceeds MaxPositionEmbeddings ({_config.MaxPositionEmbeddings}).");
+        ValidatePadding(padding, batch, seqLen);
 
-        EnsureRopeTable(seqLen);
+        EnsureRopeTable(Math.Max(seqLen, (padding?.PaddedPosition ?? 0) + 1));
 
         Tensor? hidden = null;
         bool hiddenIsCaptured = false;
         List<Tensor> captures = new(K);
         using ForwardConstants constants = PrepareForwardConstants(
-            backend, batch, seqLen, _ropeCos!, _ropeSin!, _ropeCosLocal, _ropeSinLocal);
+            backend, batch, seqLen, _ropeCos!, _ropeSin!, _ropeCosLocal, _ropeSinLocal, padding);
         try
         {
             hidden = TextEncoderTensorHelpers.EmbeddingLookup(backend, tokenIds, batch, seqLen,
@@ -442,6 +449,18 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
     }
 
+    private void ValidatePadding(TextEncoderPadding? padding, int batch, int seqLen)
+    {
+        if (padding is not TextEncoderPadding layout)
+            return;
+        if (batch != 1)
+            throw new ArgumentException($"Padded encoding takes one prompt, got a batch of {batch}.", nameof(padding));
+        if (layout.ValidLength < 1 || layout.ValidLength > seqLen)
+            throw new ArgumentOutOfRangeException(nameof(padding), layout.ValidLength, $"Valid length must be in [1, {seqLen}].");
+        if (layout.PaddedPosition < 0 || layout.PaddedPosition >= _config.MaxPositionEmbeddings)
+            throw new ArgumentOutOfRangeException(nameof(padding), layout.PaddedPosition, "Padded position is outside the rotary table.");
+    }
+
     private (int Batch, int Sequence) ValidateTokenBatch(int[][] tokenIds)
     {
         (int batch, int seqLen) = TextEncoderTensorHelpers.ValidateTokenBatch(tokenIds, _config.VocabSize);
@@ -467,8 +486,21 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         float[] globalCos,
         float[] globalSin,
         float[]? localCos = null,
-        float[]? localSin = null)
+        float[]? localSin = null,
+        TextEncoderPadding? padding = null)
     {
+        if (padding is TextEncoderPadding layout)
+        {
+            int half = _config.HeadDim / 2;
+            globalCos = TextEncoderTensorHelpers.GatherRopeRows(globalCos, half, seqLen, layout.PositionOf);
+            globalSin = TextEncoderTensorHelpers.GatherRopeRows(globalSin, half, seqLen, layout.PositionOf);
+            if (localCos is not null && localSin is not null)
+            {
+                localCos = TextEncoderTensorHelpers.GatherRopeRows(localCos, half, seqLen, layout.PositionOf);
+                localSin = TextEncoderTensorHelpers.GatherRopeRows(localSin, half, seqLen, layout.PositionOf);
+            }
+        }
+        int keyLimit = padding?.ValidLength ?? int.MaxValue;
         Tensor? mask = null;
         Tensor? gCos = null;
         Tensor? gSin = null;
@@ -477,7 +509,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         try
         {
             mask = TextEncoderTensorHelpers.MakeResidentCopy(
-                backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue));
+                backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue, keyLimit));
             gCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
                 TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalCos, batch, seqLen, _config.HeadDim));
             gSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,

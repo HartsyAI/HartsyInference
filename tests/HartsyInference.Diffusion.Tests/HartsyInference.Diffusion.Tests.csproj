@@ -40,6 +40,7 @@
   <ItemGroup>
     <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Samplers\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Flux3\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

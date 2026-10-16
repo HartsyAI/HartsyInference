@@ -1,6 +1,7 @@
 using System.Globalization;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Lora.Mappers;
 using HartsyInference.ModelAssets.MiniMaxH3;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -12,6 +13,7 @@ public sealed class LoraFile : IDisposable
 {
     private SafeTensorsLoader? _loader;
     private MiniMaxH3PddTrunkConversion? _miniMaxH3Conversion;
+    private List<Tensor> _ownedTensors = [];
     private int _disposed;
 
     /// <summary>Path of the loaded safetensors file.</summary>
@@ -34,6 +36,8 @@ public sealed class LoraFile : IDisposable
     {
         SafeTensorsLoader loader = new();
         MiniMaxH3PddTrunkConversion? miniMaxH3Conversion = null;
+        // Tensors a mapper had to allocate (a reordered matrix) rather than borrow from the mapping; owned with the file.
+        List<Tensor> ownedTensors = [];
         try
         {
             loader.Load(filePath);
@@ -68,6 +72,7 @@ public sealed class LoraFile : IDisposable
                     LoraFormat.ComfyBflDit => KohyaFluxMapper.ParseLayers(loader, dottedBflRoots: true),
                     LoraFormat.ComfyZImageDit => ZImageLoraMapper.ParseLayers(loader),
                     LoraFormat.KohyaWan or LoraFormat.DiffusersWan => WanLoraMapper.ParseLayers(loader, format, out fullWeightDiffs),
+                    LoraFormat.Flux3 => Flux3LoraMapper.ParseLayers(loader, ownedTensors),
                     _ => throw new NotSupportedException($"LoRA format {format} parsing not implemented."),
                 };
             }
@@ -87,10 +92,12 @@ public sealed class LoraFile : IDisposable
             };
             file._loader = loader;
             file._miniMaxH3Conversion = miniMaxH3Conversion;
+            file._ownedTensors = ownedTensors;
             return file;
         }
         catch
         {
+            foreach (Tensor tensor in ownedTensors) tensor.Dispose();
             miniMaxH3Conversion?.Dispose();
             loader.Dispose();
             throw;
@@ -138,6 +145,8 @@ public sealed class LoraFile : IDisposable
             return;
         _miniMaxH3Conversion?.Dispose();
         _miniMaxH3Conversion = null;
+        foreach (Tensor tensor in _ownedTensors) tensor.Dispose();
+        _ownedTensors = [];
         _loader?.Dispose();
         _loader = null;
     }

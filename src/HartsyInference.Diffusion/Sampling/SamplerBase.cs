@@ -41,6 +41,9 @@ public abstract class SamplerBase : ISampler
     /// <inheritdoc/>
     public int StepCount => _sigmas.Length - 1;
 
+    /// <inheritdoc/>
+    public IReadOnlyList<float> Sigmas => _sigmas;
+
     /// <summary>Base seed for stochastic draws.</summary>
     protected int Seed { get; }
 

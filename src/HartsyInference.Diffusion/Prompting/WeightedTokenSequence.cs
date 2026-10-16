@@ -34,6 +34,31 @@ public sealed record WeightedTokenSequence(int[] Tokens, float[] Weights)
             ? this
             : new WeightedTokenSequence(Tokens[..maxTokens], Weights[..maxTokens]) { UniformWeight = UniformWeight };
 
+    /// <summary>Right-pads to <paramref name="length"/> with <paramref name="padId"/> at weight <c>1</c>; a sequence
+    /// already that long is returned unchanged, so truncate first for a fixed window.</summary>
+    public WeightedTokenSequence PadTo(int length, int padId)
+    {
+        if (Tokens.Length >= length)
+        {
+            return this;
+        }
+        int[] tokens = new int[length];
+        float[] weights = new float[length];
+        Array.Fill(weights, 1f);
+        Tokens.CopyTo(tokens, 0);
+        Weights.CopyTo(weights, 0);
+        Array.Fill(tokens, padId, Tokens.Length, length - Tokens.Length);
+        return new WeightedTokenSequence(tokens, weights) { UniformWeight = UniformWeight };
+    }
+
+    /// <summary>Right-pads to the next multiple of <paramref name="multiple"/> (FLUX.3 pads prompts to 80).</summary>
+    public WeightedTokenSequence PadToMultiple(int multiple, int padId)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(multiple, 1);
+        int remainder = Tokens.Length % multiple;
+        return remainder == 0 ? this : PadTo(Tokens.Length + multiple - remainder, padId);
+    }
+
     /// <summary>Surrounds the sequence with template ids, which always carry weight <c>1</c>.</summary>
     /// <remarks>Separate from <see cref="WeightedTokenBuilder"/>'s own wrapping so a caller can truncate the BODY
     /// first. A tokenizer that caps the text and keeps its specials — <c>ErnieTokenizer.Encode</c> reserves room

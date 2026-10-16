@@ -14,10 +14,10 @@ public sealed class ImageInputLimitsTests
 {
     private static ImageData Image() => new ImageData { Rgb = [0, 0, 0], Width = 1, Height = 1 };
 
-    private static ImageRequest Request(bool init, int references) => new ImageRequest
+    private static ImageRequest Request(bool init, int references, Img2ImgMode mode = Img2ImgMode.Auto) => new ImageRequest
     {
         Prompt = "limits test",
-        Img2Img = init ? new Img2Img { InitImage = Image() } : null,
+        Img2Img = init ? new Img2Img { InitImage = Image(), Mode = mode } : null,
         ReferenceImages = references == 0 ? null : [.. Enumerable.Range(0, references).Select(_ => Image())],
     };
 
@@ -81,6 +81,28 @@ public sealed class ImageInputLimitsTests
     {
         string? violation = LimitsOf("qwen-image").Violation("qwen-image", Request(init, references));
         Assert.Equal($"Model family 'qwen-image' takes at most 3 input images; {total} were supplied.", violation);
+    }
+
+    /// <summary>FLUX.3 conditions on ten references and can also denoise an init image, so the image count alone cannot
+    /// say which eleven-image requests it reads: an init image in Reference mode is one of the ten.</summary>
+    [Theory]
+    [InlineData(Img2ImgMode.Denoise, true, 10)]
+    [InlineData(Img2ImgMode.Auto, true, 10)]
+    [InlineData(Img2ImgMode.Reference, true, 9)]
+    [InlineData(Img2ImgMode.Reference, false, 10)]
+    public void Flux3_TenReferencesPlusADenoisedInit_Passes(Img2ImgMode mode, bool init, int references)
+    {
+        Assert.Null(LimitsOf("flux3").Violation("flux3", Request(init, references, mode)));
+    }
+
+    [Theory]
+    [InlineData(Img2ImgMode.Reference, true, 10, 11)]
+    [InlineData(Img2ImgMode.Auto, false, 11, 11)]
+    public void Flux3_PastTenReferences_IsRefusedWithTheCount(Img2ImgMode mode, bool init, int references, int total)
+    {
+        string? violation = LimitsOf("flux3").Violation("flux3", Request(init, references, mode));
+        Assert.Equal($"Model family 'flux3' conditions on at most 10 reference images; {total} were supplied "
+            + "(an init image in Reference mode counts as one).", violation);
     }
 
     [Fact]
