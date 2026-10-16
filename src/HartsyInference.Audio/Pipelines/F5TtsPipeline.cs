@@ -168,22 +168,16 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         int sr = melCfg.SampleRate;
         float[] mono24k = sampleRate == sr ? refAudio.ToArray() : Resampler.Create(sampleRate, sr).Resample(refAudio);
 
-        // Upstream: if rms < target_rms (0.1), scale the reference up so quiet clips don't under-drive the DiT.
-        const float targetRms = 0.1f;
-        double sumSq = 0.0;
-        for (int i = 0; i < mono24k.Length; i++) sumSq += (double)mono24k[i] * mono24k[i];
-        float rms = mono24k.Length > 0 ? (float)Math.Sqrt(sumSq / mono24k.Length) : 0f;
-        if (rms > 1e-6f && rms < targetRms)
-        {
-            float g = targetRms / rms;
-            for (int i = 0; i < mono24k.Length; i++) mono24k[i] *= g;
-        }
-
-        // Trim leading/trailing silence so tRef reflects actual speech. Otherwise pauses/silence inflate the
-        // reference length, which over-estimates the target duration (target = ref_frames·target_len/ref_len)
-        // and lets the model pad the output start with reference continuation ("reference bleed") — mirrors
-        // upstream preprocess_ref_audio_text, which clips the reference to its non-silent span.
-        mono24k = TrimEdgeSilence(mono24k, sr);
+        // Upstream clips and trims the reference first (preprocess_ref_audio_text), then scales a quiet one up to
+        // target_rms and scales the output back down by the same factor. Silence is judged on the unscaled clip, so
+        // the order matters.
+        const double targetRms = 0.1;
+        float[] clip = F5ReferenceAudio.Prepare(mono24k, sr);
+        double rms = F5ReferenceAudio.Rms(clip);
+        bool quiet = rms > 1e-6 && rms < targetRms;
+        if (quiet)
+            for (int i = 0; i < clip.Length; i++) clip[i] = (float)(clip[i] * targetRms / rms);
+        mono24k = clip;
 
         MelSpectrogramExtractor extractor = new(melCfg);
         float[,] melData = extractor.Compute(mono24k);
@@ -198,39 +192,10 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         if (prof) { backend.Sync(); HartsyInference.Core.Logging.Logs.Info($"[F5 time] mel-extract(ref {mono24k.Length} smp → {tRef} frames): {_secSw.Elapsed.TotalMilliseconds:0}ms"); }
         float[] audio = Generate(backend, refMel, refText, targetText, options);
         refMel.Dispose();
+        // Upstream infer_batch_process: a quiet reference scales its output back by rms / target_rms.
+        if (quiet)
+            for (int i = 0; i < audio.Length; i++) audio[i] = (float)(audio[i] * rms / targetRms);
         return audio;
-    }
-
-    /// <summary>Trims leading/trailing silence from the reference waveform using windowed RMS, keeping a small
-    /// margin so onsets/offsets aren't clipped. Conservative — only removes clearly-silent edge regions
-    /// (window RMS below a fraction of the loudest window); never touches interior audio.</summary>
-    private static float[] TrimEdgeSilence(float[] x, int sr)
-    {
-        int win = Math.Max(1, sr / 50);          // 20 ms windows
-        int nWin = x.Length / win;
-        if (nWin < 4) return x;                    // too short to bother
-        float[] rms = new float[nWin];
-        float maxRms = 0f;
-        for (int wi = 0; wi < nWin; wi++)
-        {
-            double s = 0; int off = wi * win;
-            for (int i = 0; i < win; i++) { float v = x[off + i]; s += (double)v * v; }
-            rms[wi] = (float)Math.Sqrt(s / win);
-            if (rms[wi] > maxRms) maxRms = rms[wi];
-        }
-        if (maxRms < 1e-4f) return x;              // effectively silent — leave as-is
-        float thresh = 0.08f * maxRms;             // silence = below 8% of the loudest window
-        int first = 0; while (first < nWin && rms[first] < thresh) first++;
-        int last = nWin - 1; while (last > first && rms[last] < thresh) last--;
-        if (first == 0 && last == nWin - 1) return x;   // no edge silence
-        int margin = sr / 20;                      // 50 ms keepout on each side
-        int start = Math.Max(0, first * win - margin);
-        int end = Math.Min(x.Length, (last + 1) * win + margin);
-        int len = end - start;
-        if (len <= 0 || len >= x.Length) return x;
-        float[] outp = new float[len];
-        Array.Copy(x, start, outp, 0, len);
-        return outp;
     }
 
     /// <summary>Upstream's non-empty chunks for this reference. A reference with no frames or

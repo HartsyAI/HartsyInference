@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- F5-TTS reference preparation follows upstream `preprocess_ref_audio_text`: a reference over 12 s is cut at its
+  pauses, edge silence is trimmed with pydub's -42 dBFS rule, and a quiet reference's output is scaled back by
+  `rms / 0.1`, as upstream does. Verified sample-exact against upstream on 9 cases (`F5ReferenceParityTests`).
+
 ## alpha.372
 
 - **Added: FLUX.3 Klein, full and step-distilled.** Black Forest Labs' 5.6B model loads from the ComfyUI single files (bf16, fp8, int8 and NVFP4 builds, fused or split `qkv`) as family `flux3`, SwarmUI class `flux.3-klein`. It covers text-to-image, img2img, inpaint, up to 10 reference images (`<ref_image_N>`), and prompt regions sent as ComfyUI's layout table. The step-distilled build is detected from its `ref_time_in` weights and runs as a flow map, with each step conditioned on the sigma it jumps to; defaults are 25 steps at CFG 3.5 for the full build and 15 steps at CFG 1 for the distilled one. The text encoder is the Qwen3-VL-4B file Krea 2 already uses. A tiny-config forward matches ComfyUI's own FLUX.3 module to 5e-6 on the guided, two-reference and flow-map paths. It has not been run on the real weights yet, which are gated.

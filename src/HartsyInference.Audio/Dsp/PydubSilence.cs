@@ -1,6 +1,6 @@
 namespace HartsyInference.Audio.Dsp;
 
-/// <summary>ZipVoice's <c>remove_silence</c> reproduced over pydub's rules: 16-bit samples, millisecond positions
+/// <summary>pydub's silence rules for the reference clips of ZipVoice and F5-TTS: 16-bit samples, millisecond positions
 /// rounded as <c>AudioSegment</c> rounds them, integer RMS in 10 ms chunks and 1 s windows, and a trailing silence that
 /// pydub resamples from 11.025 kHz.</summary>
 internal static class PydubSilence
@@ -18,8 +18,8 @@ internal static class PydubSilence
     internal static float[] RemoveSilence(float[] audio, int sampleRate, bool onlyEdge, int trailSilenceMs)
     {
         short[] pcm = Quantize(audio);
-        if (!onlyEdge) pcm = SplitOnSilenceJoined(pcm, sampleRate);
-        pcm = RemoveEdges(pcm, sampleRate);
+        if (!onlyEdge) pcm = Concat(SplitOnSilence(pcm, sampleRate, MinSilenceMs, ThresholdDb, KeepAroundSegmentsMs));
+        pcm = RemoveEdges(pcm, sampleRate, ThresholdDb, KeepMs);
         int trail = ResampledSilenceFrames(trailSilenceMs, sampleRate);
         float[] result = new float[pcm.Length + trail];
         for (int i = 0; i < pcm.Length; i++) result[i] = (float)(pcm[i] / FullScale);
@@ -38,18 +38,14 @@ internal static class PydubSilence
         return (int)(outRate * (frames - 1) / inRate) + 1;
     }
 
-    private static short[] Quantize(float[] audio)
+    /// <summary>pydub's <c>split_on_silence</c> with a 10 ms seek step: the non-silent pieces, each widened by
+    /// <paramref name="keepMs"/> on both sides, where neighbours that overlap are split at their midpoint.</summary>
+    internal static List<short[]> SplitOnSilence(
+        short[] pcm, int sampleRate, int minSilenceMs, double thresholdDb, int keepMs)
     {
-        short[] pcm = new short[audio.Length];
-        for (int i = 0; i < audio.Length; i++) pcm[i] = (short)Math.Clamp(audio[i] * 32768f, -32768f, 32767f);
-        return pcm;
-    }
-
-    private static short[] SplitOnSilenceJoined(short[] pcm, int sampleRate)
-    {
-        List<(int Start, int End)> ranges = DetectNonsilent(pcm, sampleRate);
+        List<(int Start, int End)> ranges = DetectNonsilent(pcm, sampleRate, minSilenceMs, thresholdDb);
         for (int i = 0; i < ranges.Count; i++)
-            ranges[i] = (ranges[i].Start - KeepAroundSegmentsMs, ranges[i].End + KeepAroundSegmentsMs);
+            ranges[i] = (ranges[i].Start - keepMs, ranges[i].End + keepMs);
         for (int i = 0; i + 1 < ranges.Count; i++)
         {
             int lastEnd = ranges[i].End;
@@ -60,41 +56,77 @@ internal static class PydubSilence
             ranges[i + 1] = (middle, ranges[i + 1].End);
         }
         int lengthMs = LengthMs(pcm.Length, sampleRate);
-        List<short> joined = new();
+        List<short[]> pieces = new(ranges.Count);
         foreach ((int start, int end) in ranges)
-            joined.AddRange(Slice(pcm, sampleRate, Math.Max(start, 0), Math.Min(end, lengthMs)));
-        return [.. joined];
+            pieces.Add(Slice(pcm, sampleRate, Math.Max(start, 0), Math.Min(end, lengthMs)));
+        return pieces;
     }
 
-    private static short[] RemoveEdges(short[] pcm, int sampleRate)
+    /// <summary>pydub's <c>remove_silence_edges</c>-style trim: leading and trailing silence in 10 ms chunks below
+    /// <paramref name="thresholdDb"/>, keeping <paramref name="keepMs"/> of each edge.</summary>
+    internal static short[] RemoveEdges(short[] pcm, int sampleRate, double thresholdDb, int keepMs)
     {
-        short[] trimmed = DropLeading(pcm, sampleRate);
+        short[] trimmed = DropLeading(pcm, sampleRate, thresholdDb, keepMs);
         Array.Reverse(trimmed);
-        trimmed = DropLeading(trimmed, sampleRate);
+        trimmed = DropLeading(trimmed, sampleRate, thresholdDb, keepMs);
         Array.Reverse(trimmed);
         return trimmed;
     }
 
-    private static short[] DropLeading(short[] pcm, int sampleRate)
+    /// <summary>Joins pieces end to end, as pydub's <c>+</c> does at a shared frame rate.</summary>
+    internal static short[] Concat(IEnumerable<short[]> pieces)
     {
-        int start = Math.Max(0, LeadingSilenceMs(pcm, sampleRate) - KeepMs);
+        List<short> joined = new();
+        foreach (short[] piece in pieces) joined.AddRange(piece);
+        return [.. joined];
+    }
+
+    /// <summary>The first <paramref name="endMs"/> milliseconds (pydub's <c>segment[:endMs]</c>).</summary>
+    internal static short[] Take(short[] pcm, int sampleRate, int endMs) => Slice(pcm, sampleRate, 0, endMs);
+
+    /// <summary>The 16-bit samples of a float signal in [-1, 1), as pydub's export would write them.</summary>
+    internal static short[] Quantize(float[] audio)
+    {
+        short[] pcm = new short[audio.Length];
+        for (int i = 0; i < audio.Length; i++) pcm[i] = (short)Math.Clamp(audio[i] * 32768f, -32768f, 32767f);
+        return pcm;
+    }
+
+    /// <summary>Back to float samples in [-1, 1).</summary>
+    internal static float[] ToFloat(short[] pcm)
+    {
+        float[] audio = new float[pcm.Length];
+        for (int i = 0; i < pcm.Length; i++) audio[i] = (float)(pcm[i] / FullScale);
+        return audio;
+    }
+
+    // pydub's len(): whole milliseconds, rounded half to even.
+    internal static int LengthMs(int samples, int sampleRate) =>
+        (int)Math.Round(1000.0 * (samples / (double)sampleRate), MidpointRounding.ToEven);
+
+    private static short[] DropLeading(short[] pcm, int sampleRate, double thresholdDb, int keepMs)
+    {
+        int start = Math.Max(0, LeadingSilenceMs(pcm, sampleRate, thresholdDb) - keepMs);
         return Slice(pcm, sampleRate, start, LengthMs(pcm.Length, sampleRate));
     }
 
-    private static int LeadingSilenceMs(short[] pcm, int sampleRate)
+    private static int LeadingSilenceMs(short[] pcm, int sampleRate, double thresholdDb)
     {
         int lengthMs = LengthMs(pcm.Length, sampleRate);
         int trim = 0;
-        while (trim < lengthMs && IsQuiet(IntegerRms(pcm, sampleRate, trim, trim + ChunkMs))) trim += ChunkMs;
+        while (trim < lengthMs && IsQuiet(IntegerRms(pcm, sampleRate, trim, trim + ChunkMs), thresholdDb))
+            trim += ChunkMs;
         return Math.Min(trim, lengthMs);
     }
 
-    private static bool IsQuiet(int rms) => rms == 0 || 20 * Math.Log(rms / FullScale, 10) < ThresholdDb;
+    private static bool IsQuiet(int rms, double thresholdDb) =>
+        rms == 0 || 20 * Math.Log(rms / FullScale, 10) < thresholdDb;
 
-    private static List<(int Start, int End)> DetectNonsilent(short[] pcm, int sampleRate)
+    private static List<(int Start, int End)> DetectNonsilent(
+        short[] pcm, int sampleRate, int minSilenceMs, double thresholdDb)
     {
         int lengthMs = LengthMs(pcm.Length, sampleRate);
-        List<(int Start, int End)> silent = DetectSilence(pcm, sampleRate, lengthMs);
+        List<(int Start, int End)> silent = DetectSilence(pcm, sampleRate, lengthMs, minSilenceMs, thresholdDb);
         if (silent.Count == 0) return [(0, lengthMs)];
         if (silent[0].Start == 0 && silent[0].End == lengthMs) return [];
         List<(int Start, int End)> nonsilent = new();
@@ -109,18 +141,19 @@ internal static class PydubSilence
         return nonsilent;
     }
 
-    private static List<(int Start, int End)> DetectSilence(short[] pcm, int sampleRate, int lengthMs)
+    private static List<(int Start, int End)> DetectSilence(
+        short[] pcm, int sampleRate, int lengthMs, int minSilenceMs, double thresholdDb)
     {
         List<(int Start, int End)> ranges = new();
-        if (lengthMs < MinSilenceMs) return ranges;
-        double threshold = Math.Pow(10, ThresholdDb / 20) * FullScale;
-        int lastStart = lengthMs - MinSilenceMs;
+        if (lengthMs < minSilenceMs) return ranges;
+        double threshold = Math.Pow(10, thresholdDb / 20) * FullScale;
+        int lastStart = lengthMs - minSilenceMs;
         List<int> starts = new();
         for (int i = 0; i <= lastStart; i += ChunkMs)
         {
-            if (IntegerRms(pcm, sampleRate, i, i + MinSilenceMs) <= threshold) starts.Add(i);
+            if (IntegerRms(pcm, sampleRate, i, i + minSilenceMs) <= threshold) starts.Add(i);
         }
-        if (lastStart % ChunkMs != 0 && IntegerRms(pcm, sampleRate, lastStart, lastStart + MinSilenceMs) <= threshold)
+        if (lastStart % ChunkMs != 0 && IntegerRms(pcm, sampleRate, lastStart, lastStart + minSilenceMs) <= threshold)
             starts.Add(lastStart);
         if (starts.Count == 0) return ranges;
         int previous = starts[0];
@@ -129,21 +162,17 @@ internal static class PydubSilence
         {
             int current = starts[k];
             bool continuous = current == previous + ChunkMs;
-            bool gap = current > previous + MinSilenceMs;
+            bool gap = current > previous + minSilenceMs;
             if (!continuous && gap)
             {
-                ranges.Add((rangeStart, previous + MinSilenceMs));
+                ranges.Add((rangeStart, previous + minSilenceMs));
                 rangeStart = current;
             }
             previous = current;
         }
-        ranges.Add((rangeStart, previous + MinSilenceMs));
+        ranges.Add((rangeStart, previous + minSilenceMs));
         return ranges;
     }
-
-    // pydub's len(): whole milliseconds, rounded half to even.
-    private static int LengthMs(int samples, int sampleRate) =>
-        (int)Math.Round(1000.0 * (samples / (double)sampleRate), MidpointRounding.ToEven);
 
     private static int SampleIndex(int ms, int sampleRate) => (int)(ms * (sampleRate / 1000.0));
 
