@@ -43,6 +43,36 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("Speaking rate (1.0 = normal, higher = faster).")]
         public float Speed { get; init; } = 1.0f;
 
+        /// <summary>Random seed for sampling models; the same seed and text repeat the take.</summary>
+        [CommandOption("--seed")]
+        [Description("Random seed for sampling models (Fish Audio, Dia, Orpheus, ...); the same seed and text repeat the take.")]
+        public int? Seed { get; init; }
+
+        /// <summary>Sampling temperature for models that sample tokens.</summary>
+        [CommandOption("--temperature")]
+        [Description("Sampling temperature for models that sample tokens (Fish Audio defaults to 0.7).")]
+        public double? Temperature { get; init; }
+
+        /// <summary>Nucleus sampling mass for models that sample tokens.</summary>
+        [CommandOption("--top-p")]
+        [Description("Nucleus sampling mass for models that sample tokens (Fish Audio defaults to 0.7).")]
+        public double? TopP { get; init; }
+
+        /// <summary>Top-k sampling cut-off for models that sample tokens.</summary>
+        [CommandOption("--top-k")]
+        [Description("Top-k sampling cut-off for models that sample tokens (Fish Audio defaults to 30).")]
+        public int? TopK { get; init; }
+
+        /// <summary>Upper bound on generated tokens or frames; unset (or 0) keeps the model's own limit.</summary>
+        [CommandOption("--max-tokens")]
+        [Description("Upper bound on generated tokens or frames; unset or 0 keeps the model's own limit.")]
+        public int? MaxTokens { get; init; }
+
+        /// <summary>Skip the peak loudness normalization that Fish-Speech applies to one-shot output by default.</summary>
+        [CommandOption("--no-normalize")]
+        [Description("Skip loudness normalization (Fish-Speech normalizes one-shot output by default).")]
+        public bool NoNormalize { get; init; }
+
         /// <summary>Path to a voice-reference WAV, for cloning models (Zonos, F5-TTS, CosyVoice, Chatterbox, …).</summary>
         [CommandOption("--reference")]
         [Description("Voice-reference WAV for cloning models (Zonos, F5-TTS, CosyVoice, Chatterbox, VibeVoice, …).")]
@@ -55,7 +85,7 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
 
         /// <summary>A JSON file of voice references, for models that clone from several (Fish Audio Drama 3).</summary>
         [CommandOption("--references")]
-        [Description("JSON file of voice references, one per speaker: [{\"text\": transcript, \"audio\": \"clip.wav\"}] (Fish Audio Drama 3).")]
+        [Description("JSON file of voice references, one per speaker: [[{\"text\": transcript, \"audio\": \"clip.wav\"}]] (Fish Audio Drama 3).")]
         public string? References { get; init; }
 
         /// <summary>A JSON file of earlier turns, for models that revise takes (Fish Audio Drama 3).</summary>
@@ -137,6 +167,15 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
 
         ParamState parameters = new ParamState(Modality.Speech) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("speed", settings.Speed.ToString(CultureInfo.InvariantCulture));
+        parameters.PutIfSet("seed", settings.Seed);
+        parameters.PutIfSet("temperature", settings.Temperature);
+        parameters.PutIfSet("top-p", settings.TopP);
+        parameters.PutIfSet("top-k", settings.TopK);
+        parameters.PutIfSet("max-tokens", settings.MaxTokens);
+        if (settings.NoNormalize)
+        {
+            parameters.Put("no-normalize", "true");
+        }
         if (settings.Voice is { Length: > 0 })
             parameters.Put("voice", settings.Voice);
         if (settings.Reference is { Length: > 0 })

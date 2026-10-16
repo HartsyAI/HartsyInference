@@ -13,6 +13,8 @@ stable release will require. Dates are UTC.
 - **Fixed: Fish-Speech loads the checkpoint it names.** Before, `org/repo` variants were cached under their own key but loaded fish-speech-1.5. Unknown variants now throw instead of silently loading 1.5.
 - **Changed: Fish-Speech rejects voice references.** Fish-Speech 1.5 and 1.4 do not clone yet, since the Firefly encoder is not ported. A request with a reference clip now fails before the download and load. Before, the reference was ignored and the output used the model's default voice.
 - **Fixed: Fish real-weight tests fail when their weights are missing under `HARTSY_REQUIRE_REAL_WEIGHTS=1`.** The Firefly, S2 and ModifiedDAC parity tests returned silently before. A reference dump without `enc_codes` is now a failure, not a pass. The Drama 3 docs cite the Fish Audio Community License v1.0, not the research license.
+- **Added: `hartsy speak` takes sampling and length options.** `--seed`, `--temperature`, `--top-p`, `--top-k`, `--max-tokens` and `--no-normalize` now reach the speech request. Before, the command had no such options, so Fish-Speech and Drama 3 always ran with their defaults.
+- **Fixed: `hartsy speak --help` crashed.** The `--references` description held a literal `[{...}]`, which the console markup read as a style tag.
 
 ## alpha.374
 
