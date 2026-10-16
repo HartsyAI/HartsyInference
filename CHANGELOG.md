@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Added: Fish-Speech 1.4 as a variant of `fishspeech`** (`fishspeech:fish-speech-1.4`). The 1.4 checkpoint uses its own layout: the HF `tokenizer.json`, the single `<|semantic|>` sentinel, one-based codebook values, the plain chat prompt, and upstream's `clean_text`, all matching fish-speech v1.4.3. Status is structural: the tokenizer ids match HF `tokenizers`, but there is no real-weight or Swarm run yet.
+- **Added: HF `Digits` and `Punctuation` pre-tokenizer stages.** Digits split one by one (or as runs when `individual_digits` is false). Punctuation isolates Unicode P* and ASCII punctuation; other symbols stay grouped, as HF does. The fish-speech-1.4 tokenizer needs both.
+- **Fixed: Fish-Speech loads the checkpoint it names.** Before, `org/repo` variants were cached under their own key but loaded fish-speech-1.5. Unknown variants now throw instead of silently loading 1.5.
+- **Changed: Fish-Speech rejects voice references.** Fish-Speech 1.5 and 1.4 do not clone yet, since the Firefly encoder is not ported. A request with a reference clip now fails before the download and load. Before, the reference was ignored and the output used the model's default voice.
+
 ## alpha.374
 
 - **Added: a streamed speech take returns its turns.** `ISpeechService.SynthesizeStreamAsync` has an overload taking `onTurns`, which receives the turns a one-shot synthesis returns as `AudioResult.Turns`. It is called once, before the stream ends. A streamed Fish Audio Drama 3 take can now be revised like a one-shot take; before, the stream returned audio only.
