@@ -21,8 +21,14 @@ public sealed class MossImagePromptTokenizer(ILlmTokenizer tokenizer, int maxTok
     /// <summary>The template text after the prompt: the end of the user turn and an open thinking block.</summary>
     public const string TemplateSuffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n";
 
-    private readonly ILlmTokenizer _tokenizer = tokenizer ?? throw new ArgumentNullException(nameof(tokenizer));
-    private readonly int _maxTokens = maxTokens > 0 ? maxTokens : throw new ArgumentOutOfRangeException(nameof(maxTokens));
+    /// <summary>The special tokens the template spells out; a tokenizer missing any of them is not Qwen3.5's.</summary>
+    public static IReadOnlyList<string> TemplateSpecialTokens { get; } = ["<|im_start|>", "<|im_end|>", "<think>"];
+
+    /// <summary>The Qwen3.5 tokenizer.</summary>
+    public ILlmTokenizer Tokenizer { get; } = tokenizer ?? throw new ArgumentNullException(nameof(tokenizer));
+
+    /// <summary>The token budget; longer prompts are truncated, as the reference truncates at its maximum sequence length.</summary>
+    public int MaxTokens { get; } = maxTokens > 0 ? maxTokens : throw new ArgumentOutOfRangeException(nameof(maxTokens));
 
     /// <summary>Tokenizes <paramref name="prompt"/> (emphasis grammar included) into ids and per-token weights.</summary>
     public WeightedTokenSequence Tokenize(string prompt)
@@ -44,8 +50,8 @@ public sealed class MossImagePromptTokenizer(ILlmTokenizer tokenizer, int maxTok
         {
             sequence = WeightedTokenBuilder.Build(spans, Encode, Encode(TemplatePrefix), Encode(TemplateSuffix));
         }
-        return sequence.Tokens.Length > _maxTokens ? sequence.Truncate(_maxTokens) : sequence;
+        return sequence.Tokens.Length > MaxTokens ? sequence.Truncate(MaxTokens) : sequence;
     }
 
-    private int[] Encode(string text) => _tokenizer.Encode(text, addSpecial: true);
+    private int[] Encode(string text) => Tokenizer.Encode(text, addSpecial: true);
 }

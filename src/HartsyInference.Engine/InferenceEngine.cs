@@ -546,6 +546,7 @@ public sealed class InferenceEngine : IInferenceEngine
             ModelArchitecture.Flux1 => "flux1",
             ModelArchitecture.Flux2 => "flux2",
             ModelArchitecture.Flux3 => "flux3",
+            ModelArchitecture.MossImage => "moss-image",
             ModelArchitecture.AuraFlow => "auraflow",
             ModelArchitecture.Chroma => "chroma",
             ModelArchitecture.MiniMaxH3 => "minimax-h3",

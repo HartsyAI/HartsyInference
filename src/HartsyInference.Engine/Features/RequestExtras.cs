@@ -1,8 +1,10 @@
+using System.Collections;
 using System.Globalization;
+using System.Text.Json;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Typed reads out of <c>ImageRequest.Extra</c> for the knobs the flat contract does not name. The contract is frozen, so features whose resolvers need extra parameters (ControlNet union type, IP-Adapter model/weight/window, Redux blending) source them here under documented keys and fall back to sensible defaults when absent. <para>Keys: <c>controlnet.union_type.{index}</c> (string, per-slot union control type, e.g. "canny"); <c>ipadapter.model</c> (string, adapter id/path — absent disables IP-Adapter); <c>ipadapter.clipvision</c> (string, CLIP-Vision override); <c>ipadapter.weight</c> (number, default 1.0); <c>ipadapter.start</c> (number, default 0.0); <c>ipadapter.end</c> (number, default 1.0); <c>ipadapter.weight_type</c> (string, default "standard"); <c>redux.stylemodel</c> (string, projector id/path — absent disables Redux); <c>redux.multiply</c> (number, default 1.0); <c>redux.merge</c> (number 0..1, default 1.0); <c>redux.apply_start</c> (number, default 0.0); <c>flux.tools_control_image</c> (<see cref="Requests.ImageData"/>, FLUX.1 Canny/Depth's already-preprocessed control hint — absent means the checkpoint is driven as vanilla Flux or FLUX.1 Fill instead).</para></summary>
+/// <summary>Typed reads out of <c>ImageRequest.Extra</c> for the knobs the flat contract does not name. The contract is frozen, so features whose resolvers need extra parameters (ControlNet union type, IP-Adapter model/weight/window, Redux blending) source them here under documented keys and fall back to sensible defaults when absent. <para>Keys: <c>controlnet.union_type.{index}</c> (string, per-slot union control type, e.g. "canny"); <c>ipadapter.model</c> (string, adapter id/path — absent disables IP-Adapter); <c>ipadapter.clipvision</c> (string, CLIP-Vision override); <c>ipadapter.weight</c> (number, default 1.0); <c>ipadapter.start</c> (number, default 0.0); <c>ipadapter.end</c> (number, default 1.0); <c>ipadapter.weight_type</c> (string, default "standard"); <c>redux.stylemodel</c> (string, projector id/path — absent disables Redux); <c>redux.multiply</c> (number, default 1.0); <c>redux.merge</c> (number 0..1, default 1.0); <c>redux.apply_start</c> (number, default 0.0); <c>flux.tools_control_image</c> (<see cref="Requests.ImageData"/>, FLUX.1 Canny/Depth's already-preprocessed control hint — absent means the checkpoint is driven as vanilla Flux or FLUX.1 Fill instead); <c>slg.uncond_skip_layers</c>, <c>slg.layers</c> (integer lists, see <see cref="IntList"/>), <c>slg.scale</c>, <c>slg.start</c>, <c>slg.stop</c> (numbers) for skip-layer guidance, each defaulting to the family's own recipe.</para></summary>
 public static class RequestExtras
 {
     /// <summary>Per-slot ControlNet union control type key, e.g. <c>controlnet.union_type.0</c>.</summary>
@@ -41,6 +43,23 @@ public static class RequestExtras
     /// <summary>FLUX.1 Canny/Depth's already-preprocessed control hint (<see cref="Requests.ImageData"/>) — the host runs the edge/depth annotator (it needs host-app image types) and hands back the finished map. Absent means no Tools control image was supplied; the recipe still resolves the checkpoint's actual variant from the loaded weights, so an absent hint on a genuine Tools checkpoint surfaces as <see cref="Diffusion.Pipelines.FluxPipeline"/>'s own clear "requires a control image" error rather than a silent fallback.</summary>
     public const string FluxToolsControlImage = "flux.tools_control_image";
 
+    /// <summary>Blocks (0-indexed) the unconditional branch skips — "two-pass" skip-layer guidance. An empty list turns it
+    /// off; absent keeps the family's default.</summary>
+    public const string SlgUncondSkipLayers = "slg.uncond_skip_layers";
+
+    /// <summary>Blocks (0-indexed) an extra conditional branch skips in "three-pass" skip-layer guidance, which adds
+    /// <c>scale·(cond − skipped)</c>. Empty or a zero <see cref="SlgScale"/> runs no extra branch.</summary>
+    public const string SlgLayers = "slg.layers";
+
+    /// <summary>Weight of the three-pass skip-layer guidance term.</summary>
+    public const string SlgScale = "slg.scale";
+
+    /// <summary>Fraction of the steps at which skip-layer guidance starts.</summary>
+    public const string SlgStart = "slg.start";
+
+    /// <summary>Fraction of the steps at which skip-layer guidance stops (exclusive).</summary>
+    public const string SlgStop = "slg.stop";
+
     /// <summary>The string at <paramref name="key"/>, or <paramref name="fallback"/> when absent or blank.</summary>
     public static string? String(IReadOnlyDictionary<string, object>? extra, string key, string? fallback = null)
     {
@@ -69,6 +88,39 @@ public static class RequestExtras
             return fallback;
         }
     }
+
+    /// <summary>The integer list at <paramref name="key"/>: a comma- or space-separated string (<c>"22, 24"</c>; blank or
+    /// <c>none</c> is the empty list), one number, or a sequence of numbers (including a JSON array). Null when absent, or unparseable
+    /// (logged), so the caller's default applies.</summary>
+    public static IReadOnlyList<int>? IntList(IReadOnlyDictionary<string, object>? extra, string key)
+    {
+        if (extra is null || !extra.TryGetValue(key, out object? value) || value is null)
+        {
+            return null;
+        }
+        try
+        {
+            return value switch
+            {
+                string text => ParseIntList(text),
+                JsonElement { ValueKind: JsonValueKind.String } json => ParseIntList(json.GetString() ?? ""),
+                JsonElement { ValueKind: JsonValueKind.Array } json => [.. json.EnumerateArray().Select(item => item.GetInt32())],
+                JsonElement json => [json.GetInt32()],
+                IEnumerable sequence => [.. sequence.Cast<object>().Select(item => Convert.ToInt32(item, CultureInfo.InvariantCulture))],
+                _ => [Convert.ToInt32(value, CultureInfo.InvariantCulture)],
+            };
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException or InvalidOperationException)
+        {
+            HartsyInference.Core.Logging.Logs.Warning($"[Features][Extra] '{key}' is not a list of integers ('{value}'); using the default. {ex.Message}");
+            return null;
+        }
+    }
+
+    private static int[] ParseIntList(string text) => string.Equals(text.Trim(), "none", StringComparison.OrdinalIgnoreCase)
+        ? []
+        : [.. text.Split([',', ' ', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(item => int.Parse(item, NumberStyles.Integer, CultureInfo.InvariantCulture))];
 
     /// <summary>The ControlNet union control type declared for slot <paramref name="index"/>, or null for none.</summary>
     public static string? ControlNetUnionType(IReadOnlyDictionary<string, object>? extra, int index) =>
