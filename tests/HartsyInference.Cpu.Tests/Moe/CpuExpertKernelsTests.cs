@@ -25,7 +25,7 @@ public sealed unsafe class CpuExpertKernelsTests
     public static TheoryData<string, int, int> Cases()
     {
         TheoryData<string, int, int> data = new();
-        foreach (string dtype in new[] { "Q8_0", "Q4_K", "Q5_K", "Q6_K", "Q4_K/Q6_K", "Q4_K/Q8_0/Q6_K" })
+        foreach (string dtype in new[] { "Q8_0", "Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q4_K/Q6_K", "Q4_K/Q8_0/Q6_K" })
             foreach (int program in new[] { 0, 1, 2, 3 })
                 foreach (int rows in new[] { 1, 3, 8 })
                     data.Add(dtype, program, rows);
@@ -79,6 +79,8 @@ public sealed unsafe class CpuExpertKernelsTests
     [InlineData("Q4_K", false)]
     [InlineData("Q4_K/Q6_K", true)]
     [InlineData("Q5_K", true)]
+    [InlineData("Q4_0", true)]
+    [InlineData("Q4_0", false)]
     public void SteadyStateCallAllocatesNothing(string dtypeName, bool simd)
     {
         ExpertDTypes dtype = ParseDTypes(dtypeName);
@@ -139,6 +141,7 @@ public sealed unsafe class CpuExpertKernelsTests
     private static DType ParseDType(string name) => name switch
     {
         "Q8_0" => DType.Q8_0,
+        "Q4_0" => DType.Q4_0,
         "Q4_K" => DType.Q4_K,
         "Q5_K" => DType.Q5_K,
         "Q6_K" => DType.Q6_K,

@@ -1,10 +1,13 @@
 namespace HartsyInference.Cpu.Moe;
 
-/// <summary>Scalar integer block dot products and the packed block sizes of the Q8_0, Q4_K, Q5_K and Q6_K formats.</summary>
+/// <summary>Scalar integer block dot products and the packed block sizes of the Q8_0, Q4_0, Q4_K, Q5_K and Q6_K formats.</summary>
 public static unsafe partial class CpuExpertKernels
 {
     /// <summary>Bytes per Q8_0 block: a half scale and 32 int8 codes.</summary>
     private const int Q8BlockBytes = 34;
+
+    /// <summary>Bytes per Q4_0 block: a half scale and 16 bytes of nibbles.</summary>
+    private const int Q40BlockBytes = 18;
 
     /// <summary>Elements per Q4_K super-block.</summary>
     private const int Q4KSuperBlockElems = 256;
@@ -24,6 +27,14 @@ public static unsafe partial class CpuExpertKernels
     {
         int sum = 0;
         for (int k = 0; k < QuantBlock; k++) sum += w[k] * a[k];
+        return sum;
+    }
+
+    /// <summary>Exact int32 dot of a Q4_0 block's 32 unsigned nibbles (low nibbles first, then high) and 32 int8 activation codes.</summary>
+    private static int Q40BlockDotScalar(byte* qs, sbyte* a)
+    {
+        int sum = 0;
+        for (int k = 0; k < 16; k++) sum += (qs[k] & 0x0F) * a[k] + (qs[k] >> 4) * a[k + 16];
         return sum;
     }
 

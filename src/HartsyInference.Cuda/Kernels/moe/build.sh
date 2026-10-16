@@ -9,6 +9,7 @@ KERNELS=(
     "moe_id_q4k"
     "moe_id_q6k"
     "moe_id_q8_0"
+    "moe_id_q4_0"
     "moe_combine_slots"
     "moe_prefill"
 )
