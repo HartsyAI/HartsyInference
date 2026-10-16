@@ -12,10 +12,11 @@ stable release will require. Dates are UTC.
   checkpoint's rows instead of widening all eight codebook tables to F32, the quantized embed tables stay F16 rather
   than being widened at load, and the transposed audio heads are released once the GGUF cache owns the weights.
   Peak anonymous RSS on a 30 s q8 song fell from 5.5 GB to 3.1 GB with bit-identical output.
-- **Changed: HeartMuLa's frame tail runs on the device.** The CFG blend, the codebook draws and the depth-step
-  embeddings stay resident, and each frame reads back its eight codes once instead of once per codebook. The draws
-  use the device sampler, so a same seed produces different songs; `numerics.csmDeviceFrame=false` restores the host
-  sampler. Frame time on the 3060 at q8 is unchanged (about 41 ms per frame); the host syncs were not the bottleneck.
+- **Added (opt-in): HeartMuLa's frame tail can run on the device.** `numerics.csmDeviceFrame=true` keeps the CFG blend,
+  the codebook draws and the depth-step embeddings resident, and reads each frame's eight codes back once instead of
+  once per codebook. The draws use the device sampler, so same-seed songs differ from the host sampler. It is off by
+  default until it has a teacher-forced parity check and a host-versus-device distribution check. Frame time on the
+  3060 at q8 is unchanged (about 41 ms per frame).
 
 ## alpha.374
 

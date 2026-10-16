@@ -43,7 +43,7 @@ public static partial class EngineKnobs
 
     /// <summary>Runs the CSM/HeartMuLa frame tail on the device (CFG blend, device sampler, depth embedding gather) with one code readback per frame.</summary>
     public static readonly Knob<bool> CsmDeviceFrame =
-        Bool("numerics.csmDeviceFrame", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the CSM/HeartMuLa frame tail on the device (CFG blend, device sampler, depth embedding gather), reading back one frame's codes at a time; 0 restores the host sampler.");
+        Bool("numerics.csmDeviceFrame", false, KnobScope.Runtime, KnobDomain.Numerics, "Opt-in: runs the CSM/HeartMuLa frame tail on the device (CFG blend, device sampler, depth embedding gather), reading back one frame's codes at a time. Changes same-seed output; off keeps the host sampler.");
 
     /// <summary>Kill-switch for CUDA-graph replay of CSM's steady-state one-row backbone decode step; 0 keeps it eager.</summary>
     public static readonly Knob<bool> CsmGraph =
