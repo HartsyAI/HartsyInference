@@ -1,0 +1,87 @@
+{
+ "source": "f5_tts utils_infer.preprocess_ref_audio_text",
+ "rate": 24000,
+ "cases": [
+  {
+   "name": "speech_like",
+   "in_len": 124800,
+   "rate": 24000,
+   "out_len": 125998,
+   "out_sha1": "5398e4fcc85d384134a9703934b96b6ffc605c89",
+   "rms": 0.06929642980174577,
+   "spec": "L 120 S 150 L 40 S 20 L 100 S 60 L 30"
+  },
+  {
+   "name": "long_over_12s",
+   "in_len": 432000,
+   "rate": 24000,
+   "out_len": 265198,
+   "out_sha1": "268770dd006fbbbce49a6f89fdeed29163cab14b",
+   "rms": 0.08414512079629836,
+   "spec": "L 300 S 100 L 300 S 100 L 300 S 100 L 300 S 100 L 200"
+  },
+  {
+   "name": "short_internal_pause",
+   "in_len": 99600,
+   "rate": 24000,
+   "out_len": 100798,
+   "out_sha1": "3170f47b1713fb5dad551e45951935597030f5bf",
+   "rms": 0.09098852675749612,
+   "spec": "L 200 S 15 L 200"
+  },
+  {
+   "name": "edge_silence_only",
+   "in_len": 57600,
+   "rate": 24000,
+   "out_len": 25198,
+   "out_sha1": "d2fb4b52ee2fdf3a1c29884661c3f2630d2b42a7",
+   "rms": 0.09098595817287186,
+   "spec": "S 80 L 100 S 60"
+  },
+  {
+   "name": "quiet_speech",
+   "in_len": 103200,
+   "rate": 11025,
+   "out_len": 551,
+   "out_sha1": "0071a0a17a2705daa8b77f9e79418688a6bf97e1",
+   "rms": 0.0,
+   "spec": "S 30 Q 200 S 20 Q 150 S 30"
+  },
+  {
+   "name": "threshold_blocks",
+   "in_len": 69600,
+   "rate": 24000,
+   "out_len": 15598,
+   "out_sha1": "8f4ce43fe5a08a5e693805f0b8f55e4e246ecb5a",
+   "rms": 0.08958417704510087,
+   "spec": "S 40 T 120 U 30 S 40 L 60"
+  },
+  {
+   "name": "all_silent",
+   "in_len": 72000,
+   "rate": 11025,
+   "out_len": 551,
+   "out_sha1": "0071a0a17a2705daa8b77f9e79418688a6bf97e1",
+   "rms": 0.0,
+   "spec": "S 300"
+  },
+  {
+   "name": "mixed_blocks_rms",
+   "in_len": 52800,
+   "rate": 24000,
+   "out_len": 5998,
+   "out_sha1": "5eb9d696ba8ce21497cf32265d7f0eb92f8455b6",
+   "rms": 0.08340876847649964,
+   "spec": "S 25 V 150 S 25 L 20"
+  },
+  {
+   "name": "speech_clip",
+   "in_len": 106205,
+   "rate": 24000,
+   "out_len": 87478,
+   "out_sha1": "38d07e319467615b422b29003776c78a31b25a5f",
+   "rms": 0.05306931636939101,
+   "spec": "file:f5_reference_speech_24k.wav"
+  }
+ ]
+}

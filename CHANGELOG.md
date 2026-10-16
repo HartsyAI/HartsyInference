@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- F5-TTS reference preparation follows upstream `preprocess_ref_audio_text`: a reference over 12 s is cut at its
+  pauses, edge silence is trimmed with pydub's -42 dBFS rule, and a quiet reference's output is scaled back by
+  `rms / 0.1`, as upstream does. Verified sample-exact against upstream on 9 cases (`F5ReferenceParityTests`).
+
 ## alpha.370
 
 - **Fixed: ZipVoice phonemizes with the American `en-us` voice.** The pipeline built its phonemizer for espeak's British `en` voice, so the model was fed phonemes it never trained on (`əʊ` for `oʊ`, non-rhotic vowels); upstream's tokenizer runs piper_phonemize on `en-us`. Word agreement with upstream's tokens on a 137-line corpus rose from 58% to 94%. The same mistake was fixed for Piper on 2026-07-13. Gate rows 04 and 05, which misheard words before (mean WER 0.067 and 0.091), now transcribe word-perfect on every take, as upstream's do, and generated durations match upstream's within a median 3.5%.
