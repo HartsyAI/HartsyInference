@@ -128,18 +128,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     }
 
     /// <summary>Loads an RMSNorm weight to F32, optionally baking Gemma's <c>(1 + weight)</c> offset into a fresh tensor so the runtime norm op is the standard one and no borrowed GGUF mmap/cached weight is mutated in place.</summary>
-    private static Tensor LoadNorm(Tensor t, bool addOne)
-    {
-        Tensor f = EnsureF32(t);
-        if (!addOne) return f;
-        Tensor outp = new(f.Shape, DType.F32);
-        long n = f.ElementCount;
-        float* src = (float*)f.DataPointer;
-        float* dst = (float*)outp.DataPointer;
-        for (long i = 0; i < n; i++) dst[i] = src[i] + 1f;
-        if (!ReferenceEquals(f, t)) f.Dispose();   // free the transient cast/dequant
-        return outp;
-    }
+    private static Tensor LoadNorm(Tensor t, bool addOne) => NormWeights.Load(t, addOne);
 
     /// <summary>A zeroed bias vector of length <paramref name="n"/> for the LayerNorm path (models that use LayerNorm but ship no norm bias, e.g. Cohere).</summary>
     private static Tensor ZeroBias(int n)

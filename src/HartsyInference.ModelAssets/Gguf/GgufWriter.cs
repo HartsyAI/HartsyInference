@@ -31,7 +31,10 @@ public sealed class GgufWriter : IDisposable
     private sealed class TensorEntry
     {
         public required string Name { get; init; }
-        public required Tensor Tensor { get; init; }
+        public Tensor? Tensor { get; init; }
+        public Func<Tensor>? Produce { get; init; }
+        public required TensorShape Shape { get; init; }
+        public required DType DType { get; init; }
         public required uint GgufTypeId { get; init; }
         public long RelativeOffset { get; set; }
     }
@@ -53,17 +56,37 @@ public sealed class GgufWriter : IDisposable
     /// <summary>Registers a tensor. The tensor's data is read at <see cref="Finalize"/> — caller must keep it alive until then. Throws if the dtype isn't a valid ggml type (i.e. has no canonical type ID).</summary>
     public void AddTensor(string name, Tensor tensor)
     {
+        ArgumentNullException.ThrowIfNull(tensor);
+        Register(name, tensor.Shape, tensor.DType, tensor, null);
+    }
+
+    /// <summary>Registers a tensor whose data is produced only when <see cref="Flush"/> reaches it, so a writer streaming a
+    /// model larger than host memory holds one converted tensor at a time. <paramref name="produce"/> must return a tensor of
+    /// exactly <paramref name="shape"/> and <paramref name="dtype"/> that the writer owns — an owned buffer or a fresh view
+    /// (<see cref="Tensor.Reshape"/>) over borrowed memory, never a shared instance — and the writer disposes it once written.</summary>
+    public void AddTensor(string name, TensorShape shape, DType dtype, Func<Tensor> produce)
+    {
+        ArgumentNullException.ThrowIfNull(produce);
+        Register(name, shape, dtype, null, produce);
+    }
+
+    private void Register(string name, TensorShape shape, DType dtype, Tensor? tensor, Func<Tensor>? produce)
+    {
         ThrowIfDisposed();
         if (string.IsNullOrEmpty(name)) throw new ArgumentException("Tensor name cannot be empty.", nameof(name));
         if (_tensors.Any(t => t.Name == name))
             throw new ArgumentException($"Duplicate tensor name '{name}'.", nameof(name));
+        if (dtype.IsQuantized && shape.ElementCount % dtype.BlockElementCount != 0)
+            throw new ArgumentException($"Tensor '{name}' of {shape.ElementCount} elements is not a whole number of {dtype.Name} blocks.", nameof(shape));
 
-        uint ggufTypeId = MapDTypeToGgufId(tensor.DType);
         _tensors.Add(new TensorEntry
         {
             Name = name,
             Tensor = tensor,
-            GgufTypeId = ggufTypeId,
+            Produce = produce,
+            Shape = shape,
+            DType = dtype,
+            GgufTypeId = MapDTypeToGgufId(dtype),
         });
     }
 
@@ -107,8 +130,24 @@ public sealed class GgufWriter : IDisposable
             long expectedAbsolute = dataStart + t.RelativeOffset;
             long padToHere = expectedAbsolute - fs.Position;
             for (long i = 0; i < padToHere; i++) w.Write((byte)0);
-            WriteTensorData(w, t.Tensor);
+            WriteEntryData(w, t);
         }
+    }
+
+    private static void WriteEntryData(BinaryWriter w, TensorEntry entry)
+    {
+        if (entry.Tensor is not null)
+        {
+            WriteTensorData(w, entry.Tensor);
+            return;
+        }
+        using Tensor produced = entry.Produce!();
+        if (produced.DType != entry.DType || produced.Shape.ElementCount != entry.Shape.ElementCount)
+        {
+            throw new InvalidDataException(
+                $"Tensor '{entry.Name}' was registered as {entry.Shape} {entry.DType.Name} but produced {produced.Shape} {produced.DType.Name}.");
+        }
+        WriteTensorData(w, produced);
     }
 
     private void AssignTensorOffsets(long alignment)
@@ -118,7 +157,7 @@ public sealed class GgufWriter : IDisposable
         {
             offset = AlignUp(offset, alignment);
             t.RelativeOffset = offset;
-            offset += t.Tensor.DType.ComputeByteCount(t.Tensor.Shape.ElementCount);
+            offset += t.DType.ComputeByteCount(t.Shape.ElementCount);
         }
     }
 
@@ -165,11 +204,11 @@ public sealed class GgufWriter : IDisposable
     private static void WriteTensorInfo(BinaryWriter w, TensorEntry t)
     {
         WriteString(w, t.Name);
-        int rank = t.Tensor.Shape.Rank;
+        int rank = t.Shape.Rank;
         w.Write((uint)rank);
         for (int i = rank - 1; i >= 0; i--)
         {
-            w.Write((ulong)t.Tensor.Shape[i]);
+            w.Write((ulong)t.Shape[i]);
         }
         w.Write(t.GgufTypeId);
         w.Write((ulong)t.RelativeOffset);
@@ -178,8 +217,14 @@ public sealed class GgufWriter : IDisposable
     private static unsafe void WriteTensorData(BinaryWriter w, Tensor tensor)
     {
         long byteCount = tensor.DType.ComputeByteCount(tensor.Shape.ElementCount);
-        ReadOnlySpan<byte> data = new ReadOnlySpan<byte>((void*)tensor.DataPointer, (int)byteCount);
-        w.Write(data);
+        byte* data = (byte*)tensor.DataPointer;
+        // A span is limited to int.MaxValue bytes; a large embedding table or stacked expert tensor exceeds that.
+        for (long done = 0; done < byteCount;)
+        {
+            int chunk = (int)Math.Min(byteCount - done, 1L << 30);
+            w.Write(new ReadOnlySpan<byte>(data + done, chunk));
+            done += chunk;
+        }
     }
 
     private static long AlignUp(long value, long alignment) => (value + alignment - 1) & ~(alignment - 1);

@@ -113,24 +113,32 @@ public static class GgufQuantizer
     /// </remarks>
     public static Dictionary<string, Tensor> ReadBack(GgufLoader loader, IReadOnlyDictionary<string, Tensor> source)
     {
-        ArgumentNullException.ThrowIfNull(loader);
         ArgumentNullException.ThrowIfNull(source);
+        return ReadBack(loader, name => source.TryGetValue(name, out Tensor? original) ? original.Shape : null);
+    }
+
+    /// <summary><see cref="ReadBack(GgufLoader, IReadOnlyDictionary{string, Tensor})"/> with each tensor's engine-order shape
+    /// given by <paramref name="sourceShape"/> (null when the cache's writer is not known to have had one).</summary>
+    public static Dictionary<string, Tensor> ReadBack(GgufLoader loader, Func<string, TensorShape?> sourceShape)
+    {
+        ArgumentNullException.ThrowIfNull(loader);
+        ArgumentNullException.ThrowIfNull(sourceShape);
         Dictionary<string, Tensor> weights = new(loader.Descriptors.Count, StringComparer.Ordinal);
         foreach (string name in loader.Descriptors.Keys)
         {
             Tensor stored = loader.GetTensor(name);
             weights[name] = stored;
-            if (source.TryGetValue(name, out Tensor? original))
+            if (sourceShape(name) is TensorShape original)
             {
-                if (original.Shape.ElementCount != stored.Shape.ElementCount)
+                if (original.ElementCount != stored.Shape.ElementCount)
                 {
                     throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
                         $"GGUF cache tensor '{name}' holds {stored.Shape.ElementCount} elements but its source holds "
-                        + $"{original.Shape.ElementCount}; the cache was not written from this dictionary.");
+                        + $"{original.ElementCount}; the cache was not written from this source.");
                 }
-                if (!SameShape(original.Shape, stored.Shape))
+                if (!SameShape(original, stored.Shape))
                 {
-                    weights[name] = stored.Reshape(original.Shape);
+                    weights[name] = stored.Reshape(original);
                 }
                 continue;
             }

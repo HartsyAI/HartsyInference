@@ -84,37 +84,11 @@ internal static class MiniMaxMusic3WeightPolicy
             (quantizable(entry.Key) ? selected : passthrough)[entry.Key] = entry.Value;
         }
 
-        if (!File.Exists(cachePath))
-        {
-            Logs.Info($"[Audio][MiniMaxMusic3] Quantizing the {label} to {backbone.Name} → {cachePath} (one-time)...");
-            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-            string temporary = cachePath + ".tmp";
-            try
-            {
-                GgufQuantizer.ConvertDictionaryToGguf(selected, temporary, policy, "minimax-music3");
-                File.Move(temporary, cachePath, overwrite: true);
-            }
-            catch
-            {
-                try
-                {
-                    if (File.Exists(temporary)) { File.Delete(temporary); }
-                }
-                catch (Exception cleanup)
-                {
-                    Logs.Error($"[Audio][MiniMaxMusic3] Could not remove the partial quant cache '{temporary}'.", cleanup);
-                }
-                throw;
-            }
-        }
-
-        GgufLoader loader = new GgufLoader();
-        loader.Load(cachePath);
+        (Dictionary<string, Tensor> quantized, GgufLoader loader) =
+            GgufQuantCache.Load(selected, cachePath, policy, "minimax-music3", "[Audio][MiniMaxMusic3]");
         cache = loader;
         Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(passthrough, StringComparer.Ordinal);
-        // Read back under the source shapes: the file is in ggml order, and the raw loader would hand every
-        // projection over transposed (see GgufQuantizer.ReadBack).
-        foreach (KeyValuePair<string, Tensor> entry in GgufQuantizer.ReadBack(loader, selected))
+        foreach (KeyValuePair<string, Tensor> entry in quantized)
         {
             merged[entry.Key] = entry.Value;
         }

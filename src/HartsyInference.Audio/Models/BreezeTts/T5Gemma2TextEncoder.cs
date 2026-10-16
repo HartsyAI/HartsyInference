@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.BreezeTts;
 
@@ -45,14 +46,7 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
         }
     }
 
-    private static Tensor OnePlus(Tensor w)
-    {
-        Tensor f = WhisperOps.EnsureF32(w);
-        Tensor o = new(f.Shape, DType.F32);
-        float* s = (float*)f.DataPointer, d = (float*)o.DataPointer;
-        for (long i = 0; i < f.ElementCount; i++) d[i] = 1f + s[i];
-        return o;
-    }
+    private static Tensor OnePlus(Tensor w) => NormWeights.OnePlus(w);
 
     /// <summary>Encodes one text segment (positions 0..n-1) to its <c>[n, hidden]</c> final hidden states.</summary>
     public float[] Encode(IBackend backend, ReadOnlySpan<int> tokens, Action<string, float[]>? tap = null)
