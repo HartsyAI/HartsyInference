@@ -93,6 +93,58 @@ public sealed class StreamingPrimitiveTests
         });
     }
 
+    [Fact]
+    public async Task AudioStreamer_FromProducer_PlacesEachBufferAfterTheLast_AndSkipsEmptyOnes()
+    {
+        List<AudioChunk> received = [];
+        await foreach (AudioChunk chunk in AudioStreamer.FromProducer(emit =>
+        {
+            emit(new float[30]);
+            emit([]);
+            emit(new float[50]);
+        }, 44_100))
+        {
+            received.Add(chunk);
+        }
+        Assert.Equal([0L, 30L], received.Select(static c => c.StartSampleOffset));
+        Assert.Equal([30, 50], received.Select(static c => c.FrameCount));
+        Assert.All(received, static c => Assert.Equal(44_100, c.SampleRate));
+    }
+
+    [Fact]
+    public async Task AudioStreamer_FromProducer_FailsWithTheProducersException()
+    {
+        InvalidOperationException thrown = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (AudioChunk _ in AudioStreamer.FromProducer(emit =>
+            {
+                emit(new float[10]);
+                throw new InvalidOperationException("generation failed");
+            }, 24_000))
+            {
+            }
+        });
+        Assert.Equal("generation failed", thrown.Message);
+    }
+
+    [Fact]
+    public async Task AudioStreamer_FromProducer_EndsWhenTheConsumerStopsEarly_EvenWithAFullQueue()
+    {
+        // More buffers than the queue holds: a producer left waiting on a full queue would hang the consumer's exit.
+        Task consume = Task.Run(async () =>
+        {
+            await foreach (AudioChunk _ in AudioStreamer.FromProducer(emit =>
+            {
+                for (int i = 0; i < 500; i++) emit(new float[4]);
+            }, 24_000))
+            {
+                break;
+            }
+        });
+        Assert.Same(consume, await Task.WhenAny(consume, Task.Delay(TimeSpan.FromSeconds(30))));
+        await consume;
+    }
+
     // ── AudioChunk ──────────────────────────────────────────────────────
 
     // ── StreamingKvCache ────────────────────────────────────────────────

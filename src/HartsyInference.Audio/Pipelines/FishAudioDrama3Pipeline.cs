@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Collections;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -166,12 +167,7 @@ public sealed class FishAudioDrama3Pipeline : IDisposable
         {
             _frames.Add(codes.ToArray());
             if (_frames.Count < _nextEmit) return;
-            int[,] grid = new int[codes.Length, _frames.Count];
-            for (int f = 0; f < _frames.Count; f++)
-            {
-                for (int c = 0; c < codes.Length; c++) grid[c, f] = _frames[f][c];
-            }
-            Emit(pipeline.Decode(backend, grid));
+            Emit(pipeline.Decode(backend, Grid2D.FromColumns(_frames)));
             _nextEmit = _frames.Count + Math.Min(_frames.Count, StreamMaxStep);
         }
 

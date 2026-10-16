@@ -15,6 +15,15 @@ public sealed record SpeechRequest
     /// <summary>Optional voice reference for cloning; null uses the model's built-in / default voice.</summary>
     public AudioClip? Reference { get; init; }
 
+    /// <summary>Voice references for a model that clones from several (Fish Audio Drama 3, one per speaker in
+    /// <c>&lt;|speaker:N|&gt;</c> order), each a transcript with its clip or codes. <see cref="Reference"/> with
+    /// <see cref="RefText"/> is the one-reference form; a model that takes a list reads that one first.</summary>
+    public IReadOnlyList<SpeechTurn>? References { get; init; }
+
+    /// <summary>Earlier turns of the conversation, oldest first, for a model that revises takes (Fish Audio Drama 3): send back
+    /// the <see cref="AudioResult.Turns"/> of a take, then ask again with revised direction.</summary>
+    public IReadOnlyList<SpeechTurn>? History { get; init; }
+
     /// <summary>Built-in voice name (e.g. a Kokoro voice pack); null/empty uses the model default.</summary>
     public string? Voice { get; init; }
 

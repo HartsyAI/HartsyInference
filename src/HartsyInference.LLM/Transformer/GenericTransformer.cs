@@ -10,7 +10,7 @@ namespace HartsyInference.LLM.Transformer;
 
 /// <summary>Config-driven dense decoder transformer — the reusable spine for LLM text generation: one forward path serves Qwen2, Qwen3, and Llama-lineage models, the differences (QKV bias, per-head Q/K RMSNorm, decoupled head dimension, tied head) being <see cref="TransformerConfig"/> flags.</summary>
 /// <remarks>Built for full GPU residency: every op is an <see cref="IBackend"/> call, no activation is read on the host mid-forward, weights are the raw loaded tensors (stable references) handed to <see cref="IBackend.PreloadWeights"/> so each uploads once and every projection hits the weight cache, and K/V grow on-device via <see cref="KvCache"/>. Validated against the per-family reference decoders. Scope: batch = 1, F32, pre-norm + SwiGLU + causal attention.</remarks>
-public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM.Generation.IGraphDecodeRowSource
+public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM.Generation.IGraphDecodeRowSource, IExpertOffloadTarget
 {
     /// <summary>Layers a cancellable forward lets the device have in flight: two keeps the next layer queued behind the
     /// running one, so the bound costs no device time, while a stop leaves at most that much to drain.</summary>
@@ -288,6 +288,12 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             if (!grouped.Contains(t)) yield return [t];
         }
     }
+
+    /// <inheritdoc/>
+    public int ExpertHiddenSize => _cfg.HiddenSize;
+
+    /// <inheritdoc/>
+    public int ExpertIntermediateSize => _cfg.Moe?.MoeIntermediateSize ?? 0;
 
     /// <summary>Every routed expert projection of every MoE layer.</summary>
     public IEnumerable<Tensor> EnumerateExpertWeights()

@@ -120,6 +120,9 @@ public sealed class ParamState
                 _values["speed"] = "1.0";
                 _values["reference"] = "";
                 _values["ref-text"] = "";
+                _values["references"] = "";
+                _values["history"] = "";
+                _values["save-turns"] = "";
                 _values["exaggeration"] = "";
                 _values["nfe-step"] = "";
                 _values["cfg-scale"] = "";

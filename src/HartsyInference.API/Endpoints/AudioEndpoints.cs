@@ -135,6 +135,7 @@ public static class AudioEndpoints
         result.Format,
         result.DurationSeconds,
         result.SampleRate,
+        result.Turns,
         result.Meta,
         savedPath,
     };

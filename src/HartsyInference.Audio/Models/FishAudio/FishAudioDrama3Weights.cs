@@ -22,16 +22,27 @@ public static class FishAudioDrama3Weights
     ];
 
     /// <summary>Parses a precision name: native (or empty), bf16, q8 / q8_0, q6 / q6_k, q5 / q5_k, q4 / q4_k.</summary>
-    public static FishAudioDrama3Precision ParsePrecision(string? name) => name?.Trim().ToLowerInvariant() switch
+    /// <exception cref="ArgumentException">Any other name.</exception>
+    public static FishAudioDrama3Precision ParsePrecision(string? name) => TryParsePrecision(name, out FishAudioDrama3Precision precision)
+        ? precision
+        : throw new ArgumentException($"Unknown Drama 3 precision '{name}'; expected native, bf16, q8, q6, q5 or q4.", nameof(name));
+
+    /// <summary>Parses a precision name as <see cref="ParsePrecision"/> does; false for any other name.</summary>
+    public static bool TryParsePrecision(string? name, out FishAudioDrama3Precision precision)
     {
-        null or "" or "native" or "default" => FishAudioDrama3Precision.Native,
-        "bf16" or "off" or "none" => FishAudioDrama3Precision.Bf16,
-        "q8" or "q8_0" => FishAudioDrama3Precision.Q8_0,
-        "q6" or "q6_k" => FishAudioDrama3Precision.Q6_K,
-        "q5" or "q5_k" or "q5_k_m" => FishAudioDrama3Precision.Q5_K,
-        "q4" or "q4_k" or "q4_k_m" => FishAudioDrama3Precision.Q4_K,
-        string other => throw new ArgumentException($"Unknown Drama 3 precision '{other}'; expected native, bf16, q8, q6, q5 or q4."),
-    };
+        FishAudioDrama3Precision? parsed = name?.Trim().ToLowerInvariant() switch
+        {
+            null or "" or "native" or "default" => FishAudioDrama3Precision.Native,
+            "bf16" or "off" or "none" => FishAudioDrama3Precision.Bf16,
+            "q8" or "q8_0" => FishAudioDrama3Precision.Q8_0,
+            "q6" or "q6_k" => FishAudioDrama3Precision.Q6_K,
+            "q5" or "q5_k" or "q5_k_m" => FishAudioDrama3Precision.Q5_K,
+            "q4" or "q4_k" or "q4_k_m" => FishAudioDrama3Precision.Q4_K,
+            _ => null,
+        };
+        precision = parsed ?? FishAudioDrama3Precision.Native;
+        return parsed is not null;
+    }
 
     /// <summary>The dtype <paramref name="weight"/> is loaded as at <paramref name="precision"/>.</summary>
     public static DType TargetDType(HfQuantWeight weight, FishAudioDrama3Precision precision)

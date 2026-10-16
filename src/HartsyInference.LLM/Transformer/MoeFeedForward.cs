@@ -83,6 +83,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// <summary>Routed experts in this block.</summary>
     public int NumExperts => _moe.NumExperts;
 
+    /// <summary>Inner width of one routed expert.</summary>
+    public int IntermediateSize => _moe.MoeIntermediateSize;
+
     /// <summary>
     /// Opt-in (default off): routes the routed experts through the heterogeneous runtime. The scheduler plans every expert on
     /// the CPU, <see cref="HostExpertCache"/> holds the layer's F32 weights without copying them, and

@@ -10,7 +10,7 @@ namespace HartsyInference.LLM.Ssm;
 
 /// <summary>Qwen3.5 (<c>qwen35</c> GGUF arch) — a hybrid decoder, NOT a transformer or a pure recurrent model: most layers are Gated DeltaNet (a delta-rule linear attention), interleaved every <see cref="FullAttentionInterval"/>-th layer with a REGULAR causal self-attention layer (GQA + partial RoPE + KV cache, Qwen3-style QK-norm, plus a fused query+gate projection unique to this arch).</summary>
 /// <remarks>Text-only: the GGUF's 4-section M-RoPE degenerates to a single partial-rotary RoPE (<see cref="RotaryDim"/> = sum of the 4 sections × 2) since every section gets the same position for non-multimodal input. Ported from llama.cpp's <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side, matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</remarks>
-public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable
+public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable, IExpertOffloadTarget
 {
     private readonly GgufModelLoader.LoadedGgufModel? _handle;
     private readonly List<Tensor> _ownedTensors = [];
@@ -57,6 +57,12 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
             if (!grouped.Contains(t)) yield return [t];
         }
     }
+
+    /// <inheritdoc/>
+    public int ExpertHiddenSize => DModel;
+
+    /// <inheritdoc/>
+    public int ExpertIntermediateSize => Array.Find(_moe, static ff => ff is not null)?.IntermediateSize ?? 0;
 
     /// <summary>Every routed expert projection of every MoE layer.</summary>
     public IEnumerable<Tensor> EnumerateExpertWeights()

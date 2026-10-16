@@ -115,15 +115,25 @@ public static class TextPlacementDemandReader
     {
         long hidden = archValue("embedding_length") ?? 0;
         long inter = archValue("expert_feed_forward_length") ?? archValue("feed_forward_length") ?? 0;
-        foreach (TextTensorInfo t in tensors)
+        return ExpertsHostReason(tensors.Where(static t => t.Name.Contains("_exps.", StringComparison.Ordinal)).Select(static t => t.DType),
+            hidden, inter);
+    }
+
+    /// <summary>Why the packed CPU kernels cannot run routed experts stored as <paramref name="expertTypes"/> with model width
+    /// <paramref name="hidden"/> and expert width <paramref name="intermediate"/>, or null when they can: every type must be one
+    /// <see cref="CpuExpertKernels.Supports"/> accepts, and both widths must fill its blocks. The reason completes a sentence
+    /// starting "Expert offload runs missed experts on the CPU, and".</summary>
+    public static string? ExpertsHostReason(IEnumerable<DType> expertTypes, long hidden, long intermediate)
+    {
+        ArgumentNullException.ThrowIfNull(expertTypes);
+        foreach (DType dtype in expertTypes.Distinct())
         {
-            if (!t.Name.Contains("_exps.", StringComparison.Ordinal)) continue;
-            if (!CpuExpertKernels.Supports(t.DType))
-                return $"its experts are stored in {t.DType.Name}, which the CPU expert kernels do not read (Q8_0, Q4_K, Q5_K or Q6_K).";
-            int block = t.DType.BlockElementCount;
-            if (hidden <= 0 || inter <= 0 || hidden % block != 0 || inter % block != 0 || hidden % CpuExpertKernels.QuantBlock != 0
-                || inter % CpuExpertKernels.QuantBlock != 0)
-                return $"its widths ({hidden} and {inter}) do not fill {t.DType.Name} blocks of {block}.";
+            if (!CpuExpertKernels.Supports(dtype))
+                return $"its experts are stored in {dtype.Name}, which the CPU expert kernels do not read (Q8_0, Q4_0, Q4_K, Q5_K or Q6_K).";
+            int block = dtype.BlockElementCount;
+            if (hidden <= 0 || intermediate <= 0 || hidden % block != 0 || intermediate % block != 0
+                || hidden % CpuExpertKernels.QuantBlock != 0 || intermediate % CpuExpertKernels.QuantBlock != 0)
+                return $"its widths ({hidden} and {intermediate}) do not fill {dtype.Name} blocks of {block}.";
         }
         return null;
     }

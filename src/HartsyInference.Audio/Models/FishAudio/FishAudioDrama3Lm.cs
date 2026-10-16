@@ -58,6 +58,24 @@ public sealed unsafe class FishAudioDrama3Lm : IDisposable
     /// <summary>Backbone prefill rows per forward.</summary>
     public int PrefillChunk { get; }
 
+    /// <summary>Device bytes the KV caches grow by per sequence row, counted at F32 so the figure never undershoots: the backbone's
+    /// full-attention layers (its Gated DeltaNet layers carry fixed-size state instead) and every tower layer.</summary>
+    public long KvBytesPerRow
+    {
+        get
+        {
+            Qwen35HfConfig backbone = _config.Backbone;
+            long fullAttention = 0;
+            for (int i = 0; i < backbone.NumLayers; i++)
+            {
+                if (!backbone.IsLinearLayer(i)) fullAttention++;
+            }
+            FishAudioDrama3TowerConfig tower = _config.Tower;
+            long towerLayers = tower.SharedLayers + tower.ResidualLayers;
+            return (fullAttention * backbone.NumKvHeads * backbone.HeadDim + towerLayers * tower.NumKvHeads * tower.HeadDim) * 2 * sizeof(float);
+        }
+    }
+
     public FishAudioDrama3Config Config => _config;
 
     /// <summary>The backbone's weights grouped for <see cref="IBackend.PreloadWeightGroups"/> (each MoE layer's experts per projection,

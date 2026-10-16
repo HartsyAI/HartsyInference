@@ -199,7 +199,8 @@ public static class GenerationDispatch
     }
 
     /// <summary>Text-to-speech through <see cref="ISpeechService"/>; cloning models read an optional <c>reference</c> path.</summary>
-    /// <remarks>F5-style models also read <c>ref-text</c> alongside <c>reference</c>.</remarks>
+    /// <remarks>F5-style models also read <c>ref-text</c> alongside <c>reference</c>. Fish Audio Drama 3 reads <c>references</c> and
+    /// <c>history</c> turn files (<see cref="SpeechTurnFile"/>) and writes the take's turns to <c>save-turns</c>.</remarks>
     private static async Task<GeneratedArtifact> SpeechAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
@@ -212,6 +213,8 @@ public static class GenerationDispatch
             Speed = speed > 0d ? speed : null,
             Reference = LoadAudioClip(parameters.GetStringOrNull("reference")),
             RefText = parameters.Get("ref-text") ?? "",
+            References = SpeechTurnFile.Load(parameters.GetStringOrNull("references")),
+            History = SpeechTurnFile.Load(parameters.GetStringOrNull("history")),
             Exaggeration = parameters.GetDoubleOrNull("exaggeration"),
             NfeStep = parameters.GetIntOrNull("nfe-step"),
             CfgScale = parameters.GetDoubleOrNull("cfg-scale"),
@@ -225,7 +228,17 @@ public static class GenerationDispatch
             Seed = Math.Max(0, parameters.GetInt("seed", 0)),
         };
         AudioResult result = await engine.Speech.SynthesizeAsync(spec, request, cancel).ConfigureAwait(false);
-        return AudioArtifact(result, "speech");
+        GeneratedArtifact artifact = AudioArtifact(result, "speech");
+        if (parameters.GetStringOrNull("save-turns") is { } turnsPath)
+        {
+            if (result.Turns is not { Count: > 0 } turns)
+            {
+                throw new InvalidOperationException("--save-turns needs a model that returns its turns (Fish Audio Drama 3).");
+            }
+            SpeechTurnFile.Save(turnsPath, turns);
+            artifact.Meta["turns"] = turnsPath;
+        }
+        return artifact;
     }
 
     /// <summary>The <c>--reasoning-effort</c> value, read by <see cref="EncodeOptions.ParseReasoningEffort"/> as the chat API reads it: an integer in [1, 100], or a
@@ -824,7 +837,7 @@ public static class GenerationDispatch
 
     /// <summary>Reads an audio file into an <see cref="AudioClip"/>, or null when <paramref name="path"/> is null/empty.</summary>
     /// <remarks>Throws if a path was given but does not exist.</remarks>
-    private static AudioClip? LoadAudioClip(string? path)
+    internal static AudioClip? LoadAudioClip(string? path)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
