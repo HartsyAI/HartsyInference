@@ -13,6 +13,12 @@ public interface ISpeechService
     /// <summary>Synthesizes speech for <paramref name="request"/>, yielding audio incrementally for models that support it (currently Kyutai TTS). Models without a streaming implementation yield exactly one chunk containing the complete synthesized buffer, so callers have a single code path regardless of which model is selected.</summary>
     IAsyncEnumerable<AudioChunk> SynthesizeStreamAsync(ModelSpec spec, SpeechRequest request, CancellationToken cancel = default);
 
+    /// <summary>Streams as <see cref="SynthesizeStreamAsync(ModelSpec, SpeechRequest, CancellationToken)"/> does, and hands the take's
+    /// turns to <paramref name="onTurns"/>: the turns a one-shot synthesis returns as <see cref="AudioResult.Turns"/>, so a streamed take
+    /// can be revised too. Called once, on the generating thread, before the stream ends; never for a model that returns no turns.</summary>
+    IAsyncEnumerable<AudioChunk> SynthesizeStreamAsync(ModelSpec spec, SpeechRequest request, Action<IReadOnlyList<SpeechTurn>>? onTurns,
+        CancellationToken cancel = default) => SynthesizeStreamAsync(spec, request, cancel);
+
     /// <summary>Loads the model for <paramref name="spec"/> exactly as <see cref="SynthesizeAsync"/> would (same catalog,
     /// cache key and download) and returns a lease that keeps it resident on this engine's backend until disposed; see
     /// <see cref="ISynthesizerLease"/> for the contract.</summary>

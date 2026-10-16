@@ -73,14 +73,19 @@ public sealed class SpeechService : ISpeechService
     }
 
     /// <inheritdoc/>
-    public IAsyncEnumerable<AudioChunk> SynthesizeStreamAsync(ModelSpec spec, SpeechRequest request, CancellationToken cancel = default)
+    public IAsyncEnumerable<AudioChunk> SynthesizeStreamAsync(ModelSpec spec, SpeechRequest request, CancellationToken cancel = default) =>
+        SynthesizeStreamAsync(spec, request, onTurns: null, cancel);
+
+    /// <inheritdoc/>
+    public IAsyncEnumerable<AudioChunk> SynthesizeStreamAsync(ModelSpec spec, SpeechRequest request, Action<IReadOnlyList<SpeechTurn>>? onTurns,
+        CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (string.IsNullOrWhiteSpace(request.Text))
         {
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
-        return StreamCore(ResolveTarget(spec, request.Voice), request, cancel);
+        return StreamCore(ResolveTarget(spec, request.Voice), request, onTurns, cancel);
     }
 
     /// <inheritdoc/>
@@ -163,14 +168,14 @@ public sealed class SpeechService : ISpeechService
         !string.IsNullOrWhiteSpace(voice) && !voice.Equals("default", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Owns reference-file materialization/cleanup around the streamed run, exactly mirroring <see cref="SynthesizeAsync"/>'s non-streaming <c>finally</c>.</summary>
-    private async IAsyncEnumerable<AudioChunk> StreamCore(TtsTarget target, SpeechRequest request,
+    private async IAsyncEnumerable<AudioChunk> StreamCore(TtsTarget target, SpeechRequest request, Action<IReadOnlyList<SpeechTurn>>? onTurns,
         [EnumeratorCancellation] CancellationToken cancel)
     {
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
             ValidateReference(target.Descriptor, referenceMono);
-            TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, cancel);
+            TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, cancel) with { TurnSink = onTurns };
             await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(target.Backend, Job(target),
                 ct => StreamWork(target, job, ct), cancel, target.StageBackends).ConfigureAwait(false))
             {
