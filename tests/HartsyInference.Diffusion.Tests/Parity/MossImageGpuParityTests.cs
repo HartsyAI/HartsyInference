@@ -2,8 +2,6 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
-using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
@@ -17,8 +15,7 @@ namespace HartsyInference.Diffusion.Tests.Parity;
 [Trait("Category", "GpuIntegration")]
 public sealed unsafe class MossImageGpuParityTests(ITestOutputHelper output)
 {
-    private const int Height = 3, Width = 4;
-    private static readonly string FixturePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "MossImage", "moss_image_tiny.safetensors");
+    private const int Height = MossImageFixture.Height, Width = MossImageFixture.Width;
 
     [Theory]
     [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
@@ -81,26 +78,15 @@ public sealed unsafe class MossImageGpuParityTests(ITestOutputHelper output)
 
     private static void Run(IBackend backend, Action<MossImageTransformer, IReadOnlyDictionary<string, Tensor>> body)
     {
-        using SafeTensorsLoader loader = new();
-        loader.Load(FixturePath);
-        Dictionary<string, Tensor> all = loader.GetAllTensors();
-        Dictionary<string, Tensor> raw = new(StringComparer.Ordinal);
-        foreach ((string key, Tensor value) in all)
-        {
-            if (key.StartsWith("weights.", StringComparison.Ordinal))
-                raw[key["weights.".Length..]] = value;
-        }
-        Dictionary<string, Tensor> weights = MossImageCheckpointConverter.ConvertTransformer(raw);
-        using MossImageTransformer transformer = new(MossImageConfig.FromWeights(weights));
-        transformer.LoadWeights(weights);
-        backend.PreloadWeights(transformer.EnumerateWeights());
+        using MossImageFixture fixture = new();
+        backend.PreloadWeights(fixture.Transformer.EnumerateWeights());
         try
         {
-            body(transformer, all);
+            body(fixture.Transformer, fixture.Tensors);
         }
         finally
         {
-            backend.FreeWeights(transformer.EnumerateWeights());
+            backend.FreeWeights(fixture.Transformer.EnumerateWeights());
         }
     }
 }

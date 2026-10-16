@@ -54,4 +54,36 @@ public static class HfCheckpointDirectory
         return new HfCheckpointInfo(root, configPath, hasIndex ? indexPath : null,
             File.Exists(tokenizerPath) ? tokenizerPath : null, modelType, flavor);
     }
+
+    /// <summary>The safetensors files that make up the checkpoint in <paramref name="directory"/>: every shard a
+    /// <c>*.safetensors.index.json</c> names (transformers' <c>model.</c> or diffusers'
+    /// <c>diffusion_pytorch_model.</c> index), else every <c>.safetensors</c> file, in name order.</summary>
+    /// <exception cref="FileNotFoundException">The directory holds no weights, or an index names a missing shard.</exception>
+    public static IReadOnlyList<string> WeightFiles(string directory)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(directory);
+        string root = Path.GetFullPath(directory);
+        string? index = Directory.EnumerateFiles(root, "*.safetensors.index.json").Order(StringComparer.Ordinal).FirstOrDefault();
+        if (index is null)
+        {
+            string[] files = [.. Directory.EnumerateFiles(root, "*.safetensors").Order(StringComparer.Ordinal)];
+            return files.Length > 0 ? files : throw new FileNotFoundException($"'{root}' holds no .safetensors weights.");
+        }
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(index));
+        SortedSet<string> shards = new(StringComparer.Ordinal);
+        foreach (JsonProperty entry in document.RootElement.GetProperty("weight_map").EnumerateObject())
+        {
+            string name = entry.Value.GetString() ?? throw new InvalidDataException($"'{index}' maps '{entry.Name}' to no file.");
+            string path = Path.GetFullPath(Path.Combine(root, name));
+            if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new InvalidDataException($"'{index}' names a shard outside its folder: '{name}'.");
+            shards.Add(path);
+        }
+        foreach (string shard in shards)
+        {
+            if (!File.Exists(shard))
+                throw new FileNotFoundException($"'{Path.GetFileName(index)}' names a shard that is not on disk.", shard);
+        }
+        return [.. shards];
+    }
 }

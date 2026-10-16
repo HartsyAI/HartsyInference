@@ -3,8 +3,11 @@ namespace HartsyInference.Diffusion.Schedulers;
 /// <summary>A shifted flow-match schedule snapped to the discrete grid a model was trained on, as MOSS-Image's
 /// <c>MOSSImageScheduler</c> builds it: <c>count</c> points spaced linearly from 1 down to the shifted grid's lowest
 /// training point, shifted by <c>σ = s·v/(1 + (s − 1)·v)</c>, then each moved to the nearest training sigma (ties to the
-/// lower one) and consecutive duplicates dropped. Every value is computed in F32 exactly as <c>torch.linspace</c> and the
-/// reference's tensor ops do, so the schedule matches it bit for bit. Feed the result to
+/// lower one) and consecutive duplicates dropped. Each grid point is computed in F64 and rounded to F32 once. The
+/// reference builds them in F32 with <c>torch.linspace</c>, whose last bit depends on the CPU (FMA contraction and
+/// SIMD width change which partial products round), so no fixed F32 recipe matches every machine; one rounding of the
+/// exact value lands the training grid on <c>j/1000</c> and reproduces the reference's published goldens
+/// (SGLang <c>test_v2_schedule_and_shift_override</c>). Feed the result to
 /// <see cref="FlowMatchEulerDiscreteScheduler.SetSigmas"/>, which appends the terminal 0.</summary>
 public static class TrainingGridSchedule
 {
@@ -38,31 +41,17 @@ public static class TrainingGridSchedule
         return [.. snapped];
     }
 
-    /// <summary><c>count</c> linear points from 1 to <c>shift/(total + shift − 1)</c>, shifted: the point the lowest
-    /// training sigma maps to under this shift, so the grid ends on the training grid's floor.</summary>
+    /// <summary><c>count</c> linear points from 1 to <c>shift/(total + shift − 1)</c>, shifted, each rounded once: the
+    /// point the lowest training sigma maps to under this shift, so the grid ends on the training grid's floor.</summary>
     private static float[] ShiftedGrid(int count, float shift, int total)
     {
-        float lower = (float)(shift / (total + (double)shift - 1.0));
-        float[] values = Linspace(1f, lower, count);
-        for (int i = 0; i < values.Length; i++)
-            values[i] = shift * values[i] / (1f + (shift - 1f) * values[i]);
-        return values;
-    }
-
-    /// <summary><c>torch.linspace</c> in F32: the first half steps up from the start, the second half steps back from the
-    /// end, so both endpoints are exact.</summary>
-    private static float[] Linspace(float start, float end, int count)
-    {
+        double lower = shift / (total + (double)shift - 1.0);
         float[] values = new float[count];
-        if (count == 1)
-        {
-            values[0] = start;
-            return values;
-        }
-        float step = (end - start) / (count - 1);
-        int halfway = count / 2;
         for (int i = 0; i < count; i++)
-            values[i] = i < halfway ? start + step * i : end - step * (count - i - 1);
+        {
+            double v = count == 1 ? 1.0 : 1.0 + (lower - 1.0) * i / (count - 1);
+            values[i] = (float)(shift * v / (1.0 + (shift - 1.0) * v));
+        }
         return values;
     }
 

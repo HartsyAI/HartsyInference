@@ -2,8 +2,6 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
-using HartsyInference.ModelAssets.CheckpointConverters;
-using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -17,8 +15,7 @@ namespace HartsyInference.Diffusion.Tests.Parity;
 public sealed unsafe class MossImageParityTests(ITestOutputHelper output)
 {
     private const float Tolerance = 2e-4f;
-    private const int Height = 3, Width = 4;
-    private static readonly string FixturePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "MossImage", "moss_image_tiny.safetensors");
+    private const int Height = MossImageFixture.Height, Width = MossImageFixture.Width;
 
     [Fact]
     public void Config_IsReadFromTheWeights() =>
@@ -76,23 +73,12 @@ public sealed unsafe class MossImageParityTests(ITestOutputHelper output)
             foreach (Tensor velocity in velocities) velocity.Dispose();
         });
 
-    private void Run(Action<MossImageTransformer, IBackend, IReadOnlyDictionary<string, Tensor>> body)
+    private static void Run(Action<MossImageTransformer, IBackend, IReadOnlyDictionary<string, Tensor>> body)
     {
-        using SafeTensorsLoader loader = new();
-        loader.Load(FixturePath);
-        Dictionary<string, Tensor> all = loader.GetAllTensors();
-        Dictionary<string, Tensor> raw = new(StringComparer.Ordinal);
-        foreach ((string key, Tensor value) in all)
-        {
-            if (key.StartsWith("weights.", StringComparison.Ordinal))
-                raw["model.diffusion_model." + key["weights.".Length..]] = value;
-        }
-        Dictionary<string, Tensor> weights = MossImageCheckpointConverter.ConvertTransformer(raw);
-        Assert.False(weights.ContainsKey("rope.bands"));
-        using MossImageTransformer transformer = new(MossImageConfig.FromWeights(weights));
-        transformer.LoadWeights(weights);
+        using MossImageFixture fixture = new();
+        Assert.False(fixture.Weights.ContainsKey("rope.bands"));
         using CpuBackend backend = new();
-        body(transformer, backend, all);
+        body(fixture.Transformer, backend, fixture.Tensors);
     }
 
     private void AssertClose(Tensor expected, Tensor actual, string what)
