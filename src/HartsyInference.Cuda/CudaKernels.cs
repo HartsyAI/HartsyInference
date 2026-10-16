@@ -3914,12 +3914,12 @@ public sealed partial class CudaKernels : IDisposable
     }
 
     /// <summary>MiniMax guided semantic logits: the conditional top-K candidates get <c>u + (c - u)·g</c>, all other entries -inf
-    /// (lm_cfg_topk_guided.cu). One block per row; <paramref name="count"/> is capped at the kernel's 16384-entry mask.</summary>
+    /// (lm_cfg_topk_guided.cu). One block per row; <paramref name="count"/> is capped at the kernel mask of 16448 entries.</summary>
     public unsafe void LaunchCfgTopKGuided(ulong output, ulong cond, ulong uncond, int count, int topK, float guidance, nint stream)
     {
         if (_lmCfgTopKGuided == 0) throw new InvalidOperationException("lm_cfg_topk_guided.ptx not present in the Ptx folder.");
-        if (count < 1 || count > 16384 || topK < 1 || topK > count)
-            throw new ArgumentOutOfRangeException(nameof(count), $"guided top-K needs 1 <= topK <= count <= 16384; got count={count} topK={topK}.");
+        if (count < 1 || count > 16448 || topK < 1 || topK > count)
+            throw new ArgumentOutOfRangeException(nameof(count), $"guided top-K needs 1 <= topK <= count <= 16448; got count={count} topK={topK}; the mask holds up to 16448 entries.");
         ulong outArg = output, condArg = cond, uncondArg = uncond;
         int countArg = count, topKArg = topK;
         float guidanceArg = guidance;

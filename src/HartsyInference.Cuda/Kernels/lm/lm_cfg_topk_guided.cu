@@ -2,7 +2,7 @@
 // every candidate gets u + (c - u) * g with the host's operation order, and every other entry is -inf. The threshold is the
 // K-th largest conditional value, so ties at the threshold stay candidates, as in the host BlendGuided. Round-to-nearest
 // intrinsics stop the compiler from contracting the blend into an FMA, which would change the last bit.
-#define MM3_TOPK_MAX_COUNT 16384
+#define MM3_TOPK_MAX_COUNT 16448   // 16384 codes plus end-of-audio, with room for the rounding of the shared mask
 #define MM3_TOPK_BLOCK 256
 #define MM3_NEG_INF __int_as_float(0xff800000)   // -inf without the math header, which NVRTC does not provide
 
