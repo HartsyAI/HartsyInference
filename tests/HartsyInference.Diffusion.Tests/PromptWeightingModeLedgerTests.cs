@@ -39,6 +39,9 @@ public sealed class PromptWeightingModeLedgerTests
         // supported_models.py:827/832/838 -> KleinTokenizer (flux.py:169), KleinTokenizer8B (:172), Flux2Tokenizer (:104);
         // the Mistral arm also disables in its ctor (flux.py:88). All three Flux.2 text stacks discard weights.
         ["flux2"] = PromptWeightingMode.CondScale,
+        // supported_models.py:862 -> flux.Flux3Tokenizer (flux.py:203), a Qwen3VLTokenizer subclass -> disable_weights at
+        // qwen3vl.py:189. Nothing is trimmed off the encoder output (the padding is masked, not dropped), so offset 0.
+        ["flux3"] = PromptWeightingMode.CondScale,
         // supported_models.py:1797 -> pixart_t5.PixArtTokenizer (pixart_t5.py:29) -> T5XXLTokenizer (:24-27), no disable.
         ["chroma"] = PromptWeightingMode.ComfyBlend,
         // supported_models.py:1833 ChromaRadiance(Chroma) adds no clip_target, so it inherits Chroma's T5 stack (:1794-1797).

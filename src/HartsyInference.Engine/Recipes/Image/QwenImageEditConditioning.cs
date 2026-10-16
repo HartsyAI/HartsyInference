@@ -90,10 +90,10 @@ public static class QwenImageEditConditioning
             foreach (ImageData reference in ordered)
             {
                 // 16, not ComfyUI's 8: packing the reference latent needs the patch size to divide it too.
-                (int latentW, int latentH) = ScaleToArea(reference.Width, reference.Height, LatentTargetArea, multiple: 16);
+                (int latentW, int latentH) = FeatureImaging.ScaleToArea(reference.Width, reference.Height, LatentTargetArea, multiple: 16);
                 latent.Add(FeatureImaging.RgbToTensorMinusOneOne(
                     FeatureImaging.ResizeRgb24(reference, latentW, latentH), latentW, latentH));
-                (int visionW, int visionH) = ScaleToArea(reference.Width, reference.Height, template.VisionTargetArea, multiple: 1);
+                (int visionW, int visionH) = FeatureImaging.ScaleToArea(reference.Width, reference.Height, template.VisionTargetArea, multiple: 1);
                 vision.Add(FeatureImaging.RgbToTensorZeroOne(
                     FeatureImaging.ResizeRgb24(reference, visionW, visionH), visionW, visionH));
             }
@@ -167,15 +167,5 @@ public static class QwenImageEditConditioning
         WeightedTokenSequence sequence = WeightedTokenBuilder.Build(
             prompt, tokenizer.EncodeRaw, CollectionsMarshal.AsSpan(prefix), CollectionsMarshal.AsSpan(suffix));
         return (sequence, dropIndex);
-    }
-
-    /// <summary>Aspect-preserving rescale to <paramref name="targetArea"/> pixels, each side snapped to a multiple of
-    /// <paramref name="multiple"/> (ComfyUI's <c>sqrt(total / (w·h))</c> scale, same banker's rounding).</summary>
-    private static (int Width, int Height) ScaleToArea(int width, int height, int targetArea, int multiple)
-    {
-        double scale = Math.Sqrt(targetArea / ((double)width * height));
-        int scaledW = Math.Max(multiple, (int)Math.Round(width * scale / multiple) * multiple);
-        int scaledH = Math.Max(multiple, (int)Math.Round(height * scale / multiple) * multiple);
-        return (scaledW, scaledH);
     }
 }

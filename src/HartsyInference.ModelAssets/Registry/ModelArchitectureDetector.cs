@@ -47,6 +47,10 @@ public static class ModelArchitectureDetector
             k.HasPrefix("model.diffusion_model.") &&
             k.HasPrefix("cond_stage_model.transformer.")),
 
+        // ── FLUX.3 (per-mode blocks; shares single_blocks naming with Flux.1 but has no double_blocks) ─
+        (ModelArchitecture.Flux3, k =>
+            CheckpointConverters.Flux3CheckpointConverter.MatchesByKeys(k.Keys)),
+
         // ── Flux.2 before Flux.1 (Flux.2 modulation keys are distinctive) ─
         (ModelArchitecture.Flux2, k =>
             k.HasPrefixAfterOptional("model.diffusion_model.", "double_stream_modulation_img.")),

@@ -104,6 +104,43 @@ internal sealed class LoraGroupBuffer
         }
     }
 
+    /// <summary>Spreads one matrix of an adapter trained on a FUSED projection over the split weights that carry its rows: the up matrix is cut into consecutive row windows (views on the file's mapping, no copy), while the down matrix and alpha are shared by every split. Returns false for any other role — cutting a LyCORIS factor or a DoRA magnitude is decomposition-specific, so the caller refuses it by name.</summary>
+    /// <param name="slices">Each split's canonical key and its row count, in the fused weight's row order.</param>
+    public static bool AssignFusedRows(Dictionary<(LoraTarget, string), LoraGroupBuffer> groups, LoraTarget target,
+        IReadOnlyList<(string CanonicalKey, long Rows)> slices, string sourceKey, LoraRole role, Tensor tensor)
+    {
+        if (role is not (LoraRole.Down or LoraRole.Up or LoraRole.Alpha))
+        {
+            return false;
+        }
+        if (role != LoraRole.Up)
+        {
+            foreach ((string canonicalKey, long _) in slices)
+            {
+                GetOrCreate(groups, target, canonicalKey, sourceKey).Assign(role, tensor);
+            }
+            return true;
+        }
+
+        long totalRows = 0;
+        foreach ((string _, long rows) in slices)
+        {
+            totalRows += rows;
+        }
+        if (tensor.Shape.Rank != 2 || tensor.Shape[0] != totalRows)
+        {
+            throw new HartsyInferenceException(
+                $"LoRA fused up matrix '{sourceKey}' has shape {tensor.Shape}; its {slices.Count} splits need [{totalRows}, rank].");
+        }
+        long offset = 0;
+        foreach ((string canonicalKey, long rows) in slices)
+        {
+            GetOrCreate(groups, target, canonicalKey, sourceKey).Up = tensor.SliceRows(offset, rows);
+            offset += rows;
+        }
+        return true;
+    }
+
     /// <summary>Finalizes accumulated groups into layers, picking each group's decomposition from the slots it filled. A group that filled no complete set is skipped with the warning <paramref name="missingWarning"/> builds from its <see cref="FirstSourceKey"/>. Alpha defaults to rank.</summary>
     public static IReadOnlyList<LoraLayer> BuildLayers(Dictionary<(LoraTarget, string), LoraGroupBuffer> groups,
         Func<string, string> missingWarning)

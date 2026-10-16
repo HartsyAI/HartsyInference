@@ -89,6 +89,7 @@ per-model architecture notes and build plans.
 | ~~F-Lite~~ | ✅ **CORRECT + BENCHED 07-11** (`44.67-local`): **Python baseline 122.98 s (07-18, diffusers `f_lite` sequential CPU offload — 10B+T5-XXL≈29 GB > 24 GB so resident/model-offload OOM; memory-bound not compute) → 0.50× faster** (`image_python_baselines_2026-07-18.md`). coherent reference-quality astronaut @1024²/30st/cfg6, **warm 61.5s** (prompt-cache hit skips T5; peak 23.8GB). Byte-oracle campaign vs fal-ai found 4 real bugs: register_tokens + lambda_param are **BF16 read as host float*** (bytes reinterpreted → garbage registers + broken V-residual), alpha from the LATENT grid (4 @1024², not 2), and reference T5 conditioning = NO attention mask + zeros-tensor negative. Plus the GPU-residency port (90→1.9s/step, 47×, host-glue AV gone) and TE⇄DiT staging + prompt cache. Old note: ⚠️ BLOCKED ON THE KNOWN HOST-GLUE CRASH 07-10: loader fully works (`f-lite` model class registered in the extension — diffusers-folder shards scan architecture-less otherwise), TE+DiT+VAE load, denoise runs @1024²/30st — but **90s/step, GPU 11%** (glue scan: FLiteBlock cpu=24, FLiteAttention cpu=13, FLiteRope cpu=19 HOST rope, FLiteTransformer cpu=40) and dies ~step 6 with the documented `cpu-glue-async-race` AccessViolation. Fix for BOTH stability and speed = the GPU-residency block port (perf-pass queue #1). **CLI catalog-path re-verified 2026-07-21**: 1024² reproducibly OOMs on this 24GB 4090 (even in total isolation, even inside the tiled-VAE-decode recovery path) — the "peak 23.8GB" figure above leaves only ~700MB headroom on a 24564MB card, which real allocator/context overhead now eats into; this is a genuine ragged-edge memory ceiling, not a regression (same class as zeta-chroma's 1024 ceiling). **768×768 succeeds cleanly**: clear on-prompt astronaut in full white spacesuit/helmet on a brown horse, no artifacts. `CliDrivable=true` with 768 as the practical default until this gets a real memory-budget pass. |
 | **Hunyuan Image 2.1** | ✅ **FIRST E2E 07-10** (`44.52-local`): sharp 2048²/20st/cfg3.5 astronaut, warm **~50.0s** (**ComfyUI baseline 48.08 s → 1.04× MATCHED**; 07-18 A/B on `alpha.61`: F16 50.1 s ≈ F32 49.9 s. ([details](#hunyuan-image-21)) |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
+| **FLUX.3 Klein** (5.6B, full + step-distilled) | 🔧 Built 2026-10-15. Text-to-image, img2img, inpaint, up to 10 reference images, the native layout table, and LoRA (diffusers/PEFT, ComfyUI and kohya names). Tiny-config parity against ComfyUI passes; no real-weight or GPU run yet. ([details](#flux3-klein)) |
 
 ## Edit / image-conditioned variants (🔧 — to download + e2e test)
 
@@ -555,6 +556,31 @@ Generate. `CliDrivable=true`.
 - **Schedule.** Uses the shipped `sample_sigmas` table (8 values, terminal 0 appended) through `FlowMatchEulerDiscreteScheduler.SetSigmas`. Steps and CFG are pinned to 8 and 1, with a warning when a request differs.
 - **Side models.** Text encoder and VAE are the Comfy-Org builds the base 2.1 entry already downloads. The Turbo repo's own copies are diffusers-keyed, and the engine's loaders read the Comfy names, so they are not used. This assumes the weights match the base release, which is unverified.
 - **Verified so far:** unit tests for the variant token, defaults, the sigma schedule, the MLP fuse order and shard discovery (`QwenImage21TurboTests`). **Not verified:** a real-weight generation or parity check. Status stays 🔧 until a 4090 run confirms output is coherent and matches the Python reference at the same seed.
+
+### FLUX.3 Klein
+
+**Built, not yet run on real weights (2026-10-15).** Family id `flux3` (SwarmUI class `flux.3-klein`). The weights are
+in the gated `black-forest-labs/flux-3-image-klein-comfy`, so the catalog entry downloads only the side models
+(`qwen3vl_4b.safetensors`, the one Krea 2 uses, and the Flux.2 VAE); the transformer comes from `--model-path`.
+Architecture and sources: [FLUX3_KLEIN_ARCHITECTURE.md](../Research/FLUX3_KLEIN_ARCHITECTURE.md).
+
+- **Variants.** `base` (25 steps, CFG 3.5) and `distilled` (15 steps, CFG 1). The distilled build is a flow map: it
+  carries `ref_time_in`, which proves the variant structurally and embeds the sigma each step jumps to.
+- **Conditioning.** Text and reference streams are computed once per generation for the base build, and per step
+  for the flow map. CFG runs cond and uncond separately, both with the references. `Img2ImgMode.Reference` makes the
+  init image reference 0.
+- **Layout.** `<region:x,y,w,h> text` prompt regions become ComfyUI's `Flux3LayoutPrompt` JSON table on the 0–1000 grid.
+- **LoRA.** `Flux3LoraMapper` reads diffusers/PEFT names under `transformer.` (SimpleTuner), BFL names under
+  `diffusion_model.` or bare (ComfyUI), and kohya `lora_unet_`. An adapter on a fused `qkv` is split over
+  `q_proj`/`k_proj`/`v_proj`, and diffusers' `norm_out.linear` is reordered from `[scale | shift]`.
+  `terminusresearch/flux-3-klein-image-distilled-lora-extract` is an SVD extract of the step distillation: apply it to
+  the **full** build and set steps and CFG to the distilled values yourself. It carries no `ref_time_in`, so it does
+  not turn the full build into a flow map. The ComfyUI version this was built against (a5e95e6) maps only the BFL
+  names for FLUX.3, not that extract's diffusers names.
+- **Verified so far:** tiny-config parity against ComfyUI's module (see [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md)),
+  synthetic smoke tests, converter, LoRA mapping and merge tests. **Not verified:** a real-weight generation, the
+  text-encoder taps against ComfyUI, GPU backends, and an A/B of the hoisted Flux.2 latent and VAE code on Flux.2,
+  Krea 2 and Lens.
 
 ### Qwen-Image-Edit 2511
 

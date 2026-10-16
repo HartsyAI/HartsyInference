@@ -39,6 +39,20 @@ public static class ModelFileLocator
                 $"{role} '{nameOrPath}' was not found under '{RepoPaths.ModelsRoot()}' (searched: {string.Join(", ", subfolders)}).");
     }
 
+    /// <summary>Resolves a caller's component override when one is given; otherwise ensures <paramref name="fallback"/> is
+    /// on disk (downloading it if needed — the token is honored because that may transfer several gigabytes).</summary>
+    public static string RequireOrEnsure(string? requested, ModelAsset fallback, string role, CancellationToken cancel,
+        params string[] subfolders)
+    {
+        ArgumentNullException.ThrowIfNull(fallback);
+        if (!string.IsNullOrWhiteSpace(requested))
+        {
+            return Require(requested, role, subfolders);
+        }
+        return ModelDownloader.EnsureSideModelAsync(fallback, downloadIfMissing: true, onProgress: null, cancel)
+            .GetAwaiter().GetResult();
+    }
+
     /// <summary>Each name candidate directly under <paramref name="root"/> (when given) and in each folder, then a
     /// recursive scan of the folders for the bare stem.</summary>
     private static string? Search(string nameOrPath, string? root, string[] folders)

@@ -20,7 +20,7 @@ public sealed class ImageFeatureDeclarationTests
         // (IArchitectureRecipe.Name), not SwarmUI compat-class ids — "flux2", not "flux-2".
         "krea2", "anima",                                       // QwenImageVaeEncoder
         "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",   // VaeConfig.Flux
-        "flux2", "ernie-image", "ideogram4",                    // VaeConfig.Flux2
+        "flux2", "flux3", "ernie-image", "ideogram4",           // VaeConfig.Flux2
         "auraflow",                                             // VaeConfig.AuraFlow (= Sdxl)
         "lance-image",                                          // Wan22VaeEncoder — img2img only
         // Phase 4 — built from nothing; these three had no img2img at any layer
@@ -37,7 +37,7 @@ public sealed class ImageFeatureDeclarationTests
         "sd3", "zimage", "qwen-image", "zeta-chroma", "chroma-radiance",
         "krea2", "anima",
         "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",
-        "flux2", "ernie-image", "ideogram4",
+        "flux2", "flux3", "ernie-image", "ideogram4",
         "auraflow",
         "hidream",
         // 72b725ae — per-token blend (MaskBlendUtilities.BlendTokensInPlace) covering all three token-space
@@ -69,6 +69,7 @@ public sealed class ImageFeatureDeclarationTests
         "lance-image",                                                      // (*) layers.N
         "boogu",                                                            // (*) double_stream_layers.N
         "hunyuan-image", "lens", "mage-flow",
+        "flux3",                                                            // fused qkv split to q/k/v_proj at load
     ];
 
     private readonly ITestOutputHelper _output;
@@ -92,13 +93,14 @@ public sealed class ImageFeatureDeclarationTests
     }
 
     /// <summary>An edit model must not also claim strength-based img2img unless it genuinely implements both, because
-    /// the two obey different contracts and <c>Img2ImgMode.Auto</c> resolves ambiguity in favour of the classic path.</summary>
+    /// the two obey different contracts and <c>Img2ImgMode.Auto</c> resolves ambiguity in favour of the classic path.
+    /// FLUX.3 runs one set of weights for both: the init image denoises and references condition at full strength.</summary>
     [Fact]
-    public void QwenImageIsTheOnlyFamilyDeclaringBothInitImageModes()
+    public void OnlyFamiliesImplementingBothInitImageModesDeclareThem()
     {
         string[] both = [.. DeclaringFamilies(ImageFeatures.RefEdit)
             .Where(f => (Supports(f) & ImageFeatures.Img2Img) != ImageFeatures.None)];
-        Assert.Equal(["qwen-image"], both);
+        Assert.Equal(["flux3", "qwen-image"], both);
     }
 
     [Fact]

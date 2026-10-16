@@ -28,6 +28,9 @@ public static class DiffusionGgufFamilies
         DiffusionGgufKeyMapper.MatchingAny("hunyuan_image",
             [And(Has("transformer_blocks."), Or(Has(".dual_attention"), Has(".moe.")))],
             [And(Has("double_blocks."), Has("img_attn_qkv.")), HasPrefix("byt5_in.")]),
+        // FLUX.3 keeps Flux's single_blocks naming but has no double_blocks, so the Flux row cannot claim it; its
+        // per-mode content blocks and joint modulations are its own.
+        new DiffusionGgufKeyMapper("flux3", [Has("content_mode_blocks."), Has("single_stream_modulations.")]),
         // Flux.2 keeps Flux's double+single block naming and adds top-level shared modulation linears, so it matches
         // Flux's signature as well; it has to be asked first. (It was registered after Flux before this table, which
         // made a Flux.2 GGUF with no declared architecture detect as Flux.1 — latent only because every shipped Flux.2

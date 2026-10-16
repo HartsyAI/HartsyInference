@@ -19,6 +19,12 @@ public interface ISampler
     /// <summary>Total steps in the resolved schedule.</summary>
     int StepCount { get; }
 
+    /// <summary>The resolved schedule this sampler integrates, terminal zero included: <c>Sigmas[i]</c> is the noise
+    /// level the latent carries at the start of step <c>i</c>. A caller acting on the latent between steps (a masked
+    /// inpaint re-noising its source, a flow map's jump target) reads it here, not from the family scheduler, which a
+    /// sigma schedule or a discard-penultimate sampler re-spaces.</summary>
+    IReadOnlyList<float> Sigmas { get; }
+
     /// <summary>Prepares for a run over latents of <paramref name="latentShape"/>, clearing any history from a previous
     /// generation. Must be called before the first <see cref="Step"/>; cheap and idempotent for stateless samplers.</summary>
     void Reset(TensorShape latentShape);

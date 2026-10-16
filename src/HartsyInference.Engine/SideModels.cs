@@ -173,7 +173,7 @@ public static class SideModels
         Sha256 = "4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd"
     };
 
-    /// <summary>Qwen3-VL-4B (fp8_scaled) — Krea 2's and Mage-Flow's text encoder (taps 12 decoder layers, rope θ=5e6); distinct from the base Qwen3-4B Z-Image / Flux.2 Klein 4B use. Flat filename matches SwarmUI's Comfy <c>RequireClipModel("qwen3vl_4b.safetensors")</c> for file reuse.</summary>
+    /// <summary>Qwen3-VL-4B (fp8_scaled) — Krea 2's, Mage-Flow's and FLUX.3 Klein's text encoder (rope θ=5e6); distinct from the base Qwen3-4B Z-Image / Flux.2 Klein 4B use. Flat filename matches SwarmUI's Comfy <c>RequireClipModel("qwen3vl_4b.safetensors")</c> for file reuse.</summary>
     public static readonly ModelAsset Qwen3VL_4B = new ModelAsset
     {
         Repo = "Comfy-Org/Krea-2",

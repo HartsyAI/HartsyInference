@@ -43,6 +43,7 @@ public static class RefinerStage
                 ModelArchitecture.StableDiffusion3 => "sd3",
                 ModelArchitecture.Flux1 => "flux1",
                 ModelArchitecture.Flux2 => "flux2",
+                ModelArchitecture.Flux3 => "flux3",
                 ModelArchitecture.AuraFlow => "auraflow",
                 ModelArchitecture.Chroma => "chroma",
                 _ => arch.ToString().ToLowerInvariant(),

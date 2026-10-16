@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.Lora.Mappers;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Lora;
@@ -26,9 +27,17 @@ public static class LoraFormatDetector
         bool hasComfyBfl = false;
         bool hasZImage = false;
         bool hasDiffusersMiniMaxH3 = false;
+        bool hasFlux3 = false;
 
         foreach (string key in descriptors.Keys)
         {
+            // FLUX.3 in any spelling. Its joint stack shares Flux's `single_blocks` / `single_transformer_blocks`
+            // roots and wrappers, so the arms below would route it to a Flux mapper whose names it does not have;
+            // its own modules (per-mode blocks, stream modulations, embedders) are what claim it, ahead of all of them.
+            if (HasLoraSuffix(key) && Flux3LoraMapper.IsDistinctive(key))
+            {
+                hasFlux3 = true;
+            }
             // No wrapper prefix at all — the root IS the checkpoint's own key (MiniMax-H3's published Turbo LoRA:
             // `blocks.0.attn.qkv_proj.lora_A.weight`, `token_refiner.blocks.0.mlp.fc1.lora_B.weight`). Recorded
             // rather than returned so it stays LAST in the precedence list below: "carries a LoRA suffix and no
@@ -132,6 +141,7 @@ public static class LoraFormatDetector
             }
         }
 
+        if (hasFlux3) return LoraFormat.Flux3;
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
         if (hasComfyBfl) return LoraFormat.ComfyBflDit;
         if (hasZImage) return LoraFormat.ComfyZImageDit;

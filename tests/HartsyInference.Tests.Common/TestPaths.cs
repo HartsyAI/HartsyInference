@@ -36,6 +36,19 @@ public static class TestPaths
         public static string Klein        => Resolve("FLUX2_KLEIN_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "Flux2", "flux-2-klein-4b.safetensors"));
     }
 
+    /// <summary>FLUX.3 Klein checkpoint and LoRA paths (gated <c>black-forest-labs/flux-3-image-klein-comfy</c>).</summary>
+    public static class Flux3
+    {
+        /// <summary>Full (guided) build. Override with FLUX3_KLEIN_PATH.</summary>
+        public static string Klein => Resolve("FLUX3_KLEIN_PATH", Path.Combine(ModelsDir, "diffusion_models", "flux3_image_klein_int8_convrot.safetensors"));
+
+        /// <summary>Step-distilled (flow-map) build. Override with FLUX3_KLEIN_DISTILLED_PATH.</summary>
+        public static string KleinDistilled => Resolve("FLUX3_KLEIN_DISTILLED_PATH", Path.Combine(ModelsDir, "diffusion_models", "flux3_image_klein_sd_int8_convrot.safetensors"));
+
+        /// <summary>terminusresearch's SimpleTuner PEFT extract of the step distillation (diffusers names). Override with FLUX3_DISTILLED_LORA_PATH.</summary>
+        public static string DistilledLoraExtract => Resolve("FLUX3_DISTILLED_LORA_PATH", Path.Combine(ModelsDir, "Lora", "Flux3", "flux-3-klein-image-distilled-lora-extract.safetensors"));
+    }
+
     /// <summary>Z-Image family checkpoint paths.</summary>
     public static class ZImage
     {
