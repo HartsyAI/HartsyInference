@@ -51,6 +51,10 @@ public static class ModelArchitectureDetector
         (ModelArchitecture.Flux3, k =>
             CheckpointConverters.Flux3CheckpointConverter.MatchesByKeys(k.Keys)),
 
+        // ── MOSS-Image (one shared block modulation; ERNIE-Image's shared adaLN uses other names) ─
+        (ModelArchitecture.MossImage, k =>
+            CheckpointConverters.MossImageCheckpointConverter.MatchesByKeys(k.Keys)),
+
         // ── Flux.2 before Flux.1 (Flux.2 modulation keys are distinctive) ─
         (ModelArchitecture.Flux2, k =>
             k.HasPrefixAfterOptional("model.diffusion_model.", "double_stream_modulation_img.")),
@@ -102,9 +106,12 @@ public static class ModelArchitectureDetector
     /// <summary>Detects the architecture from a checkpoint file by reading only its header, in either container. For a diffusers-layout directory or multi-shard checkpoint, pass the representative file resolved by <see cref="ModelLayoutResolver"/>.</summary>
     /// <remarks>This opened every file as safetensors, so a GGUF checkpoint could not be identified at all: the header
     /// parse failed with "Invalid safetensors header length" and the user was told their file was malformed. It was
-    /// reachable only by naming the family explicitly, which defeats the point of detection.</remarks>
+    /// reachable only by naming the family explicitly, which defeats the point of detection.
+    /// <para>A shard its folder's index names is judged by the index's whole key set rather than its own header: one
+    /// shard holds whatever the exporter happened to put in it, and a signature whose tensors straddle shards (MOSS-Image's
+    /// block modulation and output head) would otherwise depend on which shard was picked.</para></remarks>
     public static ModelArchitecture DetectFromFile(string checkpointPath) =>
-        Detect(CheckpointHeader.Read(checkpointPath).Descriptors.Keys);
+        Detect(HfCheckpointDirectory.IndexedTensorNames(checkpointPath) ?? CheckpointHeader.Read(checkpointPath).Descriptors.Keys);
 
     /// <summary>Lightweight prefix-membership probe over a checkpoint's key set. Sorted once so prefix hits are a single binary search rather than a full scan per query.</summary>
     private sealed class KeySet

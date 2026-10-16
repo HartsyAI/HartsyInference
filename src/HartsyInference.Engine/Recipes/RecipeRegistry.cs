@@ -42,6 +42,7 @@ public static class RecipeRegistry
         new Image.Flux1Recipe(),
         new Image.Flux2Recipe(),
         new Image.Flux3Recipe(),
+        new Image.MossImageRecipe(),
         new Image.Lumina2Recipe(),
         new Image.QwenImageRecipe(),
         new Image.QwenImage21Recipe(),

@@ -14,7 +14,9 @@ namespace HartsyInference.ModelAssets.Checkpoints;
 /// <param name="Keys">Every tensor name, as a full load would map it (GGUF names go through <see cref="CheckpointHeader"/>).</param>
 /// <param name="Shapes">Each tensor's shape, keyed like <paramref name="Keys"/>.</param>
 /// <param name="Metadata">Safetensors <c>__metadata__</c> strings or the GGUF KV block; the first file's value wins for a bundle.</param>
-/// <param name="FileNames">The checkpoint file name without extension, or for a directory its leaf name plus every contained file name.</param>
+/// <param name="FileNames">The checkpoint file name without extension, or for a directory its leaf name plus every contained file name. A
+/// shard its folder's index names adds that folder's name, and the pipeline folder's when the shard folder is a diffusers
+/// component (the build is named there, not in <c>diffusion_pytorch_model-00001-of-00004</c>).</param>
 public sealed record CheckpointProbe(IReadOnlySet<string> Keys, IReadOnlyDictionary<string, TensorShape> Shapes,
     IReadOnlyDictionary<string, string> Metadata, IReadOnlyList<string> FileNames)
 {
@@ -38,7 +40,11 @@ public sealed record CheckpointProbe(IReadOnlySet<string> Keys, IReadOnlyDiction
         if (File.Exists(path))
         {
             fileNames.Add(Path.GetFileNameWithoutExtension(path));
-            ReadFileInto(path, keys, shapes, metadata);
+            IReadOnlyList<string> files = ShardSetOf(path);
+            if (files.Count > 1)
+                AddContainerNames(path, fileNames);
+            foreach (string file in files)
+                ReadFileInto(file, keys, shapes, metadata);
             return new CheckpointProbe(keys, shapes, metadata, fileNames);
         }
         if (!Directory.Exists(path))
@@ -59,6 +65,34 @@ public sealed record CheckpointProbe(IReadOnlySet<string> Keys, IReadOnlyDiction
             Logs.Warning($"[CheckpointProbe] Could not scan '{path}': {ex.Message}");
         }
         return new CheckpointProbe(keys, shapes, metadata, fileNames);
+    }
+
+    /// <summary>The whole shard set <paramref name="file"/> belongs to (<see cref="HfCheckpointDirectory.CheckpointFiles"/>),
+    /// or the file alone when its index cannot be read: a probe never throws.</summary>
+    private static IReadOnlyList<string> ShardSetOf(string file)
+    {
+        try
+        {
+            return HfCheckpointDirectory.CheckpointFiles(file);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException
+            or KeyNotFoundException or InvalidOperationException)
+        {
+            Logs.Warning($"[CheckpointProbe] Could not read the shard index beside '{file}': {ex.Message}");
+            return [file];
+        }
+    }
+
+    /// <summary>Adds the shard folder's name, and its parent's when the parent is a diffusers pipeline folder.</summary>
+    private static void AddContainerNames(string shard, List<string> fileNames)
+    {
+        string? folder = Path.GetDirectoryName(Path.GetFullPath(shard));
+        if (folder is null)
+            return;
+        fileNames.Add(Path.GetFileName(folder));
+        string? pipeline = Path.GetDirectoryName(folder);
+        if (pipeline is not null && File.Exists(Path.Combine(pipeline, "model_index.json")))
+            fileNames.Add(Path.GetFileName(pipeline));
     }
 
     /// <summary>True when every one of <paramref name="markers"/> is a tensor name in this checkpoint.</summary>

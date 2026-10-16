@@ -66,6 +66,9 @@ public static class ModelIdentityCatalog
             // One SwarmUI class covers the full and the step-distilled build; the weights tell them apart.
             Image("flux3", "flux.3-klein", "Flux.3 Klein", "Black Forest Labs", "other", "1024x1024",
                 "black-forest-labs/flux-3-image-klein-comfy"),
+            // Base and SFT share the architecture and every sampling default; the variant only names the build.
+            Image("moss-image", "moss-image", "MOSS-Image", "OpenMOSS", "other", "1024x1024",
+                "OpenMOSS-Team/MOSS-Image-Base"),
             Image("chroma", "chroma", "Chroma", "lodestones", "apache-2.0", "1024x1024"),
             Image("chroma-radiance", "chroma-radiance", "Chroma Radiance", "lodestones", "apache-2.0", "1024x1024"),
             // Base, Edit and Edit-2509 are key-for-key identical, so the stamped class is what tells SwarmUI (and the
