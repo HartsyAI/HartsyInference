@@ -214,23 +214,31 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
         }
-        Tensor vaeLatent;
-        using (Tensor finalLatent = latent)
-        {
-            vaeLatent = Flux2LatentOps.FromPackedTokens(finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
-                _config.VaeLatentChannels, _config.PatchSize);
-        }
-        Tensor image;
-        using (vaeLatent)
-        {
-            image = _vaeDecoder.DecodeTiled(Backend, vaeLatent);
-        }
         byte[] rgb;
-        using (image)
+        try
         {
-            if (masked && ((ImageToImageRequest)request).RecompositeAtEnd)
-                MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, plan.MaskPixel!);
-            rgb = ImagePostProcessor.TensorToRgbBytes(image);
+            Tensor vaeLatent;
+            using (Tensor finalLatent = latent)
+            {
+                vaeLatent = Flux2LatentOps.FromPackedTokens(finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    _config.VaeLatentChannels, _config.PatchSize);
+            }
+            Tensor image;
+            using (vaeLatent)
+            {
+                image = _vaeDecoder.DecodeTiled(Backend, vaeLatent);
+            }
+            using (image)
+            {
+                if (masked && ((ImageToImageRequest)request).RecompositeAtEnd)
+                    MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, plan.MaskPixel!);
+                rgb = ImagePostProcessor.TensorToRgbBytes(image);
+            }
+        }
+        catch
+        {
+            ReclaimAfterFailure();
+            throw;
         }
         Backend.FreeActivations();
         Logs.Info($"{Family} generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
