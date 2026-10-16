@@ -130,7 +130,9 @@ public sealed class GgufLanguageModel : IDisposable
             return ChatMlOrRaw();
         }
 
-        try { return new JinjaChatTemplate(chatTemplate); }
+        // llama.cpp strips a BOS the template rendered first, then its tokenizer adds one, so such a prompt starts with exactly one.
+        bool prependBos = meta.GetBool("tokenizer.ggml.add_bos_token", false);
+        try { return new JinjaChatTemplate(chatTemplate, prependBos); }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[WRN] GGUF: chat template did not compile ({ex.Message}); falling back (raw completion / embeddings still work).");
@@ -344,7 +346,7 @@ public sealed class GgufLanguageModel : IDisposable
     internal static void SplitStackedExperts(Dictionary<string, Tensor> w, TransformerConfig cfg)
     {
         int e = cfg.Moe!.NumExperts;
-        int hidden = cfg.HiddenSize;
+        int hidden = cfg.Moe.ExpertWidth(cfg.HiddenSize);
         int inter = cfg.Moe.MoeIntermediateSize;
         for (int i = 0; i < cfg.NumLayers; i++)
         {

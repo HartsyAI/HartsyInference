@@ -65,6 +65,7 @@ Qwen-MoE shared-expert path is unit-test-verified against an HF reference (no 14
 | **GPT-OSS 20B / 120B** | Per-head **attention sinks** built (CPU+CUDA, PTX recompiled) & **slice-verified** (`FlashAttentionTests.Flash_Sink_*`); `gpt-oss` arch/mapper/config wired. MoE + o200k tokenizer reused. MXFP4 tensor-type decode added 2026-07-22 (`DType.MXFP4`/`Codec_MXFP4`) — the load-time crash every public checkpoint hit is fixed. e2e 20B+ still deferred (VRAM, not an engine gap anymore). |
 | **Llama-3.2-Vision-11B (mllama)** | ✅ **VERIFIED e2e on the 3060** (leafspark Q4_K_M + mmproj-F16, low-VRAM): red circle→"red", blue square→"a blue square with a white outline…". ([details](#llama-32-vision-11b-mllama)) |
 | **Gemma-4 31B-dense / 26B-A4B-MoE** | Same `gemma4` arch/config/forward path as the verified E2B row above — the 26B-A4B variant additionally exercises `ParallelDenseMoeBranch` (routed-expert FFN running IN PARALLEL WITH the dense/"shared" branch, each own pre/post norm, summed — a genuinely different pattern from every other MoE arch here, which fuses a shared expert into the router output instead) and `ComputeRouterLogits`'s separately-normalized router input. ([details](#gemma-4-31b-dense--26b-a4b-moe)) |
+| **Muse Spark Open** (`muse-spark`, 816B-A42B, text) | 🔧 Text decoder built and checked on synthetic weights only: GGUFs from llama.cpp's muse-spark converter load (every quant type it writes); logits match transformers on every quant, reasoning and `<atem:invoke>` tool calls are parsed. HF-format weights map only through the library API: the engine does not load a Muse Spark HF directory. Not run on the real checkpoint; no GPU measurement. ([details](#muse-spark-open)) |
 
 ## VLMs (vision-language) — mixed verification
 
@@ -130,6 +131,8 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Architecture coverage frontier
 - [ ] Nemotron-H (Mamba-proper hybrid — beyond the Jamba / Zamba2 / Granite-4 hybrids already in Phase 7).
+- [ ] Muse Spark Open on real weights and GPU: graph decode for the gated residual block, CUDA kernels for the quant types
+  it widens to F32, then an A/B against llama.cpp CUDA ([details](#muse-spark-open)).
 
 ### Tool calling
 - Engine plumbing (alpha.220): tool schemas reach the chat template (`tools` in Jinja, Qwen2.5-shaped `# Tools` block in
@@ -171,6 +174,25 @@ tables on 2026-08-06 so the tables stay scannable — no content was dropped.
 ### Gemma-4
 
 Ported cold from llama.cpp's `src/models/gemma4.cpp` (no local reference model existed) — per-layer embeddings (PLE, Gemma-3n-lineage), per-layer head dim (global 512 vs local/SWA 256 on E2B — the Q/K/V/O weight shapes themselves differ, not just RoPE theta), cross-layer KV-cache sharing (donor-layer formula from llama.cpp's kv-cache `reuse` callback), weightless V RMSNorm, optional per-layer output scale, per-layer FFN width (derived from the loaded weight's own shape, not a config constant — some layers are 2× wider). Found 3 real bugs along the way, none Gemma-4-specific: our GGUF parser silently discarded BOOL-typed arrays (`sliding_window_pattern` is a genuine per-layer array, not a broadcast period — every layer was reading as "global"); our `Linear`'s `Tensor.Shape[0]`=outDim/`Shape[1]`=inDim convention got reversed in my first pass; `tokenizer.ggml.model="gemma4"` wasn't routed to the SentencePiece tokenizer (fell through to generic BPE, dropping the `▁`→space substitution — coherent but "Thecapitalof..."). Also fixed 4 general Jinja chat-template bugs surfaced by Gemma-4's tool-calling template (unary minus, block-form `{% set %}...{% endset %}`, `range()`, `is sequence`). Verified live: coherent, factually correct, properly-spaced multi-sentence generation.
+
+### Muse Spark Open
+
+Text decoder only (`GenericTransformer` with `MoeFeedForward`): weightless embedding norm; sigmoid-gated attention with a
+per-head output norm; NoPE full-attention layers; sliding-window RoPE layers; norm-preserving residual gates; and a latent
+MoE (256 experts, top-8 sigmoid routing with a selection-only bias, pre/post expert projections, per-expert output norm).
+The real checkpoint has not been run: at 816B it needs multi-GPU or expert offload. On CPU it does not fit, because the CPU
+backend widens every quant to F32.
+Evidence is on synthetic weights ([parity](PARITY_VERIFICATION.md)). Gaps:
+
+- Real weights, and a GPU run against llama.cpp CUDA. Graph decode refuses the gated residual block. CUDA widens Q4_1, Q5_1,
+  the IQ and TQ types, Q1_0, Q2_0 and MXFP4 to F32 at load, and its indexed MoE kernels cover Q4_K, Q6_K and Q8_0 only.
+- CPU speed, small random model, 4 threads (`llama-bench` pp512/tg128): engine 1.7-1.9k tok/s prefill and 70-75 tok/s
+  decode on every quant; llama.cpp 10.8-13.5k prefill, 147 (F32) to 270 (Q8_0) decode. The 202k-row LM head is 11.5 of
+  the engine's 15.8 ms per token.
+- The engine loads Muse Spark from GGUF only. `MuseSparkHfConfig` and `MuseSparkCheckpointMapper` map HF-format weights as a library
+  API, but `HfTextDirectoryLoader` still accepts only DeepSeek-V4.1 and refuses a Muse Spark directory.
+- Not wired: the vision and audio towers, the request's numeric `ReasoningEffort` (the template defaults to `xhigh`),
+  tensor parallelism (refused), the HF NVFP4 checkpoint format and GGUFs converted from it with ggml's NVFP4 type (40).
 
 ### Llama-3.2-Vision-11B (mllama)
 

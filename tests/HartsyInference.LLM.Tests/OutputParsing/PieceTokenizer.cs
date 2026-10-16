@@ -3,17 +3,23 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Tests.OutputParsing;
 
-/// <summary>Test tokenizer whose ids are handed out per piece of bytes, so a test controls exactly where a completion is split; the five DeepSeek control literals are single special ids.</summary>
-internal sealed class PieceTokenizer : ILlmTokenizer
+/// <summary>Test tokenizer whose ids are handed out per piece of bytes, so a test controls exactly where a completion is split; each control literal (the five DeepSeek ones unless others are given) is a single special id.</summary>
+internal sealed class PieceTokenizer(params string[] specials) : ILlmTokenizer
 {
     public const string Bos = "<｜begin▁of▁sentence｜>";
     public const string Eos = "<｜end▁of▁sentence｜>";
     public const string Think = "<think>";
     public const string ThinkEnd = "</think>";
     public const string Dsml = "｜DSML｜";
-    public static readonly string[] Specials = [Bos, Eos, Think, ThinkEnd, Dsml];
+    public static readonly string[] DeepSeekSpecials = [Bos, Eos, Think, ThinkEnd, Dsml];
 
     private readonly List<byte[]> _pieces = [];
+
+    public PieceTokenizer() : this(DeepSeekSpecials)
+    {
+    }
+
+    public string[] Specials { get; } = specials;
 
     public int Add(byte[] bytes)
     {

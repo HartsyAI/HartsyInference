@@ -37,6 +37,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="Fixtures\Clef\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\MuseSpark\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

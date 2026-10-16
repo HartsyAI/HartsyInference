@@ -29,6 +29,20 @@ public sealed class TextServiceFinalTextTests
     }
 
     [Fact]
+    public void MuseSparkResultIsTheAnswerWithoutHeadersOrReasoning()
+    {
+        PieceTokenizer tok = new("<|start|>", "<|message|>", "<|eom|>", "<|eot|>", "<|end_of_text|>");
+        int[] ids = tok.RandomWithSpecials(" to=self<|message|>plan<|eom|><|start|>assistant to=user<|message|>answer<|eot|>", new Random(1), 3);
+        MuseSparkOutputParser parser = new(tok);
+        foreach (int id in ids) parser.Push(id, _ => { });
+        parser.Finish(_ => { });
+
+        string decoded = tok.Decode(ids);
+        Assert.Equal(" to=selfplanassistant to=useranswer", decoded);
+        Assert.Equal("answer", TextService.FinalText(parser, callCount: 0, decoded));
+    }
+
+    [Fact]
     public void NoParserKeepsTheDecodedText()
     {
         Assert.Equal("x", TextService.FinalText(null, callCount: 0, "x"));
