@@ -952,6 +952,18 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   purely because the old `nari-labs/Dia-1.6B` was downloaded instead of `Dia-1.6B-0626` (identical 343
   keys/shapes, only values differ). Orpheus "silent output" traced to weights/sourcing (unsloth mirror),
   not engine code.
+- **Dia-1.6B-0626 "heard you" on the 3-sentence fox prompt: termination depends on the seed, and upstream shows it too.**
+  Weights are the official files (`pytorch_model.bin` sha256 `8a5106c0…`, the HF main hash; DAC `weights.pth` `a88eed82…`),
+  and the RAID safetensors repacks are byte-identical per tensor (343 Dia, 301 DAC), so the checkpoint is not the cause.
+  On CPU, `[S1] The quick brown fox … [S2] Then it naps … [S1] What a lovely …`: seed 42 emits EOS at step 954 (~11 s) and
+  its first sentence transcribes correctly; seed 0 never emits EOS within 1000 steps, and seed 7 falls into a 698-dominated loop
+  (~3.4 s) after the first sentence. The transformers 5.19 `DiaForConditionalGeneration` with the same weights, converted by the layout rules of
+  `DiaWeights.Adapt`, reproduces the seed-0 non-termination on both this prompt and the July text; on the July text with seed
+  42 it ends at step 773 and the engine at step 877. AudioLab passes `-1` when no seed is set, and SwarmUI's `LockSeeds` replaces
+  a missing or `-1` seed with a random one (per the source; not confirmed in a live journal), so the e2e verdict is one draw of a seed-dependent outcome.
+  Repro: `HARTSYINFERENCE_MODEL_CACHE=<cache> hartsy --settings-file <empty> --set diagnostics.diaDebugTokens=<file>
+  speak "<text>" -m dia:1.6b -b cpu --seed N`; read the dump's first EOS index and its distinct codes per second. Follow-ups:
+  fail fast on a non-terminating loop (wire `StopGate`), and pick a seed or prompt for the e2e case.
 - **Always verify TTS with whisper `medium.en`, never `base.en`** — `base.en` was actively misleading in
   multiple cases.
 - **English-only Whisper (`openai/whisper-*.en`, `distil-whisper/distil-*.en`): different special-token layout.**
