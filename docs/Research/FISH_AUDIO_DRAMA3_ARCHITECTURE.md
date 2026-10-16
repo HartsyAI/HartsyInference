@@ -111,7 +111,8 @@ Engine-level behavior:
   so a take can be revised by sending it back with a new cue. On the CLI these are `speak --references`, `--history` and
   `--save-turns`.
 - **Streaming.** Each chunk decodes progressively while it generates: at 16 frames, then at doubling spans of at most 256 frames.
-  Every emission hands over only the samples past the previous one.
+  Every emission hands over only the samples past the previous one. A streamed take returns its turns through the `onTurns`
+  overload of `ISpeechService.SynthesizeStreamAsync`, so it can be revised like a one-shot take.
 
 ## Verification
 

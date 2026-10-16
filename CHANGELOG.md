@@ -6,8 +6,9 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## Unreleased
+## alpha.374
 
+- **Added: a streamed speech take returns its turns.** `ISpeechService.SynthesizeStreamAsync` has an overload taking `onTurns`, which receives the turns a one-shot synthesis returns as `AudioResult.Turns`. It is called once, before the stream ends. A streamed Fish Audio Drama 3 take can now be revised like a one-shot take; before, the stream returned audio only.
 - **Fixed: espeak spells out acronyms and vowel-less abbreviations as piper does.** A word the dictionary does not pronounce is now spelled letter by letter when it has no vowel letter (PC, PM, HR, km, kg, btw, tsp, Blvd) or when its dictionary entry is flagged for spelling (OK, AI, abc), with each letter name stressed as espeak stresses it (AI -> ˌeɪˈaɪ). Before, these were read by letter-to-sound rules (PM -> pəm, km -> kəm). Agreement with piper_phonemize on 673 English words rose from 83.7% to 93.3% (82.0% to 91.7% on the default cache data), and a 404-word held-out set rose from 74.5% to 92.6% (cache 73.5% to 91.6%). No word that matched before stopped matching. Uppercase acronyms with vowels (IBM, CEO, NBA) are still read by the rules.
 
 - F5-TTS reference preparation follows upstream `preprocess_ref_audio_text`: a reference over 12 s is cut at its
