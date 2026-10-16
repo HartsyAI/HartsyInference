@@ -82,7 +82,8 @@ public sealed class GgufSplitDetectionTests : IDisposable
         using GgufLoader loader = new GgufLoader();
         UnsupportedModelException error = Assert.Throws<UnsupportedModelException>(() => loader.Load(first));
 
-        Assert.Contains("appears twice", error.Message);
+        Assert.Contains("appears in both", error.Message);
+        Assert.Contains("model-00002-of-00002.gguf", error.Message);
     }
 
     [Fact]

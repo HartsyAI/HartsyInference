@@ -42,7 +42,7 @@ public sealed class GgufLoader : IDisposable
             {
                 Metadata = givenMetadata;
                 Dictionary<string, GgufTensorDescriptor> single = new(givenTensors.Count);
-                AddPartTensors(single, givenTensors, 0, filePath);
+                AddPartTensors(single, givenTensors, 0, [filePath]);
                 Descriptors = single;
                 return;
             }
@@ -69,7 +69,7 @@ public sealed class GgufLoader : IDisposable
             GgufSplitDetector.ValidatePart(metadata, paths[index], index, paths.Count);
             if (index == 0)
                 Metadata = metadata;
-            AddPartTensors(descriptors, tensors, index, paths[index]);
+            AddPartTensors(descriptors, tensors, index, paths);
         }
 
         if (GgufSplitDetector.DeclaredTensorCount(Metadata) is long declared && declared != descriptors.Count)
@@ -120,7 +120,7 @@ public sealed class GgufLoader : IDisposable
             offset += bytesRead;
         }
 
-        // Tensor data starts after alignment padding (typically 32 bytes)
+        // Each part reads its own alignment; a split's later parts may omit general.alignment, which means the default.
         long alignment = (long)metadata.GetUInt64("general.alignment", 32);
         long dataStart = AlignUp(offset, alignment);
         foreach (GgufTensorDescriptor desc in tensors)
@@ -129,13 +129,19 @@ public sealed class GgufLoader : IDisposable
         }
     }
 
-    private static void AddPartTensors(Dictionary<string, GgufTensorDescriptor> target, List<GgufTensorDescriptor> tensors, int part, string path)
+    private static void AddPartTensors(Dictionary<string, GgufTensorDescriptor> target, List<GgufTensorDescriptor> tensors, int part, IReadOnlyList<string> paths)
     {
         foreach (GgufTensorDescriptor desc in tensors)
         {
             desc.Part = part;
-            if (!target.TryAdd(desc.Name, desc))
-                throw new HartsyInference.Core.Exceptions.UnsupportedModelException($"Tensor '{desc.Name}' appears twice in '{path}'.", null, "GGUF");
+            if (target.TryAdd(desc.Name, desc))
+                continue;
+            string first = paths[target[desc.Name].Part];
+            string second = paths[part];
+            throw new HartsyInference.Core.Exceptions.UnsupportedModelException(
+                first == second
+                    ? $"Tensor '{desc.Name}' appears twice in '{second}'."
+                    : $"Tensor '{desc.Name}' appears in both '{first}' and '{second}'.", null, "GGUF");
         }
     }
 
