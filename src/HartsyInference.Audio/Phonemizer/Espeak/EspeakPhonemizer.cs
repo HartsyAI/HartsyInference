@@ -24,19 +24,28 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private const string LanguageSwitchMnemonic = "_^_";
     private readonly int _switchCode;
 
-    /// <summary>Whether espeak-ng pronounces <paramref name="word"/> in another language: its dictionary entry, or
-    /// when the dictionary has no pronunciation for it, its letter-to-sound rules, emit the language-switch phoneme.
-    /// The dictionary is consulted first, as espeak's word translation does. The word is read on its own, as
-    /// espeak reads a word in a clause.</summary>
-    public bool SwitchesLanguage(string word)
+    /// <summary>The codes espeak-ng's word translation gives <paramref name="word"/> read on its own: the dictionary
+    /// entry, else the rules with prefix and suffix stripping and stem re-translation, as in a clause.</summary>
+    internal List<byte> WordCodes(string word)
     {
         ArgumentNullException.ThrowIfNull(word);
-        if (_switchCode < 0) return false;
+        ClauseState state = new() { Numbers = new EspeakNumbers(_lookup, _phon, _options) };
+        return PhonemizeWord(word, [word.ToLowerInvariant()], 0, state, out _);
+    }
+
+    /// <summary>Whether espeak-ng reads <paramref name="word"/> in English: its word translation (the dictionary entry,
+    /// else the rules with prefix and suffix stripping and stem re-translation, as in a clause) emits the
+    /// language-switch phoneme. A dictionary entry whose switch is followed by further phonemes names another language
+    /// (Italian <c>barbecue</c> is read in French), so such a switch is not English and is left to this voice.
+    /// Only that exception is inferred: the target language is not read from the phoneme codes, and the one
+    /// non-English switch observed so far is <c>barbecue</c>.</summary>
+    public bool SwitchesToEnglish(string word)
+    {
+        ArgumentNullException.ThrowIfNull(word);
+        if (_switchCode < 0 || !WordCodes(word).Contains((byte)_switchCode)) return false;
         string lower = word.ToLowerInvariant();
-        if (_lookup.Lookup(lower, out EspeakLookupResult entry) && entry.Phonemes.Count > 0)
-            return entry.Phonemes.Contains((byte)_switchCode);
-        byte[] buf = BuildBuffer([lower], 0, out int start);
-        return _rules.TranslateRules(buf, start).Contains((byte)_switchCode);
+        return !(_lookup.Lookup(lower, out EspeakLookupResult entry) && entry.Phonemes.Count > 1
+            && entry.Phonemes.Contains((byte)_switchCode));
     }
 
     private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakLanguageOptions options, IReadOnlyList<(string From, string To)> replacements, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index, bool spellsLetters)

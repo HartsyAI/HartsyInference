@@ -33,7 +33,7 @@ public sealed class KokoroFrenchEnglishWordsTests
         string? dir = DataDir();
         if (dir is null) return; // gated
         EspeakPhonemizer fr = EspeakPhonemizer.FromDataDirectory(dir, "fr");
-        KokoroEspeakG2P g2p = new(fr, EspeakPhonemizer.FromDataDirectory(dir, "en"), fr.SwitchesLanguage);
+        KokoroEspeakG2P g2p = new(fr, EspeakPhonemizer.FromDataDirectory(dir, "en"), fr.SwitchesToEnglish);
 
         Assert.Equal("ðə kwˈɪk bɹˈWn fˈɔks ʒˈœ̃ ˌQvə ðə lˈAzi dˈɔɡ, ðˈɛn nˈap ɪnðə wˈɔːm ˌaftənˈuːn sˈʌn.", g2p.ToIpa(Speech));
     }
@@ -45,8 +45,8 @@ public sealed class KokoroFrenchEnglishWordsTests
         if (dir is null) return; // gated
         EspeakPhonemizer fr = EspeakPhonemizer.FromDataDirectory(dir, "fr");
 
-        Assert.All(SwitchedWords, w => Assert.True(fr.SwitchesLanguage(w), $"'{w}' should switch to English"));
-        Assert.All(FrenchWords, w => Assert.False(fr.SwitchesLanguage(w), $"'{w}' should stay French"));
+        Assert.All(SwitchedWords, w => Assert.True(fr.SwitchesToEnglish(w), $"'{w}' should switch to English"));
+        Assert.All(FrenchWords, w => Assert.False(fr.SwitchesToEnglish(w), $"'{w}' should stay French"));
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public sealed class KokoroFrenchEnglishWordsTests
         if (dir is null) return; // gated
         EspeakPhonemizer fr = EspeakPhonemizer.FromDataDirectory(dir, "fr");
         KokoroEspeakG2P before = new(fr);
-        KokoroEspeakG2P after = new(fr, EspeakPhonemizer.FromDataDirectory(dir, "en"), fr.SwitchesLanguage);
+        KokoroEspeakG2P after = new(fr, EspeakPhonemizer.FromDataDirectory(dir, "en"), fr.SwitchesToEnglish);
 
         using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(
             Path.Combine(AppContext.BaseDirectory, "Fixtures", "kokoro_espeak_parity.json")));

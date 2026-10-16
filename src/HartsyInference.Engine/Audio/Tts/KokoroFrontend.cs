@@ -87,7 +87,7 @@ internal sealed class KokoroFrontend
             KokoroEspeakG2P g2p = lang switch
             {
                 'h' => new KokoroEspeakG2P(espeak, EspeakPhonemizer.FromDataDirectory(data, "en")),
-                'f' => new KokoroEspeakG2P(espeak, EspeakPhonemizer.FromDataDirectory(data, "en"), espeak.SwitchesLanguage),
+                'f' => new KokoroEspeakG2P(espeak, EspeakPhonemizer.FromDataDirectory(data, "en"), espeak.SwitchesToEnglish),
                 _ => new KokoroEspeakG2P(espeak),
             };
             return g2p.ToIpa;

@@ -27,7 +27,7 @@ public sealed partial class KokoroEspeakG2P
     /// <c>remove-flags</c> drops the <c>(en)</c> spans that espeak marks them with. <paramref name="switchesToLatin"/>
     /// says which words switch. Hindi's script has no Latin letter rules, so every Latin-script word switches there
     /// (the default); French switches the words espeak's dictionary or rules mark, as
-    /// <see cref="EspeakPhonemizer.SwitchesLanguage"/> reports.</summary>
+    /// <see cref="EspeakPhonemizer.SwitchesToEnglish"/> reports.</summary>
     public KokoroEspeakG2P(EspeakPhonemizer espeak, EspeakPhonemizer? latin = null, Func<string, bool>? switchesToLatin = null)
     {
         ArgumentNullException.ThrowIfNull(espeak);
