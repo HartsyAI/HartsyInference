@@ -320,7 +320,8 @@ public sealed unsafe class CsmModel : IDisposable
             if (graphEnabled && EngineKnobs.CsmCfgGraph.Value
                 && _backbone.SupportsDualGraphDecode(backend) && session.Backbone.CurrentLength == ucB.CurrentLength)
             {
-                (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, ucB, condNewEmbeds, uncondNewEmbeds!, bh);
+                Tensor stackedG = StackCfgRows(condNewEmbeds, uncondNewEmbeds!, bh);
+                (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, ucB, stackedG, bh);
                 return DecodeFrameTail(backend, lastG, uLastG, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
             }
             Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
@@ -358,6 +359,41 @@ public sealed unsafe class CsmModel : IDisposable
         }
 
         return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
+    }
+
+    /// <summary>Steady-state CFG frame whose input embedding is summed on the device from the previous frame's codes, which the
+    /// device frame tail left in the session's token buffers. The sum adds the codebook rows in order, as the host gather does,
+    /// so the embedding is bit-identical. Returns null when the device frame or the dual graph does not apply; the caller then
+    /// takes the host embedding path.</summary>
+    public int[]? StepFrameFromDeviceCodes(IBackend backend, DecodeSession session, ref uint rng,
+        float? temperature, int? topK, float? topP, float cfgScale)
+    {
+        ThrowIfDisposed();
+        bool graphEnabled = EngineKnobs.CsmGraph.Value && backend.GraphDecodeSupported && _backbone.SupportsGraphDecode(backend);
+        if (session.DeviceFrame != true || session.DeviceCodes is null || !graphEnabled || cfgScale == 1f
+            || session.Uncond is null || !EngineKnobs.CsmCfgGraph.Value || !_backbone.SupportsDualGraphDecode(backend)
+            || session.Backbone.CurrentLength != session.Uncond.CurrentLength || !EngineKnobs.CsmCfgBatch.Value)
+        {
+            return null;
+        }
+        int bh = _cfg.Backbone.HiddenSize;
+        Tensor frameEmbed = new(new TensorShape(1, 1, bh), DType.F32);
+        for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
+        {
+            if (cb == 0)
+            {
+                backend.EmbedGatherDecodeStep(frameEmbed, _audioEmbed[0]!, session.DeviceCodes[0]);
+                continue;
+            }
+            using Tensor row = new(new TensorShape(1, 1, bh), DType.F32);
+            backend.EmbedGatherDecodeStep(row, _audioEmbed[cb]!, session.DeviceCodes[cb]);
+            backend.Add(frameEmbed, frameEmbed, row);
+        }
+        Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
+        backend.Concat(stacked, [frameEmbed, frameEmbed], 1);
+        frameEmbed.Dispose();
+        (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, session.Uncond, stacked, bh);
+        return DecodeFrameTail(backend, lastG, uLastG, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
     }
 
     /// <summary>Runs one backbone step for a stream and returns its last-position hidden <c>[1,1,bh]</c> (a fresh,
@@ -426,15 +462,22 @@ public sealed unsafe class CsmModel : IDisposable
     /// graph replay (the graph win). Warmup frames run the same dual step eagerly through the SAME fixed buffers
     /// so every weight/cache is device-resident and the buffers are pool-bound before capture. Advances BOTH
     /// caches by one and returns fresh caller-owned cond/uncond last hiddens (each <c>[1,1,bh]</c>).</summary>
+    /// <summary>Stacks the cond and uncond input rows into a fresh host-built <c>[1,2,bh]</c> (row 0 conditional).</summary>
+    private static Tensor StackCfgRows(Tensor condNew, Tensor uncondNew, int bh)
+    {
+        Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
+        Buffer.MemoryCopy((void*)condNew.DataPointer, (void*)stacked.DataPointer, (long)bh * 4, (long)bh * 4);
+        Buffer.MemoryCopy((void*)uncondNew.DataPointer, (float*)stacked.DataPointer + bh, (long)bh * 4, (long)bh * 4);
+        return stacked;
+    }
+
+    /// <summary>Runs the dual graph on a stacked <c>[1,2,bh]</c> input (disposed here) and returns the cond/uncond last hiddens.</summary>
     private (Tensor last, Tensor uLast) BackboneLastDual(IBackend backend, DecodeSession session, FixedKvCache uncond,
-        Tensor condNew, Tensor uncondNew, int bh)
+        Tensor stacked, int bh)
     {
         FixedKvCache cond = session.Backbone;
         GraphStream gs = session.DualGraph ??= new GraphStream(backend, bh, rows: 2);
         int pos = cond.CurrentLength;
-        Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
-        Buffer.MemoryCopy((void*)condNew.DataPointer, (void*)stacked.DataPointer, (long)bh * 4, (long)bh * 4);
-        Buffer.MemoryCopy((void*)uncondNew.DataPointer, (float*)stacked.DataPointer + bh, (long)bh * 4, (long)bh * 4);
         backend.CopyInto(gs.InEmbed, stacked);                  // refresh fixed input OUTSIDE capture
         stacked.Dispose();
         backend.WriteDevicePos(gs.DevicePos, pos + 1, pos);     // shared {kvLen, qOffset} — both streams are aligned

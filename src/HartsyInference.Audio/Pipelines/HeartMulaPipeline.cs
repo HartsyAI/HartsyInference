@@ -106,21 +106,32 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         for (int f = 0; f < maxFrames; f++)
         {
             cancel.ThrowIfCancellationRequested();   // per-frame cancellation checkpoint (Stop Generation)
-            Tensor condNew;
-            Tensor? uncondNew;
-            if (f == 0)
+            // Steady-state CFG frames sum the previous frame's embedding on the device when the device frame runs; otherwise
+            // the host embeds the previous frame's codes.
+            int[]? deviceCodes = f > 0 && useCfg ? _lm.StepFrameFromDeviceCodes(backend, session, ref rng, temp, tk, tp, g) : null;
+            int[] codes;
+            if (deviceCodes is not null)
             {
-                condNew = BuildPrompt(tagsTokens, lyricsTokens, muqEmbed, hasMuqRow);
-                uncondNew = useCfg ? _lm.UncondTextRows(prefixLen) : null;
+                codes = deviceCodes;
             }
             else
             {
-                condNew = _lm.EmbedAudioFrame(frames[f - 1]);
-                uncondNew = useCfg ? _lm.EmbedAudioFrame(frames[f - 1]) : null;
+                Tensor condNew;
+                Tensor? uncondNew;
+                if (f == 0)
+                {
+                    condNew = BuildPrompt(tagsTokens, lyricsTokens, muqEmbed, hasMuqRow);
+                    uncondNew = useCfg ? _lm.UncondTextRows(prefixLen) : null;
+                }
+                else
+                {
+                    condNew = _lm.EmbedAudioFrame(frames[f - 1]);
+                    uncondNew = useCfg ? _lm.EmbedAudioFrame(frames[f - 1]) : null;
+                }
+                codes = _lm.StepFrame(backend, session, condNew, ref rng, temp, tk, tp, useCfg ? g : 1f, uncondNew, uncondStandalone: false);
+                condNew.Dispose();
+                uncondNew?.Dispose();
             }
-            int[] codes = _lm.StepFrame(backend, session, condNew, ref rng, temp, tk, tp, useCfg ? g : 1f, uncondNew, uncondStandalone: false);
-            condNew.Dispose();
-            uncondNew?.Dispose();
             bool eos = false;   // upstream stops when ANY codebook value >= audio_eos_id
             for (int cb = 0; cb < codes.Length; cb++) if (codes[cb] >= _cfg.Lm.AudioEosToken) { eos = true; break; }
             if (eos) break;
