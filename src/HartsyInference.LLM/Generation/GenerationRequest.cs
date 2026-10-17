@@ -31,6 +31,10 @@ public sealed record GenerationRequest
     /// <summary>Reasoning effort in [1, 100] for a template that takes one (DeepSeek-V4.1 thinking mode); null uses the template's default. Templates without one ignore it.</summary>
     public int? ReasoningEffort { get; init; }
 
+    /// <summary>Passes of the recurrent block for a looped (latent-recurrent) model such as Dory, 1 up to the loaded model's maximum (4 by default):
+    /// more loops trade latency for accuracy from the same weights. Null takes the checkpoint's default; other models ignore it.</summary>
+    public int? Loops { get; init; }
+
 
     /// <summary>Pre-tokenized prompt ids; when set, templating and tokenization are skipped entirely.</summary>
     public IReadOnlyList<int>? RawTokenIds { get; init; }

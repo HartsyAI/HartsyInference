@@ -233,23 +233,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
                 StagedWeightPreload.Preload(_transformer, _placement!, headroom - (2L << 30));
                 return;
             }
-            if (_backend.FreeMemoryBytes() is long free && free > headroom)
-            {
-                List<Tensor> toPreload = [];
-                long budget = free - headroom;
-                long skipped = 0;
-                int skippedCount = 0;
-                foreach (Tensor t in _transformer.EnumerateWeights(includeRedundantSplits: false))
-                {
-                    long bytes = Tensor.ComputeByteSize(t.Shape, t.DType);
-                    if (budget - bytes < 0) { skipped += bytes; skippedCount++; continue; }
-                    budget -= bytes;
-                    toPreload.Add(t);
-                }
-                Logs.Info($"[preload] free={_backend.FreeMemoryBytes() >> 20}MB headroom={headroom >> 20}MB " +
-                    $"kept={toPreload.Count} skipped={skippedCount} ({skipped >> 20}MB left lazy)");
-                _backend.PreloadWeights(toPreload);
-            }
+            DecodeWeightPreload.Preload(_backend, _transformer.EnumerateWeights(includeRedundantSplits: false), headroom);
         }
         catch (Exception ex) { Logs.Warning($"weight preload failed (continuing with lazy residency): {ex.Message}"); }
     }

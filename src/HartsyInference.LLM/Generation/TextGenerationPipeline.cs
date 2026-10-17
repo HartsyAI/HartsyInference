@@ -105,7 +105,7 @@ public sealed class TextGenerationPipeline
         // `reuse` already holds one (AcquireCache), in which case its common prefix with `promptIds` is kept —
         // grown by copy when the retained buffer is too small — and only the diverging tail below is prefilled.
         int maxSeq = promptIds.Length + request.MaxTokens + 1;
-        (ISequenceState cache, int reusedLen) = AcquireCache(reuse, promptIds, maxSeq, request.PrefixCacheCapacityHint);
+        (ISequenceState cache, int reusedLen) = AcquireCache(reuse, promptIds, maxSeq, request.PrefixCacheCapacityHint, request.Loops ?? 0);
         bool committed = false;
         // True only once cache.Length is guaranteed >= promptIds.Length (the first prefill below has returned).
         // The catch block below commits on cancellation ONLY once this is true: the first Prefill observes `ct`
@@ -334,8 +334,14 @@ public sealed class TextGenerationPipeline
     /// <c>old.Length</c> (defensive — Generate's own bookkeeping keeps <c>reuse.TokenIds</c> within that bound already,
     /// but <see cref="FixedKvCache.Truncate"/> throws instead of clamping, so a future bug here should degrade to less
     /// reuse, not a crash).</summary>
-    private (ISequenceState Cache, int ReusedLen) AcquireCache(RetainedSequence? reuse, int[] promptIds, int maxSeq, int? capacityHint)
+    private (ISequenceState Cache, int ReusedLen) AcquireCache(RetainedSequence? reuse, int[] promptIds, int maxSeq, int? capacityHint, int loops)
     {
+        // A retained state the model no longer accepts for this request (a looped model asked for another loop count) is dropped
+        // rather than reused: its keys were computed under a configuration this forward will not repeat.
+        if (reuse?.Cache is { } stale && !_model!.AcceptsRetainedState(stale, new SequenceStateOptions(maxSeq, null, loops)))
+        {
+            reuse.Dispose();
+        }
         if (reuse?.Cache is { } old)
         {
             int commonLen = Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length);
@@ -363,7 +369,7 @@ public sealed class TextGenerationPipeline
             }
         }
         int capacity = Math.Max(maxSeq, capacityHint ?? 0);
-        return (_model!.CreateSequenceState(new SequenceStateOptions(capacity)), 0);
+        return (_model!.CreateSequenceState(new SequenceStateOptions(capacity, null, loops)), 0);
     }
 
     /// <summary><see cref="IGenerationModel.ResizeSequenceState"/>, or null when the model cannot copy its state or

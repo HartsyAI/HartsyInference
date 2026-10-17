@@ -97,6 +97,11 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Reasoning effort for models that take one (DeepSeek-V4.1 thinking): low, high, max, or an integer in [1, 100].")]
         public string? ReasoningEffort { get; init; }
 
+        /// <summary>Recurrent-block passes for a looped model (Dory: 1 to 4); unset uses the checkpoint's default. Ignored by other models.</summary>
+        [CommandOption("--loops")]
+        [Description("Recurrent-block passes for a looped model (Dory: 1 fastest, 4 most accurate). Unset uses the checkpoint default.")]
+        public int? Loops { get; init; }
+
         /// <summary>Keep weights compressed at their on-disk quant instead of dequantizing to full precision.</summary>
         [CommandOption("--low-vram-quant")]
         [Description("Keep weights compressed at their on-disk quant to reduce VRAM use.")]
@@ -180,6 +185,15 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("thinking", "false");
         if (settings.ReasoningEffort is { Length: > 0 } effort)
             parameters.Put("reasoning-effort", effort);
+        if (settings.Loops is { } loops)
+        {
+            if (loops < 1)
+            {
+                AnsiConsole.MarkupLine("[red]--loops must be at least 1.[/]");
+                return 1;
+            }
+            parameters.Put("loops", loops.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
         parameters.Put("low-vram-quant", settings.LowVramQuant ? "true" : "false");
         parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
         if (settings.Placement is { Length: > 0 } placement)

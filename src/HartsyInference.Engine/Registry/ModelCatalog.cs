@@ -57,6 +57,22 @@ public static class ModelCatalog
                         Sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5" },
                 },
             },
+            // NVIDIA Nemotron Dory 1.0 4B: looped (latent-recurrent) normalized-GPT decoder, 8/20/8 input/recurrent/output blocks
+            // (each block counted in attention+MLP pairs; 72 single-sublayer physical layers), hybrid sliding-window/full attention,
+            // the recurrent block dialled at runtime to 1-4 passes (`--loops` / `loops`). ValidationPending: the pinned Q5_K_M has not
+            // been run on real weights yet (see MODEL_STATUS_LLM.md).
+            new CatalogEntry
+            {
+                Id = "dory", Modality = txt, DisplayName = "Nemotron Dory 1.0 (4B looped)",
+                Architecture = "looped nGPT transformer: shared recurrent block run 1-4 times per request, hybrid SWA/full attention, per-loop or last-loop KV cache",
+                Status = vp, CliDrivable = true, HuggingFaceRepo = "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B",
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-GGUF", RepoPath = "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf",
+                        TargetSubdir = "LLM/dory", Role = "transformer",
+                        Sha256 = "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0" },
+                },
+            },
             // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). ValidationPending: the pinned Q4_K_M has not been run (see MODEL_STATUS_LLM.md).
             new CatalogEntry
             {

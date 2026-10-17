@@ -594,8 +594,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // F16 scatter kernels; if the sequence is later joined and retires its session, the eager rounds keep
         // reading the same cache, which KvCacheAppend/FlashAttention handle in either dtype.
         ISequenceState cache = graphEligible
-            ? _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1))
-            : _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, _pool));
+            ? _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, null, req.Loops ?? 0))
+            : _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, _pool, req.Loops ?? 0));
         try
         {
             List<int> generated = new(req.MaxTokens);

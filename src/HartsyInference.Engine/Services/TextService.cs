@@ -17,6 +17,7 @@ using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
+using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.OutputParsing;
 using HartsyInference.LLM.Transformer;
@@ -406,7 +407,7 @@ public sealed class TextService : ITextService, IDisposable
                 continue;
             try
             {
-                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer ?? slot.DeepSeekV41?.Tokenizer;
+                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer ?? slot.Looped?.Tokenizer ?? slot.DeepSeekV41?.Tokenizer;
                 if (tokenizer is not null)
                     return tokenizer.EncodeOrdinary(text).Length;
             }
@@ -567,6 +568,49 @@ public sealed class TextService : ITextService, IDisposable
         return scheduler;
     }
 
+    /// <summary>The scheduler for a looped model: its page pool holds one slot per attention layer and loop up to the model's maximum, so a
+    /// pooled sequence can run any loop count a request asks for.</summary>
+    private DynamicBatchScheduler? CreateLoopedScheduler(TextDeviceSlot slot, string deviceKey, LoopedLanguageModel model, IBackend backend)
+    {
+        if (!EngineKnobs.ContinuousBatching.Value) return null;
+        LoopedTransformerConfig cfg = model.Config;
+        int slots = LoopedSchedule.MaxSlotCount(cfg);
+        int[] headDimPerLayer = new int[slots];
+        Array.Fill(headDimPerLayer, cfg.HeadDim);
+        EngineOptions options = _engine.Options;
+        int maxPages = PagedKvPool.PageCountForBudget(cfg.NumKvHeads, headDimPerLayer, options.KvPageSize, options.KvPoolBytesBudget);
+        PagedKvPool pool = new(slots, cfg.NumKvHeads, headDimPerLayer, options.KvPageSize, maxPages);
+        DynamicBatchScheduler? scheduler = CreateScheduler(slot, new LoopedTransformerModel(model.Transformer, backend), model.Tokenizer,
+            model.Template, pool, [.. GateOrdinalsFor(slot, deviceKey)]);
+        if (scheduler is null) pool.Dispose();
+        return scheduler;
+    }
+
+    /// <summary>Architectures that load on one device only: the state-space models and the looped decoders, neither of which has a layer-split or tensor-parallel path.</summary>
+    private static bool SingleDeviceOnly(string architecture) =>
+        SsmLanguageModel.IsSsmArchitecture(architecture) || LoopedLanguageModel.IsLoopedArchitecture(architecture);
+
+    /// <summary>Loads a looped (latent-recurrent) GGUF decoder onto <paramref name="backend"/>: every weight resident, the pipeline over the model's own
+    /// generation adapter, and a scheduler whose pool is sized for the model's largest loop count.</summary>
+    private void LoadLooped(TextDeviceSlot slot, string deviceKey, string path, TextRequest request, IBackend backend, bool dequantize,
+        IReadOnlySet<DType>? keepQuantized)
+    {
+        bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
+        slot.Looped = LoopedLanguageModel.Load(path, lowVram, dequantizeToF32: dequantize, keepQuantized);
+        backend.PreloadWeights(slot.Looped.Transformer.EnumerateWeights());
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.Pipeline = new TextGenerationPipeline(new LoopedTransformerModel(slot.Looped.Transformer, backend, preloadWeights: true),
+            slot.Looped.Tokenizer, slot.Looped.Template);
+        slot.PlannedPlacement = null;
+        slot.PlacementRequested = null;
+        slot.Scheduler = CreateLoopedScheduler(slot, deviceKey, slot.Looped, backend);
+        slot.LoadedPath = path;
+        LoopedTransformerConfig cfg = slot.Looped.Config;
+        Logs.Info($"[TextService] Loaded GGUF looped model '{Path.GetFileName(path)}' ({slot.Looped.Architecture}: "
+            + $"{cfg.InputLayers}+{cfg.RecurrentLayers}×loops+{cfg.OutputLayers} layers, default {cfg.Loops} of up to {cfg.EffectiveMaxLoops} loops, "
+            + $"{cfg.KvCacheMode} KV cache) on {deviceKey}.");
+    }
+
     private GenOutcome RunText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
     {
         using GenerationRequestWiring run = BeginText(slot, request, sink, diagnosticId, cancel, scheduled: false);
@@ -621,14 +665,18 @@ public sealed class TextService : ITextService, IDisposable
     private GenerationRequestWiring BeginText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel, bool scheduled)
     {
         ILlmTokenizer tokenizer = slot.SsmModel is not null ? slot.SsmModel.Tokenizer
+            : slot.Looped is not null ? slot.Looped.Tokenizer
             : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Tokenizer
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Tokenizer : slot.Model!.Tokenizer;
         IChatTemplate template = slot.SsmModel is not null ? slot.SsmModel.Template
+            : slot.Looped is not null ? slot.Looped.Template
             : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Template
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Template : slot.Model!.Template;
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         bool injectToolPrompt = ShouldInjectToolPrompt(request, rawCompletion, template);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer, injectToolPrompt);
+        if (request.Loops is { } loops && slot.Looped is null)
+            Logs.Debug($"[TextService] Loops={loops} requested, but '{Path.GetFileName(slot.LoadedPath)}' is not a looped model; the field is ignored.");
         long requestId = Interlocked.Increment(ref _requestCounter);
         // Muse Spark frames every reply in message headers with a reasoning channel, so its parser runs even without a stream.
         bool museSpark = !rawCompletion && genRequest.EffectiveMessages() is not null && MuseSparkOutputParser.Handles(template, tokenizer);
@@ -639,7 +687,7 @@ public sealed class TextService : ITextService, IDisposable
             RequestId = requestId,
             TemplateName = template.Name,
             ChatTemplateSource = template.Source,
-            Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture ?? slot.TpCheckpoint?.Architecture,
+            Architecture = slot.Model?.Architecture ?? slot.SsmModel?.Architecture ?? slot.Looped?.Architecture ?? slot.TpCheckpoint?.Architecture,
             ModelPath = slot.LoadedPath,
             HasStructuredParser = structured,
             ToolPromptInjected = injectToolPrompt,
@@ -819,7 +867,7 @@ public sealed class TextService : ITextService, IDisposable
                 : new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
-        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
+        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
@@ -923,14 +971,14 @@ public sealed class TextService : ITextService, IDisposable
         // TP config would silently layer-split, pass token parity AND the both-cards VRAM check, and read
         // as green while testing nothing (the DiT-mosaic lesson).
         int tpDegree = _engine.Placement.TensorParallelDegree;
-        if (tpDegree > 1 && !deviceKey.Contains('+') && shardDevices.Length == tpDegree
-            && !SsmLanguageModel.IsSsmArchitecture(architecture0))
+        bool singleDeviceOnly = SingleDeviceOnly(architecture0);
+        if (tpDegree > 1 && !deviceKey.Contains('+') && shardDevices.Length == tpDegree && !singleDeviceOnly)
         {
             EnsureRamHeadroomFor(path, dequantizesEverything: true);
             LoadTensorParallel(slot, path, request, shardDevices);
             return;
         }
-        if (shardDevices.Length >= 2 && tpDegree <= 1 && !SsmLanguageModel.IsSsmArchitecture(architecture0))
+        if (shardDevices.Length >= 2 && tpDegree <= 1 && !singleDeviceOnly)
         {
             EnsureRamHeadroomFor(path, dequantizesEverything: false);
             LoadSharded(slot, deviceKey, path, request, shardDevices);
@@ -939,7 +987,7 @@ public sealed class TextService : ITextService, IDisposable
         // The placement planner decides a GGUF on one CUDA device before any backend is built, so a split or a refusal never
         // creates a backend it then throws away.
         TextPlacement? placement = null;
-        if (PlacementApplies(deviceKey, path) && !SsmLanguageModel.IsSsmArchitecture(architecture0))
+        if (PlacementApplies(deviceKey, path) && !singleDeviceOnly)
         {
             placement = PlanPlacement(deviceKey, path, request);
             Logs.Info($"[TextService] Placement for '{Path.GetFileName(path)}': {placement.Mode} on {placement.DeviceKey}. {placement.Reason}");
@@ -971,7 +1019,7 @@ public sealed class TextService : ITextService, IDisposable
             // so the warning always describes where the load actually lands.
             string fallbackDevice = deviceKey.Contains('+') ? shardDevices[0] : deviceKey;
             Logs.Warning($"[TextService] '{deviceKey}' requests a {shardDevices.Length}-way split, but "
-                + $"'{architecture0}' is an SSM/recurrent architecture — layer-split isn't supported for it. "
+                + $"'{architecture0}' is an SSM or looped (latent-recurrent) architecture — layer-split isn't supported for it. "
                 + $"Loading on '{fallbackDevice}' only; the rest of the device list is ignored.");
             deviceKey = fallbackDevice;
             buildSelector = fallbackDevice;
@@ -993,6 +1041,11 @@ public sealed class TextService : ITextService, IDisposable
         string architecture = architecture0;
         bool ssm = SsmLanguageModel.IsSsmArchitecture(architecture);
         EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || ssm, keepQuantized);
+        if (LoopedLanguageModel.IsLoopedArchitecture(architecture))
+        {
+            LoadLooped(slot, deviceKey, path, request, backend, dequantize, keepQuantized);
+            return;
+        }
         if (ssm)
         {
             slot.SsmModel = SsmLanguageModel.Load(path, architecture);
@@ -1042,7 +1095,7 @@ public sealed class TextService : ITextService, IDisposable
     /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
     private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
         string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null
-            : slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null);
+            : slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null);
 
     /// <summary>Whether loading <paramref name="path"/> onto <paramref name="slot"/> frees the model it holds, decided as <see cref="LoadInto"/> decides it. A missing
     /// path frees nothing: the load refuses it first.</summary>
@@ -1587,7 +1640,7 @@ public sealed class TextService : ITextService, IDisposable
             catch (Exception ex) { Logs.Debug($"[TextService] Disposing the expert offload failed: {ex.Message}"); }
             slot.ExpertOffload = null;
         }
-        if (slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null)
+        if (slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null)
         {
             if (slot.Backend is not null)
             {
@@ -1613,6 +1666,8 @@ public sealed class TextService : ITextService, IDisposable
         slot.TpCheckpoint = null;
         slot.Model?.Dispose();
         slot.Model = null;
+        slot.Looped?.Dispose();
+        slot.Looped = null;
         slot.DeepSeekV41?.Dispose();
         slot.DeepSeekV41 = null;
         slot.ResidencyPlan = null;
@@ -1861,6 +1916,7 @@ public sealed class TextService : ITextService, IDisposable
             SpeculativeDecode = request.SpeculativeDecode,
             EnableThinking = request.EnableThinking,
             ReasoningEffort = request.ReasoningEffort,
+            Loops = request.Loops,
             PrefixCacheCapacityHint = request.PrefixCacheCapacityHint,
         };
         if (request.RawTokenIds is not null)
