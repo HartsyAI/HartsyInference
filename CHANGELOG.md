@@ -12,6 +12,8 @@ stable release will require. Dates are UTC.
 
 ## alpha.376
 
+- **Fixed: Kokoro's Hindi voices read Latin words, as espeak-ng does.** Hindi's script has no Latin letter rules, so an English word in Hindi text phonemized to nothing. An English sentence through `hf_*` or `hm_*` reached the model as about half a second of near-silence (espeak-ng 1.52 reads those words with its English dictionary). Latin-script words in Hindi text now phonemize with the English voice, and Devanagari runs keep the Hindi voice. Output for Hindi text without Latin letters is unchanged. The other Kokoro languages are unchanged.
+- **Fixed: Kokoro's French voices read the English words espeak-ng switches to English.** espeak-ng 1.52 reads some English words inside French text with its English voice. Our French reading dropped them, leaving blanks (for example "The quick brown", "over", "lazy"). Those words now read as English. The switch follows espeak's per-word decision: the word's dictionary entry, or else its rules with prefix and suffix stripping, emit the language-switch phoneme. Checked against espeak-ng 1.52 on 3,000 English words, French agrees on all 948 words espeak reads in English. Native French is unchanged: all 89 French parity-fixture sentences are byte-identical.
 - **Fixed: HeartMuLa's quantized load keeps about 2 GB less host RAM.** The audio-embedding split borrows the
   checkpoint's rows instead of widening all eight codebook tables to F32, the quantized embed tables stay F16 rather
   than being widened at load, and the transposed audio heads are released once the GGUF cache owns the weights.
