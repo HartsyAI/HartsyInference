@@ -176,12 +176,21 @@ def ws_url(host, port):
     return f"ws://{host}:{port}"
 
 
-def unload(base, sid):
-    """Frees the resident model so the next step's reload shows which card serves it; errors are the step's to report."""
-    try:
-        http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=120)
-    except (urllib.error.URLError, json.JSONDecodeError, OSError):
-        pass
+def unload(base, sid, attempts=3):
+    """Frees the resident model, retrying a few times: before a step, so its reload shows which card serves it; at the end, so
+    the card is handed back empty. Returns None when SwarmUI confirmed it, else the last error text (the caller fails on it)."""
+    error = None
+    for attempt in range(attempts):
+        try:
+            reply = http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=120)
+            if isinstance(reply, dict) and reply.get("success") is not False and not reply.get("error"):
+                return None
+            error = f"unload refused: {reply.get('error') if isinstance(reply, dict) else reply!r}"
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            error = f"unload failed: {e!r}"
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    return error
 
 
 async def voice_turn(ws_base, sid, loops, lease, timeout_s=600):
@@ -228,7 +237,10 @@ async def voice_turn(ws_base, sid, loops, lease, timeout_s=600):
 def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
     if lease is not None:
         lease.check_alive()
-    unload(base, sid)
+    unload_error = unload(base, sid)
+    if unload_error:
+        log(f"[probe] loops={loops if loops is not None else 'default'}: FAILED before the request: {unload_error}")
+        return {"loops": loops, "success": False, "error": unload_error, "response": None, "served_gpu": None}
     started = time.monotonic()
     with GpuUseSampler() as sampler:
         try:
@@ -271,7 +283,10 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
     # Unload before the baseline sample, so the bench's own reload shows up as growth on the card that serves it.
-    unload(base, sid)
+    unload_error = unload(base, sid)
+    if unload_error:
+        log(f"[bench] loops={loops}: FAILED before the run: {unload_error}")
+        return {"loops": loops, "error": unload_error, "out": str(out_file), "served_gpu": None}
     with GpuUseSampler() as sampler:
         returncode, lost = run_under_lease(cmd, lease, log_file=log_file)
     if lost:
@@ -371,8 +386,13 @@ def main():
         summary["error"] = repr(e)
         raise
     finally:
-        # Swarm cleanup first, the lease last: the card is handed back only once the model is out of it.
-        unload(base, sid)
+        # Swarm cleanup first, the lease last: the card is handed back only once the model is out of it, and a card that
+        # could not be emptied is handed back marked failed so the gate knows.
+        unload_error = unload(base, sid)
+        if unload_error:
+            failed = True
+            summary["cleanup_error"] = unload_error
+            log(f"[run] cleanup: {unload_error}")
         if lease is not None:
             lease.release(failed=failed)
         summary["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()

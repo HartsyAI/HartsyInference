@@ -182,12 +182,15 @@ class GpuLease:
         if self.status == "queued":
             self.cancel()
             return
-        if self.lease_id and not self.lost:
+        if self.lease_id:
+            # Attempted even after a heartbeat failure: a refused or unreadable heartbeat may have been transient, and a card
+            # the gate still considers leased would otherwise stay reserved until expiry. A reply that the lease is already
+            # gone is the expected answer then, and is only logged.
             try:
-                call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed})
-                self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed else ""))
+                call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed or self.lost})
+                self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed or self.lost else ""))
             except GateError as e:
-                self.log(f"[gate] release failed: {e}")
+                self.log(f"[gate] release not accepted ({'lease was already lost' if self.lost else 'error'}): {e}")
 
     def __enter__(self):
         try:
@@ -211,6 +214,32 @@ def _signal_group(proc, sig):
         pass
 
 
+def _group_alive(proc):
+    """Whether any process of the wrapped command's group still exists (its leader is the group id)."""
+    try:
+        os.killpg(proc.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def stop_group(proc, grace_s):
+    """SIGTERM to the whole group, then SIGKILL to whatever of it is left after grace_s: the leader may handle the first signal
+    and exit while a descendant ignores it, so the wait watches the group, not the leader. Returns once the group is gone or
+    the kill has been sent."""
+    _signal_group(proc, signal.SIGTERM)
+    deadline = time.monotonic() + grace_s
+    while _group_alive(proc) and time.monotonic() < deadline:
+        proc.poll()  # reap the leader so it does not linger as a zombie member
+        time.sleep(0.2)
+    if _group_alive(proc):
+        _signal_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_under_lease(cmd, lease, log_file=None, env=None, grace_s=10, poll_s=1.0):
     """Runs a command while the lease is held, polling every poll_s seconds: a lost lease terminates it, and everything it
     started (the command runs as its own process group, so a shell's llama-bench or tee goes with it), with a kill after
@@ -219,29 +248,23 @@ def run_under_lease(cmd, lease, log_file=None, env=None, grace_s=10, poll_s=1.0)
     sink = open(log_file, "w") if log_file else None
     lost = False
     proc = None
-
-    def stop_group():
-        _signal_group(proc, signal.SIGTERM)
-        try:
-            proc.wait(timeout=grace_s)
-        except subprocess.TimeoutExpired:
-            _signal_group(proc, signal.SIGKILL)
-            proc.wait()
-
     try:
         proc = subprocess.Popen(cmd, text=True, stdout=sink, stderr=subprocess.STDOUT if sink else None, env=env,
                                 start_new_session=True)
         while proc.poll() is None:
             if lease is not None and lease.lost:
                 lost = True
-                stop_group()
+                stop_group(proc, grace_s)
                 break
             time.sleep(poll_s)
+        # The leader finishing is not the group finishing: a descendant that outlives it is stopped before we return.
+        if _group_alive(proc):
+            stop_group(proc, grace_s)
     except BaseException:
         # An interrupt or any error here must not leave the group running on the card: its own session means it never
         # saw the terminal's SIGINT, so it is stopped explicitly before the lease is released by the caller.
-        if proc is not None and proc.poll() is None:
-            stop_group()
+        if proc is not None:
+            stop_group(proc, grace_s)
         raise
     finally:
         if sink is not None:

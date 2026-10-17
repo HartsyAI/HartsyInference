@@ -33,6 +33,13 @@ if [ "$PHASE" = "all" ]; then
     if [ ! -d "$WORK/.git" ]; then
         git clone --depth 1 --branch dory-support https://github.com/brianchmielNV/llama.cpp "$WORK"
     fi
+    # The recorded commit must be what gets built: a checkout with local edits would attribute the numbers to a commit that
+    # cannot reproduce them, so it is refused rather than built.
+    if [ -n "$(git -C "$WORK" status --porcelain --untracked-files=no)" ]; then
+        echo "llama.cpp checkout at $WORK has local changes; commit, stash or discard them so the recorded commit is what is built" >&2
+        git -C "$WORK" status --short --untracked-files=no >&2
+        exit 1
+    fi
     git -C "$WORK" rev-parse --short HEAD | tee "$OUT_DIR/llamacpp_dory_commit.txt"
     cmake -S "$WORK" -B "$WORK/build" -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release >/dev/null
     cmake --build "$WORK/build" --config Release -j"$(nproc)" --target llama-bench >/dev/null
