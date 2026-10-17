@@ -45,6 +45,7 @@ import websockets
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from gpu_gate import GateError, GpuLease, run_under_lease  # noqa: E402
+from swarm_llm_bench import PROMPT as BENCH_PROMPT  # noqa: E402
 
 # The pinned release, mirroring the engine catalog's `dory` entry (src/HartsyInference.Engine/Registry/ModelCatalog.cs).
 MODEL_FILE = "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf"
@@ -54,6 +55,9 @@ AGENT = "Dory AI model integration"
 TASK = "Nemotron Dory 1.0 4B: greedy correctness probes at loops 1/2/4 through the SwarmUI LLM Assistant API, then the decode-throughput bench"
 PROBE_PROMPT = "Explain in three sentences why the sky is blue, then list two things that would change its color."
 PROBE_MAX_TOKENS = 200
+# BOS plus the chat template's role markers for a system turn and a user turn: the part of the bench request's depth that
+# neither token count below covers. An estimate, as the whole depth is (see swarm_prompt_depth).
+TEMPLATE_OVERHEAD_TOKENS = 12
 BENCH = pathlib.Path(__file__).resolve().parent / "swarm_llm_bench.py"
 
 
@@ -97,6 +101,53 @@ def model_listed(base, sid, name):
         log(f"[swarm] model listing failed: {e}")
         return None
     return name in json.dumps(reply)
+
+
+def count_tokens(base, sid, text):
+    """Token count of text with the model's own tokenizer, through LLMAssistantCountTokens; None when unavailable."""
+    try:
+        reply = http_post(base, "/API/LLMAssistantCountTokens", {"session_id": sid, "model": MODEL_FILE, "text": text}, timeout=120)
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+    for key in ("tokens", "count", "tokenCount", "token_count"):
+        if isinstance(reply, dict) and isinstance(reply.get(key), int):
+            return reply[key]
+    return None
+
+
+def chat_instruction_text(base, sid):
+    """The chat instruction, the system prompt the chat route renders, from LLMAssistantGetInstructions; None if absent."""
+    try:
+        reply = http_post(base, "/API/LLMAssistantGetInstructions", {"session_id": sid}, timeout=60)
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+    for item in reply.get("instructions") or [] if isinstance(reply, dict) else []:
+        if isinstance(item, dict) and item.get("id") == "chat":
+            for key in ("text", "content", "instruction", "prompt"):
+                if isinstance(item.get(key), str):
+                    return item[key]
+    return None
+
+
+def swarm_prompt_depth(base, sid, out_dir):
+    """Estimates the context depth the bench's requests decode behind: the chat instruction (the system prompt), the bench
+    prompt and the template's markers. SwarmUI exposes no prompt token count, so this is an estimate, and a lower bound when
+    the active assistant adds tool prompts. Written to swarm_prompt_depth.txt for llamacpp_dory_baseline.sh, which decodes at
+    the same depth (llama-bench -d), so the two decode rates are measured behind comparable KV caches."""
+    system_text = chat_instruction_text(base, sid)
+    system_tokens = count_tokens(base, sid, system_text) if system_text else None
+    user_tokens = count_tokens(base, sid, BENCH_PROMPT)
+    if user_tokens is None:
+        log("[depth] LLMAssistantCountTokens unavailable; no depth written for the llama.cpp baseline")
+        return None
+    depth = (system_tokens or 0) + user_tokens + TEMPLATE_OVERHEAD_TOKENS
+    record = {"system_tokens": system_tokens, "user_tokens": user_tokens, "template_overhead_tokens": TEMPLATE_OVERHEAD_TOKENS,
+              "depth": depth, "estimate": True,
+              "note": "system instruction + bench prompt + template markers; a lower bound if the assistant adds tool prompts"}
+    (out_dir / "swarm_prompt_depth.json").write_text(json.dumps(record, indent=2))
+    (out_dir / "swarm_prompt_depth.txt").write_text(f"{depth}\n")
+    log(f"[depth] bench requests decode behind about {depth} tokens (system {system_tokens}, user {user_tokens}, markers {TEMPLATE_OVERHEAD_TOKENS})")
+    return record
 
 
 def nvidia_smi_apps():
@@ -382,6 +433,7 @@ def main():
         for loops in args.loops:
             summary["probes"].append(run_probe(base, ws_base, sid, loops, lease, bound_gpu))
         (out_dir / "dory_probes.json").write_text(json.dumps(summary["probes"], indent=2))
+        summary["swarm_prompt_depth"] = swarm_prompt_depth(base, sid, out_dir)
 
         if not args.skip_bench:
             for loops in args.loops:

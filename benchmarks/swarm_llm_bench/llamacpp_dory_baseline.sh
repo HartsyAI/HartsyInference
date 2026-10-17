@@ -14,6 +14,10 @@
 # gate's gpu index equals nvidia-smi's, which CUDA_DEVICE_ORDER=PCI_BUS_ID makes llama.cpp follow too.
 # Defaults: the pinned Q5_K_M under /mnt/model-storage, benchmarks/results/dory, the leased card. The lease asks for the
 # card the Swarm run uses (GATE_CARD, default gpu1, the RTX 4090 SwarmUI is pinned to) so the comparison is card for card.
+# Decode depth: the Swarm bench decodes behind its rendered chat prompt, so llama-bench decodes at the same depth (-d),
+# taken from DEPTH or from <out-dir>/swarm_prompt_depth.txt, which dory_e2e_run.py writes (an estimate: system instruction
+# plus bench prompt plus template markers). Without either, or with a llama-bench that has no -d, the decode runs from an
+# empty context and the output says so.
 # LLAMACPP_DIR overrides the checkout location (default ~/llama.cpp-dory); an existing checkout is reused and only rebuilt.
 set -euo pipefail
 
@@ -61,14 +65,27 @@ if [ -n "${GATE_GPU:-}" ] && [ -n "$GPU_ARG" ] && [ "$GPU_ARG" != "$GATE_GPU" ];
     exit 1
 fi
 GPU="${GATE_GPU:-${GPU_ARG:-0}}"
+DEPTH="${DEPTH:-}"
+if [ -z "$DEPTH" ] && [ -f "$OUT_DIR/swarm_prompt_depth.txt" ]; then
+    DEPTH="$(tr -dc '0-9' < "$OUT_DIR/swarm_prompt_depth.txt")"
+fi
+DEPTH_ARGS=()
+if [ -n "$DEPTH" ] && "$WORK/build/bin/llama-bench" --help 2>&1 | grep -q -- '--n-depth'; then
+    DEPTH_ARGS=(-d "$DEPTH")
+else
+    echo "warning: no decode depth (DEPTH unset and no $OUT_DIR/swarm_prompt_depth.txt, or llama-bench lacks -d); decoding from an empty context, not comparable with the Swarm numbers" >&2
+fi
 if [ -x "$WORK/build/bin/llama-completion" ]; then
     COMPLETE=("$WORK/build/bin/llama-completion")
 else
     COMPLETE=("$WORK/build/bin/llama-cli" -no-cnv)
 fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU"
-# Decode throughput at the checkpoint's own loop count (the same count the Swarm bench measures when --loops is omitted).
-"$WORK/build/bin/llama-bench" -m "$MODEL" -p 512 -n 128 -r 5 -ngl 99 -o json | tee "$OUT_DIR/llamacpp_dory_bench.json"
+# Decode throughput at the checkpoint's own loop count (the same count the Swarm bench measures when --loops is omitted),
+# behind the Swarm requests' depth when known.
+"$WORK/build/bin/llama-bench" -m "$MODEL" -p 512 -n 128 -r 5 -ngl 99 ${DEPTH_ARGS[@]+"${DEPTH_ARGS[@]}"} -o json \
+    | tee "$OUT_DIR/llamacpp_dory_bench.json"
+echo "${DEPTH:-0}" > "$OUT_DIR/llamacpp_dory_depth.txt"
 # Greedy text for the quality comparison against dory_probes.json (same prompt, temperature 0, 200 tokens).
 "${COMPLETE[@]}" -m "$MODEL" -ngl 99 --temp 0 -n 200 -p "$PROMPT" 2>"$OUT_DIR/llamacpp_dory_completion.log" \
     | tee "$OUT_DIR/llamacpp_dory_completion.txt"
