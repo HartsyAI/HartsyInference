@@ -166,4 +166,9 @@ timeout.
 `swarm_llm_bench/llamacpp_dory_baseline.sh` is its llama.cpp counterpart: it verifies the same file, builds the
 Dory-capable llama.cpp branch with CUDA, then holds its own lease (through `gpu_gate.py`, which also wraps any other
 box-side command) while it runs `llama-bench` and a greedy completion of the same probe prompt, for the speed and quality
-comparison the parity ledger asks for.
+comparison the parity ledger asks for. Both need the box's quiet window first (`tests/swarm-quiet-window.sh --gpu 4090`,
+then `--quiet-window-passed` for the runner and `QUIET_WINDOW_PASSED=1` for the baseline): the gate's exclusive lease keeps
+other gate users off the card, not SwarmUI's own users, so the runner also checks SwarmUI's global queue before and after
+every step and rejects a step during which a process other than SwarmUI touched the card, as the voice bench does, and the
+baseline spot-checks the window right before `llama-bench`. A chat turn from another session inside the same SwarmUI is
+the remaining blind spot: it leaves no queue entry, journal line or separate process.

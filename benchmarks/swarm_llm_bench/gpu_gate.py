@@ -138,24 +138,36 @@ class GpuLease:
         self._thread = None
 
     def _take_grant(self, reply):
-        """Reads a granted reply; a grant without a lease id or a readable card is refused, since work under it could be
-        neither attributed to a card nor released."""
-        lease_id, gpu = reply.get("lease_id"), gpu_index(reply.get("gpu"))
-        if not isinstance(lease_id, str) or not lease_id or gpu is None:
-            raise GateError(f"request {self.request_id}: grant without a lease id or a card ({reply!r:.200}); not starting")
-        self.lease_id, self.gpu = lease_id, gpu
+        """Reads a granted reply. A grant without a lease id is refused (nothing could be released); one whose card cannot be
+        read keeps its lease id and is released at once, marked failed, then refused, since work under it could not be kept
+        to one card."""
+        lease_id = reply.get("lease_id")
+        if not isinstance(lease_id, str) or not lease_id:
+            raise GateError(f"request {self.request_id}: grant without a lease id ({reply!r:.200}); not starting")
+        self.lease_id = lease_id
+        gpu = gpu_index(reply.get("gpu"))
+        if gpu is None:
+            self.log(f"[gate] request {self.request_id}: lease {lease_id} granted without a readable card; releasing it")
+            self._release_lease(failed=True)
+            raise GateError(f"request {self.request_id}: grant without a readable card ({reply!r:.200}); released, not starting")
+        self.gpu = gpu
 
     def request(self):
         reply = call(self.base, "POST", "/api/request", self.body)
         self.request_id = reply.get("request_id")
-        self.status = reply.get("status")
-        if self.status == "granted":
+        status = reply.get("status")
+        if status == "granted":
+            self.status = status
             self._take_grant(reply)
         else:
             # A queued reply without a request id could be neither polled nor cancelled: the gate would hold a request
             # for a process that has given up on it.
             if not isinstance(self.request_id, str) or not self.request_id:
                 raise GateError(f"reply without a request id ({reply!r:.200}); not waiting on it")
+            if status in TERMINAL_STATUSES:
+                raise GateError(f"request {self.request_id} ended as {status} on arrival")
+            # Queued, or a reply whose status cannot be read: polled either way, and cancelled if given up on.
+            self.status = "queued"
             self.lease_id = reply.get("lease_id")
             self.gpu = gpu_index(reply.get("gpu"))
         self.log(f"[gate] request {self.request_id}: {self.status}"
@@ -171,7 +183,13 @@ class GpuLease:
                 raise GateError(f"request {self.request_id} not granted within {self.grant_timeout_s} s")
             time.sleep(POLL_SECONDS)
             reply = call(self.base, "GET", f"/api/request/{self.request_id}", attempts=CALL_ATTEMPTS)
-            self.status = reply.get("status")
+            status = reply.get("status")
+            if status not in ("queued", "granted") and status not in TERMINAL_STATUSES:
+                # An answer without a readable status says nothing: the request stays what it was (queued, so still
+                # cancellable if given up on) until a poll that does.
+                self.log(f"[gate] request {self.request_id}: poll without a readable status ({reply!r:.200}); still waiting")
+                continue
+            self.status = status
             if self.status in TERMINAL_STATUSES:
                 raise GateError(f"request {self.request_id} ended as {self.status} before a grant")
             if self.status == "granted":
@@ -284,7 +302,8 @@ class GpuLease:
             # is cancelled, a lease already granted is released, marked failed.
             if self.lease_id and self.status == "granted":
                 self._stop.set()
-                self._release_lease(failed=True)
+                if not self.released:
+                    self._release_lease(failed=True)
             else:
                 self.cancel()
             raise

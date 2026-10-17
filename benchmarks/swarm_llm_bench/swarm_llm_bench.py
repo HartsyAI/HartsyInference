@@ -367,13 +367,13 @@ class GpuSampler:
         return best_uuid, best_delta
 
 
-def swarm_status(sid):
+def swarm_status(sid, base=None):
     # GetGlobalStatus sums every session; GetCurrentStatus counts only this session's own gens.
-    return http_post("/API/GetGlobalStatus", {"session_id": sid}).get("status", {})
+    return http_post("/API/GetGlobalStatus", {"session_id": sid}, base=base).get("status", {})
 
 
-def assert_swarm_idle(sid, when):
-    s = swarm_status(sid)
+def assert_swarm_idle(sid, when, base=None):
+    s = swarm_status(sid, base=base)
     busy = {k: s.get(k) for k in ("live_gens", "waiting_gens", "loading_models") if s.get(k)}
     if busy:
         raise RuntimeError(f"foreign Swarm activity {when}: {busy} — aborting the timed batch")

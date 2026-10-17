@@ -25,6 +25,12 @@ the leased card or ask the gate for the card it uses. The probes use LLMAssistan
 generation when the socket closes, so a probe caught by a lost lease is cancelled, not just abandoned; the bench child is
 stopped the same moment. A failed probe, a failed bench, a rejected card or a lost lease fails the run: exit 1 and the
 lease released as failed.
+
+The gate's exclusive lease keeps other gate users off the card, not SwarmUI's own users, so the run also needs the box's
+quiet window first (tests/swarm-quiet-window.sh --gpu 4090, then --quiet-window-passed, as the voice bench does), checks
+SwarmUI's global queue (GetGlobalStatus, every session) at the start and before and after every step, and rejects a step
+during which a process other than SwarmUI touched the card. A chat turn from another session inside the same SwarmUI is
+the remaining blind spot: it leaves no queue entry, journal line or separate process.
 """
 import argparse
 import asyncio
@@ -46,7 +52,7 @@ import websockets
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from gpu_gate import GateError, GpuLease, gpu_index, run_under_lease  # noqa: E402
-from swarm_llm_bench import PROMPT as BENCH_PROMPT, count_tokens  # noqa: E402
+from swarm_llm_bench import PROMPT as BENCH_PROMPT, assert_swarm_idle, count_tokens, swarm_pid  # noqa: E402
 
 # The pinned release, mirroring the engine catalog's `dory` entry (src/HartsyInference.Engine/Registry/ModelCatalog.cs).
 MODEL_FILE = "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf"
@@ -162,15 +168,16 @@ class AttributionError(Exception):
 
 
 def nvidia_smi_apps(time_left=lambda: NVIDIA_SMI_TIMEOUT_S):
-    """{gpu_index: used MiB by compute apps}, to attribute the serving card. None when nvidia-smi is not installed (no
-    attribution is possible then), AttributionError when it is but the reading failed. time_left() is asked before each of
-    the two calls for the seconds that call may take, so a caller winding down can hold the whole reading to one deadline."""
+    """({gpu_index: used MiB by compute apps}, [{gpu, pid, name, mib} per compute app]), to attribute the serving card and to
+    see what else is on it. None when nvidia-smi is not installed (no attribution is possible then), AttributionError when it
+    is but the reading failed. time_left() is asked before each of the two calls for the seconds that call may take, so a
+    caller winding down can hold the whole reading to one deadline."""
     try:
         timeout_s = time_left()
         if timeout_s <= 0:
             raise AttributionError("no time left for the reading")
-        out = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,used_memory", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=timeout_s, check=True).stdout
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=timeout_s, check=True).stdout
         timeout_s = time_left()
         if timeout_s <= 0:
             raise AttributionError("no time left for the reading")
@@ -180,17 +187,20 @@ def nvidia_smi_apps(time_left=lambda: NVIDIA_SMI_TIMEOUT_S):
         for line in gpus.strip().splitlines():
             index, uuid = [p.strip() for p in line.split(",")]
             index_of[uuid] = int(index)
-        used = {}
+        used, rows = {}, []
         for line in out.strip().splitlines():
             if not line.strip():
                 continue
-            uuid, mib = [p.strip() for p in line.split(",")]
-            used[index_of.get(uuid, uuid)] = used.get(index_of.get(uuid, uuid), 0) + int(mib)
+            parts = [p.strip() for p in line.split(",")]
+            uuid, pid, name, mib = parts[0], parts[1], ",".join(parts[2:-1]), int(parts[-1])
+            gpu = index_of.get(uuid, uuid)
+            used[gpu] = used.get(gpu, 0) + mib
+            rows.append({"gpu": gpu, "pid": pid, "name": name, "mib": mib})
     except FileNotFoundError:
         return None
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as e:
         raise AttributionError(f"{type(e).__name__}: {e}") from e
-    return used
+    return used, rows
 
 
 def largest_growth(lows, highs, floor_mib=32):
@@ -209,8 +219,10 @@ class GpuUseSampler:
     and its exit (the reading in flight and, after a normal exit, one closing reading) is held to one shared deadline of
     SAMPLER_TEARDOWN_S, so the cleanup after a step is never kept waiting longer than that by a slow nvidia-smi."""
 
-    def __init__(self, interval_s=0.5):
+    def __init__(self, interval_s=0.5, bound_gpu=None, swarm_pid=None):
         self.interval_s = interval_s
+        self.bound_gpu, self.swarm_pid = bound_gpu, swarm_pid
+        self.foreign = set()  # (pid, name) of any process but SwarmUI seen on the bound card: the step was not alone there
         self.lows, self.highs = {}, {}
         self.present = True
         self.available = False
@@ -227,15 +239,19 @@ class GpuUseSampler:
 
     def _sample(self):
         try:
-            used = nvidia_smi_apps(self._time_left)
+            reading = nvidia_smi_apps(self._time_left)
         except AttributionError as e:
             self.failures += 1
             self.last_failure = str(e)
             return
-        if used is None:
+        if reading is None:
             self.present = False
             return
+        used, rows = reading
         self.available = True
+        for row in rows:
+            if row["gpu"] == self.bound_gpu and row["pid"] != self.swarm_pid and "swarmui" not in row["name"].lower():
+                self.foreign.add((row["pid"], row["name"]))
         for gpu in set(used) | set(self.lows):
             value = used.get(gpu, 0)
             self.lows[gpu] = min(self.lows.get(gpu, value), value)
@@ -360,6 +376,18 @@ async def voice_turn(ws_base, sid, loops, lease, timeout_s=600):
                 return {"success": True, "response": message.get("full_text") or "".join(chunks), "error": None, "notice": notice}
 
 
+def swarm_idle_error(base, sid, when):
+    """Why a step cannot be accepted, or None: SwarmUI's global queue (every session) must be idle before and after a step,
+    since a generation queued or in flight elsewhere in SwarmUI would share the card. The same check the voice bench makes."""
+    try:
+        assert_swarm_idle(sid, when, base=base)
+    except RuntimeError as e:
+        return str(e)
+    except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException, OSError) as e:
+        return f"GetGlobalStatus unavailable {when}: {e!r}"
+    return None
+
+
 def check_lease(lease):
     """Raises GateError once the lease (None without one) is lost: called at every step boundary, so no work starts on a card
     the gate has taken back."""
@@ -367,15 +395,15 @@ def check_lease(lease):
         lease.check_alive()
 
 
-def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
+def run_probe(base, ws_base, sid, loops, lease, bound_gpu, spid=None):
     check_lease(lease)
-    unload_error = unload(base, sid, lease=lease)
-    if unload_error:
-        log(f"[probe] loops={loops if loops is not None else 'default'}: FAILED before the request: {unload_error}")
-        return {"loops": loops, "success": False, "error": unload_error, "response": None, "served_gpu": None}
+    before = unload(base, sid, lease=lease) or swarm_idle_error(base, sid, "before the probe")
+    if before:
+        log(f"[probe] loops={loops if loops is not None else 'default'}: FAILED before the request: {before}")
+        return {"loops": loops, "success": False, "error": before, "response": None, "served_gpu": None}
     check_lease(lease)  # the unload may have blocked or retried
     started = time.monotonic()
-    with GpuUseSampler() as sampler:
+    with GpuUseSampler(bound_gpu=bound_gpu, swarm_pid=spid) as sampler:
         check_lease(lease)  # the baseline reading takes time
         try:
             reply = asyncio.run(voice_turn(ws_base, sid, loops, lease))
@@ -390,7 +418,7 @@ def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
     result = {"loops": loops, "elapsed_s_including_load": round(elapsed, 2), "success": bool(reply.get("success")),
               "response": reply.get("response"), "error": reply.get("error"), "notice": reply.get("notice"), "served_gpu": served}
     if result["success"]:
-        rejected = served_card_error(served, bound_gpu, sampler)
+        rejected = served_card_error(served, bound_gpu, sampler) or swarm_idle_error(base, sid, "after the probe")
         if rejected:
             result.update({"success": False, "error": rejected})
     head = (result["response"] or result["error"] or "")[:120].replace("\n", " ")
@@ -407,6 +435,9 @@ def served_card_error(served_gpu, lease_gpu, sampler):
         return None
     if not sampler.available:
         return f"nvidia-smi failed throughout the step ({sampler.last_failure}); result rejected"
+    if sampler.foreign:
+        others = ", ".join(f"{pid} {name}" for pid, name in sorted(sampler.foreign))
+        return f"another process was on gpu {lease_gpu} during the step ({others}); result rejected"
     if served_gpu is None:
         return "the serving card could not be attributed from nvidia-smi; result rejected"
     if served_gpu != lease_gpu:
@@ -414,19 +445,19 @@ def served_card_error(served_gpu, lease_gpu, sampler):
     return None
 
 
-def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
+def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu, spid=None):
     check_lease(lease)
     cmd = [sys.executable, str(BENCH), "--host", host, "--port", str(port), "--models", MODEL_FILE,
            "--loops", str(loops), "--out", str(out_file), "--fresh-thread"]
     log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
     # Unload before the baseline sample, so the bench's own reload shows up as growth on the card that serves it.
-    unload_error = unload(base, sid, lease=lease)
-    if unload_error:
-        log(f"[bench] loops={loops}: FAILED before the run: {unload_error}")
-        return {"loops": loops, "error": unload_error, "out": str(out_file), "served_gpu": None}
+    before = unload(base, sid, lease=lease) or swarm_idle_error(base, sid, "before the bench")
+    if before:
+        log(f"[bench] loops={loops}: FAILED before the run: {before}")
+        return {"loops": loops, "error": before, "out": str(out_file), "served_gpu": None}
     check_lease(lease)  # the unload may have blocked or retried
-    with GpuUseSampler() as sampler:
+    with GpuUseSampler(bound_gpu=bound_gpu, swarm_pid=spid) as sampler:
         check_lease(lease)  # the baseline reading takes time
         returncode, _ = run_under_lease(cmd, lease, log_file=log_file, grace_s=bench_child_grace_s())
         lost = lease is not None and lease.lost  # stopped, or finished as the heartbeat was refused: not accepted either way
@@ -450,7 +481,7 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     else:
         record["error"] = console.strip().splitlines()[-1] if console.strip() else f"exit {returncode}"
     if not record.get("error"):
-        record["error"] = served_card_error(served, bound_gpu, sampler)
+        record["error"] = served_card_error(served, bound_gpu, sampler) or swarm_idle_error(base, sid, "after the bench")
     if record.get("error"):
         # A result this lease may not report is not left on disk either; the console log stays for diagnosis.
         record.update({"tg_tps_median": None, "ttft_ms_median": None, "counted_tokens": None, "out": None})
@@ -471,10 +502,15 @@ def main():
     ap.add_argument("--vram-mb", type=int, default=6000)
     ap.add_argument("--minutes", type=int, default=90)
     ap.add_argument("--gate-gpu", default="gpu1", help="the card to lease, as the gate names it; SwarmUI is pinned to gpu1 (RTX 4090)")
+    ap.add_argument("--quiet-window-passed", action="store_true",
+                    help="assert that tests/swarm-quiet-window.sh passed for the card just before this run (required, as for the voice bench)")
     ap.add_argument("--skip-hash", action="store_true")
     ap.add_argument("--skip-bench", action="store_true", help="probes only")
     ap.add_argument("--out-dir", default="benchmarks/results/dory")
     args = ap.parse_args()
+    if not args.quiet_window_passed:
+        raise SystemExit("REFUSED: the run needs --quiet-window-passed (run tests/swarm-quiet-window.sh --gpu 4090 first): the gate's "
+                         "lease keeps other gate users off the card, not SwarmUI's own users")
 
     # The card this run is bound to under --no-lease: the one the caller's lease (gpu_gate.py's wrapper) exported as GATE_GPU,
     # read as the gate names cards ("gpu1" or 1). A lease id whose card cannot be read is refused before anything runs: a run
@@ -518,6 +554,12 @@ def main():
         raise SystemExit(f"SwarmUI at {base} not reachable: {e}")
     summary["model_listed"] = model_listed(base, sid, MODEL_FILE)
     log(f"[swarm] session ok; model listed: {summary['model_listed']}")
+    # Before the lease is asked for: a busy SwarmUI is not this run's to wait out.
+    busy = swarm_idle_error(base, sid, "at start")
+    if busy:
+        raise SystemExit(f"REFUSED: {busy}")
+    spid = swarm_pid()  # SwarmUI's own process, the one allowed on the card during a step (None: known by name only)
+    summary["swarm_pid"] = spid
 
     # Exclusive: a benchmark never runs alongside another suite, benchmark or generation (docs/Agents/AGENTS.md).
     lease = None if args.no_lease else GpuLease(AGENT, TASK, args.model_path, base=args.gate, vram_mb=args.vram_mb,
@@ -536,9 +578,9 @@ def main():
         bound_gpu = lease.gpu if lease is not None else held_gpu
         summary["bound_gpu"] = bound_gpu
 
-        summary["probes"].append(run_probe(base, ws_base, sid, None, lease, bound_gpu))
+        summary["probes"].append(run_probe(base, ws_base, sid, None, lease, bound_gpu, spid))
         for loops in args.loops:
-            summary["probes"].append(run_probe(base, ws_base, sid, loops, lease, bound_gpu))
+            summary["probes"].append(run_probe(base, ws_base, sid, loops, lease, bound_gpu, spid))
         (out_dir / "dory_probes.json").write_text(json.dumps(summary["probes"], indent=2))
         # Counted only once a probe has run the model: the engine counts with the resident model's tokenizer, and reports a
         # chars/4 estimate as a count when nothing is resident (see swarm_llm_bench.count_tokens).
@@ -551,7 +593,7 @@ def main():
         if not args.skip_bench:
             for loops in args.loops:
                 summary["bench"].append(run_bench(base, sid, args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json",
-                                                  lease, bound_gpu))
+                                                  lease, bound_gpu, spid))
         failures = [f"probe loops={p['loops']}: {p['error'] or 'no reply'}" for p in summary["probes"] if not p["success"]]
         failures += [f"bench loops={b['loops']}: {b['error']}" for b in summary["bench"] if b.get("error")]
         if lease is not None and lease.lost:

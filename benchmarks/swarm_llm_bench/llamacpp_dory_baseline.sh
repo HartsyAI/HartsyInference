@@ -19,6 +19,9 @@
 # plus bench prompt plus template markers). Without either, or with a llama-bench that has no -d, the decode runs from an
 # empty context and the output says so.
 # LLAMACPP_DIR overrides the checkout location (default ~/llama.cpp-dory); an existing checkout is reused and only rebuilt.
+# The box's quiet window is a precondition (tests/swarm-quiet-window.sh --gpu 4090, then QUIET_WINDOW_PASSED=1): the gate's
+# lease keeps other gate users off the card, not SwarmUI's own users. The GPU phase spot-checks the window on the leased
+# card (queue, card and journal) right before llama-bench, through the same script, and refuses to measure if it is dirty.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,9 +32,14 @@ WORK="${LLAMACPP_DIR:-$HOME/llama.cpp-dory}"
 GATE_CARD="${GATE_CARD:-gpu1}"
 PROMPT="Explain in three sentences why the sky is blue, then list two things that would change its color."
 PHASE="${LLAMACPP_BASELINE_PHASE:-all}"
+QUIET="$HERE/../../tests/swarm-quiet-window.sh"
 
-# Configuration checks first, before the hash of a 3.6 GB file: an inherited lease must name its card, and an override may
-# not contradict it.
+# Configuration checks first, before the hash of a 3.6 GB file: the quiet window must have passed, an inherited lease must
+# name its card, and an override may not contradict it.
+if [ "${QUIET_WINDOW_PASSED:-}" != "1" ]; then
+    echo "REFUSED: run tests/swarm-quiet-window.sh --gpu 4090 first, then QUIET_WINDOW_PASSED=1 $0 ...: the gate's lease keeps other gate users off the card, not SwarmUI's own users" >&2
+    exit 1
+fi
 if [ -n "${GATE_LEASE_ID:-}" ] && [ -z "${GATE_GPU:-}" ] && [ -z "$GPU_ARG" ]; then
     echo "GATE_LEASE_ID is set but neither GATE_GPU nor a gpu index argument names the leased card; refusing to guess" >&2
     exit 1
@@ -87,6 +95,11 @@ else
     COMPLETE=("$WORK/build/bin/llama-cli" -no-cnv)
 fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU"
+# The spot check of the quiet window on the leased card, right before the measurement: the timed window was the operator's
+# precondition; this catches anything that started since (a queued gen, a process on the card, a journal line).
+GPU_UUID="$(nvidia-smi --query-gpu=uuid -i "$GPU" --format=csv,noheader | tr -d ' ')"
+"$QUIET" --minutes 0 --gpu "$GPU_UUID" --host "${SWARM_HOST:-127.0.0.1}" --port "${SWARM_PORT:-7801}" \
+    || { echo "gpu $GPU is not quiet; refusing to measure" >&2; exit 1; }
 # Decode throughput at the checkpoint's own loop count (the same count the Swarm bench measures when --loops is omitted),
 # behind the Swarm requests' depth when known.
 "$WORK/build/bin/llama-bench" -m "$MODEL" -p 512 -n 128 -r 5 -ngl 99 ${DEPTH_ARGS[@]+"${DEPTH_ARGS[@]}"} -o json \
