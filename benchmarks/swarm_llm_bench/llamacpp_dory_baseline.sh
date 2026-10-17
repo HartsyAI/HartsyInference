@@ -30,6 +30,16 @@ GATE_CARD="${GATE_CARD:-gpu1}"
 PROMPT="Explain in three sentences why the sky is blue, then list two things that would change its color."
 PHASE="${LLAMACPP_BASELINE_PHASE:-all}"
 
+# Configuration checks first, before the hash of a 3.6 GB file: an inherited lease must name its card, and an override may
+# not contradict it.
+if [ -n "${GATE_LEASE_ID:-}" ] && [ -z "${GATE_GPU:-}" ] && [ -z "$GPU_ARG" ]; then
+    echo "GATE_LEASE_ID is set but neither GATE_GPU nor a gpu index argument names the leased card; refusing to guess" >&2
+    exit 1
+fi
+if [ -n "${GATE_GPU:-}" ] && [ -n "$GPU_ARG" ] && [ "$GPU_ARG" != "$GATE_GPU" ]; then
+    echo "gpu $GPU_ARG was asked for but the lease is for gpu $GATE_GPU; the leased card wins, re-run without the override" >&2
+    exit 1
+fi
 mkdir -p "$OUT_DIR"
 python3 -c "import sys; sys.path.insert(0, sys.argv[1]); from dory_e2e_run import verify_model; verify_model(sys.argv[2], False)" "$HERE" "$MODEL"
 
@@ -60,10 +70,6 @@ if [ "$PHASE" = "all" ]; then
     fi
 fi
 
-if [ -n "${GATE_GPU:-}" ] && [ -n "$GPU_ARG" ] && [ "$GPU_ARG" != "$GATE_GPU" ]; then
-    echo "gpu $GPU_ARG was asked for but the lease is for gpu $GATE_GPU; the leased card wins, re-run without the override" >&2
-    exit 1
-fi
 GPU="${GATE_GPU:-${GPU_ARG:-0}}"
 DEPTH="${DEPTH:-}"
 if [ -z "$DEPTH" ] && [ -f "$OUT_DIR/swarm_prompt_depth.txt" ]; then

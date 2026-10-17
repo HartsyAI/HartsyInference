@@ -231,13 +231,18 @@ def ws_url(host, port):
     return f"ws://{host}:{port}"
 
 
-def unload(base, sid, attempts=3):
+# The wrapper SIGKILLs a stopped runner ten seconds after SIGTERM (gpu_gate.run_under_lease grace_s), so the one unload a
+# terminated run attempts must answer well inside that, or be reported as a cleanup failure instead of being cut off.
+TERMINATED_UNLOAD_TIMEOUT_S = 6
+
+
+def unload(base, sid, attempts=3, timeout_s=120):
     """Frees the resident model, retrying a few times: before a step, so its reload shows which card serves it; at the end, so
     the card is handed back empty. Returns None when SwarmUI confirmed it, else the last error text (the caller fails on it)."""
     error = None
     for attempt in range(attempts):
         try:
-            reply = http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=120)
+            reply = http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=timeout_s)
             if isinstance(reply, dict) and reply.get("success") is not False and not reply.get("error"):
                 return None
             error = f"unload refused: {reply.get('error') if isinstance(reply, dict) else reply!r}"
@@ -461,7 +466,7 @@ def main():
         # could not be emptied is handed back marked failed so the gate knows. A run that never got its card leaves SwarmUI
         # alone: the unload is global, and the card's current holder may be using the model.
         if used_swarm:
-            unload_error = unload(base, sid, attempts=1 if terminated else 3)
+            unload_error = unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S) if terminated else unload(base, sid)
             if unload_error:
                 failed = True
                 summary["cleanup_error"] = unload_error

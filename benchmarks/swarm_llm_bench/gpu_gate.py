@@ -111,12 +111,23 @@ class GpuLease:
         self._stop = threading.Event()
         self._thread = None
 
+    def _take_grant(self, reply):
+        """Reads a granted reply; a grant without a lease id or a readable card is refused, since work under it could be
+        neither attributed to a card nor released."""
+        lease_id, gpu = reply.get("lease_id"), gpu_index(reply.get("gpu"))
+        if not isinstance(lease_id, str) or not lease_id or gpu is None:
+            raise GateError(f"request {self.request_id}: grant without a lease id or a card ({reply!r:.200}); not starting")
+        self.lease_id, self.gpu = lease_id, gpu
+
     def request(self):
         reply = call(self.base, "POST", "/api/request", self.body)
         self.request_id = reply.get("request_id")
-        self.lease_id = reply.get("lease_id")
-        self.gpu = gpu_index(reply.get("gpu"))
         self.status = reply.get("status")
+        if self.status == "granted":
+            self._take_grant(reply)
+        else:
+            self.lease_id = reply.get("lease_id")
+            self.gpu = gpu_index(reply.get("gpu"))
         self.log(f"[gate] request {self.request_id}: {self.status}"
                  + (f" (position {reply.get('position')})" if self.status == "queued" else f" on gpu {self.gpu}"))
         return reply
@@ -133,8 +144,11 @@ class GpuLease:
             self.status = reply.get("status")
             if self.status in TERMINAL_STATUSES:
                 raise GateError(f"request {self.request_id} ended as {self.status} before a grant")
-            self.lease_id = reply.get("lease_id") or self.lease_id
-            self.gpu = gpu_index(reply.get("gpu")) if reply.get("gpu") is not None else self.gpu
+            if self.status == "granted":
+                self._take_grant(reply)
+            else:
+                self.lease_id = reply.get("lease_id") or self.lease_id
+                self.gpu = gpu_index(reply.get("gpu")) if reply.get("gpu") is not None else self.gpu
             self.log(f"[gate] request {self.request_id}: {self.status}"
                      + (f" (position {reply.get('position')})" if self.status == "queued" else f" on gpu {self.gpu}"))
         return {"lease_id": self.lease_id, "gpu": self.gpu}
