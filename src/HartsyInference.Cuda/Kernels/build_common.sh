@@ -39,6 +39,10 @@ KERNELS_SM80=("${KERNELS_SM80[@]:-}")
 ARCH_VARIANTS=("${ARCH_VARIANTS[@]:-}")
 TUNED=("${TUNED[@]:-}")
 
+# PTX ISA version a file declares in its header, and whether it is at or below the fleet driver's JIT ceiling (9.0).
+ptx_version() { head -20 "$1" | sed -n 's/^\.version \([0-9.]*\)$/\1/p' | head -1; }
+ptx_isa_ok() { local v; v="$(ptx_version "$1")"; [[ -n "$v" && "$(printf '%s\n' "$v" 9.0 | sort -V | tail -1)" == "9.0" ]]; }
+
 # compile_one <kernel> <arch>   arch is the bare number nvcc's sm_ and nvrtc's compute_ take (80, 75, 120a);
 # a family-specific arch (trailing letter) lands as <kernel>.sm<digits>.ptx, the baseline as <kernel>.ptx.
 compile_one() {
@@ -51,22 +55,35 @@ compile_one() {
         echo "missing source: $src" >&2
         exit 1
     fi
-    # HARTSY_PTX_COMPILER=nvrtc forces the NVRTC route, for hosts whose nvcc emits a PTX ISA newer than the pin.
+    # nvcc from CUDA 13.x emits PTX ISA 9.3, which the fleet driver cannot JIT. nvcc is tried first only when its
+    # output carries the pinned ISA; otherwise the kernel is recompiled through the nvrtc helper, which emits 9.0.
+    # HARTSY_PTX_COMPILER=nvrtc skips nvcc outright.
+    local compiled=false
     if [[ "${HARTSY_PTX_COMPILER:-auto}" != nvrtc ]] && command -v nvcc >/dev/null 2>&1; then
         echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${arch} ${kernel}.cu"
         nvcc -ptx -arch="sm_${arch}" "$src" -o "$ptx"
-    else
+        if ptx_isa_ok "$ptx"; then
+            compiled=true
+        else
+            echo "  nvcc emitted PTX ISA $(ptx_version "$ptx"); recompiling ${kernel} with the nvrtc helper (ISA 9.0)" >&2
+        fi
+    fi
+    if ! $compiled; then
         if [[ ! -x "$NVRTC" ]]; then
-            echo "no nvcc on PATH and no nvrtc helper — build it: cc -O2 -o $NVRTC ${NVRTC}.c -ldl" >&2
-            exit 1
+            if command -v cc >/dev/null 2>&1; then
+                cc -O2 -o "$NVRTC" "${NVRTC}.c" -ldl
+            else
+                echo "no usable nvrtc helper at $NVRTC and no cc to build it" >&2
+                exit 1
+            fi
         fi
         echo "[$(date +%H:%M:%S)] nvrtc_compile compute_${arch} ${kernel}.cu"
         # The kernel's own directory is an include path too: NVRTC compiles from a string and resolves
         # #include "x.cuh" only through the paths it is given.
         LD_LIBRARY_PATH="$CUDA_LIB" "$NVRTC" "$src" "$ptx" "compute_${arch}" "$CUDA_INC" "${THIS_DIR}"
     fi
-    if ! head -20 "$ptx" | grep -q '^\.version 9\.0$'; then
-        echo "ERROR: ${kernel}${suffix}.ptx is not PTX ISA 9.0 (driver JIT ceiling) — check toolchain pin." >&2
+    if ! ptx_isa_ok "$ptx"; then
+        echo "ERROR: ${kernel}${suffix}.ptx is PTX ISA $(ptx_version "$ptx") (driver JIT ceiling is 9.0) — check toolchain pin." >&2
         exit 1
     fi
     if $INSTALL; then
@@ -81,21 +98,31 @@ compile_one() {
     fi
 }
 
+# want <kernel>: true when no kernel names were given on the command line, or when this one is named.
+want() {
+    [[ ${#ONLY[@]} -eq 0 ]] && return 0
+    local o
+    for o in "${ONLY[@]}"; do [[ "$o" == "$1" ]] && return 0; done
+    return 1
+}
+
 build_all() {
     INSTALL=true
     INSTALL_TUNED=false
+    local ONLY=()
     local extra_arch=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --no-install)    INSTALL=false; shift ;;
             --install-tuned) INSTALL_TUNED=true; shift ;;
             --arch)          extra_arch="${2#sm_}"; shift 2 ;;
-            *) echo "unknown argument: $1" >&2; exit 2 ;;
+            -*) echo "unknown argument: $1" >&2; exit 2 ;;
+            *)  ONLY+=("$1"); shift ;;
         esac
     done
-    for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && compile_one "$kernel" 80; done
-    for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && compile_one "$kernel" 75; done
-    for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && compile_one "$kernel" 80; done
+    for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
+    for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 75; done
+    for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
     if [[ -n "$extra_arch" ]]; then
         if [[ ! "$extra_arch" =~ [a-z]$ ]]; then
             echo "ERROR: --arch takes a family-specific arch (sm_120a, sm_100a): plain sm_${extra_arch} PTX would replace nothing and load nowhere the baseline does not." >&2
@@ -103,5 +130,6 @@ build_all() {
         fi
         for kernel in "${ARCH_VARIANTS[@]}"; do [[ -n "$kernel" ]] && compile_one "$kernel" "$extra_arch"; done
     fi
+    "${THIS_DIR}/../check_ptx_isa.sh" >/dev/null || { echo "ERROR: a shipped PTX file is not ISA 9.0; run check_ptx_isa.sh" >&2; exit 1; }
     echo "done."
 }

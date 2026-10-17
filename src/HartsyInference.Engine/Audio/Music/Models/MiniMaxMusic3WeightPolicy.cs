@@ -3,6 +3,10 @@ using HartsyInference.Audio.Models.Csm;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.SafeTensors;
+using System.Security.Cryptography;
+using System.Text;
+using System.Linq;
 
 namespace HartsyInference.Engine.Audio;
 
@@ -97,27 +101,81 @@ internal static class MiniMaxMusic3WeightPolicy
         return merged;
     }
 
-    /// <summary>Casts the F32 transformer to BF16 on the quantized variants — 9.6 GB does not fit alongside the vocoder on a 12 GB card. Returns the source untouched otherwise.</summary>
+    /// <summary>The flow transformer on the quantized variants, with its projections stored as BF16 in a disk cache that is
+    /// written once and then mapped. The loader borrows the mapping, so no BF16 copy of the 9.6 GB F32 source is held in host
+    /// memory; the device upload reads the mapped pages. A 9.6 GB F32 transformer does not fit beside the vocoder on a 12 GB card,
+    /// which is why the narrowing exists. Returns the source untouched when nothing is quantized.</summary>
     internal static IReadOnlyDictionary<string, Tensor> PrepareTransformer(
-        IReadOnlyDictionary<string, Tensor> weights, string? quant, out IDisposable? owned)
+        IReadOnlyDictionary<string, Tensor> weights, string repo, string? quant, out IDisposable? owned)
     {
         owned = null;
         if (CsmWeightCache.ResolveQuant(quant) is null)
         {
             return weights;
         }
-        Dictionary<string, Tensor> cast = new Dictionary<string, Tensor>(weights.Count, StringComparer.Ordinal);
-        OwnedTensors tracker = new OwnedTensors();
-        foreach (KeyValuePair<string, Tensor> entry in weights)
+        string path = Path.Combine(AudioModelCache.CacheRoot, "music", "_gguf-cache",
+            $"{repo.Replace('/', '_')}-transformer-bf16.safetensors");
+        string signature = TransformerSignature(weights);
+        string sidecar = path + ".sig";
+        if (!File.Exists(path) || !File.Exists(sidecar) || File.ReadAllText(sidecar) != signature)
         {
-            // Norms and biases are tiny and precision-sensitive, and time_proj is read host-side by the Fourier
-            // embedding rather than through a backend op — only the projections are worth narrowing.
-            bool narrow = entry.Value.DType == DType.F32 && entry.Value.Shape.Rank >= 2
-                && !entry.Key.StartsWith("time_proj", StringComparison.Ordinal);
-            cast[entry.Key] = narrow ? tracker.Track(entry.Value.CastTo(DType.BF16)) : entry.Value;
+            List<SafeTensorsStreamWriter.Entry> entries = new List<SafeTensorsStreamWriter.Entry>(weights.Count);
+            foreach (KeyValuePair<string, Tensor> entry in weights)
+            {
+                Tensor source = entry.Value;
+                if (NarrowsToBf16(entry.Key, source))
+                {
+                    entries.Add(new SafeTensorsStreamWriter.Entry(entry.Key, DType.BF16, source.Shape,
+                        () => (source.CastTo(DType.BF16), true)));
+                }
+                else
+                {
+                    entries.Add(new SafeTensorsStreamWriter.Entry(entry.Key, source.DType, source.Shape, () => (source, false)));
+                }
+            }
+            Logs.Info($"[Audio][MiniMaxMusic3] Writing the BF16 flow transformer cache '{path}' (once; later runs map it).");
+            SafeTensorsStreamWriter.Write(path, entries, new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["hartsy.policy"] = "transformer-bf16-v1",
+                ["hartsy.signature"] = signature,
+            });
+            File.WriteAllText(sidecar, signature);
         }
-        owned = tracker;
-        return cast;
+        SafeTensorsLoader loader = new SafeTensorsLoader();
+        try
+        {
+            loader.Load(path);
+        }
+        catch
+        {
+            loader.Dispose();
+            throw;
+        }
+        owned = loader;
+        return loader.GetAllTensors();
+    }
+
+    /// <summary>Only the F32 projections are narrowed. Norms and biases are tiny and precision-sensitive, and time_proj is read
+    /// host-side by the Fourier embedding rather than through a backend op.</summary>
+    private static bool NarrowsToBf16(string name, Tensor tensor) =>
+        tensor.DType == DType.F32 && tensor.Shape.Rank >= 2 && !name.StartsWith("time_proj", StringComparison.Ordinal);
+
+    /// <summary>Identifies the cache's source: the tensor names, shapes, dtypes and narrowing decisions. A release that changes
+    /// any of them rebuilds the cache.</summary>
+    private static string TransformerSignature(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        StringBuilder text = new StringBuilder("transformer-bf16-v1\n");
+        foreach (KeyValuePair<string, Tensor> entry in weights.OrderBy(e => e.Key, StringComparer.Ordinal))
+        {
+            Tensor tensor = entry.Value;
+            text.Append(entry.Key).Append('|').Append(tensor.DType.Name).Append('|');
+            for (int d = 0; d < tensor.Shape.Rank; d++)
+            {
+                text.Append(tensor.Shape[d]).Append('x');
+            }
+            text.Append('|').Append(NarrowsToBf16(entry.Key, tensor) ? "bf16" : "keep").Append('\n');
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())));
     }
 
     /// <summary>Quantizes the projection matrices; keeps norms and biases at F16.</summary>
