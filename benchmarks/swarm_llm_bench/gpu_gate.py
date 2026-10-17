@@ -36,6 +36,7 @@ lost lease stops it, and the lease is released as failed when the command fails.
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -188,22 +189,31 @@ class GpuLease:
         return False
 
 
+def _signal_group(proc, sig):
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
 def run_under_lease(cmd, lease, log_file=None, env=None, grace_s=10, poll_s=1.0):
-    """Runs a command while the lease is held, polling every poll_s seconds: a lost lease terminates it (kill after
-    grace_s) rather than letting it use the card until it finishes. The child's console goes to log_file when given,
-    else to ours. lease may be None (nothing to lose). Returns (returncode, lease_lost)."""
+    """Runs a command while the lease is held, polling every poll_s seconds: a lost lease terminates it, and everything it
+    started (the command runs as its own process group, so a shell's llama-bench or tee goes with it), with a kill after
+    grace_s, rather than letting any of it use the card until it finishes. The child's console goes to log_file when
+    given, else to ours. lease may be None (nothing to lose). Returns (returncode, lease_lost)."""
     sink = open(log_file, "w") if log_file else None
     lost = False
     try:
-        proc = subprocess.Popen(cmd, text=True, stdout=sink, stderr=subprocess.STDOUT if sink else None, env=env)
+        proc = subprocess.Popen(cmd, text=True, stdout=sink, stderr=subprocess.STDOUT if sink else None, env=env,
+                                start_new_session=True)
         while proc.poll() is None:
             if lease is not None and lease.lost:
                 lost = True
-                proc.terminate()
+                _signal_group(proc, signal.SIGTERM)
                 try:
                     proc.wait(timeout=grace_s)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    _signal_group(proc, signal.SIGKILL)
                     proc.wait()
                 break
             time.sleep(poll_s)

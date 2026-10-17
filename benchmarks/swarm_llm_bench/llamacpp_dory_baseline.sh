@@ -9,7 +9,8 @@
 # The file is verified against the catalog pin (size and sha256, through dory_e2e_run.verify_model) before anything runs.
 # The build needs no card and runs first; the GPU phase then re-runs this script through gpu_gate.py, which requests the
 # lease, heartbeats, stops the phase if the lease is lost, and passes the granted card as GATE_GPU. A caller that already
-# holds a lease (GATE_LEASE_ID set) runs the GPU phase directly; the third argument overrides the card either way. The
+# holds a lease (GATE_LEASE_ID set) runs the GPU phase directly on that lease's card (GATE_GPU), or on the third argument
+# when the lease came without one. The granted card always wins: a third argument that names another card is refused. The
 # gate's gpu index equals nvidia-smi's, which CUDA_DEVICE_ORDER=PCI_BUS_ID makes llama.cpp follow too.
 # Defaults: the pinned Q5_K_M under /mnt/model-storage, benchmarks/results/dory, the leased card. LLAMACPP_DIR overrides
 # the checkout location (default ~/llama.cpp-dory); an existing checkout is reused and only rebuilt.
@@ -38,14 +39,18 @@ if [ "$PHASE" = "all" ]; then
         cmake --build "$WORK/build" --config Release -j"$(nproc)" --target llama-cli >/dev/null
     fi
     if [ -z "${GATE_LEASE_ID:-}" ]; then
-        # No lease held by the caller: hold one around the GPU phase only.
+        # No lease held by the caller: hold one around the GPU phase only; the gate picks the card, so no override is passed.
         exec python3 "$HERE/gpu_gate.py" --agent "Dory AI model integration" \
             --task "llama.cpp Dory baseline: llama-bench and a greedy completion on the pinned Q5_K_M" \
-            --model-path "$MODEL" -- env LLAMACPP_BASELINE_PHASE=run "$0" "$MODEL" "$OUT_DIR" "$GPU_ARG"
+            --model-path "$MODEL" -- env LLAMACPP_BASELINE_PHASE=run "$0" "$MODEL" "$OUT_DIR"
     fi
 fi
 
-GPU="${GPU_ARG:-${GATE_GPU:-0}}"
+if [ -n "${GATE_GPU:-}" ] && [ -n "$GPU_ARG" ] && [ "$GPU_ARG" != "$GATE_GPU" ]; then
+    echo "gpu $GPU_ARG was asked for but the lease is for gpu $GATE_GPU; the leased card wins, re-run without the override" >&2
+    exit 1
+fi
+GPU="${GATE_GPU:-${GPU_ARG:-0}}"
 if [ -x "$WORK/build/bin/llama-completion" ]; then
     COMPLETE=("$WORK/build/bin/llama-completion")
 else

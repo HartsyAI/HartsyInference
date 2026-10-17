@@ -9,8 +9,9 @@ own heartbeat, so one command covers a run longer than the gate's 10-minute hear
         --model-path /mnt/model-storage/Models/llm/nemotron-dory/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf
 
 Options: --loops 1 2 4 (default), --host/--port for SwarmUI (127.0.0.1:7801), --gate for the lease service, --no-lease
-when a lease is already held or the gate is not running, --skip-hash to skip the sha256 (the size is always checked),
---out-dir for the result files (benchmarks/results/dory), --device-map for the gate-gpu-to-engine-device mapping.
+when a lease is already held (under gpu_gate.py's wrapper the inherited GATE_GPU still names the card for the probes and
+the bench check) or the gate is not running, --skip-hash to skip the sha256 (the size is always checked), --out-dir for
+the result files (benchmarks/results/dory), --device-map for the gate-gpu-to-engine-device mapping.
 
 Outputs in --out-dir: dory_probes.json (every probe reply in full), swarm_llm_dory_loops<N>.json and .log (the bench's own
 file and console per loop count) and dory_e2e_summary.json; the summary table is also printed.
@@ -221,7 +222,7 @@ def served_card_error(served_gpu, lease_gpu, attributable):
     return None
 
 
-def run_bench(base, sid, host, port, loops, out_file, lease):
+def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     if lease is not None:
         lease.check_alive()
     cmd = [sys.executable, str(BENCH), "--host", host, "--port", str(port), "--models", MODEL_FILE,
@@ -252,7 +253,7 @@ def run_bench(base, sid, host, port, loops, out_file, lease):
     else:
         record["error"] = console.strip().splitlines()[-1] if console.strip() else f"exit {returncode}"
     if not record.get("error"):
-        rejected = served_card_error(served, None if lease is None else lease.gpu, sampler.available)
+        rejected = served_card_error(served, bound_gpu, sampler.available)
         if rejected:
             record.update({"error": rejected, "tg_tps_median": None, "ttft_ms_median": None, "counted_tokens": None})
     if record.get("error"):
@@ -276,7 +277,8 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7801)
     ap.add_argument("--gate", default="http://127.0.0.1:8686")
-    ap.add_argument("--no-lease", action="store_true", help="run without requesting a lease (one is already held)")
+    ap.add_argument("--no-lease", action="store_true",
+                    help="run without requesting a lease; one already held by the caller (GATE_GPU in the environment) still names the card")
     ap.add_argument("--vram-mb", type=int, default=6000)
     ap.add_argument("--minutes", type=int, default=90)
     ap.add_argument("--skip-hash", action="store_true")
@@ -302,12 +304,19 @@ def main():
 
     lease = None if args.no_lease else GpuLease(AGENT, TASK, args.model_path, base=args.gate, vram_mb=args.vram_mb,
                                                  minutes=args.minutes, log=log)
+    # The card this run is bound to: the lease it holds, or under --no-lease the one the caller's lease (gpu_gate.py's wrapper)
+    # exported as GATE_GPU; None only when no lease is involved at all.
+    held_gpu = int(os.environ["GATE_GPU"]) if args.no_lease and os.environ.get("GATE_GPU", "").isdigit() else None
     failed = False
     try:
         if lease is not None:
             lease.__enter__()
             summary["lease"] = {"lease_id": lease.lease_id, "gpu": lease.gpu}
-        device = parse_device_map(args.device_map).get(lease.gpu) if lease is not None and lease.gpu is not None else None
+        elif held_gpu is not None:
+            summary["lease"] = {"lease_id": os.environ.get("GATE_LEASE_ID"), "gpu": held_gpu, "inherited": True}
+            log(f"[gate] using the caller's lease on gpu {held_gpu}")
+        bound_gpu = lease.gpu if lease is not None else held_gpu
+        device = parse_device_map(args.device_map).get(bound_gpu) if bound_gpu is not None else None
         summary["probe_device"] = device
 
         summary["probes"].append(run_probe(base, sid, None, device, lease))
@@ -317,7 +326,8 @@ def main():
 
         if not args.skip_bench:
             for loops in args.loops:
-                summary["bench"].append(run_bench(base, sid, args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json", lease))
+                summary["bench"].append(run_bench(base, sid, args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json",
+                                                  lease, bound_gpu))
         failures = [f"probe loops={p['loops']}: {p['error'] or 'no reply'}" for p in summary["probes"] if not p["success"]]
         failures += [f"bench loops={b['loops']}: {b['error']}" for b in summary["bench"] if b.get("error")]
         if failures:
