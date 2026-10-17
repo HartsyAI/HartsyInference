@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## Unreleased
+## alpha.376
 
 - **Fixed: Whisper decodes a sung passage to its words instead of music-note symbols.** The greedy decoder now applies the checkpoint's own `suppress_tokens` (every step) and `begin_suppress_tokens` (first step) from its `generation_config.json`, as Hugging Face does. Without them a sung clip came back as `♪♪♪`, which the HF defaults transcribe to its words. Checkpoints with no such file decode as before. A corrupt `generation_config.json` falls back to no suppression with a warning rather than failing the load. Some songs can score slightly lower: tiny on `acestep-base` went from 0.90 to 0.70 lyric recall, while the larger models gain.
 - **Added: Fish-Speech 1.4 as a variant of `fishspeech`** (`fishspeech:fish-speech-1.4`). The 1.4 checkpoint uses its own layout: the HF `tokenizer.json`, the single `<|semantic|>` sentinel, one-based codebook values, the plain chat prompt, and upstream's `clean_text`, all matching fish-speech v1.4.3. Status is structural: the tokenizer ids match HF `tokenizers`, but there is no real-weight or Swarm run yet.
