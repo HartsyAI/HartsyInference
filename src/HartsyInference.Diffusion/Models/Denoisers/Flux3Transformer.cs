@@ -304,29 +304,47 @@ public sealed class Flux3Transformer : IDisposable
     /// backend keeps F32, so a default CPU build never reaches an F16 kernel.</summary>
     private static bool UseF16Stream(IBackend backend) => backend.SupportsF16Activations && DitDtype.Act == DType.F16;
 
-    /// <summary>Scales an embedded F32 stream by the residual damp and casts it to F16, taking ownership of it. On the F32
-    /// path the stream is returned unchanged.</summary>
+    /// <summary>Scales an embedded F32 stream by the residual damp and casts it to F16. On success this takes ownership of
+    /// <paramref name="f32"/> and returns the F16 stream; on the F32 path the stream is returned unchanged. On failure the
+    /// caller still owns <paramref name="f32"/>, and every temporary this call created is freed.</summary>
     private static Tensor ToStreamDtype(IBackend backend, Tensor f32, bool f16)
     {
         if (!f16)
             return f32;
         TensorShape shape = f32.Shape;
         Tensor damped = new Tensor(shape, DType.F32);
-        backend.Scale(damped, f32, ChromaF16.ResidualDamp);
-        f32.Dispose();
         Tensor stream = new Tensor(shape, DType.F16);
-        backend.CastToF16(stream, damped);
+        try
+        {
+            backend.Scale(damped, f32, ChromaF16.ResidualDamp);
+            backend.CastToF16(stream, damped);
+        }
+        catch
+        {
+            damped.Dispose();
+            stream.Dispose();
+            throw;
+        }
         damped.Dispose();
+        f32.Dispose();
         return stream;
     }
 
     /// <summary>Scales a block's gate row by the residual damp. The gate multiplies the whole branch (attention, MLP and any
     /// runtime LoRA adjunct), so the damped stream sees the branch at the same scale on every backend and weight format.
-    /// Takes ownership of <paramref name="gate"/>.</summary>
+    /// On success this takes ownership of <paramref name="gate"/>; on failure the caller still owns it.</summary>
     private static Tensor DampGate(IBackend backend, Tensor gate)
     {
         Tensor damped = new Tensor(gate.Shape, DType.F32);
-        backend.Scale(damped, gate, ChromaF16.ResidualDamp);
+        try
+        {
+            backend.Scale(damped, gate, ChromaF16.ResidualDamp);
+        }
+        catch
+        {
+            damped.Dispose();
+            throw;
+        }
         gate.Dispose();
         return damped;
     }
@@ -339,7 +357,15 @@ public sealed class Flux3Transformer : IDisposable
         try
         {
             Tensor[] rows = projection.Forward(backend, vec);
-            if (f16) rows[2] = DampGate(backend, rows[2]);
+            try
+            {
+                if (f16) rows[2] = DampGate(backend, rows[2]);
+            }
+            catch
+            {
+                foreach (Tensor row in rows) row.Dispose();
+                throw;
+            }
             using Flux3Modulation modulation = Flux3Modulation.Uniform(rows[0], rows[1], rows[2]);
             foreach (Flux3Block block in blocks)
             {
