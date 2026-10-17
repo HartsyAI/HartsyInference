@@ -675,6 +675,8 @@ public sealed class TextService : ITextService, IDisposable
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         bool injectToolPrompt = ShouldInjectToolPrompt(request, rawCompletion, template);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer, injectToolPrompt);
+        if (request.Loops is { } loops && slot.Looped is null)
+            Logs.Debug($"[TextService] Loops={loops} requested, but '{Path.GetFileName(slot.LoadedPath)}' is not a looped model; the field is ignored.");
         long requestId = Interlocked.Increment(ref _requestCounter);
         // Muse Spark frames every reply in message headers with a reasoning channel, so its parser runs even without a stream.
         bool museSpark = !rawCompletion && genRequest.EffectiveMessages() is not null && MuseSparkOutputParser.Handles(template, tokenizer);
