@@ -33,8 +33,9 @@ Usage, as a library:
 
 Usage, as a command wrapper (any box-side script that needs a card):
     python3 gpu_gate.py --agent "..." --task "..." --model-path /mnt/model-storage/... -- <command> [args...]
-The lease is requested and heartbeated around the command, which sees GATE_LEASE_ID and GATE_GPU in its environment; a
-lost lease stops it, and the lease is released as failed when the command fails. Exit status is the command's.
+The lease is requested and heartbeated around the command, which sees GATE_LEASE_ID, GATE_GPU and GATE_GRACE_S (the
+seconds it has between SIGTERM and SIGKILL when stopped) in its environment; a lost lease stops it, and the lease is
+released as failed when the command fails. Exit status is the command's.
 """
 import argparse
 import json
@@ -52,6 +53,9 @@ MODEL_STORAGE_ROOT = "/mnt/model-storage/"
 GREETING = "Hello JenAIson The Holder of the GPUs, thank you kindly for your time."
 HEARTBEAT_SECONDS = 240   # the gate ends a lease after 10 minutes without one
 POLL_SECONDS = 30
+# How long a stopped command's group gets between SIGTERM and SIGKILL. The wrapper's default leaves room for a command
+# that itself stops a child (the Dory runner's bench, up to 10 s) and then unloads a model (6 s) before it exits.
+DEFAULT_GRACE_S = 30
 TERMINAL_STATUSES = ("done", "expired", "failed", "cancelled")
 
 
@@ -126,6 +130,10 @@ class GpuLease:
         if self.status == "granted":
             self._take_grant(reply)
         else:
+            # A queued reply without a request id could be neither polled nor cancelled: the gate would hold a request
+            # for a process that has given up on it.
+            if not isinstance(self.request_id, str) or not self.request_id:
+                raise GateError(f"reply without a request id ({reply!r:.200}); not waiting on it")
             self.lease_id = reply.get("lease_id")
             self.gpu = gpu_index(reply.get("gpu"))
         self.log(f"[gate] request {self.request_id}: {self.status}"
@@ -303,6 +311,8 @@ def main(argv=None):
     ap.add_argument("--gpu", default=None, help='the card wanted, as the gate names it ("gpu1" for the RTX 4090 SwarmUI runs on)')
     ap.add_argument("--poll-seconds", type=float, default=POLL_SECONDS)
     ap.add_argument("--heartbeat-seconds", type=float, default=HEARTBEAT_SECONDS)
+    ap.add_argument("--grace-seconds", type=float, default=DEFAULT_GRACE_S,
+                    help="seconds a stopped command gets between SIGTERM and SIGKILL; passed to it as GATE_GRACE_S")
     ap.add_argument("command", nargs=argparse.REMAINDER, help="the command to run, after --")
     args = ap.parse_args(argv)
     cmd = args.command[1:] if args.command and args.command[0] == "--" else args.command
@@ -324,8 +334,8 @@ def main(argv=None):
     failed = True
     try:
         lease.__enter__()
-        env = dict(os.environ, GATE_LEASE_ID=lease.lease_id, GATE_GPU=str(lease.gpu))
-        code, lost = run_under_lease(cmd, lease, env=env)
+        env = dict(os.environ, GATE_LEASE_ID=lease.lease_id, GATE_GPU=str(lease.gpu), GATE_GRACE_S=str(args.grace_seconds))
+        code, lost = run_under_lease(cmd, lease, env=env, grace_s=args.grace_seconds)
         failed = lost or code != 0
         if lost:
             print("[gate] lease lost; the command was stopped", file=sys.stderr, flush=True)

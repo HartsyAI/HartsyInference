@@ -231,9 +231,22 @@ def ws_url(host, port):
     return f"ws://{host}:{port}"
 
 
-# The wrapper SIGKILLs a stopped runner ten seconds after SIGTERM (gpu_gate.run_under_lease grace_s), so the one unload a
+# When the wrapper stops this runner it SIGKILLs it GATE_GRACE_S seconds after SIGTERM (30 by default), so the one unload a
 # terminated run attempts must answer well inside that, or be reported as a cleanup failure instead of being cut off.
 TERMINATED_UNLOAD_TIMEOUT_S = 6
+BENCH_CHILD_GRACE_S = 10
+
+
+def bench_child_grace_s():
+    """Seconds the bench child gets between SIGTERM and SIGKILL. Under the wrapper this fits inside the wrapper's own grace
+    with the terminated-path unload and a margin, so the child is killed and the model unloaded before the wrapper gives up
+    on the runner; outside it the full default applies."""
+    outer = os.environ.get("GATE_GRACE_S", "")
+    try:
+        outer_s = float(outer)
+    except ValueError:
+        return BENCH_CHILD_GRACE_S
+    return max(1.0, min(BENCH_CHILD_GRACE_S, outer_s - TERMINATED_UNLOAD_TIMEOUT_S - 2))
 
 
 def unload(base, sid, attempts=3, timeout_s=120):
@@ -352,7 +365,7 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     if lease is not None:
         lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
     with GpuUseSampler() as sampler:
-        returncode, lost = run_under_lease(cmd, lease, log_file=log_file)
+        returncode, lost = run_under_lease(cmd, lease, log_file=log_file, grace_s=bench_child_grace_s())
     if lost:
         log("[bench] lease lost; the bench was stopped")
     console = log_file.read_text()
