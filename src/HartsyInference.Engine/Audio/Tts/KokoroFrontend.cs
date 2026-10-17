@@ -70,7 +70,7 @@ internal sealed class KokoroFrontend
         }
     }
 
-    private static async Task<Func<string, string>> LoadAsync(char lang, string voice, CancellationToken cancel)
+    private async Task<Func<string, string>> LoadAsync(char lang, string voice, CancellationToken cancel)
     {
         if (lang is 'a' or 'b')
         {
@@ -86,8 +86,8 @@ internal sealed class KokoroFrontend
             EspeakPhonemizer espeak = EspeakPhonemizer.FromDataDirectory(data, language);
             KokoroEspeakG2P g2p = lang switch
             {
-                'h' => new KokoroEspeakG2P(espeak, EspeakPhonemizer.FromDataDirectory(data, "en")),
-                'f' => new KokoroEspeakG2P(espeak, EspeakPhonemizer.FromDataDirectory(data, "en"), espeak.SwitchesToEnglish),
+                'h' => new KokoroEspeakG2P(espeak, EnglishVoice(data)),
+                'f' => new KokoroEspeakG2P(espeak, EnglishVoice(data), espeak.SwitchesToEnglish),
                 _ => new KokoroEspeakG2P(espeak),
             };
             return g2p.ToIpa;
@@ -105,6 +105,12 @@ internal sealed class KokoroFrontend
         throw new HartsyInferenceException($"Kokoro voice '{voice}' speaks a language ('{lang}') this engine has no "
             + "front-end for. Use a voice starting with a, b, e, f, h, i, j, p or z.");
     }
+
+    // The espeak English voice that reads the words Hindi and French switch to English. Built once, on first use,
+    // by LoadAsync, which runs under _gate; the phonemizer is safe to share across the two front-ends.
+    private EspeakPhonemizer? _englishEspeak;
+
+    private EspeakPhonemizer EnglishVoice(string data) => _englishEspeak ??= EspeakPhonemizer.FromDataDirectory(data, "en");
 
     /// <summary>misaki's lexicon for American (us_) or British (gb_) English, with espeak (en-us or en-gb) behind it
     /// and, for American, the CMU dictionary. Each file is fetched once into the shared audio folder.</summary>

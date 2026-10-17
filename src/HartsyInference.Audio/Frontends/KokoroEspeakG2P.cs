@@ -59,28 +59,44 @@ public sealed partial class KokoroEspeakG2P
     private void AppendClause(StringBuilder sb, string clause)
     {
         if (string.IsNullOrWhiteSpace(clause)) return;
-        // A clause with no word that switches goes to the phonemizer whole, exactly as before.
         string[] words = clause.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (_latin is null || !words.Any(IsLatin))
+        // The predicate runs once per word; the runs below reuse these flags.
+        bool[] latin = new bool[words.Length];
+        bool anyLatin = false;
+        if (_latin is not null)
+        {
+            for (int i = 0; i < words.Length; i++)
+            {
+                latin[i] = IsLatin(words[i]);
+                anyLatin |= latin[i];
+            }
+        }
+        // A clause with no word that switches goes to the phonemizer whole, exactly as before.
+        if (!anyLatin)
         {
             sb.Append(_espeak.PhonemizeTied(clause.Trim(), '^'));
             return;
         }
         // Each run of words that switch, and each run that does not, goes to its own phonemizer, so the switched
-        // words read as English.
+        // words read as English. A run the phonemizer leaves empty adds nothing, and the separator is only written
+        // when the output does not already end in one, so runs never meet with two spaces.
         for (int i = 0; i < words.Length;)
         {
-            bool latin = IsLatin(words[i]);
+            bool run = latin[i];
             int end = i;
-            while (end < words.Length && IsLatin(words[end]) == latin) end++;
+            while (end < words.Length && latin[end] == run) end++;
             if (sb.Length > 0 && sb[^1] != ' ') sb.Append(' ');
-            EspeakPhonemizer phonemizer = latin ? _latin! : _espeak;
+            EspeakPhonemizer phonemizer = run ? _latin! : _espeak;
             sb.Append(phonemizer.PhonemizeTied(string.Join(' ', words, i, end - i), '^'));
             i = end;
         }
     }
 
-    // Whether espeak-ng reads the word in English: the predicate given, else any Latin letter in it.
+    // Whether espeak-ng reads the word in English: the predicate given, else any ASCII letter in it. The default is for
+    // Hindi, whose script has no Latin letter rules, so a token with a Latin letter in it is read in English as a whole.
+    // espeak-ng instead splits a mixed token by script: the Latin part goes to English and the Devanagari part stays
+    // Hindi ("abcदेव" -> English "abc" + Hindi "देव"; "9am" -> Hindi "9" + English "am"). That split is not done here,
+    // so a Devanagari part of a mixed token is read in English.
     private bool IsLatin(string word) => _switchesToLatin?.Invoke(word) ?? word.Any(char.IsAsciiLetter);
 
     // phonemizer's default marks, each run with the whitespace around it.

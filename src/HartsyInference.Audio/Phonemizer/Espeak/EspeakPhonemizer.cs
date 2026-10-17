@@ -42,7 +42,13 @@ public sealed class EspeakPhonemizer : IPhonemizer
     public bool SwitchesToEnglish(string word)
     {
         ArgumentNullException.ThrowIfNull(word);
-        if (_switchCode < 0 || !WordCodes(word).Contains((byte)_switchCode)) return false;
+        if (_switchCode < 0) return false;
+        // espeak-ng reads the parts of a hyphenated word as separate words (libespeak: "e-mail" reads "e" in French and
+        // "mail" in English), so a switch in any part makes the token switch. The part itself is not split here: a
+        // switched token is read whole in English, so the French part of "e-mail" is read in English too.
+        if (word.Contains('-'))
+            return word.Split('-', StringSplitOptions.RemoveEmptyEntries).Any(SwitchesToEnglish);
+        if (!WordCodes(word).Contains((byte)_switchCode)) return false;
         string lower = word.ToLowerInvariant();
         return !(_lookup.Lookup(lower, out EspeakLookupResult entry) && entry.Phonemes.Count > 1
             && entry.Phonemes.Contains((byte)_switchCode));

@@ -41,4 +41,26 @@ public sealed class EspeakSwitchWordsTests
         if (dir is null) return; // gated
         Assert.Equal(expected, EspeakPhonemizer.FromDataDirectory(dir, "it").SwitchesToEnglish(word));
     }
+    /// <summary>The Italian probe: 3,000 random English words (CMU dictionary, seed 7), read by libespeak-ng 1.52.0.1 as
+    /// English in <c>woodstock</c>, <c>steve</c>, <c>catherine</c> and <c>teams</c>, and as French in <c>barbecue</c>. This
+    /// test fails if a second non-English switch appears, so enabling Italian later cannot misroute one silently. Any
+    /// change to the expected sets must come from a fresh libespeak run, not from the port's output.</summary>
+    [Fact]
+    public void ItalianProbe_NonEnglishSwitchesAreExactlyBarbecue()
+    {
+        string? dir = DataDir();
+        if (dir is null) return; // gated
+        string[] words = File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "Fixtures", "it_english_probe_words.txt"))
+            .Where(w => w.Length > 0).ToArray();
+        EspeakPhonemizer it = EspeakPhonemizer.FromDataDirectory(dir, "it");
+        EspeakPhonemeTable table = EspeakPhonemeTable.Load(Path.Combine(dir, "phontab"), EspeakVoiceVariant.Resolve(dir, "it").PhonemeTable);
+        byte switchCode = (byte)table.CodeForText("_^_");
+
+        string[] english = words.Where(it.SwitchesToEnglish).OrderBy(w => w, StringComparer.Ordinal).ToArray();
+        string[] nonEnglish = words.Where(w => it.WordCodes(w).Contains(switchCode) && !it.SwitchesToEnglish(w))
+            .OrderBy(w => w, StringComparer.Ordinal).ToArray();
+
+        Assert.Equal(new[] { "catherine", "steve", "teams", "woodstock" }, english);
+        Assert.Equal(new[] { "barbecue" }, nonEnglish);
+    }
 }
