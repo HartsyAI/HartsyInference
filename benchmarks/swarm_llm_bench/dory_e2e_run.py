@@ -56,6 +56,7 @@ AGENT = "Dory AI model integration"
 TASK = "Nemotron Dory 1.0 4B: greedy correctness probes at loops 1/2/4 through the SwarmUI LLM Assistant API, then the decode-throughput bench"
 PROBE_PROMPT = "Explain in three sentences why the sky is blue, then list two things that would change its color."
 PROBE_MAX_TOKENS = 200
+DEPTH_FILES = ("swarm_prompt_depth.json", "swarm_prompt_depth.txt")  # the depth estimate, read by llamacpp_dory_baseline.sh
 # BOS plus the chat template's role markers for a system turn and a user turn: the part of the bench request's depth that
 # neither token count below covers. An estimate, as the whole depth is (see swarm_prompt_depth).
 TEMPLATE_OVERHEAD_TOKENS = 12
@@ -123,14 +124,18 @@ def chat_instruction_text(base, sid):
     return ""
 
 
+def remove_depth_files(out_dir):
+    """An earlier run's depth must never stand in for this run's: removed before anything runs, and again before the estimate."""
+    for name in DEPTH_FILES:
+        (out_dir / name).unlink(missing_ok=True)
+
+
 def swarm_prompt_depth(base, sid, out_dir):
     """Estimates the context depth the bench's requests decode behind: the chat instruction (the system prompt), the bench
     prompt and the template's markers. SwarmUI exposes no prompt token count, so this is an estimate, and a lower bound when
     the active assistant adds tool prompts. Written to swarm_prompt_depth.txt for llamacpp_dory_baseline.sh, which decodes at
     the same depth (llama-bench -d), so the two decode rates are measured behind comparable KV caches."""
-    # An earlier run's depth must never stand in for this run's: both files go before the estimate is attempted.
-    for stale in (out_dir / "swarm_prompt_depth.json", out_dir / "swarm_prompt_depth.txt"):
-        stale.unlink(missing_ok=True)
+    remove_depth_files(out_dir)
     system_text = chat_instruction_text(base, sid)
     if system_text is None:
         log("[depth] LLMAssistantGetInstructions unavailable; no depth written for the llama.cpp baseline")
@@ -146,8 +151,8 @@ def swarm_prompt_depth(base, sid, out_dir):
     record = {"system_tokens": system_tokens, "user_tokens": user_tokens, "template_overhead_tokens": TEMPLATE_OVERHEAD_TOKENS,
               "depth": depth, "estimate": True,
               "note": "system instruction + bench prompt + template markers; a lower bound if the assistant adds tool prompts"}
-    (out_dir / "swarm_prompt_depth.json").write_text(json.dumps(record, indent=2))
-    (out_dir / "swarm_prompt_depth.txt").write_text(f"{depth}\n")
+    (out_dir / DEPTH_FILES[0]).write_text(json.dumps(record, indent=2))
+    (out_dir / DEPTH_FILES[1]).write_text(f"{depth}\n")
     log(f"[depth] bench requests decode behind about {depth} tokens (system {system_tokens}, user {user_tokens}, markers {TEMPLATE_OVERHEAD_TOKENS})")
     return record
 
@@ -302,9 +307,9 @@ def unload(base, sid, attempts=3, timeout_s=120, lease=None):
             return f"{error}; not retried, the lease is lost"
         try:
             reply = http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=timeout_s)
-            if isinstance(reply, dict) and reply.get("success") is not False and not reply.get("error"):
+            if isinstance(reply, dict) and reply.get("success") is True:  # only the route's own confirmation counts
                 return None
-            error = f"unload refused: {reply.get('error') if isinstance(reply, dict) else reply!r}"
+            error = f"unload not confirmed: {reply.get('error') if isinstance(reply, dict) and reply.get('error') else repr(reply)[:200]}"
         except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException, OSError) as e:
             error = f"unload failed: {e!r}"
         if attempt + 1 < attempts:
@@ -482,14 +487,27 @@ def main():
     base = f"http://{args.host}:{args.port}"
     ws_base = ws_url(args.host, args.port)
 
-    # A SIGTERM (the lease wrapper stopping this run, or an operator) unwinds through the cleanup below like Ctrl-C does,
-    # so the model is unloaded before the card goes back; Python's default would exit without reaching the finally.
+    # A SIGTERM (an operator, a service stop) unwinds through the cleanup below like Ctrl-C does, so the model is unloaded
+    # before the card goes back; Python's default would exit without reaching the finally. SIGUSR1 is the lease wrapper's
+    # word that the lease is gone: the run unwinds the same way, but the cleanup leaves SwarmUI alone, as after a loss of
+    # this run's own lease. Further signals are ignored once one has been taken, so the cleanup itself is not cut short.
+    lease_lost_signalled = False
+
     def terminate(signum, frame):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGUSR1, signal.SIG_IGN)
         raise KeyboardInterrupt(f"signal {signum}")
 
+    def lease_lost(signum, frame):
+        nonlocal lease_lost_signalled
+        lease_lost_signalled = True
+        terminate(signum, frame)
+
     signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGUSR1, lease_lost)
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    remove_depth_files(out_dir)
     summary = {"started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "model_path": args.model_path,
                "loops": args.loops, "probes": [], "bench": []}
     summary["model_check"] = verify_model(args.model_path, args.skip_hash)
@@ -544,8 +562,8 @@ def main():
     except (GateError, KeyboardInterrupt) as e:
         failed = True
         terminated = isinstance(e, KeyboardInterrupt)
-        summary["error"] = repr(e)
-        log(f"[run] stopped: {e!r}")
+        summary["error"] = "lease lost, as the wrapper signalled; stopped" if lease_lost_signalled else repr(e)
+        log(f"[run] stopped: {summary['error']}")
     except Exception as e:  # noqa: BLE001 - the lease must be released as failed whatever went wrong
         failed = True
         summary["error"] = repr(e)
@@ -555,7 +573,7 @@ def main():
         # could not be emptied is handed back marked failed so the gate knows. A run that never got its card, or whose lease
         # is gone, leaves SwarmUI alone: the unload is global, and the card's holder by then may be using the model; the
         # release marked failed tells the gate the model may still be resident.
-        if used_swarm and lease is not None and lease.lost:
+        if used_swarm and ((lease is not None and lease.lost) or lease_lost_signalled):
             log("[run] cleanup: the lease is gone; SwarmUI left alone (the model may still be resident; the release says the run failed)")
         elif used_swarm:
             unload_error = (unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S) if terminated

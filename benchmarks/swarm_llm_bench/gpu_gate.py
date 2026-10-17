@@ -34,7 +34,9 @@ Usage, as a library:
 Usage, as a command wrapper (any box-side script that needs a card):
     python3 gpu_gate.py --agent "..." --task "..." --model-path /mnt/model-storage/... -- <command> [args...]
 The lease is requested and heartbeated around the command, which sees GATE_LEASE_ID, GATE_GPU and GATE_GRACE_S (the
-seconds it has between SIGTERM and SIGKILL when stopped) in its environment; a lost lease stops it, and the lease is
+seconds it has between SIGTERM and SIGKILL when stopped) in its environment; a lost lease stops it with SIGUSR1 (a command that does not handle that signal ends on it at once; one that does, like
+dory_e2e_run.py, knows the card is gone and skips any cleanup that touches it) and the wrapper's own interruption with
+SIGTERM, either followed by SIGKILL after the grace period, and the lease is
 released as failed when the command fails. Exit status is the command's.
 """
 import argparse
@@ -53,10 +55,11 @@ MODEL_STORAGE_ROOT = "/mnt/model-storage/"
 GREETING = "Hello JenAIson The Holder of the GPUs, thank you kindly for your time."
 HEARTBEAT_SECONDS = 240   # the gate ends a lease after 10 minutes without one
 POLL_SECONDS = 30
-# How long a stopped command's group gets between SIGTERM and SIGKILL. The wrapper's default leaves room for a command
+# How long a stopped command's group gets between the stop signal and SIGKILL. The wrapper's default leaves room for a command
 # that itself stops a child (the Dory runner's bench, up to 10 s) and then unloads a model (6 s) before it exits.
 DEFAULT_GRACE_S = 30
 TERMINAL_STATUSES = ("done", "expired", "failed", "cancelled")
+LOST_SIGNAL = signal.SIGUSR1  # how a wrapped command is told its lease is gone; its default action ends a command that ignores it
 CALL_ATTEMPTS = 3  # for the idempotent calls: an unanswered heartbeat, poll, cancel or release is tried again, a refusal is not
 RETRY_WAIT_S = 1
 
@@ -308,11 +311,11 @@ def _group_alive(proc):
         return False
 
 
-def stop_group(proc, grace_s):
-    """SIGTERM to the whole group, then SIGKILL to whatever of it is left after grace_s: the leader may handle the first signal
-    and exit while a descendant ignores it, so the wait watches the group, not the leader. Returns once the group is gone or
-    the kill has been sent."""
-    _signal_group(proc, signal.SIGTERM)
+def stop_group(proc, grace_s, sig=signal.SIGTERM):
+    """sig (SIGTERM, or LOST_SIGNAL when the lease is gone) to the whole group, then SIGKILL to whatever of it is left after
+    grace_s: the leader may handle the first signal and exit while a descendant ignores it, so the wait watches the group,
+    not the leader. Returns once the group is gone or the kill has been sent."""
+    _signal_group(proc, sig)
     deadline = time.monotonic() + grace_s
     while _group_alive(proc) and time.monotonic() < deadline:
         proc.poll()  # reap the leader so it does not linger as a zombie member
@@ -339,7 +342,7 @@ def run_under_lease(cmd, lease, log_file=None, env=None, grace_s=10, poll_s=1.0)
         while proc.poll() is None:
             if lease is not None and lease.lost:
                 lost = True
-                stop_group(proc, grace_s)
+                stop_group(proc, grace_s, sig=LOST_SIGNAL)
                 break
             time.sleep(poll_s)
         # The leader finishing is not the group finishing: a descendant that outlives it is stopped before we return.
