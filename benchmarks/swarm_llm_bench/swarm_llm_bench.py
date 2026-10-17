@@ -116,10 +116,13 @@ def unload_models(sid):
 
 
 def count_tokens(sid, model, text):
-    """Authoritative token count via the same tokenizer the engine uses."""
+    """Token count of text with the model's own tokenizer, through LLMAssistantCountTokens; None when unavailable, or when the
+    extension marks the count as not exact (its chars/4 fallback when no provider can tokenize)."""
     try:
         r = http_post("/API/LLMAssistantCountTokens",
                       {"session_id": sid, "model": model, "text": text})
+        if not isinstance(r, dict) or r.get("exact") is False:
+            return None
         # tolerate a few possible field names
         for k in ("tokens", "count", "tokenCount", "token_count"):
             if k in r and isinstance(r[k], int):
@@ -167,6 +170,7 @@ async def one_generation(sid, tid, model, prompt=PROMPT, max_tokens=MAX_TOKENS):
         frame["loops"] = LOOPS
     t_send = time.perf_counter()
     chunk_stamps, full_text, err = [], None, None
+    first_chunk = None  # its tokens were generated before the decode window opened; the rate leaves them out
     async with websockets.connect(BASE_WS + "/API/LLMAssistantSendMessageWS",
                                   max_size=None, open_timeout=60,
                                   ping_interval=None) as ws:
@@ -183,6 +187,8 @@ async def one_generation(sid, tid, model, prompt=PROMPT, max_tokens=MAX_TOKENS):
                 continue
             if "chunk" in m and m["chunk"]:
                 chunk_stamps.append(now)
+                if first_chunk is None:
+                    first_chunk = m["chunk"]
             elif "error" in m:
                 err = m["error"]; break
             elif m.get("done"):
@@ -196,7 +202,7 @@ async def one_generation(sid, tid, model, prompt=PROMPT, max_tokens=MAX_TOKENS):
     decode_window = chunk_stamps[-1] - chunk_stamps[0]
     n_chunks = len(chunk_stamps)
     return {"ttft": ttft, "decode_window": decode_window,
-            "n_chunks": n_chunks, "full_text": full_text}
+            "n_chunks": n_chunks, "full_text": full_text, "first_chunk": first_chunk}
 
 
 async def bench_model(sid, tid, model):
@@ -215,12 +221,21 @@ async def bench_model(sid, tid, model):
         reps.append(r)
     # authoritative token count from the last reply
     tok = count_tokens(sid, model, reps[-1]["full_text"])
-    # Stream chunks are not tokens: the decode rate is the tokenizer's count of the reply (greedy, so every rep's reply is
-    # the same text) over the window between the first and last chunk, and stays unset (None) when no count came back
-    # rather than being filled from chunks. The chunk rate is kept as its own field, since that is what the earlier results
-    # in benchmarks/results were computed from.
+    # Stream chunks are not tokens: the decode rate is the tokens generated inside the window between the first and the last
+    # chunk's arrival, over that window. That is the reply's count (greedy, so every rep's reply is the same text) less the
+    # first chunk's, counted per rep since chunking can differ between reps: the first chunk's tokens were produced before
+    # the window opened. Both counts come from the model's tokenizer, so a chunk that re-tokenizes differently from how it
+    # was generated is off by about a token. Without either count, or with a first chunk that holds the whole reply, the
+    # token rate stays unset (None) rather than being filled from chunks; the chunk rate is kept as its own field, since
+    # that is what the earlier results in benchmarks/results were computed from.
     chunk_rate_list = [(r["n_chunks"] - 1) / r["decode_window"] if r["decode_window"] > 0 else 0 for r in reps]
-    tg_list = [(tok - 1) / r["decode_window"] if r["decode_window"] > 0 else 0 for r in reps] if tok else []
+    tg_list = []
+    for r in reps if tok else []:
+        first = count_tokens(sid, model, r["first_chunk"]) if r.get("first_chunk") else None
+        if first is None or first >= tok or r["decode_window"] <= 0:
+            tg_list = []
+            break
+        tg_list.append((tok - first) / r["decode_window"])
     ttft_list = [r["ttft"] for r in reps]
     return {
         "model": model,

@@ -104,13 +104,16 @@ def model_listed(base, sid, name):
 
 
 def count_tokens(base, sid, text):
-    """Token count of text with the model's own tokenizer, through LLMAssistantCountTokens; None when unavailable."""
+    """Token count of text with the model's own tokenizer, through LLMAssistantCountTokens; None when unavailable, or when the
+    extension marks the count as not exact (its chars/4 fallback when no provider can tokenize)."""
     try:
         reply = http_post(base, "/API/LLMAssistantCountTokens", {"session_id": sid, "model": MODEL_FILE, "text": text}, timeout=120)
     except (urllib.error.URLError, json.JSONDecodeError, OSError):
         return None
+    if not isinstance(reply, dict) or reply.get("exact") is False:
+        return None
     for key in ("tokens", "count", "tokenCount", "token_count"):
-        if isinstance(reply, dict) and isinstance(reply.get(key), int):
+        if isinstance(reply.get(key), int):
             return reply[key]
     return None
 
@@ -140,8 +143,10 @@ def swarm_prompt_depth(base, sid, out_dir):
     system_text = chat_instruction_text(base, sid)
     system_tokens = count_tokens(base, sid, system_text) if system_text else None
     user_tokens = count_tokens(base, sid, BENCH_PROMPT)
-    if user_tokens is None:
-        log("[depth] LLMAssistantCountTokens unavailable; no depth written for the llama.cpp baseline")
+    # Either count missing leaves no depth: a depth short of the whole chat instruction would be taken as comparable.
+    if user_tokens is None or (system_text and system_tokens is None):
+        log(f"[depth] LLMAssistantCountTokens gave no count for the {'bench prompt' if user_tokens is None else 'chat instruction'}; "
+            "no depth written for the llama.cpp baseline")
         return None
     depth = (system_tokens or 0) + user_tokens + TEMPLATE_OVERHEAD_TOKENS
     record = {"system_tokens": system_tokens, "user_tokens": user_tokens, "template_overhead_tokens": TEMPLATE_OVERHEAD_TOKENS,
@@ -306,6 +311,8 @@ async def voice_turn(ws_base, sid, loops, lease, timeout_s=600):
     deadline = time.monotonic() + timeout_s
     async with websockets.connect(ws_base + "/API/LLMAssistantVoiceTurnWS", max_size=None, open_timeout=60,
                                   ping_interval=None) as ws:
+        if lease is not None and lease.lost:
+            return {"success": False, "error": "lease lost before the probe was sent", "response": ""}
         await ws.send(json.dumps(frame))
         while True:
             if lease is not None and lease.lost:
@@ -347,12 +354,18 @@ def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
         lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
     started = time.monotonic()
     with GpuUseSampler() as sampler:
+        if lease is not None:
+            lease.check_alive()  # the baseline reading takes time; no request goes out on a lease lost during it
         try:
             reply = asyncio.run(voice_turn(ws_base, sid, loops, lease))
         except (OSError, websockets.WebSocketException, ValueError) as e:
             reply = {"success": False, "error": repr(e), "response": None}
         if lease is not None and lease.lost:
-            sampler.closing_sample = False  # the step has failed; the model's unload comes before any further reading
+            # A reply that finished as the heartbeat was refused is not accepted either (a lost lease fails the run), and the
+            # model's unload comes before any further reading.
+            sampler.closing_sample = False
+            reply = {"success": False, "error": "lease lost during the probe; reply not accepted", "response": reply.get("response"),
+                     "notice": reply.get("notice")}
     elapsed = time.monotonic() - started
     served = sampler.served()
     result = {"loops": loops, "elapsed_s_including_load": round(elapsed, 2), "success": bool(reply.get("success")),
@@ -396,18 +409,22 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     if lease is not None:
         lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
     with GpuUseSampler() as sampler:
+        if lease is not None:
+            lease.check_alive()  # the baseline reading takes time; the child does not start on a lease lost during it
         returncode, lost = run_under_lease(cmd, lease, log_file=log_file, grace_s=bench_child_grace_s())
+        # A child that finished as the heartbeat was refused is not accepted either: a lost lease fails the run.
+        lost = lost or (lease is not None and lease.lost)
         if lost:
             sampler.closing_sample = False  # the step has failed; the model's unload comes before any further reading
     if lost:
-        log("[bench] lease lost; the bench was stopped")
+        log("[bench] lease lost; the bench was stopped or its result not accepted")
     console = log_file.read_text()
     sys.stderr.write(console)
     served = sampler.served()
     record = {"loops": loops, "returncode": returncode, "out": str(out_file), "log": str(log_file), "served_gpu": served,
               "gpu_growth_mib": {str(gpu): sampler.highs.get(gpu, 0) - sampler.lows.get(gpu, 0) for gpu in sampler.highs}}
     if lost:
-        record["error"] = "lease lost during the bench; stopped"
+        record["error"] = "lease lost during the bench; result not accepted"
     elif returncode == 0 and out_file.is_file():
         rows = json.loads(out_file.read_text())
         row = rows[0] if rows else {}
@@ -502,6 +519,8 @@ def main():
             for loops in args.loops:
                 summary["bench"].append(run_bench(base, sid, args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json",
                                                   lease, bound_gpu))
+        if lease is not None:
+            lease.check_alive()  # a lease lost as the last step ended fails the run too; its results are not reported
         failures = [f"probe loops={p['loops']}: {p['error'] or 'no reply'}" for p in summary["probes"] if not p["success"]]
         failures += [f"bench loops={b['loops']}: {b['error']}" for b in summary["bench"] if b.get("error")]
         if failures:

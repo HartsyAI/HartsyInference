@@ -57,10 +57,15 @@ POLL_SECONDS = 30
 # that itself stops a child (the Dory runner's bench, up to 10 s) and then unloads a model (6 s) before it exits.
 DEFAULT_GRACE_S = 30
 TERMINAL_STATUSES = ("done", "expired", "failed", "cancelled")
+RELEASE_ATTEMPTS = 3  # a release the gate did not answer is tried again: the card would otherwise wait for the gate's expiry
 
 
 class GateError(RuntimeError):
     """A gate reply with ok false, an HTTP failure, or a request that ended without a grant."""
+
+
+class GateRefused(GateError):
+    """The gate answered and said no (ok false): a final answer, unlike a call it did not answer or answered unreadably."""
 
 
 def gpu_index(value):
@@ -86,7 +91,7 @@ def call(base, method, path, body=None, timeout=20):
     if not isinstance(reply, dict):
         raise GateError(f"{method} {path}: unexpected reply {str(reply)[:200]!r}")
     if reply.get("ok") is False:
-        raise GateError(f"{method} {path}: {reply.get('error', 'rejected')}")
+        raise GateRefused(f"{method} {path}: {reply.get('error', 'rejected')}")
     return reply
 
 
@@ -214,14 +219,25 @@ class GpuLease:
         self._release_lease(failed=True)
 
     def _release_lease(self, failed):
-        """The one release call for the lease held, made at most once. A refusal is only logged: a lease the gate already
-        ended (expired, or lost after a refused heartbeat) answers that way, and there is nothing more to hand back."""
-        self.released = True
-        try:
-            call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed})
-            self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed else ""))
-        except GateError as e:
-            self.log(f"[gate] release not accepted ({'lease was already lost' if self.lost else 'error'}): {e}")
+        """The release call for the lease held. The gate's answer, accepted or refused, settles it (released): a refusal is
+        final and only logged, since a lease the gate already ended (expired, or lost after a refused heartbeat) answers that
+        way and there is nothing more to hand back. A call the gate did not answer, or answered unreadably, is tried again a
+        few times here, and leaves released unset so a later release() tries once more: a card the gate still considers
+        leased would otherwise stay reserved until its own expiry, though the work on it has stopped."""
+        for attempt in range(1, RELEASE_ATTEMPTS + 1):
+            try:
+                call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed}, timeout=10)
+                self.released = True
+                self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed else ""))
+                return
+            except GateRefused as e:
+                self.released = True
+                self.log(f"[gate] release not accepted ({'lease was already lost' if self.lost else 'refused'}): {e}")
+                return
+            except GateError as e:
+                self.log(f"[gate] release attempt {attempt} of {RELEASE_ATTEMPTS} got no answer: {e}")
+                if attempt < RELEASE_ATTEMPTS:
+                    time.sleep(2)
 
     def release(self, failed=False):
         """Ends the heartbeat and releases the lease; a request still queued is cancelled instead."""
