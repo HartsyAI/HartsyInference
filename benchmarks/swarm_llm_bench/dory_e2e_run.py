@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+Dory end-to-end run on the swarm box: lease a card from the GPU gate, verify the GGUF, run greedy correctness probes
+at each loop count through the SwarmUI LLM Assistant API, then the decode-throughput bench (swarm_llm_bench.py) at
+each loop count, and write one summary. Runs on the box itself (the gate and SwarmUI are box-local) and holds its
+own heartbeat, so one command covers a run longer than the gate's 10-minute heartbeat timeout.
+
+    python3 benchmarks/swarm_llm_bench/dory_e2e_run.py \
+        --model-path /mnt/model-storage/Models/llm/nemotron-dory/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf
+
+Options: --loops 1 2 4 (default), --host/--port for SwarmUI (127.0.0.1:7801), --gate for the lease service, --no-lease
+when a lease is already held or the gate is not running, --skip-hash to skip the sha256 (the size is always checked),
+--out-dir for the result files (benchmarks/results/dory), --device-map for the gate-gpu-to-engine-device mapping.
+
+Outputs in --out-dir: dory_probes.json (every probe reply in full), swarm_llm_dory_loops<N>.json (the bench's own
+file per loop count) and dory_e2e_summary.json; the summary table is also printed.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from gpu_gate import GateError, GpuLease  # noqa: E402
+
+# The pinned release, mirroring the engine catalog's `dory` entry (src/HartsyInference.Engine/Registry/ModelCatalog.cs).
+MODEL_FILE = "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf"
+MODEL_SHA256 = "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0"
+MODEL_BYTES = 3_673_288_864
+AGENT = "Dory AI model integration"
+TASK = "Nemotron Dory 1.0 4B: greedy correctness probes at loops 1/2/4 through the SwarmUI LLM Assistant API, then the decode-throughput bench"
+PROBE_PROMPT = "Explain in three sentences why the sky is blue, then list two things that would change its color."
+PROBE_MAX_TOKENS = 200
+BENCH = pathlib.Path(__file__).resolve().parent / "swarm_llm_bench.py"
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def http_post(base, path, payload, timeout=600):
+    req = urllib.request.Request(base + path, data=json.dumps(payload).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode() or "{}")
+
+
+def verify_model(path, skip_hash):
+    """The gate does not check the file, so the run does: size always, sha256 unless skipped."""
+    if not os.path.isfile(path):
+        raise SystemExit(f"model file missing: {path}")
+    size = os.path.getsize(path)
+    if size != MODEL_BYTES:
+        raise SystemExit(f"model size {size} bytes, expected {MODEL_BYTES}: {path}")
+    if skip_hash:
+        log(f"[model] size ok ({size} bytes); sha256 skipped")
+        return {"size_ok": True, "sha256_checked": False}
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(16 * 1024 * 1024), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    if digest != MODEL_SHA256:
+        raise SystemExit(f"model sha256 {digest}, expected {MODEL_SHA256}: {path}")
+    log(f"[model] size and sha256 ok: {path}")
+    return {"size_ok": True, "sha256_checked": True}
+
+
+def model_listed(base, sid, name):
+    """Whether the LLM Assistant lists the file; the listing shape is the extension's, so this matches on the name."""
+    try:
+        reply = http_post(base, "/API/LLMAssistantGetModels", {"session_id": sid}, timeout=120)
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        log(f"[swarm] model listing failed: {e}")
+        return None
+    return name in json.dumps(reply)
+
+
+def nvidia_smi_apps():
+    """{gpu_index: used MiB by compute apps}, or None without nvidia-smi; used to attribute the serving card."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,used_memory", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=20, check=True).stdout
+        gpus = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+                              capture_output=True, text=True, timeout=20, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    index_of = {}
+    for line in gpus.strip().splitlines():
+        index, uuid = [p.strip() for p in line.split(",")]
+        index_of[uuid] = int(index)
+    used = {}
+    for line in out.strip().splitlines():
+        if not line.strip():
+            continue
+        uuid, mib = [p.strip() for p in line.split(",")]
+        used[index_of.get(uuid, uuid)] = used.get(index_of.get(uuid, uuid), 0) + int(mib)
+    return used
+
+
+def busiest_delta(before, after):
+    """The gpu index whose compute-app memory grew the most between two samples, or None."""
+    if not before and not after:
+        return None
+    deltas = {gpu: (after or {}).get(gpu, 0) - (before or {}).get(gpu, 0) for gpu in set(before or {}) | set(after or {})}
+    gpu, delta = max(deltas.items(), key=lambda kv: kv[1], default=(None, 0))
+    return gpu if delta >= 32 else None
+
+
+def run_probe(base, sid, loops, device, lease):
+    payload = {"session_id": sid, "message": PROBE_PROMPT, "model": MODEL_FILE, "temperature": 0,
+               "maxTokens": PROBE_MAX_TOKENS, "noCache": True}
+    if loops is not None:
+        payload["loops"] = loops
+    if device:
+        payload["device"] = device
+    if lease is not None:
+        lease.check_alive()
+    started = time.monotonic()
+    try:
+        reply = http_post(base, "/API/LLMAssistantSendMessage", payload)
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        reply = {"success": False, "error": repr(e)}
+    elapsed = time.monotonic() - started
+    result = {"loops": loops, "device": device, "elapsed_s": round(elapsed, 2), "success": bool(reply.get("success")),
+              "response": reply.get("response"), "error": reply.get("error")}
+    head = (result["response"] or result["error"] or "")[:120].replace("\n", " ")
+    log(f"[probe] loops={loops if loops is not None else 'default'}: {'ok' if result['success'] else 'FAILED'} in {elapsed:.1f}s: {head}")
+    return result
+
+
+def run_bench(host, port, loops, out_file, lease):
+    if lease is not None:
+        lease.check_alive()
+    cmd = [sys.executable, str(BENCH), "--host", host, "--port", str(port), "--models", MODEL_FILE,
+           "--loops", str(loops), "--out", str(out_file)]
+    log(f"[bench] loops={loops}: {' '.join(cmd)}")
+    before = nvidia_smi_apps()
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    after = nvidia_smi_apps()
+    sys.stderr.write(proc.stderr)
+    record = {"loops": loops, "returncode": proc.returncode, "out": str(out_file), "served_gpu": busiest_delta(before, after)}
+    if proc.returncode == 0 and out_file.is_file():
+        rows = json.loads(out_file.read_text())
+        row = rows[0] if rows else {}
+        record.update({"error": row.get("error"), "tg_tps_median": row.get("tg_tps_median"),
+                       "ttft_ms_median": row.get("ttft_ms_median"), "counted_tokens": row.get("counted_tokens")})
+    else:
+        record["error"] = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else f"exit {proc.returncode}"
+    return record
+
+
+def parse_device_map(text):
+    """'0=cuda:1,1=cuda:0' -> {0: 'cuda:1', 1: 'cuda:0'}; empty disables the mapping (the backend's own device)."""
+    mapping = {}
+    for part in filter(None, (p.strip() for p in text.split(","))):
+        gpu, device = part.split("=", 1)
+        mapping[int(gpu)] = device.strip()
+    return mapping
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model-path", required=True, help=f"absolute path of {MODEL_FILE} under /mnt/model-storage/")
+    ap.add_argument("--loops", type=int, nargs="*", default=[1, 2, 4])
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=7801)
+    ap.add_argument("--gate", default="http://127.0.0.1:8686")
+    ap.add_argument("--no-lease", action="store_true", help="run without requesting a lease (one is already held)")
+    ap.add_argument("--vram-mb", type=int, default=6000)
+    ap.add_argument("--minutes", type=int, default=90)
+    ap.add_argument("--skip-hash", action="store_true")
+    ap.add_argument("--skip-bench", action="store_true", help="probes only")
+    ap.add_argument("--out-dir", default="benchmarks/results/dory")
+    ap.add_argument("--device-map", default="0=cuda:1,1=cuda:0",
+                    help="gate gpu index to engine device for the probes; '' leaves the backend's own device")
+    args = ap.parse_args()
+
+    base = f"http://{args.host}:{args.port}"
+    out_dir = pathlib.Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = {"started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "model_path": args.model_path,
+               "loops": args.loops, "probes": [], "bench": []}
+    summary["model_check"] = verify_model(args.model_path, args.skip_hash)
+
+    try:
+        sid = http_post(base, "/API/GetNewSession", {}, timeout=30)["session_id"]
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError) as e:
+        raise SystemExit(f"SwarmUI at {base} not reachable: {e}")
+    summary["model_listed"] = model_listed(base, sid, MODEL_FILE)
+    log(f"[swarm] session ok; model listed: {summary['model_listed']}")
+
+    lease = None if args.no_lease else GpuLease(AGENT, TASK, args.model_path, base=args.gate, vram_mb=args.vram_mb,
+                                                 minutes=args.minutes, log=log)
+    failed = False
+    try:
+        if lease is not None:
+            lease.__enter__()
+            summary["lease"] = {"lease_id": lease.lease_id, "gpu": lease.gpu}
+        device = parse_device_map(args.device_map).get(lease.gpu) if lease is not None and lease.gpu is not None else None
+        summary["probe_device"] = device
+
+        summary["probes"].append(run_probe(base, sid, None, device, lease))
+        for loops in args.loops:
+            summary["probes"].append(run_probe(base, sid, loops, device, lease))
+        (out_dir / "dory_probes.json").write_text(json.dumps(summary["probes"], indent=2))
+
+        if not args.skip_bench:
+            for loops in args.loops:
+                summary["bench"].append(run_bench(args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json", lease))
+    except (GateError, KeyboardInterrupt) as e:
+        failed = True
+        summary["error"] = repr(e)
+        log(f"[run] stopped: {e!r}")
+    except Exception as e:  # noqa: BLE001 - the lease must be released as failed whatever went wrong
+        failed = True
+        summary["error"] = repr(e)
+        raise
+    finally:
+        if lease is not None:
+            lease.release(failed=failed)
+        try:
+            http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=120)
+        except (urllib.error.URLError, json.JSONDecodeError):
+            pass
+        summary["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (out_dir / "dory_e2e_summary.json").write_text(json.dumps(summary, indent=2))
+
+    print(f"\n{'loops':>7} {'probe':>7} {'tg t/s':>8} {'ttft ms':>8} {'tokens':>7} {'gpu':>4}  reply head")
+    bench_by_loops = {b["loops"]: b for b in summary["bench"]}
+    for p in summary["probes"]:
+        b = bench_by_loops.get(p["loops"], {})
+        tg = b.get("tg_tps_median")
+        ttft = b.get("ttft_ms_median")
+        tg_text = "" if tg is None else f"{tg:.2f}"
+        ttft_text = "" if ttft is None else f"{ttft:.0f}"
+        tokens_text = "" if b.get("counted_tokens") is None else str(b["counted_tokens"])
+        gpu_text = "" if b.get("served_gpu") is None else str(b["served_gpu"])
+        head = (p["response"] or p["error"] or "")[:60].replace("\n", " ")
+        print(f"{str(p['loops'] if p['loops'] is not None else 'default'):>7} {'ok' if p['success'] else 'FAIL':>7} "
+              f"{tg_text:>8} {ttft_text:>8} {tokens_text:>7} {gpu_text:>4}  {head}")
+    print(f"\nwrote {out_dir / 'dory_e2e_summary.json'}")
+    return 1 if failed or summary.get("error") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

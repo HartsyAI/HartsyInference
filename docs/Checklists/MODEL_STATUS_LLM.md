@@ -191,8 +191,9 @@ before every pass. Loaded from llama.cpp's `dory` GGUF (PR #30306, unmerged as o
 expert offload). The loop count is a per-sequence property (`LoopedSequenceState`): a retained conversation prefix is
 reused only by requests with the same count, and a batched decode round groups sequences by count. Gaps:
 
-- Real weights: not run. The HF repo is gated (no `config.json` read) and the swarm box's model rule needs a Hartsy.ai
-  repack of the GGUF before it can sit on the RAID.
+- Real weights: not run. The pinned Q5_K_M comes from NVIDIA's Hugging Face release (no Hartsy.ai LLM repacks exist yet);
+  once it sits under `/mnt/model-storage/` on the swarm box, `benchmarks/swarm_llm_bench/dory_e2e_run.py` leases a card,
+  verifies the file and runs the greedy probes and the throughput bench at loops 1, 2 and 4 in one command.
 - The NVFP4 / MXFP8 safetensors derivatives are not loaded (GGUF only).
 - No llama.cpp speed comparison yet (no Dory-capable build existed on the box).
 - Graph decode and the F16 KV cache are wired but untested on a GPU; eager CPU paths are what the tests cover.

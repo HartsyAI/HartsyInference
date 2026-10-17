@@ -155,3 +155,9 @@ remain available for separate investigations; their historical scores are not im
 `run_benchmarks.sh`, `analyze.py`, `profile.sh`, BenchmarkDotNet projects, and `python-baseline/` remain available.
 They are not the community submission protocol. Read [profiling methodology](../docs/Research/PROFILING_METHODOLOGY.md)
 for kernel investigations and the [parity ledger](../docs/Checklists/PARITY_VERIFICATION.md) for numerical correctness.
+
+On the swarm box, `swarm_llm_bench/swarm_llm_bench.py` drives the engine through the live SwarmUI LLM Assistant API, and
+`swarm_llm_bench/dory_e2e_run.py` wraps it for Nemotron Dory: it holds a card lease from the box's GPU gate through
+`swarm_llm_bench/gpu_gate.py` (request, grant polling, heartbeat, release), verifies the pinned GGUF, runs greedy
+correctness probes at each loop count, then the bench at each loop count, and writes one summary under
+`results/dory/`. One command, run on the box itself, for a session longer than the gate's heartbeat timeout.
