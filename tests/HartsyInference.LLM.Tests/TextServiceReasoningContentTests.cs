@@ -27,6 +27,16 @@ public sealed class TextServiceReasoningContentTests
         Assert.Equal([null, "plan", null], generation.Messages!.Select(m => m.ReasoningContent));
     }
 
+    [Fact]
+    public void DeepSeekV41RendersCarriedReasoningOnlyWhereItKeepsThinking()
+    {
+        GenerationRequest generation = TextService.BuildRequest(Request("plan"), rawCompletion: false, new CharTokenizer());
+        string kept = DeepSeekV41Encoder.RenderText(generation.Messages!, new EncodeOptions { Thinking = true, DropThinking = false });
+        string dropped = DeepSeekV41Encoder.RenderText(generation.Messages!, new EncodeOptions { Thinking = true });
+        Assert.Contains("plan</think>Hello!", kept, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan", dropped, StringComparison.Ordinal);
+    }
+
     private static string Render(string? reasoning)
     {
         CharTokenizer tokenizer = new();
