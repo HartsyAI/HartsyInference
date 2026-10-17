@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import threading
@@ -281,7 +282,7 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     if lease is not None:
         lease.check_alive()
     cmd = [sys.executable, str(BENCH), "--host", host, "--port", str(port), "--models", MODEL_FILE,
-           "--loops", str(loops), "--out", str(out_file)]
+           "--loops", str(loops), "--out", str(out_file), "--fresh-thread"]
     log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
     # Unload before the baseline sample, so the bench's own reload shows up as growth on the card that serves it.
@@ -337,6 +338,13 @@ def main():
 
     base = f"http://{args.host}:{args.port}"
     ws_base = ws_url(args.host, args.port)
+
+    # A SIGTERM (the lease wrapper stopping this run, or an operator) unwinds through the cleanup below like Ctrl-C does,
+    # so the model is unloaded before the card goes back; Python's default would exit without reaching the finally.
+    def terminate(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    signal.signal(signal.SIGTERM, terminate)
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = {"started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "model_path": args.model_path,
@@ -357,6 +365,7 @@ def main():
     # exported as GATE_GPU; None only when no lease is involved at all.
     held_gpu = int(os.environ["GATE_GPU"]) if args.no_lease and os.environ.get("GATE_GPU", "").isdigit() else None
     failed = False
+    terminated = False  # stopped by a signal: the cleanup gets one quick unload attempt, inside the wrapper's grace period
     used_swarm = False  # only a run that got its card touches SwarmUI's model state, in the steps and in the cleanup
     try:
         if lease is not None:
@@ -385,6 +394,7 @@ def main():
             summary["error"] = "; ".join(failures)
     except (GateError, KeyboardInterrupt) as e:
         failed = True
+        terminated = isinstance(e, KeyboardInterrupt)
         summary["error"] = repr(e)
         log(f"[run] stopped: {e!r}")
     except Exception as e:  # noqa: BLE001 - the lease must be released as failed whatever went wrong
@@ -396,7 +406,7 @@ def main():
         # could not be emptied is handed back marked failed so the gate knows. A run that never got its card leaves SwarmUI
         # alone: the unload is global, and the card's current holder may be using the model.
         if used_swarm:
-            unload_error = unload(base, sid)
+            unload_error = unload(base, sid, attempts=1 if terminated else 3)
             if unload_error:
                 failed = True
                 summary["cleanup_error"] = unload_error

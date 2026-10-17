@@ -51,6 +51,10 @@ BASE_WS   = "ws://127.0.0.1:7801"
 # Recurrent-block passes for a looped model (Dory); None leaves the field out of the request so the checkpoint's
 # (or the backend's RecurrentLoops) default applies. Set from --loops.
 LOOPS = None
+# --fresh-thread: a new thread for every generation, warmup included, so each request carries only the system prompt and
+# the one user turn, like llama-bench's fixed prompt. The default reuses one thread per run, the protocol every number in
+# benchmarks/results was produced with; a growing thread adds a prompt and a reply to the prefill on every rep.
+FRESH_THREAD = False
 # Frozen benchmark params
 MAX_TOKENS = 128
 TEMPERATURE = 0          # -> greedy in HartsyLocalLLMProvider (Greedy = temp <= 0)
@@ -200,12 +204,12 @@ async def bench_model(sid, tid, model):
     unload_models(sid)
     # warmup (also forces lazy model load into the CUDA slot)
     for _ in range(WARMUP):
-        w = await one_generation(sid, tid, model)
+        w = await one_generation(sid, create_thread(sid) if FRESH_THREAD else tid, model)
         if "error" in w:
             return {"model": model, "error": w["error"]}
     reps = []
     for _ in range(REPS):
-        r = await one_generation(sid, tid, model)
+        r = await one_generation(sid, create_thread(sid) if FRESH_THREAD else tid, model)
         if "error" in r:
             return {"model": model, "error": r["error"]}
         reps.append(r)
@@ -446,13 +450,16 @@ async def main():
     ap.add_argument("--port", default="7801")
     ap.add_argument("--loops", type=int, default=None,
                     help="recurrent-block passes for a looped model such as Dory (1-4); omitted = the checkpoint default")
+    ap.add_argument("--fresh-thread", action="store_true",
+                    help="a new thread for every generation (fixed-context numbers, comparable to llama-bench); default reuses one thread")
     ap.add_argument("--voice-qwen3", action="store_true", help="voice-turn Qwen3-4B TTFT/tok-s mode (see module doc)")
     ap.add_argument("--quiet-window-passed", action="store_true",
                     help="assert that tests/swarm-quiet-window.sh --gpu 4090 exited 0 just before this run")
     ap.add_argument("--voice-out", default="benchmarks/results/swarm_voice_llm.json")
     args = ap.parse_args()
-    global LOOPS
+    global LOOPS, FRESH_THREAD
     LOOPS = args.loops
+    FRESH_THREAD = args.fresh_thread
     BASE_HTTP = f"http://{args.host}:{args.port}"
     BASE_WS = f"ws://{args.host}:{args.port}"
 
