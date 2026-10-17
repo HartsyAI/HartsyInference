@@ -98,6 +98,19 @@ public sealed class GgufSplitDetectionTests : IDisposable
         Assert.Equal(new float[] { 1f }, loader.GetTensor("a").AsSpan<float>().ToArray());
     }
 
+    [Fact]
+    public void Load_FileNameCountDisagreesWithSplitCount_IsRejected()
+    {
+        string path = WriteFile(1, 2, declaredNo: 0, declaredTensors: 1, ("a", [1f]));
+        string renamed = Path.Combine(_dir, "model-00001-of-00003.gguf");
+        File.Move(path, renamed);
+
+        using GgufLoader loader = new GgufLoader();
+        UnsupportedModelException error = Assert.Throws<UnsupportedModelException>(() => loader.Load(renamed));
+
+        Assert.Contains("named as part of 3", error.Message);
+    }
+
     private string WritePart(int index, int count, int declaredTensors, params (string Name, float[] Values)[] tensors) =>
         WriteFile(index, count, declaredNo: index - 1, declaredTensors, tensors);
 
