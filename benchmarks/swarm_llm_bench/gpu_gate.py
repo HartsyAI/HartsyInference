@@ -97,11 +97,11 @@ def call(base, method, path, body=None, timeout=20, attempts=1):
         except (OSError, ValueError) as e:  # URLError, timeouts, a truncated body, non-JSON or non-UTF-8 text
             error = GateError(f"{method} {path}: {e}")
         else:
-            if not isinstance(reply, dict):
-                raise GateError(f"{method} {path}: unexpected reply {str(reply)[:200]!r}")
-            if reply.get("ok") is False:
+            if isinstance(reply, dict) and reply.get("ok") is False:
                 raise GateRefused(f"{method} {path}: {reply.get('error', 'rejected')}")
-            return reply
+            if isinstance(reply, dict):
+                return reply
+            error = GateError(f"{method} {path}: unexpected reply {str(reply)[:200]!r}")  # not an object: unreadable, retried
         if attempt < attempts:
             time.sleep(RETRY_WAIT_S)
     raise error
@@ -274,10 +274,16 @@ class GpuLease:
         try:
             self.request()
             self.wait_granted()
+            self.start_heartbeat()
         except BaseException:
-            self.cancel()
+            # Interrupted or failed before the lease reaches the caller, who never sees __exit__ then: a request still queued
+            # is cancelled, a lease already granted is released, marked failed.
+            if self.lease_id and self.status == "granted":
+                self._stop.set()
+                self._release_lease(failed=True)
+            else:
+                self.cancel()
             raise
-        self.start_heartbeat()
         return self
 
     def __exit__(self, exc_type, exc, tb):

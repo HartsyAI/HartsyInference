@@ -104,19 +104,6 @@ def model_listed(base, sid, name):
     return name in json.dumps(reply)
 
 
-def model_loaded(base, sid, name):
-    """Whether SwarmUI reports the model resident (the local backend's is_loaded, from the engine's placements); None when
-    the listing cannot be read."""
-    try:
-        reply = http_post(base, "/API/LLMAssistantGetModels", {"session_id": sid}, timeout=60)
-    except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
-        return None
-    models = reply.get("models") if isinstance(reply, dict) else None
-    if not isinstance(models, list):
-        return None
-    return any(isinstance(m, dict) and name in (m.get("id"), m.get("name")) and m.get("is_loaded") is True for m in models)
-
-
 def chat_instruction_text(base, sid):
     """The settings-level chat instruction from LLMAssistantGetInstructions: its text, "" when the list has none, or None when
     the list could not be fetched or read. The chat route renders the active assistant's own chat instruction when it defines
@@ -165,33 +152,39 @@ def swarm_prompt_depth(base, sid, out_dir):
     return record
 
 
+class AttributionError(Exception):
+    """nvidia-smi is installed but a reading failed: it timed out, exited non-zero, answered unreadably or had no time left."""
+
+
 def nvidia_smi_apps(time_left=lambda: NVIDIA_SMI_TIMEOUT_S):
-    """{gpu_index: used MiB by compute apps}, or None without nvidia-smi or when the time for a call has run out; used to
-    attribute the serving card. time_left() is asked before each of the two calls for the seconds that call may take, so a
-    caller winding down can hold the whole reading to one deadline."""
+    """{gpu_index: used MiB by compute apps}, to attribute the serving card. None when nvidia-smi is not installed (no
+    attribution is possible then), AttributionError when it is but the reading failed. time_left() is asked before each of
+    the two calls for the seconds that call may take, so a caller winding down can hold the whole reading to one deadline."""
     try:
         timeout_s = time_left()
         if timeout_s <= 0:
-            return None
+            raise AttributionError("no time left for the reading")
         out = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,used_memory", "--format=csv,noheader,nounits"],
                              capture_output=True, text=True, timeout=timeout_s, check=True).stdout
         timeout_s = time_left()
         if timeout_s <= 0:
-            return None
+            raise AttributionError("no time left for the reading")
         gpus = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
                               capture_output=True, text=True, timeout=timeout_s, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
+        index_of = {}
+        for line in gpus.strip().splitlines():
+            index, uuid = [p.strip() for p in line.split(",")]
+            index_of[uuid] = int(index)
+        used = {}
+        for line in out.strip().splitlines():
+            if not line.strip():
+                continue
+            uuid, mib = [p.strip() for p in line.split(",")]
+            used[index_of.get(uuid, uuid)] = used.get(index_of.get(uuid, uuid), 0) + int(mib)
+    except FileNotFoundError:
         return None
-    index_of = {}
-    for line in gpus.strip().splitlines():
-        index, uuid = [p.strip() for p in line.split(",")]
-        index_of[uuid] = int(index)
-    used = {}
-    for line in out.strip().splitlines():
-        if not line.strip():
-            continue
-        uuid, mib = [p.strip() for p in line.split(",")]
-        used[index_of.get(uuid, uuid)] = used.get(index_of.get(uuid, uuid), 0) + int(mib)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        raise AttributionError(f"{type(e).__name__}: {e}") from e
     return used
 
 
@@ -205,15 +198,18 @@ def largest_growth(lows, highs, floor_mib=32):
 class GpuUseSampler:
     """Samples compute-app memory per gpu index while a step runs, keeping each card's lowest and highest reading; served()
     is the card whose use grew the most during the step. The bench unloads and reloads the model, and the runner unloads it
-    before the baseline, so the serving card's growth is the model's size while the others stay flat. available is False
-    without nvidia-smi, when no attribution is possible. Once the step has started the sampling thread is the only sampler,
+    before the baseline, so the serving card's growth is the model's size while the others stay flat. present is False
+    without nvidia-smi, when no attribution is possible; available is False while no reading has succeeded, and failures
+    counts the readings that did not. Once the step has started the sampling thread is the only sampler,
     and its exit (the reading in flight and, after a normal exit, one closing reading) is held to one shared deadline of
     SAMPLER_TEARDOWN_S, so the cleanup after a step is never kept waiting longer than that by a slow nvidia-smi."""
 
     def __init__(self, interval_s=0.5):
         self.interval_s = interval_s
         self.lows, self.highs = {}, {}
+        self.present = True
         self.available = False
+        self.failures, self.last_failure = 0, None
         self.closing_sample = True  # cleared by a caller that already knows the step failed (a lost lease): cleanup comes first
         self.teardown_complete = True
         self._deadline = None  # monotonic time the sampler's exit must be done by; set in __exit__
@@ -225,8 +221,14 @@ class GpuUseSampler:
         return NVIDIA_SMI_TIMEOUT_S if self._deadline is None else min(NVIDIA_SMI_TIMEOUT_S, self._deadline - time.monotonic())
 
     def _sample(self):
-        used = nvidia_smi_apps(self._time_left)
+        try:
+            used = nvidia_smi_apps(self._time_left)
+        except AttributionError as e:
+            self.failures += 1
+            self.last_failure = str(e)
+            return
         if used is None:
+            self.present = False
             return
         self.available = True
         for gpu in set(used) | set(self.lows):
@@ -290,11 +292,14 @@ def bench_child_grace_s():
     return max(1.0, min(BENCH_CHILD_GRACE_S, outer_s - TERMINATED_UNLOAD_TIMEOUT_S - SAMPLER_TEARDOWN_S - 2))
 
 
-def unload(base, sid, attempts=3, timeout_s=120):
+def unload(base, sid, attempts=3, timeout_s=120, lease=None):
     """Frees the resident model, retrying a few times: before a step, so its reload shows which card serves it; at the end, so
-    the card is handed back empty. Returns None when SwarmUI confirmed it, else the last error text (the caller fails on it)."""
+    the card is handed back empty. Returns None when SwarmUI confirmed it, else the last error text (the caller fails on it).
+    Not retried once the lease given is lost: the card may be someone else's by then, and the unload is global."""
     error = None
     for attempt in range(attempts):
+        if attempt and lease is not None and lease.lost:
+            return f"{error}; not retried, the lease is lost"
         try:
             reply = http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=timeout_s)
             if isinstance(reply, dict) and reply.get("success") is not False and not reply.get("error"):
@@ -380,7 +385,7 @@ def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
     result = {"loops": loops, "elapsed_s_including_load": round(elapsed, 2), "success": bool(reply.get("success")),
               "response": reply.get("response"), "error": reply.get("error"), "notice": reply.get("notice"), "served_gpu": served}
     if result["success"]:
-        rejected = served_card_error(served, bound_gpu, sampler.available)
+        rejected = served_card_error(served, bound_gpu, sampler)
         if rejected:
             result.update({"success": False, "error": rejected})
     head = (result["response"] or result["error"] or "")[:120].replace("\n", " ")
@@ -389,13 +394,14 @@ def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
     return result
 
 
-def served_card_error(served_gpu, lease_gpu, attributable):
-    """Why a bench result must be rejected under the lease, or None: the gate leased one card, so a run served from another,
-    or one that cannot be attributed while nvidia-smi is present, is not a result this lease may report."""
-    if lease_gpu is None:
+def served_card_error(served_gpu, lease_gpu, sampler):
+    """Why a result must be rejected under the lease, or None: the gate leased one card, so a run served from another, or one
+    that cannot be attributed although nvidia-smi is installed (every reading failed, or no card's use grew), is not a result
+    this lease may report. Without nvidia-smi at all there is no attribution to apply."""
+    if lease_gpu is None or not sampler.present:
         return None
-    if not attributable:
-        return None
+    if not sampler.available:
+        return f"nvidia-smi failed throughout the step ({sampler.last_failure}); result rejected"
     if served_gpu is None:
         return "the serving card could not be attributed from nvidia-smi; result rejected"
     if served_gpu != lease_gpu:
@@ -439,7 +445,7 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     else:
         record["error"] = console.strip().splitlines()[-1] if console.strip() else f"exit {returncode}"
     if not record.get("error"):
-        record["error"] = served_card_error(served, bound_gpu, sampler.available)
+        record["error"] = served_card_error(served, bound_gpu, sampler)
     if record.get("error"):
         # A result this lease may not report is not left on disk either; the console log stays for diagnosis.
         record.update({"tg_tps_median": None, "ttft_ms_median": None, "counted_tokens": None, "out": None})
@@ -546,15 +552,14 @@ def main():
         raise
     finally:
         # Swarm cleanup first, the lease last: the card is handed back only once the model is out of it, and a card that
-        # could not be emptied is handed back marked failed so the gate knows. A run that never got its card leaves SwarmUI
-        # alone: the unload is global, and the card's current holder may be using the model. Once the lease is gone the card
-        # may already be someone else's, so the unload is one quick attempt, and none when the model is no longer resident.
-        lost = lease is not None and lease.lost
-        if used_swarm and lost and model_loaded(base, sid, MODEL_FILE) is False:
-            log("[run] cleanup: the lease is gone and the model is no longer resident; SwarmUI left alone")
+        # could not be emptied is handed back marked failed so the gate knows. A run that never got its card, or whose lease
+        # is gone, leaves SwarmUI alone: the unload is global, and the card's holder by then may be using the model; the
+        # release marked failed tells the gate the model may still be resident.
+        if used_swarm and lease is not None and lease.lost:
+            log("[run] cleanup: the lease is gone; SwarmUI left alone (the model may still be resident; the release says the run failed)")
         elif used_swarm:
-            quick = terminated or lost
-            unload_error = unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S) if quick else unload(base, sid)
+            unload_error = (unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S) if terminated
+                            else unload(base, sid, lease=lease))
             if unload_error:
                 failed = True
                 summary["cleanup_error"] = unload_error
