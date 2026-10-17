@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import datetime
 import hashlib
+import http.client
 import json
 import os
 import pathlib
@@ -45,7 +46,7 @@ import websockets
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from gpu_gate import GateError, GpuLease, gpu_index, run_under_lease  # noqa: E402
-from swarm_llm_bench import PROMPT as BENCH_PROMPT  # noqa: E402
+from swarm_llm_bench import PROMPT as BENCH_PROMPT, count_tokens  # noqa: E402
 
 # The pinned release, mirroring the engine catalog's `dory` entry (src/HartsyInference.Engine/Registry/ModelCatalog.cs).
 MODEL_FILE = "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf"
@@ -97,39 +98,42 @@ def model_listed(base, sid, name):
     """Whether the LLM Assistant lists the file; the listing shape is the extension's, so this matches on the name."""
     try:
         reply = http_post(base, "/API/LLMAssistantGetModels", {"session_id": sid}, timeout=120)
-    except (urllib.error.URLError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException) as e:
         log(f"[swarm] model listing failed: {e}")
         return None
     return name in json.dumps(reply)
 
 
-def count_tokens(base, sid, text):
-    """Token count of text with the model's own tokenizer, through LLMAssistantCountTokens; None when unavailable, or when the
-    extension marks the count as not exact (its chars/4 fallback when no provider can tokenize)."""
+def model_loaded(base, sid, name):
+    """Whether SwarmUI reports the model resident (the local backend's is_loaded, from the engine's placements); None when
+    the listing cannot be read."""
     try:
-        reply = http_post(base, "/API/LLMAssistantCountTokens", {"session_id": sid, "model": MODEL_FILE, "text": text}, timeout=120)
-    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        reply = http_post(base, "/API/LLMAssistantGetModels", {"session_id": sid}, timeout=60)
+    except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
         return None
-    if not isinstance(reply, dict) or reply.get("exact") is False:
+    models = reply.get("models") if isinstance(reply, dict) else None
+    if not isinstance(models, list):
         return None
-    for key in ("tokens", "count", "tokenCount", "token_count"):
-        if isinstance(reply.get(key), int):
-            return reply[key]
-    return None
+    return any(isinstance(m, dict) and name in (m.get("id"), m.get("name")) and m.get("is_loaded") is True for m in models)
 
 
 def chat_instruction_text(base, sid):
-    """The chat instruction, the system prompt the chat route renders, from LLMAssistantGetInstructions; None if absent."""
+    """The settings-level chat instruction from LLMAssistantGetInstructions: its text, "" when the list has none, or None when
+    the list could not be fetched or read. The chat route renders the active assistant's own chat instruction when it defines
+    one and this text otherwise, so this is the estimate's input, not the rendered prompt."""
     try:
         reply = http_post(base, "/API/LLMAssistantGetInstructions", {"session_id": sid}, timeout=60)
-    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+    except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
         return None
-    for item in reply.get("instructions") or [] if isinstance(reply, dict) else []:
+    items = reply.get("instructions") if isinstance(reply, dict) else None
+    if not isinstance(items, list):
+        return None
+    for item in items:
         if isinstance(item, dict) and item.get("id") == "chat":
             for key in ("text", "content", "instruction", "prompt"):
                 if isinstance(item.get(key), str):
                     return item[key]
-    return None
+    return ""
 
 
 def swarm_prompt_depth(base, sid, out_dir):
@@ -141,14 +145,17 @@ def swarm_prompt_depth(base, sid, out_dir):
     for stale in (out_dir / "swarm_prompt_depth.json", out_dir / "swarm_prompt_depth.txt"):
         stale.unlink(missing_ok=True)
     system_text = chat_instruction_text(base, sid)
-    system_tokens = count_tokens(base, sid, system_text) if system_text else None
-    user_tokens = count_tokens(base, sid, BENCH_PROMPT)
-    # Either count missing leaves no depth: a depth short of the whole chat instruction would be taken as comparable.
-    if user_tokens is None or (system_text and system_tokens is None):
-        log(f"[depth] LLMAssistantCountTokens gave no count for the {'bench prompt' if user_tokens is None else 'chat instruction'}; "
+    if system_text is None:
+        log("[depth] LLMAssistantGetInstructions unavailable; no depth written for the llama.cpp baseline")
+        return None
+    # A depth short of the chat instruction would be taken as comparable: no count, no depth.
+    system_tokens = count_tokens(sid, MODEL_FILE, system_text, base=base, timeout=120) if system_text else 0
+    user_tokens = count_tokens(sid, MODEL_FILE, BENCH_PROMPT, base=base, timeout=120)
+    if user_tokens is None or system_tokens is None:
+        log(f"[depth] LLMAssistantCountTokens gave no exact count for the {'bench prompt' if user_tokens is None else 'chat instruction'}; "
             "no depth written for the llama.cpp baseline")
         return None
-    depth = (system_tokens or 0) + user_tokens + TEMPLATE_OVERHEAD_TOKENS
+    depth = system_tokens + user_tokens + TEMPLATE_OVERHEAD_TOKENS
     record = {"system_tokens": system_tokens, "user_tokens": user_tokens, "template_overhead_tokens": TEMPLATE_OVERHEAD_TOKENS,
               "depth": depth, "estimate": True,
               "note": "system instruction + bench prompt + template markers; a lower bound if the assistant adds tool prompts"}
@@ -293,7 +300,7 @@ def unload(base, sid, attempts=3, timeout_s=120):
             if isinstance(reply, dict) and reply.get("success") is not False and not reply.get("error"):
                 return None
             error = f"unload refused: {reply.get('error') if isinstance(reply, dict) else reply!r}"
-        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException, OSError) as e:
             error = f"unload failed: {e!r}"
         if attempt + 1 < attempts:
             time.sleep(2)
@@ -343,29 +350,31 @@ async def voice_turn(ws_base, sid, loops, lease, timeout_s=600):
                 return {"success": True, "response": message.get("full_text") or "".join(chunks), "error": None, "notice": notice}
 
 
-def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
+def check_lease(lease):
+    """Raises GateError once the lease (None without one) is lost: called at every step boundary, so no work starts on a card
+    the gate has taken back."""
     if lease is not None:
         lease.check_alive()
+
+
+def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
+    check_lease(lease)
     unload_error = unload(base, sid)
     if unload_error:
         log(f"[probe] loops={loops if loops is not None else 'default'}: FAILED before the request: {unload_error}")
         return {"loops": loops, "success": False, "error": unload_error, "response": None, "served_gpu": None}
-    if lease is not None:
-        lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
+    check_lease(lease)  # the unload may have blocked or retried
     started = time.monotonic()
     with GpuUseSampler() as sampler:
-        if lease is not None:
-            lease.check_alive()  # the baseline reading takes time; no request goes out on a lease lost during it
+        check_lease(lease)  # the baseline reading takes time
         try:
             reply = asyncio.run(voice_turn(ws_base, sid, loops, lease))
         except (OSError, websockets.WebSocketException, ValueError) as e:
             reply = {"success": False, "error": repr(e), "response": None}
         if lease is not None and lease.lost:
-            # A reply that finished as the heartbeat was refused is not accepted either (a lost lease fails the run), and the
-            # model's unload comes before any further reading.
-            sampler.closing_sample = False
-            reply = {"success": False, "error": "lease lost during the probe; reply not accepted", "response": reply.get("response"),
-                     "notice": reply.get("notice")}
+            sampler.closing_sample = False  # the step has failed; the model's unload comes before any further reading
+            if reply.get("success"):  # finished as the heartbeat was refused: not accepted; a failed reply keeps its own cause
+                reply = dict(reply, success=False, error="lease lost during the probe; reply not accepted")
     elapsed = time.monotonic() - started
     served = sampler.served()
     result = {"loops": loops, "elapsed_s_including_load": round(elapsed, 2), "success": bool(reply.get("success")),
@@ -395,8 +404,7 @@ def served_card_error(served_gpu, lease_gpu, attributable):
 
 
 def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
-    if lease is not None:
-        lease.check_alive()
+    check_lease(lease)
     cmd = [sys.executable, str(BENCH), "--host", host, "--port", str(port), "--models", MODEL_FILE,
            "--loops", str(loops), "--out", str(out_file), "--fresh-thread"]
     log_file = out_file.with_suffix(".log")
@@ -406,18 +414,13 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     if unload_error:
         log(f"[bench] loops={loops}: FAILED before the run: {unload_error}")
         return {"loops": loops, "error": unload_error, "out": str(out_file), "served_gpu": None}
-    if lease is not None:
-        lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
+    check_lease(lease)  # the unload may have blocked or retried
     with GpuUseSampler() as sampler:
-        if lease is not None:
-            lease.check_alive()  # the baseline reading takes time; the child does not start on a lease lost during it
-        returncode, lost = run_under_lease(cmd, lease, log_file=log_file, grace_s=bench_child_grace_s())
-        # A child that finished as the heartbeat was refused is not accepted either: a lost lease fails the run.
-        lost = lost or (lease is not None and lease.lost)
+        check_lease(lease)  # the baseline reading takes time
+        returncode, _ = run_under_lease(cmd, lease, log_file=log_file, grace_s=bench_child_grace_s())
+        lost = lease is not None and lease.lost  # stopped, or finished as the heartbeat was refused: not accepted either way
         if lost:
             sampler.closing_sample = False  # the step has failed; the model's unload comes before any further reading
-    if lost:
-        log("[bench] lease lost; the bench was stopped or its result not accepted")
     console = log_file.read_text()
     sys.stderr.write(console)
     served = sampler.served()
@@ -431,16 +434,16 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
         record.update({"error": row.get("error"), "tg_tps_median": row.get("tg_tps_median"),
                        "ttft_ms_median": row.get("ttft_ms_median"), "counted_tokens": row.get("counted_tokens")})
         if not record["error"] and record["tg_tps_median"] is None:
-            # The bench leaves the token rate unset when LLMAssistantCountTokens gave no count; its chunk rate is not a token
-            # rate, so the step has no result to report against llama.cpp.
-            record["error"] = "no decode rate: the reply's tokens could not be counted (LLMAssistantCountTokens), and stream chunks are not tokens"
+            # The bench leaves the token rate unset rather than report its chunk rate as one; the step then has no result.
+            record["error"] = f"no decode rate: {row.get('tg_tps_unset_reason') or 'the bench gave none'}"
     else:
         record["error"] = console.strip().splitlines()[-1] if console.strip() else f"exit {returncode}"
     if not record.get("error"):
-        rejected = served_card_error(served, bound_gpu, sampler.available)
-        if rejected:
-            record.update({"error": rejected, "tg_tps_median": None, "ttft_ms_median": None, "counted_tokens": None})
+        record["error"] = served_card_error(served, bound_gpu, sampler.available)
     if record.get("error"):
+        # A result this lease may not report is not left on disk either; the console log stays for diagnosis.
+        record.update({"tg_tps_median": None, "ttft_ms_median": None, "counted_tokens": None, "out": None})
+        out_file.unlink(missing_ok=True)
         log(f"[bench] loops={loops}: FAILED: {record['error']}")
     return record
 
@@ -513,16 +516,22 @@ def main():
         for loops in args.loops:
             summary["probes"].append(run_probe(base, ws_base, sid, loops, lease, bound_gpu))
         (out_dir / "dory_probes.json").write_text(json.dumps(summary["probes"], indent=2))
-        summary["swarm_prompt_depth"] = swarm_prompt_depth(base, sid, out_dir)
+        # Counted only once a probe has run the model: the engine counts with the resident model's tokenizer, and reports a
+        # chars/4 estimate as a count when nothing is resident (see swarm_llm_bench.count_tokens).
+        if all(p["success"] for p in summary["probes"]):
+            summary["swarm_prompt_depth"] = swarm_prompt_depth(base, sid, out_dir)
+        else:
+            log("[depth] no successful probe; no depth written for the llama.cpp baseline")
+            summary["swarm_prompt_depth"] = None
 
         if not args.skip_bench:
             for loops in args.loops:
                 summary["bench"].append(run_bench(base, sid, args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json",
                                                   lease, bound_gpu))
-        if lease is not None:
-            lease.check_alive()  # a lease lost as the last step ended fails the run too; its results are not reported
         failures = [f"probe loops={p['loops']}: {p['error'] or 'no reply'}" for p in summary["probes"] if not p["success"]]
         failures += [f"bench loops={b['loops']}: {b['error']}" for b in summary["bench"] if b.get("error")]
+        if lease is not None and lease.lost:
+            failures.append("lease lost as the last step ended")
         if failures:
             failed = True
             summary["error"] = "; ".join(failures)
@@ -538,17 +547,26 @@ def main():
     finally:
         # Swarm cleanup first, the lease last: the card is handed back only once the model is out of it, and a card that
         # could not be emptied is handed back marked failed so the gate knows. A run that never got its card leaves SwarmUI
-        # alone: the unload is global, and the card's current holder may be using the model.
-        if used_swarm:
-            unload_error = unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S) if terminated else unload(base, sid)
+        # alone: the unload is global, and the card's current holder may be using the model. Once the lease is gone the card
+        # may already be someone else's, so the unload is one quick attempt, and none when the model is no longer resident.
+        lost = lease is not None and lease.lost
+        if used_swarm and lost and model_loaded(base, sid, MODEL_FILE) is False:
+            log("[run] cleanup: the lease is gone and the model is no longer resident; SwarmUI left alone")
+        elif used_swarm:
+            quick = terminated or lost
+            unload_error = unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S) if quick else unload(base, sid)
             if unload_error:
                 failed = True
                 summary["cleanup_error"] = unload_error
                 log(f"[run] cleanup: {unload_error}")
+        if lease is not None and lease.lost and not failed:
+            failed = True
+            summary["error"] = "lease lost during the cleanup"
+            log("[run] lease lost during the cleanup")
+        summary["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (out_dir / "dory_e2e_summary.json").write_text(json.dumps(summary, indent=2))  # before the release: it may take a while
         if lease is not None:
             lease.release(failed=failed)
-        summary["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        (out_dir / "dory_e2e_summary.json").write_text(json.dumps(summary, indent=2))
 
     print(f"\n{'loops':>7} {'probe':>7} {'tg t/s':>8} {'ttft ms':>8} {'tokens':>7} {'gpu':>4}  reply head")
     bench_by_loops = {b["loops"]: b for b in summary["bench"]}

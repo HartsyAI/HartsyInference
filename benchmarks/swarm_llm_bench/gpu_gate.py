@@ -57,7 +57,8 @@ POLL_SECONDS = 30
 # that itself stops a child (the Dory runner's bench, up to 10 s) and then unloads a model (6 s) before it exits.
 DEFAULT_GRACE_S = 30
 TERMINAL_STATUSES = ("done", "expired", "failed", "cancelled")
-RELEASE_ATTEMPTS = 3  # a release the gate did not answer is tried again: the card would otherwise wait for the gate's expiry
+CALL_ATTEMPTS = 3  # for the idempotent calls: an unanswered heartbeat, poll, cancel or release is tried again, a refusal is not
+RETRY_WAIT_S = 1
 
 
 class GateError(RuntimeError):
@@ -78,21 +79,32 @@ def gpu_index(value):
     return int(text) if text.isdigit() else None
 
 
-def call(base, method, path, body=None, timeout=20):
-    """One gate call; returns the parsed JSON and raises GateError on HTTP failure or ok false."""
+def call(base, method, path, body=None, timeout=20, attempts=1):
+    """One gate call; returns the parsed JSON. Raises GateRefused when the gate says no (ok false, or an HTTP 4xx) and
+    GateError when it did not answer or answered unreadably; only the latter is tried again, attempts times in all, which is
+    for the idempotent calls (never the request itself, which a repeat could queue twice)."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"} if data is not None else {})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            reply = json.loads(resp.read().decode() or "{}")
-    except (OSError, ValueError) as e:  # URLError, timeouts, a truncated body, non-JSON or non-UTF-8 text
-        raise GateError(f"{method} {path}: {e}") from e
-    if not isinstance(reply, dict):
-        raise GateError(f"{method} {path}: unexpected reply {str(reply)[:200]!r}")
-    if reply.get("ok") is False:
-        raise GateRefused(f"{method} {path}: {reply.get('error', 'rejected')}")
-    return reply
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                reply = json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                raise GateRefused(f"{method} {path}: HTTP {e.code}") from e
+            error = GateError(f"{method} {path}: HTTP {e.code}")
+        except (OSError, ValueError) as e:  # URLError, timeouts, a truncated body, non-JSON or non-UTF-8 text
+            error = GateError(f"{method} {path}: {e}")
+        else:
+            if not isinstance(reply, dict):
+                raise GateError(f"{method} {path}: unexpected reply {str(reply)[:200]!r}")
+            if reply.get("ok") is False:
+                raise GateRefused(f"{method} {path}: {reply.get('error', 'rejected')}")
+            return reply
+        if attempt < attempts:
+            time.sleep(RETRY_WAIT_S)
+    raise error
 
 
 class GpuLease:
@@ -154,7 +166,7 @@ class GpuLease:
                 self.cancel()
                 raise GateError(f"request {self.request_id} not granted within {self.grant_timeout_s} s")
             time.sleep(POLL_SECONDS)
-            reply = call(self.base, "GET", f"/api/request/{self.request_id}")
+            reply = call(self.base, "GET", f"/api/request/{self.request_id}", attempts=CALL_ATTEMPTS)
             self.status = reply.get("status")
             if self.status in TERMINAL_STATUSES:
                 raise GateError(f"request {self.request_id} ended as {self.status} before a grant")
@@ -168,8 +180,10 @@ class GpuLease:
         return {"lease_id": self.lease_id, "gpu": self.gpu}
 
     def heartbeat(self, extend_min=0):
+        """One heartbeat; an unanswered one is tried again at once (the gate only ends a lease after ten minutes without one),
+        and a refused or still unanswered one marks the lease lost."""
         try:
-            call(self.base, "POST", "/api/heartbeat", {"lease_id": self.lease_id, "extend_min": extend_min})
+            call(self.base, "POST", "/api/heartbeat", {"lease_id": self.lease_id, "extend_min": extend_min}, attempts=CALL_ATTEMPTS)
         except GateError as e:
             self.lost = True
             self.log(f"[gate] heartbeat failed, lease gone: {e}")
@@ -193,51 +207,55 @@ class GpuLease:
             raise GateError(f"lease {self.lease_id} is gone (heartbeat refused); stop the run")
 
     def cancel(self):
-        """Withdraws a request that is still queued, so an aborted acquisition never receives a card later. A cancel the gate
-        refuses is followed by one look at the request: granted in the meantime, its lease would keep the card reserved for a
-        run that is not starting until the gate expires it, so that lease is released here, marked failed."""
+        """Withdraws a request that is still queued, so an aborted acquisition never receives a card later. An unanswered cancel
+        is tried again; after a refusal, or when the cancels went unanswered, the request is looked at: granted in the meantime,
+        its lease would keep the card reserved for a run that is not starting until the gate expires it, so that lease is
+        released here, marked failed; still queued, the cancel is sent once more."""
         if not (self.request_id and self.status == "queued"):
             return
-        try:
-            call(self.base, "POST", "/api/cancel", {"request_id": self.request_id})
-            self.status = "cancelled"
-            self.log(f"[gate] cancelled request {self.request_id}")
-            return
-        except GateError as e:
-            self.log(f"[gate] cancel refused: {e}; checking whether the request was granted meanwhile")
-        try:
-            reply = call(self.base, "GET", f"/api/request/{self.request_id}")
-            self.status = reply.get("status")
-            if self.status != "granted":
-                self.log(f"[gate] request {self.request_id} is {self.status}; nothing to release")
-                return
-            self._take_grant(reply)
-        except GateError as e:
-            self.log(f"[gate] request {self.request_id} could not be checked after the refused cancel: {e}")
-            return
-        self.log(f"[gate] request {self.request_id} was granted during its cancellation; releasing lease {self.lease_id}")
-        self._release_lease(failed=True)
-
-    def _release_lease(self, failed):
-        """The release call for the lease held. The gate's answer, accepted or refused, settles it (released): a refusal is
-        final and only logged, since a lease the gate already ended (expired, or lost after a refused heartbeat) answers that
-        way and there is nothing more to hand back. A call the gate did not answer, or answered unreadably, is tried again a
-        few times here, and leaves released unset so a later release() tries once more: a card the gate still considers
-        leased would otherwise stay reserved until its own expiry, though the work on it has stopped."""
-        for attempt in range(1, RELEASE_ATTEMPTS + 1):
+        for _ in range(2):
             try:
-                call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed}, timeout=10)
-                self.released = True
-                self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed else ""))
+                call(self.base, "POST", "/api/cancel", {"request_id": self.request_id}, attempts=CALL_ATTEMPTS)
+                self.status = "cancelled"
+                self.log(f"[gate] cancelled request {self.request_id}")
                 return
             except GateRefused as e:
-                self.released = True
-                self.log(f"[gate] release not accepted ({'lease was already lost' if self.lost else 'refused'}): {e}")
-                return
+                self.log(f"[gate] cancel refused: {e}; checking whether the request was granted meanwhile")
             except GateError as e:
-                self.log(f"[gate] release attempt {attempt} of {RELEASE_ATTEMPTS} got no answer: {e}")
-                if attempt < RELEASE_ATTEMPTS:
-                    time.sleep(2)
+                self.log(f"[gate] cancel got no answer: {e}; checking what became of the request")
+            try:
+                reply = call(self.base, "GET", f"/api/request/{self.request_id}", attempts=CALL_ATTEMPTS)
+            except GateError as e:
+                self.log(f"[gate] request {self.request_id} could not be checked; it may be granted later and expire unused: {e}")
+                return
+            self.status = reply.get("status")
+            if self.status == "granted":
+                try:
+                    self._take_grant(reply)
+                except GateError as e:
+                    self.log(f"[gate] request {self.request_id} was granted during its cancellation, unreadably: {e}")
+                    return
+                self.log(f"[gate] request {self.request_id} was granted during its cancellation; releasing lease {self.lease_id}")
+                self._release_lease(failed=True)
+                return
+            if self.status != "queued":
+                self.log(f"[gate] request {self.request_id} is {self.status}; nothing to release")
+                return
+        self.log(f"[gate] request {self.request_id} is still queued after the cancels; it may be granted later and expire unused")
+
+    def _release_lease(self, failed):
+        """The release call for the lease held. The gate's answer settles it (released): a refusal is final, since a lease the
+        gate already ended answers that way. An unanswered call is tried again inside call(); still unanswered, released stays
+        unset so a later release() tries once more rather than leave the card reserved until the gate's own expiry."""
+        try:
+            call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed}, attempts=CALL_ATTEMPTS)
+            self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed else ""))
+        except GateRefused as e:
+            self.log(f"[gate] release not accepted ({'lease was already lost' if self.lost else 'refused'}): {e}")
+        except GateError as e:
+            self.log(f"[gate] release got no answer; a later release() tries again: {e}")
+            return
+        self.released = True
 
     def release(self, failed=False):
         """Ends the heartbeat and releases the lease; a request still queued is cancelled instead."""
