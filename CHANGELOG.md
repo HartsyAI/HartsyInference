@@ -10,6 +10,10 @@ stable release will require. Dates are UTC.
 
 - **Added: split GGUF sets load as one model.** A llama.cpp split (`stem-NNNNN-of-NNNNN.gguf`) is read from any part: every part is mapped, its tensors are indexed together, and the set is checked for completeness, part order and tensor count. The loader used to refuse split files and ask for a `llama-gguf-split` merge.
 
+## alpha.377
+
+- **Fixed: an assistant turn's reasoning reaches the chat template.** `TextService` dropped `TextMessage.ReasoningContent` when it built the template's messages, so no template ever saw `reasoning_content`: a caller that sent a turn's reasoning back (the OpenAI-compatible route's `reasoning_content`, or a host replaying history) had it ignored. Templates that read the field, such as Qwen3's for the current turn's tool rounds and Muse Spark's `to=self` message, now render it as Hugging Face does. DeepSeek V4.1's renderer receives it too and shows it where that model keeps reasoning: in thinking mode, for a turn after the last user message, or for every turn when reasoning is not dropped. A turn without reasoning renders as before (`TextServiceReasoningContentTests`).
+
 ## alpha.376
 
 - **Fixed: HeartMuLa's quantized load keeps about 2 GB less host RAM.** The audio-embedding split borrows the
