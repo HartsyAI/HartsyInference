@@ -231,6 +231,11 @@ compile_one "snake" -DUSE_FP16=1 -DUSE_BETA=1 -- "_beta_f16"
 compile_one "sdpa_flash" -DUSE_FP16=0 -DHAS_MASK=1 -- "_mask_f32"
 compile_one "sdpa_flash" -DUSE_FP16=1 -DHAS_MASK=1 -- "_mask_f16"
 
+# embed_gather_decode: TABLE_DTYPE selects the table format (the F32 build is the SINGLE_KERNELS entry above). The F16 and
+# BF16 variants read a narrow table as 32-bit words; the output is F32 in every variant.
+compile_one "embed_gather_decode" -DTABLE_DTYPE=1 -- "_f16"
+compile_one "embed_gather_decode" -DTABLE_DTYPE=2 -- "_bf16"
+
 # affine_broadcast_last_dim: HAS_SHIFT=0 is Ideogram 4's scale-only adaLN (shift is null) — a distinct
 # #if-compiled binding layout (like USE_BETA/HAS_MASK above), needing its own SPIR-V module.
 compile_one "affine_broadcast_last_dim" -DUSE_FP16=0 -DHAS_SHIFT=0 -- "_noshift_f32"

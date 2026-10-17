@@ -156,6 +156,9 @@ public sealed partial class CudaKernels : IDisposable
     // ── Language-model (decoder LLM) glue Module + handles ───────────────
     private readonly CudaModule _lmF32Module;
     private readonly CudaModule _lmHistoryModule;
+    private readonly CudaModule _lmEmbedGatherModule;
+    private readonly CudaModule _lmCfgTopKModule;
+    private readonly nint _lmCfgTopKGuided;
     private readonly nint _lmRepeatKvF32;
     private readonly nint _lmKvAppendF32;
     private readonly nint _lmKvAppendF16;
@@ -185,6 +188,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _lmRopeDecodeSplitHalf;
     private readonly nint _lmRopeDecodeInterleaved;
     private readonly nint _lmEmbedGatherDecodeF32;
+    private readonly nint _lmEmbedGatherDecodeF16;
+    private readonly nint _lmEmbedGatherDecodeBF16;
     private readonly nint _lmHistoryAppendDistinct;
     private readonly nint _lmRepetitionPenaltyF32;
     private readonly nint _lmKvSliceTimeF32;
@@ -473,6 +478,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _mulMatVecQ8_0Q8_1Module;
     private readonly nint _mulMatVecQ8_0Q8_1;
     private readonly nint _mulMatVecQ8_0Q8_1Ksplit;
+    private readonly nint _mulMatVecQ8_0Q8_1Mb;
+    private readonly nint _mulMatVecQ8_0Q8_1KsplitMb;
     private readonly CudaModule _mulMatVecQ6KQ8_1Module;
     private readonly nint _mulMatVecQ6KQ8_1;
     private readonly nint _mulMatVecQ6KQ8_1Ksplit;
@@ -1069,6 +1076,12 @@ public sealed partial class CudaKernels : IDisposable
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
         _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
         _lmEmbedGatherDecodeF32 = _lmF32Module.GetFunction("lm_embed_gather_decode_f32");
+        // Half/bfloat16 table gathers sit in their own module, so the hand-tuned lm_f32 PTX is not rebuilt for them.
+        _lmEmbedGatherModule = LoadOwnedModule(Ptx("lm_embed_gather"));
+        _lmEmbedGatherDecodeF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_f16");
+        _lmEmbedGatherDecodeBF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_bf16");
+        _lmCfgTopKModule = LoadOwnedModule(Ptx("lm_cfg_topk_guided"));
+        _lmCfgTopKGuided = _lmCfgTopKModule.GetFunction("lm_cfg_topk_guided_f32");
         // The distinct-history append lives in its own module so the hand-tuned lm_f32 PTX is not rebuilt for it.
         _lmHistoryModule = LoadOwnedModule(Ptx("lm_history_f32"));
         _lmHistoryAppendDistinct = _lmHistoryModule.GetFunction("lm_history_append_distinct");
@@ -1177,6 +1190,8 @@ public sealed partial class CudaKernels : IDisposable
         _mulMatVecQ8_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q8_0_q8_1"));
         _mulMatVecQ8_0Q8_1 = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1");
         _mulMatVecQ8_0Q8_1Ksplit = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_ksplit");
+        _mulMatVecQ8_0Q8_1Mb = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_mb");
+        _mulMatVecQ8_0Q8_1KsplitMb = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_ksplit_mb");
         _mulMatVecQ6KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q6k_q8_1"));
         _mulMatVecQ6KQ8_1 = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1");
         _mulMatVecQ6KQ8_1Ksplit = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1_ksplit");
@@ -3900,6 +3915,34 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_lmEmbedGatherDecodeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>MiniMax guided semantic logits: the conditional top-K candidates get <c>u + (c - u)·g</c>, all other entries -inf
+    /// (lm_cfg_topk_guided.cu). One block per row; <paramref name="count"/> is capped at the kernel mask of 16448 entries.</summary>
+    public unsafe void LaunchCfgTopKGuided(ulong output, ulong cond, ulong uncond, int count, int topK, float guidance, nint stream)
+    {
+        if (_lmCfgTopKGuided == 0) throw new InvalidOperationException("lm_cfg_topk_guided.ptx not present in the Ptx folder.");
+        if (count < 1 || count > 16448 || topK < 1 || topK > count)
+            throw new ArgumentOutOfRangeException(nameof(count), $"guided top-K needs 1 <= topK <= count <= 16448; got count={count} topK={topK}; the mask holds up to 16448 entries.");
+        ulong outArg = output, condArg = cond, uncondArg = uncond;
+        int countArg = count, topKArg = topK;
+        float guidanceArg = guidance;
+        void** args = stackalloc void*[6];
+        args[0] = &outArg; args[1] = &condArg; args[2] = &uncondArg; args[3] = &countArg; args[4] = &topKArg; args[5] = &guidanceArg;
+        CudaDriverApi.cuLaunchKernel(_lmCfgTopKGuided, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Device-indexed gather from a half- or bfloat16-stored table into an F32 row (lm_embed_gather.cu).</summary>
+    public unsafe void LaunchEmbedGatherDecodeTable(ulong output, ulong embedTable, ulong tokenId, int hidden, bool bf16, nint stream)
+    {
+        nint function = bf16 ? _lmEmbedGatherDecodeBF16 : _lmEmbedGatherDecodeF16;
+        if (function == 0) throw new InvalidOperationException("lm_embed_gather.ptx not present in the Ptx folder.");
+        ulong outArg = output, embArg = embedTable, tokArg = tokenId;
+        uint hiddenArg = (uint)hidden;
+        void** args = stackalloc void*[4];
+        args[0] = &outArg; args[1] = &embArg; args[2] = &tokArg; args[3] = &hiddenArg;
+        uint gridDim = (uint)(((uint)hidden + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(function, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Graph-capture decode: appends the current device token id into the repetition-penalty history buffer and increments its counter. Fixed 1×1×1 launch — capturable.</summary>
     public unsafe void LaunchHistoryAppend(ulong history, ulong historyCount, ulong tokenId, nint stream)
     {
@@ -4946,7 +4989,39 @@ public sealed partial class CudaKernels : IDisposable
 
     /// <summary>Fused Q8_0 × Q8_1 dp4a matrix-vector product for decode (M small). Q8_0 is symmetric, so only the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ8_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
-        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ8_0Q8_1, _mulMatVecQ8_0Q8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
+    {
+        // The multi-row kernels read the weight once for up to Q8_MB rows (lm/mul_mat_vec_q8_0_q8_1.cu); each row keeps the
+        // single-row kernel's arithmetic and reduction order, so the outputs are bit-identical to LaunchMulMatVecQ8_0Q8_1PerRow.
+        const int rowsPerBlock = 4;   // Q8_MB in lm/mul_mat_vec_q8_0_q8_1.cu
+        ulong outA = output, xqA = xq, xdA = xd, wA = weight, bA = bias;
+        int nA = N, kA = K, mA = M;
+        void** args = stackalloc void*[8];
+        args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &wA; args[4] = &bA;
+        args[5] = &nA; args[6] = &kA; args[7] = &mA;
+        uint gridY = (uint)((M + rowsPerBlock - 1) / rowsPerBlock);
+        uint ksplit = GemvKsplitWarps(N, K);
+        if (ksplit > 1)
+        {
+            if (ksplit > 16) throw new InvalidOperationException("mul_mat_vec_q8_0_q8_1_ksplit_mb holds one partial per warp in 16 slots; blockDim.y must be at most 16.");
+            CudaDriverApi.cuLaunchKernel(_mulMatVecQ8_0Q8_1KsplitMb, (uint)N, gridY, 1, 32, ksplit, 1, 0, stream, (nint)args, 0).ThrowOnError();
+            return;
+        }
+        uint WARPS_PER_BLOCK = (uint)_wpbOverride;
+        uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        CudaDriverApi.cuLaunchKernel(_mulMatVecQ8_0Q8_1Mb, gridX, gridY, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Reference for <see cref="LaunchMulMatVecQ8_0Q8_1"/>: one single-row launch per activation row, over the same weight.</summary>
+    public unsafe void LaunchMulMatVecQ8_0Q8_1PerRow(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    {
+        int nblk = K / 32;
+        for (int m = 0; m < M; m++)
+        {
+            LaunchMulMatVecQ8_1Impl(_mulMatVecQ8_0Q8_1, _mulMatVecQ8_0Q8_1Ksplit,
+                output + (ulong)m * (ulong)N * 4, xq + (ulong)m * (ulong)K, xd + (ulong)m * (ulong)nblk * 4,
+                weight, bias, N, K, 1, stream);
+        }
+    }
 
     /// <summary>Fused Q6_K × Q8_1 dp4a matrix-vector product for decode (M small). Q6_K scales are signed (symmetric), so only the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ6KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)

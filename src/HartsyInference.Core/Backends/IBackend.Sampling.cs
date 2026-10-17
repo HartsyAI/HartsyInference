@@ -22,4 +22,9 @@ public partial interface IBackend
     /// nucleus cut <paramref name="topP"/> and the <paramref name="minP"/> cut, then a multinomial draw from the device RNG) and writes its
     /// id to <paramref name="outputTokenId"/>. Capturable: nothing returns to the host.</summary>
     void SampleTopKInto(ulong outputTokenId, Tensor logits, int topK, float temperature, float topP, float minP, ulong rngState) { }
+
+    /// <summary>MiniMax Music 3's guided semantic logits: the candidates are the top-K of <paramref name="cond"/>, each gets
+    /// <c>u + (c - u)·guidance</c>, and every other entry is -inf. Ties at the K-th value stay candidates.</summary>
+    void CfgTopKGuided(Tensor output, Tensor cond, Tensor uncond, int topK, float guidance) =>
+        throw new NotSupportedException("CfgTopKGuided is not implemented by this backend.");
 }
