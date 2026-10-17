@@ -6,11 +6,14 @@ Every run that touches a card on the box holds a lease from the gate for its dur
 gave it on 2026-10-17 (the full text is API.md in the Holder's folder):
 
   POST /api/request   {"agent", "greeting", "task", "modality", "engine", "model_source", "model_format", "model_path",
-                       "vram_mb", "minutes", "exclusive"}  ->  {"ok", "request_id", "status": "granted"|"queued",
+                       "vram_mb", "minutes", "exclusive", "gpu"?}  ->  {"ok", "request_id", "status": "granted"|"queued",
                        "lease_id", "gpu", "position"}; a rejection is {"ok": false, "error": ...} with HTTP 200, so
                        every reply is checked for ok. The greeting must name JenAIson and the Holder to keep full
                        priority; model_path must start with /mnt/model-storage/ (the gate does not check that the
-                       file exists, so the caller does).
+                       file exists, so the caller does). exclusive true grants only a card with no other gate lease
+                       and no more than 1 GB of other compute, and never stops SwarmUI (stop_services is never set).
+                       gpu names the card wanted ("gpu1"); SwarmUI is pinned to the RTX 4090, gpu1, so Swarm-driven
+                       work must lease that card, and the grant waits (queued) while it is busy.
   GET  /api/request/<request_id>  ->  {"status": queued|granted|done|expired|failed|cancelled, "position", "lease_id",
                        "gpu", "lease_status"}; polled about every 30 s while queued.
   POST /api/heartbeat {"lease_id", "extend_min"}  about every 4 minutes; a lease ends after 10 minutes without one;
@@ -19,9 +22,9 @@ gave it on 2026-10-17 (the full text is API.md in the Holder's folder):
   POST /api/cancel    {"request_id"} for a request still queued.
   GET  /api/status    the full snapshot.
 
-Card numbering: the gate's gpu index follows nvidia-smi (gpu0 = RTX 3060, gpu1 = RTX 4090 on the box); the engine's
-cuda:N follows the CUDA runtime order, which the Swarm benchmarks document as cuda:0 = 4090, cuda:1 = 3060. A caller
-that must address the leased card through the engine maps one to the other (see dory_e2e_run.py --device-map).
+Card numbering: the gate's gpu index follows nvidia-smi (gpu0 = RTX 3060, gpu1 = RTX 4090 on the box), and its replies
+name a card either way ("gpu1" or 1); gpu_index() reads both. The engine's cuda:N follows the CUDA runtime order, which
+the Swarm benchmarks document as cuda:0 = 4090, cuda:1 = 3060.
 
 Usage, as a library:
     with GpuLease(agent="...", task="...", model_path="/mnt/model-storage/...") as lease:
@@ -56,6 +59,16 @@ class GateError(RuntimeError):
     """A gate reply with ok false, an HTTP failure, or a request that ended without a grant."""
 
 
+def gpu_index(value):
+    """The nvidia-smi index of a card as the gate names it ("gpu1", "1" or 1), or None when it names none."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text.startswith("gpu"):
+        text = text[3:]
+    return int(text) if text.isdigit() else None
+
+
 def call(base, method, path, body=None, timeout=20):
     """One gate call; returns the parsed JSON and raises GateError on HTTP failure or ok false."""
     data = json.dumps(body).encode() if body is not None else None
@@ -78,7 +91,7 @@ class GpuLease:
     releases on exit (failed=True when the block raised). Reusable by any script that runs on the box."""
 
     def __init__(self, agent, task, model_path, *, base=DEFAULT_BASE, modality="text", engine="swarmui",
-                 model_source="raid-local", model_format="gguf", vram_mb=6000, minutes=90, exclusive=False,
+                 model_source="raid-local", model_format="gguf", vram_mb=6000, minutes=90, exclusive=False, gpu=None,
                  greeting=GREETING, grant_timeout_s=3600, log=print):
         if not model_path.startswith(MODEL_STORAGE_ROOT):
             raise ValueError(f"model_path must start with {MODEL_STORAGE_ROOT}: {model_path}")
@@ -86,6 +99,8 @@ class GpuLease:
         self.body = {"agent": agent, "greeting": greeting, "task": task, "modality": modality, "engine": engine,
                      "model_source": model_source, "model_format": model_format, "model_path": model_path,
                      "vram_mb": vram_mb, "minutes": minutes, "exclusive": exclusive}
+        if gpu:
+            self.body["gpu"] = gpu
         self.grant_timeout_s = grant_timeout_s
         self.log = log
         self.request_id = None
@@ -100,7 +115,7 @@ class GpuLease:
         reply = call(self.base, "POST", "/api/request", self.body)
         self.request_id = reply.get("request_id")
         self.lease_id = reply.get("lease_id")
-        self.gpu = reply.get("gpu")
+        self.gpu = gpu_index(reply.get("gpu"))
         self.status = reply.get("status")
         self.log(f"[gate] request {self.request_id}: {self.status}"
                  + (f" (position {reply.get('position')})" if self.status == "queued" else f" on gpu {self.gpu}"))
@@ -119,7 +134,7 @@ class GpuLease:
             if self.status in TERMINAL_STATUSES:
                 raise GateError(f"request {self.request_id} ended as {self.status} before a grant")
             self.lease_id = reply.get("lease_id") or self.lease_id
-            self.gpu = reply.get("gpu") if reply.get("gpu") is not None else self.gpu
+            self.gpu = gpu_index(reply.get("gpu")) if reply.get("gpu") is not None else self.gpu
             self.log(f"[gate] request {self.request_id}: {self.status}"
                      + (f" (position {reply.get('position')})" if self.status == "queued" else f" on gpu {self.gpu}"))
         return {"lease_id": self.lease_id, "gpu": self.gpu}
@@ -203,20 +218,31 @@ def run_under_lease(cmd, lease, log_file=None, env=None, grace_s=10, poll_s=1.0)
     given, else to ours. lease may be None (nothing to lose). Returns (returncode, lease_lost)."""
     sink = open(log_file, "w") if log_file else None
     lost = False
+    proc = None
+
+    def stop_group():
+        _signal_group(proc, signal.SIGTERM)
+        try:
+            proc.wait(timeout=grace_s)
+        except subprocess.TimeoutExpired:
+            _signal_group(proc, signal.SIGKILL)
+            proc.wait()
+
     try:
         proc = subprocess.Popen(cmd, text=True, stdout=sink, stderr=subprocess.STDOUT if sink else None, env=env,
                                 start_new_session=True)
         while proc.poll() is None:
             if lease is not None and lease.lost:
                 lost = True
-                _signal_group(proc, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=grace_s)
-                except subprocess.TimeoutExpired:
-                    _signal_group(proc, signal.SIGKILL)
-                    proc.wait()
+                stop_group()
                 break
             time.sleep(poll_s)
+    except BaseException:
+        # An interrupt or any error here must not leave the group running on the card: its own session means it never
+        # saw the terminal's SIGINT, so it is stopped explicitly before the lease is released by the caller.
+        if proc is not None and proc.poll() is None:
+            stop_group()
+        raise
     finally:
         if sink is not None:
             sink.close()
@@ -237,6 +263,7 @@ def main(argv=None):
     ap.add_argument("--vram-mb", type=int, default=6000)
     ap.add_argument("--minutes", type=int, default=90)
     ap.add_argument("--exclusive", action="store_true")
+    ap.add_argument("--gpu", default=None, help='the card wanted, as the gate names it ("gpu1" for the RTX 4090 SwarmUI runs on)')
     ap.add_argument("--poll-seconds", type=float, default=POLL_SECONDS)
     ap.add_argument("--heartbeat-seconds", type=float, default=HEARTBEAT_SECONDS)
     ap.add_argument("command", nargs=argparse.REMAINDER, help="the command to run, after --")
@@ -247,7 +274,8 @@ def main(argv=None):
     POLL_SECONDS, HEARTBEAT_SECONDS = args.poll_seconds, args.heartbeat_seconds
     lease = GpuLease(args.agent, args.task, args.model_path, base=args.gate, modality=args.modality, engine=args.engine,
                      model_source=args.model_source, model_format=args.model_format, vram_mb=args.vram_mb,
-                     minutes=args.minutes, exclusive=args.exclusive, log=lambda m: print(m, file=sys.stderr, flush=True))
+                     minutes=args.minutes, exclusive=args.exclusive, gpu=args.gpu,
+                     log=lambda m: print(m, file=sys.stderr, flush=True))
     failed = True
     try:
         lease.__enter__()

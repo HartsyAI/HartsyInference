@@ -12,8 +12,9 @@
 # holds a lease (GATE_LEASE_ID set) runs the GPU phase directly on that lease's card (GATE_GPU), or on the third argument
 # when the lease came without one. The granted card always wins: a third argument that names another card is refused. The
 # gate's gpu index equals nvidia-smi's, which CUDA_DEVICE_ORDER=PCI_BUS_ID makes llama.cpp follow too.
-# Defaults: the pinned Q5_K_M under /mnt/model-storage, benchmarks/results/dory, the leased card. LLAMACPP_DIR overrides
-# the checkout location (default ~/llama.cpp-dory); an existing checkout is reused and only rebuilt.
+# Defaults: the pinned Q5_K_M under /mnt/model-storage, benchmarks/results/dory, the leased card. The lease asks for the
+# card the Swarm run uses (GATE_CARD, default gpu1, the RTX 4090 SwarmUI is pinned to) so the comparison is card for card.
+# LLAMACPP_DIR overrides the checkout location (default ~/llama.cpp-dory); an existing checkout is reused and only rebuilt.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +22,7 @@ MODEL="${1:-/mnt/model-storage/Models/llm/nemotron-dory/NVIDIA-Nemotron-Labs-Dor
 OUT_DIR="${2:-benchmarks/results/dory}"
 GPU_ARG="${3:-}"
 WORK="${LLAMACPP_DIR:-$HOME/llama.cpp-dory}"
+GATE_CARD="${GATE_CARD:-gpu1}"
 PROMPT="Explain in three sentences why the sky is blue, then list two things that would change its color."
 PHASE="${LLAMACPP_BASELINE_PHASE:-all}"
 
@@ -40,9 +42,10 @@ if [ "$PHASE" = "all" ]; then
     fi
     if [ -z "${GATE_LEASE_ID:-}" ]; then
         # No lease held by the caller: hold one around the GPU phase only; the gate picks the card, so no override is passed.
+        # Exclusive: a benchmark never runs alongside another suite, benchmark or generation (docs/Agents/AGENTS.md).
         exec python3 "$HERE/gpu_gate.py" --agent "Dory AI model integration" \
             --task "llama.cpp Dory baseline: llama-bench and a greedy completion on the pinned Q5_K_M" \
-            --model-path "$MODEL" -- env LLAMACPP_BASELINE_PHASE=run "$0" "$MODEL" "$OUT_DIR"
+            --model-path "$MODEL" --exclusive --gpu "$GATE_CARD" -- env LLAMACPP_BASELINE_PHASE=run "$0" "$MODEL" "$OUT_DIR"
     fi
 fi
 

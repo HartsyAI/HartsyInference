@@ -157,10 +157,12 @@ They are not the community submission protocol. Read [profiling methodology](../
 for kernel investigations and the [parity ledger](../docs/Checklists/PARITY_VERIFICATION.md) for numerical correctness.
 
 On the swarm box, `swarm_llm_bench/swarm_llm_bench.py` drives the engine through the live SwarmUI LLM Assistant API, and
-`swarm_llm_bench/dory_e2e_run.py` wraps it for Nemotron Dory: it holds a card lease from the box's GPU gate through
-`swarm_llm_bench/gpu_gate.py` (request, grant polling, heartbeat, release), verifies the pinned GGUF, runs greedy
-correctness probes at each loop count, then the bench at each loop count, and writes one summary under
-`results/dory/`. One command, run on the box itself, for a session longer than the gate's heartbeat timeout.
+`swarm_llm_bench/dory_e2e_run.py` wraps it for Nemotron Dory: it holds an exclusive card lease from the box's GPU gate
+through `swarm_llm_bench/gpu_gate.py` (request, grant polling, heartbeat, release; the same file wraps any box-side
+command in a lease), verifies the pinned GGUF, runs greedy correctness probes at each loop count over the voice
+websocket route, then the bench at each loop count, attributes every step to the card that served it, and writes one
+summary under `results/dory/`. One command, run on the box itself, for a session longer than the gate's heartbeat
+timeout.
 `swarm_llm_bench/llamacpp_dory_baseline.sh` is its llama.cpp counterpart: it verifies the same file, builds the
 Dory-capable llama.cpp branch with CUDA, then holds its own lease (through `gpu_gate.py`, which also wraps any other
 box-side command) while it runs `llama-bench` and a greedy completion of the same probe prompt, for the speed and quality
