@@ -194,6 +194,7 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
             tensor.Dispose();
         }
         _owned.Clear();
+        _residualRows = null;   // borrowed views of _audioEmbeddings, released above; ResidualRows throws after Dispose
     }
 
     /// <summary>The position embedding rows a block of <paramref name="steps"/> steps at <paramref name="position"/> adds, one

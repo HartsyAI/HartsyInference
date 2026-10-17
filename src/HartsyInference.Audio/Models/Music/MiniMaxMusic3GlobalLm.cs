@@ -227,6 +227,7 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         _semanticEnd?.Dispose();
         _semanticEnd = null;
         _embedTokens = null;
+        _semanticEmbed = null;   // a borrowed view of the released table: clear it so SemanticEmbedRows throws, not dangles
         _backbone.Dispose();
     }
 

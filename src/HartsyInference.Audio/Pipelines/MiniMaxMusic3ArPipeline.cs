@@ -190,6 +190,10 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
     /// is read back, so a batch bounds the device memory and the readbacks.</summary>
     private const int DeviceFrameRing = 256;
 
+    /// <summary>The first end-of-audio batch in the device loop. Each later batch doubles up to <see cref="DeviceFrameRing"/>,
+    /// so a short clip stops after a few extra frames instead of a whole ring.</summary>
+    private const int FirstDeviceBatchFrames = 16;
+
     /// <summary>The device-resident AR loop (opt-in: <c>numerics.mm3DeviceAr</c>). The semantic draw, the six residual draws, the
     /// depth embeddings, the feedback and the frame hiddens stay on the device. The end-of-audio check reads the codes once per
     /// <see cref="DeviceFrameRing"/> frames; frames at or after end-of-audio are dropped, so the output matches a per-frame check.
@@ -220,6 +224,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
             }
             float feedbackScale = 1f / MathF.Sqrt(codebooks);
             int cycleStart = 0;
+            int batchFrames = FirstDeviceBatchFrames;
             for (int frameIndex = 0; frameIndex <= frameLimit && !ended; frameIndex++)
             {
                 cancel.ThrowIfCancellationRequested();
@@ -281,11 +286,14 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
                 hiddens.Dispose();
                 hiddens = next;
 
-                bool batchEnd = (frameIndex + 1) % DeviceFrameRing == 0 || frameIndex == frameLimit;
+                // Batches double from FirstDeviceBatchFrames up to DeviceFrameRing. A batch never exceeds the ring, so its
+                // slots are distinct and each is read before the next batch overwrites it.
+                bool batchEnd = frameIndex - cycleStart + 1 == batchFrames || frameIndex == frameLimit;
                 if (batchEnd)
                 {
                     ended = FlushDeviceBatch(backend, tokens, cycleStart, frameIndex, pending, frames, frameLimit, onFrame, frameWidth);
                     cycleStart = frameIndex + 1;
+                    batchFrames = Math.Min(DeviceFrameRing, batchFrames * 2);
                 }
             }
         }
