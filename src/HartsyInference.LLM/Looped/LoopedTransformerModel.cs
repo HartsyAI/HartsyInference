@@ -125,29 +125,36 @@ public sealed class LoopedTransformerModel : IGenerationModel, IGraphDecodable
         return DecodeGrouped(embeds, looped);
     }
 
-    /// <summary>Runs one forward per distinct loop count over the rows that share it and gathers the results back into batch order.</summary>
+    /// <summary>Runs one forward per distinct loop count, lowest first, over the rows that share it and gathers the results back into batch order.</summary>
     private Tensor DecodeGrouped(Tensor embeds, LoopedSequenceState[] looped)
     {
         int n = looped.Length;
         int hidden = Info.HiddenSize;
-        List<int> order = [];
+        int[] order = new int[n];
+        int ordered = 0;
         List<Tensor> outputs = [];
         try
         {
-            foreach (int loops in looped.Select(s => s.Loops).Distinct().Order())
+            for (int loops = 1; loops <= Config.EffectiveMaxLoops; loops++)
             {
-                int[] members = Enumerable.Range(0, n).Where(b => looped[b].Loops == loops).ToArray();
-                int[] positions = new int[members.Length];
-                IKvCache[] caches = new IKvCache[members.Length];
-                for (int i = 0; i < members.Length; i++)
+                int count = 0;
+                for (int b = 0; b < n; b++) if (looped[b].Loops == loops) count++;
+                if (count == 0) continue;
+                int[] members = new int[count];
+                int[] positions = new int[count];
+                IKvCache[] caches = new IKvCache[count];
+                for (int b = 0, i = 0; b < n; b++)
                 {
-                    caches[i] = looped[members[i]];
-                    positions[i] = looped[members[i]].CurrentLength;
+                    if (looped[b].Loops != loops) continue;
+                    members[i] = b;
+                    caches[i] = looped[b];
+                    positions[i] = looped[b].CurrentLength;
+                    order[ordered++] = b;
+                    i++;
                 }
-                using Tensor groupEmbeds = new(new TensorShape(1, members.Length, hidden), DType.F32);
+                using Tensor groupEmbeds = new(new TensorShape(1, count, hidden), DType.F32);
                 _backend.GatherRows(groupEmbeds, embeds, members);
                 outputs.Add(_transformer.ForwardBatchDecode(_backend, groupEmbeds, positions, caches, loops));
-                order.AddRange(members);
             }
             using Tensor joined = new(new TensorShape(1, n, hidden), DType.F32);
             _backend.Concat(joined, [.. outputs], dim: 1);
