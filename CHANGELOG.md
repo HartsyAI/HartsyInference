@@ -6,12 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.377
+## alpha.378
 
 - **Changed: Qwen-Image 2.1 Turbo downloads Comfy-Org's single fused file.** The catalog fetched Qwen's two-shard diffusers
   release, which needs its split MLP re-fused. `qwen_image_2.1_turbo_bf16.safetensors` in `Comfy-Org/Qwen-Image-2.1` carries
   the same 265 BF16 tensors and fused MLP as the base build, so the converter passes it through. The `turbo` filename
   token still selects the Turbo variant. Not yet verified on a GPU.
+
+## alpha.377
+
+- **Fixed: an assistant turn's reasoning reaches the chat template.** `TextService` dropped `TextMessage.ReasoningContent` when it built the template's messages, so no template ever saw `reasoning_content`: a caller that sent a turn's reasoning back (the OpenAI-compatible route's `reasoning_content`, or a host replaying history) had it ignored. Templates that read the field, such as Qwen3's for the current turn's tool rounds and Muse Spark's `to=self` message, now render it as Hugging Face does. DeepSeek V4.1's renderer receives it too and shows it where that model keeps reasoning: in thinking mode, for a turn after the last user message, or for every turn when reasoning is not dropped. A turn without reasoning renders as before (`TextServiceReasoningContentTests`).
 
 ## alpha.376
 
