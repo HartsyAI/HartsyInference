@@ -86,6 +86,7 @@ public sealed record CheckpointHeader(
                 Name = key,
                 DType = source.DType,
                 Shape = ReverseNeOrder(source.Shape),
+                // For a split set this offset is into the part holding the tensor; byte reads go through GgufLoader, not this header.
                 DataOffset = source.AbsoluteOffset,
                 ByteLength = source.DType.ComputeByteCount(source.Shape.ElementCount),
             };

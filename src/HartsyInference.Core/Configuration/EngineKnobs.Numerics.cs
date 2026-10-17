@@ -41,6 +41,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> CsmCfgGraph =
         Bool("numerics.csmCfgGraph", true, KnobScope.Runtime, KnobDomain.Numerics, "Replays the CSM batched B=2 CFG backbone step as one captured CUDA graph instead of the eager batched step.");
 
+    /// <summary>Runs the CSM/HeartMuLa frame tail on the device (CFG blend, device sampler, depth embedding gather) with one code readback per frame.</summary>
+    public static readonly Knob<bool> CsmDeviceFrame =
+        Bool("numerics.csmDeviceFrame", false, KnobScope.Runtime, KnobDomain.Numerics, "Opt-in: runs the CSM/HeartMuLa frame tail on the device (CFG blend, device sampler, depth embedding gather), reading back one frame's codes at a time. Changes same-seed output; off keeps the host sampler.");
+
     /// <summary>Kill-switch for CUDA-graph replay of CSM's steady-state one-row backbone decode step; 0 keeps it eager.</summary>
     public static readonly Knob<bool> CsmGraph =
         Bool("numerics.csmGraph", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for CUDA-graph replay of CSM's steady-state one-row backbone decode step; 0 keeps it eager.");
@@ -140,6 +144,11 @@ public static partial class EngineKnobs
     /// <summary>Runs MiniMax-Music3's AR CFG cond+uncond rows as one batched step; 0 restores separate passes.</summary>
     public static readonly Knob<bool> Mm3CfgBatch =
         Bool("numerics.mm3CfgBatch", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs MiniMax-Music3's AR CFG cond+uncond rows as one batched step; 0 restores separate passes.");
+
+    /// <summary>Runs MiniMax Music 3's AR loop on the device: the semantic and residual draws, the depth embeddings, the feedback
+    /// and the frame hiddens stay resident, and the end-of-audio check reads codes once per 256 frames. Off keeps the host loop.</summary>
+    public static readonly Knob<bool> Mm3DeviceAr =
+        Bool("numerics.mm3DeviceAr", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs MiniMax Music 3's autoregressive loop on the device (draws, depth, feedback and frame hiddens resident; end-of-audio read once per 256 frames). Changes same-seed output; off keeps the host loop.");
 
     /// <summary>Also quantizes the MiniMax-Music3 depth decoder; off leaves it at checkpoint precision.</summary>
     public static readonly Knob<bool> Mm3DepthQuant =

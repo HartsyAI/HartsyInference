@@ -27,7 +27,9 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
 
     private readonly Layer[] _layers = new Layer[NumLayers];
     private readonly List<Tensor> _owned = [];
+    private readonly Dictionary<(int Batch, int Steps, int Position), Tensor> _positionRows = new();
     private Tensor? _audioEmbeddings;
+    private Tensor[]? _residualRows;   // borrowed per-codebook views of _audioEmbeddings, for the device loop
     private Tensor? _projection;
     private Tensor? _positionEmbedding;
     private Tensor? _finalNorm;
@@ -51,6 +53,11 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         // The checkpoint is BF16. The embedding tables and the norm weights are read directly rather than through
         // a backend op, so they are widened here; the projections keep their dtype for the matmul path.
         _audioEmbeddings = Widen(weights["audio_embeddings.weight"]);
+        _residualRows = new Tensor[NumCodebooks - 1];
+        for (int index = 1; index < NumCodebooks; index++)
+        {
+            _residualRows[index - 1] = ViewRows(_audioEmbeddings, (index - 1) * AudioVocabSize, AudioVocabSize);
+        }
         _projection = weights["projection.weight"];
         _positionEmbedding = Widen(weights["pos_embedding.weight"]);
         _finalNorm = Widen(weights["norm.weight"]);
@@ -114,19 +121,10 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         int steps = (int)sequence.Shape[1];
         int position = cache.Length;
 
+        // The position embedding is added on the device against a per-shape table, so the depth step does not read the
+        // sequence back to the host. One float add per element, the same arithmetic as the host loop it replaces.
         Tensor hidden = new Tensor(sequence.Shape, DType.F32);
-        float* destination = (float*)hidden.DataPointer;
-        ReadOnlySpan<float> source = sequence.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> positions = _positionEmbedding!.AsReadOnlySpan<float>();
-        for (int row = 0; row < batch * steps; row++)
-        {
-            int step = position + (row % steps);
-            for (int channel = 0; channel < HiddenSize; channel++)
-            {
-                destination[((long)row * HiddenSize) + channel] =
-                    source[(row * HiddenSize) + channel] + positions[(step * HiddenSize) + channel];
-            }
-        }
+        backend.Add(hidden, sequence, PositionRows(backend, batch, steps, position));
 
         for (int index = 0; index < _layers.Length; index++)
         {
@@ -147,6 +145,21 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
         Tensor logits = new Tensor(new TensorShape((int)hidden.Shape[0], AudioVocabSize), DType.F32);
         backend.Linear(logits, hidden, _audioHeads[index - 1]!, null);
         return logits;
+    }
+
+    /// <summary>The embedding rows of residual codebook <paramref name="index"/> (1-based) as a borrowed view, so a device gather
+    /// takes the code directly as its row. The device loop preloads these views explicitly.</summary>
+    public Tensor ResidualRows(int index)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(index, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, NumCodebooks);
+        return _residualRows?[index - 1] ?? throw new InvalidOperationException("MiniMax Music 3 depth weights are not loaded.");
+    }
+
+    private static Tensor ViewRows(Tensor table, int firstRow, int count)
+    {
+        float* start = (float*)table.DataPointer + ((long)firstRow * HiddenSize);
+        return new Tensor(start, new TensorShape(count, HiddenSize), DType.F32);
     }
 
     /// <summary>Every loaded weight, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/>.</summary>
@@ -181,6 +194,30 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
             tensor.Dispose();
         }
         _owned.Clear();
+        _residualRows = null;   // borrowed views of _audioEmbeddings, released above; ResidualRows throws after Dispose
+    }
+
+    /// <summary>The position embedding rows a block of <paramref name="steps"/> steps at <paramref name="position"/> adds, one
+    /// <c>[steps, 4096]</c> row per batch entry, uploaded to the device once and reused for every later call of that shape.</summary>
+    private Tensor PositionRows(IBackend backend, int batch, int steps, int position)
+    {
+        (int Batch, int Steps, int Position) key = (batch, steps, position);
+        if (_positionRows.TryGetValue(key, out Tensor? cached))
+        {
+            return cached;
+        }
+        Tensor rows = new Tensor(new TensorShape(batch, steps, HiddenSize), DType.F32);
+        Span<float> destination = rows.AsSpan<float>();
+        ReadOnlySpan<float> positions = _positionEmbedding!.AsReadOnlySpan<float>();
+        for (int row = 0; row < batch * steps; row++)
+        {
+            int step = position + (row % steps);
+            positions.Slice(step * HiddenSize, HiddenSize).CopyTo(destination.Slice(row * HiddenSize, HiddenSize));
+        }
+        backend.PreloadWeights([rows]);
+        _positionRows[key] = rows;
+        _owned.Add(rows);
+        return rows;
     }
 
     /// <summary>Returns an F32 view of <paramref name="tensor"/>, tracking the cast for disposal when one happens.</summary>

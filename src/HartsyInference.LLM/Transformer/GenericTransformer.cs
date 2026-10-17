@@ -95,37 +95,10 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     /// <remarks>A ComfyUI <c>int8_tensorwise</c> weight keeps its dequant scale on <see cref="Tensor.QuantInfo"/>,
     /// indexed by exactly the rows a concatenation renumbers, so the fused copy would be raw int8 with no scale.
     /// Fusion is a decode-time dispatch saving; the separate projections are already the packed-weight fast path.</remarks>
-    private static bool Fusable(params Tensor?[] parts)
-    {
-        foreach (Tensor? part in parts)
-        {
-            if (part?.QuantInfo is not null) return false;
-        }
-        return true;
-    }
+    private static bool Fusable(params Tensor?[] parts) => ProjectionOps.Fusable(parts);
 
     /// <summary>Concatenates weight (<c>[N,K]</c>) or bias (<c>[N]</c>) tensors along dim 0 (output rows) via a plain byte-level copy — correct for any dtype, including block-quantized formats, since a GGUF/our quant block never spans two output rows. Load-time only, used to fuse separate Q/K/V or gate/up projections into a single larger GEMV dispatch. All parts must share dtype and (for 2D) K.</summary>
-    private static Tensor ConcatRows(params Tensor[] parts)
-    {
-        DType dt = parts[0].DType;
-        long elementsPerRow = parts[0].ElementCount / parts[0].Shape[0];
-        long totalRows = 0;
-        foreach (Tensor p in parts) totalRows += p.Shape[0];
-        TensorShape outShape = parts[0].Shape.Rank == 1 ? new TensorShape(totalRows)
-            : new TensorShape(totalRows, parts[0].Shape[1]);
-        Tensor result = new(outShape, dt);
-        long rowBytes = dt.ComputeByteCount(elementsPerRow);
-        byte* dst = (byte*)result.DataPointer;
-        long offset = 0;
-        foreach (Tensor p in parts)
-        {
-            byte* src = (byte*)p.DataPointer;
-            long bytes = p.Shape[0] * rowBytes;
-            Buffer.MemoryCopy(src, dst + offset, bytes, bytes);
-            offset += bytes;
-        }
-        return result;
-    }
+    private static Tensor ConcatRows(params Tensor[] parts) => ProjectionOps.ConcatRows(parts);
 
     /// <summary>Loads an RMSNorm weight to F32, optionally baking Gemma's <c>(1 + weight)</c> offset into a fresh tensor so the runtime norm op is the standard one and no borrowed GGUF mmap/cached weight is mutated in place.</summary>
     private static Tensor LoadNorm(Tensor t, bool addOne) => NormWeights.Load(t, addOne);
@@ -1077,31 +1050,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         // per-dtype dispatch: a blanket %256 here silently sent every model with hidden ≡ 128 (mod 256) — e.g.
         // qwen2.5-0.5b (896) and gemma3-1b (1152), whose heads are Q8_0 — down the dequant-to-F16-then-cuBLAS
         // route EVERY token; nsys measured that at 55% of qwen2.5-0.5b's total decode GPU time (2026-07-22).
-        bool fusedHead = t <= 8
-            && (((headW.DType == DType.Q4_K || headW.DType == DType.Q5_K || headW.DType == DType.Q6_K)
-            && _cfg.HiddenSize % 256 == 0)
-            || ((headW.DType == DType.Q8_0 || headW.DType == DType.Q4_0 || headW.DType == DType.Q5_0)
-            && _cfg.HiddenSize % 32 == 0));
-        if (fusedHead)
-        {
-            Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
-        }
-        else if (_cfg.LowVramQuant && headW.DType.IsQuantized)
-        {
-            // Large-vocab heads (GLM-4 = 151k, Qwen = 152k) are the biggest single weight. With an F32 hidden the
-            // GEMM dtype resolves to BF16, whose dequant stages a full-size F32 temp (≈2.4 GB for a 151k×4096 head)
-            // on top of the F16 dequant — OOM on a 12 GB card. Casting the tiny hidden to F16 makes the GEMM resolve
-            // to F16 directly (one ≈1.2 GB dequant, no F32 staging). Logits never reach the SwiGLU-intermediate
-            // magnitudes that motivate BF16 elsewhere, so F16 is numerically safe here.
-            Tensor hidF16 = new(hidden.Shape, DType.F16);
-            backend.CastToF16(hidF16, hidden);
-            backend.QuantizedMatMul(logits, hidF16, headW, bias: null);
-            hidF16.Dispose();
-        }
-        else
-        {
-            Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
-        }
+        ProjectionOps.ProjectHead(backend, logits, hidden, headW, _cfg.HiddenSize, t, _cfg.LowVramQuant);
         // Granite divides the logits by logit_scale.
         if (_cfg.LogitScale != 1f) backend.Scale(logits, logits, 1f / _cfg.LogitScale);
         // Gemma-2 final-logit soft-cap: cap·tanh(logit/cap), elementwise in place.
@@ -1186,27 +1135,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     /// unconditionally — unlike <see cref="MakeResident"/>, which leaves a borrowable source's disposal to its
     /// own caller.</summary>
     private static (Tensor Cos, Tensor Sin) MakeRopeTableResident(IBackend backend, Tensor cos, Tensor sin)
-    {
-        Tensor residentCos = new(cos.Shape, DType.F32);
-        Tensor residentSin = new(sin.Shape, DType.F32);
-        try
-        {
-            backend.Scale(residentCos, cos, 1f);
-            backend.Scale(residentSin, sin, 1f);
-        }
-        catch
-        {
-            residentCos.Dispose();
-            residentSin.Dispose();
-            throw;
-        }
-        finally
-        {
-            cos.Dispose();
-            sin.Dispose();
-        }
-        return (residentCos, residentSin);
-    }
+        => ProjectionOps.MakeRopeTableResident(backend, cos, sin);
 
     /// <summary>Uploads <paramref name="source"/> once via a cheap, backend-agnostic <c>Scale(_, _, 1f)</c>
     /// identity op and returns the resident replacement — its output gets the ordinary <c>CacheActivation</c>
@@ -1216,20 +1145,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     /// and the measurements). Disposes the half-built resident tensor and rethrows on failure so nothing leaks;
     /// <paramref name="source"/>'s own disposal is the caller's — it may be borrowed, not owned, at the call
     /// site, and this helper neither knows nor assumes.</summary>
-    private static Tensor MakeResident(IBackend backend, Tensor source)
-    {
-        Tensor resident = new(source.Shape, DType.F32);
-        try
-        {
-            backend.Scale(resident, source, 1f);
-        }
-        catch
-        {
-            resident.Dispose();
-            throw;
-        }
-        return resident;
-    }
+    private static Tensor MakeResident(IBackend backend, Tensor source) => ProjectionOps.MakeResident(backend, source);
 
     private void ThrowIfDisposed()
     {

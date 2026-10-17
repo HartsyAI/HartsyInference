@@ -145,9 +145,7 @@ public sealed class TextPackageDiscoveryTests : IDisposable
         Assert.Equal(3, split.Files.Count);
         Assert.Equal("qwen-00001-of-00003.gguf", Path.GetFileName(split.EntryPath));
         Assert.Equal(9, split.TotalBytes);
-        Assert.DoesNotContain(split.Problems, p => p.StartsWith("missing part", StringComparison.Ordinal));
-        // The loader reads single files only, so a split is not loadable as it stands.
-        Assert.Contains(split.Problems, p => p.Contains("merge the parts", StringComparison.Ordinal));
+        Assert.Empty(split.Problems);
 
         TextModelPackage partial = Find(_root, "llm/partial");
         Assert.Equal(TextPackageFormat.SplitGguf, partial.Format);

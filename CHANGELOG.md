@@ -6,9 +6,47 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## Unreleased
+## alpha.378
 
 - **Changed: FLUX.3 runs its block loop in F16 on CUDA** (`numerics.ditF16`, on by default). Each embedded stream and each block's gate are scaled by `ChromaF16.ResidualDamp`, and the stream returns to F32 for the final layer. The CPU backend and any backend without F16 activation kernels keep F32, and `--set numerics.ditF16=false` restores the F32 path everywhere. Real-weight numerics and Swarm speed are not yet verified, so this stays Unreleased.
+- **Added: NVIDIA Nemotron Dory 1.0 4B, a looped (latent-recurrent) decoder, with a runtime loop dial.** `LoopedTransformer`
+  runs llama.cpp's `dory` GGUF (ggml-org/llama.cpp#30306) through the shared backend ops: an input block, a recurrent block whose
+  weights are applied 1 to 4 times per request with the input block's output re-injected and unit-normed before every pass, and an
+  output block. Every physical layer is a single sublayer (sliding-window attention, full attention or a gated MLP) joined to the
+  residual by normalized-GPT's hypersphere interpolation; the learned scale vectors are baked to their effective values at load.
+  Both cache modes are supported: `per_loop` (the checkpoint default, one key/value slot per recurrent attention layer and loop) and
+  `last_loop` (one slot, overwritten by every pass). The loop count is per request: `TextRequest.Loops`, the OpenAI route's `loops`
+  body field and `hartsy text --loops`; a conversation's retained prefix is reused only by requests with the same count. Batched
+  decode groups sequences by loop count, prompt-lookup speculation and the CUDA graph decode step are wired, and the catalog
+  entry `dory` pins the Q5_K_M release. Checked on synthetic weights against a scalar double-precision reference of the model
+  (both cache modes, chunked prefill, batched decode); the real checkpoint has not been run yet.
+- **Added: split GGUF sets load as one model.** A llama.cpp split (`stem-NNNNN-of-NNNNN.gguf`) is read from any part: every part is mapped, its tensors are indexed together, and the set is checked for completeness, part order and tensor count. The loader used to refuse split files and ask for a `llama-gguf-split` merge.
+
+## alpha.377
+
+- **Fixed: an assistant turn's reasoning reaches the chat template.** `TextService` dropped `TextMessage.ReasoningContent` when it built the template's messages, so no template ever saw `reasoning_content`: a caller that sent a turn's reasoning back (the OpenAI-compatible route's `reasoning_content`, or a host replaying history) had it ignored. Templates that read the field, such as Qwen3's for the current turn's tool rounds and Muse Spark's `to=self` message, now render it as Hugging Face does. DeepSeek V4.1's renderer receives it too and shows it where that model keeps reasoning: in thinking mode, for a turn after the last user message, or for every turn when reasoning is not dropped. A turn without reasoning renders as before (`TextServiceReasoningContentTests`).
+
+## alpha.376
+
+- **Fixed: Kokoro's Hindi voices read Latin words, as espeak-ng does.** Hindi's script has no Latin letter rules, so an English word in Hindi text phonemized to nothing. An English sentence through `hf_*` or `hm_*` reached the model as about half a second of near-silence (espeak-ng 1.52 reads those words with its English dictionary). Latin-script words in Hindi text now phonemize with the English voice, and Devanagari runs keep the Hindi voice. Output for Hindi text without Latin letters is unchanged. The other Kokoro languages are unchanged.
+- **Fixed: Kokoro's French voices read the English words espeak-ng switches to English.** espeak-ng 1.52 reads some English words inside French text with its English voice. Our French reading dropped them, leaving blanks (for example "The quick brown", "over", "lazy"). Those words now read as English. The switch follows espeak's per-word decision: the word's dictionary entry, or else its rules with prefix and suffix stripping, emit the language-switch phoneme. Checked against espeak-ng 1.52 on 3,000 English words, French agrees on all 948 words espeak reads in English. Native French is unchanged: all 89 French parity-fixture sentences are byte-identical.
+- **Fixed: HeartMuLa's quantized load keeps about 2 GB less host RAM.** The audio-embedding split borrows the
+  checkpoint's rows instead of widening all eight codebook tables to F32, the quantized embed tables stay F16 rather
+  than being widened at load, and the transposed audio heads are released once the GGUF cache owns the weights.
+  Peak anonymous RSS on a 30 s q8 song fell from 5.5 GB to 3.1 GB with bit-identical output.
+- **Added (opt-in): HeartMuLa's frame tail can run on the device.** `numerics.csmDeviceFrame=true` keeps the CFG blend,
+  the codebook draws and the depth-step embeddings resident, and reads each frame's eight codes back once instead of
+  once per codebook. The draws use the device sampler, so same-seed songs differ from the host sampler. It is off by
+  default until it has a teacher-forced parity check and a host-versus-device distribution check. Frame time on the
+  3060 at q8 is the same as the host sampler's.
+- **Changed: the Q8 decode GEMV reads each weight row once for the CFG pair.** `mul_mat_vec_q8_0_q8_1` and its K-split
+  variant accumulate up to four activation rows in one weight pass, with each row's arithmetic and reduction order
+  unchanged, so outputs are bit-identical. HeartMuLa q8 on the 3060 runs at about 32 ms per frame, down from 41. The
+  change is faster on the CFG pair only; single-row calls are unchanged.
+- **Added: Vulkan gathers F16 and BF16 embedding tables.** `EmbedGatherDecodeStep` picks a shader from the table dtype.
+  F32 output is bit-identical to the CUDA kernel.
+- **Fixed: the CUDA PTX build emits ISA 9.0 with any toolchain.** nvcc from CUDA 13 emits 9.3, which the driver cannot
+  JIT, so such kernels are recompiled through nvrtc. A check script fails on any shipped PTX above 9.0.
 - **Fixed: Whisper decodes a sung passage to its words instead of music-note symbols.** The greedy decoder now applies the checkpoint's own `suppress_tokens` (every step) and `begin_suppress_tokens` (first step) from its `generation_config.json`, as Hugging Face does. Without them a sung clip came back as `♪♪♪`, which the HF defaults transcribe to its words. Checkpoints with no such file decode as before. A corrupt `generation_config.json` falls back to no suppression with a warning rather than failing the load. Some songs can score slightly lower: tiny on `acestep-base` went from 0.90 to 0.70 lyric recall, while the larger models gain.
 - **Added: Fish-Speech 1.4 as a variant of `fishspeech`** (`fishspeech:fish-speech-1.4`). The 1.4 checkpoint uses its own layout: the HF `tokenizer.json`, the single `<|semantic|>` sentinel, one-based codebook values, the plain chat prompt, and upstream's `clean_text`, all matching fish-speech v1.4.3. Status is structural: the tokenizer ids match HF `tokenizers`, but there is no real-weight or Swarm run yet.
 - **Added: HF `Digits` and `Punctuation` pre-tokenizer stages.** Digits split one by one (or as runs when `individual_digits` is false). Punctuation isolates Unicode P* and ASCII punctuation; other symbols stay grouped, as HF does. The fish-speech-1.4 tokenizer needs both.

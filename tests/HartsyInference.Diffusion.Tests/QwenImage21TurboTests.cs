@@ -1,8 +1,10 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Engine;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -37,6 +39,16 @@ public sealed unsafe class QwenImage21TurboTests : IDisposable
     {
         ResolvedModelVariant resolved = ModelVariantResolver.Classify(QwenImage21Variants.Catalog, Probe(fileName), []);
         Assert.Equal(expected, resolved.Id);
+    }
+
+    /// <summary>The catalog downloads Comfy-Org's single fused file, not Qwen's two shards, and its name keeps the token that selects the Turbo variant.</summary>
+    [Fact]
+    public void CatalogDownloadsTheComfyFusedTurboFile()
+    {
+        ModelAsset transformer = ModelCatalog.Find("qwen-image-2.1-turbo")!.Assets.Single(a => a.Role == "transformer");
+        Assert.Equal("Comfy-Org/Qwen-Image-2.1", transformer.Repo);
+        Assert.Equal("diffusion_models/qwen_image_2.1_turbo_bf16.safetensors", transformer.RepoPath);
+        Assert.Contains("turbo", Path.GetFileName(transformer.RepoPath), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

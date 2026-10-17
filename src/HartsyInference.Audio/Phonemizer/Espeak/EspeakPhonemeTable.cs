@@ -63,6 +63,16 @@ internal sealed class EspeakPhonemeTable
         return sb.ToString();
     }
 
+    /// <summary>The code of the phoneme whose mnemonic text is <paramref name="text"/> (e.g. <c>_^_</c>, the language
+    /// switch), or -1 when the table has no such phoneme.</summary>
+    public int CodeForText(string text)
+    {
+        for (int code = 0; code <= MaxCode; code++)
+            if (TryGet((byte)code, out EspeakPhoneme ph) && ph.MnemonicText == text)
+                return code;
+        return -1;
+    }
+
     /// <summary>Looks up the code for a packed mnemonic (espeak <c>PhonemeCode</c>), or 0 when not found.</summary>
     public int CodeForMnemonic(uint mnemonic)
     {

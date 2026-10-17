@@ -143,6 +143,7 @@ public static class GenerationDispatch
             GraphDecode = parameters.GetBool("graph-decode", false) ? true : null,
             EnableThinking = parameters.GetStringOrNull("thinking") is { Length: > 0 } thinking ? bool.Parse(thinking) : null,
             ReasoningEffort = ParseReasoningEffort(parameters.GetStringOrNull("reasoning-effort")),
+            Loops = parameters.GetIntOrNull("loops"),
             // TextService.LoadInto only checks LowVramQuant for non-empty (a bool-shaped toggle, not an actual
             // target quant selector), so any non-empty sentinel works here — see its doc comment.
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,

@@ -57,6 +57,22 @@ public static class ModelCatalog
                         Sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5" },
                 },
             },
+            // NVIDIA Nemotron Dory 1.0 4B: looped (latent-recurrent) normalized-GPT decoder, 8/20/8 input/recurrent/output blocks
+            // (each block counted in attention+MLP pairs; 72 single-sublayer physical layers), hybrid sliding-window/full attention,
+            // the recurrent block dialled at runtime to 1-4 passes (`--loops` / `loops`). ValidationPending: the pinned Q5_K_M has not
+            // been run on real weights yet (see MODEL_STATUS_LLM.md).
+            new CatalogEntry
+            {
+                Id = "dory", Modality = txt, DisplayName = "Nemotron Dory 1.0 (4B looped)",
+                Architecture = "looped nGPT transformer: shared recurrent block run 1-4 times per request, hybrid SWA/full attention, per-loop or last-loop KV cache",
+                Status = vp, CliDrivable = true, HuggingFaceRepo = "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B",
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-GGUF", RepoPath = "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf",
+                        TargetSubdir = "LLM/dory", Role = "transformer",
+                        Sha256 = "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0" },
+                },
+            },
             // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). ValidationPending: the pinned Q4_K_M has not been run (see MODEL_STATUS_LLM.md).
             new CatalogEntry
             {
@@ -680,21 +696,17 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                // Qwen/Qwen-Image-2.1-Turbo: the step-distilled transformer, published by Qwen in diffusers layout (two
-                // safetensors shards). The shards are renamed on the way in so the variant resolver reads "turbo" from
-                // the file name, and ShardSetDiscovery finds the sibling shard from either one. Its text encoder and VAE
-                // are the Comfy-Org builds the base 2.1 entry uses: the Turbo repo's own copies are diffusers-keyed, which
-                // the engine's loaders do not read.
+                // The step-distilled Turbo transformer as a single fused bf16 file from Comfy-Org, the same layout as the base 2.1
+                // build. The file name carries "turbo", which the variant resolver reads. Qwen's own diffusers release is two
+                // shards with a split MLP, so it is not used here. Its text encoder and VAE are the Comfy-Org builds the base 2.1
+                // entry uses.
                 Id = "qwen-image-2.1-turbo", Modality = img, DisplayName = "Qwen-Image 2.1 Turbo", Architecture = "Single-stream DiT (Qwen3-VL-8B), 8-step distilled",
                 Status = vp,
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "Qwen/Qwen-Image-2.1-Turbo", RepoPath = "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
-                        TargetSubdir = "diffusion_models", TargetName = "Qwen-Image-2.1-Turbo-00001-of-00002.safetensors", Role = "transformer",
-                        Sha256 = "6cccd922767f01694461bdcf1f34ea7b771f3442e4d5e338ea9aa55277431cc0" },
-                    new() { Repo = "Qwen/Qwen-Image-2.1-Turbo", RepoPath = "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
-                        TargetSubdir = "diffusion_models", TargetName = "Qwen-Image-2.1-Turbo-00002-of-00002.safetensors", Role = "transformer",
-                        Sha256 = "69f53ebb063d2f606bdaff7e22e0e2144f28d978d73dc75e6e4293fc5982eab5" },
+                    new() { Repo = "Comfy-Org/Qwen-Image-2.1", RepoPath = "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "8b74237a7f505773e2c66726fa696444b4c704585c93a347cff9044937f7914a" },
                     SideModels.Qwen3VL_8B_QwenImage21,
                     SideModels.QwenImage21Vae,
                 },

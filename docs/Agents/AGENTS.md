@@ -35,9 +35,10 @@ commit message or PR body, and none in the changelog.
      included) against the branch, interleaved on the same seeds, reporting wall clock, per-step ms, VRAM and
      SSIM or raw-pixel digest per pair, via `tests/regression-ab.sh`. State up front whether the expectation
      is identical (refactor) or bounded (numerics change, with a floor and a reason). Table goes in the PR body.
-4. Final pass: comment/doc cleanup, a `## alpha.N` section in `CHANGELOG.md`, and the matching
-   `Directory.Build.props` `VersionSuffix` bump — one per PR, docs-only PRs skip both. The bump is not
-   optional for code: the engine version is what the SwarmUI extension's NuGet pin resolves against.
+4. Final pass: comment/doc cleanup. Bump only for a new feature or a large bug fix: then add a `## alpha.N` section
+   in `CHANGELOG.md` and the matching `Directory.Build.props` `VersionSuffix` bump, one per PR. Small changes,
+   docs-only ones included, skip both. A merge to `main` that touches `src/` publishes whatever version is already
+   set, so a small change ships with the next bump and its changelog section.
 5. Mark ready for review. `claude-code-review.yml` reviews on open, on each push and on ready; the Codex
    connector reviews independently. A Codex usage-limit note means no review happened — comment
    `@claude review pr` on the PR and wait for `claude[bot]`.

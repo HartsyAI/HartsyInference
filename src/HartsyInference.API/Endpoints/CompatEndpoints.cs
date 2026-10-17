@@ -374,6 +374,7 @@ public static class CompatEndpoints
             MaxTokens = req.MaxTokens ?? 4096,
             Seed = req.Seed.HasValue ? (long)req.Seed.Value : -1,
             ReasoningEffort = ParseReasoningEffort(req.ReasoningEffort),
+            Loops = ParseLoops(req.Loops),
             EnableThinking = ResolveThinking(req.Thinking, req.ChatTemplateKwargs),
             User = req.User,
             Priority = ParsePriority(req.Priority),
@@ -495,6 +496,14 @@ public static class CompatEndpoints
                 throw new HartsyInferenceException($"The images in one request decode to more than {MaxRequestImageBytes / (1024 * 1024)} MiB together. Send fewer or smaller images.");
         }
     }
+
+    /// <summary>The <c>loops</c> body field: null when absent, else a positive count (the model's own maximum is enforced at generation).</summary>
+    internal static int? ParseLoops(int? loops) => loops switch
+    {
+        null => null,
+        >= 1 => loops,
+        _ => throw new ArgumentException("loops must be a positive integer (the recurrent-block pass count of a looped model)."),
+    };
 
     /// <summary>OpenAI <c>reasoning_effort</c>: a name the engine defines (<c>low</c>, <c>high</c>, <c>max</c>) or an integer in [1, 100]. A string or a number is read
     /// by <see cref="EncodeOptions.ParseReasoningEffort"/>, the parser the CLI uses; anything else is the caller's error.</summary>

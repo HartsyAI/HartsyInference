@@ -18,6 +18,11 @@ public interface IGenerationModel : IDisposable
     /// <summary>Creates an empty sequence sized by <paramref name="options"/>; the caller disposes it.</summary>
     ISequenceState CreateSequenceState(SequenceStateOptions options);
 
+    /// <summary>Whether a sequence this model created earlier may serve a request that would create it with <paramref name="options"/>:
+    /// false when the state's shape no longer matches the request (a looped model asked for another loop count), so the driver
+    /// discards the retained state instead of reusing keys computed under a different configuration. True by default.</summary>
+    bool AcceptsRetainedState(ISequenceState state, in SequenceStateOptions options) => true;
+
     /// <summary>A new sequence with room for <paramref name="capacity"/> tokens holding a device copy of
     /// <paramref name="state"/>'s committed tokens, or null when this model's state cannot be copied that way.
     /// <paramref name="state"/> is left unchanged and still owned by the caller, who also disposes the copy.</summary>

@@ -20,6 +20,40 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakPhonemeList? _plist;
     private readonly EspeakPhonemeRenderer? _renderer;
 
+    // espeak-ng's language-switch phoneme (phonSWITCH, code 21 in the espeak-ng-data phoneme tables).
+    private const string LanguageSwitchMnemonic = "_^_";
+    private readonly int _switchCode;
+
+    /// <summary>The codes espeak-ng's word translation gives <paramref name="word"/> read on its own: the dictionary
+    /// entry, else the rules with prefix and suffix stripping and stem re-translation, as in a clause.</summary>
+    internal List<byte> WordCodes(string word)
+    {
+        ArgumentNullException.ThrowIfNull(word);
+        ClauseState state = new() { Numbers = new EspeakNumbers(_lookup, _phon, _options) };
+        return PhonemizeWord(word, [word.ToLowerInvariant()], 0, state, out _);
+    }
+
+    /// <summary>Whether espeak-ng reads <paramref name="word"/> in English: its word translation (the dictionary entry,
+    /// else the rules with prefix and suffix stripping and stem re-translation, as in a clause) emits the
+    /// language-switch phoneme. A dictionary entry whose switch is followed by further phonemes names another language
+    /// (Italian <c>barbecue</c> is read in French), so such a switch is not English and is left to this voice.
+    /// Only that exception is inferred: the target language is not read from the phoneme codes, and the one
+    /// non-English switch observed so far is <c>barbecue</c>.</summary>
+    public bool SwitchesToEnglish(string word)
+    {
+        ArgumentNullException.ThrowIfNull(word);
+        if (_switchCode < 0) return false;
+        // espeak-ng reads the parts of a hyphenated word as separate words (libespeak: "e-mail" reads "e" in French and
+        // "mail" in English), so a switch in any part makes the token switch. The part itself is not split here: a
+        // switched token is read whole in English, so the French part of "e-mail" is read in English too.
+        if (word.Contains('-'))
+            return word.Split('-', StringSplitOptions.RemoveEmptyEntries).Any(SwitchesToEnglish);
+        if (!WordCodes(word).Contains((byte)_switchCode)) return false;
+        string lower = word.ToLowerInvariant();
+        return !(_lookup.Lookup(lower, out EspeakLookupResult entry) && entry.Phonemes.Count > 1
+            && entry.Phonemes.Contains((byte)_switchCode));
+    }
+
     private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakLanguageOptions options, IReadOnlyList<(string From, string To)> replacements, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index, bool spellsLetters)
     {
         _lookup = lookup;
@@ -31,6 +65,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
         _ipa = ipa;
         _variant = variant;
         _spellsLetters = spellsLetters;
+        _switchCode = phon.CodeForText(LanguageSwitchMnemonic);
         if (index is not null)
         {
             // Exact allophone + IPA path: run espeak's phoneme-program VM over the clause phoneme list.
