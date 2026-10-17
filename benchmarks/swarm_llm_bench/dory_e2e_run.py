@@ -16,11 +16,12 @@ Outputs in --out-dir: dory_probes.json (every probe reply in full), swarm_llm_do
 file and console per loop count) and dory_e2e_summary.json; the summary table is also printed.
 
 The lease covers one card. The probes name it (--device-map); the bench goes through the websocket chat route, which runs on
-the LLM Assistant backend's own device, so each bench run is attributed from nvidia-smi (the bench reloads the model, so the
-card whose compute-app memory grows is the one serving) and a run served from any other card, or one that cannot be
-attributed while nvidia-smi is present, is rejected. If that happens, point the local backend at the leased card or ask the
-gate for the card it uses. A failed probe, a failed bench, a rejected card or a lost lease fails the run: exit 1 and the
-lease released as failed.
+the LLM Assistant backend's own device, so each bench run is attributed from nvidia-smi: the model is unloaded first and
+compute-app memory is sampled throughout the run, so the card whose use grows the most while the bench reloads the model is
+the one serving. A run served from any other card, or one that cannot be attributed while nvidia-smi is present, is
+rejected. If that happens, point the local backend at the leased card or ask the gate for the card it uses. A probe or
+bench in flight when the lease is lost is abandoned and its reply never accepted. A failed probe, a failed bench, a
+rejected card or a lost lease fails the run: exit 1 and the lease released as failed.
 """
 import argparse
 import datetime
@@ -30,6 +31,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -112,13 +114,78 @@ def nvidia_smi_apps():
     return used
 
 
-def busiest_delta(before, after):
-    """The gpu index whose compute-app memory grew the most between two samples, or None."""
-    if not before and not after:
-        return None
-    deltas = {gpu: (after or {}).get(gpu, 0) - (before or {}).get(gpu, 0) for gpu in set(before or {}) | set(after or {})}
-    gpu, delta = max(deltas.items(), key=lambda kv: kv[1], default=(None, 0))
-    return gpu if delta >= 32 else None
+def largest_growth(lows, highs, floor_mib=32):
+    """The gpu index whose compute-app memory grew the most between its lowest and highest sample, or None below floor_mib."""
+    growth = {gpu: highs.get(gpu, 0) - lows.get(gpu, 0) for gpu in set(lows) | set(highs)}
+    gpu, delta = max(growth.items(), key=lambda kv: kv[1], default=(None, 0))
+    return gpu if delta >= floor_mib else None
+
+
+class GpuUseSampler:
+    """Samples compute-app memory per gpu index while a step runs, keeping each card's lowest and highest reading; served()
+    is the card whose use grew the most during the step. The bench unloads and reloads the model, and the runner unloads it
+    before the baseline, so the serving card's growth is the model's size while the others stay flat. available is False
+    without nvidia-smi, when no attribution is possible."""
+
+    def __init__(self, interval_s=0.5):
+        self.interval_s = interval_s
+        self.lows, self.highs = {}, {}
+        self.available = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _sample(self):
+        used = nvidia_smi_apps()
+        if used is None:
+            return
+        self.available = True
+        for gpu in set(used) | set(self.lows):
+            value = used.get(gpu, 0)
+            self.lows[gpu] = min(self.lows.get(gpu, value), value)
+            self.highs[gpu] = max(self.highs.get(gpu, value), value)
+
+    def __enter__(self):
+        self._sample()
+        self._stop.clear()
+
+        def loop():
+            while not self._stop.wait(self.interval_s):
+                self._sample()
+
+        self._thread = threading.Thread(target=loop, name="gpu-use-sampler", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self._sample()
+        return False
+
+    def served(self):
+        return largest_growth(self.lows, self.highs)
+
+
+def post_under_lease(base, path, payload, lease, timeout=600):
+    """Issues one SwarmUI request while watching the lease: a lease lost while the request is in flight abandons the wait, and a
+    reply that lands after the loss is never accepted; either way the step fails. Returns the reply dict (success false on error)."""
+    outcome = {}
+
+    def work():
+        try:
+            outcome["reply"] = http_post(base, path, payload, timeout=timeout)
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            outcome["error"] = repr(e)
+
+    worker = threading.Thread(target=work, name="swarm-request", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        if lease is not None and lease.lost:
+            return {"success": False, "error": "lease lost during the request; abandoned"}
+        worker.join(0.5)
+    if lease is not None and lease.lost:
+        return {"success": False, "error": "lease lost during the request; reply rejected"}
+    return outcome.get("reply") or {"success": False, "error": outcome.get("error", "no reply")}
 
 
 def run_probe(base, sid, loops, device, lease):
@@ -131,10 +198,7 @@ def run_probe(base, sid, loops, device, lease):
     if lease is not None:
         lease.check_alive()
     started = time.monotonic()
-    try:
-        reply = http_post(base, "/API/LLMAssistantSendMessage", payload)
-    except (urllib.error.URLError, json.JSONDecodeError) as e:
-        reply = {"success": False, "error": repr(e)}
+    reply = post_under_lease(base, "/API/LLMAssistantSendMessage", payload, lease)
     elapsed = time.monotonic() - started
     result = {"loops": loops, "device": device, "elapsed_s": round(elapsed, 2), "success": bool(reply.get("success")),
               "response": reply.get("response"), "error": reply.get("error")}
@@ -157,22 +221,27 @@ def served_card_error(served_gpu, lease_gpu, attributable):
     return None
 
 
-def run_bench(host, port, loops, out_file, lease):
+def run_bench(base, sid, host, port, loops, out_file, lease):
     if lease is not None:
         lease.check_alive()
     cmd = [sys.executable, str(BENCH), "--host", host, "--port", str(port), "--models", MODEL_FILE,
            "--loops", str(loops), "--out", str(out_file)]
     log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
-    before = nvidia_smi_apps()
-    returncode, lost = run_under_lease(cmd, lease, log_file=log_file)
+    # Unload before the baseline sample, so the bench's own reload shows up as growth on the card that serves it.
+    try:
+        http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=120)
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        pass
+    with GpuUseSampler() as sampler:
+        returncode, lost = run_under_lease(cmd, lease, log_file=log_file)
     if lost:
         log("[bench] lease lost; the bench was stopped")
-    after = nvidia_smi_apps()
     console = log_file.read_text()
     sys.stderr.write(console)
-    served = busiest_delta(before, after)
-    record = {"loops": loops, "returncode": returncode, "out": str(out_file), "log": str(log_file), "served_gpu": served}
+    served = sampler.served()
+    record = {"loops": loops, "returncode": returncode, "out": str(out_file), "log": str(log_file), "served_gpu": served,
+              "gpu_growth_mib": {str(gpu): sampler.highs.get(gpu, 0) - sampler.lows.get(gpu, 0) for gpu in sampler.highs}}
     if lost:
         record["error"] = "lease lost during the bench; stopped"
     elif returncode == 0 and out_file.is_file():
@@ -183,7 +252,7 @@ def run_bench(host, port, loops, out_file, lease):
     else:
         record["error"] = console.strip().splitlines()[-1] if console.strip() else f"exit {returncode}"
     if not record.get("error"):
-        rejected = served_card_error(served, None if lease is None else lease.gpu, before is not None)
+        rejected = served_card_error(served, None if lease is None else lease.gpu, sampler.available)
         if rejected:
             record.update({"error": rejected, "tg_tps_median": None, "ttft_ms_median": None, "counted_tokens": None})
     if record.get("error"):
@@ -248,7 +317,7 @@ def main():
 
         if not args.skip_bench:
             for loops in args.loops:
-                summary["bench"].append(run_bench(args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json", lease))
+                summary["bench"].append(run_bench(base, sid, args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json", lease))
         failures = [f"probe loops={p['loops']}: {p['error'] or 'no reply'}" for p in summary["probes"] if not p["success"]]
         failures += [f"bench loops={b['loops']}: {b['error']}" for b in summary["bench"] if b.get("error")]
         if failures:
