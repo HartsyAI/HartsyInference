@@ -81,8 +81,9 @@ def gpu_index(value):
 
 def call(base, method, path, body=None, timeout=20, attempts=1):
     """One gate call; returns the parsed JSON. Raises GateRefused when the gate says no (ok false, or an HTTP 4xx) and
-    GateError when it did not answer or answered unreadably; only the latter is tried again, attempts times in all, which is
-    for the idempotent calls (never the request itself, which a repeat could queue twice)."""
+    GateError when it did not answer or answered unreadably (not JSON, not an object, or without ok true, the contract's mark
+    of an accepted call); only the latter is tried again, attempts times in all, which is for the idempotent calls (never the
+    request itself, which a repeat could queue twice)."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"} if data is not None else {})
@@ -99,9 +100,9 @@ def call(base, method, path, body=None, timeout=20, attempts=1):
         else:
             if isinstance(reply, dict) and reply.get("ok") is False:
                 raise GateRefused(f"{method} {path}: {reply.get('error', 'rejected')}")
-            if isinstance(reply, dict):
+            if isinstance(reply, dict) and reply.get("ok") is True:
                 return reply
-            error = GateError(f"{method} {path}: unexpected reply {str(reply)[:200]!r}")  # not an object: unreadable, retried
+            error = GateError(f"{method} {path}: unexpected reply {str(reply)[:200]!r}")  # no ok true: unreadable, retried
         if attempt < attempts:
             time.sleep(RETRY_WAIT_S)
     raise error

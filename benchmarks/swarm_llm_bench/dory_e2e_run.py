@@ -364,7 +364,7 @@ def check_lease(lease):
 
 def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
     check_lease(lease)
-    unload_error = unload(base, sid)
+    unload_error = unload(base, sid, lease=lease)
     if unload_error:
         log(f"[probe] loops={loops if loops is not None else 'default'}: FAILED before the request: {unload_error}")
         return {"loops": loops, "success": False, "error": unload_error, "response": None, "served_gpu": None}
@@ -416,7 +416,7 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
     # Unload before the baseline sample, so the bench's own reload shows up as growth on the card that serves it.
-    unload_error = unload(base, sid)
+    unload_error = unload(base, sid, lease=lease)
     if unload_error:
         log(f"[bench] loops={loops}: FAILED before the run: {unload_error}")
         return {"loops": loops, "error": unload_error, "out": str(out_file), "served_gpu": None}
@@ -569,9 +569,11 @@ def main():
             summary["error"] = "lease lost during the cleanup"
             log("[run] lease lost during the cleanup")
         summary["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        (out_dir / "dory_e2e_summary.json").write_text(json.dumps(summary, indent=2))  # before the release: it may take a while
-        if lease is not None:
-            lease.release(failed=failed)
+        try:
+            (out_dir / "dory_e2e_summary.json").write_text(json.dumps(summary, indent=2))  # before the release: it may take a while
+        finally:
+            if lease is not None:
+                lease.release(failed=failed)  # whatever became of the write, the card is handed back
 
     print(f"\n{'loops':>7} {'probe':>7} {'tg t/s':>8} {'ttft ms':>8} {'tokens':>7} {'gpu':>4}  reply head")
     bench_by_loops = {b["loops"]: b for b in summary["bench"]}
