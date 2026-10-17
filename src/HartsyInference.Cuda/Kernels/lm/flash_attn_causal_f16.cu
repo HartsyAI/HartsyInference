@@ -16,7 +16,11 @@
 // Build: ../lm/build.sh (nvcc -ptx -arch=sm_80).
 
 #include <cuda_fp16.h>
+#if defined(__CUDACC_RTC__)
+typedef unsigned int uint32_t;   // NVRTC has no host <stdint.h>; the kernels only use uint32_t
+#else
 #include <stdint.h>
+#endif
 
 #define FA_BR 64
 #define FA_BC 64

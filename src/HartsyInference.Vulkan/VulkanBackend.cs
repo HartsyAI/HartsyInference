@@ -4421,13 +4421,23 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     // ── Embed gather + argmax ───────────────────────────────────────────────────────────────────────────
 
+    /// <summary>Gathers one row of an F32, F16 or BF16 embed table, selected by the device token id, widened to F32.</summary>
+    /// <remarks>The table is uploaded in its stored dtype (no conversion), and the F16/BF16 shaders widen it exactly. A narrow
+    /// table must have an even element count: the shader reads it as 32-bit words, so an odd count would overrun the buffer.</remarks>
     public void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId)
     {
         using OpScope _op = EnterOp();
-        if (tokenId == 0 || !_scalarBuffers.TryGetValue(tokenId, out VulkanBuffer? tokBuf)
-            || output.DType != DType.F32 || embedTable.DType != DType.F32)
+        string shader = embedTable.DType == DType.F32 ? "embed_gather_decode"
+            : embedTable.DType == DType.F16 ? "embed_gather_decode_f16"
+            : embedTable.DType == DType.BF16 ? "embed_gather_decode_bf16"
+            : throw new NotSupportedException($"EmbedGatherDecodeStep supports F32, F16 and BF16 tables, not {embedTable.DType}.");
+        if (tokenId == 0 || !_scalarBuffers.TryGetValue(tokenId, out VulkanBuffer? tokBuf) || output.DType != DType.F32)
         {
-            throw new NotSupportedException("EmbedGatherDecodeStep requires an F32 embed table and a valid device token-id buffer.");
+            throw new NotSupportedException("EmbedGatherDecodeStep requires an F32 output and a valid device token-id buffer.");
+        }
+        if (embedTable.DType != DType.F32 && embedTable.ElementCount % 2 != 0)
+        {
+            throw new NotSupportedException($"EmbedGatherDecodeStep: a {embedTable.DType} table needs an even element count, not {embedTable.ElementCount}.");
         }
         int hidden = (int)output.ElementCount;
         VulkanBuffer embBuf = GetBuffer(embedTable);
@@ -4435,7 +4445,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
         try
         {
-            VulkanKernel k = GetKernel("embed_gather_decode", 3, _default1DSpec);
+            VulkanKernel k = GetKernel(shader, 3, _default1DSpec);
             Span<byte> pc = stackalloc byte[4];
             BinaryWriteUInt(pc, 0, (uint)hidden);
             Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, embBuf.Handle, tokBuf.Handle };
