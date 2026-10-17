@@ -49,6 +49,54 @@ public sealed unsafe class Flux3F16StreamGpuTests(ITestOutputHelper output)
         Assert.True(maxDiff <= 0.03f * maxRef, $"F16 velocity drifted {maxDiff:E3} from F32 (max |v| {maxRef:E3}).");
     }
 
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void StaleStates_AreRebuiltOnTheCurrentStreamDtype_OnCuda()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: PtxDir());
+        int seed = 11;
+        Dictionary<string, Tensor> weights = Weights(ref seed);
+        Flux3Config config = Flux3Config.FromWeights(weights) with { ContextInDim = Context };
+        using Flux3Transformer transformer = new Flux3Transformer(config);
+        transformer.LoadWeights(weights);
+
+        using Tensor text = Stream(ref seed, SqrtThree, 1, 4, Context);
+        using Tensor latent = Stream(ref seed, SqrtThree, 1, 4, 128);
+        using Tensor references = Stream(ref seed, SqrtThree, 1, 6, 128);
+        Flux3ConditionInput input = new Flux3ConditionInput(text, references, [(2, 2), (1, 2)]);
+
+        // States built while the F32 stream was active, then handed to a call that runs the F16 stream. Joining them
+        // without a dtype check would copy F32 bytes into an F16 joint buffer.
+        Flux3ConditionStates stale;
+        using (KnobProfile.Create("flux3-stale-f32").With(EngineKnobs.DitF16, false).Push())
+            stale = transformer.PrecomputeConditioning(backend, input);
+        using (stale)
+        {
+            using IDisposable knob = KnobProfile.Create("flux3-stale-f16").With(EngineKnobs.DitF16, true).Push();
+            using Tensor reused = transformer.Forward(backend, latent, 2, 2, 0.5f, input, stale);
+            using Tensor rebuilt = transformer.Forward(backend, latent, 2, 2, 0.5f, input, null);
+            backend.Sync();
+            float[] a = ReadHost(reused), b = ReadHost(rebuilt);
+            float maxRef = 0f, maxDiff = 0f;
+            for (int i = 0; i < a.Length; i++)
+            {
+                maxRef = MathF.Max(maxRef, MathF.Abs(b[i]));
+                maxDiff = MathF.Max(maxDiff, MathF.Abs(a[i] - b[i]));
+            }
+            _output.WriteLine($"stale states: maxDiff={maxDiff:E3} maxAbs={maxRef:E3} rel={maxDiff / maxRef:E3}");
+            Assert.True(maxDiff <= 1e-4f * maxRef,
+                $"Forward with F32 states on an F16 call differs by {maxDiff:E3} from a fresh F16 forward (max |v| {maxRef:E3}).");
+        }
+    }
+
+    private static float[] ReadHost(Tensor t) => new ReadOnlySpan<float>((float*)t.DataPointer, (int)t.ElementCount).ToArray();
+
     private static float[] Velocity(CudaBackend backend, bool f16)
     {
         using IDisposable knob = KnobProfile.Create("flux3-f16-stream-gpu").With(EngineKnobs.DitF16, f16).Push();

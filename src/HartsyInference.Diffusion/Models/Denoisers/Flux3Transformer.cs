@@ -181,8 +181,18 @@ public sealed class Flux3Transformer : IDisposable
         try
         {
             bool f16 = UseF16Stream(backend);
-            owned = states is null ? PrecomputeConditioning(backend, input, targetSigma) : null;
-            Flux3ConditionStates conditioning = states ?? owned!;
+            // JoinStreams copies bytes without converting dtypes, so cached states must match this call's stream dtype. The
+            // knob can change between a precompute and a later forward; a mismatch is rebuilt here and the caller's states are left alone.
+            Flux3ConditionStates conditioning;
+            if (states is not null && StatesMatch(states, f16))
+            {
+                conditioning = states;
+            }
+            else
+            {
+                owned = PrecomputeConditioning(backend, input, targetSigma);
+                conditioning = owned;
+            }
             imageVec = TimeVector(backend, sigma, targetSigma);
             zeroVec = TimeVector(backend, 0f, targetSigma);
             image = EmbedTokens(backend, packedLatent, _imageEmbed!, _config.InChannels, "packed latent");
@@ -303,6 +313,13 @@ public sealed class Flux3Transformer : IDisposable
     /// <summary>The F16 stream runs where the backend has F16 activation kernels and <c>numerics.ditF16</c> is on. The CPU
     /// backend keeps F32, so a default CPU build never reaches an F16 kernel.</summary>
     private static bool UseF16Stream(IBackend backend) => backend.SupportsF16Activations && DitDtype.Act == DType.F16;
+
+    /// <summary>True when every cached stream already has the dtype this call's stream would produce.</summary>
+    private static bool StatesMatch(Flux3ConditionStates states, bool f16)
+    {
+        DType expected = f16 ? DType.F16 : DType.F32;
+        return states.Text.DType == expected && (states.References is null || states.References.DType == expected);
+    }
 
     /// <summary>Scales an embedded F32 stream by the residual damp and casts it to F16. On success this takes ownership of
     /// <paramref name="f32"/> and returns the F16 stream; on the F32 path the stream is returned unchanged. On failure the
