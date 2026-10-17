@@ -161,6 +161,7 @@ On the swarm box, `swarm_llm_bench/swarm_llm_bench.py` drives the engine through
 `swarm_llm_bench/gpu_gate.py` (request, grant polling, heartbeat, release), verifies the pinned GGUF, runs greedy
 correctness probes at each loop count, then the bench at each loop count, and writes one summary under
 `results/dory/`. One command, run on the box itself, for a session longer than the gate's heartbeat timeout.
-`swarm_llm_bench/llamacpp_dory_baseline.sh` is its llama.cpp counterpart: it builds the Dory-capable llama.cpp branch
-with CUDA and runs `llama-bench` and a greedy completion of the same probe prompt on the same file, for the speed and
-quality comparison the parity ledger asks for.
+`swarm_llm_bench/llamacpp_dory_baseline.sh` is its llama.cpp counterpart: it verifies the same file, builds the
+Dory-capable llama.cpp branch with CUDA, then holds its own lease (through `gpu_gate.py`, which also wraps any other
+box-side command) while it runs `llama-bench` and a greedy completion of the same probe prompt, for the speed and quality
+comparison the parity ledger asks for.

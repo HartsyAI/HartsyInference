@@ -35,7 +35,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from gpu_gate import GateError, GpuLease  # noqa: E402
+from gpu_gate import GateError, GpuLease, run_under_lease  # noqa: E402
 
 # The pinned release, mirroring the engine catalog's `dory` entry (src/HartsyInference.Engine/Registry/ModelCatalog.cs).
 MODEL_FILE = "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf"
@@ -157,27 +157,6 @@ def served_card_error(served_gpu, lease_gpu, attributable):
     return None
 
 
-def run_child_under_lease(cmd, log_file, lease, grace_s=10):
-    """Runs a command with its console in log_file, polling once a second; a lost lease terminates it (then kills it after
-    grace_s) rather than letting it use the card until it finishes. Returns (returncode, lease_lost)."""
-    with open(log_file, "w") as sink:
-        proc = subprocess.Popen(cmd, text=True, stdout=sink, stderr=subprocess.STDOUT)
-        lost = False
-        while proc.poll() is None:
-            if lease is not None and lease.lost:
-                lost = True
-                log("[bench] lease lost; stopping the bench")
-                proc.terminate()
-                try:
-                    proc.wait(timeout=grace_s)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                break
-            time.sleep(1)
-    return proc.returncode, lost
-
-
 def run_bench(host, port, loops, out_file, lease):
     if lease is not None:
         lease.check_alive()
@@ -186,7 +165,9 @@ def run_bench(host, port, loops, out_file, lease):
     log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
     before = nvidia_smi_apps()
-    returncode, lost = run_child_under_lease(cmd, log_file, lease)
+    returncode, lost = run_under_lease(cmd, lease, log_file=log_file)
+    if lost:
+        log("[bench] lease lost; the bench was stopped")
     after = nvidia_smi_apps()
     console = log_file.read_text()
     sys.stderr.write(console)
@@ -282,12 +263,13 @@ def main():
         summary["error"] = repr(e)
         raise
     finally:
-        if lease is not None:
-            lease.release(failed=failed)
+        # Swarm cleanup first, the lease last: the card is handed back only once the model is out of it.
         try:
             http_post(base, "/API/LLMAssistantUnloadModels", {"session_id": sid}, timeout=120)
         except (urllib.error.URLError, json.JSONDecodeError):
             pass
+        if lease is not None:
+            lease.release(failed=failed)
         summary["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         (out_dir / "dory_e2e_summary.json").write_text(json.dumps(summary, indent=2))
 
