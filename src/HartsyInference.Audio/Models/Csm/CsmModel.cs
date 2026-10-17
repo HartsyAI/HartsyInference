@@ -133,38 +133,33 @@ public sealed unsafe class CsmModel : IDisposable
         return outT;
     }
 
-    // Keep F32/BF16 tables as loaded (no F32 duplication); anything else casts up once.
+    // Keep F32/BF16/F16 tables as stored: widening a GGUF F16 or checkpoint table to F32 costs its full size in host RAM.
     private static Tensor KeepF32OrBf16(Tensor t) =>
-        t.DType == DType.F32 || t.DType == DType.BF16 ? t : t.CastTo(DType.F32);
+        t.DType == DType.F32 || t.DType == DType.BF16 || t.DType == DType.F16 ? t : t.CastTo(DType.F32);
 
-    // dst = table[id] as F32 (row-clamped; table F32 or BF16).
-    private static void CopyRowF32(Tensor table, int id, float* dst, int h)
+    // dst = table[id] as F32 (row-clamped; table F32, BF16 or F16).
+    private static void CopyRowF32(Tensor table, int id, float* dst, int h) => ReadEmbedRow(table, id, dst, h, accumulate: false);
+
+    // dst += table[id] as F32 (row-clamped; table F32, BF16 or F16).
+    private static void AddRowF32(Tensor table, int id, float* dst, int h) => ReadEmbedRow(table, id, dst, h, accumulate: true);
+
+    private static void ReadEmbedRow(Tensor table, int id, float* dst, int h, bool accumulate)
     {
         long off = (long)Math.Clamp(id, 0, (int)table.Shape[0] - 1) * h;
         if (table.DType == DType.BF16)
         {
             ushort* row = (ushort*)table.DataPointer + off;
-            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; dst[c] = *(float*)&b; }
+            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; float v = *(float*)&b; dst[c] = accumulate ? dst[c] + v : v; }
         }
-        else
+        else if (table.DType == DType.F16)
         {
-            Buffer.MemoryCopy((float*)table.DataPointer + off, dst, h * 4L, h * 4L);
-        }
-    }
-
-    // dst += table[id] as F32 (row-clamped; table F32 or BF16).
-    private static void AddRowF32(Tensor table, int id, float* dst, int h)
-    {
-        long off = (long)Math.Clamp(id, 0, (int)table.Shape[0] - 1) * h;
-        if (table.DType == DType.BF16)
-        {
-            ushort* row = (ushort*)table.DataPointer + off;
-            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; dst[c] += *(float*)&b; }
+            Half* row = (Half*)table.DataPointer + off;
+            for (int c = 0; c < h; c++) { float v = (float)row[c]; dst[c] = accumulate ? dst[c] + v : v; }
         }
         else
         {
             float* row = (float*)table.DataPointer + off;
-            for (int c = 0; c < h; c++) dst[c] += row[c];
+            for (int c = 0; c < h; c++) dst[c] = accumulate ? dst[c] + row[c] : row[c];
         }
     }
 
@@ -222,6 +217,12 @@ public sealed unsafe class CsmModel : IDisposable
         internal FixedKvCache? DepthUncond;
         internal GraphStream? DepthCondGraph;
         internal GraphStream? DepthUncondGraph;
+        // Device-resident frame tail (DecodeFrameTailDevice), decided once per generation: one token buffer per codebook and
+        // the device sampler's RNG, released with the session.
+        internal bool? DeviceFrame;
+        internal ulong[]? DeviceCodes;
+        internal ulong DeviceRng;
+        internal IBackend? DeviceBackend;
         private int _disposed;
 
         internal DecodeSession(FixedKvCache backbone, FixedKvCache? uncond)
@@ -240,6 +241,21 @@ public sealed unsafe class CsmModel : IDisposable
             DualGraph?.Dispose();
             DepthCondGraph?.Dispose();
             DepthUncondGraph?.Dispose();
+            if (DeviceBackend is { } deviceBackend)
+            {
+                try
+                {
+                    if (DeviceCodes is { } codes)
+                    {
+                        foreach (ulong token in codes)
+                        {
+                            if (token != 0) deviceBackend.FreeDeviceTokenId(token);
+                        }
+                    }
+                    if (DeviceRng != 0) deviceBackend.FreeDeviceRng(DeviceRng);
+                }
+                catch (Exception ex) { Logs.Warning($"[CSM] Device frame buffers failed to free during cleanup (continuing): {ex.Message}"); }
+            }
             try { DepthCond?.Dispose(); }
             catch (Exception ex) { Logs.Warning($"[CSM] Depth KV dispose failed during cleanup (continuing): {ex.Message}"); }
             try { DepthUncond?.Dispose(); }
@@ -307,7 +323,8 @@ public sealed unsafe class CsmModel : IDisposable
             if (graphEnabled && EngineKnobs.CsmCfgGraph.Value
                 && _backbone.SupportsDualGraphDecode(backend) && session.Backbone.CurrentLength == ucB.CurrentLength)
             {
-                (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, ucB, condNewEmbeds, uncondNewEmbeds!, bh);
+                Tensor stackedG = StackCfgRows(condNewEmbeds, uncondNewEmbeds!, bh);
+                (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, ucB, stackedG, bh);
                 return DecodeFrameTail(backend, lastG, uLastG, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
             }
             Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
@@ -345,6 +362,41 @@ public sealed unsafe class CsmModel : IDisposable
         }
 
         return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
+    }
+
+    /// <summary>Steady-state CFG frame whose input embedding is summed on the device from the previous frame's codes, which the
+    /// device frame tail left in the session's token buffers. The sum adds the codebook rows in order, as the host gather does,
+    /// so the embedding is bit-identical. Returns null when the device frame or the dual graph does not apply; the caller then
+    /// takes the host embedding path.</summary>
+    public int[]? StepFrameFromDeviceCodes(IBackend backend, DecodeSession session, ref uint rng,
+        float? temperature, int? topK, float? topP, float cfgScale)
+    {
+        ThrowIfDisposed();
+        bool graphEnabled = EngineKnobs.CsmGraph.Value && backend.GraphDecodeSupported && _backbone.SupportsGraphDecode(backend);
+        if (session.DeviceFrame != true || session.DeviceCodes is null || !graphEnabled || cfgScale == 1f
+            || session.Uncond is null || !EngineKnobs.CsmCfgGraph.Value || !_backbone.SupportsDualGraphDecode(backend)
+            || session.Backbone.CurrentLength != session.Uncond.CurrentLength || !EngineKnobs.CsmCfgBatch.Value)
+        {
+            return null;
+        }
+        int bh = _cfg.Backbone.HiddenSize;
+        Tensor frameEmbed = new(new TensorShape(1, 1, bh), DType.F32);
+        for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
+        {
+            if (cb == 0)
+            {
+                backend.EmbedGatherDecodeStep(frameEmbed, _audioEmbed[0]!, session.DeviceCodes[0]);
+                continue;
+            }
+            using Tensor row = new(new TensorShape(1, 1, bh), DType.F32);
+            backend.EmbedGatherDecodeStep(row, _audioEmbed[cb]!, session.DeviceCodes[cb]);
+            backend.Add(frameEmbed, frameEmbed, row);
+        }
+        Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
+        backend.Concat(stacked, [frameEmbed, frameEmbed], 1);
+        frameEmbed.Dispose();
+        (Tensor lastG, Tensor uLastG) = BackboneLastDual(backend, session, session.Uncond, stacked, bh);
+        return DecodeFrameTail(backend, lastG, uLastG, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
     }
 
     /// <summary>Runs one backbone step for a stream and returns its last-position hidden <c>[1,1,bh]</c> (a fresh,
@@ -406,6 +458,15 @@ public sealed unsafe class CsmModel : IDisposable
         return last;
     }
 
+    /// <summary>Stacks the cond and uncond input rows into a fresh host-built <c>[1,2,bh]</c> (row 0 conditional).</summary>
+    private static Tensor StackCfgRows(Tensor condNew, Tensor uncondNew, int bh)
+    {
+        Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
+        Buffer.MemoryCopy((void*)condNew.DataPointer, (void*)stacked.DataPointer, (long)bh * 4, (long)bh * 4);
+        Buffer.MemoryCopy((void*)uncondNew.DataPointer, (float*)stacked.DataPointer + bh, (long)bh * 4, (long)bh * 4);
+        return stacked;
+    }
+
     /// <summary>CFG dual-stream flavor of <see cref="BackboneLast"/>: runs cond+uncond as ONE position-aligned
     /// B=2 backbone step (stacked <c>[1,2,bh]</c> through the session's <see cref="DecodeSession.DualGraph"/> fixed
     /// buffers), captured once and replayed per frame. Combines both wins: the batched layers read each weight
@@ -414,14 +475,11 @@ public sealed unsafe class CsmModel : IDisposable
     /// so every weight/cache is device-resident and the buffers are pool-bound before capture. Advances BOTH
     /// caches by one and returns fresh caller-owned cond/uncond last hiddens (each <c>[1,1,bh]</c>).</summary>
     private (Tensor last, Tensor uLast) BackboneLastDual(IBackend backend, DecodeSession session, FixedKvCache uncond,
-        Tensor condNew, Tensor uncondNew, int bh)
+        Tensor stacked, int bh)
     {
         FixedKvCache cond = session.Backbone;
         GraphStream gs = session.DualGraph ??= new GraphStream(backend, bh, rows: 2);
         int pos = cond.CurrentLength;
-        Tensor stacked = new(new TensorShape(1, 2, bh), DType.F32);
-        Buffer.MemoryCopy((void*)condNew.DataPointer, (void*)stacked.DataPointer, (long)bh * 4, (long)bh * 4);
-        Buffer.MemoryCopy((void*)uncondNew.DataPointer, (float*)stacked.DataPointer + bh, (long)bh * 4, (long)bh * 4);
         backend.CopyInto(gs.InEmbed, stacked);                  // refresh fixed input OUTSIDE capture
         stacked.Dispose();
         backend.WriteDevicePos(gs.DevicePos, pos + 1, pos);     // shared {kvLen, qOffset} — both streams are aligned
@@ -476,6 +534,11 @@ public sealed unsafe class CsmModel : IDisposable
         bool useCfg = cfgScale != 1f && uLast is not null;
         int bh = _cfg.Backbone.HiddenSize;
         int dh = _cfg.Decoder.HiddenSize;
+
+        if (graphEnabled && session is not null && (session.DeviceFrame ??= PrepareDeviceFrame(backend, tk, temp, rng, session)))
+        {
+            return DecodeFrameTailDevice(backend, last, uLast, temp, tk, tp, cfgScale, session);
+        }
 
         // codebook 0 from the backbone head.
         Tensor c0Logits = WhisperOps.ProjectLinear(backend, last, _c0Head!, bias: null, 1, 1, bh, _cfg.AudioVocab);
@@ -607,7 +670,24 @@ public sealed unsafe class CsmModel : IDisposable
         Tensor embed = EmbedRow(table, id);                                              // [1,1,bh] host-built
         Tensor decInput = WhisperOps.ProjectLinear(backend, embed, _projW!, bias: null, 1, 1, bh, dh);
         embed.Dispose();
+        return DepthStepGraphProjected(backend, decInput, dh, cache, ref gs);
+    }
 
+    /// <summary>Gather-fed <see cref="DepthStepGraph"/>: the codebook embedding is gathered on the device from its token
+    /// buffer, so the depth step after a draw needs no host read.</summary>
+    private Tensor DepthStepGraphGather(IBackend backend, Tensor table, ulong token, int bh, int dh, FixedKvCache cache, ref GraphStream? gs)
+    {
+        Tensor embed = new(new TensorShape(1, 1, bh), DType.F32);
+        backend.EmbedGatherDecodeStep(embed, table, token);
+        Tensor decInput = WhisperOps.ProjectLinear(backend, embed, _projW!, bias: null, 1, 1, bh, dh);
+        embed.Dispose();
+        return DepthStepGraphProjected(backend, decInput, dh, cache, ref gs);
+    }
+
+    /// <summary>Steps the depth decoder's captured graph on an already projected input and returns a fresh last hidden;
+    /// disposes <paramref name="decInput"/>.</summary>
+    private Tensor DepthStepGraphProjected(IBackend backend, Tensor decInput, int dh, FixedKvCache cache, ref GraphStream? gs)
+    {
         gs ??= new GraphStream(backend, dh);
         int pos = cache.CurrentLength;
         backend.CopyInto(gs.InEmbed, decInput);                 // refresh fixed input OUTSIDE capture
@@ -638,6 +718,151 @@ public sealed unsafe class CsmModel : IDisposable
         Tensor dLast = new(new TensorShape(1, 1, dh), DType.F32);
         backend.CopyInto(dLast, gs.OutHidden);
         return dLast;
+    }
+
+    /// <summary>Decides once per generation whether the frame tail runs on the device: the depth steps need the graph path,
+    /// the device sampler must cover the top-k, and every audio table must be gatherable. Preloads the tables (a gather
+    /// against an unloaded table would upload per call) and allocates the per-codebook token buffers and the device RNG.</summary>
+    private bool PrepareDeviceFrame(IBackend backend, int topK, float temperature, uint rng, DecodeSession session)
+    {
+        // Greedy (temperature <= 0) stays on the host: the host sampler treats it as 1, and the device sampler is not defined there.
+        if (!EngineKnobs.CsmDeviceFrame.Value || !backend.DeviceSamplingSupported || temperature <= 0f || topK < 1
+            || topK > backend.DeviceSamplingMaxTopK || !_decoder.SupportsGraphDecode(backend))
+        {
+            return false;
+        }
+        List<Tensor> tables = new(_audioEmbed.Length);
+        foreach (Tensor? table in _audioEmbed)
+        {
+            if (table is null || !(table.DType == DType.F32 || table.DType == DType.BF16 || table.DType == DType.F16))
+            {
+                return false;
+            }
+            tables.Add(table);
+        }
+        backend.PreloadWeights(tables);
+        // The backend and the handle array are recorded before any allocation, so a throw partway through leaves Dispose
+        // with exactly the handles that exist (zero handles are skipped there).
+        session.DeviceBackend = backend;
+        session.DeviceCodes = new ulong[_cfg.NumCodebooks];
+        for (int cb = 0; cb < session.DeviceCodes.Length; cb++)
+        {
+            session.DeviceCodes[cb] = backend.AllocDeviceTokenId();
+        }
+        session.DeviceRng = backend.AllocDeviceRng(((ulong)rng << 32) | 0x9E3779B9ul, topK);
+        return true;
+    }
+
+    /// <summary>Device-resident frame tail. The codebook logits, the CFG blend, the draws and the depth embeddings stay on
+    /// the device, and the codes are read back once the frame is enqueued, so the host waits once per frame instead of
+    /// once per codebook. Consumes <paramref name="last"/> and <paramref name="uLast"/>.</summary>
+    private int[] DecodeFrameTailDevice(IBackend backend, Tensor last, Tensor? uLast, float temp, int tk, float tp,
+        float cfgScale, DecodeSession session)
+    {
+        int bh = _cfg.Backbone.HiddenSize;
+        int dh = _cfg.Decoder.HiddenSize;
+        int vocab = _cfg.AudioVocab;
+        bool useCfg = cfgScale != 1f && uLast is not null;
+        ulong[] tokens = session.DeviceCodes!;
+        ulong rngState = session.DeviceRng;
+        int maxDec = _cfg.NumCodebooks + 1;
+
+        session.DepthCond ??= new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+        FixedKvCache dCache = session.DepthCond;
+        dCache.Reset();
+        FixedKvCache? uCache = null;
+        if (useCfg)
+        {
+            session.DepthUncond ??= new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+            uCache = session.DepthUncond;
+            uCache.Reset();
+        }
+
+        Tensor? dLast = null;
+        Tensor? uDLast = null;
+        try
+        {
+            using (Tensor c0Logits = WhisperOps.ProjectLinear(backend, last, _c0Head!, bias: null, 1, 1, bh, vocab))
+            using (Tensor? uC0Logits = useCfg ? WhisperOps.ProjectLinear(backend, uLast!, _c0Head!, bias: null, 1, 1, bh, vocab) : null)
+            {
+                SampleCodebook(backend, c0Logits, uC0Logits, cfgScale, vocab, temp, tk, tp, tokens[0], rngState);
+            }
+            dLast = DepthPrefillDevice(backend, last, tokens[0], bh, dh, dCache);
+            if (useCfg)
+            {
+                uDLast = DepthPrefillDevice(backend, uLast!, tokens[0], bh, dh, uCache!);
+            }
+
+            for (int cb = 1; cb < _cfg.NumCodebooks; cb++)
+            {
+                Tensor cbLogits = WhisperOps.ProjectLinear(backend, dLast!, _audioHead[cb - 1]!, bias: null, 1, 1, dh, vocab);
+                Tensor? uCbLogits = useCfg ? WhisperOps.ProjectLinear(backend, uDLast!, _audioHead[cb - 1]!, bias: null, 1, 1, dh, vocab) : null;
+                dLast!.Dispose();
+                dLast = null;
+                uDLast?.Dispose();
+                uDLast = null;
+                SampleCodebook(backend, cbLogits, uCbLogits, cfgScale, vocab, temp, tk, tp, tokens[cb], rngState);
+                cbLogits.Dispose();
+                uCbLogits?.Dispose();
+                if (cb < _cfg.NumCodebooks - 1)
+                {
+                    dLast = DepthStepGraphGather(backend, _audioEmbed[cb]!, tokens[cb], bh, dh, dCache, ref session.DepthCondGraph);
+                    if (useCfg)
+                    {
+                        uDLast = DepthStepGraphGather(backend, _audioEmbed[cb]!, tokens[cb], bh, dh, uCache!, ref session.DepthUncondGraph);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            dLast?.Dispose();
+            uDLast?.Dispose();
+            last.Dispose();
+            uLast?.Dispose();
+        }
+
+        int[] frame = new int[_cfg.NumCodebooks];
+        for (int cb = 0; cb < frame.Length; cb++)
+        {
+            frame[cb] = backend.ReadDeviceTokenId(tokens[cb]);
+        }
+        return frame;
+    }
+
+    /// <summary>Device twin of <see cref="DepthPrefill"/>: the decoder prefix is <c>[anchor, embed_0(c0)]</c>, with the
+    /// codebook-0 embedding gathered from its token buffer.</summary>
+    private Tensor DepthPrefillDevice(IBackend backend, Tensor anchor, ulong c0Token, int bh, int dh, FixedKvCache cache)
+    {
+        Tensor embed = new(new TensorShape(1, 1, bh), DType.F32);
+        backend.EmbedGatherDecodeStep(embed, _audioEmbed[0]!, c0Token);
+        Tensor curr = new(new TensorShape(1, 2, bh), DType.F32);
+        backend.Concat(curr, [anchor, embed], 1);
+        embed.Dispose();
+        Tensor decInput = WhisperOps.ProjectLinear(backend, curr, _projW!, bias: null, 1, 2, bh, dh);
+        curr.Dispose();
+        Tensor dHidden = _decoder.ForwardEmbeds(backend, decInput, 1, 2, 0, cache);
+        decInput.Dispose();
+        Tensor dLast = SliceLast(dHidden, dh);
+        dHidden.Dispose();
+        return dLast;
+    }
+
+    /// <summary>Draws one codebook on the device. The guided logits <c>u + g·(c − u)</c> are built as
+    /// <c>0 + 1·(g·c + (1 − g)·u)</c> by <see cref="IBackend.CfgEulerStep"/> (the same value to rounding), and the device
+    /// sampler's draw is written into <paramref name="token"/>.</summary>
+    private static void SampleCodebook(IBackend backend, Tensor condLogits, Tensor? uncondLogits, float cfgScale, int vocab,
+        float temp, int topK, float topP, ulong token, ulong rngState)
+    {
+        if (uncondLogits is null)
+        {
+            backend.SampleTopKInto(token, condLogits, topK, temp, topP, 0f, rngState);
+            return;
+        }
+        using Tensor guided = new(new TensorShape(1, 1, vocab), DType.F32);
+        backend.Fill(guided, 0f);
+        backend.CfgEulerStep(guided, condLogits, uncondLogits, cfgScale, 1f);
+        backend.SampleTopKInto(token, guided, topK, temp, topP, 0f, rngState);
     }
 
     /// <summary>CFG-combines <paramref name="condLogits"/> in place with the uncond head projection of

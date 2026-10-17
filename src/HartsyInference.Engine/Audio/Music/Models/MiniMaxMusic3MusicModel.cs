@@ -120,7 +120,7 @@ internal static class MiniMaxMusic3MusicModel
         IReadOnlyDictionary<string, Tensor> preparedDepth =
             MiniMaxMusic3WeightPolicy.PrepareDepthDecoder(depthWeights, repo, depthQuant, out IDisposable? depthQuantCache);
         IReadOnlyDictionary<string, Tensor> preparedDit =
-            MiniMaxMusic3WeightPolicy.PrepareTransformer(ditWeights, quant, out IDisposable? ditCast);
+            MiniMaxMusic3WeightPolicy.PrepareTransformer(ditWeights, repo, quant, out IDisposable? ditCast);
         ModelAssets.Lora.LoraStack? loras = ApplyLoras(context, ref preparedLanguage, ref preparedDit);
 
         // The quantized variants are the small-card path, where an F32 KV cache is the difference between

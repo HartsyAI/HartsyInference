@@ -21,7 +21,9 @@ namespace HartsyInference.Audio.Models.HeartMula;
 public static unsafe class HeartMulaCheckpointConverter
 {
     /// <summary>Remaps a raw HeartMuLa checkpoint dictionary into the engine key layout; pass-through tensors are shared (no copy), while the two fused tensors are split into freshly-allocated F32 tensors.</summary>
-    public static Dictionary<string, Tensor> Remap(IReadOnlyDictionary<string, Tensor> w, HeartMulaConfig cfg)
+    /// <param name="ownedSplits">Receives the tensors this call allocates (the transposed audio heads), so the caller can release them once the
+    /// quantized cache owns the weights. Borrowed views and pass-through entries are not added.</param>
+    public static Dictionary<string, Tensor> Remap(IReadOnlyDictionary<string, Tensor> w, HeartMulaConfig cfg, List<Tensor>? ownedSplits = null)
     {
         int nb = cfg.Lm.NumCodebooks;
         int vocab = cfg.Lm.AudioVocab;
@@ -40,10 +42,10 @@ public static unsafe class HeartMulaCheckpointConverter
                 case "backbone.norm.scale": outW["backbone.norm.weight"] = t; break;
                 case "decoder.norm.scale": outW["decoder.norm.weight"] = t; break;
                 case "audio_embeddings.weight":
-                    SplitAudioEmbeddings(outW, WhisperOps.EnsureF32(t), nb, vocab, bbH);
+                    SplitAudioEmbeddings(outW, t, nb, vocab, bbH);
                     break;
                 case "audio_head":
-                    SplitAudioHead(outW, WhisperOps.EnsureF32(t), nb, vocab, decH);
+                    SplitAudioHead(outW, WhisperOps.EnsureF32(t), nb, vocab, decH, ownedSplits);
                     break;
                 default:
                     // text_embeddings / codebook0_head / projection / muq_linear / unconditional_text_embedding.
@@ -81,23 +83,22 @@ public static unsafe class HeartMulaCheckpointConverter
         return newTail is null ? null : $"{head}.{newTail}";
     }
 
-    /// <summary>Splits the fused <c>[nb·vocab, H]</c> table into <c>nb</c> contiguous <c>[vocab, H]</c> blocks.</summary>
+    /// <summary>Borrows the <c>nb</c> contiguous <c>[vocab, H]</c> blocks of the fused <c>[nb·vocab, H]</c> table in its stored
+    /// dtype: the row gather reads them in place, so no widened host copy of the whole table is made.</summary>
     private static void SplitAudioEmbeddings(Dictionary<string, Tensor> outW, Tensor fused, int nb, int vocab, int h)
     {
         if (fused.Shape[0] != (long)nb * vocab || fused.Shape[1] != h)
             throw new InvalidOperationException($"audio_embeddings.weight is {fused.Shape}, expected [{(long)nb * vocab},{h}].");
-        float* src = (float*)fused.DataPointer;
+        byte* src = (byte*)fused.DataPointer;
+        long blockBytes = fused.DType.ComputeByteCount((long)vocab * h);
         for (int i = 0; i < nb; i++)
         {
-            Tensor block = new(new TensorShape(vocab, h), DType.F32);
-            long bytes = (long)vocab * h * sizeof(float);
-            Buffer.MemoryCopy(src + (long)i * vocab * h, (void*)block.DataPointer, bytes, bytes);
-            outW[$"audio_embeddings.{i}.weight"] = block;
+            outW[$"audio_embeddings.{i}.weight"] = new Tensor(src + (i * blockBytes), new TensorShape(vocab, h), fused.DType);
         }
     }
 
     /// <summary>Splits + transposes the fused <c>audio_head</c> <c>[nb-1, decH, vocab]</c> Parameter into <c>nb-1</c> heads of <c>[vocab, decH]</c>, matching <c>ProjectLinear</c>'s <c>[out, in]</c> weight layout.</summary>
-    private static void SplitAudioHead(Dictionary<string, Tensor> outW, Tensor fused, int nb, int vocab, int decH)
+    private static void SplitAudioHead(Dictionary<string, Tensor> outW, Tensor fused, int nb, int vocab, int decH, List<Tensor>? ownedSplits)
     {
         if (fused.Shape[0] != nb - 1 || fused.Shape[1] != decH || fused.Shape[2] != vocab)
             throw new InvalidOperationException($"audio_head is {fused.Shape}, expected [{nb - 1},{decH},{vocab}].");
@@ -111,6 +112,7 @@ public static unsafe class HeartMulaCheckpointConverter
                 for (int inp = 0; inp < decH; inp++)
                     dst[(long)o * decH + inp] = slice[(long)inp * vocab + o];
             outW[$"audio_head.{i}.weight"] = head;
+            ownedSplits?.Add(head);
         }
     }
 }

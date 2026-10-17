@@ -81,7 +81,7 @@ public sealed class Qwen3Model : IDisposable
     public IKvCache CreateDecodeCache(int maxSeqLen) => KvCaches.ForDecode(NumLayers, KvHeads, HeadDim, maxSeqLen);
 
     /// <summary>All weight tensors for GPU preloading.</summary>
-    public IEnumerable<Tensor> EnumerateWeights() => _transformer.EnumerateWeights();
+    public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits = true) => _transformer.EnumerateWeights(includeRedundantSplits);
 
     private void ThrowIfDisposed()
     {
