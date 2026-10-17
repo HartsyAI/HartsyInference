@@ -133,16 +133,23 @@ class GpuLease:
             raise GateError(f"lease {self.lease_id} is gone (heartbeat refused); stop the run")
 
     def cancel(self):
+        """Withdraws a request that is still queued, so an aborted acquisition never receives a card later."""
         if self.request_id and self.status == "queued":
             try:
                 call(self.base, "POST", "/api/cancel", {"request_id": self.request_id})
+                self.status = "cancelled"
+                self.log(f"[gate] cancelled request {self.request_id}")
             except GateError as e:
                 self.log(f"[gate] cancel failed: {e}")
 
     def release(self, failed=False):
+        """Ends the heartbeat and releases the lease; a request still queued is cancelled instead."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
+        if self.status == "queued":
+            self.cancel()
+            return
         if self.lease_id and not self.lost:
             try:
                 call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed})
@@ -151,8 +158,12 @@ class GpuLease:
                 self.log(f"[gate] release failed: {e}")
 
     def __enter__(self):
-        self.request()
-        self.wait_granted()
+        try:
+            self.request()
+            self.wait_granted()
+        except BaseException:
+            self.cancel()
+            raise
         self.start_heartbeat()
         return self
 

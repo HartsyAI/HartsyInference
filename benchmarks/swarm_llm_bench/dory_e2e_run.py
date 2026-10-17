@@ -12,8 +12,15 @@ Options: --loops 1 2 4 (default), --host/--port for SwarmUI (127.0.0.1:7801), --
 when a lease is already held or the gate is not running, --skip-hash to skip the sha256 (the size is always checked),
 --out-dir for the result files (benchmarks/results/dory), --device-map for the gate-gpu-to-engine-device mapping.
 
-Outputs in --out-dir: dory_probes.json (every probe reply in full), swarm_llm_dory_loops<N>.json (the bench's own
-file per loop count) and dory_e2e_summary.json; the summary table is also printed.
+Outputs in --out-dir: dory_probes.json (every probe reply in full), swarm_llm_dory_loops<N>.json and .log (the bench's own
+file and console per loop count) and dory_e2e_summary.json; the summary table is also printed.
+
+The lease covers one card. The probes name it (--device-map); the bench goes through the websocket chat route, which runs on
+the LLM Assistant backend's own device, so each bench run is attributed from nvidia-smi (the bench reloads the model, so the
+card whose compute-app memory grows is the one serving) and a run served from any other card, or one that cannot be
+attributed while nvidia-smi is present, is rejected. If that happens, point the local backend at the leased card or ask the
+gate for the card it uses. A failed probe, a failed bench, a rejected card or a lost lease fails the run: exit 1 and the
+lease released as failed.
 """
 import argparse
 import datetime
@@ -136,24 +143,70 @@ def run_probe(base, sid, loops, device, lease):
     return result
 
 
+def served_card_error(served_gpu, lease_gpu, attributable):
+    """Why a bench result must be rejected under the lease, or None: the gate leased one card, so a run served from another,
+    or one that cannot be attributed while nvidia-smi is present, is not a result this lease may report."""
+    if lease_gpu is None:
+        return None
+    if not attributable:
+        return None
+    if served_gpu is None:
+        return "the serving card could not be attributed from nvidia-smi; result rejected"
+    if served_gpu != lease_gpu:
+        return f"served on gpu {served_gpu} but the lease is for gpu {lease_gpu}; result rejected"
+    return None
+
+
+def run_child_under_lease(cmd, log_file, lease, grace_s=10):
+    """Runs a command with its console in log_file, polling once a second; a lost lease terminates it (then kills it after
+    grace_s) rather than letting it use the card until it finishes. Returns (returncode, lease_lost)."""
+    with open(log_file, "w") as sink:
+        proc = subprocess.Popen(cmd, text=True, stdout=sink, stderr=subprocess.STDOUT)
+        lost = False
+        while proc.poll() is None:
+            if lease is not None and lease.lost:
+                lost = True
+                log("[bench] lease lost; stopping the bench")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=grace_s)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                break
+            time.sleep(1)
+    return proc.returncode, lost
+
+
 def run_bench(host, port, loops, out_file, lease):
     if lease is not None:
         lease.check_alive()
     cmd = [sys.executable, str(BENCH), "--host", host, "--port", str(port), "--models", MODEL_FILE,
            "--loops", str(loops), "--out", str(out_file)]
+    log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
     before = nvidia_smi_apps()
-    proc = subprocess.run(cmd, text=True, capture_output=True)
+    returncode, lost = run_child_under_lease(cmd, log_file, lease)
     after = nvidia_smi_apps()
-    sys.stderr.write(proc.stderr)
-    record = {"loops": loops, "returncode": proc.returncode, "out": str(out_file), "served_gpu": busiest_delta(before, after)}
-    if proc.returncode == 0 and out_file.is_file():
+    console = log_file.read_text()
+    sys.stderr.write(console)
+    served = busiest_delta(before, after)
+    record = {"loops": loops, "returncode": returncode, "out": str(out_file), "log": str(log_file), "served_gpu": served}
+    if lost:
+        record["error"] = "lease lost during the bench; stopped"
+    elif returncode == 0 and out_file.is_file():
         rows = json.loads(out_file.read_text())
         row = rows[0] if rows else {}
         record.update({"error": row.get("error"), "tg_tps_median": row.get("tg_tps_median"),
                        "ttft_ms_median": row.get("ttft_ms_median"), "counted_tokens": row.get("counted_tokens")})
     else:
-        record["error"] = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else f"exit {proc.returncode}"
+        record["error"] = console.strip().splitlines()[-1] if console.strip() else f"exit {returncode}"
+    if not record.get("error"):
+        rejected = served_card_error(served, None if lease is None else lease.gpu, before is not None)
+        if rejected:
+            record.update({"error": rejected, "tg_tps_median": None, "ttft_ms_median": None, "counted_tokens": None})
+    if record.get("error"):
+        log(f"[bench] loops={loops}: FAILED: {record['error']}")
     return record
 
 
@@ -215,6 +268,11 @@ def main():
         if not args.skip_bench:
             for loops in args.loops:
                 summary["bench"].append(run_bench(args.host, args.port, loops, out_dir / f"swarm_llm_dory_loops{loops}.json", lease))
+        failures = [f"probe loops={p['loops']}: {p['error'] or 'no reply'}" for p in summary["probes"] if not p["success"]]
+        failures += [f"bench loops={b['loops']}: {b['error']}" for b in summary["bench"] if b.get("error")]
+        if failures:
+            failed = True
+            summary["error"] = "; ".join(failures)
     except (GateError, KeyboardInterrupt) as e:
         failed = True
         summary["error"] = repr(e)
