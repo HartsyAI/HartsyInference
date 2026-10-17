@@ -680,21 +680,17 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                // Qwen/Qwen-Image-2.1-Turbo: the step-distilled transformer, published by Qwen in diffusers layout (two
-                // safetensors shards). The shards are renamed on the way in so the variant resolver reads "turbo" from
-                // the file name, and ShardSetDiscovery finds the sibling shard from either one. Its text encoder and VAE
-                // are the Comfy-Org builds the base 2.1 entry uses: the Turbo repo's own copies are diffusers-keyed, which
-                // the engine's loaders do not read.
+                // The step-distilled Turbo transformer as a single fused bf16 file from Comfy-Org, the same layout as the base 2.1
+                // build. The file name carries "turbo", which the variant resolver reads. Qwen's own diffusers release is two
+                // shards with a split MLP, so it is not used here. Its text encoder and VAE are the Comfy-Org builds the base 2.1
+                // entry uses.
                 Id = "qwen-image-2.1-turbo", Modality = img, DisplayName = "Qwen-Image 2.1 Turbo", Architecture = "Single-stream DiT (Qwen3-VL-8B), 8-step distilled",
                 Status = vp,
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "Qwen/Qwen-Image-2.1-Turbo", RepoPath = "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
-                        TargetSubdir = "diffusion_models", TargetName = "Qwen-Image-2.1-Turbo-00001-of-00002.safetensors", Role = "transformer",
-                        Sha256 = "6cccd922767f01694461bdcf1f34ea7b771f3442e4d5e338ea9aa55277431cc0" },
-                    new() { Repo = "Qwen/Qwen-Image-2.1-Turbo", RepoPath = "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
-                        TargetSubdir = "diffusion_models", TargetName = "Qwen-Image-2.1-Turbo-00002-of-00002.safetensors", Role = "transformer",
-                        Sha256 = "69f53ebb063d2f606bdaff7e22e0e2144f28d978d73dc75e6e4293fc5982eab5" },
+                    new() { Repo = "Comfy-Org/Qwen-Image-2.1", RepoPath = "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "8b74237a7f505773e2c66726fa696444b4c704585c93a347cff9044937f7914a" },
                     SideModels.Qwen3VL_8B_QwenImage21,
                     SideModels.QwenImage21Vae,
                 },

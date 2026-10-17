@@ -56,7 +56,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **AuraFlow v0.3** | ✅ | Clean on-prompt horse+rider @1024 (`calcuis/aura` fp8). ([details](#auraflow-v03)) |
 | **Qwen-Image** (20B MMDiT) | ✅ | Clean photoreal astronaut-on-horse @1024 (Q4_K GGUF + Qwen2.5-VL fp8 TE). ([details](#qwen-image)) |
 | **Qwen-Image 2.1** (7B single-stream DiT) | ✅ | Clean on-prompt apple @512 text-to-image (bf16 DiT + Qwen3-VL-8B bf16 TE + RGBA VAE). Reference-image editing and LoRA not wired. ([details](#qwen-image-21)) |
-| **Qwen-Image 2.1 Turbo** (7B, 8-step distilled) | 🔧 | Built 2026-10-09 from `Qwen/Qwen-Image-2.1-Turbo` (diffusers layout, two shards). Fixed 8-step sigma schedule, CFG pinned to 1, split MLP re-fused. Not yet run on a GPU. ([details](#qwen-image-21-turbo)) |
+| **Qwen-Image 2.1 Turbo** (7B, 8-step distilled) | 🔧 | Built from Comfy-Org's single fused file `diffusion_models/qwen_image_2.1_turbo_bf16.safetensors` (Qwen's diffusers release is two shards and is no longer the catalog source). Fixed 8-step sigma schedule, CFG pinned to 1. Not yet run on a GPU. ([details](#qwen-image-21-turbo)) |
 | **Qwen-Image-Edit 2511** (20B, Q5 GGUF) | ✅ | Full edit conditioning e2e (`44.39-local`, 2026-07-10): suit-recolor + background-swap edits verified with subject identity preserved. ([details](#qwen-image-edit-2511)) |
 | **Anima** (Cosmos-Predict2 2B) | ✅ | Clean on-prompt anime @512 on the 3060 (Qwen3-0.6B embeds). ([details](#anima)) |
 | **Lumina-Image 2.0** (2B NextDiT) | ✅ | Clean on-prompt mountain-lake @512 (53s). ([details](#lumina-image-20)) |
@@ -551,7 +551,7 @@ Generate. `CliDrivable=true`.
 
 ### Qwen-Image 2.1 Turbo
 
-**Built, not yet GPU-verified (2026-10-09).** `Qwen/Qwen-Image-2.1-Turbo` is the same 7B single-stream DiT as 2.1, distilled to 8 steps. The catalog id is `qwen-image-2.1-turbo`, which runs the `qwen-image-2.1` recipe and resolves to the Turbo variant from a `turbo` filename token (`QwenImage21Variants`).
+**Built, not yet GPU-verified (2026-10-09; catalog source moved to Comfy-Org's fused file 2026-10-17).** The Turbo transformer is the same 7B single-stream DiT as 2.1, distilled to 8 steps. The catalog downloads `Comfy-Org/Qwen-Image-2.1` `diffusion_models/qwen_image_2.1_turbo_bf16.safetensors`: one 14.2 GB file with the same 265 BF16 tensors and fused MLP as the base, so the converter passes it through unchanged. The catalog id is `qwen-image-2.1-turbo`, which runs the `qwen-image-2.1` recipe and resolves to the Turbo variant from a `turbo` filename token (`QwenImage21Variants`).
 
 - **Checkpoint layout.** The repo ships the transformer as two diffusers shards, not the Comfy single file. The MLP is split (`img_mlp.gate_layer` + `img_mlp.proj`), so `QwenImage21CheckpointConverter` re-fuses it into `img_mlp.gate_up` with gate in the first half. That matches diffusers' `out(silu(gate_layer(x)) * proj(x))`, which was read from the upstream `transformer_qwenimage21.py`. Shard discovery (`ShardSetDiscovery`) finds the sibling from any one shard.
 - **Schedule.** Uses the shipped `sample_sigmas` table (8 values, terminal 0 appended) through `FlowMatchEulerDiscreteScheduler.SetSigmas`. Steps and CFG are pinned to 8 and 1, with a warning when a request differs.
