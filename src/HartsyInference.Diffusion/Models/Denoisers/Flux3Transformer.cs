@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -74,9 +75,10 @@ public sealed class Flux3Transformer : IDisposable
         {
             // Enter the damped-residual regime at the bias-less embedders; block-output damping keeps the streams there,
             // and every stream read is a no-affine LayerNorm, so the factor cancels before the final layer.
-            _imageEmbed.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
-            _referenceEmbed.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
-            _textEmbed.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+            Flux3ResidualDamp.ApplyOnce(_imageEmbed, ChromaF16.ResidualDamp);
+            Flux3ResidualDamp.ApplyOnce(_referenceEmbed, ChromaF16.ResidualDamp);
+            Flux3ResidualDamp.ApplyOnce(_textEmbed, ChromaF16.ResidualDamp);
+            Logs.Info($"[Flux3] F16 block loop active (residual damp 1/{1.0f / ChromaF16.ResidualDamp:F0})");
         }
         _timeIn1 = weights["time_in.in_layer.weight"];
         _timeIn2 = weights["time_in.out_layer.weight"];

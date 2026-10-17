@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -25,8 +26,8 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
 
     /// <summary>Binds this block's weights under <paramref name="prefix"/>. <paramref name="branchDamp"/> scales the two
     /// branch-output projections so an F16 stream rides at the damped scale (see <c>ChromaF16.ResidualDamp</c>); the
-    /// damp folds into each GEMM's alpha through <c>Fp8ScaleFactor</c>, and a weight loaded once per transformer is
-    /// scaled once.</summary>
+    /// damp folds into each GEMM's alpha through <c>Fp8ScaleFactor</c>. A weight is scaled at most once, even when a
+    /// second load binds the same tensor (see <see cref="Flux3ResidualDamp"/>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         _qProj = weights[$"{prefix}.q_proj.weight"];
@@ -35,8 +36,8 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         _mlpIn = weights[$"{prefix}.mlp_in.weight"];
         _attnOut = weights[$"{prefix}.attn_out.weight"];
         _mlpOut = weights[$"{prefix}.mlp_out.weight"];
-        _attnOut.Fp8ScaleFactor *= branchDamp;
-        _mlpOut.Fp8ScaleFactor *= branchDamp;
+        Flux3ResidualDamp.ApplyOnce(_attnOut, branchDamp);
+        Flux3ResidualDamp.ApplyOnce(_mlpOut, branchDamp);
         _normQ.LoadWeights(weights[$"{prefix}.norm.query_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.norm.key_norm.weight"]);
     }
@@ -122,5 +123,23 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         Tensor result = modulation.GatedResidual(backend, x, summed);
         summed.Dispose();
         return result;
+    }
+}
+
+/// <summary>Applies the F16 residual damp to a FLUX.3 weight at most once. The damp lives in the weight's
+/// <see cref="Tensor.Fp8ScaleFactor"/>, so a second load that binds the same tensor would otherwise scale it again and
+/// break the cancellation the damp relies on.</summary>
+internal static class Flux3ResidualDamp
+{
+    private static readonly ConditionalWeakTable<Tensor, object> Applied = new();
+    private static readonly object Marker = new();
+
+    /// <summary>Scales <paramref name="weight"/> by <paramref name="damp"/> unless this tensor was already damped.</summary>
+    public static void ApplyOnce(Tensor weight, float damp)
+    {
+        if (damp == 1.0f || Applied.TryGetValue(weight, out _))
+            return;
+        weight.Fp8ScaleFactor *= damp;
+        Applied.AddOrUpdate(weight, Marker);
     }
 }
