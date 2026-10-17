@@ -79,9 +79,8 @@ internal static class DiaTtsModel
             string tagged = text.Contains("[S", StringComparison.Ordinal) ? text : $"[S1] {text}";
             if (tagged.Length < 120)
             {
-                Logs.Warning($"[Audio][Dia] Prompt is very short ({tagged.Length} chars). Dia-1.6B can return silence "
-                    + "on short prompts, and on some prompts it does not stop where the text ends; check the output "
-                    + "length against the text.");
+                Logs.Warning($"[Audio][Dia] Prompt is very short ({tagged.Length} chars). Dia-1.6B can fail to stop "
+                    + "on short prompts; check the output length against the text.");
             }
             return tagged;
         }
