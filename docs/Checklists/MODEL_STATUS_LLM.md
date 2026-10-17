@@ -113,6 +113,12 @@ IQ2_XS/IQ2_XXS/IQ1_S/IQ1_M by known-block test only, no small published file).
 | **Clef** (`clef`, Cloudflare Clef GGUF) | 🧪 | 64-layer Qwen3.5 hybrid VLM, Q2_K GGUF + f16 mmproj from `bartowski/Cloudflare_clef-GGUF` (~11.7 GB), loaded through the existing `qwen35` path; catalog pins both LFS SHA-256s. Wired, **not validated**: no real-weight run yet (`ClefGgufRealWeightTests`, opt-in via `CLEF_GGUF_PATH`), so the catalog status is ValidationPending. |
 | **Encoder-decoder** (T5/FLAN-T5) | ✅ verified | `T5Model` — full seq2seq (rel-pos bias, no 1/√d scaling, cross-attn, GeGLU). flan-t5-small encoder + decoder **cosine = 1.0** vs HF; e2e "Das Haus ist schön." BART is a near-variant. |
 
+## Looped (latent-recurrent) architectures
+
+| Family | Status | Notes |
+|---|---|---|
+| **Nemotron Dory 1.0 4B** (`dory`, NVIDIA looped nGPT) | 🧪 | `LoopedTransformer` (`HartsyInference.LLM.Looped`, its own `IGenerationModel` adapter, not `GenericTransformer`): input/recurrent/output blocks, the recurrent block run 1-4 times per request (`TextRequest.Loops`, `loops` on the OpenAI route, `--loops`), hybrid sliding-window/full attention, per-loop and last-loop KV caches, fused QKV and gate/up, batched decode grouped by loop count, speculation, CUDA graph decode step. Checked on synthetic weights against a scalar reference only ([parity](PARITY_VERIFICATION.md)); the pinned Q5_K_M (`dory` catalog id) has not been run. ([details](#nemotron-dory-10)) |
+
 ## Text / vision encoders
 
 | Encoder | Status | Notes |
@@ -174,6 +180,22 @@ tables on 2026-08-06 so the tables stay scannable — no content was dropped.
 ### Gemma-4
 
 Ported cold from llama.cpp's `src/models/gemma4.cpp` (no local reference model existed) — per-layer embeddings (PLE, Gemma-3n-lineage), per-layer head dim (global 512 vs local/SWA 256 on E2B — the Q/K/V/O weight shapes themselves differ, not just RoPE theta), cross-layer KV-cache sharing (donor-layer formula from llama.cpp's kv-cache `reuse` callback), weightless V RMSNorm, optional per-layer output scale, per-layer FFN width (derived from the loaded weight's own shape, not a config constant — some layers are 2× wider). Found 3 real bugs along the way, none Gemma-4-specific: our GGUF parser silently discarded BOOL-typed arrays (`sliding_window_pattern` is a genuine per-layer array, not a broadcast period — every layer was reading as "global"); our `Linear`'s `Tensor.Shape[0]`=outDim/`Shape[1]`=inDim convention got reversed in my first pass; `tokenizer.ggml.model="gemma4"` wasn't routed to the SentencePiece tokenizer (fell through to generic BPE, dropping the `▁`→space substitution — coherent but "Thecapitalof..."). Also fixed 4 general Jinja chat-template bugs surfaced by Gemma-4's tool-calling template (unary minus, block-form `{% set %}...{% endset %}`, `range()`, `is sequence`). Verified live: coherent, factually correct, properly-spaced multi-sentence generation.
+
+### Nemotron Dory 1.0
+
+Looped normalized-GPT decoder ([architecture](../Research/DORY_ARCHITECTURE.md)): every physical layer is one sublayer
+(sliding attention, full attention or gated MLP) joined by the hypersphere interpolation, no norm weights, learned scale
+vectors baked at load, and the shared recurrent block re-run with the input block's output re-injected and unit-normed
+before every pass. Loaded from llama.cpp's `dory` GGUF (PR #30306, unmerged as of 2026-10-17) through `DoryKeyMapper` and
+`LoopedConfigFactory`; `LoopedLanguageModel` is the single-device load path (no layer split, tensor parallelism or
+expert offload). The loop count is a per-sequence property (`LoopedSequenceState`): a retained conversation prefix is
+reused only by requests with the same count, and a batched decode round groups sequences by count. Gaps:
+
+- Real weights: not run. The HF repo is gated (no `config.json` read) and the swarm box's model rule needs a Hartsy.ai
+  repack of the GGUF before it can sit on the RAID.
+- The NVFP4 / MXFP8 safetensors derivatives are not loaded (GGUF only).
+- No llama.cpp speed comparison yet (no Dory-capable build existed on the box).
+- Graph decode and the F16 KV cache are wired but untested on a GPU; eager CPU paths are what the tests cover.
 
 ### Muse Spark Open
 

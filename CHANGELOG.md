@@ -6,8 +6,19 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## Unreleased
+## alpha.378
 
+- **Added: NVIDIA Nemotron Dory 1.0 4B, a looped (latent-recurrent) decoder, with a runtime loop dial.** `LoopedTransformer`
+  runs llama.cpp's `dory` GGUF (ggml-org/llama.cpp#30306) through the shared backend ops: an input block, a recurrent block whose
+  weights are applied 1 to 4 times per request with the input block's output re-injected and unit-normed before every pass, and an
+  output block. Every physical layer is a single sublayer (sliding-window attention, full attention or a gated MLP) joined to the
+  residual by normalized-GPT's hypersphere interpolation; the learned scale vectors are baked to their effective values at load.
+  Both cache modes are supported: `per_loop` (the checkpoint default, one key/value slot per recurrent attention layer and loop) and
+  `last_loop` (one slot, overwritten by every pass). The loop count is per request: `TextRequest.Loops`, the OpenAI route's `loops`
+  body field and `hartsy text --loops`; a conversation's retained prefix is reused only by requests with the same count. Batched
+  decode groups sequences by loop count, prompt-lookup speculation and the CUDA graph decode step are wired, and the catalog
+  entry `dory` pins the Q5_K_M release. Checked on synthetic weights against a scalar double-precision reference of the model
+  (both cache modes, chunked prefill, batched decode); the real checkpoint has not been run yet.
 - **Added: split GGUF sets load as one model.** A llama.cpp split (`stem-NNNNN-of-NNNNN.gguf`) is read from any part: every part is mapped, its tensors are indexed together, and the set is checked for completeness, part order and tensor count. The loader used to refuse split files and ask for a `llama-gguf-split` merge.
 
 ## alpha.377
