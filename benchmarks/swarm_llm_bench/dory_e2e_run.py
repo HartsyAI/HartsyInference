@@ -378,9 +378,10 @@ async def voice_turn(ws_base, sid, loops, lease, timeout_s=600):
 
 def swarm_idle_error(base, sid, when):
     """Why a step cannot be accepted, or None: SwarmUI's global queue (every session) must be idle before and after a step,
-    since a generation queued or in flight elsewhere in SwarmUI would share the card. The same check the voice bench makes."""
+    and before any unload, which is global, since a generation queued or in flight elsewhere in SwarmUI would share the card
+    or lose its model. The same check the voice bench makes."""
     try:
-        assert_swarm_idle(sid, when, base=base)
+        assert_swarm_idle(sid, when, base=base, timeout=10)
     except RuntimeError as e:
         return str(e)
     except (urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException, OSError) as e:
@@ -397,7 +398,8 @@ def check_lease(lease):
 
 def run_probe(base, ws_base, sid, loops, lease, bound_gpu, spid=None):
     check_lease(lease)
-    before = unload(base, sid, lease=lease) or swarm_idle_error(base, sid, "before the probe")
+    before = (swarm_idle_error(base, sid, "before the probe's unload") or unload(base, sid, lease=lease)
+              or swarm_idle_error(base, sid, "before the probe"))
     if before:
         log(f"[probe] loops={loops if loops is not None else 'default'}: FAILED before the request: {before}")
         return {"loops": loops, "success": False, "error": before, "response": None, "served_gpu": None}
@@ -452,7 +454,8 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu, spid=Non
     log_file = out_file.with_suffix(".log")
     log(f"[bench] loops={loops}: {' '.join(cmd)}")
     # Unload before the baseline sample, so the bench's own reload shows up as growth on the card that serves it.
-    before = unload(base, sid, lease=lease) or swarm_idle_error(base, sid, "before the bench")
+    before = (swarm_idle_error(base, sid, "before the bench's unload") or unload(base, sid, lease=lease)
+              or swarm_idle_error(base, sid, "before the bench"))
     if before:
         log(f"[bench] loops={loops}: FAILED before the run: {before}")
         return {"loops": loops, "error": before, "out": str(out_file), "served_gpu": None}
@@ -488,6 +491,22 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu, spid=Non
         out_file.unlink(missing_ok=True)
         log(f"[bench] loops={loops}: FAILED: {record['error']}")
     return record
+
+
+def final_unload(base, sid, lease, lost, terminated):
+    """The cleanup's unload, so the card goes back empty: none once the lease is gone (the card may be the next holder's and
+    the unload is global; the release marked failed tells the gate the model may still be resident) and none while SwarmUI
+    is busy with someone else's generation, which is then reported as a cleanup failure since the model stays resident; one
+    quick attempt after a termination, else the confirmed one. Returns the error text, or None."""
+    if lost:
+        log("[run] cleanup: the lease is gone; SwarmUI left alone (the model may still be resident; the release says the run failed)")
+        return None
+    busy = swarm_idle_error(base, sid, "at the cleanup")
+    if busy:
+        return f"{busy}; the model was not unloaded"
+    if terminated:
+        return unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S)
+    return unload(base, sid, lease=lease)
 
 
 def main():
@@ -612,14 +631,10 @@ def main():
         raise
     finally:
         # Swarm cleanup first, the lease last: the card is handed back only once the model is out of it, and a card that
-        # could not be emptied is handed back marked failed so the gate knows. A run that never got its card, or whose lease
-        # is gone, leaves SwarmUI alone: the unload is global, and the card's holder by then may be using the model; the
-        # release marked failed tells the gate the model may still be resident.
-        if used_swarm and ((lease is not None and lease.lost) or lease_lost_signalled):
-            log("[run] cleanup: the lease is gone; SwarmUI left alone (the model may still be resident; the release says the run failed)")
-        elif used_swarm:
-            unload_error = (unload(base, sid, attempts=1, timeout_s=TERMINATED_UNLOAD_TIMEOUT_S) if terminated
-                            else unload(base, sid, lease=lease))
+        # could not be emptied is handed back marked failed so the gate knows. A run that never got its card leaves SwarmUI
+        # alone: the unload is global, and the card's holder may be using the model.
+        if used_swarm:
+            unload_error = final_unload(base, sid, lease, (lease is not None and lease.lost) or lease_lost_signalled, terminated)
             if unload_error:
                 failed = True
                 summary["cleanup_error"] = unload_error

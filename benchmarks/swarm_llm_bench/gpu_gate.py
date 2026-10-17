@@ -250,8 +250,9 @@ class GpuLease:
             except GateError as e:
                 self.log(f"[gate] request {self.request_id} could not be checked; it may be granted later and expire unused: {e}")
                 return
-            self.status = reply.get("status")
-            if self.status == "granted":
+            status = reply.get("status")
+            if status == "granted":
+                self.status = status
                 try:
                     self._take_grant(reply)
                 except GateError as e:
@@ -260,9 +261,12 @@ class GpuLease:
                 self.log(f"[gate] request {self.request_id} was granted during its cancellation; releasing lease {self.lease_id}")
                 self._release_lease(failed=True)
                 return
-            if self.status != "queued":
-                self.log(f"[gate] request {self.request_id} is {self.status}; nothing to release")
+            if status in TERMINAL_STATUSES:
+                self.status = status
+                self.log(f"[gate] request {self.request_id} is {status}; nothing to release")
                 return
+            # Queued, or an answer without a readable status: still the gate's to grant, so the cancel is sent once more.
+            self.log(f"[gate] request {self.request_id} is {status or 'unreadable'} after the cancel; cancelling again")
         self.log(f"[gate] request {self.request_id} is still queued after the cancels; it may be granted later and expire unused")
 
     def _release_lease(self, failed):
@@ -367,6 +371,8 @@ def run_under_lease(cmd, lease, log_file=None, env=None, grace_s=10, poll_s=1.0)
         # The leader finishing is not the group finishing: a descendant that outlives it is stopped before we return.
         if _group_alive(proc):
             stop_group(proc, grace_s)
+        # A loss seen only after the leader exited still counts: what the command did as the lease went is not accepted.
+        lost = lost or (lease is not None and lease.lost)
     except BaseException:
         # An interrupt or any error here must not leave the group running on the card: its own session means it never
         # saw the terminal's SIGINT, so it is stopped explicitly before the lease is released by the caller.
