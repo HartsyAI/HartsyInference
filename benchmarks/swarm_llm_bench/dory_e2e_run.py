@@ -134,6 +134,9 @@ def swarm_prompt_depth(base, sid, out_dir):
     prompt and the template's markers. SwarmUI exposes no prompt token count, so this is an estimate, and a lower bound when
     the active assistant adds tool prompts. Written to swarm_prompt_depth.txt for llamacpp_dory_baseline.sh, which decodes at
     the same depth (llama-bench -d), so the two decode rates are measured behind comparable KV caches."""
+    # An earlier run's depth must never stand in for this run's: both files go before the estimate is attempted.
+    for stale in (out_dir / "swarm_prompt_depth.json", out_dir / "swarm_prompt_depth.txt"):
+        stale.unlink(missing_ok=True)
     system_text = chat_instruction_text(base, sid)
     system_tokens = count_tokens(base, sid, system_text) if system_text else None
     user_tokens = count_tokens(base, sid, BENCH_PROMPT)

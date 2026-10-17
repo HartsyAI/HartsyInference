@@ -299,6 +299,14 @@ def main(argv=None):
                      model_source=args.model_source, model_format=args.model_format, vram_mb=args.vram_mb,
                      minutes=args.minutes, exclusive=args.exclusive, gpu=args.gpu,
                      log=lambda m: print(m, file=sys.stderr, flush=True))
+
+    # A SIGTERM to the wrapper (a service stop, an external timeout) unwinds like Ctrl-C: the wrapped group, which sits in
+    # its own session and never sees the signal itself, is stopped and the lease released, instead of a bare exit that
+    # would leave the group on the card until the lease expired.
+    def terminate(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    signal.signal(signal.SIGTERM, terminate)
     failed = True
     try:
         lease.__enter__()
