@@ -157,9 +157,9 @@ def nvidia_smi_apps():
     """{gpu_index: used MiB by compute apps}, or None without nvidia-smi; used to attribute the serving card."""
     try:
         out = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,used_memory", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=20, check=True).stdout
+                             capture_output=True, text=True, timeout=NVIDIA_SMI_TIMEOUT_S, check=True).stdout
         gpus = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
-                              capture_output=True, text=True, timeout=20, check=True).stdout
+                              capture_output=True, text=True, timeout=NVIDIA_SMI_TIMEOUT_S, check=True).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     index_of = {}
@@ -217,10 +217,13 @@ class GpuUseSampler:
         self._thread.start()
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, tb):
         self._stop.set()
-        self._thread.join(timeout=5)
-        self._sample()
+        self._thread.join(timeout=NVIDIA_SMI_TIMEOUT_S + 1)
+        # A step that ends by exception (a lost lease, a termination) is already failed: no closing sample, so the
+        # teardown stays inside the time a stopped runner has left for its unload.
+        if exc_type is None:
+            self._sample()
         return False
 
     def served(self):
@@ -235,6 +238,8 @@ def ws_url(host, port):
 # terminated run attempts must answer well inside that, or be reported as a cleanup failure instead of being cut off.
 TERMINATED_UNLOAD_TIMEOUT_S = 6
 BENCH_CHILD_GRACE_S = 10
+NVIDIA_SMI_TIMEOUT_S = 5
+SAMPLER_TEARDOWN_S = NVIDIA_SMI_TIMEOUT_S + 2  # a sample in flight plus the thread join, the most the sampler's exit can take
 
 
 def bench_child_grace_s():
@@ -246,7 +251,7 @@ def bench_child_grace_s():
         outer_s = float(outer)
     except ValueError:
         return BENCH_CHILD_GRACE_S
-    return max(1.0, min(BENCH_CHILD_GRACE_S, outer_s - TERMINATED_UNLOAD_TIMEOUT_S - 2))
+    return max(1.0, min(BENCH_CHILD_GRACE_S, outer_s - TERMINATED_UNLOAD_TIMEOUT_S - SAMPLER_TEARDOWN_S - 2))
 
 
 def unload(base, sid, attempts=3, timeout_s=120):
