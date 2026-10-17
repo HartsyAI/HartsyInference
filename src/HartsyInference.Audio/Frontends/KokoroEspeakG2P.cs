@@ -96,7 +96,7 @@ public sealed partial class KokoroEspeakG2P
     // Hindi, whose script has no Latin letter rules, so a token with a Latin letter in it is read in English as a whole.
     // espeak-ng instead splits a mixed token by script: the Latin part goes to English and the Devanagari part stays
     // Hindi ("abcदेव" -> English "abc" + Hindi "देव"; "9am" -> Hindi "9" + English "am"). That split is not done here,
-    // so a Devanagari part of a mixed token is read in English.
+    // so a mixed token goes to English whole: its Devanagari part is dropped, and a digit is read as English ("9am" -> "nine am").
     private bool IsLatin(string word) => _switchesToLatin?.Invoke(word) ?? word.Any(char.IsAsciiLetter);
 
     // phonemizer's default marks, each run with the whitespace around it.
