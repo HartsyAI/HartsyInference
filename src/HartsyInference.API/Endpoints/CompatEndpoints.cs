@@ -374,6 +374,7 @@ public static class CompatEndpoints
             MaxTokens = req.MaxTokens ?? 4096,
             Seed = req.Seed.HasValue ? (long)req.Seed.Value : -1,
             ReasoningEffort = ParseReasoningEffort(req.ReasoningEffort),
+            Loops = ParseLoops(req.Loops),
             EnableThinking = ResolveThinking(req.Thinking, req.ChatTemplateKwargs),
             User = req.User,
             Priority = ParsePriority(req.Priority),
@@ -498,6 +499,14 @@ public static class CompatEndpoints
 
     /// <summary>OpenAI <c>reasoning_effort</c>: a name the engine defines (<c>low</c>, <c>high</c>, <c>max</c>) or an integer in [1, 100]. A string or a number is read
     /// by <see cref="EncodeOptions.ParseReasoningEffort"/>, the parser the CLI uses; anything else is the caller's error.</summary>
+    /// <summary>The <c>loops</c> body field: null when absent, else a positive count (the model's own maximum is enforced at generation).</summary>
+    internal static int? ParseLoops(int? loops) => loops switch
+    {
+        null => null,
+        >= 1 => loops,
+        _ => throw new ArgumentException("loops must be a positive integer (the recurrent-block pass count of a looped model)."),
+    };
+
     internal static int? ParseReasoningEffort(JsonElement? value) => value?.ValueKind switch
     {
         null or JsonValueKind.Null => null,

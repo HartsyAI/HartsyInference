@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Engine.Placement;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.LLM.Transformer;
@@ -43,6 +44,9 @@ internal sealed class TextDeviceSlot
 
     /// <summary>The generation pipeline built for <see cref="SsmModel"/> on <see cref="Backend"/>.</summary>
     public SsmGenerationPipeline? SsmPipeline { get; set; }
+
+    /// <summary>The loaded GGUF looped (latent-recurrent) model (Dory), or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter.</summary>
+    public LoopedLanguageModel? Looped { get; set; }
 
     /// <summary>The loaded DeepSeek-V4.1 host reference model, or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter; the slot's <see cref="Backend"/> is a CPU backend.</summary>
     public DeepSeekV41TextModel? DeepSeekV41 { get; set; }

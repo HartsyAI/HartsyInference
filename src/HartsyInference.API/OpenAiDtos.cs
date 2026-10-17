@@ -154,6 +154,9 @@ public sealed class ChatCompletionRequest
     /// <summary>OpenAI-style <c>reasoning_effort</c>: a name (<c>low</c>, <c>high</c>, <c>max</c>) or an integer in [1, 100]. <c>medium</c> is not defined by the engine and is refused.</summary>
     [JsonPropertyName("reasoning_effort")] public JsonElement? ReasoningEffort { get; set; }
 
+    /// <summary>Passes of the recurrent block for a looped model (Dory: 1 to 4); omitted takes the checkpoint's default. Ignored by other models.</summary>
+    [JsonPropertyName("loops")] public int? Loops { get; set; }
+
     /// <summary>OpenAI-style <c>thinking</c>: <c>{"type": "enabled"}</c> or <c>{"type": "disabled"}</c> selects the model's reasoning mode.</summary>
     [JsonPropertyName("thinking")] public ChatThinkingDto? Thinking { get; set; }
 

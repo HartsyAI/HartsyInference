@@ -50,6 +50,11 @@ public sealed record TextRequest
     /// <summary>Reasoning effort in [1, 100] for a template that takes one (DeepSeek-V4.1 thinking mode); null uses the template's default (75). Templates without an effort slot ignore it.</summary>
     public int? ReasoningEffort { get; init; }
 
+    /// <summary>Passes of the recurrent block for a looped (latent-recurrent) model such as NVIDIA Nemotron Dory: 1 for the lowest latency, up to the
+    /// loaded model's maximum (4 by default) for the highest accuracy, all from the same weights. Null takes the checkpoint's default; models without a
+    /// recurrent block ignore it. A conversation's cached prefix is reused only by requests with the same loop count.</summary>
+    public int? Loops { get; init; }
+
     /// <summary>The caller's own user identifier (OpenAI's <c>user</c>), carried on the request; the engine does not use it yet. It does not choose the tenant: the tenant comes from the API key, so a client cannot claim another tenant's cache.</summary>
     public string? User { get; init; }
 

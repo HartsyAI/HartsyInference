@@ -229,50 +229,54 @@ public sealed class GgufLanguageModel : IDisposable
     private static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
         GgufModelLoader.LoadedGgufModel handle, bool lowVramQuant, bool dequantizeToF32, IReadOnlySet<DType>? keepQuantized = null)
     {
+        if (SsmArchitectures.Contains(handle.Architecture))
+            throw new NotSupportedException($"'{handle.Architecture}' is a state-space (non-transformer) architecture — load it via HartsyInference.LLM.Ssm.SsmLanguageModel, not GgufLanguageModel.");
+        if (Looped.LoopedConfigFactory.Architectures.Contains(handle.Architecture))
+            throw new NotSupportedException($"'{handle.Architecture}' is a looped (latent-recurrent) architecture — load it via HartsyInference.LLM.Looped.LoopedLanguageModel, not GgufLanguageModel.");
+
+        Dictionary<string, Tensor> weights = RelabelAndWidenWeights(handle, dequantizeToF32, keepQuantized);
+
+        // Phi-3 fuses q/k/v into one attn_qkv tensor and gate/up into one ffn_up tensor; split them into the
+        // separate projections the transformer expects (contiguous row-byte copy, dtype-preserving → works
+        // on the quantized weights without dequant).
+        if (handle.Architecture == "phi3") SplitFusedPhi(weights, handle.Metadata);
+        if (handle.Architecture == "glm4") SplitFusedPhi(weights, handle.Metadata, "glm4");   // fused gate+up → gate/up (q/k/v already separate)
+        // GPT-2 / BLOOM fuse q/k/v (weight + bias) into one attn_qkv tensor laid out [q|k|v]; split before the
+        // config factory reads tensor presence (so the QKV bias is detected). Runs before FromGguf.
+        if (handle.Architecture is "gpt2" or "bloom" or "gptneox") SplitFusedGpt2(weights, handle.Metadata, handle.Architecture);
+
+        TransformerConfig config = GgufConfigFactory.FromGguf(handle.Metadata, weights, lowVramQuant);
+        // MoE: GGUF stacks all experts into one 3D tensor per projection; split them into the per-expert 2D
+        // weights the MoE block loads (reshape to 2D + contiguous row-byte slice, dtype-preserving).
+        if (config.Moe is not null) SplitStackedExperts(weights, config);
+        return (weights, config);
+    }
+
+    /// <summary>The loader stage every GGUF decoder shares: relabels each rank-2 tensor from GGUF's <c>[in, out]</c> to <c>[out, in]</c> (a metadata swap over the mmap, no data moves) and widens the quantized formats the device cannot read — every quantized and half tensor when <paramref name="dequantizeToF32"/> asks for the F32-only CPU path, except the <paramref name="keepQuantized"/> formats a backend reads packed.</summary>
+    internal static Dictionary<string, Tensor> RelabelAndWidenWeights(GgufModelLoader.LoadedGgufModel handle, bool dequantizeToF32,
+        IReadOnlySet<DType>? keepQuantized = null)
+    {
+        Dictionary<string, Tensor> weights = new(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Tensor> kv in handle.Weights)
         {
-            if (SsmArchitectures.Contains(handle.Architecture))
-                throw new NotSupportedException($"'{handle.Architecture}' is a state-space (non-transformer) architecture — load it via HartsyInference.LLM.Ssm.SsmLanguageModel, not GgufLanguageModel.");
-
-            // GGUF stores matrix dims in [in, out] order (data already row-major [out, in], same as HF
-            // safetensors). Relabel every rank-2 tensor's shape to [out, in] so the matmul backend (which reads
-            // N=Shape[0], K=Shape[1]) and the embed/lm_head ([vocab, hidden]) see the convention they expect.
-            // Pure metadata swap, no data movement; the tensors keep borrowing the GGUF mmap.
-            Dictionary<string, Tensor> weights = new(StringComparer.Ordinal);
-            foreach (KeyValuePair<string, Tensor> kv in handle.Weights)
+            Tensor t = kv.Value;
+            if (t.Shape.Rank == 2)
+                t = t.Reshape(new TensorShape((int)t.Shape[1], (int)t.Shape[0]));
+            // Quant formats the GPU matmul/dequant path doesn't handle (e.g. Q5_0 tensors inside a Q4_K_M
+            // mix) are dequantized to F32 up front; the supported formats stay quantized for the
+            // dequant-to-F16 / fused-GEMV path. The CPU backend is F32-only, so dequantizeToF32 widens
+            // everything (quantized and half-float) to F32 instead.
+            if (t.DType.IsQuantized && keepQuantized?.Contains(t.DType) == true)
             {
-                Tensor t = kv.Value;
-                if (t.Shape.Rank == 2)
-                    t = t.Reshape(new TensorShape((int)t.Shape[1], (int)t.Shape[0]));
-                // Quant formats the GPU matmul/dequant path doesn't handle (e.g. Q5_0 tensors inside a Q4_K_M
-                // mix) are dequantized to F32 up front; the supported formats stay quantized for the
-                // dequant-to-F16 / fused-GEMV path. The CPU backend is F32-only, so dequantizeToF32 widens
-                // everything (quantized and half-float) to F32 instead.
-                if (t.DType.IsQuantized && keepQuantized?.Contains(t.DType) == true)
-                {
-                    // Kept packed: the backend reads this block format directly.
-                }
-                else if (t.DType.IsQuantized && (dequantizeToF32 || !GpuSupportedQuant.Contains(t.DType.Name)))
-                    t = GgufDequantizer.Dequantize(t, DType.F32);
-                else if (dequantizeToF32 && t.DType.IsFloatingPoint && t.DType != DType.F32)
-                    t = t.CastTo(DType.F32);
-                weights[kv.Key] = t;
+                // Kept packed: the backend reads this block format directly.
             }
-
-            // Phi-3 fuses q/k/v into one attn_qkv tensor and gate/up into one ffn_up tensor; split them into the
-            // separate projections the transformer expects (contiguous row-byte copy, dtype-preserving → works
-            // on the quantized weights without dequant).
-            if (handle.Architecture == "phi3") SplitFusedPhi(weights, handle.Metadata);
-            if (handle.Architecture == "glm4") SplitFusedPhi(weights, handle.Metadata, "glm4");   // fused gate+up → gate/up (q/k/v already separate)
-            // GPT-2 / BLOOM fuse q/k/v (weight + bias) into one attn_qkv tensor laid out [q|k|v]; split before the
-            // config factory reads tensor presence (so the QKV bias is detected). Runs before FromGguf.
-            if (handle.Architecture is "gpt2" or "bloom" or "gptneox") SplitFusedGpt2(weights, handle.Metadata, handle.Architecture);
-
-            TransformerConfig config = GgufConfigFactory.FromGguf(handle.Metadata, weights, lowVramQuant);
-            // MoE: GGUF stacks all experts into one 3D tensor per projection; split them into the per-expert 2D
-            // weights the MoE block loads (reshape to 2D + contiguous row-byte slice, dtype-preserving).
-            if (config.Moe is not null) SplitStackedExperts(weights, config);
-            return (weights, config);
+            else if (t.DType.IsQuantized && (dequantizeToF32 || !GpuSupportedQuant.Contains(t.DType.Name)))
+                t = GgufDequantizer.Dequantize(t, DType.F32);
+            else if (dequantizeToF32 && t.DType.IsFloatingPoint && t.DType != DType.F32)
+                t = t.CastTo(DType.F32);
+            weights[kv.Key] = t;
         }
+        return weights;
     }
 
     /// <summary>Splits Phi-3's fused <c>qkv_proj</c> (→ q/k/v) and <c>gate_up_proj</c> (→ gate/up) into separate per-projection tensors; rows are contiguous in the (possibly quantized) layout, so each split is a dtype-preserving byte-range copy.</summary>
