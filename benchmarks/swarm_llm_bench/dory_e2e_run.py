@@ -44,7 +44,7 @@ import urllib.request
 import websockets
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from gpu_gate import GateError, GpuLease, run_under_lease  # noqa: E402
+from gpu_gate import GateError, GpuLease, gpu_index, run_under_lease  # noqa: E402
 from swarm_llm_bench import PROMPT as BENCH_PROMPT  # noqa: E402
 
 # The pinned release, mirroring the engine catalog's `dory` entry (src/HartsyInference.Engine/Registry/ModelCatalog.cs).
@@ -153,13 +153,21 @@ def swarm_prompt_depth(base, sid, out_dir):
     return record
 
 
-def nvidia_smi_apps():
-    """{gpu_index: used MiB by compute apps}, or None without nvidia-smi; used to attribute the serving card."""
+def nvidia_smi_apps(time_left=lambda: NVIDIA_SMI_TIMEOUT_S):
+    """{gpu_index: used MiB by compute apps}, or None without nvidia-smi or when the time for a call has run out; used to
+    attribute the serving card. time_left() is asked before each of the two calls for the seconds that call may take, so a
+    caller winding down can hold the whole reading to one deadline."""
     try:
+        timeout_s = time_left()
+        if timeout_s <= 0:
+            return None
         out = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,used_memory", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=NVIDIA_SMI_TIMEOUT_S, check=True).stdout
+                             capture_output=True, text=True, timeout=timeout_s, check=True).stdout
+        timeout_s = time_left()
+        if timeout_s <= 0:
+            return None
         gpus = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
-                              capture_output=True, text=True, timeout=NVIDIA_SMI_TIMEOUT_S, check=True).stdout
+                              capture_output=True, text=True, timeout=timeout_s, check=True).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     index_of = {}
@@ -186,17 +194,26 @@ class GpuUseSampler:
     """Samples compute-app memory per gpu index while a step runs, keeping each card's lowest and highest reading; served()
     is the card whose use grew the most during the step. The bench unloads and reloads the model, and the runner unloads it
     before the baseline, so the serving card's growth is the model's size while the others stay flat. available is False
-    without nvidia-smi, when no attribution is possible."""
+    without nvidia-smi, when no attribution is possible. Once the step has started the sampling thread is the only sampler,
+    and its exit (the reading in flight and, after a normal exit, one closing reading) is held to one shared deadline of
+    SAMPLER_TEARDOWN_S, so the cleanup after a step is never kept waiting longer than that by a slow nvidia-smi."""
 
     def __init__(self, interval_s=0.5):
         self.interval_s = interval_s
         self.lows, self.highs = {}, {}
         self.available = False
+        self.closing_sample = True  # cleared by a caller that already knows the step failed (a lost lease): cleanup comes first
+        self.teardown_complete = True
+        self._deadline = None  # monotonic time the sampler's exit must be done by; set in __exit__
         self._stop = threading.Event()
         self._thread = None
 
+    def _time_left(self):
+        """Seconds one nvidia-smi call may take now: its normal bound, or what remains of the teardown deadline once set."""
+        return NVIDIA_SMI_TIMEOUT_S if self._deadline is None else min(NVIDIA_SMI_TIMEOUT_S, self._deadline - time.monotonic())
+
     def _sample(self):
-        used = nvidia_smi_apps()
+        used = nvidia_smi_apps(self._time_left)
         if used is None:
             return
         self.available = True
@@ -212,18 +229,25 @@ class GpuUseSampler:
         def loop():
             while not self._stop.wait(self.interval_s):
                 self._sample()
+            if self.closing_sample:
+                self._sample()
 
         self._thread = threading.Thread(target=loop, name="gpu-use-sampler", daemon=True)
         self._thread.start()
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        # One deadline for all that is left: a reading in flight and the closing reading each get only what remains of it,
+        # so whatever nvidia-smi does the step's cleanup starts within SAMPLER_TEARDOWN_S. A step that ends by exception
+        # (a lost lease, a termination) is already failed and takes no closing reading.
+        self._deadline = time.monotonic() + SAMPLER_TEARDOWN_S
+        if exc_type is not None:
+            self.closing_sample = False
         self._stop.set()
-        self._thread.join(timeout=NVIDIA_SMI_TIMEOUT_S + 1)
-        # A step that ends by exception (a lost lease, a termination) is already failed: no closing sample, so the
-        # teardown stays inside the time a stopped runner has left for its unload.
-        if exc_type is None:
-            self._sample()
+        self._thread.join(timeout=SAMPLER_TEARDOWN_S + 1)
+        self.teardown_complete = not self._thread.is_alive()
+        if not self.teardown_complete:
+            log("[gpu] nvidia-smi did not return within the sampler's teardown; its last reading is not waited for")
         return False
 
     def served(self):
@@ -239,7 +263,7 @@ def ws_url(host, port):
 TERMINATED_UNLOAD_TIMEOUT_S = 6
 BENCH_CHILD_GRACE_S = 10
 NVIDIA_SMI_TIMEOUT_S = 5
-SAMPLER_TEARDOWN_S = NVIDIA_SMI_TIMEOUT_S + 2  # a sample in flight plus the thread join, the most the sampler's exit can take
+SAMPLER_TEARDOWN_S = NVIDIA_SMI_TIMEOUT_S + 2  # the sampler's exit deadline: a reading in flight, then the closing reading
 
 
 def bench_child_grace_s():
@@ -327,6 +351,8 @@ def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
             reply = asyncio.run(voice_turn(ws_base, sid, loops, lease))
         except (OSError, websockets.WebSocketException, ValueError) as e:
             reply = {"success": False, "error": repr(e), "response": None}
+        if lease is not None and lease.lost:
+            sampler.closing_sample = False  # the step has failed; the model's unload comes before any further reading
     elapsed = time.monotonic() - started
     served = sampler.served()
     result = {"loops": loops, "elapsed_s_including_load": round(elapsed, 2), "success": bool(reply.get("success")),
@@ -371,6 +397,8 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
         lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
     with GpuUseSampler() as sampler:
         returncode, lost = run_under_lease(cmd, lease, log_file=log_file, grace_s=bench_child_grace_s())
+        if lost:
+            sampler.closing_sample = False  # the step has failed; the model's unload comes before any further reading
     if lost:
         log("[bench] lease lost; the bench was stopped")
     console = log_file.read_text()
@@ -385,6 +413,10 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
         row = rows[0] if rows else {}
         record.update({"error": row.get("error"), "tg_tps_median": row.get("tg_tps_median"),
                        "ttft_ms_median": row.get("ttft_ms_median"), "counted_tokens": row.get("counted_tokens")})
+        if not record["error"] and record["tg_tps_median"] is None:
+            # The bench leaves the token rate unset when LLMAssistantCountTokens gave no count; its chunk rate is not a token
+            # rate, so the step has no result to report against llama.cpp.
+            record["error"] = "no decode rate: the reply's tokens could not be counted (LLMAssistantCountTokens), and stream chunks are not tokens"
     else:
         record["error"] = console.strip().splitlines()[-1] if console.strip() else f"exit {returncode}"
     if not record.get("error"):
@@ -413,6 +445,14 @@ def main():
     ap.add_argument("--out-dir", default="benchmarks/results/dory")
     args = ap.parse_args()
 
+    # The card this run is bound to under --no-lease: the one the caller's lease (gpu_gate.py's wrapper) exported as GATE_GPU,
+    # read as the gate names cards ("gpu1" or 1). A lease id whose card cannot be read is refused before anything runs: a run
+    # that cannot tell which card its lease is for could neither keep its work on that card nor reject another. None only when
+    # no lease is involved at all.
+    held_gpu = gpu_index(os.environ.get("GATE_GPU")) if args.no_lease else None
+    if args.no_lease and os.environ.get("GATE_LEASE_ID") and held_gpu is None:
+        raise SystemExit(f"GATE_LEASE_ID is set but GATE_GPU ({os.environ.get('GATE_GPU')!r}) does not name the leased card; refusing to guess")
+
     base = f"http://{args.host}:{args.port}"
     ws_base = ws_url(args.host, args.port)
 
@@ -438,9 +478,6 @@ def main():
     # Exclusive: a benchmark never runs alongside another suite, benchmark or generation (docs/Agents/AGENTS.md).
     lease = None if args.no_lease else GpuLease(AGENT, TASK, args.model_path, base=args.gate, vram_mb=args.vram_mb,
                                                  minutes=args.minutes, exclusive=True, gpu=args.gate_gpu, log=log)
-    # The card this run is bound to: the lease it holds, or under --no-lease the one the caller's lease (gpu_gate.py's wrapper)
-    # exported as GATE_GPU; None only when no lease is involved at all.
-    held_gpu = int(os.environ["GATE_GPU"]) if args.no_lease and os.environ.get("GATE_GPU", "").isdigit() else None
     failed = False
     terminated = False  # stopped by a signal: the cleanup gets one quick unload attempt, inside the wrapper's grace period
     used_swarm = False  # only a run that got its card touches SwarmUI's model state, in the steps and in the cleanup

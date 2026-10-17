@@ -215,21 +215,18 @@ async def bench_model(sid, tid, model):
         reps.append(r)
     # authoritative token count from the last reply
     tok = count_tokens(sid, model, reps[-1]["full_text"])
-    # Stream chunks are not tokens: the decode rate counts the tokenizer's count of the reply (greedy, so every rep's
-    # reply is the same text) over the window between the first and last chunk; the chunk rate is kept as its own field,
-    # since that is what the earlier results in benchmarks/results were computed from.
-    tg_list, chunk_rate_list, ttft_list = [], [], []
-    for r in reps:
-        n = tok if tok else r["n_chunks"]
-        tg_list.append((n - 1) / r["decode_window"] if r["decode_window"] > 0 else 0)
-        chunk_rate_list.append((r["n_chunks"] - 1) / r["decode_window"] if r["decode_window"] > 0 else 0)
-        ttft_list.append(r["ttft"])
+    # Stream chunks are not tokens: the decode rate is the tokenizer's count of the reply (greedy, so every rep's reply is
+    # the same text) over the window between the first and last chunk, and stays unset (None) when no count came back
+    # rather than being filled from chunks. The chunk rate is kept as its own field, since that is what the earlier results
+    # in benchmarks/results were computed from.
+    chunk_rate_list = [(r["n_chunks"] - 1) / r["decode_window"] if r["decode_window"] > 0 else 0 for r in reps]
+    tg_list = [(tok - 1) / r["decode_window"] if r["decode_window"] > 0 else 0 for r in reps] if tok else []
+    ttft_list = [r["ttft"] for r in reps]
     return {
         "model": model,
-        "tg_tps_median": statistics.median(tg_list),
-        "tg_tps_mean": statistics.mean(tg_list),
-        "tg_tps_std": statistics.pstdev(tg_list) if len(tg_list) > 1 else 0.0,
-        "tg_tps_from": "counted_tokens" if tok else "n_chunks",
+        "tg_tps_median": statistics.median(tg_list) if tg_list else None,
+        "tg_tps_mean": statistics.mean(tg_list) if tg_list else None,
+        "tg_tps_std": (statistics.pstdev(tg_list) if len(tg_list) > 1 else 0.0) if tg_list else None,
         "tg_chunks_per_s_median": statistics.median(chunk_rate_list),
         "ttft_ms_median": statistics.median(ttft_list) * 1000,
         "n_chunks": reps[-1]["n_chunks"],
@@ -486,7 +483,8 @@ async def main():
         if "error" in r:
             print(f"    ERROR: {r['error']}", file=sys.stderr)
         else:
-            print(f"    tg={r['tg_tps_median']:.2f} t/s  ttft={r['ttft_ms_median']:.0f}ms  "
+            tg = "n/a (LLMAssistantCountTokens gave no count)" if r["tg_tps_median"] is None else f"{r['tg_tps_median']:.2f} t/s"
+            print(f"    tg={tg}  chunks/s={r['tg_chunks_per_s_median']:.2f}  ttft={r['ttft_ms_median']:.0f}ms  "
                   f"chunks={r['n_chunks']}  tok={r['counted_tokens']}", file=sys.stderr)
 
     with open(args.out, "w") as f:
@@ -498,6 +496,8 @@ async def main():
     for r in results:
         if "error" in r:
             print(f'{r["model"]:42} {"ERROR: "+str(r["error"])[:30]:>18}')
+        elif r["tg_tps_median"] is None:
+            print(f'{r["model"]:42} {"n/a (no token count)":>18} {r["ttft_ms_median"]:10.0f} {r["n_chunks"]:7}')
         else:
             print(f'{r["model"]:42} {r["tg_tps_median"]:12.2f} ±{r["tg_tps_std"]:4.1f} '
                   f'{r["ttft_ms_median"]:10.0f} {r["n_chunks"]:7}')

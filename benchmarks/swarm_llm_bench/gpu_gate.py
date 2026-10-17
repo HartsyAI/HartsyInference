@@ -112,6 +112,7 @@ class GpuLease:
         self.gpu = None
         self.status = None
         self.lost = False
+        self.released = False
         self._stop = threading.Event()
         self._thread = None
 
@@ -187,14 +188,40 @@ class GpuLease:
             raise GateError(f"lease {self.lease_id} is gone (heartbeat refused); stop the run")
 
     def cancel(self):
-        """Withdraws a request that is still queued, so an aborted acquisition never receives a card later."""
-        if self.request_id and self.status == "queued":
-            try:
-                call(self.base, "POST", "/api/cancel", {"request_id": self.request_id})
-                self.status = "cancelled"
-                self.log(f"[gate] cancelled request {self.request_id}")
-            except GateError as e:
-                self.log(f"[gate] cancel failed: {e}")
+        """Withdraws a request that is still queued, so an aborted acquisition never receives a card later. A cancel the gate
+        refuses is followed by one look at the request: granted in the meantime, its lease would keep the card reserved for a
+        run that is not starting until the gate expires it, so that lease is released here, marked failed."""
+        if not (self.request_id and self.status == "queued"):
+            return
+        try:
+            call(self.base, "POST", "/api/cancel", {"request_id": self.request_id})
+            self.status = "cancelled"
+            self.log(f"[gate] cancelled request {self.request_id}")
+            return
+        except GateError as e:
+            self.log(f"[gate] cancel refused: {e}; checking whether the request was granted meanwhile")
+        try:
+            reply = call(self.base, "GET", f"/api/request/{self.request_id}")
+            self.status = reply.get("status")
+            if self.status != "granted":
+                self.log(f"[gate] request {self.request_id} is {self.status}; nothing to release")
+                return
+            self._take_grant(reply)
+        except GateError as e:
+            self.log(f"[gate] request {self.request_id} could not be checked after the refused cancel: {e}")
+            return
+        self.log(f"[gate] request {self.request_id} was granted during its cancellation; releasing lease {self.lease_id}")
+        self._release_lease(failed=True)
+
+    def _release_lease(self, failed):
+        """The one release call for the lease held, made at most once. A refusal is only logged: a lease the gate already
+        ended (expired, or lost after a refused heartbeat) answers that way, and there is nothing more to hand back."""
+        self.released = True
+        try:
+            call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed})
+            self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed else ""))
+        except GateError as e:
+            self.log(f"[gate] release not accepted ({'lease was already lost' if self.lost else 'error'}): {e}")
 
     def release(self, failed=False):
         """Ends the heartbeat and releases the lease; a request still queued is cancelled instead."""
@@ -204,15 +231,10 @@ class GpuLease:
         if self.status == "queued":
             self.cancel()
             return
-        if self.lease_id:
+        if self.lease_id and not self.released:
             # Attempted even after a heartbeat failure: a refused or unreadable heartbeat may have been transient, and a card
-            # the gate still considers leased would otherwise stay reserved until expiry. A reply that the lease is already
-            # gone is the expected answer then, and is only logged.
-            try:
-                call(self.base, "POST", "/api/release", {"lease_id": self.lease_id, "failed": failed or self.lost})
-                self.log(f"[gate] released lease {self.lease_id}" + (" (failed)" if failed or self.lost else ""))
-            except GateError as e:
-                self.log(f"[gate] release not accepted ({'lease was already lost' if self.lost else 'error'}): {e}")
+            # the gate still considers leased would otherwise stay reserved until expiry.
+            self._release_lease(failed=failed or self.lost)
 
     def __enter__(self):
         try:
