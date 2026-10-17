@@ -241,6 +241,8 @@ def run_probe(base, ws_base, sid, loops, lease, bound_gpu):
     if unload_error:
         log(f"[probe] loops={loops if loops is not None else 'default'}: FAILED before the request: {unload_error}")
         return {"loops": loops, "success": False, "error": unload_error, "response": None, "served_gpu": None}
+    if lease is not None:
+        lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
     started = time.monotonic()
     with GpuUseSampler() as sampler:
         try:
@@ -287,6 +289,8 @@ def run_bench(base, sid, host, port, loops, out_file, lease, bound_gpu):
     if unload_error:
         log(f"[bench] loops={loops}: FAILED before the run: {unload_error}")
         return {"loops": loops, "error": unload_error, "out": str(out_file), "served_gpu": None}
+    if lease is not None:
+        lease.check_alive()  # the unload may have blocked or retried; no new work starts on a lease lost meanwhile
     with GpuUseSampler() as sampler:
         returncode, lost = run_under_lease(cmd, lease, log_file=log_file)
     if lost:
@@ -353,10 +357,12 @@ def main():
     # exported as GATE_GPU; None only when no lease is involved at all.
     held_gpu = int(os.environ["GATE_GPU"]) if args.no_lease and os.environ.get("GATE_GPU", "").isdigit() else None
     failed = False
+    used_swarm = False  # only a run that got its card touches SwarmUI's model state, in the steps and in the cleanup
     try:
         if lease is not None:
             lease.__enter__()
             summary["lease"] = {"lease_id": lease.lease_id, "gpu": lease.gpu}
+        used_swarm = True
         elif held_gpu is not None:
             summary["lease"] = {"lease_id": os.environ.get("GATE_LEASE_ID"), "gpu": held_gpu, "inherited": True}
             log(f"[gate] using the caller's lease on gpu {held_gpu}")
@@ -387,12 +393,14 @@ def main():
         raise
     finally:
         # Swarm cleanup first, the lease last: the card is handed back only once the model is out of it, and a card that
-        # could not be emptied is handed back marked failed so the gate knows.
-        unload_error = unload(base, sid)
-        if unload_error:
-            failed = True
-            summary["cleanup_error"] = unload_error
-            log(f"[run] cleanup: {unload_error}")
+        # could not be emptied is handed back marked failed so the gate knows. A run that never got its card leaves SwarmUI
+        # alone: the unload is global, and the card's current holder may be using the model.
+        if used_swarm:
+            unload_error = unload(base, sid)
+            if unload_error:
+                failed = True
+                summary["cleanup_error"] = unload_error
+                log(f"[run] cleanup: {unload_error}")
         if lease is not None:
             lease.release(failed=failed)
         summary["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
