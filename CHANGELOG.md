@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.377
+
+- **Changed: Qwen-Image 2.1 Turbo downloads Comfy-Org's single fused file.** The catalog fetched Qwen's two-shard diffusers
+  release, which needs its split MLP re-fused. `qwen_image_2.1_turbo_bf16.safetensors` in `Comfy-Org/Qwen-Image-2.1` carries
+  the same 265 BF16 tensors and fused MLP as the base build, so the converter passes it through. The `turbo` filename
+  token still selects the Turbo variant. Not yet verified on a GPU.
+
 ## alpha.376
 
 - **Fixed: HeartMuLa's quantized load keeps about 2 GB less host RAM.** The audio-embedding split borrows the
