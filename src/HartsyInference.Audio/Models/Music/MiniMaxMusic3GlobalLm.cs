@@ -36,7 +36,6 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
 
     private readonly Qwen3Model _backbone;
     private readonly bool _halfPrecisionKv;
-    // Off by default: the dual-stream device attention it routes through diverges on high-SM cards (passes on a
     private Tensor? _embedTokens;
     private Tensor? _semanticEmbed;   // borrowed rows [AudioCodeOffset, +16385) of the mapped embedding table, for the device loop
     private Tensor? _semanticCodes;   // borrowed rows [AudioCodeOffset, +16384) of the mapped head
@@ -44,19 +43,6 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
     private int _disposed;
 
     /// <param name="halfPrecisionKv">Store the KV cache as F16. A five-minute song reaches ~7500 frames, which is ~2.3 GB per branch at F32 and ~4.5 GB across the guided pair — more headroom than the quantized variants have on a 12 GB card. CUDA-only; the CPU path keeps F32, which is also what the parity runs compare.</param>
-    /// <summary>Diagnostic: anonymous resident memory at a load milestone.</summary>
-    private static void LogRssAnonDiag(string stage)
-    {
-        foreach (string line in System.IO.File.ReadLines("/proc/self/status"))
-        {
-            if (line.StartsWith("RssAnon:", StringComparison.Ordinal))
-            {
-                HartsyInference.Core.Logging.Logs.Info($"[Audio][MiniMaxMusic3] RssAnon {stage}: {line.AsSpan(8).Trim().ToString()}.");
-                return;
-            }
-        }
-    }
-
     public MiniMaxMusic3GlobalLm(bool halfPrecisionKv = false)
     {
         _halfPrecisionKv = halfPrecisionKv;
@@ -80,7 +66,6 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         _backbone.LoadWeightsHeadless(weights, prefix: "model");
-        LogRssAnonDiag("lm backbone headless");
         _embedTokens = weights["model.embed_tokens.weight"];
         _semanticEmbed = BorrowRows(_embedTokens, AudioCodeOffset, SemanticVocabSize + 1);
         Tensor head = weights["lm_head.weight"];
@@ -92,7 +77,6 @@ public sealed unsafe class MiniMaxMusic3GlobalLm : IDisposable
         // before it, so they are two views. No owned F32 copy of the head is made.
         _semanticCodes = BorrowRows(head, AudioCodeOffset, SemanticVocabSize);
         _semanticEnd = BorrowRows(head, AudioEndTokenId, 1);
-        LogRssAnonDiag("lm semantic head");
     }
 
     /// <summary>Allocates a decode cache sized for <paramref name="maxSeqLen"/> tokens. One per classifier-free branch; the caller disposes them.</summary>

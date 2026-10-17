@@ -59,19 +59,6 @@ internal static class MiniMaxMusic3MusicModel
         return lower.EndsWith("q4", StringComparison.Ordinal) || lower.EndsWith("q4_k", StringComparison.Ordinal) ? "q4_k" : null;
     }
 
-    /// <summary>Diagnostic: the process's anonymous resident memory at a load milestone.</summary>
-    private static void LogRssAnon(string stage)
-    {
-        foreach (string line in File.ReadLines("/proc/self/status"))
-        {
-            if (line.StartsWith("RssAnon:", StringComparison.Ordinal))
-            {
-                Logs.Info($"[Audio][MiniMaxMusic3] RssAnon after {stage}: {line.AsSpan(8).Trim().ToString()}.");
-                return;
-            }
-        }
-    }
-
     private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, string repo, string? quant, string? localPath, CancellationToken cancel)
     {
         string tokenizerPath = await AudioModelCache.GetAsync(repo, "tokenizer/tokenizer.json", Category, ct: cancel).ConfigureAwait(false);
@@ -134,32 +121,23 @@ internal static class MiniMaxMusic3MusicModel
             MiniMaxMusic3WeightPolicy.PrepareDepthDecoder(depthWeights, repo, depthQuant, out IDisposable? depthQuantCache);
         IReadOnlyDictionary<string, Tensor> preparedDit =
             MiniMaxMusic3WeightPolicy.PrepareTransformer(ditWeights, repo, quant, out IDisposable? ditCast);
-            LogRssAnon("prepare transformer");
         ModelAssets.Lora.LoraStack? loras = ApplyLoras(context, ref preparedLanguage, ref preparedDit);
 
         // The quantized variants are the small-card path, where an F32 KV cache is the difference between
         // a five-minute song fitting and not.
         MiniMaxMusic3GlobalLm languageModel = new MiniMaxMusic3GlobalLm(halfPrecisionKv: quant is not null && context.Backend.Capabilities.SupportsF16);
-        LogRssAnon("before language model LoadWeights");
         languageModel.LoadWeights(preparedLanguage);
-        LogRssAnon("after language model LoadWeights");
-        LogRssAnon("language model");
         MiniMaxMusic3DepthDecoder depthDecoder = new MiniMaxMusic3DepthDecoder();
         depthDecoder.LoadWeights(preparedDepth);
-        LogRssAnon("depth decoder");
         MiniMaxMusic3ConditionEncoder conditionEncoder = new MiniMaxMusic3ConditionEncoder();
         conditionEncoder.LoadWeights(conditionWeights);
-        LogRssAnon("condition encoder");
         MiniMaxMusic3Dit dit = new MiniMaxMusic3Dit();
         dit.LoadWeights(preparedDit);
-        LogRssAnon("dit");
         MiniMaxMusic3Vocoder vocoder = new MiniMaxMusic3Vocoder();
         vocoder.LoadWeights(vocoderWeights);
-        LogRssAnon("vocoder");
 
         using FileStream tokenizerJson = File.OpenRead(tokenizerPath);
         GgufTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson);
-        LogRssAnon("tokenizer");
 
         MiniMaxMusic3ArPipeline autoregressive = new MiniMaxMusic3ArPipeline(languageModel, depthDecoder);
         MiniMaxMusic3FlowPipeline flow = new MiniMaxMusic3FlowPipeline(context.Backend, conditionEncoder, dit);
@@ -208,16 +186,9 @@ internal static class MiniMaxMusic3MusicModel
             Tensor[] chunks;
             try
             {
-                // Candidate fix for the flow upload from the mapped cache: read the mapping ahead of the upload.
-                bool willNeed = (ditCast as SafeTensorsLoader)?.AdviseWillNeed() ?? false;
-                Logs.Info($"[Audio][MiniMaxMusic3] Flow transformer mapping advised WillNeed: {willNeed}.");
-                long uploadStart = Environment.TickCount64;
                 backend.PreloadWeights(conditionEncoder.EnumerateWeights());
                 backend.PreloadWeights(dit.EnumerateWeights());
-                long denoiseStart = Environment.TickCount64;
-                Logs.Info($"[Audio][MiniMaxMusic3] Flow weights uploaded in {(denoiseStart - uploadStart) / 1000.0:0.0}s.");
                 chunks = flow.Denoise(frameHiddens, produced, steps, cfgScale, request.Seed, OnStep, ct);
-                Logs.Info($"[Audio][MiniMaxMusic3] Flow denoise took {(Environment.TickCount64 - denoiseStart) / 1000.0:0.0}s.");
             }
             finally
             {
