@@ -1,5 +1,4 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -69,9 +68,7 @@ public sealed unsafe class Flux3ParityTests(ITestOutputHelper output)
         Flux3Config config = Flux3Config.FromWeights(converted) with { ContextInDim = Context };
         Assert.Equal(flowMap, config.FlowMap);
         using Flux3Transformer transformer = new Flux3Transformer(config);
-        // The CPU reference backend has no F16 kernels; the Comfy parity runs the F32 stream (the F16 path is gated on GPU).
-        using (KnobProfile.Create("flux3-f32-parity").With(EngineKnobs.DitF16, false).Push())
-            transformer.LoadWeights(converted);
+        transformer.LoadWeights(converted);
         try
         {
             body(transformer, new CpuBackend(), all);
