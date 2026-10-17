@@ -48,6 +48,9 @@ import websockets
 BASE_HTTP = "http://127.0.0.1:7801"
 BASE_WS   = "ws://127.0.0.1:7801"
 
+# Recurrent-block passes for a looped model (Dory); None leaves the field out of the request so the checkpoint's
+# (or the backend's RecurrentLoops) default applies. Set from --loops.
+LOOPS = None
 # Frozen benchmark params
 MAX_TOKENS = 128
 TEMPERATURE = 0          # -> greedy in HartsyLocalLLMProvider (Greedy = temp <= 0)
@@ -156,6 +159,8 @@ async def one_generation(sid, tid, model, prompt=PROMPT, max_tokens=MAX_TOKENS):
     frame = {"session_id": sid, "threadId": tid, "message": prompt,
              "model": model, "temperature": TEMPERATURE,
              "maxTokens": max_tokens, "seed": SEED}
+    if LOOPS is not None:
+        frame["loops"] = LOOPS
     t_send = time.perf_counter()
     chunk_stamps, full_text, err = [], None, None
     async with websockets.connect(BASE_WS + "/API/LLMAssistantSendMessageWS",
@@ -439,11 +444,15 @@ async def main():
     ap.add_argument("--out", default="benchmarks/results/swarm_llm_3060.json")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", default="7801")
+    ap.add_argument("--loops", type=int, default=None,
+                    help="recurrent-block passes for a looped model such as Dory (1-4); omitted = the checkpoint default")
     ap.add_argument("--voice-qwen3", action="store_true", help="voice-turn Qwen3-4B TTFT/tok-s mode (see module doc)")
     ap.add_argument("--quiet-window-passed", action="store_true",
                     help="assert that tests/swarm-quiet-window.sh --gpu 4090 exited 0 just before this run")
     ap.add_argument("--voice-out", default="benchmarks/results/swarm_voice_llm.json")
     args = ap.parse_args()
+    global LOOPS
+    LOOPS = args.loops
     BASE_HTTP = f"http://{args.host}:{args.port}"
     BASE_WS = f"ws://{args.host}:{args.port}"
 
