@@ -1905,6 +1905,7 @@ public sealed class TextService : ITextService, IDisposable
             : null,
         ToolCallId = m.ToolCallId,
         Name = m.Name,
+        ReasoningContent = m.ReasoningContent,
     };
 
     /// <summary>OpenAI-form tool JSON (<c>{"type":"function","function":{name,description,parameters}}</c>) for the chat template; null when no tools are offered. A schema that is not valid JSON fails here, before any model work.</summary>
