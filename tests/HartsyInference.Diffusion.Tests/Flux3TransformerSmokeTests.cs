@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -122,7 +123,9 @@ public sealed unsafe class Flux3TransformerSmokeTests
         }
         Flux3Config config = Flux3Config.FromWeights(w) with { ContextInDim = Context };
         Flux3Transformer transformer = new Flux3Transformer(config);
-        transformer.LoadWeights(w);
+        // The CPU reference backend has no F16 kernels; these run the F32 stream (the F16 path is gated on GPU).
+        using (KnobProfile.Create("flux3-f32-smoke").With(EngineKnobs.DitF16, false).Push())
+            transformer.LoadWeights(w);
         return (transformer, w);
     }
 

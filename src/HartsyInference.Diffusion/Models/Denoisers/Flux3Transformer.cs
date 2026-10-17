@@ -36,6 +36,8 @@ public sealed class Flux3Transformer : IDisposable
     private Tensor? _targetTimeIn1;
     private Tensor? _targetTimeIn2;
     private Tensor? _finalLinear;
+    // True when the streams run in F16 (numerics.ditF16, bound at load so the weight damp and the stream dtype always agree).
+    private bool _f16Mode;
     private int _disposed;
 
     /// <summary>Creates an unloaded transformer for <paramref name="config"/>.</summary>
@@ -63,9 +65,19 @@ public sealed class Flux3Transformer : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
+        _f16Mode = DitDtype.Act == DType.F16;
+        float branchDamp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
         _imageEmbed = weights["emb_in.image.weight"];
         _referenceEmbed = weights["emb_in.image_cond.weight"];
         _textEmbed = weights["txt_in.weight"];
+        if (_f16Mode)
+        {
+            // Enter the damped-residual regime at the bias-less embedders; block-output damping keeps the streams there,
+            // and every stream read is a no-affine LayerNorm, so the factor cancels before the final layer.
+            _imageEmbed.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+            _referenceEmbed.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+            _textEmbed.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+        }
         _timeIn1 = weights["time_in.in_layer.weight"];
         _timeIn2 = weights["time_in.out_layer.weight"];
         if (_config.FlowMap)
@@ -79,12 +91,12 @@ public sealed class Flux3Transformer : IDisposable
             modulation.LoadWeights(weights[$"single_stream_modulations.{mode}.lin.weight"], null);
         for (int i = 0; i < _config.Depth; i++)
         {
-            _imageBlocks[i].LoadWeights(weights, $"content_mode_blocks.{ImageMode}.{i}");
-            _referenceBlocks[i].LoadWeights(weights, $"content_mode_blocks.{ReferenceMode}.{i}");
-            _textBlocks[i].LoadWeights(weights, $"txt_mode_blocks.{i}");
+            _imageBlocks[i].LoadWeights(weights, $"content_mode_blocks.{ImageMode}.{i}", branchDamp);
+            _referenceBlocks[i].LoadWeights(weights, $"content_mode_blocks.{ReferenceMode}.{i}", branchDamp);
+            _textBlocks[i].LoadWeights(weights, $"txt_mode_blocks.{i}", branchDamp);
         }
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
-            _jointBlocks[i].LoadWeights(weights, $"single_blocks.{i}");
+            _jointBlocks[i].LoadWeights(weights, $"single_blocks.{i}", branchDamp);
         _finalModulation.LoadWeights(weights["final_layer.image.adaLN_modulation.1.weight"], null);
         _finalLinear = weights["final_layer.image.linear.weight"];
     }
@@ -122,6 +134,7 @@ public sealed class Flux3Transformer : IDisposable
         try
         {
             text = EmbedTokens(backend, input.TextFeatures, _textEmbed!, _config.ContextInDim, "text features");
+            text = ToStreamDtype(backend, text);
             int textLength = (int)text.Shape[1];
             FluxRope textRope = _textRope.Ensure(textLength, () => Flux3PosEmbed.TextIds(textLength));
             text = RunStack(backend, text, _textBlocks, _earlyModulations[TextMode], zeroVec, textRope);
@@ -130,6 +143,7 @@ public sealed class Flux3Transformer : IDisposable
             {
                 ValidateReferences(input);
                 references = EmbedTokens(backend, input.ReferenceTokens, _referenceEmbed!, _config.InChannels, "reference tokens");
+                references = ToStreamDtype(backend, references);
                 FluxRope referenceRope = _referenceRope.Ensure(ReferenceSignature(input.ReferenceShapes),
                     () => Flux3PosEmbed.ReferenceIds(input.ReferenceShapes, _config.ImageRopeScale));
                 references = RunStack(backend, references, _referenceBlocks, _earlyModulations[ReferenceMode], zeroVec, referenceRope);
@@ -182,6 +196,7 @@ public sealed class Flux3Transformer : IDisposable
             imageVec = TimeVector(backend, sigma, targetSigma);
             zeroVec = TimeVector(backend, 0f, targetSigma);
             image = EmbedTokens(backend, packedLatent, _imageEmbed!, _config.InChannels, "packed latent");
+            image = ToStreamDtype(backend, image);
             FluxRope imageRope = _imageRope.Ensure(GridSignature(hPacked, wPacked),
                 () => Flux3PosEmbed.ImageIds(hPacked, wPacked, 0f, _config.ImageRopeScale));
             image = RunStack(backend, image, _imageBlocks, _earlyModulations[ImageMode], imageVec, imageRope);
@@ -196,6 +211,15 @@ public sealed class Flux3Transformer : IDisposable
             imageRows = new Tensor(new TensorShape(1, imageTokens, _config.HiddenSize), joint.DType);
             backend.SliceRows(imageRows, joint, 0);
             joint.Dispose();
+            if (imageRows.DType == DType.F16)
+            {
+                // Back to F32 for the final layer: its LayerNorm cancels the residual damp, and the velocity keeps F32 precision
+                // across Euler steps (the Flux2 recipe).
+                Tensor rowsF32 = new Tensor(imageRows.Shape, DType.F32);
+                backend.CastToF32(rowsF32, imageRows);
+                imageRows.Dispose();
+                imageRows = rowsF32;
+            }
             return FinalLayer(backend, imageRows, imageVec);
         }
         finally
@@ -284,6 +308,17 @@ public sealed class Flux3Transformer : IDisposable
         Tensor embedded = new Tensor(new TensorShape(1, tokens.Shape[1], _config.HiddenSize), DType.F32);
         backend.Linear(embedded, tokens, weight, null);
         return embedded;
+    }
+
+    /// <summary>Casts an embedded F32 stream to the block dtype (F16 on the damped path), taking ownership of it.</summary>
+    private Tensor ToStreamDtype(IBackend backend, Tensor f32)
+    {
+        if (!_f16Mode)
+            return f32;
+        Tensor f16 = new Tensor(f32.Shape, DType.F16);
+        backend.CastToF16(f16, f32);
+        f32.Dispose();
+        return f16;
     }
 
     /// <summary>Runs <paramref name="x"/> through <paramref name="blocks"/>, taking ownership of it: each block's input is

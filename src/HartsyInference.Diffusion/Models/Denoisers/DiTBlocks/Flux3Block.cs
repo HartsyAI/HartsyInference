@@ -23,8 +23,11 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
     private Tensor? _attnOut;
     private Tensor? _mlpOut;
 
-    /// <summary>Binds this block's weights under <paramref name="prefix"/>.</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    /// <summary>Binds this block's weights under <paramref name="prefix"/>. <paramref name="branchDamp"/> scales the two
+    /// branch-output projections so an F16 stream rides at the damped scale (see <c>ChromaF16.ResidualDamp</c>); the
+    /// damp folds into each GEMM's alpha through <c>Fp8ScaleFactor</c>, and a weight loaded once per transformer is
+    /// scaled once.</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         _qProj = weights[$"{prefix}.q_proj.weight"];
         _kProj = weights[$"{prefix}.k_proj.weight"];
@@ -32,6 +35,8 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         _mlpIn = weights[$"{prefix}.mlp_in.weight"];
         _attnOut = weights[$"{prefix}.attn_out.weight"];
         _mlpOut = weights[$"{prefix}.mlp_out.weight"];
+        _attnOut.Fp8ScaleFactor *= branchDamp;
+        _mlpOut.Fp8ScaleFactor *= branchDamp;
         _normQ.LoadWeights(weights[$"{prefix}.norm.query_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.norm.key_norm.weight"]);
     }
@@ -49,8 +54,9 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         foreach (Tensor w in _normK.EnumerateWeights()) yield return w;
     }
 
-    /// <summary>Runs the block on <paramref name="x"/> <c>[1, S, D]</c> (F32) and returns a new tensor; <paramref name="rope"/>
-    /// must hold tables precomputed for exactly these <c>S</c> tokens.</summary>
+    /// <summary>Runs the block on <paramref name="x"/> <c>[1, S, D]</c> in its own dtype (F32, or F16 on the damped stream)
+    /// and returns a new tensor of that dtype; <paramref name="rope"/> must hold tables precomputed for exactly these
+    /// <c>S</c> tokens.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Flux3Modulation modulation, FluxRope rope)
     {
         if (x.Shape.Rank != 3 || x.Shape[0] != 1 || x.Shape[2] != _hiddenSize)
