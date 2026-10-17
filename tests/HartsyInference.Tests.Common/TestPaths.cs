@@ -477,6 +477,10 @@ public static class TestPaths
         /// GGUFs in every quantization, the transformers reference logits, the per-quant dequantized references and llama.cpp's logits.</summary>
         public static string MuseSparkSmallDir => Resolve("MUSE_SPARK_SMALL_DIR", Path.Combine(ModelsDir, "llm", "muse-spark-small"));
 
+        /// <summary>Part 1 of the Muse Spark Open Q4_K_S split set; the loader reads the other parts beside it.</summary>
+        public static string MuseSparkOpenQ4KS => Resolve("MUSE_SPARK_OPEN_Q4KS_PATH",
+            Path.Combine(ModelsDir, "llm", "muse-spark-open", "Muse-Spark-Open-816B-A42B-Q4_K_S-00001-of-00022.gguf"));
+
         /// <summary>Qwen3-32B, Q4_K_M GGUF (~19.8 GB). Too large for a single 24 GB consumer card once driver
         /// overhead and KV/activations are counted — the layer-split tok/s oracle.</summary>
         public static string Qwen3_32BQ4KM => Resolve("QWEN3_32B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-32B-Q4_K_M.gguf"));
