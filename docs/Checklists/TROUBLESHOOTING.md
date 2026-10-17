@@ -952,6 +952,27 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   purely because the old `nari-labs/Dia-1.6B` was downloaded instead of `Dia-1.6B-0626` (identical 343
   keys/shapes, only values differ). Orpheus "silent output" traced to weights/sourcing (unsloth mirror),
   not engine code.
+- **Dia-1.6B-0626 "heard you" on the 3-sentence fox prompt: CPU runs fail to stop for some seeds; the 3060 passes.**
+  - **Evidence.** The weights are the official files: `pytorch_model.bin` sha256 `8a5106c0…` (the HF main hash) and DAC
+    `weights.pth` sha256 `a88eed82…`. The RAID safetensors repacks are byte-identical per tensor (343 Dia, 301 DAC), so the
+    checkpoint is not the cause. Prompt: `[S1] The quick brown fox … [S2] Then it naps … [S1] What a lovely …`.
+    On CPU, seed 42 emits EOS at step 954 (~11 s), seed 0 emits no EOS within 1000 steps, and seed 7 falls into a
+    698-dominated loop (~3.4 s) after the first sentence. On the 3060 (CUDA, full 1720-frame budget, current head), seed 42
+    emits EOS at step 771 (8.95 s) and seed 0 at step 1030 (11.96 s). Whisper base (not the `medium.en` this entry's own rule
+    requires, so re-check with `medium.en` before relying on "exact") transcribes all three sentences in both, though seed 0
+    has a silent gap at ~8 s and its most common code is 530 (138 of 1030 steps). The
+    transformers 5.19 `DiaForConditionalGeneration` port on CPU, with the same weights converted by the `DiaWeights.Adapt`
+    layout rules, also fails to stop for seed 0 on this prompt and on the July text. Its seed-42 July-text run ends at
+    step 773, against 877 for the CPU engine. The port uses torch's RNG, so its seed 0 is not the engine's seed-0 trajectory.
+  - **Repro.** CPU: `HARTSYINFERENCE_MODEL_CACHE=<cache> hartsy --settings-file <empty> --set diagnostics.diaDebugTokens=<file>
+    speak "<text>" -m dia:1.6b -b cpu --seed N`. GPU: the same with `CUDA_VISIBLE_DEVICES=1` and `-b cuda:0` (the 3060).
+    Read the dump's first EOS index and its distinct codes per second.
+  - **Swarm.** AudioLab passes `-1` when no seed is set, and SwarmUI's `LockSeeds` (per source; not checked in a live
+    journal) replaces that with a random seed. The 2026-10-16 09:08 Swarm output was much quieter (peak 0.15) than the
+    3060 output (peak 0.99), so that run may not have come from this path. Its engine build and device are not verified here.
+  - **Follow-ups.** Find why CPU and GPU diverge on seed 0 (a numerical difference or a CPU-only bug). Wire `StopGate` so a
+    non-terminating loop fails fast. Re-run the Swarm `dia` case after the seed pin and a deploy, and record its engine
+    version and device next to this run.
 - **Always verify TTS with whisper `medium.en`, never `base.en`** — `base.en` was actively misleading in
   multiple cases.
 - **English-only Whisper (`openai/whisper-*.en`, `distil-whisper/distil-*.en`): different special-token layout.**
