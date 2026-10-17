@@ -362,10 +362,10 @@ def main():
         if lease is not None:
             lease.__enter__()
             summary["lease"] = {"lease_id": lease.lease_id, "gpu": lease.gpu}
-        used_swarm = True
         elif held_gpu is not None:
             summary["lease"] = {"lease_id": os.environ.get("GATE_LEASE_ID"), "gpu": held_gpu, "inherited": True}
             log(f"[gate] using the caller's lease on gpu {held_gpu}")
+        used_swarm = True
         bound_gpu = lease.gpu if lease is not None else held_gpu
         summary["bound_gpu"] = bound_gpu
 
