@@ -139,9 +139,13 @@ internal sealed class LoopedLayer : IDisposable
     private Tensor Attention(IBackend backend, Tensor hidden, int t, int posStart, IKvCache cache, int slot, Tensor cos, Tensor sin)
     {
         int hq = _cfg.NumHeads, hkv = _cfg.NumKvHeads, d = _cfg.HeadDim;
+        // RoPE reads positions from the token-major shape, so q and k stay [1,t,heads,d] until after it; a single token's
+        // token-major and head-major layouts are byte-identical, so v is projected head-major and the attention output is
+        // consumed as is, skipping two of prefill's four permute copies on every decode step.
+        bool single = t == 1;
         Tensor q = new(new TensorShape(1, t, hq, d), DType.F32);
         Tensor k = new(new TensorShape(1, t, hkv, d), DType.F32);
-        Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
+        Tensor v = new(single ? new TensorShape(1, hkv, 1, d) : new TensorShape(1, t, hkv, d), DType.F32);
         ProjectQkv(backend, q, k, v, hidden, t);
         Tensor gate = ProjectGate(backend, hidden, t);
         backend.ApplyRopeSingle(q, cos, sin, d);
@@ -158,11 +162,9 @@ internal sealed class LoopedLayer : IDisposable
         backend.AffineBroadcastLastDim(qScaled, qHeads, _qkScale!, null);
         qHeads.Dispose();
         Tensor kHeads = new(new TensorShape(1, hkv, t, d), DType.F32);
-        Tensor vHeads = new(new TensorShape(1, hkv, t, d), DType.F32);
         backend.Permute0213(kHeads, kNormed, t, hkv, d);
-        backend.Permute0213(vHeads, v, t, hkv, d);
         kNormed.Dispose();
-        v.Dispose();
+        Tensor vHeads = ToHeadMajor(backend, v, t, hkv, d);
         cache.AppendStep(backend, slot, kHeads, vHeads);
         kHeads.Dispose();
         vHeads.Dispose();
@@ -170,10 +172,22 @@ internal sealed class LoopedLayer : IDisposable
         backend.FlashAttention(attn, qScaled, cache.KeyPrefix(slot), cache.ValuePrefix(slot), posStart + t, _cfg.KvGroup, causal: true,
             qOffset: posStart, AttentionScale, 0f, null, Window, null);
         qScaled.Dispose();
+        if (single) return GateAndProject(backend, attn, gate, 1);
         Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
         backend.Permute0213(attnFlat, attn, hq, t, d);
         attn.Dispose();
         return GateAndProject(backend, attnFlat, gate, t);
+    }
+
+    /// <summary>The head-major <c>[1, heads, t, d]</c> copy of a token-major <c>[1, t, heads, d]</c> tensor, consuming it; a single token is already
+    /// in that layout, so it is returned as is.</summary>
+    private static Tensor ToHeadMajor(IBackend backend, Tensor tokenMajor, int t, int heads, int d)
+    {
+        if (t == 1) return tokenMajor;
+        Tensor headMajor = new(new TensorShape(1, heads, t, d), DType.F32);
+        backend.Permute0213(headMajor, tokenMajor, t, heads, d);
+        tokenMajor.Dispose();
+        return headMajor;
     }
 
     private Tensor AttentionGraphStep(IBackend backend, Tensor hidden, IKvCache cache, int slot, Tensor cosTable, Tensor sinTable, ulong devicePos)
