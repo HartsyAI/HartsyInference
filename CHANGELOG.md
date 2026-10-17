@@ -8,7 +8,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.378
 
-- **Changed: FLUX.3 runs its block loop in F16 on CUDA** (`numerics.ditF16`, on by default). Each embedded stream and each block's gate are scaled by `ChromaF16.ResidualDamp`, and the stream returns to F32 for the final layer. The CPU backend and any backend without F16 activation kernels keep F32, and `--set numerics.ditF16=false` restores the F32 path everywhere. Real-weight numerics and Swarm speed are not yet verified, so this stays Unreleased.
+- **Added (opt-in): FLUX.3 can run its block loop in F16 on CUDA** (`numerics.flux3F16=true`). Each embedded stream and each block's gate are scaled by `ChromaF16.ResidualDamp`, and the stream returns to F32 for the final layer. It is off by default: real-weight numerics and a Swarm A/B are not yet verified, so the default stays F32 until they clear their acceptance floor. `numerics.ditF16=false` forces F32 everywhere, and the CPU backend always keeps F32.
 - **Added: NVIDIA Nemotron Dory 1.0 4B, a looped (latent-recurrent) decoder, with a runtime loop dial.** `LoopedTransformer`
   runs llama.cpp's `dory` GGUF (ggml-org/llama.cpp#30306) through the shared backend ops: an input block, a recurrent block whose
   weights are applied 1 to 4 times per request with the input block's output re-injected and unit-normed before every pass, and an

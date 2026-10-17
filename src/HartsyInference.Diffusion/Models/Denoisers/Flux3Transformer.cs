@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -216,7 +217,15 @@ public sealed class Flux3Transformer : IDisposable
                 // Back to F32 for the final layer: its LayerNorm cancels the residual damp, and the velocity keeps F32 precision
                 // across Euler steps (the Flux2 recipe).
                 Tensor rowsF32 = new Tensor(imageRows.Shape, DType.F32);
-                backend.CastToF32(rowsF32, imageRows);
+                try
+                {
+                    backend.CastToF32(rowsF32, imageRows);
+                }
+                catch
+                {
+                    rowsF32.Dispose();
+                    throw;
+                }
                 imageRows.Dispose();
                 imageRows = rowsF32;
             }
@@ -310,9 +319,10 @@ public sealed class Flux3Transformer : IDisposable
         return embedded;
     }
 
-    /// <summary>The F16 stream runs where the backend has F16 activation kernels and <c>numerics.ditF16</c> is on. The CPU
-    /// backend keeps F32, so a default CPU build never reaches an F16 kernel.</summary>
-    private static bool UseF16Stream(IBackend backend) => backend.SupportsF16Activations && DitDtype.Act == DType.F16;
+    /// <summary>The F16 stream is opt-in (<c>numerics.flux3F16</c>). It also needs the backend to have F16 activation kernels and
+    /// <c>numerics.ditF16</c> on, so the CPU backend keeps F32 and <c>numerics.ditF16=0</c> forces F32 everywhere.</summary>
+    private static bool UseF16Stream(IBackend backend) =>
+        EngineKnobs.Flux3F16.Value && backend.SupportsF16Activations && DitDtype.Act == DType.F16;
 
     /// <summary>True when every cached stream already has the dtype this call's stream would produce.</summary>
     private static bool StatesMatch(Flux3ConditionStates states, bool f16)

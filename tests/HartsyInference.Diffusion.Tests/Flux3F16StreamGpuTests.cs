@@ -78,7 +78,7 @@ public sealed unsafe class Flux3F16StreamGpuTests(ITestOutputHelper output)
             stale = transformer.PrecomputeConditioning(backend, input);
         using (stale)
         {
-            using IDisposable knob = KnobProfile.Create("flux3-stale-f16").With(EngineKnobs.DitF16, true).Push();
+            using IDisposable knob = KnobProfile.Create("flux3-stale-f16").With(EngineKnobs.DitF16, true).With(EngineKnobs.Flux3F16, true).Push();
             using Tensor reused = transformer.Forward(backend, latent, 2, 2, 0.5f, input, stale);
             using Tensor rebuilt = transformer.Forward(backend, latent, 2, 2, 0.5f, input, null);
             backend.Sync();
@@ -99,7 +99,7 @@ public sealed unsafe class Flux3F16StreamGpuTests(ITestOutputHelper output)
 
     private static float[] Velocity(CudaBackend backend, bool f16)
     {
-        using IDisposable knob = KnobProfile.Create("flux3-f16-stream-gpu").With(EngineKnobs.DitF16, f16).Push();
+        using IDisposable knob = KnobProfile.Create("flux3-f16-stream-gpu").With(EngineKnobs.DitF16, f16).With(EngineKnobs.Flux3F16, f16).Push();
         int seed = 11;
         Dictionary<string, Tensor> weights = Weights(ref seed);
         Flux3Config config = Flux3Config.FromWeights(weights) with { ContextInDim = Context };
