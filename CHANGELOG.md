@@ -6,6 +6,11 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.379
+
+- **Changed: Qwen-Image 2.1 Turbo downloads Comfy-Org's fused file.** The catalog now fetches `Comfy-Org/Qwen-Image-2.1` `diffusion_models/qwen_image_2.1_turbo_bf16.safetensors` in place of the two-shard diffusers release. A `diffusion_model` wrapper prefix on that file is stripped, and its fused `img_mlp.gate_up` passes through unchanged, pinned by a converter test. Still unverified on real weights.
+- **Changed: the denoise loop builds each step's conditioning once.** `QwenImage21Transformer.PrepareStep` returns a `QwenImage21StepConditioning` (a readonly struct) that both CFG branches share, so the timestep embedding and block modulation are no longer rebuilt per branch. Output is bit-identical on CPU.
+
 ## alpha.378
 
 - **Added (opt-in): FLUX.3 can run its block loop in F16 on CUDA** (`numerics.flux3F16=true`). Each embedded stream and each block's gate are scaled by `ChromaF16.ResidualDamp`, and the stream returns to F32 for the final layer. It is off by default: real-weight numerics and a Swarm A/B are not yet verified, so the default stays F32 until they clear their acceptance floor. `numerics.ditF16=false` forces F32 everywhere, and the CPU backend always keeps F32.
