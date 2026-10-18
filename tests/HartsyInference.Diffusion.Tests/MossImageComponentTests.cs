@@ -164,6 +164,36 @@ public sealed class MossImageComponentTests
         foreach (Tensor t in weights.Values) t.Dispose();
     }
 
+    [Fact]
+    public void JointBlock_SplitsTheComfyFusedQkvIntoQueryKeyValue()
+    {
+        const int hidden = 4;
+        Tensor qkv = new(new TensorShape(3 * hidden, hidden), DType.F32);
+        for (int i = 0; i < 3 * hidden * hidden; i++) qkv.AsSpan<float>()[i] = i;
+        Dictionary<string, Tensor> weights = new(StringComparer.Ordinal)
+        {
+            ["layers.0.norm1.weight"] = Make([1, 1, 1, 1]),
+            ["layers.0.norm2.weight"] = Make([1, 1, 1, 1]),
+            ["layers.0.q_norm.weight"] = Make([1, 1]),
+            ["layers.0.k_norm.weight"] = Make([1, 1]),
+            ["layers.0.proj.qkv.weight"] = qkv,
+            ["layers.0.proj.o.weight"] = new Tensor(new TensorShape(hidden, hidden), DType.F32),
+            ["layers.0.proj.ffn_up_gate.weight"] = new Tensor(new TensorShape(8, hidden), DType.F32),
+            ["layers.0.proj.ffn_down.weight"] = new Tensor(new TensorShape(hidden, 4), DType.F32),
+        };
+        MossImageBlock block = new(hidden, numHeads: 2, ffnHidden: 4, eps: 1e-6f);
+
+        block.LoadWeights(weights, "layers.0");
+        List<Tensor> bound = [.. block.EnumerateWeights()];
+
+        float[] all = qkv.AsSpan<float>().ToArray();
+        int third = hidden * hidden;
+        Assert.Equal(all[..third], bound[2].AsSpan<float>().ToArray());
+        Assert.Equal(all[third..(2 * third)], bound[3].AsSpan<float>().ToArray());
+        Assert.Equal(all[(2 * third)..], bound[4].AsSpan<float>().ToArray());
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
     private static Tensor Make(float[] values)
     {
         Tensor tensor = new(new TensorShape(1, values.Length), DType.F32);

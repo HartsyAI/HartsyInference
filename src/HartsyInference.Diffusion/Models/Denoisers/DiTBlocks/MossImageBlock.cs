@@ -33,12 +33,32 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         _norm2 = TensorCasts.LoadF32(weights, $"{prefix}.norm2.weight");
         _normQ.LoadWeights(weights[$"{prefix}.q_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.k_norm.weight"]);
-        _q = weights[$"{prefix}.proj.q.weight"];
-        _k = weights[$"{prefix}.proj.k.weight"];
-        _v = weights[$"{prefix}.proj.v.weight"];
+        if (weights.TryGetValue($"{prefix}.proj.q.weight", out Tensor? q))
+        {
+            _q = q;
+            _k = weights[$"{prefix}.proj.k.weight"];
+            _v = weights[$"{prefix}.proj.v.weight"];
+        }
+        else
+        {
+            string qkvKey = $"{prefix}.proj.qkv.weight";
+            Tensor qkv = weights[qkvKey];
+            _q = HiddenRows(qkv, 0, _hidden, qkvKey);
+            _k = HiddenRows(qkv, 1, _hidden, qkvKey);
+            _v = HiddenRows(qkv, 2, _hidden, qkvKey);
+        }
         _o = weights[$"{prefix}.proj.o.weight"];
         _ffnUpGate = weights[$"{prefix}.proj.ffn_up_gate.weight"];
         _ffnDown = weights[$"{prefix}.proj.ffn_down.weight"];
+    }
+
+    /// <summary>The <paramref name="index"/>th run of <paramref name="hidden"/> rows of a fused projection, as a view that
+    /// carries its own slice of the per-row quantization companion.</summary>
+    private static Tensor HiddenRows(Tensor fused, int index, int hidden, string key)
+    {
+        Tensor rows = fused.SliceRows(index * hidden, hidden);
+        rows.QuantInfo = fused.QuantInfo?.SliceRows(index * hidden, hidden, key);
+        return rows;
     }
 
     /// <summary>Every weight this block reads.</summary>
