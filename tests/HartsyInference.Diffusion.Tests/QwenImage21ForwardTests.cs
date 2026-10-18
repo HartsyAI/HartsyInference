@@ -82,6 +82,39 @@ public sealed class QwenImage21ForwardTests
         foreach (Tensor t in weights.Values) t.Dispose();
     }
 
+    /// <summary>Both CFG branches read one step's conditioning. Building it once must not change either branch's
+    /// velocity: the shared step fed to each prefix equals that prefix's own call.</summary>
+    [Fact]
+    public void ASharedStepGivesEachBranchTheVelocityItWouldGetAlone()
+    {
+        using CpuBackend backend = new CpuBackend();
+        QwenImage21Config config = TinyConfig;
+        using QwenImage21Transformer transformer = new QwenImage21Transformer(config, DType.F32);
+        Dictionary<string, Tensor> weights = BuildWeights(config, seed: 9);
+        transformer.LoadWeights(weights);
+
+        Tensor condText = Random(new TensorShape(1, 4, ContextDim), 21);
+        Tensor uncondText = Random(new TensorShape(1, 3, ContextDim), 23);
+        using QwenImage21PrefixCache cond = transformer.BuildPrefix(backend, condText);
+        using QwenImage21PrefixCache uncond = transformer.BuildPrefix(backend, uncondText);
+        condText.Dispose();
+        uncondText.Dispose();
+
+        Tensor latent = Random(new TensorShape(1, Channels, 2, 2), 25);
+        using Tensor condAlone = transformer.Forward(backend, latent, cond, timestep: 0.6f);
+        using Tensor uncondAlone = transformer.Forward(backend, latent, uncond, timestep: 0.6f);
+
+        using QwenImage21StepConditioning step = transformer.PrepareStep(backend, 0.6f);
+        using Tensor condShared = transformer.Forward(backend, latent, cond, step);
+        using Tensor uncondShared = transformer.Forward(backend, latent, uncond, step);
+        latent.Dispose();
+
+        Assert.Equal(condAlone.AsReadOnlySpan<float>().ToArray(), condShared.AsReadOnlySpan<float>().ToArray());
+        Assert.Equal(uncondAlone.AsReadOnlySpan<float>().ToArray(), uncondShared.AsReadOnlySpan<float>().ToArray());
+        Assert.NotEqual(condShared.AsReadOnlySpan<float>().ToArray(), uncondShared.AsReadOnlySpan<float>().ToArray());
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
     /// <summary>A whole forward on synthetic weights: text prefix through every block, then image rows against the
     /// cached K/V. Asserts the contract the pipeline depends on — velocity comes back in the latent's own shape, and
     /// the prefix holds one K and one V per block.</summary>

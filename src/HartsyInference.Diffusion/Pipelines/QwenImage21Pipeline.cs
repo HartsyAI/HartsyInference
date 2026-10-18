@@ -144,12 +144,13 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
                 PredictionType.FlowVelocity,
                 (x, s, stepIndex) =>
                 {
-                    Tensor cond = _transformer.Forward(Backend, x, condPrefix, s);
+                    using QwenImage21StepConditioning step = _transformer.PrepareStep(Backend, s);
+                    Tensor cond = _transformer.Forward(Backend, x, condPrefix, step);
                     if (!useCfg)
                     {
                         return new DenoisePrediction(cond, cond);
                     }
-                    Tensor uncond = _transformer.Forward(Backend, x, uncondPrefix!, s);
+                    Tensor uncond = _transformer.Forward(Backend, x, uncondPrefix!, step);
                     return new DenoisePrediction(cond, uncond, cfgScale);
                 });
 

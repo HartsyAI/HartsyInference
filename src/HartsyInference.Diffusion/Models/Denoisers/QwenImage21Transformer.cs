@@ -145,6 +145,14 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
     /// same shape and dtype as the input latent.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, QwenImage21PrefixCache prefix, float timestep)
     {
+        using QwenImage21StepConditioning step = PrepareStep(backend, timestep);
+        return Forward(backend, latent, prefix, step);
+    }
+
+    /// <summary>The velocity for one denoise step over a prepared <paramref name="step"/>. Same contract as the
+    /// timestep overload; both CFG branches pass the same step.</summary>
+    public Tensor Forward(IBackend backend, Tensor latent, QwenImage21PrefixCache prefix, QwenImage21StepConditioning step)
+    {
         int channels = (int)latent.Shape[1];
         int h = (int)latent.Shape[2];
         int w = (int)latent.Shape[3];
@@ -152,11 +160,8 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
             throw new ArgumentException($"latent has {channels} channels; expected {_config.InChannels}.", nameof(latent));
         int imgSeq = h * w;
 
-        // The reference rounds t through the compute dtype before the sinusoid, twice: (t*1000).to(dtype)/1000
-        // then .to(dtype). Reproduced so the embedding lands on the same value the reference feeds its blocks.
-        float rounded = RoundThroughAct(RoundThroughAct(timestep * 1000.0f) / 1000.0f);
-        using Tensor temb = ComputeTimestepEmbedding(backend, rounded);
-        using QwenImage21Modulation mod = ComputeModulation(backend, temb);
+        Tensor temb = step.Temb;
+        QwenImage21Modulation mod = step.Modulation;
         (Tensor ropeCos, Tensor ropeSin) = _rope.GetOrBuildImageTables(backend, prefix.Length, h, w);
 
         Tensor tokens = new Tensor(new TensorShape(1, imgSeq, channels), latent.DType);
@@ -189,6 +194,25 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
         backend.UnpatchifyTokens(output, projectedOut, _config.OutChannels, h, w, patch: 1, innerChannelFastest: true);
         projectedOut.Dispose();
         return output;
+    }
+
+    /// <summary>Builds the conditioning one step shares across its CFG branches. The caller disposes it after the
+    /// branches that read it.</summary>
+    public QwenImage21StepConditioning PrepareStep(IBackend backend, float timestep)
+    {
+        // The reference rounds t through the compute dtype before the sinusoid, twice: (t*1000).to(dtype)/1000
+        // then .to(dtype). Reproduced so the embedding lands on the same value the reference feeds its blocks.
+        float rounded = RoundThroughAct(RoundThroughAct(timestep * 1000.0f) / 1000.0f);
+        Tensor temb = ComputeTimestepEmbedding(backend, rounded);
+        try
+        {
+            return new QwenImage21StepConditioning(temb, ComputeModulation(backend, temb));
+        }
+        catch
+        {
+            temb.Dispose();
+            throw;
+        }
     }
 
     /// <summary><c>TextProjection</c>: zero-centered RMSNorm, then <c>in_layer</c>, tanh-approximate GELU and
