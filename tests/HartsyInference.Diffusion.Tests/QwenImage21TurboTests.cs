@@ -137,6 +137,28 @@ public sealed unsafe class QwenImage21TurboTests : IDisposable
     }
 
     [Fact]
+    public void ComfyRepack_WrappedFusedCheckpoint_StripsPrefixAndKeepsGateUp()
+    {
+        // The Comfy-Org Turbo file is already fused and may carry a diffusion_model wrapper; both must pass through.
+        Tensor gateUp = Make(4, 3, 7f);
+        Tensor imgIn = Make(3, 3, 2f);
+        Tensor mlpOut = Make(3, 2, 5f);
+        Dictionary<string, Tensor> source = new()
+        {
+            ["model.diffusion_model.transformer_blocks.0.img_mlp.gate_up.weight"] = gateUp,
+            ["model.diffusion_model.img_in.weight"] = imgIn,
+            ["model.diffusion_model.transformer_blocks.0.img_mlp.out.weight"] = mlpOut,
+        };
+
+        QwenImage21CheckpointConverter.ConvertedWeights converted = QwenImage21CheckpointConverter.Convert(source);
+
+        Assert.Equal(3, converted.Transformer.Count);
+        Assert.Same(gateUp, converted.Transformer["transformer_blocks.0.img_mlp.gate_up.weight"]);
+        Assert.Same(imgIn, converted.Transformer["img_in.weight"]);
+        Assert.Same(mlpOut, converted.Transformer["transformer_blocks.0.img_mlp.out.weight"]);
+    }
+
+    [Fact]
     public void SplitMlp_LeftoverSplitTensorIsAnError()
     {
         Dictionary<string, Tensor> source = new()
