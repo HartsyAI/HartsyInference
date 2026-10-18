@@ -5,11 +5,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>One denoise step's conditioning: the timestep embedding and the modulation every block reads. Both CFG
 /// branches share the step's timestep, so it is built once by <see cref="QwenImage21Transformer.PrepareStep"/> and
-/// passed to each branch. Owns both tensors and releases them once.</summary>
-public sealed class QwenImage21StepConditioning(Tensor temb, QwenImage21Modulation modulation) : IDisposable
+/// passed to each branch. A struct, so the denoise loop does not allocate per step; release it once with
+/// <c>using</c>.</summary>
+public readonly struct QwenImage21StepConditioning(Tensor temb, QwenImage21Modulation modulation) : IDisposable
 {
-    private int _disposed;
-
     /// <summary>The timestep embedding, <c>[1, hidden]</c> F32; the final layer reads it.</summary>
     public Tensor Temb { get; } = temb;
 
@@ -19,10 +18,6 @@ public sealed class QwenImage21StepConditioning(Tensor temb, QwenImage21Modulati
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            return;
-        }
         Temb.Dispose();
         Modulation.Dispose();
     }
