@@ -49,8 +49,9 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         foreach (Tensor w in _normK.EnumerateWeights()) yield return w;
     }
 
-    /// <summary>Runs the block on <paramref name="x"/> <c>[1, S, D]</c> (F32) and returns a new tensor; <paramref name="rope"/>
-    /// must hold tables precomputed for exactly these <c>S</c> tokens.</summary>
+    /// <summary>Runs the block on <paramref name="x"/> <c>[1, S, D]</c> in its own dtype (F32, or F16 on the damped stream)
+    /// and returns a new tensor of that dtype; <paramref name="rope"/> must hold tables precomputed for exactly these
+    /// <c>S</c> tokens.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Flux3Modulation modulation, FluxRope rope)
     {
         if (x.Shape.Rank != 3 || x.Shape[0] != 1 || x.Shape[2] != _hiddenSize)

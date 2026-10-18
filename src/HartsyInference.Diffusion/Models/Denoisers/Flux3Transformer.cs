@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -116,23 +117,26 @@ public sealed class Flux3Transformer : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(input);
         ValidateTarget(targetSigma);
+        bool f16 = UseF16Stream(backend);
         Tensor zeroVec = TimeVector(backend, 0f, targetSigma);
         Tensor? text = null;
         Tensor? references = null;
         try
         {
             text = EmbedTokens(backend, input.TextFeatures, _textEmbed!, _config.ContextInDim, "text features");
+            text = ToStreamDtype(backend, text, f16);
             int textLength = (int)text.Shape[1];
             FluxRope textRope = _textRope.Ensure(textLength, () => Flux3PosEmbed.TextIds(textLength));
-            text = RunStack(backend, text, _textBlocks, _earlyModulations[TextMode], zeroVec, textRope);
+            text = RunStack(backend, text, _textBlocks, _earlyModulations[TextMode], zeroVec, textRope, f16);
 
             if (input.ReferenceTokens is not null)
             {
                 ValidateReferences(input);
                 references = EmbedTokens(backend, input.ReferenceTokens, _referenceEmbed!, _config.InChannels, "reference tokens");
+                references = ToStreamDtype(backend, references, f16);
                 FluxRope referenceRope = _referenceRope.Ensure(ReferenceSignature(input.ReferenceShapes),
                     () => Flux3PosEmbed.ReferenceIds(input.ReferenceShapes, _config.ImageRopeScale));
-                references = RunStack(backend, references, _referenceBlocks, _earlyModulations[ReferenceMode], zeroVec, referenceRope);
+                references = RunStack(backend, references, _referenceBlocks, _earlyModulations[ReferenceMode], zeroVec, referenceRope, f16);
             }
             return new Flux3ConditionStates(text, references);
         }
@@ -177,25 +181,54 @@ public sealed class Flux3Transformer : IDisposable
         Tensor? imageRows = null;
         try
         {
-            owned = states is null ? PrecomputeConditioning(backend, input, targetSigma) : null;
-            Flux3ConditionStates conditioning = states ?? owned!;
+            bool f16 = UseF16Stream(backend);
+            // JoinStreams copies bytes without converting dtypes, so cached states must match this call's stream dtype. The
+            // knob can change between a precompute and a later forward; a mismatch is rebuilt here and the caller's states are left alone.
+            Flux3ConditionStates conditioning;
+            if (states is not null && StatesMatch(states, f16))
+            {
+                conditioning = states;
+            }
+            else
+            {
+                owned = PrecomputeConditioning(backend, input, targetSigma);
+                conditioning = owned;
+            }
             imageVec = TimeVector(backend, sigma, targetSigma);
             zeroVec = TimeVector(backend, 0f, targetSigma);
             image = EmbedTokens(backend, packedLatent, _imageEmbed!, _config.InChannels, "packed latent");
+            image = ToStreamDtype(backend, image, f16);
             FluxRope imageRope = _imageRope.Ensure(GridSignature(hPacked, wPacked),
                 () => Flux3PosEmbed.ImageIds(hPacked, wPacked, 0f, _config.ImageRopeScale));
-            image = RunStack(backend, image, _imageBlocks, _earlyModulations[ImageMode], imageVec, imageRope);
+            image = RunStack(backend, image, _imageBlocks, _earlyModulations[ImageMode], imageVec, imageRope, f16);
 
             joint = JoinStreams(backend, image, conditioning, out int[] spanLengths);
             image.Dispose();
             int textLength = (int)conditioning.Text.Shape[1];
             long jointSignature = HashCode.Combine(GridSignature(hPacked, wPacked), ReferenceSignature(input.ReferenceShapes), textLength);
             FluxRope jointRope = _jointRope.Ensure(jointSignature, () => BuildJointIds(hPacked, wPacked, input.ReferenceShapes, textLength));
-            joint = RunJoint(backend, joint, imageVec, zeroVec, spanLengths, conditioning.References is not null, jointRope);
+            joint = RunJoint(backend, joint, imageVec, zeroVec, spanLengths, conditioning.References is not null, jointRope, f16);
 
             imageRows = new Tensor(new TensorShape(1, imageTokens, _config.HiddenSize), joint.DType);
             backend.SliceRows(imageRows, joint, 0);
             joint.Dispose();
+            if (imageRows.DType == DType.F16)
+            {
+                // Back to F32 for the final layer: its LayerNorm cancels the residual damp, and the velocity keeps F32 precision
+                // across Euler steps (the Flux2 recipe).
+                Tensor rowsF32 = new Tensor(imageRows.Shape, DType.F32);
+                try
+                {
+                    backend.CastToF32(rowsF32, imageRows);
+                }
+                catch
+                {
+                    rowsF32.Dispose();
+                    throw;
+                }
+                imageRows.Dispose();
+                imageRows = rowsF32;
+            }
             return FinalLayer(backend, imageRows, imageVec);
         }
         finally
@@ -286,13 +319,80 @@ public sealed class Flux3Transformer : IDisposable
         return embedded;
     }
 
+    /// <summary>The F16 stream is opt-in (<c>numerics.flux3F16</c>). It also needs the backend to have F16 activation kernels and
+    /// <c>numerics.ditF16</c> on, so the CPU backend keeps F32 and <c>numerics.ditF16=0</c> forces F32 everywhere.</summary>
+    private static bool UseF16Stream(IBackend backend) =>
+        EngineKnobs.Flux3F16.Value && backend.SupportsF16Activations && DitDtype.Act == DType.F16;
+
+    /// <summary>True when every cached stream already has the dtype this call's stream would produce.</summary>
+    private static bool StatesMatch(Flux3ConditionStates states, bool f16)
+    {
+        DType expected = f16 ? DType.F16 : DType.F32;
+        return states.Text.DType == expected && (states.References is null || states.References.DType == expected);
+    }
+
+    /// <summary>Scales an embedded F32 stream by the residual damp and casts it to F16. On success this takes ownership of
+    /// <paramref name="f32"/> and returns the F16 stream; on the F32 path the stream is returned unchanged. On failure the
+    /// caller still owns <paramref name="f32"/>, and every temporary this call created is freed.</summary>
+    private static Tensor ToStreamDtype(IBackend backend, Tensor f32, bool f16)
+    {
+        if (!f16)
+            return f32;
+        TensorShape shape = f32.Shape;
+        Tensor damped = new Tensor(shape, DType.F32);
+        Tensor stream = new Tensor(shape, DType.F16);
+        try
+        {
+            backend.Scale(damped, f32, ChromaF16.ResidualDamp);
+            backend.CastToF16(stream, damped);
+        }
+        catch
+        {
+            damped.Dispose();
+            stream.Dispose();
+            throw;
+        }
+        damped.Dispose();
+        f32.Dispose();
+        return stream;
+    }
+
+    /// <summary>Scales a block's gate row by the residual damp. The gate multiplies the whole branch (attention, MLP and any
+    /// runtime LoRA adjunct), so the damped stream sees the branch at the same scale on every backend and weight format.
+    /// On success this takes ownership of <paramref name="gate"/>; on failure the caller still owns it.</summary>
+    private static Tensor DampGate(IBackend backend, Tensor gate)
+    {
+        Tensor damped = new Tensor(gate.Shape, DType.F32);
+        try
+        {
+            backend.Scale(damped, gate, ChromaF16.ResidualDamp);
+        }
+        catch
+        {
+            damped.Dispose();
+            throw;
+        }
+        gate.Dispose();
+        return damped;
+    }
+
     /// <summary>Runs <paramref name="x"/> through <paramref name="blocks"/>, taking ownership of it: each block's input is
     /// freed once its output exists, and the current activation is freed if a block throws.</summary>
-    private static Tensor RunStack(IBackend backend, Tensor x, Flux3Block[] blocks, AdaLNModulation projection, Tensor vec, FluxRope rope)
+    private static Tensor RunStack(IBackend backend, Tensor x, Flux3Block[] blocks, AdaLNModulation projection, Tensor vec, FluxRope rope,
+        bool f16)
     {
         try
         {
             Tensor[] rows = projection.Forward(backend, vec);
+            try
+            {
+                if (f16) rows[2] = DampGate(backend, rows[2]);
+            }
+            catch
+            {
+                foreach (Tensor row in rows) row.Dispose();
+                throw;
+            }
             using Flux3Modulation modulation = Flux3Modulation.Uniform(rows[0], rows[1], rows[2]);
             foreach (Flux3Block block in blocks)
             {
@@ -312,7 +412,7 @@ public sealed class Flux3Transformer : IDisposable
     /// <summary>Runs the joint stack over <paramref name="joint"/>, taking ownership of it as <see cref="RunStack"/> does:
     /// each block's input is freed once its output exists, and the current activation is freed if anything throws.</summary>
     private Tensor RunJoint(IBackend backend, Tensor joint, Tensor imageVec, Tensor zeroVec, int[] spanLengths, bool hasReferences,
-        FluxRope rope)
+        FluxRope rope, bool f16)
     {
         List<Tensor[]> projected = new List<Tensor[]>(3);
         try
@@ -320,6 +420,10 @@ public sealed class Flux3Transformer : IDisposable
             projected.Add(_jointModulations[ImageMode].Forward(backend, imageVec));
             if (hasReferences) projected.Add(_jointModulations[ReferenceMode].Forward(backend, zeroVec));
             projected.Add(_jointModulations[TextMode].Forward(backend, zeroVec));
+            if (f16)
+            {
+                foreach (Tensor[] triple in projected) triple[2] = DampGate(backend, triple[2]);
+            }
             List<(Tensor Shift, Tensor Scale, Tensor Gate)> rows = new List<(Tensor, Tensor, Tensor)>(projected.Count);
             foreach (Tensor[] triple in projected) rows.Add((triple[0], triple[1], triple[2]));
             using Flux3Modulation modulation = Flux3Modulation.Spans(backend, rows, spanLengths);

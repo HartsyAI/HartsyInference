@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -124,6 +126,33 @@ public sealed unsafe class Flux3TransformerSmokeTests
         Flux3Transformer transformer = new Flux3Transformer(config);
         transformer.LoadWeights(w);
         return (transformer, w);
+    }
+
+    [Fact]
+    public void DefaultF16Knob_OnCpu_RunsTheF32Stream()
+    {
+        // numerics.ditF16 defaults on, but the CPU backend has no F16 activation kernels, so the stream stays F32 there.
+        Assert.Equal(DType.F16, DitDtype.Act);
+        IBackend backend = new CpuBackend();
+        (Flux3Transformer transformer, Dictionary<string, Tensor> weights) = Build(flowMap: false);
+        using Tensor text = Rand(1, 5, Context);
+        using Tensor latent = Rand(1, 6, 128);
+        Flux3ConditionInput input = Flux3ConditionInput.TextOnly(text);
+        try
+        {
+            using Tensor defaults = transformer.Forward(backend, latent, 2, 3, 0.7f, input, null);
+            Tensor pinned;
+            using (KnobProfile.Create("flux3-f32-check").With(EngineKnobs.DitF16, false).Push())
+                pinned = transformer.Forward(backend, latent, 2, 3, 0.7f, input, null);
+            using (pinned)
+            {
+                Assert.Equal(pinned.AsReadOnlySpan<float>().ToArray(), defaults.AsReadOnlySpan<float>().ToArray());
+            }
+        }
+        finally
+        {
+            Dispose(transformer, weights);
+        }
     }
 
     private Tensor Rand(params long[] shape)

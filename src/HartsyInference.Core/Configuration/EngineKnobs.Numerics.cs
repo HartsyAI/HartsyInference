@@ -73,6 +73,12 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> DitF16 =
         Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
 
+    /// <summary>Opt-in F16 residual stream for the FLUX.3 block loop, on backends with F16 activation kernels. It also needs
+    /// <see cref="DitF16"/>, so <c>numerics.ditF16=0</c> still forces F32 everywhere. Off by default until real-weight numerics
+    /// and a Swarm A/B clear their acceptance floor.</summary>
+    public static readonly Knob<bool> Flux3F16 =
+        Bool("numerics.flux3F16", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs the FLUX.3 block loop in F16 on backends with F16 activation kernels. Off by default until real-weight numerics and a Swarm A/B pass; 1 turns it on.");
+
     /// <summary>CUDA-graph capture of a DiT denoise step: 0 kills both tiers, 1 forces both, unset keeps per-arch defaults.</summary>
     public static readonly Knob<bool> DitGraph =
         Bool("numerics.ditGraph", false, KnobScope.Runtime, KnobDomain.Numerics, "CUDA-graph capture of a DiT denoise step: 0 kills both tiers, 1 forces both, unset keeps per-arch defaults.");
