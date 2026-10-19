@@ -70,7 +70,7 @@ public sealed class Flux2VaeComponents : IDisposable
     /// <summary>The decoder's stage widths as the checkpoint builds them: the up-blocks' output channels, reversed. FLUX.2's
     /// own decoder mirrors the encoder (128-512); OpenMOSS's MOSS-Image folder ships a narrower one (96-384) over the same
     /// latent, so a fixed preset would load its weights into the wrong layers.</summary>
-    private static VaeConfig WithCheckpointDecoder(VaeConfig config, Dictionary<string, Tensor> weights)
+    internal static VaeConfig WithCheckpointDecoder(VaeConfig config, Dictionary<string, Tensor> weights)
     {
         int stages = config.BlockOutChannels.Length;
         int[] decoder = new int[stages];
