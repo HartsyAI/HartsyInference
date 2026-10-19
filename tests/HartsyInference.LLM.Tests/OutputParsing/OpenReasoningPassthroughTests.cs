@@ -61,6 +61,8 @@ public sealed class OpenReasoningPassthroughTests
         Assert.Equal("", parser.Result.Content);
         Assert.True(parser.Result.Completed);
         Assert.DoesNotContain(events, e => e.Kind == ParsedEventKind.ContentDelta);
+        // What a non-streaming TextResult carries: the answer text (FinalText) is empty and the reasoning (Parser.Result.Reasoning) is intact.
+        Assert.Equal("", TextService.FinalText(parser, callCount: 0, "Still thinking about it"));
     }
 
     [Fact]
