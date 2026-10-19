@@ -15,7 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// rebuilds every domain from current source and byte-diffs the result.</para>
 ///
 /// <para>Each kernel is rebuilt with the compiler its PTX shipped from: the nvrtc helper, or the CUDA 13.0.88 nvcc
-/// (<c>HARTSY_NVCC</c> or PATH) for a domain's <c>NVCC_BUILT</c> list. The two stamp the same toolchain line yet
+/// (<c>HARTSY_NVCC</c>, PATH, or the workstation's pinned install) for a domain's <c>NVCC_BUILT</c> list. The two stamp the same toolchain line yet
 /// emit different PTX, so a kernel whose compiler is missing is reported UNVERIFIED instead of compared. A build that
 /// errors out skips the test, and a kernel built by a different CUDA release than its committed PTX is reported
 /// instead of compared, because a byte-compare is only meaningful against the toolchain that produced it. All of
@@ -75,7 +75,7 @@ public sealed class CudaKernelDriftTests
             }
 
             // build.sh deletes the intermediate of a kernel it could not build; this also ignores one left by hand.
-            HashSet<string> unverifiedNames = new(unverified.Select(l => l[..l.IndexOf(':')]), StringComparer.Ordinal);
+            HashSet<string> unverifiedNames = new(unverified.Select(KernelOf), StringComparer.Ordinal);
             List<string> missing = new(), differing = new(), otherRelease = new();
             int compared = 0;
             foreach (string fresh in rebuilt.OrderBy(x => x, StringComparer.Ordinal))
@@ -131,6 +131,13 @@ public sealed class CudaKernelDriftTests
     /// whitespace must still match exactly.</summary>
     private static bool SameKernel(string a, string b)
         => string.Equals(File.ReadAllText(a).TrimEnd(), File.ReadAllText(b).TrimEnd(), StringComparison.Ordinal);
+
+    /// <summary>The kernel an UNVERIFIED line names: build.sh writes <c>UNVERIFIED &lt;kernel&gt;: &lt;reason&gt;</c>.</summary>
+    private static string KernelOf(string unverifiedLine)
+    {
+        int end = unverifiedLine.IndexOfAny([':', ' ']);
+        return end > 0 ? unverifiedLine[..end] : unverifiedLine;
+    }
 
     /// <summary>The compiler-identity line NVVM stamps into every PTX it emits, e.g.
     /// <c>// Cuda compilation tools, release 13.0, V13.0.88</c>.</summary>

@@ -68,7 +68,7 @@ line, yet emit different PTX for many kernels (instruction selection, register n
 the whole tree. Most kernels ship as nvrtc output. Those in a domain's `NVCC_BUILT` list — the LLM decode GEMVs,
 norms, top-k and flash attention in `lm/`, the expert GEMVs in `moe/` — ship as CUDA 13.0.88 nvcc output, the bytes
 their decode timings were taken on. `build.sh` therefore uses nvrtc for every other kernel even when nvcc is on PATH,
-and builds `NVCC_BUILT` kernels only with nvcc (`HARTSY_NVCC`, else PATH); without one that emits ISA 9.0 it reports
-them `UNVERIFIED` and leaves them as shipped. A pip-installed nvcc may lack CCCL (`<nv/target>`, which
+and builds `NVCC_BUILT` kernels only with nvcc (`HARTSY_NVCC`, else PATH, else `~/.local/cuda-tools-13.0`); unless
+that nvcc is the 13.0.88 release at ISA 9.0 it reports them `UNVERIFIED` and leaves them as shipped. A pip-installed nvcc may lack CCCL (`<nv/target>`, which
 `cuda_fp16.h` needs); the build then takes it from `$CUDA_INC`. Moving a kernel between lists changes its codegen,
 so do it only alongside a perf run.

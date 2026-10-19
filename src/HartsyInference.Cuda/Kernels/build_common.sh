@@ -16,10 +16,10 @@
 #
 # Each kernel has one compiler. nvcc and nvrtc of the same release stamp the same PTX header but still emit different
 # PTX (instruction selection, register numbering), so taking whichever is on PATH would rewrite benchmarked kernels.
-# NVCC_BUILT kernels use $HARTSY_NVCC, else nvcc on PATH; when neither emits ISA 9.0 they are reported UNVERIFIED and
-# left as shipped. Every other kernel uses the committed ../nvrtc_compile frontend (needs $CUDA_LIB and the CUDA
-# headers, $CUDA_INC). The emitted PTX must say ".version 9.0": a newer toolchain emits 9.3, which the fleet
-# driver refuses to JIT (TROUBLESHOOTING §CUDA/PTX).
+# NVCC_BUILT kernels use $HARTSY_NVCC, else nvcc on PATH, else ~/.local/cuda-tools-13.0; without the 13.0.88 release
+# at ISA 9.0 they are reported UNVERIFIED and left as shipped. Every other kernel uses the committed ../nvrtc_compile
+# frontend (needs $CUDA_LIB and the CUDA headers, $CUDA_INC). The emitted PTX must say ".version 9.0": a newer
+# toolchain emits 9.3, which the fleet driver refuses to JIT (TROUBLESHOOTING §CUDA/PTX).
 
 set -euo pipefail
 
@@ -35,6 +35,12 @@ if [[ -z "${CUDA_INC:-}" ]]; then
     CUDA_INC="${CUDA_INC:-${CUDA_LIB}/include}"
 fi
 NVCC="${HARTSY_NVCC:-$(command -v nvcc || true)}"
+# The pinned pip --target install the workstation keeps, when nothing else names an nvcc.
+if [[ -z "$NVCC" && -x "${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc" ]]; then
+    NVCC="${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc"
+fi
+# NVCC_BUILT kernels are this release's output; another nvcc release emits different PTX even at ISA 9.0.
+NVCC_RELEASE="release 13.0, V13.0.88"
 # A pip-installed nvcc can ship without CCCL, which cuda_fp16.h includes (<nv/target>); borrow the nvrtc header set's.
 NVCC_FLAGS=()
 if [[ -n "$NVCC" ]]; then
@@ -77,8 +83,9 @@ compile_one() {
         fi
         echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${arch} ${kernel}.cu"
         "$NVCC" -ptx -arch="sm_${arch}" ${NVCC_FLAGS[@]+"${NVCC_FLAGS[@]}"} "$src" -o "$ptx"
-        if ! ptx_isa_ok "$ptx"; then
-            echo "UNVERIFIED ${kernel}${suffix}: ${NVCC} emits PTX ISA $(ptx_version "$ptx"); nvcc-built kernels need CUDA 13.0.88 nvcc and nvvm"
+        if ! ptx_isa_ok "$ptx" || ! grep -qF "// Cuda compilation tools, ${NVCC_RELEASE}" "$ptx"; then
+            echo "UNVERIFIED ${kernel}${suffix}: ${NVCC} emits PTX ISA $(ptx_version "$ptx") from" \
+                "\"$(grep -m1 -o 'release [0-9.]*, V[0-9.]*' "$ptx" || true)\"; nvcc-built kernels need CUDA 13.0.88 nvcc and nvvm"
             rm -f "$ptx"
             return 0
         fi
