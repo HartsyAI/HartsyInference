@@ -32,6 +32,10 @@ public sealed unsafe class Qwen35MultimodalEncoderParityTests(ITestOutputHelper 
         using IBackend backend = new CpuBackend();
         using Tensor hidden = encoder.Encode(backend, Ids(expected.GetTensor("input_ids")), [image]);
         AssertClose(expected.GetTensor("hidden"), hidden, "image prompt hidden state");
+        // The second prompt of an edit reuses the kept vision tokens instead of running the tower again.
+        using Tensor again = encoder.Encode(backend, Ids(expected.GetTensor("input_ids")), [image]);
+        Assert.True(new ReadOnlySpan<float>((void*)hidden.DataPointer, (int)hidden.ElementCount)
+            .SequenceEqual(new ReadOnlySpan<float>((void*)again.DataPointer, (int)again.ElementCount)));
     }
 
     [Fact]

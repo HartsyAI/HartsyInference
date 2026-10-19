@@ -21,7 +21,9 @@ public static class ReferenceCachePolicy
         if (free <= 0 || total <= free * (double)options.CacheBudgetFraction)
             return true;
         Logs.Warning($"{family}: {cacheCount} reference key/value cache(s) need about {total / (1024 * 1024)} MiB against "
-            + $"{free / (1024 * 1024)} MiB free. Use smaller or fewer reference images, or CFG 1 to halve the caches.");
+            + $"{free / (1024 * 1024)} MiB free, so the prepass may run out of device memory. Use smaller or fewer reference "
+            + "images (reference.max_pixels), or CFG 1 to halve the caches. reference.kv_cache=false avoids the caches "
+            + "altogether, but only an adapter trained without kv_cache expects that layout.");
         return false;
     }
 }

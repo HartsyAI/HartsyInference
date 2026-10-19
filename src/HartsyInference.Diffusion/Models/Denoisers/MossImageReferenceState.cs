@@ -14,7 +14,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 public sealed class MossImageReferenceState : IDisposable
 {
     private readonly IBackend _backend;
-    private readonly Dictionary<long, ReferenceKvCache> _caches = [];
+    private readonly Dictionary<UInt128, ReferenceKvCache> _caches = [];
     private int _disposed;
 
     internal MossImageReferenceState(IBackend backend, ReferenceAttentionMode mode, IReadOnlyList<(int Height, int Width)> grids,
@@ -52,15 +52,15 @@ public sealed class MossImageReferenceState : IDisposable
     /// <summary><c>[image + text | references]</c> as modulation groups 0 and 1; joint mode only.</summary>
     public TokenSegmentLayout? Layout { get; }
 
-    /// <summary>The cache built for skipped-layer set <paramref name="skipKey"/>, if any.</summary>
-    public bool TryGetCache(long skipKey, out ReferenceKvCache? cache)
+    /// <summary>The cache built for skipped-layer set <paramref name="skipKey"/> (a bitmask of the skipped blocks), if any.</summary>
+    public bool TryGetCache(UInt128 skipKey, out ReferenceKvCache? cache)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         return _caches.TryGetValue(skipKey, out cache);
     }
 
     /// <summary>Stores <paramref name="cache"/> for <paramref name="skipKey"/>; this state disposes it.</summary>
-    public void AddCache(long skipKey, ReferenceKvCache cache)
+    public void AddCache(UInt128 skipKey, ReferenceKvCache cache)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

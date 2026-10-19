@@ -98,12 +98,22 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         int kvSeq = seq;
         if (cachedKeys is not null)
         {
-            Tensor keys = ReferenceKvCache.ConcatTokens(backend, k, cachedKeys);
-            k.Dispose();
-            k = keys;
-            Tensor values = ReferenceKvCache.ConcatTokens(backend, v, cachedValues!);
-            v.Dispose();
-            v = values;
+            try
+            {
+                Tensor keys = ReferenceKvCache.ConcatTokens(backend, k, cachedKeys);
+                k.Dispose();
+                k = keys;
+                Tensor values = ReferenceKvCache.ConcatTokens(backend, v, cachedValues!);
+                v.Dispose();
+                v = values;
+            }
+            catch
+            {
+                q.Dispose();
+                k.Dispose();
+                v.Dispose();
+                throw;
+            }
             kvSeq = (int)k.Shape[1];
         }
         Tensor attn = TokenMajorAttention.Run(backend, q, k, v, seq, kvSeq, _numHeads, _headDim);

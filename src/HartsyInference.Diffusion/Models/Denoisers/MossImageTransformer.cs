@@ -226,7 +226,7 @@ public sealed class MossImageTransformer : IDisposable
             MossImageReferenceState? references = branch.Conditioning.References;
             if (references is not { Mode: ReferenceAttentionMode.CachedKv })
                 continue;
-            long key = SkipKey(branch.SkipLayers);
+            UInt128 key = SkipKey(branch.SkipLayers);
             if (references.TryGetCache(key, out _))
                 continue;
             references.AddCache(key, BuildReferenceCache(backend, branch.Conditioning, branch.SkipLayers));
@@ -459,7 +459,17 @@ public sealed class MossImageTransformer : IDisposable
                     continue;
                 Tensor next = _blocks[i].ForwardPrefix(backend, stream, modulation, references.Cos!, references.Sin!, act,
                     out Tensor keys, out Tensor values);
-                builder.Set(i, keys, values);
+                try
+                {
+                    builder.Set(i, keys, values);
+                }
+                catch
+                {
+                    keys.Dispose();
+                    values.Dispose();
+                    next.Dispose();
+                    throw;
+                }
                 if (ownsStream)
                     stream.Dispose();
                 stream = next;
@@ -479,13 +489,17 @@ public sealed class MossImageTransformer : IDisposable
         return builder.Build(backend, fingerprint.ToHashCode(), "MOSS-Image");
     }
 
-    /// <summary>Order-independent identity of a skipped-layer set.</summary>
-    private static long SkipKey(IReadOnlyCollection<int> skipLayers)
+    /// <summary>A skipped-layer set as a bitmask: exact and order-independent, so two sets never share a cache.</summary>
+    private static UInt128 SkipKey(IReadOnlyCollection<int> skipLayers)
     {
-        HashCode hash = new();
-        foreach (int layer in skipLayers.Order()) hash.Add(layer);
-        hash.Add(skipLayers.Count);
-        return hash.ToHashCode();
+        UInt128 mask = 0;
+        foreach (int layer in skipLayers)
+        {
+            if ((uint)layer >= 128)
+                throw new ArgumentOutOfRangeException(nameof(skipLayers), layer, "MOSS-Image skip layers must be below 128.");
+            mask |= UInt128.One << layer;
+        }
+        return mask;
     }
 
     /// <summary>The step's <c>shared_block_modulation</c> and <c>video_head_modulation</c> rows. The sinusoid is built

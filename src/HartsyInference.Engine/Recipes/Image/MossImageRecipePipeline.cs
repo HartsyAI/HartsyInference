@@ -28,6 +28,9 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
     /// <summary>Training defaults of ai-toolkit's MOSS-Image edit models: the VAE copy fit to 1 MP, the vision copy to 384².</summary>
     public const int DefaultReferencePixels = 1024 * 1024, DefaultVisionPixels = 384 * 384;
 
+    /// <summary>Largest pixel budget either reference copy accepts (Qwen's processor ceiling, 4096²).</summary>
+    public const int MaxBudgetPixels = 16_777_216;
+
     private int _disposed;
 
     /// <inheritdoc/>
@@ -150,13 +153,14 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
 
     /// <summary>The reference policy the request's <c>reference.*</c> extras describe: up to three images, the VAE copy fit
     /// down to <c>reference.max_pixels</c> (1 MP; 0 keeps its size) and snapped to the 16-pixel token grid, the vision copy
-    /// fit down to <c>reference.vision_pixels</c> (384²), more images than three refused.</summary>
+    /// fit down to <c>reference.vision_pixels</c> (384²), more images than three refused. Budgets outside their range are
+    /// refused rather than clamped, so a typo cannot turn into "no budget" on a large photo.</summary>
     public static ReferenceImagePolicy ReferencePolicy(IReadOnlyDictionary<string, object>? extra) => new()
     {
         MaxReferences = MossImageConfig.MaxReferenceImages,
-        LatentTargetArea = Math.Max(0, (int)RequestExtras.Number(extra, RequestExtras.ReferenceMaxPixels, DefaultReferencePixels)),
+        LatentTargetArea = Budget(extra, RequestExtras.ReferenceMaxPixels, DefaultReferencePixels, 0, MaxBudgetPixels),
         LatentMultiple = 16,
-        VisionTargetArea = Math.Max(1, (int)RequestExtras.Number(extra, RequestExtras.ReferenceVisionPixels, DefaultVisionPixels)),
+        VisionTargetArea = Budget(extra, RequestExtras.ReferenceVisionPixels, DefaultVisionPixels, 1, MaxBudgetPixels),
         Overflow = ReferenceOverflow.Refuse,
     };
 
@@ -173,6 +177,14 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
             Start = (float)RequestExtras.Number(extra, RequestExtras.SlgStart, reference.Start),
             Stop = (float)RequestExtras.Number(extra, RequestExtras.SlgStop, reference.Stop),
         };
+    }
+
+    private static int Budget(IReadOnlyDictionary<string, object>? extra, string key, int fallback, int min, int max)
+    {
+        double value = RequestExtras.Number(extra, key, fallback);
+        if (!double.IsFinite(value) || value < min || value > max || value != Math.Floor(value))
+            throw new ArgumentOutOfRangeException(key, value, $"MOSS-Image '{key}' must be a whole number of pixels in [{min}, {max}].");
+        return (int)value;
     }
 
     /// <inheritdoc/>

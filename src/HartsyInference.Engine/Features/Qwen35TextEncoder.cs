@@ -3,6 +3,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -24,6 +25,7 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
     private readonly Qwen35Model _model;
     private readonly IDisposable _owner;
     private Qwen35VisionTower? _vision;
+    private VisionFeatures? _visionFeatures;
     private int _disposed;
 
     private Qwen35TextEncoder(Qwen35Model model, IDisposable owner, ILlmTokenizer? tokenizer)
@@ -56,6 +58,8 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (vision.Config.OutHiddenSize != _model.DModel)
             throw new InvalidDataException($"The vision tower emits {vision.Config.OutHiddenSize}-wide tokens; the trunk is {_model.DModel} wide.");
+        _visionFeatures?.Dispose();
+        _visionFeatures = null;
         _vision?.Dispose();
         _vision = vision;
     }
@@ -176,23 +180,41 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (images.Count == 0)
             return Encode(backend, tokenIds);
-        Qwen35VisionTower vision = RequireVision();
         if (ImageTokenId < 0)
             throw new InvalidOperationException("The image placeholder token id must be set before image input.");
         int[] ids = [.. tokenIds];
+        VisionFeatures features = EncodeImages(backend, images);
+        using Tensor embeds = new(new TensorShape(1, ids.Length, _model.DModel), DType.F32);
+        _model.EmbedLookup(embeds, ids);
+        VisionTokenSplice.Apply(embeds, ids, ImageTokenId, features.Tokens);
+        int[] positions = MRopePositions.Build(ids, ImageTokenId, features.Grids, out _);
+        return EncodeEmbeds(backend, embeds, positions, ids.Length);
+    }
+
+    /// <summary>The vision tower's tokens for <paramref name="images"/>. The last set is kept, keyed by the images' content,
+    /// so the conditional and unconditional prompts of one edit run the tower once.</summary>
+    private unsafe VisionFeatures EncodeImages(IBackend backend, IReadOnlyList<Tensor> images)
+    {
+        Qwen35VisionTower vision = RequireVision();
+        for (int i = 0; i < images.Count; i++)
+        {
+            Tensor image = images[i];
+            if (image.Shape.Rank != 4 || image.Shape[0] != 1 || image.Shape[1] != 3 || image.DType != DType.F32)
+                throw new ArgumentException($"Image {i} must be F32 [1, 3, H, W], got {image.Shape} {image.DType}.", nameof(images));
+        }
+        long signature = ImageSignature.CombineList(images);
+        if (_visionFeatures is { } last && last.Signature == signature && last.Tokens.Length == images.Count)
+            return last;
         MRopeImageGrid[] grids = new MRopeImageGrid[images.Count];
-        List<Tensor> features = new(images.Count);
-        int hidden = _model.DModel;
-        Tensor? embeds = null;
+        Tensor[] tokens = new Tensor[images.Count];
+        int done = 0;
         try
         {
             backend.PreloadWeights(vision.Encoder.EnumerateWeights());
             int merge = vision.Config.SpatialMergeSize;
-            for (int i = 0; i < images.Count; i++)
+            for (; done < images.Count; done++)
             {
-                Tensor image = images[i];
-                if (image.Shape.Rank != 4 || image.Shape[0] != 1 || image.Shape[1] != 3 || image.DType != DType.F32)
-                    throw new ArgumentException($"Image {i} must be F32 [1, 3, H, W], got {image.Shape} {image.DType}.", nameof(images));
+                Tensor image = images[done];
                 Tensor rgb = image.Reshape(new TensorShape(3, image.Shape[2], image.Shape[3]));
                 (Tensor pixels, int gridT, int gridH, int gridW) = vision.Processor.Preprocess(rgb);
                 Qwen3VlVisionEncoder.VisionOutput output;
@@ -201,24 +223,24 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
                     output = vision.Encoder.Forward(backend, pixels, gridT, gridH, gridW);
                 }
                 foreach (Tensor tap in output.DeepstackFeatures) tap?.Dispose();
-                features.Add(output.MergedTokens);
-                grids[i] = new MRopeImageGrid(gridT, gridH / merge, gridW / merge);
+                tokens[done] = output.MergedTokens;
+                grids[done] = new MRopeImageGrid(gridT, gridH / merge, gridW / merge);
             }
             backend.Sync();
-            foreach (Tensor f in features) _ = f.DataPointer;
-            backend.FreeWeights(vision.Encoder.EnumerateWeights());
-
-            embeds = new Tensor(new TensorShape(1, ids.Length, hidden), DType.F32);
-            _model.EmbedLookup(embeds, ids);
-            VisionTokenSplice.Apply(embeds, ids, ImageTokenId, features);
-            int[] positions = MRopePositions.Build(ids, ImageTokenId, grids, out _);
-            return EncodeEmbeds(backend, embeds, positions, ids.Length);
+            foreach (Tensor t in tokens) _ = t.DataPointer;
+        }
+        catch
+        {
+            for (int i = 0; i < done; i++) tokens[i].Dispose();
+            throw;
         }
         finally
         {
-            foreach (Tensor f in features) f.Dispose();
-            embeds?.Dispose();
+            backend.FreeWeights(vision.Encoder.EnumerateWeights());
         }
+        _visionFeatures?.Dispose();
+        _visionFeatures = new VisionFeatures(signature, tokens, grids);
+        return _visionFeatures;
     }
 
     /// <inheritdoc/>
@@ -280,9 +302,25 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        _visionFeatures?.Dispose();
         _vision?.Dispose();
         _model.Dispose();
         _owner.Dispose();
+    }
+
+    /// <summary>One image set's vision tokens (host F32, owned) and merged grids.</summary>
+    private sealed class VisionFeatures(long signature, Tensor[] tokens, MRopeImageGrid[] grids) : IDisposable
+    {
+        public long Signature { get; } = signature;
+
+        public Tensor[] Tokens { get; } = tokens;
+
+        public MRopeImageGrid[] Grids { get; } = grids;
+
+        public void Dispose()
+        {
+            foreach (Tensor t in Tokens) t.Dispose();
+        }
     }
 
     private static int CountFull(Qwen35HfConfig config)
