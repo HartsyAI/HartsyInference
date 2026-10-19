@@ -1,15 +1,19 @@
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Wan-Video 3D rotary position embedding (<c>WanRotaryPosEmbed</c> + the processor's <c>apply_rotary_emb</c> in diffusers <c>transformer_wan.py</c>). Per-head (head_dim) interleaved-pair RoPE: the head dim splits into <c>t_dim / h_dim / w_dim</c> (<c>h=w=2·(head_dim//6)</c>, <c>t=head_dim−h−w</c>), each axis getting standard <c>get_1d_rotary_pos_embed</c> frequencies (<c>θ^(−2i/dim)</c>, repeat-interleaved). Distinct from <see cref="LtxRope"/> (full-dim) and <see cref="Multimodal3DRope"/> (block form).</summary>
+/// <remarks>Frequencies come from a <see cref="RopeFrequencyPlan"/> per θ (one per head in sigma_theta mode) and the duplicated-pair
+/// rows from <see cref="MultiAxisRopeTables"/>; this class owns only the <c>(frame, row, col)</c> coordinates.</remarks>
 public sealed unsafe class WanRope
 {
+    private const int NumAxes = 3;
+
     private readonly int _headDim;
-    private readonly int _tDim, _hDim, _wDim;
-    private readonly double[] _freqT, _freqH, _freqW;   // per-axis angular frequencies (length dim/2)
+    private readonly RopeFrequencyPlan _plan;
     private readonly int _numHeads;                     // > 0 only in per-head (sigma_theta) mode
-    private readonly double[][]? _phFreqT, _phFreqH, _phFreqW;   // [head][dim/2] per-head freqs (sigma_theta mode)
+    private readonly RopeFrequencyPlan[]? _headPlans;   // one θ_h per head (sigma_theta mode)
 
     /// <param name="sigmaTheta">Matrix-Game 3.0 per-head θ spread (<c>config.json sigma_theta</c>). When non-zero (and
     /// <paramref name="numHeads"/> &gt; 0) each head <c>h</c> gets <c>θ_h = theta·(1 + sigmaTheta·ε_h)</c> with
@@ -17,26 +21,19 @@ public sealed unsafe class WanRope
     /// tables <c>[numHeads, S, headDim]</c>. Zero = a single shared θ (standard Wan behavior; byte-identical path).</param>
     public WanRope(int headDim, double theta, int maxSeqLen, double sigmaTheta = 0.0, int numHeads = 0)
     {
-        _headDim = headDim;
-        _hDim = _wDim = 2 * (headDim / 6);
-        _tDim = headDim - _hDim - _wDim;
-        _freqT = AxisFreqs(_tDim, theta);
-        _freqH = AxisFreqs(_hDim, theta);
-        _freqW = AxisFreqs(_wDim, theta);
+        int hDim = 2 * (headDim / 6);
+        int tDim = headDim - 2 * hDim;
+        _plan = Plan(tDim, hDim, hDim, theta);
+        _headDim = _plan.HeadDim;
         _ = maxSeqLen;   // freqs are computed on demand; max length is informational
         if (sigmaTheta != 0.0 && numHeads > 0)
         {
             _numHeads = numHeads;
-            _phFreqT = new double[numHeads][];
-            _phFreqH = new double[numHeads][];
-            _phFreqW = new double[numHeads][];
+            _headPlans = new RopeFrequencyPlan[numHeads];
             for (int h = 0; h < numHeads; h++)
             {
                 double eps = numHeads == 1 ? -1.0 : -1.0 + 2.0 * h / (numHeads - 1);   // linspace(-1, 1, numHeads)
-                double thetaH = theta * (1.0 + sigmaTheta * eps);
-                _phFreqT[h] = AxisFreqs(_tDim, thetaH);
-                _phFreqH[h] = AxisFreqs(_hDim, thetaH);
-                _phFreqW[h] = AxisFreqs(_wDim, thetaH);
+                _headPlans[h] = Plan(tDim, hDim, hDim, theta * (1.0 + sigmaTheta * eps));
             }
         }
     }
@@ -45,23 +42,15 @@ public sealed unsafe class WanRope
     /// over a 64-wide head, instead of the main DiT's derived split.</summary>
     public WanRope(int tDim, int hDim, int wDim, double theta)
     {
-        _headDim = tDim + hDim + wDim;
-        _tDim = tDim; _hDim = hDim; _wDim = wDim;
-        _freqT = AxisFreqs(_tDim, theta);
-        _freqH = AxisFreqs(_hDim, theta);
-        _freqW = AxisFreqs(_wDim, theta);
+        _plan = Plan(tDim, hDim, wDim, theta);
+        _headDim = _plan.HeadDim;
     }
 
     /// <summary>Head dim this rope rotates.</summary>
     public int HeadDim => _headDim;
 
-    private static double[] AxisFreqs(int dim, double theta)
-    {
-        int n = dim / 2;
-        double[] f = new double[n];
-        for (int i = 0; i < n; i++) f[i] = 1.0 / Math.Pow(theta, (2.0 * i) / dim);
-        return f;
-    }
+    private static RopeFrequencyPlan Plan(int tDim, int hDim, int wDim, double theta) =>
+        RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [tDim, hDim, wDim], Theta = theta });
 
     /// <summary>Builds cos/sin <c>[S, headDim]</c> for a token grid <c>gridT × gridH × gridW</c> in <c>(f,h,w)</c> order. Each value is duplicated across its interleaved pair (so the pair shares one angle).</summary>
     /// <param name="offsetT">Per-axis position offsets added to every token's index. Wan-Animate-2's driving stream
@@ -79,67 +68,59 @@ public sealed unsafe class WanRope
     /// (non-contiguous gaps are fine; the model is trained for them).</summary>
     public (Tensor Cos, Tensor Sin) BuildCosSin(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int offsetH = 0, int offsetW = 0)
     {
+        float[] positions = GridPositions(frameIndices, gridH, gridW, offsetH, offsetW);
+        int seq = positions.Length / NumAxes;
+        if (_headPlans is null)
+        {
+            return MultiAxisRopeTables.BuildTensors(_plan, positions, seq, RopeAngleOrder.MultiplyByInverse,
+                RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity);
+        }
+
+        // Per-head (sigma_theta) cos/sin [numHeads, S, headDim]: token order matches the shared path, but each head uses its
+        // own θ_h frequencies. Consumed by ApplyRotary's rank-3 branch.
+        Tensor cos = new Tensor(new TensorShape(_numHeads, seq, _headDim), DType.F32);
+        Tensor? sin = null;
+        bool built = false;
+        try
+        {
+            sin = new Tensor(new TensorShape(_numHeads, seq, _headDim), DType.F32);
+            int headLength = checked(seq * _headDim);
+            for (int h = 0; h < _numHeads; h++)
+            {
+                MultiAxisRopeTables.BuildRows(_headPlans[h], positions, seq, RopeAngleOrder.MultiplyByInverse,
+                    RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity,
+                    new Span<float>((float*)cos.DataPointer + (long)h * headLength, headLength),
+                    new Span<float>((float*)sin.DataPointer + (long)h * headLength, headLength));
+            }
+            built = true;
+            return (cos, sin);
+        }
+        finally
+        {
+            if (!built)
+            {
+                cos.Dispose();
+                sin?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Token-major <c>(frame, row, col)</c> coordinates for the <c>(f, h, w)</c> grid, with the row and column offsets
+    /// applied.</summary>
+    private static float[] GridPositions(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int offsetH, int offsetW)
+    {
         int gridT = frameIndices.Length;
-        int seq = gridT * gridH * gridW;
-        if (_phFreqT is not null) return BuildCosSinPerHead(frameIndices, gridH, gridW, gridT, seq, offsetH, offsetW);
-
-        Tensor cos = new Tensor(new TensorShape(seq, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(seq, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-
+        float[] positions = new float[checked(gridT * gridH * gridW * NumAxes)];
+        int at = 0;
         for (int fi = 0; fi < gridT; fi++)
             for (int hi = 0; hi < gridH; hi++)
                 for (int wi = 0; wi < gridW; wi++)
                 {
-                    long token = ((long)fi * gridH + hi) * gridW + wi;
-                    long off = token * _headDim;
-                    int d = 0;
-                    FillAxis(cp, sp, off, ref d, _freqT, frameIndices[fi]);
-                    FillAxis(cp, sp, off, ref d, _freqH, hi + offsetH);
-                    FillAxis(cp, sp, off, ref d, _freqW, wi + offsetW);
+                    positions[at++] = frameIndices[fi];
+                    positions[at++] = hi + offsetH;
+                    positions[at++] = wi + offsetW;
                 }
-        return (cos, sin);
-    }
-
-    /// <summary>Per-head (sigma_theta) cos/sin <c>[numHeads, S, headDim]</c>: token order matches the shared path, but
-    /// each head uses its own θ_h frequencies. Consumed by <see cref="ApplyRotary"/>'s rank-3 branch.</summary>
-    private (Tensor Cos, Tensor Sin) BuildCosSinPerHead(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int gridT, int seq,
-        int offsetH, int offsetW)
-    {
-        Tensor cos = new Tensor(new TensorShape(_numHeads, seq, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(_numHeads, seq, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        int[] frames = frameIndices.ToArray();
-        for (int h = 0; h < _numHeads; h++)
-        {
-            long headBase = (long)h * seq * _headDim;
-            for (int fi = 0; fi < gridT; fi++)
-                for (int hi = 0; hi < gridH; hi++)
-                    for (int wi = 0; wi < gridW; wi++)
-                    {
-                        long token = ((long)fi * gridH + hi) * gridW + wi;
-                        long off = headBase + token * _headDim;
-                        int d = 0;
-                        FillAxis(cp, sp, off, ref d, _phFreqT![h], frames[fi]);
-                        FillAxis(cp, sp, off, ref d, _phFreqH![h], hi + offsetH);
-                        FillAxis(cp, sp, off, ref d, _phFreqW![h], wi + offsetW);
-                    }
-        }
-        return (cos, sin);
-    }
-
-    private static void FillAxis(float* cp, float* sp, long off, ref int d, double[] freqs, int pos)
-    {
-        foreach (double f in freqs)
-        {
-            double angle = pos * f;
-            float c = (float)Math.Cos(angle), s = (float)Math.Sin(angle);
-            cp[off + d] = c; sp[off + d] = s;
-            cp[off + d + 1] = c; sp[off + d + 1] = s;
-            d += 2;
-        }
+        return positions;
     }
 
     /// <summary>Applies the per-head interleaved-pair rotation in-place to <paramref name="x"/> <c>[S, heads, headDim]</c>.
