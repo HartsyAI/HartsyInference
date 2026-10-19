@@ -277,8 +277,12 @@ public sealed class VaeDecoder
     /// <see cref="DecodeTiled"/>, forcing the always-tiled behavior.</summary>
     private static bool FullResEnabled => EngineKnobs.VaeFullres.Value;
 
-    /// <summary>Set when a full-resolution decode attempt failed (OOM) — tiles for the rest of the session.</summary>
-    private bool _fullResDisabled;
+    /// <summary>Smallest latent (batch × height × width) whose full-resolution attempt failed this session; latents
+    /// at least that large tile without trying, smaller ones still attempt.</summary>
+    private long _fullResFailedArea = long.MaxValue;
+
+    /// <summary>Test seam: an exception returned here is thrown inside the full-resolution attempt.</summary>
+    internal Func<Exception?>? FullResFailureForTests { get; set; }
 
     /// <summary>Largest single im2col workspace the full-res attempt may require before it falls back to tiling
     /// without trying. 10 GB covers 1024² output for an F32 [128,256,512,512] AutoencoderKL (peak 9.66 GB) while
@@ -337,8 +341,8 @@ public sealed class VaeDecoder
         // GPU decode plus per-tile D2H drains and a multi-megapixel host blend/normalize loop (measured ~1.5 s
         // vs ~0.3 s for a comparable full-res VAE). When the estimated worst-case im2col buffer is within
         // budget, decode the whole latent in one pass (the same code path the single-tile case runs). OOM falls
-        // back to tiles for the rest of the session — the allocator already syncs + trims the pool before
-        // giving up, so a genuine failure means the VRAM truly isn't there.
+        // back to tiles for this latent size and larger for the rest of the session — the allocator already syncs
+        // + trims the pool before giving up, so a genuine failure means the VRAM truly isn't there.
         int gemmElemSize = Math.Max(2, weightDtype.SizeInBytes);   // fp8 weights GEMM at 16-bit
         long fullResWorkspace = EstimateDecodeWorkspaceBytes(latentH, latentW, gemmElemSize);
         // A banding backend caps every conv's im2col at its workspace cap — the naive per-conv estimate above
@@ -348,12 +352,12 @@ public sealed class VaeDecoder
         // Post-trim headroom the attempt needs beyond the single worst im2col: neighboring layer activations
         // plus a second in-flight im2col whose async free hasn't recycled yet. Below this, skip to tiled for
         // THIS generation only — a resident-DiT host (vram.keepModels) may free VRAM later, and a skipped
-        // attempt costs nothing, unlike an OOM-failed one (~0.5 s + session-tiled).
+        // attempt costs nothing, unlike an OOM-failed one (~0.5 s + tiled at that size for the session).
         const long FullResHeadroomBytes = 3L << 29;   // 1.5 GB
-        if (FullResEnabled && !_fullResDisabled && fullResWorkspace <= FullResWorkspaceCapBytes)
+        long latentArea = (long)batch * latentH * latentW;
+        if (FullResEnabled && latentArea < _fullResFailedArea && fullResWorkspace <= FullResWorkspaceCapBytes)
         {
-            // Pre-trim when the pool's reservations would OOM the big im2col: the caller just drained the
-            // stream (the latent arrives host-resident), so a planned trim here is near-free, vs. the
+            // Pre-trim when the pool's reservations would OOM the big im2col: a planned trim here is cheap, vs. the
             // allocator's OOM-retry mid-decode which syncs a deep conv queue (measured ~+470 ms/gen).
             if (backend.FreeMemoryBytes() < fullResWorkspace + FullResHeadroomBytes)
                 backend.TrimMemoryPool();
@@ -370,6 +374,8 @@ public sealed class VaeDecoder
                 try
                 {
                     single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, weightDtype, disposeSourceOnCast: false);
+                    if (FullResFailureForTests?.Invoke() is Exception injected)
+                        throw injected;
                     Tensor decoded = Decode(backend, single);
                     if (!ReferenceEquals(single, latent)) single.Dispose();
                     Logs.Verbose($"[vae-phase] full-res decode {latentH}x{latentW} latent in {fullSw.ElapsedMilliseconds}ms " +
@@ -380,12 +386,15 @@ public sealed class VaeDecoder
                 {
                     // Almost certainly VRAM exhaustion on the im2col workspace (despite the headroom check —
                     // e.g. fragmentation). Clean up whatever the partial decode left on-device and fall back
-                    // to the tiled path (and stay tiled this session).
-                    _fullResDisabled = true;
+                    // to the tiled path (and stay tiled at this size this session).
+                    _fullResFailedArea = Math.Min(_fullResFailedArea, latentArea);
                     if (single is not null && !ReferenceEquals(single, latent)) single.Dispose();
+                    // FreeActivations drops device copies without a sync-back and the tiles slice the latent on
+                    // the host, so a device-resident latent would otherwise decode as zeros (a flat gray image).
+                    backend.OffloadActivation(latent);
                     backend.FreeActivations();
                     Logs.Warning($"[vae-phase] full-res decode failed after {fullSw.ElapsedMilliseconds}ms — " +
-                        $"falling back to tiled for this session: {ex.Message}");
+                        $"falling back to tiled for {latentH}x{latentW} latents and larger this session: {ex.Message}");
                 }
             }
         }
