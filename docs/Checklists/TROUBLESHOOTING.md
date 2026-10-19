@@ -375,6 +375,10 @@ no bug, any more than one bad seed was proof there was one.
   deterministically single-threaded. Fix: `using` declarations + `GC.KeepAlive` around raw-pointer copy
   loops. Same class: `ConvWeightSlices` cast-weight freed mid-loop → `GC.KeepAlive(wf)` after the write
   loops.
+- **`FreeActivations` drops device-only data.** It frees every unpinned activation without a sync-back, so a tensor
+  whose only copy is on the device afterwards reads its lazily allocated host buffer: zeros. Host-materialize
+  (`backend.OffloadActivation`) or pin anything still read after a sweep. Signature in an image model: the same
+  output for every seed, e.g. one flat gray image when a VAE decodes a zero latent (only the shift factor survives).
 - **Pass-through helpers that MIGHT allocate are disposal traps.** `PadCaption`/`PadImage` returning the
   input unchanged when already aligned → caller disposes an aliased tensor → `ObjectDisposedException`.
   Guard `if (!ReferenceEquals(result,input)) input.Dispose();` or always allocate.
