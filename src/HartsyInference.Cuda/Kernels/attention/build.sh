@@ -9,8 +9,6 @@ KERNELS=(
     "sage_attn_int8"
     "sage_attn_int8_v1"
 )
-# h3_vsa ships nvcc-built PTX that nvrtc does not reproduce; a routine rebuild must not overwrite it (--install-tuned does).
-TUNED=("h3_vsa")
 
 # shellcheck source=../build_common.sh
 . "${THIS_DIR}/../build_common.sh"

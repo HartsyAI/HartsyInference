@@ -39,9 +39,20 @@ KERNELS=(
     "mul_mat_vec_q3k_q8_1"
     "ssm_prefill_f32"
 )
-# LLM-decode hot paths tuned against llama.cpp: their sources are current and only register allocation differs
-# between toolchains, so a routine rebuild must not overwrite the shipped artifacts (see --install-tuned).
-TUNED=("lm_f32" "mul_mat_vec_q6k_q8_1")
+# Shipped as CUDA 13.0.88 nvcc output, which the decode timings were taken on; nvrtc emits different PTX for these.
+NVCC_BUILT=(
+    "lm_f32"
+    "flash_attn_causal_f16"
+    "flash_attn_decode_gqa"
+    "lm_norm_q8_fast"
+    "lm_decode_fused"
+    "lm_topk_f32"
+    "mul_mat_vec_q4k_q8_1"
+    "mul_mat_vec_q6k_q8_1"
+    "mul_mat_vec_q5_0_q8_1"
+    "mul_mat_vec_q2k_q8_1"
+    "mul_mat_vec_q3k_q8_1"
+)
 
 # shellcheck source=../build_common.sh
 . "${THIS_DIR}/../build_common.sh"

@@ -14,24 +14,18 @@ namespace HartsyInference.Cuda.Tests;
 /// not regenerated and committed simply keeps running the old code, with nothing logged at any layer. This test
 /// rebuilds every domain from current source and byte-diffs the result.</para>
 ///
-/// <para>Skips rather than fails when the local toolchain cannot reproduce the committed artifacts — no compiler,
-/// a build that errors out, or a different compiler version — because a byte-compare is only meaningful against the
-/// toolchain that produced them. All three are reported through <see cref="ITestOutputHelper"/> so an inconclusive
-/// run does not read as a pass.</para></summary>
+/// <para>Each kernel is rebuilt with the compiler its PTX shipped from: the nvrtc helper, or the CUDA 13.0.88 nvcc
+/// (<c>HARTSY_NVCC</c> or PATH) for a domain's <c>NVCC_BUILT</c> list. The two stamp the same toolchain line yet
+/// emit different PTX, so a kernel whose compiler is missing is reported UNVERIFIED instead of compared. A build that
+/// errors out skips the test, and a kernel built by a different CUDA release than its committed PTX is reported
+/// instead of compared, because a byte-compare is only meaningful against the toolchain that produced it. All of
+/// these go to <see cref="ITestOutputHelper"/> so an inconclusive run does not read as a pass.</para></summary>
 [Collection("CudaSerial")]
 public sealed class CudaKernelDriftTests
 {
+    private const string UnverifiedPrefix = "UNVERIFIED ";
     private readonly ITestOutputHelper _out;
     public CudaKernelDriftTests(ITestOutputHelper output) => _out = output;
-
-    /// <summary>Kernels deliberately left at their tuned register allocation. Per <c>Kernels/README.md</c> the
-    /// sources are current and only codegen differs; both are LLM-decode hot paths whose throughput was measured
-    /// against llama.cpp, so they are regenerated only alongside a perf run.</summary>
-    private static readonly HashSet<string> TunedAllowlist = new(StringComparer.Ordinal)
-    {
-        "lm_f32",
-        "mul_mat_vec_q6k_q8_1",
-    };
 
     [Fact]
     public void CommittedPtx_MatchesFreshRebuildFromSource()
@@ -58,6 +52,7 @@ public sealed class CudaKernelDriftTests
         // existed so the test leaves the tree as it found it.
         HashSet<string> preExisting = new(domains.SelectMany(d => Directory.GetFiles(d, "*.ptx")), StringComparer.Ordinal);
         List<string> rebuilt = new();
+        List<string> unverified = new();
 
         try
         {
@@ -67,46 +62,55 @@ public sealed class CudaKernelDriftTests
                 if (exit != 0)
                 {
                     _out.WriteLine($"SKIPPED: {Path.GetFileName(domain)}/build.sh exited {exit} — no usable toolchain " +
-                        "(needs nvcc on PATH, or the committed Kernels/nvrtc_compile helper plus a COMPLETE header set; " +
+                        "(needs the committed Kernels/nvrtc_compile helper plus a COMPLETE header set; " +
                         "see Kernels/README.md). Inconclusive, not a pass.");
                     _out.WriteLine("stdout:\n" + stdout);
                     _out.WriteLine("stderr:\n" + stderr);
                     return;
                 }
+                unverified.AddRange(stdout.Split('\n')
+                    .Where(l => l.StartsWith(UnverifiedPrefix, StringComparison.Ordinal))
+                    .Select(l => l[UnverifiedPrefix.Length..].Trim()));
                 rebuilt.AddRange(Directory.GetFiles(domain, "*.ptx"));
             }
 
-            List<string> missing = new(), differing = new(), skippedTuned = new();
+            // build.sh deletes the intermediate of a kernel it could not build; this also ignores one left by hand.
+            HashSet<string> unverifiedNames = new(unverified.Select(l => l[..l.IndexOf(':')]), StringComparer.Ordinal);
+            List<string> missing = new(), differing = new(), otherRelease = new();
+            int compared = 0;
             foreach (string fresh in rebuilt.OrderBy(x => x, StringComparer.Ordinal))
             {
                 string name = Path.GetFileNameWithoutExtension(fresh);
+                if (unverifiedNames.Contains(name)) continue;
                 string committed = Path.Combine(ptxDir, name + ".ptx");
                 if (!File.Exists(committed)) { missing.Add(name); continue; }
 
-                // A byte-compare across compiler versions is meaningless, so verify provenance first. nvcc and
-                // nvrtc at the same NVVM version emit identical PTX (verified: msda.ptx matches byte-for-byte
-                // through either), but a different CUDA release does not.
+                // nvcc and nvrtc of one release stamp the same line, so this catches another release, not the other
+                // frontend; the domain lists decide the frontend.
                 string? freshTool = ToolchainLine(fresh), committedTool = ToolchainLine(committed);
                 if (freshTool is not null && committedTool is not null && freshTool != committedTool)
                 {
-                    _out.WriteLine($"SKIPPED at {name}: local toolchain emits \"{freshTool}\" but the committed PTX " +
-                        $"was built by \"{committedTool}\". A byte-compare across compiler versions is meaningless. " +
-                        "Pin nvidia-cuda-nvcc==13.0.88 AND nvidia-nvvm==13.0.* (nvvm decides the ISA). Inconclusive.");
-                    return;
+                    otherRelease.Add($"{name} (\"{freshTool}\", committed \"{committedTool}\")");
+                    continue;
                 }
 
-                if (TunedAllowlist.Contains(name)) { skippedTuned.Add(name); continue; }
+                compared++;
                 if (!SameKernel(fresh, committed)) differing.Add(name);
             }
 
-            if (skippedTuned.Count > 0)
-                _out.WriteLine("Allowlisted (hand-tuned register allocation, regenerate only with a perf run): " + string.Join(", ", skippedTuned));
+            if (unverified.Count > 0)
+                _out.WriteLine("UNVERIFIED, not compared (set HARTSY_NVCC to the CUDA 13.0.88 nvcc to check them):\n  " +
+                    string.Join("\n  ", unverified));
+            if (otherRelease.Count > 0)
+                _out.WriteLine("SKIPPED, built by another CUDA release than the committed PTX, so a byte-compare is meaningless " +
+                    "(pin nvidia-cuda-nvcc==13.0.88 AND nvidia-nvvm==13.0.*; nvvm decides the ISA): " +
+                    string.Join(", ", otherRelease));
             if (missing.Count > 0)
                 _out.WriteLine("Built from source but NOT present in Ptx/ (new kernel never installed/committed): " + string.Join(", ", missing));
             if (differing.Count > 0)
                 _out.WriteLine("Byte-differs from a fresh rebuild — the shipped kernel is NOT this source: " + string.Join(", ", differing));
 
-            _out.WriteLine($"Checked {rebuilt.Count} rebuilt kernels across {domains.Length} domains against {ptxDir}.");
+            _out.WriteLine($"Compared {compared} rebuilt kernels across {domains.Length} domains against {ptxDir}.");
 
             Assert.True(missing.Count == 0 && differing.Count == 0,
                 $"Committed Ptx/ has drifted from Kernels/ source: {missing.Count} missing, {differing.Count} changed. " +
@@ -151,7 +155,7 @@ public sealed class CudaKernelDriftTests
             UseShellExecute = false,
         };
         // build.sh probes for its own toolchain; forward only what an operator may have overridden.
-        foreach (string key in new[] { "CUDA_LIB", "CUDA_INC", "LD_LIBRARY_PATH" })
+        foreach (string key in new[] { "CUDA_LIB", "CUDA_INC", "HARTSY_NVCC", "LD_LIBRARY_PATH" })
         {
             if (Environment.GetEnvironmentVariable(key) is string v) psi.Environment[key] = v;
         }
