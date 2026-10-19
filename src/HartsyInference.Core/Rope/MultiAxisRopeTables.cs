@@ -32,8 +32,7 @@ public static class MultiAxisRopeTables
                 throw new ArgumentException("RoPE positions must be finite.", nameof(positions));
         }
 
-        ReadOnlySpan<int> axisDims = plan.AxisDims;
-        ReadOnlySpan<int> offsets = plan.AxisPairOffsets;
+        ReadOnlySpan<int> pairAxes = plan.PairAxes;
         ReadOnlySpan<double> inverse = plan.InverseFrequencies;
         ReadOnlySpan<double> denominators = plan.Denominators;
         bool multiply = order == RopeAngleOrder.MultiplyByInverse;
@@ -41,18 +40,12 @@ public static class MultiAxisRopeTables
         {
             int rowBase = s * pairs;
             int positionBase = s * axes;
-            for (int a = 0; a < axes; a++)
+            for (int k = 0; k < pairs; k++)
             {
-                double position = positions[positionBase + a];
-                int pairStart = offsets[a];
-                int pairCount = axisDims[a] / 2;
-                for (int k = 0; k < pairCount; k++)
-                {
-                    int index = pairStart + k;
-                    double angle = multiply ? position * inverse[index] : position / denominators[index];
-                    cos[rowBase + index] = (float)Math.Cos(angle);
-                    sin[rowBase + index] = (float)Math.Sin(angle);
-                }
+                double position = positions[positionBase + pairAxes[k]];
+                double angle = multiply ? position * inverse[k] : position / denominators[k];
+                cos[rowBase + k] = (float)Math.Cos(angle);
+                sin[rowBase + k] = (float)Math.Sin(angle);
             }
         }
     }
