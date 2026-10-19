@@ -27,6 +27,9 @@ public sealed record ComponentOverrides
     /// <summary>Qwen text-encoder override.</summary>
     public string? Qwen { get; init; }
 
+    /// <summary>Vision tower for a vision-language text encoder whose own file has none (image input to an edit model).</summary>
+    public string? TextEncoderVision { get; init; }
+
     /// <summary>LLaMA text-encoder override.</summary>
     public string? Llama { get; init; }
 

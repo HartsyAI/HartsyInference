@@ -36,6 +36,13 @@ public sealed record Qwen35HfConfig
 
     public float RopeTheta { get; init; } = 10_000_000f;
 
+    /// <summary>Frequency pairs per multimodal RoPE axis (temporal, height, width); null when the config does not say, in
+    /// which case the model takes the family's <c>[11, 11, 10]</c>.</summary>
+    public IReadOnlyList<int>? MropeSection { get; init; }
+
+    /// <summary>Whether the M-RoPE axes interleave across frequency pairs (Qwen3.5) rather than sitting in sections.</summary>
+    public bool MropeInterleaved { get; init; } = true;
+
     public float RmsNormEps { get; init; } = 1e-6f;
 
     /// <summary>Per-layer attention kind from <c>layer_types</c> (true = Gated DeltaNet); null derives it from <see cref="FullAttentionInterval"/>.</summary>
@@ -79,15 +86,34 @@ public sealed record Qwen35HfConfig
     public static Qwen35HfConfig FromTextConfig(JsonElement t)
     {
         float theta = 10_000_000f, partial = 0.25f;
-        if (t.TryGetProperty("rope_parameters", out JsonElement rope))
+        List<JsonElement> mropeScopes = [];
+        foreach (string key in (string[])["rope_parameters", "rope_scaling"])
         {
-            if (rope.TryGetProperty("rope_theta", out JsonElement th)) theta = (float)th.GetDouble();
-            if (rope.TryGetProperty("partial_rotary_factor", out JsonElement pf)) partial = (float)pf.GetDouble();
+            if (t.TryGetProperty(key, out JsonElement scope) && scope.ValueKind == JsonValueKind.Object) mropeScopes.Add(scope);
+        }
+        mropeScopes.Add(t);
+        if (t.TryGetProperty("rope_parameters", out JsonElement parameters))
+        {
+            if (parameters.TryGetProperty("rope_theta", out JsonElement th)) theta = (float)th.GetDouble();
+            if (parameters.TryGetProperty("partial_rotary_factor", out JsonElement pf)) partial = (float)pf.GetDouble();
         }
         else
         {
             if (t.TryGetProperty("rope_theta", out JsonElement th)) theta = (float)th.GetDouble();
             if (t.TryGetProperty("partial_rotary_factor", out JsonElement pf2)) partial = (float)pf2.GetDouble();
+        }
+        int[]? mropeSection = null;
+        bool mropeInterleaved = true;
+        foreach (JsonElement scope in mropeScopes)
+        {
+            if (mropeSection is null && scope.TryGetProperty("mrope_section", out JsonElement section) && section.ValueKind == JsonValueKind.Array)
+            {
+                mropeSection = new int[section.GetArrayLength()];
+                int at = 0;
+                foreach (JsonElement pairs in section.EnumerateArray()) mropeSection[at++] = pairs.GetInt32();
+            }
+            if (scope.TryGetProperty("mrope_interleaved", out JsonElement interleaved) && interleaved.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                mropeInterleaved = interleaved.GetBoolean();
         }
         int layers = t.GetProperty("num_hidden_layers").GetInt32();
         bool[]? linear = null;
@@ -126,7 +152,7 @@ public sealed record Qwen35HfConfig
             LinearValueHeadDim = t.GetProperty("linear_value_head_dim").GetInt32(),
             LinearNumKeyHeads = t.GetProperty("linear_num_key_heads").GetInt32(),
             LinearNumValueHeads = t.GetProperty("linear_num_value_heads").GetInt32(),
-            PartialRotaryFactor = partial, RopeTheta = theta,
+            PartialRotaryFactor = partial, RopeTheta = theta, MropeSection = mropeSection, MropeInterleaved = mropeInterleaved,
             RmsNormEps = t.TryGetProperty("rms_norm_eps", out JsonElement eps) ? (float)eps.GetDouble() : 1e-6f,
             NumExperts = Int(t, "num_experts", 0), NumExpertsPerTok = Int(t, "num_experts_per_tok", 0),
             MoeIntermediateSize = Int(t, "moe_intermediate_size", 0),

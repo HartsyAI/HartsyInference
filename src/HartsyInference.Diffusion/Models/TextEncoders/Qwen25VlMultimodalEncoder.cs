@@ -125,6 +125,7 @@ public sealed unsafe class Qwen25VlMultimodalEncoder
     /// <c>qwen2vl_mrope_position_ids</c> running-offset formulation.</summary>
     private (int[] t, int[] h, int[] w) BuildRopeIndex(int[] tokenIds, (int h, int w)[] grids)
     {
+        // TODO(mrope-shared): move onto Core.Rope.MRopePositions and MRopeTable (layouts pinned by MRopeTests).
         int seqLen = tokenIds.Length;
         int[] pt = new int[seqLen], ph = new int[seqLen], pw = new int[seqLen];
         int current = 0;

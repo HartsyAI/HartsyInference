@@ -9,7 +9,8 @@ using HartsyInference.ModelAssets.Gguf;
 namespace HartsyInference.LLM.Ssm;
 
 /// <summary>Qwen3.5 (<c>qwen35</c> GGUF arch) — a hybrid decoder, NOT a transformer or a pure recurrent model: most layers are Gated DeltaNet (a delta-rule linear attention), interleaved every <see cref="FullAttentionInterval"/>-th layer with a REGULAR causal self-attention layer (GQA + partial RoPE + KV cache, Qwen3-style QK-norm, plus a fused query+gate projection unique to this arch).</summary>
-/// <remarks>Text-only: the GGUF's 4-section M-RoPE degenerates to a single partial-rotary RoPE (<see cref="RotaryDim"/> = sum of the 4 sections × 2) since every section gets the same position for non-multimodal input. Ported from llama.cpp's <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side, matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</remarks>
+/// <remarks>Image input supplies its own multimodal RoPE rows (<see cref="ForwardEmbedsHidden(IBackend, Tensor, int, Tensor?, Tensor?)"/>,
+/// built from <see cref="MropeSection"/>). Text-only: the GGUF's 4-section M-RoPE degenerates to a single partial-rotary RoPE (<see cref="RotaryDim"/> = sum of the 4 sections × 2) since every section gets the same position for non-multimodal input. Ported from llama.cpp's <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side, matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</remarks>
 public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable, IExpertOffloadTarget
 {
     private readonly GgufModelLoader.LoadedGgufModel? _handle;
@@ -130,6 +131,17 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     public int RotaryDim { get; }        // sum(rope.dimension_sections) * 2 — text-only M-RoPE degenerate case
     public float RopeTheta { get; }
 
+    /// <summary>The family's multimodal RoPE split when a checkpoint does not carry one: 32 frequency pairs over the temporal,
+    /// height and width axes, interleaved.</summary>
+    public static IReadOnlyList<int> DefaultMropeSection { get; } = [11, 11, 10];
+
+    /// <summary>Frequency pairs per M-RoPE axis (temporal, height, width), from <c>rope.dimension_sections</c> or the config;
+    /// what image input needs to place vision tokens (text-only input never reads it).</summary>
+    public IReadOnlyList<int> MropeSection { get; private set; } = DefaultMropeSection;
+
+    /// <summary>Whether the M-RoPE axes interleave across frequency pairs (always so for Qwen3.5 GGUFs).</summary>
+    public bool MropeInterleaved { get; private set; } = true;
+
     // Gated DeltaNet layer dims.
     public int ConvKernel { get; }
     public int HeadKDim { get; }         // ssm.state_size (S_k == S_v for every known qwen35 checkpoint)
@@ -199,15 +211,25 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
     /// <summary>Runs <paramref name="embeds"/> (<c>[1, seq, DModel]</c> host F32, not consumed) through every layer, continuing the
     /// carried state, and returns every position's final-norm hidden state <c>[1, seq, DModel]</c> (caller owns).</summary>
-    public Tensor ForwardEmbedsHidden(IBackend backend, Tensor embeds, int seq)
+    public Tensor ForwardEmbedsHidden(IBackend backend, Tensor embeds, int seq) => ForwardEmbedsHidden(backend, embeds, seq, null, null);
+
+    /// <summary><see cref="ForwardEmbedsHidden(IBackend, Tensor, int)"/> with the full-attention layers rotated by caller-built
+    /// rows <paramref name="ropeCos"/>/<paramref name="ropeSin"/> (host F32 <c>[1, seq, AttnHeadDim]</c>, split-half over the
+    /// first <see cref="RotaryDim"/> channels) instead of the sequence positions: multimodal RoPE, where text after an image
+    /// resumes at a position past its grid. Causality and the cache still follow the sequence index.</summary>
+    public Tensor ForwardEmbedsHidden(IBackend backend, Tensor embeds, int seq, Tensor? ropeCos, Tensor? ropeSin)
     {
         ArgumentNullException.ThrowIfNull(embeds);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seq);
         if (embeds.ElementCount < (long)seq * DModel) throw new ArgumentException($"Embeddings hold fewer than {seq} rows of {DModel}.", nameof(embeds));
+        if ((ropeCos is null) != (ropeSin is null))
+            throw new ArgumentException("RoPE cosines and sines come together.", nameof(ropeSin));
+        if (ropeCos is not null && (ropeCos.ElementCount != (long)seq * AttnHeadDim || ropeSin!.ElementCount != ropeCos.ElementCount))
+            throw new ArgumentException($"RoPE rows must be [1, {seq}, {AttnHeadDim}], got {ropeCos.Shape} and {ropeSin!.Shape}.", nameof(ropeCos));
         int d = DModel;
         Tensor h = new(new TensorShape(1, seq, d), DType.F32);
         Buffer.MemoryCopy((void*)embeds.DataPointer, (void*)h.DataPointer, (long)seq * d * 4, (long)seq * d * 4);
-        return RunTrunk(backend, h, seq);
+        return RunTrunk(backend, h, seq, ropeCos, ropeSin);
     }
 
     /// <summary>Projects <paramref name="rows"/> hidden rows (<c>[1, rows, DModel]</c>) to vocabulary logits <c>[1, rows, VocabSize]</c> (caller owns).</summary>
@@ -348,9 +370,13 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
                 }
             }
 
-            return new Qwen35Model(handle, w, dModel, layers, vocab, eps, fullAttnInterval, recrOverride,
+            Qwen35Model model = new Qwen35Model(handle, w, dModel, layers, vocab, eps, fullAttnInterval, recrOverride,
                 numHeads, numKvHeads, attnHeadDim, rotaryDim, ropeTheta,
                 convK, headKvDim, headVDim, numKHeads, numVHeads, moe);
+            int[]? sections = m.GetIntArray($"{arch}.rope.dimension_sections");
+            if (sections is { Length: > 0 })
+                model.MropeSection = Array.FindAll(sections, static s => s > 0);
+            return model;
         }
         catch { handle.Dispose(); throw; }
     }
@@ -381,24 +407,34 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// <summary>Shared decode core: consumes an initial hidden state <paramref name="h"/> (owned — disposed here), runs every layer (Gated-DeltaNet or full-attention), final RMSNorm, and projects the last position to vocab logits; the ids-in and embeds-in entry points differ only in how <paramref name="h"/> is seeded.</summary>
     private float[] ForwardFromHidden(IBackend backend, Tensor h, int seq) => ProjectLast(backend, RunTrunk(backend, h, seq), seq);
 
-    private Tensor RunTrunk(IBackend backend, Tensor h, int seq)
+    private Tensor RunTrunk(IBackend backend, Tensor h, int seq, Tensor? ropeCos = null, Tensor? ropeSin = null)
     {
         int d = DModel;
         // seq==1 decode: one rope table for the token position, shared by every attention layer
         // (previously rebuilt host-side per layer per token).
         Tensor? stepCos = null, stepSin = null;
-        if (seq == 1)
+        bool ownsStep = false;
+        if (seq == 1 && ropeCos is not null)
+        {
+            stepCos = ropeCos;
+            stepSin = ropeSin;
+        }
+        else if (seq == 1)
         {
             stepCos = new Tensor(new TensorShape(1, 1, AttnHeadDim), DType.F32);
             stepSin = new Tensor(new TensorShape(1, 1, AttnHeadDim), DType.F32);
             BuildRope(stepCos, stepSin, 1, _pos, AttnHeadDim, RotaryDim, RopeTheta);
+            ownsStep = true;
         }
         for (int i = 0; i < NumLayers; i++)
         {
-            Tensor next = _isLinear[i] ? BlockLinear(backend, h, i, seq) : BlockAttn(backend, h, i, seq, stepCos, stepSin);
+            Tensor next = _isLinear[i] ? BlockLinear(backend, h, i, seq) : BlockAttn(backend, h, i, seq, stepCos, stepSin, ropeCos, ropeSin);
             h.Dispose(); h = next;
         }
-        stepCos?.Dispose(); stepSin?.Dispose();
+        if (ownsStep)
+        {
+            stepCos?.Dispose(); stepSin?.Dispose();
+        }
         _pos += seq;
         _kvCache.AdvanceLength(seq);
 
@@ -501,7 +537,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     }
 
     /// <summary>Regular causal self-attention layer: GQA + partial RoPE + KV cache, Qwen3-style per-head QK-norm, and a fused query+gate projection (wq outputs <c>[query | gate]</c>, double width — the gate sigmoid-gates the attention output before <c>wo</c>, unique to this arch's full-attention layers).</summary>
-    private Tensor BlockAttn(IBackend backend, Tensor hIn, int i, int seq, Tensor? stepCos = null, Tensor? stepSin = null)
+    private Tensor BlockAttn(IBackend backend, Tensor hIn, int i, int seq, Tensor? stepCos = null, Tensor? stepSin = null,
+        Tensor? ropeCos = null, Tensor? ropeSin = null)
     {
         if (seq == 1 && stepCos is not null && backend.GraphDecodeSupported && EngineKnobs.SsmDeviceStep.Value)
             return BlockAttnDeviceStep(backend, hIn, i, stepCos, stepSin!);
@@ -536,12 +573,20 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Linear(v, xn, W($"{p}.attn_v.weight"), null);
         xn.Dispose();
 
-        Tensor cos = new(new TensorShape(1, seq, hd), DType.F32);
-        Tensor sin = new(new TensorShape(1, seq, hd), DType.F32);
-        BuildRope(cos, sin, seq, _pos, hd, RotaryDim, RopeTheta);
-        backend.ApplyRopeSingle(qN, cos, sin, RotaryDim);
-        backend.ApplyRopeSingle(kN, cos, sin, RotaryDim);
-        cos.Dispose(); sin.Dispose();
+        if (ropeCos is not null)
+        {
+            backend.ApplyRopeSingle(qN, ropeCos, ropeSin!, RotaryDim);
+            backend.ApplyRopeSingle(kN, ropeCos, ropeSin!, RotaryDim);
+        }
+        else
+        {
+            Tensor cos = new(new TensorShape(1, seq, hd), DType.F32);
+            Tensor sin = new(new TensorShape(1, seq, hd), DType.F32);
+            BuildRope(cos, sin, seq, _pos, hd, RotaryDim, RopeTheta);
+            backend.ApplyRopeSingle(qN, cos, sin, RotaryDim);
+            backend.ApplyRopeSingle(kN, cos, sin, RotaryDim);
+            cos.Dispose(); sin.Dispose();
+        }
 
         Tensor qMh = new(new TensorShape(1, hq, seq, hd), DType.F32);
         Tensor kMh = new(new TensorShape(1, hkv, seq, hd), DType.F32);

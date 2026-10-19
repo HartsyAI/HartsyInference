@@ -449,6 +449,7 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
     /// <c>(base, base + row, base + col)</c> and the base then advances by <c>max(rows, cols)</c>.</summary>
     private (int[] T, int[] H, int[] W) BuildRopeIndex(int[] tokenIds, VisionResult[] visionOut)
     {
+        // TODO(mrope-shared): move onto Core.Rope.MRopePositions and MRopeTable (layouts pinned by MRopeTests).
         int seqLen = tokenIds.Length;
         int[] pt = new int[seqLen], ph = new int[seqLen], pw = new int[seqLen];
         int merge = _visionConfig?.SpatialMergeSize ?? 2;
