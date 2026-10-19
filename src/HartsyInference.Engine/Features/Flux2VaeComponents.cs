@@ -52,7 +52,7 @@ public sealed class Flux2VaeComponents : IDisposable
             Dictionary<string, Tensor> weights = loader.GetAllTensors();
             Tensor rawMean = Require(weights, BnMeanKey, vaePath);
             Tensor rawVar = Require(weights, BnVarKey, vaePath);
-            VaeDecoder decoder = new VaeDecoder(VaeConfig.Flux2);
+            VaeDecoder decoder = new VaeDecoder(WithCheckpointDecoder(VaeConfig.Flux2, weights));
             decoder.LoadWeights(weights);
             VaeEncoder? encoder = LoaderVaeUtils.TryBuildEncoder(VaeConfig.Flux2, weights, family);
             Tensor mean = TensorCasts.EnsureF32(rawMean);
@@ -65,6 +65,27 @@ public sealed class Flux2VaeComponents : IDisposable
             loader.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The decoder's stage widths as the checkpoint builds them: the up-blocks' output channels, reversed. FLUX.2's
+    /// own decoder mirrors the encoder (128-512); OpenMOSS's MOSS-Image folder ships a narrower one (96-384) over the same
+    /// latent, so a fixed preset would load its weights into the wrong layers.</summary>
+    private static VaeConfig WithCheckpointDecoder(VaeConfig config, Dictionary<string, Tensor> weights)
+    {
+        int stages = config.BlockOutChannels.Length;
+        int[] decoder = new int[stages];
+        for (int up = 0; up < stages; up++)
+        {
+            if (!weights.TryGetValue($"decoder.up_blocks.{up}.resnets.0.conv2.weight", out Tensor? conv))
+                return config;
+            decoder[stages - 1 - up] = (int)conv.Shape[0];
+        }
+        for (int i = 0; i < stages; i++)
+        {
+            if (decoder[i] != config.BlockOutChannels[i])
+                return config with { DecoderBlockOutChannels = decoder };
+        }
+        return config;
     }
 
     private static Tensor Require(Dictionary<string, Tensor> weights, string key, string path) =>

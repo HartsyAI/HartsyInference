@@ -9,6 +9,10 @@ public sealed record VaeConfig
     /// <summary>Output channel counts per block stage: [128, 256, 512, 512] for all standard configs.</summary>
     public int[] BlockOutChannels { get; init; } = [128, 256, 512, 512];
 
+    /// <summary>Decoder output channels per stage when the decoder is narrower than the encoder (FLUX.2's small decoder,
+    /// [96, 192, 384, 384] against [128, 256, 512, 512]). Null means the decoder mirrors <see cref="BlockOutChannels"/>.</summary>
+    public int[]? DecoderBlockOutChannels { get; init; }
+
     /// <summary>Number of ResNet layers per encoder down-block. Decoder uses LayersPerBlock + 1.</summary>
     public int LayersPerBlock { get; init; } = 2;
 
