@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Numerics;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -13,8 +14,7 @@ public sealed unsafe class FluxRope
     /// range of them amortizes dispatch, and the ranges depend only on the vector count.</summary>
     private const long RowsPerRange = 1024;
 
-    private readonly int[] _axesDim;
-    private readonly int _theta;
+    private readonly RopeFrequencyPlan _plan;
     private readonly int _headDim;
 
     // Cached cos/sin tables: [totalSeqLen, headDim/2] interleaved
@@ -42,15 +42,13 @@ public sealed unsafe class FluxRope
     private bool _gpuTablesDirty = true;
 
     /// <summary>Creates a FluxRope with the given per-axis dimensions.</summary>
-    /// <param name="axesDim">Dimensions per axis. Default: [16, 56, 56]. Must sum to headDim.</param>
+    /// <param name="axesDim">Dimensions per axis. Default: [16, 56, 56]. Must be positive and even; the sum is the head dimension.</param>
     /// <param name="theta">Base frequency. Default: 10000.</param>
     public FluxRope(int[]? axesDim = null, int theta = 10000)
     {
-        _axesDim = axesDim ?? [16, 56, 56];
-        _theta = theta;
-        _headDim = 0;
-        for (int i = 0; i < _axesDim.Length; i++)
-            _headDim += _axesDim[i];
+        int[] dims = axesDim ?? [16, 56, 56];
+        _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = dims, Theta = theta });
+        _headDim = _plan.HeadDim;
     }
 
     /// <summary>Total head dimension (sum of all axes dimensions, typically 128).</summary>
@@ -60,61 +58,24 @@ public sealed unsafe class FluxRope
     /// <param name="posIds">Position IDs [totalSeqLen, numAxes] as float32. Text tokens: all zeros. Image tokens: [0, row, col].</param>
     public void Precompute(Tensor posIds)
     {
-        // Locked: two backends sharing this FluxRope (CFG-branch parallelism) can call Precompute
-        // concurrently for the same step. Without this, concurrent writers race on _cosCache/_sinCache/
-        // _cachedSeqLen (a torn read is possible even when both calls compute identical values, since
-        // .NET gives no ordering guarantee between the array-content writes and the field publish without
-        // a barrier). Callers with DIFFERING signatures (e.g. cond/uncond token counts differ under
-        // regional conditioning) must not be routed here concurrently at all — one _cosCache instance
-        // cannot correctly serve two different signatures at once; see FluxPipeline's cfgParallelEligible
-        // guard, which requires matching signatures before allowing the concurrent branch.
+        int totalSeqLen = (int)posIds.Shape[0];
+        int numAxes = (int)posIds.Shape[1];
+        if (numAxes != _plan.Axes)
+            throw new ArgumentException($"FluxRope is configured for {_plan.Axes} axes but the position IDs carry {numAxes}.", nameof(posIds));
+
+        // Locked: two backends sharing this FluxRope (CFG-branch parallelism) can call Precompute concurrently for the same
+        // step. Callers with DIFFERING signatures (e.g. cond/uncond token counts differ under regional conditioning) must not
+        // be routed here concurrently at all; see FluxPipeline's cfgParallelEligible guard.
         lock (_gpuLock)
         {
-            int totalSeqLen = (int)posIds.Shape[0];
-            int numAxes = (int)posIds.Shape[1];
-            int halfDim = _headDim / 2;
+            float[] cos = new float[totalSeqLen * (_headDim / 2)];
+            float[] sin = new float[cos.Length];
+            ReadOnlySpan<float> positions = new((void*)posIds.DataPointer, totalSeqLen * numAxes);
+            MultiAxisRopeTables.ComputePairs(_plan, positions, totalSeqLen, RopeAngleOrder.MultiplyByInverse, cos, sin);
 
-            _cosCache = new float[totalSeqLen * halfDim];
-            _sinCache = new float[totalSeqLen * halfDim];
+            _cosCache = cos;
+            _sinCache = sin;
             _cachedSeqLen = totalSeqLen;
-
-            float* posPtr = (float*)posIds.DataPointer;
-            int freqOffset = 0;
-
-            // Max pairs across all axes (56/2=28 for Flux)
-            int maxPairs = 0;
-            for (int a = 0; a < numAxes; a++)
-                maxPairs = Math.Max(maxPairs, _axesDim[a] / 2);
-            Span<double> omega = stackalloc double[maxPairs];
-
-            for (int axis = 0; axis < numAxes; axis++)
-            {
-                int axisDim = _axesDim[axis];
-                int numPairs = axisDim / 2;
-
-                // Precompute omega for this axis: omega[k] = 1 / (theta ^ (2k / axisDim))
-                for (int k = 0; k < numPairs; k++)
-                {
-                    double scale = (double)(2 * k) / axisDim;
-                    omega[k] = 1.0 / Math.Pow(_theta, scale);
-                }
-
-                for (int s = 0; s < totalSeqLen; s++)
-                {
-                    double pos = posPtr[s * numAxes + axis];
-
-                    for (int k = 0; k < numPairs; k++)
-                    {
-                        double angle = pos * omega[k];
-                        int idx = s * halfDim + freqOffset + k;
-                        _cosCache[idx] = (float)Math.Cos(angle);
-                        _sinCache[idx] = (float)Math.Sin(angle);
-                    }
-                }
-
-                freqOffset += numPairs;
-            }
-
             _gpuTablesDirty = true;   // host tables changed → every backend's GPU tables must be rebuilt
         }
     }
