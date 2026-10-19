@@ -6,7 +6,8 @@ namespace HartsyInference.Cuda;
 /// <summary>Manages a CUDA context for a specific device. Handles initialization, context creation, and device info queries. <para>Uses the CUDA Driver API <c>cuDevicePrimaryCtxRetain</c> rather than <c>cuCtxCreate</c>: the primary context is one-per-device-per-process, refcounted, and shared with the CUDA Runtime API. This avoids the thread-stack push side-effect of <c>cuCtxCreate</c> (which silently binds the context only to the constructing thread) and lets any thread in the process bind the same context via <see cref="EnsureCurrent"/>.</para> <para>Thread affinity in the Driver API is explicit: every thread that issues CUDA API calls must have the context current on it (via <c>cuCtxSetCurrent</c>). The <see cref="EnsureCurrent"/> method below remembers the binding in a <c>[ThreadStatic]</c> cache and confirms it with <c>cuCtxGetCurrent</c> before trusting it, so a thread already bound costs a TLS read and a thread-local driver read.</para></summary>
 public sealed class CudaContext : IDisposable
 {
-    private static int _cudaInitialized;
+    private static readonly object _initLock = new();
+    private static volatile bool _cudaInitialized;
 
     /// <summary>The primary-context handle currently bound to the calling thread, or 0 if the thread has never been bound. ThreadStatic so each worker maintains its own notion of "what's already current here."</summary>
     [ThreadStatic]
@@ -242,11 +243,25 @@ public sealed class CudaContext : IDisposable
         }
     }
 
+    /// <summary>Runs <c>cuInit</c> once per process. Every caller waits for the first one to finish: the driver answers
+    /// CUDA_ERROR_NOT_INITIALIZED to any call that overtakes an in-flight <c>cuInit</c>, and parallel xUnit collections
+    /// start dozens of CUDA tests in the same second. Marking the flag before the call let those callers through, so
+    /// <see cref="IsAvailable"/> reported a machine with a GPU as having none. A failed <c>cuInit</c> is not recorded,
+    /// so later callers see the driver's real error instead of NOT_INITIALIZED.</summary>
     private static void EnsureCudaInitialized()
     {
-        if (Interlocked.CompareExchange(ref _cudaInitialized, 1, 0) == 0)
+        if (_cudaInitialized)
         {
+            return;
+        }
+        lock (_initLock)
+        {
+            if (_cudaInitialized)
+            {
+                return;
+            }
             CudaDriverApi.cuInit(0).ThrowOnError();
+            _cudaInitialized = true;
         }
     }
 
