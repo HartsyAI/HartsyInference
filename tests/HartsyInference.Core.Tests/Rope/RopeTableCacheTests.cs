@@ -290,6 +290,23 @@ public sealed class RopeTableCacheTests
     }
 
     [Fact]
+    public void ReleaseBackend_OneFailedFree_StillReleasesTheBackendsOtherTables()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true, retained: 2));
+        RopeRecordingBackend backend = new();
+        using (cache.Acquire(backend, 0, 2, SignatureA)) { }
+        using (cache.Acquire(backend, 0, 2, SignatureB)) { }
+        backend.FailFreeCall = 1;
+
+        Assert.Throws<InvalidOperationException>(() => cache.ReleaseBackend(backend));
+        Assert.Equal(new[] { "preload:2", "preload:2", "free-failed:2", "free:2" }, backend.Calls);
+
+        cache.ReleaseBackend(backend);
+        Assert.Equal("free:2", backend.Calls[^1]);
+        Assert.Equal(5, backend.Calls.Count);
+    }
+
+    [Fact]
     public void FailedRollback_KeepsTheTensorsForTheNextFlush()
     {
         using RopeTableCache cache = new(Plan(), Settings(preload: true));

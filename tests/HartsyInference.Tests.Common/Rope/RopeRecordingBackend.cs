@@ -21,6 +21,11 @@ public sealed class RopeRecordingBackend : IBackend
     /// <summary>When set, <c>FreeWeights</c> throws after recording the attempt.</summary>
     public bool FailFree { get; set; }
 
+    /// <summary>1-based index of the one free call that throws, or 0 for none.</summary>
+    public int FailFreeCall { get; set; }
+
+    private int _freeCalls;
+
     private int _preloadCalls;
 
     public IStreamingWeightCache? StreamingCache => null;
@@ -41,7 +46,7 @@ public sealed class RopeRecordingBackend : IBackend
     public void FreeWeights(IEnumerable<Tensor> weights)
     {
         int count = weights.Count();
-        if (FailFree)
+        if (FailFree || ++_freeCalls == FailFreeCall)
         {
             Calls.Add($"free-failed:{count}");
             throw new InvalidOperationException("Injected free failure.");
