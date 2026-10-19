@@ -81,7 +81,7 @@ public sealed unsafe class LensRope : IDisposable
     /// is bit-identical to the two per-stream host passes it replaces. Mirrors QwenImageRope.GetOrBuildJointTables.</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int hPacked, int wPacked, int txtSeqLen, int txtPositionStart) =>
         _jointTables.GetOrBuildStaged((hPacked, wPacked, txtSeqLen, txtPositionStart),
-            () => LensPosEmbed.JointRows(hPacked, wPacked, txtSeqLen, txtPositionStart));
+            static key => LensPosEmbed.JointRows(key.ImgH, key.ImgW, key.Txt, key.TxtStart));
 
     /// <summary>Frees the cached joint tables.</summary>
     public void Dispose()
