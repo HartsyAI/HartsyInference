@@ -14,10 +14,10 @@
 # Speed is the median over the warm seeds (every seed after the first) of the per-step ms the CLI prints, the wall
 # clock, and peak VRAM from one nvidia-smi sampler. Quality is the head artifact against the base artifact at the
 # same seed: SSIM over decoded pixels (PNG bytes are not stable; pixels are) and the raw-RGB digest
-# migration-baseline.sh uses; text at temperature 0 compares the token stream, and audio the digest of its decoded
-# F32 samples (no SSIM, so a bounded run fails on any audio change). `--expect identical` (a refactor)
-# needs every digest to match; `--expect bounded:<ssim>` (a numerics change) needs the minimum SSIM to clear the
-# floor. Either way a step time more than --speed-tolerance percent slower fails the case.
+# migration-baseline.sh uses (over every frame of a video, SSIM on its first); text at temperature 0 compares the token
+# stream, and audio the digest of its decoded F32 samples (no SSIM, so a bounded run fails on any audio change).
+# `--expect identical` (a refactor) needs every digest to match; `--expect bounded:<ssim>` (a numerics change) needs
+# the minimum SSIM to clear the floor. Either way a step time more than --speed-tolerance percent slower fails the case.
 #
 # Arms alternate seed by seed (A s0, B s0, A s1, B s1, …) so thermal drift and page-cache state land on both equally.
 set -uo pipefail
@@ -203,30 +203,37 @@ run_one() {
         if [ -n "$rate" ]; then step_n=1; step_med="$(awk -v r="$rate" 'BEGIN { printf "%.2f", 1000 / r }')"; fi
     fi
     local status="ok" digest="-" artifact=""
-    artifact="$(find "$dir/out" -type f \( -name '*.png' -o -name '*.wav' -o -name '*.txt' \) | sort | head -1)"
+    # An image is one PNG, a video one PNG per frame (and audio.wav when it has sound), audio a WAV, text a TXT. The digest
+    # covers every decoded frame and the audio samples, in name order; SSIM and the montage use the first frame.
+    local frames=() audio="" f
+    mapfile -t frames < <(find "$dir/out" -type f -name '*.png' | sort)
+    audio="$(find "$dir/out" -type f -name '*.wav' | sort | head -1)"
+    if [ ${#frames[@]} -gt 0 ]; then
+        artifact="${frames[0]}"
+    elif [ -n "$audio" ]; then
+        artifact="$audio"
+    else
+        artifact="$(find "$dir/out" -type f -name '*.txt' | sort | head -1)"
+    fi
     if [ "$rc" -ne 0 ] || [ -z "$artifact" ]; then
         status="CRASH"
+    elif [ ${#frames[@]} -gt 0 ] || [ -n "$audio" ]; then
+        : >"$dir/decoded.raw"
+        for f in "${frames[@]}"; do
+            ffmpeg -nostdin -loglevel error -i "$f" -f rawvideo -pix_fmt rgb24 - >>"$dir/decoded.raw" 2>>"$dir/run.log" || status="CRASH"
+        done
+        # The samples, not the file: a header field that changes with the writer would read as a regression.
+        if [ -n "$audio" ]; then
+            ffmpeg -nostdin -loglevel error -i "$audio" -f f32le -acodec pcm_f32le - >>"$dir/decoded.raw" 2>>"$dir/run.log" || status="CRASH"
+        fi
+        if [ "$status" = ok ] && [ -s "$dir/decoded.raw" ]; then
+            digest="$(digest_of "$dir/decoded.raw")" || status="CRASH"
+        else
+            status="CRASH"
+        fi
+        rm -f "$dir/decoded.raw"
     else
-        case "$artifact" in
-            *.png)
-                if ffmpeg -nostdin -loglevel error -i "$artifact" -f rawvideo -pix_fmt rgb24 -y "$dir/pixels.rgb24" >>"$dir/run.log" 2>&1 \
-                    && [ -s "$dir/pixels.rgb24" ]; then
-                    digest="$(digest_of "$dir/pixels.rgb24")" || status="CRASH"
-                    rm -f "$dir/pixels.rgb24"
-                else
-                    status="CRASH"
-                fi ;;
-            *.wav)
-                # The samples, not the file: a header field that changes with the writer would read as a regression.
-                if ffmpeg -nostdin -loglevel error -i "$artifact" -f f32le -acodec pcm_f32le -y "$dir/samples.f32" >>"$dir/run.log" 2>&1 \
-                    && [ -s "$dir/samples.f32" ]; then
-                    digest="$(digest_of "$dir/samples.f32")" || status="CRASH"
-                    rm -f "$dir/samples.f32"
-                else
-                    status="CRASH"
-                fi ;;
-            *) [ -s "$artifact" ] && digest="$(digest_of "$artifact")" || status="CRASH" ;;
-        esac
+        [ -s "$artifact" ] && digest="$(digest_of "$artifact")" || status="CRASH"
     fi
     printf 'status=%s\nwall=%s\nstep_n=%s\nstep_med=%s\npeak=%s\ndigest=%s\nartifact=%s\n' \
         "$status" "$wall" "$step_n" "$step_med" "${peak:-0}" "$digest" "$artifact" >"$dir/metrics.env"
