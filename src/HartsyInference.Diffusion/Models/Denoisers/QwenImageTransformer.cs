@@ -599,6 +599,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable, IStreamableDenois
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _rope.Dispose();
             _imgInWeight = null; _imgInBias = null;
             _txtNormWeight = null;
             _txtInWeight = null; _txtInBias = null;

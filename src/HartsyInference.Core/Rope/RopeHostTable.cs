@@ -2,8 +2,8 @@ using HartsyInference.Core.Backends;
 
 namespace HartsyInference.Core.Rope;
 
-/// <summary>Host pairs for one position signature in one slot, and the device tables built from them. Guarded by the owning
-/// cache's gate.</summary>
+/// <summary>Host pairs for one position signature in one slot, and the device and staged rows built from them. Guarded by the
+/// owning cache's gate.</summary>
 internal sealed class RopeHostTable
 {
     public RopeHostTable(float[] positions, int tokens, float[] cos, float[] sin)
@@ -24,4 +24,7 @@ internal sealed class RopeHostTable
     public float[] Sin { get; }
 
     public Dictionary<IBackend, RopeDeviceTable> Devices { get; }
+
+    /// <summary>Rows staged for upload by <see cref="RopeTableCache.AcquireStaged"/>; null until the first staged acquire.</summary>
+    public RopeDeviceTable? Staged { get; set; }
 }

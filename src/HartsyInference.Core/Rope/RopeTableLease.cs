@@ -34,10 +34,18 @@ public readonly struct RopeTableLease : IDisposable
     public ReadOnlySpan<float> HostSin => _host is null ? ReadOnlySpan<float>.Empty : _host.Sin;
 
     /// <summary>Device cos rows for the backend the lease was acquired on, or null when the cache does not preload.</summary>
-    public Tensor? DeviceCos => _device?.Cos;
+    public Tensor? DeviceCos => _device is { Backend: not null } ? _device.Cos : null;
 
     /// <summary>Device sin rows for the backend the lease was acquired on, or null when the cache does not preload.</summary>
-    public Tensor? DeviceSin => _device?.Sin;
+    public Tensor? DeviceSin => _device is { Backend: not null } ? _device.Sin : null;
+
+    /// <summary>Staged <c>[tokens, headDim]</c> cos rows from <see cref="RopeTableCache.AcquireStaged"/>, or null for any other
+    /// lease. They live in host memory; a backend uploads them the first time an op reads them.</summary>
+    public Tensor? StagedCos => _device is { Backend: null } ? _device.Cos : null;
+
+    /// <summary>Staged <c>[tokens, headDim]</c> sin rows from <see cref="RopeTableCache.AcquireStaged"/>, or null for any other
+    /// lease.</summary>
+    public Tensor? StagedSin => _device is { Backend: null } ? _device.Sin : null;
 
     /// <summary>Releases the lease once. Copies and repeated calls are no-ops.</summary>
     public void Dispose()

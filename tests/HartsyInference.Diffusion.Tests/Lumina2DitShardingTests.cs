@@ -46,7 +46,7 @@ public sealed class Lumina2DitShardingTests
         PatchSize = 2,
         CapFeatDim = 12,
         AdaLNEmbedDim = 16,
-        AxesDims = [2, 3, 3],
+        AxesDims = [2, 2, 4],   // even per axis, as every real config is; the Core RoPE plan rejects an odd axis
         RopeTheta = 10000f,
     };
 
