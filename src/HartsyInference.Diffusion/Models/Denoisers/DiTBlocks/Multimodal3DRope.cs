@@ -1,3 +1,4 @@
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -7,12 +8,11 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <para><b>Reusability:</b> this class knows nothing about MaPE or modality roles — those are encoded in the <c>positionIds</c> the caller passes (MaPE is just a per-role offset applied to the temporal axis when building positions). Any model that produces <c>(t,h,w)</c> position ids per token can use this directly.</para></summary>
 public sealed unsafe class Multimodal3DRope
 {
+    private const int NumAxes = 3;
+
     private readonly int _headDim;
     private readonly int _halfDim;
-    private readonly double _theta;
-    private readonly double[] _invFreq;   // length halfDim
-    private readonly int[] _axisOfDim;    // length headDim: which of t/h/w (0/1/2) feeds channel d
-    private readonly int[] _freqOfDim;    // length headDim: which inv_freq index feeds channel d
+    private readonly RopeFrequencyPlan _plan;
 
     /// <summary>Creates the M-RoPE for the given head dim, base θ, and per-axis sections <c>(t, h, w)</c> (must sum to head_dim/2).</summary>
     public Multimodal3DRope(int headDim, double theta, (int Temporal, int Height, int Width) section)
@@ -21,31 +21,14 @@ public sealed unsafe class Multimodal3DRope
             throw new ArgumentException($"headDim {headDim} must be even.", nameof(headDim));
         _headDim = headDim;
         _halfDim = headDim / 2;
-        _theta = theta;
         if (section.Temporal + section.Height + section.Width != _halfDim)
             throw new ArgumentException($"mrope_section {section} must sum to head_dim/2 = {_halfDim}.", nameof(section));
-
-        _invFreq = new double[_halfDim];
-        for (int k = 0; k < _halfDim; k++)
-            _invFreq[k] = 1.0 / Math.Pow(_theta, (double)(2 * k) / _headDim);
-
-        // Assemble the per-channel axis + freq-index tables. apply_multimodal_rotary_pos_emb doubles the
-        // sections across the full headDim ([t,h,w,t,h,w]); channel d in block b takes axis (b % 3) and
-        // freq index (d mod halfDim).
-        _axisOfDim = new int[_headDim];
-        _freqOfDim = new int[_headDim];
-        int[] sections = [section.Temporal, section.Height, section.Width, section.Temporal, section.Height, section.Width];
-        int dim = 0;
-        for (int block = 0; block < sections.Length; block++)
-        {
-            int axis = block % 3;
-            for (int j = 0; j < sections[block]; j++)
-            {
-                _axisOfDim[dim] = axis;
-                _freqOfDim[dim] = dim % _halfDim;
-                dim++;
-            }
-        }
+        // apply_multimodal_rotary_pos_emb doubles the sections across the two rotate-half halves ([t,h,w,t,h,w]), so pair k of
+        // the first half reads its section's axis and channel k + half repeats it — the rotate-half row layout.
+        int[] pairAxes = new int[_halfDim];
+        pairAxes.AsSpan(section.Temporal, section.Height).Fill(1);
+        pairAxes.AsSpan(section.Temporal + section.Height, section.Width).Fill(2);
+        _plan = RopeFrequencyPlan.CreateSectioned(theta, pairAxes, NumAxes);
     }
 
     /// <summary>Total per-head dimension.</summary>
@@ -55,30 +38,10 @@ public sealed unsafe class Multimodal3DRope
     public (Tensor Cos, Tensor Sin) BuildCosSin(Tensor positionIds)
     {
         int seq = (int)positionIds.Shape[0];
-        if ((int)positionIds.Shape[1] != 3)
+        if ((int)positionIds.Shape[1] != NumAxes)
             throw new ArgumentException($"positionIds last dim must be 3, got {positionIds.Shape[1]}.", nameof(positionIds));
-
-        Tensor cos = new Tensor(new TensorShape(seq, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(seq, _headDim), DType.F32);
-        float* posPtr = (float*)positionIds.DataPointer;
-        float* cosPtr = (float*)cos.DataPointer;
-        float* sinPtr = (float*)sin.DataPointer;
-
-        for (int s = 0; s < seq; s++)
-        {
-            double pt = posPtr[s * 3 + 0];
-            double ph = posPtr[s * 3 + 1];
-            double pw = posPtr[s * 3 + 2];
-            long outBase = (long)s * _headDim;
-            for (int d = 0; d < _headDim; d++)
-            {
-                double pos = _axisOfDim[d] switch { 0 => pt, 1 => ph, _ => pw };
-                double angle = pos * _invFreq[_freqOfDim[d]];
-                cosPtr[outBase + d] = (float)Math.Cos(angle);
-                sinPtr[outBase + d] = (float)Math.Sin(angle);
-            }
-        }
-        return (cos, sin);
+        return MultiAxisRopeTables.BuildTensors(_plan, new ReadOnlySpan<float>(positionIds.DataPointer, checked(seq * NumAxes)), seq,
+            RopeAngleOrder.MultiplyByInverse, RopeTableLayout.RotateHalf, 0, RopeTablePadding.Identity);
     }
 
     /// <summary>Applies the rotation in-place to <paramref name="x"/> shaped <c>[seq, numHeads, headDim]</c> (used for both Q and K; call once each). cos/sin are <c>[seq, headDim]</c>, broadcast over heads. <c>out = x·cos + rotate_half(x)·sin</c>, <c>rotate_half(x) = cat(-x[half:], x[:half])</c>.</summary>

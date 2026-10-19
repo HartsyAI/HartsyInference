@@ -1,3 +1,4 @@
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -9,12 +10,11 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <para><b>Section assignment.</b> With <c>head_dim/2 = 128</c> frequency slots and <c>mrope_section = (T, H, W)</c>: slot <c>k</c> defaults to the temporal axis; slots <c>1, 4, …, 1+3·(H−1)</c> take the height axis; slots <c>2, 5, …, 2+3·(W−1)</c> take the width axis. (The temporal section count is implicit — temporal keeps every slot the H/W loops don't claim.)</para></summary>
 public sealed unsafe class Ideogram4Mrope
 {
+    private const int NumAxes = 3;
+
     private readonly int _headDim;
     private readonly int _halfDim;
-    private readonly double _theta;
-    private readonly int _sectionH;
-    private readonly int _sectionW;
-    private readonly double[] _invFreq;
+    private readonly RopeFrequencyPlan _plan;
 
     /// <summary>Creates the MRoPE for the given head dim, base θ, and per-axis sections <c>(temporal, height, width)</c>.</summary>
     public Ideogram4Mrope(int headDim, int theta, (int Temporal, int Height, int Width) section)
@@ -23,78 +23,64 @@ public sealed unsafe class Ideogram4Mrope
             throw new ArgumentException($"head_dim {headDim} must be even.", nameof(headDim));
         _headDim = headDim;
         _halfDim = headDim / 2;
-        _theta = theta;
-        _sectionH = section.Height;
-        _sectionW = section.Width;
-
-        _invFreq = new double[_halfDim];
-        for (int k = 0; k < _halfDim; k++)
-            _invFreq[k] = 1.0 / Math.Pow(_theta, (double)(2 * k) / _headDim);
+        _plan = RopeFrequencyPlan.CreateSectioned(theta, PairAxes(_halfDim, section.Height, section.Width), NumAxes);
     }
 
     /// <summary>Total per-head dimension covered by the rotation.</summary>
     public int HeadDim => _headDim;
+
+    /// <summary>The axis each of the <paramref name="half"/> frequency slots reads: temporal by default, height for slots
+    /// <c>1, 4, …, 1 + 3·(H−1)</c> and width for <c>2, 5, …, 2 + 3·(W−1)</c>, each run stopping at the last slot.</summary>
+    private static int[] PairAxes(int half, int sectionH, int sectionW)
+    {
+        int[] axes = new int[half];
+        for (int j = 0; j < sectionH; j++)
+        {
+            int k = 1 + 3 * j;
+            if (k >= half) break;
+            axes[k] = 1;
+        }
+        for (int j = 0; j < sectionW; j++)
+        {
+            int k = 2 + 3 * j;
+            if (k >= half) break;
+            axes[k] = 2;
+        }
+        return axes;
+    }
 
     /// <summary>Builds the cos/sin tensors for one denoising step. <paramref name="positionIds"/> is <c>[B, L, 3]</c> F32 holding <c>(temporal, height, width)</c> positions. Outputs are <c>[B, L, head_dim]</c> each.</summary>
     public (Tensor Cos, Tensor Sin) BuildCosSin(Tensor positionIds)
     {
         int batch = (int)positionIds.Shape[0];
         int seqLen = (int)positionIds.Shape[1];
-        if ((int)positionIds.Shape[2] != 3)
+        if ((int)positionIds.Shape[2] != NumAxes)
             throw new ArgumentException($"positionIds last dim must be 3, got {positionIds.Shape[2]}.", nameof(positionIds));
 
+        // emb = cat(freqs, freqs): each slot's angle fills both halves, the rotate-half row layout.
         TensorShape shape = new TensorShape(batch, seqLen, _headDim);
         Tensor cos = new Tensor(shape, DType.F32);
-        Tensor sin = new Tensor(shape, DType.F32);
-        float* posPtr = (float*)positionIds.DataPointer;
-        float* cosPtr = (float*)cos.DataPointer;
-        float* sinPtr = (float*)sin.DataPointer;
-
-        Span<double> freqs = stackalloc double[_halfDim];
-
-        for (int b = 0; b < batch; b++)
+        Tensor? sin = null;
+        bool built = false;
+        try
         {
-            for (int s = 0; s < seqLen; s++)
+            sin = new Tensor(shape, DType.F32);
+            int tokens = checked(batch * seqLen);
+            int count = checked(tokens * _headDim);
+            MultiAxisRopeTables.BuildRows(_plan, new ReadOnlySpan<float>(positionIds.DataPointer, checked(tokens * NumAxes)), tokens,
+                RopeAngleOrder.MultiplyByInverse, RopeTableLayout.RotateHalf, 0, RopeTablePadding.Identity,
+                new Span<float>(cos.DataPointer, count), new Span<float>(sin.DataPointer, count));
+            built = true;
+            return (cos, sin);
+        }
+        finally
+        {
+            if (!built)
             {
-                long posOff = ((long)b * seqLen + s) * 3;
-                double posT = posPtr[posOff + 0];
-                double posH = posPtr[posOff + 1];
-                double posW = posPtr[posOff + 2];
-
-                // Default every slot to the temporal axis.
-                for (int k = 0; k < _halfDim; k++)
-                    freqs[k] = posT * _invFreq[k];
-
-                // Overwrite height-axis slots: k = 1, 4, …, 1 + 3·(H−1).
-                for (int j = 0; j < _sectionH; j++)
-                {
-                    int k = 1 + 3 * j;
-                    if (k >= _halfDim) break;
-                    freqs[k] = posH * _invFreq[k];
-                }
-                // Overwrite width-axis slots: k = 2, 5, …, 2 + 3·(W−1).
-                for (int j = 0; j < _sectionW; j++)
-                {
-                    int k = 2 + 3 * j;
-                    if (k >= _halfDim) break;
-                    freqs[k] = posW * _invFreq[k];
-                }
-
-                // emb = cat(freqs, freqs) → block repeat. cos/sin over the full head_dim.
-                long outBase = ((long)b * seqLen + s) * _headDim;
-                for (int k = 0; k < _halfDim; k++)
-                {
-                    float c = (float)Math.Cos(freqs[k]);
-                    float sn = (float)Math.Sin(freqs[k]);
-                    cosPtr[outBase + k] = c;
-                    cosPtr[outBase + _halfDim + k] = c;
-                    sinPtr[outBase + k] = sn;
-                    sinPtr[outBase + _halfDim + k] = sn;
-                }
+                cos.Dispose();
+                sin?.Dispose();
             }
         }
-
-        return (cos, sin);
     }
 
     /// <summary>Applies the rotation in-place to Q and K, both <c>[B, L, numHeads, head_dim]</c>. cos/sin are <c>[B, L, head_dim]</c> (broadcast over heads). <c>out[i] = x[i]·cos[i] + rotate_half(x)[i]·sin[i]</c> with <c>rotate_half(x) = cat(-x[half:], x[:half])</c>.</summary>

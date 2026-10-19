@@ -86,11 +86,13 @@ public unsafe class ContextParallelQwenImageTests
         int imgSeq = hPacked * wPacked;
 
         Dictionary<string, Tensor> w = QwenImageWeightBuilder.Build(cfg);
-        using QwenImageTransformer transformer = new(cfg);
-        transformer.LoadWeights(w);
 
+        // The transformer is declared after the backends so it disposes first: its RoPE tables are leased from
+        // those backends and must be freed while they are alive.
         using CudaBackend backend1 = new(deviceOrdinal: 0, PtxDir());
         using CudaBackend backend2 = new(deviceOrdinal: 0, PtxDir());
+        using QwenImageTransformer transformer = new(cfg);
+        transformer.LoadWeights(w);
         backend1.PreloadWeights(transformer.EnumerateWeights());
         backend2.PreloadWeights(transformer.EnumerateWeights());
 
