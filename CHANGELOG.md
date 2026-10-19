@@ -26,6 +26,7 @@ stable release will require. Dates are UTC.
   returned false on a machine with a GPU. In the full CUDA `GpuIntegration` run, 3 tests failed and 11 skipped silently
   this way. Callers now wait for the first `cuInit`. A failed `cuInit` is retried, so later callers report the driver's
   real error. `CudaLibraryResolver.Register` now waits for registration the same way.
+- **Fixed: a CUDA card older than Ampere (sm_75, Turing) failed backend creation.** Every module was loaded eagerly, and the driver refused the sm_80 PTX (`CUDA error 218: PTX JIT failed`). `CudaKernels` now reads each module's `.target` and skips the ones built for a newer architecture: the backend constructs, its sm_70 and sm_75 kernels (elementwise, GGUF dequant, expert) load, `CudaBackend.SkippedKernelModules` lists the rest, and launching one fails with an error that names what was skipped. `auto` backend selection and the CUDA probe pass over such a card to Vulkan. Nothing changes at sm_80 and above.
 
 ## alpha.380
 

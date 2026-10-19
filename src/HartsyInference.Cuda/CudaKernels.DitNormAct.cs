@@ -14,7 +14,7 @@ public sealed partial class CudaKernels
     private void LoadDitNormActKernels()
     {
         string path = Ptx("dit_norm_act");
-        if (!File.Exists(path))
+        if (!CanLoad(path))
             return;
         _ditNormActModule = LoadOwnedModule(path);
         _rmsNormModulateF32F32 = _ditNormActModule.GetFunction("rms_norm_modulate_f32_f32");

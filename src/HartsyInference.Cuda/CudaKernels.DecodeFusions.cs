@@ -13,7 +13,7 @@ public sealed partial class CudaKernels
     private void LoadDecodeFusedKernels()
     {
         string path = Ptx("lm_decode_fused");
-        if (!File.Exists(path)) return;
+        if (!CanLoad(path)) return;
         _decodeFusedModule = LoadOwnedModule(path);
         for (int k = 2; k <= 32; k++)
         {
