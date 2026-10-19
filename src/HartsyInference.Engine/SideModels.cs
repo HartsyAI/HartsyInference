@@ -177,6 +177,20 @@ public static class SideModels
     /// token), in unsloth's llama.cpp repack of <c>Qwen/Qwen3.5-9B</c>: half the size of the BF16 trunk OpenMOSS ships
     /// under <c>text_encoder/</c>, and it carries its own tokenizer. A full MOSS-Image folder's BF16 encoder is used
     /// instead when the checkpoint sits in one. Hash is pinned on the first real-weight run.</summary>
+    /// <summary>Qwen3.5-9B in bf16 (the stock weights MOSS-Image was trained against; Comfy-Org's <c>MOSS-Image</c> repack
+    /// ships the same file). Its hidden states match OpenMOSS's reference, where the Q8 GGUF's do not (see MossImageRecipe).</summary>
+    public static readonly ModelAsset Qwen35_9BBf16 = new ModelAsset
+    {
+        Repo = "Comfy-Org/MOSS-Image",
+        RepoPath = "text_encoders/qwen3.5_9b_bf16.safetensors",
+        TargetSubdir = "text_encoders",
+        TargetName = "qwen35_9b_bf16.safetensors",
+        Role = "text encoder",
+        Sha256 = "7e6e9f08d598f829cb940e60ac0c698e1f1c27a47daffd7e598cd78c78b4cc53"
+    };
+
+    /// <summary>Qwen3.5-9B Q8_0 GGUF (unsloth). Its linear-attention and RMSNorm conventions differ from the HF weights, so
+    /// its hidden states diverge from the bf16 model's (rel L2 0.85 against the bf16 reference on MOSS's prompt).</summary>
     public static readonly ModelAsset Qwen35_9B = new ModelAsset
     {
         Repo = "unsloth/Qwen3.5-9B-GGUF",
@@ -342,6 +356,18 @@ public static class SideModels
         TargetName = "Flux/flux2-vae.safetensors",
         Role = "vae",
         Sha256 = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    };
+
+    /// <summary>FLUX.2 VAE with the small decoder (96-192-384-384) that OpenMOSS ships for MOSS-Image: its decoder tensors
+    /// are byte-identical to the MOSS-Image folder's <c>vae/</c>. Path and hash match Comfy-Org's <c>MOSS-Image</c> repack.</summary>
+    public static readonly ModelAsset Flux2VaeSmall = new ModelAsset
+    {
+        Repo = "Comfy-Org/MOSS-Image",
+        RepoPath = "vae/flux2-vae_small.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "flux2-vae_small.safetensors",
+        Role = "vae",
+        Sha256 = "d8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b"
     };
 
     /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
