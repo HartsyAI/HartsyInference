@@ -320,6 +320,42 @@ public sealed class RopeTableCacheTests
     }
 
     [Fact]
+    public void Flush_OneFailedFree_StillFreesTheOtherBackends_AndRetriesLater()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true));
+        RopeRecordingBackend failing = new();
+        RopeRecordingBackend healthy = new();
+        using (cache.Acquire(failing, 0, 2, SignatureA)) { }
+        using (cache.Acquire(healthy, 0, 2, SignatureA)) { }
+        failing.FailFree = true;
+
+        Assert.Throws<InvalidOperationException>(() => cache.Clear());
+        Assert.Contains("free:2", healthy.Calls);
+
+        failing.FailFree = false;
+        using (cache.Acquire(healthy, 0, 2, SignatureB)) { }
+        Assert.Contains("free:2", failing.Calls);
+    }
+
+    [Fact]
+    public void Flush_SeveralFailedFrees_AreReportedTogether()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true));
+        RopeRecordingBackend first = new();
+        RopeRecordingBackend second = new();
+        using (cache.Acquire(first, 0, 2, SignatureA)) { }
+        using (cache.Acquire(second, 0, 2, SignatureA)) { }
+        first.FailFree = true;
+        second.FailFree = true;
+
+        AggregateException error = Assert.Throws<AggregateException>(() => cache.Clear());
+
+        Assert.Equal(2, error.InnerExceptions.Count);
+        first.FailFree = false;
+        second.FailFree = false;
+    }
+
+    [Fact]
     public void DefaultLease_IsAnEmptyNoOp()
     {
         RopeTableLease lease = default;

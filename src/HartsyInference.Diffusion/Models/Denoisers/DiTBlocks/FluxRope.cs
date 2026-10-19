@@ -91,7 +91,8 @@ public sealed unsafe class FluxRope : IDisposable
     /// the pre-permute <c>[1, S, H, D]</c> layout is exactly WanRopeInterleaved's <c>[S, heads·headDim]</c>
     /// contract. Replaces the per-block host loop (full Q/K D2H→trig→H2D round trip per block per step).
     /// Requires batch 1 (flat-layout equivalence); callers keep the host <see cref="Forward"/> for B&gt;1.
-    /// Mirrors <see cref="HunyuanImageRope.ApplyGpu"/>.</summary>
+    /// Mirrors <see cref="HunyuanImageRope.ApplyGpu"/>. Reads the signature without the precompute lock, so it must not
+    /// run alongside a <see cref="Precompute"/> of another signature (the same contract as concurrent precomputes).</summary>
     public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads)
     {
         CheckGpuPrecondition("ApplyGpu", q);
