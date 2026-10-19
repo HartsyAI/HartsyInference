@@ -92,9 +92,10 @@ public sealed unsafe class HunyuanImageRope : IDisposable
     {
         lock (_gate)
         {
-            foreach (HeldGrid held in _held.Values)
-                held.Lease.Dispose();
+            HeldGrid[] all = _held.Values.ToArray();
             _held.Clear();
+            foreach (HeldGrid held in all)
+                held.Lease.Dispose();
         }
         _deviceTables.Dispose();
     }
@@ -128,8 +129,8 @@ public sealed unsafe class HunyuanImageRope : IDisposable
                 throw;
             }
 
-            previous?.Lease.Dispose();
             _held[backend] = new HeldGrid(packedDims.ToArray(), lease, cos, sin);
+            previous?.Lease.Dispose();
             return (cos, sin, seqLen);
         }
     }
