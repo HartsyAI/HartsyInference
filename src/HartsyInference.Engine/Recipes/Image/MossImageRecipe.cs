@@ -139,7 +139,9 @@ public sealed class MossImageRecipe : IArchitectureRecipe
         string? folder = root is null ? null : Path.Combine(root, TextEncoderFolder);
         if (string.IsNullOrWhiteSpace(requested) && folder is not null && Directory.Exists(folder))
             return folder;
-        return ModelFileLocator.RequireOrEnsure(requested, SideModels.Qwen35_9B, "Qwen3.5-9B text encoder", context.Cancel,
+        // The bf16 safetensors, not the Q8 GGUF: the GGUF's hidden states diverge from the reference model, and the image
+        // comes out unrelated to the prompt.
+        return ModelFileLocator.RequireOrEnsure(requested, SideModels.Qwen35_9BBf16, "Qwen3.5-9B text encoder", context.Cancel,
             "text_encoders", "clip", "LLM");
     }
 
@@ -182,6 +184,8 @@ public sealed class MossImageRecipe : IArchitectureRecipe
         string? folder = root is null ? null : Path.Combine(root, VaeFolder);
         if (string.IsNullOrWhiteSpace(requested) && folder is not null && Directory.Exists(folder))
             return HfCheckpointDirectory.WeightFiles(folder)[0];
-        return ModelFileLocator.RequireOrEnsure(requested, SideModels.Flux2Vae, "FLUX.2 VAE", context.Cancel, "VAE", "vae");
+        // OpenMOSS decodes with the small FLUX.2 decoder, so a single-file checkpoint falls back to that one rather than the
+        // full-decoder FLUX.2 VAE, which decodes the same latents with the wrong widths.
+        return ModelFileLocator.RequireOrEnsure(requested, SideModels.Flux2VaeSmall, "FLUX.2 small VAE", context.Cancel, "VAE", "vae");
     }
 }
