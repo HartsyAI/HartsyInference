@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -21,6 +22,7 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
     private readonly int _axes;
     private readonly Dictionary<IBackend, Held> _held = new(ReferenceEqualityComparer.Instance);
     private Held? _staged;
+    private bool _disposed;
 
     /// <summary>Creates a holder for <paramref name="slot"/> of <paramref name="cache"/>. Positions carry <paramref name="axes"/> values per token.</summary>
     public RopeHeldTables(RopeTableCache cache, int slot, int axes)
@@ -37,6 +39,7 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
         ArgumentNullException.ThrowIfNull(backend);
         lock (_gate)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_held.TryGetValue(backend, out Held? current) && current.Key.Equals(key))
             {
                 tables = (current.Cos, current.Sin);
@@ -55,6 +58,7 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
         ArgumentNullException.ThrowIfNull(backend);
         lock (_gate)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_held.TryGetValue(backend, out Held? current) && current.Key.Equals(key))
                 return (current.Cos, current.Sin);
 
@@ -87,6 +91,7 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
     {
         lock (_gate)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_staged is not null && _staged.Key.Equals(key))
                 return (_staged.Cos, _staged.Sin);
 
@@ -112,18 +117,37 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
         }
     }
 
-    /// <summary>Releases every held lease. The cache frees each table once its last lease is released.</summary>
+    /// <summary>Releases every held lease, each one even when an earlier release throws; the cache frees each table once its
+    /// last lease is released. A single failure is rethrown as itself, several as an <see cref="AggregateException"/>.
+    /// Lookups after this throw <see cref="ObjectDisposedException"/>, so nothing can re-add a lease that no one releases.</summary>
     public void Dispose()
     {
         lock (_gate)
         {
-            Held[] all = _held.Values.ToArray();
+            if (_disposed)
+                return;
+            _disposed = true;
+            List<Held> all = [.. _held.Values];
             _held.Clear();
-            Held? staged = _staged;
+            if (_staged is not null)
+                all.Add(_staged);
             _staged = null;
+            List<Exception>? failures = null;
             foreach (Held held in all)
-                held.Lease.Dispose();
-            staged?.Lease.Dispose();
+            {
+                try
+                {
+                    held.Lease.Dispose();
+                }
+                catch (Exception error)
+                {
+                    (failures ??= []).Add(error);
+                }
+            }
+            if (failures is [Exception only])
+                ExceptionDispatchInfo.Capture(only).Throw();
+            if (failures is not null)
+                throw new AggregateException("Releasing held RoPE tables failed.", failures);
         }
     }
 
