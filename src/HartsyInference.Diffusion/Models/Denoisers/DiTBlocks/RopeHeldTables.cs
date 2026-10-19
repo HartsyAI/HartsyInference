@@ -13,7 +13,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <remarks>Build-then-swap: the new lease is acquired before the backend's previous lease is released, so a failed build
 /// leaves the previous tables valid. Every call takes the holder's own gate, so concurrent callers (context-parallel ranks)
 /// are serialized here. The held entry is installed before the previous lease is released, so a release that throws
-/// (a failed free) leaves no consumed lease in the map.</remarks>
+/// (a failed free) leaves no consumed lease in the map: that call reports the failure once, and the next call for the same
+/// key finds the new tables already held.</remarks>
 internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable<TKey>
 {
     private readonly object _gate = new();

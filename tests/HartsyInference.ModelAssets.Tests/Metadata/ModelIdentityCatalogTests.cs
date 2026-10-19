@@ -70,4 +70,18 @@ public sealed class ModelIdentityCatalogTests
     {
         Assert.Equal(expected, ModelIdentityCatalog.Find("qwen3tts")!.ForVariant(variant).SwarmClassId);
     }
+
+    /// <summary>The class and provider id a repack stamps must be the one AudioLab registers the provider under, or
+    /// AudioLab's artifact index never admits the file.</summary>
+    [Theory]
+    [InlineData("breeze", "breeze_tts")]
+    [InlineData("indextts", "indextts_tts")]
+    [InlineData("indextts2", "indextts2_tts")]
+    [InlineData("controlfoley", "controlfoley_sfx")]
+    public void RepackableAudioFamiliesStampTheirAudioLabProvider(string engineId, string providerId)
+    {
+        ArtifactIdentity identity = Assert.IsType<ArtifactIdentity>(ModelIdentityCatalog.Find(engineId));
+        Assert.Equal(providerId, identity.SwarmClassId);
+        Assert.Equal(providerId, identity.ProviderId);
+    }
 }
