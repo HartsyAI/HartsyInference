@@ -129,6 +129,7 @@ public static class ModelIdentityCatalog
             Audio("heartmula", "heartlib_music", "HeartMuLa oss-3B", "HeartMuLa", "apache-2.0", "music"),
             Audio("musicgen", "musicgen_music", "MusicGen", "Meta", "cc-by-nc-4.0", "music"),
             Audio("audiogen", "audiogen_sfx", "AudioGen", "Meta", "cc-by-nc-4.0", "music"),
+            Audio("controlfoley", "controlfoley_sfx", "ControlFoley", "Xiaomi", "cc-by-nc-4.0", "music", "YJX-Xiaomi/ControlFoley"),
             Audio("stableaudio", "stableaudio_music", "Stable Audio Open Small", "Stability AI", "other", "music"),
 
             // ── Speech-to-text ──────────────────────────────────────────────────────────────────────────
@@ -177,6 +178,11 @@ public static class ModelIdentityCatalog
             Audio("fishaudio", "fishaudio_tts", "Fish Audio S2 Pro", "Fish Audio", "other", "tts", "fishaudio/s2-pro"),
             Audio("fishaudio-drama3", "fishaudio_drama3_tts", "Fish Audio Drama 3", "Fish Audio", "other", "tts", "fishaudio/drama-3"),
             Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),
+            // Breeze TTS 2 and IndexTTS 2 ship under their own model licenses, which have no HuggingFace id. IndexTTS 2
+            // names no upstream repo: 2.0 and 2.5 are separate releases, so each repack passes its own --source-repo.
+            Audio("breeze", "breeze_tts", "Breeze TTS 2", "BreezeBlue", "other", "tts", "BreezeBlue/Breeze-TTS-2"),
+            Audio("indextts", "indextts_tts", "IndexTTS 1.5", "Bilibili", "apache-2.0", "tts", "IndexTeam/IndexTTS-1.5"),
+            Audio("indextts2", "indextts2_tts", "IndexTTS 2", "Bilibili", "other", "tts"),
 
             // ── Voice conversion and effects ────────────────────────────────────────────────────────────
             Audio("rvc", "rvc_clone", "RVC v2", "RVC-Project", "mit", "clone"),

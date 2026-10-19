@@ -32,15 +32,15 @@ public sealed class IndexTtsPipeline : IDisposable
     private readonly IndexTtsT2sDecoder _t2s;
     private readonly IndexTtsBigVganGenerator _bigVgan;
     private readonly MelSpectrogramExtractor _melExtractor;
-    private readonly PytorchPickleLoader _gptLoader;
-    private readonly PytorchPickleLoader _bigVganLoader;
+    private readonly AnyFormatCheckpointLoader _gptLoader;
+    private readonly AnyFormatCheckpointLoader _bigVganLoader;
     private readonly List<Tensor> _convertedWeights;
     private int _disposed;
 
     public string ModelName => "indextts-1.5";
 
     private IndexTtsPipeline(IndexTtsConfig cfg, IndexTtsTokenizer tokenizer, IndexTtsSpeakerEncoder speakerEncoder,
-        IndexTtsT2sDecoder t2s, IndexTtsBigVganGenerator bigVgan, PytorchPickleLoader gptLoader, PytorchPickleLoader bigVganLoader,
+        IndexTtsT2sDecoder t2s, IndexTtsBigVganGenerator bigVgan, AnyFormatCheckpointLoader gptLoader, AnyFormatCheckpointLoader bigVganLoader,
         List<Tensor> convertedWeights, IndexTtsFstNormalizers textNormalizers)
     {
         _cfg = cfg;
@@ -72,10 +72,10 @@ public sealed class IndexTtsPipeline : IDisposable
         IndexTtsConfig resolved = cfg ?? IndexTtsConfig.V1_5;
 
         IndexTtsTokenizer? tokenizer = null;
-        PytorchPickleLoader? gptLoader = null;
+        AnyFormatCheckpointLoader? gptLoader = null;
         IndexTtsSpeakerEncoder? speakerEncoder = null;
         IndexTtsT2sDecoder? t2s = null;
-        PytorchPickleLoader? bigVganLoader = null;
+        AnyFormatCheckpointLoader? bigVganLoader = null;
         IndexTtsBigVganGenerator? bigVgan = null;
         List<Tensor> converted = [];
         try
@@ -92,8 +92,9 @@ public sealed class IndexTtsPipeline : IDisposable
             // written against instead of requiring each of those classes to track its own conversions. Both
             // loaders are still kept as fields for the (now BF16-only) originals, disposed only in
             // IndexTtsPipeline.Dispose() on the success path -- or right here, alongside every other component
-            // already constructed, if a later step throws.
-            gptLoader = new PytorchPickleLoader();
+            // already constructed, if a later step throws. Either file may be a converted safetensors standing in at
+            // the .pth path, which carries the keys the recursive flatten would give.
+            gptLoader = new AnyFormatCheckpointLoader();
             gptLoader.Load(gptPath, recursiveFlatten: true);
             Dictionary<string, Tensor> gptWeights = ToF32(gptLoader.GetAllTensors(), converted);
 
@@ -103,7 +104,7 @@ public sealed class IndexTtsPipeline : IDisposable
             t2s = new IndexTtsT2sDecoder(resolved.Gpt, resolved.MaxMelTokens);
             t2s.LoadWeights(gptWeights);
 
-            bigVganLoader = new PytorchPickleLoader();
+            bigVganLoader = new AnyFormatCheckpointLoader();
             bigVganLoader.Load(bigVganPath, recursiveFlatten: true);
             Dictionary<string, Tensor> bigVganWeights = ToF32(bigVganLoader.GetAllTensors(), converted);
             bigVgan = new IndexTtsBigVganGenerator(resolved.BigVgan);
