@@ -13,6 +13,8 @@ public sealed class Qwen2PreTokenizerTests
     [InlineData("gpt-4o", "Gpt4o")]
     [InlineData("qwen2", "Qwen2")]
     [InlineData("kolibri1", "Qwen2")]
+    [InlineData("tekken", "Tekken")]
+    [InlineData("pixtral", "Tekken")]
     public void PreName_MapsToItsFamily(string pre, string family) =>
         Assert.Equal(family, GgufLanguageModel.PreTokenizerFamilyFor(pre).ToString());
 

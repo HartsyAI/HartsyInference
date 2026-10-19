@@ -105,13 +105,7 @@ public static class CompatEndpoints
                         Model = model,
                         Choices = [new ChatCompletionChoice
                         {
-                            // OpenAI sets content null (not "") when a tool call is present.
-                            Message = new ChatMessageDto
-                            {
-                                Role = "assistant",
-                                Content = result.ToolCall is null ? result.Text : null,
-                                ToolCalls = result.ToolCalls is { Count: > 0 } calls ? [.. calls.Select(c => ToToolCallDto(c))] : null,
-                            },
+                            Message = ToAssistantMessage(result),
                             FinishReason = ToFinishReason(result.Stop),
                         }],
                         Usage = new ChatUsage { PromptTokens = result.PromptTokens, CompletionTokens = result.CompletionTokens },
@@ -551,6 +545,17 @@ public static class CompatEndpoints
         Id = string.IsNullOrEmpty(call.Id) ? $"call_{Guid.NewGuid():N}" : call.Id,
         Index = index,
         Function = new ChatToolCallFunctionDto { Name = call.Name, Arguments = call.Arguments },
+    };
+
+    /// <summary>The assistant turn a non-streaming completion returns: the answer in <c>content</c>, any reasoning the model wrote first in
+    /// <c>reasoning_content</c>, and any tool calls.</summary>
+    internal static ChatMessageDto ToAssistantMessage(TextResult result) => new ChatMessageDto
+    {
+        Role = "assistant",
+        // OpenAI sets content null (not "") when a tool call is present.
+        Content = result.ToolCall is null ? result.Text : null,
+        ReasoningContent = string.IsNullOrEmpty(result.Reasoning) ? null : result.Reasoning,
+        ToolCalls = result.ToolCalls is { Count: > 0 } calls ? [.. calls.Select(c => ToToolCallDto(c))] : null,
     };
 
     // OpenAI's finish_reason vocabulary has no slot for Cancelled/Error — both collapse to "stop" (best-effort
