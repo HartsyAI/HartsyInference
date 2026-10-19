@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: Z-Image at 2048x2048 decoded to a flat gray image.** When the VAE's full-resolution attempt ran out of memory, its
+  fallback freed the device-only latent Z-Image hands over and the tiles decoded zeros. The fallback now copies the latent to the host
+  first. A failed attempt also no longer makes every later decode in the session tiled, only latents at least that large. On CUDA a
+  BF16 attention whose score matrix would not fit now runs query-tiled like F32 does, so a BF16 VAE mid-block at 2048x2048 no longer
+  asks for one 16 GB allocation.
+- **Changed: BF16 VAEs decode 2048x2048 at full resolution when it fits.** Z-Image and Lumina 2 used to fall back to tiles there;
+  the single pass removes tile seams but holds more VRAM while it runs (Lumina 2 peaked at 23.8 GB on a 24 GB RTX 4090, as the pool
+  reports it, against 18.4 GB tiled). When the memory is not there, the attempt fails, falls back to tiles and is skipped for that size
+  afterwards.
 - **Fixed: `tekken` and `pixtral` GGUF tokenizers use Mistral's Tekken pre-token split.** Both names fell through to the GPT-2 split, so
   Dory (`pixtral`) and the Mistral Nemo/Small family (`tekken`) encoded prompts with non-canonical ids (`in-app`, `swarm_docs`, paths and
   newlines split differently). Dory now matches its checkpoint's `tokenizer.json` on every sample in `DoryTokenizerParityTests`.
