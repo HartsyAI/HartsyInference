@@ -119,6 +119,14 @@ no bug, any more than one bad seed was proof there was one.
 
 ## Attention / RoPE / multi-head parity
 
+- **RoPE tables come from `Core/Rope`; a family owns only its positions.** Per-axis plans (`RopeFrequencyPlan.Create`),
+  M-RoPE plans (`CreateSectioned`), rows (`MultiAxisRopeTables`) and device tables (`RopeTableCache`) serve FLUX/Chroma/
+  Krea 2/HiDream, Anima, Qwen-Image (2.1), HunyuanImage/Video, Z-Image/Lumina 2, Kandinsky 5, MOSS, Stable Audio,
+  OmniGen 2/Boogu, Lens, Wan, ERNIE-Image, Ideogram 4 and Lance. `RopeFamilyGoldenTests` pins every one against digests
+  of the pre-migration code; a deliberate numerics change recaptures that fixture. Left model-owned on purpose: LTX and
+  LTX-2 (`theta^linspace·π/2` schedule, front identity pad), AxialRope2D and SeedVR2 v1 (pixel schedules), F-Lite and
+  ControlFoley (float32 angle math), MiniMax-H3 (checkpoint `inv_freq`, double positions), Cosmos3D (no users), and the
+  audio Qwen3-TTS and AuK ropes (TTS output is not seed-reproducible, so no identical A/B guards a move).
 - **diffusers `attention_head_dim` is a TRAP — it means head COUNT, not head dim** when
   `num_attention_heads` is unset. SD1.5 `attention_head_dim=8` = 8 heads (head_dim=40), not 40 heads of
   dim 8. Wrong split → 2.24× too-large attention scale and ~56% signal dampening. Print `model.attn.heads`

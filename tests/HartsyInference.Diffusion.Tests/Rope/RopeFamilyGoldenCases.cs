@@ -34,11 +34,17 @@ internal static unsafe class RopeFamilyGoldenCases
         "anima_freqs", "anima_device_tables",
         "flux_forward", "flux_gpu", "flux_gpu_gqa_kontext",
         "hidream_gpu",
-        // Large, non-square and odd grids: the positions and table sizes of 2K images (128 tokens a side), 16:9 frames, and
-        // grids whose centering splits unevenly (Qwen-Image's native 1328² is 83×83).
+        "wan_shared", "wan_offsets", "wan_frame_indices", "wan_sigma_theta", "wan_explicit_split", "wan_temporal_only",
+        "wan_apply_shared", "wan_apply_per_head",
+        "ernie_freqs_batch2", "ernie_gpu",
+        "ideogram4_tables", "ideogram4_sections_overrun", "ideogram4_apply",
+        "mrope3d_tables", "mrope3d_apply",
+        // Large, non-square and odd grids: the positions and table sizes of 2K images (128 tokens a side), 16:9 frames, 720p
+        // video, and grids whose centering splits unevenly (Qwen-Image's native 1328² is 83×83).
         "qwen_device_joint_odd_1328", "qwen_apply_image_odd", "qwen21_device_image_wide_2k", "hunyuan_gpu_2048",
         "zimage_gpu_2048", "kandinsky5_apply_wide_2k", "moss_joint_2048", "omnigen2_staged_wide_2k", "lens_staged_joint_odd",
         "anima_device_tables_2048", "flux_gpu_2048", "stableaudio_tables_long",
+        "wan_shared_720p", "ernie_gpu_2048", "ideogram4_tables_wide_2k", "mrope3d_tables_video_1024",
     ];
 
     /// <summary>Runs <paramref name="name"/> and returns its digests as space-separated <c>label=hex</c> pairs.</summary>
@@ -224,6 +230,129 @@ internal static unsafe class RopeFamilyGoldenCases
                 ids.Dispose();
                 return RotatePrePermute(128, GridH * GridW + TextLength, Heads, (q, k) => rope.ApplyGpu(cpu, q, k, Heads));
             }
+            case "wan_shared":
+            {
+                (Tensor cos, Tensor sin) = new WanRope(128, 10000, 1024).BuildCosSin(2, GridH, GridW);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "wan_offsets":
+            {
+                (Tensor cos, Tensor sin) = new WanRope(128, 10000, 1024).BuildCosSin(2, GridH, GridW, 1, 0, GridW);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "wan_frame_indices":
+            {
+                (Tensor cos, Tensor sin) = new WanRope(128, 10000, 1024).BuildCosSin([0, 3, 7, 21], 4, 4, 2, 5);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "wan_sigma_theta":
+            {
+                (Tensor cos, Tensor sin) = new WanRope(128, 10000, 1024, sigmaTheta: 0.1, numHeads: 4).BuildCosSin(2, 4, 4);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "wan_explicit_split":
+            {
+                (Tensor cos, Tensor sin) = new WanRope(8, 28, 28, 256).BuildCosSin(3, 4, 4);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "wan_temporal_only":
+            {
+                (Tensor cos, Tensor sin) = new WanRope(64, 0, 0, 10000).BuildCosSin(9, 1, 1);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "wan_apply_shared":
+            {
+                WanRope rope = new(128, 10000, 1024);
+                (Tensor cos, Tensor sin) = rope.BuildCosSin(2, 4, 4);
+                string digests = RotateShapes(new TensorShape(32, Heads, 128), new TensorShape(32, Heads, 128), (q, k) =>
+                {
+                    rope.ApplyRotary(q, cos, sin, Heads);
+                    rope.ApplyRotary(k, cos, sin, Heads);
+                });
+                cos.Dispose();
+                sin.Dispose();
+                return digests;
+            }
+            case "wan_apply_per_head":
+            {
+                WanRope rope = new(128, 10000, 1024, sigmaTheta: 0.1, numHeads: Heads);
+                (Tensor cos, Tensor sin) = rope.BuildCosSin(2, 4, 4);
+                string digests = RotateShapes(new TensorShape(32, Heads, 128), new TensorShape(32, Heads, 128), (q, k) =>
+                {
+                    rope.ApplyRotary(q, cos, sin, Heads);
+                    rope.ApplyRotary(k, cos, sin, Heads);
+                });
+                cos.Dispose();
+                sin.Dispose();
+                return digests;
+            }
+            case "ernie_freqs_batch2":
+            {
+                Tensor ids = ErnieImageRope.BuildPositionIds(2, [5, 7], GridH, GridW, 9);
+                Tensor freqs = new ErnieImageRope().BuildFreqs(ids);
+                ids.Dispose();
+                string digests = Digests(("freqs", freqs));
+                freqs.Dispose();
+                return digests;
+            }
+            case "ernie_gpu":
+            {
+                ErnieImageRope rope = new();
+                Tensor ids = ErnieImageRope.BuildPositionIds(1, [7], GridH, GridW, 9);
+                Tensor freqs = rope.BuildFreqs(ids);
+                ids.Dispose();
+                string digests = RotatePrePermute(128, GridH * GridW + 9, Heads, (q, k) => rope.ApplyRotaryEmbGpu(cpu, q, k, freqs));
+                freqs.Dispose();
+                return digests;
+            }
+            case "ideogram4_tables":
+            {
+                Tensor ids = SeededPositions(2, 11);
+                (Tensor cos, Tensor sin) = new Ideogram4Mrope(128, 5_000_000, (24, 20, 20)).BuildCosSin(ids);
+                ids.Dispose();
+                return DigestsAndDispose(cos, sin);
+            }
+            case "ideogram4_sections_overrun":
+            {
+                Tensor ids = SeededPositions(1, 9);
+                (Tensor cos, Tensor sin) = new Ideogram4Mrope(16, 10000, (2, 4, 4)).BuildCosSin(ids);
+                ids.Dispose();
+                return DigestsAndDispose(cos, sin);
+            }
+            case "ideogram4_apply":
+            {
+                Ideogram4Mrope rope = new(128, 5_000_000, (24, 20, 20));
+                Tensor ids = SeededPositions(1, 11);
+                (Tensor cos, Tensor sin) = rope.BuildCosSin(ids);
+                ids.Dispose();
+                string digests = RotateShapes(new TensorShape(1, 11, Heads, 128), new TensorShape(1, 11, Heads, 128),
+                    (q, k) => rope.ApplyRotary(q, k, cos, sin));
+                cos.Dispose();
+                sin.Dispose();
+                return digests;
+            }
+            case "mrope3d_tables":
+            {
+                Tensor ids = SeededPositions(13, 1, rank2: true);
+                (Tensor cos, Tensor sin) = new Multimodal3DRope(128, 1_000_000f, (16, 24, 24)).BuildCosSin(ids);
+                ids.Dispose();
+                return DigestsAndDispose(cos, sin);
+            }
+            case "mrope3d_apply":
+            {
+                Multimodal3DRope rope = new(128, 1_000_000f, (16, 24, 24));
+                Tensor ids = SeededPositions(13, 1, rank2: true);
+                (Tensor cos, Tensor sin) = rope.BuildCosSin(ids);
+                ids.Dispose();
+                string digests = RotateShapes(new TensorShape(13, Heads, 128), new TensorShape(13, Heads, 128), (q, k) =>
+                {
+                    rope.ApplyRotary(q, cos, sin);
+                    rope.ApplyRotary(k, cos, sin);
+                });
+                cos.Dispose();
+                sin.Dispose();
+                return digests;
+            }
             case "qwen_device_joint_odd_1328":
             {
                 QwenImageRope rope = new();
@@ -298,9 +427,98 @@ internal static unsafe class RopeFamilyGoldenCases
                 Tensor sin = StableAudioRope.BuildSinTable(invFreq, 2049, 64);
                 return DigestsAndDispose(cos, sin);
             }
+            case "wan_shared_720p":
+            {
+                // Wan 2.1 at 1280×720 and 81 frames: 21 latent frames of 45×80 tokens.
+                (Tensor cos, Tensor sin) = new WanRope(128, 10000, 1024).BuildCosSin(21, 45, 80);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "ernie_gpu_2048":
+            {
+                ErnieImageRope rope = new();
+                Tensor ids = ErnieImageRope.BuildPositionIds(1, [TextLength], 128, 128, 9);
+                Tensor freqs = rope.BuildFreqs(ids);
+                ids.Dispose();
+                string digests = RotatePrePermute(128, 128 * 128 + 9, Heads, (q, k) => rope.ApplyRotaryEmbGpu(cpu, q, k, freqs));
+                freqs.Dispose();
+                return digests;
+            }
+            case "ideogram4_tables_wide_2k":
+            {
+                Tensor ids = Ideogram4Positions(TextLength, 72, 128);
+                (Tensor cos, Tensor sin) = new Ideogram4Mrope(128, 5_000_000, (24, 20, 20)).BuildCosSin(ids);
+                ids.Dispose();
+                return DigestsAndDispose(cos, sin);
+            }
+            case "mrope3d_tables_video_1024":
+            {
+                // Lance video at 1024×576 and 25 frames: 7 latent frames of 36×64 tokens.
+                Tensor ids = LanceVideoPositions(20, 7, 36, 64, 2);
+                (Tensor cos, Tensor sin) = new Multimodal3DRope(128, 1_000_000f, (16, 24, 24)).BuildCosSin(ids);
+                ids.Dispose();
+                return DigestsAndDispose(cos, sin);
+            }
             default:
                 throw new ArgumentException($"Unknown RoPE golden case '{name}'.", nameof(name));
         }
+    }
+
+    /// <summary>Fixed <c>(t, h, w)</c> positions, <c>[batch, seq, 3]</c> (or <c>[seq, 3]</c>), mixing integers, fractions and
+    /// negatives the way M-RoPE callers produce them.</summary>
+    private static Tensor SeededPositions(int a, int b, bool rank2 = false)
+    {
+        int tokens = a * b;
+        Tensor ids = rank2 ? new(new TensorShape(tokens, 3), DType.F32) : new(new TensorShape(a, b, 3), DType.F32);
+        float* data = (float*)ids.DataPointer;
+        for (int t = 0; t < tokens; t++)
+        {
+            data[3 * t] = t;
+            data[3 * t + 1] = (t % 5) - 2.5f;
+            data[3 * t + 2] = (t * 7 % 11) * 0.5f;
+        }
+        return ids;
+    }
+
+    /// <summary>Ideogram 4's <c>[1, L, 3]</c> positions as its pipeline builds them: text <c>(i, i, i)</c>, then the image grid at
+    /// <c>(0, row, col)</c> plus the image offset of 65536.</summary>
+    private static Tensor Ideogram4Positions(int text, int gridH, int gridW)
+    {
+        const int offset = 65536;
+        Tensor ids = new(new TensorShape(1, text + gridH * gridW, 3), DType.F32);
+        float* data = (float*)ids.DataPointer;
+        for (int t = 0; t < text; t++)
+            data[3 * t] = data[3 * t + 1] = data[3 * t + 2] = t;
+        for (int i = 0; i < gridH * gridW; i++)
+        {
+            long at = 3L * (text + i);
+            data[at] = offset;
+            data[at + 1] = offset + i / gridW;
+            data[at + 2] = offset + i % gridW;
+        }
+        return ids;
+    }
+
+    /// <summary>Lance's <c>[seq, 3]</c> generation positions (Qwen2.5-VL <c>get_rope_index</c>): text <c>(i, i, i)</c>, the latent
+    /// block anchored at the text length with <paramref name="step"/> positions per latent frame, then two trailing tokens.</summary>
+    private static Tensor LanceVideoPositions(int text, int gridT, int gridH, int gridW, int step)
+    {
+        Tensor ids = new(new TensorShape(text + gridT * gridH * gridW + 2, 3), DType.F32);
+        float* data = (float*)ids.DataPointer;
+        for (int i = 0; i < text; i++)
+            data[3 * i] = data[3 * i + 1] = data[3 * i + 2] = i;
+        long at = text;
+        for (int t = 0; t < gridT; t++)
+            for (int h = 0; h < gridH; h++)
+                for (int w = 0; w < gridW; w++, at++)
+                {
+                    data[3 * at] = text + t * step;
+                    data[3 * at + 1] = text + h;
+                    data[3 * at + 2] = text + w;
+                }
+        int max = text + Math.Max((gridT - 1) * step, Math.Max(gridH, gridW) - 1);
+        for (int i = 0; i < 2; i++, at++)
+            data[3 * at] = data[3 * at + 1] = data[3 * at + 2] = max + 1 + i;
+        return ids;
     }
 
     private static ZImageRope PrecomputedZImage()

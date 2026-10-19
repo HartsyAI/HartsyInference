@@ -8,6 +8,16 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: every CUDA kernel rebuilds with the compiler its shipped PTX came from.** `CudaKernelDriftTests` failed on main with 13
+  kernels changed, but 11 were current CUDA 13.0.88 nvcc builds that the test had rebuilt with nvrtc, which stamps the same toolchain
+  line. A domain's `NVCC_BUILT` list now names its nvcc-built kernels: `build.sh` builds those only with that nvcc (`HARTSY_NVCC`, PATH,
+  or the workstation's pinned install) and every other kernel with nvrtc, so an nvcc on PATH no longer rewrites nvrtc-built PTX. The two
+  stale kernels are rebuilt: `mul_mat_vec_q4_0_q8_1` gets its row-partial refactor, and `moe_id_q8_0` the multi-row Q8 GEMV source it
+  includes, with its three expert kernels instruction-identical. Output is unchanged: a real-generation A/B on the RTX 4090 matched main
+  token for token on every text row, including a new Q8_0 MoE row (`granitemoe-3b-q8`).
+
+## alpha.381
+
 - **Fixed: Z-Image at 2048x2048 decoded to a flat gray image.** When the VAE's full-resolution attempt ran out of memory, its
   fallback freed the device-only latent Z-Image hands over and the tiles decoded zeros. The fallback now copies the latent to the host
   first. A failed attempt also no longer makes every later decode in the session tiled, only latents at least that large. On CUDA a
@@ -37,13 +47,7 @@ stable release will require. Dates are UTC.
   real error. `CudaLibraryResolver.Register` now waits for registration the same way.
 - **Fixed: a CUDA card older than Ampere (sm_75, Turing) failed backend creation.** Every module was loaded eagerly, and the driver refused the sm_80 PTX (`CUDA error 218: PTX JIT failed`). `CudaKernels` now reads each module's `.target` and skips the ones built for a newer architecture: the backend constructs, its sm_70 and sm_75 kernels (elementwise, GGUF dequant, expert) load, `CudaBackend.SkippedKernelModules` lists the rest, and launching one fails with an error that names what was skipped. `auto` backend selection and the CUDA probe pass over such a card to Vulkan. Nothing changes at sm_80 and above.
 - **Changed: every Diffusion RoPE family uses the shared tables.** QwenImage and Qwen-Image 2.1, HunyuanImage and HunyuanVideo, Z-Image and Lumina 2, Kandinsky 5, MOSS-Image, Stable Audio, OmniGen 2 and Boogu, and Lens now build their frequencies and rows through `HartsyInference.Core.Rope`. Their device tables live in the shared cache: preloaded per backend, or staged on the host through the new `RopeTableCache.AcquireStaged` where the caller has no backend. Output is bit-identical to the previous implementations, pinned by golden digests of every family's tables and a real-generation A/B.
-- **Fixed: every CUDA kernel rebuilds with the compiler its shipped PTX came from.** `CudaKernelDriftTests` failed on main with 13
-  kernels changed, but 11 were current CUDA 13.0.88 nvcc builds that the test had rebuilt with nvrtc, which stamps the same toolchain
-  line. A domain's `NVCC_BUILT` list now names its nvcc-built kernels: `build.sh` builds those only with that nvcc (`HARTSY_NVCC`, PATH,
-  or the workstation's pinned install) and every other kernel with nvrtc, so an nvcc on PATH no longer rewrites nvrtc-built PTX. The two
-  stale kernels are rebuilt: `mul_mat_vec_q4_0_q8_1` gets its row-partial refactor, and `moe_id_q8_0` the multi-row Q8 GEMV source it
-  includes, with its three expert kernels instruction-identical. Output is unchanged: a real-generation A/B on the RTX 4090 matched main
-  token for token on every text row, including a new Q8_0 MoE row (`granitemoe-3b-q8`).
+- **Changed: Wan, ERNIE-Image, Ideogram 4 and Lance RoPE use the shared tables too.** `RopeFrequencyPlan.CreateSectioned` adds the M-RoPE form (one frequency schedule over the head, each pair assigned an axis) beside the per-axis form, and `WanRope` (Wan 2.1/2.2, VACE, S2V, Animate, Matrix-Game, Oasis), `ErnieImageRope`, `Ideogram4Mrope` and `Multimodal3DRope` (Lance) now build their tables through it. Output is bit-identical, pinned by golden digests. A sigma_theta of 1 or more now throws, where the old code produced NaN or infinity; real configs sit far below 1.
 
 ## alpha.380
 

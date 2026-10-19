@@ -198,4 +198,72 @@ public sealed unsafe class MultiAxisRopeTablesTests
             sin.Dispose();
         }
     }
+
+    [Fact]
+    public void CreateSectioned_RejectsInvalidInput()
+    {
+        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.CreateSectioned(0.0, [0, 1], 2));
+        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.CreateSectioned(double.NaN, [0, 1], 2));
+        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.CreateSectioned(10000, [0, 1], 0));
+        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.CreateSectioned(10000, [], 2));
+        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.CreateSectioned(10000, [0, 2], 2));
+        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.CreateSectioned(10000, [-1, 0], 2));
+    }
+
+    [Fact]
+    public void CreateSectioned_SpansTheHead_AndCountsEachAxisChannels()
+    {
+        RopeFrequencyPlan plan = RopeFrequencyPlan.CreateSectioned(10000, [0, 1, 2, 0, 1, 2, 0], 4);
+
+        Assert.Equal(14, plan.HeadDim);
+        Assert.Equal(7, plan.Pairs);
+        Assert.Equal(4, plan.Axes);
+        Assert.Equal(new[] { 6, 4, 4, 0 }, plan.AxisDims.ToArray());
+    }
+
+    [Fact]
+    public void ComputePairs_SectionedPlan_TurnsPairKAtTheWholeHeadScheduleOnItsOwnAxis()
+    {
+        int[] pairAxes = [0, 2, 1, 1, 0, 2];
+        RopeFrequencyPlan plan = RopeFrequencyPlan.CreateSectioned(5_000_000, pairAxes, 3);
+        float[] positions = [3f, -1.5f, 7f, 0.25f, 4f, -2f];
+        float[] cos = new float[12];
+        float[] sin = new float[12];
+
+        MultiAxisRopeTables.ComputePairs(plan, positions, 2, RopeAngleOrder.MultiplyByInverse, cos, sin);
+
+        for (int t = 0; t < 2; t++)
+        {
+            for (int k = 0; k < 6; k++)
+            {
+                double angle = (double)positions[t * 3 + pairAxes[k]] * (1.0 / Math.Pow(5_000_000.0, (double)(2 * k) / 12));
+                Assert.Equal(BitConverter.SingleToInt32Bits((float)Math.Cos(angle)), BitConverter.SingleToInt32Bits(cos[t * 6 + k]));
+                Assert.Equal(BitConverter.SingleToInt32Bits((float)Math.Sin(angle)), BitConverter.SingleToInt32Bits(sin[t * 6 + k]));
+            }
+        }
+    }
+
+    [Fact]
+    public void ComputePairs_ContiguousPlan_IsUnchangedByThePerPairWalk()
+    {
+        // Create's plans now record an axis per pair; the walk must still give axis a its own run and schedule.
+        RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [2, 4, 0, 2], Theta = 256 });
+        float[] positions = [1f, 2f, 3f, 4f, -1f, 0.5f, 9f, 6f];
+        float[] cos = new float[8];
+        float[] sin = new float[8];
+
+        MultiAxisRopeTables.ComputePairs(plan, positions, 2, RopeAngleOrder.MultiplyByInverse, cos, sin);
+
+        (int Axis, int K, int Dim)[] pairs = [(0, 0, 2), (1, 0, 4), (1, 1, 4), (3, 0, 2)];
+        for (int t = 0; t < 2; t++)
+        {
+            for (int p = 0; p < pairs.Length; p++)
+            {
+                (int axis, int k, int dim) = pairs[p];
+                double angle = (double)positions[t * 4 + axis] * (1.0 / Math.Pow(256.0, (double)(2 * k) / dim));
+                Assert.Equal(BitConverter.SingleToInt32Bits((float)Math.Cos(angle)), BitConverter.SingleToInt32Bits(cos[t * 4 + p]));
+                Assert.Equal(BitConverter.SingleToInt32Bits((float)Math.Sin(angle)), BitConverter.SingleToInt32Bits(sin[t * 4 + p]));
+            }
+        }
+    }
 }
