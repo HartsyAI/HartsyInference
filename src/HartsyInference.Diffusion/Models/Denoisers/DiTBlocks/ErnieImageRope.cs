@@ -1,3 +1,4 @@
+using System.Buffers;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -98,21 +99,31 @@ public sealed unsafe class ErnieImageRope
         // the stack-and-reshape duplicates each pair into [θ0, θ0, θ1, θ1, ...] — the interleaved-pair row layout.
         int tokens = checked(batch * totalSeq);
         int rowLength = checked(tokens * _headDim);
-        float[] cosRows = new float[rowLength];
-        float[] sinRows = new float[rowLength];
-        MultiAxisRopeTables.BuildRows(_plan, new ReadOnlySpan<float>(posIds.DataPointer, checked(tokens * numAxes)), tokens,
-            RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity, cosRows, sinRows);
-
-        // Packed per token as [cos(headDim) | sin(headDim)].
-        Tensor freqs = new Tensor(new TensorShape(batch, totalSeq, 2 * _headDim), DType.F32);
-        float* outPtr = (float*)freqs.DataPointer;
-        for (int t = 0; t < tokens; t++)
+        // Batched generation turns the transformer's freqs cache off and rebuilds every forward, so the rows are pooled.
+        float[] cosRows = ArrayPool<float>.Shared.Rent(Math.Max(rowLength, 1));
+        float[] sinRows = ArrayPool<float>.Shared.Rent(Math.Max(rowLength, 1));
+        try
         {
-            long outBase = (long)t * 2 * _headDim;
-            cosRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase, _headDim));
-            sinRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase + _headDim, _headDim));
+            MultiAxisRopeTables.BuildRows(_plan, new ReadOnlySpan<float>(posIds.DataPointer, checked(tokens * numAxes)), tokens,
+                RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity,
+                cosRows.AsSpan(0, rowLength), sinRows.AsSpan(0, rowLength));
+
+            // Packed per token as [cos(headDim) | sin(headDim)].
+            Tensor freqs = new Tensor(new TensorShape(batch, totalSeq, 2 * _headDim), DType.F32);
+            float* outPtr = (float*)freqs.DataPointer;
+            for (int t = 0; t < tokens; t++)
+            {
+                long outBase = (long)t * 2 * _headDim;
+                cosRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase, _headDim));
+                sinRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase + _headDim, _headDim));
+            }
+            return freqs;
         }
-        return freqs;
+        finally
+        {
+            ArrayPool<float>.Shared.Return(cosRows);
+            ArrayPool<float>.Shared.Return(sinRows);
+        }
     }
 
     /// <summary>Applies the non-interleaved Megatron-style rotation to Q/K on-device: slices the packed
