@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -9,8 +10,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 public sealed unsafe class ErnieImageRope
 {
     private readonly int[] _axesDim;
-    private readonly float _theta;
     private readonly int _headDim;
+    private readonly RopeFrequencyPlan _plan;
 
     /// <summary>Creates a 3-axis ERNIE-Image RoPE.</summary>
     /// <param name="axesDim">Per-axis dimensions <c>(text_pos, y, x)</c>. Must sum to head_dim. Default <c>[32, 48, 48]</c> (sums to 128).</param>
@@ -20,14 +21,14 @@ public sealed unsafe class ErnieImageRope
         _axesDim = axesDim ?? [32, 48, 48];
         if (_axesDim.Length != 3)
             throw new ArgumentException($"ErnieImageRope expects 3 axes, got {_axesDim.Length}.", nameof(axesDim));
-        _theta = theta;
-        _headDim = 0;
         for (int i = 0; i < _axesDim.Length; i++)
         {
             if (_axesDim[i] % 2 != 0)
                 throw new ArgumentException($"Axis {i} dim must be even (got {_axesDim[i]}).", nameof(axesDim));
-            _headDim += _axesDim[i];
         }
+        // The reference widens the float base to double for every frequency, so the plan's base is that widened value.
+        _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
+        _headDim = _plan.HeadDim;
     }
 
     /// <summary>Total head dimension (sum of axes, 128 by default).</summary>
@@ -93,62 +94,24 @@ public sealed unsafe class ErnieImageRope
         if (numAxes != _axesDim.Length)
             throw new ArgumentException($"posIds last dim {numAxes} != configured axes {_axesDim.Length}.", nameof(posIds));
 
-        int halfDim = _headDim / 2;
-        TensorShape outShape = new TensorShape(batch, totalSeq, 2 * _headDim);
-        Tensor freqs = new Tensor(outShape, DType.F32);
-        float* posPtr = (float*)posIds.DataPointer;
+        // Per-axis angles concatenate into headDim/2 pairs (torch.cat([rope(ids[...,a], axes_dim[a], theta) ...], -1)), and
+        // the stack-and-reshape duplicates each pair into [θ0, θ0, θ1, θ1, ...] — the interleaved-pair row layout.
+        int tokens = checked(batch * totalSeq);
+        int rowLength = checked(tokens * _headDim);
+        float[] cosRows = new float[rowLength];
+        float[] sinRows = new float[rowLength];
+        MultiAxisRopeTables.BuildRows(_plan, new ReadOnlySpan<float>(posIds.DataPointer, checked(tokens * numAxes)), tokens,
+            RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity, cosRows, sinRows);
+
+        // Packed per token as [cos(headDim) | sin(headDim)].
+        Tensor freqs = new Tensor(new TensorShape(batch, totalSeq, 2 * _headDim), DType.F32);
         float* outPtr = (float*)freqs.DataPointer;
-
-        // Per-axis omega tables: freq_k = 1 / theta^(2k / axis_dim), k in [0, axis_dim/2).
-        int maxPairs = 0;
-        for (int a = 0; a < numAxes; a++)
-            maxPairs = Math.Max(maxPairs, _axesDim[a] / 2);
-        Span<double> omega = stackalloc double[maxPairs];
-        // Allocate once outside the per-token loop to avoid CA2014 stackalloc-in-loop and the
-        // associated stack-overflow risk for large halfDim or large totalSeq.
-        Span<double> halfAngles = stackalloc double[halfDim];
-
-        for (int b = 0; b < batch; b++)
+        for (int t = 0; t < tokens; t++)
         {
-            for (int s = 0; s < totalSeq; s++)
-            {
-                long posOff = ((long)b * totalSeq + s) * numAxes;
-                long outBase = ((long)b * totalSeq + s) * (2L * _headDim);
-
-                // ── 1. Build the halfDim-long angle vector by concatenating per-axis angles ──
-                // (Equivalent to Python's `torch.cat([rope(ids[...,a], axes_dim[a], theta) for a in range(3)], -1)`.)
-                int writeOffset = 0;
-                for (int a = 0; a < numAxes; a++)
-                {
-                    int axisDim = _axesDim[a];
-                    int axisPairs = axisDim / 2;
-                    double pos = posPtr[posOff + a];
-                    for (int k = 0; k < axisPairs; k++)
-                    {
-                        double scale = (double)(2 * k) / axisDim;
-                        omega[k] = 1.0 / Math.Pow(_theta, scale);
-                        halfAngles[writeOffset + k] = pos * omega[k];
-                    }
-                    writeOffset += axisPairs;
-                }
-
-                // ── 2. Build the head_dim-long freqs vector via stack-and-reshape:
-                //    [a0, a0, a1, a1, ..., a_{halfDim-1}, a_{halfDim-1}].
-                // Then store cos in [0, head_dim) and sin in [head_dim, 2*head_dim) of the output tensor. ──
-                for (int k = 0; k < halfDim; k++)
-                {
-                    double angle = halfAngles[k];
-                    float cv = (float)Math.Cos(angle);
-                    float sv = (float)Math.Sin(angle);
-                    int twoK = 2 * k;
-                    outPtr[outBase + twoK + 0] = cv;
-                    outPtr[outBase + twoK + 1] = cv;
-                    outPtr[outBase + _headDim + twoK + 0] = sv;
-                    outPtr[outBase + _headDim + twoK + 1] = sv;
-                }
-            }
+            long outBase = (long)t * 2 * _headDim;
+            cosRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase, _headDim));
+            sinRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase + _headDim, _headDim));
         }
-
         return freqs;
     }
 
