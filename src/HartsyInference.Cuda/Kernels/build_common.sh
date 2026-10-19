@@ -82,7 +82,7 @@ compile_one() {
         fi
         echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${arch} ${kernel}.cu"
         local tmp
-        tmp="$(mktemp --suffix=.ptx)"
+        tmp="$(mktemp --suffix=.ptx)"   # GNU mktemp; the PTX build runs on Linux
         if ! "$NVCC" -ptx -arch="sm_${arch}" ${NVCC_FLAGS[@]+"${NVCC_FLAGS[@]}"} "$src" -o "$tmp"; then
             rm -f "$tmp"
             exit 1

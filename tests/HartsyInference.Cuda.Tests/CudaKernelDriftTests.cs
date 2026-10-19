@@ -111,6 +111,12 @@ public sealed class CudaKernelDriftTests
                 _out.WriteLine("Byte-differs from a fresh rebuild — the shipped kernel is NOT this source: " + string.Join(", ", differing));
 
             _out.WriteLine($"Compared {compared} rebuilt kernels across {domains.Length} domains against {ptxDir}.");
+            if (compared == 0 && missing.Count == 0)
+            {
+                _out.WriteLine("SKIPPED: no rebuilt kernel could be compared — every one was UNVERIFIED or built by another " +
+                    "CUDA release. Inconclusive, not a pass.");
+                return;
+            }
 
             Assert.True(missing.Count == 0 && differing.Count == 0,
                 $"Committed Ptx/ has drifted from Kernels/ source: {missing.Count} missing, {differing.Count} changed. " +
