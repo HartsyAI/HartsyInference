@@ -3,14 +3,17 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Tests.Rope;
+namespace HartsyInference.Tests.Common;
 
 /// <summary>Backend stub for RoPE cache tests. Records preload, free and step-graph calls in order, and can fail the Nth
 /// preload or every free on demand. Compute methods are unused by the cache.</summary>
-internal sealed class RopeRecordingBackend : IBackend
+public sealed class RopeRecordingBackend : IBackend
 {
     /// <summary>Every recorded call in order: <c>preload:N</c>, <c>free:N</c>, <c>free-failed:N</c>, <c>graph-reset</c>.</summary>
     public List<string> Calls { get; } = new();
+
+    /// <summary>Tensors passed to each preload call, in order, so tests can read the device rows back.</summary>
+    public List<Tensor[]> PreloadedBatches { get; } = new();
 
     /// <summary>1-based index of the preload call that throws, or 0 for none.</summary>
     public int FailPreloadCall { get; set; }
@@ -29,6 +32,7 @@ internal sealed class RopeRecordingBackend : IBackend
     public void PreloadWeights(IEnumerable<Tensor> weights)
     {
         _preloadCalls++;
+        PreloadedBatches.Add(weights.ToArray());
         Calls.Add($"preload:{weights.Count()}");
         if (_preloadCalls == FailPreloadCall)
             throw new InvalidOperationException("Injected preload failure.");

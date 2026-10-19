@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Rope;
+using HartsyInference.Tests.Common;
 using Xunit;
 
 namespace HartsyInference.Core.Tests.Rope;
@@ -205,6 +206,20 @@ public sealed class RopeTableCacheTests
 
         Assert.ThrowsAny<ArgumentException>(() => cache.Acquire(backend, 0, 0, []));
         Assert.Empty(backend.Calls);
+    }
+
+    [Fact]
+    public void Clear_RetiresEveryTable_AndTheNextAcquireRebuilds()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true, retained: 2),
+            backend => ((RopeRecordingBackend)backend).Calls.Add("beforeRetire"));
+        RopeRecordingBackend backend = new();
+        using (cache.Acquire(backend, 0, 2, SignatureA)) { }
+
+        cache.Clear();
+        using (cache.Acquire(backend, 0, 2, SignatureA)) { }
+
+        Assert.Equal(new[] { "preload:1", "preload:1", "beforeRetire", "free:2", "preload:1", "preload:1" }, backend.Calls);
     }
 
     [Fact]

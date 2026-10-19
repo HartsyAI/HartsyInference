@@ -71,7 +71,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
                 config.HiddenSize, config.NumHeads, mlpDim, config.QkNormEps);
         }
 
-        _rope = new FluxRope(config.AxesDim, config.Theta);
+        _rope = new FluxRope(config.AxesDim, config.Theta, InvalidateStepGraph);
     }
 
     /// <summary>Loads all transformer weights from named tensors using diffusers naming.</summary>
@@ -1058,6 +1058,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _rope.Dispose();
             _xEmbedWeight = null;
             _xEmbedBias = null;
             _contextEmbedWeight = null;

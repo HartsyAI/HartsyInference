@@ -77,6 +77,18 @@ public sealed class RopeTableCache : IDisposable
         }
     }
 
+    /// <summary>Retires every table so the next acquisition rebuilds. Tables with outstanding leases are freed when their last
+    /// lease is released.</summary>
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+                return;
+            RetireAllLocked();
+        }
+    }
+
     /// <summary>Marks the cache disposed and retires every table. Tables with outstanding leases are freed when their last
     /// lease is released. Later acquisitions throw.</summary>
     public void Dispose()
@@ -86,14 +98,19 @@ public sealed class RopeTableCache : IDisposable
             if (_disposed)
                 return;
             _disposed = true;
-            foreach (List<RopeHostTable> tables in _slots.Values)
-            {
-                foreach (RopeHostTable host in tables)
-                    RetireHost(host);
-            }
-            _slots.Clear();
-            FlushPendingRetirement();
+            RetireAllLocked();
         }
+    }
+
+    private void RetireAllLocked()
+    {
+        foreach (List<RopeHostTable> tables in _slots.Values)
+        {
+            foreach (RopeHostTable host in tables)
+                RetireHost(host);
+        }
+        _slots.Clear();
+        FlushPendingRetirement();
     }
 
     internal void ReleaseLease(RopeLeaseSlot slot, ulong ticket)
