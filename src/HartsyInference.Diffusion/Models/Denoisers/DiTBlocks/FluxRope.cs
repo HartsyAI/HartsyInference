@@ -71,12 +71,16 @@ public sealed unsafe class FluxRope : IDisposable
             float[] sin = new float[cos.Length];
             ReadOnlySpan<float> positions = new((void*)posIds.DataPointer, totalSeqLen * numAxes);
             MultiAxisRopeTables.ComputePairs(_plan, positions, totalSeqLen, RopeAngleOrder.MultiplyByInverse, cos, sin);
+            float[] signature = positions.ToArray();
 
+            // Every backend's device tables are rebuilt on next use. Retire them before publishing the new host state: a
+            // retirement that throws then leaves this instance on the previous signature, which is the one its owner still
+            // records as current.
+            _deviceTables.Clear();
             _cosCache = cos;
             _sinCache = sin;
             _cachedSeqLen = totalSeqLen;
-            _positions = positions.ToArray();
-            _deviceTables.Clear();   // host tables changed → every backend's device tables are rebuilt on next use
+            _positions = signature;
         }
     }
 

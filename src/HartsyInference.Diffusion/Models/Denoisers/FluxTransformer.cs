@@ -832,8 +832,14 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
         Tensor posIds = refSeqLen > 0
             ? FluxRope.BuildPositionIdsKontext(txtSeqLen, hPacked, wPacked, refHPacked, refWPacked)
             : FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-        _rope.Precompute(posIds);
-        posIds.Dispose();
+        try
+        {
+            _rope.Precompute(posIds);
+        }
+        finally
+        {
+            posIds.Dispose();
+        }
         _ropeSig = sig;
     }
 
@@ -1056,15 +1062,16 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     /// <summary>Releases all tensor references.</summary>
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        bool first = Interlocked.Exchange(ref _disposed, 1) == 0;
+        // Invalidate the step graph before any owned tensor is freed, and free the owned tensors even if the rope's release
+        // throws. A repeated Dispose still reaches the rope: its cache keeps a failed retirement pending and retries it there.
+        try
         {
-            // Invalidate the step graph before any owned tensor is freed, and free the owned tensors even if
-            // the rope's release throws.
-            try
-            {
-                _rope.Dispose();
-            }
-            finally
+            _rope.Dispose();
+        }
+        finally
+        {
+            if (first)
             {
                 _xEmbedWeight = null;
                 _xEmbedBias = null;
