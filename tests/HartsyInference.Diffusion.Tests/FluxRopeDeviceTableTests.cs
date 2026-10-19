@@ -89,6 +89,36 @@ public sealed unsafe class FluxRopeDeviceTableTests
     }
 
     [Fact]
+    public void Precompute_FailedRetirement_LeavesThePreviousSignaturePublished()
+    {
+        RopeRecordingBackend backend = new();
+        bool failRetire = false;
+        using FluxRope rope = new([4, 4], 10000, _ =>
+        {
+            if (failRetire)
+                throw new InvalidOperationException("retirement failed");
+        });
+        Tensor q = Zeros(2, 8);
+        Tensor k = Zeros(2, 8);
+        rope.Precompute(PositionTensor(Positions, 2, 2));
+        rope.ApplyGpu(backend, q, k, 1);
+
+        failRetire = true;
+        Assert.Throws<InvalidOperationException>(() => rope.Precompute(PositionTensor([1f, 1f, 1f, 1f, 1f, 1f], 3, 2)));
+        failRetire = false;
+
+        // Still the first signature: two tokens, and its own rows are what the next apply preloads.
+        rope.ApplyGpu(backend, q, k, 1);
+        float[] expectedCos = new float[16];
+        float[] expectedSin = new float[16];
+        MultiAxisRopeTables.BuildRows(RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, 4], Theta = 10000 }), Positions, 2,
+            RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity, expectedCos, expectedSin);
+        Tensor rebuilt = backend.PreloadedBatches[^1][0];
+        Assert.Equal(expectedCos, new ReadOnlySpan<float>((void*)rebuilt.DataPointer, 16).ToArray());
+        Dispose(q, k);
+    }
+
+    [Fact]
     public void ApplyGpu_AfterDispose_IsRejected()
     {
         RopeRecordingBackend backend = new();
