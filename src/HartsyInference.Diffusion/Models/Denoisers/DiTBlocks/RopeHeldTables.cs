@@ -8,7 +8,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// family returns stay valid until that backend builds a different signature. A block loop reads them after the call
 /// returns, and two backends can build different signatures concurrently, so retiring them early would free tables in use.</summary>
 /// <remarks>Build-then-swap: the new lease is acquired before the backend's previous lease is released, so a failed build
-/// leaves the previous tables valid. Not thread-safe by itself; the owning family serializes calls.</remarks>
+/// leaves the previous tables valid. Every call takes the holder's own gate, so concurrent callers (context-parallel ranks)
+/// are serialized here. The held entry is installed before the previous lease is released, so a release that throws
+/// (a failed free) leaves no consumed lease in the map.</remarks>
 internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable<TKey>
 {
     private readonly object _gate = new();
@@ -50,9 +52,9 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
                 throw;
             }
 
-            if (_held.TryGetValue(backend, out current))
-                current.Lease.Dispose();
+            _held.TryGetValue(backend, out Held? previous);
             _held[backend] = new Held(key, lease, cos, sin);
+            previous?.Lease.Dispose();
             return (cos, sin);
         }
     }
@@ -62,9 +64,10 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
     {
         lock (_gate)
         {
-            foreach (Held held in _held.Values)
-                held.Lease.Dispose();
+            Held[] all = _held.Values.ToArray();
             _held.Clear();
+            foreach (Held held in all)
+                held.Lease.Dispose();
         }
     }
 
