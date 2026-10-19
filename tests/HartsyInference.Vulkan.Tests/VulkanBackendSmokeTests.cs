@@ -1902,7 +1902,7 @@ public sealed class VulkanBackendSmokeTests
             Span<float> xS = x.AsSpan<float>();
             for (int i = 0; i < xS.Length; i++) { xS[i] = (float)(rng.NextDouble() * 2 - 1); xRef[i] = xS[i]; }
         }
-        // Duplicated-pair layout (FluxRope.GetGpuTables): pair i's angle is stored at BOTH 2i and 2i+1.
+        // Duplicated-pair layout (FluxRope device tables via RopeTableCache): pair i's angle is stored at BOTH 2i and 2i+1.
         Span<float> cS = cos.AsSpan<float>();
         Span<float> sS = sin.AsSpan<float>();
         for (int s = 0; s < seqLen; s++)

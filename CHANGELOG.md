@@ -20,6 +20,8 @@ stable release will require. Dates are UTC.
   answer alone for these models.** Clients that read `content` on the OpenAI-compatible route, or `TextResult.Text`, no longer see the
   reasoning inline. Read `reasoning_content` or `TextResult.Reasoning` instead.
 
+- **Changed: RoPE tables come from shared Core utilities.** `HartsyInference.Core.Rope` adds a frozen per-pair frequency plan, a table builder and an expander for the three apply-op layouts (rotate-half, interleaved prefix, interleaved pair), and a per-backend table cache whose leases keep device rows alive while a call reads them. `FluxRope` (FLUX.1, FLUX.2, Chroma, Krea 2, HiDream) and `AnimaRope` build on them. Output is bit-identical: a real-generation A/B on the RTX 4090 matched main pixel for pixel, and golden fixtures pin the tables.
+
 ## alpha.380
 
 - **Fixed: MOSS-Image produced noise.** The FLUX.2 VAE loader built every decoder at the 128-512 preset, but the MOSS-Image folder's decoder is 96-384 wide, and the weights loaded into the wrong layers with no error. The decoder widths now come from the checkpoint (`VaeConfig.DecoderBlockOutChannels`), and a `conv_in` width mismatch fails loudly. FLUX.2, FLUX.3 and Lens files keep their widths.

@@ -17,7 +17,7 @@ public sealed unsafe class QwenImageRope
     // pair i lives at index 2i; both slots filled). Position-only, so one host build serves every block of
     // every step — the per-block host ApplyJoint this replaces was a D2H+H2D round trip of joint Q AND K
     // (~50 MB each) per block. Keyed on the full sequence layout; a resolution/prompt-length change rebuilds.
-    // Cached PER BACKEND (the FluxRope._gpuTables precedent): DiT sharding runs blocks [split, Depth) on a
+    // Cached PER BACKEND (the RopeTableCache precedent): DiT sharding runs blocks [split, Depth) on a
     // second backend, and two backends staging the SAME host tensor through WanRopeInterleaved trips the
     // transfer helper's binding/pinning state (observed CUDA_ERROR_INVALID_VALUE on the second card at real
     // table sizes) — each backend gets its own host build instead, a few MB per card. Guarded by a lock:
