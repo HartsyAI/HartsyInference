@@ -528,6 +528,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly string _ptxDir;
     private readonly List<string> _archVariants = [];
     private readonly List<string> _skippedModules = [];
+    private readonly Dictionary<string, int> _targetSmByPath = new(StringComparer.Ordinal);   // read once per file: CanLoad, then the load
 
     /// <summary>The PTX to load for <paramref name="kernel"/>: the device's own variant, <c>{kernel}.sm{sm}.ptx</c> — built with the family-specific arch, so it may use instructions the baseline cannot — when one ships, else the baseline <c>{kernel}.ptx</c>. Exact compute capability only: arch-specific PTX is not forward-compatible, so a variant for another SM must never be picked.</summary>
     public static string PtxPath(string ptxDir, string kernel, int sm)
@@ -627,7 +628,11 @@ public sealed partial class CudaKernels : IDisposable
         int gate = GateSm;
         if (gate <= 0)
             return false;
-        int target = CudaModule.ReadTargetSm(path);
+        if (!_targetSmByPath.TryGetValue(path, out int target))
+        {
+            target = CudaModule.ReadTargetSm(path);
+            _targetSmByPath[path] = target;
+        }
         if (target <= gate)
             return false;
         string entry = $"{Path.GetFileNameWithoutExtension(path)} (sm_{target})";
