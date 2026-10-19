@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -17,31 +18,47 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// different times: the text prefix runs once per prompt, the image rows once per denoise step (see
 /// <see cref="QwenImage21Transformer"/>). Centering is <c>r − (h − h/2)</c> with integer division; the half-token
 /// term ComfyUI adds for a reference grid of the opposite parity is zero for the target image, which is the only
-/// image in a text-to-image sequence.</para></summary>
-public sealed unsafe class QwenImage21Rope : IDisposable
+/// image in a text-to-image sequence.</para>
+///
+/// <para>The angle is <c>position / Pow(theta, 2k/axisDim)</c>, a division by the denominator, so the tables use
+/// <see cref="RopeAngleOrder.DivideByDenominator"/>. Multiplying by the reciprocal would change the last bit.</para></summary>
+public sealed class QwenImage21Rope : IDisposable
 {
-    private readonly int[] _axesDim;
-    private readonly int _theta;
-    private readonly int _headDim;
+    private static readonly RopeTableSettings DeviceTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.DivideByDenominator,
+        Layout = RopeTableLayout.InterleavedPair,
+        Preload = true,
+        RetainedSignatures = 2,
+    };
 
-    // Cached per backend, exactly as QwenImageRope does and for the same reason: two backends staging one host
-    // tensor through the transfer helper trips its pinning state, so each card builds its own few-MB copy.
-    private readonly Dictionary<IBackend, (int Key, Tensor Cos, Tensor Sin)> _textTables = new();
-    private readonly Dictionary<IBackend, ((int Text, int H, int W) Key, Tensor Cos, Tensor Sin)> _imageTables = new();
+    private const int TextSlot = 0;
+    private const int ImageSlot = 1;
+
+    private readonly int[] _axesDim;
+    private readonly int _headDim;
+    private readonly RopeTableCache _deviceTables;
+
+    // Cached per backend, exactly as QwenImageRope does and for the same reason: each DiT shard keeps its own tables, and
+    // a build on one backend never frees tables another backend still reads.
+    private readonly RopeHeldTables<int> _textTables;
+    private readonly RopeHeldTables<(int, int, int)> _imageTables;
 
     public QwenImage21Rope(int[]? axesDim = null, int theta = 10000)
     {
         _axesDim = axesDim ?? [16, 56, 56];
         if (_axesDim.Length != 3)
             throw new ArgumentException("QwenImage21Rope requires exactly 3 axes (sequence, height, width).", nameof(axesDim));
-        _theta = theta;
-        _headDim = 0;
         foreach (int d in _axesDim)
         {
             if (d % 2 != 0)
                 throw new ArgumentException($"Each RoPE axis must be even; got {d}.", nameof(axesDim));
-            _headDim += d;
         }
+        RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
+        _headDim = plan.HeadDim;
+        _deviceTables = new RopeTableCache(plan, DeviceTableSettings);
+        _textTables = new RopeHeldTables<int>(_deviceTables, TextSlot, QwenImage21PosEmbed.NumAxes);
+        _imageTables = new RopeHeldTables<(int, int, int)>(_deviceTables, ImageSlot, QwenImage21PosEmbed.NumAxes);
     }
 
     /// <summary>Sum of the per-axis dimensions; equals the attention head dim.</summary>
@@ -49,109 +66,39 @@ public sealed unsafe class QwenImage21Rope : IDisposable
 
     /// <summary>Per-token <c>(sequence, height, width)</c> positions for the text prefix: token <c>i</c> sits at
     /// <c>i</c> on all three axes.</summary>
-    public static (double Seq, double Height, double Width)[] TextPositions(int textLen)
-    {
-        (double, double, double)[] positions = new (double, double, double)[textLen];
-        for (int i = 0; i < textLen; i++)
-            positions[i] = (i, i, i);
-        return positions;
-    }
+    public static (double Seq, double Height, double Width)[] TextPositions(int textLen) =>
+        ToTuples(QwenImage21PosEmbed.TextRows(textLen));
 
     /// <summary>Per-token positions for the target image, row-major over <paramref name="imgH"/>×<paramref name="imgW"/>.
     /// The sequence axis is the constant <paramref name="textLen"/> (the counter's value after the text run); the
     /// other two are centered on the grid.</summary>
-    public static (double Seq, double Height, double Width)[] ImagePositions(int textLen, int imgH, int imgW)
-    {
-        (double, double, double)[] positions = new (double, double, double)[imgH * imgW];
-        double hCenter = imgH - imgH / 2;
-        double wCenter = imgW - imgW / 2;
-        for (int r = 0; r < imgH; r++)
-        {
-            for (int c = 0; c < imgW; c++)
-                positions[r * imgW + c] = (textLen, r - hCenter, c - wCenter);
-        }
-        return positions;
-    }
+    public static (double Seq, double Height, double Width)[] ImagePositions(int textLen, int imgH, int imgW) =>
+        ToTuples(QwenImage21PosEmbed.ImageRows(textLen, imgH, imgW));
 
     /// <summary>Builds (or returns the cached) text-prefix tables, <c>[textLen, headDim]</c> F32 in the
     /// <see cref="IBackend.WanRopeInterleaved"/> convention (pair <c>i</c>'s angle duplicated at <c>2i</c> and
     /// <c>2i+1</c>).</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(IBackend backend, int textLen)
-    {
-        lock (_textTables)
-        {
-            if (_textTables.TryGetValue(backend, out (int Key, Tensor Cos, Tensor Sin) entry) && entry.Key == textLen)
-                return (entry.Cos, entry.Sin);
-            entry.Cos?.Dispose();
-            entry.Sin?.Dispose();
-            (Tensor cos, Tensor sin) = Build(TextPositions(textLen));
-            _textTables[backend] = (textLen, cos, sin);
-            return (cos, sin);
-        }
-    }
+    public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(IBackend backend, int textLen) =>
+        _textTables.GetOrBuild(backend, textLen, () => QwenImage21PosEmbed.TextRows(textLen));
 
     /// <summary>Builds (or returns the cached) target-image tables, <c>[imgH·imgW, headDim]</c>. Keyed on the text
     /// length too, since that sets the image rows' sequence-axis position.</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildImageTables(IBackend backend, int textLen, int imgH, int imgW)
-    {
-        (int, int, int) key = (textLen, imgH, imgW);
-        lock (_imageTables)
-        {
-            if (_imageTables.TryGetValue(backend, out ((int, int, int) Key, Tensor Cos, Tensor Sin) entry) && entry.Key == key)
-                return (entry.Cos, entry.Sin);
-            entry.Cos?.Dispose();
-            entry.Sin?.Dispose();
-            (Tensor cos, Tensor sin) = Build(ImagePositions(textLen, imgH, imgW));
-            _imageTables[backend] = (key, cos, sin);
-            return (cos, sin);
-        }
-    }
+    public (Tensor Cos, Tensor Sin) GetOrBuildImageTables(IBackend backend, int textLen, int imgH, int imgW) =>
+        _imageTables.GetOrBuild(backend, (textLen, imgH, imgW), () => QwenImage21PosEmbed.ImageRows(textLen, imgH, imgW));
 
-    private (Tensor Cos, Tensor Sin) Build((double Seq, double Height, double Width)[] positions)
-    {
-        Tensor cos = new Tensor(new TensorShape(positions.Length, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(positions.Length, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        for (int s = 0; s < positions.Length; s++)
-            FillToken(cp + (long)s * _headDim, sp + (long)s * _headDim, positions[s]);
-        return (cos, sin);
-    }
-
-    /// <summary>Writes one token's interleaved cos/sin row. Axis-major (<c>EmbedND</c> concatenates each axis's pairs
-    /// in order), angle <c>pos · theta^(−2k/axisDim)</c>, each pair's angle duplicated across both of its slots.</summary>
-    private void FillToken(float* cos, float* sin, (double Seq, double Height, double Width) position)
-    {
-        Span<double> axes = [position.Seq, position.Height, position.Width];
-        int slot = 0;
-        for (int axis = 0; axis < 3; axis++)
-        {
-            int axisDim = _axesDim[axis];
-            for (int k = 0; k < axisDim / 2; k++)
-            {
-                double angle = axes[axis] / Math.Pow(_theta, (double)(2 * k) / axisDim);
-                float c = (float)Math.Cos(angle);
-                float s = (float)Math.Sin(angle);
-                cos[slot] = c;
-                cos[slot + 1] = c;
-                sin[slot] = s;
-                sin[slot + 1] = s;
-                slot += 2;
-            }
-        }
-    }
-
+    /// <summary>Releases the held tables and the cache. Tables still under a lease are freed by their last release.</summary>
     public void Dispose()
     {
-        lock (_textTables)
-        {
-            foreach ((_, Tensor cos, Tensor sin) in _textTables.Values) { cos.Dispose(); sin.Dispose(); }
-            _textTables.Clear();
-        }
-        lock (_imageTables)
-        {
-            foreach ((_, Tensor cos, Tensor sin) in _imageTables.Values) { cos.Dispose(); sin.Dispose(); }
-            _imageTables.Clear();
-        }
+        _textTables.Dispose();
+        _imageTables.Dispose();
+        _deviceTables.Dispose();
+    }
+
+    private static (double Seq, double Height, double Width)[] ToTuples(float[] rows)
+    {
+        (double Seq, double Height, double Width)[] positions = new (double Seq, double Height, double Width)[rows.Length / QwenImage21PosEmbed.NumAxes];
+        for (int i = 0; i < positions.Length; i++)
+            positions[i] = (rows[i * 3], rows[i * 3 + 1], rows[i * 3 + 2]);
+        return positions;
     }
 }

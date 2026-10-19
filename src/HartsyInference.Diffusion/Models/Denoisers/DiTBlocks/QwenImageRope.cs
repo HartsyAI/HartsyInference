@@ -1,40 +1,47 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>3-axis rotary positional embedding for Qwen-Image (<c>QwenEmbedRope</c>). Splits the head dimension into <c>(frame, height, width)</c> sub-bands (default <c>[16, 56, 56]</c>) and rotates each pair of features by <c>theta = position * (1 / base^(2k/axisDim))</c>. Image tokens use CENTERED positions <c>[0, h-(H-H//2), w-(W-W//2)]</c> for a single-frame layout (<c>scale_rope=True</c>, which diffusers hardcodes). Text tokens use linearly-increasing positions starting at <c>max(H//2, W//2)</c>, mirroring diffusers' <c>txt_freqs = pos_freqs[max_vid_index : max_vid_index + max_txt_seq_len]</c>. The two streams are rotated separately before joint-attention concatenation. Apply order matches Flux's complex polar interpretation: pairs are <c>(real, imag)</c> at indices <c>(2i, 2i+1)</c>.</summary>
-public sealed unsafe class QwenImageRope
+/// <remarks>Frequencies and tables come from <see cref="RopeFrequencyPlan"/> and <see cref="MultiAxisRopeTables"/>. Position
+/// rules live in <see cref="QwenImagePosEmbed"/>. Device tables go through a <see cref="RopeTableCache"/>, one lease per
+/// backend, so each DiT shard keeps its own tables.</remarks>
+public sealed unsafe class QwenImageRope : IDisposable
 {
+    private static readonly RopeTableSettings DeviceTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.MultiplyByInverse,
+        Layout = RopeTableLayout.InterleavedPair,
+        Preload = true,
+        RetainedSignatures = 2,
+    };
+
     private readonly int[] _axesDim;
-    private readonly int _theta;
     private readonly int _headDim;
     // false → text tokens get NO positional embedding (identity rotation): Mage-Flow's apply_text_rotary_emb=false.
     // Achieved by putting text at position 0 on all axes (angle 0 → cos 1 / sin 0). Qwen-Image ropes text (=true).
     private readonly bool _ropeText;
+    private readonly RopeFrequencyPlan _plan;
+    private readonly RopeTableCache _deviceTables;
 
-    // Cached joint cos/sin tables in the [S, headDim] layout IBackend.WanRopeInterleaved reads (the angle for
-    // pair i lives at index 2i; both slots filled). Position-only, so one host build serves every block of
-    // every step — the per-block host ApplyJoint this replaces was a D2H+H2D round trip of joint Q AND K
-    // (~50 MB each) per block. Keyed on the full sequence layout; a resolution/prompt-length change rebuilds.
-    // Cached PER BACKEND (the RopeTableCache precedent): DiT sharding runs blocks [split, Depth) on a
-    // second backend, and two backends staging the SAME host tensor through WanRopeInterleaved trips the
-    // transfer helper's binding/pinning state (observed CUDA_ERROR_INVALID_VALUE on the second card at real
-    // table sizes) — each backend gets its own host build instead, a few MB per card. Guarded by a lock:
-    // context-parallel rank threads (one per backend) hit this concurrently, and a rebuild (cond/uncond txt
-    // lengths alternate the key) is a dictionary WRITE.
-    private readonly Dictionary<Core.Backends.IBackend, ((int ImgH, int ImgW, int Txt, int TxtStart, long RefSig, int ImgStart, int ImgCount) Key, Tensor Cos, Tensor Sin)> _jointTables = new();
+    // Joint device tables are keyed by the full sequence layout, one held lease per backend. DiT sharding runs blocks on a
+    // second backend, and context-parallel ranks build different row sub-ranges concurrently; each backend keeps its own
+    // tables, so one rank's build never frees tables another rank still reads.
+    private readonly RopeHeldTables<(int, int, int, int, long, int, int)> _jointTables;
 
     public QwenImageRope(int[]? axesDim = null, int theta = 10000, bool ropeText = true)
     {
         _axesDim = axesDim ?? [16, 56, 56];
         if (_axesDim.Length != 3)
             throw new ArgumentException("QwenImageRope requires exactly 3 axes (frame, height, width).", nameof(axesDim));
-        _theta = theta;
         _ropeText = ropeText;
-        _headDim = 0;
-        for (int i = 0; i < _axesDim.Length; i++)
-            _headDim += _axesDim[i];
+        _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
+        _headDim = _plan.HeadDim;
+        _deviceTables = new RopeTableCache(_plan, DeviceTableSettings);
+        _jointTables = new RopeHeldTables<(int, int, int, int, long, int, int)>(_deviceTables, slot: 0, axes: QwenImagePosEmbed.NumAxes);
     }
 
     /// <summary>Sum of the per-axis dimensions; equals the per-head dim of the wrapped attention block.</summary>
@@ -46,40 +53,14 @@ public sealed unsafe class QwenImageRope
     /// <summary>Rotates Q and K in-place for image tokens. Tokens are laid out row-major over <paramref name="hPacked"/> × <paramref name="wPacked"/>; token <c>r * W + c</c> uses position <c>[0, r, c]</c>. Both Q and K must be <c>[B, numHeads, imgSeqLen, headDim]</c> and <c>imgSeqLen == hPacked * wPacked</c>.</summary>
     public void ApplyImage(Tensor q, Tensor k, int batch, int numHeads, int hPacked, int wPacked)
     {
-        int imgSeqLen = hPacked * wPacked;
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[imgSeqLen * halfDim];
-        float[] sinTable = new float[imgSeqLen * halfDim];
-
         // scale_rope=True (diffusers QwenImageTransformer2DModel hardcodes it): spatial positions are CENTERED.
-        // height = row - (H - H//2), width = col - (W - W//2); frame axis stays 0 (not centered). For even dims
-        // this is row - H/2 / col - W/2. Centering matters for non-square images and the frame sub-band of cross-attn.
-        int hCenter = hPacked - hPacked / 2;
-        int wCenter = wPacked - wPacked / 2;
-        for (int s = 0; s < imgSeqLen; s++)
-        {
-            int row = s / wPacked;
-            int col = s - row * wPacked;
-            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: row - hCenter, width: col - wCenter);
-        }
-
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, imgSeqLen);
+        ApplyPositions(q, k, batch, numHeads, QwenImagePosEmbed.ImageRows(hPacked, wPacked));
     }
 
     /// <summary>Rotates Q and K in-place for text tokens. Each text position <paramref name="positionStart"/> + s uses <c>[positionStart + s, positionStart + s, positionStart + s]</c> (diffusers <c>pos_freqs</c> is the same scalar across the three axes for the text region). Both Q and K must be <c>[B, numHeads, txtSeqLen, headDim]</c>.</summary>
     public void ApplyText(Tensor q, Tensor k, int batch, int numHeads, int txtSeqLen, int positionStart)
     {
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[txtSeqLen * halfDim];
-        float[] sinTable = new float[txtSeqLen * halfDim];
-
-        for (int s = 0; s < txtSeqLen; s++)
-        {
-            int pos = positionStart + s;
-            FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
-        }
-
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, txtSeqLen);
+        ApplyPositions(q, k, batch, numHeads, QwenImagePosEmbed.TextRows(txtSeqLen, positionStart));
     }
 
     /// <summary>Rotates Q and K in-place for the JOINT <c>[txt, img]</c> sequence in one pass — text occupies rows
@@ -89,78 +70,27 @@ public sealed unsafe class QwenImageRope
     /// is per-row independent. Used by the GPU-resident block path, which concatenates <c>[txt, img]</c> on the GPU
     /// first (contiguous row-concat) and then ropes the joint tensor once — avoiding a per-stream CPU round-trip.
     /// Both Q and K must be <c>[B, numHeads, txtSeqLen + H·W (+ refH·refW), headDim]</c>.
-    /// <para>Qwen-Image-Edit reference-latent tokens: when <paramref name="refPackedH"/>/<paramref name="refPackedW"/>
-    /// are non-zero, an extra <c>refH·refW</c> token section follows the main image rows. Ref tokens use frame axis
-    /// <paramref name="refFrameIndex"/> (ComfyUI <c>qwen_image/model.py</c> ref_latents "index" method: first ref = 1)
-    /// and spatial positions centered on the REF grid — the reference image may have a different resolution than the
-    /// output.</para></summary>
+    /// <para>Qwen-Image-Edit reference-latent tokens: when <paramref name="refGrids"/> is non-empty, an extra
+    /// <c>refH·refW</c> token section follows the main image rows. Ref tokens use frame axis <c>index + 1</c>
+    /// (ComfyUI <c>qwen_image/model.py</c> ref_latents "index" method: first ref = 1) and spatial positions centered on the
+    /// REF grid — the reference image may have a different resolution than the output.</para></summary>
     public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads, int imgPackedH, int imgPackedW, int txtSeqLen,
         int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids = default)
     {
-        int imgSeqLen = imgPackedH * imgPackedW;
-        int refSeqLen = 0;
-        foreach ((int rh, int rw) in refGrids) refSeqLen += rh * rw;
-        int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[totalSeqLen * halfDim];
-        float[] sinTable = new float[totalSeqLen * halfDim];
-
-        FillJointFreqs(cosTable, sinTable, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids);
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);
-    }
-
-    /// <summary>Fills the joint-layout frequency tables: text rows (positions <c>txtPositionStart + s</c>),
-    /// centered main-image rows (frame 0), then each reference grid in order with frame axis <c>i + 1</c>
-    /// (ComfyUI ref_latents "index"/"index_timestep_zero" methods increment the frame per ref) and spatial
-    /// positions centered on that reference's own grid. <paramref name="imgTokenStart"/>/<paramref name="imgTokenCount"/>
-    /// restrict the image section to a global token sub-range (a context-parallel rank's rows — positions stay the
-    /// GLOBAL grid positions, only the emitted rows shrink); the default covers the whole grid.</summary>
-    private void FillJointFreqs(Span<float> cosTable, Span<float> sinTable,
-        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids,
-        int imgTokenStart = 0, int imgTokenCount = -1)
-    {
-        for (int s = 0; s < txtSeqLen; s++)
-        {
-            // _ropeText=false (Mage-Flow): position 0 on every axis → angle 0 → cos 1/sin 0 → identity (no rope).
-            int pos = _ropeText ? txtPositionStart + s : 0;
-            FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
-        }
-        int imgSeqLen = imgTokenCount < 0 ? imgPackedH * imgPackedW : imgTokenCount;
-        int hCenter = imgPackedH - imgPackedH / 2;
-        int wCenter = imgPackedW - imgPackedW / 2;
-        for (int i = 0; i < imgSeqLen; i++)
-        {
-            int si = imgTokenStart + i;
-            int row = si / imgPackedW;
-            int col = si - row * imgPackedW;
-            FillTokenFreqs(cosTable, sinTable, txtSeqLen + i, frame: 0, height: row - hCenter, width: col - wCenter);
-        }
-        int rowBase = txtSeqLen + imgSeqLen;
-        for (int r = 0; r < refGrids.Length; r++)
-        {
-            (int refH, int refW) = refGrids[r];
-            int refHCenter = refH - refH / 2;
-            int refWCenter = refW - refW / 2;
-            int refSeq = refH * refW;
-            for (int si = 0; si < refSeq; si++)
-            {
-                int row = si / refW;
-                int col = si - row * refW;
-                FillTokenFreqs(cosTable, sinTable, rowBase + si,
-                    frame: r + 1, height: row - refHCenter, width: col - refWCenter);
-            }
-            rowBase += refSeq;
-        }
+        ApplyPositions(q, k, batch, numHeads,
+            QwenImagePosEmbed.JointRows(imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, _ropeText, refGrids,
+                imgTokenStart: 0, imgTokenCount: -1));
     }
 
     /// <summary>Builds (or returns the cached) joint cos/sin tables for the device rope path, <c>[S, headDim]</c>
-    /// F32 in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/> convention (pair i's angle at index
+    /// F32 in the <see cref="IBackend.WanRopeInterleaved"/> convention (pair i's angle at index
     /// <c>2i</c>). Same position math as <see cref="ApplyJoint"/> — the rotation itself matches the interleaved
     /// kernel exactly (<c>x0·cos−x1·sin, x0·sin+x1·cos</c> on pairs (2i, 2i+1)).
     /// <para><paramref name="imgTokenStart"/>/<paramref name="imgTokenCount"/> restrict the image section to a
     /// context-parallel rank's global token sub-range (GLOBAL grid positions, fewer rows); incompatible with
-    /// reference grids — the pipeline gates edit conditioning off under CP.</para></summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(Core.Backends.IBackend backend, int imgPackedH, int imgPackedW, int txtSeqLen,
+    /// reference grids — the pipeline gates edit conditioning off under CP.</para>
+    /// <para>The tables stay valid until this backend builds a different layout, or until <see cref="Dispose"/>.</para></summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(IBackend backend, int imgPackedH, int imgPackedW, int txtSeqLen,
         int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids = default, int imgTokenStart = 0, int imgTokenCount = -1)
     {
         long refSig = 0x51F0;
@@ -173,75 +103,33 @@ public sealed unsafe class QwenImageRope
         if (imgTokenCount >= 0 && refSeqLen > 0)
             throw new ArgumentException("A rank-restricted image range cannot be combined with reference grids.", nameof(imgTokenCount));
         (int, int, int, int, long, int, int) key = (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refSig, imgTokenStart, imgTokenCount);
-        lock (_jointTables)
-        {
-            if (_jointTables.TryGetValue(backend, out ((int, int, int, int, long, int, int) Key, Tensor Cos, Tensor Sin) entry)
-                && entry.Key == key)
-                return (entry.Cos, entry.Sin);
-            if (entry.Cos is not null)
-            {
-                entry.Cos.Dispose();
-                entry.Sin.Dispose();
-            }
 
-            int imgSeqLen = imgTokenCount < 0 ? imgPackedH * imgPackedW : imgTokenCount;
-            int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
-            int halfDim = _headDim / 2;
-            float[] cosTable = new float[totalSeqLen * halfDim];
-            float[] sinTable = new float[totalSeqLen * halfDim];
-            FillJointFreqs(cosTable, sinTable, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids,
-                imgTokenStart, imgTokenCount);
-
-            Tensor cos = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
-            Tensor sin = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
-            float* cp = (float*)cos.DataPointer;
-            float* sp = (float*)sin.DataPointer;
-            for (int s = 0; s < totalSeqLen; s++)
-            {
-                for (int i = 0; i < halfDim; i++)
-                {
-                    float c = cosTable[s * halfDim + i];
-                    float sn = sinTable[s * halfDim + i];
-                    long off = (long)s * _headDim + 2 * i;
-                    cp[off] = c;
-                    cp[off + 1] = c;
-                    sp[off] = sn;
-                    sp[off + 1] = sn;
-                }
-            }
-            _jointTables[backend] = (key, cos, sin);
-            return (cos, sin);
-        }
+        // A lambda cannot capture the span, so the grids are copied; ToArray on an empty span allocates nothing.
+        (int H, int W)[] refs = refGrids.ToArray();
+        return _jointTables.GetOrBuild(backend, key, () => QwenImagePosEmbed.JointRows(imgPackedH, imgPackedW, txtSeqLen,
+            txtPositionStart, _ropeText, refs, imgTokenStart, imgTokenCount));
     }
 
     /// <summary>Computes the position offset to use when calling <see cref="ApplyText"/>. Matches diffusers'
     /// <c>scale_rope=True</c> mode where text starts at <c>max_vid_index = max(height//2, width//2)</c>
     /// (the centered image grid's max index), used as the single scalar across all three axes for text.</summary>
-    public static int ComputeTextPositionStart(int hPacked, int wPacked) => Math.Max(hPacked / 2, wPacked / 2);
+    public static int ComputeTextPositionStart(int hPacked, int wPacked) => QwenImagePosEmbed.TextPositionStart(hPacked, wPacked);
 
-    private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx,
-        double frame, double height, double width)
+    /// <summary>Releases the held joint tables and the cache. Tables still under a lease are freed by their last release.</summary>
+    public void Dispose()
     {
-        int halfDim = _headDim / 2;
-        int destOffset = seqIdx * halfDim;
-        int freqOffset = 0;
+        _jointTables.Dispose();
+        _deviceTables.Dispose();
+    }
 
-        Span<double> positions = stackalloc double[3] { frame, height, width };
-        for (int axis = 0; axis < 3; axis++)
-        {
-            int axisDim = _axesDim[axis];
-            int numPairs = axisDim / 2;
-            double pos = positions[axis];
-
-            for (int kIdx = 0; kIdx < numPairs; kIdx++)
-            {
-                double inv = 1.0 / Math.Pow(_theta, (double)(2 * kIdx) / axisDim);
-                double angle = pos * inv;
-                cosTable[destOffset + freqOffset + kIdx] = (float)Math.Cos(angle);
-                sinTable[destOffset + freqOffset + kIdx] = (float)Math.Sin(angle);
-            }
-            freqOffset += numPairs;
-        }
+    /// <summary>Computes the compact per-pair host tables for <paramref name="positions"/> and rotates Q and K with them.</summary>
+    private void ApplyPositions(Tensor q, Tensor k, int batch, int numHeads, float[] positions)
+    {
+        int tokens = positions.Length / QwenImagePosEmbed.NumAxes;
+        float[] cos = new float[tokens * _plan.Pairs];
+        float[] sin = new float[cos.Length];
+        MultiAxisRopeTables.ComputePairs(_plan, positions, tokens, RopeAngleOrder.MultiplyByInverse, cos, sin);
+        ApplyRotationBatched(q, k, cos, sin, batch, numHeads, tokens);
     }
 
     private void ApplyRotationBatched(Tensor q, Tensor k, ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable,
