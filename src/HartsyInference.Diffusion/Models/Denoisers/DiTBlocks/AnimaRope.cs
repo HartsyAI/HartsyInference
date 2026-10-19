@@ -155,8 +155,10 @@ public sealed unsafe class AnimaRope
             {
                 if (held.TFrames == tFrames && held.HPatched == hPatched && held.WPatched == wPatched)
                     return DeviceTablesOf(held.Lease);
-                held.Lease.Dispose();
+                // Unmap before releasing: a release whose free throws (the cache keeps it pending and retries) must not leave
+                // an entry that would later hand out tables the retry has freed.
                 _held.Remove(backend);
+                held.Lease.Dispose();
             }
 
             if (_gridSignature != (tFrames, hPatched, wPatched))
