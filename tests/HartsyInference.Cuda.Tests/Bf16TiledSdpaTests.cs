@@ -8,7 +8,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>A BF16 attention whose score matrix would not fit runs the query-tiled F32 core on its F32 casts instead of
 /// materializing every score (a BF16 AutoencoderKL mid-block at 2048² asked for one 16 GB allocation). The tiled route
-/// must give what the materialized route gives: same casts, same TF32 GEMMs, same softmax kernel, only tiled.</summary>
+/// must give what the materialized route gives: same casts and kernels, with only the GEMM tiling different.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("CudaSerial")]
 public sealed unsafe class Bf16TiledSdpaTests
@@ -49,18 +49,25 @@ public sealed unsafe class Bf16TiledSdpaTests
 
         float* m = (float*)materialized.DataPointer, t = (float*)tiled.DataPointer;
         float peak = 0f, worst = 0f;
-        long beyondOneUlp = 0;
+        double sumDiff = 0;
+        long differing = 0, outOfBound = 0;
         for (long i = 0; i < materialized.ElementCount; i++)
         {
             float diff = MathF.Abs(m[i] - t[i]);
             peak = MathF.Max(peak, MathF.Abs(m[i]));
             worst = MathF.Max(worst, diff);
-            // One BF16 ulp is at most 2^-7 of the value: only the accumulation order differs between the two routes.
-            if (diff > MathF.Abs(m[i]) / 128f + 1e-6f) beyondOneUlp++;
+            sumDiff += diff;
+            if (diff > 0f) differing++;
+            // One BF16 output ulp (at most 2^-7 of the value), plus one TF32 rounding of a softmax weight (2^-11 against
+            // |V| <= 1): the two routes tile QK^T differently, so a weight near a TF32 boundary can round either way.
+            if (diff > MathF.Abs(m[i]) / 128f + 1f / 2048f) outOfBound++;
         }
-        _output.WriteLine($"max|out| {peak:F4}, max|materialized - tiled| {worst:E3}, beyond one BF16 ulp: {beyondOneUlp}");
+        double meanDiff = sumDiff / materialized.ElementCount;
+        _output.WriteLine($"max|out| {peak:F4}, max|diff| {worst:E3}, differing {differing} of {materialized.ElementCount}, "
+            + $"mean|diff| {meanDiff:E3}, out of bound {outOfBound}");
         Assert.True(peak > 0.05f, $"the attention output is near zero (max {peak}), so agreement would prove nothing");
-        Assert.Equal(0, beyondOneUlp);
+        Assert.Equal(0, outOfBound);
+        Assert.True(meanDiff < 1e-6, $"mean |materialized - tiled| is {meanDiff:E3}: a systematic difference, not rounding");
     }
 
     /// <summary>Runs one BF16 attention and returns its output widened to F32 on the host.</summary>
