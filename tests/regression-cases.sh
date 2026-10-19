@@ -48,5 +48,6 @@ ernie-turbo	vulkanbar	Stable-Diffusion/Ernie/ernie-image-turbo-fp8.safetensors	i
 hunyuanimage-comfy	hunyuan	Stable-Diffusion/hunyuanimage21-fp8-1_0-hunyuan-image-21-base-fp8.safetensors	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light|-m hunyuan-image --steps 20 --width 1024 --height 1024 --cfg 4
 hunyuanimage-q4	hunyuan	Stable-Diffusion/HunyuanImage/hunyuanimage2.1-q4_0.gguf	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light|-m hunyuan-image --steps 20 --width 1024 --height 1024 --cfg 4
 anima	anima	Stable-Diffusion/Anima/anima-preview3-base.safetensors	image|a bowl of ripe cherries on a wooden table, soft morning light|-m anima --steps 20 --width 512 --height 512 --cfg 4
+moss-base	moss	diffusion_models/moss_image_base_bf16.safetensors	image|a red bicycle leaning on a white wall, photo|-m moss-image --steps 30 --width 1024 --height 1024 --cfg 3
 MATRIX
 }
