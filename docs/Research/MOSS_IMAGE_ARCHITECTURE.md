@@ -84,8 +84,48 @@ meant for LoRA training) and **MOSS-Image-SFT** (Base fine-tuned on curated data
   `slg.scale`, `slg.start`, `slg.stop`; CLI `--slg-uncond-layers`, `--slg-layers`, `--slg-scale`, `--slg-start`,
   `--slg-stop`. The sigma shift maps directly (SwarmUI's `ModelSamplingSD3` shift).
 - **LoRA.** `MossImageLoraMapper`: PEFT under `transformer.`, ComfyUI under `diffusion_model.`, bare module names, and
-  kohya `lora_unet_` (resolved through `MossImageKeyNames`' module templates). Every spelling names the same module once
-  its wrapper is stripped.
+  underscored `lora_unet_` / `lora_transformer_` / `lora_diffusion_model_` (resolved through `MossImageKeyNames`' module
+  templates). Every spelling names the same module once its wrapper is stripped.
+
+## Reference images (edits)
+
+OpenMOSS ships no reference path. ai-toolkit trains edit LoRAs on the stock weights with `model_kwargs.edit: true`, and
+Ostris's ComfyUI node `ostris/ComfyUI-MOSS-Image-Ostris-Edit` (`nodes.py`) adds the inference side; ai-toolkit's
+`extensions_built_in/diffusion_models/moss_image/src/{transformer,pipeline}.py` is the training side. The engine
+follows both.
+
+- **Text side.** Per reference (at most 3), `Picture N: <|vision_start|><|image_pad|>…<|vision_end|>` before the prompt,
+  inside the usual template, one `<|image_pad|>` per merged vision token. The negative prompt gets the same blocks and
+  images (the node's README wiring). The vision copy is scaled down only to fit 384² pixels, then Qwen's processor
+  (factor 32, 65 536–16 777 216 pixels, mean/std 0.5, the frame duplicated across the temporal patch): a full-budget
+  image is 144 tokens. The encoder's whole final hidden state, image rows included, is the conditioning.
+- **Qwen3.5 vision tower** (`qwen3_5_vision`): the Qwen3-VL ViT (27 blocks, 1152 wide, learned 2304-entry position
+  embedding interpolated to the grid, 2-D rotary, tanh-GELU MLPs) with no deepstack taps and an exact-GELU merger to
+  4096. Image tokens replace the placeholder rows; the full-attention layers rotate by interleaved M-RoPE (sections
+  11/11/10 over the 32 pairs of the 64-wide rotary slice; text after an image resumes at its start + max(H, W)).
+  The DeltaNet layers read no positions. Comfy-Org's `qwen3.5_9b_*` files and the HF release carry the tower;
+  OpenMOSS's `text_encoder/` and the llama.cpp GGUFs do not.
+- **DiT side.** Each reference is VAE-encoded (scaled down only to 1 MP, sides rounded to 16), BN-packed like the target,
+  and embedded by the same `video_embedder`. Reference `i` sits at RoPE `(i + 1, L, row − (h−1)/2, col − (w−1)/2)` on its
+  own grid, and takes the modulation of timestep 0; the head reads the image rows only.
+- **Two attention layouts, set by how the LoRA was trained.** Cached (ai-toolkit's `kv_cache`, its default): the
+  references run once at timestep 0 attending only to each other, every block's rotated keys and raw values are kept,
+  and each step appends them after the live `[image ; text]` keys and values. A cache depends on the prompt length (the
+  references' RoPE frame) and the skipped blocks, so cond and uncond (block 22 skipped) build their own. Joint
+  (`kv_cache: false`): the references ride after the text every step, attending to everything, with per-segment
+  modulation through the row-indexed ops.
+- **Engine.** `ReferenceImageResolver` with `MossImageRecipePipeline.ReferencePolicy` prepares both copies;
+  `Qwen35VisionTower` / `Qwen35TextEncoder.Encode(ids, images)` the text side; `MossImageTransformer.PrepareConditioning`
+  with `ReferenceLatentTokens` and `EnsureReferenceCaches` the DiT side, on the shared `ReferenceKvCache`,
+  `SegmentModulation` and `TokenMajorAttention`. Extras `reference.kv_cache` (default true), `reference.max_pixels`
+  (1 048 576, 0 keeps the size) and `reference.vision_pixels` (147 456); CLI `--reference-kv-cache`,
+  `--reference-max-pixels`, `--reference-vision-pixels`, `--vision-encoder`.
+- **Cost.** A cache is `2 × blocks × S_ref × 3072` values in the activation dtype, about 2.1 GB in F16 for one 1 MP
+  reference over 42 blocks, and an edit builds one per skipped-block set (two by default). The pipeline warns when the
+  caches exceed half the free device memory and never switches layout on its own.
+- **Divergences.** The VAE copy is resampled once with Keys bicubic (ai-toolkit: bilinear after its own fit); the
+  vision copy goes straight to its smart-resize size in one bicubic pass (ai-toolkit: bicubic then the processor's own
+  resize); HF's 65 536-pixel floor scales a reference smaller than 256² up, where ComfyUI's 3 136 floor would not.
 
 ## Performance
 
@@ -112,4 +152,6 @@ meant for LoRA training) and **MOSS-Image-SFT** (Base fine-tuned on curated data
 
 The repositories' shard names and hashes (the catalog entry lists only side models), the weights' license, the
 Qwen3.5-9B GGUF's numerics against the BF16 encoder, and the real-weight parity and speed runs on the GPU box
-(`dump_moss_image_reference.py real` + `MossImageRealWeightTests`).
+(`dump_moss_image_reference.py real` + `MossImageRealWeightTests`). For edits: a check of the transcription against
+the Ostris node's patched forward, a published ai-toolkit edit LoRA to run (none was public on 2026-10-19), and an
+mmproj GGUF as a vision-tower source for GGUF encoders.

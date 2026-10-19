@@ -90,7 +90,7 @@ per-model architecture notes and build plans.
 | **Hunyuan Image 2.1** | ✅ **FIRST E2E 07-10** (`44.52-local`): sharp 2048²/20st/cfg3.5 astronaut, warm **~50.0s** (**ComfyUI baseline 48.08 s → 1.04× MATCHED**; 07-18 A/B on `alpha.61`: F16 50.1 s ≈ F32 49.9 s. ([details](#hunyuan-image-21)) |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
 | **FLUX.3 Klein** (5.6B, full + step-distilled) | 🔧 Built 2026-10-15. Text-to-image, img2img, inpaint, up to 10 reference images, the native layout table, and LoRA (diffusers/PEFT, ComfyUI and kohya names). Tiny-config parity against ComfyUI passes; no real-weight or GPU run yet. ([details](#flux3-klein)) |
-| **MOSS-Image** (5B DiT + Qwen3.5-9B, Base + SFT) | 🔧 Built 2026-10-16. Text-to-image, img2img, inpaint, the native layout JSON, two- and three-pass skip-layer guidance, LoRA (PEFT, ComfyUI, kohya names), every weight format through `CheckpointSource` and GGUF, a one-launch CUDA step graph and Vulkan kernels. Tiny-config parity passes on CPU and Vulkan (llvmpipe); no real-weight, CUDA or speed run yet. ([details](#moss-image)) |
+| **MOSS-Image** (5B DiT + Qwen3.5-9B, Base + SFT) | 🔧 Built 2026-10-16. Text-to-image, img2img, inpaint, the native layout JSON, two- and three-pass skip-layer guidance, LoRA (PEFT, ComfyUI, kohya names), reference-image edits in the Ostris / ai-toolkit layout (up to 3, cached or joint), every weight format through `CheckpointSource` and GGUF, a one-launch CUDA step graph and Vulkan kernels. Tiny-config parity passes on CPU and Vulkan, edits included; no real-weight, CUDA or speed run yet. ([details](#moss-image)) |
 
 ## Edit / image-conditioned variants (🔧 — to download + e2e test)
 
@@ -597,12 +597,22 @@ Architecture and sources: [MOSS_IMAGE_ARCHITECTURE.md](../Research/MOSS_IMAGE_AR
   the untagged prompt its summary caption. A layout JSON typed as the prompt passes through.
 - **Speed.** The text side is built once per generation, the Qwen3.5 prefill runs on the device, SiTU-GLU and the
   modulated RMSNorm are fused kernels, and on CUDA all branches of a step replay as one captured graph.
+- **Edits (reference images).** Up to three, from `ReferenceImages` and an init image in Reference mode, in the layout
+  ai-toolkit's MOSS-Image edit LoRAs are trained on (`ostris/ComfyUI-MOSS-Image-Ostris-Edit`). Each image goes to
+  Qwen3.5's vision tower behind a `Picture N:` block in both prompts and to the DiT as reference tokens. Default
+  attention is cached keys/values (ai-toolkit's `kv_cache`); `reference.kv_cache=false` / `--reference-kv-cache off`
+  is for a LoRA trained without it. The encoder must carry the vision tower (Comfy-Org's `qwen3.5_9b_*` files and the
+  HF release do; OpenMOSS's `text_encoder/` and the GGUFs do not; `--vision-encoder` supplies one). The base model
+  was not trained on references, so an edit needs an edit LoRA. Details in the
+  [research doc](../Research/MOSS_IMAGE_ARCHITECTURE.md#reference-images-edits).
 - **Verified so far:** tiny-config parity against the numpy transcription of OpenMOSS's ComfyUI module on CPU and on
-  Vulkan (llvmpipe), including step-graph replay; the schedule against SGLang's goldens; the device DeltaNet prefill
-  against transformers on a tiny trunk; detection, LoRA, layout, tokenizer and recipe unit tests.
-  **Not verified:** the transcription against the torch module itself (`dump_moss_image_reference.py verify`), the real
-  weights (`dump_moss_image_reference.py real` + `MossImageRealWeightTests`), CUDA, and the speed comparison with the
-  Python pipeline.
+  Vulkan (llvmpipe and an RTX 2060 SUPER), including step-graph replay, with edits in both attention modes; the
+  Qwen3.5 image path (vision tower, splice, interleaved M-RoPE) against transformers on a tiny checkpoint; the
+  schedule against SGLang's goldens; the device DeltaNet prefill against transformers on a tiny trunk; a synthetic
+  end-to-end edit through the pipeline; detection, LoRA, layout, tokenizer and recipe unit tests.
+  **Not verified:** the transcription against the torch module itself (`dump_moss_image_reference.py verify`, and the
+  Ostris node for edits), the real weights (`dump_moss_image_reference.py real` + `MossImageRealWeightTests`), an edit
+  with a real edit LoRA, CUDA, and the speed comparison with the Python pipeline.
 
 ### Qwen-Image-Edit 2511
 

@@ -359,7 +359,8 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             return;
         references.Validate(Family);
         if (references.Count > MossImageConfig.MaxReferenceImages)
-            throw new ArgumentException($"{Family} conditions on at most {MossImageConfig.MaxReferenceImages} reference images, got {references.Count}.");
+            throw new ArgumentException($"{Family} conditions on at most {MossImageConfig.MaxReferenceImages} reference images, "
+                + $"got {references.Count}.");
         if (_vaeEncoder is null)
             throw new InvalidOperationException($"{Family} reference images need the FLUX.2 VAE encoder.");
         if (references.Vision.Count > 0 && _textEncoder is not IMultimodalFinalHiddenStateEncoder { HasVision: true })

@@ -112,8 +112,11 @@ public sealed record Qwen35HfConfig
                 int at = 0;
                 foreach (JsonElement pairs in section.EnumerateArray()) mropeSection[at++] = pairs.GetInt32();
             }
-            if (scope.TryGetProperty("mrope_interleaved", out JsonElement interleaved) && interleaved.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            if (scope.TryGetProperty("mrope_interleaved", out JsonElement interleaved)
+                && interleaved.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
                 mropeInterleaved = interleaved.GetBoolean();
+            }
         }
         int layers = t.GetProperty("num_hidden_layers").GetInt32();
         bool[]? linear = null;

@@ -113,7 +113,10 @@ public sealed class MossImageTransformer : IDisposable
         if (hPacked < 1 || wPacked < 1)
             throw new ArgumentOutOfRangeException(nameof(hPacked), $"MOSS-Image needs a positive token grid, got {hPacked}x{wPacked}.");
         if (references is { Count: > MossImageConfig.MaxReferenceImages })
-            throw new ArgumentException($"MOSS-Image conditions on at most {MossImageConfig.MaxReferenceImages} reference images, got {references.Count}.", nameof(references));
+        {
+            throw new ArgumentException($"MOSS-Image conditions on at most {MossImageConfig.MaxReferenceImages} reference images, "
+                + $"got {references.Count}.", nameof(references));
+        }
         if (references is not null)
         {
             foreach (ReferenceLatentTokens reference in references) reference.Validate(_config.LatentChannels, "MOSS-Image");

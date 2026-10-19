@@ -119,7 +119,8 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
 
         /// <summary>How edit references attend: cached keys/values (on) or in the live sequence (off).</summary>
         [CommandOption("--reference-kv-cache")]
-        [Description("on (default): references attend through cached keys/values, ai-toolkit's kv_cache default; off: they ride in the sequence, for a LoRA trained with kv_cache: false. MOSS-Image only.")]
+        [Description("on (default): references attend through cached keys/values, ai-toolkit's kv_cache default; off: they ride "
+            + "in the sequence, for a LoRA trained with kv_cache: false. MOSS-Image only.")]
         public string? ReferenceKvCache { get; init; }
 
         /// <summary>Pixel budget of each reference's VAE copy.</summary>
@@ -139,12 +140,14 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
 
         /// <summary>Text-encoder override for families with a Qwen encoder.</summary>
         [CommandOption("--text-encoder")]
-        [Description("Path or name of the Qwen text encoder to use instead of the family's default (MOSS-Image: a Qwen3.5-9B safetensors, folder or GGUF).")]
+        [Description("Path or name of the Qwen text encoder to use instead of the family's default "
+            + "(MOSS-Image: a Qwen3.5-9B safetensors, folder or GGUF).")]
         public string? TextEncoder { get; init; }
 
         /// <summary>Vision tower for a text encoder whose file has none.</summary>
         [CommandOption("--vision-encoder")]
-        [Description("Safetensors (or folder) holding the text encoder's vision tower (visual.* keys), when the encoder file has none; needed for reference images.")]
+        [Description("Safetensors (or folder) holding the text encoder's vision tower (visual.* keys), when the encoder file "
+            + "has none; needed for reference images.")]
         public string? VisionEncoder { get; init; }
 
         /// <summary>Image-guidance (InstructPix2Pix) scale for dual-CFG edit models; unset uses the family default.</summary>

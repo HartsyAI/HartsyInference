@@ -55,7 +55,8 @@ public sealed class ReferenceKvCache : IDisposable
             || live.Shape[2] != cached.Shape[2] || live.Shape[3] != cached.Shape[3] || live.DType != cached.DType)
         {
             throw new ArgumentException(
-                $"Cached keys/values {cached.Shape} {cached.DType} cannot extend live {live.Shape} {live.DType}; both must be [1, S, heads, headDim] of one dtype.");
+                $"Cached keys/values {cached.Shape} {cached.DType} cannot extend live {live.Shape} {live.DType}; "
+                + "both must be [1, S, heads, headDim] of one dtype.");
         }
         Tensor joined = new(new TensorShape(1, live.Shape[1] + cached.Shape[1], live.Shape[2], live.Shape[3]), live.DType);
         backend.Concat(joined, [live, cached], 1);

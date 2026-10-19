@@ -21,7 +21,10 @@ public static class VisionTokenSplice
         {
             ArgumentNullException.ThrowIfNull(features);
             if (features.DType != DType.F32 || features.Shape[features.Shape.Rank - 1] != hidden)
-                throw new ArgumentException($"Image features {features.Shape} {features.DType} are not F32 rows of width {hidden}.", nameof(imageFeatures));
+            {
+                throw new ArgumentException($"Image features {features.Shape} {features.DType} are not F32 rows of width {hidden}.",
+                    nameof(imageFeatures));
+            }
             featureRows += features.ElementCount / hidden;
         }
         int placeholders = 0;

@@ -94,7 +94,8 @@ public sealed class MossImageRecipeTests : IDisposable
         });
         Assert.Equal(0, custom.LatentTargetArea);
         Assert.Equal(65536, custom.VisionTargetArea);
-        Assert.False(RequestExtras.Bool(new Dictionary<string, object> { [RequestExtras.ReferenceKvCache] = "off" }, RequestExtras.ReferenceKvCache, true));
+        Dictionary<string, object> off = new() { [RequestExtras.ReferenceKvCache] = "off" };
+        Assert.False(RequestExtras.Bool(off, RequestExtras.ReferenceKvCache, true));
         Assert.True(RequestExtras.Bool(null, RequestExtras.ReferenceKvCache, true));
     }
 
