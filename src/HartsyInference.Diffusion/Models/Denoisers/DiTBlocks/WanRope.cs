@@ -1,3 +1,4 @@
+using System.Buffers;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -68,8 +69,21 @@ public sealed unsafe class WanRope
     /// (non-contiguous gaps are fine; the model is trained for them).</summary>
     public (Tensor Cos, Tensor Sin) BuildCosSin(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int offsetH = 0, int offsetW = 0)
     {
-        float[] positions = GridPositions(frameIndices, gridH, gridW, offsetH, offsetW);
-        int seq = positions.Length / NumAxes;
+        int seq = checked(frameIndices.Length * gridH * gridW);
+        float[] positions = ArrayPool<float>.Shared.Rent(Math.Max(seq * NumAxes, 1));
+        try
+        {
+            FillGridPositions(frameIndices, gridH, gridW, offsetH, offsetW, positions);
+            return BuildTables(positions.AsSpan(0, seq * NumAxes), seq);
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(positions);
+        }
+    }
+
+    private (Tensor Cos, Tensor Sin) BuildTables(ReadOnlySpan<float> positions, int seq)
+    {
         if (_headPlans is null)
         {
             return MultiAxisRopeTables.BuildTensors(_plan, positions, seq, RopeAngleOrder.MultiplyByInverse,
@@ -105,12 +119,12 @@ public sealed unsafe class WanRope
         }
     }
 
-    /// <summary>Token-major <c>(frame, row, col)</c> coordinates for the <c>(f, h, w)</c> grid, with the row and column offsets
-    /// applied.</summary>
-    private static float[] GridPositions(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int offsetH, int offsetW)
+    /// <summary>Writes token-major <c>(frame, row, col)</c> coordinates for the <c>(f, h, w)</c> grid into
+    /// <paramref name="positions"/>, with the row and column offsets applied.</summary>
+    private static void FillGridPositions(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int offsetH, int offsetW,
+        Span<float> positions)
     {
         int gridT = frameIndices.Length;
-        float[] positions = new float[checked(gridT * gridH * gridW * NumAxes)];
         int at = 0;
         for (int fi = 0; fi < gridT; fi++)
             for (int hi = 0; hi < gridH; hi++)
@@ -120,7 +134,6 @@ public sealed unsafe class WanRope
                     positions[at++] = hi + offsetH;
                     positions[at++] = wi + offsetW;
                 }
-        return positions;
     }
 
     /// <summary>Applies the per-head interleaved-pair rotation in-place to <paramref name="x"/> <c>[S, heads, headDim]</c>.

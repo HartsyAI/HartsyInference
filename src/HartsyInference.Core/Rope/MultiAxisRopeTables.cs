@@ -66,8 +66,33 @@ public static class MultiAxisRopeTables
         ArgumentNullException.ThrowIfNull(plan);
         ValidateTokens(tokens);
         int effective = RopeTableExpander.EffectiveRotaryDim(plan.HeadDim, rotaryDim, layout);
-        (float[] cosActive, float[] sinActive) = ComputeActivePairs(plan, positions, tokens, order, effective / 2);
-        RopeTableExpander.Expand(cosActive, sinActive, tokens, plan.HeadDim, layout, rotaryDim, padding, cosRows, sinRows);
+        int active = effective / 2;
+        int pairs = plan.Pairs;
+        int fullLength = checked(tokens * pairs);
+        // Pooled scratch, so a caller that rebuilds tables every step (or every head) leaves no managed garbage behind.
+        float[] cos = ArrayPool<float>.Shared.Rent(Math.Max(fullLength, 1));
+        float[] sin = ArrayPool<float>.Shared.Rent(Math.Max(fullLength, 1));
+        try
+        {
+            ComputePairs(plan, positions, tokens, order, cos.AsSpan(0, fullLength), sin.AsSpan(0, fullLength));
+            if (active != pairs)
+            {
+                // Keep each token's leading pairs, packed together; moving forward never overwrites a pair still to move.
+                for (int s = 1; s < tokens; s++)
+                {
+                    cos.AsSpan(s * pairs, active).CopyTo(cos.AsSpan(s * active, active));
+                    sin.AsSpan(s * pairs, active).CopyTo(sin.AsSpan(s * active, active));
+                }
+            }
+            int activeLength = tokens * active;
+            RopeTableExpander.Expand(cos.AsSpan(0, activeLength), sin.AsSpan(0, activeLength), tokens, plan.HeadDim, layout,
+                rotaryDim, padding, cosRows, sinRows);
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(cos);
+            ArrayPool<float>.Shared.Return(sin);
+        }
     }
 
     /// <summary>Allocates <c>[tokens, headDim]</c> F32 cos and sin rows. The caller owns and disposes both tensors.</summary>
