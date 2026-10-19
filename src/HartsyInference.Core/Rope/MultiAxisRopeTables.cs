@@ -80,6 +80,8 @@ public static class MultiAxisRopeTables
             Span<float> cos = new(cosScratch, fullLength);
             Span<float> sin = new(sinScratch, fullLength);
             ComputePairs(plan, positions, tokens, order, cos, sin);
+            // Trig is computed for every pair even when only the leading `active` pairs are kept: a partial-rotary caller would
+            // save that work by computing only the active pairs.
             if (active != pairs)
             {
                 // Keep each token's leading pairs, packed together; moving forward never overwrites a pair still to move.
