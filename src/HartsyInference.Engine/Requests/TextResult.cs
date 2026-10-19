@@ -3,8 +3,13 @@ namespace HartsyInference.Engine.Requests;
 /// <summary>The non-streaming result of a text generation: the full text, why it stopped, token counts, and an optional native tool call the model emitted instead of finishing.</summary>
 public sealed record TextResult
 {
-    /// <summary>The generated text.</summary>
+    /// <summary>The generated text: the answer alone when the model reasoned first (see <see cref="Reasoning"/>).</summary>
     public required string Text { get; init; }
+
+    /// <summary>The reasoning the model wrote before its answer when its prompt ended inside a think block; empty otherwise. A reply that ran out
+    /// of tokens mid-reasoning keeps its partial reasoning here with <see cref="Stop"/> = <see cref="StopReason.Length"/> and an empty
+    /// <see cref="Text"/>.</summary>
+    public string Reasoning { get; init; } = "";
 
     /// <summary>Why generation stopped.</summary>
     public StopReason Stop { get; init; } = StopReason.Stop;

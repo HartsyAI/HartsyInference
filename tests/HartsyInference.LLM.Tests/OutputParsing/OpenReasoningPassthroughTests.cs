@@ -48,7 +48,7 @@ public sealed class OpenReasoningPassthroughTests
     }
 
     [Fact]
-    public void ReasoningThatNeverClosesLeavesNoAnswer()
+    public void ReasoningThatNeverClosesKeepsThePartialReasoning()
     {
         PieceTokenizer tok = new();
         int close = tok.SpecialIdOf(PieceTokenizer.ThinkEnd);
@@ -59,7 +59,41 @@ public sealed class OpenReasoningPassthroughTests
 
         Assert.Equal("Still thinking about it", parser.Result.Reasoning);
         Assert.Equal("", parser.Result.Content);
+        Assert.True(parser.Result.Completed);
         Assert.DoesNotContain(events, e => e.Kind == ParsedEventKind.ContentDelta);
+    }
+
+    [Fact]
+    public async Task BudgetRunningOutMidReasoningStreamsTheReasoningThenALengthStop()
+    {
+        // Thinking on, as TextService wires it: the parser starts in reasoning, and a decode that stops on the token budget ends as Length.
+        PieceTokenizer tok = new();
+        int close = tok.SpecialIdOf(PieceTokenizer.ThinkEnd);
+        int[] ids = tok.SplitBytes("The user asks why the sky is blue. Rayleigh", 9, 20);
+        List<(TextChunkKind Kind, string? Text, StopReason? Stop)> got = await Stream(tok, ids, close, StopReason.Length);
+
+        Assert.Equal("The user asks why the sky is blue. Rayleigh", string.Concat(got.Where(c => c.Kind == TextChunkKind.Reasoning).Select(c => c.Text)));
+        Assert.DoesNotContain(got, c => c.Kind == TextChunkKind.Chunk);
+        Assert.Equal([(TextChunkKind.Result, "", null), (TextChunkKind.StopReason, null, StopReason.Length)], got.TakeLast(2));
+    }
+
+    [Fact]
+    public async Task ThinkingOffAnswersDirectly()
+    {
+        // Thinking off: the template prefills an empty think block, TextService passes no close token, and every token is the answer.
+        LiteralControlTokenizer literal = new();
+        GenerationRequest genRequest = new() { Messages = Conversation };
+        TextRequest notThinking = new() { Messages = [], EnableThinking = false };
+        int? close = TextService.OpenReasoningCloseId(new JinjaChatTemplate(PrefillTemplate), literal, genRequest, notThinking, rawCompletion: false);
+        Assert.Null(close);
+
+        PieceTokenizer tok = new();
+        int[] ids = tok.SplitBytes("Rayleigh scattering.", 4, 11);
+        List<(TextChunkKind Kind, string? Text, StopReason? Stop)> got = await Stream(tok, ids, close, StopReason.Stop);
+
+        Assert.DoesNotContain(got, c => c.Kind == TextChunkKind.Reasoning);
+        Assert.Equal("Rayleigh scattering.", string.Concat(got.Where(c => c.Kind == TextChunkKind.Chunk).Select(c => c.Text)));
+        Assert.Equal([(TextChunkKind.Result, "Rayleigh scattering.", null), (TextChunkKind.StopReason, null, StopReason.Stop)], got.TakeLast(2));
     }
 
     [Fact]
@@ -105,6 +139,27 @@ public sealed class OpenReasoningPassthroughTests
         Assert.Null(TextService.OpenReasoningCloseId(template, tok, genRequest, thinking, rawCompletion: true));
         Assert.Null(TextService.OpenReasoningCloseId(new ChatMlTemplate(), tok, genRequest, thinking, rawCompletion: false));
         Assert.Null(TextService.OpenReasoningCloseId(template, tok, new GenerationRequest { Prompt = "hi" }, thinking, rawCompletion: false));
+    }
+
+    /// <summary>Runs <paramref name="ids"/> through the wiring <c>TextService.StreamAsync</c> uses (parser, translator, pump), ending with the
+    /// Result chunk (the parser's content) and <paramref name="stop"/>.</summary>
+    private static async Task<List<(TextChunkKind Kind, string? Text, StopReason? Stop)>> Stream(PieceTokenizer tok, int[] ids, int? close, StopReason stop)
+    {
+        Task<IReadOnlyList<TextChunk>> Produce(Action<TextChunk> sink, CancellationToken ct)
+        {
+            PassthroughOutputParser parser = new(tok, null, close);
+            ParsedEventTranslator translator = new(sink, 1);
+            foreach (int id in ids) parser.Push(id, translator.Handle);
+            parser.Finish(translator.Handle);
+            return Task.FromResult<IReadOnlyList<TextChunk>>(
+            [
+                new TextChunk { Kind = TextChunkKind.Result, Text = TextService.FinalText(parser, callCount: 0, tok.Decode(ids)) },
+                new TextChunk { Kind = TextChunkKind.StopReason, Stop = stop },
+            ]);
+        }
+        List<(TextChunkKind Kind, string? Text, StopReason? Stop)> got = [];
+        await foreach (TextChunk c in TextStreamPump.Run(Produce)) got.Add((c.Kind, c.Text, c.Stop));
+        return got;
     }
 
     private static string Joined(List<ParsedEvent> events, ParsedEventKind kind) => string.Concat(events.Where(e => e.Kind == kind).Select(e => e.Text));

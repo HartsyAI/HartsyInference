@@ -13,7 +13,9 @@ stable release will require. Dates are UTC.
   newlines split differently). Dory now matches its checkpoint's `tokenizer.json` on every sample in `DoryTokenizerParityTests`.
 - **Fixed: a prefilled think block streams as reasoning.** When a model's own Jinja template ends the prompt inside `<think>` (Dory,
   Nemotron and Qwen3-Thinking with thinking on), the text up to `</think>` is now `Reasoning`, not the answer, and the close token is
-  consumed. Before, the reasoning arrived as answer text with a stray `</think>` and no opener, so clients could not split it.
+  consumed. Before, the reasoning arrived as answer text with a stray `</think>` and no opener, so clients could not split it. A
+  non-streaming `TextResult` carries it in the new `Reasoning` field; a reply that runs out of tokens mid-reasoning keeps the partial
+  reasoning with `Stop = Length` and empty `Text`. With thinking off the template's empty think block applies and the reply is all answer.
 
 ## alpha.379
 
