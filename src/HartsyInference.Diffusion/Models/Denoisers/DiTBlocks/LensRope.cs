@@ -7,10 +7,18 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>3-axis complex-polar rotary positional embedding for Microsoft Lens (<c>LensEmbedRope</c>). Splits the head dimension into <c>(frame, height, width)</c> sub-bands (default <c>[8, 28, 28]</c> summing to 64 = head_dim) and rotates each pair of features by <c>θ = position * (1 / base^(2k/axisDim))</c>. <b>Differs from QwenImageRope in two ways:</b> (1) <c>scale_rope=True</c> hardcoded — height and width positions are split into negative+positive halves centered around 0 (top/left rows get <c>arange(4096).flip(0) * -1 - 1</c>, bottom/right rows get <c>arange(4096)</c>), centering the rotation around the image's middle pixel rather than the top-left; (2) text RoPE positions start at <c>max(h//2, w//2)</c> (not <c>max(h, w)</c>) because of the height/width halving. Apply order matches QwenImageRope's complex polar pairs: features at indices <c>(2i, 2i+1)</c> form one complex number that gets multiplied by <c>e^(iθ)</c>.</summary>
 /// <remarks>The operation is complex multiplication, which is the same as the interleaved 2x2 rotation the apply ops run. Frequencies
 /// come from <see cref="RopeFrequencyPlan"/>, rows from <see cref="MultiAxisRopeTables"/>, and position rules live in
-/// <see cref="LensPosEmbed"/>. The single joint device table has no backend parameter, so it is not held in a
-/// <see cref="RopeTableCache"/>. A rebuild installs the new table before it frees the old one.</remarks>
+/// <see cref="LensPosEmbed"/>. The single joint device table is the staged row set of a <see cref="RopeTableCache"/> slot: host
+/// tensors the backend uploads on first use, since the builder carries no backend. A rebuild installs the new table before it
+/// frees the old one.</remarks>
 public sealed unsafe class LensRope : IDisposable
 {
+    private static readonly RopeTableSettings StagedTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.MultiplyByInverse,
+        Layout = RopeTableLayout.InterleavedPair,
+        RetainedSignatures = 1,
+    };
+
     private readonly int[] _axesDim;
     private readonly int _headDim;
     private readonly RopeFrequencyPlan _plan;
@@ -20,9 +28,8 @@ public sealed unsafe class LensRope : IDisposable
     // step — replacing the per-block host ApplyRotationBatched, which was a D2H+H2D round trip of Q AND K per
     // stream per block (the dominant Lens step cost). Keyed on the full sequence layout; a resolution or
     // prompt-length change rebuilds. Joint order is [img, txt] (Lens's concat order — opposite of Qwen-Image).
-    private (int ImgH, int ImgW, int Txt, int TxtStart) _jointTableKey = (-1, -1, -1, -1);
-    private Tensor? _jointCos;
-    private Tensor? _jointSin;
+    private readonly RopeTableCache _tables;
+    private readonly RopeHeldTables<(int ImgH, int ImgW, int Txt, int TxtStart)> _jointTables;
 
     /// <summary>Creates a Lens RoPE with the given axis split. Lens always uses <c>scale_rope=True</c> — height/width positions are split into negative+positive halves around 0. Frame axis stays at <c>[0]</c> for image-only inference (frame=1).</summary>
     public LensRope(int[]? axesDim = null, int theta = 10000)
@@ -32,6 +39,8 @@ public sealed unsafe class LensRope : IDisposable
             throw new ArgumentException("LensRope requires exactly 3 axes (frame, height, width).", nameof(axesDim));
         _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
         _headDim = _plan.HeadDim;
+        _tables = new RopeTableCache(_plan, StagedTableSettings);
+        _jointTables = new RopeHeldTables<(int, int, int, int)>(_tables, slot: 0, axes: LensPosEmbed.NumAxes);
     }
 
     /// <summary>Sum of per-axis dims; equals the per-head dim of the wrapped attention block (64 for Lens default).</summary>
@@ -70,31 +79,15 @@ public sealed unsafe class LensRope : IDisposable
     /// angle duplicated at indices 2i and 2i+1). Same position math as <see cref="ApplyImage"/> +
     /// <see cref="ApplyText"/> — RoPE is per-row independent, so rotating the GPU-concatenated joint sequence once
     /// is bit-identical to the two per-stream host passes it replaces. Mirrors QwenImageRope.GetOrBuildJointTables.</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int hPacked, int wPacked, int txtSeqLen, int txtPositionStart)
-    {
-        (int, int, int, int) key = (hPacked, wPacked, txtSeqLen, txtPositionStart);
-        if (_jointCos is not null && _jointSin is not null && _jointTableKey == key)
-            return (_jointCos, _jointSin);
-
-        int totalSeqLen = hPacked * wPacked + txtSeqLen;
-        (Tensor cos, Tensor sin) = MultiAxisRopeTables.BuildTensors(_plan, LensPosEmbed.JointRows(hPacked, wPacked, txtSeqLen, txtPositionStart),
-            totalSeqLen, RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity);
-        Tensor? oldCos = _jointCos;
-        Tensor? oldSin = _jointSin;
-        _jointCos = cos;
-        _jointSin = sin;
-        _jointTableKey = key;
-        oldCos?.Dispose();
-        oldSin?.Dispose();
-        return (cos, sin);
-    }
+    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int hPacked, int wPacked, int txtSeqLen, int txtPositionStart) =>
+        _jointTables.GetOrBuildStaged((hPacked, wPacked, txtSeqLen, txtPositionStart),
+            () => LensPosEmbed.JointRows(hPacked, wPacked, txtSeqLen, txtPositionStart));
 
     /// <summary>Frees the cached joint tables.</summary>
     public void Dispose()
     {
-        _jointCos?.Dispose();
-        _jointSin?.Dispose();
-        _jointCos = _jointSin = null;
+        _jointTables.Dispose();
+        _tables.Dispose();
     }
 
     /// <summary>Computes the compact pair tables for flat <c>(frame, height, width)</c> rows and rotates Q and K with them.</summary>

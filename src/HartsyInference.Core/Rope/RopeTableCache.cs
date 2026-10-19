@@ -9,7 +9,8 @@ namespace HartsyInference.Core.Rope;
 /// signature; device rows are built per backend. Leases keep device rows alive while a backend call uses them.</summary>
 /// <remarks>Freeing a device table runs <c>beforeRetire</c> for its backend first, so the owner can invalidate its own step graph.
 /// The cache never resets a backend-wide graph itself. A free that throws stays tracked and is retried on the next acquire,
-/// release or dispose.</remarks>
+/// release or dispose. A cache that does not preload can also hand out staged rows through <see cref="AcquireStaged"/>: host
+/// tensors built once per signature that any backend uploads on first use, for owners whose callers carry no backend.</remarks>
 public sealed class RopeTableCache : IDisposable
 {
     private readonly object _gate = new();
@@ -60,12 +61,7 @@ public sealed class RopeTableCache : IDisposable
     public RopeTableLease Acquire(IBackend backend, int slot, int tokens, ReadOnlySpan<float> positions)
     {
         ArgumentNullException.ThrowIfNull(backend);
-        if (slot < 0)
-            throw new ArgumentOutOfRangeException(nameof(slot), slot, "Slot must be non-negative.");
-        if (tokens < 0)
-            throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "Token count cannot be negative.");
-        if (positions.Length != (long)tokens * _plan.Axes)
-            throw new ArgumentException($"Positions must hold {tokens} tokens of {_plan.Axes} axes.", nameof(positions));
+        ValidateRequest(slot, tokens, positions);
         if (_preload && tokens == 0)
             throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "Preloaded device tables need at least one token.");
 
@@ -75,17 +71,33 @@ public sealed class RopeTableCache : IDisposable
                 throw new ObjectDisposedException(nameof(RopeTableCache));
             FlushPendingRetirement();
             RopeHostTable host = FindOrBuildHost(slot, tokens, positions);
-            RopeDeviceTable? device = null;
-            if (_preload)
+            return Lease(host, _preload ? FindOrBuildDevice(host, backend) : null);
+        }
+    }
+
+    /// <summary>Returns the host tables and the staged <c>[tokens, headDim]</c> rows for the signature <paramref name="positions"/>,
+    /// with no backend: whichever backend reads the rows first uploads them. Only for a cache that does not preload. The rows
+    /// are built once per signature and shared by every lease on it; dispose the lease once nothing reads them.</summary>
+    public RopeTableLease AcquireStaged(int slot, int tokens, ReadOnlySpan<float> positions)
+    {
+        if (_preload)
+            throw new InvalidOperationException("A preloading cache builds rows per backend; acquire them with a backend.");
+        ValidateRequest(slot, tokens, positions);
+        if (tokens == 0)
+            throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "Staged rows need at least one token.");
+
+        lock (_gate)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(RopeTableCache));
+            FlushPendingRetirement();
+            RopeHostTable host = FindOrBuildHost(slot, tokens, positions);
+            if (host.Staged is null)
             {
-                device = FindOrBuildDevice(host, backend);
-                device.Outstanding++;
+                (Tensor cos, Tensor sin) = BuildRows(host);
+                host.Staged = new RopeDeviceTable(null, cos, sin);
             }
-            RopeLeaseSlot leaseSlot = _freeLeaseSlots.Count > 0 ? _freeLeaseSlots.Pop() : new RopeLeaseSlot();
-            ulong ticket = ++_lastTicket;
-            leaseSlot.Ticket = ticket;
-            leaseSlot.Device = device;
-            return new RopeTableLease(this, leaseSlot, ticket, host, device);
+            return Lease(host, host.Staged);
         }
     }
 
@@ -226,24 +238,13 @@ public sealed class RopeTableCache : IDisposable
         if (host.Devices.TryGetValue(backend, out RopeDeviceTable? existing))
             return existing;
 
-        int headDim = _plan.HeadDim;
-        int count = checked(host.Tokens * headDim);
-        Tensor cos = new(new TensorShape(host.Tokens, headDim), DType.F32);
-        Tensor? sin = null;
-        bool preloadAttempted = false;
+        (Tensor cos, Tensor sin) = BuildRows(host);
         bool built = false;
         bool keepForRetry = false;
         try
         {
-            sin = new Tensor(new TensorShape(host.Tokens, headDim), DType.F32);
-            unsafe
-            {
-                RopeTableExpander.Expand(host.Cos, host.Sin, host.Tokens, headDim, _layout, _rotaryDim, _padding,
-                    new Span<float>(cos.DataPointer, count), new Span<float>(sin.DataPointer, count));
-            }
             // One batch, as the original per-backend tables uploaded it. A failed batch may have uploaded either tensor,
             // so rollback frees both.
-            preloadAttempted = true;
             backend.PreloadWeights([cos, sin]);
             RopeDeviceTable device = new(backend, cos, sin);
             host.Devices[backend] = device;
@@ -254,32 +255,88 @@ public sealed class RopeTableCache : IDisposable
         {
             if (!built)
             {
-                if (preloadAttempted && sin is not null)
+                try { backend.FreeWeights([cos, sin]); }
+                catch (Exception error)
                 {
-                    try { backend.FreeWeights([cos, sin]); }
-                    catch (Exception error)
-                    {
-                        // The failed batch may still hold device memory, so the tensors wait for the next flush.
-                        Logs.Warning($"[RopeTableCache] Failed to roll back a partial preload; retrying on the next flush: {error.Message}");
-                        _pendingRetirement.Add(new RopeDeviceTable(backend, cos, sin));
-                        keepForRetry = true;
-                    }
+                    // The failed batch may still hold device memory, so the tensors wait for the next flush.
+                    Logs.Warning($"[RopeTableCache] Failed to roll back a partial preload; retrying on the next flush: {error.Message}");
+                    _pendingRetirement.Add(new RopeDeviceTable(backend, cos, sin));
+                    keepForRetry = true;
                 }
                 if (!keepForRetry)
                 {
                     cos.Dispose();
-                    sin?.Dispose();
+                    sin.Dispose();
                 }
             }
         }
     }
 
-    /// <summary>Unmaps every device of a host table, so none of them can be reused. Idle devices are queued for freeing.</summary>
+    /// <summary>Allocates the <c>[tokens, headDim]</c> rows of <paramref name="host"/> and expands its pairs into them. Nothing
+    /// leaks when a step throws.</summary>
+    private (Tensor Cos, Tensor Sin) BuildRows(RopeHostTable host)
+    {
+        int headDim = _plan.HeadDim;
+        int count = checked(host.Tokens * headDim);
+        Tensor cos = new(new TensorShape(host.Tokens, headDim), DType.F32);
+        Tensor? sin = null;
+        bool built = false;
+        try
+        {
+            sin = new Tensor(new TensorShape(host.Tokens, headDim), DType.F32);
+            unsafe
+            {
+                RopeTableExpander.Expand(host.Cos, host.Sin, host.Tokens, headDim, _layout, _rotaryDim, _padding,
+                    new Span<float>(cos.DataPointer, count), new Span<float>(sin.DataPointer, count));
+            }
+            built = true;
+            return (cos, sin);
+        }
+        finally
+        {
+            if (!built)
+            {
+                cos.Dispose();
+                sin?.Dispose();
+            }
+        }
+    }
+
+    private void ValidateRequest(int slot, int tokens, ReadOnlySpan<float> positions)
+    {
+        if (slot < 0)
+            throw new ArgumentOutOfRangeException(nameof(slot), slot, "Slot must be non-negative.");
+        if (tokens < 0)
+            throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "Token count cannot be negative.");
+        if (positions.Length != (long)tokens * _plan.Axes)
+            throw new ArgumentException($"Positions must hold {tokens} tokens of {_plan.Axes} axes.", nameof(positions));
+    }
+
+    /// <summary>Hands out a lease on <paramref name="host"/>, counting it against <paramref name="rows"/> when there are rows to
+    /// keep alive. Runs under the gate.</summary>
+    private RopeTableLease Lease(RopeHostTable host, RopeDeviceTable? rows)
+    {
+        if (rows is not null)
+            rows.Outstanding++;
+        RopeLeaseSlot leaseSlot = _freeLeaseSlots.Count > 0 ? _freeLeaseSlots.Pop() : new RopeLeaseSlot();
+        ulong ticket = ++_lastTicket;
+        leaseSlot.Ticket = ticket;
+        leaseSlot.Device = rows;
+        return new RopeTableLease(this, leaseSlot, ticket, host, rows);
+    }
+
+    /// <summary>Unmaps every device of a host table and its staged rows, so none of them can be reused. Idle tables are queued
+    /// for freeing.</summary>
     private void UnmapAll(RopeHostTable host)
     {
         foreach (RopeDeviceTable device in host.Devices.Values)
             Unmap(device);
         host.Devices.Clear();
+        if (host.Staged is not null)
+        {
+            Unmap(host.Staged);
+            host.Staged = null;
+        }
     }
 
     /// <summary>Marks a device retired. An idle device is queued for freeing now; one under a lease waits for its last release.</summary>
@@ -293,10 +350,11 @@ public sealed class RopeTableCache : IDisposable
     /// <summary>Frees an idle device table now. It stays mapped if its free throws, so the next call retries it.</summary>
     private void FreeIdle(RopeHostTable host, RopeDeviceTable device)
     {
-        _beforeRetire?.Invoke(device.Backend);
-        device.Backend.FreeWeights([device.Cos, device.Sin]);
+        IBackend backend = device.Backend!;
+        _beforeRetire?.Invoke(backend);
+        backend.FreeWeights([device.Cos, device.Sin]);
         device.Retired = true;
-        host.Devices.Remove(device.Backend);
+        host.Devices.Remove(backend);
         device.Cos.Dispose();
         device.Sin.Dispose();
     }
@@ -308,8 +366,12 @@ public sealed class RopeTableCache : IDisposable
         RopeDeviceTable[] pending = _pendingRetirement.ToArray();
         foreach (RopeDeviceTable device in pending)
         {
-            _beforeRetire?.Invoke(device.Backend);
-            device.Backend.FreeWeights([device.Cos, device.Sin]);
+            // Staged rows were never preloaded, so they only need disposing.
+            if (device.Backend is not null)
+            {
+                _beforeRetire?.Invoke(device.Backend);
+                device.Backend.FreeWeights([device.Cos, device.Sin]);
+            }
             _pendingRetirement.Remove(device);
             device.Cos.Dispose();
             device.Sin.Dispose();

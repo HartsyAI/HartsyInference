@@ -3,18 +3,20 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Rope;
 
-/// <summary>Device rows for one host table on one backend. Lease counts are per device, so releasing one backend never waits
-/// on another backend's leases. Guarded by the owning cache's gate.</summary>
+/// <summary>Device rows for one host table on one backend, or the host table's staged rows when <see cref="Backend"/> is null.
+/// Lease counts are per table, so releasing one backend never waits on another backend's leases. Guarded by the owning
+/// cache's gate.</summary>
 internal sealed class RopeDeviceTable
 {
-    public RopeDeviceTable(IBackend backend, Tensor cos, Tensor sin)
+    public RopeDeviceTable(IBackend? backend, Tensor cos, Tensor sin)
     {
         Backend = backend;
         Cos = cos;
         Sin = sin;
     }
 
-    public IBackend Backend { get; }
+    /// <summary>The backend the rows were preloaded on; null for staged rows, which no backend owns.</summary>
+    public IBackend? Backend { get; }
 
     public Tensor Cos { get; }
 

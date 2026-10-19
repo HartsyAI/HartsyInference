@@ -6,7 +6,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Holds one device-table lease per backend for one slot of a <see cref="RopeTableCache"/>, so the raw tensors a
 /// family returns stay valid until that backend builds a different signature. A block loop reads them after the call
-/// returns, and two backends can build different signatures concurrently, so retiring them early would free tables in use.</summary>
+/// returns, and two backends can build different signatures concurrently, so retiring them early would free tables in use.
+/// A family whose callers carry no backend holds one staged lease instead (<see cref="GetOrBuildStaged"/>), shared by every
+/// backend that uploads the rows.</summary>
 /// <remarks>Build-then-swap: the new lease is acquired before the backend's previous lease is released, so a failed build
 /// leaves the previous tables valid. Every call takes the holder's own gate, so concurrent callers (context-parallel ranks)
 /// are serialized here. The held entry is installed before the previous lease is released, so a release that throws
@@ -18,6 +20,7 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
     private readonly int _slot;
     private readonly int _axes;
     private readonly Dictionary<IBackend, Held> _held = new(ReferenceEqualityComparer.Instance);
+    private Held? _staged;
 
     /// <summary>Creates a holder for <paramref name="slot"/> of <paramref name="cache"/>. Positions carry <paramref name="axes"/> values per token.</summary>
     public RopeHeldTables(RopeTableCache cache, int slot, int axes)
@@ -59,6 +62,37 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
         }
     }
 
+    /// <summary>Returns the staged rows for <paramref name="key"/> from a cache that does not preload. Builds from
+    /// <paramref name="buildPositions"/> only when the held signature differs; the rows stay valid until the next build.</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildStaged(TKey key, Func<float[]> buildPositions)
+    {
+        lock (_gate)
+        {
+            if (_staged is not null && _staged.Key.Equals(key))
+                return (_staged.Cos, _staged.Sin);
+
+            float[] positions = buildPositions();
+            RopeTableLease lease = _cache.AcquireStaged(_slot, positions.Length / _axes, positions);
+            Tensor cos;
+            Tensor sin;
+            try
+            {
+                cos = lease.StagedCos ?? throw new InvalidOperationException("RoPE staged rows require a cache that does not preload.");
+                sin = lease.StagedSin ?? throw new InvalidOperationException("RoPE staged rows require a cache that does not preload.");
+            }
+            catch
+            {
+                lease.Dispose();
+                throw;
+            }
+
+            Held? previous = _staged;
+            _staged = new Held(key, lease, cos, sin);
+            previous?.Lease.Dispose();
+            return (cos, sin);
+        }
+    }
+
     /// <summary>Releases every held lease. The cache frees each table once its last lease is released.</summary>
     public void Dispose()
     {
@@ -66,8 +100,11 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
         {
             Held[] all = _held.Values.ToArray();
             _held.Clear();
+            Held? staged = _staged;
+            _staged = null;
             foreach (Held held in all)
                 held.Lease.Dispose();
+            staged?.Lease.Dispose();
         }
     }
 

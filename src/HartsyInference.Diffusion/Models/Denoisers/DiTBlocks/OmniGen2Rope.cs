@@ -20,25 +20,32 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <para>Editing/reference-image positions (<c>l_effective_ref_img_len</c> path) are intentionally not modeled
 /// here — this implementation is t2i-only.</para></summary>
 /// <remarks>Frequencies come from <see cref="RopeFrequencyPlan"/> and <see cref="MultiAxisRopeTables"/>. Position rules live
-/// in <see cref="OmniGen2PosEmbed"/>. Device-layout tables are expanded by <see cref="RopeTableExpander"/>. Each of the three
-/// roles keeps one table, as before. The tables are host-staged and not preloaded, and the public builders carry no backend,
-/// so they do not go through <see cref="RopeTableCache"/>.</remarks>
+/// in <see cref="OmniGen2PosEmbed"/>. The device-layout tables are staged rows of a <see cref="RopeTableCache"/> (one slot per
+/// role, one signature each, as before): host tensors the backend uploads on first use, since the builders carry no
+/// backend.</remarks>
 public sealed unsafe class OmniGen2Rope : IDisposable
 {
+    private const int TextSlot = 0, ImageSlot = 1, JointSlot = 2;
+
+    private static readonly RopeTableSettings StagedTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.MultiplyByInverse,
+        Layout = RopeTableLayout.InterleavedPair,
+        RetainedSignatures = 1,
+    };
+
     private readonly int[] _axesDim;
     private readonly int _headDim;
     private readonly RopeFrequencyPlan _plan;
 
-    // Device rope-table caches (WanRopeInterleaved [S, headDim] layout). Positions are step-invariant and
-    // size-invariant, so a table built once is reused across every block and every denoise step of a generation
-    // (and across generations at the same geometry) — this is what turns the per-block host Q/K drain into a
-    // single device kernel. One slot per stream type used concurrently in a forward (text / image / joint).
-    private Tensor? _textCos, _textSin;
-    private int _textKey = -1;
-    private Tensor? _imageCos, _imageSin;
-    private (int h, int w, int t) _imageKey = (-1, -1, -1);
-    private Tensor? _jointCos, _jointSin;
-    private (int txt, int h, int w) _jointKey = (-1, -1, -1);
+    // Device rope tables (WanRopeInterleaved [S, headDim] layout). Positions are step-invariant and size-invariant, so a
+    // table built once is reused across every block and every denoise step of a generation (and across generations at the
+    // same geometry) — this is what turns the per-block host Q/K drain into a single device kernel. One slot per stream
+    // type used concurrently in a forward (text / image / joint).
+    private readonly RopeTableCache _tables;
+    private readonly RopeHeldTables<int> _textTables;
+    private readonly RopeHeldTables<(int H, int W, int T)> _imageTables;
+    private readonly RopeHeldTables<(int Txt, int H, int W)> _jointTables;
 
     /// <summary>Creates a 3-axis OmniGen2 RoPE.</summary>
     /// <param name="axesDim">Per-axis dimensions <c>(time, height, width)</c>; each must be even. Sum must equal head_dim.</param>
@@ -53,6 +60,10 @@ public sealed unsafe class OmniGen2Rope : IDisposable
                 throw new ArgumentException($"axesDim[{i}] = {_axesDim[i]} must be even (RoPE rotates pairs of features).");
         _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
         _headDim = _plan.HeadDim;
+        _tables = new RopeTableCache(_plan, StagedTableSettings);
+        _textTables = new RopeHeldTables<int>(_tables, TextSlot, OmniGen2PosEmbed.NumAxes);
+        _imageTables = new RopeHeldTables<(int, int, int)>(_tables, ImageSlot, OmniGen2PosEmbed.NumAxes);
+        _jointTables = new RopeHeldTables<(int, int, int)>(_tables, JointSlot, OmniGen2PosEmbed.NumAxes);
     }
 
     /// <summary>Sum of the per-axis dimensions; equals the per-head dim of the wrapped attention block.</summary>
@@ -182,55 +193,26 @@ public sealed unsafe class OmniGen2Rope : IDisposable
     /// <summary>Returns the cached device <c>(cos, sin)</c> tables for a text-only stream (positions <c>(s,s,s)</c>),
     /// building them on first use. <c>[txtSeqLen, headDim]</c> in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/>
     /// convention — bit-equivalent to the host <see cref="ApplyText"/> path minus the per-block Q/K D2H drain.</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(int txtSeqLen)
-    {
-        if (_textCos is not null && _textSin is not null && _textKey == txtSeqLen)
-            return (_textCos, _textSin);
-        (float[] cos, float[] sin) = BuildTextTable(txtSeqLen);
-        (Tensor nextCos, Tensor nextSin) = ExpandToDeviceTables(cos, sin);
-        Replace(ref _textCos, ref _textSin, nextCos, nextSin);
-        _textKey = txtSeqLen;
-        return (_textCos!, _textSin!);
-    }
+    public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(int txtSeqLen) =>
+        _textTables.GetOrBuildStaged(txtSeqLen, () => OmniGen2PosEmbed.TextRows(txtSeqLen));
 
     /// <summary>Returns the cached device <c>(cos, sin)</c> tables for an image-only stream (positions
     /// <c>(timeOffset, row, col)</c>), building them on first use. <c>[hPacked·wPacked, headDim]</c>.</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildImageTables(int hPacked, int wPacked, int timeOffset)
-    {
-        (int, int, int) key = (hPacked, wPacked, timeOffset);
-        if (_imageCos is not null && _imageSin is not null && _imageKey == key)
-            return (_imageCos, _imageSin);
-        (float[] cos, float[] sin) = BuildImageTable(hPacked, wPacked, timeOffset);
-        (Tensor nextCos, Tensor nextSin) = ExpandToDeviceTables(cos, sin);
-        Replace(ref _imageCos, ref _imageSin, nextCos, nextSin);
-        _imageKey = key;
-        return (_imageCos!, _imageSin!);
-    }
+    public (Tensor Cos, Tensor Sin) GetOrBuildImageTables(int hPacked, int wPacked, int timeOffset) =>
+        _imageTables.GetOrBuildStaged((hPacked, wPacked, timeOffset), () => OmniGen2PosEmbed.ImageRows(hPacked, wPacked, timeOffset));
 
     /// <summary>Returns the cached device <c>(cos, sin)</c> tables for the joint <c>[text, image]</c> stream,
     /// building them on first use. <c>[txtSeqLen + hPacked·wPacked, headDim]</c>.</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int txtSeqLen, int hPacked, int wPacked)
-    {
-        (int, int, int) key = (txtSeqLen, hPacked, wPacked);
-        if (_jointCos is not null && _jointSin is not null && _jointKey == key)
-            return (_jointCos, _jointSin);
-        (float[] cos, float[] sin) = BuildJointTable(txtSeqLen, hPacked, wPacked);
-        (Tensor nextCos, Tensor nextSin) = ExpandToDeviceTables(cos, sin);
-        Replace(ref _jointCos, ref _jointSin, nextCos, nextSin);
-        _jointKey = key;
-        return (_jointCos!, _jointSin!);
-    }
+    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int txtSeqLen, int hPacked, int wPacked) =>
+        _jointTables.GetOrBuildStaged((txtSeqLen, hPacked, wPacked), () => OmniGen2PosEmbed.JointRows(txtSeqLen, hPacked, wPacked));
 
     /// <summary>Frees the cached device rope tables.</summary>
     public void Dispose()
     {
-        _textCos?.Dispose();
-        _textSin?.Dispose();
-        _imageCos?.Dispose();
-        _imageSin?.Dispose();
-        _jointCos?.Dispose();
-        _jointSin?.Dispose();
-        _textCos = _textSin = _imageCos = _imageSin = _jointCos = _jointSin = null;
+        _textTables.Dispose();
+        _imageTables.Dispose();
+        _jointTables.Dispose();
+        _tables.Dispose();
     }
 
     /// <summary>Computes compact pair tables for flat <c>(time, height, width)</c> rows.</summary>
@@ -241,17 +223,6 @@ public sealed unsafe class OmniGen2Rope : IDisposable
         float[] sin = new float[cos.Length];
         MultiAxisRopeTables.ComputePairs(_plan, positions, tokens, RopeAngleOrder.MultiplyByInverse, cos, sin);
         return (cos, sin);
-    }
-
-    /// <summary>Installs a new table pair, then frees the one it replaces. A failed build never leaves a freed table in a field.</summary>
-    private static void Replace(ref Tensor? cos, ref Tensor? sin, Tensor nextCos, Tensor nextSin)
-    {
-        Tensor? oldCos = cos;
-        Tensor? oldSin = sin;
-        cos = nextCos;
-        sin = nextSin;
-        oldCos?.Dispose();
-        oldSin?.Dispose();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Rope;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Tests.Common;
 using Xunit;
 
@@ -353,6 +354,107 @@ public sealed class RopeTableCacheTests
 
         Assert.ThrowsAny<ArgumentException>(() => cache.Acquire(backend, -1, 2, SignatureA));
         Assert.ThrowsAny<ArgumentException>(() => cache.Acquire(backend, 0, 1, SignatureA));
+    }
+
+    [Fact]
+    public unsafe void AcquireStaged_RowsMatchBuildRowsBitForBit_AndCarryNoDeviceRows()
+    {
+        RopeFrequencyPlan plan = Plan();
+        using RopeTableCache cache = new(plan, Settings());
+        float[] expectedCos = new float[2 * plan.HeadDim];
+        float[] expectedSin = new float[2 * plan.HeadDim];
+        MultiAxisRopeTables.BuildRows(plan, SignatureA, 2, RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0,
+            RopeTablePadding.Identity, expectedCos, expectedSin);
+
+        using RopeTableLease lease = cache.AcquireStaged(0, 2, SignatureA);
+
+        Assert.Null(lease.DeviceCos);
+        Assert.Null(lease.DeviceSin);
+        Tensor cos = lease.StagedCos!;
+        Tensor sin = lease.StagedSin!;
+        Assert.Equal(2, cos.Shape[0]);
+        Assert.Equal(plan.HeadDim, cos.Shape[1]);
+        Assert.Equal(expectedCos, new ReadOnlySpan<float>(cos.DataPointer, expectedCos.Length).ToArray());
+        Assert.Equal(expectedSin, new ReadOnlySpan<float>(sin.DataPointer, expectedSin.Length).ToArray());
+    }
+
+    [Fact]
+    public void AcquireStaged_SameSignature_SharesOneRowSet()
+    {
+        using RopeTableCache cache = new(Plan(), Settings());
+
+        using RopeTableLease first = cache.AcquireStaged(0, 2, SignatureA);
+        using RopeTableLease second = cache.AcquireStaged(0, 2, SignatureA);
+
+        Assert.Same(first.StagedCos, second.StagedCos);
+        Assert.Same(first.StagedSin, second.StagedSin);
+    }
+
+    [Fact]
+    public void AcquireStaged_EvictedRows_StayAliveUntilTheLastLeaseIsReleased()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(retained: 1));
+        RopeTableLease held = cache.AcquireStaged(0, 2, SignatureA);
+        Tensor rows = held.StagedCos!;
+
+        using (cache.AcquireStaged(0, 2, SignatureB)) { }
+        Assert.False(IsDisposed(rows));
+
+        held.Dispose();
+        Assert.True(IsDisposed(rows));
+    }
+
+    [Fact]
+    public void AcquireStaged_IdleRows_AreDisposedByClearAndByDispose()
+    {
+        RopeTableCache cache = new(Plan(), Settings());
+        Tensor cleared;
+        using (RopeTableLease lease = cache.AcquireStaged(0, 2, SignatureA))
+            cleared = lease.StagedCos!;
+        cache.Clear();
+        Assert.True(IsDisposed(cleared));
+
+        Tensor disposed;
+        using (RopeTableLease lease = cache.AcquireStaged(0, 2, SignatureA))
+            disposed = lease.StagedSin!;
+        cache.Dispose();
+        Assert.True(IsDisposed(disposed));
+    }
+
+    [Fact]
+    public void AcquireStaged_IsRejectedByAPreloadingCache_AndForZeroTokens()
+    {
+        using RopeTableCache preloading = new(Plan(), Settings(preload: true));
+        using RopeTableCache staged = new(Plan(), Settings());
+
+        Assert.Throws<InvalidOperationException>(() => preloading.AcquireStaged(0, 2, SignatureA));
+        Assert.ThrowsAny<ArgumentException>(() => staged.AcquireStaged(0, 0, []));
+    }
+
+    [Fact]
+    public void ReleaseBackend_LeavesStagedRowsAlone()
+    {
+        using RopeTableCache cache = new(Plan(), Settings());
+        RopeRecordingBackend backend = new();
+        using RopeTableLease lease = cache.AcquireStaged(0, 2, SignatureA);
+
+        cache.ReleaseBackend(backend);
+
+        Assert.False(IsDisposed(lease.StagedCos!));
+        Assert.Empty(backend.Calls);
+    }
+
+    private static unsafe bool IsDisposed(Tensor tensor)
+    {
+        try
+        {
+            _ = tensor.DataPointer;
+            return false;
+        }
+        catch (ObjectDisposedException)
+        {
+            return true;
+        }
     }
 
     private static RopeFrequencyPlan Plan() => RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, 4], Theta = 10000 });
