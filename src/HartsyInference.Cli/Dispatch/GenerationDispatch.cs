@@ -81,6 +81,7 @@ public static class GenerationDispatch
                 ? new IpAdapter { PromptImages = [.. promptPaths.Select(LoadImage)] } : null,
             ReferenceImages = SplitPaths(parameters.GetStringOrNull("reference-images")) is { Length: > 0 } refPaths
                 ? [.. refPaths.Select(LoadImage)] : null,
+            Components = BuildImageComponents(parameters),
             Extra = BuildImageExtra(parameters),
         };
 
@@ -629,6 +630,17 @@ public static class GenerationDispatch
         return artifact;
     }
 
+    /// <summary>The image component overrides from <c>--vae</c>, <c>--text-encoder</c> and <c>--vision-encoder</c>, or null.</summary>
+    private static ComponentOverrides? BuildImageComponents(ParamState parameters)
+    {
+        string? vae = parameters.GetStringOrNull("vae");
+        string? textEncoder = parameters.GetStringOrNull("text-encoder");
+        string? vision = parameters.GetStringOrNull("vision-encoder");
+        return vae is null && textEncoder is null && vision is null
+            ? null
+            : new ComponentOverrides { Vae = vae, Qwen = textEncoder, TextEncoderVision = vision };
+    }
+
     private static ComponentOverrides? BuildVideoComponents(ParamState parameters)
     {
         string? videoVae = parameters.GetStringOrNull("video-vae");
@@ -1007,6 +1019,18 @@ public static class GenerationDispatch
             {
                 extra[key] = value;
             }
+        }
+        if (parameters.GetStringOrNull("reference-kv-cache") is { Length: > 0 } kvCache)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceKvCache] = kvCache;
+        }
+        if (parameters.GetIntOrNull("reference-max-pixels") is { } maxPixels)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceMaxPixels] = maxPixels;
+        }
+        if (parameters.GetIntOrNull("reference-vision-pixels") is { } visionPixels)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceVisionPixels] = visionPixels;
         }
         return extra;
     }

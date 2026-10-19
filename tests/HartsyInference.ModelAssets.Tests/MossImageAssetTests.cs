@@ -31,6 +31,8 @@ public sealed unsafe class MossImageAssetTests : IDisposable
     [InlineData("lora_unet_layers_12_proj_ffn_down.lora_down.weight")]
     [InlineData("lora_unet_text_embedder_blocks_1_ffn_gate.lora_up.weight")]
     [InlineData("lora_unet_video_head_modulation.lora_down.weight")]
+    [InlineData("lora_transformer_layers_0_proj_q.lora_down.weight")]
+    [InlineData("lora_diffusion_model_layers_5_proj_ffn_down.lora_up.weight")]
     public void Detect_ClaimsEveryMossImageSpelling(string key)
     {
         Assert.Equal(LoraFormat.MossImage, LoraFormatDetector.Detect(Descriptors(key)));
@@ -44,6 +46,9 @@ public sealed unsafe class MossImageAssetTests : IDisposable
         // ERNIE-Image / Ideogram 4 also root their blocks at layers.N, under other leaves.
         Assert.Equal(LoraFormat.DiffusersBareDit, LoraFormatDetector.Detect(Descriptors("layers.0.self_attention.to_q.lora_A.weight")));
         Assert.Equal(LoraFormat.Flux3, LoraFormatDetector.Detect(Descriptors("transformer.mode_blocks.image.0.attn.to_q.lora_A.weight")));
+        // ai-toolkit's underscored Flux spelling stays Flux: no MOSS-Image module hides behind it.
+        Assert.Equal(LoraFormat.AiToolkitFlux,
+            LoraFormatDetector.Detect(Descriptors("lora_transformer_single_transformer_blocks_0_attn_to_q.lora_A.weight")));
     }
 
     [Theory]
@@ -56,6 +61,8 @@ public sealed unsafe class MossImageAssetTests : IDisposable
     [InlineData("lora_unet_text_embedder_proj", "text_embedder.proj")]
     [InlineData("lora_unet_time_embedding_0", "time_embedding.0")]
     [InlineData("lora_unet_shared_block_modulation", "shared_block_modulation")]
+    [InlineData("lora_transformer_layers_3_proj_k", "layers.3.proj.k")]
+    [InlineData("lora_diffusion_model_layers_0_proj_ffn_up_gate", "layers.0.proj.ffn_up_gate")]
     public void TryResolve_MapsEachSpellingToTheTransformerModule(string root, string expected)
     {
         Assert.True(MossImageLoraMapper.TryResolve(root, out string module));

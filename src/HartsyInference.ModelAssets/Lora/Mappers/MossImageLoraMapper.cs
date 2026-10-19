@@ -6,12 +6,15 @@ namespace HartsyInference.ModelAssets.Lora.Mappers;
 
 /// <summary>Parses MOSS-Image LoRA files onto the transformer keys <c>MossImageTransformer</c> loads, in each spelling a
 /// trainer emits: diffusers/PEFT under <c>transformer.</c> (OpenMOSS's diffusers pipeline), ComfyUI's
-/// <c>diffusion_model.</c> (its built-in LoRA loader on the ComfyUI export), bare module names, and kohya
-/// <c>lora_unet_</c>. Every spelling names the same module once its wrapper is gone, so no rows are reordered or split;
-/// names resolve through <see cref="MossImageKeyNames"/>.</summary>
+/// <c>diffusion_model.</c> (its built-in LoRA loader on the ComfyUI export), bare module names, and underscored
+/// <c>lora_unet_</c> / <c>lora_transformer_</c> / <c>lora_diffusion_model_</c> (kohya and other trainers). Ostris /
+/// ai-toolkit edit LoRAs adapt the same modules as any other. Every spelling names the same module once its wrapper is
+/// gone, so no rows are reordered or split; names resolve through <see cref="MossImageKeyNames"/>.</summary>
 public static class MossImageLoraMapper
 {
-    private const string KohyaPrefix = "lora_unet_";
+    /// <summary>Underscored roots, longest first: kohya's <c>lora_unet_</c> and the <c>lora_transformer_</c> /
+    /// <c>lora_diffusion_model_</c> spellings other trainers (ai-toolkit's older exports among them) write.</summary>
+    private static readonly string[] UnderscoredPrefixes = ["lora_diffusion_model_", "lora_transformer_", "lora_unet_"];
 
     /// <summary>Dotted wrappers in front of a module path, longest first; a root carrying none is the module path itself.</summary>
     private static readonly string[] DottedWrappers = ["model.diffusion_model.", "diffusion_model.", "transformer."];
@@ -53,9 +56,17 @@ public static class MossImageLoraMapper
     public static bool TryResolve(string root, out string module)
     {
         ArgumentNullException.ThrowIfNull(root);
-        string? resolved = root.StartsWith(KohyaPrefix, StringComparison.Ordinal)
-            ? MossImageKeyNames.Modules.FromKohya(root[KohyaPrefix.Length..])
-            : StripDottedWrapper(root) is string body && MossImageKeyNames.Modules.IsModule(body) ? body : null;
+        string? resolved = null;
+        foreach (string prefix in UnderscoredPrefixes)
+        {
+            if (root.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                resolved = MossImageKeyNames.Modules.FromKohya(root[prefix.Length..]);
+                break;
+            }
+        }
+        if (resolved is null && !root.StartsWith("lora_", StringComparison.Ordinal))
+            resolved = StripDottedWrapper(root) is string body && MossImageKeyNames.Modules.IsModule(body) ? body : null;
         module = resolved ?? string.Empty;
         return resolved is not null;
     }

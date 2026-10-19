@@ -60,6 +60,40 @@ public static class RequestExtras
     /// <summary>Fraction of the steps at which skip-layer guidance stops (exclusive).</summary>
     public const string SlgStop = "slg.stop";
 
+    /// <summary>Edit references attend through cached keys and values (true, ai-toolkit's <c>kv_cache</c> default) or ride
+    /// in the live sequence (false, for an adapter trained with <c>kv_cache: false</c>).</summary>
+    public const string ReferenceKvCache = "reference.kv_cache";
+
+    /// <summary>Pixel budget of each reference's VAE copy (scaled down only); 0 keeps each image's own size.</summary>
+    public const string ReferenceMaxPixels = "reference.max_pixels";
+
+    /// <summary>Pixel budget of each reference's copy for the text encoder's vision tower (scaled down only).</summary>
+    public const string ReferenceVisionPixels = "reference.vision_pixels";
+
+    /// <summary>The boolean at <paramref name="key"/> (<c>true/false</c>, <c>on/off</c>, <c>1/0</c>, or a JSON boolean), or
+    /// <paramref name="fallback"/> when absent or unparseable (logged).</summary>
+    public static bool Bool(IReadOnlyDictionary<string, object>? extra, string key, bool fallback)
+    {
+        if (extra is null || !extra.TryGetValue(key, out object? value) || value is null)
+            return fallback;
+        switch (value)
+        {
+            case bool flag:
+                return flag;
+            case JsonElement { ValueKind: JsonValueKind.True }:
+                return true;
+            case JsonElement { ValueKind: JsonValueKind.False }:
+                return false;
+        }
+        string text = (value is JsonElement json ? json.ToString() : Convert.ToString(value, CultureInfo.InvariantCulture) ?? "").Trim();
+        if (text is "1" || text.Equals("true", StringComparison.OrdinalIgnoreCase) || text.Equals("on", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (text is "0" || text.Equals("false", StringComparison.OrdinalIgnoreCase) || text.Equals("off", StringComparison.OrdinalIgnoreCase))
+            return false;
+        HartsyInference.Core.Logging.Logs.Warning($"[Features][Extra] '{key}' is not a boolean ('{value}'); using {fallback}.");
+        return fallback;
+    }
+
     /// <summary>The string at <paramref name="key"/>, or <paramref name="fallback"/> when absent or blank.</summary>
     public static string? String(IReadOnlyDictionary<string, object>? extra, string key, string? fallback = null)
     {

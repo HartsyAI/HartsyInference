@@ -117,6 +117,36 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Path to an extra reference image for an edit family; repeatable. The init image is the first reference.")]
         public string[]? ReferenceImages { get; init; }
 
+        /// <summary>How edit references attend: cached keys/values (on) or in the live sequence (off).</summary>
+        [CommandOption("--reference-kv-cache")]
+        [Description("on (default): references attend through cached keys/values, ai-toolkit's kv_cache default; off: they ride in the sequence, for a LoRA trained with kv_cache: false. MOSS-Image only.")]
+        public string? ReferenceKvCache { get; init; }
+
+        /// <summary>Pixel budget of each reference's VAE copy.</summary>
+        [CommandOption("--reference-max-pixels")]
+        [Description("Pixel budget each reference is scaled down to before the VAE (default 1048576; 0 keeps its size). MOSS-Image only.")]
+        public int? ReferenceMaxPixels { get; init; }
+
+        /// <summary>Pixel budget of each reference's vision-tower copy.</summary>
+        [CommandOption("--reference-vision-pixels")]
+        [Description("Pixel budget each reference is scaled down to for the text encoder's vision tower (default 147456 = 384²). MOSS-Image only.")]
+        public int? ReferenceVisionPixels { get; init; }
+
+        /// <summary>VAE override.</summary>
+        [CommandOption("--vae")]
+        [Description("Path or name of a VAE to use instead of the family's default.")]
+        public string? Vae { get; init; }
+
+        /// <summary>Text-encoder override for families with a Qwen encoder.</summary>
+        [CommandOption("--text-encoder")]
+        [Description("Path or name of the Qwen text encoder to use instead of the family's default (MOSS-Image: a Qwen3.5-9B safetensors, folder or GGUF).")]
+        public string? TextEncoder { get; init; }
+
+        /// <summary>Vision tower for a text encoder whose file has none.</summary>
+        [CommandOption("--vision-encoder")]
+        [Description("Safetensors (or folder) holding the text encoder's vision tower (visual.* keys), when the encoder file has none; needed for reference images.")]
+        public string? VisionEncoder { get; init; }
+
         /// <summary>Image-guidance (InstructPix2Pix) scale for dual-CFG edit models; unset uses the family default.</summary>
         [CommandOption("--ip2p-cfg")]
         [Description("Image-guidance scale for dual-CFG edit models (OmniGen2 default 2.0, Boogu default 1.0). Requires --init-image on an edit family.")]
@@ -241,6 +271,12 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         {
             parameters.Put("reference-images", string.Join('\n', settings.ReferenceImages));
         }
+        parameters.PutIfSet("reference-kv-cache", settings.ReferenceKvCache);
+        parameters.PutIfSet("reference-max-pixels", settings.ReferenceMaxPixels);
+        parameters.PutIfSet("reference-vision-pixels", settings.ReferenceVisionPixels);
+        parameters.PutIfSet("vae", settings.Vae);
+        parameters.PutIfSet("text-encoder", settings.TextEncoder);
+        parameters.PutIfSet("vision-encoder", settings.VisionEncoder);
         parameters.PutIfSet("ip2p-cfg", settings.Ip2pCfg);
         parameters.PutIfSet("mask", settings.Mask);
         parameters.PutIfSet("mask-grow", settings.MaskGrow);

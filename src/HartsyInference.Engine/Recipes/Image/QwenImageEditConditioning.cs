@@ -1,4 +1,3 @@
-using HartsyInference.Core.Logging;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Prompting;
@@ -57,60 +56,28 @@ public static class QwenImageEditConditioning
     public static References? Resolve(QwenImageEditTemplate template, ImageData? initImage, IReadOnlyList<ImageData>? extraReferences)
     {
         ArgumentNullException.ThrowIfNull(template);
-        List<ImageData> ordered = new List<ImageData>(template.MaxReferences);
-        if (initImage is not null)
+        ReferenceImagePolicy policy = PolicyFor(template);
+        IReadOnlyList<ImageData> ordered = ReferenceImageResolver.Collect(initImage, extraReferences, policy, "QwenImageEdit");
+        ResolvedReferences? resolved = ReferenceImageResolver.Resolve(ordered, policy);
+        return resolved is null ? null : new References { Latent = resolved.Latent, Vision = resolved.Vision };
+    }
+
+    /// <summary>The template's reference policy: the VAE copy at ~1 MP and the vision copy at the template's area, both
+    /// scaled up or down as ComfyUI's encode nodes do, extra images dropped.</summary>
+    public static ReferenceImagePolicy PolicyFor(QwenImageEditTemplate template)
+    {
+        ArgumentNullException.ThrowIfNull(template);
+        return new ReferenceImagePolicy
         {
-            ordered.Add(initImage);
-        }
-        int offered = ordered.Count;
-        if (extraReferences is not null)
-        {
-            offered += extraReferences.Count;
-            foreach (ImageData reference in extraReferences)
-            {
-                if (reference is not null && ordered.Count < template.MaxReferences)
-                {
-                    ordered.Add(reference);
-                }
-            }
-        }
-        if (offered > ordered.Count)
-        {
-            Logs.Warning($"[QwenImageEdit] {offered} reference images supplied; the edit template addresses "
-                + $"{template.MaxReferences}, so the last {offered - ordered.Count} were dropped.");
-        }
-        if (ordered.Count == 0)
-        {
-            return null;
-        }
-        List<Tensor> latent = new List<Tensor>(ordered.Count);
-        List<Tensor> vision = new List<Tensor>(ordered.Count);
-        try
-        {
-            foreach (ImageData reference in ordered)
-            {
-                // 16, not ComfyUI's 8: packing the reference latent needs the patch size to divide it too.
-                (int latentW, int latentH) = FeatureImaging.ScaleToArea(reference.Width, reference.Height, LatentTargetArea, multiple: 16);
-                latent.Add(FeatureImaging.RgbToTensorMinusOneOne(
-                    FeatureImaging.ResizeRgb24(reference, latentW, latentH), latentW, latentH));
-                (int visionW, int visionH) = FeatureImaging.ScaleToArea(reference.Width, reference.Height, template.VisionTargetArea, multiple: 1);
-                vision.Add(FeatureImaging.RgbToTensorZeroOne(
-                    FeatureImaging.ResizeRgb24(reference, visionW, visionH), visionW, visionH));
-            }
-        }
-        catch
-        {
-            foreach (Tensor tensor in latent)
-            {
-                tensor.Dispose();
-            }
-            foreach (Tensor tensor in vision)
-            {
-                tensor.Dispose();
-            }
-            throw;
-        }
-        return new References { Latent = latent, Vision = vision };
+            MaxReferences = template.MaxReferences,
+            LatentTargetArea = LatentTargetArea,
+            LatentUpscale = true,
+            // 16, not ComfyUI's 8: packing the reference latent needs the patch size to divide it too.
+            LatentMultiple = 16,
+            VisionTargetArea = template.VisionTargetArea,
+            VisionUpscale = true,
+            Overflow = ReferenceOverflow.Drop,
+        };
     }
 
     /// <summary>Builds the templated edit-instruction token ids plus the prefix-drop index (the count of leading
