@@ -34,6 +34,11 @@ internal static unsafe class RopeFamilyGoldenCases
         "anima_freqs", "anima_device_tables",
         "flux_forward", "flux_gpu", "flux_gpu_gqa_kontext",
         "hidream_gpu",
+        // Large, non-square and odd grids: the positions and table sizes of 2K images (128 tokens a side), 16:9 frames, and
+        // grids whose centering splits unevenly (Qwen-Image's native 1328² is 83×83).
+        "qwen_device_joint_odd_1328", "qwen_apply_image_odd", "qwen21_device_image_wide_2k", "hunyuan_gpu_2048",
+        "zimage_gpu_2048", "kandinsky5_apply_wide_2k", "moss_joint_2048", "omnigen2_staged_wide_2k", "lens_staged_joint_odd",
+        "anima_device_tables_2048", "flux_gpu_2048", "stableaudio_tables_long",
     ];
 
     /// <summary>Runs <paramref name="name"/> and returns its digests as space-separated <c>label=hex</c> pairs.</summary>
@@ -218,6 +223,80 @@ internal static unsafe class RopeFamilyGoldenCases
                 rope.Precompute(ids);
                 ids.Dispose();
                 return RotatePrePermute(128, GridH * GridW + TextLength, Heads, (q, k) => rope.ApplyGpu(cpu, q, k, Heads));
+            }
+            case "qwen_device_joint_odd_1328":
+            {
+                QwenImageRope rope = new();
+                (Tensor cos, Tensor sin) = rope.GetOrBuildJointTables(cpu, 83, 83, TextLength,
+                    QwenImageRope.ComputeTextPositionStart(83, 83));
+                return DigestsAndRelease(rope, ("cos", cos), ("sin", sin));
+            }
+            case "qwen_apply_image_odd":
+                return Rotate(128, 65 * 41, (q, k) => new QwenImageRope().ApplyImage(q, k, 1, Heads, 65, 41));
+            case "qwen21_device_image_wide_2k":
+            {
+                QwenImage21Rope rope = new();
+                (Tensor cos, Tensor sin) = rope.GetOrBuildImageTables(cpu, TextLength, 72, 128);
+                return DigestsAndRelease(rope, ("cos", cos), ("sin", sin));
+            }
+            case "hunyuan_gpu_2048":
+                return RotatePrePermute(128, 128 * 128, Heads,
+                    (q, k) => new HunyuanImageRope().ApplyGpu(cpu, q, k, Heads, [128, 128]));
+            case "zimage_gpu_2048":
+            {
+                ZImageRope rope = new();
+                Tensor ids = ZImageRope.BuildPositionIds(32, 128, 128, 128 * 128);
+                rope.Precompute(ids);
+                ids.Dispose();
+                return RotatePrePermute(128, 32 + 128 * 128, Heads, (q, k) => rope.ApplyGpu(cpu, q, k, Heads));
+            }
+            case "kandinsky5_apply_wide_2k":
+            {
+                Kandinsky5Rope rope = new(128);
+                rope.Precompute3D([16, 56, 56], 1, 72, 128, 0, 1f, 2f, 2f);
+                return Rotate(128, 72 * 128, (q, k) => rope.Apply(q, k, 1, Heads, 72 * 128));
+            }
+            case "moss_joint_2048":
+            {
+                (Tensor cos, Tensor sin) = MossImageRope.Joint(128, 128, TextLength, 128, 10000f);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "omnigen2_staged_wide_2k":
+            {
+                using OmniGen2Rope rope = new();
+                (Tensor imageCos, Tensor imageSin) = rope.GetOrBuildImageTables(72, 128, TextLength);
+                (Tensor jointCos, Tensor jointSin) = rope.GetOrBuildJointTables(TextLength, 72, 128);
+                return Digests(("image_cos", imageCos), ("image_sin", imageSin), ("joint_cos", jointCos), ("joint_sin", jointSin));
+            }
+            case "lens_staged_joint_odd":
+            {
+                LensRope rope = new();
+                (Tensor cos, Tensor sin) = rope.GetOrBuildJointTables(127, 65, TextLength, LensRope.ComputeTextPositionStart(127, 65));
+                return DigestsAndRelease(rope, ("cos", cos), ("sin", sin));
+            }
+            case "anima_device_tables_2048":
+            {
+                AnimaRope rope = new(128, 10000f, (1f, 4f, 4f));
+                (Tensor cos, Tensor sin) = rope.GetOrCreateTables(cpu, 1, 128, 128);
+                string digests = Digests(("cos", cos), ("sin", sin));
+                rope.ReleaseGpuTables(cpu);
+                return digests;
+            }
+            case "flux_gpu_2048":
+            {
+                FluxRope rope = new([16, 56, 56], 10000);
+                Tensor ids = FluxRope.BuildPositionIds(TextLength, 128, 128);
+                rope.Precompute(ids);
+                ids.Dispose();
+                return RotatePrePermute(128, TextLength + 128 * 128, Heads, (q, k) => rope.ApplyGpu(cpu, q, k, Heads));
+            }
+            case "stableaudio_tables_long":
+            {
+                float[] invFreq = new float[16];
+                for (int i = 0; i < invFreq.Length; i++) invFreq[i] = 1f / MathF.Pow(10000f, i / 16f);
+                Tensor cos = StableAudioRope.BuildCosTable(invFreq, 2049, 64);
+                Tensor sin = StableAudioRope.BuildSinTable(invFreq, 2049, 64);
+                return DigestsAndDispose(cos, sin);
             }
             default:
                 throw new ArgumentException($"Unknown RoPE golden case '{name}'.", nameof(name));
