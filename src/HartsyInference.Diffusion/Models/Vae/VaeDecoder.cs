@@ -10,6 +10,9 @@ public sealed class VaeDecoder
 {
     private readonly VaeConfig _config;
 
+    // The decoder's stage widths: the encoder's, unless the checkpoint's decoder is narrower (FLUX.2 small decoder).
+    private readonly int[] _decoderChannels;
+
     // post_quant_conv (optional, SD1.5/SDXL only)
     private Tensor? _postQuantConvWeight;
     private Tensor? _postQuantConvBias;
@@ -41,8 +44,9 @@ public sealed class VaeDecoder
     public VaeDecoder(VaeConfig config)
     {
         _config = config;
+        _decoderChannels = config.DecoderBlockOutChannels ?? config.BlockOutChannels;
 
-        int[] blockChannels = config.BlockOutChannels;
+        int[] blockChannels = _decoderChannels;
         int midChannels = blockChannels[^1];
 
         // Mid-block: two ResNet blocks with attention between them (all at midChannels)
@@ -97,8 +101,15 @@ public sealed class VaeDecoder
             _postQuantConvBias = weights["post_quant_conv.bias"];
         }
 
-        // conv_in
-        _convInWeight = weights["decoder.conv_in.weight"];
+        // conv_in: a checkpoint whose decoder is built for other widths would otherwise load silently and decode garbage.
+        Tensor convIn = weights["decoder.conv_in.weight"];
+        if (convIn.Shape[0] != _decoderChannels[^1])
+        {
+            throw new InvalidDataException(
+                $"VAE decoder conv_in has {convIn.Shape[0]} channels but the decoder is built for {_decoderChannels[^1]}; "
+                + "the checkpoint's decoder widths do not match this VaeConfig.");
+        }
+        _convInWeight = convIn;
         _convInBias = weights["decoder.conv_in.bias"];
 
         // mid_block
@@ -175,7 +186,7 @@ public sealed class VaeDecoder
         int batch = (int)z.Shape[0];
         int h = (int)z.Shape[2];
         int w = (int)z.Shape[3];
-        int midCh = _config.BlockOutChannels[^1];
+        int midCh = _decoderChannels[^1];
 
         TensorShape convInOutShape = new TensorShape(batch, midCh, h, w);
         Tensor hidden = new Tensor(convInOutShape, dtype);
@@ -195,10 +206,10 @@ public sealed class VaeDecoder
         hidden = midOut1;
 
         // 5. Up-blocks
-        int[] reversedChannels = new int[_config.BlockOutChannels.Length];
+        int[] reversedChannels = new int[_decoderChannels.Length];
         for (int i = 0; i < reversedChannels.Length; i++)
         {
-            reversedChannels[i] = _config.BlockOutChannels[^(i + 1)];
+            reversedChannels[i] = _decoderChannels[^(i + 1)];
         }
 
         for (int blockIdx = 0; blockIdx < _upBlockResNets.Length; blockIdx++)
@@ -234,7 +245,7 @@ public sealed class VaeDecoder
         // 6. Fused GroupNorm+SiLU → conv_out
         int finalH = (int)hidden.Shape[2];
         int finalW = (int)hidden.Shape[3];
-        int finalCh = _config.BlockOutChannels[0];
+        int finalCh = _decoderChannels[0];
 
         TensorShape finalShape = new TensorShape(batch, finalCh, finalH, finalW);
         Tensor siluOut = new Tensor(finalShape, dtype);
@@ -614,7 +625,7 @@ public sealed class VaeDecoder
     /// full output resolution that still carries the previous block's channel count.</summary>
     private long EstimateDecodeWorkspaceBytes(int latentH, int latentW, int elemSize)
     {
-        int[] ch = _config.BlockOutChannels;
+        int[] ch = _decoderChannels;
         int numBlocks = ch.Length;
         long h = latentH, w = latentW;
         long prevCh = ch[^1];

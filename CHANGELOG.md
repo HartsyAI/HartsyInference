@@ -6,6 +6,11 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.380
+
+- **Fixed: MOSS-Image produced noise.** The FLUX.2 VAE loader built every decoder at the 128-512 preset, but the MOSS-Image folder's decoder is 96-384 wide, and the weights loaded into the wrong layers with no error. The decoder widths now come from the checkpoint (`VaeConfig.DecoderBlockOutChannels`), and a `conv_in` width mismatch fails loudly. FLUX.2, FLUX.3 and Lens files keep their widths.
+- **Changed: MOSS-Image's fallback encoder is the bf16 Qwen3.5-9B safetensors, and its fallback VAE is `flux2-vae_small`.** The Q8 GGUF encoder's hidden states diverge from the bf16 model (relative L2 0.85 on MOSS's prompt), so single-file checkpoints produced unrelated images. The GGUF loader does not undo llama.cpp's Qwen3.5 conventions (RMSNorm `+1` offset, linear-attention head order); that is still open for any other GGUF Qwen3.5 user.
+
 ## alpha.379
 
 - **Changed: Qwen-Image 2.1 Turbo downloads Comfy-Org's fused file.** The catalog now fetches `Comfy-Org/Qwen-Image-2.1` `diffusion_models/qwen_image_2.1_turbo_bf16.safetensors` in place of the two-shard diffusers release. A `diffusion_model` wrapper prefix on that file is stripped, and its fused `img_mlp.gate_up` passes through unchanged, pinned by a converter test. Still unverified on real weights.
