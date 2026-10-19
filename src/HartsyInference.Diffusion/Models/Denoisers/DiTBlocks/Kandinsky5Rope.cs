@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -18,19 +19,33 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// by the per-axis position. Concatenated rope = [t-rope, h-rope, w-rope].</item>
 /// </list>
 /// In both cases the resulting cos/sin tables are <c>[seq_len, head_dim/2]</c>; <see cref="ApplyRotation"/>
-/// rotates each consecutive pair of values <c>(vec[2i], vec[2i+1])</c> by the corresponding angle.</summary>
+/// rotates each consecutive pair of values <c>(vec[2i], vec[2i+1])</c> by the corresponding angle.
+///
+/// Host pairs are computed by <see cref="Kandinsky5PosEmbed"/>, which owns the coordinate scales. The device rows are
+/// duplicated pairs in a <see cref="RopeTableCache"/> whose host writer copies those pairs.</summary>
 public sealed unsafe class Kandinsky5Rope
 {
+    private static readonly RopeTableSettings DeviceTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.MultiplyByInverse,
+        Layout = RopeTableLayout.InterleavedPair,
+        Preload = true,
+        RetainedSignatures = 1,
+    };
+
     private readonly int _headDim;
     private readonly float _theta;
 
     private float[]? _cosCache;
     private float[]? _sinCache;
     private int _cachedSeqLen;
-    private int _version;
     private string? _precomputeKey;
-    private int _tableVersion = -1;
-    private Tensor? _tableCos, _tableSin;
+
+    // Device rows. The cache is bound to one axis layout, so it is recreated when the layout changes. Every new precompute
+    // clears it, so the rows always come from the latest host pairs.
+    private RopeTableCache? _deviceTables;
+    private int[]? _deviceAxes;
+    private float[]? _signature;
 
     /// <summary>Creates a Kandinsky 5 rope with the given head dim and base period.</summary>
     public Kandinsky5Rope(int headDim, float theta = 10000.0f)
@@ -53,29 +68,13 @@ public sealed unsafe class Kandinsky5Rope
         string key = $"1d:{positions.Length}:{(positions.Length > 0 ? positions[0] : 0)}:{(positions.Length > 0 ? positions[^1] : 0)}";
         if (key == _precomputeKey && _cosCache is not null) return;
         _precomputeKey = key;
-        _version++;
 
         int seqLen = positions.Length;
         int halfDim = _headDim / 2;
-        _cosCache = new float[seqLen * halfDim];
-        _sinCache = new float[seqLen * halfDim];
-        _cachedSeqLen = seqLen;
-
-        Span<double> freqs = stackalloc double[halfDim];
-        for (int k = 0; k < halfDim; k++)
-            freqs[k] = 1.0 / Math.Pow(_theta, (double)(2 * k) / _headDim);
-
-        for (int s = 0; s < seqLen; s++)
-        {
-            double pos = positions[s];
-            int rowOffset = s * halfDim;
-            for (int k = 0; k < halfDim; k++)
-            {
-                double angle = pos * freqs[k];
-                _cosCache[rowOffset + k] = (float)Math.Cos(angle);
-                _sinCache[rowOffset + k] = (float)Math.Sin(angle);
-            }
-        }
+        float[] cos = new float[seqLen * halfDim];
+        float[] sin = new float[cos.Length];
+        Kandinsky5PosEmbed.Fill1D(_theta, _headDim, positions, cos, sin);
+        Publish([_headDim], cos, sin, seqLen, Kandinsky5PosEmbed.Signature1D(positions));
     }
 
     /// <summary>Precomputes the 3D RoPE tables for visual tokens flattened in <c>(t, h, w)</c> order. Each axis contributes <c>axesDims[i]/2</c> frequency pairs concatenated along the head dim. Position grid is <c>[duration, height, width]</c> in patch units (after <c>patch_size</c>).</summary>
@@ -102,61 +101,13 @@ public sealed unsafe class Kandinsky5Rope
         string key = $"3d:{string.Join(',', axesDims)}:{duration}:{height}:{width}:{tStart}:{scaleT}:{scaleH}:{scaleW}";
         if (key == _precomputeKey && _cosCache is not null) return;
         _precomputeKey = key;
-        _version++;
 
         int seqLen = duration * height * width;
         int halfDim = _headDim / 2;
-        _cosCache = new float[seqLen * halfDim];
-        _sinCache = new float[seqLen * halfDim];
-        _cachedSeqLen = seqLen;
-
-        // Per-axis frequency tables.
-        int dt = axesDims[0], dh = axesDims[1], dw = axesDims[2];
-        int pt = dt / 2, ph = dh / 2, pw = dw / 2;
-        Span<double> ft = stackalloc double[pt];
-        Span<double> fh = stackalloc double[ph];
-        Span<double> fw = stackalloc double[pw];
-        for (int k = 0; k < pt; k++) ft[k] = 1.0 / Math.Pow(_theta, (double)(2 * k) / dt);
-        for (int k = 0; k < ph; k++) fh[k] = 1.0 / Math.Pow(_theta, (double)(2 * k) / dh);
-        for (int k = 0; k < pw; k++) fw[k] = 1.0 / Math.Pow(_theta, (double)(2 * k) / dw);
-
-        for (int t = 0; t < duration; t++)
-        {
-            double posT = (t + tStart) / (double)scaleT;
-            for (int h = 0; h < height; h++)
-            {
-                double posH = h / (double)scaleH;
-                for (int w = 0; w < width; w++)
-                {
-                    double posW = w / (double)scaleW;
-                    int s = (t * height + h) * width + w;
-                    int rowOffset = s * halfDim;
-
-                    int k = 0;
-                    for (int i = 0; i < pt; i++)
-                    {
-                        double angle = posT * ft[i];
-                        _cosCache[rowOffset + k] = (float)Math.Cos(angle);
-                        _sinCache[rowOffset + k] = (float)Math.Sin(angle);
-                        k++;
-                    }
-                    for (int i = 0; i < ph; i++)
-                    {
-                        double angle = posH * fh[i];
-                        _cosCache[rowOffset + k] = (float)Math.Cos(angle);
-                        _sinCache[rowOffset + k] = (float)Math.Sin(angle);
-                        k++;
-                    }
-                    for (int i = 0; i < pw; i++)
-                    {
-                        double angle = posW * fw[i];
-                        _cosCache[rowOffset + k] = (float)Math.Cos(angle);
-                        _sinCache[rowOffset + k] = (float)Math.Sin(angle);
-                        k++;
-                    }
-                }
-            }
-        }
+        float[] cos = new float[seqLen * halfDim];
+        float[] sin = new float[cos.Length];
+        Kandinsky5PosEmbed.Fill3D(_theta, axesDims, _headDim, duration, height, width, tStart, scaleT, scaleH, scaleW, cos, sin);
+        Publish(axesDims, cos, sin, seqLen, Kandinsky5PosEmbed.Signature3D(duration, height, width, tStart));
     }
 
     /// <summary>Applies RoPE rotation to Q and K in-place. Q/K are <c>[B, numHeads, seqLen, headDim]</c> contiguous floats. Each pair <c>(x[2i], x[2i+1])</c> is rotated by <c>(cos[i], sin[i])</c>.</summary>
@@ -190,47 +141,56 @@ public sealed unsafe class Kandinsky5Rope
         }
     }
 
-    /// <summary>GPU-resident RoPE on a PRE-head-permute <c>[1, S, H, D]</c> Q/K pair (byte-identical to the <c>[S, heads·headDim]</c> layout <see cref="IBackend.WanRopeInterleaved"/> expects) — the rotation math is the same interleaved GPT-J pairing, so the Wan kernel applies verbatim. Replaces the per-block host excursion (a full Q/K D2H → trig → H2D round trip per attention, the dominant per-step cost). The duplicated-pair cos/sin tables are built ONCE per Precompute (version-keyed) and preloaded to the GPU weight cache. Requires batch 1; callers keep <see cref="Apply"/> as the batched fallback.</summary>
+    /// <summary>GPU-resident RoPE on a PRE-head-permute <c>[1, S, H, D]</c> Q/K pair (byte-identical to the <c>[S, heads·headDim]</c> layout <see cref="IBackend.WanRopeInterleaved"/> expects) — the rotation math is the same interleaved GPT-J pairing, so the Wan kernel applies verbatim. Replaces the per-block host excursion (a full Q/K D2H → trig → H2D round trip per attention, the dominant per-step cost). The duplicated-pair cos/sin tables are built ONCE per Precompute and preloaded to the GPU weight cache. Requires batch 1; callers keep <see cref="Apply"/> as the batched fallback.</summary>
     public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads, int seqLen)
     {
-        if (_cosCache is null || _sinCache is null)
+        if (_cosCache is null || _sinCache is null || _deviceTables is null || _signature is null)
             throw new InvalidOperationException("Kandinsky5Rope: Precompute must be called before ApplyGpu.");
         if (seqLen != _cachedSeqLen)
             throw new InvalidOperationException(
                 $"Kandinsky5Rope: cached seq_len {_cachedSeqLen} doesn't match requested {seqLen}");
 
-        if (_tableVersion != _version || _tableCos is null)
+        using RopeTableLease lease = _deviceTables.Acquire(backend, 0, seqLen, _signature);
+        (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
+        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+    }
+
+    /// <summary>Installs new host pairs and retires the device rows built from the previous ones.</summary>
+    private void Publish(int[] axes, float[] cos, float[] sin, int seqLen, float[] signature)
+    {
+        if (_deviceTables is null || _deviceAxes is null || !_deviceAxes.AsSpan().SequenceEqual(axes))
         {
-            if (_tableCos is not null)
-            {
-                backend.FreeWeights([_tableCos, _tableSin!]);
-                _tableCos.Dispose();
-                _tableSin!.Dispose();
-            }
-            int halfDim = _headDim / 2;
-            Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-            Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-            float* cp = (float*)cos.DataPointer;
-            float* sp = (float*)sin.DataPointer;
-            for (int s = 0; s < _cachedSeqLen; s++)
-            {
-                int src = s * halfDim;
-                long dst = (long)s * _headDim;
-                for (int i = 0; i < halfDim; i++)
-                {
-                    cp[dst + 2 * i] = _cosCache[src + i]; cp[dst + 2 * i + 1] = _cosCache[src + i];
-                    sp[dst + 2 * i] = _sinCache[src + i]; sp[dst + 2 * i + 1] = _sinCache[src + i];
-                }
-            }
-            backend.PreloadWeights([cos, sin]);
-            _tableCos = cos;
-            _tableSin = sin;
-            _tableVersion = _version;
+            RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = axes, Theta = _theta });
+            RopeTableCache next = new(plan, DeviceTableSettings, hostWriter: (_, tokens, c, s) => CopyHostPairs(tokens, c, s));
+            _deviceTables?.Dispose();
+            _deviceTables = next;
+            _deviceAxes = (int[])axes.Clone();
+        }
+        else
+        {
+            _deviceTables.Clear();
         }
 
-        backend.WanRopeInterleaved(q, _tableCos, _tableSin!, seqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, _tableCos, _tableSin!, seqLen, numHeads, _headDim);
+        _cosCache = cos;
+        _sinCache = sin;
+        _cachedSeqLen = seqLen;
+        _signature = signature;
     }
+
+    /// <summary>Host writer for the device cache: copies the pairs this rope computed for the current precompute.</summary>
+    private void CopyHostPairs(int tokens, Span<float> cos, Span<float> sin)
+    {
+        if (_cosCache is null || _sinCache is null || tokens != _cachedSeqLen)
+            throw new InvalidOperationException("Kandinsky5Rope: host pairs changed while device rows were being built.");
+        _cosCache.AsSpan().CopyTo(cos);
+        _sinCache.AsSpan().CopyTo(sin);
+    }
+
+    private static (Tensor Cos, Tensor Sin) DeviceTablesOf(RopeTableLease lease) =>
+        lease.DeviceCos is { } cos && lease.DeviceSin is { } sin
+            ? (cos, sin)
+            : throw new InvalidOperationException("Kandinsky5Rope device tables require a preloading cache.");
 
     /// <summary>Rotates each consecutive pair via <c>x[2i]'   = cos·x[2i]   - sin·x[2i+1]</c> and <c>x[2i+1]' = sin·x[2i] + cos·x[2i+1]</c>. Equivalent to the diffusers' <c>(rope * x.unsqueeze(-1)).sum(-1)</c> with rope viewed as <c>[c, -s; s, c]</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
