@@ -474,6 +474,12 @@ no bug, any more than one bad seed was proof there was one.
   PTX ISA 9.3; driver 580.x JIT caps at 9.0 → `CUDA error 222: Unsupported .version 9.3`. Fix: pin
   `nvidia-cuda-nvcc==13.0.88` **and** `nvidia-nvvm==13.0.*` (nvvm is the ISA-determining piece, not nvcc)
   into an isolated `pip --target` dir; **verify every emitted PTX starts `.version 9.0` before shipping.**
+- **Pre-Ampere card (sm_75): `CUDA error 218: PTX JIT failed … requires .target sm_80`.** The shipped kernels are
+  built for sm_80 (`build_common.sh` `KERNELS`), and PTX JITs forward only. `CudaKernels` reads each module's
+  `.target` and skips what the device cannot load, logging `[Cuda] This device (SM 7.5) cannot load N kernel
+  module(s)…` at startup; the sm_70/sm_75 modules still load. A later `CUDA_ERROR_INVALID_HANDLE` that carries the
+  same note is a launch of a skipped kernel. Use Vulkan on such a card (`auto` already does); a local `.sm75.ptx`
+  variant beside a kernel is picked on an exact SM 7.5 match.
 - **"Drifted" PTX whose source is current — check the frontend first.** nvcc and nvrtc of one release stamp the
   same `// Cuda compilation tools, release 13.0, V13.0.88` line but emit different PTX for many kernels, so the
   header cannot say which one built a file. Rebuild the kernel with both before blaming the source: if one

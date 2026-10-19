@@ -33,7 +33,7 @@ public sealed partial class CudaKernels
     private void LoadMoeExpertKernels()
     {
         string q4k = Ptx("moe_id_q4k");
-        if (File.Exists(q4k))
+        if (CanLoad(q4k))
         {
             _moeIdQ4kModule = LoadOwnedModule(q4k);
             _moeGateUpIdQ4k = _moeIdQ4kModule.GetFunction("moe_gateup_id_q4k");
@@ -41,7 +41,7 @@ public sealed partial class CudaKernels
             _moeDownIdKsplitQ4k = _moeIdQ4kModule.GetFunction("moe_down_id_ksplit_q4k");
         }
         string q6k = Ptx("moe_id_q6k");
-        if (File.Exists(q6k))
+        if (CanLoad(q6k))
         {
             _moeIdQ6kModule = LoadOwnedModule(q6k);
             _moeGateUpIdQ6k = _moeIdQ6kModule.GetFunction("moe_gateup_id_q6k");
@@ -49,7 +49,7 @@ public sealed partial class CudaKernels
             _moeDownIdKsplitQ6k = _moeIdQ6kModule.GetFunction("moe_down_id_ksplit_q6k");
         }
         string q8 = Ptx("moe_id_q8_0");
-        if (File.Exists(q8))
+        if (CanLoad(q8))
         {
             _moeIdQ8_0Module = LoadOwnedModule(q8);
             _moeGateUpIdQ8_0 = _moeIdQ8_0Module.GetFunction("moe_gateup_id_q8_0");
@@ -57,7 +57,7 @@ public sealed partial class CudaKernels
             _moeDownIdKsplitQ8_0 = _moeIdQ8_0Module.GetFunction("moe_down_id_ksplit_q8_0");
         }
         string q4 = Ptx("moe_id_q4_0");
-        if (File.Exists(q4))
+        if (CanLoad(q4))
         {
             _moeIdQ4_0Module = LoadOwnedModule(q4);
             _moeGateUpIdQ4_0 = _moeIdQ4_0Module.GetFunction("moe_gateup_id_q4_0");
@@ -65,13 +65,13 @@ public sealed partial class CudaKernels
             _moeDownIdKsplitQ4_0 = _moeIdQ4_0Module.GetFunction("moe_down_id_ksplit_q4_0");
         }
         string combine = Ptx("moe_combine_slots");
-        if (File.Exists(combine))
+        if (CanLoad(combine))
         {
             _moeCombineSlotsModule = LoadOwnedModule(combine);
             _moeCombineSlotsF32 = _moeCombineSlotsModule.GetFunction("moe_combine_slots_f32");
         }
         string prefill = Ptx("moe_prefill");
-        if (File.Exists(prefill))
+        if (CanLoad(prefill))
         {
             _moePrefillModule = LoadOwnedModule(prefill);
             _moeGatherRows16 = _moePrefillModule.GetFunction("moe_gather_rows_16");

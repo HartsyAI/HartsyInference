@@ -60,8 +60,12 @@ public static class CudaErrorChecking
             // If we can't look up the error, use the code directly
         }
 
-        throw new CudaException(errorCode, $"{errorName} — {errorString}");
+        // A kernel this device could not load is an unbound (null) function, and launching one is an invalid handle.
+        string? skipped = errorCode == CudaErrorInvalidHandle ? CudaKernels.SkippedModulesNoteForCurrentContext() : null;
+        throw new CudaException(errorCode, skipped is null ? $"{errorName} — {errorString}" : $"{errorName} — {errorString}. {skipped}");
     }
+
+    private const int CudaErrorInvalidHandle = 400;
 
     /// <summary>Throws CudaException if the cuBLAS return code is non-zero.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

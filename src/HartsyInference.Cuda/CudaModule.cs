@@ -24,10 +24,40 @@ public sealed class CudaModule : IDisposable
         }
     }
 
+    private readonly bool _unloadable;
+
     private CudaModule(nint module)
     {
         _module = module;
         if (module != 0) Interlocked.Increment(ref _liveHandleCount);
+    }
+
+    private CudaModule() => _unloadable = true;
+
+    /// <summary>Stands in for a module this device cannot JIT because its PTX targets a newer architecture. Every function
+    /// lookup returns 0, so a kernel table built from it carries unbound kernels instead of failing construction. Owns no
+    /// handle; disposing it does nothing.</summary>
+    internal static CudaModule Unloadable { get; } = new();
+
+    /// <summary>The compute capability a PTX file's <c>.target</c> directive names (80 for <c>sm_80</c>, 120 for
+    /// <c>sm_120a</c>), or 0 when its header names none. The driver JITs PTX forward only, so a device below this number
+    /// cannot load the file.</summary>
+    public static int ReadTargetSm(string ptxPath)
+    {
+        foreach (string line in File.ReadLines(ptxPath).Take(64))
+        {
+            ReadOnlySpan<char> text = line.AsSpan().Trim();
+            if (!text.StartsWith(".target", StringComparison.Ordinal))
+                continue;
+            int at = text.IndexOf("sm_", StringComparison.Ordinal);
+            if (at < 0)
+                return 0;
+            int sm = 0;
+            for (int i = at + 3; i < text.Length && char.IsAsciiDigit(text[i]); i++)
+                sm = sm * 10 + (text[i] - '0');
+            return sm;
+        }
+        return 0;
     }
 
     /// <summary>Loads a PTX file from disk and JIT-compiles it for the current device.</summary>
@@ -136,9 +166,11 @@ public sealed class CudaModule : IDisposable
         return LoadFromBytes(bytes);
     }
 
-    /// <summary>Gets a kernel function handle by name from this module.</summary>
+    /// <summary>Gets a kernel function handle by name from this module; 0 from <see cref="Unloadable"/>.</summary>
     public nint GetFunction(string functionName)
     {
+        if (_unloadable)
+            return 0;
         CudaDriverApi.cuModuleGetFunction(out nint function, Handle, functionName).ThrowOnError();
         return function;
     }

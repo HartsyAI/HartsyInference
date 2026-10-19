@@ -32,14 +32,14 @@ public sealed partial class CudaKernels
     private void LoadMoeKernels()
     {
         string routePath = Ptx("moe_route");
-        if (File.Exists(routePath))
+        if (CanLoad(routePath))
         {
             _moeRouteModule = LoadOwnedModule(routePath);
             _moeRouteF32 = _moeRouteModule.GetFunction("moe_route_f32");
             _softplusF32 = _moeRouteModule.GetFunction("softplus_f32");
         }
         string dispatchPath = Ptx("moe_dispatch");
-        if (File.Exists(dispatchPath))
+        if (CanLoad(dispatchPath))
         {
             _moeDispatchModule = LoadOwnedModule(dispatchPath);
             _moeDispatchCountI32 = _moeDispatchModule.GetFunction("moe_dispatch_count_i32");
@@ -49,7 +49,7 @@ public sealed partial class CudaKernels
         }
         LoadMoeExpertKernels();
         string topKPath = Ptx("lm_topk_f32");
-        if (File.Exists(topKPath))
+        if (CanLoad(topKPath))
         {
             _topKModule = LoadOwnedModule(topKPath);
             _topKF32 = _topKModule.GetFunction("lm_topk_f32");
