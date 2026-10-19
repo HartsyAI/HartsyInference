@@ -823,6 +823,7 @@ public sealed class TextService : ITextService, IDisposable
         return new PassthroughOutputParser(tokenizer, literalSpecialIds, reasoningClose);
     }
 
+    // TODO: this renders the template a second time per request for tokenizers with think tokens. Reuse the encode render (follow-up).
     /// <summary>The reasoning close token when the prompt a model's own Jinja template renders ends inside a think block (its generation prompt prefills
     /// <c>&lt;think&gt;</c>), else null. The passthrough parser then reports the text before that token as reasoning, not as the answer.</summary>
     internal static int? OpenReasoningCloseId(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest, TextRequest request,
