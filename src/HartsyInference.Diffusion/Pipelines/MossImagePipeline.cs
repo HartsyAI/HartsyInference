@@ -5,6 +5,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Prompting;
@@ -73,9 +74,12 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
 
     /// <summary>Generates an image. <paramref name="negative"/> is encoded whenever the CFG scale is not 1 (the reference
     /// runs both branches even below 1); an absent negative is the empty prompt. <see cref="TextToImageRequest.SigmaShift"/>
-    /// is the schedule's time shift (reference 5).</summary>
+    /// is the schedule's time shift (reference 5). With <paramref name="references"/> this is an edit (the Ostris /
+    /// ai-toolkit layout): both prompts' placeholder runs take the vision copies through the encoder, and the VAE copies
+    /// become the DiT's reference tokens.</summary>
     public (byte[] rgbData, int width, int height, int seed) Generate(WeightedTokenSequence prompt, WeightedTokenSequence negative,
-        TextToImageRequest request, MossImageGuidance guidance, Action<GenerationProgress>? onProgress = null)
+        TextToImageRequest request, MossImageGuidance guidance, Action<GenerationProgress>? onProgress = null,
+        ReferenceImageInputs? references = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(prompt);
@@ -86,6 +90,8 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         if (request is ImageToImageRequest && _vaeEncoder is null)
             throw new InvalidOperationException($"{Family} image-to-image and inpaint need the FLUX.2 VAE encoder.");
+        ValidateReferences(references);
+        bool encodes = references is not null || request is ImageToImageRequest;
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         (int requestedSteps, float cfg, int reqWidth, int reqHeight) = Defaults.Resolve(request);
@@ -107,7 +113,8 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         bool masked = plan.MaskPixel is not null;
         Logs.Info($"{Family}: {imgW}x{imgH}, {steps} steps (shift {shift}), cfg={cfg}, uncond skip=[{string.Join(",", guidance.UncondSkipLayers)}]"
             + (guidance.HasSlgBranch ? $", slg {guidance.SlgScale} on [{string.Join(",", guidance.SlgLayers)}]" : "")
-            + $", window {guidance.Start}..{guidance.Stop}, seed={seed}");
+            + $", window {guidance.Start}..{guidance.Stop}, seed={seed}"
+            + (references is null ? "" : $", {references.Count} reference image(s), {references.Options.Mode}"));
         Stopwatch sw = Stopwatch.StartNew();
 
         Tensor? latent = null;
@@ -117,21 +124,28 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         Tensor? weightedUncond = null;
         MossImageConditioning? cond = null;
         MossImageConditioning? uncond = null;
+        ReferenceLatentTokens[]? referenceTokens = null;
         bool graph = false;
         try
         {
-            Tensor condText = EncodePrompt(prompt, CondSlot);
-            Tensor? uncondText = guided ? EncodePrompt(negative, UncondSlot) : null;
+            IReadOnlyList<Tensor> vision = references?.Vision ?? [];
+            Tensor condText = EncodePrompt(prompt, CondSlot, vision);
+            Tensor? uncondText = guided ? EncodePrompt(negative, UncondSlot, vision) : null;
 
-            if (request is ImageToImageRequest)
+            if (encodes)
                 Backend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
             try
             {
+                if (references is not null)
+                {
+                    referenceTokens = Flux2ReferenceEncoder.Encode(Backend, _vaeEncoder!, references.Latent, _bnMean, _bnVar, _bnEps,
+                        _config.PatchSize, _config.VaeDownscaleFactor, Family);
+                }
                 (latent, sourceTokens) = BuildInitialLatent(request, scheduler, patH, patW, seed, plan.StartStep, masked);
             }
             finally
             {
-                if (request is ImageToImageRequest)
+                if (encodes)
                 {
                     Backend.Sync();
                     Backend.FreeWeights(_vaeEncoder!.EnumerateWeights());
@@ -149,8 +163,11 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             weightedUncond = guided && !negative.IsUniformlyUnweighted ? CondTokenWeights.Apply(Backend, uncondText!, null, negative).Cond : null;
             Backend.PreloadWeights(_transformer.EnumerateWeights());
             _ditResident = true;
-            cond = _transformer.PrepareConditioning(Backend, weightedCond ?? condText, patH, patW);
-            uncond = guided ? _transformer.PrepareConditioning(Backend, weightedUncond ?? uncondText!, patH, patW) : null;
+            ReferenceAttentionMode mode = references?.Options.Mode ?? ReferenceAttentionMode.CachedKv;
+            cond = _transformer.PrepareConditioning(Backend, weightedCond ?? condText, patH, patW, referenceTokens, mode);
+            uncond = guided ? _transformer.PrepareConditioning(Backend, weightedUncond ?? uncondText!, patH, patW, referenceTokens, mode) : null;
+            if (references is not null)
+                WarmReferenceCaches(references.Options, cond, uncond, guided, guidance, plan.StartStep, steps);
 
             // The step graph needs the latent at a fixed address that only the in-place Euler update writes, so a
             // second-order sampler (extra forwards, scratch latents) and the inpaint re-blend (a host write) run eagerly.
@@ -205,6 +222,10 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             _transformer.InvalidateStepGraph(Backend);
             cond?.Dispose();
             uncond?.Dispose();
+            if (referenceTokens is not null)
+            {
+                foreach (ReferenceLatentTokens reference in referenceTokens) reference.Tokens.Dispose();
+            }
             weightedCond?.Dispose();
             weightedUncond?.Dispose();
             sourceTokens?.Dispose();
@@ -293,11 +314,17 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Encodes one prompt's final Qwen3.5 hidden states, reusing the last result for the same ids. On a shared
-    /// backend the DiT is evicted first, since the 9B encoder and a resident DiT need not fit together.</summary>
-    private Tensor EncodePrompt(WeightedTokenSequence prompt, int slot)
+    /// <summary>Encodes one prompt's final Qwen3.5 hidden states, reusing the last result for the same ids and images.
+    /// On a shared backend the DiT is evicted first, since the 9B encoder and a resident DiT need not fit together.</summary>
+    private Tensor EncodePrompt(WeightedTokenSequence prompt, int slot, IReadOnlyList<Tensor> images)
     {
-        if (_promptCache.TryGet(slot, prompt.Tokens, 0, out Tensor? cached))
+        int discriminator = 0;
+        if (images.Count > 0)
+        {
+            long signature = ImageSignature.CombineList(images);
+            discriminator = unchecked((int)(signature ^ (signature >> 32))) | 1;
+        }
+        if (_promptCache.TryGet(slot, prompt.Tokens, discriminator, out Tensor? cached))
             return cached!;
         IBackend encoderBackend = TextEncoderBackend;
         if (_ditResident && ReferenceEquals(encoderBackend, Backend))
@@ -309,16 +336,47 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
         try
         {
-            hidden = _textEncoder.Encode(encoderBackend, prompt.Tokens);
+            hidden = images.Count == 0
+                ? _textEncoder.Encode(encoderBackend, prompt.Tokens)
+                : ((IMultimodalFinalHiddenStateEncoder)_textEncoder).Encode(encoderBackend, prompt.Tokens, images);
         }
         finally
         {
             encoderBackend.FreeWeights(_textEncoder.EnumerateWeights());
+            if (images.Count > 0)
+                encoderBackend.FreeWeights(((IMultimodalFinalHiddenStateEncoder)_textEncoder).EnumerateVisionWeights());
             encoderBackend.FreeActivations();
         }
-        Logs.Info($"{Family}: encoded {prompt.Tokens.Length} prompt tokens in {sw.ElapsedMilliseconds}ms");
-        _promptCache.Store(slot, prompt.Tokens, 0, hidden);
+        Logs.Info($"{Family}: encoded {prompt.Tokens.Length} prompt tokens ({images.Count} image(s)) in {sw.ElapsedMilliseconds}ms");
+        _promptCache.Store(slot, prompt.Tokens, discriminator, hidden);
         return hidden;
+    }
+
+    /// <summary>Refuses references the pipeline cannot use before anything is allocated.</summary>
+    private void ValidateReferences(ReferenceImageInputs? references)
+    {
+        if (references is null)
+            return;
+        references.Validate(Family);
+        if (references.Count > MossImageConfig.MaxReferenceImages)
+            throw new ArgumentException($"{Family} conditions on at most {MossImageConfig.MaxReferenceImages} reference images, got {references.Count}.");
+        if (_vaeEncoder is null)
+            throw new InvalidOperationException($"{Family} reference images need the FLUX.2 VAE encoder.");
+        if (references.Vision.Count > 0 && _textEncoder is not IMultimodalFinalHiddenStateEncoder { HasVision: true })
+            throw new InvalidOperationException($"{Family} reference images need a Qwen3.5 encoder with its vision tower.");
+    }
+
+    /// <summary>Checks the reference caches against the device budget and builds the first step's caches, so a failed
+    /// prepass surfaces before the denoise loop starts.</summary>
+    private void WarmReferenceCaches(ReferenceConditioningOptions options, MossImageConditioning cond, MossImageConditioning? uncond,
+        bool guided, MossImageGuidance guidance, int startStep, int steps)
+    {
+        if (options.Mode != ReferenceAttentionMode.CachedKv)
+            return;
+        DType act = Backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
+        long perCache = ReferenceKvCache.EstimateBytes(_config.NumLayers, cond.References!.TokenCount, _config.HiddenSize, act);
+        ReferenceCachePolicy.Check(Backend, options, perCache, guidance.DistinctBranchCaches(guided), Family);
+        _transformer.EnsureReferenceCaches(Backend, guidance.BranchesFor(cond, uncond, guided, startStep, steps));
     }
 
     /// <summary>Initial packed latent: noise for text-to-image; for img2img the encoded source noised at

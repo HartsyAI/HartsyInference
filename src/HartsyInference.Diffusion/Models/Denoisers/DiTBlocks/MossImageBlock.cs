@@ -4,7 +4,9 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>MOSS-Image joint block (<c>_Block</c>) over <c>[image ; text]</c>, modulated by the one
-/// <see cref="MossImageModulation"/> every block shares. No biases.
+/// <see cref="MossImageModulation"/> every block shares. No biases. Reference images of an edit enter either as cached
+/// keys and values (<see cref="ForwardPrefix"/>, then the cached <c>Forward</c>) or as a third segment modulated at
+/// timestep zero (<see cref="ForwardSegmented"/>).
 /// <code>
 /// y = rms(x)·w1·(1 + scale_a) + shift_a
 /// q, k = rope(rms_head(q(y))), rope(rms_head(k(y)))
@@ -76,14 +78,109 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
     /// <summary>Runs the block on the F32 residual stream <paramref name="x"/> <c>[1, S, hidden]</c> and returns a new
     /// F32 tensor; <paramref name="cos"/>/<paramref name="sin"/> are the joint sequence's <c>[1, S, headDim]</c> tables
     /// and <paramref name="act"/> the branch dtype.</summary>
-    public Tensor Forward(IBackend backend, Tensor x, MossImageModulation modulation, Tensor cos, Tensor sin, DType act)
+    public Tensor Forward(IBackend backend, Tensor x, MossImageModulation modulation, Tensor cos, Tensor sin, DType act) =>
+        Forward(backend, x, modulation, cos, sin, act, null, null);
+
+    /// <summary><see cref="Forward(IBackend, Tensor, MossImageModulation, Tensor, Tensor, DType)"/> with cached reference
+    /// keys and values (<see cref="ReferenceKvCache"/>, <c>[1, S_ref, heads, headDim]</c> in <paramref name="act"/>)
+    /// appended after the live ones, so every live query also attends to the references.</summary>
+    public Tensor Forward(IBackend backend, Tensor x, MossImageModulation modulation, Tensor cos, Tensor sin, DType act,
+        Tensor? cachedKeys, Tensor? cachedValues)
     {
+        ArgumentNullException.ThrowIfNull(modulation);
+        if ((cachedKeys is null) != (cachedValues is null))
+            throw new ArgumentException("Cached reference keys and values come together.", nameof(cachedValues));
         int seq = (int)x.Shape[1];
         TensorShape flat = new(1, seq, _hidden);
-        TensorShape heads = new(1, seq, _numHeads, _headDim);
-
         Tensor y = new(flat, act);
         backend.RmsNormModulate(y, x, _norm1!, modulation.ScaleAttn, modulation.ShiftAttn, _eps);
+        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, y, seq, act, cos, sin);
+        int kvSeq = seq;
+        if (cachedKeys is not null)
+        {
+            Tensor keys = ReferenceKvCache.ConcatTokens(backend, k, cachedKeys);
+            k.Dispose();
+            k = keys;
+            Tensor values = ReferenceKvCache.ConcatTokens(backend, v, cachedValues!);
+            v.Dispose();
+            v = values;
+            kvSeq = (int)k.Shape[1];
+        }
+        Tensor attn = TokenMajorAttention.Run(backend, q, k, v, seq, kvSeq, _numHeads, _headDim);
+        return Finish(backend, x, attn, modulation, act);
+    }
+
+    /// <summary>Runs the block on reference tokens alone (a prepass at the references' own modulation, references
+    /// attending only to each other) and hands back this block's post-norm, rotated <paramref name="keys"/> and its
+    /// <paramref name="values"/>, both <c>[1, S_ref, heads, headDim]</c> in <paramref name="act"/>, for a
+    /// <see cref="ReferenceKvCache"/>. Returns the next F32 reference stream.</summary>
+    public Tensor ForwardPrefix(IBackend backend, Tensor x, MossImageModulation modulation, Tensor cos, Tensor sin, DType act,
+        out Tensor keys, out Tensor values)
+    {
+        ArgumentNullException.ThrowIfNull(modulation);
+        int seq = (int)x.Shape[1];
+        Tensor y = new(new TensorShape(1, seq, _hidden), act);
+        backend.RmsNormModulate(y, x, _norm1!, modulation.ScaleAttn, modulation.ShiftAttn, _eps);
+        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, y, seq, act, cos, sin);
+        Tensor attn;
+        try
+        {
+            attn = TokenMajorAttention.Run(backend, q, k, v, seq, seq, _numHeads, _headDim, disposeInputs: false);
+        }
+        catch
+        {
+            k.Dispose();
+            v.Dispose();
+            throw;
+        }
+        finally
+        {
+            q.Dispose();
+        }
+        Tensor result;
+        try
+        {
+            result = Finish(backend, x, attn, modulation, act);
+        }
+        catch
+        {
+            k.Dispose();
+            v.Dispose();
+            throw;
+        }
+        keys = k;
+        values = v;
+        return result;
+    }
+
+    /// <summary>Runs the block over a sequence whose segments take different modulation (live tokens at the step's
+    /// timestep, reference tokens at timestep zero): each norm goes F32 through the segment tables, then to
+    /// <paramref name="act"/>; both gated adds read the segment gates.</summary>
+    public Tensor ForwardSegmented(IBackend backend, Tensor x, SegmentModulation attention, SegmentModulation ffn, Tensor cos,
+        Tensor sin, DType act)
+    {
+        ArgumentNullException.ThrowIfNull(attention);
+        ArgumentNullException.ThrowIfNull(ffn);
+        int seq = (int)x.Shape[1];
+        Tensor y = NormSegmented(backend, x, _norm1!, attention, act);
+        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, y, seq, act, cos, sin);
+        Tensor attn = TokenMajorAttention.Run(backend, q, k, v, seq, seq, _numHeads, _headDim);
+        Tensor projected = OutProject(backend, attn, seq);
+        Tensor x1 = attention.GatedResidual(backend, x, projected);
+        projected.Dispose();
+
+        Tensor y2 = NormSegmented(backend, x1, _norm2!, ffn, act);
+        Tensor down = Ffn(backend, y2, seq, act);
+        Tensor result = ffn.GatedResidual(backend, x1, down);
+        x1.Dispose();
+        down.Dispose();
+        return result;
+    }
+
+    /// <summary>Normalized, rotated Q and K and raw V from the modulated input <paramref name="y"/>, which it disposes.</summary>
+    private (Tensor Q, Tensor K, Tensor V) ProjectQkv(IBackend backend, Tensor y, int seq, DType act, Tensor cos, Tensor sin)
+    {
+        TensorShape heads = new(1, seq, _numHeads, _headDim);
         Tensor q = new(heads, act);
         backend.Linear(q, y, _q!, null);
         Tensor k = new(heads, act);
@@ -98,29 +195,66 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
         k.Dispose();
         backend.ApplyRope(qNormed, kNormed, cos, sin);
-        Tensor attn = MossImageAttention.Run(backend, qNormed, kNormed, v, seq, _numHeads, _headDim);
-        Tensor projected = new(flat, DType.F32);
-        backend.Linear(projected, attn, _o!, null);
-        attn.Dispose();
+        return (qNormed, kNormed, v);
+    }
+
+    /// <summary>The attention output projection, the gated residual and the feed-forward half under the uniform
+    /// <paramref name="modulation"/>; disposes <paramref name="attn"/>.</summary>
+    private Tensor Finish(IBackend backend, Tensor x, Tensor attn, MossImageModulation modulation, DType act)
+    {
+        int seq = (int)x.Shape[1];
+        TensorShape flat = new(1, seq, _hidden);
+        Tensor projected = OutProject(backend, attn, seq);
         Tensor x1 = new(flat, DType.F32);
         backend.GatedResidualLastDim(x1, x, projected, modulation.GateAttn);
         projected.Dispose();
 
         Tensor y2 = new(flat, act);
         backend.RmsNormModulate(y2, x1, _norm2!, modulation.ScaleFfn, modulation.ShiftFfn, _eps);
-        Tensor pair = new(new TensorShape(1, seq, 2 * _ffnHidden), act);
-        backend.Linear(pair, y2, _ffnUpGate!, null);
-        y2.Dispose();
-        Tensor activated = new(new TensorShape(1, seq, _ffnHidden), act);
-        backend.SituGlu(activated, pair);
-        pair.Dispose();
-        Tensor down = new(flat, DType.F32);
-        backend.Linear(down, activated, _ffnDown!, null);
-        activated.Dispose();
+        Tensor down = Ffn(backend, y2, seq, act);
         Tensor result = new(flat, DType.F32);
         backend.GatedResidualLastDim(result, x1, down, modulation.GateFfn);
         x1.Dispose();
         down.Dispose();
         return result;
+    }
+
+    /// <summary>The F32 output projection of <paramref name="attn"/>, which it disposes.</summary>
+    private Tensor OutProject(IBackend backend, Tensor attn, int seq)
+    {
+        Tensor projected = new(new TensorShape(1, seq, _hidden), DType.F32);
+        backend.Linear(projected, attn, _o!, null);
+        attn.Dispose();
+        return projected;
+    }
+
+    /// <summary>The F32 SiTU-GLU feed-forward of <paramref name="y"/>, which it disposes.</summary>
+    private Tensor Ffn(IBackend backend, Tensor y, int seq, DType act)
+    {
+        Tensor pair = new(new TensorShape(1, seq, 2 * _ffnHidden), act);
+        backend.Linear(pair, y, _ffnUpGate!, null);
+        y.Dispose();
+        Tensor activated = new(new TensorShape(1, seq, _ffnHidden), act);
+        backend.SituGlu(activated, pair);
+        pair.Dispose();
+        Tensor down = new(new TensorShape(1, seq, _hidden), DType.F32);
+        backend.Linear(down, activated, _ffnDown!, null);
+        activated.Dispose();
+        return down;
+    }
+
+    /// <summary>F32 <c>rms(x)·weight</c> through the segment tables, cast to <paramref name="act"/>.</summary>
+    private Tensor NormSegmented(IBackend backend, Tensor x, Tensor weight, SegmentModulation modulation, DType act)
+    {
+        Tensor normed = new(x.Shape, DType.F32);
+        backend.RmsNorm(normed, x, weight, _eps);
+        Tensor modulated = modulation.Affine(backend, normed);
+        normed.Dispose();
+        if (act == DType.F32)
+            return modulated;
+        Tensor cast = new(modulated.Shape, act);
+        backend.CastToF16(cast, modulated);
+        modulated.Dispose();
+        return cast;
     }
 }

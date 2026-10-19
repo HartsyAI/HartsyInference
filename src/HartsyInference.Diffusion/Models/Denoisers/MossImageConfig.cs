@@ -23,6 +23,9 @@ public sealed record MossImageConfig
     /// <summary>Longest formatted prompt, chat template included, the model was trained on.</summary>
     public const int MaxTextTokens = 4096;
 
+    /// <summary>Reference images an edit conditions on (the Ostris edit node's three inputs).</summary>
+    public const int MaxReferenceImages = 3;
+
     /// <summary>Hidden dimension (= <see cref="NumHeads"/> × <see cref="HeadDim"/>).</summary>
     public required int HiddenSize { get; init; }
 
