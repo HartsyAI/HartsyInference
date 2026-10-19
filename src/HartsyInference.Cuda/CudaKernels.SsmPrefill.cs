@@ -23,7 +23,7 @@ public sealed partial class CudaKernels
     private void LoadSsmPrefillKernels()
     {
         string path = Ptx("ssm_prefill_f32");
-        if (!File.Exists(path))
+        if (!CanLoad(path))
             return;
         _ssmPrefillModule = LoadOwnedModule(path);
         _ssmConvSplitPrefill = _ssmPrefillModule.GetFunction("ssm_conv_split_prefill_f32");

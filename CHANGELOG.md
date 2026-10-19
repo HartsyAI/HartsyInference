@@ -26,6 +26,12 @@ stable release will require. Dates are UTC.
   reasoning inline. Read `reasoning_content` or `TextResult.Reasoning` instead.
 
 - **Changed: RoPE tables come from shared Core utilities.** `HartsyInference.Core.Rope` adds a frozen per-pair frequency plan, a table builder and an expander for the three apply-op layouts (rotate-half, interleaved prefix, interleaved pair), and a per-backend table cache whose leases keep device rows alive while a call reads them. `FluxRope` (FLUX.1, FLUX.2, Chroma, Krea 2, HiDream) and `AnimaRope` build on them. Output is bit-identical: a real-generation A/B on the RTX 4090 matched main pixel for pixel, and golden fixtures pin the tables.
+- **Fixed: CUDA could report no device when several threads made their first CUDA call at once.** `CudaContext` marked
+  CUDA initialized before `cuInit` returned. A concurrent caller then got `CUDA_ERROR_NOT_INITIALIZED`, and `IsAvailable()`
+  returned false on a machine with a GPU. In the full CUDA `GpuIntegration` run, 3 tests failed and 11 skipped silently
+  this way. Callers now wait for the first `cuInit`. A failed `cuInit` is retried, so later callers report the driver's
+  real error. `CudaLibraryResolver.Register` now waits for registration the same way.
+- **Fixed: a CUDA card older than Ampere (sm_75, Turing) failed backend creation.** Every module was loaded eagerly, and the driver refused the sm_80 PTX (`CUDA error 218: PTX JIT failed`). `CudaKernels` now reads each module's `.target` and skips the ones built for a newer architecture: the backend constructs, its sm_70 and sm_75 kernels (elementwise, GGUF dequant, expert) load, `CudaBackend.SkippedKernelModules` lists the rest, and launching one fails with an error that names what was skipped. `auto` backend selection and the CUDA probe pass over such a card to Vulkan. Nothing changes at sm_80 and above.
 
 ## alpha.380
 
