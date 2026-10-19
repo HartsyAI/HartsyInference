@@ -5,7 +5,8 @@ using Xunit;
 
 namespace HartsyInference.API.Tests;
 
-/// <summary>A non-streaming completion carries the model's reasoning in <c>reasoning_content</c>, beside the answer alone in <c>content</c>.</summary>
+/// <summary>A non-streaming completion carries the model's reasoning in <c>reasoning_content</c>, beside the answer alone
+/// in <c>content</c>.</summary>
 public sealed class CompatReasoningMappingTests
 {
     [Fact]

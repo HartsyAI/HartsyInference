@@ -25,9 +25,10 @@ public sealed class DoryTokenizerParityTests
         { "Whenever the user asks how to do anything in SwarmUI — a feature, a setting, an API call, an extension, prompt syntax, model setup, "
             + "troubleshooting — you MUST consult the bundled documentation rather than guessing.",
             [3237, 60095, 1278, 3330, 25747, 2606, 1317, 1653, 7211, 1294, 6767, 3802, 8442, 2251, 1261, 7326, 1044, 1261, 9436, 1044, 1420, 10523,
-                3690, 1044, 1420, 13088, 1044, 16925, 22692, 1044, 3244, 14919, 1044, 38273, 86920, 2251, 1636, 123390, 12627, 1278, 124252, 18189, 6153,
-                2224, 67541, 1046] },
-        { "Use the swarm_docs tool: 1. If you don't already know which doc covers the topic, call swarm_docs with action='list' once.\n\n2. Then call it again.",
+                3690, 1044, 1420, 13088, 1044, 16925, 22692, 1044, 3244, 14919, 1044, 38273, 86920, 2251, 1636, 123390, 12627, 1278, 124252,
+                18189, 6153, 2224, 67541, 1046] },
+        { "Use the swarm_docs tool: 1. If you don't already know which doc covers the topic, call swarm_docs with "
+            + "action='list' once.\n\n2. Then call it again.",
             [15908, 1278, 4250, 3802, 3602, 11540, 9519, 1058, 1032, 1049, 1046, 3367, 1636, 2607, 2405, 5314, 2840, 1799, 8953, 23843, 1278, 17915,
                 1044, 3690, 4250, 3802, 3602, 11540, 1454, 5263, 3760, 6059, 1039, 5785, 1338, 1050, 1046, 6830, 3690, 1494, 2790, 1046] },
         { "In 2026, GPT-4o and HTTPServer cost $1,234.56 (approx. 12%)!\r\n\tTabs   and    spaces\n\n\nend",

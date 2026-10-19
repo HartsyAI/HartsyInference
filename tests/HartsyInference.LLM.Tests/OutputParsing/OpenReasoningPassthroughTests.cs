@@ -7,8 +7,8 @@ using Xunit;
 
 namespace HartsyInference.LLM.Tests.OutputParsing;
 
-/// <summary>A Jinja template that prefills <c>&lt;think&gt;</c> (Dory, Nemotron, Qwen3-Thinking) starts the completion inside the think block: the text up
-/// to <c>&lt;/think&gt;</c> is reasoning, not the answer, and the close token itself is consumed.</summary>
+/// <summary>A Jinja template that prefills <c>&lt;think&gt;</c> (Dory, Nemotron, Qwen3-Thinking) starts the completion inside
+/// the think block: the text up to <c>&lt;/think&gt;</c> is reasoning, not the answer, and the close token itself is consumed.</summary>
 public sealed class OpenReasoningPassthroughTests
 {
     /// <summary>Dory's generation prompt, reduced to its thinking switch.</summary>
@@ -24,7 +24,8 @@ public sealed class OpenReasoningPassthroughTests
         + "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}"
         + "{%- if enable_thinking is defined and enable_thinking is false %}{{- '<think>\\n\\n</think>\\n\\n' }}{%- endif %}{%- endif %}";
 
-    private static readonly IReadOnlyList<ChatMessage> Conversation = [ChatMessage.System("You are Swarmie."), ChatMessage.User("Why is the sky blue?")];
+    private static readonly IReadOnlyList<ChatMessage> Conversation =
+        [ChatMessage.System("You are Swarmie."), ChatMessage.User("Why is the sky blue?")];
 
     [Fact]
     public void ReasoningBeforeTheCloseTokenIsReportedApartFromTheAnswer()
@@ -74,7 +75,8 @@ public sealed class OpenReasoningPassthroughTests
         int[] ids = tok.SplitBytes("The user asks why the sky is blue. Rayleigh", 9, 20);
         List<(TextChunkKind Kind, string? Text, StopReason? Stop)> got = await Stream(tok, ids, close, StopReason.Length);
 
-        Assert.Equal("The user asks why the sky is blue. Rayleigh", string.Concat(got.Where(c => c.Kind == TextChunkKind.Reasoning).Select(c => c.Text)));
+        Assert.Equal("The user asks why the sky is blue. Rayleigh",
+            string.Concat(got.Where(c => c.Kind == TextChunkKind.Reasoning).Select(c => c.Text)));
         Assert.DoesNotContain(got, c => c.Kind == TextChunkKind.Chunk);
         Assert.Equal([(TextChunkKind.Result, "", null), (TextChunkKind.StopReason, null, StopReason.Length)], got.TakeLast(2));
     }
@@ -145,7 +147,8 @@ public sealed class OpenReasoningPassthroughTests
 
     /// <summary>Runs <paramref name="ids"/> through the wiring <c>TextService.StreamAsync</c> uses (parser, translator, pump), ending with the
     /// Result chunk (the parser's content) and <paramref name="stop"/>.</summary>
-    private static async Task<List<(TextChunkKind Kind, string? Text, StopReason? Stop)>> Stream(PieceTokenizer tok, int[] ids, int? close, StopReason stop)
+    private static async Task<List<(TextChunkKind Kind, string? Text, StopReason? Stop)>> Stream(PieceTokenizer tok, int[] ids, int? close,
+        StopReason stop)
     {
         Task<IReadOnlyList<TextChunk>> Produce(Action<TextChunk> sink, CancellationToken ct)
         {
@@ -164,7 +167,8 @@ public sealed class OpenReasoningPassthroughTests
         return got;
     }
 
-    private static string Joined(List<ParsedEvent> events, ParsedEventKind kind) => string.Concat(events.Where(e => e.Kind == kind).Select(e => e.Text));
+    private static string Joined(List<ParsedEvent> events, ParsedEventKind kind) =>
+        string.Concat(events.Where(e => e.Kind == kind).Select(e => e.Text));
 
     /// <summary>The literal tokenizer's vocabulary without the reasoning markers as control tokens.</summary>
     private sealed class NoThinkTokenizer : HartsyInference.ModelAssets.Tokenizers.ILlmTokenizer

@@ -46,7 +46,8 @@ public sealed class DoryChatTemplateTests
         int[] ids = template.Encode(tokenizer, Conversation, addGenerationPrompt: true, enableThinking: null);
         int imStart = tokenizer.SpecialId("<|im_start|>")!.Value;
         Assert.Equal(imStart, ids[0]);
-        Assert.Equal(tokenizer.Encode("<|im_start|>system\n" + Conversation[0].Content + "<|im_end|>\n", addSpecial: true), ids[..TurnEnd(ids, tokenizer, 1)]);
+        Assert.Equal(tokenizer.Encode("<|im_start|>system\n" + Conversation[0].Content + "<|im_end|>\n", addSpecial: true),
+            ids[..TurnEnd(ids, tokenizer, 1)]);
         Assert.Equal(tokenizer.Encode("<|im_start|>assistant\n<think>\n", addSpecial: true), ids[Array.LastIndexOf(ids, imStart)..]);
         Assert.True(jinja.ResolveParserState(tokenizer, Conversation, enableThinking: null, tools: null).ReasoningOpen);
         _output.WriteLine($"{ids.Length} prompt ids; tail [{string.Join(", ", ids[Array.LastIndexOf(ids, imStart)..])}]");

@@ -3,8 +3,9 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.OutputParsing;
 
-/// <summary>Parser for every template without a structured output format: all decoded text is content, control tokens are skipped, so streaming output equals a plain decode.
-/// When the prompt ended inside a think block (a template that prefills <c>&lt;think&gt;</c>), the text up to the reasoning close token is reasoning instead.</summary>
+/// <summary>Parser for every template without a structured output format: all decoded text is content, control tokens are
+/// skipped, so streaming output equals a plain decode. When the prompt ended inside a think block (a template that prefills
+/// <c>&lt;think&gt;</c>), the text up to the reasoning close token is reasoning instead.</summary>
 public sealed class PassthroughOutputParser : IOutputParser
 {
     private readonly IncrementalDetokenizer _detok;
@@ -25,8 +26,9 @@ public sealed class PassthroughOutputParser : IOutputParser
     {
     }
 
-    /// <summary>Creates a passthrough parser; a non-null <paramref name="openReasoningCloseId"/> means the prompt ended inside a think block, so the
-    /// completion is reasoning until that token, which is consumed, and content after it, with the whitespace that opens the answer dropped.</summary>
+    /// <summary>Creates a passthrough parser; a non-null <paramref name="openReasoningCloseId"/> means the prompt ended inside a
+    /// think block, so the completion is reasoning until that token, which is consumed, and content after it, with the whitespace
+    /// that opens the answer dropped.</summary>
     public PassthroughOutputParser(ILlmTokenizer tokenizer, IReadOnlySet<int>? literalSpecialIds, int? openReasoningCloseId)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
