@@ -243,11 +243,8 @@ public sealed class CudaContext : IDisposable
         }
     }
 
-    /// <summary>Runs <c>cuInit</c> once per process. Every caller waits for the first one to finish: the driver answers
-    /// CUDA_ERROR_NOT_INITIALIZED to any call that overtakes an in-flight <c>cuInit</c>, and parallel xUnit collections
-    /// start dozens of CUDA tests in the same second. Marking the flag before the call let those callers through, so
-    /// <see cref="IsAvailable"/> reported a machine with a GPU as having none. A failed <c>cuInit</c> is not recorded,
-    /// so later callers see the driver's real error instead of NOT_INITIALIZED.</summary>
+    /// <summary>Runs <c>cuInit</c> once per process. Callers wait for it: the driver fails any call that overtakes
+    /// an in-flight <c>cuInit</c> with CUDA_ERROR_NOT_INITIALIZED.</summary>
     private static void EnsureCudaInitialized()
     {
         if (_cudaInitialized)
@@ -261,6 +258,7 @@ public sealed class CudaContext : IDisposable
                 return;
             }
             CudaDriverApi.cuInit(0).ThrowOnError();
+            // Set only on success, so a later caller retries and reports the driver's real error.
             _cudaInitialized = true;
         }
     }

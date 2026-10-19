@@ -10,9 +10,8 @@ public static class CudaLibraryResolver
     private static readonly object _registerLock = new();
     private static volatile bool _registered;
 
-    /// <summary>Registers the resolver for the HartsyInference.Cuda assembly. Safe to call multiple times and from
-    /// several threads: a caller returns only once the resolver is set, so its first P/Invoke cannot fall back to the
-    /// default search (which misses the probe dirs) while another thread is still registering.</summary>
+    /// <summary>Registers the resolver for the HartsyInference.Cuda assembly. Safe to call repeatedly and from several
+    /// threads: it returns only once the resolver is set, so no P/Invoke falls back to the default search.</summary>
     public static void Register()
     {
         if (_registered)
