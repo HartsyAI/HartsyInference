@@ -24,7 +24,7 @@ internal static unsafe class RopeFamilyGoldenCases
         "qwen_apply_image", "qwen_apply_text", "qwen_apply_joint_refs", "qwen_apply_joint_unroped_text",
         "qwen_device_joint_refs", "qwen_device_joint_slice",
         "qwen21_device_text", "qwen21_device_image",
-        "hunyuan_apply_image", "hunyuan_apply_joint", "hunyuan_gpu",
+        "hunyuan_apply_image", "hunyuan_apply_video_joint", "hunyuan_gpu", "hunyuan_video_gpu_with_text",
         "zimage_forward", "zimage_gpu", "zimage_gpu_gqa",
         "kandinsky5_apply_3d", "kandinsky5_gpu_3d", "kandinsky5_apply_1d",
         "moss_joint", "moss_text",
@@ -81,11 +81,15 @@ internal static unsafe class RopeFamilyGoldenCases
             }
             case "hunyuan_apply_image":
                 return Rotate(128, GridH * GridW, (q, k) => new HunyuanImageRope().ApplyImage(q, k, 1, Heads, GridH, GridW));
-            case "hunyuan_apply_joint":
-                return Rotate(128, GridH * GridW, (q, k) => new HunyuanImageRope().ApplyJoint(q, k, 1, Heads, [GridH, GridW]));
+            case "hunyuan_apply_video_joint":
+                return Rotate(128, 2 * GridH * GridW,
+                    (q, k) => new HunyuanImageRope([16, 56, 56], 256f).ApplyJoint(q, k, 1, Heads, [2, GridH, GridW]));
             case "hunyuan_gpu":
                 return RotatePrePermute(128, GridH * GridW, Heads,
                     (q, k) => new HunyuanImageRope().ApplyGpu(cpu, q, k, Heads, [GridH, GridW]));
+            case "hunyuan_video_gpu_with_text":
+                return RotatePrePermute(128, 2 * GridH * GridW + TextLength, Heads,
+                    (q, k) => new HunyuanImageRope([16, 56, 56], 256f).ApplyGpu(cpu, q, k, Heads, [2, GridH, GridW]));
             case "zimage_forward":
             {
                 ZImageRope rope = PrecomputedZImage();
