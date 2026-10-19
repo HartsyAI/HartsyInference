@@ -114,13 +114,15 @@ public sealed class RopeTableCache : IDisposable
     }
 
     /// <summary>Retires this backend's device tables and keeps the host pairs. An idle table is freed now. A table under a lease
-    /// is unmapped at once and freed by its last release. A failed free leaves the table mapped, so the next call retries. It
-    /// still works after <see cref="Dispose"/>, so an owner tearing down its backend frees whatever remains.</summary>
+    /// is unmapped at once and freed by its last release. A failed free leaves that table mapped, so the next call retries it,
+    /// and the backend's other tables are still released; the failure is rethrown afterwards. It still works after
+    /// <see cref="Dispose"/>, so an owner tearing down its backend frees whatever remains.</summary>
     public void ReleaseBackend(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
         lock (_gate)
         {
+            List<Exception>? failures = null;
             foreach (List<RopeHostTable> tables in _slots.Values)
             {
                 foreach (RopeHostTable host in tables)
@@ -128,13 +130,34 @@ public sealed class RopeTableCache : IDisposable
                     if (!host.Devices.TryGetValue(backend, out RopeDeviceTable? device))
                         continue;
                     if (device.Outstanding == 0)
-                        FreeIdle(host, device);
+                    {
+                        try
+                        {
+                            FreeIdle(host, device);
+                        }
+                        catch (Exception error)
+                        {
+                            // Still mapped, so the next call retries it; the backend's other tables are released now.
+                            Collect(ref failures, error);
+                            continue;
+                        }
+                    }
                     else
+                    {
                         Unmap(device);
+                    }
                     host.Devices.Remove(backend);
                 }
             }
-            FlushPendingRetirement();
+            try
+            {
+                FlushPendingRetirement();
+            }
+            catch (Exception error)
+            {
+                Collect(ref failures, error);
+            }
+            Rethrow(failures);
         }
     }
 
@@ -379,13 +402,29 @@ public sealed class RopeTableCache : IDisposable
                 }
                 catch (Exception error)
                 {
-                    (failures ??= []).Add(error);
+                    Collect(ref failures, error);
                     continue;
                 }
             }
             _pendingRetirement.Remove(device);
             DisposeRows(device);
         }
+        Rethrow(failures);
+    }
+
+    /// <summary>Adds a failure to the list, unwrapping one this cache already aggregated.</summary>
+    private static void Collect(ref List<Exception>? failures, Exception error)
+    {
+        failures ??= [];
+        if (error is AggregateException aggregate)
+            failures.AddRange(aggregate.InnerExceptions);
+        else
+            failures.Add(error);
+    }
+
+    /// <summary>Rethrows collected retirement failures: one as itself, several as one AggregateException.</summary>
+    private static void Rethrow(List<Exception>? failures)
+    {
         if (failures is { Count: 1 })
             ExceptionDispatchInfo.Capture(failures[0]).Throw();
         if (failures is not null)
