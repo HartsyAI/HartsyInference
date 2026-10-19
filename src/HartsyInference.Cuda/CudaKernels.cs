@@ -515,8 +515,19 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Kernels for which an arch-specific PTX (<c>{kernel}.sm{CC}.ptx</c>) was loaded instead of the baseline.</summary>
     public IReadOnlyList<string> ArchVariantsLoaded => _archVariants;
 
+    /// <summary>The compute capability the shipped kernels are built for: <c>Kernels/build_common.sh</c> compiles every
+    /// <c>KERNELS</c> list for sm_80. A device below it can load only the modules built for it, such as the sm_75 GGUF
+    /// dequant and expert kernels and the sm_70 elementwise PTX.</summary>
+    public const int BaselineSm = CudaArch.Ampere;
+
+    /// <summary>Modules skipped because their PTX targets a newer architecture than this device, as <c>name (sm_XX)</c>.
+    /// Empty at or above <see cref="BaselineSm"/>. Their kernels stay unbound: an optional module reports itself missing
+    /// through its <c>Has…</c> flag, and a launch of a required one fails with CUDA_ERROR_INVALID_HANDLE.</summary>
+    public IReadOnlyList<string> SkippedModules => _skippedModules;
+
     private readonly string _ptxDir;
     private readonly List<string> _archVariants = [];
+    private readonly List<string> _skippedModules = [];
 
     /// <summary>The PTX to load for <paramref name="kernel"/>: the device's own variant, <c>{kernel}.sm{sm}.ptx</c> — built with the family-specific arch, so it may use instructions the baseline cannot — when one ships, else the baseline <c>{kernel}.ptx</c>. Exact compute capability only: arch-specific PTX is not forward-compatible, so a variant for another SM must never be picked.</summary>
     public static string PtxPath(string ptxDir, string kernel, int sm)
@@ -536,6 +547,58 @@ public sealed partial class CudaKernels : IDisposable
         return path;
     }
     private static Func<string, Exception?>? _moduleLoadFailureForTests;
+    private static int _gateSmForTests;
+    private static string? _skippedModulesNote;
+
+    /// <summary>Test-only: the compute capability modules are gated against in place of the device's, so an Ampere-or-newer
+    /// card can stand in for an older one. 0 gates against the device.</summary>
+    internal static int GateSmForTests
+    {
+        get => Volatile.Read(ref _gateSmForTests);
+        set => Volatile.Write(ref _gateSmForTests, value);
+    }
+
+    /// <summary>What the last kernel table to skip modules skipped, for the invalid-handle error a launch of one of them
+    /// raises; null while no table has skipped any.</summary>
+    internal static string? SkippedModulesNote => Volatile.Read(ref _skippedModulesNote);
+
+    /// <summary>The compute capability modules are gated against: the device's, unless a test stands in another.</summary>
+    private int GateSm => GateSmForTests is > 0 and int forced ? forced : Sm;
+
+    /// <summary>Logs what a device below <see cref="BaselineSm"/> could not load, and leaves the note the invalid-handle error
+    /// of a launch of one of those kernels carries.</summary>
+    private void ReportSkippedModules()
+    {
+        const int Named = 12;
+        string device = $"This device (SM {GateSm / 10}.{GateSm % 10}) cannot load {_skippedModules.Count} kernel module(s) built "
+            + "for a newer architecture, so their kernels are unbound";
+        string advice = $"The CUDA kernels target sm_{BaselineSm} and newer; use the Vulkan backend on this card.";
+        string named = _skippedModules.Count <= Named
+            ? string.Join(", ", _skippedModules)
+            : $"{string.Join(", ", _skippedModules.Take(Named))} and {_skippedModules.Count - Named} more";
+        Volatile.Write(ref _skippedModulesNote, $"{device}: {named}. {advice}");
+        HartsyInference.Core.Logging.Logs.Warning($"[Cuda] {device}: {string.Join(", ", _skippedModules)}. {advice}");
+    }
+
+    /// <summary>Whether <paramref name="path"/> exists and this device can JIT it. A module built for a newer architecture is
+    /// recorded in <see cref="SkippedModules"/> and reported as not loadable.</summary>
+    private bool CanLoad(string path) => File.Exists(path) && !SkipsForArchitecture(path);
+
+    /// <summary>True, and recorded once, when <paramref name="path"/> targets a newer architecture than the gate. No gate
+    /// applies without a device, so a context-less table loads everything as before.</summary>
+    private bool SkipsForArchitecture(string path)
+    {
+        int gate = GateSm;
+        if (gate <= 0)
+            return false;
+        int target = CudaModule.ReadTargetSm(path);
+        if (target <= gate)
+            return false;
+        string entry = $"{Path.GetFileNameWithoutExtension(path)} (sm_{target})";
+        if (!_skippedModules.Contains(entry))
+            _skippedModules.Add(entry);
+        return true;
+    }
 
     /// <summary>Test-only fault injector invoked with each PTX path immediately before it is loaded.</summary>
     internal static Func<string, Exception?>? ModuleLoadFailureForTests
@@ -549,6 +612,8 @@ public sealed partial class CudaKernels : IDisposable
     {
         Exception? injectedFailure = Volatile.Read(ref _moduleLoadFailureForTests)?.Invoke(path);
         if (injectedFailure is not null) throw injectedFailure;
+        if (SkipsForArchitecture(path))
+            return CudaModule.Unloadable;
         CudaModule module = CudaModule.LoadFromFile(path, maxRegisters);
         try
         {
@@ -665,7 +730,7 @@ public sealed partial class CudaKernels : IDisposable
         // Optional module: present only after src/HartsyInference.Cuda/Kernels/dit/build.sh has compiled stepcache.cu on a
         // CUDA-toolkit box. Absence is not an error — the step-cache feature reports unsupported instead.
         string stepCachePath = Ptx("stepcache");
-        if (File.Exists(stepCachePath))
+        if (CanLoad(stepCachePath))
         {
             _stepCacheModule = LoadOwnedModule(stepCachePath);
             _stepCacheRelL1F32 = _stepCacheModule.GetFunction("stepcache_rel_l1_f32");
@@ -675,7 +740,7 @@ public sealed partial class CudaKernels : IDisposable
         // Optional module: LTX-2.5 NA diffusion decoder (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).
         // Absence is not an error — the decoder falls back to the managed reference.
         string ltx25NaPath = Ptx("ltx25_na_decoder");
-        if (File.Exists(ltx25NaPath))
+        if (CanLoad(ltx25NaPath))
         {
             _ltx25NaModule = LoadOwnedModule(ltx25NaPath);
             _ltx25Na3dF32 = _ltx25NaModule.GetFunction("ltx25_na3d_f32");
@@ -699,7 +764,7 @@ public sealed partial class CudaKernels : IDisposable
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
         string w8a8Path = Ptx("w8a8");
-        if (File.Exists(w8a8Path))
+        if (CanLoad(w8a8Path))
         {
             _w8a8Module = LoadOwnedModule(w8a8Path);
             _w8a8QuantRowwiseF16 = _w8a8Module.GetFunction("w8a8_quant_rowwise_f16");
@@ -712,7 +777,7 @@ public sealed partial class CudaKernels : IDisposable
 
         // Optional module: ConvRot rotation (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu). Absence is not an error.
         string convRotPath = Ptx("convrot");
-        if (File.Exists(convRotPath))
+        if (CanLoad(convRotPath))
         {
             _convRotModule = LoadOwnedModule(convRotPath);
             _convRotRotateF16 = _convRotModule.GetFunction("convrot_rotate_f16");
@@ -725,11 +790,11 @@ public sealed partial class CudaKernels : IDisposable
 
         // Optional module: fused-dequant int8 mma GEMM (Kernels/dequant/int8_mma_gemm.cu). Absence is not an error.
         string mmaPath = Ptx("int8_mma_gemm");
-        if (File.Exists(mmaPath) && Int8MmaSharedBytesPad > (uint)MaxDynamicSharedBytes)
+        if (CanLoad(mmaPath) && Int8MmaSharedBytesPad > (uint)MaxDynamicSharedBytes)
         {
             HartsyInference.Core.Logging.Logs.Warning($"[Cuda] int8 mma GEMM needs {Int8MmaSharedBytesPad} B of dynamic shared memory per block; this device allows {MaxDynamicSharedBytes}. Using cuBLASLt + dequant instead.");
         }
-        else if (File.Exists(mmaPath))
+        else if (CanLoad(mmaPath))
         {
             // No register cap: at 128x256 the accumulator alone is 128 registers and 90 KB of shared already pins
             // the kernel to one block per SM, so capping could only force spills. Verify with NUM_REGS (attribute
@@ -754,7 +819,7 @@ public sealed partial class CudaKernels : IDisposable
         // Optional module: block-scaled activation quantization for the Blackwell GEMM path
         // (src/HartsyInference.Cuda/Kernels/dequant/block_quant.cu). Absence is not an error.
         string blockQuantPath = Ptx("block_quant");
-        if (File.Exists(blockQuantPath))
+        if (CanLoad(blockQuantPath))
         {
             _blockQuantModule = LoadOwnedModule(blockQuantPath);
             _blockQuantFinalizeNvfp4 = _blockQuantModule.GetFunction("block_quant_finalize_nvfp4");
@@ -767,7 +832,7 @@ public sealed partial class CudaKernels : IDisposable
 
         // Optional module: MXFP8 unpack (Kernels/dequant/dequant_mxfp8_to_f16.cu). Absence is not an error.
         string mxfp8Path = Ptx("dequant_mxfp8_to_f16");
-        if (File.Exists(mxfp8Path))
+        if (CanLoad(mxfp8Path))
         {
             _mxfp8Module = LoadOwnedModule(mxfp8Path);
             _mxfp8DequantF16 = _mxfp8Module.GetFunction("dequant_mxfp8_to_f16");
@@ -776,7 +841,7 @@ public sealed partial class CudaKernels : IDisposable
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
         string nvfp4Path = Ptx("dequant_nvfp4_to_f16");
-        if (File.Exists(nvfp4Path))
+        if (CanLoad(nvfp4Path))
         {
             _nvfp4Module = LoadOwnedModule(nvfp4Path);
             _nvfp4DequantF16 = _nvfp4Module.GetFunction("dequant_nvfp4_to_f16");
@@ -785,7 +850,7 @@ public sealed partial class CudaKernels : IDisposable
 
         // Optional module: SageAttention INT8 (src/HartsyInference.Cuda/Kernels/attention/build.sh). Absence is not an error.
         string sageAttnPath = Ptx("sage_attn_int8");
-        if (File.Exists(sageAttnPath))
+        if (CanLoad(sageAttnPath))
         {
             _sageAttnModule = LoadOwnedModule(sageAttnPath);
             _sageKMeanF32 = _sageAttnModule.GetFunction("sage_k_mean_f32");
@@ -798,7 +863,7 @@ public sealed partial class CudaKernels : IDisposable
 
             // The register-resident v1 flash stage (same prologue kernels) — preferred when present.
             string sageV1Path = Ptx("sage_attn_int8_v1");
-            if (File.Exists(sageV1Path))
+            if (CanLoad(sageV1Path))
             {
                 _sageAttnV1Module = LoadOwnedModule(sageV1Path);
                 _sageAttnV1D128 = _sageAttnV1Module.GetFunction("sage_attn_int8_v1_d128_f32");
@@ -929,14 +994,14 @@ public sealed partial class CudaKernels : IDisposable
         // Separate module so rebuilding it can't perturb dit_f32.ptx's other 40 kernels. Optional:
         // absent PTX just leaves the handle 0 and callers fall back to the v1 kernel above.
         string ropeV2Path = Ptx("dit_rope");
-        if (File.Exists(ropeV2Path))
+        if (CanLoad(ropeV2Path))
         {
             _ditRopeModule = LoadOwnedModule(ropeV2Path);
             _ditRopeHeadMajorV2F32 = _ditRopeModule.GetFunction("dit_rope_head_major_v2_f32");
         }
 
         string fp8EmitPath = Ptx("dit_fp8emit");
-        if (File.Exists(fp8EmitPath))
+        if (CanLoad(fp8EmitPath))
         {
             _ditFp8EmitModule = LoadOwnedModule(fp8EmitPath);
             _ditAffineBroadcastRowIndexedToFp8F32 =
@@ -1100,7 +1165,7 @@ public sealed partial class CudaKernels : IDisposable
         // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. Ignore failure (kernel launch will surface it).
         CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
         string channelsLastPath = Ptx("channels_last");
-        if (File.Exists(channelsLastPath))
+        if (CanLoad(channelsLastPath))
         {
             _channelsLastModule = LoadOwnedModule(channelsLastPath);
             _transposeTiledB16 = _channelsLastModule.GetFunction("transpose_tiled_b16");
@@ -1108,7 +1173,7 @@ public sealed partial class CudaKernels : IDisposable
         }
 
         string flashF16Path = Ptx("flash_attn_f16");
-        if (File.Exists(flashF16Path))
+        if (CanLoad(flashF16Path))
         {
             _flashF16Module = LoadOwnedModule(flashF16Path);
             _flashF16D64 = _flashF16Module.GetFunction("flash_attn_f16_d64");
@@ -1167,7 +1232,7 @@ public sealed partial class CudaKernels : IDisposable
         // Optional module: the additive causal bias the fused cuDNN prefill path needs
         // (src/HartsyInference.Cuda/Kernels/lm/lm_attn_mask.cu). Absence just means prefill keeps the general kernel.
         string causalMaskPath = Ptx("lm_attn_mask");
-        if (File.Exists(causalMaskPath))
+        if (CanLoad(causalMaskPath))
         {
             _causalMaskModule = LoadOwnedModule(causalMaskPath);
             _causalBiasMaskF32 = _causalMaskModule.GetFunction("lm_causal_bias_mask_f32");
@@ -1216,6 +1281,8 @@ public sealed partial class CudaKernels : IDisposable
         LoadSamplingKernels();
         LoadRecipeDequantKernels();
         LoadAttentionKernels();
+        if (_skippedModules.Count > 0)
+            ReportSkippedModules();
         }
         catch (Exception constructionFailure)
         {

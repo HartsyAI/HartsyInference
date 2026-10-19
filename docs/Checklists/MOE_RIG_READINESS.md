@@ -38,9 +38,11 @@ Subsystems with CPU tests in place:
   resolved, by a reboot or a matching reinstall, before the rig run so the stop rule below stays meaningful. That is a
   system change, so it was not made from here.
 - **Expert kernels on this card.** `CudaExpertKernelTests` passes 5 of 5 (`expert_f32` is built for sm_75).
-  `CudaExpertDeviceRunnerTests` fails 3 of 3 with PTX JIT error 218. The cause is that `CudaBackend` construction loads
-  about 80 modules eagerly, some built for sm_80 or sm_120a, and the card cannot load those. Making the load lazy is a
-  larger change and is deferred. Rent sm_80 or newer: the baseline PTX is sm_80.
+  `CudaExpertDeviceRunnerTests` failed 3 of 3 with PTX JIT error 218 (checked 2026-10-09): `CudaBackend` construction
+  loaded about 80 modules eagerly, most built for sm_80, and the card cannot load those. Construction now skips modules
+  whose PTX targets a newer architecture and keeps the sm_70 and sm_75 ones (checked on an RTX 3060 gated as SM 7.5, not
+  yet re-run on this card). The runner's own kernels are sm_75; anything it reaches in an sm_80 module still fails, now
+  with an error naming the skipped modules. Model and large-MoE validation still need sm_80 or newer.
 - **PTX.** Every shipped PTX file is ISA 9.0 or older. 28 files are ISA 7.0, which the driver loads fine. No file is newer
   than the 9.0 ceiling in `src/HartsyInference.Cuda/Kernels/build_common.sh`.
 - **Host memory.** 39 GB total. Check `free -g` before any large load (see the no-heavy-GPU-runs note).
@@ -76,8 +78,9 @@ Subsystems with CPU tests in place:
    `set -euo pipefail` stops the run at the first failing class, so a later pass cannot hide an earlier failure. Every class
    in the list matches at least one test (checked with `--list-tests`). `CudaExpertKernelTests` (#335) checks `expert_f32`
    against the reference for every program variant. `CudaExpertDeviceRunnerTests` (#335) runs the lease-validated device
-   runner through `CudaBackend`; it needs sm_80 or newer. On an sm_75 card, skip it: its 3 failures there come from the
-   eager module load, not from a regression.
+   runner through `CudaBackend`. On an sm_75 card the backend now constructs with only its sm_70 and sm_75 kernels; a
+   failure that names skipped modules means the runner reached an sm_80 kernel, which is a gap on that card rather than a
+   regression.
    `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter does not select
    them; this explicit loop is the only way they run on the rig.
 4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,

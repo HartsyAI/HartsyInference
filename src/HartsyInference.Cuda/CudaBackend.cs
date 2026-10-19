@@ -328,6 +328,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>The loaded kernel table (null if PTX kernels unavailable); internal for tests and optional-kernel launch glue.</summary>
     internal CudaKernels? Kernels => _kernels;
 
+    /// <summary>Kernel modules this device could not load because their PTX targets a newer architecture (see
+    /// <see cref="CudaKernels.SkippedModules"/>). Empty on any device at or above <see cref="CudaKernels.BaselineSm"/>.</summary>
+    public IReadOnlyList<string> SkippedKernelModules => _kernels?.SkippedModules ?? [];
+
     /// <summary>The upload stream for async weight transfers. For diagnostics/tests; production callers use <see cref="StreamingCache"/>.</summary>
     public CudaStream UploadStream => _uploadStream;
 

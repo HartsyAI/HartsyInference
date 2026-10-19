@@ -6,6 +6,10 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: a CUDA card older than Ampere (sm_75, Turing) failed backend creation.** Every module was loaded eagerly, and the driver refused the sm_80 PTX (`CUDA error 218: PTX JIT failed`). `CudaKernels` now reads each module's `.target` and skips the ones built for a newer architecture: the backend constructs, its sm_70 and sm_75 kernels (elementwise, GGUF dequant, expert) load, `CudaBackend.SkippedKernelModules` lists the rest, and launching one fails with an error that names what was skipped. `auto` backend selection and the CUDA probe pass over such a card to Vulkan. Nothing changes at sm_80 and above.
+
 ## alpha.380
 
 - **Fixed: MOSS-Image produced noise.** The FLUX.2 VAE loader built every decoder at the 128-512 preset, but the MOSS-Image folder's decoder is 96-384 wide, and the weights loaded into the wrong layers with no error. The decoder widths now come from the checkpoint (`VaeConfig.DecoderBlockOutChannels`), and a `conv_in` width mismatch fails loudly. FLUX.2, FLUX.3 and Lens files keep their widths.

@@ -200,6 +200,18 @@ public sealed class CudaContext : IDisposable
         return count;
     }
 
+    /// <summary>Compute capability of device <paramref name="ordinal"/> as one number (<see cref="CudaArch"/>), read from the
+    /// driver without creating a context.</summary>
+    public static int QuerySm(int ordinal)
+    {
+        CudaLibraryResolver.Register();
+        EnsureCudaInitialized();
+        CudaDriverApi.cuDeviceGet(out int device, ordinal).ThrowOnError();
+        CudaDriverApi.cuDeviceGetAttribute(out int major, CudaDriverApi.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device).ThrowOnError();
+        CudaDriverApi.cuDeviceGetAttribute(out int minor, CudaDriverApi.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device).ThrowOnError();
+        return CudaArch.Sm(major, minor);
+    }
+
     /// <summary>Why the last <see cref="IsAvailable"/> call returned <c>false</c>; <c>null</c> when it returned true. Without this the reason is swallowed and a host silently degrades to CPU with nothing to report.</summary>
     public static string? LastUnavailableReason { get; private set; }
 

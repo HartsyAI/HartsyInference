@@ -22,7 +22,7 @@ public sealed partial class CudaKernels
     private void LoadRecipeDequantKernels()
     {
         string path = Ptx("dequant_recipe_to_bf16");
-        if (!File.Exists(path)) return;
+        if (!CanLoad(path)) return;
         _recipeDequantModule = LoadOwnedModule(path);
         _mxfp4E8m0ToBf16 = _recipeDequantModule.GetFunction("dequant_mxfp4_e8m0_to_bf16");
         _fp8BlockE8m0ToBf16 = _recipeDequantModule.GetFunction("dequant_fp8_block_e8m0_to_bf16");

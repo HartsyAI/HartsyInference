@@ -40,14 +40,14 @@ public sealed partial class CudaKernels
     private void LoadAttentionKernels()
     {
         string attentionPath = Ptx("latent_attention");
-        if (File.Exists(attentionPath))
+        if (CanLoad(attentionPath))
         {
             _latentAttentionModule = LoadOwnedModule(attentionPath);
             _sparseLatentAttentionF32 = _latentAttentionModule.GetFunction("sparse_latent_attention_f32");
             _indexerScoresF32 = _latentAttentionModule.GetFunction("indexer_scores_f32");
         }
         string quantPath = Ptx("latent_quant");
-        if (File.Exists(quantPath))
+        if (CanLoad(quantPath))
         {
             _latentQuantModule = LoadOwnedModule(quantPath);
             _latentRowWinnerInit = _latentQuantModule.GetFunction("latent_row_winner_init");
@@ -56,7 +56,7 @@ public sealed partial class CudaKernels
             _actQuantDequantInplaceF32 = _latentQuantModule.GetFunction("act_quant_dequant_inplace_f32");
         }
         string hcPath = Ptx("hc_mix");
-        if (File.Exists(hcPath))
+        if (CanLoad(hcPath))
         {
             _hcMixModule = LoadOwnedModule(hcPath);
             _hcSplitSinkhornF32 = _hcMixModule.GetFunction("hc_split_sinkhorn_f32");
@@ -64,7 +64,7 @@ public sealed partial class CudaKernels
             _hcPostMixF32 = _hcMixModule.GetFunction("hc_post_mix_f32");
         }
         string positionsPath = Ptx("latent_positions");
-        if (File.Exists(positionsPath))
+        if (CanLoad(positionsPath))
         {
             _latentPositionsModule = LoadOwnedModule(positionsPath);
             _ropeInterleavedOffsetF32 = _latentPositionsModule.GetFunction("rope_interleaved_offset_f32");
