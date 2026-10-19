@@ -131,7 +131,11 @@ public sealed class RopeTableCache : IDisposable
         lock (_gate)
         {
             if (_disposed)
+            {
+                // A failed retirement from the first call is retried here.
+                FlushPendingRetirement();
                 return;
+            }
             _disposed = true;
             RetireAllLocked();
         }
@@ -228,6 +232,7 @@ public sealed class RopeTableCache : IDisposable
         Tensor? sin = null;
         bool preloadAttempted = false;
         bool built = false;
+        bool keepForRetry = false;
         try
         {
             sin = new Tensor(new TensorShape(host.Tokens, headDim), DType.F32);
@@ -252,10 +257,19 @@ public sealed class RopeTableCache : IDisposable
                 if (preloadAttempted && sin is not null)
                 {
                     try { backend.FreeWeights([cos, sin]); }
-                    catch (Exception error) { Logs.Warning($"[RopeTableCache] Failed to roll back a partial preload: {error.Message}"); }
+                    catch (Exception error)
+                    {
+                        // The failed batch may still hold device memory, so the tensors wait for the next flush.
+                        Logs.Warning($"[RopeTableCache] Failed to roll back a partial preload; retrying on the next flush: {error.Message}");
+                        _pendingRetirement.Add(new RopeDeviceTable(backend, cos, sin));
+                        keepForRetry = true;
+                    }
                 }
-                cos.Dispose();
-                sin?.Dispose();
+                if (!keepForRetry)
+                {
+                    cos.Dispose();
+                    sin?.Dispose();
+                }
             }
         }
     }

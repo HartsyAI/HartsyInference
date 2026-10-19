@@ -1058,35 +1058,43 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _rope.Dispose();
-            _xEmbedWeight = null;
-            _xEmbedBias = null;
-            _contextEmbedWeight = null;
-            _contextEmbedBias = null;
-            _timestepLinear1Weight = null;
-            _timestepLinear1Bias = null;
-            _timestepLinear2Weight = null;
-            _timestepLinear2Bias = null;
-            _textLinear1Weight = null;
-            _textLinear1Bias = null;
-            _textLinear2Weight = null;
-            _textLinear2Bias = null;
-            _guidanceLinear1Weight = null;
-            _guidanceLinear1Bias = null;
-            _guidanceLinear2Weight = null;
-            _guidanceLinear2Bias = null;
-            _normOutLinearWeight = null;
-            _normOutLinearBias = null;
-            _projOutWeight = null;
-            _projOutBias = null;
-            _latentFixed?.Dispose();
-            _latentFixed = null;
-            _sinFixed?.Dispose();
-            _sinFixed = null;
-            _guidanceSinFixed?.Dispose();
-            _guidanceSinFixed = null;
-            _graphVelocity?.Dispose();
-            _graphVelocity = null;
+            // Invalidate the step graph before any owned tensor is freed, and free the owned tensors even if
+            // the rope's release throws.
+            try
+            {
+                _rope.Dispose();
+            }
+            finally
+            {
+                _xEmbedWeight = null;
+                _xEmbedBias = null;
+                _contextEmbedWeight = null;
+                _contextEmbedBias = null;
+                _timestepLinear1Weight = null;
+                _timestepLinear1Bias = null;
+                _timestepLinear2Weight = null;
+                _timestepLinear2Bias = null;
+                _textLinear1Weight = null;
+                _textLinear1Bias = null;
+                _textLinear2Weight = null;
+                _textLinear2Bias = null;
+                _guidanceLinear1Weight = null;
+                _guidanceLinear1Bias = null;
+                _guidanceLinear2Weight = null;
+                _guidanceLinear2Bias = null;
+                _normOutLinearWeight = null;
+                _normOutLinearBias = null;
+                _projOutWeight = null;
+                _projOutBias = null;
+                _latentFixed?.Dispose();
+                _latentFixed = null;
+                _sinFixed?.Dispose();
+                _sinFixed = null;
+                _guidanceSinFixed?.Dispose();
+                _guidanceSinFixed = null;
+                _graphVelocity?.Dispose();
+                _graphVelocity = null;
+            }
         }
         GC.SuppressFinalize(this);
     }
