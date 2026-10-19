@@ -15,7 +15,7 @@ public sealed partial class CudaKernels
     private void LoadSamplingKernels()
     {
         string path = Ptx("lm_sample_topk");
-        if (!File.Exists(path)) return;
+        if (!CanLoad(path)) return;
         _sampleTopKModule = LoadOwnedModule(path);
         _sampleFromTopK = _sampleTopKModule.GetFunction("lm_sample_from_topk");
     }
