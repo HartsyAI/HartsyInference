@@ -14,7 +14,8 @@
 # Speed is the median over the warm seeds (every seed after the first) of the per-step ms the CLI prints, the wall
 # clock, and peak VRAM from one nvidia-smi sampler. Quality is the head artifact against the base artifact at the
 # same seed: SSIM over decoded pixels (PNG bytes are not stable; pixels are) and the raw-RGB digest
-# migration-baseline.sh uses; text at temperature 0 compares the token stream. `--expect identical` (a refactor)
+# migration-baseline.sh uses; text at temperature 0 compares the token stream, and audio the digest of its decoded
+# F32 samples (no SSIM, so a bounded run fails on any audio change). `--expect identical` (a refactor)
 # needs every digest to match; `--expect bounded:<ssim>` (a numerics change) needs the minimum SSIM to clear the
 # floor. Either way a step time more than --speed-tolerance percent slower fails the case.
 #
@@ -202,7 +203,7 @@ run_one() {
         if [ -n "$rate" ]; then step_n=1; step_med="$(awk -v r="$rate" 'BEGIN { printf "%.2f", 1000 / r }')"; fi
     fi
     local status="ok" digest="-" artifact=""
-    artifact="$(find "$dir/out" -type f \( -name '*.png' -o -name '*.txt' \) | sort | head -1)"
+    artifact="$(find "$dir/out" -type f \( -name '*.png' -o -name '*.wav' -o -name '*.txt' \) | sort | head -1)"
     if [ "$rc" -ne 0 ] || [ -z "$artifact" ]; then
         status="CRASH"
     else
@@ -212,6 +213,15 @@ run_one() {
                     && [ -s "$dir/pixels.rgb24" ]; then
                     digest="$(digest_of "$dir/pixels.rgb24")" || status="CRASH"
                     rm -f "$dir/pixels.rgb24"
+                else
+                    status="CRASH"
+                fi ;;
+            *.wav)
+                # The samples, not the file: a header field that changes with the writer would read as a regression.
+                if ffmpeg -nostdin -loglevel error -i "$artifact" -f f32le -acodec pcm_f32le -y "$dir/samples.f32" >>"$dir/run.log" 2>&1 \
+                    && [ -s "$dir/samples.f32" ]; then
+                    digest="$(digest_of "$dir/samples.f32")" || status="CRASH"
+                    rm -f "$dir/samples.f32"
                 else
                     status="CRASH"
                 fi ;;
@@ -293,6 +303,7 @@ for backend in ${BACKENDS//,/ }; do
                     ffmpeg -nostdin -loglevel error -y -i "$b_art" -i "$h_art" \
                         -filter_complex "[0:v][1:v]blend=all_mode=difference[d];[0:v][1:v][d]hstack=inputs=3" \
                         "$REPORT_DIR/pairs/${id}_${backend}_s${seed}.png" 2>/dev/null ;;
+                *.wav) ;;   # no pixel or text view; the sample digest above is the comparison
                 *)
                     if [ "$b_digest" != "$h_digest" ]; then diff -u "$b_art" "$h_art" >"$REPORT_DIR/pairs/${id}_${backend}_s${seed}.diff" 2>/dev/null; fi ;;
             esac
@@ -319,7 +330,7 @@ for backend in ${BACKENDS//,/ }; do
                 if [ "$min_ssim" != "-" ] && awk -v a="$min_ssim" -v f="$SSIM_FLOOR" 'BEGIN { exit !(a < f) }'; then
                     verdict="FAIL"; notes+="SSIM $min_ssim < $SSIM_FLOOR; "
                 elif [ "$min_ssim" = "-" ] && [ "$changed" = 1 ]; then
-                    verdict="FAIL"; notes+="text CHANGED; "
+                    verdict="FAIL"; notes+="output CHANGED (no SSIM for this artifact); "
                 fi
             fi
             # A speed verdict needs a noise floor: the base arm's own range over its warm seeds. A delta inside that
