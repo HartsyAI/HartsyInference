@@ -75,20 +75,26 @@ compile_one() {
         exit 1
     fi
     if listed "$kernel" "${NVCC_BUILT[@]}"; then
-        # No nvrtc stand-in: it would be installed, or compared by the drift test, as if it were the nvcc build.
-        rm -f "$ptx"
+        # Never an nvrtc stand-in, and an UNVERIFIED kernel leaves any earlier intermediate as it was.
         if [[ -z "$NVCC" ]]; then
             echo "UNVERIFIED ${kernel}${suffix}: nvcc-built and no nvcc found; set HARTSY_NVCC to the CUDA 13.0.88 nvcc"
             return 0
         fi
         echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${arch} ${kernel}.cu"
-        "$NVCC" -ptx -arch="sm_${arch}" ${NVCC_FLAGS[@]+"${NVCC_FLAGS[@]}"} "$src" -o "$ptx"
-        if ! ptx_isa_ok "$ptx" || ! grep -qF "// Cuda compilation tools, ${NVCC_RELEASE}" "$ptx"; then
-            echo "UNVERIFIED ${kernel}${suffix}: ${NVCC} emits PTX ISA $(ptx_version "$ptx") from" \
-                "\"$(grep -m1 -o 'release [0-9.]*, V[0-9.]*' "$ptx" || true)\"; nvcc-built kernels need CUDA 13.0.88 nvcc and nvvm"
-            rm -f "$ptx"
+        local tmp
+        tmp="$(mktemp --suffix=.ptx)"
+        if ! "$NVCC" -ptx -arch="sm_${arch}" ${NVCC_FLAGS[@]+"${NVCC_FLAGS[@]}"} "$src" -o "$tmp"; then
+            rm -f "$tmp"
+            exit 1
+        fi
+        if ! ptx_isa_ok "$tmp" || ! grep -qF "// Cuda compilation tools, ${NVCC_RELEASE}" "$tmp"; then
+            echo "UNVERIFIED ${kernel}${suffix}: ${NVCC} emits PTX ISA $(ptx_version "$tmp") from" \
+                "\"$(grep -m1 -o 'release [0-9.]*, V[0-9.]*' "$tmp" || true)\"; nvcc-built kernels need CUDA 13.0.88 nvcc and nvvm"
+            rm -f "$tmp"
             return 0
         fi
+        cat "$tmp" > "$ptx"
+        rm -f "$tmp"
     else
         if [[ ! -x "$NVRTC" ]]; then
             if command -v cc >/dev/null 2>&1; then

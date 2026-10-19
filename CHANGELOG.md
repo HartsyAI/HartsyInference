@@ -26,7 +26,8 @@ stable release will require. Dates are UTC.
   line. A domain's `NVCC_BUILT` list now names its nvcc-built kernels: `build.sh` builds those only with that nvcc (`HARTSY_NVCC`, PATH,
   or the workstation's pinned install) and every other kernel with nvrtc, so an nvcc on PATH no longer rewrites nvrtc-built PTX. The two
   stale kernels are rebuilt: `mul_mat_vec_q4_0_q8_1` gets its row-partial refactor, and `moe_id_q8_0` the multi-row Q8 GEMV source it
-  includes, with its three expert kernels instruction-identical.
+  includes, with its three expert kernels instruction-identical. Output is unchanged: a real-generation A/B on the RTX 4090 matched main
+  token for token on every text row, including a new Q8_0 MoE row (`granitemoe-3b-q8`).
 
 ## alpha.380
 

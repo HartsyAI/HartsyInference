@@ -74,7 +74,7 @@ public sealed class CudaKernelDriftTests
                 rebuilt.AddRange(Directory.GetFiles(domain, "*.ptx"));
             }
 
-            // build.sh deletes the intermediate of a kernel it could not build; this also ignores one left by hand.
+            // An UNVERIFIED kernel was not rebuilt, so any intermediate beside its .cu predates this run.
             HashSet<string> unverifiedNames = new(unverified.Select(KernelOf), StringComparer.Ordinal);
             List<string> missing = new(), differing = new(), otherRelease = new();
             int compared = 0;
