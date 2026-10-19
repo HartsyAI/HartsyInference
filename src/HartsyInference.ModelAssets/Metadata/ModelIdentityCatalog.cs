@@ -178,8 +178,9 @@ public static class ModelIdentityCatalog
             Audio("fishaudio", "fishaudio_tts", "Fish Audio S2 Pro", "Fish Audio", "other", "tts", "fishaudio/s2-pro"),
             Audio("fishaudio-drama3", "fishaudio_drama3_tts", "Fish Audio Drama 3", "Fish Audio", "other", "tts", "fishaudio/drama-3"),
             Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),
-            // Breeze TTS 2 and IndexTTS 2 ship under their own model licenses, which have no HuggingFace id. IndexTTS 2
-            // names no upstream repo: 2.0 and 2.5 are separate releases, so each repack passes its own --source-repo.
+            // Breeze TTS 2 and IndexTTS 2 ship under their own model licenses, which have no HuggingFace license id, so
+            // both are "other". IndexTTS 2 names no upstream repo: 2.0 and 2.5 are separate releases, so each repack
+            // passes its own --source-repo.
             Audio("breeze", "breeze_tts", "Breeze TTS 2", "BreezeBlue", "other", "tts", "BreezeBlue/Breeze-TTS-2"),
             Audio("indextts", "indextts_tts", "IndexTTS 1.5", "Bilibili", "apache-2.0", "tts", "IndexTeam/IndexTTS-1.5"),
             Audio("indextts2", "indextts2_tts", "IndexTTS 2", "Bilibili", "other", "tts"),
