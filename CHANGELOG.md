@@ -8,6 +8,19 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: `tekken` and `pixtral` GGUF tokenizers use Mistral's Tekken pre-token split.** Both names fell through to the GPT-2 split, so
+  Dory (`pixtral`) and the Mistral Nemo/Small family (`tekken`) encoded prompts with non-canonical ids (`in-app`, `swarm_docs`, paths and
+  newlines split differently). Dory now matches its checkpoint's `tokenizer.json` on every sample in `DoryTokenizerParityTests`.
+- **Fixed: a prefilled think block streams as reasoning.** When a model's own Jinja template ends the prompt inside `<think>` (Dory,
+  Nemotron and Qwen3-Thinking with thinking on), the text up to `</think>` is now `Reasoning`, not the answer, and the close token is
+  consumed. Before, the reasoning arrived as answer text with a stray `</think>` and no opener, so clients could not split it. A
+  non-streaming `TextResult` carries it in the new `Reasoning` field; a reply that runs out of tokens mid-reasoning keeps the partial
+  reasoning with `Stop = Length` and empty `Text`. With thinking off the template's empty think block applies and the reply is all answer.
+- **Changed: a non-streaming chat completion returns the model's reasoning as `reasoning_content`, and `TextResult.Text` holds the
+  answer alone for these models.** Clients that read `content` on the OpenAI-compatible route, or `TextResult.Text`, no longer see the
+  reasoning inline. Read `reasoning_content` or `TextResult.Reasoning` instead.
+
+- **Changed: RoPE tables come from shared Core utilities.** `HartsyInference.Core.Rope` adds a frozen per-pair frequency plan, a table builder and an expander for the three apply-op layouts (rotate-half, interleaved prefix, interleaved pair), and a per-backend table cache whose leases keep device rows alive while a call reads them. `FluxRope` (FLUX.1, FLUX.2, Chroma, Krea 2, HiDream) and `AnimaRope` build on them. Output is bit-identical: a real-generation A/B on the RTX 4090 matched main pixel for pixel, and golden fixtures pin the tables.
 - **Fixed: a CUDA card older than Ampere (sm_75, Turing) failed backend creation.** Every module was loaded eagerly, and the driver refused the sm_80 PTX (`CUDA error 218: PTX JIT failed`). `CudaKernels` now reads each module's `.target` and skips the ones built for a newer architecture: the backend constructs, its sm_70 and sm_75 kernels (elementwise, GGUF dequant, expert) load, `CudaBackend.SkippedKernelModules` lists the rest, and launching one fails with an error that names what was skipped. `auto` backend selection and the CUDA probe pass over such a card to Vulkan. Nothing changes at sm_80 and above.
 
 ## alpha.380
