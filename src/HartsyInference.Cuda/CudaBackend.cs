@@ -113,6 +113,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public long FlashF16ExecutionCount => Interlocked.Read(ref _flashF16ExecutionCount);
     private long _flashF16ExecutionCount;
 
+    /// <summary>Query-tiled attention calls this backend served (see <see cref="SdpaTiledF32Core"/>).</summary>
+    internal long SdpaTiledExecutionCount => Interlocked.Read(ref _sdpaTiledExecutionCount);
+    private long _sdpaTiledExecutionCount;
+
     /// <summary>Test diagnostic incremented whenever a new cuDNN SDPA handle/plan cache is constructed.</summary>
     internal long CudnnSdpaSessionGeneration => Interlocked.Read(ref _cudnnSdpaSessionGeneration);
 
@@ -7510,6 +7514,22 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 opDtype = DType.F16;
             }
 
+            // BF16 skipped the tiled branch above; a score matrix over the same budget runs the query-tiled core on
+            // the F32 casts instead (an AutoencoderKL mid-block at 2048² would otherwise ask for 16 GB at once).
+            if (query.DType == DType.BF16 && mask is null)
+            {
+                ulong castScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
+                (nuint castFree, _) = _context.GetMemoryInfo();
+                if (EngineKnobs.SdpaForceTiled.Value || castScoreBytes > (ulong)castFree / 2)
+                {
+                    SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, biasBlocks: 0);
+                    _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+            }
+
             bool isF16 = opDtype == DType.F16;
             int elemSize = opDtype.SizeInBytes;
             ulong opMask = pMaskBroadcast != 0 ? pMaskBroadcast : pMask;
@@ -8312,7 +8332,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long skv = key.Shape[2];
         long totalHeads = b * h;
 
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, scoresBuf = 0, pBias = 0, pOnes = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, pBias = 0;
         long biasBlocks = 0;
         bool cachedOutput = false;
         try
@@ -8330,7 +8350,28 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            SdpaTiledF32Core(pQ, pK, pV, pOut, totalHeads, sq, skv, d, scale, pBias, biasBlocks);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (pBias != 0) GpuTransferHelper.FreeDevice(pBias);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+        }
+    }
 
+    /// <summary>The query-tiled loop of <see cref="SdpaTiledF32"/> over F32 device buffers, shared with the BF16 path
+    /// of <see cref="ScaledDotProductAttention"/>, which runs it on its F32 casts.</summary>
+    private unsafe void SdpaTiledF32Core(ulong pQ, ulong pK, ulong pV, ulong pOut, long totalHeads, long sq, long skv,
+        long d, float scale, ulong pBias, long biasBlocks)
+    {
+        ulong scoresBuf = 0, pOnes = 0;
+        try
+        {
             // Query-tile height: fit [totalHeads, Br, Skv] into ~a quarter of free VRAM (leaves room for Q/K/V/out
             // and the model weights). Env override numerics.sdpaTile forces a fixed Br (benchmarking).
             (nuint freeBytes, _) = _context.GetMemoryInfo();
@@ -8408,17 +8449,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
             }
-
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
+            Interlocked.Increment(ref _sdpaTiledExecutionCount);
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pQ);
-            GpuTransferHelper.FreeDevice(pK);
-            GpuTransferHelper.FreeDevice(pV);
-            if (pBias != 0) GpuTransferHelper.FreeDevice(pBias);
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
             if (pOnes != 0) CudaMemory.FreeAsync(pOnes, _stream.Handle);
         }
