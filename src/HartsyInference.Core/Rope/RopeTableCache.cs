@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -113,7 +114,8 @@ public sealed class RopeTableCache : IDisposable
     }
 
     /// <summary>Retires this backend's device tables and keeps the host pairs. An idle table is freed now. A table under a lease
-    /// is unmapped at once and freed by its last release. A failed free leaves the table mapped, so the next call retries.</summary>
+    /// is unmapped at once and freed by its last release. A failed free leaves the table mapped, so the next call retries. It
+    /// still works after <see cref="Dispose"/>, so an owner tearing down its backend frees whatever remains.</summary>
     public void ReleaseBackend(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -355,26 +357,45 @@ public sealed class RopeTableCache : IDisposable
         backend.FreeWeights([device.Cos, device.Sin]);
         device.Retired = true;
         host.Devices.Remove(backend);
-        device.Cos.Dispose();
-        device.Sin.Dispose();
+        DisposeRows(device);
     }
 
+    /// <summary>Frees every table waiting for retirement. One whose free throws stays pending for the next acquire, release or
+    /// dispose, and the rest are still freed; the failure is rethrown afterwards, several as one AggregateException.</summary>
     private void FlushPendingRetirement()
     {
         if (_pendingRetirement.Count == 0)
             return;
-        RopeDeviceTable[] pending = _pendingRetirement.ToArray();
-        foreach (RopeDeviceTable device in pending)
+        List<Exception>? failures = null;
+        foreach (RopeDeviceTable device in _pendingRetirement.ToArray())
         {
             // Staged rows were never preloaded, so they only need disposing.
             if (device.Backend is not null)
             {
-                _beforeRetire?.Invoke(device.Backend);
-                device.Backend.FreeWeights([device.Cos, device.Sin]);
+                try
+                {
+                    _beforeRetire?.Invoke(device.Backend);
+                    device.Backend.FreeWeights([device.Cos, device.Sin]);
+                }
+                catch (Exception error)
+                {
+                    (failures ??= []).Add(error);
+                    continue;
+                }
             }
             _pendingRetirement.Remove(device);
-            device.Cos.Dispose();
-            device.Sin.Dispose();
+            DisposeRows(device);
         }
+        if (failures is { Count: 1 })
+            ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        if (failures is not null)
+            throw new AggregateException("RoPE device tables failed to retire and stay pending.", failures);
+    }
+
+    /// <summary>Disposes both host tensors of a freed table, the second even when the first throws.</summary>
+    private static void DisposeRows(RopeDeviceTable device)
+    {
+        try { device.Cos.Dispose(); }
+        finally { device.Sin.Dispose(); }
     }
 }
