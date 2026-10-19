@@ -90,6 +90,24 @@ public sealed unsafe class MultiAxisRopeTablesTests
     }
 
     [Fact]
+    public void NegativeZeroPosition_PropagatesSignedZeroThroughExpander()
+    {
+        RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4], Theta = 10000 });
+        float[] positions = [-0f];
+        float[] cos = new float[2];
+        float[] sin = new float[2];
+        float[] cosRows = new float[4];
+        float[] sinRows = new float[4];
+
+        MultiAxisRopeTables.ComputePairs(plan, positions, 1, RopeAngleOrder.MultiplyByInverse, cos, sin);
+        RopeTableExpander.Expand(cos, sin, 1, 4, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity, cosRows, sinRows);
+
+        Assert.Equal(BitConverter.SingleToInt32Bits(-0f), BitConverter.SingleToInt32Bits(sin[0]));
+        Assert.Equal(BitConverter.SingleToInt32Bits(-0f), BitConverter.SingleToInt32Bits(sinRows[0]));
+        Assert.Equal(BitConverter.SingleToInt32Bits(-0f), BitConverter.SingleToInt32Bits(sinRows[1]));
+    }
+
+    [Fact]
     public void ComputePairs_RejectsNonFinitePositions()
     {
         RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4], Theta = 10000 });
@@ -123,6 +141,16 @@ public sealed unsafe class MultiAxisRopeTablesTests
 
         Assert.Equal(expectedCos, actualCos);
         Assert.Equal(expectedSin, actualSin);
+    }
+
+    [Fact]
+    public void BuildTensors_ZeroTokens_IsRejectedBeforeAllocation()
+    {
+        RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, 4], Theta = 10000 });
+
+        Assert.ThrowsAny<ArgumentException>(() =>
+            MultiAxisRopeTables.BuildTensors(plan, [], 0, RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0,
+                RopeTablePadding.Identity));
     }
 
     [Fact]

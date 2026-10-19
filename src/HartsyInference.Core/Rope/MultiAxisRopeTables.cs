@@ -88,7 +88,8 @@ public static class MultiAxisRopeTables
         RopeTablePadding padding)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        ValidateTokens(tokens);
+        if (tokens == 0)
+            throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "Tensor storage needs at least one token; use BuildRows for empty tables.");
         int headDim = plan.HeadDim;
         int count = checked(tokens * headDim);
         Tensor cos = new(new TensorShape(tokens, headDim), DType.F32);

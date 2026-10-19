@@ -198,6 +198,16 @@ public sealed class RopeTableCacheTests
     }
 
     [Fact]
+    public void Acquire_PreloadWithZeroTokens_IsRejected()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true));
+        RopeRecordingBackend backend = new();
+
+        Assert.ThrowsAny<ArgumentException>(() => cache.Acquire(backend, 0, 0, []));
+        Assert.Empty(backend.Calls);
+    }
+
+    [Fact]
     public void DefaultLease_IsAnEmptyNoOp()
     {
         RopeTableLease lease = default;

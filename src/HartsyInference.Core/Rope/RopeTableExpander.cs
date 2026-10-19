@@ -1,6 +1,3 @@
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
-
 namespace HartsyInference.Core.Rope;
 
 /// <summary>Expands compact per-pair cos/sin into the full <c>[tokens, headDim]</c> rows each apply op reads.</summary>
@@ -44,8 +41,8 @@ public static class RopeTableExpander
         long rowLength = (long)tokens * headDim;
         if (cosRows.Length != rowLength || sinRows.Length != rowLength)
             throw new ArgumentException($"Destination rows must hold {tokens} tokens of {headDim} channels.", nameof(cosRows));
-        if (Overlaps(cos, cosRows) || Overlaps(cos, sinRows) || Overlaps(sin, cosRows) || Overlaps(sin, sinRows)
-            || Overlaps(cosRows, sinRows))
+        if (cos.Overlaps(cosRows) || cos.Overlaps(sinRows) || sin.Overlaps(cosRows) || sin.Overlaps(sinRows)
+            || cosRows.Overlaps(sinRows))
             throw new ArgumentException("Input and destination buffers must not overlap.");
         if (tokens == 0)
             return;
@@ -93,16 +90,5 @@ public static class RopeTableExpander
                 sinRows[rowBase + j] = 0f;
             }
         }
-    }
-
-    private static unsafe bool Overlaps(ReadOnlySpan<float> first, ReadOnlySpan<float> second)
-    {
-        if (first.IsEmpty || second.IsEmpty)
-            return false;
-        nint firstStart = (nint)Unsafe.AsPointer(ref Unsafe.AsRef(in MemoryMarshal.GetReference(first)));
-        nint secondStart = (nint)Unsafe.AsPointer(ref Unsafe.AsRef(in MemoryMarshal.GetReference(second)));
-        nint firstEnd = firstStart + (nint)((long)first.Length * sizeof(float));
-        nint secondEnd = secondStart + (nint)((long)second.Length * sizeof(float));
-        return firstStart < secondEnd && secondStart < firstEnd;
     }
 }

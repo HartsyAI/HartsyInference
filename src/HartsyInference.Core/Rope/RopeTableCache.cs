@@ -58,6 +58,8 @@ public sealed class RopeTableCache : IDisposable
             throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "Token count cannot be negative.");
         if (positions.Length != (long)tokens * _plan.Axes)
             throw new ArgumentException($"Positions must hold {tokens} tokens of {_plan.Axes} axes.", nameof(positions));
+        if (_preload && tokens == 0)
+            throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "Preloaded device tables need at least one token.");
 
         lock (_gate)
         {
@@ -199,6 +201,8 @@ public sealed class RopeTableCache : IDisposable
         host.Devices.Clear();
     }
 
+    // Backend preload and free run under the gate so table state and lease bookkeeping change together.
+    // Backend callbacks must not re-enter the cache.
     private void FlushPendingRetirement()
     {
         if (_pendingRetirement.Count == 0)
@@ -208,9 +212,9 @@ public sealed class RopeTableCache : IDisposable
         {
             _beforeRetire?.Invoke(device.Backend);
             device.Backend.FreeWeights([device.Cos, device.Sin]);
+            _pendingRetirement.Remove(device);
             device.Cos.Dispose();
             device.Sin.Dispose();
-            _pendingRetirement.Remove(device);
         }
     }
 }
