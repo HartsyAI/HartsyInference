@@ -30,9 +30,27 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
         _axes = axes;
     }
 
-    /// <summary>Returns the tensors for <paramref name="key"/> on <paramref name="backend"/>. Builds from <paramref name="buildPositions"/>
-    /// only when the backend's held signature differs.</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuild(IBackend backend, TKey key, Func<float[]> buildPositions)
+    /// <summary>Returns the tensors <paramref name="backend"/> holds for <paramref name="key"/>, or false when it holds another
+    /// signature or none. Lets a caller whose builder needs more than the key skip assembling that state on a hit.</summary>
+    public bool TryGet(IBackend backend, TKey key, out (Tensor Cos, Tensor Sin) tables)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        lock (_gate)
+        {
+            if (_held.TryGetValue(backend, out Held? current) && current.Key.Equals(key))
+            {
+                tables = (current.Cos, current.Sin);
+                return true;
+            }
+            tables = default;
+            return false;
+        }
+    }
+
+    /// <summary>Returns the tensors for <paramref name="key"/> on <paramref name="backend"/>. Builds from
+    /// <paramref name="buildPositions"/> only when the backend's held signature differs; the builder receives the key, so a
+    /// static lambda makes a hit allocation-free.</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuild(IBackend backend, TKey key, Func<TKey, float[]> buildPositions)
     {
         ArgumentNullException.ThrowIfNull(backend);
         lock (_gate)
@@ -40,7 +58,7 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
             if (_held.TryGetValue(backend, out Held? current) && current.Key.Equals(key))
                 return (current.Cos, current.Sin);
 
-            float[] positions = buildPositions();
+            float[] positions = buildPositions(key);
             RopeTableLease lease = _cache.Acquire(backend, _slot, positions.Length / _axes, positions);
             Tensor cos;
             Tensor sin;
@@ -63,15 +81,16 @@ internal sealed class RopeHeldTables<TKey> : IDisposable where TKey : IEquatable
     }
 
     /// <summary>Returns the staged rows for <paramref name="key"/> from a cache that does not preload. Builds from
-    /// <paramref name="buildPositions"/> only when the held signature differs; the rows stay valid until the next build.</summary>
-    public (Tensor Cos, Tensor Sin) GetOrBuildStaged(TKey key, Func<float[]> buildPositions)
+    /// <paramref name="buildPositions"/> only when the held signature differs; the rows stay valid until the next build. The
+    /// builder receives the key, so a static lambda makes a hit allocation-free.</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildStaged(TKey key, Func<TKey, float[]> buildPositions)
     {
         lock (_gate)
         {
             if (_staged is not null && _staged.Key.Equals(key))
                 return (_staged.Cos, _staged.Sin);
 
-            float[] positions = buildPositions();
+            float[] positions = buildPositions(key);
             RopeTableLease lease = _cache.AcquireStaged(_slot, positions.Length / _axes, positions);
             Tensor cos;
             Tensor sin;

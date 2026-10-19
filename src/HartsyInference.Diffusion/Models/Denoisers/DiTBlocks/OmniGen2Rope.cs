@@ -194,17 +194,17 @@ public sealed unsafe class OmniGen2Rope : IDisposable
     /// building them on first use. <c>[txtSeqLen, headDim]</c> in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/>
     /// convention — bit-equivalent to the host <see cref="ApplyText"/> path minus the per-block Q/K D2H drain.</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(int txtSeqLen) =>
-        _textTables.GetOrBuildStaged(txtSeqLen, () => OmniGen2PosEmbed.TextRows(txtSeqLen));
+        _textTables.GetOrBuildStaged(txtSeqLen, static length => OmniGen2PosEmbed.TextRows(length));
 
     /// <summary>Returns the cached device <c>(cos, sin)</c> tables for an image-only stream (positions
     /// <c>(timeOffset, row, col)</c>), building them on first use. <c>[hPacked·wPacked, headDim]</c>.</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildImageTables(int hPacked, int wPacked, int timeOffset) =>
-        _imageTables.GetOrBuildStaged((hPacked, wPacked, timeOffset), () => OmniGen2PosEmbed.ImageRows(hPacked, wPacked, timeOffset));
+        _imageTables.GetOrBuildStaged((hPacked, wPacked, timeOffset), static key => OmniGen2PosEmbed.ImageRows(key.H, key.W, key.T));
 
     /// <summary>Returns the cached device <c>(cos, sin)</c> tables for the joint <c>[text, image]</c> stream,
     /// building them on first use. <c>[txtSeqLen + hPacked·wPacked, headDim]</c>.</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int txtSeqLen, int hPacked, int wPacked) =>
-        _jointTables.GetOrBuildStaged((txtSeqLen, hPacked, wPacked), () => OmniGen2PosEmbed.JointRows(txtSeqLen, hPacked, wPacked));
+        _jointTables.GetOrBuildStaged((txtSeqLen, hPacked, wPacked), static key => OmniGen2PosEmbed.JointRows(key.Txt, key.H, key.W));
 
     /// <summary>Frees the cached device rope tables.</summary>
     public void Dispose()

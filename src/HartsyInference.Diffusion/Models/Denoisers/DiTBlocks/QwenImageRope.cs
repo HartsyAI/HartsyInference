@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using JointKey = (int ImgH, int ImgW, int Txt, int TxtStart, long RefSig, int TokenStart, int TokenCount);
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -30,7 +31,7 @@ public sealed unsafe class QwenImageRope : IDisposable
     // Joint device tables are keyed by the full sequence layout, one held lease per backend. DiT sharding runs blocks on a
     // second backend, and context-parallel ranks build different row sub-ranges concurrently; each backend keeps its own
     // tables, so one rank's build never frees tables another rank still reads.
-    private readonly RopeHeldTables<(int, int, int, int, long, int, int)> _jointTables;
+    private readonly RopeHeldTables<JointKey> _jointTables;
 
     public QwenImageRope(int[]? axesDim = null, int theta = 10000, bool ropeText = true)
     {
@@ -41,7 +42,7 @@ public sealed unsafe class QwenImageRope : IDisposable
         _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
         _headDim = _plan.HeadDim;
         _deviceTables = new RopeTableCache(_plan, DeviceTableSettings);
-        _jointTables = new RopeHeldTables<(int, int, int, int, long, int, int)>(_deviceTables, slot: 0, axes: QwenImagePosEmbed.NumAxes);
+        _jointTables = new RopeHeldTables<JointKey>(_deviceTables, slot: 0, axes: QwenImagePosEmbed.NumAxes);
     }
 
     /// <summary>Sum of the per-axis dimensions; equals the per-head dim of the wrapped attention block.</summary>
@@ -102,13 +103,18 @@ public sealed unsafe class QwenImageRope : IDisposable
         }
         if (imgTokenCount >= 0 && refSeqLen > 0)
             throw new ArgumentException("A rank-restricted image range cannot be combined with reference grids.", nameof(imgTokenCount));
-        (int, int, int, int, long, int, int) key = (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refSig, imgTokenStart, imgTokenCount);
+        JointKey key = (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refSig, imgTokenStart, imgTokenCount);
+        if (_jointTables.TryGet(backend, key, out (Tensor Cos, Tensor Sin) held))
+            return held;
 
-        // A lambda cannot capture the span, so the grids are copied; ToArray on an empty span allocates nothing.
-        (int H, int W)[] refs = refGrids.ToArray();
-        return _jointTables.GetOrBuild(backend, key, () => QwenImagePosEmbed.JointRows(imgPackedH, imgPackedW, txtSeqLen,
-            txtPositionStart, _ropeText, refs, imgTokenStart, imgTokenCount));
+        // A lambda cannot capture the span, so a miss copies the grids; ToArray on an empty span allocates nothing.
+        return BuildJointTables(backend, key, refGrids.ToArray());
     }
+
+    /// <summary>The miss path of <see cref="GetOrBuildJointTables"/>, kept apart so a hit allocates no closure.</summary>
+    private (Tensor Cos, Tensor Sin) BuildJointTables(IBackend backend, JointKey key, (int H, int W)[] refs) =>
+        _jointTables.GetOrBuild(backend, key, k => QwenImagePosEmbed.JointRows(k.ImgH, k.ImgW, k.Txt, k.TxtStart, _ropeText, refs,
+            k.TokenStart, k.TokenCount));
 
     /// <summary>Computes the position offset to use when calling <see cref="ApplyText"/>. Matches diffusers'
     /// <c>scale_rope=True</c> mode where text starts at <c>max_vid_index = max(height//2, width//2)</c>

@@ -42,7 +42,7 @@ public sealed class QwenImage21Rope : IDisposable
     // Cached per backend, exactly as QwenImageRope does and for the same reason: each DiT shard keeps its own tables, and
     // a build on one backend never frees tables another backend still reads.
     private readonly RopeHeldTables<int> _textTables;
-    private readonly RopeHeldTables<(int, int, int)> _imageTables;
+    private readonly RopeHeldTables<(int Text, int H, int W)> _imageTables;
 
     public QwenImage21Rope(int[]? axesDim = null, int theta = 10000)
     {
@@ -79,12 +79,12 @@ public sealed class QwenImage21Rope : IDisposable
     /// <see cref="IBackend.WanRopeInterleaved"/> convention (pair <c>i</c>'s angle duplicated at <c>2i</c> and
     /// <c>2i+1</c>).</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(IBackend backend, int textLen) =>
-        _textTables.GetOrBuild(backend, textLen, () => QwenImage21PosEmbed.TextRows(textLen));
+        _textTables.GetOrBuild(backend, textLen, static length => QwenImage21PosEmbed.TextRows(length));
 
     /// <summary>Builds (or returns the cached) target-image tables, <c>[imgH·imgW, headDim]</c>. Keyed on the text
     /// length too, since that sets the image rows' sequence-axis position.</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildImageTables(IBackend backend, int textLen, int imgH, int imgW) =>
-        _imageTables.GetOrBuild(backend, (textLen, imgH, imgW), () => QwenImage21PosEmbed.ImageRows(textLen, imgH, imgW));
+        _imageTables.GetOrBuild(backend, (textLen, imgH, imgW), static key => QwenImage21PosEmbed.ImageRows(key.Text, key.H, key.W));
 
     /// <summary>Releases the held tables and the cache. Tables still under a lease are freed by their last release.</summary>
     public void Dispose()
