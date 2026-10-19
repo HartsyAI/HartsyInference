@@ -14,7 +14,7 @@ public sealed unsafe class MultiAxisRopeTablesTests
     {
         Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [], Theta = 10000 }));
         Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, 5], Theta = 10000 }));
-        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, 0], Theta = 10000 }));
+        Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, -2], Theta = 10000 }));
         Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4], Theta = 0 }));
         Assert.ThrowsAny<ArgumentException>(() => RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4], Theta = double.NaN }));
         Assert.ThrowsAny<ArgumentException>(() =>
@@ -23,6 +23,21 @@ public sealed unsafe class MultiAxisRopeTablesTests
             RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4], Theta = 10000, NtkScales = [0.0] }));
         Assert.ThrowsAny<ArgumentException>(() =>
             RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4], Theta = 10000, NtkScales = [double.NaN] }));
+    }
+
+    [Fact]
+    public void Plan_AcceptsZeroWidthAxes_ThatContributeNoPairs()
+    {
+        RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, 0, 0], Theta = 10000 });
+        float[] positions = [1f, 9f, 9f];
+        float[] cos = new float[2];
+        float[] sin = new float[2];
+
+        MultiAxisRopeTables.ComputePairs(plan, positions, 1, RopeAngleOrder.MultiplyByInverse, cos, sin);
+
+        Assert.Equal(4, plan.HeadDim);
+        Assert.Equal(2, plan.Pairs);
+        Assert.Equal(3, plan.Axes);
     }
 
     [Fact]

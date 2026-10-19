@@ -1,14 +1,15 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Rope;
 
-/// <summary>RoPE tables for one <see cref="RopeFrequencyPlan"/> and one settings snapshot. Host tables are shared per
-/// position signature; device rows are built per backend. Leases keep tables alive while a backend call uses them.</summary>
-/// <remarks>Retirement runs <c>beforeRetire</c> for the owning backend first, so the owner can invalidate its own step
-/// graph before device memory is freed. The cache never resets a backend-wide graph itself. A retirement that throws stays
-/// tracked and is retried on the next acquire, release or dispose.</remarks>
+/// <summary>RoPE tables for one <see cref="RopeFrequencyPlan"/> and one settings snapshot. Host pairs are shared per position
+/// signature; device rows are built per backend. Leases keep device rows alive while a backend call uses them.</summary>
+/// <remarks>Freeing a device table runs <c>beforeRetire</c> for its backend first, so the owner can invalidate its own step graph.
+/// The cache never resets a backend-wide graph itself. A free that throws stays tracked and is retried on the next acquire,
+/// release or dispose.</remarks>
 public sealed class RopeTableCache : IDisposable
 {
     private readonly object _gate = new();
@@ -21,6 +22,7 @@ public sealed class RopeTableCache : IDisposable
     private readonly bool _preload;
     private readonly int _retainedSignatures;
     private readonly Action<IBackend>? _beforeRetire;
+    private readonly RopeHostTableWriter? _hostWriter;
     private readonly Dictionary<int, List<RopeHostTable>> _slots = new();
     private readonly List<RopeDeviceTable> _pendingRetirement = new();
     private readonly Stack<RopeLeaseSlot> _freeLeaseSlots = new();
@@ -28,7 +30,12 @@ public sealed class RopeTableCache : IDisposable
     private bool _disposed;
 
     /// <summary>Creates a cache. Plan and settings are copied here and never read again.</summary>
-    public RopeTableCache(RopeFrequencyPlan plan, RopeTableSettings settings, Action<IBackend>? beforeRetire = null)
+    /// <param name="hostWriter">Optional host-pair writer. When absent, pairs come from <see cref="MultiAxisRopeTables"/>.</param>
+    public RopeTableCache(
+        RopeFrequencyPlan plan,
+        RopeTableSettings settings,
+        Action<IBackend>? beforeRetire = null,
+        RopeHostTableWriter? hostWriter = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(settings);
@@ -45,10 +52,11 @@ public sealed class RopeTableCache : IDisposable
         _preload = settings.Preload;
         _retainedSignatures = settings.RetainedSignatures;
         _beforeRetire = beforeRetire;
+        _hostWriter = hostWriter;
     }
 
-    /// <summary>Returns tables for the signature <paramref name="positions"/> on <paramref name="backend"/>. Dispose the
-    /// lease once the backend call no longer needs the tables.</summary>
+    /// <summary>Returns tables for the signature <paramref name="positions"/> on <paramref name="backend"/>. Dispose the lease
+    /// once the backend call no longer needs the tables.</summary>
     public RopeTableLease Acquire(IBackend backend, int slot, int tokens, ReadOnlySpan<float> positions)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -67,18 +75,21 @@ public sealed class RopeTableCache : IDisposable
                 throw new ObjectDisposedException(nameof(RopeTableCache));
             FlushPendingRetirement();
             RopeHostTable host = FindOrBuildHost(slot, tokens, positions);
-            RopeDeviceTable? device = _preload ? FindOrBuildDevice(host, backend) : null;
+            RopeDeviceTable? device = null;
+            if (_preload)
+            {
+                device = FindOrBuildDevice(host, backend);
+                device.Outstanding++;
+            }
             RopeLeaseSlot leaseSlot = _freeLeaseSlots.Count > 0 ? _freeLeaseSlots.Pop() : new RopeLeaseSlot();
             ulong ticket = ++_lastTicket;
             leaseSlot.Ticket = ticket;
-            leaseSlot.Host = host;
-            host.Outstanding++;
+            leaseSlot.Device = device;
             return new RopeTableLease(this, leaseSlot, ticket, host, device);
         }
     }
 
-    /// <summary>Retires every table so the next acquisition rebuilds. Tables with outstanding leases are freed when their last
-    /// lease is released.</summary>
+    /// <summary>Retires every table so the next acquisition rebuilds. Tables under a lease are freed by its last release.</summary>
     public void Clear()
     {
         lock (_gate)
@@ -89,8 +100,32 @@ public sealed class RopeTableCache : IDisposable
         }
     }
 
-    /// <summary>Marks the cache disposed and retires every table. Tables with outstanding leases are freed when their last
-    /// lease is released. Later acquisitions throw.</summary>
+    /// <summary>Retires this backend's device tables and keeps the host pairs. An idle table is freed now. A table under a lease
+    /// is unmapped at once and freed by its last release. A failed free leaves the table mapped, so the next call retries.</summary>
+    public void ReleaseBackend(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        lock (_gate)
+        {
+            foreach (List<RopeHostTable> tables in _slots.Values)
+            {
+                foreach (RopeHostTable host in tables)
+                {
+                    if (!host.Devices.TryGetValue(backend, out RopeDeviceTable? device))
+                        continue;
+                    if (device.Outstanding == 0)
+                        FreeIdle(host, device);
+                    else
+                        Unmap(device);
+                    host.Devices.Remove(backend);
+                }
+            }
+            FlushPendingRetirement();
+        }
+    }
+
+    /// <summary>Marks the cache disposed and retires every table. Tables under a lease are freed by their last release. Later
+    /// acquisitions throw.</summary>
     public void Dispose()
     {
         lock (_gate)
@@ -102,31 +137,34 @@ public sealed class RopeTableCache : IDisposable
         }
     }
 
-    private void RetireAllLocked()
-    {
-        foreach (List<RopeHostTable> tables in _slots.Values)
-        {
-            foreach (RopeHostTable host in tables)
-                RetireHost(host);
-        }
-        _slots.Clear();
-        FlushPendingRetirement();
-    }
-
     internal void ReleaseLease(RopeLeaseSlot slot, ulong ticket)
     {
         if (Interlocked.CompareExchange(ref slot.Ticket, 0UL, ticket) != ticket)
             return;
         lock (_gate)
         {
-            RopeHostTable host = slot.Host!;
-            slot.Host = null;
+            RopeDeviceTable? device = slot.Device;
+            slot.Device = null;
             _freeLeaseSlots.Push(slot);
-            host.Outstanding--;
-            if (host.Retired)
-                RetireHost(host);
+            if (device is not null)
+            {
+                device.Outstanding--;
+                if (device.Outstanding == 0 && device.Retired)
+                    _pendingRetirement.Add(device);
+            }
             FlushPendingRetirement();
         }
+    }
+
+    private void RetireAllLocked()
+    {
+        foreach (List<RopeHostTable> tables in _slots.Values)
+        {
+            foreach (RopeHostTable host in tables)
+                UnmapAll(host);
+        }
+        _slots.Clear();
+        FlushPendingRetirement();
     }
 
     private RopeHostTable FindOrBuildHost(int slot, int tokens, ReadOnlySpan<float> positions)
@@ -148,7 +186,7 @@ public sealed class RopeTableCache : IDisposable
             }
         }
 
-        (float[] cos, float[] sin) = MultiAxisRopeTables.ComputeActivePairs(_plan, positions, tokens, _angleOrder, _activePairs);
+        (float[] cos, float[] sin) = BuildHostPairs(positions, tokens);
         RopeHostTable built = new(positions.ToArray(), tokens, cos, sin);
         if (!_slots.TryGetValue(slot, out tables))
         {
@@ -161,12 +199,22 @@ public sealed class RopeTableCache : IDisposable
         {
             RopeHostTable oldest = tables[^1];
             tables.RemoveAt(tables.Count - 1);
-            RetireHost(oldest);
+            UnmapAll(oldest);
             evicted = true;
         }
         if (evicted)
             FlushPendingRetirement();
         return built;
+    }
+
+    private (float[] Cos, float[] Sin) BuildHostPairs(ReadOnlySpan<float> positions, int tokens)
+    {
+        if (_hostWriter is null)
+            return MultiAxisRopeTables.ComputeActivePairs(_plan, positions, tokens, _angleOrder, _activePairs);
+        float[] cos = new float[checked(tokens * _activePairs)];
+        float[] sin = new float[cos.Length];
+        _hostWriter(positions, tokens, cos, sin);
+        return (cos, sin);
     }
 
     private RopeDeviceTable FindOrBuildDevice(RopeHostTable host, IBackend backend)
@@ -178,7 +226,7 @@ public sealed class RopeTableCache : IDisposable
         int count = checked(host.Tokens * headDim);
         Tensor cos = new(new TensorShape(host.Tokens, headDim), DType.F32);
         Tensor? sin = null;
-        bool cosPreloaded = false;
+        bool preloadAttempted = false;
         bool built = false;
         try
         {
@@ -188,9 +236,10 @@ public sealed class RopeTableCache : IDisposable
                 RopeTableExpander.Expand(host.Cos, host.Sin, host.Tokens, headDim, _layout, _rotaryDim, _padding,
                     new Span<float>(cos.DataPointer, count), new Span<float>(sin.DataPointer, count));
             }
-            backend.PreloadWeights([cos]);
-            cosPreloaded = true;
-            backend.PreloadWeights([sin]);
+            // One batch, as the original per-backend tables uploaded it. A failed batch may have uploaded either tensor,
+            // so rollback frees both.
+            preloadAttempted = true;
+            backend.PreloadWeights([cos, sin]);
             RopeDeviceTable device = new(backend, cos, sin);
             host.Devices[backend] = device;
             built = true;
@@ -200,26 +249,44 @@ public sealed class RopeTableCache : IDisposable
         {
             if (!built)
             {
-                if (cosPreloaded)
-                    backend.FreeWeights([cos]);
+                if (preloadAttempted && sin is not null)
+                {
+                    try { backend.FreeWeights([cos, sin]); }
+                    catch (Exception error) { Logs.Warning($"[RopeTableCache] Failed to roll back a partial preload: {error.Message}"); }
+                }
                 cos.Dispose();
                 sin?.Dispose();
             }
         }
     }
 
-    private void RetireHost(RopeHostTable host)
+    /// <summary>Unmaps every device of a host table, so none of them can be reused. Idle devices are queued for freeing.</summary>
+    private void UnmapAll(RopeHostTable host)
     {
-        host.Retired = true;
-        if (host.Outstanding > 0 || host.Devices.Count == 0)
-            return;
         foreach (RopeDeviceTable device in host.Devices.Values)
-            _pendingRetirement.Add(device);
+            Unmap(device);
         host.Devices.Clear();
     }
 
-    // Backend preload and free run under the gate so table state and lease bookkeeping change together.
-    // Backend callbacks must not re-enter the cache.
+    /// <summary>Marks a device retired. An idle device is queued for freeing now; one under a lease waits for its last release.</summary>
+    private void Unmap(RopeDeviceTable device)
+    {
+        device.Retired = true;
+        if (device.Outstanding == 0)
+            _pendingRetirement.Add(device);
+    }
+
+    /// <summary>Frees an idle device table now. It stays mapped if its free throws, so the next call retries it.</summary>
+    private void FreeIdle(RopeHostTable host, RopeDeviceTable device)
+    {
+        _beforeRetire?.Invoke(device.Backend);
+        device.Backend.FreeWeights([device.Cos, device.Sin]);
+        device.Retired = true;
+        host.Devices.Remove(device.Backend);
+        device.Cos.Dispose();
+        device.Sin.Dispose();
+    }
+
     private void FlushPendingRetirement()
     {
         if (_pendingRetirement.Count == 0)

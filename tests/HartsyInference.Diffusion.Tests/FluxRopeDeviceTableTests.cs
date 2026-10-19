@@ -24,7 +24,7 @@ public sealed unsafe class FluxRopeDeviceTableTests
         rope.ApplyGpu(backend, q, k, 1);
         rope.ApplyGpu(backend, q, k, 1);
 
-        Assert.Equal(new[] { "preload:1", "preload:1" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2" }, backend.Calls);
         Dispose(q, k);
     }
 
@@ -44,7 +44,7 @@ public sealed unsafe class FluxRopeDeviceTableTests
         MultiAxisRopeTables.BuildRows(RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [4, 4], Theta = 10000 }), Positions, 2,
             RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity, expectedCos, expectedSin);
         Tensor device = backend.PreloadedBatches[0][0];
-        Tensor deviceSin = backend.PreloadedBatches[1][0];
+        Tensor deviceSin = backend.PreloadedBatches[0][1];
         ReadOnlySpan<float> actualCos = new((void*)device.DataPointer, 16);
         ReadOnlySpan<float> actualSin = new((void*)deviceSin.DataPointer, 16);
         for (int i = 0; i < 16; i++)
@@ -68,7 +68,7 @@ public sealed unsafe class FluxRopeDeviceTableTests
         rope.Precompute(PositionTensor([1f, 1f, 1f, 1f], 2, 2));
         rope.ApplyGpu(backend, q, k, 1);
 
-        Assert.Equal(new[] { "preload:1", "preload:1", "beforeRetire", "free:2", "preload:1", "preload:1" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2", "beforeRetire", "free:2", "preload:2" }, backend.Calls);
         Dispose(q, k);
     }
 
@@ -84,7 +84,7 @@ public sealed unsafe class FluxRopeDeviceTableTests
 
         rope.Dispose();
 
-        Assert.Equal(new[] { "preload:1", "preload:1", "beforeRetire", "free:2" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2", "beforeRetire", "free:2" }, backend.Calls);
         Dispose(q, k);
     }
 

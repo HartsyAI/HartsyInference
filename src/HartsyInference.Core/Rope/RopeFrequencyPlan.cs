@@ -53,8 +53,8 @@ public sealed class RopeFrequencyPlan
         for (int a = 0; a < axes; a++)
         {
             int dim = spec.AxisDims[a];
-            if (dim <= 0 || (dim & 1) != 0)
-                throw new ArgumentOutOfRangeException(nameof(spec), dim, "RoPE axis dims must be positive and even.");
+            if (dim < 0 || (dim & 1) != 0)
+                throw new ArgumentOutOfRangeException(nameof(spec), dim, "RoPE axis dims must be non-negative and even.");
             if (headDim > int.MaxValue - dim)
                 throw new ArgumentOutOfRangeException(nameof(spec), dim, "RoPE head dimension overflows.");
             axisDims[a] = dim;
@@ -62,6 +62,8 @@ public sealed class RopeFrequencyPlan
             headDim += dim;
         }
 
+        if (headDim == 0)
+            throw new ArgumentException("RoPE needs a positive head dimension.", nameof(spec));
         int pairs = headDim / 2;
         double[] inverse = new double[pairs];
         double[] denominators = new double[pairs];

@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -21,27 +21,43 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// the rotation is <c>(x_real * cos - x_imag * sin, x_real * sin + x_imag * cos)</c>. Because the upstream concat duplicates
 /// freqs into both halves, both halves see the same cos/sin pattern and the rotation is well-defined.</para>
 ///
+/// <para>Host pairs are computed in float to match the upstream arithmetic. Device rows live in a <see cref="RopeTableCache"/>
+/// with the rotate-half layout, and this class supplies the float host writer.</para>
+///
 /// <para>For the t2i variant (<c>T = 1</c>), the temporal axis evaluates to position 0 and contributes <c>cos=1, sin=0</c> for
 /// every <c>dim_t/2</c> frequency — i.e. it leaves Q/K untouched in the temporal sub-band. We compute and store these zeros
 /// anyway so the layout matches the upstream tables byte-for-byte (useful for diff dumps).</para></summary>
 public sealed unsafe class AnimaRope
 {
+    private static readonly RopeTableSettings DeviceTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.MultiplyByInverse,
+        Layout = RopeTableLayout.RotateHalf,
+        Preload = true,
+        RetainedSignatures = 1,
+    };
+
     private readonly int _headDim;
     private readonly int _dimT;
     private readonly int _dimH;
     private readonly int _dimW;
     private readonly float _theta;
     private readonly (float T, float H, float W) _ntkFactor;
+    private readonly float[] _invFreqT;
+    private readonly float[] _invFreqH;
+    private readonly float[] _invFreqW;
+    private readonly RopeTableCache _deviceTables;
     private readonly object _gpuTableLock = new();
-    private readonly Dictionary<IBackend, GpuTableEntry> _gpuTables =
-        new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<IBackend, HeldTables> _held = new(ReferenceEqualityComparer.Instance);
+    private (int T, int H, int W) _gridSignature;
+    private float[] _gridPositions = [];
 
-    private sealed record GpuTableEntry(int TFrames, int HPatched, int WPatched, Tensor Cos, Tensor Sin);
+    private sealed record HeldTables(int TFrames, int HPatched, int WPatched, RopeTableLease Lease);
 
     /// <summary>Creates a 3-axis Cosmos RoPE for the given <paramref name="hiddenSize"/> per head and base period.
     /// <paramref name="ropeScale"/> applies the upstream NTK scale: <c>theta_axis = theta * scale^(dim_axis/(dim_axis-2))</c>
-    /// for axes with <c>dim_axis > 2</c>.</summary>
-    public AnimaRope(int hiddenSize, float theta, (float T, float H, float W) ropeScale)
+    /// for axes with <c>dim_axis > 2</c>. <paramref name="beforeRetire"/> runs for a backend before its device tables are freed.</summary>
+    public AnimaRope(int hiddenSize, float theta, (float T, float H, float W) ropeScale, Action<IBackend>? beforeRetire = null)
     {
         if (hiddenSize <= 0 || (hiddenSize & 1) != 0)
             throw new ArgumentOutOfRangeException(
@@ -65,6 +81,11 @@ public sealed unsafe class AnimaRope
             T: NtkFactor(ropeScale.T, _dimT),
             H: NtkFactor(ropeScale.H, _dimH),
             W: NtkFactor(ropeScale.W, _dimW));
+        _invFreqT = InverseFrequencies(_dimT, _theta * _ntkFactor.T);
+        _invFreqH = InverseFrequencies(_dimH, _theta * _ntkFactor.H);
+        _invFreqW = InverseFrequencies(_dimW, _theta * _ntkFactor.W);
+        RopeFrequencyPlan plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = [_dimT, _dimH, _dimW], Theta = theta });
+        _deviceTables = new RopeTableCache(plan, DeviceTableSettings, beforeRetire, WriteHostPairs);
     }
 
     /// <summary>Total head dim (= sum of axis sub-dims).</summary>
@@ -78,13 +99,7 @@ public sealed unsafe class AnimaRope
     /// row-major over <c>(t, h, w)</c>. Caller takes ownership and disposes.</summary>
     public (Tensor Cos, Tensor Sin) BuildFreqs(int tFrames, int hPatched, int wPatched)
     {
-        if (tFrames <= 0)
-            throw new ArgumentOutOfRangeException(nameof(tFrames), tFrames, "AnimaRope frame count must be positive.");
-        if (hPatched <= 0)
-            throw new ArgumentOutOfRangeException(nameof(hPatched), hPatched, "AnimaRope packed height must be positive.");
-        if (wPatched <= 0)
-            throw new ArgumentOutOfRangeException(nameof(wPatched), wPatched, "AnimaRope packed width must be positive.");
-
+        ValidateGrid(tFrames, hPatched, wPatched);
         int seqLen;
         try
         {
@@ -96,143 +111,75 @@ public sealed unsafe class AnimaRope
             throw new ArgumentOutOfRangeException(
                 nameof(wPatched), "AnimaRope table geometry exceeds signed addressable storage.");
         }
-        int halfDim = _headDim / 2;
 
-        TensorShape shape = new TensorShape(seqLen, _headDim);
-        Tensor? cos = null;
-        Tensor? sin = null;
+        float[] positions = GridPositions(tFrames, hPatched, wPatched);
+        int halfDim = _headDim / 2;
+        float[] cos = new float[checked(seqLen * halfDim)];
+        float[] sin = new float[cos.Length];
+        WriteHostPairs(positions, seqLen, cos, sin);
+
+        TensorShape shape = new(seqLen, _headDim);
+        Tensor? cosTensor = null;
+        Tensor? sinTensor = null;
+        bool succeeded = false;
         try
         {
-            cos = new Tensor(shape, DType.F32);
-            sin = new Tensor(shape, DType.F32);
-            float* cosPtr = (float*)cos.DataPointer;
-            float* sinPtr = (float*)sin.DataPointer;
-
-            // Inverse frequencies per axis: 1.0 / (theta_axis ^ (2k / dim_axis)).
-            Span<float> invFreqsT = _dimT > 0 ? new float[_dimT / 2] : [];
-            Span<float> invFreqsH = _dimH > 0 ? new float[_dimH / 2] : [];
-            Span<float> invFreqsW = _dimW > 0 ? new float[_dimW / 2] : [];
-            FillInvFreqs(invFreqsT, _dimT, _theta * _ntkFactor.T);
-            FillInvFreqs(invFreqsH, _dimH, _theta * _ntkFactor.H);
-            FillInvFreqs(invFreqsW, _dimW, _theta * _ntkFactor.W);
-
-            for (int t = 0; t < tFrames; t++)
-            {
-                for (int h = 0; h < hPatched; h++)
-                {
-                    for (int w = 0; w < wPatched; w++)
-                    {
-                        int seqIdx = (t * hPatched + h) * wPatched + w;
-                        long rowOff = (long)seqIdx * _headDim;
-
-                        // Concat order in the upstream: [emb_t, emb_h, emb_w], then repeated to fill head_dim.
-                        // Each emb_x contributes dim_x/2 unique cos/sin values.
-                        int featOff = 0;
-                        WriteAxisFreqs(cosPtr, sinPtr, rowOff, featOff, t, invFreqsT);
-                        featOff += _dimT / 2;
-                        WriteAxisFreqs(cosPtr, sinPtr, rowOff, featOff, h, invFreqsH);
-                        featOff += _dimH / 2;
-                        WriteAxisFreqs(cosPtr, sinPtr, rowOff, featOff, w, invFreqsW);
-                        featOff += _dimW / 2;
-
-                        // Second half of head_dim is a verbatim copy of the first half. Standard "rotate-half" form
-                        // sees the same cos/sin in both halves so the rotation is consistent across the split.
-                        long copyBytes = (long)halfDim * sizeof(float);
-                        Buffer.MemoryCopy(cosPtr + rowOff, cosPtr + rowOff + halfDim, copyBytes, copyBytes);
-                        Buffer.MemoryCopy(sinPtr + rowOff, sinPtr + rowOff + halfDim, copyBytes, copyBytes);
-                    }
-                }
-            }
-            return (cos, sin);
+            cosTensor = new Tensor(shape, DType.F32);
+            sinTensor = new Tensor(shape, DType.F32);
+            int count = checked(seqLen * _headDim);
+            RopeTableExpander.Expand(cos, sin, seqLen, _headDim, RopeTableLayout.RotateHalf, 0, RopeTablePadding.Identity,
+                new Span<float>(cosTensor.DataPointer, count), new Span<float>(sinTensor.DataPointer, count));
+            succeeded = true;
+            return (cosTensor, sinTensor);
         }
-        catch
+        finally
         {
-            DisposeBestEffort(cos, "partially built cosine table");
-            DisposeBestEffort(sin, "partially built sine table");
-            throw;
+            if (!succeeded)
+            {
+                cosTensor?.Dispose();
+                sinTensor?.Dispose();
+            }
         }
     }
 
-    /// <summary>Returns immutable tables for one backend/grid, preloading the pair once so every transformer block and
-    /// denoising step reuses the same device addresses. Returned tensors are borrowed; callers must not dispose
-    /// them and must pair the model phase with <see cref="ReleaseGpuTables"/>.</summary>
-    internal (Tensor Cos, Tensor Sin) GetOrCreateTables(
-        IBackend backend, int tFrames, int hPatched, int wPatched)
+    /// <summary>Returns this backend's device table pair for the grid. A lease held for the same grid is reused, so a denoising
+    /// step never re-acquires. Borrowed: callers must not dispose the tensors, and must pair the model phase with
+    /// <see cref="ReleaseGpuTables"/>.</summary>
+    internal (Tensor Cos, Tensor Sin) GetOrCreateTables(IBackend backend, int tFrames, int hPatched, int wPatched)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        ValidateGrid(tFrames, hPatched, wPatched);
         lock (_gpuTableLock)
         {
-            if (_gpuTables.TryGetValue(backend, out GpuTableEntry? cached))
+            if (_held.TryGetValue(backend, out HeldTables? held))
             {
-                if (cached.TFrames == tFrames && cached.HPatched == hPatched && cached.WPatched == wPatched)
-                    return (cached.Cos, cached.Sin);
-                ReleaseGpuTablesLocked(backend, cached);
+                if (held.TFrames == tFrames && held.HPatched == hPatched && held.WPatched == wPatched)
+                    return DeviceTablesOf(held.Lease);
+                held.Lease.Dispose();
+                _held.Remove(backend);
             }
 
-            Tensor? cos = null;
-            Tensor? sin = null;
-            try
+            if (_gridSignature != (tFrames, hPatched, wPatched))
             {
-                (cos, sin) = BuildFreqs(tFrames, hPatched, wPatched);
-                backend.PreloadWeights([cos, sin]);
-                _gpuTables.Add(backend, new GpuTableEntry(tFrames, hPatched, wPatched, cos, sin));
-                return (cos, sin);
+                _gridPositions = GridPositions(tFrames, hPatched, wPatched);
+                _gridSignature = (tFrames, hPatched, wPatched);
             }
-            catch
-            {
-                // Preload implementations are not universally transactional. Roll back both possible entries,
-                // attempt every host cleanup, and preserve the construction/preload exception.
-                try
-                {
-                    if (cos is not null)
-                        backend.FreeWeights(sin is null ? [cos] : [cos, sin]);
-                }
-                catch (Exception cleanupError)
-                {
-                    Logs.Warning($"[Anima RoPE] Failed to roll back preloaded tables: {cleanupError.Message}");
-                }
-                DisposeBestEffort(cos, "cosine table after preload failure");
-                DisposeBestEffort(sin, "sine table after preload failure");
-                throw;
-            }
+            RopeTableLease lease = _deviceTables.Acquire(backend, 0, _gridPositions.Length / 3, _gridPositions);
+            _held.Add(backend, new HeldTables(tFrames, hPatched, wPatched, lease));
+            return DeviceTablesOf(lease);
         }
     }
 
-    /// <summary>Evicts and disposes this backend's explicitly preloaded table pair. Idempotent. A backend-eviction failure
-    /// leaves the entry published so the caller can retry without losing the handles to live device allocations.</summary>
+    /// <summary>Releases this backend's device tables and any lease held for it. Idempotent. A failed free leaves the
+    /// tables tracked, so the next call retries.</summary>
     public void ReleaseGpuTables(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
         lock (_gpuTableLock)
         {
-            if (_gpuTables.TryGetValue(backend, out GpuTableEntry? cached))
-                ReleaseGpuTablesLocked(backend, cached);
-        }
-    }
-
-    private void ReleaseGpuTablesLocked(IBackend backend, GpuTableEntry cached)
-    {
-        backend.FreeWeights([cached.Cos, cached.Sin]);
-
-        Exception? firstError = null;
-        try { cached.Cos.Dispose(); }
-        catch (Exception error) { firstError = error; }
-        try { cached.Sin.Dispose(); }
-        catch (Exception error) { firstError ??= error; }
-        _gpuTables.Remove(backend);
-
-        if (firstError is not null)
-            throw new InvalidOperationException(
-                "Anima RoPE tables were evicted but one or more host owners could not be released.", firstError);
-    }
-
-    private static void DisposeBestEffort(Tensor? tensor, string description)
-    {
-        if (tensor is null) return;
-        try { tensor.Dispose(); }
-        catch (Exception error)
-        {
-            Logs.Warning($"[Anima RoPE] Failed to dispose {description}: {error.Message}");
+            if (_held.Remove(backend, out HeldTables? held))
+                held.Lease.Dispose();
+            _deviceTables.ReleaseBackend(backend);
         }
     }
 
@@ -269,28 +216,82 @@ public sealed unsafe class AnimaRope
         return MathF.Pow(scale, (float)dim / (dim - 2));
     }
 
-    /// <summary>Fills <paramref name="invFreqs"/> with <c>1 / theta^(2k / dim)</c>. Length must be <paramref name="dim"/>/2.</summary>
-    private static void FillInvFreqs(Span<float> invFreqs, int dim, float theta)
+    /// <summary>Inverse frequencies <c>1 / theta^(2k / dim)</c> for one axis, length <c>dim/2</c>, in float.</summary>
+    private static float[] InverseFrequencies(int dim, float theta)
     {
+        float[] invFreqs = new float[dim / 2];
         int n = invFreqs.Length;
         for (int k = 0; k < n; k++)
         {
             float exponent = (float)(2 * k) / dim;
             invFreqs[k] = 1.0f / MathF.Pow(theta, exponent);
         }
+        return invFreqs;
     }
 
-    /// <summary>Writes <c>cos(pos * invFreq[k])</c> / <c>sin(pos * invFreq[k])</c> into the cos/sin tables for one axis.</summary>
-    private static void WriteAxisFreqs(float* cosPtr, float* sinPtr, long rowOff, int featOff, int pos, ReadOnlySpan<float> invFreqs)
+    /// <summary>Writes host pairs in the rotate-half compact layout: each axis's <c>dim/2</c> values, in <c>(t, h, w)</c> order.</summary>
+    private void WriteHostPairs(ReadOnlySpan<float> positions, int tokens, Span<float> cos, Span<float> sin)
     {
-        int n = invFreqs.Length;
-        for (int k = 0; k < n; k++)
+        int halfDim = _headDim / 2;
+        for (int s = 0; s < tokens; s++)
         {
-            float angle = pos * invFreqs[k];
-            cosPtr[rowOff + featOff + k] = MathF.Cos(angle);
-            sinPtr[rowOff + featOff + k] = MathF.Sin(angle);
+            int row = s * halfDim;
+            int featOff = 0;
+            WriteAxisFreqs(cos, sin, row, featOff, positions[s * 3], _invFreqT);
+            featOff += _dimT / 2;
+            WriteAxisFreqs(cos, sin, row, featOff, positions[s * 3 + 1], _invFreqH);
+            featOff += _dimH / 2;
+            WriteAxisFreqs(cos, sin, row, featOff, positions[s * 3 + 2], _invFreqW);
         }
     }
+
+    /// <summary>Writes <c>cos(pos * invFreq[k])</c> / <c>sin(pos * invFreq[k])</c> for one axis.</summary>
+    private static void WriteAxisFreqs(Span<float> cos, Span<float> sin, int rowOff, int featOff, float pos, ReadOnlySpan<float> invFreqs)
+    {
+        for (int k = 0; k < invFreqs.Length; k++)
+        {
+            float angle = pos * invFreqs[k];
+            cos[rowOff + featOff + k] = MathF.Cos(angle);
+            sin[rowOff + featOff + k] = MathF.Sin(angle);
+        }
+    }
+
+    /// <summary>Per-token <c>(t, h, w)</c> coordinates for a grid, in the sequence order <c>(t * H + h) * W + w</c>.</summary>
+    private static float[] GridPositions(int tFrames, int hPatched, int wPatched)
+    {
+        int seqLen = checked(tFrames * hPatched * wPatched);
+        float[] positions = new float[checked(seqLen * 3)];
+        int s = 0;
+        for (int t = 0; t < tFrames; t++)
+        {
+            for (int h = 0; h < hPatched; h++)
+            {
+                for (int w = 0; w < wPatched; w++)
+                {
+                    positions[s * 3] = t;
+                    positions[s * 3 + 1] = h;
+                    positions[s * 3 + 2] = w;
+                    s++;
+                }
+            }
+        }
+        return positions;
+    }
+
+    private static void ValidateGrid(int tFrames, int hPatched, int wPatched)
+    {
+        if (tFrames <= 0)
+            throw new ArgumentOutOfRangeException(nameof(tFrames), tFrames, "AnimaRope frame count must be positive.");
+        if (hPatched <= 0)
+            throw new ArgumentOutOfRangeException(nameof(hPatched), hPatched, "AnimaRope packed height must be positive.");
+        if (wPatched <= 0)
+            throw new ArgumentOutOfRangeException(nameof(wPatched), wPatched, "AnimaRope packed width must be positive.");
+    }
+
+    private static (Tensor Cos, Tensor Sin) DeviceTablesOf(RopeTableLease lease) =>
+        lease.DeviceCos is { } cos && lease.DeviceSin is { } sin
+            ? (cos, sin)
+            : throw new InvalidOperationException("Anima RoPE device tables require a preloading cache.");
 
     /// <summary>GPT-NeoX rotate-half: split the head into two halves [real | imag], rotate by (cos, sin) per element pairwise.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

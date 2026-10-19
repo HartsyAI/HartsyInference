@@ -5,5 +5,5 @@ internal sealed class RopeLeaseSlot
 {
     public ulong Ticket;
 
-    public RopeHostTable? Host { get; set; }
+    public RopeDeviceTable? Device { get; set; }
 }

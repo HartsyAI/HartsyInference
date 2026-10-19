@@ -4,7 +4,7 @@ namespace HartsyInference.Core.Rope;
 /// never reads this record again.</summary>
 public sealed record RopeSpec
 {
-    /// <summary>Channel count per axis. Each entry is positive and even; their sum is the head dimension.</summary>
+    /// <summary>Channel count per axis. Each entry is non-negative and even, and a zero-width axis contributes no pairs; their sum is the head dimension.</summary>
     public required IReadOnlyList<int> AxisDims { get; init; }
 
     /// <summary>Base frequency shared by every axis before NTK scaling.</summary>

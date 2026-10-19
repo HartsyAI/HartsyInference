@@ -70,23 +70,23 @@ public sealed class RopeTableCacheTests
 
         Assert.NotNull(lease.DeviceCos);
         Assert.NotNull(lease.DeviceSin);
-        Assert.Equal(new[] { "preload:1", "preload:1" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2" }, backend.Calls);
     }
 
     [Fact]
     public void Acquire_PartialPreloadFailure_RollsBackTheFirstTensor_AndRecovers()
     {
         using RopeTableCache cache = new(Plan(), Settings(preload: true));
-        RopeRecordingBackend backend = new() { FailPreloadCall = 2 };
+        RopeRecordingBackend backend = new() { FailPreloadCall = 1 };
 
         Assert.Throws<InvalidOperationException>(() => cache.Acquire(backend, 0, 2, SignatureA));
-        Assert.Equal(new[] { "preload:1", "preload:1", "free:1" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2", "free:2" }, backend.Calls);
 
         backend.FailPreloadCall = 0;
         using RopeTableLease lease = cache.Acquire(backend, 0, 2, SignatureA);
 
         Assert.NotNull(lease.DeviceCos);
-        Assert.Equal(new[] { "preload:1", "preload:1", "free:1", "preload:1", "preload:1" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2", "free:2", "preload:2" }, backend.Calls);
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public sealed class RopeTableCacheTests
 
         using (RopeTableLease b = cache.Acquire(backend, 0, 2, SignatureB)) { }
 
-        Assert.Equal(new[] { "preload:1", "preload:1", "beforeRetire", "free:2", "preload:1", "preload:1" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2", "beforeRetire", "free:2", "preload:2" }, backend.Calls);
     }
 
     [Fact]
@@ -219,7 +219,73 @@ public sealed class RopeTableCacheTests
         cache.Clear();
         using (cache.Acquire(backend, 0, 2, SignatureA)) { }
 
-        Assert.Equal(new[] { "preload:1", "preload:1", "beforeRetire", "free:2", "preload:1", "preload:1" }, backend.Calls);
+        Assert.Equal(new[] { "preload:2", "beforeRetire", "free:2", "preload:2" }, backend.Calls);
+    }
+
+    [Fact]
+    public void HostWriter_ProvidesTheHostTables()
+    {
+        RopeHostTableWriter writer = (positions, tokens, cos, sin) =>
+        {
+            for (int i = 0; i < cos.Length; i++)
+            {
+                cos[i] = 0.25f + i;
+                sin[i] = -0.5f - i;
+            }
+        };
+        using RopeTableCache cache = new(Plan(), Settings(), hostWriter: writer);
+        RopeRecordingBackend backend = new();
+
+        using RopeTableLease lease = cache.Acquire(backend, 0, 2, SignatureA);
+
+        Assert.Equal(new float[] { 0.25f, 1.25f, 2.25f, 3.25f, 4.25f, 5.25f, 6.25f, 7.25f }, lease.HostCos.ToArray().Take(8).ToArray());
+        Assert.Equal(-0.5f, lease.HostSin.ToArray()[0]);
+    }
+
+    [Fact]
+    public void ReleaseBackend_FreesOnlyThatBackend_AndKeepsTheHostTables()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true));
+        RopeRecordingBackend first = new();
+        RopeRecordingBackend second = new();
+        using (cache.Acquire(first, 0, 2, SignatureA)) { }
+        using RopeTableLease secondLease = cache.Acquire(second, 0, 2, SignatureB);
+
+        cache.ReleaseBackend(first);
+
+        Assert.Equal(new[] { "preload:2", "free:2" }, first.Calls);
+        Assert.Equal(new[] { "preload:2" }, second.Calls);
+        Assert.True(secondLease.IsValid);
+        Assert.True(SameStorage(secondLease.HostCos, cache.Acquire(second, 0, 2, SignatureB).HostCos));
+    }
+
+    [Fact]
+    public void ReleaseBackend_IsDeferredWhileALeaseIsOutstanding()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true));
+        RopeRecordingBackend backend = new();
+        RopeTableLease held = cache.Acquire(backend, 0, 2, SignatureA);
+
+        cache.ReleaseBackend(backend);
+        Assert.DoesNotContain("free:2", backend.Calls);
+
+        held.Dispose();
+        Assert.Contains("free:2", backend.Calls);
+    }
+
+    [Fact]
+    public void ReleaseBackend_FailedFree_RetriesOnTheNextRelease()
+    {
+        using RopeTableCache cache = new(Plan(), Settings(preload: true));
+        RopeRecordingBackend backend = new();
+        using (cache.Acquire(backend, 0, 2, SignatureA)) { }
+        backend.FailFree = true;
+
+        Assert.Throws<InvalidOperationException>(() => cache.ReleaseBackend(backend));
+        backend.FailFree = false;
+        cache.ReleaseBackend(backend);
+
+        Assert.Single(backend.Calls, call => call == "free:2");
     }
 
     [Fact]

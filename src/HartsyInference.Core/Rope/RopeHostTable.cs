@@ -2,7 +2,8 @@ using HartsyInference.Core.Backends;
 
 namespace HartsyInference.Core.Rope;
 
-/// <summary>Host tables for one position signature in one slot. All fields are guarded by the owning cache's gate.</summary>
+/// <summary>Host pairs for one position signature in one slot, and the device tables built from them. Guarded by the owning
+/// cache's gate.</summary>
 internal sealed class RopeHostTable
 {
     public RopeHostTable(float[] positions, int tokens, float[] cos, float[] sin)
@@ -23,8 +24,4 @@ internal sealed class RopeHostTable
     public float[] Sin { get; }
 
     public Dictionary<IBackend, RopeDeviceTable> Devices { get; }
-
-    public int Outstanding { get; set; }
-
-    public bool Retired { get; set; }
 }
