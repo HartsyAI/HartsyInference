@@ -34,13 +34,13 @@ public sealed partial class CudaKernels
     private void LoadFa2Kernels()
     {
         string path = Ptx("flash_attn_causal_f16");
-        if (!File.Exists(path)) return;
+        if (!CanLoad(path)) return;
         _fa2Module = LoadOwnedModule(path);
         _fa2D128 = _fa2Module.GetFunction("lm_fa2_causal_d128");
         _fa2D64 = _fa2Module.GetFunction("lm_fa2_causal_d64");
         _kvToF16 = _fa2Module.GetFunction("lm_kv_to_f16");
         string scatter = Ptx("kv_scatter_f16");
-        if (File.Exists(scatter))
+        if (CanLoad(scatter))
         {
             _kvScatterF16Module = LoadOwnedModule(scatter);
             _kvScatterQkvF16 = _kvScatterF16Module.GetFunction("lm_qkv_rope_scatter_f16kv");
@@ -52,7 +52,7 @@ public sealed partial class CudaKernels
             catch (CudaException) { _castF32ToF16Sat = 0; }
         }
         string normFast = Ptx("lm_norm_q8_fast");
-        if (File.Exists(normFast))
+        if (CanLoad(normFast))
         {
             _normFastModule = LoadOwnedModule(normFast);
             for (int log = 1; log <= 5; log++)
@@ -62,7 +62,7 @@ public sealed partial class CudaKernels
             }
         }
         string decode = Ptx("flash_attn_decode_gqa");
-        if (File.Exists(decode))
+        if (CanLoad(decode))
         {
             _decodeGqaModule = LoadOwnedModule(decode);
             _decF32D128 = _decodeGqaModule.GetFunction("lm_fa_decode_gqa_f32_d128");
