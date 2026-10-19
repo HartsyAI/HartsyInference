@@ -1,4 +1,4 @@
-using System.Buffers;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -99,14 +99,18 @@ public sealed unsafe class ErnieImageRope
         // the stack-and-reshape duplicates each pair into [θ0, θ0, θ1, θ1, ...] — the interleaved-pair row layout.
         int tokens = checked(batch * totalSeq);
         int rowLength = checked(tokens * _headDim);
-        // Batched generation turns the transformer's freqs cache off and rebuilds every forward, so the rows are pooled.
-        float[] cosRows = ArrayPool<float>.Shared.Rent(Math.Max(rowLength, 1));
-        float[] sinRows = ArrayPool<float>.Shared.Rent(Math.Max(rowLength, 1));
+        // Batched generation turns the transformer's freqs cache off and rebuilds every forward, so the rows are
+        // unmanaged scratch.
+        nuint bytes = (nuint)Math.Max(rowLength, 1) * sizeof(float);
+        float* cosScratch = (float*)NativeMemory.AlignedAlloc(bytes, 64);
+        float* sinScratch = null;
         try
         {
+            sinScratch = (float*)NativeMemory.AlignedAlloc(bytes, 64);
+            Span<float> cosRows = new(cosScratch, rowLength);
+            Span<float> sinRows = new(sinScratch, rowLength);
             MultiAxisRopeTables.BuildRows(_plan, new ReadOnlySpan<float>(posIds.DataPointer, checked(tokens * numAxes)), tokens,
-                RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity,
-                cosRows.AsSpan(0, rowLength), sinRows.AsSpan(0, rowLength));
+                RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity, cosRows, sinRows);
 
             // Packed per token as [cos(headDim) | sin(headDim)].
             Tensor freqs = new Tensor(new TensorShape(batch, totalSeq, 2 * _headDim), DType.F32);
@@ -114,15 +118,15 @@ public sealed unsafe class ErnieImageRope
             for (int t = 0; t < tokens; t++)
             {
                 long outBase = (long)t * 2 * _headDim;
-                cosRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase, _headDim));
-                sinRows.AsSpan(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase + _headDim, _headDim));
+                cosRows.Slice(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase, _headDim));
+                sinRows.Slice(t * _headDim, _headDim).CopyTo(new Span<float>(outPtr + outBase + _headDim, _headDim));
             }
             return freqs;
         }
         finally
         {
-            ArrayPool<float>.Shared.Return(cosRows);
-            ArrayPool<float>.Shared.Return(sinRows);
+            NativeMemory.AlignedFree(cosScratch);
+            NativeMemory.AlignedFree(sinScratch);
         }
     }
 

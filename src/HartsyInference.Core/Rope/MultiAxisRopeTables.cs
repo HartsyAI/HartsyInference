@@ -1,4 +1,4 @@
-using System.Buffers;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Rope;
@@ -52,7 +52,7 @@ public static class MultiAxisRopeTables
 
     /// <summary>Computes per-pair values, keeps the first <c>effectiveRotaryDim / 2</c> pairs of each token, and expands
     /// them into full rows in <paramref name="layout"/>.</summary>
-    public static void BuildRows(
+    public static unsafe void BuildRows(
         RopeFrequencyPlan plan,
         ReadOnlySpan<float> positions,
         int tokens,
@@ -69,29 +69,34 @@ public static class MultiAxisRopeTables
         int active = effective / 2;
         int pairs = plan.Pairs;
         int fullLength = checked(tokens * pairs);
-        // Pooled scratch, so a caller that rebuilds tables every step (or every head) leaves no managed garbage behind.
-        float[] cos = ArrayPool<float>.Shared.Rent(Math.Max(fullLength, 1));
-        float[] sin = ArrayPool<float>.Shared.Rent(Math.Max(fullLength, 1));
+        // Unmanaged scratch: these are bulk table values, and a caller that rebuilds tables every step (or every head)
+        // must leave nothing on the managed heap.
+        nuint bytes = (nuint)Math.Max(fullLength, 1) * sizeof(float);
+        float* cosScratch = (float*)NativeMemory.AlignedAlloc(bytes, 64);
+        float* sinScratch = null;
         try
         {
-            ComputePairs(plan, positions, tokens, order, cos.AsSpan(0, fullLength), sin.AsSpan(0, fullLength));
+            sinScratch = (float*)NativeMemory.AlignedAlloc(bytes, 64);
+            Span<float> cos = new(cosScratch, fullLength);
+            Span<float> sin = new(sinScratch, fullLength);
+            ComputePairs(plan, positions, tokens, order, cos, sin);
             if (active != pairs)
             {
                 // Keep each token's leading pairs, packed together; moving forward never overwrites a pair still to move.
                 for (int s = 1; s < tokens; s++)
                 {
-                    cos.AsSpan(s * pairs, active).CopyTo(cos.AsSpan(s * active, active));
-                    sin.AsSpan(s * pairs, active).CopyTo(sin.AsSpan(s * active, active));
+                    cos.Slice(s * pairs, active).CopyTo(cos.Slice(s * active, active));
+                    sin.Slice(s * pairs, active).CopyTo(sin.Slice(s * active, active));
                 }
             }
             int activeLength = tokens * active;
-            RopeTableExpander.Expand(cos.AsSpan(0, activeLength), sin.AsSpan(0, activeLength), tokens, plan.HeadDim, layout,
+            RopeTableExpander.Expand(cos[..activeLength], sin[..activeLength], tokens, plan.HeadDim, layout,
                 rotaryDim, padding, cosRows, sinRows);
         }
         finally
         {
-            ArrayPool<float>.Shared.Return(cos);
-            ArrayPool<float>.Shared.Return(sin);
+            NativeMemory.AlignedFree(cosScratch);
+            NativeMemory.AlignedFree(sinScratch);
         }
     }
 
@@ -135,7 +140,7 @@ public static class MultiAxisRopeTables
     }
 
     /// <summary>Per-pair cos and sin for the first <paramref name="activePairs"/> pairs of each token, as compact arrays.</summary>
-    internal static (float[] Cos, float[] Sin) ComputeActivePairs(
+    internal static unsafe (float[] Cos, float[] Sin) ComputeActivePairs(
         RopeFrequencyPlan plan,
         ReadOnlySpan<float> positions,
         int tokens,
@@ -144,24 +149,28 @@ public static class MultiAxisRopeTables
     {
         int pairs = plan.Pairs;
         int fullLength = checked(tokens * pairs);
-        float[] cosFull = ArrayPool<float>.Shared.Rent(fullLength);
-        float[] sinFull = ArrayPool<float>.Shared.Rent(fullLength);
+        nuint bytes = (nuint)Math.Max(fullLength, 1) * sizeof(float);
+        float* cosScratch = (float*)NativeMemory.AlignedAlloc(bytes, 64);
+        float* sinScratch = null;
         try
         {
-            ComputePairs(plan, positions, tokens, order, cosFull.AsSpan(0, fullLength), sinFull.AsSpan(0, fullLength));
+            sinScratch = (float*)NativeMemory.AlignedAlloc(bytes, 64);
+            Span<float> cosFull = new(cosScratch, fullLength);
+            Span<float> sinFull = new(sinScratch, fullLength);
+            ComputePairs(plan, positions, tokens, order, cosFull, sinFull);
             float[] cos = new float[checked(tokens * activePairs)];
             float[] sin = new float[cos.Length];
             for (int s = 0; s < tokens; s++)
             {
-                cosFull.AsSpan(s * pairs, activePairs).CopyTo(cos.AsSpan(s * activePairs, activePairs));
-                sinFull.AsSpan(s * pairs, activePairs).CopyTo(sin.AsSpan(s * activePairs, activePairs));
+                cosFull.Slice(s * pairs, activePairs).CopyTo(cos.AsSpan(s * activePairs, activePairs));
+                sinFull.Slice(s * pairs, activePairs).CopyTo(sin.AsSpan(s * activePairs, activePairs));
             }
             return (cos, sin);
         }
         finally
         {
-            ArrayPool<float>.Shared.Return(cosFull);
-            ArrayPool<float>.Shared.Return(sinFull);
+            NativeMemory.AlignedFree(cosScratch);
+            NativeMemory.AlignedFree(sinScratch);
         }
     }
 

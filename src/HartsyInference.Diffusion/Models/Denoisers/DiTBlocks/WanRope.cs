@@ -1,4 +1,4 @@
-using System.Buffers;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -70,15 +70,17 @@ public sealed unsafe class WanRope
     public (Tensor Cos, Tensor Sin) BuildCosSin(ReadOnlySpan<int> frameIndices, int gridH, int gridW, int offsetH = 0, int offsetW = 0)
     {
         int seq = checked(frameIndices.Length * gridH * gridW);
-        float[] positions = ArrayPool<float>.Shared.Rent(Math.Max(seq * NumAxes, 1));
+        int length = checked(seq * NumAxes);
+        float* scratch = (float*)NativeMemory.AlignedAlloc((nuint)Math.Max(length, 1) * sizeof(float), 64);
         try
         {
+            Span<float> positions = new(scratch, length);
             FillGridPositions(frameIndices, gridH, gridW, offsetH, offsetW, positions);
-            return BuildTables(positions.AsSpan(0, seq * NumAxes), seq);
+            return BuildTables(positions, seq);
         }
         finally
         {
-            ArrayPool<float>.Shared.Return(positions);
+            NativeMemory.AlignedFree(scratch);
         }
     }
 
