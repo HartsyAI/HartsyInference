@@ -119,7 +119,7 @@ public sealed unsafe class ZImageRope
         using RopeTableLease lease = _deviceTables.Acquire(backend, 0, seqLen, _positions!);
         (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
         backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, cos, sin, seqLen, numKvHeads, _headDim);
     }
 
     /// <summary>Releases the device-resident table copies for <paramref name="backend"/> while preserving the CPU precompute.
