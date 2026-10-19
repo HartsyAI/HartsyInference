@@ -467,6 +467,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable, IStreamableDen
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _rope.Dispose();
             _xEmbedWeight = null; _xEmbedBias = null;
             _timeProjLinear1Weight = null; _timeProjLinear1Bias = null;
             _timeProjLinear2Weight = null; _timeProjLinear2Bias = null;
