@@ -205,6 +205,7 @@ public sealed class QwenImageControlNet : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _rope.Dispose();
             _imgInWeight = null; _imgInBias = null;
             _controlXEmbedWeight = null; _controlXEmbedBias = null;
             if (_ownsTxtNormWeight) _txtNormWeight?.Dispose();
