@@ -7,14 +7,32 @@ namespace HartsyInference.Cuda;
 /// <summary>Resolves "cuda" and "cublas" library names to platform-specific paths at runtime.</summary>
 public static class CudaLibraryResolver
 {
-    private static int _registered;
+    private static readonly object _registerLock = new();
+    private static volatile bool _registered;
 
-    /// <summary>Registers the resolver for the HartsyInference.Cuda assembly. Safe to call multiple times.</summary>
+    /// <summary>Registers the resolver for the HartsyInference.Cuda assembly. Safe to call repeatedly and from several
+    /// threads: it returns only once the resolver is set, so no P/Invoke falls back to the default search.</summary>
     public static void Register()
     {
-        if (Interlocked.CompareExchange(ref _registered, 1, 0) == 0)
+        if (_registered)
         {
-            NativeLibrary.SetDllImportResolver(typeof(CudaLibraryResolver).Assembly, ResolveLibrary);
+            return;
+        }
+        lock (_registerLock)
+        {
+            if (_registered)
+            {
+                return;
+            }
+            try
+            {
+                NativeLibrary.SetDllImportResolver(typeof(CudaLibraryResolver).Assembly, ResolveLibrary);
+            }
+            finally
+            {
+                // SetDllImportResolver throws only when a resolver is already set; retrying cannot succeed.
+                _registered = true;
+            }
         }
     }
 

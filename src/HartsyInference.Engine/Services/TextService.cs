@@ -358,6 +358,7 @@ public sealed class TextService : ITextService, IDisposable
                 ToolCalls = outcome.ToolCalls,
                 PrefillMilliseconds = outcome.PrefillMilliseconds,
                 DecodeMilliseconds = outcome.DecodeMilliseconds,
+                Reasoning = outcome.Reasoning,
             };
         }
         catch (OperationCanceledException)
@@ -712,9 +713,11 @@ public sealed class TextService : ITextService, IDisposable
         }
         // A structured parser also runs without a stream when the request offers tools: its tool calls are the only way a non-streaming reply can end on a call.
         bool structuredTools = structured && request.Tools is { Count: > 0 };
-        if (sink is not null || filter is not null || structuredTools || museSpark)
+        // A prompt that ends inside a think block needs the parser without a stream too, or the reasoning would come back merged into the answer.
+        int? reasoningClose = structured ? null : OpenReasoningCloseId(template, tokenizer, run.Request, request, rawCompletion);
+        if (sink is not null || filter is not null || structuredTools || museSpark || reasoningClose is not null)
         {
-            run.Parser = CreateParser(template, tokenizer, run.Request, request, rawCompletion, literalIds);
+            run.Parser = CreateParser(template, tokenizer, run.Request, request, rawCompletion, literalIds, reasoningClose);
             Action<TextChunk> chunkSink = sink ?? (_ => { });
             if (filter is not null)
             {
@@ -776,10 +779,10 @@ public sealed class TextService : ITextService, IDisposable
             if (FilterSink is null)
             {
                 return new GenOutcome(FinalText(Parser, calls.Count, result.Text), resolved, result.PromptTokens, result.TokenIds.Count, calls,
-                    result.PrefillMilliseconds, result.DecodeMilliseconds);
+                    result.PrefillMilliseconds, result.DecodeMilliseconds, Parser?.Result.Reasoning ?? "");
             }
             return new GenOutcome(FilterSink.Text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
-                result.PrefillMilliseconds, result.DecodeMilliseconds);
+                result.PrefillMilliseconds, result.DecodeMilliseconds, Parser?.Result.Reasoning ?? "");
         }
 
         /// <summary>The outcome of a request the filter stopped: ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.</summary>
@@ -787,7 +790,7 @@ public sealed class TextService : ITextService, IDisposable
         {
             IReadOnlyList<NativeToolCall> calls = FilterSink!.ToolCalls;
             StopReason stop = calls.Count == 0 ? StopReason.Stop : StopReason.ToolCall;
-            return new GenOutcome(FilterSink.Text, stop, PromptTokens, Count, calls);
+            return new GenOutcome(FilterSink.Text, stop, PromptTokens, Count, calls, Reasoning: Parser?.Result.Reasoning ?? "");
         }
 
         public void Dispose() => StopSource?.Dispose();
@@ -799,7 +802,7 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
     private static IOutputParser CreateParser(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest,
-        TextRequest request, bool rawCompletion, IReadOnlySet<int>? literalSpecialIds)
+        TextRequest request, bool rawCompletion, IReadOnlySet<int>? literalSpecialIds, int? reasoningClose)
     {
         if (!rawCompletion && genRequest.EffectiveMessages() is not null && MuseSparkOutputParser.Handles(template, tokenizer))
         {
@@ -817,7 +820,19 @@ public sealed class TextService : ITextService, IDisposable
                 Logs.Warning($"Structured output parser unavailable, streaming plain text: {ex.Message}");
             }
         }
-        return new PassthroughOutputParser(tokenizer, literalSpecialIds);
+        return new PassthroughOutputParser(tokenizer, literalSpecialIds, reasoningClose);
+    }
+
+    // TODO: this renders the template a second time per request for tokenizers with think tokens. Reuse the encode render (follow-up).
+    /// <summary>The reasoning close token when the prompt a model's own Jinja template renders ends inside a think block (its
+    /// generation prompt prefills <c>&lt;think&gt;</c>), else null. The passthrough parser then reports the text before that token
+    /// as reasoning, not as the answer.</summary>
+    internal static int? OpenReasoningCloseId(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest, TextRequest request,
+        bool rawCompletion)
+    {
+        if (rawCompletion || template is not JinjaChatTemplate jinja || genRequest.EffectiveMessages() is not { } messages) return null;
+        if (tokenizer.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[1]) is not int close) return null;
+        return jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools).ReasoningOpen ? close : null;
     }
 
     /// <summary>The special-token ids the passthrough parser decodes as text: the control-token literals a filter asked to see, plus the reasoning markers so a thinking model's <c>&lt;think&gt;</c> tags stay in the stream. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
@@ -2103,7 +2118,7 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>The outcome of one generation: full text, stop reason, token counts, and the tool call a stream filter completed (null without one).</summary>
     private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens, IReadOnlyList<NativeToolCall>? ToolCalls = null,
-        double PrefillMilliseconds = 0, double DecodeMilliseconds = 0)
+        double PrefillMilliseconds = 0, double DecodeMilliseconds = 0, string Reasoning = "")
     {
         /// <summary>The last tool call the generation completed, or null.</summary>
         public NativeToolCall? ToolCall => ToolCalls is { Count: > 0 } calls ? calls[^1] : null;

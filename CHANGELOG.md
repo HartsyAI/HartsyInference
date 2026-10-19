@@ -8,7 +8,24 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: `tekken` and `pixtral` GGUF tokenizers use Mistral's Tekken pre-token split.** Both names fell through to the GPT-2 split, so
+  Dory (`pixtral`) and the Mistral Nemo/Small family (`tekken`) encoded prompts with non-canonical ids (`in-app`, `swarm_docs`, paths and
+  newlines split differently). Dory now matches its checkpoint's `tokenizer.json` on every sample in `DoryTokenizerParityTests`.
+- **Fixed: a prefilled think block streams as reasoning.** When a model's own Jinja template ends the prompt inside `<think>` (Dory,
+  Nemotron and Qwen3-Thinking with thinking on), the text up to `</think>` is now `Reasoning`, not the answer, and the close token is
+  consumed. Before, the reasoning arrived as answer text with a stray `</think>` and no opener, so clients could not split it. A
+  non-streaming `TextResult` carries it in the new `Reasoning` field; a reply that runs out of tokens mid-reasoning keeps the partial
+  reasoning with `Stop = Length` and empty `Text`. With thinking off the template's empty think block applies and the reply is all answer.
+- **Changed: a non-streaming chat completion returns the model's reasoning as `reasoning_content`, and `TextResult.Text` holds the
+  answer alone for these models.** Clients that read `content` on the OpenAI-compatible route, or `TextResult.Text`, no longer see the
+  reasoning inline. Read `reasoning_content` or `TextResult.Reasoning` instead.
+
 - **Changed: RoPE tables come from shared Core utilities.** `HartsyInference.Core.Rope` adds a frozen per-pair frequency plan, a table builder and an expander for the three apply-op layouts (rotate-half, interleaved prefix, interleaved pair), and a per-backend table cache whose leases keep device rows alive while a call reads them. `FluxRope` (FLUX.1, FLUX.2, Chroma, Krea 2, HiDream) and `AnimaRope` build on them. Output is bit-identical: a real-generation A/B on the RTX 4090 matched main pixel for pixel, and golden fixtures pin the tables.
+- **Fixed: CUDA could report no device when several threads made their first CUDA call at once.** `CudaContext` marked
+  CUDA initialized before `cuInit` returned. A concurrent caller then got `CUDA_ERROR_NOT_INITIALIZED`, and `IsAvailable()`
+  returned false on a machine with a GPU. In the full CUDA `GpuIntegration` run, 3 tests failed and 11 skipped silently
+  this way. Callers now wait for the first `cuInit`. A failed `cuInit` is retried, so later callers report the driver's
+  real error. `CudaLibraryResolver.Register` now waits for registration the same way.
 - **Changed: every Diffusion RoPE family uses the shared tables.** QwenImage and Qwen-Image 2.1, HunyuanImage and HunyuanVideo, Z-Image and Lumina 2, Kandinsky 5, MOSS-Image, Stable Audio, OmniGen 2 and Boogu, and Lens now build their frequencies and rows through `HartsyInference.Core.Rope`. Their device tables live in the shared cache: preloaded per backend, or staged on the host through the new `RopeTableCache.AcquireStaged` where the caller has no backend. Output is bit-identical to the previous implementations, pinned by golden digests of every family's tables and a real-generation A/B.
 
 ## alpha.380
