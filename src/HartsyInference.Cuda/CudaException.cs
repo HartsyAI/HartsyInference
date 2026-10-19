@@ -61,7 +61,7 @@ public static class CudaErrorChecking
         }
 
         // A kernel this device could not load is an unbound (null) function, and launching one is an invalid handle.
-        string? skipped = errorCode == CudaErrorInvalidHandle ? CudaKernels.SkippedModulesNote : null;
+        string? skipped = errorCode == CudaErrorInvalidHandle ? CudaKernels.SkippedModulesNoteForCurrentContext() : null;
         throw new CudaException(errorCode, skipped is null ? $"{errorName} — {errorString}" : $"{errorName} — {errorString}. {skipped}");
     }
 

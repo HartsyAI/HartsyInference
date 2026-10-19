@@ -102,6 +102,37 @@ public sealed class ArchitectureGateTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
+    public void InvalidHandleNote_BelongsToTheSkippingContext_AndLeavesWithItsTables()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        int previous = CudaKernels.GateSmForTests;
+        try
+        {
+            CudaKernels.GateSmForTests = 75;
+            CudaBackend gated = new(0, PtxDir());
+            CudaKernels.GateSmForTests = previous;
+            try
+            {
+                // The constructing thread has the gated table's context current.
+                Assert.Contains("cannot load", Assert.Throws<CudaException>(() => 400.ThrowOnError()).Message, StringComparison.Ordinal);
+            }
+            finally
+            {
+                gated.Dispose();
+            }
+
+            using CudaBackend ungated = new(0, PtxDir());
+            Assert.DoesNotContain("cannot load", Assert.Throws<CudaException>(() => 400.ThrowOnError()).Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CudaKernels.GateSmForTests = previous;
+        }
+    }
+
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
     public void AtOrAboveTheBaseline_NothingIsSkipped()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }

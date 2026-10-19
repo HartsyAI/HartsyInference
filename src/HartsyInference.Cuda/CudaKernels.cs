@@ -548,7 +548,12 @@ public sealed partial class CudaKernels : IDisposable
     }
     private static Func<string, Exception?>? _moduleLoadFailureForTests;
     private static int _gateSmForTests;
-    private static string? _skippedModulesNote;
+
+    // What each device context's kernel tables skipped, with the number of live tables that report it. Keyed by context so
+    // an invalid-handle error on one GPU never carries another GPU's note.
+    private static readonly Dictionary<nint, (string Note, int Tables)> SkippedNotes = [];
+    private readonly nint _contextHandle;
+    private bool _notedSkips;
 
     /// <summary>Test-only: the compute capability modules are gated against in place of the device's, so an Ampere-or-newer
     /// card can stand in for an older one. 0 gates against the device.</summary>
@@ -558,9 +563,32 @@ public sealed partial class CudaKernels : IDisposable
         set => Volatile.Write(ref _gateSmForTests, value);
     }
 
-    /// <summary>What the last kernel table to skip modules skipped, for the invalid-handle error a launch of one of them
-    /// raises; null while no table has skipped any.</summary>
-    internal static string? SkippedModulesNote => Volatile.Read(ref _skippedModulesNote);
+    /// <summary>What the kernel tables of the calling thread's current context skipped, for the invalid-handle error a launch
+    /// of one of those kernels raises; null when that context's tables skipped nothing.</summary>
+    internal static string? SkippedModulesNoteForCurrentContext()
+    {
+        if (CudaDriverApi.cuCtxGetCurrent(out nint context) != 0 || context == 0)
+            return null;
+        lock (SkippedNotes)
+            return SkippedNotes.TryGetValue(context, out (string Note, int Tables) entry) ? entry.Note : null;
+    }
+
+    /// <summary>Drops this table's share of its context's note; the note goes with the last table that reported it.</summary>
+    private void ForgetSkippedModules()
+    {
+        if (!_notedSkips)
+            return;
+        _notedSkips = false;
+        lock (SkippedNotes)
+        {
+            if (!SkippedNotes.TryGetValue(_contextHandle, out (string Note, int Tables) entry))
+                return;
+            if (entry.Tables <= 1)
+                SkippedNotes.Remove(_contextHandle);
+            else
+                SkippedNotes[_contextHandle] = (entry.Note, entry.Tables - 1);
+        }
+    }
 
     /// <summary>The compute capability modules are gated against: the device's, unless a test stands in another.</summary>
     private int GateSm => GateSmForTests is > 0 and int forced ? forced : Sm;
@@ -576,7 +604,15 @@ public sealed partial class CudaKernels : IDisposable
         string named = _skippedModules.Count <= Named
             ? string.Join(", ", _skippedModules)
             : $"{string.Join(", ", _skippedModules.Take(Named))} and {_skippedModules.Count - Named} more";
-        Volatile.Write(ref _skippedModulesNote, $"{device}: {named}. {advice}");
+        if (_contextHandle != 0)
+        {
+            lock (SkippedNotes)
+            {
+                int tables = SkippedNotes.TryGetValue(_contextHandle, out (string Note, int Tables) entry) ? entry.Tables : 0;
+                SkippedNotes[_contextHandle] = ($"{device}: {named}. {advice}", tables + 1);
+            }
+            _notedSkips = true;
+        }
         HartsyInference.Core.Logging.Logs.Warning($"[Cuda] {device}: {string.Join(", ", _skippedModules)}. {advice}");
     }
 
@@ -641,6 +677,7 @@ public sealed partial class CudaKernels : IDisposable
         DefaultDynamicSharedBytes = context?.MaxSharedMemoryPerBlock ?? 48 << 10;
         MaxDynamicSharedBytes = context?.MaxSharedMemoryPerBlockOptin ?? int.MaxValue;
         Sm = context?.Sm ?? 0;
+        _contextHandle = context?.Handle ?? 0;
         try
         {
             if (!Directory.Exists(ptxDir))
@@ -1219,7 +1256,8 @@ public sealed partial class CudaKernels : IDisposable
                 _mulMatVecF16Bf16Module = LoadOwnedModule(Ptx("mul_mat_vec_f16_bf16_f32"));
                 _mulMatVecBf16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_bf16_f32");
                 _mulMatVecF16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_f16_f32");
-                HasFloatGemv = true;
+                // A device below the module's architecture gets the unloadable stand-in and zero handles: cuBLAS then.
+                HasFloatGemv = _mulMatVecBf16F32 != 0 && _mulMatVecF16F32 != 0;
             }
             catch (Exception ex)
             {
@@ -5201,6 +5239,7 @@ public sealed partial class CudaKernels : IDisposable
 
     private void ReleaseOwnedModules(bool throwOnError)
     {
+        ForgetSkippedModules();
         List<Exception>? failures = null;
         foreach (CudaModule module in _ownedModules)
         {
