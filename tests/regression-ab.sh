@@ -45,6 +45,9 @@ NO_BASE=0
 FRESH=0
 SPEED_TOL=5
 TIMEOUT=1800
+# Bumped whenever what a digest covers changes, so a cached run is regenerated instead of compared across formats.
+# 2: every frame of a video (and its audio), not just the first file found.
+DIGEST_FORMAT=2
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -172,8 +175,9 @@ run_one() {
     shift 10
     local sets=("$@")
     # A clean commit's build is deterministic, so its completed runs are reused whichever arm it is; a dirty tree
-    # is regenerated every time, and --fresh regenerates everything.
-    if [ "$FRESH" = 0 ] && [[ "$label" != *+dirty* ]] && grep -qx 'status=ok' "$dir/metrics.env" 2>/dev/null; then
+    # is regenerated every time, and --fresh regenerates everything. So is a run recorded under an older digest format.
+    if [ "$FRESH" = 0 ] && [[ "$label" != *+dirty* ]] && grep -qx 'status=ok' "$dir/metrics.env" 2>/dev/null \
+        && grep -qx "digest_format=$DIGEST_FORMAT" "$dir/metrics.env"; then
         return 0
     fi
     rm -rf "$dir"
@@ -235,8 +239,8 @@ run_one() {
     else
         [ -s "$artifact" ] && digest="$(digest_of "$artifact")" || status="CRASH"
     fi
-    printf 'status=%s\nwall=%s\nstep_n=%s\nstep_med=%s\npeak=%s\ndigest=%s\nartifact=%s\n' \
-        "$status" "$wall" "$step_n" "$step_med" "${peak:-0}" "$digest" "$artifact" >"$dir/metrics.env"
+    printf 'status=%s\nwall=%s\nstep_n=%s\nstep_med=%s\npeak=%s\ndigest=%s\nartifact=%s\ndigest_format=%s\n' \
+        "$status" "$wall" "$step_n" "$step_med" "${peak:-0}" "$digest" "$artifact" "$DIGEST_FORMAT" >"$dir/metrics.env"
     [ "$status" = CRASH ] && log "  CRASH: $id $backend seed $seed on $label — see $dir/run.log"
     return 0
 }
