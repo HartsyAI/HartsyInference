@@ -47,5 +47,6 @@ chroma-hd	vulkanbar	Stable-Diffusion/Chroma/Chroma1-HD-fp8mixed-final.safetensor
 ernie-turbo	vulkanbar	Stable-Diffusion/Ernie/ernie-image-turbo-fp8.safetensors	image|a red apple on a wooden table|-m ernie-image --steps 8 --width 1024 --height 1024
 hunyuanimage-comfy	hunyuan	Stable-Diffusion/hunyuanimage21-fp8-1_0-hunyuan-image-21-base-fp8.safetensors	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light|-m hunyuan-image --steps 20 --width 1024 --height 1024 --cfg 4
 hunyuanimage-q4	hunyuan	Stable-Diffusion/HunyuanImage/hunyuanimage2.1-q4_0.gguf	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light|-m hunyuan-image --steps 20 --width 1024 --height 1024 --cfg 4
+anima	anima	Stable-Diffusion/Anima/anima-preview3-base.safetensors	image|a bowl of ripe cherries on a wooden table, soft morning light|-m anima --steps 20 --width 512 --height 512 --cfg 4
 MATRIX
 }
