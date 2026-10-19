@@ -817,7 +817,17 @@ public sealed class TextService : ITextService, IDisposable
                 Logs.Warning($"Structured output parser unavailable, streaming plain text: {ex.Message}");
             }
         }
-        return new PassthroughOutputParser(tokenizer, literalSpecialIds);
+        return new PassthroughOutputParser(tokenizer, literalSpecialIds, OpenReasoningCloseId(template, tokenizer, genRequest, request, rawCompletion));
+    }
+
+    /// <summary>The reasoning close token when the prompt a model's own Jinja template renders ends inside a think block (its generation prompt prefills
+    /// <c>&lt;think&gt;</c>), else null. The passthrough parser then reports the text before that token as reasoning, not as the answer.</summary>
+    internal static int? OpenReasoningCloseId(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest, TextRequest request,
+        bool rawCompletion)
+    {
+        if (rawCompletion || template is not JinjaChatTemplate jinja || genRequest.EffectiveMessages() is not { } messages) return null;
+        if (tokenizer.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[1]) is not int close) return null;
+        return jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools).ReasoningOpen ? close : null;
     }
 
     /// <summary>The special-token ids the passthrough parser decodes as text: the control-token literals a filter asked to see, plus the reasoning markers so a thinking model's <c>&lt;think&gt;</c> tags stay in the stream. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>

@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: `tekken` and `pixtral` GGUF tokenizers use Mistral's Tekken pre-token split.** Both names fell through to the GPT-2 split, so
+  Dory (`pixtral`) and the Mistral Nemo/Small family (`tekken`) encoded prompts with non-canonical ids (`in-app`, `swarm_docs`, paths and
+  newlines split differently). Dory now matches its checkpoint's `tokenizer.json` on every sample in `DoryTokenizerParityTests`.
+- **Fixed: a prefilled think block streams as reasoning.** When a model's own Jinja template ends the prompt inside `<think>` (Dory,
+  Nemotron and Qwen3-Thinking with thinking on), the text up to `</think>` is now `Reasoning`, not the answer, and the close token is
+  consumed. Before, the reasoning arrived as answer text with a stray `</think>` and no opener, so clients could not split it.
+
 ## alpha.379
 
 - **Changed: Qwen-Image 2.1 Turbo downloads Comfy-Org's fused file.** The catalog now fetches `Comfy-Org/Qwen-Image-2.1` `diffusion_models/qwen_image_2.1_turbo_bf16.safetensors` in place of the two-shard diffusers release. A `diffusion_model` wrapper prefix on that file is stripped, and its fused `img_mlp.gate_up` passes through unchanged, pinned by a converter test. Still unverified on real weights.

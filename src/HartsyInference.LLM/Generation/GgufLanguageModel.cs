@@ -83,18 +83,20 @@ public sealed class GgufLanguageModel : IDisposable
         // A wrong split gives wrong token ids, so the pre-tokenizer name fixes both the split and ignore_merges.
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
         return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, PreTokenRegexFor(pre),
-            ignoreMerges: PreTokenizerFamilyFor(pre) == PreTokenizerFamily.Llama3);
+            ignoreMerges: PreTokenizerFamilyFor(pre) is PreTokenizerFamily.Llama3 or PreTokenizerFamily.Tekken);
     }
 
     /// <summary>The pre-tokenizer families that choose a split regex.</summary>
-    internal enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2 }
+    internal enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2, Tekken }
 
-    /// <summary>Maps a <c>tokenizer.ggml.pre</c> name to its family. <c>qwen2</c> is llama.cpp's QWEN2 split.</summary>
+    /// <summary>Maps a <c>tokenizer.ggml.pre</c> name to its family. <c>qwen2</c> is llama.cpp's QWEN2 split; <c>tekken</c> and <c>pixtral</c>
+    /// (Mistral Nemo, Pixtral, NVIDIA Nemotron Dory) are its TEKKEN/PIXTRAL split.</summary>
     internal static PreTokenizerFamily PreTokenizerFamilyFor(string pre) => pre switch
     {
         "llama-bpe" or "llama3" or "smaug-bpe" => PreTokenizerFamily.Llama3,
         "gpt-4o" or "o200k" => PreTokenizerFamily.Gpt4o,
         "qwen2" or "kolibri1" => PreTokenizerFamily.Qwen2,
+        "tekken" or "pixtral" => PreTokenizerFamily.Tekken,
         _ => PreTokenizerFamily.Default,
     };
 
@@ -104,6 +106,7 @@ public sealed class GgufLanguageModel : IDisposable
         PreTokenizerFamily.Llama3 => Llama3PreTokenRegex,
         PreTokenizerFamily.Gpt4o => Gpt4oPreTokenRegex,
         PreTokenizerFamily.Qwen2 => Qwen2PreTokenRegex,
+        PreTokenizerFamily.Tekken => TekkenPreTokenRegex,
         _ => null,
     };
 
@@ -141,6 +144,10 @@ public sealed class GgufLanguageModel : IDisposable
     }
 
     internal const string Qwen2PreTokenRegex = GgufTokenizer.Qwen2PreTokenRegex;
+
+    // Tekken byte-level pre-token split (Mistral's tokenizer.json, llama.cpp TEKKEN/PIXTRAL).
+    private const string TekkenPreTokenRegex =
+        @"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
     // Llama-3 / GPT-4 byte-level pre-token split (matches llama.cpp LLAMA3 + HF tokenizer.json).
     private const string Llama3PreTokenRegex =
