@@ -71,7 +71,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
                 config.HiddenSize, config.NumHeads, mlpDim, config.QkNormEps);
         }
 
-        _rope = new FluxRope(config.AxesDim, config.Theta);
+        _rope = new FluxRope(config.AxesDim, config.Theta, InvalidateStepGraph);
     }
 
     /// <summary>Loads all transformer weights from named tensors using diffusers naming.</summary>
@@ -832,8 +832,14 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
         Tensor posIds = refSeqLen > 0
             ? FluxRope.BuildPositionIdsKontext(txtSeqLen, hPacked, wPacked, refHPacked, refWPacked)
             : FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-        _rope.Precompute(posIds);
-        posIds.Dispose();
+        try
+        {
+            _rope.Precompute(posIds);
+        }
+        finally
+        {
+            posIds.Dispose();
+        }
         _ropeSig = sig;
     }
 
@@ -1056,36 +1062,46 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     /// <summary>Releases all tensor references.</summary>
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        bool first = Interlocked.Exchange(ref _disposed, 1) == 0;
+        // Invalidate the step graph before any owned tensor is freed, and free the owned tensors even if the rope's release
+        // throws. A repeated Dispose still reaches the rope: its cache keeps a failed retirement pending and retries it there.
+        try
         {
-            _xEmbedWeight = null;
-            _xEmbedBias = null;
-            _contextEmbedWeight = null;
-            _contextEmbedBias = null;
-            _timestepLinear1Weight = null;
-            _timestepLinear1Bias = null;
-            _timestepLinear2Weight = null;
-            _timestepLinear2Bias = null;
-            _textLinear1Weight = null;
-            _textLinear1Bias = null;
-            _textLinear2Weight = null;
-            _textLinear2Bias = null;
-            _guidanceLinear1Weight = null;
-            _guidanceLinear1Bias = null;
-            _guidanceLinear2Weight = null;
-            _guidanceLinear2Bias = null;
-            _normOutLinearWeight = null;
-            _normOutLinearBias = null;
-            _projOutWeight = null;
-            _projOutBias = null;
-            _latentFixed?.Dispose();
-            _latentFixed = null;
-            _sinFixed?.Dispose();
-            _sinFixed = null;
-            _guidanceSinFixed?.Dispose();
-            _guidanceSinFixed = null;
-            _graphVelocity?.Dispose();
-            _graphVelocity = null;
+            _rope.Dispose();
+        }
+        finally
+        {
+            if (first)
+            {
+                _xEmbedWeight = null;
+                _xEmbedBias = null;
+                _contextEmbedWeight = null;
+                _contextEmbedBias = null;
+                _timestepLinear1Weight = null;
+                _timestepLinear1Bias = null;
+                _timestepLinear2Weight = null;
+                _timestepLinear2Bias = null;
+                _textLinear1Weight = null;
+                _textLinear1Bias = null;
+                _textLinear2Weight = null;
+                _textLinear2Bias = null;
+                _guidanceLinear1Weight = null;
+                _guidanceLinear1Bias = null;
+                _guidanceLinear2Weight = null;
+                _guidanceLinear2Bias = null;
+                _normOutLinearWeight = null;
+                _normOutLinearBias = null;
+                _projOutWeight = null;
+                _projOutBias = null;
+                _latentFixed?.Dispose();
+                _latentFixed = null;
+                _sinFixed?.Dispose();
+                _sinFixed = null;
+                _guidanceSinFixed?.Dispose();
+                _guidanceSinFixed = null;
+                _graphVelocity?.Dispose();
+                _graphVelocity = null;
+            }
         }
         GC.SuppressFinalize(this);
     }
