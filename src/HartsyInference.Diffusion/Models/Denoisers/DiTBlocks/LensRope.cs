@@ -1,14 +1,19 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>3-axis complex-polar rotary positional embedding for Microsoft Lens (<c>LensEmbedRope</c>). Splits the head dimension into <c>(frame, height, width)</c> sub-bands (default <c>[8, 28, 28]</c> summing to 64 = head_dim) and rotates each pair of features by <c>θ = position * (1 / base^(2k/axisDim))</c>. <b>Differs from QwenImageRope in two ways:</b> (1) <c>scale_rope=True</c> hardcoded — height and width positions are split into negative+positive halves centered around 0 (top/left rows get <c>arange(4096).flip(0) * -1 - 1</c>, bottom/right rows get <c>arange(4096)</c>), centering the rotation around the image's middle pixel rather than the top-left; (2) text RoPE positions start at <c>max(h//2, w//2)</c> (not <c>max(h, w)</c>) because of the height/width halving. Apply order matches QwenImageRope's complex polar pairs: features at indices <c>(2i, 2i+1)</c> form one complex number that gets multiplied by <c>e^(iθ)</c>.</summary>
-public sealed unsafe class LensRope
+/// <remarks>The operation is complex multiplication, which is the same as the interleaved 2x2 rotation the apply ops run. Frequencies
+/// come from <see cref="RopeFrequencyPlan"/>, rows from <see cref="MultiAxisRopeTables"/>, and position rules live in
+/// <see cref="LensPosEmbed"/>. The single joint device table has no backend parameter, so it is not held in a
+/// <see cref="RopeTableCache"/>. A rebuild installs the new table before it frees the old one.</remarks>
+public sealed unsafe class LensRope : IDisposable
 {
     private readonly int[] _axesDim;
-    private readonly int _theta;
     private readonly int _headDim;
+    private readonly RopeFrequencyPlan _plan;
 
     // Cached joint cos/sin tables in the [S, headDim] layout IBackend.WanRopeInterleaved reads (the angle for
     // pair i duplicated at indices 2i and 2i+1). Position-only, so one host build serves every block of every
@@ -25,10 +30,8 @@ public sealed unsafe class LensRope
         _axesDim = axesDim ?? [8, 28, 28];
         if (_axesDim.Length != 3)
             throw new ArgumentException("LensRope requires exactly 3 axes (frame, height, width).", nameof(axesDim));
-        _theta = theta;
-        _headDim = 0;
-        for (int i = 0; i < _axesDim.Length; i++)
-            _headDim += _axesDim[i];
+        _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
+        _headDim = _plan.HeadDim;
     }
 
     /// <summary>Sum of per-axis dims; equals the per-head dim of the wrapped attention block (64 for Lens default).</summary>
@@ -40,44 +43,17 @@ public sealed unsafe class LensRope
     /// <summary>Rotates Q and K in-place for image tokens in <c>scale_rope=True</c> mode. With <paramref name="hPacked"/>=H, the top <c>H - H/2</c> rows use positions <c>[-H+H/2, ..., -1]</c> and the bottom <c>H/2</c> rows use positions <c>[0, ..., H/2 - 1]</c> (Microsoft's centered convention). Same split applies to width. Token <c>r*W + c</c> uses position <c>[0, row_pos, col_pos]</c>. Both Q and K must be <c>[B, numHeads, imgSeqLen, headDim]</c>.</summary>
     public void ApplyImage(Tensor q, Tensor k, int batch, int numHeads, int hPacked, int wPacked)
     {
-        int imgSeqLen = hPacked * wPacked;
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[imgSeqLen * halfDim];
-        float[] sinTable = new float[imgSeqLen * halfDim];
-
-        // Centered position lookup tables: row 0..hPacked-1 → centered position.
-        // First (hPacked - hPacked/2) rows get negative positions, last hPacked/2 rows get positive.
-        int[] rowPositions = ComputeCenteredPositions(hPacked);
-        int[] colPositions = ComputeCenteredPositions(wPacked);
-
-        for (int s = 0; s < imgSeqLen; s++)
-        {
-            int row = s / wPacked;
-            int col = s - row * wPacked;
-            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: rowPositions[row], width: colPositions[col]);
-        }
-
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, imgSeqLen);
+        ApplyPositions(q, k, batch, numHeads, LensPosEmbed.ImageRows(hPacked, wPacked));
     }
 
     /// <summary>Rotates Q and K in-place for text tokens. With <c>scale_rope=True</c> text positions start at <c>max(hPacked/2, wPacked/2)</c> to live past the image's positive-half range. All three axes (frame, h, w) get the same scalar position per text token (upstream uses <c>pos_freqs</c> directly on the text region with no axis split).</summary>
     public void ApplyText(Tensor q, Tensor k, int batch, int numHeads, int txtSeqLen, int positionStart)
     {
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[txtSeqLen * halfDim];
-        float[] sinTable = new float[txtSeqLen * halfDim];
-
-        for (int s = 0; s < txtSeqLen; s++)
-        {
-            int pos = positionStart + s;
-            FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
-        }
-
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, txtSeqLen);
+        ApplyPositions(q, k, batch, numHeads, LensPosEmbed.TextRows(txtSeqLen, positionStart));
     }
 
     /// <summary>Computes the position offset for text tokens in <c>scale_rope=True</c> mode. Matches upstream's <c>max_vid_index = max(height // 2, width // 2)</c>.</summary>
-    public static int ComputeTextPositionStart(int hPacked, int wPacked) => Math.Max(hPacked / 2, wPacked / 2);
+    public static int ComputeTextPositionStart(int hPacked, int wPacked) => LensPosEmbed.TextPositionStart(hPacked, wPacked);
 
     /// <summary>Rotates Q and K in-place for the JOINT <c>[img, txt]</c> sequence in one host pass — bit-identical
     /// to calling <see cref="ApplyImage"/> then <see cref="ApplyText"/> on the separate streams before concatenation
@@ -86,27 +62,7 @@ public sealed unsafe class LensRope
     public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads, int hPacked, int wPacked,
         int txtSeqLen, int txtPositionStart)
     {
-        int imgSeqLen = hPacked * wPacked;
-        int totalSeqLen = imgSeqLen + txtSeqLen;
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[totalSeqLen * halfDim];
-        float[] sinTable = new float[totalSeqLen * halfDim];
-
-        int[] rowPositions = ComputeCenteredPositions(hPacked);
-        int[] colPositions = ComputeCenteredPositions(wPacked);
-        for (int s = 0; s < imgSeqLen; s++)
-        {
-            int row = s / wPacked;
-            int col = s - row * wPacked;
-            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: rowPositions[row], width: colPositions[col]);
-        }
-        for (int s = 0; s < txtSeqLen; s++)
-        {
-            int pos = txtPositionStart + s;
-            FillTokenFreqs(cosTable, sinTable, imgSeqLen + s, frame: pos, height: pos, width: pos);
-        }
-
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);
+        ApplyPositions(q, k, batch, numHeads, LensPosEmbed.JointRows(hPacked, wPacked, txtSeqLen, txtPositionStart));
     }
 
     /// <summary>Builds (or returns the cached) joint <c>[img, txt]</c> cos/sin tables for the device rope path,
@@ -119,93 +75,36 @@ public sealed unsafe class LensRope
         (int, int, int, int) key = (hPacked, wPacked, txtSeqLen, txtPositionStart);
         if (_jointCos is not null && _jointSin is not null && _jointTableKey == key)
             return (_jointCos, _jointSin);
-        _jointCos?.Dispose();
-        _jointSin?.Dispose();
 
-        int imgSeqLen = hPacked * wPacked;
-        int totalSeqLen = imgSeqLen + txtSeqLen;
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[totalSeqLen * halfDim];
-        float[] sinTable = new float[totalSeqLen * halfDim];
-
-        int[] rowPositions = ComputeCenteredPositions(hPacked);
-        int[] colPositions = ComputeCenteredPositions(wPacked);
-        for (int s = 0; s < imgSeqLen; s++)
-        {
-            int row = s / wPacked;
-            int col = s - row * wPacked;
-            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: rowPositions[row], width: colPositions[col]);
-        }
-        for (int s = 0; s < txtSeqLen; s++)
-        {
-            int pos = txtPositionStart + s;
-            FillTokenFreqs(cosTable, sinTable, imgSeqLen + s, frame: pos, height: pos, width: pos);
-        }
-
-        Tensor cos = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        for (int s = 0; s < totalSeqLen; s++)
-        {
-            for (int i = 0; i < halfDim; i++)
-            {
-                float c = cosTable[s * halfDim + i];
-                float sn = sinTable[s * halfDim + i];
-                long off = (long)s * _headDim + 2 * i;
-                cp[off] = c;
-                cp[off + 1] = c;
-                sp[off] = sn;
-                sp[off + 1] = sn;
-            }
-        }
+        int totalSeqLen = hPacked * wPacked + txtSeqLen;
+        (Tensor cos, Tensor sin) = MultiAxisRopeTables.BuildTensors(_plan, LensPosEmbed.JointRows(hPacked, wPacked, txtSeqLen, txtPositionStart),
+            totalSeqLen, RopeAngleOrder.MultiplyByInverse, RopeTableLayout.InterleavedPair, 0, RopeTablePadding.Identity);
+        Tensor? oldCos = _jointCos;
+        Tensor? oldSin = _jointSin;
         _jointCos = cos;
         _jointSin = sin;
         _jointTableKey = key;
+        oldCos?.Dispose();
+        oldSin?.Dispose();
         return (cos, sin);
     }
 
-    private static int[] ComputeCenteredPositions(int len)
+    /// <summary>Frees the cached joint tables.</summary>
+    public void Dispose()
     {
-        // Upstream LensEmbedRope._compute_video_freqs (scale_rope=True branch):
-        //   freqs_height = cat([freqs_neg[1][-(H - H//2):], freqs_pos[1][:H//2]], dim=0)
-        // where freqs_neg uses indices [-1, -2, ..., -(H - H//2)] (the last (H - H//2) of the reversed negative range)
-        // and freqs_pos uses indices [0, 1, ..., H//2 - 1].
-        // Net effect: rows 0..(H - H//2 - 1) get positions [-(H - H//2), ..., -1]
-        //             rows (H - H//2)..H-1 get positions [0, ..., H//2 - 1]
-        int[] positions = new int[len];
-        int halfLen = len / 2;
-        int negRows = len - halfLen;
-        for (int i = 0; i < negRows; i++)
-            positions[i] = -(negRows - i);
-        for (int i = 0; i < halfLen; i++)
-            positions[negRows + i] = i;
-        return positions;
+        _jointCos?.Dispose();
+        _jointSin?.Dispose();
+        _jointCos = _jointSin = null;
     }
 
-    private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx,
-        double frame, double height, double width)
+    /// <summary>Computes the compact pair tables for flat <c>(frame, height, width)</c> rows and rotates Q and K with them.</summary>
+    private void ApplyPositions(Tensor q, Tensor k, int batch, int numHeads, float[] positions)
     {
-        int halfDim = _headDim / 2;
-        int destOffset = seqIdx * halfDim;
-        int freqOffset = 0;
-
-        Span<double> positions = stackalloc double[3] { frame, height, width };
-        for (int axis = 0; axis < 3; axis++)
-        {
-            int axisDim = _axesDim[axis];
-            int numPairs = axisDim / 2;
-            double pos = positions[axis];
-
-            for (int kIdx = 0; kIdx < numPairs; kIdx++)
-            {
-                double inv = 1.0 / Math.Pow(_theta, (double)(2 * kIdx) / axisDim);
-                double angle = pos * inv;
-                cosTable[destOffset + freqOffset + kIdx] = (float)Math.Cos(angle);
-                sinTable[destOffset + freqOffset + kIdx] = (float)Math.Sin(angle);
-            }
-            freqOffset += numPairs;
-        }
+        int tokens = positions.Length / LensPosEmbed.NumAxes;
+        float[] cos = new float[tokens * _plan.Pairs];
+        float[] sin = new float[cos.Length];
+        MultiAxisRopeTables.ComputePairs(_plan, positions, tokens, RopeAngleOrder.MultiplyByInverse, cos, sin);
+        ApplyRotationBatched(q, k, cos, sin, batch, numHeads, tokens);
     }
 
     private void ApplyRotationBatched(Tensor q, Tensor k, ReadOnlySpan<float> cosTable, ReadOnlySpan<float> sinTable,

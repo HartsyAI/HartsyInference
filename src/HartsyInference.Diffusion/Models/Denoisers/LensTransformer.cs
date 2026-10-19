@@ -286,6 +286,7 @@ public sealed unsafe class LensTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _rope.Dispose();
             for (int i = 0; i < _txtTokenCache.Count; i++) _txtTokenCache[i].Tokens.Dispose();
             _txtTokenCache.Clear();
             _imgInWeight = null; _imgInBias = null;
