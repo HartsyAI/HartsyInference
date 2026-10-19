@@ -78,6 +78,36 @@ public sealed class JinjaChatTemplate : IChatTemplate
         return WithBos(tokenizer, SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer));
     }
 
+    /// <summary>How the prompt for <paramref name="messages"/> ends: reasoning is open when the generation prompt the template appends
+    /// writes a <c>&lt;think&gt;</c> it does not close (Dory, Nemotron and Qwen3-Thinking prefill one), so the completion starts inside the
+    /// think block. Only the appended tail is read, because message content keeps its reasoning markers literal.</summary>
+    /// <remarks>Content when the tokenizer lacks either marker as a control token, when the template does not render, or when the render
+    /// without the generation prompt is not a prefix of the render with it.</remarks>
+    public ParserInitialState ResolveParserState(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking,
+        IReadOnlyList<ToolSpec>? tools)
+    {
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        ArgumentNullException.ThrowIfNull(messages);
+        string open = SpecialLiteralEscaper.ReasoningMarkers[0];
+        string close = SpecialLiteralEscaper.ReasoningMarkers[1];
+        if (tokenizer.SpecialId(open) is null || tokenizer.SpecialId(close) is null) return new ParserInitialState(false);
+        string withPrompt, withoutPrompt;
+        try
+        {
+            withPrompt = Render(tokenizer, messages, addGenerationPrompt: true, enableThinking, tools);
+            withoutPrompt = Render(tokenizer, messages, addGenerationPrompt: false, enableThinking, tools);
+        }
+        catch (Exception ex) when (ex is ChatTemplateRaiseException or FormatException or InvalidOperationException
+            or NotSupportedException or ArgumentException)
+        {
+            // Encode retries and falls back on its own; a prompt this render cannot produce is parsed as plain content.
+            return new ParserInitialState(false);
+        }
+        if (!withPrompt.StartsWith(withoutPrompt, StringComparison.Ordinal)) return new ParserInitialState(false);
+        ReadOnlySpan<char> tail = withPrompt.AsSpan(withoutPrompt.Length);
+        return new ParserInitialState(tail.LastIndexOf(open, StringComparison.Ordinal) > tail.LastIndexOf(close, StringComparison.Ordinal));
+    }
+
     /// <summary>The prompt <paramref name="ids"/> starting with exactly one BOS when this template was built with <c>prependBos</c>.</summary>
     private int[] WithBos(ILlmTokenizer tokenizer, int[] ids)
         => _prependBos && tokenizer.BosId is int bos && (ids.Length == 0 || ids[0] != bos) ? [bos, .. ids] : ids;

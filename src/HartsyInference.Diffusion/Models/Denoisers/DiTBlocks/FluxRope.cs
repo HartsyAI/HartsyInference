@@ -1,20 +1,19 @@
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Numerics;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Axial Rotary Position Embedding for Flux. Computes RoPE rotation matrices across 3 axes [16, 56, 56] with theta=10000, then applies 2x2 rotation to each Q/K pair. Precomputes cos/sin tables per resolution for caching.</summary>
-public sealed unsafe class FluxRope
+public sealed unsafe class FluxRope : IDisposable
 {
     /// <summary>Q/K vectors rotated per range of the host fan-out: a vector is only a few hundred operations, so a
     /// range of them amortizes dispatch, and the ranges depend only on the vector count.</summary>
     private const long RowsPerRange = 1024;
 
-    private readonly int[] _axesDim;
-    private readonly int _theta;
+    private readonly RopeFrequencyPlan _plan;
     private readonly int _headDim;
 
     // Cached cos/sin tables: [totalSeqLen, headDim/2] interleaved
@@ -22,35 +21,33 @@ public sealed unsafe class FluxRope
     private float[]? _sinCache;
     private int _cachedSeqLen;
 
-    // GPU duplicated-pair tables [S, headDim] (pair i stored at both 2i and 2i+1 — the layout
-    // IBackend.WanRopeInterleaved reads), one pair PER BACKEND: CFG-branch parallelism and DiT block
-    // sharding both route two IBackend instances through one shared transformer/rope object (the
-    // transformer's `_rope` field is not duplicated per backend), so ApplyGpu/ApplyGpuGqa can be called
-    // for two different backends against the same FluxRope — concurrently (CFG-parallel: cond/uncond on
-    // two threads) or sequentially (a block-range shard: backend A's block range, then backend B's).
-    // WanRopeInterleaved re-stages cos/sin fresh via GpuTransferHelper.CopyToDevice/FreeDevice on every
-    // call (not a weight-cache hit), so a single shared Tensor object used by two backends already reads
-    // correctly regardless of which one built it — a stale reference here is not a wrong-device numerics
-    // bug. The real hazard: a single unkeyed slot's rebuild-on-dirty path called backend.FreeWeights +
-    // Tensor.Dispose() unconditionally, which can tear the tensor down while ANOTHER backend/thread is
-    // mid-CopyToDevice against it (the same class of lifecycle race as the EnsureCpuData fix elsewhere in
-    // this plan) — and concurrent Precompute calls raced unsynchronized writes to _cosCache/_sinCache.
-    // _gpuLock serializes both; the per-backend keying also avoids redundant rebuild churn when two
-    // backends alternate through one FluxRope.
+    // Device duplicated-pair tables [S, headDim] live in a per-instance RopeTableCache, one entry per backend. Two
+    // IBackend instances (CFG-branch parallelism, or DiT block sharding) can use one FluxRope, so the cache keys by
+    // backend and serializes its own state. Precompute retires the previous signature's tables before the new ones are
+    // built, which also gives the owning transformer its step-graph invalidation through beforeRetire.
     private readonly object _gpuLock = new();
-    private readonly Dictionary<IBackend, (Tensor Cos, Tensor Sin)> _gpuTables = new();
-    private bool _gpuTablesDirty = true;
+    private readonly RopeTableCache _deviceTables;
+    private float[]? _positions;
+
+    private static readonly RopeTableSettings DeviceTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.MultiplyByInverse,
+        Layout = RopeTableLayout.InterleavedPair,
+        Preload = true,
+        RetainedSignatures = 1,
+    };
 
     /// <summary>Creates a FluxRope with the given per-axis dimensions.</summary>
-    /// <param name="axesDim">Dimensions per axis. Default: [16, 56, 56]. Must sum to headDim.</param>
+    /// <param name="axesDim">Dimensions per axis. Default: [16, 56, 56]. Must be positive and even; the sum is the head dimension.</param>
     /// <param name="theta">Base frequency. Default: 10000.</param>
-    public FluxRope(int[]? axesDim = null, int theta = 10000)
+    /// <param name="beforeRetire">Runs for the owning backend before its device tables are freed. A transformer passes its
+    /// step-graph invalidation here.</param>
+    public FluxRope(int[]? axesDim = null, int theta = 10000, Action<IBackend>? beforeRetire = null)
     {
-        _axesDim = axesDim ?? [16, 56, 56];
-        _theta = theta;
-        _headDim = 0;
-        for (int i = 0; i < _axesDim.Length; i++)
-            _headDim += _axesDim[i];
+        int[] dims = axesDim ?? [16, 56, 56];
+        _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = dims, Theta = theta });
+        _headDim = _plan.HeadDim;
+        _deviceTables = new RopeTableCache(_plan, DeviceTableSettings, beforeRetire);
     }
 
     /// <summary>Total head dimension (sum of all axes dimensions, typically 128).</summary>
@@ -60,62 +57,30 @@ public sealed unsafe class FluxRope
     /// <param name="posIds">Position IDs [totalSeqLen, numAxes] as float32. Text tokens: all zeros. Image tokens: [0, row, col].</param>
     public void Precompute(Tensor posIds)
     {
-        // Locked: two backends sharing this FluxRope (CFG-branch parallelism) can call Precompute
-        // concurrently for the same step. Without this, concurrent writers race on _cosCache/_sinCache/
-        // _cachedSeqLen (a torn read is possible even when both calls compute identical values, since
-        // .NET gives no ordering guarantee between the array-content writes and the field publish without
-        // a barrier). Callers with DIFFERING signatures (e.g. cond/uncond token counts differ under
-        // regional conditioning) must not be routed here concurrently at all — one _cosCache instance
-        // cannot correctly serve two different signatures at once; see FluxPipeline's cfgParallelEligible
-        // guard, which requires matching signatures before allowing the concurrent branch.
+        int totalSeqLen = (int)posIds.Shape[0];
+        int numAxes = (int)posIds.Shape[1];
+        if (numAxes != _plan.Axes)
+            throw new ArgumentException($"FluxRope is configured for {_plan.Axes} axes but the position IDs carry {numAxes}.", nameof(posIds));
+
+        // Locked: two backends sharing this FluxRope (CFG-branch parallelism) can call Precompute concurrently for the same
+        // step. Callers with DIFFERING signatures (e.g. cond/uncond token counts differ under regional conditioning) must not
+        // be routed here concurrently at all; see FluxPipeline's cfgParallelEligible guard.
         lock (_gpuLock)
         {
-            int totalSeqLen = (int)posIds.Shape[0];
-            int numAxes = (int)posIds.Shape[1];
-            int halfDim = _headDim / 2;
+            float[] cos = new float[totalSeqLen * (_headDim / 2)];
+            float[] sin = new float[cos.Length];
+            ReadOnlySpan<float> positions = new((void*)posIds.DataPointer, totalSeqLen * numAxes);
+            MultiAxisRopeTables.ComputePairs(_plan, positions, totalSeqLen, RopeAngleOrder.MultiplyByInverse, cos, sin);
+            float[] signature = positions.ToArray();
 
-            _cosCache = new float[totalSeqLen * halfDim];
-            _sinCache = new float[totalSeqLen * halfDim];
+            // Every backend's device tables are rebuilt on next use. Retire them before publishing the new host state: a
+            // retirement that throws then leaves this instance on the previous signature, which is the one its owner still
+            // records as current.
+            _deviceTables.Clear();
+            _cosCache = cos;
+            _sinCache = sin;
             _cachedSeqLen = totalSeqLen;
-
-            float* posPtr = (float*)posIds.DataPointer;
-            int freqOffset = 0;
-
-            // Max pairs across all axes (56/2=28 for Flux)
-            int maxPairs = 0;
-            for (int a = 0; a < numAxes; a++)
-                maxPairs = Math.Max(maxPairs, _axesDim[a] / 2);
-            Span<double> omega = stackalloc double[maxPairs];
-
-            for (int axis = 0; axis < numAxes; axis++)
-            {
-                int axisDim = _axesDim[axis];
-                int numPairs = axisDim / 2;
-
-                // Precompute omega for this axis: omega[k] = 1 / (theta ^ (2k / axisDim))
-                for (int k = 0; k < numPairs; k++)
-                {
-                    double scale = (double)(2 * k) / axisDim;
-                    omega[k] = 1.0 / Math.Pow(_theta, scale);
-                }
-
-                for (int s = 0; s < totalSeqLen; s++)
-                {
-                    double pos = posPtr[s * numAxes + axis];
-
-                    for (int k = 0; k < numPairs; k++)
-                    {
-                        double angle = pos * omega[k];
-                        int idx = s * halfDim + freqOffset + k;
-                        _cosCache[idx] = (float)Math.Cos(angle);
-                        _sinCache[idx] = (float)Math.Sin(angle);
-                    }
-                }
-
-                freqOffset += numPairs;
-            }
-
-            _gpuTablesDirty = true;   // host tables changed → every backend's GPU tables must be rebuilt
+            _positions = signature;
         }
     }
 
@@ -126,87 +91,44 @@ public sealed unsafe class FluxRope
     /// the pre-permute <c>[1, S, H, D]</c> layout is exactly WanRopeInterleaved's <c>[S, heads·headDim]</c>
     /// contract. Replaces the per-block host loop (full Q/K D2H→trig→H2D round trip per block per step).
     /// Requires batch 1 (flat-layout equivalence); callers keep the host <see cref="Forward"/> for B&gt;1.
-    /// Mirrors <see cref="HunyuanImageRope.ApplyGpu"/>.</summary>
+    /// Mirrors <see cref="HunyuanImageRope.ApplyGpu"/>. Reads the signature without the precompute lock, so it must not
+    /// run alongside a <see cref="Precompute"/> of another signature (the same contract as concurrent precomputes).</summary>
     public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads)
     {
-        if (_cosCache == null || _sinCache == null)
-            throw new InvalidOperationException("FluxRope.Precompute must be called before ApplyGpu.");
-        int seqLen = (int)q.Shape[1];
-        if (seqLen != _cachedSeqLen)
-            throw new InvalidOperationException($"FluxRope.ApplyGpu: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
-
-        (Tensor cos, Tensor sin) = GetGpuTables(backend);
+        CheckGpuPrecondition("ApplyGpu", q);
+        using RopeTableLease lease = _deviceTables.Acquire(backend, 0, _cachedSeqLen, _positions!);
+        (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
         backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
         backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numHeads, _headDim);
     }
 
     /// <summary>GQA variant of <see cref="ApplyGpu"/>: rotates Q with <paramref name="numHeads"/> and K with
-    /// <paramref name="numKvHeads"/> (grouped-query attention, where K has fewer heads than Q). Same pre-permute
-    /// <c>[1, S, H, D]</c> contract and bit-identical interleaved-pair rotation as <see cref="ApplyGpu"/> —
-    /// <see cref="IBackend.WanRopeInterleaved"/> is single-tensor and takes an explicit head count, so the only
-    /// reason the shared-count <see cref="ApplyGpu"/> couldn't serve GQA was the hardcoded single count. RoPE is
-    /// head-independent (cos/sin index position×dim, not head), so rotating Q and K with their own counts is exact.
-    /// Requires batch 1; callers keep the host <see cref="ForwardSingle"/> for B&gt;1.</summary>
+    /// <paramref name="numKvHeads"/>. Requires batch 1.</summary>
     public void ApplyGpuGqa(IBackend backend, Tensor q, Tensor k, int numHeads, int numKvHeads)
     {
-        if (_cosCache == null || _sinCache == null)
-            throw new InvalidOperationException("FluxRope.Precompute must be called before ApplyGpuGqa.");
-        int seqLen = (int)q.Shape[1];
-        if (seqLen != _cachedSeqLen)
-            throw new InvalidOperationException($"FluxRope.ApplyGpuGqa: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
-
-        (Tensor cos, Tensor sin) = GetGpuTables(backend);
+        CheckGpuPrecondition("ApplyGpuGqa", q);
+        using RopeTableLease lease = _deviceTables.Acquire(backend, 0, _cachedSeqLen, _positions!);
+        (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
         backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
         backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numKvHeads, _headDim);
     }
 
-    /// <summary>Builds (or returns the per-backend cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> from
-    /// the host <see cref="Precompute"/> tables — a pure copy-expansion, no trig — and preloads them into
-    /// <paramref name="backend"/>'s weight cache so the per-block op skips the H2D upload. All backends' cached
-    /// tables are evicted (freed against their OWNING backend, not the caller) the first time this is called
-    /// after Precompute refreshes the host tables; each backend then rebuilds lazily on its own next call.
-    /// Locked: two backends can call this concurrently (CFG-branch parallelism) or in sequence (a block-range
-    /// shard handing off from one backend to another mid-step) — either way each backend gets its own tensors,
-    /// never another backend's.</summary>
-    private unsafe (Tensor cos, Tensor sin) GetGpuTables(IBackend backend)
+    /// <summary>Releases the device tables. Outstanding leases keep theirs until released.</summary>
+    public void Dispose() => _deviceTables.Dispose();
+
+    private void CheckGpuPrecondition(string method, Tensor q)
     {
-        lock (_gpuLock)
-        {
-            if (_gpuTablesDirty)
-            {
-                foreach (KeyValuePair<IBackend, (Tensor Cos, Tensor Sin)> entry in _gpuTables)
-                {
-                    entry.Key.FreeWeights([entry.Value.Cos, entry.Value.Sin]);
-                    entry.Value.Cos.Dispose();
-                    entry.Value.Sin.Dispose();
-                }
-                _gpuTables.Clear();
-                _gpuTablesDirty = false;
-            }
-            if (_gpuTables.TryGetValue(backend, out (Tensor Cos, Tensor Sin) cached))
-                return (cached.Cos, cached.Sin);
-
-            int halfDim = _headDim / 2;
-            Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-            Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
-            float* cp = (float*)cos.DataPointer;
-            float* sp = (float*)sin.DataPointer;
-            for (int s = 0; s < _cachedSeqLen; s++)
-            {
-                long srcOff = (long)s * halfDim;
-                long dstOff = (long)s * _headDim;
-                for (int i = 0; i < halfDim; i++)
-                {
-                    cp[dstOff + 2 * i] = _cosCache![srcOff + i]; cp[dstOff + 2 * i + 1] = _cosCache[srcOff + i];
-                    sp[dstOff + 2 * i] = _sinCache![srcOff + i]; sp[dstOff + 2 * i + 1] = _sinCache[srcOff + i];
-                }
-            }
-
-            backend.PreloadWeights([cos, sin]);
-            _gpuTables[backend] = (cos, sin);
-            return (cos, sin);
-        }
+        if (_cosCache == null || _sinCache == null)
+            throw new InvalidOperationException($"FluxRope.Precompute must be called before {method}.");
+        int seqLen = (int)q.Shape[1];
+        if (seqLen != _cachedSeqLen)
+            throw new InvalidOperationException($"FluxRope.{method}: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
     }
+
+    private static (Tensor Cos, Tensor Sin) DeviceTablesOf(RopeTableLease lease) =>
+        lease.DeviceCos is { } cos && lease.DeviceSin is { } sin
+            ? (cos, sin)
+            : throw new InvalidOperationException("FluxRope device tables require a preloading cache.");
 
     /// <summary>Applies RoPE rotation to Q and K tensors in-place. Q/K must be [B, numHeads, seqLen, headDim] laid out as contiguous floats. Precompute must be called first with matching seqLen.</summary>
     /// <param name="q">Query tensor [B, numHeads, seqLen, headDim]. Modified in-place.</param>
