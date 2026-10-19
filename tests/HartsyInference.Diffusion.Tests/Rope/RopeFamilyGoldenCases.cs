@@ -39,11 +39,12 @@ internal static unsafe class RopeFamilyGoldenCases
         "ernie_freqs_batch2", "ernie_gpu",
         "ideogram4_tables", "ideogram4_sections_overrun", "ideogram4_apply",
         "mrope3d_tables", "mrope3d_apply",
-        // Large, non-square and odd grids: the positions and table sizes of 2K images (128 tokens a side), 16:9 frames, and
-        // grids whose centering splits unevenly (Qwen-Image's native 1328² is 83×83).
+        // Large, non-square and odd grids: the positions and table sizes of 2K images (128 tokens a side), 16:9 frames, 720p
+        // video, and grids whose centering splits unevenly (Qwen-Image's native 1328² is 83×83).
         "qwen_device_joint_odd_1328", "qwen_apply_image_odd", "qwen21_device_image_wide_2k", "hunyuan_gpu_2048",
         "zimage_gpu_2048", "kandinsky5_apply_wide_2k", "moss_joint_2048", "omnigen2_staged_wide_2k", "lens_staged_joint_odd",
         "anima_device_tables_2048", "flux_gpu_2048", "stableaudio_tables_long",
+        "wan_shared_720p", "ernie_gpu_2048", "ideogram4_tables_wide_2k", "mrope3d_tables_video_1024",
     ];
 
     /// <summary>Runs <paramref name="name"/> and returns its digests as space-separated <c>label=hex</c> pairs.</summary>
@@ -426,6 +427,37 @@ internal static unsafe class RopeFamilyGoldenCases
                 Tensor sin = StableAudioRope.BuildSinTable(invFreq, 2049, 64);
                 return DigestsAndDispose(cos, sin);
             }
+            case "wan_shared_720p":
+            {
+                // Wan 2.1 at 1280×720 and 81 frames: 21 latent frames of 45×80 tokens.
+                (Tensor cos, Tensor sin) = new WanRope(128, 10000, 1024).BuildCosSin(21, 45, 80);
+                return DigestsAndDispose(cos, sin);
+            }
+            case "ernie_gpu_2048":
+            {
+                ErnieImageRope rope = new();
+                Tensor ids = ErnieImageRope.BuildPositionIds(1, [TextLength], 128, 128, 9);
+                Tensor freqs = rope.BuildFreqs(ids);
+                ids.Dispose();
+                string digests = RotatePrePermute(128, 128 * 128 + 9, Heads, (q, k) => rope.ApplyRotaryEmbGpu(cpu, q, k, freqs));
+                freqs.Dispose();
+                return digests;
+            }
+            case "ideogram4_tables_wide_2k":
+            {
+                Tensor ids = Ideogram4Positions(TextLength, 72, 128);
+                (Tensor cos, Tensor sin) = new Ideogram4Mrope(128, 5_000_000, (24, 20, 20)).BuildCosSin(ids);
+                ids.Dispose();
+                return DigestsAndDispose(cos, sin);
+            }
+            case "mrope3d_tables_video_1024":
+            {
+                // Lance video at 1024×576 and 25 frames: 7 latent frames of 36×64 tokens.
+                Tensor ids = LanceVideoPositions(20, 7, 36, 64, 2);
+                (Tensor cos, Tensor sin) = new Multimodal3DRope(128, 1_000_000f, (16, 24, 24)).BuildCosSin(ids);
+                ids.Dispose();
+                return DigestsAndDispose(cos, sin);
+            }
             default:
                 throw new ArgumentException($"Unknown RoPE golden case '{name}'.", nameof(name));
         }
@@ -444,6 +476,48 @@ internal static unsafe class RopeFamilyGoldenCases
             data[3 * t + 1] = (t % 5) - 2.5f;
             data[3 * t + 2] = (t * 7 % 11) * 0.5f;
         }
+        return ids;
+    }
+
+    /// <summary>Ideogram 4's <c>[1, L, 3]</c> positions as its pipeline builds them: text <c>(i, i, i)</c>, then the image grid at
+    /// <c>(0, row, col)</c> plus the image offset of 65536.</summary>
+    private static Tensor Ideogram4Positions(int text, int gridH, int gridW)
+    {
+        const int offset = 65536;
+        Tensor ids = new(new TensorShape(1, text + gridH * gridW, 3), DType.F32);
+        float* data = (float*)ids.DataPointer;
+        for (int t = 0; t < text; t++)
+            data[3 * t] = data[3 * t + 1] = data[3 * t + 2] = t;
+        for (int i = 0; i < gridH * gridW; i++)
+        {
+            long at = 3L * (text + i);
+            data[at] = offset;
+            data[at + 1] = offset + i / gridW;
+            data[at + 2] = offset + i % gridW;
+        }
+        return ids;
+    }
+
+    /// <summary>Lance's <c>[seq, 3]</c> generation positions (Qwen2.5-VL <c>get_rope_index</c>): text <c>(i, i, i)</c>, the latent
+    /// block anchored at the text length with <paramref name="step"/> positions per latent frame, then two trailing tokens.</summary>
+    private static Tensor LanceVideoPositions(int text, int gridT, int gridH, int gridW, int step)
+    {
+        Tensor ids = new(new TensorShape(text + gridT * gridH * gridW + 2, 3), DType.F32);
+        float* data = (float*)ids.DataPointer;
+        for (int i = 0; i < text; i++)
+            data[3 * i] = data[3 * i + 1] = data[3 * i + 2] = i;
+        long at = text;
+        for (int t = 0; t < gridT; t++)
+            for (int h = 0; h < gridH; h++)
+                for (int w = 0; w < gridW; w++, at++)
+                {
+                    data[3 * at] = text + t * step;
+                    data[3 * at + 1] = text + h;
+                    data[3 * at + 2] = text + w;
+                }
+        int max = text + Math.Max((gridT - 1) * step, Math.Max(gridH, gridW) - 1);
+        for (int i = 0; i < 2; i++, at++)
+            data[3 * at] = data[3 * at + 1] = data[3 * at + 2] = max + 1 + i;
         return ids;
     }
 
