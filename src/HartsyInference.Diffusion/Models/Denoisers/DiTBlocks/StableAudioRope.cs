@@ -1,3 +1,4 @@
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -12,7 +13,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <para>Applied via <see cref="Core.Backends.IBackend.ApplyRopeSingle"/> (GPU-resident on CUDA) rather than a
 /// host loop — that op expects the pre-multi-head-permute <c>[B, L, H, D]</c> layout and a cos/sin table
 /// <b>duplicated</b> across the rotated half (<c>table[pos, i] == table[pos, i + half]</c> for
-/// <c>i in [0, half)</c>), which is what <see cref="BuildCosSinTensors"/> below produces.</para></summary>
+/// <c>i in [0, half)</c>), which is what <see cref="BuildCosTable"/> below produces. The rows come from
+/// <see cref="RopeTableExpander"/> in <see cref="RopeTableLayout.RotateHalf"/> with zero padding, so the trailing channels
+/// are zero, as before.</para></summary>
 public static unsafe class StableAudioRope
 {
     /// <summary>Builds <c>[1, seqLen, headDim]</c> cos/sin tables for <see cref="Core.Backends.IBackend.ApplyRopeSingle"/>
@@ -31,19 +34,52 @@ public static unsafe class StableAudioRope
     private static Tensor BuildTable(ReadOnlySpan<float> invFreq, int seqLen, int headDim, bool sine)
     {
         int half = invFreq.Length;
+        if (2 * half > headDim)
+            throw new ArgumentOutOfRangeException(nameof(invFreq), half, "Stable Audio RoPE rotates 2 × invFreq.Length channels, which must fit in headDim.");
         Tensor table = new(new TensorShape(1, seqLen, headDim), DType.F32);
-        float* p = (float*)table.DataPointer;
+        if (half == 0)
+            return table;   // No rotated channels. RopeTableExpander treats rotaryDim 0 as full width, so skip it.
+
+        float[] frequencies = invFreq.ToArray();
+        float[] positions = new float[seqLen];
         for (int pos = 0; pos < seqLen; pos++)
+            positions[pos] = pos;
+        RopeHostTableWriter writer = (p, tokens, cos, sin) => WriteHostPairs(frequencies, p, tokens, cos, sin);
+        float[] cosPairs = new float[checked(seqLen * half)];
+        float[] sinPairs = new float[cosPairs.Length];
+        writer(positions, seqLen, cosPairs, sinPairs);
+
+        try
         {
-            long rowOff = (long)pos * headDim;
+            int count = checked(seqLen * headDim);
+            float[] scratch = new float[count];
+            Span<float> tableRows = new((void*)table.DataPointer, count);
+            Span<float> scratchRows = scratch;
+            RopeTableExpander.Expand(cosPairs, sinPairs, seqLen, headDim, RopeTableLayout.RotateHalf, 2 * half, RopeTablePadding.Zero,
+                sine ? scratchRows : tableRows, sine ? tableRows : scratchRows);
+            return table;
+        }
+        catch
+        {
+            table.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Checkpoint frequencies in F32: <c>angle = position × invFreq[i]</c>, then <c>cos</c> and <c>sin</c> in F32.
+    /// Positions are the sequence index, exact as floats.</summary>
+    private static void WriteHostPairs(float[] invFreq, ReadOnlySpan<float> positions, int tokens, Span<float> cos, Span<float> sin)
+    {
+        int half = invFreq.Length;
+        for (int t = 0; t < tokens; t++)
+        {
+            int row = t * half;
             for (int i = 0; i < half; i++)
             {
-                float angle = pos * invFreq[i];
-                float v = sine ? MathF.Sin(angle) : MathF.Cos(angle);
-                p[rowOff + i] = v;
-                p[rowOff + half + i] = v;
+                float angle = positions[t] * invFreq[i];
+                cos[row + i] = MathF.Cos(angle);
+                sin[row + i] = MathF.Sin(angle);
             }
         }
-        return table;
     }
 }

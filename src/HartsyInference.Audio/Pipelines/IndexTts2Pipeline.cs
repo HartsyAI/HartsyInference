@@ -150,7 +150,8 @@ public sealed class IndexTts2Pipeline : IDisposable
                 encode = new IndexTts2TiktokenTokenizer(tokenizerPath).Encode;
             }
 
-            PytorchPickleLoader gptLoader = new();
+            // Every .pth below may be a converted safetensors standing in at its path; the any-format loader reads either.
+            AnyFormatCheckpointLoader gptLoader = new();
             gptLoader.Load(gptPath, recursiveFlatten: true);
             loaders.Add(gptLoader);
             Dictionary<string, Tensor> gptWeights = IndexTtsPipeline.ToF32(gptLoader.GetAllTensors(), converted);
@@ -168,7 +169,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             loaders.Add(w2vLoader);
             Dictionary<string, Tensor> w2vWeights = IndexTtsPipeline.ToF32(w2vLoader.GetAllTensors(), converted);
 
-            PytorchPickleLoader statsLoader = new();
+            AnyFormatCheckpointLoader statsLoader = new();
             statsLoader.Load(w2vStatsPath, recursiveFlatten: true);
             loaders.Add(statsLoader);
             Dictionary<string, Tensor> statsWeights = statsLoader.GetAllTensors();
@@ -176,7 +177,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             semanticFeatures = new IndexTts2SemanticFeatures();
             semanticFeatures.LoadWeights(w2vWeights, "", statsWeights["mean"], statsWeights["var"]);
 
-            PytorchPickleLoader campplusLoader = new();
+            AnyFormatCheckpointLoader campplusLoader = new();
             campplusLoader.Load(campplusPath, recursiveFlatten: true);
             loaders.Add(campplusLoader);
             Dictionary<string, Tensor> campplusWeights = IndexTtsPipeline.ToF32(campplusLoader.GetAllTensors(), converted);
@@ -196,7 +197,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             }
             else
             {
-                PytorchPickleLoader codecLoader = new();
+                AnyFormatCheckpointLoader codecLoader = new();
                 codecLoader.Load(codecPath, recursiveFlatten: true);
                 loaders.Add(codecLoader);
                 Dictionary<string, Tensor> codecWeights = IndexTtsPipeline.ToF32(codecLoader.GetAllTensors(), converted);
@@ -205,7 +206,7 @@ public sealed class IndexTts2Pipeline : IDisposable
 
             lengthRegulator = new InterpolateLengthRegulator(resolved.LengthRegulatorChannels, resolved.LengthRegulatorInChannels, resolved.LengthRegulatorNumStages);
 
-            PytorchPickleLoader s2melLoader = new();
+            AnyFormatCheckpointLoader s2melLoader = new();
             s2melLoader.Load(s2melPath, recursiveFlatten: true);
             loaders.Add(s2melLoader);
             Dictionary<string, Tensor> s2melWeights = IndexTtsPipeline.ToF32(s2melLoader.GetAllTensors(), converted);
@@ -214,7 +215,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             dit = new IndexTts2Dit(resolved.S2MelDit);
             dit.LoadWeights(s2melWeights, "net.cfm.estimator");
 
-            PytorchPickleLoader bigVganLoader = new();
+            AnyFormatCheckpointLoader bigVganLoader = new();
             bigVganLoader.Load(bigVganPath, recursiveFlatten: true);
             loaders.Add(bigVganLoader);
             Dictionary<string, Tensor> bigVganWeights = IndexTtsPipeline.ToF32(bigVganLoader.GetAllTensors(), converted);
@@ -226,10 +227,10 @@ public sealed class IndexTts2Pipeline : IDisposable
                 // The loaders own the tensors' backing storage (an F32 tensor is returned as-is, not copied), so
                 // they stay alive for the pipeline's lifetime — disposing them here would free the banks the
                 // lookup still reads.
-                PytorchPickleLoader feat1Loader = new();
+                AnyFormatCheckpointLoader feat1Loader = new();
                 feat1Loader.Load(feat1Path, recursiveFlatten: true);
                 loaders.Add(feat1Loader);
-                PytorchPickleLoader feat2Loader = new();
+                AnyFormatCheckpointLoader feat2Loader = new();
                 feat2Loader.Load(feat2Path, recursiveFlatten: true);
                 loaders.Add(feat2Loader);
                 emoLookup = new IndexTts2EmotionVectorLookup(feat1Loader.GetAllTensors()["data"], feat2Loader.GetAllTensors()["data"]);

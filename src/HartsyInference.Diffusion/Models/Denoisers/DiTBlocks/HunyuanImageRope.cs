@@ -1,20 +1,34 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>2-axis rotary position embedding for Hunyuan Image 2.1 (<c>HunyuanImageRotaryPosEmbed</c>). Splits the per-head dimension into <c>(height, width)</c> sub-bands (default <c>[64, 64]</c>) and rotates each pair of features by <c>theta = position * (1 / base^(2k/axisDim))</c>. Applied to image tokens only — text tokens are kept unrotated and concatenated after rotation. Each token at packed-grid <c>(row, col)</c> uses position <c>[row, col]</c>; both axes contribute <c>axesDim/2</c> cos/sin pairs to the head vector. Diffusers uses <c>theta=256</c> by default and <c>get_1d_rotary_pos_embed</c> with <c>use_real=True</c> producing <c>(cos, sin)</c> tables that are concatenated along the feature axis before being applied as the standard <c>(real, imag)</c> 2x2 rotation; this implementation produces the same numerical output by composing the per-axis tables in the same axis order.</summary>
-public sealed unsafe class HunyuanImageRope
+/// <remarks>Frequencies and tables come from <see cref="RopeFrequencyPlan"/> and <see cref="MultiAxisRopeTables"/>. Grid positions
+/// come from <see cref="HunyuanImagePosEmbed"/>. Device tables go through a <see cref="RopeTableCache"/> with one lease per
+/// backend, so each DiT shard keeps its own tables. The theta is a float, but the legacy arithmetic already widens it to double
+/// before <c>Math.Pow</c>, so the standard reciprocal order matches exactly.</remarks>
+public sealed unsafe class HunyuanImageRope : IDisposable
 {
+    private static readonly RopeTableSettings DeviceTableSettings = new()
+    {
+        AngleOrder = RopeAngleOrder.MultiplyByInverse,
+        Layout = RopeTableLayout.InterleavedPair,
+        Preload = true,
+        RetainedSignatures = 1,
+    };
+
     private readonly int[] _axesDim;
-    private readonly float _theta;
     private readonly int _headDim;
-    // Cached PER BACKEND (the QwenImageRope/FluxRope precedent): DiT sharding runs blocks [split, BlockCount) on
-    // a second backend, and two backends staging the SAME host tensor through WanRopeInterleaved trips the
-    // transfer helper's binding/pinning state (observed CUDA_ERROR_INVALID_VALUE on the second card at real
-    // table sizes) — each backend gets its own host build, preloaded into that backend's own weight cache.
-    private readonly Dictionary<IBackend, (int[] Dims, Tensor Cos, Tensor Sin)> _tables = new();
+    private readonly RopeFrequencyPlan _plan;
+    private readonly RopeTableCache _deviceTables;
+
+    // One held lease per backend: the tables a backend's block loop reads stay valid until it builds a different grid. Another
+    // backend's build never frees them, and the lock serializes the held state.
+    private readonly object _gate = new();
+    private readonly Dictionary<IBackend, HeldGrid> _held = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>Creates a HunyuanImageRope.</summary>
     /// <param name="axesDim">Per-axis dim split. 2 axes <c>(height, width)</c> for image (default <c>[64, 64]</c>); 3 axes <c>(temporal, height, width)</c> for video (e.g. <c>[16, 56, 56]</c> for HunyuanVideo). Each must be even.</param>
@@ -24,10 +38,9 @@ public sealed unsafe class HunyuanImageRope
         _axesDim = axesDim ?? [64, 64];
         if (_axesDim.Length < 1)
             throw new ArgumentException("HunyuanImageRope requires at least 1 axis.", nameof(axesDim));
-        _theta = theta;
-        _headDim = 0;
-        for (int i = 0; i < _axesDim.Length; i++)
-            _headDim += _axesDim[i];
+        _plan = RopeFrequencyPlan.Create(new RopeSpec { AxisDims = _axesDim, Theta = theta });
+        _headDim = _plan.HeadDim;
+        _deviceTables = new RopeTableCache(_plan, DeviceTableSettings);
     }
 
     /// <summary>Sum of per-axis dimensions; equals the per-head dim of the wrapped attention block.</summary>
@@ -52,25 +65,12 @@ public sealed unsafe class HunyuanImageRope
     {
         if (packedDims.Length != _axesDim.Length)
             throw new ArgumentException($"packedDims has {packedDims.Length} dims but rope has {_axesDim.Length} axes.", nameof(packedDims));
-        int seqLen = 1;
-        for (int i = 0; i < packedDims.Length; i++) seqLen *= packedDims[i];
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[seqLen * halfDim];
-        float[] sinTable = new float[seqLen * halfDim];
-
-        Span<double> pos = stackalloc double[packedDims.Length];
-        for (int s = 0; s < seqLen; s++)
-        {
-            // Decode row-major coordinates for token s over packedDims.
-            int rem = s;
-            for (int axis = packedDims.Length - 1; axis >= 0; axis--)
-            {
-                pos[axis] = rem % packedDims[axis];
-                rem /= packedDims[axis];
-            }
-            FillTokenFreqs(cosTable, sinTable, s, pos);
-        }
-
+        int seqLen = HunyuanImagePosEmbed.TokenCount(packedDims);
+        int pairs = _plan.Pairs;
+        float[] cosTable = new float[seqLen * pairs];
+        float[] sinTable = new float[seqLen * pairs];
+        MultiAxisRopeTables.ComputePairs(_plan, HunyuanImagePosEmbed.GridRows(packedDims), seqLen, RopeAngleOrder.MultiplyByInverse,
+            cosTable, sinTable);
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, seqLen);
     }
 
@@ -87,79 +87,51 @@ public sealed unsafe class HunyuanImageRope
         backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
     }
 
-    /// <summary>Builds (or returns the cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> for
-    /// <paramref name="packedDims"/> — the value for pair <c>i</c> stored at both <c>2i</c> and <c>2i+1</c>, the
-    /// layout <see cref="IBackend.WanRopeInterleaved"/> reads. One table set per backend (see the field note),
-    /// preloaded into that backend's weight cache so the per-block op skips the H2D upload; frees that backend's
-    /// previous tables when the grid changes.</summary>
-    private (Tensor cos, Tensor sin, int seqLen) GetTables(IBackend backend, ReadOnlySpan<int> packedDims)
+    /// <summary>Releases the held device tables and the cache. Tables still under a lease are freed by their last release.</summary>
+    public void Dispose()
     {
-        if (packedDims.Length != _axesDim.Length)
-            throw new ArgumentException($"packedDims has {packedDims.Length} dims but rope has {_axesDim.Length} axes.", nameof(packedDims));
-        int seqLen = 1;
-        for (int i = 0; i < packedDims.Length; i++) seqLen *= packedDims[i];
-
-        bool hasEntry = _tables.TryGetValue(backend, out (int[] Dims, Tensor Cos, Tensor Sin) entry);
-        if (hasEntry && packedDims.SequenceEqual(entry.Dims))
-            return (entry.Cos, entry.Sin, seqLen);
-
-        if (hasEntry)
+        lock (_gate)
         {
-            backend.FreeWeights([entry.Cos, entry.Sin]);
-            entry.Cos.Dispose();
-            entry.Sin.Dispose();
+            HeldGrid[] all = _held.Values.ToArray();
+            _held.Clear();
+            foreach (HeldGrid held in all)
+                held.Lease.Dispose();
         }
-
-        int halfDim = _headDim / 2;
-        float[] compactCos = new float[halfDim];
-        float[] compactSin = new float[halfDim];
-        Tensor cos = new Tensor(new TensorShape(seqLen, _headDim), DType.F32);
-        Tensor sin = new Tensor(new TensorShape(seqLen, _headDim), DType.F32);
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-        Span<double> pos = stackalloc double[packedDims.Length];
-        for (int s = 0; s < seqLen; s++)
-        {
-            int rem = s;
-            for (int axis = packedDims.Length - 1; axis >= 0; axis--)
-            {
-                pos[axis] = rem % packedDims[axis];
-                rem /= packedDims[axis];
-            }
-            FillTokenFreqs(compactCos, compactSin, 0, pos);
-            long baseOff = (long)s * _headDim;
-            for (int i = 0; i < halfDim; i++)
-            {
-                cp[baseOff + 2 * i] = compactCos[i]; cp[baseOff + 2 * i + 1] = compactCos[i];
-                sp[baseOff + 2 * i] = compactSin[i]; sp[baseOff + 2 * i + 1] = compactSin[i];
-            }
-        }
-
-        backend.PreloadWeights([cos, sin]);
-        _tables[backend] = (packedDims.ToArray(), cos, sin);
-        return (cos, sin, seqLen);
+        _deviceTables.Dispose();
     }
 
-    private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx, ReadOnlySpan<double> positions)
+    /// <summary>Returns the duplicated-pair cos/sin tables <c>[S, headDim]</c> for <paramref name="packedDims"/> on
+    /// <paramref name="backend"/>, the layout <see cref="IBackend.WanRopeInterleaved"/> reads. Each backend holds one grid;
+    /// a grid change releases that backend's previous lease after the new one is acquired.</summary>
+    private (Tensor Cos, Tensor Sin, int SeqLen) GetTables(IBackend backend, ReadOnlySpan<int> packedDims)
     {
-        int halfDim = _headDim / 2;
-        int destOffset = seqIdx * halfDim;
-        int freqOffset = 0;
+        ArgumentNullException.ThrowIfNull(backend);
+        if (packedDims.Length != _axesDim.Length)
+            throw new ArgumentException($"packedDims has {packedDims.Length} dims but rope has {_axesDim.Length} axes.", nameof(packedDims));
+        int seqLen = HunyuanImagePosEmbed.TokenCount(packedDims);
 
-        for (int axis = 0; axis < _axesDim.Length; axis++)
+        lock (_gate)
         {
-            int axisDim = _axesDim[axis];
-            int numPairs = axisDim / 2;
-            double pos = positions[axis];
+            if (_held.TryGetValue(backend, out HeldGrid? previous) && packedDims.SequenceEqual(previous.Dims))
+                return (previous.Cos, previous.Sin, seqLen);
 
-            for (int kIdx = 0; kIdx < numPairs; kIdx++)
+            RopeTableLease lease = _deviceTables.Acquire(backend, 0, seqLen, HunyuanImagePosEmbed.GridRows(packedDims));
+            Tensor cos;
+            Tensor sin;
+            try
             {
-                double inv = 1.0 / Math.Pow(_theta, (double)(2 * kIdx) / axisDim);
-                double angle = pos * inv;
-                cosTable[destOffset + freqOffset + kIdx] = (float)Math.Cos(angle);
-                sinTable[destOffset + freqOffset + kIdx] = (float)Math.Sin(angle);
+                cos = lease.DeviceCos ?? throw new InvalidOperationException("RoPE device tables require a preloading cache.");
+                sin = lease.DeviceSin ?? throw new InvalidOperationException("RoPE device tables require a preloading cache.");
             }
-            freqOffset += numPairs;
+            catch
+            {
+                lease.Dispose();
+                throw;
+            }
+
+            _held[backend] = new HeldGrid(packedDims.ToArray(), lease, cos, sin);
+            previous?.Lease.Dispose();
+            return (cos, sin, seqLen);
         }
     }
 
@@ -198,5 +170,25 @@ public sealed unsafe class HunyuanImageRope
             vec[2 * i] = cos[i] * x0 - sin[i] * x1;
             vec[2 * i + 1] = sin[i] * x0 + cos[i] * x1;
         }
+    }
+
+    /// <summary>The grid a backend currently holds, with its lease and device tensors.</summary>
+    private sealed class HeldGrid
+    {
+        public HeldGrid(int[] dims, RopeTableLease lease, Tensor cos, Tensor sin)
+        {
+            Dims = dims;
+            Lease = lease;
+            Cos = cos;
+            Sin = sin;
+        }
+
+        public int[] Dims { get; }
+
+        public RopeTableLease Lease { get; }
+
+        public Tensor Cos { get; }
+
+        public Tensor Sin { get; }
     }
 }

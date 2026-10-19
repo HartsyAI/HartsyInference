@@ -1,3 +1,4 @@
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -8,7 +9,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// Image tokens come first at <c>(0, textLength, row − (H−1)/2, col − (W−1)/2)</c>; text token <c>i</c> sits at
 /// <c>(0, i, 0, 0)</c>. With no reference images <c>r</c> is 0 everywhere, so its quarter of the head is unrotated.
 /// Tables are full-width <c>[1, S, headDim]</c> (both halves repeat the per-pair value), the layout
-/// <see cref="Core.Backends.IBackend.ApplyRope"/> takes. Phases are F32 products, as the reference builds them.</summary>
+/// <see cref="Core.Backends.IBackend.ApplyRope"/> takes. Phases are F32 products, as the reference builds them.
+/// The coordinates come from <see cref="MossImagePosEmbed"/>; <see cref="RopeTableExpander"/> writes the rotate-half rows.</summary>
 public static class MossImageRope
 {
     /// <summary>Coordinate axes per token.</summary>
@@ -27,56 +29,53 @@ public static class MossImageRope
 
     /// <summary>Tables for the joint sequence: the <paramref name="height"/>×<paramref name="width"/> image grid followed
     /// by <paramref name="textLength"/> text tokens.</summary>
-    public static (Tensor Cos, Tensor Sin) Joint(int height, int width, int textLength, int headDim, float ropeBase)
-    {
-        int imageTokens = height * width;
-        float[] coords = new float[(imageTokens + textLength) * NumAxes];
-        float rowCenter = (height - 1) / 2f, colCenter = (width - 1) / 2f;
-        for (int row = 0; row < height; row++)
-        {
-            for (int col = 0; col < width; col++)
-            {
-                int at = (row * width + col) * NumAxes;
-                coords[at + 1] = textLength;
-                coords[at + 2] = row - rowCenter;
-                coords[at + 3] = col - colCenter;
-            }
-        }
-        for (int i = 0; i < textLength; i++) coords[(imageTokens + i) * NumAxes + 1] = i;
-        return Tables(coords, headDim, ropeBase);
-    }
+    public static (Tensor Cos, Tensor Sin) Joint(int height, int width, int textLength, int headDim, float ropeBase) =>
+        Tables(MossImagePosEmbed.JointCoords(height, width, textLength), headDim, ropeBase);
 
     /// <summary>Tables for the text refiner, which runs on the text tokens alone at their joint positions.</summary>
-    public static (Tensor Cos, Tensor Sin) Text(int textLength, int headDim, float ropeBase)
-    {
-        float[] coords = new float[textLength * NumAxes];
-        for (int i = 0; i < textLength; i++) coords[i * NumAxes + 1] = i;
-        return Tables(coords, headDim, ropeBase);
-    }
+    public static (Tensor Cos, Tensor Sin) Text(int textLength, int headDim, float ropeBase) =>
+        Tables(MossImagePosEmbed.TextCoords(textLength), headDim, ropeBase);
 
+    /// <summary>Float phases as the reference builds them: <c>phase = coordinate × band</c> in F32, then cos and sin of the
+    /// widened phase, rounded to F32. The pairs are compact per token, one per band in <c>(r, t, h, w)</c> order, and
+    /// <see cref="RopeTableExpander"/> duplicates each pair into both halves.</summary>
     private static unsafe (Tensor Cos, Tensor Sin) Tables(float[] coords, int headDim, float ropeBase)
     {
         float[] bands = Bands(headDim, ropeBase);
         int tokens = coords.Length / NumAxes;
         int half = headDim / 2;
-        Tensor cos = new(new TensorShape(1, tokens, headDim), DType.F32);
-        Tensor sin = new(new TensorShape(1, tokens, headDim), DType.F32);
-        float* c = (float*)cos.DataPointer;
-        float* s = (float*)sin.DataPointer;
+        float[] cosPairs = new float[checked(tokens * half)];
+        float[] sinPairs = new float[cosPairs.Length];
         for (int t = 0; t < tokens; t++)
         {
-            float* cRow = c + (long)t * headDim;
-            float* sRow = s + (long)t * headDim;
+            int row = t * half;
             for (int i = 0; i < half; i++)
             {
                 float phase = coords[t * NumAxes + i / bands.Length] * bands[i % bands.Length];
-                float cv = (float)Math.Cos(phase), sv = (float)Math.Sin(phase);
-                cRow[i] = cv;
-                cRow[i + half] = cv;
-                sRow[i] = sv;
-                sRow[i + half] = sv;
+                cosPairs[row + i] = (float)Math.Cos(phase);
+                sinPairs[row + i] = (float)Math.Sin(phase);
             }
         }
-        return (cos, sin);
+
+        Tensor cos = new(new TensorShape(1, tokens, headDim), DType.F32);
+        Tensor? sin = null;
+        bool succeeded = false;
+        try
+        {
+            sin = new Tensor(new TensorShape(1, tokens, headDim), DType.F32);
+            int count = checked(tokens * headDim);
+            RopeTableExpander.Expand(cosPairs, sinPairs, tokens, headDim, RopeTableLayout.RotateHalf, 0, RopeTablePadding.Identity,
+                new Span<float>(cos.DataPointer, count), new Span<float>(sin.DataPointer, count));
+            succeeded = true;
+            return (cos, sin);
+        }
+        finally
+        {
+            if (!succeeded)
+            {
+                cos.Dispose();
+                sin?.Dispose();
+            }
+        }
     }
 }
