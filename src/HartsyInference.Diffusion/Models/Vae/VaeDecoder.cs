@@ -388,13 +388,13 @@ public sealed class VaeDecoder
                     // e.g. fragmentation). Clean up whatever the partial decode left on-device and fall back
                     // to the tiled path (and stay tiled at this size this session).
                     _fullResFailedArea = Math.Min(_fullResFailedArea, latentArea);
+                    Logs.Warning($"[vae-phase] full-res decode failed after {fullSw.ElapsedMilliseconds}ms — " +
+                        $"falling back to tiled for {latentH}x{latentW} latents and larger this session: {ex.Message}");
                     if (single is not null && !ReferenceEquals(single, latent)) single.Dispose();
                     // FreeActivations drops device copies without a sync-back and the tiles slice the latent on
                     // the host, so a device-resident latent would otherwise decode as zeros (a flat gray image).
                     backend.OffloadActivation(latent);
                     backend.FreeActivations();
-                    Logs.Warning($"[vae-phase] full-res decode failed after {fullSw.ElapsedMilliseconds}ms — " +
-                        $"falling back to tiled for {latentH}x{latentW} latents and larger this session: {ex.Message}");
                 }
             }
         }
