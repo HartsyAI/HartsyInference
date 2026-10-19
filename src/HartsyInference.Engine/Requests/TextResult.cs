@@ -8,7 +8,8 @@ public sealed record TextResult
 
     /// <summary>The reasoning the model wrote before its answer when its prompt ended inside a think block; empty otherwise. A reply that ran out
     /// of tokens mid-reasoning keeps its partial reasoning here with <see cref="Stop"/> = <see cref="StopReason.Length"/> and an empty
-    /// <see cref="Text"/>.</summary>
+    /// <see cref="Text"/>. A reply that ends with end-of-sequence while still inside its reasoning keeps that reasoning here, with an empty
+    /// <see cref="Text"/> and the normal stop.</summary>
     public string Reasoning { get; init; } = "";
 
     /// <summary>Why generation stopped.</summary>

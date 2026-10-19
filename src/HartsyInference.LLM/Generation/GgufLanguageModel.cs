@@ -90,7 +90,7 @@ public sealed class GgufLanguageModel : IDisposable
     internal enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2, Tekken }
 
     /// <summary>Maps a <c>tokenizer.ggml.pre</c> name to its family. <c>qwen2</c> is llama.cpp's QWEN2 split; <c>tekken</c> and <c>pixtral</c>
-    /// (Mistral Nemo, Pixtral, NVIDIA Nemotron Dory) are its TEKKEN/PIXTRAL split.</summary>
+    /// (Mistral Nemo, Pixtral, and the NVIDIA Nemotron Dory GGUF, which writes <c>pixtral</c>) are its TEKKEN/PIXTRAL split.</summary>
     internal static PreTokenizerFamily PreTokenizerFamilyFor(string pre) => pre switch
     {
         "llama-bpe" or "llama3" or "smaug-bpe" => PreTokenizerFamily.Llama3,

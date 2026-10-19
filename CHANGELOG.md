@@ -16,6 +16,7 @@ stable release will require. Dates are UTC.
   consumed. Before, the reasoning arrived as answer text with a stray `</think>` and no opener, so clients could not split it. A
   non-streaming `TextResult` carries it in the new `Reasoning` field; a reply that runs out of tokens mid-reasoning keeps the partial
   reasoning with `Stop = Length` and empty `Text`. With thinking off the template's empty think block applies and the reply is all answer.
+- **Changed: a non-streaming chat completion returns the model's reasoning as `reasoning_content`, and `TextResult.Text` holds the answer alone for these models.** Clients that read `content` on the OpenAI-compatible route, or `TextResult.Text`, no longer see the reasoning inline. Read `reasoning_content` or `TextResult.Reasoning` instead.
 
 ## alpha.380
 
