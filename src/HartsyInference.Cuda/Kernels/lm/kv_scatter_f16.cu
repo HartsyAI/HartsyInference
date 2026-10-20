@@ -37,6 +37,7 @@ extern "C" __global__ void lm_qkv_rope_scatter_f16kv(
     unsigned long long total = qElems + 2ull * kvElems;
     if (gid >= total) return;
     int pos = devicePos[1];
+    if (gid >= qElems && (unsigned int)pos >= maxSeq) return;   // a slot past the capacity writes no K/V
 
     if (gid >= qElems + kvElems) {
         // v: plain copy into the cache slot (same addressing as lm_kv_append_f32 at tNew=1).
@@ -110,6 +111,7 @@ extern "C" __global__ void lm_qknorm_rope_scatter_f16kv(
     unsigned int h = blockIdx.x;
     if (h >= nq + 2u * nkv) return;
     int pos = devicePos[1];
+    if (h >= nq && (unsigned int)pos >= maxSeq) return;   // a slot past the capacity writes no K/V
 
     if (h >= nq + nkv) {
         // v head: plain copy into the cache slot (identical addressing to lm_kv_append_f32, tNew=1).
@@ -197,6 +199,7 @@ extern "C" __global__ void lm_kv_append_f16_sat(
     unsigned int ti = (unsigned int)(rem % tNew);
     unsigned int h = (unsigned int)(rem / tNew);
 
+    if (offset + ti >= maxSeq) return;
     buffer[(((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d] = kv_half_sat(newKv[i]);
 }
 

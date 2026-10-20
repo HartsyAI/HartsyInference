@@ -397,7 +397,8 @@ public sealed partial class CudaBackend
                         && c.Logits.Softcap == 0f && c.Query.DType == DType.F32 && c.Output.DType == DType.F32
                         && (key.DType == DType.F32 || f16Kv) && value.DType == key.DType
                         && _kernels is { HasFa2Causal: true } && CudaKernels.Fa2SupportsHeadDim(c.QkHeadDim)
-                        && c.Heads % Math.Max(1, c.KvHeads) == 0 && EngineKnobs.Fa2Prefill.Value;
+                        && c.Heads % Math.Max(1, c.KvHeads) == 0 && CudaKernels.GridYzFits(c.Heads, c.Batch)
+                        && (f16Kv || CudaKernels.KvToF16GridFits(c.Positions.KvLength, c.QkHeadDim)) && EngineKnobs.Fa2Prefill.Value;
                 },
                 (in AttentionCall c) =>
                 {

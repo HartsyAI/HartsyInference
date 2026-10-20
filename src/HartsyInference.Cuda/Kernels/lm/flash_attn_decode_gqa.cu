@@ -70,7 +70,7 @@ __device__ __forceinline__ void fa_decode_gqa(
     const int tid = threadIdx.x;
     const int warp = tid >> 5;
     const int lane = tid & 31;
-    if (dPos != nullptr) { kvLen = dPos[0]; qOffset = dPos[1]; }
+    if (dPos != nullptr) { kvLen = min(max(dPos[0], 0), Lk); qOffset = dPos[1]; }
 
     const int kMax = min(qOffset, kvLen - 1);
     const int kMin = window > 0 ? max(0, qOffset - window + 1) : 0;

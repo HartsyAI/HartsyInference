@@ -160,6 +160,7 @@ __device__ __forceinline__ void qknorm_full_rope_scatter(
     const unsigned int h = blockIdx.x;
     if (h >= nq + 2u * nkv) return;
     const int pos = devicePos[1];
+    if (h >= nq && (unsigned int)pos >= maxSeq) return;   // a slot past the capacity writes no K/V
 
     if (h >= nq + nkv) {
         const unsigned int vh = h - nq - nkv;

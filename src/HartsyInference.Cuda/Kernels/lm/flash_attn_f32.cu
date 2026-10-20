@@ -40,7 +40,7 @@ extern "C" __global__ void lm_flash_attn_f32(
     // Graph-capture decode: read this step's position from a device buffer {kvLen, qOffset} so one captured
     // graph replays at every step without re-baking host ints (grid is position-independent for Tq=1). Null →
     // use the host-passed kvLen/qOffset (eager path, cross-attention, and all LLM callers).
-    if (dPos != nullptr) { kvLen = (unsigned int)dPos[0]; qOffset = dPos[1]; }
+    if (dPos != nullptr) { kvLen = min((unsigned int)max(dPos[0], 0), Lk); qOffset = dPos[1]; }
 
     // blockDim.x is a power of two >= max(D, 32), so the tree reduction always has a complete final warp;
     // threads tid in [D, blockDim.x) are padding (contribute 0, write no output). This lets the
@@ -147,7 +147,7 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
     if (hkv >= Hkv) hkv = Hkv - 1;
     unsigned int tid = threadIdx.x;
 
-    if (dPos != nullptr) { kvLen = (unsigned int)dPos[0]; qOffset = dPos[1]; }
+    if (dPos != nullptr) { kvLen = min((unsigned int)max(dPos[0], 0), Lk); qOffset = dPos[1]; }
 
     extern __shared__ float sdata[];
     size_t qBase = (((size_t)b * Hq + h) * Tq + r) * D;
