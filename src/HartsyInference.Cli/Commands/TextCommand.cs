@@ -94,7 +94,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
 
         /// <summary>Reasoning effort for models that take one (DeepSeek-V4.1 thinking mode): <c>low</c>, <c>high</c>, <c>max</c>, or an integer in [1, 100]. Unset uses the template default.</summary>
         [CommandOption("--reasoning-effort")]
-        [Description("Reasoning effort for models that take one (DeepSeek-V4.1 thinking): low, high, max, or an integer in [1, 100].")]
+        [Description("Reasoning effort for models that take one (DeepSeek-V4.1 thinking): low, high, max, or an integer in [[1, 100]].")]
         public string? ReasoningEffort { get; init; }
 
         /// <summary>Recurrent-block passes for a looped model (Dory: 1 to 4); unset uses the checkpoint's default. Ignored by other models.</summary>

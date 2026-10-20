@@ -262,7 +262,7 @@ run_one() {
 }
 
 # ── teacher-forced text probe ──────────────────────────────────────────────────────────────────────────────────
-has_scores() { dotnet "$1/HartsyInference.Cli.dll" text --help 2>/dev/null | grep -q -- '--scores-out'; }
+has_scores() { grep -qa -- '--scores-out' "$1/HartsyInference.Cli.dll"; }
 # run_scores <build> <label> <ckpt> <positional> <args> <backend> <out.tsv> [extra CLI args...]; a clean commit's file is reused.
 run_scores() {
     local build="$1" label="$2" ckpt="$3" positional="$4" args="$5" backend="$6" out="$7"

@@ -21,6 +21,7 @@ stable release will require. Dates are UTC.
   Wan 2.1 14B, SD3.5, AuraFlow, Qwen3, Gemma-2); `tests/gpu-suite.sh` runs a test project with CUDA and Vulkan pinned to
   one card by name; four cuDNN SDPA tests the GPU sweep never ran are tagged `GpuIntegration`; `regression-ab.sh`
   leaves SwarmUI running when the run is on a card it does not use.
+- **Fixed:** `hartsy text --help` stopped with a markup error at the `--reasoning-effort` description.
 
 ## alpha.383
 
