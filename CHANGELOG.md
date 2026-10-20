@@ -17,6 +17,11 @@ stable release will require. Dates are UTC.
   throttling; `benchmarks/python-baseline/bench_attention.py` times torch's SDPA backends and Comfy Kitchen's INT8
   attention on the same `attention_shapes.json`. They replace `SdpaGpuBenchmarks`, `FlashAttnGpuBenchmarks`,
   `SageSdpaMicroBench` and `bench_pytorch_sdpa.py`.
+- **Added: attention baselines.** `benchmarks/attention/profile_attention_share.sh` measures attention's share of a denoise
+  step per case (synced profiler at S and 2S steps, so load, encoding and decode cancel); `bench_comfy_e2e.py` times
+  ComfyUI with and without `--use-ck-attention` against this engine on the same models; `tests/cudnn-probes.sh` runs the
+  cuDNN 9.24 SDPA capability probes (GQA, BF16, head dims, bias shapes, band-op causal, window, sinks, softcap), one
+  isolated process each, every one executed and compared with a float64 reference.
 - **Tests:** an `attention` regression tag (17 existing cases and 13 new: LoRA, LTX-2.5, MiniMax-H3, HunyuanVideo,
   Wan 2.1 14B, SD3.5, AuraFlow, Qwen3, Gemma-2); `tests/gpu-suite.sh` runs a test project with CUDA and Vulkan pinned to
   one card by name; four cuDNN SDPA tests the GPU sweep never ran are tagged `GpuIntegration`; `regression-ab.sh`

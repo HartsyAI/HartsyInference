@@ -33,11 +33,13 @@ def table(path):
     return rows
 
 
-def step_ms(log):
+def step_ms(log, first=2):
     if not log.exists():
         return None
-    ticks = [int(m.group(3)) for m in TICK.finditer(log.read_text(errors="replace")) if int(m.group(1)) >= 2]
-    return statistics.median(ticks) if ticks else None
+    # The mean, not the median: an unsynced pipeline enqueues steps ahead of the GPU, so single ticks read 0 ms and a
+    # later one absorbs the backlog; only their sum over steps 2..N is the steps' real time.
+    ticks = [int(m.group(3)) for m in TICK.finditer(log.read_text(errors="replace")) if int(m.group(1)) >= first]
+    return round(statistics.fmean(ticks), 1) if ticks else None
 
 
 def geometry(label):
@@ -70,28 +72,39 @@ def main():
         if not t1 or not t2:
             print(f"| {case.name} | missing profile | | | | | |" + " |" * len(rs))
             continue
-        per = {}
+        per, flagged = {}, set()
         for label, (c2, m2) in t2.items():
             c1, m1 = t1.get(label, (0, 0.0))
-            per[label] = ((c2 - c1) / s, (m2 - m1) / s)
+            calls = (c2 - c1) / s
+            # Per call: the run-to-run slope, unless a one-time cost (a plan build, a JIT, a cold weight upload) landed in
+            # one run and not the other; then the longer run's average, which dilutes that cost, and the label is flagged.
+            avg = m2 / c2 if c2 else 0.0
+            slope = (m2 - m1) / (c2 - c1) if c2 > c1 else 0.0
+            per_call = slope if 0 < slope <= avg else avg
+            if per_call != slope:
+                flagged.add(label)
+            per[label] = (calls, calls * per_call)
         attn = {k: v for k, v in per.items() if k.startswith(("SDPA", "FlashAttention")) and v[0] > 0}
         tm = {geometry(k): v[0] for k, v in attn.items() if k.startswith("SDPA-TM")}
         nested = [k for k, v in attn.items() if k.startswith("SDPA ") and geometry(k) in tm and abs(tm[geometry(k)] - v[0]) < 1e-6]
         attn_ms = sum(v[1] for k, v in attn.items() if k not in nested)
         adj_ms = sum(v[1] for k, v in per.items() if ADJACENT.match(k) and v[0] > 0)
-        plain, synced = step_ms(case / f"plain{2 * s}.log"), step_ms(case / f"prof{2 * s}.log")
+        # The synced run's ticks are per-step accurate, so its denominator skips step 2 (first-use uploads and plan builds,
+        # which the per-call estimate above also excludes); the plain run is async and only its sum over 2..N is real.
+        plain, synced = step_ms(case / f"plain{2 * s}.log"), step_ms(case / f"prof{2 * s}.log", first=3)
         denom = synced or sum(v[1] for v in per.values())
         f = attn_ms / denom if denom else float("nan")
         cells = [f"{f * (1 - 1 / r) * 100:.1f}% (×{1 / ((1 - f) + f / r):.2f})" for r in rs]
         print(f"| {case.name} | {plain or 'NA'} | {synced or 'NA'} | {attn_ms:.1f} | {f * 100:.1f}% | {adj_ms:.1f} | "
               f"{adj_ms / denom * 100 if denom else float('nan'):.1f}% | " + " | ".join(cells) + " |")
         for k, (calls, ms) in sorted(attn.items(), key=lambda kv: -kv[1][1]):
-            shapes.append((case.name, k, calls, ms, k in nested))
+            shapes.append((case.name, k, calls, ms, k in nested, k in flagged))
     print("\nAttention calls per step (from the shape-split labels; the shape table is frozen from these):\n")
     print("| case | label | calls/step | ms/step | note |")
     print("|---|---|---|---|---|")
-    for case, k, calls, ms, nest in shapes:
-        print(f"| {case} | `{k}` | {calls:g} | {ms:.2f} | {'nested in SDPA-TM' if nest else ''} |")
+    for case, k, calls, ms, nest, flag in shapes:
+        notes = [n for n, on in (("nested in SDPA-TM", nest), ("per-call cost from the longer run's average", flag)) if on]
+        print(f"| {case} | `{k}` | {calls:g} | {ms:.2f} | {'; '.join(notes)} |")
 
 
 if __name__ == "__main__":
