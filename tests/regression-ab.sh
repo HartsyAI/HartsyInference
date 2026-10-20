@@ -311,7 +311,7 @@ pct() {   # pct <base> <head> -> signed percent, or -
 
 for backend in ${BACKENDS//,/ }; do
     # A backend other than cuda runs the cases tagged with its name; cuda runs the whole selection.
-    backend_tag=""; [ "$backend" != cuda ] && backend_tag="$backend"
+    backend_tag=""; [ "$backend" != cuda ] && backend_tag="${backend%%:*}"
     while IFS=$'\t' read -r id ckpt spec; do
         [ -z "$id" ] && continue
         if [ -n "$FILTER" ] && [[ ",$FILTER," != *",$id,"* ]]; then continue; fi
