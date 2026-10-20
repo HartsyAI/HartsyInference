@@ -114,18 +114,41 @@ follows both.
   references' RoPE frame) and the skipped blocks, so cond and uncond (block 22 skipped) build their own. Joint
   (`kv_cache: false`): the references ride after the text every step, attending to everything, with per-segment
   modulation through the row-indexed ops.
-- **Engine.** `ReferenceImageResolver` with `MossImageRecipePipeline.ReferencePolicy` prepares both copies;
-  `Qwen35VisionTower` / `Qwen35TextEncoder.Encode(ids, images)` the text side; `MossImageTransformer.PrepareConditioning`
-  with `ReferenceLatentTokens` and `EnsureReferenceCaches` the DiT side, on the shared `ReferenceKvCache`,
-  `SegmentModulation` and `TokenMajorAttention`. Extras `reference.kv_cache` (default true), `reference.max_pixels`
-  (1 048 576, 0 keeps the size) and `reference.vision_pixels` (147 456); CLI `--reference-kv-cache`,
-  `--reference-max-pixels`, `--reference-vision-pixels`, `--vision-encoder`.
+- **The colorize layout** (`reference.layout=colorize`, for `sorryhyun/moss-image-colorize`; the spec is its ComfyUI node
+  `sorryhyun/ComfyUI-MOSS-i2i` (`reference.py`, `nodes.py`), which beats the card). One page, and no `Picture N:` label:
+  the text encode is one user turn, `<|vision_start|>[pads]<|vision_end|>{caption}`, and the negative is a plain encode
+  of the empty prompt with no image. The vision copy is the page cover-fit to the target size and smart-resized (factor
+  32, 65 536-pixel floor) to that size's own pixel count, about 1 000 tokens at 1 MP. The target size is the request's
+  `--width`/`--height`, which the caller must set to the node's `target_size` for the page (see Divergences). The VAE copy is the same page at
+  `1/reference.ref_scale` per side (default 2, the trained scale, which the LoRA metadata does not record), sides rounded
+  to 16 with ties to even. The DiT sequence is `[image | ref | text]`: the ref carries no noise, takes the step's live
+  modulation (not timestep 0, so no segment layout), and sits at RoPE `(1, L, i, j)` with its `(h, w)` stretched onto the
+  target grid, `(i + ½)·H/h − ½`, centred like the image. Attention is full and nothing is cached; the head reads image
+  rows only. The ref is in every CFG branch, so the uncond branch (block 22 skipped) keeps it. The parity test cannot see
+  the order (attention is permutation-equivariant given the coordinates); the order is the node's by construction.
+  Card sampler: 30 steps on ER-SDE (the defaults for this layout), CFG 3, shift 5, skip 22 on uncond.
+- **Engine.** `ReferenceImageResolver` with `MossImageRecipePipeline.ReferencePolicy` (Ostris) or `ColorizePolicy`
+  prepares both copies; `Qwen35VisionTower` / `Qwen35TextEncoder.Encode(ids, images)` the text side;
+  `MossImageTransformer.PrepareConditioning` with `ReferenceLatentTokens` and `EnsureReferenceCaches` the DiT side, on
+  the shared `ReferenceKvCache`, `SegmentModulation` and `TokenMajorAttention`. Extras `reference.kv_cache` (default true,
+  Ostris only; refused under colorize), `reference.max_pixels` (1 048 576, 0 keeps the size) and `reference.vision_pixels`
+  (147 456), both Ostris only; `reference.layout` (`ostris` default, or `colorize`) and `reference.ref_scale` (colorize,
+  1–8, default 2). CLI `--reference-kv-cache`, `--reference-max-pixels`, `--reference-vision-pixels`,
+  `--reference-layout`, `--reference-scale`, `--vision-encoder`.
 - **Cost.** A cache is `2 × blocks × S_ref × 3072` values in the activation dtype, about 2.1 GB in F16 for one 1 MP
   reference over 42 blocks, and an edit builds one per skipped-block set (two by default). The pipeline warns when the
   caches exceed half the free device memory and never switches layout on its own.
 - **Divergences.** The VAE copy is resampled once with Keys bicubic (ai-toolkit: bilinear after its own fit); the
   vision copy goes straight to its smart-resize size in one bicubic pass (ai-toolkit: bicubic then the processor's own
   resize); HF's 65 536-pixel floor scales a reference smaller than 256² up, where ComfyUI's 3 136 floor would not.
+  The colorize copies use the same Keys bicubic for the cover-fit that the node does in Lanczos, so their pixels differ
+  slightly from the node's; the tensor sizes match it exactly.
+- **Target size.** The node takes no size: it derives the target from the page with `target_size(page_w, page_h,
+  resolution=1024)`, which keeps the native aspect with sides multiples of 16 and area at most 1024² (never larger than
+  the page; a page already on the 16 grid within 1.1·1024² is returned as-is). The engine takes its size from the request,
+  so a like-for-like run passes the node's size for that page (`--width`/`--height`); a 1024² request on a portrait page
+  cover-crops it. The colorize layout does not default the size from the page. The function is checked against
+  `nodes.py` over 1 356 sizes in the GPU handoff §3b.
 
 ## Performance
 
@@ -147,6 +170,8 @@ follows both.
 - The unconditional branch's skip is part of the default recipe, not an add-on: plain CFG is a different look.
 - The unconditional branch reads the negative prompt (empty by default) through its own text refiner pass; only the
   joint blocks differ between the branches by the skipped layer.
+- The colorize negative sees no page: its text encode runs with no image, so its prompt cache entry is image-free too.
+  The caption goes in raw; `LayoutPromptBuilder` only rewrites region syntax, and plain tags pass through unchanged.
 
 ## Open questions
 
@@ -154,4 +179,6 @@ The repositories' shard names and hashes (the catalog entry lists only side mode
 Qwen3.5-9B GGUF's numerics against the BF16 encoder, and the real-weight parity and speed runs on the GPU box
 (`dump_moss_image_reference.py real` + `MossImageRealWeightTests`). For edits: a check of the transcription against
 the Ostris node's patched forward, a published ai-toolkit edit LoRA to run (none was public on 2026-10-19), and an
-mmproj GGUF as a vision-tower source for GGUF encoders.
+mmproj GGUF as a vision-tower source for GGUF encoders. For the colorize layout: the real-weight run of
+`sorryhyun/moss-image-colorize` (the only public reference LoRA; `MOSS_IMAGE_EDIT_GPU_HANDOFF.md` §3b), and the
+colorize sampler's ER-SDE on flow-match sigmas, which the tiny fixtures do not exercise.

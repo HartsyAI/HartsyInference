@@ -31,6 +31,20 @@ public static class MossImagePosEmbed
         return coords;
     }
 
+    /// <summary>Coordinates for the inline layout (the colorize LoRA's): the centred image grid, then one reference on RoPE
+    /// index 1 and frame <paramref name="textLength"/> whose rows and columns are stretched onto the image grid
+    /// (<c>(i + ½)·H/h − ½</c>, then centred on the image), then the text tokens.</summary>
+    public static float[] InlineCoords(int height, int width, int textLength, (int Height, int Width) reference)
+    {
+        int imageTokens = height * width;
+        int referenceTokens = CountTokens([reference]);
+        float[] coords = new float[(imageTokens + referenceTokens + textLength) * MossImageRope.NumAxes];
+        FillGrid(coords, 0, 0, textLength, height, width);
+        FillStretched(coords, imageTokens, textLength, height, width, reference.Height, reference.Width);
+        for (int i = 0; i < textLength; i++) coords[(imageTokens + referenceTokens + i) * MossImageRope.NumAxes + 1] = i;
+        return coords;
+    }
+
     /// <summary>Coordinates for the text refiner: text token <c>i</c> sits at <c>(0, i, 0, 0)</c>.</summary>
     public static float[] TextCoords(int textLength)
     {
@@ -58,6 +72,26 @@ public static class MossImagePosEmbed
         {
             FillGrid(coords, token, i + 1, textLength, grids[i].Height, grids[i].Width);
             token += grids[i].Height * grids[i].Width;
+        }
+    }
+
+    /// <summary>Writes a <paramref name="refHeight"/>×<paramref name="refWidth"/> grid stretched over the
+    /// <paramref name="height"/>×<paramref name="width"/> image grid, at index 1, from token <paramref name="firstToken"/>.</summary>
+    private static void FillStretched(float[] coords, int firstToken, int frame, int height, int width, int refHeight, int refWidth)
+    {
+        float rowCenter = (height - 1) / 2f, colCenter = (width - 1) / 2f;
+        for (int row = 0; row < refHeight; row++)
+        {
+            float rowAt = (row + 0.5f) * height / refHeight - 0.5f;
+            for (int col = 0; col < refWidth; col++)
+            {
+                float colAt = (col + 0.5f) * width / refWidth - 0.5f;
+                int at = (firstToken + row * refWidth + col) * MossImageRope.NumAxes;
+                coords[at] = 1;
+                coords[at + 1] = frame;
+                coords[at + 2] = rowAt - rowCenter;
+                coords[at + 3] = colAt - colCenter;
+            }
         }
     }
 

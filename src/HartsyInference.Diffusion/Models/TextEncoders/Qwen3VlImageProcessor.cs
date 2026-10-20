@@ -49,15 +49,21 @@ public sealed unsafe class Qwen3VlImageProcessor
 
     /// <summary>Smart-resizes (h, w) to multiples of <c>patch·merge</c> within the pixel budget (and the optional
     /// side-length cap), preserving aspect.</summary>
-    public (int height, int width) SmartResize(int height, int width)
+    public (int height, int width) SmartResize(int height, int width) =>
+        SmartResize(height, width, _config.PatchSize * _config.SpatialMergeSize, _minPixels, _maxPixels, _maxSideLength);
+
+    /// <summary>Qwen2-VL's <c>smart_resize</c> with explicit sides factor and pixel bounds: sides snapped to
+    /// <paramref name="factor"/>, the area kept within [<paramref name="minPixels"/>, <paramref name="maxPixels"/>], aspect
+    /// preserved, and the longer side capped at <paramref name="maxSideLength"/> when it is positive.</summary>
+    public static (int height, int width) SmartResize(int height, int width, int factor, long minPixels, long maxPixels,
+        int maxSideLength = 0)
     {
-        int factor = _config.PatchSize * _config.SpatialMergeSize;
         if (height < factor) height = factor;
         if (width < factor) width = factor;
 
-        if (_maxSideLength > 0 && Math.Max(height, width) > _maxSideLength)
+        if (maxSideLength > 0 && Math.Max(height, width) > maxSideLength)
         {
-            double beta = (double)Math.Max(height, width) / _maxSideLength;
+            double beta = (double)Math.Max(height, width) / maxSideLength;
             height = Math.Max(factor, (int)Math.Floor(height / beta));
             width = Math.Max(factor, (int)Math.Floor(width / beta));
         }
@@ -65,15 +71,15 @@ public sealed unsafe class Qwen3VlImageProcessor
         int hBar = Math.Max(factor, (int)Math.Round((double)height / factor) * factor);
         int wBar = Math.Max(factor, (int)Math.Round((double)width / factor) * factor);
 
-        if ((long)hBar * wBar > _maxPixels)
+        if ((long)hBar * wBar > maxPixels)
         {
-            double beta = Math.Sqrt((double)height * width / _maxPixels);
+            double beta = Math.Sqrt((double)height * width / maxPixels);
             hBar = Math.Max(factor, (int)Math.Floor(height / beta / factor) * factor);
             wBar = Math.Max(factor, (int)Math.Floor(width / beta / factor) * factor);
         }
-        else if ((long)hBar * wBar < _minPixels)
+        else if ((long)hBar * wBar < minPixels)
         {
-            double beta = Math.Sqrt((double)_minPixels / (height * width));
+            double beta = Math.Sqrt((double)minPixels / (height * width));
             hBar = (int)Math.Ceiling(height * beta / factor) * factor;
             wBar = (int)Math.Ceiling(width * beta / factor) * factor;
         }

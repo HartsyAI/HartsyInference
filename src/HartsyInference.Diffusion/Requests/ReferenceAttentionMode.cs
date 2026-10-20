@@ -11,4 +11,9 @@ public enum ReferenceAttentionMode
     /// <summary>The reference tokens ride in the live sequence every step, attending to and attended by everything
     /// (ai-toolkit's <c>kv_cache: false</c>).</summary>
     Joint,
+
+    /// <summary>One reference sits between the image and the text in the live sequence, under the step's own timestep
+    /// modulation, on RoPE <c>r = 1</c> with its grid stretched onto the image grid (the colorize LoRA's layout). Full
+    /// attention, no cache; only the image rows are read out.</summary>
+    Inline,
 }

@@ -133,6 +133,17 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Pixel budget each reference is scaled down to for the text encoder's vision tower (default 147456 = 384²). MOSS-Image only.")]
         public int? ReferenceVisionPixels { get; init; }
 
+        /// <summary>The edit layout the reference LoRA was trained with.</summary>
+        [CommandOption("--reference-layout")]
+        [Description("ostris (default): ai-toolkit's edit layout, up to three labelled references. colorize: the sorryhyun/moss-image-colorize "
+            + "layout, one page cover-fit to the size, between the image and the text (defaults to 30 steps on er_sde). MOSS-Image only.")]
+        public string? ReferenceLayout { get; init; }
+
+        /// <summary>The colorize layout's reference scale.</summary>
+        [CommandOption("--reference-scale")]
+        [Description("Colorize layout only: the page's VAE copy is the size divided by this per side (default 2, the trained scale).")]
+        public int? ReferenceScale { get; init; }
+
         /// <summary>VAE override.</summary>
         [CommandOption("--vae")]
         [Description("Path or name of a VAE to use instead of the family's default.")]
@@ -277,6 +288,8 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("reference-kv-cache", settings.ReferenceKvCache);
         parameters.PutIfSet("reference-max-pixels", settings.ReferenceMaxPixels);
         parameters.PutIfSet("reference-vision-pixels", settings.ReferenceVisionPixels);
+        parameters.PutIfSet("reference-layout", settings.ReferenceLayout);
+        parameters.PutIfSet("reference-scale", settings.ReferenceScale);
         parameters.PutIfSet("vae", settings.Vae);
         parameters.PutIfSet("text-encoder", settings.TextEncoder);
         parameters.PutIfSet("vision-encoder", settings.VisionEncoder);

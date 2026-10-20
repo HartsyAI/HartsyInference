@@ -70,6 +70,13 @@ public static class RequestExtras
     /// <summary>Pixel budget of each reference's copy for the text encoder's vision tower (scaled down only).</summary>
     public const string ReferenceVisionPixels = "reference.vision_pixels";
 
+    /// <summary>The edit layout a reference-trained adapter expects: <c>ostris</c> (default, ai-toolkit's edit LoRAs, kv cache
+    /// or joint) or <c>colorize</c> (one page between the image and the text, <c>sorryhyun/moss-image-colorize</c>).</summary>
+    public const string ReferenceLayout = "reference.layout";
+
+    /// <summary>The colorize layout's reference scale: the page's VAE copy is the target divided by this per side (default 2).</summary>
+    public const string ReferenceScale = "reference.ref_scale";
+
     /// <summary>The boolean at <paramref name="key"/> (<c>true/false</c>, <c>on/off</c>, <c>1/0</c>, or a JSON boolean), or
     /// <paramref name="fallback"/> when absent or unparseable (logged).</summary>
     public static bool Bool(IReadOnlyDictionary<string, object>? extra, string key, bool fallback)

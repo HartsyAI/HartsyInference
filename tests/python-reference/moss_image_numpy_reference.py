@@ -19,6 +19,12 @@ sequence; cached mode runs them alone first (references attending only to refere
 keys and raw values after the live ones. The two modes are different models of the references, so their velocities
 differ by construction.
 
+The colorize layout (sorryhyun/moss-image-colorize, its ComfyUI node's reference.py forward_with_ref) is a different
+model of the reference: one page, after the image and before the text, [image ; ref ; text], under the live timestep
+modulation with no zero-timestep rows, on RoPE r = 1 with its (h, w) stretched onto the image grid
+((i + ½)·H/h − ½, centred), and the image rows are the only output. Its layout is checked against its own forward
+(forward_colorize below), not against the Ostris one.
+
 Cases (keys prefixed in the output file):
   full.*                every block, timestep 500
   skip.*                joint block 1 skipped (the reference's uncond_skip_layers), timestep 937
@@ -26,6 +32,8 @@ Cases (keys prefixed in the output file):
   edit.*                two references (grids 2x2 and 1x3), joint mode, timestep 500
   edit_cached.*         the same references, cached mode, timestep 500
   edit_cached_skip.*    cached mode with joint block 1 skipped in the prepass and the step, timestep 937
+  colorize.*            one page on grid 2x3 stretched onto the 3x4 image grid, inline, timestep 500
+  colorize_skip.*       the same with joint block 1 skipped (the colorize uncond branch), timestep 937
 
 Usage: python -I moss_image_numpy_reference.py <output .safetensors>
 Requires: numpy, safetensors.
@@ -47,6 +55,7 @@ EPS = 1e-6
 TEXT_TOKENS = 5
 GRID = (3, 4)
 REF_GRIDS = ((2, 2), (1, 3))
+COLORIZE_GRID = (2, 3)
 SEED = 20261016
 
 
@@ -281,6 +290,37 @@ def forward_edit(w, latent, timestep, context, refs, cached, skip=()):
     return linear(w, x, "final_linear_video", bias=False)
 
 
+def inline_coords(ref_hw, text_length):
+    # The colorize reference: RoPE index 1 at frame text_length, its grid stretched onto GRID, then centred.
+    height, width = GRID
+    rh, rw = ref_hw
+    h, w = np.meshgrid((np.arange(rh) + 0.5) * height / rh - 0.5, (np.arange(rw) + 0.5) * width / rw - 0.5, indexing="ij")
+    coords = np.stack((np.ones_like(h), np.full_like(h, text_length), h, w), -1).reshape(-1, 4).astype(np.float32)
+    coords[:, 2] -= np.float32((height - 1) / 2)
+    coords[:, 3] -= np.float32((width - 1) / 2)
+    return coords
+
+
+def forward_colorize(w, latent, timestep, context, ref, skip=()):
+    # [image ; ref ; text] in one live sequence under the step's modulation; refine_text runs on the text alone.
+    height, width = GRID
+    tokens = height * width
+    length = context.shape[0]
+    mod, head = modulation(w, timestep)
+    image = grid_coords(0, length, height, width)
+    text_coords = np.zeros((length, 4), dtype=np.float32)
+    text_coords[:, 1] = np.arange(length, dtype=np.float32)
+    sin, cos = tables(np.concatenate([image, inline_coords(COLORIZE_GRID, length), text_coords], 0))
+    text_sin, text_cos = rope_table(height, width, length)
+    refined = refine_text(w, context, text_sin, text_cos, tokens)
+    x = np.concatenate((linear(w, latent, "video_embedder"), linear(w, ref, "video_embedder"), refined), 0)
+    for i in range(LAYERS):
+        if i not in skip:
+            x = joint_block(w, f"layers.{i}", x, sin, cos, mod)
+    x = rms(x[:tokens], w["final_norm_video.weight"]) * (1 + head[1]) + head[0]
+    return linear(w, x, "final_linear_video", bias=False)
+
+
 def main():
     output = sys.argv[1]
     rng = np.random.default_rng(SEED)
@@ -293,6 +333,11 @@ def main():
     # Drawn after every earlier input, so the plain-generation goldens above are unchanged by the edit cases.
     refs = [rng.standard_normal((h * w_, LATENT)).astype(np.float32) for h, w_ in REF_GRIDS]
     refs64 = [r.astype(np.float64) for r in refs]
+    # The colorize page is drawn last, so every draw above (and every key it feeds) is unchanged.
+    colorize_ref = rng.standard_normal((COLORIZE_GRID[0] * COLORIZE_GRID[1], LATENT)).astype(np.float32)
+    colorize = forward_colorize(w, latent.astype(np.float64), 500.0, context.astype(np.float64), colorize_ref.astype(np.float64))
+    colorize_skip = forward_colorize(w, latent.astype(np.float64), 937.0, context.astype(np.float64),
+                                     colorize_ref.astype(np.float64), skip=(1,))
     edit = forward_edit(w, latent.astype(np.float64), 500.0, context.astype(np.float64), refs64, cached=False)
     edit_cached = forward_edit(w, latent.astype(np.float64), 500.0, context.astype(np.float64), refs64, cached=True)
     edit_cached_skip = forward_edit(w, latent.astype(np.float64), 937.0, context.astype(np.float64), refs64, cached=True,
@@ -313,6 +358,9 @@ def main():
     tensors["edit.velocity"] = edit.astype(np.float32)[None]
     tensors["edit_cached.velocity"] = edit_cached.astype(np.float32)[None]
     tensors["edit_cached_skip.velocity"] = edit_cached_skip.astype(np.float32)[None]
+    tensors["inputs.colorize_ref"] = colorize_ref[None]
+    tensors["colorize.velocity"] = colorize.astype(np.float32)[None]
+    tensors["colorize_skip.velocity"] = colorize_skip.astype(np.float32)[None]
     save_file({k: np.ascontiguousarray(v) for k, v in tensors.items()}, output)
     for key in sorted(k for k in tensors if not k.startswith("weights.")):
         t = tensors[key].astype(np.float64)

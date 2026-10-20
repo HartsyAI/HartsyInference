@@ -52,6 +52,9 @@ public sealed class MossImageFixture : IDisposable
         new ReferenceLatentTokens(Tensors["inputs.ref1"], 1, 3),
     ];
 
+    /// <summary>The colorize cases' one page latent as borrowed tokens (grid 2×3, stretched onto the 3×4 image grid).</summary>
+    public ReferenceLatentTokens Colorize() => new(Tensors["inputs.colorize_ref"], 2, 3);
+
     /// <inheritdoc/>
     public void Dispose()
     {

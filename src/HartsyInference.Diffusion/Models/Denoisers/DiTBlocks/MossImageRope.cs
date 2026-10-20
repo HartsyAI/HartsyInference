@@ -39,6 +39,12 @@ public static class MossImageRope
         IReadOnlyList<(int Height, int Width)> referenceGrids, int headDim, float ropeBase) =>
         Tables(MossImagePosEmbed.JointCoords(height, width, textLength, referenceGrids), headDim, ropeBase);
 
+    /// <summary>Tables for the inline layout: the image grid, one reference stretched onto it, then the text
+    /// (<see cref="MossImagePosEmbed.InlineCoords"/>).</summary>
+    public static (Tensor Cos, Tensor Sin) Inline(int height, int width, int textLength, (int Height, int Width) reference,
+        int headDim, float ropeBase) =>
+        Tables(MossImagePosEmbed.InlineCoords(height, width, textLength, reference), headDim, ropeBase);
+
     /// <summary>Tables for reference images alone, as a prepass sees them: reference <c>i</c> sits at
     /// <c>(i + 1, textLength, row − (h−1)/2, col − (w−1)/2)</c> over its own grid, the Ostris edit coordinates.</summary>
     public static (Tensor Cos, Tensor Sin) References(IReadOnlyList<(int Height, int Width)> referenceGrids, int textLength,

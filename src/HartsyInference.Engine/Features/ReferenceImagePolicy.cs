@@ -17,6 +17,14 @@ public sealed record ReferenceImagePolicy
     /// <summary>The VAE copy's sides are rounded to this multiple (the latent token stride).</summary>
     public required int LatentMultiple { get; init; }
 
+    /// <summary>When set, each reference is cover-fit and centre-cropped to this size first, and both copies come from that
+    /// page, so a reference lines up with the target grid it is placed on; null keeps each image's own aspect.</summary>
+    public (int Width, int Height)? FitTo { get; init; }
+
+    /// <summary>When above zero, the VAE copy's sides are the fitted size divided by this factor (rounded to
+    /// <see cref="LatentMultiple"/>) instead of an area budget.</summary>
+    public int LatentSideDivisor { get; init; }
+
     /// <summary>Pixel budget of the vision-tower copy; 0 makes no vision copy.</summary>
     public int VisionTargetArea { get; init; }
 

@@ -28,7 +28,8 @@ public sealed class MossImageConditioning : IDisposable
     /// <summary>Refined text tokens <c>[1, L, hidden]</c> (F32).</summary>
     public Tensor Text { get; }
 
-    /// <summary>RoPE cosines for the step sequence: <c>[1, H·W + L, headDim]</c>, plus the reference tokens in joint mode.</summary>
+    /// <summary>RoPE cosines for the step sequence: <c>[1, H·W + L, headDim]</c>, with the reference tokens after the image
+    /// (inline) or after the text (joint) when there are any.</summary>
     public Tensor Cos { get; }
 
     /// <summary>RoPE sines, laid out as <see cref="Cos"/>.</summary>

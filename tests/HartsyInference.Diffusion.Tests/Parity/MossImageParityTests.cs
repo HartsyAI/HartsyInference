@@ -13,8 +13,8 @@ namespace HartsyInference.Diffusion.Tests.Parity;
 /// a float64 transcription of OpenMOSS's ComfyUI module over F16-rounded weights (re-checked against the module itself
 /// by <c>dump_moss_image_reference.py</c> wherever torch is available). Fed through
 /// <see cref="MossImageCheckpointConverter"/>, the port must reproduce the full forward, the forward with a joint block
-/// skipped (the reference's unconditional branch), the refined text tokens, and the Ostris edit layout with two
-/// reference images in both its joint and its cached-key/value form.</summary>
+/// skipped (the reference's unconditional branch), the refined text tokens, the Ostris edit layout with two
+/// reference images in both its joint and its cached-key/value form, and the colorize layout's inline page.</summary>
 public sealed unsafe class MossImageParityTests(ITestOutputHelper output)
 {
     private const float Tolerance = 2e-4f;
@@ -137,6 +137,50 @@ public sealed unsafe class MossImageParityTests(ITestOutputHelper output)
         });
 
     [Fact]
+    public void Colorize_InlinePage_MatchesReference() =>
+        RunColorize((transformer, backend, f, page) =>
+        {
+            using MossImageConditioning conditioning = transformer.PrepareConditioning(backend, f["inputs.context"], Height, Width,
+                [page], ReferenceAttentionMode.Inline);
+            using Tensor velocity = transformer.Forward(backend, f["inputs.latent"], 500f, conditioning);
+            AssertClose(f["colorize.velocity"], velocity, "inline colorize velocity");
+        });
+
+    [Fact]
+    public void Colorize_SkippedLayer_MatchesReference() =>
+        RunColorize((transformer, backend, f, page) =>
+        {
+            using MossImageConditioning conditioning = transformer.PrepareConditioning(backend, f["inputs.context"], Height, Width,
+                [page], ReferenceAttentionMode.Inline);
+            using Tensor velocity = transformer.Forward(backend, f["inputs.latent"], 937f, conditioning, [1]);
+            AssertClose(f["colorize_skip.velocity"], velocity, "inline colorize velocity, layer 1 skipped");
+        });
+
+    [Fact]
+    public void Colorize_Branches_MatchSingleForwards_WithThePageInEveryBranch() =>
+        RunColorize((transformer, backend, f, page) =>
+        {
+            using MossImageConditioning conditioning = transformer.PrepareConditioning(backend, f["inputs.context"], Height, Width,
+                [page], ReferenceAttentionMode.Inline);
+            (Tensor[] velocities, bool callerOwns) = transformer.ForwardBranches(backend, f["inputs.latent"], 937f,
+                [new MossImageBranch(conditioning, []), new MossImageBranch(conditioning, [1])]);
+            Assert.True(callerOwns);
+            using Tensor full = transformer.Forward(backend, f["inputs.latent"], 937f, conditioning);
+            AssertClose(full, velocities[0], "colorize branch 0");
+            AssertClose(f["colorize_skip.velocity"], velocities[1], "colorize branch 1");
+            foreach (Tensor velocity in velocities) velocity.Dispose();
+        });
+
+    [Fact]
+    public void Colorize_RefusesOtherThanOnePage() =>
+        RunColorize((transformer, backend, f, page) =>
+        {
+            ReferenceLatentTokens second = new(f["inputs.ref0"], 2, 2);
+            Assert.Throws<ArgumentException>(() => transformer.PrepareConditioning(backend, f["inputs.context"], Height, Width,
+                [page, second], ReferenceAttentionMode.Inline));
+        });
+
+    [Fact]
     public void NoReferences_IsBitIdenticalToPlainConditioning() =>
         Run((transformer, backend, f) =>
         {
@@ -163,6 +207,14 @@ public sealed unsafe class MossImageParityTests(ITestOutputHelper output)
         using MossImageFixture fixture = new();
         using CpuBackend backend = new();
         body(fixture.Transformer, backend, fixture.Tensors, fixture.References());
+    }
+
+    private static void RunColorize(
+        Action<MossImageTransformer, IBackend, IReadOnlyDictionary<string, Tensor>, ReferenceLatentTokens> body)
+    {
+        using MossImageFixture fixture = new();
+        using CpuBackend backend = new();
+        body(fixture.Transformer, backend, fixture.Tensors, fixture.Colorize());
     }
 
     private void AssertClose(Tensor expected, Tensor actual, string what)

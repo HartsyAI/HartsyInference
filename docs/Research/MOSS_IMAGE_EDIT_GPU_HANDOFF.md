@@ -1,7 +1,8 @@
 # MOSS-Image edit GPU handoff
 
 State: MOSS-Image reference-image edits (the Ostris / ai-toolkit edit-LoRA layout) are on `main` since
-PR HartsyAI/HartsyInference#458 (alpha.382). The DiT side, the Qwen3.5 image input and the engine wiring are
+PR HartsyAI/HartsyInference#458 (alpha.382). The colorize layout (`reference.layout=colorize`, the one public reference
+LoRA, §3b) ships in alpha.383. The DiT side, the Qwen3.5 image input and the engine wiring are
 verified on the CPU, and the DiT side also on Vulkan (RTX 2060 SUPER), all with tiny fixtures against float64 / transformers references. **Nothing has run on real weights or on CUDA; do not claim
 parity.** Contract, layouts and divergences: [MOSS_IMAGE_ARCHITECTURE.md](MOSS_IMAGE_ARCHITECTURE.md#reference-images-edits).
 Upstream: `github.com/ostris/ComfyUI-MOSS-Image-Ostris-Edit` (`nodes.py`) and ai-toolkit
@@ -78,10 +79,75 @@ That proves the mechanics only, so say so. If an ai-toolkit MOSS edit LoRA is av
 `--lora <file> --lora-weight 1.0`, using cached mode unless the LoRA was trained with `kv_cache: false`. On 2026-10-20
 none was public on Hugging Face or Civitai (search `moss` LoRAs and `ostris` models again first).
 
-`sorryhyun/moss-image-colorize` is reference-conditioned but trained on a different layout, so it is not a test of
-this path. It puts the reference before the text (`[image | ref | text]`), gives it the live timestep, stretches its
-RoPE `(h, w)` onto the target grid, sends the vision copy at the target's pixel count without `Picture N:` labels, and
-leaves the image out of the negative prompt. Supporting it is a separate reference profile on the same shared blocks.
+`sorryhyun/moss-image-colorize` is trained on a different layout, the colorize one, so it does not test this Ostris
+path; it is the next section.
+
+## 3b. Colorize layout: a B&W page through the colorize LoRA (`sorryhyun/moss-image-colorize`)
+The LoRA is `moss_colorize_ref_v1.safetensors` (149 MB, bf16, rank 32 / alpha 128, `proj` layers of all 42 blocks) from
+`huggingface.co/sorryhyun/moss-image-colorize`; put it in the models' `loras` folder and pass it as `--lora`. Check its
+header before the run (`python3 -I tools/inspect_checkpoint_header.py <lora>`): 756 tensors named
+`lora_unet_layers_{0..41}_proj_{q,k,v,o,ffn_up_gate,ffn_down}.{alpha,lora_down.weight,lora_up.weight}`, metadata
+`base_model=MOSS-Image` and `reference_latents=1000`. Its metadata has no `ref_scale`; the trained scale is 2, the default.
+
+Input: a B&W manga page `page.png` and its caption (colour tags), or an empty caption for page-only colouring.
+
+Size: pass the page's target size, not a free choice. The node derives the target from the page itself, with
+`target_size(page_w, page_h, resolution=1024)`: native aspect, sides multiples of 16, area at most 1024², never larger
+than the page, and a page already on the 16 grid within 1.1·1024² is kept as-is. The engine takes its size from
+`--width`/`--height`, so it does not do that for you. Compute the size with this (the node's `target_size`, checked
+against `nodes.py` over 1 356 page sizes), where `W H` is the page's pixel size (`identify -format '%w %h' page.png`):
+```python
+import math, sys
+
+def target_size(w, h, resolution=1024, stride=16, tolerance=1.10):
+    cap = resolution * resolution
+    if w % stride == 0 and h % stride == 0 and w * h <= cap * tolerance:
+        return w, h
+    area = min(cap, w * h)
+    aspect = w / h
+    out_w = round(math.sqrt(area * aspect) / stride) * stride
+    out_h = round(math.sqrt(area / aspect) / stride) * stride
+    out_w = max(stride, min(out_w, w // stride * stride))
+    out_h = max(stride, min(out_h, h // stride * stride))
+    return out_w, out_h
+
+print(*target_size(int(sys.argv[1]), int(sys.argv[2])))
+```
+Run it as `python3 target_size.py W H`. For the 848×1200 example page it prints `848 1200`, so the commands below pass
+`--width 848 --height 1200`. A `--width 1024 --height 1024` request would cover-crop that page to a square and drop its
+top and bottom.
+
+Colour (the test):
+```bash
+dotnet /tmp/hartsy-cli/HartsyInference.Cli.dll image "touhou, purple eyes, purple hair, black hairband, blue shirt" -m moss-image --model-path <dit> --text-encoder <encoder> --vae <vae> --lora <moss_colorize_ref_v1.safetensors> --lora-weight 1.0 --reference-image page.png --reference-layout colorize --sampler er_sde --steps 30 --cfg 3 -b cuda --width 848 --height 1200 --seed 1 -o Output/moss-edit/colorize
+```
+Control (the same command with the `--lora` and `--lora-weight` flags removed; the base never saw a reference, so expect
+no faithful colouring):
+```bash
+dotnet /tmp/hartsy-cli/HartsyInference.Cli.dll image "touhou, purple eyes, purple hair, black hairband, blue shirt" -m moss-image --model-path <dit> --text-encoder <encoder> --vae <vae> --reference-image page.png --reference-layout colorize --sampler er_sde --steps 30 --cfg 3 -b cuda --width 848 --height 1200 --seed 1 -o Output/moss-edit/colorize-control
+```
+Then the page-only run (empty caption, `""`) with the LoRA.
+
+Pass: the page's line work survives, and the hair, eyes and shirt take the caption's colours in their places. Fail: noise,
+lost line work, or colour unrelated to the caption. Also check the logs:
+- The result meta has `reference_layout=colorize` and `reference_attention=inline`, and the generation line reports
+  `1 reference image(s), Inline`.
+- The positive encode logs `(1 image(s))` with the vision pads for the page's vision copy plus the caption: 988 for
+  848×1200 (the copy is 832×1216 after the factor-32 resize), and 1 024 for 1024×1024. The negative logs `(0 image(s))`:
+  it is a plain encode of the empty prompt.
+- The VAE copy is the target size over 2 per side, rounded to 16: 416×608 for 848×1200 (512×512 for 1024²). The prompt
+  has no `Picture` label.
+- The control's colouring differs from the LoRA run: if it does not, the LoRA did not load.
+
+Record wall clock, per-step ms and VRAM, as in §3. ER-SDE disables the CUDA step graph, so these runs are slower per
+step than the default sampler; that is expected, not a regression.
+
+Triage a failed colouring run:
+- Placement off (colour bleeding across lines, the page ghosting): the stretch in `MossImagePosEmbed.InlineCoords` and the
+  `[image | ref | text]` layout in `MossImageTransformer.ForwardCore` (the `inline` branch).
+- Wrong pad count: `MossImageRecipePipeline.ColorizeVisionSize` (the node's `smart_resize` at the page's own pixel count).
+- No colour at all with the LoRA on: check `--lora-weight`, and that the LoRA's keys resolve (`MossImageLoraMapper`).
+- A wrong sampler: the layout defaults to `er_sde` and 30 steps only when the request names neither.
 
 Triage if an edit fails or looks broken:
 - Cached fails, joint works: the cache path (`ReferenceKvCache`, `MossImageBlock.ForwardPrefix`, `TokenMajorAttention`
