@@ -71,6 +71,64 @@ public static unsafe class Nf4Codec
         return output;
     }
 
+    /// <summary>Quantizes F32 weights to plain NF4: one absmax per block, each element rounded to its nearest codebook entry.</summary>
+    /// <returns>The packed nibbles (high nibble = even element) and one F32 absmax per block. Dequantize reproduces each element within <see cref="MaxBlockError"/> of its block absmax.</returns>
+    public static (byte[] Packed, float[] Absmax) Quantize(ReadOnlySpan<float> values, int blockSize = DefaultBlockSize)
+    {
+        if (blockSize <= 0)
+            throw new ArgumentException("blockSize must be positive.", nameof(blockSize));
+
+        int n = values.Length;
+        byte[] packed = new byte[(n + 1) / 2];
+        float[] absmax = new float[(n + blockSize - 1) / blockSize];
+        for (int b = 0; b < absmax.Length; b++)
+        {
+            int start = b * blockSize;
+            int end = Math.Min(n, start + blockSize);
+            float m = 0f;
+            for (int i = start; i < end; i++)
+                m = MathF.Max(m, MathF.Abs(values[i]));
+            absmax[b] = m;
+
+            float inv = m > 0f ? 1f / m : 0f;
+            for (int i = start; i < end; i++)
+            {
+                int code = NearestCode(values[i] * inv);
+                packed[i >> 1] |= (byte)((i & 1) == 0 ? code << 4 : code);
+            }
+        }
+
+        return (packed, absmax);
+    }
+
+    /// <summary>Largest reconstruction error for one element, as a fraction of its block absmax: half the widest gap between adjacent codebook entries.</summary>
+    public static float MaxBlockError
+    {
+        get
+        {
+            float widest = 0f;
+            for (int i = 1; i < Nf4Lut.Length; i++)
+                widest = MathF.Max(widest, Nf4Lut[i] - Nf4Lut[i - 1]);
+            return widest / 2f;
+        }
+    }
+
+    private static int NearestCode(float normalized)
+    {
+        int best = 0;
+        float bestError = float.MaxValue;
+        for (int c = 0; c < Nf4Lut.Length; c++)
+        {
+            float error = MathF.Abs(normalized - Nf4Lut[c]);
+            if (error < bestError)
+            {
+                bestError = error;
+                best = c;
+            }
+        }
+        return best;
+    }
+
     /// <summary>Rebuilds the F32 per-block <c>absmax</c> for a bitsandbytes double-quantized NF4 tensor: <c>absmax[b] = nestedCodebook[ qAbsmax[b] ] · nestedAbsmax[b / nestedBlockSize] + offset</c>. Feed the result to <see cref="Dequantize"/>.</summary>
     /// <param name="qAbsmax">U8 quantized absmax codes, one per primary block.</param>
     /// <param name="nestedAbsmaxF32">F32 scales for the nested blocks.</param>

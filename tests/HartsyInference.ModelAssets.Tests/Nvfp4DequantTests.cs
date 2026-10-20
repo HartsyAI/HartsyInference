@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
@@ -141,5 +142,97 @@ public sealed unsafe class Nvfp4DequantTests
         Assert.True(disagreements > 0,
             "row-major and swizzled indexing agree on this fixture, so it cannot detect the layout bug");
         _output.WriteLine($"row-major would read a different scale at {disagreements}/{Rows * BlockCols} positions");
+    }
+
+    [Fact]
+    public void Quantize_RoundTrip_WithinBoundPerBlock()
+    {
+        const int rows = 4, cols = 64;
+        float[] src = new float[rows * cols];
+        Random rng = new(11);
+        for (int i = 0; i < src.Length; i++) src[i] = (float)(rng.NextDouble() * 2 - 1) * (1 + i % 7);
+
+        (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, rows, cols);
+        float[] dec = Decode(packed, scales, global, rows, cols);
+
+        for (int r = 0; r < rows; r++)
+        for (int blk = 0; blk < cols / 16; blk++)
+        {
+            float blockMax = 0f;
+            for (int j = 0; j < 16; j++) blockMax = MathF.Max(blockMax, MathF.Abs(src[r * cols + blk * 16 + j]));
+            for (int j = 0; j < 16; j++)
+            {
+                int i = r * cols + blk * 16 + j;
+                Assert.True(MathF.Abs(dec[i] - src[i]) <= blockMax * ModelOptNvfp4Codec.MaxRoundTripError + 1e-5f,
+                    $"element {i}: {dec[i]} vs {src[i]}");
+            }
+        }
+    }
+
+    [Fact]
+    public void Quantize_ZeroMatrix_DecodesToZero()
+    {
+        float[] src = new float[32];
+        (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, 2, 16);
+        Assert.Equal(1f, global);
+        foreach (float v in Decode(packed, scales, global, 2, 16)) Assert.Equal(0f, v);
+    }
+
+    [Fact]
+    public void Quantize_RejectsColumnsNotMultipleOf16()
+    {
+        Assert.Throws<ArgumentException>(() => ModelOptNvfp4Codec.Quantize(new float[2 * 12], 2, 12));
+    }
+
+    /// <summary>Decodes a row-major NVFP4 matrix through the production dequantizer.</summary>
+    private static float[] Decode(byte[] packed, byte[] scales, float global, int rows, int cols)
+    {
+        using Tensor pk = new(new TensorShape(packed.Length), DType.U8);
+        packed.AsSpan().CopyTo(pk.AsSpan<byte>());
+        using Tensor sc = new(new TensorShape(rows, cols / 16), DType.F8E4M3);
+        scales.AsSpan().CopyTo(sc.AsSpan<byte>());
+        using Tensor g = new(new TensorShape(1), DType.F32);
+        g.AsSpan<float>()[0] = global;
+        QuantRecipe recipe = new()
+        {
+            Encoding = QuantEncoding.Nvfp4,
+            Geometry = new BlockGeometry(1, 16),
+            ScaleDType = DType.F8E4M3,
+            LogicalRows = rows,
+            LogicalCols = cols,
+            Scale = sc,
+            GlobalScale = g,
+        };
+        float[] dest = new float[rows * cols];
+        ModelOptNvfp4Codec.DequantRows(packed, recipe, 0, rows, dest);
+        return dest;
+    }
+
+    [Fact]
+    public void Quantize_RealTensor_RoundTripsWithinBound()
+    {
+        string? path = Environment.GetEnvironmentVariable("HARTSY_QUANT_TEST_SAFETENSORS");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        SafeTensorDescriptor d = loader.Descriptors.Values.First(x => x.DType == DType.F32 && x.Shape.Rank == 2 && x.Shape[1] % 16 == 0 && x.Shape.ElementCount >= 4096);
+        using Tensor w = loader.GetTensor(d.Name);
+        int rows = (int)w.Shape[0], cols = (int)w.Shape[1];
+        float[] src = w.AsReadOnlySpan<float>().ToArray();
+
+        (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, rows, cols);
+        float[] dec = Decode(packed, scales, global, rows, cols);
+        for (int r = 0; r < rows; r++)
+        for (int blk = 0; blk < cols / 16; blk++)
+        {
+            float blockMax = 0f;
+            for (int j = 0; j < 16; j++) blockMax = MathF.Max(blockMax, MathF.Abs(src[r * cols + blk * 16 + j]));
+            for (int j = 0; j < 16; j++)
+            {
+                int i = r * cols + blk * 16 + j;
+                Assert.True(MathF.Abs(dec[i] - src[i]) <= blockMax * ModelOptNvfp4Codec.MaxRoundTripError + 1e-5f, $"{d.Name}[{i}]");
+            }
+        }
     }
 }
