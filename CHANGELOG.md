@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.381
+## alpha.382
 
 - **Added: MOSS-Image reference-image edits, in the layout ai-toolkit's MOSS-Image edit LoRAs are trained on** (Ostris's
   `ComfyUI-MOSS-Image-Ostris-Edit`). Up to three references, from `ReferenceImages` and an init image in Reference mode,
@@ -32,6 +32,25 @@ stable release will require. Dates are UTC.
   rule; its tests are unchanged.
 - **Added: `hartsy image --vae`, `--text-encoder` and `--vision-encoder`** component overrides, and MOSS-Image LoRAs
   also load under the underscored `lora_transformer_` and `lora_diffusion_model_` spellings.
+- **Fixed: every CUDA kernel rebuilds with the compiler its shipped PTX came from.** `CudaKernelDriftTests` failed on main with 13
+  kernels changed, but 11 were current CUDA 13.0.88 nvcc builds that the test had rebuilt with nvrtc, which stamps the same toolchain
+  line. A domain's `NVCC_BUILT` list now names its nvcc-built kernels: `build.sh` builds those only with that nvcc (`HARTSY_NVCC`, PATH,
+  or the workstation's pinned install) and every other kernel with nvrtc, so an nvcc on PATH no longer rewrites nvrtc-built PTX. The two
+  stale kernels are rebuilt: `mul_mat_vec_q4_0_q8_1` gets its row-partial refactor, and `moe_id_q8_0` the multi-row Q8 GEMV source it
+  includes, with its three expert kernels instruction-identical. Output is unchanged: a real-generation A/B on the RTX 4090 matched main
+  token for token on every text row, including a new Q8_0 MoE row (`granitemoe-3b-q8`).
+
+## alpha.381
+
+- **Fixed: Z-Image at 2048x2048 decoded to a flat gray image.** When the VAE's full-resolution attempt ran out of memory, its
+  fallback freed the device-only latent Z-Image hands over and the tiles decoded zeros. The fallback now copies the latent to the host
+  first. A failed attempt also no longer makes every later decode in the session tiled, only latents at least that large. On CUDA a
+  BF16 attention whose score matrix would not fit now runs query-tiled like F32 does, so a BF16 VAE mid-block at 2048x2048 no longer
+  asks for one 16 GB allocation.
+- **Changed: BF16 VAEs decode 2048x2048 at full resolution when it fits.** Z-Image and Lumina 2 used to fall back to tiles there;
+  the single pass removes tile seams but holds more VRAM while it runs (Lumina 2 peaked at 23.8 GB on a 24 GB RTX 4090, as the pool
+  reports it, against 18.4 GB tiled). When the memory is not there, the attempt fails, falls back to tiles and is skipped for that size
+  afterwards.
 - **Fixed: `tekken` and `pixtral` GGUF tokenizers use Mistral's Tekken pre-token split.** Both names fell through to the GPT-2 split, so
   Dory (`pixtral`) and the Mistral Nemo/Small family (`tekken`) encoded prompts with non-canonical ids (`in-app`, `swarm_docs`, paths and
   newlines split differently). Dory now matches its checkpoint's `tokenizer.json` on every sample in `DoryTokenizerParityTests`.
@@ -45,6 +64,14 @@ stable release will require. Dates are UTC.
   reasoning inline. Read `reasoning_content` or `TextResult.Reasoning` instead.
 
 - **Changed: RoPE tables come from shared Core utilities.** `HartsyInference.Core.Rope` adds a frozen per-pair frequency plan, a table builder and an expander for the three apply-op layouts (rotate-half, interleaved prefix, interleaved pair), and a per-backend table cache whose leases keep device rows alive while a call reads them. `FluxRope` (FLUX.1, FLUX.2, Chroma, Krea 2, HiDream) and `AnimaRope` build on them. Output is bit-identical: a real-generation A/B on the RTX 4090 matched main pixel for pixel, and golden fixtures pin the tables.
+- **Fixed: CUDA could report no device when several threads made their first CUDA call at once.** `CudaContext` marked
+  CUDA initialized before `cuInit` returned. A concurrent caller then got `CUDA_ERROR_NOT_INITIALIZED`, and `IsAvailable()`
+  returned false on a machine with a GPU. In the full CUDA `GpuIntegration` run, 3 tests failed and 11 skipped silently
+  this way. Callers now wait for the first `cuInit`. A failed `cuInit` is retried, so later callers report the driver's
+  real error. `CudaLibraryResolver.Register` now waits for registration the same way.
+- **Fixed: a CUDA card older than Ampere (sm_75, Turing) failed backend creation.** Every module was loaded eagerly, and the driver refused the sm_80 PTX (`CUDA error 218: PTX JIT failed`). `CudaKernels` now reads each module's `.target` and skips the ones built for a newer architecture: the backend constructs, its sm_70 and sm_75 kernels (elementwise, GGUF dequant, expert) load, `CudaBackend.SkippedKernelModules` lists the rest, and launching one fails with an error that names what was skipped. `auto` backend selection and the CUDA probe pass over such a card to Vulkan. Nothing changes at sm_80 and above.
+- **Changed: every Diffusion RoPE family uses the shared tables.** QwenImage and Qwen-Image 2.1, HunyuanImage and HunyuanVideo, Z-Image and Lumina 2, Kandinsky 5, MOSS-Image, Stable Audio, OmniGen 2 and Boogu, and Lens now build their frequencies and rows through `HartsyInference.Core.Rope`. Their device tables live in the shared cache: preloaded per backend, or staged on the host through the new `RopeTableCache.AcquireStaged` where the caller has no backend. Output is bit-identical to the previous implementations, pinned by golden digests of every family's tables and a real-generation A/B.
+- **Changed: Wan, ERNIE-Image, Ideogram 4 and Lance RoPE use the shared tables too.** `RopeFrequencyPlan.CreateSectioned` adds the M-RoPE form (one frequency schedule over the head, each pair assigned an axis) beside the per-axis form, and `WanRope` (Wan 2.1/2.2, VACE, S2V, Animate, Matrix-Game, Oasis), `ErnieImageRope`, `Ideogram4Mrope` and `Multimodal3DRope` (Lance) now build their tables through it. Output is bit-identical, pinned by golden digests. A sigma_theta of 1 or more now throws, where the old code produced NaN or infinity; real configs sit far below 1.
 
 ## alpha.380
 

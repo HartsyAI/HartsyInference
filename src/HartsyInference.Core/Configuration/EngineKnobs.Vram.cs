@@ -89,9 +89,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SameGpuConcurrent =
         Bool("vram.sameGpuConcurrent", false, KnobScope.Runtime, KnobDomain.Vram, "Disables the process-wide gate that serializes generations sharing one GPU ordinal.");
 
-    /// <summary>Forces the query-tiled F32 SDPA path on CUDA and Vulkan instead of materializing the full score matrix.</summary>
+    /// <summary>Forces the query-tiled F32 SDPA path on CUDA and Vulkan (CUDA BF16 calls run it on their F32 casts)
+    /// instead of materializing the full score matrix.</summary>
     public static readonly Knob<bool> SdpaForceTiled =
-        Bool("vram.sdpaForceTiled", false, KnobScope.Runtime, KnobDomain.Vram, "Forces the query-tiled F32 SDPA path on CUDA and Vulkan instead of materializing the full score matrix.");
+        Bool("vram.sdpaForceTiled", false, KnobScope.Runtime, KnobDomain.Vram, "Forces the query-tiled F32 SDPA path on CUDA and Vulkan (CUDA BF16 calls run it on their F32 casts) instead of materializing the full score matrix.");
 
     /// <summary>=1 pages the step cache's cross-step residual and indicator snapshot to host memory as they are produced.</summary>
     public static readonly Knob<bool> StepCacheOffload =

@@ -421,5 +421,5 @@ public sealed unsafe class HunyuanVideoDit : IDisposable, IStreamableDenoiser
         }
     }
 
-    public void Dispose() { }
+    public void Dispose() => _rope.Dispose();
 }

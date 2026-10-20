@@ -119,6 +119,14 @@ no bug, any more than one bad seed was proof there was one.
 
 ## Attention / RoPE / multi-head parity
 
+- **RoPE tables come from `Core/Rope`; a family owns only its positions.** Per-axis plans (`RopeFrequencyPlan.Create`),
+  M-RoPE plans (`CreateSectioned`), rows (`MultiAxisRopeTables`) and device tables (`RopeTableCache`) serve FLUX/Chroma/
+  Krea 2/HiDream, Anima, Qwen-Image (2.1), HunyuanImage/Video, Z-Image/Lumina 2, Kandinsky 5, MOSS, Stable Audio,
+  OmniGen 2/Boogu, Lens, Wan, ERNIE-Image, Ideogram 4 and Lance. `RopeFamilyGoldenTests` pins every one against digests
+  of the pre-migration code; a deliberate numerics change recaptures that fixture. Left model-owned on purpose: LTX and
+  LTX-2 (`theta^linspace·π/2` schedule, front identity pad), AxialRope2D and SeedVR2 v1 (pixel schedules), F-Lite and
+  ControlFoley (float32 angle math), MiniMax-H3 (checkpoint `inv_freq`, double positions), Cosmos3D (no users), and the
+  audio Qwen3-TTS and AuK ropes (TTS output is not seed-reproducible, so no identical A/B guards a move).
 - **diffusers `attention_head_dim` is a TRAP — it means head COUNT, not head dim** when
   `num_attention_heads` is unset. SD1.5 `attention_head_dim=8` = 8 heads (head_dim=40), not 40 heads of
   dim 8. Wrong split → 2.24× too-large attention scale and ~56% signal dampening. Print `model.attn.heads`
@@ -375,6 +383,10 @@ no bug, any more than one bad seed was proof there was one.
   deterministically single-threaded. Fix: `using` declarations + `GC.KeepAlive` around raw-pointer copy
   loops. Same class: `ConvWeightSlices` cast-weight freed mid-loop → `GC.KeepAlive(wf)` after the write
   loops.
+- **`FreeActivations` drops device-only data.** It frees every unpinned activation without a sync-back, so a tensor
+  whose only copy is on the device afterwards reads its lazily allocated host buffer: zeros. Host-materialize
+  (`backend.OffloadActivation`) or pin anything still read after a sweep. Signature in an image model: the same
+  output for every seed, e.g. one flat gray image when a VAE decodes a zero latent (only the shift factor survives).
 - **Pass-through helpers that MIGHT allocate are disposal traps.** `PadCaption`/`PadImage` returning the
   input unchanged when already aligned → caller disposes an aliased tensor → `ObjectDisposedException`.
   Guard `if (!ReferenceEquals(result,input)) input.Dispose();` or always allocate.
@@ -474,6 +486,21 @@ no bug, any more than one bad seed was proof there was one.
   PTX ISA 9.3; driver 580.x JIT caps at 9.0 → `CUDA error 222: Unsupported .version 9.3`. Fix: pin
   `nvidia-cuda-nvcc==13.0.88` **and** `nvidia-nvvm==13.0.*` (nvvm is the ISA-determining piece, not nvcc)
   into an isolated `pip --target` dir; **verify every emitted PTX starts `.version 9.0` before shipping.**
+- **Pre-Ampere card (sm_75): `CUDA error 218: PTX JIT failed … requires .target sm_80`.** The shipped kernels are
+  built for sm_80 (`build_common.sh` `KERNELS`), and PTX JITs forward only. `CudaKernels` reads each module's
+  `.target` and skips what the device cannot load, logging `[Cuda] This device (SM 7.5) cannot load N kernel
+  module(s)…` at startup; the sm_70/sm_75 modules still load. A later `CUDA_ERROR_INVALID_HANDLE` that carries the
+  same note is a launch of a skipped kernel. Use Vulkan on such a card (`auto` already does); a local `.sm75.ptx`
+  variant beside a kernel is picked on an exact SM 7.5 match.
+- **"Drifted" PTX whose source is current — check the frontend first.** nvcc and nvrtc of one release stamp the
+  same `// Cuda compilation tools, release 13.0, V13.0.88` line but emit different PTX for many kernels, so the
+  header cannot say which one built a file. Rebuild the kernel with both before blaming the source: if one
+  reproduces the shipped bytes, the source is current and only the domain's `NVCC_BUILT` list is wrong. A kernel
+  that `#include`s another `.cu` (`moe_id_*` pull in the `lm/` GEMVs) also drifts when only the included file
+  changed, which `git log` on its own `.cu` does not show. A pip `--target` nvcc dir that later took 13.3
+  `nvidia-cuda-runtime`/`crt` wheels keeps a 13.0.88 nvcc but has no CCCL: `cuda_fp16.h` fails on `<nv/target>`
+  until `-I <13.x headers>/cccl` is added (`build_common.sh` does this from `$CUDA_INC`). The header version made no
+  difference to the emitted PTX for any kernel tested; CCCL is the only missing piece.
 - **Which PTX loaded?** `CudaKernels.PtxPath` prefers `<kernel>.sm<CC>.ptx` for the device's exact compute
   capability and falls back to `<kernel>.ptx`; the backend logs `[Cuda] SM x.y PTX variants: …` at startup when
   it picked any. A variant built for another SM is never chosen (family-specific PTX does not JIT elsewhere), so

@@ -100,7 +100,9 @@ public static class BackendFactory
         string s = Kind(selector);
         if (s != "auto")
             return s;
-        if (CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0)
+        Volatile.Write(ref _cudaBelowBaselineReason, null);
+        int ordinal = TryParseOrdinal(selector, out int parsed, out _) ? parsed : 0;
+        if (CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0 && CudaMeetsKernelBaseline(ordinal))
         {
             return "cuda";
         }
@@ -109,7 +111,41 @@ public static class BackendFactory
 
     /// <summary>Why <see cref="Resolve"/> last passed over CUDA; <c>null</c> when CUDA was usable.
     /// Only meaningful after a Resolve/IsAvailable call.</summary>
-    public static string? CudaUnavailableReason => CudaContext.LastUnavailableReason;
+    public static string? CudaUnavailableReason => Volatile.Read(ref _cudaBelowBaselineReason) ?? CudaContext.LastUnavailableReason;
+
+    private static string? _cudaBelowBaselineReason;
+    private static Func<int, int>? _querySmForTests;
+
+    /// <summary>Test-only: answers the compute-capability query in place of the driver, so a newer card can stand in for one
+    /// below the kernel baseline.</summary>
+    internal static Func<int, int>? QuerySmForTests
+    {
+        get => Volatile.Read(ref _querySmForTests);
+        set => Volatile.Write(ref _querySmForTests, value);
+    }
+
+    /// <summary>Whether CUDA device <paramref name="ordinal"/> can load the shipped kernels. On a device below
+    /// <see cref="CudaKernels.BaselineSm"/> a backend constructs with its sm_80 kernels unbound, so automatic selection
+    /// passes over it to Vulkan, which runs the card. Only the device the selector names is checked (<c>auto</c> is ordinal
+    /// 0, CUDA's fastest card), so a host whose first card is old goes to Vulkan even if a later one is newer. A device whose
+    /// capability cannot be read is not held back.</summary>
+    private static bool CudaMeetsKernelBaseline(int ordinal)
+    {
+        int sm;
+        try
+        {
+            sm = QuerySmForTests?.Invoke(ordinal) ?? CudaContext.QuerySm(ordinal);
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+        if (sm >= CudaKernels.BaselineSm)
+            return true;
+        Volatile.Write(ref _cudaBelowBaselineReason, $"CUDA device {ordinal} is SM {sm / 10}.{sm % 10}; the CUDA kernels need SM "
+            + $"{CudaKernels.BaselineSm / 10}.{CudaKernels.BaselineSm % 10} or newer.");
+        return false;
+    }
 
     /// <summary>Why <see cref="Resolve"/> last passed over Vulkan; <c>null</c> when a Vulkan GPU was found.
     /// Only meaningful after a Resolve/IsAvailable call.</summary>
@@ -174,6 +210,12 @@ public static class BackendFactory
         if (!CudaContext.IsAvailable())
         {
             reason = CudaContext.LastUnavailableReason ?? "CUDA is not available.";
+            return false;
+        }
+        Volatile.Write(ref _cudaBelowBaselineReason, null);
+        if (!CudaMeetsKernelBaseline(ordinal))
+        {
+            reason = Volatile.Read(ref _cudaBelowBaselineReason);
             return false;
         }
         return RunMatMulProbe(() => CreateCuda(ordinal), out reason);

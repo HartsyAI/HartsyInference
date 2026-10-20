@@ -32,6 +32,7 @@ public sealed class Dp4aGemvGroundTruthTests
     [InlineData("Q6_K", 256, 64, 1, false)]     // single-super-block minimal
     [InlineData("Q6_K", 512, 96, 4, true)]      // batched decode + bias
     [InlineData("Q4_0", 32, 8, 1, false)]       // single-block minimal
+    [InlineData("Q4_0", 4096, 96, 2, true)]     // 128 blocks: the 8-block-group loop + batch + bias
     [InlineData("Q5_0", 32, 8, 1, false)]       // single-block minimal
     [InlineData("Q5_0", 896, 256, 1, false)]    // qwen2.5-0.5b's odd hidden size (the Q5_0 fallback case)
     [InlineData("Q5_K", 256, 64, 1, false)]     // single-super-block minimal

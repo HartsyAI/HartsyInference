@@ -5,7 +5,6 @@
 #   ./build.sh                    # compile + install every kernel in the domain's lists into ../../Ptx
 #   ./build.sh --no-install       # compile only (artifacts stay beside the .cu)
 #   ./build.sh --arch sm_120a     # also build the domain's ARCH_VARIANTS for that arch, as <kernel>.sm120.ptx
-#   ./build.sh --install-tuned    # also install the TUNED kernels (see lm/build.sh)
 #
 # Lists a domain script may set before build_all:
 #   KERNELS        compiled for sm_80, the fleet baseline; PTX is JIT-forward-compatible from there
@@ -13,11 +12,14 @@
 #   KERNELS_SM80   compiled for sm_80 (alongside KERNELS_SM75; a domain uses one style or the other)
 #   ARCH_VARIANTS  kernels with arch-conditional device code; --arch builds each as a suffixed variant that
 #                  CudaKernels.PtxPath loads only on that exact compute capability
-#   TUNED          kernels whose shipped PTX is hand-tuned and not overwritten unless --install-tuned is passed
+#   NVCC_BUILT     kernels whose shipped PTX is CUDA 13.0.88 nvcc output rather than nvrtc output
 #
-# Uses nvcc when it is on PATH, else the committed ../nvrtc_compile frontend (needs $CUDA_LIB and the CUDA
-# headers, $CUDA_INC). The emitted PTX must say ".version 9.0": a newer toolchain emits 9.3, which the fleet
-# driver refuses to JIT (TROUBLESHOOTING §CUDA/PTX).
+# Each kernel has one compiler. nvcc and nvrtc of the same release stamp the same PTX header but still emit different
+# PTX (instruction selection, register numbering), so taking whichever is on PATH would rewrite benchmarked kernels.
+# NVCC_BUILT kernels use $HARTSY_NVCC, else nvcc on PATH, else ~/.local/cuda-tools-13.0; without the 13.0.88 release
+# at ISA 9.0 they are reported UNVERIFIED and left as shipped. Every other kernel uses the committed ../nvrtc_compile
+# frontend (needs $CUDA_LIB and the CUDA headers, $CUDA_INC). The emitted PTX must say ".version 9.0": a newer
+# toolchain emits 9.3, which the fleet driver refuses to JIT (TROUBLESHOOTING §CUDA/PTX).
 
 set -euo pipefail
 
@@ -32,12 +34,29 @@ if [[ -z "${CUDA_INC:-}" ]]; then
     done
     CUDA_INC="${CUDA_INC:-${CUDA_LIB}/include}"
 fi
+NVCC="${HARTSY_NVCC:-$(command -v nvcc || true)}"
+# The pinned pip --target install the workstation keeps, when nothing else names an nvcc.
+if [[ -z "$NVCC" && -x "${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc" ]]; then
+    NVCC="${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc"
+fi
+# NVCC_BUILT kernels are this release's output; another nvcc release emits different PTX even at ISA 9.0.
+NVCC_RELEASE="release 13.0, V13.0.88"
+# A pip-installed nvcc can ship without CCCL, which cuda_fp16.h includes (<nv/target>); borrow the nvrtc header set's.
+NVCC_FLAGS=()
+if [[ -n "$NVCC" ]]; then
+    _nvcc_inc="$(dirname "$NVCC")/../include"
+    if [[ ! -e "${_nvcc_inc}/nv/target" && ! -e "${_nvcc_inc}/cccl/nv/target" ]]; then
+        for _cand in "${CUDA_INC}/cccl" "${CUDA_INC}"; do
+            if [[ -e "${_cand}/nv/target" ]]; then NVCC_FLAGS=("-I${_cand}"); break; fi
+        done
+    fi
+fi
 
 KERNELS=("${KERNELS[@]:-}")
 KERNELS_SM75=("${KERNELS_SM75[@]:-}")
 KERNELS_SM80=("${KERNELS_SM80[@]:-}")
 ARCH_VARIANTS=("${ARCH_VARIANTS[@]:-}")
-TUNED=("${TUNED[@]:-}")
+NVCC_BUILT=("${NVCC_BUILT[@]:-}")
 
 # PTX ISA version a file declares in its header, and whether it is at or below the fleet driver's JIT ceiling (9.0).
 ptx_version() { head -20 "$1" | sed -n 's/^\.version \([0-9.]*\)$/\1/p' | head -1; }
@@ -55,20 +74,28 @@ compile_one() {
         echo "missing source: $src" >&2
         exit 1
     fi
-    # nvcc from CUDA 13.x emits PTX ISA 9.3, which the fleet driver cannot JIT. nvcc is tried first only when its
-    # output carries the pinned ISA; otherwise the kernel is recompiled through the nvrtc helper, which emits 9.0.
-    # HARTSY_PTX_COMPILER=nvrtc skips nvcc outright.
-    local compiled=false
-    if [[ "${HARTSY_PTX_COMPILER:-auto}" != nvrtc ]] && command -v nvcc >/dev/null 2>&1; then
-        echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${arch} ${kernel}.cu"
-        nvcc -ptx -arch="sm_${arch}" "$src" -o "$ptx"
-        if ptx_isa_ok "$ptx"; then
-            compiled=true
-        else
-            echo "  nvcc emitted PTX ISA $(ptx_version "$ptx"); recompiling ${kernel} with the nvrtc helper (ISA 9.0)" >&2
+    if listed "$kernel" "${NVCC_BUILT[@]}"; then
+        # Never an nvrtc stand-in, and an UNVERIFIED kernel leaves any earlier intermediate as it was.
+        if [[ -z "$NVCC" ]]; then
+            echo "UNVERIFIED ${kernel}${suffix}: nvcc-built and no nvcc found; set HARTSY_NVCC to the CUDA 13.0.88 nvcc"
+            return 0
         fi
-    fi
-    if ! $compiled; then
+        echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${arch} ${kernel}.cu"
+        local tmp
+        tmp="$(mktemp --suffix=.ptx)"   # GNU mktemp; the PTX build runs on Linux
+        if ! "$NVCC" -ptx -arch="sm_${arch}" ${NVCC_FLAGS[@]+"${NVCC_FLAGS[@]}"} "$src" -o "$tmp"; then
+            rm -f "$tmp"
+            exit 1
+        fi
+        if ! ptx_isa_ok "$tmp" || ! grep -qF "// Cuda compilation tools, ${NVCC_RELEASE}" "$tmp"; then
+            echo "UNVERIFIED ${kernel}${suffix}: ${NVCC} emits PTX ISA $(ptx_version "$tmp") from" \
+                "\"$(grep -m1 -o 'release [0-9.]*, V[0-9.]*' "$tmp" || true)\"; nvcc-built kernels need CUDA 13.0.88 nvcc and nvvm"
+            rm -f "$tmp"
+            return 0
+        fi
+        cat "$tmp" > "$ptx"
+        rm -f "$tmp"
+    else
         if [[ ! -x "$NVRTC" ]]; then
             if command -v cc >/dev/null 2>&1; then
                 cc -O2 -o "$NVRTC" "${NVRTC}.c" -ldl
@@ -81,40 +108,38 @@ compile_one() {
         # The kernel's own directory is an include path too: NVRTC compiles from a string and resolves
         # #include "x.cuh" only through the paths it is given.
         LD_LIBRARY_PATH="$CUDA_LIB" "$NVRTC" "$src" "$ptx" "compute_${arch}" "$CUDA_INC" "${THIS_DIR}"
-    fi
-    if ! ptx_isa_ok "$ptx"; then
-        echo "ERROR: ${kernel}${suffix}.ptx is PTX ISA $(ptx_version "$ptx") (driver JIT ceiling is 9.0) — check toolchain pin." >&2
-        exit 1
-    fi
-    if $INSTALL; then
-        local is_tuned=false
-        for t in "${TUNED[@]}"; do [[ -n "$t" && "$kernel" == "$t" ]] && is_tuned=true; done
-        if $is_tuned && ! $INSTALL_TUNED; then
-            echo "  · ${kernel}: compiled but NOT installed (hand-tuned; pass --install-tuned with a perf run)"
-        else
-            cp "$ptx" "${PTX_OUT}/${kernel}${suffix}.ptx"
-            echo "  → ${PTX_OUT}/${kernel}${suffix}.ptx"
+        if ! ptx_isa_ok "$ptx"; then
+            echo "ERROR: ${kernel}${suffix}.ptx is PTX ISA $(ptx_version "$ptx") (driver JIT ceiling is 9.0) — check toolchain pin." >&2
+            exit 1
         fi
     fi
+    if $INSTALL; then
+        cp "$ptx" "${PTX_OUT}/${kernel}${suffix}.ptx"
+        echo "  → ${PTX_OUT}/${kernel}${suffix}.ptx"
+    fi
+}
+
+# listed <kernel> <entry>...: whether the kernel is one of the (non-empty) entries.
+listed() {
+    local kernel="$1" entry
+    shift
+    for entry in "$@"; do [[ -n "$entry" && "$entry" == "$kernel" ]] && return 0; done
+    return 1
 }
 
 # want <kernel>: true when no kernel names were given on the command line, or when this one is named.
 want() {
     [[ ${#ONLY[@]} -eq 0 ]] && return 0
-    local o
-    for o in "${ONLY[@]}"; do [[ "$o" == "$1" ]] && return 0; done
-    return 1
+    listed "$1" "${ONLY[@]}"
 }
 
 build_all() {
     INSTALL=true
-    INSTALL_TUNED=false
     local ONLY=()
     local extra_arch=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --no-install)    INSTALL=false; shift ;;
-            --install-tuned) INSTALL_TUNED=true; shift ;;
             --arch)          extra_arch="${2#sm_}"; shift 2 ;;
             -*) echo "unknown argument: $1" >&2; exit 2 ;;
             *)  ONLY+=("$1"); shift ;;

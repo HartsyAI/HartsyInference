@@ -6,7 +6,8 @@ namespace HartsyInference.Cuda;
 /// <summary>Manages a CUDA context for a specific device. Handles initialization, context creation, and device info queries. <para>Uses the CUDA Driver API <c>cuDevicePrimaryCtxRetain</c> rather than <c>cuCtxCreate</c>: the primary context is one-per-device-per-process, refcounted, and shared with the CUDA Runtime API. This avoids the thread-stack push side-effect of <c>cuCtxCreate</c> (which silently binds the context only to the constructing thread) and lets any thread in the process bind the same context via <see cref="EnsureCurrent"/>.</para> <para>Thread affinity in the Driver API is explicit: every thread that issues CUDA API calls must have the context current on it (via <c>cuCtxSetCurrent</c>). The <see cref="EnsureCurrent"/> method below remembers the binding in a <c>[ThreadStatic]</c> cache and confirms it with <c>cuCtxGetCurrent</c> before trusting it, so a thread already bound costs a TLS read and a thread-local driver read.</para></summary>
 public sealed class CudaContext : IDisposable
 {
-    private static int _cudaInitialized;
+    private static readonly object _initLock = new();
+    private static volatile bool _cudaInitialized;
 
     /// <summary>The primary-context handle currently bound to the calling thread, or 0 if the thread has never been bound. ThreadStatic so each worker maintains its own notion of "what's already current here."</summary>
     [ThreadStatic]
@@ -200,6 +201,18 @@ public sealed class CudaContext : IDisposable
         return count;
     }
 
+    /// <summary>Compute capability of device <paramref name="ordinal"/> as one number (<see cref="CudaArch"/>), read from the
+    /// driver without creating a context.</summary>
+    public static int QuerySm(int ordinal)
+    {
+        CudaLibraryResolver.Register();
+        EnsureCudaInitialized();
+        CudaDriverApi.cuDeviceGet(out int device, ordinal).ThrowOnError();
+        CudaDriverApi.cuDeviceGetAttribute(out int major, CudaDriverApi.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device).ThrowOnError();
+        CudaDriverApi.cuDeviceGetAttribute(out int minor, CudaDriverApi.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device).ThrowOnError();
+        return CudaArch.Sm(major, minor);
+    }
+
     /// <summary>Why the last <see cref="IsAvailable"/> call returned <c>false</c>; <c>null</c> when it returned true. Without this the reason is swallowed and a host silently degrades to CPU with nothing to report.</summary>
     public static string? LastUnavailableReason { get; private set; }
 
@@ -242,11 +255,23 @@ public sealed class CudaContext : IDisposable
         }
     }
 
+    /// <summary>Runs <c>cuInit</c> once per process. Callers wait for it: the driver fails any call that overtakes
+    /// an in-flight <c>cuInit</c> with CUDA_ERROR_NOT_INITIALIZED.</summary>
     private static void EnsureCudaInitialized()
     {
-        if (Interlocked.CompareExchange(ref _cudaInitialized, 1, 0) == 0)
+        if (_cudaInitialized)
         {
+            return;
+        }
+        lock (_initLock)
+        {
+            if (_cudaInitialized)
+            {
+                return;
+            }
             CudaDriverApi.cuInit(0).ThrowOnError();
+            // Set only on success, so a later caller retries and reports the driver's real error.
+            _cudaInitialized = true;
         }
     }
 
