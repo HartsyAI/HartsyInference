@@ -43,7 +43,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
             NeedsTokenIdsWithEmbeds = cfg.PerLayerEmbeddingDim > 0,
             SupportsSpeculation = !Staged,
             MaxSpeculativeDepth = MaxDraftTokens,
-            SupportsBatchDecode = !Staged,
+            SupportsBatchDecode = !Staged && cfg.BatchDecodeExact,
         };
         if (_preloadWeights) PreloadDecodeWeights();
     }

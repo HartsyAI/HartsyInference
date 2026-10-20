@@ -337,6 +337,12 @@ public sealed record TransformerConfig
     /// <summary>Whether layer <paramref name="i"/> computes its own K/V projections (true for every layer when <see cref="KvSharedFromLayer"/> is 0/disabled, or for any layer before that cutoff).</summary>
     public bool HasOwnKv(int i) => KvSharedFromLayer <= 0 || i < KvSharedFromLayer;
 
+    /// <summary>Whether the batched decode step computes this model exactly: one head dim for every layer, every layer
+    /// projecting its own K/V, no V-norm, no latent attention, no cross-attention layers and no per-layer embeddings.
+    /// Anything else decodes one sequence at a time.</summary>
+    public bool BatchDecodeExact => HeadDimSwa <= 0 && KvSharedFromLayer <= 0 && !VNorm && Mla is null
+        && CrossAttnLayers.Count == 0 && PerLayerEmbeddingDim <= 0;
+
     /// <summary>The donor layer index whose KV cache slot layer <paramref name="i"/> reads instead of its own (only meaningful when <see cref="HasOwnKv"/> is false for <paramref name="i"/>). Ported from llama.cpp's reuse callback: the last layer of the SAME type (global vs local/SWA) among the layers that still compute their own KV — <c>cutoff-1</c> for a global layer, <c>cutoff-2</c> for a local one (the layer immediately before the cutoff is always global, so the last local layer sits one further back).</summary>
     public int KvDonorLayer(int i) => IsGlobalLayer(i) ? KvSharedFromLayer - 1 : KvSharedFromLayer - 2;
 
