@@ -427,8 +427,7 @@ public sealed record LlamaStyleEncoderConfig
     ///
     /// <para>PARITY STATUS: the dual local/global rope theta + per-head QK-norm (+1) require the encoder
     /// forward's per-layer rope path (Phase 1b) — until that lands this preset runs every layer at θ=1e6,
-    /// which is NOT Gemma-3-correct. Sliding-window masking is approximated as full attention (only affects
-    /// &gt;1024-token prompts).</para></summary>
+    /// which is NOT Gemma-3-correct.</para></summary>
     public static LlamaStyleEncoderConfig Gemma3_12B => new()
     {
         HiddenSize = 3840,
