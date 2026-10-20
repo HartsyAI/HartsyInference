@@ -42,7 +42,9 @@
     <None Include="Fixtures\Samplers\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Flux3\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\MossImage\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Qwen35Vl\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Rope\**\*" CopyToOutputDirectory="PreserveNewest" />
+
   </ItemGroup>
 
 </Project>

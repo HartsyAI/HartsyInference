@@ -38,6 +38,7 @@ public sealed class Flux3Modulation : IDisposable
     public static unsafe Flux3Modulation Spans(IBackend backend, IReadOnlyList<(Tensor Shift, Tensor Scale, Tensor Gate)> rows,
         IReadOnlyList<int> spanLengths)
     {
+        // TODO(reference-segments): delegate to TokenSegmentLayout + SegmentModulation (pinned by Flux3's span and edit parity tests).
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(rows);
         ArgumentNullException.ThrowIfNull(spanLengths);

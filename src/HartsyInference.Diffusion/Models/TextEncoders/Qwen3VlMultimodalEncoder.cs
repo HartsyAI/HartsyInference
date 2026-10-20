@@ -142,6 +142,7 @@ public sealed unsafe class Qwen3VlMultimodalEncoder
     /// <c>max(llm_h, llm_w)</c>.</summary>
     private (int[] t, int[] h, int[] w) BuildRopeIndex(int[] tokenIds, (int t, int h, int w)[] grids)
     {
+        // TODO(mrope-shared): move onto Core.Rope.MRopePositions and MRopeTable (layouts pinned by MRopeTests).
         int seqLen = tokenIds.Length;
         int[] pt = new int[seqLen], ph = new int[seqLen], pw = new int[seqLen];
         int current = 0;

@@ -32,6 +32,20 @@ public sealed record MossImageGuidance
     /// <summary>Whether the three-pass SLG branch runs at all.</summary>
     public bool HasSlgBranch => SlgLayers.Count > 0 && SlgScale > 0f;
 
+    /// <summary>Distinct skipped-layer sets a generation's branches run, which is how many reference key/value caches an
+    /// edit builds per conditioning: the conditional set, the unconditional one inside the window (and outside it when
+    /// the window is partial), and the SLG set.</summary>
+    public int DistinctBranchCaches(bool guided)
+    {
+        bool partialWindow = Start > 0f || Stop < 1f;
+        int caches = 1;
+        if (guided)
+            caches += UncondSkipLayers.Count == 0 ? 1 : partialWindow ? 2 : 1;
+        if (HasSlgBranch)
+            caches++;
+        return caches;
+    }
+
     /// <summary>Whether step <paramref name="stepIndex"/> of <paramref name="steps"/> is inside the skip window.</summary>
     public bool ActiveAt(int stepIndex, int steps) => Start <= (float)stepIndex / steps && (float)stepIndex / steps < Stop;
 

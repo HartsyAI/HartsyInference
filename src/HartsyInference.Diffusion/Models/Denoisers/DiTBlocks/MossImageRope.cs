@@ -7,7 +7,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// sequence position, row and column. Each axis owns <c>headDim/8</c> frequency bands
 /// <c>1/base^(j/bands)</c>, so the four axes fill half the head, and channel <c>i</c> pairs with <c>i + headDim/2</c>.
 /// Image tokens come first at <c>(0, textLength, row − (H−1)/2, col − (W−1)/2)</c>; text token <c>i</c> sits at
-/// <c>(0, i, 0, 0)</c>. With no reference images <c>r</c> is 0 everywhere, so its quarter of the head is unrotated.
+/// <c>(0, i, 0, 0)</c>. Reference image <c>i</c> of an edit takes <c>r = i + 1</c>; with none, <c>r</c> is 0 everywhere and
+/// its quarter of the head is unrotated.
 /// Tables are full-width <c>[1, S, headDim]</c> (both halves repeat the per-pair value), the layout
 /// <see cref="Core.Backends.IBackend.ApplyRope"/> takes. Phases are F32 products, as the reference builds them.
 /// The coordinates come from <see cref="MossImagePosEmbed"/>; <see cref="RopeTableExpander"/> writes the rotate-half rows.</summary>
@@ -31,6 +32,18 @@ public static class MossImageRope
     /// by <paramref name="textLength"/> text tokens.</summary>
     public static (Tensor Cos, Tensor Sin) Joint(int height, int width, int textLength, int headDim, float ropeBase) =>
         Tables(MossImagePosEmbed.JointCoords(height, width, textLength), headDim, ropeBase);
+
+    /// <summary>Tables for the joint sequence with reference images appended after the text, each reference on its own
+    /// <paramref name="referenceGrids"/> grid (the Ostris edit layout, <see cref="References"/>).</summary>
+    public static (Tensor Cos, Tensor Sin) Joint(int height, int width, int textLength,
+        IReadOnlyList<(int Height, int Width)> referenceGrids, int headDim, float ropeBase) =>
+        Tables(MossImagePosEmbed.JointCoords(height, width, textLength, referenceGrids), headDim, ropeBase);
+
+    /// <summary>Tables for reference images alone, as a prepass sees them: reference <c>i</c> sits at
+    /// <c>(i + 1, textLength, row − (h−1)/2, col − (w−1)/2)</c> over its own grid, the Ostris edit coordinates.</summary>
+    public static (Tensor Cos, Tensor Sin) References(IReadOnlyList<(int Height, int Width)> referenceGrids, int textLength,
+        int headDim, float ropeBase) =>
+        Tables(MossImagePosEmbed.ReferenceCoords(referenceGrids, textLength), headDim, ropeBase);
 
     /// <summary>Tables for the text refiner, which runs on the text tokens alone at their joint positions.</summary>
     public static (Tensor Cos, Tensor Sin) Text(int textLength, int headDim, float ropeBase) =>

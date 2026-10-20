@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -43,6 +44,13 @@ public sealed class MossImageFixture : IDisposable
 
     /// <summary>The loaded transformer.</summary>
     public MossImageTransformer Transformer { get; }
+
+    /// <summary>The edit cases' two reference latents as borrowed tokens (grids 2×2 and 1×3).</summary>
+    public ReferenceLatentTokens[] References() =>
+    [
+        new ReferenceLatentTokens(Tensors["inputs.ref0"], 2, 2),
+        new ReferenceLatentTokens(Tensors["inputs.ref1"], 1, 3),
+    ];
 
     /// <inheritdoc/>
     public void Dispose()

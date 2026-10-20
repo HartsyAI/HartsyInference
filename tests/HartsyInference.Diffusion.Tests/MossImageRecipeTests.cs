@@ -52,6 +52,54 @@ public sealed class MossImageRecipeTests : IDisposable
     }
 
     [Fact]
+    public void Tokenize_EditPrompt_PutsThePictureBlocksFirstInTheUserTurn()
+    {
+        CharTokenizer chars = new();
+        VisionPlaceholderPrompt placeholders = new(chars);
+        string blocks = placeholders.Render([2, 3]);
+        Assert.Equal("Picture 1: <|vision_start|><|image_pad|><|image_pad|><|vision_end|>"
+            + "Picture 2: <|vision_start|><|image_pad|><|image_pad|><|image_pad|><|vision_end|>", blocks);
+        WeightedTokenSequence sequence = new MossImagePromptTokenizer(chars).Tokenize("make it blue", blocks, 5, placeholders.ImagePadId);
+        Assert.Equal(chars.Encode(Prefix + blocks + "make it blue" + Suffix, addSpecial: true), sequence.Tokens);
+        Assert.Equal(5, placeholders.CountPlaceholders(sequence.Tokens));
+        WeightedTokenSequence weighted = new MossImagePromptTokenizer(chars).Tokenize("make it (blue:1.3)", blocks, 5, placeholders.ImagePadId);
+        Assert.Equal(sequence.Tokens, weighted.Tokens);
+    }
+
+    [Fact]
+    public void Tokenize_EditPrompt_RefusesTruncationAndMiscountedPlaceholders()
+    {
+        CharTokenizer chars = new();
+        VisionPlaceholderPrompt placeholders = new(chars);
+        string blocks = placeholders.Render([4]);
+        Assert.Throws<ArgumentException>(() => new MossImagePromptTokenizer(chars, maxTokens: 20).Tokenize("x", blocks, 4, placeholders.ImagePadId));
+        Assert.Throws<InvalidDataException>(() => new MossImagePromptTokenizer(chars).Tokenize("x", blocks, 3, placeholders.ImagePadId));
+        Assert.Throws<InvalidDataException>(() => new VisionPlaceholderPrompt(new CharTokenizer(withVision: false)));
+    }
+
+    [Fact]
+    public void ReferencePolicy_DefaultsToTheOstrisBudgets_AndReadsTheExtras()
+    {
+        ReferenceImagePolicy defaults = MossImageRecipePipeline.ReferencePolicy(null);
+        Assert.Equal(3, defaults.MaxReferences);
+        Assert.Equal(1024 * 1024, defaults.LatentTargetArea);
+        Assert.Equal(384 * 384, defaults.VisionTargetArea);
+        Assert.False(defaults.LatentUpscale);
+        Assert.False(defaults.VisionUpscale);
+        Assert.Equal(ReferenceOverflow.Refuse, defaults.Overflow);
+        ReferenceImagePolicy custom = MossImageRecipePipeline.ReferencePolicy(new Dictionary<string, object>
+        {
+            [RequestExtras.ReferenceMaxPixels] = 0,
+            [RequestExtras.ReferenceVisionPixels] = "65536",
+        });
+        Assert.Equal(0, custom.LatentTargetArea);
+        Assert.Equal(65536, custom.VisionTargetArea);
+        Dictionary<string, object> off = new() { [RequestExtras.ReferenceKvCache] = "off" };
+        Assert.False(RequestExtras.Bool(off, RequestExtras.ReferenceKvCache, true));
+        Assert.True(RequestExtras.Bool(null, RequestExtras.ReferenceKvCache, true));
+    }
+
+    [Fact]
     public void SceneLayout_MatchesOpenMossCompiledFormat()
     {
         string layout = LayoutPromptBuilder.BuildSceneLayout("a poster <region:0.25,0.5,0.5,0.25> (a red \"cat\":1.2)", 1024, 1024);
@@ -153,7 +201,8 @@ public sealed class MossImageRecipeTests : IDisposable
         Assert.Equal(50, recipe!.Defaults.Steps);
         Assert.Equal(3f, recipe.Defaults.CfgScale);
         Assert.Equal(PromptWeightingMode.CondScale, recipe.PromptWeighting);
-        Assert.False(recipe.Supports.HasFlag(ImageFeatures.RefEdit));
+        Assert.True(recipe.Supports.HasFlag(ImageFeatures.RefEdit));
+        Assert.Equal(new ImageInputLimits(4, false, 3), recipe.InputLimits);
         Assert.NotEmpty(SamplingCapabilities.ForImage("moss-image").Samplers);
     }
 
@@ -174,11 +223,14 @@ public sealed class MossImageRecipeTests : IDisposable
 
     /// <summary>One id per UTF-16 unit, with Qwen3.5's three template specials matched first as the HF tokenizer
     /// matches its added tokens: enough to pin where the template and the weights land.</summary>
-    private sealed class CharTokenizer : ILlmTokenizer
+    private sealed class CharTokenizer(bool withVision = true) : ILlmTokenizer
     {
-        public const int ImStart = 100_000, ImEnd = 100_001, Think = 100_002;
+        public const int ImStart = 100_000, ImEnd = 100_001, Think = 100_002, VisionStart = 100_003, ImagePad = 100_004, VisionEnd = 100_005;
 
-        private static readonly (string Literal, int Id)[] Specials = [("<|im_start|>", ImStart), ("<|im_end|>", ImEnd), ("<think>", Think)];
+        private readonly (string Literal, int Id)[] Specials = withVision
+            ? [("<|im_start|>", ImStart), ("<|im_end|>", ImEnd), ("<think>", Think), ("<|vision_start|>", VisionStart),
+                ("<|image_pad|>", ImagePad), ("<|vision_end|>", VisionEnd)]
+            : [("<|im_start|>", ImStart), ("<|im_end|>", ImEnd), ("<think>", Think)];
 
         public int? BosId => null;
 

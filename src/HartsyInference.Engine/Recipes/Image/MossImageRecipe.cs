@@ -32,9 +32,15 @@ public sealed class MossImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Regional prompts become the model's own layout JSON (<see cref="LayoutPromptBuilder.BuildSceneLayout"/>)
-    /// rather than an attention bias. There is no reference-image path: OpenMOSS lists reference generation as future work.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional
+    /// rather than an attention bias. Reference images follow the Ostris / ai-toolkit edit layout, which edit LoRAs are
+    /// trained on (the base model ignores them otherwise); they need a Qwen3.5 encoder that carries its vision tower.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.Regional
         | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Three references, plus an init image that is denoised; an init image in Reference mode is one of the three.</remarks>
+    public ImageInputLimits InputLimits => new ImageInputLimits(MossImageConfig.MaxReferenceImages + 1, ReferencesRequireInitImage: false,
+        MaxReferences: MossImageConfig.MaxReferenceImages);
 
     /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: OpenMOSS's ComfyUI tokenizer passes
@@ -83,6 +89,7 @@ public sealed class MossImageRecipe : IArchitectureRecipe
             Qwen35TextEncoder encoder = Qwen35TextEncoder.Load(encoderPath, MossImageConfig.MaxTextTokens, "MOSS-Image");
             owned.Add(encoder);
             ILlmTokenizer tokenizer = ResolveTokenizer(encoder, encoderPath, root, context.Cancel);
+            VisionPlaceholderPrompt? placeholders = AttachVision(encoder, tokenizer, encoderPath, context.Components?.TextEncoderVision);
 
             string vaePath = ResolveVaePath(context, root);
             Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "MossImageRecipe");
@@ -95,8 +102,13 @@ public sealed class MossImageRecipe : IArchitectureRecipe
             };
             owned.Add(pipeline);
             Logs.Info($"[MossImageRecipe] {variant.Variant.DisplayName} ready (encoder {Path.GetFileName(Path.TrimEndingDirectorySeparator(encoderPath))}, "
-                + $"VAE {Path.GetFileName(vaePath)}).");
-            return new MossImageRecipePipeline(pipeline, new MossImagePromptTokenizer(tokenizer), config, variant, owned);
+                + $"VAE {Path.GetFileName(vaePath)}, reference images {(placeholders is null ? "unavailable (no vision tower)" : "on")}).");
+            return new MossImageRecipePipeline(pipeline, new MossImagePromptTokenizer(tokenizer), config, variant, owned)
+            {
+                ReferenceEncoder = placeholders is null ? null : encoder,
+                Placeholders = placeholders,
+                HasLora = loraStack is not null,
+            };
         }
         catch (Exception ex)
         {
@@ -104,6 +116,30 @@ public sealed class MossImageRecipe : IArchitectureRecipe
             new CompositeDisposable([.. Enumerable.Reverse(owned)]).Dispose();
             throw;
         }
+    }
+
+    /// <summary>Gives <paramref name="encoder"/> its Qwen3.5 vision tower for edits — from the encoder's own weights (the
+    /// Comfy-Org and HF files carry it), else <paramref name="overridePath"/> — and returns the placeholder renderer for
+    /// its tokenizer. Null leaves the model text-to-image only: OpenMOSS's own <c>text_encoder/</c> omits the tower.</summary>
+    private static VisionPlaceholderPrompt? AttachVision(Qwen35TextEncoder encoder, ILlmTokenizer tokenizer, string encoderPath, string? overridePath)
+    {
+        string? configJson = Directory.Exists(encoderPath) ? Path.Combine(encoderPath, HfCheckpointDirectory.ConfigFileName) : null;
+        Qwen35VisionTower? tower = Qwen35VisionTower.Resolve(encoder.SourceWeights, overridePath,
+            configJson is not null && File.Exists(configJson) ? configJson : null, "MOSS-Image");
+        if (tower is null)
+            return null;
+        encoder.AttachVision(tower);
+        foreach (string literal in VisionPlaceholderPrompt.RequiredLiterals)
+        {
+            if (tokenizer.SpecialId(literal) is null)
+            {
+                Logs.Warning($"[MossImageRecipe] The Qwen3.5 tokenizer has no '{literal}' token; reference images are unavailable.");
+                return null;
+            }
+        }
+        VisionPlaceholderPrompt placeholders = new(tokenizer);
+        encoder.ImageTokenId = placeholders.ImagePadId;
+        return placeholders;
     }
 
     /// <summary>The OpenMOSS pipeline folder <paramref name="checkpointPath"/> belongs to: the folder itself, or the one

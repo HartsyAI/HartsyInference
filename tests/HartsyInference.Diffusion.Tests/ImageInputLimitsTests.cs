@@ -105,6 +105,26 @@ public sealed class ImageInputLimitsTests
             + "(an init image in Reference mode counts as one).", violation);
     }
 
+    /// <summary>MOSS-Image edits take the Ostris node's three references, plus an init image that is denoised.</summary>
+    [Theory]
+    [InlineData(Img2ImgMode.Denoise, true, 3)]
+    [InlineData(Img2ImgMode.Reference, true, 2)]
+    [InlineData(Img2ImgMode.Reference, false, 3)]
+    public void MossImage_ThreeReferencesPlusADenoisedInit_Passes(Img2ImgMode mode, bool init, int references)
+    {
+        Assert.Null(LimitsOf("moss-image").Violation("moss-image", Request(init, references, mode)));
+    }
+
+    [Theory]
+    [InlineData(Img2ImgMode.Reference, true, 3, 4)]
+    [InlineData(Img2ImgMode.Auto, false, 4, 4)]
+    public void MossImage_PastThreeReferences_IsRefusedWithTheCount(Img2ImgMode mode, bool init, int references, int total)
+    {
+        string? violation = LimitsOf("moss-image").Violation("moss-image", Request(init, references, mode));
+        Assert.Equal($"Model family 'moss-image' conditions on at most 3 reference images; {total} were supplied "
+            + "(an init image in Reference mode counts as one).", violation);
+    }
+
     [Fact]
     public void ReferenceOnly_InitPlusReference_IsRefused()
     {

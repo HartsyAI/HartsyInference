@@ -54,6 +54,7 @@ anima	anima,rope	Stable-Diffusion/Anima/anima-preview3-base.safetensors	image|a 
 hidream	rope	Stable-Diffusion/HiDream/hidream_i1_dev_fp8.safetensors	image|a red apple on a wooden table|-m hidream --steps 20 --width 1024 --height 1024
 kandinsky5	rope	Stable-Diffusion/kandinsky-5-lite-1_0-kandinsky5-imglite-base-bf16.safetensors	image|a red apple on a wooden table|-m kandinsky5 --steps 20 --width 1024 --height 1024
 moss-image	rope	Stable-Diffusion/moss-image-base-1_0-moss-image-base-bf16.safetensors	image|a red apple on a wooden table|-m moss-image --steps 20 --width 512 --height 512
+moss-base	moss	Stable-Diffusion/moss-image-base-1_0-moss-image-base-bf16.safetensors	image|a red bicycle leaning on a white wall, photo|-m moss-image --steps 30 --width 1024 --height 1024 --cfg 3
 omnigen2	rope	Stable-Diffusion/omnigen-2-1_0-omnigen-2-base-fp16.safetensors	image|a red apple on a wooden table|-m omnigen2 --steps 20 --width 1024 --height 1024
 stableaudio	rope	audio/music/StableAudio/stableaudio-open-small_fp32.safetensors	music|lofi hip hop beat with mellow piano and soft drums|-m stableaudio --duration 10 --steps 8
 lumina2	rope	Stable-Diffusion/Lumina2/transformer/diffusion_pytorch_model-00001-of-00002.safetensors	image|a red apple on a wooden table|-m lumina2 --steps 20 --width 1024 --height 1024

@@ -74,7 +74,7 @@ public sealed class MossImageTextBlock(int hidden, int numHeads, int ffnHidden, 
         backend.QkvSplitNorm(q, k, v, qkv, _normQ.Weight, _normK.Weight, _eps);
         qkv.Dispose();
         backend.ApplyRope(q, k, cos, sin);
-        Tensor attn = MossImageAttention.Run(backend, q, k, v, seq, _numHeads, _headDim);
+        Tensor attn = TokenMajorAttention.Run(backend, q, k, v, seq, seq, _numHeads, _headDim);
         Tensor projected = new(flat, DType.F32);
         backend.Linear(projected, attn, _proj!, _projBias);
         attn.Dispose();

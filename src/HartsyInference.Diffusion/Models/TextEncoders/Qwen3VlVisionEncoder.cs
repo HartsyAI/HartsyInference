@@ -412,7 +412,10 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
             backend.Linear(fc1, grouped, _fc1W!, _fc1B);
             grouped.Dispose();
             Tensor act = new Tensor(new TensorShape(1, numMerged, _mergedDim), DType.F32);
-            backend.Gelu(act, fc1);
+            if (_c.MergerExactGelu)
+                backend.GeluErf(act, fc1);
+            else
+                backend.Gelu(act, fc1);
             fc1.Dispose();
             Tensor outp = new Tensor(new TensorShape(numMerged, _c.OutHiddenSize), DType.F32);
             Tensor outp3d = new Tensor(new TensorShape(1, numMerged, _c.OutHiddenSize), DType.F32);

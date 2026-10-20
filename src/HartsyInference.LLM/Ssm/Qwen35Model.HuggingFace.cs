@@ -80,6 +80,8 @@ public sealed unsafe partial class Qwen35Model
                 cfg.LinearKeyHeadDim, cfg.LinearValueHeadDim, cfg.LinearNumKeyHeads, cfg.LinearNumValueHeads, moe, maxSequenceLength);
             model._ownedTensors.AddRange(owned);
             model._headless = !cfg.TieWordEmbeddings && lmHeadKey is null;
+            model.MropeSection = cfg.MropeSection ?? DefaultMropeSection;
+            model.MropeInterleaved = cfg.MropeInterleaved;
             return model;
         }
         catch

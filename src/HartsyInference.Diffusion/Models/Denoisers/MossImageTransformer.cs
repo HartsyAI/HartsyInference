@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Requests;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -14,7 +15,12 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <para><see cref="ForwardBranches"/> runs a step's guidance branches (conditional, unconditional with its skipped
 /// layers, an optional skip-layer-guidance branch) together. When the latent is the transformer's fixed buffer (see
 /// <see cref="PrepareGraphLatent"/>) on a backend with step graphs, the whole branch set is captured once and replayed
-/// with a single launch per step; only the timestep modulation is computed outside the graph.</para></summary>
+/// with a single launch per step; only the timestep modulation is computed outside the graph.</para>
+///
+/// <para>Edits (the Ostris / ai-toolkit edit layout) add reference images as packed latent tokens through the same
+/// <c>video_embedder</c>, on RoPE index <c>i + 1</c> at timestep zero. They either ride in the sequence after the text
+/// (<see cref="ReferenceAttentionMode.Joint"/>) or run once in a prepass whose per-block keys and values every step
+/// appends (<see cref="ReferenceAttentionMode.CachedKv"/>, built by <see cref="EnsureReferenceCaches"/>).</para></summary>
 public sealed class MossImageTransformer : IDisposable
 {
     private readonly MossImageConfig _config;
@@ -27,7 +33,7 @@ public sealed class MossImageTransformer : IDisposable
     private Tensor? _blockModulation, _blockModulationBias;
     private Tensor? _headModulation, _headModulationBias;
     private Tensor? _finalNorm, _finalLinear;
-    private Tensor? _latentFixed, _blockRowsFixed, _headRowsFixed;
+    private Tensor? _latentFixed, _blockRowsFixed, _headRowsFixed, _zeroBlockRowsFixed, _zeroHeadRowsFixed;
     private Tensor[] _velocityFixed = [];
     private bool _hasBlockQuantizedWeights;
     private int _disposed;
@@ -92,8 +98,12 @@ public sealed class MossImageTransformer : IDisposable
     }
 
     /// <summary>Runs the text projection and refiner over one prompt's Qwen3.5 features <c>[1, L, textDim]</c> and builds
-    /// the RoPE tables for an <paramref name="hPacked"/>×<paramref name="wPacked"/> token grid.</summary>
-    public unsafe MossImageConditioning PrepareConditioning(IBackend backend, Tensor textFeatures, int hPacked, int wPacked)
+    /// the RoPE tables for an <paramref name="hPacked"/>×<paramref name="wPacked"/> token grid. With
+    /// <paramref name="references"/> (an edit, at most <see cref="MossImageConfig.MaxReferenceImages"/>), each reference's
+    /// packed tokens go through <c>video_embedder</c> and are laid out for <paramref name="mode"/>: appended after the text
+    /// at timestep zero (joint), or kept for a prepass whose keys and values every step appends (cached).</summary>
+    public unsafe MossImageConditioning PrepareConditioning(IBackend backend, Tensor textFeatures, int hPacked, int wPacked,
+        IReadOnlyList<ReferenceLatentTokens>? references = null, ReferenceAttentionMode mode = ReferenceAttentionMode.CachedKv)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(textFeatures);
@@ -102,6 +112,15 @@ public sealed class MossImageTransformer : IDisposable
             throw new ArgumentException($"MOSS-Image text features must be [1, L >= 1, {_config.TextDim}], got {textFeatures.Shape}.", nameof(textFeatures));
         if (hPacked < 1 || wPacked < 1)
             throw new ArgumentOutOfRangeException(nameof(hPacked), $"MOSS-Image needs a positive token grid, got {hPacked}x{wPacked}.");
+        if (references is { Count: > MossImageConfig.MaxReferenceImages })
+        {
+            throw new ArgumentException($"MOSS-Image conditions on at most {MossImageConfig.MaxReferenceImages} reference images, "
+                + $"got {references.Count}.", nameof(references));
+        }
+        if (references is not null)
+        {
+            foreach (ReferenceLatentTokens reference in references) reference.Validate(_config.LatentChannels, "MOSS-Image");
+        }
         int length = (int)textFeatures.Shape[1];
         Tensor text = new(new TensorShape(1, length, _config.HiddenSize), DType.F32);
         (Tensor textCos, Tensor textSin) = MossImageRope.Text(length, _config.HeadDim, _config.RopeBase);
@@ -127,8 +146,91 @@ public sealed class MossImageTransformer : IDisposable
             textCos.Dispose();
             textSin.Dispose();
         }
-        (Tensor cos, Tensor sin) = MossImageRope.Joint(hPacked, wPacked, length, _config.HeadDim, _config.RopeBase);
-        return new MossImageConditioning(backend, text, cos, sin, hPacked, wPacked);
+        if (references is not { Count: > 0 })
+        {
+            (Tensor cos, Tensor sin) = MossImageRope.Joint(hPacked, wPacked, length, _config.HeadDim, _config.RopeBase);
+            return new MossImageConditioning(backend, text, cos, sin, hPacked, wPacked);
+        }
+        return PrepareReferences(backend, text, hPacked, wPacked, references, mode);
+    }
+
+    /// <summary>The edit half of <see cref="PrepareConditioning"/>; takes ownership of <paramref name="text"/>.</summary>
+    private unsafe MossImageConditioning PrepareReferences(IBackend backend, Tensor text, int hPacked, int wPacked,
+        IReadOnlyList<ReferenceLatentTokens> references, ReferenceAttentionMode mode)
+    {
+        int length = (int)text.Shape[1];
+        (int Height, int Width)[] grids = new (int, int)[references.Count];
+        Tensor[] parts = new Tensor[references.Count];
+        int tokens = 0;
+        for (int i = 0; i < references.Count; i++)
+        {
+            grids[i] = (references[i].Height, references[i].Width);
+            parts[i] = references[i].Tokens;
+            tokens += references[i].TokenCount;
+        }
+        Tensor? packed = null, embedded = null, cos = null, sin = null, refCos = null, refSin = null;
+        TokenSegmentLayout? layout = null;
+        MossImageReferenceState? state = null;
+        try
+        {
+            packed = new Tensor(new TensorShape(1, tokens, _config.LatentChannels), DType.F32);
+            backend.Concat(packed, parts, 1);
+            embedded = new Tensor(new TensorShape(1, tokens, _config.HiddenSize), DType.F32);
+            backend.Linear(embedded, packed, _videoEmbed!, _videoEmbedBias);
+            packed.Dispose();
+            packed = null;
+            // Host copy first, as for the text: the tokens outlive the activation sweeps between steps.
+            _ = embedded.DataPointer;
+            if (mode == ReferenceAttentionMode.Joint)
+            {
+                (cos, sin) = MossImageRope.Joint(hPacked, wPacked, length, grids, _config.HeadDim, _config.RopeBase);
+                layout = new TokenSegmentLayout([hPacked * wPacked + length, tokens], [0, 1]);
+            }
+            else
+            {
+                (cos, sin) = MossImageRope.Joint(hPacked, wPacked, length, _config.HeadDim, _config.RopeBase);
+                (refCos, refSin) = MossImageRope.References(grids, length, _config.HeadDim, _config.RopeBase);
+            }
+            state = new MossImageReferenceState(backend, mode, grids, embedded, refCos, refSin, layout);
+            return new MossImageConditioning(backend, text, cos, sin, hPacked, wPacked, state);
+        }
+        catch
+        {
+            if (state is not null)
+            {
+                state.Dispose();
+            }
+            else
+            {
+                embedded?.Dispose();
+                refCos?.Dispose();
+                refSin?.Dispose();
+                layout?.Dispose();
+            }
+            packed?.Dispose();
+            cos?.Dispose();
+            sin?.Dispose();
+            text.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Builds every reference key/value cache <paramref name="branches"/> will read that does not exist yet: one
+    /// prepass per conditioning and skipped-layer set. The step graph never captures a prepass, so this runs first.</summary>
+    public void EnsureReferenceCaches(IBackend backend, IReadOnlyList<MossImageBranch> branches)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(branches);
+        foreach (MossImageBranch branch in branches)
+        {
+            MossImageReferenceState? references = branch.Conditioning.References;
+            if (references is not { Mode: ReferenceAttentionMode.CachedKv })
+                continue;
+            UInt128 key = SkipKey(branch.SkipLayers);
+            if (references.TryGetCache(key, out _))
+                continue;
+            references.AddCache(key, BuildReferenceCache(backend, branch.Conditioning, branch.SkipLayers));
+        }
     }
 
     /// <summary>Predicts the flow velocity <c>[1, H·W, C]</c> for the packed latent <c>[1, H·W, C]</c> at
@@ -138,9 +240,15 @@ public sealed class MossImageTransformer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ValidateLatent(packedLatent, conditioning);
+        IReadOnlyCollection<int> skip = skipLayers ?? [];
+        EnsureReferenceCaches(backend, [new MossImageBranch(conditioning, skip)]);
         using TimeRows time = ComputeTimeRows(backend, timestep);
         using MossImageModulation modulation = MossImageModulation.Split(backend, time.Block, time.Head, _config.HiddenSize);
-        return ForwardCore(backend, packedLatent, conditioning, modulation, skipLayers ?? []);
+        if (conditioning.References is not { Mode: ReferenceAttentionMode.Joint })
+            return ForwardCore(backend, packedLatent, conditioning, modulation, null, skip);
+        using TimeRows zero = ComputeTimeRows(backend, 0f);
+        using MossImageModulation zeroModulation = MossImageModulation.Split(backend, zero.Block, zero.Head, _config.HiddenSize);
+        return ForwardCore(backend, packedLatent, conditioning, modulation, zeroModulation, skip);
     }
 
     /// <summary>Runs every branch of one step at <paramref name="timestep"/>, sharing its modulation. When the latent is
@@ -155,16 +263,22 @@ public sealed class MossImageTransformer : IDisposable
         if (branches.Count == 0)
             throw new ArgumentException("A MOSS-Image step needs at least one branch.", nameof(branches));
         foreach (MossImageBranch branch in branches) ValidateLatent(packedLatent, branch.Conditioning);
+        EnsureReferenceCaches(backend, branches);
+        bool joint = false;
+        foreach (MossImageBranch branch in branches) joint |= branch.Conditioning.References is { Mode: ReferenceAttentionMode.Joint };
 
         using TimeRows time = ComputeTimeRows(backend, timestep);
+        using TimeRows? zero = joint ? ComputeTimeRows(backend, 0f) : null;
         if (!UseGraph(backend, packedLatent))
         {
             using MossImageModulation modulation = MossImageModulation.Split(backend, time.Block, time.Head, _config.HiddenSize);
+            using MossImageModulation? zeroModulation = zero is TimeRows z
+                ? MossImageModulation.Split(backend, z.Block, z.Head, _config.HiddenSize) : null;
             Tensor[] eager = new Tensor[branches.Count];
             try
             {
                 for (int i = 0; i < branches.Count; i++)
-                    eager[i] = ForwardCore(backend, packedLatent, branches[i].Conditioning, modulation, branches[i].SkipLayers);
+                    eager[i] = ForwardCore(backend, packedLatent, branches[i].Conditioning, modulation, zeroModulation, branches[i].SkipLayers);
             }
             catch
             {
@@ -178,13 +292,23 @@ public sealed class MossImageTransformer : IDisposable
         _headRowsFixed ??= new Tensor(time.Head.Shape, DType.F32);
         backend.CopyInto(_blockRowsFixed, time.Block);
         backend.CopyInto(_headRowsFixed, time.Head);
+        if (zero is TimeRows zeroRows)
+        {
+            _zeroBlockRowsFixed ??= new Tensor(zeroRows.Block.Shape, DType.F32);
+            _zeroHeadRowsFixed ??= new Tensor(zeroRows.Head.Shape, DType.F32);
+            backend.CopyInto(_zeroBlockRowsFixed, zeroRows.Block);
+            backend.CopyInto(_zeroHeadRowsFixed, zeroRows.Head);
+        }
         EnsureVelocityBuffers(branches.Count, packedLatent.Shape);
         _graph.Run(backend, this, BranchSignature(branches), trimBeforeCapture: _hasBlockQuantizedWeights, step: () =>
         {
             using MossImageModulation modulation = MossImageModulation.Split(backend, _blockRowsFixed, _headRowsFixed, _config.HiddenSize);
+            using MossImageModulation? zeroModulation = joint
+                ? MossImageModulation.Split(backend, _zeroBlockRowsFixed!, _zeroHeadRowsFixed!, _config.HiddenSize) : null;
             for (int i = 0; i < branches.Count; i++)
             {
-                using Tensor velocity = ForwardCore(backend, packedLatent, branches[i].Conditioning, modulation, branches[i].SkipLayers);
+                using Tensor velocity = ForwardCore(backend, packedLatent, branches[i].Conditioning, modulation, zeroModulation,
+                    branches[i].SkipLayers);
                 backend.CopyInto(_velocityFixed[i], velocity);
             }
         });
@@ -243,28 +367,55 @@ public sealed class MossImageTransformer : IDisposable
     private bool UseGraph(IBackend backend, Tensor packedLatent) =>
         ReferenceEquals(packedLatent, _latentFixed) && GraphEligible(backend);
 
+    /// <summary>One branch's velocity. Plain generation runs <c>[image ; text]</c>; cached references append their keys and
+    /// values in every block; joint references ride as a third segment under <paramref name="zeroModulation"/>.</summary>
     private Tensor ForwardCore(IBackend backend, Tensor packedLatent, MossImageConditioning conditioning, MossImageModulation modulation,
-        IReadOnlyCollection<int> skipLayers)
+        MossImageModulation? zeroModulation, IReadOnlyCollection<int> skipLayers)
     {
         int imageTokens = conditioning.Height * conditioning.Width;
         DType act = backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
+        MossImageReferenceState? references = conditioning.References;
+        bool joint = references is { Mode: ReferenceAttentionMode.Joint };
+        ReferenceKvCache? cache = null;
+        if (references is { Mode: ReferenceAttentionMode.CachedKv } && !references.TryGetCache(SkipKey(skipLayers), out cache))
+            throw new InvalidOperationException("MOSS-Image reference caches must be built before the step (EnsureReferenceCaches).");
+        if (joint && zeroModulation is null)
+            throw new ArgumentNullException(nameof(zeroModulation), "Joint MOSS-Image references need the timestep-zero modulation.");
         Tensor? video = null;
         Tensor? x = null;
         Tensor? image = null;
         Tensor? head = null;
+        SegmentModulation? attention = null;
+        SegmentModulation? ffn = null;
         try
         {
             video = new Tensor(new TensorShape(1, imageTokens, _config.HiddenSize), DType.F32);
             backend.Linear(video, packedLatent, _videoEmbed!, _videoEmbedBias);
-            x = new Tensor(new TensorShape(1, imageTokens + conditioning.TextLength, _config.HiddenSize), DType.F32);
-            backend.Concat(x, [video, conditioning.Text], 1);
+            if (joint)
+            {
+                x = new Tensor(new TensorShape(1, imageTokens + conditioning.TextLength + references!.TokenCount, _config.HiddenSize), DType.F32);
+                backend.Concat(x, [video, conditioning.Text, references.Embedded], 1);
+                attention = SegmentModulation.Build(backend,
+                    [(modulation.ShiftAttn, modulation.ScaleAttn, modulation.GateAttn),
+                        (zeroModulation!.ShiftAttn, zeroModulation.ScaleAttn, zeroModulation.GateAttn)], references.Layout!);
+                ffn = SegmentModulation.Build(backend,
+                    [(modulation.ShiftFfn, modulation.ScaleFfn, modulation.GateFfn),
+                        (zeroModulation.ShiftFfn, zeroModulation.ScaleFfn, zeroModulation.GateFfn)], references.Layout!);
+            }
+            else
+            {
+                x = new Tensor(new TensorShape(1, imageTokens + conditioning.TextLength, _config.HiddenSize), DType.F32);
+                backend.Concat(x, [video, conditioning.Text], 1);
+            }
             video.Dispose();
             video = null;
             for (int i = 0; i < _blocks.Length; i++)
             {
                 if (skipLayers.Contains(i))
                     continue;
-                Tensor next = _blocks[i].Forward(backend, x, modulation, conditioning.Cos, conditioning.Sin, act);
+                Tensor next = joint
+                    ? _blocks[i].ForwardSegmented(backend, x, attention!, ffn!, conditioning.Cos, conditioning.Sin, act)
+                    : _blocks[i].Forward(backend, x, modulation, conditioning.Cos, conditioning.Sin, act, cache?.Keys(i), cache?.Values(i));
                 x.Dispose();
                 x = next;
             }
@@ -284,7 +435,71 @@ public sealed class MossImageTransformer : IDisposable
             x?.Dispose();
             image?.Dispose();
             head?.Dispose();
+            attention?.Dispose();
+            ffn?.Dispose();
         }
+    }
+
+    /// <summary>The reference prepass for one conditioning and skipped-layer set: the reference tokens alone, at timestep
+    /// zero, through every block not in <paramref name="skipLayers"/>, recording each block's keys and values.</summary>
+    private ReferenceKvCache BuildReferenceCache(IBackend backend, MossImageConditioning conditioning, IReadOnlyCollection<int> skipLayers)
+    {
+        MossImageReferenceState references = conditioning.References!;
+        DType act = backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
+        using TimeRows zero = ComputeTimeRows(backend, 0f);
+        using MossImageModulation modulation = MossImageModulation.Split(backend, zero.Block, zero.Head, _config.HiddenSize);
+        using ReferenceKvCache.Builder builder = new(_blocks.Length);
+        Tensor stream = references.Embedded;
+        bool ownsStream = false;
+        try
+        {
+            for (int i = 0; i < _blocks.Length; i++)
+            {
+                if (skipLayers.Contains(i))
+                    continue;
+                Tensor next = _blocks[i].ForwardPrefix(backend, stream, modulation, references.Cos!, references.Sin!, act,
+                    out Tensor keys, out Tensor values);
+                try
+                {
+                    builder.Set(i, keys, values);
+                }
+                catch
+                {
+                    keys.Dispose();
+                    values.Dispose();
+                    next.Dispose();
+                    throw;
+                }
+                if (ownsStream)
+                    stream.Dispose();
+                stream = next;
+                ownsStream = true;
+            }
+        }
+        finally
+        {
+            if (ownsStream)
+                stream.Dispose();
+        }
+        HashCode fingerprint = new();
+        fingerprint.Add(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(conditioning));
+        fingerprint.Add(conditioning.TextLength);
+        fingerprint.Add(references.TokenCount);
+        fingerprint.Add(SkipKey(skipLayers));
+        return builder.Build(backend, fingerprint.ToHashCode(), "MOSS-Image");
+    }
+
+    /// <summary>A skipped-layer set as a bitmask: exact and order-independent, so two sets never share a cache.</summary>
+    private static UInt128 SkipKey(IReadOnlyCollection<int> skipLayers)
+    {
+        UInt128 mask = 0;
+        foreach (int layer in skipLayers)
+        {
+            if ((uint)layer >= 128)
+                throw new ArgumentOutOfRangeException(nameof(skipLayers), layer, "MOSS-Image skip layers must be below 128.");
+            mask |= UInt128.One << layer;
+        }
+        return mask;
     }
 
     /// <summary>The step's <c>shared_block_modulation</c> and <c>video_head_modulation</c> rows. The sinusoid is built
@@ -336,8 +551,8 @@ public sealed class MossImageTransformer : IDisposable
         _velocityFixed = [];
     }
 
-    /// <summary>Identity of a branch set: each conditioning's identity and grid plus its skipped layers. Any change in
-    /// it changes the captured op sequence.</summary>
+    /// <summary>Identity of a branch set: each conditioning's identity and grid, its skipped layers, and the reference
+    /// layout and cache it reads. Any change in it changes the captured op sequence or the addresses it bakes.</summary>
     private static long BranchSignature(IReadOnlyList<MossImageBranch> branches)
     {
         HashCode hash = new();
@@ -347,6 +562,16 @@ public sealed class MossImageTransformer : IDisposable
             hash.Add(branch.Conditioning.Height);
             hash.Add(branch.Conditioning.Width);
             foreach (int layer in branch.SkipLayers.Order()) hash.Add(layer);
+            if (branch.Conditioning.References is MossImageReferenceState references)
+            {
+                hash.Add((int)references.Mode);
+                hash.Add(references.TokenCount);
+                if (references.TryGetCache(SkipKey(branch.SkipLayers), out ReferenceKvCache? cache))
+                {
+                    hash.Add(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(cache!));
+                    hash.Add(cache!.Fingerprint);
+                }
+            }
             hash.Add(-1);
         }
         return hash.ToHashCode();
@@ -362,6 +587,8 @@ public sealed class MossImageTransformer : IDisposable
         _latentFixed?.Dispose();
         _blockRowsFixed?.Dispose();
         _headRowsFixed?.Dispose();
+        _zeroBlockRowsFixed?.Dispose();
+        _zeroHeadRowsFixed?.Dispose();
         DisposeVelocityBuffers();
     }
 

@@ -6,8 +6,32 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## Unreleased
+## alpha.382
 
+- **Added: MOSS-Image reference-image edits, in the layout ai-toolkit's MOSS-Image edit LoRAs are trained on** (Ostris's
+  `ComfyUI-MOSS-Image-Ostris-Edit`). Up to three references, from `ReferenceImages` and an init image in Reference mode,
+  go to Qwen3.5's vision tower behind `Picture N:` blocks in both prompts and to the DiT as reference tokens (the same
+  `video_embedder`, RoPE index `i + 1`, timestep-zero modulation). Attention defaults to cached keys and values
+  (ai-toolkit's `kv_cache`); `reference.kv_cache=false` / `--reference-kv-cache off` runs the joint layout for a LoRA
+  trained without it. `reference.max_pixels` and `reference.vision_pixels` set the two copies' budgets. The encoder must
+  carry its vision tower (Comfy-Org's `qwen3.5_9b_*` files do; `--vision-encoder` supplies one otherwise). Verified:
+  tiny-config parity against the numpy transcription, extended with both edit layouts (CPU maxAbs at most 7.7e-7,
+  Vulkan on an RTX 2060 SUPER including step-graph replay), and a synthetic end-to-end edit through the pipeline. Not
+  verified: real weights, a real edit LoRA (none was public), CUDA, and the Ostris node itself.
+- **Added: Qwen3.5 text-encoder image input.** `Qwen35TextEncoder` implements the new `IMultimodalFinalHiddenStateEncoder`:
+  a `Qwen35VisionTower` (the Qwen3-VL ViT without deepstack, exact-GELU merger) from the encoder's own weights or a
+  separate file, image tokens spliced over the placeholders, and interleaved multimodal RoPE on the full-attention
+  layers (`mrope_section` from the config or GGUF, default 11/11/10). Matches transformers' `Qwen3_5Model` on a tiny
+  checkpoint (maxAbs 3.7e-5); the text-only path is unchanged (9.1e-6 against the same reference).
+- **Added: shared building blocks for in-context references and multimodal prompts.** `TokenSegmentLayout` and
+  `SegmentModulation` (per-segment adaLN through the row-indexed ops), `ReferenceKvCache`, `TokenMajorAttention` with
+  separate query and key lengths (replaces `MossImageAttention`), `Flux2ReferenceEncoder`, `ReferenceCachePolicy`;
+  `Core.Rope` `MRopePositions`, `MRopePairAxes` and `MRopeTable`; `VisionPlaceholderPrompt` and `VisionTokenSplice`;
+  `ReferenceImageResolver` with a `ReferenceImagePolicy`.
+- **Changed: Qwen-Image edit prepares its references through `ReferenceImageResolver`.** Same order, sizes and drop
+  rule; its tests are unchanged.
+- **Added: `hartsy image --vae`, `--text-encoder` and `--vision-encoder`** component overrides, and MOSS-Image LoRAs
+  also load under the underscored `lora_transformer_` and `lora_diffusion_model_` spellings.
 - **Fixed: every CUDA kernel rebuilds with the compiler its shipped PTX came from.** `CudaKernelDriftTests` failed on main with 13
   kernels changed, but 11 were current CUDA 13.0.88 nvcc builds that the test had rebuilt with nvrtc, which stamps the same toolchain
   line. A domain's `NVCC_BUILT` list now names its nvcc-built kernels: `build.sh` builds those only with that nvcc (`HARTSY_NVCC`, PATH,

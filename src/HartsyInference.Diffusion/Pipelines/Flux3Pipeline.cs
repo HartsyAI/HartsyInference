@@ -299,6 +299,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
     /// <summary>VAE-encodes each reference and concatenates their packed tokens in order.</summary>
     private (Tensor? Tokens, List<(int Height, int Width)> Shapes) EncodeReferences(IReadOnlyList<Tensor>? images)
     {
+        // TODO(reference-segments): build on Flux2ReferenceEncoder.Encode and concatenate its tokens.
         List<(int Height, int Width)> shapes = [];
         if (images is not { Count: > 0 })
             return (null, shapes);

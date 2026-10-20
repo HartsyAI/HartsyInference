@@ -72,7 +72,8 @@ public static class RecipeCacheKey
                 .Append(components.AudioVae).Append('|').Append(components.T5Xxl).Append('|')
                 .Append(components.ClipL).Append('|').Append(components.ClipG).Append('|')
                 .Append(components.ClipVision).Append('|').Append(components.Qwen).Append('|')
-                .Append(components.Llama).Append('|').Append(components.Gemma).Append(';');
+                .Append(components.Llama).Append('|').Append(components.Gemma).Append('|')
+                .Append(components.TextEncoderVision).Append(';');
         }
         return builder.ToString();
     }

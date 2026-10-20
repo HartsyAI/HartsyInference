@@ -78,6 +78,8 @@ Desktop.ini
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyStyle/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Flux3/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/MossImage/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/encoder/*.safetensors
 *.gguf
 *.ckpt
 *.pt
