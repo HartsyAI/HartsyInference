@@ -16,5 +16,6 @@ void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
     float x = inp[i];
-    outp[i] = float16_t(x > 65504.0 ? 65504.0 : (x < -65504.0 ? -65504.0 : x));
+    bool nan = (floatBitsToUint(x) & 0x7fffffffu) > 0x7f800000u;   // on the bits: a folded min/max would drop the NaN
+    outp[i] = float16_t(nan ? x : clamp(x, -65504.0, 65504.0));
 }

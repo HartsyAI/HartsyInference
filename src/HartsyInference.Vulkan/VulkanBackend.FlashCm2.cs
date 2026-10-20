@@ -103,6 +103,25 @@ public sealed partial class VulkanBackend
     private void AttendTokenMajorViaHeadMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int kvHeads, int headDim, int sq, int skv, float scale, bool allowF16)
     {
+        if (query.DType == DType.BF16 || key.DType == DType.BF16 || value.DType == DType.BF16 || output.DType == DType.BF16)
+        {
+            // The permutes have no BF16 kernel, and BF16 has more range than F16: permute F32 copies and compute in F32.
+            Tensor q32 = F32Copy(query), k32 = F32Copy(key), v32 = F32Copy(value);
+            Tensor o32 = output.DType == DType.F32 ? output : new Tensor(output.Shape, DType.F32);
+            try
+            {
+                AttendTokenMajorViaHeadMajor(o32, q32, k32, v32, mask, heads, kvHeads, headDim, sq, skv, scale, allowF16: false);
+                if (!ReferenceEquals(o32, output)) CastToBf16(output, o32);
+            }
+            finally
+            {
+                if (!ReferenceEquals(q32, query)) q32.Dispose();
+                if (!ReferenceEquals(k32, key)) k32.Dispose();
+                if (!ReferenceEquals(v32, value)) v32.Dispose();
+                if (!ReferenceEquals(o32, output)) o32.Dispose();
+            }
+            return;
+        }
         TensorShape qShape = new TensorShape(1, heads, sq, headDim);
         TensorShape kvShape = new TensorShape(1, kvHeads, skv, headDim);
         using Tensor qMh = new Tensor(qShape, query.DType);
@@ -114,6 +133,17 @@ public sealed partial class VulkanBackend
         Permute0213(vMh, value, skv, kvHeads, headDim);
         ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, allowF16);
         Permute0213(output, attnMh, heads, sq, headDim);
+    }
+
+    /// <summary><paramref name="t"/> itself when it is F32, else an F32 copy the caller disposes.</summary>
+    private Tensor F32Copy(Tensor t)
+    {
+        if (t.DType == DType.F32) return t;
+        (_, VulkanBuffer? owned) = CastIfNeeded(t, GetBuffer(t), DType.F32);
+        if (owned is null) return t.CastTo(DType.F32);   // a preloaded weight's cast belongs to the weight-cast cache
+        Tensor copy = new Tensor(t.Shape, DType.F32);
+        CacheOutput(copy, owned);
+        return copy;
     }
 
     /// <summary>Whether the cooperative-matrix-2 kernel serves this shape.</summary>

@@ -52,9 +52,11 @@ void main() {
     uint srcIdx = (h * pc.tNew + t) * pc.headDim + d;
     uint dstIdx = (h * pc.maxSeq + (pc.offset + t)) * pc.headDim + d;
 #if SRC_F32 == 1
-    // Saturated to the F16 range as CUDA's kv_half_sat is; a NaN stays NaN.
+    // Saturated to the F16 range as CUDA's kv_half_sat is; a NaN stays NaN. The NaN test is on the bits because the
+    // driver may fold float compares into min/max, which return the other operand for a NaN.
     float x = new_data[srcIdx];
-    buf_data[dstIdx] = float16_t(x > 65504.0 ? 65504.0 : (x < -65504.0 ? -65504.0 : x));
+    bool nan = (floatBitsToUint(x) & 0x7fffffffu) > 0x7f800000u;
+    buf_data[dstIdx] = float16_t(nan ? x : clamp(x, -65504.0, 65504.0));
 #else
     buf_data[dstIdx] = new_data[srcIdx];
 #endif
