@@ -1,22 +1,24 @@
 # MOSS-Image edit GPU handoff
 
-State: MOSS-Image reference-image edits (the Ostris / ai-toolkit edit-LoRA layout) are built on branch
-`claude/moss-image-edit`, PR HartsyAI/HartsyInference#458, alpha.381. The DiT side, the Qwen3.5 image input and the engine wiring are verified on the CPU, and the DiT side also on Vulkan (RTX 2060 SUPER), all with tiny
-fixtures against float64 / transformers references. **Nothing has run on real weights or on CUDA; do not claim
+State: MOSS-Image reference-image edits (the Ostris / ai-toolkit edit-LoRA layout) are on `main` since
+PR HartsyAI/HartsyInference#458 (alpha.382). The DiT side, the Qwen3.5 image input and the engine wiring are
+verified on the CPU, and the DiT side also on Vulkan (RTX 2060 SUPER), all with tiny fixtures against float64 / transformers references. **Nothing has run on real weights or on CUDA; do not claim
 parity.** Contract, layouts and divergences: [MOSS_IMAGE_ARCHITECTURE.md](MOSS_IMAGE_ARCHITECTURE.md#reference-images-edits).
 Upstream: `github.com/ostris/ComfyUI-MOSS-Image-Ostris-Edit` (`nodes.py`) and ai-toolkit
 `extensions_built_in/diffusion_models/moss_image/src/{transformer,pipeline}.py`.
 
 Your job, in order: the CUDA test suites, the first real text-to-image run, the real edit runs, the no-reference A/B,
-then record everything and push it to the PR. Run one GPU job at a time.
+then record everything in a follow-up PR (with fixes if anything breaks). Run one GPU job at a time.
 
 ## 0. Setup
-1. `git fetch && git switch claude/moss-image-edit`. Read `AGENTS.md`, `docs/CODE_STYLE.md`, `docs/Agents/AGENTS.md`.
+1. `git fetch && git switch -c claude/moss-edit-real-weights origin/main`, push it, and open a draft PR early.
+   Read `AGENTS.md`, `docs/CODE_STYLE.md`, `docs/Agents/AGENTS.md`.
 2. Weights (Comfy-Org `MOSS-Image` repack, single files). Find them first:
    `ls -R <models root> | grep -iE "moss_image|qwen3.5_9b|flux2-vae"`. The models root is the `HARTSYINFERENCE_MODELS`
    override, else `<repo>/Models` (`src/HartsyInference.Engine/RepoPaths.cs`); `tests/regression-ab.sh` uses
    `$HARTSY_MODELS_ROOT`, default `/mnt/model-storage/Models`. Needed:
-   - DiT: `diffusion_models/moss_image_base_bf16.safetensors` (SFT also fine; int8 ConvRot loads too).
+   - DiT: `diffusion_models/moss_image_base_bf16.safetensors` (SFT also fine; int8 ConvRot loads too). Main's RoPE A/B
+     ran it from `Stable-Diffusion/moss-image-base-1_0-moss-image-base-bf16.safetensors` under the models root.
    - Encoder: `text_encoders/qwen3.5_9b_bf16.safetensors`. It is also the recipe's fallback side model under the
      target name `text_encoders/qwen35_9b_bf16.safetensors` (sha256 `7e6e9f08…`). Symlink it to that name, or pass
      `--text-encoder`; with neither, the recipe downloads 19 GB.
@@ -40,11 +42,11 @@ dotnet test tests/HartsyInference.Core.Tests --filter "FullyQualifiedName~MRopeT
 - the row-indexed affine/gate kernels under graph capture (joint mode);
 - pinned reference caches across replays.
 
-Then the CPU lane (filter in `docs/CODE_STYLE.md`). Known failure on the dev box, not caused by this branch:
-`EngineReleaseDeviceGateTests.FreeMemory_WaitsForAnAudioJobOnTheDevice_BeforeReleasingDeviceMemory`. Check whether it
-also fails here.
+Then the CPU lane (filter in `docs/CODE_STYLE.md`). On the sm_75 dev box
+`BackendSelectorTests.Resolve_Auto_Prefers_Cuda_Then_Vulkan_Then_Cpu` fails because `auto` passes over Turing to
+Vulkan; it should pass on the 4090. Record any failure by name.
 
-## 2. First real text-to-image run (MOSS has never run on real weights)
+## 2. Real text-to-image run (MOSS ran on the 4090 in main's RoPE A/B, never with references)
 ```
 dotnet /tmp/hartsy-cli/HartsyInference.Cli.dll image "a red bicycle leaning on a white wall, photo" -m moss-image \
   --model-path <dit> --text-encoder <encoder> --vae <vae> -b cuda --width 1024 --height 1024 --steps 30 --cfg 3 --seed 7 \
@@ -72,9 +74,14 @@ Check in the logs:
 Record each run's wall clock, per-step ms and peak VRAM (`nvidia-smi --query-gpu=memory.used -lms 500`).
 
 Without an edit LoRA the base model is not trained to follow references. Expect a coherent image, not a faithful edit.
-That proves the mechanics only, so say so. If an ai-toolkit MOSS edit LoRA is available (none was public on
-2026-10-19), run 1–3 again with `--lora <file> --lora-weight 1.0`, using cached mode unless the LoRA was trained with
-`kv_cache: false`.
+That proves the mechanics only, so say so. If an ai-toolkit MOSS edit LoRA is available, run 1–3 again with
+`--lora <file> --lora-weight 1.0`, using cached mode unless the LoRA was trained with `kv_cache: false`. On 2026-10-20
+none was public on Hugging Face or Civitai (search `moss` LoRAs and `ostris` models again first).
+
+`sorryhyun/moss-image-colorize` is reference-conditioned but trained on a different layout, so it is not a test of
+this path. It puts the reference before the text (`[image | ref | text]`), gives it the live timestep, stretches its
+RoPE `(h, w)` onto the target grid, sends the vision copy at the target's pixel count without `Picture N:` labels, and
+leaves the image out of the negative prompt. Supporting it is a separate reference profile on the same shared blocks.
 
 Triage if an edit fails or looks broken:
 - Cached fails, joint works: the cache path (`ReferenceKvCache`, `MossImageBlock.ForwardPrefix`, `TokenMajorAttention`
@@ -88,11 +95,12 @@ Triage if an edit fails or looks broken:
 - Shape and cache-size math is in `MossImageReferenceState` and `MossImageTransformer.PrepareReferences`.
 
 ## 4. No-reference A/B (identical expected)
-Plain generation must be bit-identical to `origin/main`. The edit work rerouted the block forward, attention and
+Plain generation must be bit-identical to main before #458. The edit work rerouted the block forward, attention and
 conditioning through new overloads that issue the same ops. `tests/regression-cases.sh` has a `moss-base` row (tag
-`moss`). Fix its checkpoint path to where the DiT lives, then:
+`moss`, the RoPE A/B's checkpoint path). Use the commit before the merge as the base:
 ```
-tests/regression-ab.sh --tag moss --filter moss-base --expect identical --backend cuda
+base=$(git log --merges -1 --format=%H --grep "#458" origin/main)^1
+tests/regression-ab.sh --base "$base" --tag moss --filter moss-base --expect identical --backend cuda
 ```
 The case needs the encoder and VAE at the side-model target names (step 0.2), because the row passes no
 `--text-encoder`/`--vae`. Put the report table in the PR body.
@@ -103,11 +111,12 @@ The case needs the encoder and VAE at the side-model target names (step 0.2), be
   - the real T2I and edit runs (checkpoint, backend, date, timings, VRAM);
   - the A/B verdict;
   - what is still unverified.
-- `docs/Checklists/MODEL_STATUS_IMAGE.md` (MOSS row and section) and `CHANGELOG.md` `## alpha.381`: move "real
-  weights / CUDA" from not-verified to verified only for what actually ran.
+- `docs/Checklists/MODEL_STATUS_IMAGE.md` (MOSS row and section): move "real weights / CUDA" from not-verified to
+  verified only for what actually ran. A docs-only follow-up skips the version bump; a fix adds the next `## alpha.N`
+  and the `Directory.Build.props` bump (repo shipping rules).
 - Images go to the PR as attachments or descriptions, not into the repo (`Output/` is gitignored).
-- Commit to `claude/moss-image-edit`, push, update the PR body's verification table, and answer any review threads.
-  kalebbroo is the sole author: no co-author or tool trailers anywhere.
+- Commit to the follow-up branch, push, put the verification and A/B tables in its PR body, get it bot-reviewed and
+  answer every thread. kalebbroo is the sole author: no co-author or tool trailers anywhere.
 
 ## 6. Not in scope (proposed follow-ups)
 - Migrating the duplicate M-RoPE copies (Qwen2.5-VL, Qwen3-VL, MiniMax) and Flux3's span/reference helpers onto the
