@@ -117,8 +117,9 @@ follows both.
 - **The colorize layout** (`reference.layout=colorize`, for `sorryhyun/moss-image-colorize`; the spec is its ComfyUI node
   `sorryhyun/ComfyUI-MOSS-i2i` (`reference.py`, `nodes.py`), which beats the card). One page, and no `Picture N:` label:
   the text encode is one user turn, `<|vision_start|>[pads]<|vision_end|>{caption}`, and the negative is a plain encode
-  of the empty prompt with no image. The vision copy is the page cover-fit to the request size and smart-resized (factor
-  32, 65 536-pixel floor) to that size's own pixel count, about 1 000 tokens at 1 MP. The VAE copy is the same page at
+  of the empty prompt with no image. The vision copy is the page cover-fit to the target size and smart-resized (factor
+  32, 65 536-pixel floor) to that size's own pixel count, about 1 000 tokens at 1 MP. The target size is the request's
+  `--width`/`--height`, which the caller must set to the node's `target_size` for the page (see Divergences). The VAE copy is the same page at
   `1/reference.ref_scale` per side (default 2, the trained scale, which the LoRA metadata does not record), sides rounded
   to 16 with ties to even. The DiT sequence is `[image | ref | text]`: the ref carries no noise, takes the step's live
   modulation (not timestep 0, so no segment layout), and sits at RoPE `(1, L, i, j)` with its `(h, w)` stretched onto the
@@ -142,6 +143,12 @@ follows both.
   resize); HF's 65 536-pixel floor scales a reference smaller than 256² up, where ComfyUI's 3 136 floor would not.
   The colorize copies use the same Keys bicubic for the cover-fit that the node does in Lanczos, so their pixels differ
   slightly from the node's; the tensor sizes match it exactly.
+- **Target size.** The node takes no size: it derives the target from the page with `target_size(page_w, page_h,
+  resolution=1024)`, which keeps the native aspect with sides multiples of 16 and area at most 1024² (never larger than
+  the page; a page already on the 16 grid within 1.1·1024² is returned as-is). The engine takes its size from the request,
+  so a like-for-like run passes the node's size for that page (`--width`/`--height`); a 1024² request on a portrait page
+  cover-crops it. The colorize layout does not default the size from the page. The function is checked against
+  `nodes.py` over 1 356 sizes in the GPU handoff §3b.
 
 ## Performance
 

@@ -89,17 +89,42 @@ header before the run (`python3 -I tools/inspect_checkpoint_header.py <lora>`): 
 `lora_unet_layers_{0..41}_proj_{q,k,v,o,ffn_up_gate,ffn_down}.{alpha,lora_down.weight,lora_up.weight}`, metadata
 `base_model=MOSS-Image` and `reference_latents=1000`. Its metadata has no `ref_scale`; the trained scale is 2, the default.
 
-Input: a B&W manga page `page.png` at about 1 MP (a portrait page such as 848×1200 works; the request size is the
-target, and the page is cover-fit to it). Text: the caption (colour tags), or an empty caption for page-only colouring.
+Input: a B&W manga page `page.png` and its caption (colour tags), or an empty caption for page-only colouring.
+
+Size: pass the page's target size, not a free choice. The node derives the target from the page itself, with
+`target_size(page_w, page_h, resolution=1024)`: native aspect, sides multiples of 16, area at most 1024², never larger
+than the page, and a page already on the 16 grid within 1.1·1024² is kept as-is. The engine takes its size from
+`--width`/`--height`, so it does not do that for you. Compute the size with this (the node's `target_size`, checked
+against `nodes.py` over 1 356 page sizes), where `W H` is the page's pixel size (`identify -format '%w %h' page.png`):
+```python
+import math, sys
+
+def target_size(w, h, resolution=1024, stride=16, tolerance=1.10):
+    cap = resolution * resolution
+    if w % stride == 0 and h % stride == 0 and w * h <= cap * tolerance:
+        return w, h
+    area = min(cap, w * h)
+    aspect = w / h
+    out_w = round(math.sqrt(area * aspect) / stride) * stride
+    out_h = round(math.sqrt(area / aspect) / stride) * stride
+    out_w = max(stride, min(out_w, w // stride * stride))
+    out_h = max(stride, min(out_h, h // stride * stride))
+    return out_w, out_h
+
+print(*target_size(int(sys.argv[1]), int(sys.argv[2])))
+```
+Run it as `python3 target_size.py W H`. For the 848×1200 example page it prints `848 1200`, so the commands below pass
+`--width 848 --height 1200`. A `--width 1024 --height 1024` request would cover-crop that page to a square and drop its
+top and bottom.
 
 Colour (the test):
 ```bash
-dotnet /tmp/hartsy-cli/HartsyInference.Cli.dll image "touhou, purple eyes, purple hair, black hairband, blue shirt" -m moss-image --model-path <dit> --text-encoder <encoder> --vae <vae> --lora <moss_colorize_ref_v1.safetensors> --lora-weight 1.0 --reference-image page.png --reference-layout colorize --sampler er_sde --steps 30 --cfg 3 -b cuda --width 1024 --height 1024 --seed 1 -o Output/moss-edit/colorize
+dotnet /tmp/hartsy-cli/HartsyInference.Cli.dll image "touhou, purple eyes, purple hair, black hairband, blue shirt" -m moss-image --model-path <dit> --text-encoder <encoder> --vae <vae> --lora <moss_colorize_ref_v1.safetensors> --lora-weight 1.0 --reference-image page.png --reference-layout colorize --sampler er_sde --steps 30 --cfg 3 -b cuda --width 848 --height 1200 --seed 1 -o Output/moss-edit/colorize
 ```
 Control (the same command with the `--lora` and `--lora-weight` flags removed; the base never saw a reference, so expect
 no faithful colouring):
 ```bash
-dotnet /tmp/hartsy-cli/HartsyInference.Cli.dll image "touhou, purple eyes, purple hair, black hairband, blue shirt" -m moss-image --model-path <dit> --text-encoder <encoder> --vae <vae> --reference-image page.png --reference-layout colorize --sampler er_sde --steps 30 --cfg 3 -b cuda --width 1024 --height 1024 --seed 1 -o Output/moss-edit/colorize-control
+dotnet /tmp/hartsy-cli/HartsyInference.Cli.dll image "touhou, purple eyes, purple hair, black hairband, blue shirt" -m moss-image --model-path <dit> --text-encoder <encoder> --vae <vae> --reference-image page.png --reference-layout colorize --sampler er_sde --steps 30 --cfg 3 -b cuda --width 848 --height 1200 --seed 1 -o Output/moss-edit/colorize-control
 ```
 Then the page-only run (empty caption, `""`) with the LoRA.
 
@@ -107,9 +132,11 @@ Pass: the page's line work survives, and the hair, eyes and shirt take the capti
 lost line work, or colour unrelated to the caption. Also check the logs:
 - The result meta has `reference_layout=colorize` and `reference_attention=inline`, and the generation line reports
   `1 reference image(s), Inline`.
-- The positive encode logs `(1 image(s))` with about 1 024 `<|image_pad|>` tokens (1 MP, factor 32) plus the caption.
-  The negative logs `(0 image(s))`: it is a plain encode of the empty prompt.
-- The VAE copy is half the request size per side (512×512 for 1024²), and the prompt has no `Picture` label.
+- The positive encode logs `(1 image(s))` with the vision pads for the page's vision copy plus the caption: 988 for
+  848×1200 (the copy is 832×1216 after the factor-32 resize), and 1 024 for 1024×1024. The negative logs `(0 image(s))`:
+  it is a plain encode of the empty prompt.
+- The VAE copy is the target size over 2 per side, rounded to 16: 416×608 for 848×1200 (512×512 for 1024²). The prompt
+  has no `Picture` label.
 - The control's colouring differs from the LoRA run: if it does not, the LoRA did not load.
 
 Record wall clock, per-step ms and VRAM, as in §3. ER-SDE disables the CUDA step graph, so these runs are slower per
