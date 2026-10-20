@@ -88,14 +88,16 @@ public sealed unsafe class T5Block
         int batch = (int)input.Shape[0];
         int seqLen = (int)input.Shape[1];
         TensorShape hidShape = new TensorShape(batch, seqLen, _dModel);
+        // The attention width is heads × d_kv, which differs from d_model in T5-11B.
+        TensorShape innerShape = new TensorShape(batch, seqLen, _numHeads * _headDim);
 
         // --- Self-Attention sublayer ---
 
         Tensor normed = new Tensor(hidShape, DType.F32);
         backend.RmsNorm(normed, input, _attnNormWeight!, _eps);
 
-        // Q, K, V projections (no bias) — weight shape: [dModel, dModel]
-        Tensor query = new Tensor(hidShape, DType.F32);
+        // Q, K, V projections (no bias) — weight shape: [heads·d_kv, dModel]
+        Tensor query = new Tensor(innerShape, DType.F32);
         backend.Linear(query, normed, _qWeight!, null);
         if (qTau != 1f)
         {
@@ -104,13 +106,13 @@ public sealed unsafe class T5Block
             long qn = query.Shape.ElementCount;
             for (long qi = 0; qi < qn; qi++) qp[qi] *= qTau;
         }
-        Tensor key = new Tensor(hidShape, DType.F32);
+        Tensor key = new Tensor(innerShape, DType.F32);
         backend.Linear(key, normed, _kWeight!, null);
-        Tensor value = new Tensor(hidShape, DType.F32);
+        Tensor value = new Tensor(innerShape, DType.F32);
         backend.Linear(value, normed, _vWeight!, null);
         normed.Dispose();
 
-        // Reshape to multi-head: [B, seqLen, dModel] → [B, numHeads, seqLen, headDim]
+        // Reshape to multi-head: [B, seqLen, heads·d_kv] → [B, numHeads, seqLen, headDim]
         TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         Tensor queryMh = new Tensor(mhShape, DType.F32);
         Tensor keyMh = new Tensor(mhShape, DType.F32);
@@ -139,8 +141,8 @@ public sealed unsafe class T5Block
         if (combinedMask is not null && !ReferenceEquals(combinedMask, positionBias))
             combinedMask.Dispose();
 
-        // Reshape back: [B, numHeads, seqLen, headDim] → [B, seqLen, dModel]
-        Tensor merged = new Tensor(hidShape, DType.F32);
+        // Reshape back: [B, numHeads, seqLen, headDim] → [B, seqLen, heads·d_kv]
+        Tensor merged = new Tensor(innerShape, DType.F32);
         ReshapeFromMultiHead(merged, attnOut, batch, seqLen, _numHeads, _headDim);
         attnOut.Dispose();
 
