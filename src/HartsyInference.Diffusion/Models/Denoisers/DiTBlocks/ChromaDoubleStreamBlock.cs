@@ -362,11 +362,11 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
-        // ── 11. Split [txt, img] back along the seq dim (B=1: contiguous row ranges) ──
+        // ── 11. Split [txt, img] back along the seq dim, per batch item ──
         Tensor txtAttn = new Tensor(txtShape, act);
-        backend.SliceRows(txtAttn, jointAttnFlat, 0);
+        DiTUtils.SliceSeq(backend, txtAttn, jointAttnFlat, batch, totalSeqLen, 0);
         Tensor imgAttn = new Tensor(imgShape, act);
-        backend.SliceRows(imgAttn, jointAttnFlat, txtSeqLen);
+        DiTUtils.SliceSeq(backend, imgAttn, jointAttnFlat, batch, totalSeqLen, txtSeqLen);
         jointAttnFlat.Dispose();
 
         // ── 12. Output projections + gated residual ──

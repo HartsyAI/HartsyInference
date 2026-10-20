@@ -756,7 +756,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             throw new ArgumentOutOfRangeException(nameof(firstSeqLen),
                 $"firstSeqLen={firstSeqLen} exceeds totalSeq={totalSeq}");
         Tensor output = new Tensor(new TensorShape(batch, firstSeqLen, dim), DType.F32);
-        backend.SliceRows(output, input, 0);
+        DiTUtils.SliceSeq(backend, output, input, batch, totalSeq, 0);
         return output;
     }
 

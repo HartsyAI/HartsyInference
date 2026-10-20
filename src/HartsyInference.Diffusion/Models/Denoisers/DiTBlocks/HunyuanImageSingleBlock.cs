@@ -93,7 +93,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
     // DiTUtils / QkNorm / AdaLNModulation / ConcatFeatureDim / SplitImageText host path D2H-synced every intermediate).
     // Head reshape = declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so QK-norm runs over
     // headDim with no reshape, then Permute0213 to/from [B, H, S, D]. The [img, txt] concat preserves image-first
-    // order (Concat dim 1); the output split is SliceRows (B=1: image rows first). The ONLY op left on the CPU is the
+    // order (Concat dim 1); the output split takes each batch item's rows (image rows first). The ONLY op left on the CPU is the
     // image-only RoPE and its image-portion extract/write (ApplyRopeToImagePortion) — the image sub-region of the
     // joint [B, H, S, D] is per-head strided (not a contiguous row-block), so a clean GPU slice-write is not available;
     // this is one contained host excursion over a small tensor, and RoPE itself is host-only (as in QwenImageBlock).
@@ -200,7 +200,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         backend.Linear(projOut, concatted, _projOutWeight!, _projOutBias);
         concatted.Dispose();
 
-        // ── 10. Single gated residual + split [img, txt] (B=1: contiguous rows) ──
+        // ── 10. Single gated residual + split [img, txt] per batch item ──
         Tensor result = new Tensor(jointShape, act);
         backend.GatedResidualLastDim(result, joint, projOut, mod[2]);
         joint.Dispose();
@@ -211,9 +211,9 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtOutShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
         Tensor imgOut = new Tensor(imgOutShape, act);
-        backend.SliceRows(imgOut, result, 0);
+        DiTUtils.SliceSeq(backend, imgOut, result, batch, totalSeqLen, 0);
         Tensor txtOut = new Tensor(txtOutShape, act);
-        backend.SliceRows(txtOut, result, imgSeqLen);
+        DiTUtils.SliceSeq(backend, txtOut, result, batch, totalSeqLen, imgSeqLen);
         result.Dispose();
 
         return (imgOut, txtOut);

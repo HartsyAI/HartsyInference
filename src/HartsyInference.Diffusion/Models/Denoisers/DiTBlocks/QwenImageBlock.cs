@@ -334,15 +334,15 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         jointK.Dispose();
         jointV.Dispose();
 
-        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] (B=1: contiguous rows) ──
+        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] per batch item ──
         Tensor jointAttnFlat = new Tensor(jointFlat, act);
         backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
         Tensor txtAttn = new Tensor(txtShape, act);
-        backend.SliceRows(txtAttn, jointAttnFlat, 0);
+        DiTUtils.SliceSeq(backend, txtAttn, jointAttnFlat, batch, totalSeqLen, 0);
         Tensor imgAttn = new Tensor(imgShape, act);
-        backend.SliceRows(imgAttn, jointAttnFlat, txtSeqLen);
+        DiTUtils.SliceSeq(backend, imgAttn, jointAttnFlat, batch, totalSeqLen, txtSeqLen);
         jointAttnFlat.Dispose();
 
         // ── 9. Output projections + gated residual (input + gate*value) ──

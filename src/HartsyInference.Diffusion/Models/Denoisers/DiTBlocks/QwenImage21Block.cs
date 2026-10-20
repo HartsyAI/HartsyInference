@@ -120,7 +120,7 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
     {
         int seq = (int)x.Shape[x.Shape.Rank - 2];
         (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, x, mod.Scale1Plus1, seq, ropeCos, ropeSin);
-        Tensor attn = Attend(backend, q, k, v, seq, seq, null);
+        Tensor attn = Attend(backend, q, k, v, seq, seq, causalMask);
         q.Dispose();
         keyCache = k;
         valueCache = v;

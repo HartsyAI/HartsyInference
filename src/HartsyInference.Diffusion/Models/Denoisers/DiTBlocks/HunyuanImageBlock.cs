@@ -152,7 +152,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
     // The head reshape is expressed as declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so
     // QK-norm runs over headDim with no reshape, then Permute0213 to [B, H, S, D]; the [img, txt] seq-dim concat is a
     // Concat at dim 2 (byte-identical to ConcatAlongSeqDimMultiHead), and the post-attention split is a permute-back
-    // to [B, S, hidden] + SliceRows (B=1: image rows first, then text — see class note / QwenImageBlock).
+    // to [B, S, hidden] + a per-batch row split (image rows first, then text — see class note / QwenImageBlock).
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT = 1)
     {
@@ -279,15 +279,15 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         jointK.Dispose();
         jointV.Dispose();
 
-        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [img, txt] (B=1: contiguous rows) ──
+        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [img, txt] per batch item ──
         Tensor jointAttnFlat = new Tensor(jointFlat, act);
         backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
         Tensor imgAttn = new Tensor(imgShape, act);
-        backend.SliceRows(imgAttn, jointAttnFlat, 0);
+        DiTUtils.SliceSeq(backend, imgAttn, jointAttnFlat, batch, totalSeqLen, 0);
         Tensor txtAttn = new Tensor(txtShape, act);
-        backend.SliceRows(txtAttn, jointAttnFlat, imgSeqLen);
+        DiTUtils.SliceSeq(backend, txtAttn, jointAttnFlat, batch, totalSeqLen, imgSeqLen);
         jointAttnFlat.Dispose();
 
         // ── 9. Output projections + gated residual (input + gate*value) ──

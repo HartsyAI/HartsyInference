@@ -181,6 +181,34 @@ public sealed class QwenImage21ForwardTests
         foreach (Tensor t in weights.Values) t.Dispose();
     }
 
+    /// <summary>The text prefix is causal (ComfyUI gives each text segment a <c>tril</c> mask): the first token's keys in
+    /// the second block depend on nothing after it. Changing only the last token must leave them bit-identical and move
+    /// the last token's own keys, so the test cannot pass by the cache ignoring the text.</summary>
+    [Fact]
+    public void ThePrefixIsCausal()
+    {
+        using CpuBackend backend = new CpuBackend();
+        QwenImage21Config config = TinyConfig;
+        using QwenImage21Transformer transformer = new QwenImage21Transformer(config, DType.F32);
+        Dictionary<string, Tensor> weights = BuildWeights(config, seed: 3);
+        transformer.LoadWeights(weights);
+
+        using Tensor original = Random(new TensorShape(1, 4, ContextDim), 5);
+        using Tensor lastChanged = Random(new TensorShape(1, 4, ContextDim), 5);
+        Span<float> changed = lastChanged.AsSpan<float>();
+        for (int i = 3 * ContextDim; i < 4 * ContextDim; i++) changed[i] += 1f;
+        using QwenImage21PrefixCache a = transformer.BuildPrefix(backend, original);
+        using QwenImage21PrefixCache b = transformer.BuildPrefix(backend, lastChanged);
+
+        int row = Heads * HeadDim;
+        float[] firstA = a.Keys[1].AsReadOnlySpan<float>()[..row].ToArray(), firstB = b.Keys[1].AsReadOnlySpan<float>()[..row].ToArray();
+        float[] lastA = a.Keys[1].AsReadOnlySpan<float>()[(3 * row)..(4 * row)].ToArray();
+        float[] lastB = b.Keys[1].AsReadOnlySpan<float>()[(3 * row)..(4 * row)].ToArray();
+        Assert.Equal(firstA, firstB);
+        Assert.NotEqual(lastA, lastB);
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
     private static Dictionary<string, Tensor> BuildWeights(QwenImage21Config config, int seed)
     {
         int mlpDim = config.HiddenSize * config.MlpRatio;
