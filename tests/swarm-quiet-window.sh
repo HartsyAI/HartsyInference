@@ -17,7 +17,7 @@
 #   3. nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory
 #                                   -> every process on a target card (--gpu, matched by UUID or name substring)
 #                                      must be SwarmUI itself (the swarmui.service MainPID or a process named
-#                                      *SwarmUI*); anything else is FOREIGN. SwarmUI appearing on, leaving, or
+#                                      *SwarmUI*) or a desktop client (Xorg, rustdesk, cinnamon, gnome-shell, chrome); anything else is FOREIGN. SwarmUI appearing on, leaving, or
 #                                      moving more than 256 MiB on a target card between polls also resets the
 #                                      window (a model load or gen inside Swarm — LLMAssistant and AudioLab
 #                                      included).
@@ -371,6 +371,7 @@ else:
     fi
     # Line 1: foreign processes on the targets; line 2: SwarmUI memory per target card ("uuid=MiB …").
     GPU_EVAL=$(printf '%s\n' "${APPS}" | python3 -c '
+import re
 import sys
 targets = set(sys.argv[1].split())
 swarm_pid = sys.argv[2]
@@ -383,6 +384,8 @@ for line in sys.stdin:
     mem = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
     if pid == swarm_pid or "swarmui" in name.lower():
         swarm[uuid] = swarm.get(uuid, 0) + mem
+    elif re.search(r"Xorg|rustdesk|cinnamon|gnome-shell|chrome", name):
+        continue   # desktop and remote-desktop clients always hold a sliver of the display card
     else:
         foreign.append(f"{uuid} pid={pid} {name} {mem} MiB")
 print("; ".join(foreign))
