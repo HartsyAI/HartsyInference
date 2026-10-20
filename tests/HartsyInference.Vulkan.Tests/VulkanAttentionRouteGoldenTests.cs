@@ -27,7 +27,7 @@ public sealed class VulkanAttentionRouteGoldenTests(ITestOutputHelper output)
         new("f16-d40", "sdpa", DType.F16, 4, 4, 256, 256, 40, "none", true, "A.2"),
         new("f32-d256", "sdpa", DType.F32, 2, 2, 128, 128, 256, "none", false, "A.3"),
         new("f32-gqa-d64-bias", "sdpa", DType.F32, 6, 3, 65, 129, 64, "bias", true, "A.1", "A.2"),
-        new("f32-d64-perhead", "sdpa", DType.F32, 4, 4, 64, 64, 64, "perhead", true, "A.2"),
+        new("f32-d64-perhead", "sdpa", DType.F32, 4, 4, 64, 64, 64, "perhead", true, "A.1", "A.2"),
         new("f32-d64-key", "sdpa", DType.F32, 4, 4, 64, 64, 64, "key", true, "A.1", "A.2"),
         new("tm-f16-d128", "tm", DType.F16, 4, 4, 256, 256, 128, "none", true, "B.1", "B.2/A.2"),
         new("tm-gqa-f32-d128", "tm", DType.F32, 48, 12, 300, 300, 128, "none", true, "B.1", "B.2/A.2"),
