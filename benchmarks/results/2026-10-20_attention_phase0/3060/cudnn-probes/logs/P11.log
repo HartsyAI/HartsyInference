@@ -1,0 +1,22 @@
+Test run for /home/hartsy/Desktop/hartsy-wt/attn-phase0/tests/HartsyInference.Cuda.Tests/bin/Release/net10.0/HartsyInference.Cuda.Tests.dll (.NETCoreApp,Version=v10.0)
+VSTest version 18.0.2 (x64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+/home/hartsy/Desktop/hartsy-wt/attn-phase0/tests/HartsyInference.Cuda.Tests/bin/Release/net10.0/HartsyInference.Cuda.Tests.dll
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v2.8.2+699d445a1a (64-bit .NET 10.0.13)
+[xUnit.net 00:00:00.09]   Discovering: HartsyInference.Cuda.Tests
+[xUnit.net 00:00:00.33]   Discovered:  HartsyInference.Cuda.Tests
+[xUnit.net 00:00:00.34]   Starting:    HartsyInference.Cuda.Tests
+[xUnit.net 00:00:02.94]   Finished:    HartsyInference.Cuda.Tests
+  Passed HartsyInference.Cuda.Tests.CudnnSdpaCapabilityProbeTests.P11_Sinks [2 s]
+  Standard Output Messages:
+ P11 sink-64-8-window-128: supported [A=ok, B=ok, FALLBACK=refused, INSTANT=ok]
+ {"probe":"P11","utc":"2026-10-20T21:55:05.0403144Z","environment":{"device":"NVIDIA GeForce RTX 3060","sm":86,"expectedSm":86,"cudnnVersion":92400,"cudartVersion":13030,"driverVersion":13020,"expectedLibDir":"/home/hartsy/.local/lib/cuda13","cudnnFiles":["/home/hartsy/.local/lib/cuda13/libcudnn.so.9.24.0","/home/hartsy/.local/lib/cuda13/libcudnn_graph.so.9.24.0"],"cudaVisibleDevices":"0","cudaDeviceOrder":"PCI_BUS_ID","problems":[]},"libraryProblemsAfterRun":[],"aborted":null,"extras":null,"specs":[{"spec":{"name":"sink-64-8-window-128","dtype":"F16","layout":"HeadMajor","b":1,"hq":64,"hkv":8,"sq":4096,"skv":4096,"d":64,"kvCapacity":0,"kvHeadStrideZero":false,"unified":false,"bias":null,"causal":"TopLeft","maskForm":"Band","shiftRightBound":null,"window":128,"boundType":"Int32","fill":"-Infinity","softcap":0,"alibi":false,"sink":true,"stats":false,"blockMask":false,"padding":"None","seqQ":null,"seqKv":null,"scaleByValue":false,"scales":null,"seed":1,"expect":"Supported","note":null},"outcome":"supported","tolerance":0.001,"rowsCompared":118,"referenceMs":85.112878,"modes":[{"mode":"A","scale":0.125,"verdict":"ok","finalized":true,"executed":true,"relL2":0.00025981279638045724,"maxAbs":0.0009689977386497794,"cosine":0.9999999662513035,"nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":619.064582,"heuristicMs":54.655925,"finalizeMs":564.408657,"execMedianMs":1.270879,"configsReturned":3,"configsTried":1,"engineGlobalIndex":1,"runtimeCompiled":true,"numericalNotes":[0],"workspaceBytes":0,"error":null},{"mode":"B","scale":0.125,"verdict":"ok","finalized":true,"executed":true,"relL2":0.00025981279638045724,"maxAbs":0.0009689977386497794,"cosine":0.9999999662513035,"nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":52.190792,"heuristicMs":2.18761,"finalizeMs":50.003182,"execMedianMs":1.270776,"configsReturned":3,"configsTried":1,"engineGlobalIndex":1,"runtimeCompiled":true,"numericalNotes":[0],"workspaceBytes":0,"error":null},{"mode":"FALLBACK","scale":0.125,"verdict":"refused","finalized":false,"executed":false,"relL2":"NaN","maxAbs":"NaN","cosine":"NaN","nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":0.594745,"heuristicMs":0.594638,"finalizeMs":0.000107,"execMedianMs":"NaN","configsReturned":0,"configsTried":0,"engineGlobalIndex":-1,"runtimeCompiled":false,"numericalNotes":[],"workspaceBytes":0,"error":"heuristic returned no engine configs"},{"mode":"INSTANT","scale":0.125,"verdict":"ok","finalized":true,"executed":true,"relL2":0.00025981279638045724,"maxAbs":0.0009689977386497794,"cosine":0.9999999662513035,"nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":48.652166,"heuristicMs":2.152028,"finalizeMs":46.500138,"execMedianMs":1.275716,"configsReturned":3,"configsTried":1,"engineGlobalIndex":1,"runtimeCompiled":true,"numericalNotes":[0],"workspaceBytes":0,"error":null}]}]}
+
+
+
+Test Run Successful.
+Total tests: 1
+     Passed: 1
+ Total time: 3.6629 Seconds

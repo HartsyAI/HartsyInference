@@ -1,0 +1,80 @@
+op                              calls     total_ms     avg_ms
+Linear m=4335x12288x4608          816       1348.3      1.652
+Linear m=4096x12288x4608          816       1240.6      1.520
+H2D_BIG 12288x4608 F8_E4M3        136       1214.6      8.931
+SDPA-TM 4335x4335x18x256          408       1044.3      2.560
+SDPA-TM 4096x4096x18x256          408        983.5      2.411
+Linear m=4335x4608x12288          408        802.4      1.967
+Linear m=4096x4608x12288          408        740.2      1.814
+Linear m=4335x13824x4608          408        727.2      1.782
+H2D_BIG 13824x4608 F8_E4M3         68        683.0     10.044
+Linear m=4096x13824x4608          408        681.9      1.671
+H2D_BIG 4608x12288 F8_E4M3         68        604.4      8.888
+H2D_BIG 12288x4096 F8_E4M3         72        579.4      8.047
+RmsNorm                          5041        517.8      0.103
+Conv2D                             36        347.5      9.652
+H2D_BIG 4096x12288 F8_E4M3         36        286.4      7.955
+Mul                               852        284.6      0.334
+Linear m=4335x4608x4608           408        282.1      0.692
+H2D_BIG 151936x4096 F32             1        266.9    266.858
+Silu                              924        262.8      0.284
+Linear m=4096x4608x4608           408        257.1      0.630
+SliceLastDim                     2448        248.6      0.102
+H2D_BIG 4608x4608 F8_E4M3          72        244.1      3.391
+GatedResidual                    1632        214.8      0.132
+H2D_BIG 4096x4096 F8_E4M3          72        197.4      2.741
+GroupNormSilu                      29        189.4      6.531
+ApplyRope                         816        148.1      0.182
+ApplyRopeSingle                  1632        146.4      0.090
+AffineBroadcast                  1656        131.4      0.079
+H2D_BIG 18432x512 F8_E4M3          68        105.8      1.555
+H2D_BIG 4608x53248 F8_E4M3          2         72.4     36.213
+SDPA F32 q[1, 32, 239, 128] k[1, 32, 239, 128] m[239, 239]         36         56.7      1.575
+H2D_BIG 1024x4096 F8_E4M3          72         55.2      0.766
+Linear m=1x18432x512              816         52.5      0.064
+H2D_BIG 512x512x3x3 F32            18         34.6      1.924
+Fill                                1         21.1     21.069
+H2D_SMALL                         808         19.3      0.024
+Add                                99         19.2      0.194
+Concat                              2         16.9      8.460
+Linear m=239x4096x4096             72         15.3      0.213
+ModulationSplit4                  816         11.7      0.014
+Linear m=16384x512x512              4         11.5      2.875
+SDPA F32 q[1, 1, 16384, 512] k[1, 1, 16384, 512]          1         10.9     10.899
+Linear m=239x12288x4096            72          9.1      0.126
+H2D_BIG 1x4096x4608 F32             1          8.6      8.577
+Linear m=4096x4608x128             24          7.9      0.327
+H2D_BIG 1x239x53248 F32             1          5.6      5.650
+Linear m=239x4096x12288            36          5.2      0.145
+SliceRowsGeneric                    3          5.1      1.696
+Linear m=4096x128x4608             24          4.8      0.201
+IndexAddRows                       24          4.7      0.198
+LayerNormNoAffine                  24          4.5      0.189
+Linear m=1x4608x4608               48          4.1      0.086
+H2D_BIG 256x256x3x3 F32             6          3.9      0.642
+Linear m=239x1024x4096             72          3.7      0.051
+CastToF16                          24          3.4      0.140
+UpsampleNearest2D                   3          3.2      1.073
+CastToF32                          24          3.0      0.124
+SliceRows                          12          2.5      0.212
+Permute0213                       144          1.9      0.013
+Linear m=1x512x4608                24          1.6      0.065
+Linear m=1x4608x512                24          1.4      0.057
+ApplyRopeHeadMajor                 72          1.3      0.019
+GatherRows                          1          1.3      1.308
+RepeatKvHeads                      72          1.2      0.016
+H2D_BIG 256x512x3x3 F32             1          1.1      1.070
+H2D_BIG 1x4335x256 F32              2          1.0      0.493
+H2D_BIG 1x4096x256 F32              2          0.9      0.452
+H2D_BIG 512x4608 F8_E4M3            2          0.9      0.431
+H2D_BIG 4608x512 F8_E4M3            2          0.8      0.424
+Transpose2D                         3          0.8      0.278
+CfgEulerStep                       12          0.7      0.055
+Linear m=239x4608x53248             1          0.6      0.640
+Scale                               1          0.6      0.625
+GroupNorm                           1          0.5      0.519
+AddScalar                          24          0.5      0.020
+H2D_BIG 1x32x128x128 F32            1          0.4      0.384
+CopyInto                           12          0.4      0.032
+H2D_BIG 1x4096x128 F32              1          0.3      0.303
+H2D_BIG 128x256x3x3 F32             1          0.3      0.298

@@ -1,0 +1,28 @@
+[38;2;154;164;175msettings[0m [38;2;46;165;224mcli (4 setting(s))[0m
+[38;2;154;164;175mmodel[0m [38;2;46;165;224mchroma[0m   [38;2;154;164;175mbackend[0m [38;2;46;165;224mcuda:1[0m
+[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
+libnvToolsExt.so.1: cannot open shared object file: No such file or directory
+
+  denoise [1/8]  denoise [2/8] 883 ms[WRN] [Cuda] step-graph capture aborted mid-window — purged 1 graph-private cache entries that would otherwise dangle (CUDA_ERROR_INVALID_VALUE on the next free).
+[WRN] [Chroma graph] capture invalidated — falling back to eager: HartsyInference.Cuda.CudaException: CUDA error 901: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED — operation failed due to a previous error during capture
+   at HartsyInference.Cuda.CudaErrorChecking.ThrowCudaError(Int32 errorCode)
+   at HartsyInference.Cuda.CudaMemory.AllocateAsync(UIntPtr byteSize, IntPtr stream)
+   at HartsyInference.Cuda.CudaBackend.RmsNorm(Tensor output, Tensor input, Tensor weight, Single eps)
+   at HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.ChromaApproximator.Forward(IBackend backend, Tensor input)
+   at HartsyInference.Diffusion.Models.Denoisers.ChromaTransformer.RunPairIntoFixed(IBackend backend, Tensor packedLatent, Tensor condContext, Tensor uncondContext, Int32 condTxtLen, Int32 uncondTxtLen, Int32 hPacked, Int32 wPacked, Tensor condMask, Tensor uncondMask)
+   at HartsyInference.Diffusion.Models.Denoisers.ChromaTransformer.ForwardPaired(IBackend backend, Tensor packedLatent, Tensor condContext, Tensor uncondContext, Single timestep, Int32 hPacked, Int32 wPacked, Tensor condMask, Tensor uncondMask, DeviceFeatureCache stepCacheCond, DeviceFeatureCache stepCacheUncond)
+  denoise [3/8] 905 ms  denoise [4/8] 894 ms  denoise [5/8] 883 ms  denoise [6/8] 887 ms[WRN] [Cuda] step-graph capture aborted mid-window — purged 1 graph-private cache entries that would otherwise dangle (CUDA_ERROR_INVALID_VALUE on the next free).
+[WRN] [Chroma graph] capture invalidated — falling back to eager: HartsyInference.Cuda.CudaException: CUDA error 901: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED — operation failed due to a previous error during capture
+   at HartsyInference.Cuda.CudaErrorChecking.ThrowCudaError(Int32 errorCode)
+   at HartsyInference.Cuda.CudaMemory.AllocateAsync(UIntPtr byteSize, IntPtr stream)
+   at HartsyInference.Cuda.CudaBackend.RmsNorm(Tensor output, Tensor input, Tensor weight, Single eps)
+   at HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.ChromaApproximator.Forward(IBackend backend, Tensor input)
+   at HartsyInference.Diffusion.Models.Denoisers.ChromaTransformer.RunPairIntoFixed(IBackend backend, Tensor packedLatent, Tensor condContext, Tensor uncondContext, Int32 condTxtLen, Int32 uncondTxtLen, Int32 hPacked, Int32 wPacked, Tensor condMask, Tensor uncondMask)
+   at HartsyInference.Diffusion.Models.Denoisers.ChromaTransformer.ForwardPaired(IBackend backend, Tensor packedLatent, Tensor condContext, Tensor uncondContext, Single timestep, Int32 hPacked, Int32 wPacked, Tensor condMask, Tensor uncondMask, DeviceFeatureCache stepCacheCond, DeviceFeatureCache stepCacheUncond)
+  denoise [7/8] 888 ms  denoise [8/8] 899 ms
+[38;2;154;164;175m1024x1024 image (seed 42)[0m
+[38;2;154;164;175msize 1024x1024 · seed 42 · arch chroma · steps 8[0m
+[38;2;154;164;175msaved[0m 
+[38;2;46;165;224m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
+[38;2;46;165;224mon_phase0/4090/profile/chroma-hd/out-prof8/a-red-apple-on-a-wooden-table-0001.pn[0m
+[38;2;46;165;224mg[0m

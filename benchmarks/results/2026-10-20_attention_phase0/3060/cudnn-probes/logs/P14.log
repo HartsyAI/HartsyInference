@@ -1,0 +1,22 @@
+Test run for /home/hartsy/Desktop/hartsy-wt/attn-phase0/tests/HartsyInference.Cuda.Tests/bin/Release/net10.0/HartsyInference.Cuda.Tests.dll (.NETCoreApp,Version=v10.0)
+VSTest version 18.0.2 (x64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+/home/hartsy/Desktop/hartsy-wt/attn-phase0/tests/HartsyInference.Cuda.Tests/bin/Release/net10.0/HartsyInference.Cuda.Tests.dll
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v2.8.2+699d445a1a (64-bit .NET 10.0.13)
+[xUnit.net 00:00:00.10]   Discovering: HartsyInference.Cuda.Tests
+[xUnit.net 00:00:00.34]   Discovered:  HartsyInference.Cuda.Tests
+[xUnit.net 00:00:00.34]   Starting:    HartsyInference.Cuda.Tests
+[xUnit.net 00:00:03.13]   Finished:    HartsyInference.Cuda.Tests
+  Passed HartsyInference.Cuda.Tests.CudnnSdpaCapabilityProbeTests.P14_BlockMask [2 s]
+  Standard Output Messages:
+ P14 unified-block-mask: unsupported [A=refused, B=refused, FALLBACK=refused, INSTANT=refused]
+ {"probe":"P14","utc":"2026-10-20T21:55:45.2941309Z","environment":{"device":"NVIDIA GeForce RTX 3060","sm":86,"expectedSm":86,"cudnnVersion":92400,"cudartVersion":13030,"driverVersion":13020,"expectedLibDir":"/home/hartsy/.local/lib/cuda13","cudnnFiles":["/home/hartsy/.local/lib/cuda13/libcudnn.so.9.24.0","/home/hartsy/.local/lib/cuda13/libcudnn_graph.so.9.24.0"],"cudaVisibleDevices":"0","cudaDeviceOrder":"PCI_BUS_ID","problems":[]},"libraryProblemsAfterRun":[],"aborted":null,"extras":null,"specs":[{"spec":{"name":"unified-block-mask","dtype":"F16","layout":"HeadMajor","b":1,"hq":24,"hkv":0,"sq":4608,"skv":4608,"d":128,"kvCapacity":0,"kvHeadStrideZero":false,"unified":true,"bias":null,"causal":"None","maskForm":"Band","shiftRightBound":null,"window":0,"boundType":"Int32","fill":"-Infinity","softcap":0,"alibi":false,"sink":false,"stats":false,"blockMask":true,"padding":"None","seqQ":null,"seqKv":null,"scaleByValue":false,"scales":null,"seed":1,"expect":"Unknown","note":"one INT8 per 128x128 tile, nonzero attends; the layout is the research report\u0027s reading, unconfirmed"},"outcome":"unsupported","tolerance":0.001,"rowsCompared":141,"referenceMs":0,"modes":[{"mode":"A","scale":0.088388346,"verdict":"refused","finalized":false,"executed":false,"relL2":"NaN","maxAbs":"NaN","cosine":"NaN","nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":52.743743,"heuristicMs":52.743595,"finalizeMs":0.000148,"execMedianMs":"NaN","configsReturned":0,"configsTried":0,"engineGlobalIndex":-1,"runtimeCompiled":false,"numericalNotes":[],"workspaceBytes":0,"error":"heuristic returned no engine configs"},{"mode":"B","scale":0.088388346,"verdict":"refused","finalized":false,"executed":false,"relL2":"NaN","maxAbs":"NaN","cosine":"NaN","nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":0.147958,"heuristicMs":0.147912,"finalizeMs":4.6E-05,"execMedianMs":"NaN","configsReturned":0,"configsTried":0,"engineGlobalIndex":-1,"runtimeCompiled":false,"numericalNotes":[],"workspaceBytes":0,"error":"heuristic returned no engine configs"},{"mode":"FALLBACK","scale":0.088388346,"verdict":"refused","finalized":false,"executed":false,"relL2":"NaN","maxAbs":"NaN","cosine":"NaN","nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":0.12743,"heuristicMs":0.127402,"finalizeMs":2.8E-05,"execMedianMs":"NaN","configsReturned":0,"configsTried":0,"engineGlobalIndex":-1,"runtimeCompiled":false,"numericalNotes":[],"workspaceBytes":0,"error":"heuristic returned no engine configs"},{"mode":"INSTANT","scale":0.088388346,"verdict":"refused","finalized":false,"executed":false,"relL2":"NaN","maxAbs":"NaN","cosine":"NaN","nanCount":0,"statsRelL2":"NaN","statsRelL2Log2":"NaN","planBuildMs":0.080443,"heuristicMs":0.080412,"finalizeMs":3.1E-05,"execMedianMs":"NaN","configsReturned":0,"configsTried":0,"engineGlobalIndex":-1,"runtimeCompiled":false,"numericalNotes":[],"workspaceBytes":0,"error":"heuristic returned no engine configs"}]}]}
+
+
+
+Test Run Successful.
+Total tests: 1
+     Passed: 1
+ Total time: 3.8405 Seconds

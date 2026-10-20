@@ -1,0 +1,238 @@
+P0	flux-4608	Required	supported	A	0.08839	ok	2.86E-004	4.52E-005	511.5	11.185	1	-
+P0	flux-4608	Required	supported	B	0.08839	ok	2.86E-004	4.52E-005	45.9	10.392	1	-
+P0	flux-4608	Required	supported	FALLBACK	0.08839	refused	NaN	NaN	12.1	NaN	-1	heuristic returned no engine configs
+P0	flux-4608	Required	supported	INSTANT	0.08839	ok	2.86E-004	4.52E-005	46.8	10.379	1	-
+P0	flux-s1024	Supported	supported	A	0.08839	ok	2.78E-004	1.38E-004	44.9	0.555	1	-
+P0	flux-s1024	Supported	supported	B	0.08839	ok	2.78E-004	1.38E-004	46.0	0.561	1	-
+P0	flux-s1024	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P0	flux-s1024	Supported	supported	INSTANT	0.08839	ok	2.78E-004	1.38E-004	45.3	0.555	1	-
+P0	flux-s2048	Supported	supported	A	0.08839	ok	2.81E-004	7.72E-005	45.1	2.282	1	-
+P0	flux-s2048	Supported	supported	B	0.08839	ok	2.81E-004	7.72E-005	47.0	2.277	1	-
+P0	flux-s2048	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P0	flux-s2048	Supported	supported	INSTANT	0.08839	ok	2.81E-004	7.72E-005	46.7	2.282	1	-
+P0	flux-s4096	Supported	supported	A	0.08839	ok	2.85E-004	4.94E-005	45.2	8.968	1	-
+P0	flux-s4096	Supported	supported	B	0.08839	ok	2.85E-004	4.94E-005	45.8	8.950	1	-
+P0	flux-s4096	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P0	flux-s4096	Supported	supported	INSTANT	0.08839	ok	2.85E-004	4.94E-005	44.1	8.331	1	-
+P0	flux-s8192	Supported	supported	A	0.08839	ok	2.88E-004	3.78E-005	46.1	33.092	1	-
+P0	flux-s8192	Supported	supported	B	0.08839	ok	2.88E-004	3.78E-005	45.5	32.772	1	-
+P0	flux-s8192	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P0	flux-s8192	Supported	supported	INSTANT	0.08839	ok	2.88E-004	3.78E-005	47.4	32.773	1	-
+P15	flux-device-scale	Required	supported	A	0.08839	ok	2.84E-004	4.45E-005	109.2	11.171	1	-
+P15	flux-device-scale	Required	supported	B	0.08839	ok	2.84E-004	4.45E-005	47.5	10.383	1	-
+P15	flux-device-scale	Required	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P15	flux-device-scale	Required	supported	INSTANT	0.08839	ok	2.84E-004	4.45E-005	44.8	10.426	1	-
+P15	flux-by-value-scale	Supported	supported	A	0.08839	ok	2.84E-004	4.45E-005	407.6	11.186	1	-
+P15	flux-by-value-scale	Supported	supported	A	0.05	ok	2.91E-004	3.30E-005	407.6	NaN	1	-
+P15	flux-by-value-scale	Supported	supported	A	0.3	ok	2.19E-004	9.99E-004	407.6	NaN	1	-
+P15	flux-by-value-scale	Supported	supported	B	0.08839	ok	2.84E-004	4.45E-005	44.8	10.404	1	-
+P15	flux-by-value-scale	Supported	supported	B	0.05	ok	2.91E-004	3.30E-005	44.8	NaN	1	-
+P15	flux-by-value-scale	Supported	supported	B	0.3	ok	2.19E-004	9.99E-004	44.8	NaN	1	-
+P15	flux-by-value-scale	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P15	flux-by-value-scale	Supported	supported	INSTANT	0.08839	ok	2.84E-004	4.45E-005	46.5	10.474	1	-
+P15	flux-by-value-scale	Supported	supported	INSTANT	0.05	ok	2.91E-004	3.30E-005	46.5	NaN	1	-
+P15	flux-by-value-scale	Supported	supported	INSTANT	0.3	ok	2.19E-004	9.99E-004	46.5	NaN	1	-
+P1	flux-bf16-head-major	Supported	supported	A	0.08839	ok	2.28E-003	3.61E-004	497.3	11.174	1	-
+P1	flux-bf16-head-major	Supported	supported	B	0.08839	ok	2.28E-003	3.61E-004	46.9	10.720	1	-
+P1	flux-bf16-head-major	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P1	flux-bf16-head-major	Supported	supported	INSTANT	0.08839	ok	2.28E-003	3.61E-004	46.5	10.379	1	-
+P1	flux-bf16-token-major	Supported	supported	A	0.08839	ok	2.28E-003	3.61E-004	46.0	11.194	1	-
+P1	flux-bf16-token-major	Supported	supported	B	0.08839	ok	2.28E-003	3.61E-004	44.2	11.184	1	-
+P1	flux-bf16-token-major	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P1	flux-bf16-token-major	Supported	supported	INSTANT	0.08839	ok	2.28E-003	3.61E-004	44.9	10.361	1	-
+P2	krea2-gqa-48-12	Supported	supported	A	0.08839	ok	2.86E-004	4.25E-005	110.4	22.309	1	-
+P2	krea2-gqa-48-12	Supported	supported	B	0.08839	ok	2.86E-004	4.25E-005	48.7	20.889	1	-
+P2	krea2-gqa-48-12	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P2	krea2-gqa-48-12	Supported	supported	INSTANT	0.08839	ok	2.86E-004	4.25E-005	45.3	20.870	1	-
+P2	krea2-gqa-48-12-f32-bias	Supported	supported	A	0.08839	ok	2.70E-004	1.26E-004	571.2	27.449	1	-
+P2	krea2-gqa-48-12-f32-bias	Supported	supported	B	0.08839	ok	2.70E-004	1.26E-004	48.5	26.595	1	-
+P2	krea2-gqa-48-12-f32-bias	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P2	krea2-gqa-48-12-f32-bias	Supported	supported	INSTANT	0.08839	ok	2.70E-004	1.26E-004	45.6	26.613	1	-
+P2	llm-gqa-16-8-s8192	Supported	supported	A	0.08839	ok	2.86E-004	3.69E-005	47.2	23.583	1	-
+P2	llm-gqa-16-8-s8192	Supported	supported	B	0.08839	ok	2.86E-004	3.69E-005	45.4	22.027	1	-
+P2	llm-gqa-16-8-s8192	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P2	llm-gqa-16-8-s8192	Supported	supported	INSTANT	0.08839	ok	2.86E-004	3.69E-005	47.9	22.029	1	-
+P2	p2b-kv-head-stride0	Unknown	supported	A	0.08839	ok	2.85E-004	4.48E-005	44.7	22.338	1	-
+P2	p2b-kv-head-stride0	Unknown	supported	B	0.08839	ok	2.85E-004	4.48E-005	46.4	20.852	1	-
+P2	p2b-kv-head-stride0	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P2	p2b-kv-head-stride0	Unknown	supported	INSTANT	0.08839	ok	2.85E-004	4.48E-005	46.1	20.853	1	-
+P3	sd15-self-d40	Supported	supported	A	0.1581	ok	2.83E-004	6.77E-005	383.5	3.333	1	-
+P3	sd15-self-d40	Supported	supported	B	0.1581	ok	2.83E-004	6.77E-005	43.9	3.319	1	-
+P3	sd15-self-d40	Supported	supported	FALLBACK	0.1581	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P3	sd15-self-d40	Supported	supported	INSTANT	0.1581	ok	2.83E-004	6.77E-005	44.7	3.322	1	-
+P3	sd15-cross-d40	Supported	supported	A	0.1581	ok	2.66E-004	5.30E-004	311.0	0.157	1	-
+P3	sd15-cross-d40	Supported	supported	B	0.1581	ok	2.66E-004	5.30E-004	45.4	0.159	1	-
+P3	sd15-cross-d40	Supported	supported	FALLBACK	0.1581	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P3	sd15-cross-d40	Supported	supported	INSTANT	0.1581	ok	2.66E-004	5.30E-004	46.2	0.158	1	-
+P3	d32	Supported	supported	A	0.1768	ok	2.78E-004	1.34E-004	46.3	0.149	1	-
+P3	d32	Supported	supported	B	0.1768	ok	2.78E-004	1.34E-004	44.3	0.157	1	-
+P3	d32	Supported	supported	FALLBACK	0.1768	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P3	d32	Supported	supported	INSTANT	0.1768	ok	2.78E-004	1.34E-004	47.1	0.145	1	-
+P3	d48	Supported	supported	A	0.1443	ok	2.75E-004	1.69E-004	44.3	0.149	1	-
+P3	d48	Supported	supported	B	0.1443	ok	2.75E-004	1.69E-004	47.4	0.147	1	-
+P3	d48	Supported	supported	FALLBACK	0.1443	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P3	d48	Supported	supported	INSTANT	0.1443	ok	2.75E-004	1.69E-004	45.1	0.148	1	-
+P3	d80	Supported	supported	A	0.1118	ok	2.77E-004	1.20E-004	44.9	0.261	1	-
+P3	d80	Supported	supported	B	0.1118	ok	2.77E-004	1.20E-004	47.5	0.262	1	-
+P3	d80	Supported	supported	FALLBACK	0.1118	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P3	d80	Supported	supported	INSTANT	0.1118	ok	2.77E-004	1.20E-004	49.0	0.261	1	-
+P3	d96	Supported	supported	A	0.1021	ok	2.79E-004	1.26E-004	49.5	0.262	1	-
+P3	d96	Supported	supported	B	0.1021	ok	2.79E-004	1.26E-004	47.2	0.260	1	-
+P3	d96	Supported	supported	FALLBACK	0.1021	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P3	d96	Supported	supported	INSTANT	0.1021	ok	2.79E-004	1.26E-004	46.3	0.262	1	-
+P3	d160	Supported	supported	A	0.07906	ok	2.78E-004	1.29E-004	464.2	0.722	1	-
+P3	d160	Supported	supported	B	0.07906	ok	2.78E-004	1.29E-004	42.5	0.719	1	-
+P3	d160	Supported	supported	FALLBACK	0.07906	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P3	d160	Supported	supported	INSTANT	0.07906	ok	2.78E-004	1.29E-004	43.8	0.718	1	-
+P3	d192	Supported	supported	A	0.07217	ok	2.78E-004	1.28E-004	45.8	0.738	1	-
+P3	d192	Supported	supported	B	0.07217	ok	2.78E-004	1.28E-004	45.0	0.737	1	-
+P3	d192	Supported	supported	FALLBACK	0.07217	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P3	d192	Supported	supported	INSTANT	0.07217	ok	2.78E-004	1.28E-004	43.7	0.739	1	-
+P3	d256	Supported	supported	A	0.0625	ok	2.77E-004	1.11E-004	45.2	0.793	1	-
+P3	d256	Supported	supported	B	0.0625	ok	2.77E-004	1.11E-004	43.3	0.789	1	-
+P3	d256	Supported	supported	FALLBACK	0.0625	refused	NaN	NaN	0.7	NaN	-1	heuristic returned no engine configs
+P3	d256	Supported	supported	INSTANT	0.0625	ok	2.77E-004	1.11E-004	48.1	0.802	1	-
+P3	neg-d36	Refused	unsupported	A	0.1667	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P3	neg-d36	Refused	unsupported	B	0.1667	refused	NaN	NaN	0.1	NaN	-1	heuristic returned no engine configs
+P3	neg-d36	Refused	unsupported	FALLBACK	0.1667	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P3	neg-d36	Refused	unsupported	INSTANT	0.1667	refused	NaN	NaN	0.1	NaN	-1	heuristic returned no engine configs
+P3	neg-d44	Refused	unsupported	A	0.1508	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P3	neg-d44	Refused	unsupported	B	0.1508	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P3	neg-d44	Refused	unsupported	FALLBACK	0.1508	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P3	neg-d44	Refused	unsupported	INSTANT	0.1508	refused	NaN	NaN	0.1	NaN	-1	heuristic returned no engine configs
+P3	decode-d256	Unknown	supported	A	0.0625	ok	2.73E-004	3.29E-005	451.9	0.161	1	-
+P3	decode-d256	Unknown	supported	B	0.0625	ok	2.73E-004	3.29E-005	46.6	0.160	1	-
+P3	decode-d256	Unknown	supported	FALLBACK	0.0625	refused	NaN	NaN	0.3	NaN	-1	heuristic returned no engine configs
+P3	decode-d256	Unknown	supported	INSTANT	0.0625	ok	2.73E-004	3.29E-005	46.0	0.161	1	-
+P4	t5-24h-f32-bias	Supported	supported	A	0.125	ok	2.54E-004	4.80E-004	843.3	0.378	1	-
+P4	t5-24h-f32-bias	Supported	supported	B	0.125	ok	2.54E-004	4.80E-004	51.4	0.380	1	-
+P4	t5-24h-f32-bias	Supported	supported	FALLBACK	0.125	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P4	t5-24h-f32-bias	Supported	supported	INSTANT	0.125	ok	2.54E-004	4.80E-004	50.2	0.379	1	-
+P4	t5-24h-f16-bias	Supported	supported	A	0.125	ok	2.54E-004	4.46E-004	644.0	0.211	1	-
+P4	t5-24h-f16-bias	Supported	supported	B	0.125	ok	2.54E-004	4.46E-004	48.3	0.206	1	-
+P4	t5-24h-f16-bias	Supported	supported	FALLBACK	0.125	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P4	t5-24h-f16-bias	Supported	supported	INSTANT	0.125	ok	2.54E-004	4.46E-004	50.4	0.208	1	-
+P4	t5xxl-64h-f32-bias	Supported	supported	A	0.125	ok	2.54E-004	4.92E-004	48.1	0.941	1	-
+P4	t5xxl-64h-f32-bias	Supported	supported	B	0.125	ok	2.54E-004	4.92E-004	46.5	0.942	1	-
+P4	t5xxl-64h-f32-bias	Supported	supported	FALLBACK	0.125	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P4	t5xxl-64h-f32-bias	Supported	supported	INSTANT	0.125	ok	2.54E-004	4.92E-004	47.0	0.947	1	-
+P4	batch-bias-2x1	Supported	supported	A	0.125	ok	2.59E-004	3.10E-004	47.3	1.692	1	-
+P4	batch-bias-2x1	Supported	supported	B	0.125	ok	2.59E-004	3.10E-004	47.0	1.693	1	-
+P4	batch-bias-2x1	Supported	supported	FALLBACK	0.125	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P4	batch-bias-2x1	Supported	supported	INSTANT	0.125	ok	2.59E-004	3.10E-004	47.1	1.696	1	-
+P4	batch-head-bias-2x24	Supported	supported	A	0.125	ok	2.59E-004	4.69E-004	49.7	2.645	1	-
+P4	batch-head-bias-2x24	Supported	supported	B	0.125	ok	2.59E-004	4.69E-004	50.2	2.642	1	-
+P4	batch-head-bias-2x24	Supported	supported	FALLBACK	0.125	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P4	batch-head-bias-2x24	Supported	supported	INSTANT	0.125	ok	2.59E-004	4.69E-004	47.2	2.639	1	-
+P4	key-only-bias	Unknown	supported	A	0.08839	ok	2.59E-004	2.13E-004	491.2	0.041	1	-
+P4	key-only-bias	Unknown	supported	B	0.08839	ok	2.59E-004	2.13E-004	48.8	0.038	1	-
+P4	key-only-bias	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P4	key-only-bias	Unknown	supported	INSTANT	0.08839	ok	2.59E-004	2.13E-004	45.4	0.040	1	-
+P4	sq-stride0-bias	Unknown	supported	A	0.08839	ok	2.59E-004	2.13E-004	608.4	0.039	1	-
+P4	sq-stride0-bias	Unknown	supported	B	0.08839	ok	2.59E-004	2.13E-004	49.1	0.039	1	-
+P4	sq-stride0-bias	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P4	sq-stride0-bias	Unknown	supported	INSTANT	0.08839	ok	2.59E-004	2.13E-004	46.4	0.039	1	-
+P5	c1-band-gqa-16-8	Supported	supported	A	0.08839	ok	1.11E-004	2.33E-004	524.9	12.266	1	-
+P5	c1-band-gqa-16-8	Supported	supported	B	0.08839	ok	1.11E-004	2.33E-004	47.1	12.277	1	-
+P5	c1-band-gqa-16-8	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P5	c1-band-gqa-16-8	Supported	supported	INSTANT	0.08839	ok	1.11E-004	2.33E-004	45.5	11.474	1	-
+P5	c1-band-mha-16-16	Supported	supported	A	0.08839	ok	1.14E-004	3.14E-004	45.4	12.256	1	-
+P5	c1-band-mha-16-16	Supported	supported	B	0.08839	ok	1.14E-004	3.14E-004	45.7	11.737	1	-
+P5	c1-band-mha-16-16	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P5	c1-band-mha-16-16	Supported	supported	INSTANT	0.08839	ok	1.14E-004	3.14E-004	46.2	11.489	1	-
+P5	c1-band-fill-1e30	Unknown	supported	A	0.08839	ok	1.11E-004	2.33E-004	46.1	12.290	1	-
+P5	c1-band-fill-1e30	Unknown	supported	B	0.08839	ok	1.11E-004	2.33E-004	48.2	11.482	1	-
+P5	c1-band-fill-1e30	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P5	c1-band-fill-1e30	Unknown	supported	INSTANT	0.08839	ok	1.11E-004	2.33E-004	46.5	11.493	1	-
+P5	c2-unified-band-subgraph	Unknown	supported	A	0.08839	ok	1.11E-004	2.33E-004	45.5	12.256	8	-
+P5	c2-unified-band-subgraph	Unknown	supported	B	0.08839	ok	1.11E-004	2.33E-004	46.4	11.473	8	-
+P5	c2-unified-band-subgraph	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P5	c2-unified-band-subgraph	Unknown	supported	INSTANT	0.08839	ok	1.11E-004	2.33E-004	44.5	11.479	8	-
+P5	c3-legacy-chain	Unknown	supported	A	0.08839	ok	1.11E-004	2.33E-004	46.4	12.266	1	-
+P5	c3-legacy-chain	Unknown	supported	B	0.08839	ok	1.11E-004	2.33E-004	47.3	11.478	1	-
+P5	c3-legacy-chain	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.7	NaN	-1	heuristic returned no engine configs
+P5	c3-legacy-chain	Unknown	supported	INSTANT	0.08839	ok	1.11E-004	2.33E-004	48.0	11.468	1	-
+P5	p5b-bottom-right-resume	Supported	supported	A	0.08839	ok	2.85E-004	4.11E-005	467.8	9.197	1	-
+P5	p5b-bottom-right-resume	Supported	supported	B	0.08839	ok	2.85E-004	4.11E-005	45.3	8.600	1	-
+P5	p5b-bottom-right-resume	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P5	p5b-bottom-right-resume	Supported	supported	INSTANT	0.08839	ok	2.85E-004	4.11E-005	46.1	8.612	1	-
+P5	p5c-top-left-shift-4096	Supported	supported	A	0.08839	ok	2.85E-004	4.11E-005	443.5	9.215	1	-
+P5	p5c-top-left-shift-4096	Supported	supported	B	0.08839	ok	2.85E-004	4.11E-005	46.1	8.615	1	-
+P5	p5c-top-left-shift-4096	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P5	p5c-top-left-shift-4096	Supported	supported	INSTANT	0.08839	ok	2.85E-004	4.11E-005	46.7	8.619	1	-
+P5	neg-decode-causal-gqa	KnownIssue	supported	A	0.08839	ok	2.80E-004	3.43E-005	464.2	0.174	1	-
+P5	neg-decode-causal-gqa	KnownIssue	supported	B	0.08839	ok	2.80E-004	3.43E-005	46.1	0.172	1	-
+P5	neg-decode-causal-gqa	KnownIssue	supported	FALLBACK	0.08839	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P5	neg-decode-causal-gqa	KnownIssue	supported	INSTANT	0.08839	ok	2.80E-004	3.43E-005	47.0	0.173	1	-
+P6	window-128-int32	Supported	supported	A	0.08839	ok	2.22E-004	2.90E-004	532.0	0.929	1	-
+P6	window-128-int32	Supported	supported	B	0.08839	ok	2.22E-004	2.90E-004	53.2	0.932	1	-
+P6	window-128-int32	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.7	NaN	-1	heuristic returned no engine configs
+P6	window-128-int32	Supported	supported	INSTANT	0.08839	ok	2.22E-004	2.90E-004	48.3	0.931	1	-
+P6	window-128-float	Supported	supported	A	0.08839	ok	2.22E-004	2.90E-004	516.5	0.928	1	-
+P6	window-128-float	Supported	supported	B	0.08839	ok	2.22E-004	2.90E-004	51.4	0.926	1	-
+P6	window-128-float	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P6	window-128-float	Supported	supported	INSTANT	0.08839	ok	2.22E-004	2.90E-004	45.3	0.925	1	-
+P6	window-4096-int32	Supported	supported	A	0.08839	ok	1.14E-004	2.33E-004	52.0	9.373	1	-
+P6	window-4096-int32	Supported	supported	B	0.08839	ok	1.14E-004	2.33E-004	46.0	9.127	1	-
+P6	window-4096-int32	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.6	NaN	-1	heuristic returned no engine configs
+P6	window-4096-int32	Supported	supported	INSTANT	0.08839	ok	1.14E-004	2.33E-004	49.1	8.751	1	-
+P6	window-4096-float	Supported	supported	A	0.08839	ok	1.14E-004	2.33E-004	48.9	9.354	1	-
+P6	window-4096-float	Supported	supported	B	0.08839	ok	1.14E-004	2.33E-004	45.9	9.360	1	-
+P6	window-4096-float	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.5	NaN	-1	heuristic returned no engine configs
+P6	window-4096-float	Supported	supported	INSTANT	0.08839	ok	1.14E-004	2.33E-004	49.2	8.737	1	-
+P6	p6b-noncausal-window-512	Unknown	supported	A	0.08839	ok	2.77E-004	1.26E-004	452.3	1.106	1	-
+P6	p6b-noncausal-window-512	Unknown	supported	B	0.08839	ok	2.77E-004	1.26E-004	45.9	1.099	1	-
+P6	p6b-noncausal-window-512	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P6	p6b-noncausal-window-512	Unknown	supported	INSTANT	0.08839	ok	2.77E-004	1.26E-004	48.4	1.108	1	-
+P12	flux-lse-stats	Supported	supported	A	0.08839	ok	2.86E-004	4.52E-005	510.9	11.192	1	-
+P12	flux-lse-stats	Supported	supported	B	0.08839	ok	2.86E-004	4.52E-005	46.2	11.198	1	-
+P12	flux-lse-stats	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.4	NaN	-1	heuristic returned no engine configs
+P12	flux-lse-stats	Supported	supported	INSTANT	0.08839	ok	2.86E-004	4.52E-005	46.0	10.480	1	-
+P11	sink-64-8-window-128	Supported	supported	A	0.125	ok	2.60E-004	9.69E-004	619.1	1.271	1	-
+P11	sink-64-8-window-128	Supported	supported	B	0.125	ok	2.60E-004	9.69E-004	52.2	1.271	1	-
+P11	sink-64-8-window-128	Supported	supported	FALLBACK	0.125	refused	NaN	NaN	0.6	NaN	-1	heuristic returned no engine configs
+P11	sink-64-8-window-128	Supported	supported	INSTANT	0.125	ok	2.60E-004	9.69E-004	48.7	1.276	1	-
+P10	softcap-50-window-4096	Unknown	supported	A	0.0625	ok	1.82E-004	5.10E-004	645.8	5.434	1	-
+P10	softcap-50-window-4096	Unknown	supported	B	0.0625	ok	1.82E-004	5.10E-004	48.6	5.429	1	-
+P10	softcap-50-window-4096	Unknown	supported	FALLBACK	0.0625	refused	NaN	NaN	0.8	NaN	-1	heuristic returned no engine configs
+P10	softcap-50-window-4096	Unknown	supported	INSTANT	0.0625	ok	1.82E-004	5.10E-004	47.9	5.419	1	-
+P9	alibi-causal-16h	Supported	supported	A	0.08839	ok	2.34E-004	9.94E-004	577.1	0.939	1	-
+P9	alibi-causal-16h	Supported	supported	B	0.08839	ok	2.34E-004	9.94E-004	50.3	0.941	1	-
+P9	alibi-causal-16h	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.9	NaN	-1	heuristic returned no engine configs
+P9	alibi-causal-16h	Supported	supported	INSTANT	0.08839	ok	2.34E-004	9.94E-004	49.0	0.941	1	-
+P7	composite-padding	Supported	supported	A	0.08839	ok	2.36E-004	2.41E-004	551.5	0.484	1	-
+P7	composite-padding	Supported	supported	B	0.08839	ok	2.36E-004	2.41E-004	49.3	0.480	1	-
+P7	composite-padding	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	1.0	NaN	-1	heuristic returned no engine configs
+P7	composite-padding	Supported	supported	INSTANT	0.08839	ok	2.36E-004	2.41E-004	48.0	0.479	1	-
+P7	composite-padding-kv-capacity-2048	Supported	supported	A	0.08839	ok	2.36E-004	2.41E-004	46.4	0.482	1	-
+P7	composite-padding-kv-capacity-2048	Supported	supported	B	0.08839	ok	2.36E-004	2.41E-004	45.1	0.483	1	-
+P7	composite-padding-kv-capacity-2048	Supported	supported	FALLBACK	0.08839	refused	NaN	NaN	0.9	NaN	-1	heuristic returned no engine configs
+P7	composite-padding-kv-capacity-2048	Supported	supported	INSTANT	0.08839	ok	2.36E-004	2.41E-004	48.3	0.481	1	-
+P7	p7b-unified-seq-len	Unknown	supported	A	0.08839	ok	2.36E-004	2.41E-004	456.9	0.475	8	-
+P7	p7b-unified-seq-len	Unknown	supported	B	0.08839	ok	2.36E-004	2.41E-004	47.7	0.477	8	-
+P7	p7b-unified-seq-len	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P7	p7b-unified-seq-len	Unknown	supported	INSTANT	0.08839	ok	2.36E-004	2.41E-004	48.3	0.477	8	-
+P7	p7b-unified-seq-len-kv-capacity-2048	Unknown	supported	A	0.08839	ok	2.36E-004	2.41E-004	44.4	0.477	8	-
+P7	p7b-unified-seq-len-kv-capacity-2048	Unknown	supported	B	0.08839	ok	2.36E-004	2.41E-004	48.2	0.477	8	-
+P7	p7b-unified-seq-len-kv-capacity-2048	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P7	p7b-unified-seq-len-kv-capacity-2048	Unknown	supported	INSTANT	0.08839	ok	2.36E-004	2.41E-004	47.7	0.475	8	-
+P13	unified-flux	Unknown	supported	A	0.08839	ok	2.86E-004	4.52E-005	104.6	11.162	8	-
+P13	unified-flux	Unknown	supported	B	0.08839	ok	2.86E-004	4.52E-005	44.8	10.393	8	-
+P13	unified-flux	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P13	unified-flux	Unknown	supported	INSTANT	0.08839	ok	2.86E-004	4.52E-005	47.9	10.457	8	-
+P13	unified-t5-f16-bias	Unknown	supported	A	0.125	ok	2.54E-004	4.46E-004	635.9	0.197	8	-
+P13	unified-t5-f16-bias	Unknown	supported	B	0.125	ok	2.54E-004	4.46E-004	49.6	0.196	8	-
+P13	unified-t5-f16-bias	Unknown	supported	FALLBACK	0.125	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P13	unified-t5-f16-bias	Unknown	supported	INSTANT	0.125	ok	2.54E-004	4.46E-004	47.5	0.197	8	-
+P13	unified-t5-f32-bias	Unknown	supported	A	0.125	ok	2.54E-004	4.80E-004	752.7	0.383	8	-
+P13	unified-t5-f32-bias	Unknown	supported	B	0.125	ok	2.54E-004	4.80E-004	48.1	0.376	8	-
+P13	unified-t5-f32-bias	Unknown	supported	FALLBACK	0.125	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P13	unified-t5-f32-bias	Unknown	supported	INSTANT	0.125	ok	2.54E-004	4.80E-004	48.7	0.376	8	-
+P13	unified-krea2-gqa-48-12	Unknown	supported	A	0.08839	ok	2.86E-004	4.25E-005	45.0	22.249	8	-
+P13	unified-krea2-gqa-48-12	Unknown	supported	B	0.08839	ok	2.86E-004	4.25E-005	44.7	20.883	8	-
+P13	unified-krea2-gqa-48-12	Unknown	supported	FALLBACK	0.08839	refused	NaN	NaN	0.2	NaN	-1	heuristic returned no engine configs
+P13	unified-krea2-gqa-48-12	Unknown	supported	INSTANT	0.08839	ok	2.86E-004	4.25E-005	44.9	20.864	8	-
+P14	unified-block-mask	Unknown	unsupported	A	0.08839	refused	NaN	NaN	52.7	NaN	-1	heuristic returned no engine configs
+P14	unified-block-mask	Unknown	unsupported	B	0.08839	refused	NaN	NaN	0.1	NaN	-1	heuristic returned no engine configs
+P14	unified-block-mask	Unknown	unsupported	FALLBACK	0.08839	refused	NaN	NaN	0.1	NaN	-1	heuristic returned no engine configs
+P14	unified-block-mask	Unknown	unsupported	INSTANT	0.08839	refused	NaN	NaN	0.1	NaN	-1	heuristic returned no engine configs
