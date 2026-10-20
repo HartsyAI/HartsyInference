@@ -1,4 +1,5 @@
 using Xunit;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 
@@ -18,7 +19,7 @@ namespace HartsyInference.Cpu.Tests;
 /// results. The reference here is the diff target for the future <c>sage_attn_int8</c> PTX kernel.</para></summary>
 public sealed unsafe class SageAttentionReferenceTests
 {
-    // ── Reference implementation (promoted to src/ alongside the kernel when it lands) ──
+    // ── F32 baseline; the INT8 model under test is SageAttentionReference in src ──
 
     /// <summary>F32 baseline attention: softmax(Q·K^T·scale)·V for one head. Q,K,V are [S, D] row-major.</summary>
     private static float[] AttentionF32(float[] q, float[] k, float[] v, int seqQ, int seqK, int dim, float scale)
@@ -50,74 +51,6 @@ public sealed unsafe class SageAttentionReferenceTests
             }
         }
         return output;
-    }
-
-    /// <summary>INT8-quantized attention: per-row absmax int8 quant of Q and (optionally smoothed) K, exact
-    /// int32 dot products, dequantized scores, F32 softmax+PV — the numerical model of the planned kernel.</summary>
-    private static float[] AttentionInt8(float[] q, float[] k, float[] v, int seqQ, int seqK, int dim, float scale,
-        bool smoothK)
-    {
-        float[] kWork = (float[])k.Clone();
-        if (smoothK)
-        {
-            // Per-CHANNEL mean over the key sequence; exact under softmax (q·μ is per-query-row constant).
-            for (int d = 0; d < dim; d++)
-            {
-                double mean = 0;
-                for (int j = 0; j < seqK; j++) mean += kWork[j * dim + d];
-                float m = (float)(mean / seqK);
-                for (int j = 0; j < seqK; j++) kWork[j * dim + d] -= m;
-            }
-        }
-
-        sbyte[] q8 = new sbyte[seqQ * dim];
-        float[] qScale = new float[seqQ];
-        QuantizeRows(q, q8, qScale, seqQ, dim);
-        sbyte[] k8 = new sbyte[seqK * dim];
-        float[] kScale = new float[seqK];
-        QuantizeRows(kWork, k8, kScale, seqK, dim);
-
-        float[] output = new float[seqQ * dim];
-        float[] scores = new float[seqK];
-        for (int i = 0; i < seqQ; i++)
-        {
-            float max = float.NegativeInfinity;
-            for (int j = 0; j < seqK; j++)
-            {
-                int dot = 0;
-                for (int d = 0; d < dim; d++) dot += q8[i * dim + d] * k8[j * dim + d];
-                scores[j] = dot * qScale[i] * kScale[j] * scale;
-                max = Math.Max(max, scores[j]);
-            }
-            double sum = 0;
-            for (int j = 0; j < seqK; j++)
-            {
-                scores[j] = MathF.Exp(scores[j] - max);
-                sum += scores[j];
-            }
-            float inv = (float)(1.0 / sum);
-            for (int d = 0; d < dim; d++)
-            {
-                double acc = 0;
-                for (int j = 0; j < seqK; j++) acc += (double)scores[j] * v[j * dim + d];
-                output[i * dim + d] = (float)(acc * inv);
-            }
-        }
-        return output;
-    }
-
-    private static void QuantizeRows(float[] src, sbyte[] dst, float[] scales, int rows, int dim)
-    {
-        for (int r = 0; r < rows; r++)
-        {
-            float amax = 0f;
-            for (int d = 0; d < dim; d++) amax = Math.Max(amax, Math.Abs(src[r * dim + d]));
-            float scale = amax > 0f ? amax / 127f : 1f;
-            scales[r] = scale;
-            float inv = 1f / scale;
-            for (int d = 0; d < dim; d++)
-                dst[r * dim + d] = (sbyte)Math.Clamp(MathF.Round(src[r * dim + d] * inv), -127f, 127f);
-        }
     }
 
     private static float MaxAbsError(float[] a, float[] b)
@@ -162,7 +95,7 @@ public sealed unsafe class SageAttentionReferenceTests
         float scale = 1f / MathF.Sqrt(dim);
 
         float[] baseline = AttentionF32(q, k, v, seqQ, seqK, dim, scale);
-        float[] quantized = AttentionInt8(q, k, v, seqQ, seqK, dim, scale, smoothK: false);
+        float[] quantized = SageAttentionReference.Run(q, k, v, seqQ, seqK, dim, scale, smoothK: false);
 
         // No outliers → per-row absmax int8 alone stays within the F16-kernel-class tolerance (1e-2).
         Assert.True(MaxAbsError(baseline, quantized) < 1e-2f,
@@ -178,8 +111,8 @@ public sealed unsafe class SageAttentionReferenceTests
         float scale = 1f / MathF.Sqrt(dim);
 
         float[] baseline = AttentionF32(q, k, v, seqQ, seqK, dim, scale);
-        float[] unsmoothed = AttentionInt8(q, k, v, seqQ, seqK, dim, scale, smoothK: false);
-        float[] smoothed = AttentionInt8(q, k, v, seqQ, seqK, dim, scale, smoothK: true);
+        float[] unsmoothed = SageAttentionReference.Run(q, k, v, seqQ, seqK, dim, scale, smoothK: false);
+        float[] smoothed = SageAttentionReference.Run(q, k, v, seqQ, seqK, dim, scale, smoothK: true);
 
         float errUnsmoothed = MaxAbsError(baseline, unsmoothed);
         float errSmoothed = MaxAbsError(baseline, smoothed);
