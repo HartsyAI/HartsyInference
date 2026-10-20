@@ -80,7 +80,10 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
                 + "the image instead of denoising it, so the mask would be ignored. Use Auto or Denoise mode to inpaint.");
         }
         if (colorize && request.Extra?.ContainsKey(RequestExtras.ReferenceKvCache) == true)
-            throw new ArgumentException($"'{RequestExtras.ReferenceKvCache}' applies to the ostris layout only.");
+        {
+            throw new ArgumentException($"'{RequestExtras.ReferenceKvCache}' selects the ostris layout's attention form; the colorize "
+                + "layout always runs its page inline with full attention, so remove the key (whatever its value).");
+        }
         ReferenceImagePolicy policy = colorize ? ColorizePolicy(width, height, request.Extra) : ReferencePolicy(request.Extra);
         IReadOnlyList<ImageData> ordered = ReferenceImageResolver.Collect(initIsReference ? request.Img2Img!.InitImage : null,
             request.ReferenceImages, policy, "MOSS-Image");
@@ -214,7 +217,7 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
         FitTo = (width, height),
         LatentSideDivisor = ReferenceScaleFrom(extra),
         LatentMultiple = 16,
-        VisionTargetArea = width * height,
+        VisionTargetArea = checked(width * height),
         Overflow = ReferenceOverflow.Refuse,
     };
 
