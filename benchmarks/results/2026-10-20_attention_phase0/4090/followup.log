@@ -1,0 +1,85 @@
+[19:02:15] phase0 queue finished
+23:02:15Z quiet-window gate: host=http://192.168.10.188:7801 (default; --host or SWARM_HOST to change) session=5b37b1ec... window=10min interval=30s max=9min
+23:02:15Z   queue counters: GetGlobalStatus (every session); forbidden backend title: 'HartsyInference GPU1 (3060)' (must stay disabled)
+23:02:15Z   swarmui.service MainPID: 3199595 (allowed on the target cards, plus any process named *SwarmUI*; its memory moving > 256 MiB counts as activity)
+23:02:15Z   journal request check: on (journalctl --user -t swarmui-run.sh)
+23:02:15Z   target card(s):
+    GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d  NVIDIA GeForce RTX 4090  (nvidia-smi index 1)
+23:02:15Z poll 1: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 0s / 600s
+23:02:45Z poll 2: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 30s / 600s
+23:03:16Z poll 3: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 60s / 600s
+23:03:46Z poll 4: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 91s / 600s
+23:04:16Z poll 5: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 121s / 600s
+23:04:46Z poll 6: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 151s / 600s
+23:05:17Z poll 7: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 181s / 600s
+23:05:47Z poll 8: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 212s / 600s
+23:06:17Z poll 9: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 242s / 600s
+23:06:47Z poll 10: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 272s / 600s
+23:07:18Z poll 11: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 2 new line(s) | quiet held 302s / 600s
+23:07:48Z poll 12: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 333s / 600s
+23:08:18Z poll 13: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 363s / 600s
+23:08:48Z poll 14: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 393s / 600s
+23:09:19Z poll 15: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 423s / 600s
+23:09:49Z poll 16: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 454s / 600s
+23:10:19Z poll 17: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 484s / 600s
+23:10:50Z poll 18: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 514s / 600s
+23:11:20Z poll 19: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 545s / 600s
+23:11:20Z NO WINDOW: this invocation waited 545s (cap 540s), 545s in total; quiet held 545s of 600s. State kept in /home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attention_phase0/4090/followup.quiet.state; re-run to continue the window.
+23:11:25Z quiet-window gate: host=http://192.168.10.188:7801 (default; --host or SWARM_HOST to change) session=7a9ecc52... window=10min interval=30s max=9min
+23:11:25Z   queue counters: GetGlobalStatus (every session); forbidden backend title: 'HartsyInference GPU1 (3060)' (must stay disabled)
+23:11:25Z   swarmui.service MainPID: 3199595 (allowed on the target cards, plus any process named *SwarmUI*; its memory moving > 256 MiB counts as activity)
+23:11:25Z   journal request check: on (journalctl --user -t swarmui-run.sh)
+23:11:25Z   target card(s):
+    GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d  NVIDIA GeForce RTX 4090  (nvidia-smi index 1)
+23:11:25Z   resumed state from /home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attention_phase0/4090/followup.quiet.state: quiet_since=1792537335 polls=19 (last poll 5s ago)
+23:11:25Z poll 20: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 1 new line(s) | quiet held 550s / 600s
+23:11:55Z poll 21: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 580s / 600s
+23:12:26Z poll 22: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 2 new line(s) | quiet held 610s / 600s
+23:12:26Z QUIET WINDOW OK: 610s (>= 600s): global queue empty, no request in the journal, no foreign process on:
+    GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d  NVIDIA GeForce RTX 4090  (nvidia-smi index 1)
+23:12:26Z   checked 22 poll(s) since 23:02:15Z; backend 'HartsyInference GPU1 (3060)' stayed disabled.
+23:12:26Z   after the timed arm, confirm with: /home/hartsy/Desktop/hartsy-wt/attn-phase0/tests/swarm-quiet-window.sh --verify-since @1792537946
+[19:12:26] baseline cuda start (attempt 1)
+[19:13:43] baseline cuda rc=0
+23:13:43Z quiet-window gate: host=http://192.168.10.188:7801 (default; --host or SWARM_HOST to change) session=78029363... window=10min interval=30s max=9min
+23:13:43Z   queue counters: GetGlobalStatus (every session); forbidden backend title: 'HartsyInference GPU1 (3060)' (must stay disabled)
+23:13:43Z   swarmui.service MainPID: 3199595 (allowed on the target cards, plus any process named *SwarmUI*; its memory moving > 256 MiB counts as activity)
+23:13:43Z   journal request check: on (journalctl --user -t swarmui-run.sh)
+23:13:43Z   target card(s):
+    GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d  NVIDIA GeForce RTX 4090  (nvidia-smi index 1)
+23:13:44Z poll 1: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 0s / 600s
+23:14:14Z poll 2: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 31s / 600s
+23:14:44Z poll 3: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 61s / 600s
+23:15:15Z poll 4: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 91s / 600s
+23:15:45Z poll 5: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 122s / 600s
+23:16:15Z poll 6: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 152s / 600s
+23:16:45Z poll 7: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 182s / 600s
+23:17:16Z poll 8: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 212s / 600s
+23:17:46Z poll 9: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 2 new line(s) | quiet held 243s / 600s
+23:18:16Z poll 10: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 273s / 600s
+23:18:46Z poll 11: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 303s / 600s
+23:19:17Z poll 12: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 333s / 600s
+23:19:47Z poll 13: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 364s / 600s
+23:20:17Z poll 14: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 394s / 600s
+23:20:48Z poll 15: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 424s / 600s
+23:21:18Z poll 16: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 455s / 600s
+23:21:48Z poll 17: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 485s / 600s
+23:22:18Z poll 18: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 515s / 600s
+23:22:49Z poll 19: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 545s / 600s
+23:22:49Z NO WINDOW: this invocation waited 545s (cap 540s), 545s in total; quiet held 545s of 600s. State kept in /home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attention_phase0/4090/followup.quiet.state; re-run to continue the window.
+23:22:54Z quiet-window gate: host=http://192.168.10.188:7801 (default; --host or SWARM_HOST to change) session=3a5a5eb9... window=10min interval=30s max=9min
+23:22:54Z   queue counters: GetGlobalStatus (every session); forbidden backend title: 'HartsyInference GPU1 (3060)' (must stay disabled)
+23:22:54Z   swarmui.service MainPID: 3199595 (allowed on the target cards, plus any process named *SwarmUI*; its memory moving > 256 MiB counts as activity)
+23:22:54Z   journal request check: on (journalctl --user -t swarmui-run.sh)
+23:22:54Z   target card(s):
+    GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d  NVIDIA GeForce RTX 4090  (nvidia-smi index 1)
+23:22:54Z   resumed state from /home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attention_phase0/4090/followup.quiet.state: quiet_since=1792538023 polls=19 (last poll 5s ago)
+23:22:54Z poll 20: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 1 new line(s) | quiet held 551s / 600s
+23:23:24Z poll 21: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 2 new line(s) | quiet held 581s / 600s
+23:23:55Z poll 22: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 611s / 600s
+23:23:55Z QUIET WINDOW OK: 611s (>= 600s): global queue empty, no request in the journal, no foreign process on:
+    GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d  NVIDIA GeForce RTX 4090  (nvidia-smi index 1)
+23:23:55Z   checked 22 poll(s) since 23:13:43Z; backend 'HartsyInference GPU1 (3060)' stayed disabled.
+23:23:55Z   after the timed arm, confirm with: /home/hartsy/Desktop/hartsy-wt/attn-phase0/tests/swarm-quiet-window.sh --verify-since @1792538635
+[19:23:55] baseline vulkan start (attempt 1)
+[19:24:36] baseline vulkan rc=0

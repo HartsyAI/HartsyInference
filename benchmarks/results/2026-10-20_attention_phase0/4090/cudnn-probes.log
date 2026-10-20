@@ -1,0 +1,7 @@
+23:24:36Z quiet-window gate: host=http://192.168.10.188:7801 (default; --host or SWARM_HOST to change) session=abd6a2b2... window=10min interval=30s max=unboundedmin
+23:24:36Z   queue counters: GetGlobalStatus (every session); forbidden backend title: 'HartsyInference GPU1 (3060)' (must stay disabled)
+23:24:36Z   swarmui.service MainPID: 3199595 (allowed on the target cards, plus any process named *SwarmUI*; its memory moving > 256 MiB counts as activity)
+23:24:36Z   journal request check: on (journalctl --user -t swarmui-run.sh)
+23:24:36Z   target card(s):
+    GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d  NVIDIA GeForce RTX 4090  (nvidia-smi index 1)
+23:24:36Z poll 1: global live=0 waiting=0 loading=0 waiting_backends=0 | 3060 backend: disabled disabled | foreign on targets: none | SwarmUI on targets: GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d=436 | journal: 0 new line(s) | quiet held 0s / 600s

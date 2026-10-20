@@ -1,0 +1,9 @@
+[INF] [Cuda] device 0: NVIDIA GeForce RTX 4090 (SM 8.9)
+[INF] [cuDNN] cuDNN 9.24.0 (built for CUDA 13) from the OS library path — convolution + fused-attention fast paths ENABLED.
+[INF] [Cuda] perf flags: SdpaCudnn=False ConvCudnn=True NativeFp8Gemm=True NativeFp4Gemm=False MempoolKeep=True EpilogueFusion=True Dp4aGemv=True TensorCoreGemm=False HighPrecisionGemm=False CacheWeightCasts=True AutoPromoteWeights=True Tf32Gemm=True.
+[INF] [Cuda] cuBLAS version 130101 (~13.1) loaded from /home/hartsy/.local/lib/cuda13/libcublasLt.so.13.
+[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
+libnvToolsExt.so.1: cannot open shared object file: No such file or directory
+
+[WRN] [CudaMemory] OOM on async first attempt: requested=24612.0 MB, free=63.9 MB, total=24082.4 MB (0.3% free)
+[WRN] [CudaMemory] OOM after async sync+pool-trim retry: requested=24612.0 MB, free=21407.9 MB, total=24082.4 MB (88.9% free)
