@@ -27,11 +27,11 @@ Each domain folder has a `build.sh` holding only its kernel lists; the build its
 every domain script sources. It compiles the `.cu` and copies the `.ptx` into `../Ptx/`:
 
 ```bash
-# With nvcc on PATH (the normal case):
-src/HartsyInference.Cuda/Kernels/dequant/build.sh        # compile + install into ../Ptx
+src/HartsyInference.Cuda/Kernels/dequant/build.sh                # compile + install into ../Ptx
 src/HartsyInference.Cuda/Kernels/dequant/build.sh --no-install   # compile only
+HARTSY_NVCC=<CUDA 13.0.88>/bin/nvcc src/HartsyInference.Cuda/Kernels/lm/build.sh   # also the NVCC_BUILT kernels
 
-# No nvcc on the box — use the committed nvrtc helper (dlopens libnvrtc.so):
+# By hand, with the committed nvrtc helper (dlopens libnvrtc.so):
 cc -O2 -o src/HartsyInference.Cuda/Kernels/nvrtc_compile src/HartsyInference.Cuda/Kernels/nvrtc_compile.c -ldl        # build the helper once
 LD_LIBRARY_PATH=~/.local/lib/cuda13 src/HartsyInference.Cuda/Kernels/nvrtc_compile in.cu out.ptx compute_80 "$TINC"
 cp out.ptx src/HartsyInference.Cuda/Ptx/
@@ -45,8 +45,8 @@ against the CPU reference within tolerance before shipping (`docs/Agents/KERNEL.
 
 ### The shipped PTX must reproduce from source — check it
 
-Every `build.sh` falls back to `../nvrtc_compile` when nvcc is absent, so **all eight domains build on a box
-with no CUDA toolkit**. They did not always: `attention/`, `audio/` and `lm/` were nvcc-only, so on a
+Every `build.sh` compiles through `../nvrtc_compile`, so **every domain builds on a box with no CUDA toolkit**
+(the `NVCC_BUILT` kernels below excepted). They did not always: `attention/`, `audio/` and `lm/` were nvcc-only, so on a
 toolkit-less box they failed outright — and because nobody could rebuild them, their shipped PTX silently
 drifted from their `.cu`. Eight kernels were found compiled from sources up to five weeks older than the
 committed source, including `flash_attn_f32`/`_split` (source a week newer than the PTX) and both
@@ -63,7 +63,12 @@ md5sum -c /tmp/ptx.md5 | grep -v ': OK'      # anything listed is stale or compi
 `lib/cuda13/include` set lacks. The scripts auto-pick the first candidate that has it; override `CUDA_INC`
 explicitly for a different toolkit.
 
-Three kernels, `lm_f32`, `mul_mat_vec_q6k_q8_1` and `h3_vsa`, are **nvcc-built and do not reproduce under nvrtc** —
-the sources are current (same commit as the shipped PTX), only register allocation differs. They are deliberately left as-is (each domain's `TUNED` array keeps a routine rebuild from installing
-them): the two LLM-decode kernels were tuned against llama.cpp and `h3_vsa` is MiniMax-H3's sparse-attention hot
-path, and swapping codegen without a benchmark would risk that silently. Regenerate them only alongside a perf run.
+**Each kernel has one compiler.** nvcc and nvrtc of the same release stamp the same `// Cuda compilation tools`
+line, yet emit different PTX for many kernels (instruction selection, register numbering), and neither reproduces
+the whole tree. Most kernels ship as nvrtc output. Those in a domain's `NVCC_BUILT` list — the LLM decode GEMVs,
+norms, top-k and flash attention in `lm/`, the expert GEMVs in `moe/` — ship as CUDA 13.0.88 nvcc output, the bytes
+their decode timings were taken on. `build.sh` therefore uses nvrtc for every other kernel even when nvcc is on PATH,
+and builds `NVCC_BUILT` kernels only with nvcc (`HARTSY_NVCC`, else PATH, else `~/.local/cuda-tools-13.0`); unless
+that nvcc is the 13.0.88 release at ISA 9.0 it reports them `UNVERIFIED` and leaves them as shipped. A pip-installed nvcc may lack CCCL (`<nv/target>`, which
+`cuda_fp16.h` needs); the build then takes it from `$CUDA_INC`. Moving a kernel between lists changes its codegen,
+so do it only alongside a perf run.

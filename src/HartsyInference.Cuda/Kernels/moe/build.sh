@@ -13,6 +13,8 @@ KERNELS=(
     "moe_combine_slots"
     "moe_prefill"
 )
+# Shipped as CUDA 13.0.88 nvcc output, which the expert GEMV timings were taken on; nvrtc emits different PTX for these.
+NVCC_BUILT=("moe_id_q4k" "moe_id_q6k" "moe_id_q8_0")
 
 # The expert FFN runner's kernels: compiled for sm_75 so they load on Turing and on every later card.
 KERNELS_SM75=(

@@ -492,6 +492,15 @@ no bug, any more than one bad seed was proof there was one.
   module(s)…` at startup; the sm_70/sm_75 modules still load. A later `CUDA_ERROR_INVALID_HANDLE` that carries the
   same note is a launch of a skipped kernel. Use Vulkan on such a card (`auto` already does); a local `.sm75.ptx`
   variant beside a kernel is picked on an exact SM 7.5 match.
+- **"Drifted" PTX whose source is current — check the frontend first.** nvcc and nvrtc of one release stamp the
+  same `// Cuda compilation tools, release 13.0, V13.0.88` line but emit different PTX for many kernels, so the
+  header cannot say which one built a file. Rebuild the kernel with both before blaming the source: if one
+  reproduces the shipped bytes, the source is current and only the domain's `NVCC_BUILT` list is wrong. A kernel
+  that `#include`s another `.cu` (`moe_id_*` pull in the `lm/` GEMVs) also drifts when only the included file
+  changed, which `git log` on its own `.cu` does not show. A pip `--target` nvcc dir that later took 13.3
+  `nvidia-cuda-runtime`/`crt` wheels keeps a 13.0.88 nvcc but has no CCCL: `cuda_fp16.h` fails on `<nv/target>`
+  until `-I <13.x headers>/cccl` is added (`build_common.sh` does this from `$CUDA_INC`). The header version made no
+  difference to the emitted PTX for any kernel tested; CCCL is the only missing piece.
 - **Which PTX loaded?** `CudaKernels.PtxPath` prefers `<kernel>.sm<CC>.ptx` for the device's exact compute
   capability and falls back to `<kernel>.ptx`; the backend logs `[Cuda] SM x.y PTX variants: …` at startup when
   it picked any. A variant built for another SM is never chosen (family-specific PTX does not JIT elsewhere), so
