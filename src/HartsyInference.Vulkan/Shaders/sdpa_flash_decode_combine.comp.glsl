@@ -48,7 +48,7 @@ void main() {
     uint D = pc.headDim;
 
 #if HAS_DEVICE_POS == 1
-    uint skv = pos_data[0];
+    uint skv = min(pos_data[0], pc.kvCapacity);
     uint qPos = pos_data[1];
 #else
     uint skv = pc.skv;
@@ -56,7 +56,7 @@ void main() {
 #endif
 
     uint hi = skv;
-    if (pc.causal != 0u || pc.slidingWindow != 0u) hi = min(skv, qPos + 1u);
+    if (pc.causal != 0u) hi = min(skv, qPos + 1u);
     uint lo = 0u;
     if (pc.slidingWindow != 0u && qPos + 1u > pc.slidingWindow) lo = qPos + 1u - pc.slidingWindow;
     uint rangeLen = hi > lo ? hi - lo : 0u;

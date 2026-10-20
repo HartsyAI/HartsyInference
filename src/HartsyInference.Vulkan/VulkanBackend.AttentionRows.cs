@@ -16,9 +16,6 @@ public sealed partial class VulkanBackend
     // TODO(attention phase 4): carry the raw kvGroup in AttentionCall and delete this side channel.
     [ThreadStatic] private static int t_flashKvGroup;
 
-    /// <summary>The key-only mask expanded to every query row for the token-major call in flight; the cm2 row reads it,
-    /// the permute fallback hands the head-major entry point the original (which expands it again).</summary>
-    [ThreadStatic] private static Tensor? t_expandedMask;
 
     private AttentionKernelRow[]? _denseRows, _tokenMajorRows, _flashRows, _flashDeviceRows;
 
@@ -98,15 +95,17 @@ public sealed partial class VulkanBackend
         finally { t_flashKvGroup = saved; }
     }
 
-    /// <summary>B.1's admission. A key-only mask reaches cm2 as the <c>[Sq, Skv]</c> copy the token-major entry makes of it,
-    /// so a plan made before that copy exists judges it by the copy's shape.</summary>
+    /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>
     private bool TokenMajorCm2Admits(in AttentionCall c)
     {
-        Tensor? mask = t_expandedMask ?? c.Mask.Bias;
-        bool expandsToFull = t_expandedMask is null && mask is not null && mask.DType == DType.F32
-            && mask.ElementCount == c.KeyTokens && c.QueryTokens > 1;
-        return CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, expandsToFull ? null : mask);
+        bool f16Inputs = c.Query.DType == DType.F16 && c.Key.DType == DType.F16 && c.Value.DType == DType.F16;
+        return (c.Numerics.LegacyAssertedBounded || f16Inputs) && !AnyBf16(in c)
+            && CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.Mask.Bias);
     }
+
+    /// <summary>BF16 has more range than F16, so a BF16 call computes in F32 on the scalar kernel rather than narrowing.</summary>
+    private static bool AnyBf16(in AttentionCall c) =>
+        c.Query.DType == DType.BF16 || c.Key.DType == DType.BF16 || c.Value.DType == DType.BF16 || c.Output.DType == DType.BF16;
 
     private static AttentionKernelCapability Cap(string id, AttentionRoute entry, AttentionDTypes q, AttentionDTypes kv,
         AttentionLayouts layouts) => new() { Id = id, Entry = entry, QueryTypes = q, KvTypes = kv, Layouts = layouts };
@@ -130,7 +129,7 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) =>
                 {
                     bool f16Inputs = c.Query.DType == DType.F16 && c.Key.DType == DType.F16 && c.Value.DType == DType.F16;
-                    return (c.Numerics.LegacyAssertedBounded || f16Inputs)
+                    return (c.Numerics.LegacyAssertedBounded || f16Inputs) && !AnyBf16(in c)
                         && CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.Mask.Bias);
                 },
                 (in AttentionCall c) =>
@@ -184,7 +183,7 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) =>
                 {
                     uint qRow = (uint)((long)c.Heads * c.QkHeadDim), kvRow = (uint)((long)c.KvHeads * c.QkHeadDim);
-                    DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, t_expandedMask ?? c.Mask.Bias, c.Scale,
+                    DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         batch: 1, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.QkHeadDim,
                         new AttnStrides(qRow, (uint)c.QkHeadDim, 0), new AttnStrides(kvRow, (uint)c.QkHeadDim, 0),
                         new AttnStrides(kvRow, (uint)c.QkHeadDim, 0), new AttnStrides(qRow, (uint)c.QkHeadDim, 0));

@@ -4,11 +4,15 @@
 // Compile:
 //   glslc kv_cache_append.comp.glsl -o kv_cache_append_f32.spv
 //   glslc -DUSE_FP16=1 kv_cache_append.comp.glsl -o kv_cache_append_f16.spv
+//   glslc -DUSE_FP16=1 -DSRC_F32=1 kv_cache_append.comp.glsl -o kv_cache_append_f32_f16.spv   (F32 rows into an F16 cache)
 
 #version 460
 
 #ifndef USE_FP16
 #define USE_FP16 0
+#endif
+#ifndef SRC_F32
+#define SRC_F32 0
 #endif
 
 #if USE_FP16 == 1
@@ -22,7 +26,11 @@
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
 layout(set = 0, binding = 0) buffer Buf_          { DTYPE buf_data[]; };
+#if SRC_F32 == 1
+layout(set = 0, binding = 1) readonly buffer New_ { float new_data[]; };
+#else
 layout(set = 0, binding = 1) readonly buffer New_ { DTYPE new_data[]; };
+#endif
 
 layout(push_constant) uniform Push {
     uint heads;
@@ -43,5 +51,11 @@ void main() {
 
     uint srcIdx = (h * pc.tNew + t) * pc.headDim + d;
     uint dstIdx = (h * pc.maxSeq + (pc.offset + t)) * pc.headDim + d;
+#if SRC_F32 == 1
+    // Saturated to the F16 range as CUDA's kv_half_sat is; a NaN stays NaN.
+    float x = new_data[srcIdx];
+    buf_data[dstIdx] = float16_t(x > 65504.0 ? 65504.0 : (x < -65504.0 ? -65504.0 : x));
+#else
     buf_data[dstIdx] = new_data[srcIdx];
+#endif
 }

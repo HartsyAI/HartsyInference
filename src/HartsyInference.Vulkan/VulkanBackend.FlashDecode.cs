@@ -56,7 +56,9 @@ public sealed partial class VulkanBackend
     /// and a head dim the subgroup divides into at most <see cref="FlashDecodeMaxDpl"/> dims per lane.</summary>
     private bool CanUseFlashDecode(Tensor output, Tensor query, Tensor key, Tensor value, int kvGroup)
     {
-        if (!EnableFlashDecodeSplit || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
+        // The split pass reduces across one subgroup per workgroup, so the subgroup size must be the one it was built for.
+        if (!EnableFlashDecodeSplit || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4
+            || !(Vk.SubgroupSizeControl || Vk.MinSubgroupSize == Vk.MaxSubgroupSize))
             return false;
         if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32)
             return false;

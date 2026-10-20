@@ -3,9 +3,10 @@
 //
 // One workgroup per (batch, head, query row); each of the TILE threads owns one key in the current KV tile, so
 // scoring a tile needs no cross-thread reduction — only the tile-level online-softmax combine, done by thread 0.
-// GQA: query head h reads kv head h/(hq/hkv). Supports causal masking, a sliding window, and (HAS_MASK=1) an
-// additive [Sq,Skv] mask broadcast across batch/head. Softcap, attention sinks and ALiBi are NOT supported and
-// fall through to IBackend's reference — a scope boundary, not an oversight.
+// GQA: query head h reads kv head h/(hq/hkv). Supports causal masking, a sliding window (keys too far behind the query;
+// later keys are excluded only by causal), and (HAS_MASK=1) an additive mask addressed by per-batch, per-head and per-row
+// strides, 0 on a broadcast axis. Softcap, attention sinks and ALiBi are NOT supported and fall through to IBackend's
+// reference — a scope boundary, not an oversight.
 
 #version 460
 
@@ -32,9 +33,8 @@
 #endif
 
 // TILE = keys processed per iteration = threads per workgroup (one thread per key in the tile).
-// MAX_D = compile-time upper bound on head dim for the shared-memory tiles; real head dims (64-160)
-// must fit. TILE*MAX_D*4 bytes/array * 2 arrays (K,V) = 32*128*4*2 = 32 KiB, safely under the common
-// 48 KiB shared-memory budget.
+// MAX_D = compile-time upper bound on head dim for the shared-memory tiles. TILE*MAX_D*4 bytes/array * 2 arrays
+// (K,V) = 32*128*4*2 = 32 KiB, safely under the common 48 KiB shared-memory budget.
 #define TILE 32
 #define MAX_D 128
 
@@ -65,6 +65,11 @@ layout(push_constant) uniform Push {
     uint causal;         // 0/1
     uint qOffset;        // absolute position of query row 0 (nonzero for a decode step appending to a KV cache)
     uint slidingWindow;  // 0 = disabled; else max (qPos - kPos) distance
+#if HAS_MASK == 1
+    uint maskBatchStride;
+    uint maskHeadStride;
+    uint maskRowStride;  // 0 for a key-only mask
+#endif
 } pc;
 
 shared float sQ[MAX_D];
@@ -87,7 +92,7 @@ void main() {
     uint D = pc.headDim;
 
 #if HAS_DEVICE_POS == 1
-    uint skv = pos_data[0];
+    uint skv = min(pos_data[0], pc.kvCapacity);
     uint qOffsetV = pos_data[1];
 #else
     uint skv = pc.skv;
@@ -121,7 +126,7 @@ void main() {
             uint keyIdx = kvStart + tid;
             bool masked = false;
             if (pc.causal != 0 && keyIdx > absQPos) masked = true;
-            if (pc.slidingWindow != 0 && (keyIdx > absQPos || absQPos - keyIdx >= pc.slidingWindow)) masked = true;
+            if (pc.slidingWindow != 0 && keyIdx + pc.slidingWindow <= absQPos) masked = true;
             if (masked) {
                 sScore[tid] = -1.0 / 0.0;
             } else {
@@ -129,7 +134,7 @@ void main() {
                 for (uint d = 0; d < D; d++) dot += sQ[d] * sK[tid][d];
                 float s = dot * pc.scale;
 #if HAS_MASK == 1
-                s += mask_data[queryRow * skv + keyIdx];
+                s += mask_data[b * pc.maskBatchStride + hIdx * pc.maskHeadStride + queryRow * pc.maskRowStride + keyIdx];
 #endif
                 sScore[tid] = s;
             }

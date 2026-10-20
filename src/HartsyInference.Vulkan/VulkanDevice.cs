@@ -221,7 +221,8 @@ public sealed class VulkanDevice : IDisposable
         // presence of the extension doesn't guarantee a usable FP16/FP32 workgroup-scope
         // configuration exists — enumerate flexible-dimensions properties and confirm one does.
         uint coopMat2MGran = 0, coopMat2NGran = 0, coopMat2KGran = 0, coopMat2WgInvocations = 0;
-        bool hasCoopMatrix2 = hasCoopMatrix && hasCoopMatrix2Raw
+        (bool cm2Base, bool cm2Attention) = hasCoopMatrix && hasCoopMatrix2Raw ? CoopMat2FeaturesOffered(pd) : (false, false);
+        bool hasCoopMatrix2 = cm2Base
             && CoopMat2Supported(instance, pd, out coopMat2MGran, out coopMat2NGran, out coopMat2KGran, out coopMat2WgInvocations);
 
         // fp8 cooperative matrices need the extension, both of its features, and an enumerated E4M3 configuration;
@@ -305,6 +306,7 @@ public sealed class VulkanDevice : IDisposable
             HasPushDescriptor = hasPushDescriptor,
             HasCooperativeMatrix = hasCoopMatrix,
             HasCooperativeMatrix2 = hasCoopMatrix2,
+            HasCoopMat2AttentionFeatures = hasCoopMatrix2 && cm2Attention,
             CoopMat2MGranularity = coopMat2MGran,
             CoopMat2NGranularity = coopMat2NGran,
             CoopMat2KGranularity = coopMat2KGran,
@@ -431,6 +433,24 @@ public sealed class VulkanDevice : IDisposable
             }
         }
         return false;
+    }
+
+    /// <summary>The cooperative-matrix-2 features: those every coopmat2 kernel needs (workgroup scope, flexible dimensions, tensor
+    /// addressing), and those the attention kernel adds (reductions, conversions, per-element operations). Only called once
+    /// the extension is listed.</summary>
+    private static unsafe (bool Base, bool Attention) CoopMat2FeaturesOffered(nint pd)
+    {
+        VkPhysicalDeviceCooperativeMatrix2FeaturesNV f = new() { sType = VkStructureType.PhysicalDeviceCooperativeMatrix2FeaturesNV };
+        VkPhysicalDeviceFeatures2 feat2 = new() { sType = VkStructureType.PhysicalDeviceFeatures2, pNext = (nint)(&f) };
+        VulkanApi.vkGetPhysicalDeviceFeatures2(pd, ref feat2);
+        Logs.Verbose($"[vk-features] coopmat2 workgroup={f.cooperativeMatrixWorkgroupScope} flexible={f.cooperativeMatrixFlexibleDimensions} "
+            + $"tensor={f.cooperativeMatrixTensorAddressing} reductions={f.cooperativeMatrixReductions} "
+            + $"conversions={f.cooperativeMatrixConversions} perElement={f.cooperativeMatrixPerElementOperations}");
+        bool baseFeatures = f.cooperativeMatrixWorkgroupScope != 0 && f.cooperativeMatrixFlexibleDimensions != 0
+            && f.cooperativeMatrixTensorAddressing != 0;
+        bool attention = f.cooperativeMatrixReductions != 0 && f.cooperativeMatrixConversions != 0
+            && f.cooperativeMatrixPerElementOperations != 0;
+        return (baseFeatures, attention);
     }
 
     /// <summary>Queries <c>shaderFloat8</c> and <c>shaderFloat8CooperativeMatrix</c>; only called once the extension is listed.</summary>
@@ -574,6 +594,9 @@ public sealed class VulkanDevice : IDisposable
             cooperativeMatrixWorkgroupScope = caps.HasCooperativeMatrix2 ? 1u : 0u,
             cooperativeMatrixFlexibleDimensions = caps.HasCooperativeMatrix2 ? 1u : 0u,
             cooperativeMatrixTensorAddressing = caps.HasCooperativeMatrix2 ? 1u : 0u,
+            cooperativeMatrixReductions = caps.HasCoopMat2AttentionFeatures ? 1u : 0u,
+            cooperativeMatrixConversions = caps.HasCoopMat2AttentionFeatures ? 1u : 0u,
+            cooperativeMatrixPerElementOperations = caps.HasCoopMat2AttentionFeatures ? 1u : 0u,
         };
         VkPhysicalDeviceFeatures2 feat2 = new()
         {

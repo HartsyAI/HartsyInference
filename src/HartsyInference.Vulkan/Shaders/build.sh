@@ -124,6 +124,7 @@ SINGLE_KERNELS=(
     cfg_euler
     wan_rms_norm_channel
     cast_f32_f16
+    cast_f32_f16_sat
     cast_f16_f32
     cast_f8e4m3_f16
     cast_bf16_f32
@@ -214,7 +215,11 @@ compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=1 -- "_f16"
 compile_one "rms_norm_modulate" -DIN_FP16=0 -DOUT_FP16=1 -- "_f32_f16"
 compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=0 -- "_f16_f32"
 
-# sdpa_flash_cm2 with an F32 [Sq,Skv] additive mask; HAS_MASK adds a binding, so it is its own module.
+# kv_cache_append with F32 rows into an F16 cache (FixedKvCache appends projection rows as they come out); SRC_F32 changes
+# the source binding's type, so it is its own module.
+compile_one "kv_cache_append" -DUSE_FP16=1 -DSRC_F32=1 -- "_f32_f16"
+
+# sdpa_flash_cm2 with an F32 additive mask; HAS_MASK adds a binding, so it is its own module.
 compile_one "sdpa_flash_cm2" -DHAS_MASK=1 -- "_mask"
 
 # sdpa_flash_cm2 with the causal and sliding-window mask computed in the shader from qOffset and window; CAUSAL adds

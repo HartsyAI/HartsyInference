@@ -31,6 +31,7 @@ void main() {
     uint t = (i / pc.headDim) % pc.tNew;
     uint h = i / (pc.headDim * pc.tNew);
 
+    if (offset + t >= pc.maxSeq) return;   // a position past capacity writes nothing rather than into the next head
     uint srcIdx = (h * pc.tNew + t) * pc.headDim + d;
     uint dstIdx = (h * pc.maxSeq + (offset + t)) * pc.headDim + d;
     buf_data[dstIdx] = new_data[srcIdx];

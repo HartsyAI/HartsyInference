@@ -2688,7 +2688,7 @@ public sealed class VulkanBackendSmokeTests
                     float rowMax = float.NegativeInfinity;
                     for (int j = 0; j < skv; j++)
                     {
-                        bool masked = (causal && j > absQ) || (slidingWindow != 0 && (j > absQ || absQ - j >= slidingWindow));
+                        bool masked = (causal && j > absQ) || (slidingWindow != 0 && j + slidingWindow <= absQ);
                         if (masked) { scores[j] = float.NegativeInfinity; continue; }
                         long kBase = (((long)b * hkv + kvHead) * skv + j) * headDim;
                         float dot = 0f;
