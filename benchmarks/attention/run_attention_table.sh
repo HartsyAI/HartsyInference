@@ -69,8 +69,11 @@ swarm_tree() {
   [ "${root:-0}" -gt 0 ] || return 0
   ps -eo pid=,ppid= | awk -v r="$root" '{p[$1]=$2} END{for (k in p){x=k; while (x>1){if (x==r){print k; break}; x=p[x]}}}'
 }
+# The desktop's own GPU clients (display server, remote desktop, browser) hold a context on the display card for good;
+# the same list tests/swarm-quiet-window.sh allows.
+desktop_pids() { pgrep -x 'Xorg|rustdesk|cinnamon|gnome-shell|chrome' || true; }
 foreign_on_card() {
-  local allowed; allowed=" $(swarm_tree | tr '\n' ' ') "
+  local allowed; allowed=" $(swarm_tree | tr '\n' ' ') $(desktop_pids | tr '\n' ' ') "
   nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader \
     | awk -F', ' -v u="$UUID" -v ok="$allowed" '$1==u && index(ok, " "$2" ")==0 {f=1} END{exit !f}'
 }
