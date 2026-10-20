@@ -35,8 +35,12 @@ def main():
     ap.add_argument("--card", required=True)
     ap.add_argument("--shapes", default=str(Path(__file__).resolve().parents[1] / "python-baseline" / "attention_shapes.json"))
     a = ap.parse_args()
-    ours, ext = load(a.engine), load(a.external)
-    order = [s["id"] for s in json.load(open(a.shapes))["shapes"]]
+    shapes = {s["id"]: s for s in json.load(open(a.shapes))["shapes"]}
+    geometry = ("b", "hq", "hkv", "sq", "skv", "d", "layout")
+    # A row measured before its shape was frozen at a different geometry is not this shape's row.
+    current = lambda r: r["shape"] in shapes and all(str(shapes[r["shape"]][k]) == r[k] for k in geometry)
+    ours, ext = [r for r in load(a.engine) if current(r)], [r for r in load(a.external) if current(r)]
+    order = list(shapes)
     print(f"### {a.card}\n")
     print("| shape | ours: fastest arm | ours: production default | torch: fastest | Comfy Kitchen INT8 | ours ÷ torch | ours ÷ CK |")
     print("|---|---|---|---|---|---|---|")
