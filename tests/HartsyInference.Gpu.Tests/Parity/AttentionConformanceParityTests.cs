@@ -39,8 +39,9 @@ public sealed class AttentionConformanceParityTests(ITestOutputHelper output)
         _out.WriteLine($"  {achieved}: relL2 {rel:E2}  min cos {cos:F7}  max|Δ| {max:E2}");
     }
 
-    /// <summary>Negative controls: each runs a case on a backend and asserts the output agrees with the right oracle AND
-    /// differs from a wrong one, so the case is proven able to see the bug it names.</summary>
+    /// <summary>Negative controls: each runs a case on a backend and asserts the output agrees with the right oracle and
+    /// differs from the oracle of inputs that undo what the case checks (one block of the mask for every head, no mask, the
+    /// key/value heads swapped, the tail keys negated), so a kernel that ignored that part could not pass.</summary>
     [Theory]
     [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
     public void Negative_Controls(string kind)
@@ -57,7 +58,7 @@ public sealed class AttentionConformanceParityTests(ITestOutputHelper output)
             new AttnCase("nc-mask-applied", AttnDType.F32, AttnLayout.HeadMajor, AttnMask.QueryKey, AttnSeq.Tiny, 1, 3, 3, 64, 9, 9, 9, 0, 0,
                 false, false, false, "control"),
             (q, k, v, m) => Array.Clear(m!));
-        Control(backend, kind, "query head h reads key/value head h/group",
+        Control(backend, kind, "each query head reads its own group's key/value head",
             AttnCatalog.Get("anchor-llm-prefill"), SwapKvHeads(capacity: 96, d: 128));
         Control(backend, kind, "keys past the query rows count",
             AttnCatalog.Get("edge-skv-above-sq"),

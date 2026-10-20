@@ -141,6 +141,23 @@ public sealed class VulkanAttentionCorrectnessTests(ITestOutputHelper output)
         Assert.True(error < 2e-4f, $"max error {error} on route {VulkanBackend.LastAttentionRoute}");
     }
 
+    /// <summary>The single-row decode pair keeps later keys too when the window is not causal.</summary>
+    [Fact]
+    public void ADecodeWindowWithoutCausal_KeepsLaterKeys()
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        const int hq = 8, hkv = 2, capacity = 12, kvLen = 9, d = 64, window = 3, qOffset = 4;
+        using Tensor q = Random(new TensorShape(1, hq, 1, d), 1, false), k = Random(new TensorShape(1, hkv, capacity, d), 2, false);
+        using Tensor v = Random(new TensorShape(1, hkv, capacity, d), 3, false);
+        using Tensor expected = new(q.Shape, DType.F32), actual = new(q.Shape, DType.F32);
+        AttentionReference.FlashAttention(expected, q, k, v, kvLen, hq / hkv, causal: false, qOffset, scale: 0.125f, slidingWindow: window);
+        backend.FlashAttention(actual, q, k, v, kvLen, hq / hkv, causal: false, qOffset, scale: 0.125f, slidingWindow: window);
+        float error = MaxAbs(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
+        output.WriteLine($"route {VulkanBackend.LastAttentionRoute}, max error {error:E2}");
+        Assert.True(error < 2e-4f, $"max error {error} on route {VulkanBackend.LastAttentionRoute}");
+    }
+
     /// <summary>F32 token-major attention without the F16 permission stays in F32: it must match the reference far closer
     /// than F16 rounding would.</summary>
     [Fact]
@@ -166,11 +183,13 @@ public sealed class VulkanAttentionCorrectnessTests(ITestOutputHelper output)
     {
         if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device, so nothing narrows to F16"); return; }
         const int heads = 2, s = 70, d = 64;
         using Tensor q = Random(new TensorShape(1, heads, s, d), 1, true), k = Random(new TensorShape(1, heads, s, d), 2, true);
         using Tensor v = Filled(new TensorShape(1, heads, s, d), i => i % 7 == 0 ? 1e5f : 0.5f);
         using Tensor actual = new(q.Shape, DType.F32);
         backend.ScaledDotProductAttention(actual, q, k, v, null, 0.125f, allowF16: true);
+        Assert.Equal("A.1", VulkanBackend.LastAttentionRoute);
         ReadOnlySpan<float> o = actual.AsReadOnlySpan<float>();
         for (int i = 0; i < o.Length; i++)
             Assert.True(float.IsFinite(o[i]) && MathF.Abs(o[i]) <= 65504f * 1.001f, $"output[{i}] = {o[i]} on route {VulkanBackend.LastAttentionRoute}");

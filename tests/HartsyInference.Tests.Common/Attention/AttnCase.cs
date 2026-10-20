@@ -105,8 +105,8 @@ public static class AttnCatalog
         int? d = p[4] < 0 ? null : HeadDims[p[4]];
         AttnSeq? seq = p[5] < 0 ? null : (AttnSeq)p[5];
         bool? allowF16 = p[6] < 0 ? null : p[6] == 1;
-        bool flash = mask is AttnMask.Causal or AttnMask.Window;
-        if (layout == AttnLayout.TokenMajor && mask is not null and not (AttnMask.None or AttnMask.QueryKey)) return false;
+        bool flash = mask is AttnMask.Causal or AttnMask.Window || (seq == AttnSeq.Decode && mask == AttnMask.None);
+        if (layout == AttnLayout.TokenMajor && mask is AttnMask.PerBatch or AttnMask.Causal or AttnMask.Window) return false;
         if (flash && dtype is not null and not AttnDType.F32) return false;
         if (seq == AttnSeq.Long4k && (d > 128 || mask is AttnMask.QueryKey or AttnMask.PerHead or AttnMask.PerBatch or AttnMask.Window))
             return false;
@@ -169,6 +169,9 @@ public static class AttnCatalog
         yield return new("edge-one-by-one", AttnDType.F32, AttnLayout.HeadMajor, AttnMask.None, AttnSeq.Tiny, 1, 2, 2, 64, 1, 1, 1, 0, 0, false, false, false, "edge");
         yield return new("edge-skv-above-sq", AttnDType.F32, AttnLayout.HeadMajor, AttnMask.QueryKey, AttnSeq.Tiny, 1, 3, 3, 64, 5, 77, 77, 0, 0, false, false, false, "edge");
         yield return new("edge-window-noncausal", AttnDType.F32, AttnLayout.HeadMajor, AttnMask.Window, AttnSeq.Tiny, 1, 4, 2, 64, 9, 12, 9, 0, 3, false, true, false, "edge");
+        yield return new("edge-window-noncausal-decode", AttnDType.F32, AttnLayout.HeadMajor, AttnMask.Window, AttnSeq.Decode, 1, 8, 2, 64, 1, 12, 9, 4, 3, false, true, false, "edge");
+        yield return new("edge-tm-keyonly", AttnDType.F32, AttnLayout.TokenMajor, AttnMask.KeyOnly, AttnSeq.TileTail, 1, 4, 4, 64, 66, 66, 66, 0, 0, true, false, false, "edge");
+        yield return new("edge-tm-perhead", AttnDType.F16, AttnLayout.TokenMajor, AttnMask.PerHead, AttnSeq.Tiny, 1, 4, 2, 64, 70, 70, 70, 0, 0, true, false, false, "edge");
         yield return new("edge-sentinel-row", AttnDType.F32, AttnLayout.HeadMajor, AttnMask.QueryKey, AttnSeq.Tiny, 1, 3, 3, 64, 7, 11, 11, 0, 0, false, false, false, "edge");
     }
 }

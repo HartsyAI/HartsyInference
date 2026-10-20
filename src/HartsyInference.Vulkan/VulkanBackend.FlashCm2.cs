@@ -145,7 +145,9 @@ public sealed partial class VulkanBackend
         if (mask is not null)
         {
             AttentionMaskLayout m = AttentionMaskLayout.Of(mask, batch, hq, sq, skv);
-            WriteStrides(pc, 68, new AttnStrides((uint)m.RowStride, (uint)m.HeadStride, (uint)m.BatchStride));
+            // A one-row mask still gets a real row stride: only row 0 is in bounds, and no layout stride is ever 0.
+            uint rowStride = m.RowStride == 0 ? (uint)skv : (uint)m.RowStride;
+            WriteStrides(pc, 68, new AttnStrides(rowStride, (uint)m.HeadStride, (uint)m.BatchStride));
         }
         RunFlashCm2(output, query, key, value, mask, mask is null ? "sdpa_flash_cm2" : "sdpa_flash_cm2_mask", pc,
             batch, hq, sq, headDim);

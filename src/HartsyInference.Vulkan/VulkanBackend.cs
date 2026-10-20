@@ -1181,11 +1181,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// dtype decides, which is what every product computed in before this policy. F16 falls back to F32 on a device
     /// without it. A product in F16 written to an F32 output goes through the cooperative-matrix kernels' F32 store or the
     /// tiled kernel's cast (<see cref="DispatchGemm"/>).</summary>
-    /// <summary>The storage attention computes in: F32 when any operand is BF16 (more range than F16), else the GEMM rule.</summary>
-    private DType AttentionDtype(Tensor query, Tensor key, Tensor value, Tensor output) =>
-        query.DType == DType.BF16 || key.DType == DType.BF16 || value.DType == DType.BF16 || output.DType == DType.BF16
-            ? DType.F32 : ResolveGemmDtype(query.DType, key.DType, output.DType);
-
     private DType ResolveGemmDtype(DType a, DType b, DType output)
     {
         DType gemmDtype;
@@ -2542,6 +2537,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
         kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         if (kvLen < 0 || kvLen > key.Shape[2])
             throw new ArgumentOutOfRangeException(nameof(kvLen), $"kvLen {kvLen} is outside the cache's {key.Shape[2]} rows.");
         AttentionCall call = AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink,
@@ -2555,6 +2551,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         using OpScope _op = EnterOp();
         RunAttentionRows(FlashAttentionRows, in call, kvGroup);
     }
+
+    /// <summary>The storage attention computes in: F32 when any operand is BF16 (more range than F16), else the GEMM rule.</summary>
+    private DType AttentionDtype(Tensor query, Tensor key, Tensor value, Tensor output) =>
+        query.DType == DType.BF16 || key.DType == DType.BF16 || value.DType == DType.BF16 || output.DType == DType.BF16
+            ? DType.F32 : ResolveGemmDtype(query.DType, key.DType, output.DType);
 
     /// <summary>The FlashAttention head contract: <c>[B, Hq, S, D]</c> operands with <c>Hq = kvGroup·Hkv</c>, a group of 0 or
     /// less meaning 1 as on CUDA. Returns the group to use.</summary>
@@ -4691,6 +4692,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         float softcap = 0f, int slidingWindow = 0)
     {
         kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
             slidingWindow);
         if (!DeviceKernelEligible(in call))

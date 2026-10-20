@@ -30,7 +30,7 @@ layout(set = 0, binding = 1) writeonly buffer O_ { float o_data[]; };
 layout(push_constant) uniform Push {
     uint hq;
     uint hkv;
-    uint kvCapacity;     // unused here; kept so both passes share one push layout
+    uint kvCapacity;     // clamps a device position; same layout as the split pass
     uint skv;            // eager only
     uint qOffset;        // eager only
     uint headDim;
