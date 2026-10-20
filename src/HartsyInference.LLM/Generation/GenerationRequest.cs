@@ -42,6 +42,14 @@ public sealed record GenerationRequest
     /// <summary>Maximum number of new tokens to generate.</summary>
     public int MaxTokens { get; init; } = 256;
 
+    /// <summary>Teacher forcing: the completion is exactly these ids in order, whatever the sampler would pick, and a stop token does not
+    /// end it. Decodes eagerly — no graph or speculative decode — so the scores measure the plain prefill and decode kernels.</summary>
+    public IReadOnlyList<int>? ForcedTokenIds { get; init; }
+
+    /// <summary>Records each completion token's log-probability, and the top token's, under the raw logits before any sampler step
+    /// (<see cref="GenerationResult.TokenScores"/>). Decodes eagerly, like <see cref="ForcedTokenIds"/>.</summary>
+    public bool RecordTokenScores { get; init; }
+
     /// <summary>Sampling configuration (defaults to greedy-equivalent: temp 1, no top-k/p).</summary>
     public SamplingOptions Sampling { get; init; } = SamplingOptions.Default;
 

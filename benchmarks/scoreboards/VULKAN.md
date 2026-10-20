@@ -127,7 +127,8 @@ synthetic step was run for a head-to-head comparison — this is a before/after 
 
 ## Results — fused flash attention (`sdpa_flash`), mean time, RTX 4090 (lower is better)
 
-`SdpaGpuBenchmarks.Sdpa_F32`, same shape grid as the GEMM table above. `ScaledDotProductAttention` and
+Measured with the former `SdpaGpuBenchmarks.Sdpa_F32` BDN class, same shape grid as the GEMM table above; re-run with
+`benchmarks/attention/run_attention_table.sh --backend vulkan`, which replaced it. `ScaledDotProductAttention` and
 `FlashAttention` now dispatch the fused online-softmax kernel (`sdpa_flash.comp.glsl`) instead of the
 old materialized 3-pass path for head dims <= 128 (all sampled shapes qualify).
 

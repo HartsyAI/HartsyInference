@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Added: teacher-forced text scoring.** `TextRequest.ForcedTokenIds` commits exactly the given tokens and
+  `TextRequest.ReturnTokenScores` reports each completion token's log-probability and the top token's, from the raw
+  logits (`TextResult.TokenScores`); CLI `--scores-out`, `--teacher-force` and `--prompt-file`. `tests/regression-ab.sh`
+  uses it on text cases: the head build scores the base build's greedy tokens, so a logit shift shows before it flips one.
+- **Added: attention shape table.** `benchmarks/attention/run_attention_table.sh` times every attention kernel arm per
+  shape in its own process and reports the kernel that actually ran, the error against a float64 oracle, peak VRAM and
+  throttling; `benchmarks/python-baseline/bench_attention.py` times torch's SDPA backends and Comfy Kitchen's INT8
+  attention on the same `attention_shapes.json`. They replace `SdpaGpuBenchmarks`, `FlashAttnGpuBenchmarks`,
+  `SageSdpaMicroBench` and `bench_pytorch_sdpa.py`.
+- **Tests:** an `attention` regression tag (17 existing cases and 13 new: LoRA, LTX-2.5, MiniMax-H3, HunyuanVideo,
+  Wan 2.1 14B, SD3.5, AuraFlow, Qwen3, Gemma-2); `tests/gpu-suite.sh` runs a test project with CUDA and Vulkan pinned to
+  one card by name; four cuDNN SDPA tests the GPU sweep never ran are tagged `GpuIntegration`; `regression-ab.sh`
+  leaves SwarmUI running when the run is on a card it does not use.
+
 ## alpha.383
 
 - **Added: MOSS-Image colorize reference layout** (`reference.layout=colorize`, CLI `--reference-layout colorize`), for

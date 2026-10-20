@@ -24,4 +24,11 @@ public sealed record GenerationResult
 
     /// <summary>Wall time of the decode loop after the first token, in milliseconds (0 when the run was not timed).</summary>
     public double DecodeMilliseconds { get; init; }
+
+    /// <summary>One entry per generated token, when <see cref="GenerationRequest.RecordTokenScores"/> or
+    /// <see cref="GenerationRequest.ForcedTokenIds"/> asked for them; null otherwise.</summary>
+    public IReadOnlyList<TokenScore>? TokenScores { get; init; }
 }
+
+/// <summary>A completion token's natural-log probability under the raw logits, with the most likely token at that position.</summary>
+public readonly record struct TokenScore(int TokenId, float LogProb, int TopTokenId, float TopLogProb);

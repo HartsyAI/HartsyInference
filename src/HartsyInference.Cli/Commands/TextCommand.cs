@@ -127,6 +127,21 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Suppress staging/streaming; print only the final text.")]
         public bool Quiet { get; init; }
 
+        /// <summary>Reads the prompt from a file instead of the positional argument (long prompts, prefill measurements).</summary>
+        [CommandOption("--prompt-file")]
+        [Description("Read the prompt from this file; the positional prompt is then ignored.")]
+        public string? PromptFile { get; init; }
+
+        /// <summary>Writes each completion token's log-probability and the top token's to a TSV (eager decode, single-request route).</summary>
+        [CommandOption("--scores-out")]
+        [Description("Write per-token log-probabilities (index, token_id, logprob, top_id, top_logprob) to this TSV; decodes eagerly.")]
+        public string? ScoresOut { get; init; }
+
+        /// <summary>Teacher forcing: the completion is the token_id column of a scores TSV written by --scores-out.</summary>
+        [CommandOption("--teacher-force")]
+        [Description("Force the completion to the token ids in this --scores-out TSV and score them; requires --scores-out.")]
+        public string? TeacherForce { get; init; }
+
         /// <summary>Force CUDA-graph decode on; requires greedy sampling and an eligible dense GQA/RoPE model.</summary>
         /// <remarks>Forces --temperature to 0 if a positive temperature was also given.</remarks>
         [CommandOption("--graph-decode")]
@@ -137,8 +152,23 @@ public sealed class TextCommand : Command<TextCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (!CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out int exitCode))
+        string prompt = settings.Prompt;
+        if (settings.PromptFile is { Length: > 0 } promptFile)
+        {
+            if (!File.Exists(promptFile))
+            {
+                AnsiConsole.MarkupLine($"[red]Prompt file not found:[/] {Markup.Escape(promptFile)}");
+                return 1;
+            }
+            prompt = File.ReadAllText(promptFile);
+        }
+        if (!CommandRunner.RequireNonEmpty(prompt, "A prompt is required.", out int exitCode))
             return exitCode;
+        if (settings.TeacherForce is { Length: > 0 } && settings.ScoresOut is not { Length: > 0 })
+        {
+            AnsiConsole.MarkupLine("[red]--teacher-force needs --scores-out to write the scores of the forced tokens.[/]");
+            return 1;
+        }
 
         if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "--model", "--model-path", out exitCode))
             return exitCode;
@@ -198,11 +228,22 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
         if (settings.Placement is { Length: > 0 } placement)
             parameters.Put("placement", placement);
+        if (settings.ScoresOut is { Length: > 0 } scoresOut)
+            parameters.Put("scores-out", scoresOut);
+        if (settings.TeacherForce is { Length: > 0 } teacherForce)
+        {
+            if (!File.Exists(teacherForce))
+            {
+                AnsiConsole.MarkupLine($"[red]Teacher-force file not found:[/] {Markup.Escape(teacherForce)}");
+                return 1;
+            }
+            parameters.Put("teacher-force", teacherForce);
+        }
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Text);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
 
-        return CommandRunner.Run(Modality.Text, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
+        return CommandRunner.Run(Modality.Text, spec, prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: true);
     }
 }

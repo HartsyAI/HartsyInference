@@ -17,6 +17,10 @@ public static class Program
     /// <summary>Runs whatever benchmarks BenchmarkSwitcher dispatches based on the CLI args.</summary>
     public static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "attention-table")
+        {
+            return Attention.AttentionTableRunner.Run(args[1..]);
+        }
         Assembly assembly = typeof(Program).Assembly;
 
         IConfig config = new GpuBenchmarkConfig();

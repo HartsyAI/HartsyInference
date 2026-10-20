@@ -85,8 +85,21 @@ public sealed class TextGenerationPipeline
         HashSet<int> stops = _stopIds;
         if (request.StopTokenIds is not null) { stops = [.. _stopIds]; foreach (int s in request.StopTokenIds) stops.Add(s); }
 
+        IReadOnlyList<int>? forced = request.ForcedTokenIds;
+        if (forced is not null)
+        {
+            if (forced.Count == 0) throw new ArgumentException("ForcedTokenIds is empty.", nameof(request));
+            foreach (int id in forced)
+                if ((uint)id >= (uint)vocab) throw new ArgumentException($"Forced token id {id} is outside the vocabulary [0, {vocab}).", nameof(request));
+        }
+        // Scores are taken on the eager loop only: the graph and speculative paths never see a full logits row on the host.
+        List<TokenScore>? scores = request.RecordTokenScores || forced is not null ? new() : null;
+        int maxNew = forced?.Count ?? request.MaxTokens;
+
         if (_tp is not null)
         {
+            if (scores is not null)
+                throw new NotSupportedException("Teacher forcing and token scores are not served on the tensor-parallel path.");
             return GenerateTp(request, promptIds, sampler, stops, onToken, ct);
         }
 
@@ -96,7 +109,7 @@ public sealed class TextGenerationPipeline
         IGraphDecodable? graphModel = _model as IGraphDecodable;
         bool graphDecodeExplicit = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
         DeviceSamplerConfig? deviceSampler = DeviceSamplerFor(request.Sampling);
-        if (graphDecodeExplicit && !request.Sampling.HasJsonConstraint
+        if (scores is null && graphDecodeExplicit && !request.Sampling.HasJsonConstraint
             && (request.Sampling.Greedy || (deviceSampler is not null && graphModel?.SupportsDeviceSampling(_backend) == true))
             && graphModel?.GraphDecodeRefusal(_backend) is { } refusal)
             throw new NotSupportedException(refusal);
@@ -104,7 +117,7 @@ public sealed class TextGenerationPipeline
         // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation, unless
         // `reuse` already holds one (AcquireCache), in which case its common prefix with `promptIds` is kept —
         // grown by copy when the retained buffer is too small — and only the diverging tail below is prefilled.
-        int maxSeq = promptIds.Length + request.MaxTokens + 1;
+        int maxSeq = promptIds.Length + maxNew + 1;
         (ISequenceState cache, int reusedLen) = AcquireCache(reuse, promptIds, maxSeq, request.PrefixCacheCapacityHint, request.Loops ?? 0);
         bool committed = false;
         // True only once cache.Length is guaranteed >= promptIds.Length (the first prefill below has returned).
@@ -126,7 +139,7 @@ public sealed class TextGenerationPipeline
             using (Tensor logits = _model.ProjectLogits(hidden, 1))
             {
                 Span<float> lastRow = LastRow(logits, 1, vocab);
-                next = sampler.Next(lastRow, generated);
+                next = NextToken(lastRow, sampler, generated, forced, 0, scores);
             }
             firstPrefillDone = true;
             prefillMs = clock.Elapsed.TotalMilliseconds;
@@ -153,7 +166,7 @@ public sealed class TextGenerationPipeline
             // capture, so per-stage graphs are a measured follow-up, not a default.
             // A sampled (non-greedy) request can replay a graph too when the backend draws on the device: top-k, temperature, top-p and
             // min-p are done there, which covers the common server defaults; anything else (no top-k, a larger k) stays on the host chain.
-            bool useGraphDecode = !request.Sampling.HasJsonConstraint && graphDecodeRequested
+            bool useGraphDecode = scores is null && !request.Sampling.HasJsonConstraint && graphDecodeRequested
                 && graphModel is not null && graphModel.SupportsGraphDecode(_backend)
                 && (request.Sampling.Greedy || (deviceSampler is not null && graphModel.SupportsDeviceSampling(_backend)));
 
@@ -178,7 +191,7 @@ public sealed class TextGenerationPipeline
                     useGraphDecode = false;
                 }
             }
-            bool useSpecDecode = !useGraphDecode && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
+            bool useSpecDecode = scores is null && !useGraphDecode && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
                 && _model.Capabilities.SupportsSpeculation && specDecodeRequested;
 
             if (useGraphDecode)
@@ -192,17 +205,19 @@ public sealed class TextGenerationPipeline
             else
             {
                 stopped = false;
-                for (int step = 0; step < request.MaxTokens; step++)
+                for (int step = 0; step < maxNew; step++)
                 {
                     ct.ThrowIfCancellationRequested();
-                    if (stops.Contains(next)) { stopped = true; break; }
+                    if (forced is null && stops.Contains(next)) { stopped = true; break; }
                     generated.Add(next);
                     onToken?.Invoke(next);
 
                     using Tensor hidden = _model.Prefill(new PrefillChunk(new[] { next }, cache.Length), cache);
                     using Tensor logits = _model.ProjectLogits(hidden, 1);
                     Span<float> row = LastRow(logits, 1, vocab);
-                    next = sampler.Next(row, generated);
+                    // The last forced token is committed like any other, but nothing follows it to score.
+                    if (forced is not null && step + 1 == forced.Count) continue;
+                    next = NextToken(row, sampler, generated, forced, step + 1, scores);
                 }
             }
 
@@ -217,6 +232,8 @@ public sealed class TextGenerationPipeline
                 ReusedPromptTokens = reusedLen,
                 PrefillMilliseconds = prefillMs,
                 DecodeMilliseconds = decodeMs,
+                // The loop scores the token it would add next; a stop or the token limit leaves that one unadded.
+                TokenScores = scores is null ? null : scores.Count > generated.Count ? scores.GetRange(0, generated.Count) : scores,
             };
         }
         catch (OperationCanceledException)
@@ -400,6 +417,37 @@ public sealed class TextGenerationPipeline
     }
 
     /// <summary>Tensor-parallel generation: prefill + eager decode over per-rank KV caches; no graph/speculative decode (structurally unreachable — <c>ForwardTp</c> is the only forward) and no last-row gather optimization yet (prefill projects all rows, correctness-first).</summary>
+    /// <summary>The next completion token: the forced id at <paramref name="index"/>, else the sampler's pick. With
+    /// <paramref name="scores"/> it also records that token's log-probability and the top token's from the raw row.</summary>
+    private static int NextToken(Span<float> row, SamplerChain sampler, List<int> generated, IReadOnlyList<int>? forced, int index,
+        List<TokenScore>? scores)
+    {
+        if (scores is null) return forced is null ? sampler.Next(row, generated) : forced[index];
+        int top = 0;
+        float max = row[0];
+        for (int i = 1; i < row.Length; i++)
+            if (row[i] > max) { max = row[i]; top = i; }
+        double sum = 0;
+        for (int i = 0; i < row.Length; i++) sum += Math.Exp(row[i] - max);
+        double logSumExp = max + Math.Log(sum);
+        int next;
+        float picked;
+        if (forced is not null)
+        {
+            next = forced[index];
+            picked = row[next];
+        }
+        else
+        {
+            // The sampler rewrites the row in place, so the raw logits are copied first.
+            float[] raw = row.ToArray();
+            next = sampler.Next(row, generated);
+            picked = raw[next];
+        }
+        scores.Add(new TokenScore(next, (float)(picked - logSumExp), top, (float)(max - logSumExp)));
+        return next;
+    }
+
     private GenerationResult GenerateTp(GenerationRequest request, int[] promptIds, SamplerChain sampler,
         HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
