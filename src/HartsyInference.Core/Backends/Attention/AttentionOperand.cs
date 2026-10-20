@@ -31,7 +31,10 @@ public readonly record struct AttentionOperand(Tensor Storage, AttentionLayout L
     public static AttentionOperand TokenMajor(Tensor t, int heads, int headDim)
     {
         int batch = t.Shape.Rank == 4 ? (int)t.Shape[0] : 1;
-        int tokens = (int)(t.ElementCount / ((long)batch * heads * headDim));
+        long perToken = (long)batch * heads * headDim;
+        if (perToken <= 0 || t.ElementCount % perToken != 0)
+            throw new ArgumentException($"A token-major {t.Shape} tensor does not hold whole rows of {heads}x{headDim} per batch item.");
+        int tokens = (int)(t.ElementCount / perToken);
         long row = (long)heads * headDim;
         return new(t, AttentionLayout.TokenMajor, batch, heads, tokens, headDim, 0, tokens * row, headDim, row);
     }

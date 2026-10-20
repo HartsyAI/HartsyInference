@@ -7582,12 +7582,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
     {
-        if (kvHeads == heads)
-        {
-            ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, headDim, scale, allowF16);
-            return;
-        }
-        ValidateTokenMajorGqaAttentionContract(output, query, key, value, mask, heads, kvHeads, headDim, scale);
+        // Equal heads too: Krea2's text-fusion blocks issued the head-major sequence, not the token-major cuDNN call.
+        // The mask is validated by the head-major entry, as it was when callers issued that sequence themselves.
+        ValidateTokenMajorGqaAttentionContract(output, query, key, value, heads, kvHeads, headDim, scale);
         RunAttentionRows(TokenMajorGqaAttentionRows,
             AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16));
     }
@@ -9782,7 +9779,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
-        using OpScope _op = EnterOp();
+        using OpScope _op = EnterOp(nameof(FlashAttention));
         EnsureKernels();
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0, pSink = 0, pAlibi = 0;
         bool cachedOutput = false;
@@ -10059,6 +10056,20 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {
+        // Graph decode can keep kvLen/qOffset exclusively on-device. Unsupported storage modes fall back to
+        // eager attention, whose validator requires meaningful host positions; the device path validates the
+        // same buffer/layout/GQA contract without pretending the zero host placeholders are current positions.
+        bool devF16Kv = key.DType == DType.F16 && value.DType == DType.F16;
+        if (devicePos == 0 || query.DType != DType.F32 || output.DType != DType.F32
+            || (!devF16Kv && (key.DType != DType.F32 || value.DType != DType.F32)))
+        {
+            FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
+            t_attentionRoute = AttentionRouteText.Nested("V.0/", t_attentionRoute);
+            return;
+        }
+        ValidateFlashAttentionContract(
+            output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap,
+            sink: null, slidingWindow, alibiSlopes: null, positionOnDevice: true);
         RunAttentionRows(FlashAttentionDeviceRows,
             AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap, slidingWindow),
             kvGroup);
@@ -10069,10 +10080,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         int qOffset, float scale, ulong devicePos, float softcap, int slidingWindow)
     {
         bool devF16Kv = key.DType == DType.F16 && value.DType == DType.F16;
-        ValidateFlashAttentionContract(
-            output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap,
-            sink: null, slidingWindow, alibiSlopes: null, positionOnDevice: true);
-
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool kernelOk = d > 0 && d <= 1024;
@@ -10084,7 +10091,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             throw new NotSupportedException("Device-position FlashAttention supports head dimensions up to 1024.");
         }
-        using OpScope _op = EnterOp();
+        using OpScope _op = EnterOp(nameof(FlashAttentionDev));
         EnsureKernels();
 
         // Fixed split count from CAPACITY (lk) so the grid never changes across steps. Target ~16× SM occupancy

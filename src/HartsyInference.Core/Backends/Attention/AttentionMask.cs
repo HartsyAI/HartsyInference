@@ -29,11 +29,12 @@ public readonly record struct AttentionMask
     public static AttentionMask Additive(Tensor? bias) => new() { Bias = bias };
 
     /// <summary>The FlashAttention rule: causal, and with <paramref name="slidingWindow"/> &gt; 0 the query sees its own key
-    /// and the <c>slidingWindow − 1</c> before it.</summary>
+    /// and the <c>slidingWindow − 1</c> before it. A negative window is invalid; it is kept so the legacy entry that
+    /// rejects it still sees it.</summary>
     public static AttentionMask FromFlash(bool causal, int slidingWindow) => new()
     {
         Causal = causal,
-        WindowLeft = slidingWindow > 0 ? slidingWindow - 1 : null,
+        WindowLeft = slidingWindow != 0 ? slidingWindow - 1 : null,
     };
 
     /// <summary>The legacy FlashAttention <c>slidingWindow</c> argument this mask was built from (0 = none).</summary>
@@ -44,19 +45,20 @@ public readonly record struct AttentionMask
 }
 
 /// <summary>Valid key length and query position, on the host or in a device buffer (docs/ATTENTION_CONTRACT.md §2).</summary>
-/// <param name="KvLength">Keys of the key operand that are valid; 0 means all of them.</param>
+/// <param name="KvLength">Keys of the key operand that are valid when <paramref name="Bounded"/>; otherwise all are.</param>
 /// <param name="QueryOffset">Logical position of query row 0; keys start at position 0.</param>
 /// <param name="DeviceHandle">An <see cref="IBackend.AllocDevicePos"/> buffer holding <c>{kvLen, qOffset}</c>, or 0.</param>
-public readonly record struct AttentionPositions(int KvLength, int QueryOffset, ulong DeviceHandle)
+/// <param name="Bounded">True when <paramref name="KvLength"/> was given, so 0 means no keys rather than all of them.</param>
+public readonly record struct AttentionPositions(int KvLength, int QueryOffset, ulong DeviceHandle, bool Bounded = false)
 {
     /// <summary>Every key is valid and query row 0 sits at position 0.</summary>
     public static AttentionPositions Dense => default;
 
     /// <summary>Host positions.</summary>
-    public static AttentionPositions Host(int kvLength, int queryOffset) => new(kvLength, queryOffset, 0);
+    public static AttentionPositions Host(int kvLength, int queryOffset) => new(kvLength, queryOffset, 0, true);
 
     /// <summary>Positions read on the device; the host values are placeholders.</summary>
-    public static AttentionPositions Device(ulong handle, int kvLength, int queryOffset) => new(kvLength, queryOffset, handle);
+    public static AttentionPositions Device(ulong handle, int kvLength, int queryOffset) => new(kvLength, queryOffset, handle, true);
 
     /// <summary>True when the kernel reads positions from the device.</summary>
     public bool OnDevice => DeviceHandle != 0;

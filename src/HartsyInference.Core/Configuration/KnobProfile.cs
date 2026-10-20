@@ -45,10 +45,7 @@ public sealed class KnobProfile
                 error = null;
                 return true;
             }
-            if (!TrySet(retired.NewId, rawValue, out updated, out error)) return false;
-            if (retired.MapValue is not null)
-                updated = new KnobProfile(Name, updated.Values.SetItem(retired.NewId, retired.MapValue(updated.Values[retired.NewId])));
-            return true;
+            return TrySet(retired.NewId, KnobDeprecations.MapText(retired, rawValue), out updated, out error);
         }
         if (knob is null)
         {

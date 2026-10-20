@@ -74,7 +74,10 @@ A call carries any combination of these; they compose (logical AND of visibility
 | `KeyValidLength` | exclusion | keys at `j ≥ kvLen[b]` are not visible |
 | `SegmentIds` | exclusion | a key is visible only to queries of the same segment (block-diagonal, prefix-LM) |
 | `ExclusionTensor` | exclusion | an explicit boolean tensor, broadcast like a bias |
+| `BlockSize` | granularity | with `n > 0`, `Causal` and `Window` count blocks of `n` tokens instead of tokens (block-causal) |
 | `AdditiveBias` | finite term | a tensor with broadcast strides per axis (per batch, per head, per query row, per key) |
+
+A backend that cannot apply a component a call carries refuses the call; it never drops the component.
 
 A value never turns into an exclusion: `log(1e-4)` and `−1e30` are finite biases and keep their probability mass
 exactly as written; only an exclusion component or `−∞` stored in an `AdditiveBias` excludes. Converting a model's
@@ -185,3 +188,5 @@ The planner reproduces these until the row that owns each is rewritten.
 - Vulkan's scalar kernel reads a per-head or per-batch mask as one `[Sq,Skv]` block, and its naive kernel mis-addresses
   a per-batch one.
 - `AttentionReference.FlashAttention` adds ALiBi before the softcap; the orders differ only when a call sets both.
+- `FlashAttention` runs on the host on Vulkan when the call has a softcap, sinks, ALiBi or a head dim above 128, and on
+  CUDA when the head dim is above 1024.

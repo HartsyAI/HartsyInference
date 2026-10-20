@@ -87,6 +87,11 @@ public sealed class SettingsSetCommand : Command<SettingsSetCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
+        if (KnobRegistry.Find(settings.Id) is null && KnobDeprecations.Find(settings.Id) is { NewId: null } removed)
+        {
+            AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(KnobDeprecations.Warning(removed))}[/] Nothing was written.");
+            return 0;
+        }
         object? stored;
         try
         {
@@ -98,7 +103,7 @@ public sealed class SettingsSetCommand : Command<SettingsSetCommand.Settings>
             return 1;
         }
 
-        string id = KnobRegistry.Find(settings.Id) is null && KnobDeprecations.Find(settings.Id) is { NewId: { } renamed } ? renamed : settings.Id;
+        string id = KnobDeprecations.Resolve(settings.Id);
         AnsiConsole.MarkupLine($"[green]{Markup.Escape(id)}[/] = "
             + $"[#2ea5e0]{Markup.Escape(stored?.ToString() ?? "null")}[/]");
         AnsiConsole.MarkupLine($"[grey]written to {Markup.Escape(KnobFile.Path)}[/]");

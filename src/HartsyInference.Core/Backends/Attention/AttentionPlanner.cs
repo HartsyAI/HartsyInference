@@ -21,6 +21,15 @@ public enum AttentionDTypes
 
     /// <summary>BF16.</summary>
     BF16 = 4,
+
+    /// <summary>FP8 (E4M3 or E5M2) storage the row widens itself.</summary>
+    Fp8 = 8,
+
+    /// <summary>Any other storage (block-quantized, integer) the row widens itself.</summary>
+    Other = 16,
+
+    /// <summary>Every storage dtype.</summary>
+    Any = F32 | F16 | BF16 | Fp8 | Other,
 }
 
 /// <summary>Operand layouts a kernel row serves.</summary>
@@ -112,7 +121,7 @@ public sealed record AttentionKernelCapability
     public required AttentionLayouts Layouts { get; init; }
 
     /// <summary>Smallest head dim.</summary>
-    public int MinHeadDim { get; init; } = 1;
+    public int MinHeadDim { get; init; }
 
     /// <summary>Largest head dim.</summary>
     public int MaxHeadDim { get; init; } = int.MaxValue;
@@ -133,7 +142,7 @@ public sealed record AttentionKernelCapability
     public bool CaptureSafe { get; init; }
 
     /// <summary>Fewest query rows.</summary>
-    public int MinQueryTokens { get; init; } = 1;
+    public int MinQueryTokens { get; init; }
 
     /// <summary>Most query rows.</summary>
     public int MaxQueryTokens { get; init; } = int.MaxValue;
@@ -176,9 +185,11 @@ public sealed record AttentionKernelCapability
         return AttentionExclusion.None;
     }
 
-    private static bool Has(AttentionDTypes set, DType t) =>
-        (t == DType.F32 && (set & AttentionDTypes.F32) != 0) || (t == DType.F16 && (set & AttentionDTypes.F16) != 0)
-        || (t == DType.BF16 && (set & AttentionDTypes.BF16) != 0);
+    private static bool Has(AttentionDTypes set, DType t) => (set & Of(t)) != 0;
+
+    private static AttentionDTypes Of(DType t) =>
+        t == DType.F32 ? AttentionDTypes.F32 : t == DType.F16 ? AttentionDTypes.F16 : t == DType.BF16 ? AttentionDTypes.BF16
+        : t.IsFp8 ? AttentionDTypes.Fp8 : AttentionDTypes.Other;
 
     private static AttentionLayouts Of(AttentionLayout l) => l switch
     {

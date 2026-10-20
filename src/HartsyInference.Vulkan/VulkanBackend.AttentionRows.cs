@@ -48,52 +48,65 @@ public sealed partial class VulkanBackend
         AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa => TokenMajorAttentionRows,
         AttentionRoute.Flash => FlashAttentionRows,
         AttentionRoute.FlashDevice => FlashAttentionDeviceRows,
-        _ => throw new AttentionUnsupportedException("Vulkan plans route-pinned calls; an unpinned call needs the Phase-4 rows."),
+        _ => throw new AttentionUnsupportedException("Vulkan plans route-pinned calls only."),
     };
 
     /// <inheritdoc/>
-    /// <remarks>Re-enters through the call's legacy entry point; the entry points never call this, so they cannot recurse.</remarks>
+    /// <remarks>Re-enters through the call's legacy entry point, which validates it and runs its rows; the entry points never
+    /// call this method, so the two cannot recurse.</remarks>
     public void Attention(in AttentionCall call)
     {
+        if (call.LegacyGap() is { } gap)
+            throw new AttentionUnsupportedException($"Vulkan attention serves a call its legacy entry point can carry; this one has {gap}.");
         Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
-        if (!call.Query.IsPlain || !call.Key.IsPlain || !call.Value.IsPlain || !call.Output.IsPlain)
-            throw new AttentionUnsupportedException("Vulkan attention takes plain operands until strided rows land.");
         switch (call.Route)
         {
             case AttentionRoute.Dense:
                 ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics.LegacyAssertedBounded);
                 break;
             case AttentionRoute.TokenMajor:
+                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale,
+                    call.Numerics.LegacyAssertedBounded);
+                break;
             case AttentionRoute.TokenMajorGqa:
                 ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.KvHeads, call.QkHeadDim, call.Scale,
                     call.Numerics.LegacyAssertedBounded);
                 break;
             case AttentionRoute.Flash:
-                FlashAttention(o, q, k, v, call.Positions.KvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
+                FlashAttention(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
                     call.Logits.Softcap, call.Logits.Sinks, call.Mask.LegacySlidingWindow, call.Logits.AlibiSlopes);
                 break;
             case AttentionRoute.FlashDevice:
-                FlashAttentionDev(o, q, k, v, call.Positions.KvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
+                FlashAttentionDev(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
                     call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
                 break;
-            default:
-                throw new AttentionUnsupportedException("Vulkan plans route-pinned calls; an unpinned call needs the Phase-4 rows.");
         }
     }
 
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
+        // The token-major entry serves grouped K/V on its own rows and records the call as token-major.
+        AttentionCall planned = call.Route == AttentionRoute.TokenMajorGqa ? call with { Route = AttentionRoute.TokenMajor } : call;
         int saved = t_flashKvGroup;
         t_flashKvGroup = call.KvGroup;
-        try { return AttentionPlanner.Plan(RowsFor(call.Route), in call); }
+        try { return AttentionPlanner.Plan(RowsFor(planned.Route), in planned); }
         finally { t_flashKvGroup = saved; }
+    }
+
+    /// <summary>B.1's admission. A key-only mask reaches cm2 as the <c>[Sq, Skv]</c> copy the token-major entry makes of it,
+    /// so a plan made before that copy exists judges it by the copy's shape.</summary>
+    private bool TokenMajorCm2Admits(in AttentionCall c)
+    {
+        Tensor? mask = t_expandedMask ?? c.Mask.Bias;
+        bool expandsToFull = t_expandedMask is null && mask is not null && mask.DType == DType.F32
+            && mask.ElementCount == c.KeyTokens && c.QueryTokens > 1;
+        return CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, expandsToFull ? null : mask);
     }
 
     private static AttentionKernelCapability Cap(string id, AttentionRoute entry, AttentionDTypes q, AttentionDTypes kv,
         AttentionLayouts layouts) => new() { Id = id, Entry = entry, QueryTypes = q, KvTypes = kv, Layouts = layouts };
 
-    private const AttentionDTypes AnyFloat = AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16;
     private const AttentionMaskSupport AnyBias = AttentionMaskSupport.HeadSharedBias | AttentionMaskSupport.PerHeadBias;
     private const AttentionMaskSupport RowCausalWindow = AttentionMaskSupport.Causal | AttentionMaskSupport.Window;
 
@@ -105,7 +118,7 @@ public sealed partial class VulkanBackend
         const AttentionLayouts HM = AttentionLayouts.HeadMajor;
         return
         [
-            new DelegateAttentionRow(Cap("cm2.flash", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("cm2.flash", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast,
@@ -125,7 +138,7 @@ public sealed partial class VulkanBackend
                         new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new AttnStrides((uint)headDim, qHead, qHead * (uint)hq));
                     return true;
                 }),
-            new DelegateAttentionRow(Cap("flash.scalar", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast,
                 }, "A.2",
@@ -136,7 +149,7 @@ public sealed partial class VulkanBackend
                         causal: false, qOffset: 0, slidingWindow: 0, skv: c.KeyTokens, kvGroup: c.Heads / c.KvHeads);
                     return true;
                 }),
-            new DelegateAttentionRow(Cap("naive", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("naive", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast,
                 }, "A.3",
@@ -158,12 +171,12 @@ public sealed partial class VulkanBackend
         const AttentionLayouts TM = AttentionLayouts.TokenMajor;
         return
         [
-            new DelegateAttentionRow(Cap("cm2.flash", E, AnyFloat, AnyFloat, TM) with
+            new DelegateAttentionRow(Cap("cm2.flash", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast,
                 }, "B.1",
-                (in AttentionCall c) => CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, t_expandedMask ?? c.Mask.Bias),
+                (in AttentionCall c) => TokenMajorCm2Admits(in c),
                 (in AttentionCall c) =>
                 {
                     uint qRow = (uint)((long)c.Heads * c.QkHeadDim), kvRow = (uint)((long)c.KvHeads * c.QkHeadDim);
@@ -173,7 +186,7 @@ public sealed partial class VulkanBackend
                         new AttnStrides(kvRow, (uint)c.QkHeadDim, 0), new AttnStrides(qRow, (uint)c.QkHeadDim, 0));
                     return true;
                 }),
-            new DelegateAttentionRow(Cap("permute.dense", E, AnyFloat, AnyFloat, TM) with
+            new DelegateAttentionRow(Cap("permute.dense", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
                     Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute,
                 }, null,
@@ -182,7 +195,7 @@ public sealed partial class VulkanBackend
                 {
                     AttendTokenMajorViaHeadMajor(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Heads,
                         c.KvHeads, c.QkHeadDim, c.QueryTokens, c.KeyTokens, c.Scale, c.Numerics.LegacyAssertedBounded);
-                    t_attentionRoute = "B.2/" + t_attentionRoute;
+                    t_attentionRoute = AttentionRouteText.Nested("B.2/", t_attentionRoute);
                     return true;
                 }),
         ];
@@ -200,7 +213,7 @@ public sealed partial class VulkanBackend
         return
         [
             // Any dtype: the reference refuses non-F32 itself, with the exception callers have always seen.
-            new DelegateAttentionRow(Cap("host.reference", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("host.reference", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     Gqa = true, Masks = RowCausalWindow, LogitTerms = true, Lowering = AttentionLowering.HostReference,
                 }, "C.1",
@@ -212,7 +225,7 @@ public sealed partial class VulkanBackend
                         c.Mask.LegacySlidingWindow, c.Logits.AlibiSlopes);
                     return true;
                 }),
-            new DelegateAttentionRow(Cap("cm2.causal", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = RowCausalWindow, MinQueryTokens = 64,
                     UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast,
@@ -220,7 +233,6 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) => FlashOnDevice(in c) && c.Mask.Causal,
                 (in AttentionCall c) =>
                 {
-                    using OpScope _op = EnterOp();
                     return TryFlashCm2CausalPrefill(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength,
                         t_flashKvGroup, c.Positions.QueryOffset, c.Scale, c.Mask.LegacySlidingWindow);
                 }),
@@ -237,19 +249,17 @@ public sealed partial class VulkanBackend
                 },
                 (in AttentionCall c) =>
                 {
-                    using OpScope _op = EnterOp();
                     DispatchFlashDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale, c.Mask.Causal,
                         c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.Positions.KvLength, t_flashKvGroup, devicePos: 0);
                     return true;
                 }),
-            new DelegateAttentionRow(Cap("flash.scalar", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = RowCausalWindow, Lowering = AttentionLowering.Cast,
                 }, "C.4",
                 (in AttentionCall c) => FlashOnDevice(in c),
                 (in AttentionCall c) =>
                 {
-                    using OpScope _op = EnterOp();
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, mask: null, c.Scale, c.Mask.Causal,
                         c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, skv: c.Positions.KvLength, t_flashKvGroup);
                     return true;
@@ -280,7 +290,6 @@ public sealed partial class VulkanBackend
                     && CanUseFlashDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, t_flashKvGroup),
                 (in AttentionCall c) =>
                 {
-                    using OpScope _op = EnterOp();
                     DispatchFlashDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale, c.Mask.Causal, qOffset: 0,
                         c.Mask.LegacySlidingWindow, kvLen: 0, t_flashKvGroup, c.Positions.DeviceHandle);
                     return true;
@@ -293,13 +302,12 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) => DeviceKernelEligible(in c) && c.Mask.LegacySlidingWindow == 0,
                 (in AttentionCall c) =>
                 {
-                    using OpScope _op = EnterOp();
                     DispatchFlashAttentionDev(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale, c.Mask.Causal,
                         t_flashKvGroup, c.Positions.DeviceHandle);
                     return true;
                 }),
             // With a valid device position the host kvLen/qOffset are placeholders, so the eager path has nothing correct to run.
-            new DelegateAttentionRow(Cap("refuse", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("refuse", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     Gqa = true, Masks = RowCausalWindow, LogitTerms = true, DevicePositions = true,
                 }, "D.3",
@@ -309,7 +317,7 @@ public sealed partial class VulkanBackend
                     + $"{FlashMaxHeadDim}; a sliding window needs a single query row whose head dim the subgroup divides into at most 4 dims per lane. "
                     + $"Got headDim={c.QkHeadDim}, softcap={c.Logits.Softcap}, window={c.Mask.LegacySlidingWindow}, dtype={c.Query.DType}. "
                     + "Leave graph decode off for this model.")),
-            new DelegateAttentionRow(Cap("flash.eager", E, AnyFloat, AnyFloat, HM) with
+            new DelegateAttentionRow(Cap("flash.eager", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     Gqa = true, Masks = RowCausalWindow, LogitTerms = true, DevicePositions = true,
                 }, null,
@@ -318,7 +326,7 @@ public sealed partial class VulkanBackend
                 {
                     FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, t_flashKvGroup,
                         c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Logits.Softcap, sink: null, c.Mask.LegacySlidingWindow, alibiSlopes: null);
-                    t_attentionRoute = "D.4/" + t_attentionRoute;
+                    t_attentionRoute = AttentionRouteText.Nested("D.4/", t_attentionRoute);
                     return true;
                 }),
         ];

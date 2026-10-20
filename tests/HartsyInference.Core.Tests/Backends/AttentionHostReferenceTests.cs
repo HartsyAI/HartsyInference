@@ -88,6 +88,52 @@ public sealed unsafe class AttentionHostReferenceTests
         Assert.True(MaxDiff(oh, back) < 1e-6f);
     }
 
+    [Fact]
+    public void AnEmptyCache_AttendsNothing()
+    {
+        using Tensor q = Rand(new TensorShape(1, 2, 1, 4), 1), k = Rand(new TensorShape(1, 2, 8, 4), 2), v = Rand(new TensorShape(1, 2, 8, 4), 3);
+        using Tensor o = Rand(new TensorShape(1, 2, 1, 4), 4);
+        AttentionHostReference.Run(AttentionCall.FromFlashAttention(o, q, k, v, kvLen: 0, causal: false, qOffset: 0, scale: 0.5f,
+            softcap: 0f, sink: null, slidingWindow: 0, alibiSlopes: null));
+        float* op = (float*)o.DataPointer;
+        for (int i = 0; i < 8; i++) Assert.Equal(0f, op[i]);
+    }
+
+    [Fact]
+    public void HeadsThatDoNotDivide_AreRefused()
+    {
+        using Tensor q = Rand(new TensorShape(1, 6, 2, 4), 1), k = Rand(new TensorShape(1, 4, 3, 4), 2), v = Rand(new TensorShape(1, 4, 3, 4), 3);
+        using Tensor o = new(new TensorShape(1, 6, 2, 4), DType.F32);
+        Assert.Throws<ArgumentException>(() =>
+            AttentionHostReference.Run(AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.5f, false)));
+    }
+
+    [Fact]
+    public void ABiasBroadcastOverKeys_MatchesItsExpandedForm()
+    {
+        const int sq = 3, skv = 5;
+        using Tensor q = Rand(new TensorShape(1, 2, sq, 4), 1), k = Rand(new TensorShape(1, 2, skv, 4), 2), v = Rand(new TensorShape(1, 2, skv, 4), 3);
+        using Tensor perRow = Rand(new TensorShape(1, 1, sq, 1), 4);
+        using Tensor full = new(new TensorShape(1, 1, sq, skv), DType.F32);
+        float* src = (float*)perRow.DataPointer, dst = (float*)full.DataPointer;
+        for (int r = 0; r < sq; r++)
+            for (int j = 0; j < skv; j++) dst[r * skv + j] = src[r];
+        using Tensor a = new(new TensorShape(1, 2, sq, 4), DType.F32), b = new(new TensorShape(1, 2, sq, 4), DType.F32);
+        AttentionHostReference.Run(AttentionCall.FromScaledDotProductAttention(a, q, k, v, perRow, 0.5f, false));
+        AttentionHostReference.Run(AttentionCall.FromScaledDotProductAttention(b, q, k, v, full, 0.5f, false));
+        Assert.True(MaxDiff(a, b) < 1e-6f);
+    }
+
+    [Fact]
+    public void ACausalDenseCall_IsNotCarriedByTheLegacyEntry()
+    {
+        using Tensor q = Rand(new TensorShape(1, 1, 2, 4), 1), k = Rand(new TensorShape(1, 1, 2, 4), 2), v = Rand(new TensorShape(1, 1, 2, 4), 3);
+        using Tensor o = new(new TensorShape(1, 1, 2, 4), DType.F32);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.5f, false);
+        Assert.Null(call.LegacyGap());
+        Assert.NotNull((call with { Mask = call.Mask with { Causal = true } }).LegacyGap());
+    }
+
     /// <summary>Swaps the two middle axes of a <c>[1, A, B, D]</c> tensor.</summary>
     private static Tensor Transpose(Tensor x, int a, int b, int d)
     {

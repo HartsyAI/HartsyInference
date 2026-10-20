@@ -46,7 +46,7 @@ public sealed partial class CudaBackend
         AttentionRoute.TokenMajorGqa => TokenMajorGqaAttentionRows,
         AttentionRoute.Flash => FlashAttentionRows,
         AttentionRoute.FlashDevice => FlashAttentionDeviceRows,
-        _ => throw new AttentionUnsupportedException("CUDA plans route-pinned calls; an unpinned call needs the Phase-4 rows."),
+        _ => throw new AttentionUnsupportedException("CUDA plans route-pinned calls only."),
     };
 
     /// <inheritdoc/>
@@ -54,29 +54,30 @@ public sealed partial class CudaBackend
     /// call this method, so the two cannot recurse.</remarks>
     public void Attention(in AttentionCall call)
     {
+        if (call.LegacyGap() is { } gap)
+            throw new AttentionUnsupportedException($"CUDA attention serves a call its legacy entry point can carry; this one has {gap}.");
         Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
-        if (!call.Query.IsPlain || !call.Key.IsPlain || !call.Value.IsPlain || !call.Output.IsPlain)
-            throw new AttentionUnsupportedException("CUDA attention takes plain operands until strided rows land.");
         switch (call.Route)
         {
             case AttentionRoute.Dense:
                 ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics.LegacyAssertedBounded);
                 break;
             case AttentionRoute.TokenMajor:
+                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale,
+                    call.Numerics.LegacyAssertedBounded);
+                break;
             case AttentionRoute.TokenMajorGqa:
                 ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.KvHeads, call.QkHeadDim, call.Scale,
                     call.Numerics.LegacyAssertedBounded);
                 break;
             case AttentionRoute.Flash:
-                FlashAttention(o, q, k, v, call.Positions.KvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
+                FlashAttention(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
                     call.Logits.Softcap, call.Logits.Sinks, call.Mask.LegacySlidingWindow, call.Logits.AlibiSlopes);
                 break;
             case AttentionRoute.FlashDevice:
-                FlashAttentionDev(o, q, k, v, call.Positions.KvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
+                FlashAttentionDev(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
                     call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
                 break;
-            default:
-                throw new AttentionUnsupportedException("CUDA plans route-pinned calls; an unpinned call needs the Phase-4 rows.");
         }
     }
 
@@ -148,7 +149,7 @@ public sealed partial class CudaBackend
                     && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(c.QkHeadDim) && CudnnSdpa.ShapeSupported(c.QkHeadDim)
                     && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled,
                 (in AttentionCall c) => TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale)),
-            new DelegateAttentionRow(Cap("sage.int8.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
+            new DelegateAttentionRow(Cap("sage.int8.f32.short", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
                 }, "S.6",
@@ -168,7 +169,7 @@ public sealed partial class CudaBackend
                 {
                     FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.KeyTokens, kvGroup: 1, causal: false, qOffset: 0,
                         c.Scale);
-                    t_attentionRoute = "S.8/" + t_attentionRoute;
+                    t_attentionRoute = AttentionRouteText.Nested("S.8/", t_attentionRoute);
                     return true;
                 }),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
@@ -250,7 +251,7 @@ public sealed partial class CudaBackend
                         || (c.Query.DType == DType.F32 && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled)),
                 (in AttentionCall c) =>
                 {
-                    using OpScope _op = EnterOp();
+                    using OpScope _op = EnterOp(nameof(ScaledDotProductAttentionTokenMajor));
                     EnsureKernels();
                     return TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         CudnnSdpa.SdpaLayout.TokenMajor, 1, c.Heads, c.QueryTokens, c.KeyTokens, c.QkHeadDim);
@@ -260,7 +261,7 @@ public sealed partial class CudaBackend
                     Masks = AnyBias, Lowering = AttentionLowering.Permute,
                 }, null,
                 static (in AttentionCall c) => true,
-                (in AttentionCall c) => { TokenMajorViaHeadMajor(in c, "M.3/"); return true; }),
+                (in AttentionCall c) => { TokenMajorViaHeadMajor(in c); return true; }),
         ];
     }
 
@@ -271,24 +272,24 @@ public sealed partial class CudaBackend
                 Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute | AttentionLowering.WidenKv,
             }, null,
             static (in AttentionCall c) => true,
-            (in AttentionCall c) => { TokenMajorViaHeadMajor(in c, "MG/"); return true; }),
+            (in AttentionCall c) => { GroupedTokenMajorViaHeadMajor(in c); return true; }),
     ];
 
-    /// <summary>Token-major attention as head-major SDPA: Q/K/V permuted in, K/V heads repeated when grouped, the head-major
-    /// entry point, the output permuted back. The launch order is the one Krea2 and the M.3 fallback issued themselves.</summary>
-    private void TokenMajorViaHeadMajor(in AttentionCall c, string routePrefix)
+    /// <summary>The sequence Krea2 issued before CUDA served this overload, in its order: permute Q, K and V, repeat K/V
+    /// heads when grouped (dropping the head-major copies), head-major SDPA, permute out.</summary>
+    private void GroupedTokenMajorViaHeadMajor(in AttentionCall c)
     {
         Tensor output = c.Output.Storage, query = c.Query.Storage, key = c.Key.Storage, value = c.Value.Storage;
         int heads = c.Heads, kvHeads = c.KvHeads, headDim = c.QkHeadDim, sq = c.QueryTokens, skv = c.KeyTokens;
-        Tensor qMh = new Tensor(new TensorShape(1, heads, sq, headDim), query.DType);
-        Tensor kMh = new Tensor(new TensorShape(1, kvHeads, skv, headDim), key.DType);
-        Tensor vMh = new Tensor(new TensorShape(1, kvHeads, skv, headDim), value.DType);
-        Tensor oMh = new Tensor(new TensorShape(1, heads, sq, headDim), output.DType);
-        Tensor? kRep = null, vRep = null;
+        TensorShape qMhShape = new(1, heads, sq, headDim), kvMhShape = new(1, kvHeads, skv, headDim);
+        Tensor? qMh = null, kMh = null, vMh = null, kRep = null, vRep = null, oMh = null;
         try
         {
+            qMh = new Tensor(qMhShape, query.DType);
             Permute0213(qMh, query, sq, heads, headDim);
+            kMh = new Tensor(kvMhShape, key.DType);
             Permute0213(kMh, key, skv, kvHeads, headDim);
+            vMh = new Tensor(kvMhShape, value.DType);
             Permute0213(vMh, value, skv, kvHeads, headDim);
             if (kvHeads != heads)
             {
@@ -296,14 +297,45 @@ public sealed partial class CudaBackend
                 RepeatKvHeads(kRep, kMh, kvHeads, heads / kvHeads);
                 vRep = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
                 RepeatKvHeads(vRep, vMh, kvHeads, heads / kvHeads);
+                kMh.Dispose();
+                vMh.Dispose();
             }
+            oMh = new Tensor(qMhShape, output.DType);
             ScaledDotProductAttention(oMh, qMh, kRep ?? kMh, vRep ?? vMh, c.Mask.Bias, c.Scale, c.Numerics.LegacyAssertedBounded);
+            qMh.Dispose();
+            (kRep ?? kMh).Dispose();
+            (vRep ?? vMh).Dispose();
             Permute0213(output, oMh, heads, sq, headDim);
-            t_attentionRoute = routePrefix + t_attentionRoute;
+            t_attentionRoute = AttentionRouteText.Nested("MG/", t_attentionRoute);
         }
         finally
         {
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose(); oMh.Dispose(); kRep?.Dispose(); vRep?.Dispose();
+            qMh?.Dispose(); kMh?.Dispose(); vMh?.Dispose(); kRep?.Dispose(); vRep?.Dispose(); oMh?.Dispose();
+        }
+    }
+
+    /// <summary>Token-major attention as head-major SDPA (M.3): Q/K/V permuted in, the head-major entry point, the output
+    /// permuted back, in the order the token-major entry always issued it.</summary>
+    private void TokenMajorViaHeadMajor(in AttentionCall c)
+    {
+        Tensor output = c.Output.Storage, query = c.Query.Storage, key = c.Key.Storage, value = c.Value.Storage;
+        int heads = c.Heads, headDim = c.QkHeadDim, sq = c.QueryTokens, skv = c.KeyTokens;
+        Tensor qMh = new Tensor(new TensorShape(1, heads, sq, headDim), query.DType);
+        Tensor kMh = new Tensor(new TensorShape(1, heads, skv, headDim), key.DType);
+        Tensor vMh = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
+        Tensor oMh = new Tensor(new TensorShape(1, heads, sq, headDim), output.DType);
+        try
+        {
+            Permute0213(qMh, query, sq, heads, headDim);
+            Permute0213(kMh, key, skv, heads, headDim);
+            Permute0213(vMh, value, skv, heads, headDim);
+            ScaledDotProductAttention(oMh, qMh, kMh, vMh, c.Mask.Bias, c.Scale, c.Numerics.LegacyAssertedBounded);
+            Permute0213(output, oMh, heads, sq, headDim);
+            t_attentionRoute = AttentionRouteText.Nested("M.3/", t_attentionRoute);
+        }
+        finally
+        {
+            qMh.Dispose(); kMh.Dispose(); vMh.Dispose(); oMh.Dispose();
         }
     }
 
@@ -409,7 +441,7 @@ public sealed partial class CudaBackend
                 {
                     FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, t_flashKvGroup,
                         c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Logits.Softcap, sink: null, c.Mask.LegacySlidingWindow, alibiSlopes: null);
-                    t_attentionRoute = "V.0/" + t_attentionRoute;
+                    t_attentionRoute = AttentionRouteText.Nested("V.0/", t_attentionRoute);
                     return true;
                 }),
             new DelegateAttentionRow(Cap("flash.decode.device", E, AttentionDTypes.F32, AttentionDTypes.F32 | AttentionDTypes.F16,
@@ -431,7 +463,7 @@ public sealed partial class CudaBackend
     /// <summary>The grouped-query token-major contract: Q/output carry <paramref name="heads"/> heads, K/V
     /// <paramref name="kvHeads"/>, which divides it.</summary>
     internal static void ValidateTokenMajorGqaAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
-        Tensor? mask, int heads, int kvHeads, int headDim, float scale)
+        int heads, int kvHeads, int headDim, float scale)
     {
         if (heads <= 0 || kvHeads <= 0 || headDim <= 0 || heads % kvHeads != 0)
             throw new ArgumentException(
@@ -454,18 +486,7 @@ public sealed partial class CudaBackend
         if (output.DType != query.DType || key.DType != query.DType || value.DType != query.DType)
             throw new ArgumentException(
                 $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
-        long sq = TokenMajorRows(query), skv = TokenMajorRows(key);
-        if (mask is null) return;
-        if (mask.DType != DType.F32)
-            throw new NotSupportedException($"SDPA additive masks must be F32; got {mask.DType}.");
-        bool validMask = mask.Shape.Rank switch
-        {
-            2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
-            3 => (mask.Shape[0] == 1 || mask.Shape[0] == heads) && mask.Shape[1] == sq && mask.Shape[2] == skv,
-            4 => mask.Shape[0] == 1 && (mask.Shape[1] == 1 || mask.Shape[1] == heads) && mask.Shape[2] == sq && mask.Shape[3] == skv,
-            _ => false,
-        };
-        if (!validMask)
-            throw new ArgumentException($"SDPA mask {mask.Shape} is not broadcastable to [1,{heads},{sq},{skv}].");
+        if (TokenMajorRows(query) <= 0 || TokenMajorRows(key) <= 0)
+            throw new ArgumentException($"Grouped token-major SDPA needs at least one query and one key row; got Q={query.Shape}, K={key.Shape}.");
     }
 }

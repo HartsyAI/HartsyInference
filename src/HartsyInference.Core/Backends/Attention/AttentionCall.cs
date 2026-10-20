@@ -83,7 +83,39 @@ public readonly record struct AttentionCall
     public int ValueHeadDim => Value.HeadDim;
 
     /// <summary>Keys actually attended.</summary>
-    public int ValidKvLength => Positions.KvLength > 0 ? Positions.KvLength : Key.Tokens;
+    public int ValidKvLength => Positions.Bounded ? Positions.KvLength : Key.Tokens;
+
+    /// <summary>What the legacy entry point for <see cref="Route"/> cannot carry, or null when it can carry the whole call.
+    /// A backend that serves <see cref="IBackend.Attention"/> by re-entering that entry point refuses the rest rather than
+    /// dropping it.</summary>
+    public string? LegacyGap()
+    {
+        AttentionMask m = Mask;
+        AttentionLayout layout = Route is AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa
+            ? AttentionLayout.TokenMajor : AttentionLayout.HeadMajor;
+        if (Query.Layout != layout || Key.Layout != layout || Value.Layout != layout || Output.Layout != layout)
+            return $"{Query.Layout} operands on the {Route} route";
+        if (!Query.IsPlain || !Key.IsPlain || !Value.IsPlain || !Output.IsPlain) return "strided operands";
+        if (m.WindowRight is not null || m.BlockSize > 0) return "a right window or a block-causal mask";
+        switch (Route)
+        {
+            case AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa:
+                if (layout == AttentionLayout.TokenMajor && Batch > 1) return "a batch above 1 (the token-major entry reads one sequence)";
+                if (m.Causal || m.WindowLeft is not null) return "a causal or windowed mask (it takes an additive bias)";
+                if (Logits.Any) return "a softcap, sinks or ALiBi";
+                if (Positions.OnDevice || (Positions.Bounded && (Positions.KvLength != Key.Tokens || Positions.QueryOffset != 0)))
+                    return "key or query positions";
+                return null;
+            case AttentionRoute.Flash:
+                if (m.Bias is not null) return "an additive bias";
+                return Positions.OnDevice ? "device positions (the FlashDevice route reads them)" : null;
+            case AttentionRoute.FlashDevice:
+                if (m.Bias is not null) return "an additive bias";
+                return Logits.Sinks is not null || Logits.AlibiSlopes is not null ? "sinks or ALiBi" : null;
+            default:
+                return "an unpinned route";
+        }
+    }
 
     /// <summary>A <c>ScaledDotProductAttention</c> call: head-major operands, an optional additive bias.</summary>
     public static AttentionCall FromScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
@@ -98,13 +130,18 @@ public readonly record struct AttentionCall
     /// <summary>A <c>ScaledDotProductAttentionTokenMajor</c> call; <paramref name="kvHeads"/> below
     /// <paramref name="heads"/> is the grouped-query overload.</summary>
     public static AttentionCall FromTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, int heads,
-        int kvHeads, int headDim, float scale, bool allowF16) => new()
+        int kvHeads, int headDim, float scale, bool allowF16)
+    {
+        if (heads <= 0 || kvHeads <= 0 || headDim <= 0)
+            throw new ArgumentException($"Token-major attention needs positive heads, kvHeads and headDim; got {heads}, {kvHeads}, {headDim}.");
+        return new()
         {
             Query = AttentionOperand.TokenMajor(query, heads, headDim), Key = AttentionOperand.TokenMajor(key, kvHeads, headDim),
             Value = AttentionOperand.TokenMajor(value, kvHeads, headDim), Output = AttentionOperand.TokenMajor(output, heads, headDim),
             Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = AttentionNumerics.FromLegacy(allowF16),
             Route = kvHeads == heads ? AttentionRoute.TokenMajor : AttentionRoute.TokenMajorGqa,
         };
+    }
 
     /// <summary>A <c>FlashAttention</c> call: head-major Q/O, a head-major K/V cache whose first <paramref name="kvLen"/>
     /// rows are valid, query row 0 at <paramref name="qOffset"/>.</summary>

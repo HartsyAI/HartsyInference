@@ -10,7 +10,7 @@ namespace HartsyInference.Core.Tests.Configuration;
 [Collection(EnvironmentSensitiveCollection.Name)]
 public sealed class KnobDeprecationsTests : IDisposable
 {
-    private const string Renamed = "test.retiredRenamed", Removed = "test.retiredRemoved";
+    private const string Renamed = "test.retiredRenamed", Removed = "test.retiredRemoved", Retyped = "test.retiredRetyped";
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "hartsy-knobdep-" + Guid.NewGuid().ToString("N"));
     private readonly string? _previous = KnobFile.ExplicitPath;
 
@@ -19,7 +19,8 @@ public sealed class KnobDeprecationsTests : IDisposable
         Directory.CreateDirectory(_dir);
         KnobFile.EnsureLoaded();
         KnobFile.ExplicitPath = Path.Combine(_dir, "settings.json");
-        KnobDeprecations.Add(new(Renamed, "vram.keepModels", v => v is bool b ? !b : v, int.MaxValue, "inverted"));
+        KnobDeprecations.Add(new(Renamed, "vram.keepModels", v => v == "true" ? "false" : v == "false" ? "true" : v, int.MaxValue, "inverted"));
+        KnobDeprecations.Add(new(Retyped, "paths.modelsRoot", v => v == "true" ? "/from-a-switch" : "/off", int.MaxValue, "was a switch"));
         KnobDeprecations.Add(new(Removed, null, null, int.MaxValue, "no longer has an effect"));
     }
 
@@ -27,6 +28,7 @@ public sealed class KnobDeprecationsTests : IDisposable
     {
         KnobDeprecations.Remove(Renamed);
         KnobDeprecations.Remove(Removed);
+        KnobDeprecations.Remove(Retyped);
         KnobFile.ExplicitPath = _previous;
         KnobFile.Reload();
         try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
@@ -40,6 +42,29 @@ public sealed class KnobDeprecationsTests : IDisposable
         KnobFile.Reload();
         Assert.False(EngineKnobs.KeepModels.Value);
         Assert.Equal("settings file", KnobStore.SourceOf("vram.keepModels"));
+    }
+
+    [Fact]
+    public void ARenameThatChangesType_LoadsThroughTheMappedText()
+    {
+        File.WriteAllText(KnobFile.ExplicitPath!, $$$"""{"settings":{"{{{Retyped}}}":true}}""");
+        KnobStore.ResetOverrides();
+        KnobFile.Reload();
+        Assert.Equal("/from-a-switch", EngineKnobs.ModelsRoot.Value);
+    }
+
+    [Fact]
+    public void SavingARetiredId_StoresTheMappedValue_AndARemovedOneWritesNothing()
+    {
+        File.WriteAllText(KnobFile.ExplicitPath!, """{"settings":{}}""");
+        KnobStore.ResetOverrides();
+        KnobFile.Reload();
+        Assert.Equal(false, KnobFile.Save(Renamed, "true"));
+        Assert.Contains("\"vram.keepModels\": false", File.ReadAllText(KnobFile.ExplicitPath!));
+        Assert.Null(KnobFile.Save(Removed, "1"));
+        Assert.DoesNotContain(Removed, File.ReadAllText(KnobFile.ExplicitPath!));
+        Assert.Equal("vram.keepModels", KnobDeprecations.Resolve(Renamed));
+        Assert.Equal(Removed, KnobDeprecations.Resolve(Removed));
     }
 
     [Fact]
@@ -81,8 +106,19 @@ public sealed class KnobDeprecationsTests : IDisposable
         string props = File.ReadAllText(Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "Directory.Build.props"));
         string suffix = XDocument.Parse(props).Descendants("VersionSuffix").First().Value;
         int current = int.Parse(suffix.Replace("alpha.", "", StringComparison.Ordinal));
-        foreach (KnobDeprecations.Entry e in KnobDeprecations.All.Where(e => e.OldId is not (Renamed or Removed)))
+        foreach (KnobDeprecations.Entry e in KnobDeprecations.All.Where(e => e.OldId is not (Renamed or Removed or Retyped)))
             Assert.True(current <= e.AcceptedThrough,
                 $"'{e.OldId}' was accepted through alpha.{e.AcceptedThrough}; this is alpha.{current}. Delete the entry and its mapping.");
+    }
+
+    /// <summary>A retired id maps to a setting that exists and is not itself retired, and never shadows a live one.</summary>
+    [Fact]
+    public void EveryRetiredIdMapsToALiveSetting()
+    {
+        foreach (KnobDeprecations.Entry e in KnobDeprecations.All)
+        {
+            Assert.Null(KnobRegistry.Find(e.OldId));
+            if (e.NewId is not null) Assert.NotNull(KnobRegistry.Find(e.NewId));
+        }
     }
 }

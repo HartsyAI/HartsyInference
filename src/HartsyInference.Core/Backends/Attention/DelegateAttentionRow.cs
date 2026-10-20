@@ -21,3 +21,13 @@ public sealed class DelegateAttentionRow(AttentionKernelCapability capability, s
     /// <inheritdoc/>
     public override bool Run(in AttentionCall call) => run(in call);
 }
+
+/// <summary>Route names for a launch that re-enters another entry point ("M.3/S.15"), interned so the per-call record
+/// allocates once per distinct pair.</summary>
+public static class AttentionRouteText
+{
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string, string?), string> Cache = new();
+
+    /// <summary><paramref name="outer"/> followed by the route the nested call recorded.</summary>
+    public static string Nested(string outer, string? inner) => Cache.GetOrAdd((outer, inner), static k => k.Item1 + k.Item2);
+}

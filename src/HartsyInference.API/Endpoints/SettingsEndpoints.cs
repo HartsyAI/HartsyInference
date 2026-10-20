@@ -32,9 +32,10 @@ public static class SettingsEndpoints
         }));
 
         app.MapGet("/settings/engine/{id}", (string id) =>
-            KnobRegistry.Find(id) is null
+            Retired(id) is { } removed ? Results.Ok(removed)
+            : KnobRegistry.Find(KnobDeprecations.Resolve(id)) is null
                 ? Results.NotFound(new { error = $"Unknown setting '{id}'." })
-                : Results.Ok(One(id)));
+                : Results.Ok(One(KnobDeprecations.Resolve(id))));
 
         // PUT rather than PATCH: the body carries the whole value of one setting, and re-sending it is idempotent.
         app.MapPut("/settings/engine/{id}", (string id, EngineSettingUpdate body) =>
@@ -42,6 +43,10 @@ public static class SettingsEndpoints
             if (body?.Value is null)
             {
                 return Results.BadRequest(new { error = "Body must be {\"value\": \"...\"}." });
+            }
+            if (Retired(id) is { } removed)
+            {
+                return Results.Ok(removed);
             }
             try
             {
@@ -52,9 +57,15 @@ public static class SettingsEndpoints
                 // Unknown id, wrong type and out-of-range all surface here, from the same parse the file load uses.
                 return Results.BadRequest(new { error = ex.Message });
             }
-            return Results.Ok(One(id));
+            return Results.Ok(One(KnobDeprecations.Resolve(id)));
         });
     }
+
+    /// <summary>The answer for a setting that was removed outright: accepted, ignored, and said so.</summary>
+    private static object? Retired(string id) =>
+        KnobRegistry.Find(id) is null && KnobDeprecations.Find(id) is { NewId: null } entry
+            ? new { id, removed = true, warning = KnobDeprecations.Warning(entry) }
+            : null;
 
     private static object One(string id)
     {
