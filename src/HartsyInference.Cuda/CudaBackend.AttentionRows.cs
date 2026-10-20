@@ -84,9 +84,12 @@ public sealed partial class CudaBackend
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
+        // The rows read the legacy kvLen, which a call without bounded positions leaves at 0; Attention() passes all keys.
+        AttentionCall planned = call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !call.Positions.Bounded
+            ? call with { Positions = call.Positions with { KvLength = call.KeyTokens, Bounded = true } } : call;
         int saved = t_flashKvGroup;
         t_flashKvGroup = call.KvGroup;
-        try { return AttentionPlanner.Plan(RowsFor(call.Route), in call); }
+        try { return AttentionPlanner.Plan(RowsFor(planned.Route), in planned); }
         finally { t_flashKvGroup = saved; }
     }
 
@@ -468,9 +471,11 @@ public sealed partial class CudaBackend
         if (heads <= 0 || kvHeads <= 0 || headDim <= 0 || heads % kvHeads != 0)
             throw new ArgumentException(
                 $"Grouped token-major SDPA needs positive heads, kvHeads and headDim with kvHeads dividing heads; got heads={heads}, kvHeads={kvHeads}, headDim={headDim}.");
+        // Krea2 hands rank-4 [1, S, H, D] operands and a rank-3 [1, S, H·D] output.
         static bool Fits(Tensor t, int h, int d) => t.Shape.Rank switch
         {
             2 => t.Shape[1] == (long)h * d,
+            3 => t.Shape[0] == 1 && t.Shape[2] == (long)h * d,
             4 => t.Shape[0] == 1 && t.Shape[2] == h && t.Shape[3] == d,
             _ => false,
         };

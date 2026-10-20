@@ -7586,11 +7586,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // The mask is validated by the head-major entry, as it was when callers issued that sequence themselves.
         ValidateTokenMajorGqaAttentionContract(output, query, key, value, heads, kvHeads, headDim, scale);
         RunAttentionRows(TokenMajorGqaAttentionRows,
-            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16));
+            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16)
+                with { Route = AttentionRoute.TokenMajorGqa });
     }
 
     /// <summary>Rows of a token-major operand: <c>[S, heads*headDim]</c> and <c>[1, S, heads, headDim]</c> share one layout.</summary>
-    private static long TokenMajorRows(Tensor t) => t.Shape.Rank == 4 ? t.Shape[1] : t.Shape[0];
+    private static long TokenMajorRows(Tensor t) => t.Shape.Rank is 3 or 4 ? t.Shape[1] : t.Shape[0];
 
     /// <summary>Element strides of a contiguous head-major <c>[B, H, S, D]</c> operand.</summary>
     private static CudaKernels.FlashStrides HeadMajorStrides(long heads, long rows, long d) =>

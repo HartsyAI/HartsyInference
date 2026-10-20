@@ -2535,7 +2535,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         AttentionCall call = AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink,
             slidingWindow, alibiSlopes);
         // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
-        using OpScope? _op = FlashOnDevice(in call) ? EnterOp() : null;
+        if (!FlashOnDevice(in call))
+        {
+            RunAttentionRows(FlashAttentionRows, in call, kvGroup);
+            return;
+        }
+        using OpScope _op = EnterOp();
         RunAttentionRows(FlashAttentionRows, in call, kvGroup);
     }
 
@@ -4653,7 +4658,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
             slidingWindow);
-        using OpScope? _op = DeviceKernelEligible(in call) ? EnterOp() : null;
+        if (!DeviceKernelEligible(in call))
+        {
+            RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+            return;
+        }
+        using OpScope _op = EnterOp();
         RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
     }
 

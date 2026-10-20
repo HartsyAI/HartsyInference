@@ -16,8 +16,8 @@ public sealed unsafe class AttentionRouteGoldenTests
     private readonly ITestOutputHelper _output;
     public AttentionRouteGoldenTests(ITestOutputHelper output) => _output = output;
 
-    /// <param name="Entry">sdpa (head-major), tm (token-major), tmg (the grouped token-major overload), flash (host positions)
-    /// or dev (device positions).</param>
+    /// <param name="Entry">sdpa (head-major), tm (token-major), tmg (the grouped token-major overload), krea2 (that overload with
+    /// Krea2's own shapes: [1,S,H,D] operands, a [1,S,H·D] output), flash (host positions) or dev (device positions).</param>
     /// <param name="Mask">none, bias (<c>[1,1,Sq,Skv]</c>), perhead (<c>[1,H,Sq,Skv]</c>) or key (<c>[1,1,1,Skv]</c>).</param>
     private sealed record Case(string Name, string Entry, DType Dtype, int Hq, int Hkv, int Sq, int Skv, int D, string Mask,
         bool AllowF16, string Expected, DType? KvDtype = null, bool Sink = false, Action? Knobs = null);
@@ -63,6 +63,8 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("tm-gqa-f16-d128", "tmg", DType.F16, 48, 12, 256, 256, 128, "none", true, "MG/S.3"),
         new("tm-gqa-f16-mha", "tmg", DType.F16, 4, 4, 256, 256, 128, "none", true, "MG/S.3"),
         new("tm-gqa-f16-key", "tmg", DType.F16, 48, 12, 256, 256, 128, "key", true, "MG/S.3"),
+        new("krea2-main", "krea2", DType.F16, 48, 12, 256, 256, 128, "none", true, "MG/S.3"),
+        new("krea2-fusion-key", "krea2", DType.F16, 24, 24, 256, 256, 128, "key", true, "MG/S.3"),
         new("flash-decode", "flash", DType.F32, 8, 2, 1, 256, 128, "none", false, "F.4"),
         new("flash-decode-nogqa", "flash", DType.F32, 8, 2, 1, 256, 128, "none", false, "F.5",
             Knobs: () => KnobStore.Set(EngineKnobs.FlashDecodeGqa, false)),
@@ -170,13 +172,13 @@ public sealed unsafe class AttentionRouteGoldenTests
             }
             return;
         }
-        bool tm = c.Entry is "tm" or "tmg";
+        bool tm = c.Entry is "tm" or "tmg" or "krea2";
         TensorShape qs = tm ? new(1, c.Sq, c.Hq, c.D) : new(1, c.Hq, c.Sq, c.D);
         TensorShape ks = tm ? new(1, c.Skv, c.Hkv, c.D) : new(1, c.Hkv, c.Skv, c.D);
         using Tensor qt = Random(qs, c.Dtype, 1);
         using Tensor kt = Random(ks, c.Dtype, 2);
         using Tensor vt = Random(ks, c.Dtype, 3);
-        using Tensor ot = new(qs, c.Dtype);
+        using Tensor ot = new(c.Entry == "krea2" ? new TensorShape(1, c.Sq, c.Hq * c.D) : qs, c.Dtype);
         using Tensor? mask = c.Mask switch
         {
             "bias" => Random(new TensorShape(1, 1, c.Sq, c.Skv), DType.F32, 5, -2f, 2f),
@@ -184,7 +186,7 @@ public sealed unsafe class AttentionRouteGoldenTests
             "key" => Random(new TensorShape(1, 1, 1, c.Skv), DType.F32, 5, -2f, 2f),
             _ => null,
         };
-        if (c.Entry == "tmg") b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.Hkv, c.D, scale, c.AllowF16);
+        if (c.Entry is "tmg" or "krea2") b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.Hkv, c.D, scale, c.AllowF16);
         else if (tm) b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.D, scale, c.AllowF16);
         else b.ScaledDotProductAttention(ot, qt, kt, vt, mask, scale, c.AllowF16);
     }

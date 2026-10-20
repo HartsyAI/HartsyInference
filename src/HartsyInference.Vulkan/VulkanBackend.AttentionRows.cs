@@ -86,8 +86,11 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
-        // The token-major entry serves grouped K/V on its own rows and records the call as token-major.
+        // The token-major entry serves grouped K/V on its own rows and records the call as token-major; the rows read the
+        // legacy kvLen, which a call without bounded positions leaves at 0 while Attention() passes all keys.
         AttentionCall planned = call.Route == AttentionRoute.TokenMajorGqa ? call with { Route = AttentionRoute.TokenMajor } : call;
+        if (planned.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !planned.Positions.Bounded)
+            planned = planned with { Positions = planned.Positions with { KvLength = planned.KeyTokens, Bounded = true } };
         int saved = t_flashKvGroup;
         t_flashKvGroup = call.KvGroup;
         try { return AttentionPlanner.Plan(RowsFor(planned.Route), in planned); }
