@@ -129,7 +129,8 @@ build_arm() {
     else
         log "building $label from $src ..."
         rm -rf "$dir"
-        if ! dotnet build "$src/src/HartsyInference.Cli" -c Release -f net10.0 -o "$dir" --nologo -v q >"$OUT/build-$label.log" 2>&1; then
+        # No reused MSBuild nodes: they outlive the build holding every fd it inherited, so a caller's GPU lock stays taken.
+        if ! dotnet build "$src/src/HartsyInference.Cli" -c Release -f net10.0 -o "$dir" --nologo -v q -nodeReuse:false >"$OUT/build-$label.log" 2>&1; then
             tail -30 "$OUT/build-$label.log" >&2
             die "build of $label failed"
         fi

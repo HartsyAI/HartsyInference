@@ -7268,7 +7268,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Scaled dot-product attention via cuBLAS batched GEMM: softmax(Q @ K^T * scale) @ V.</summary>
     public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
-        using NvtxRange _nvtx = NvtxRange.Push("SDPA");
+        using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
+            ? $"SDPA {query.DType} q{query.Shape} k{key.Shape}{(mask is null ? "" : $" m{mask.Shape}")}{(allowF16 ? " f16ok" : "")}" : "SDPA");
         ValidateScaledDotProductAttentionContract(output, query, key, value, mask, scale);
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -9931,7 +9932,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// so the reduction's full-mask shuffle remains valid. Unsupported inputs fall back to the CPU reference.</remarks>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
-        using NvtxRange _nvtxFa = NvtxRange.Push(NvtxRange.ProfileShapes ? $"FlashAttention tq={query.Shape[2]}" : "FlashAttention");
+        using NvtxRange _nvtxFa = NvtxRange.Push(NvtxRange.ProfileShapes
+            ? $"FlashAttention q{query.Shape} k{key.Shape} {key.DType} kv={kvLen}{(causal ? " causal" : "")}" : "FlashAttention");
         ValidateFlashAttentionContract(
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];

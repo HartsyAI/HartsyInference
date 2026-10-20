@@ -27,7 +27,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$IDX" HARTSY_TEST_VULK
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 OUT="${OUT:-${HARTSY_REGRESSION_OUT:-$HOME/Desktop/regression-ab}/gpu-suite/$(date -u +%Y%m%dT%H%M%SZ)-$PROJECT}"
 mkdir -p "$OUT"
-[ "$BUILD" = 1 ] && nice -n 19 dotnet build "$PROJ" -c Release -v q -nologo > "$OUT/build.log"
+[ "$BUILD" = 1 ] && nice -n 19 dotnet build "$PROJ" -c Release -v q -nologo -nodeReuse:false > "$OUT/build.log"
 LOCK=/tmp/claude-1000/vk_3060.lock
 case "$GPU_NAME" in *4090*) LOCK=/tmp/claude-1000/gpu4090.lock ;; esac
 exec 9>"$LOCK"; flock 9

@@ -33,7 +33,7 @@ if [ "$BACKEND" = vulkan ]; then
   export HARTSYINFERENCE_BENCH_BACKEND=vulkan HARTSYINFERENCE_BENCH_VULKAN_DEVICE="$VKIDX"
 fi
 BIN="$ROOT/benchmarks/HartsyInference.GpuBenchmarks/bin/Release/net10.0/HartsyInference.GpuBenchmarks.dll"
-if [ "$BUILD" = 1 ]; then nice -n 19 dotnet build "$ROOT/benchmarks/HartsyInference.GpuBenchmarks" -c Release -v q -nologo >/dev/null; fi
+if [ "$BUILD" = 1 ]; then nice -n 19 dotnet build "$ROOT/benchmarks/HartsyInference.GpuBenchmarks" -c Release -v q -nologo -nodeReuse:false >/dev/null; fi
 
 IS4090=0; LOCK=/tmp/claude-1000/vk_3060.lock
 case "$GPU_NAME" in *4090*) IS4090=1; LOCK=/tmp/claude-1000/gpu4090.lock ;; esac
