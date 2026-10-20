@@ -85,6 +85,17 @@ public static class KnobCli
             }
             AnsiConsole.Write(table);
         }
+        if (KnobDeprecations.All.Count > 0)
+        {
+            Table retired = new Table().Border(TableBorder.Rounded).Title("[bold]Retired (still accepted, with a warning)[/]");
+            retired.AddColumn("old id");
+            retired.AddColumn("now");
+            retired.AddColumn("accepted through");
+            retired.AddColumn("what changed");
+            foreach (KnobDeprecations.Entry e in KnobDeprecations.All.OrderBy(e => e.OldId, StringComparer.Ordinal))
+                retired.AddRow(Markup.Escape(e.OldId), Markup.Escape(e.NewId ?? "removed"), $"alpha.{e.AcceptedThrough}", Markup.Escape(e.Note));
+            AnsiConsole.Write(retired);
+        }
         AnsiConsole.MarkupLine($"[grey]{all.Count} settings. Override with --set id=value, or --profile "
             + $"{string.Join('|', KnobProfiles.Names)}. 'load' scope binds when a model is built.[/]");
     }

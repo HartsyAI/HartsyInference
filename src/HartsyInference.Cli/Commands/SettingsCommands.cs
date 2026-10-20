@@ -41,7 +41,14 @@ public sealed class SettingsGetCommand : Command<SettingsGetCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (KnobRegistry.Find(settings.Id) is not { } knob)
+        string requested = settings.Id;
+        if (KnobRegistry.Find(requested) is null && KnobDeprecations.Find(requested) is { } retired)
+        {
+            AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(KnobDeprecations.Warning(retired))}[/]");
+            if (retired.NewId is null) return 0;
+            requested = retired.NewId;
+        }
+        if (KnobRegistry.Find(requested) is not { } knob)
         {
             AnsiConsole.MarkupLine($"[red]Unknown setting '{Markup.Escape(settings.Id)}'.[/] Run 'hartsy settings list'.");
             return 1;
@@ -91,11 +98,12 @@ public sealed class SettingsSetCommand : Command<SettingsSetCommand.Settings>
             return 1;
         }
 
-        AnsiConsole.MarkupLine($"[green]{Markup.Escape(settings.Id)}[/] = "
+        string id = KnobRegistry.Find(settings.Id) is null && KnobDeprecations.Find(settings.Id) is { NewId: { } renamed } ? renamed : settings.Id;
+        AnsiConsole.MarkupLine($"[green]{Markup.Escape(id)}[/] = "
             + $"[#2ea5e0]{Markup.Escape(stored?.ToString() ?? "null")}[/]");
         AnsiConsole.MarkupLine($"[grey]written to {Markup.Escape(KnobFile.Path)}[/]");
 
-        if (KnobRegistry.Find(settings.Id) is { } knob
+        if (KnobRegistry.Find(id) is { } knob
             && KnobRegistry.Describe(knob).Scope == KnobScope.Construction)
         {
             AnsiConsole.MarkupLine("[yellow]This setting is read when the engine is built — restart to apply it.[/]");

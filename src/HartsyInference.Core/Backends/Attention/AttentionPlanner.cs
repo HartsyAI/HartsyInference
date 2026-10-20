@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
+using System.Numerics;
 using System.Text;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -271,6 +274,26 @@ public readonly record struct AttentionPlan(AttentionKernelRow? Row, string? Var
         sb.Append(c.CaptureSafe ? " capture-safe" : " not-capture-safe");
         if (Declined is not null) sb.Append(" after ").Append(Declined);
         return sb.ToString();
+    }
+}
+
+/// <summary>The row each attention shape class ran on, logged once per class at debug level.</summary>
+public static class AttentionPlanLog
+{
+    private static readonly ConcurrentDictionary<string, byte> Seen = new(StringComparer.Ordinal);
+
+    /// <summary>Logs <paramref name="row"/> for <paramref name="call"/>'s shape class the first time that class runs on
+    /// <paramref name="backend"/>. Sequence lengths are bucketed to powers of two so decode does not log every token.</summary>
+    public static void Ran(string backend, AttentionKernelRow row, in AttentionCall call)
+    {
+        if (Logs.MinLevel > LogLevel.Debug) return;
+        static uint Bucket(int n) => BitOperations.RoundUpToPowerOf2((uint)Math.Max(1, n));
+        string mask = (call.Mask.Causal ? " causal" : "") + (call.Mask.WindowLeft is { } w ? $" window{w}" : "")
+            + (call.Mask.Bias is { } b ? $" bias{b.Shape}" : "");
+        string key = $"{backend} {call.Route} {call.Query.DType}/{call.Key.DType} h{call.Heads}/{call.KvHeads} d{call.QkHeadDim} "
+            + $"sq<={Bucket(call.QueryTokens)} skv<={Bucket(call.KeyTokens)}{mask}";
+        if (Seen.TryAdd(key, 0))
+            Logs.Debug($"Attention {key}: {new AttentionPlan(row, row.Variant(in call), "ran", null).Describe()}");
     }
 }
 

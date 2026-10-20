@@ -30,6 +30,7 @@ public sealed partial class CudaBackend
         {
             AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
             if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
+            AttentionPlanLog.Ran("cuda", row, in call);
         }
         finally
         {
