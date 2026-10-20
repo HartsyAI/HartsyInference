@@ -107,7 +107,10 @@ public sealed unsafe class CudaAttentionCorrectnessTests
             float[] actual = AttnInvoker.ReadF32(o);
             Assert.All(actual, x => Assert.True(float.IsFinite(x), "a V value past the F16 range must clip, not become infinity"));
             float[] expected = Reference(e => AttentionCall.FromScaledDotProductAttention(e, q, k, vClamped, null, scale, false), [1, h, s, d]);
-            (double rel, _, _) = AttnAssert.Agrees(actual, expected, d, AttnTolerance.For(AttnAchieved.F16), "against V clipped to the F16 range");
+            // The absolute bar scales with the output, which reaches thousands next to the clipped value.
+            (double RelL2, double MinCos, double MaxAbs) bar = AttnTolerance.For(AttnAchieved.F16);
+            bar.MaxAbs *= Math.Max(1.0, expected.Max(MathF.Abs));
+            (double rel, _, _) = AttnAssert.Agrees(actual, expected, d, bar, "against V clipped to the F16 range");
             _output.WriteLine($"materialized F16 cast saturates: relL2 {rel:E2} vs V clipped at 65504");
         }
         finally
