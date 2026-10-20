@@ -5,6 +5,8 @@ milliseconds) and the step ticks of plain{2S}.log, prof{S}.log and prof{2S}.log.
 difference divided by S, which cancels load, encoding, decode and the first step. Attention is every SDPA, SDPA-TM and
 FlashAttention label, minus an SDPA that a token-major call made on its permute fallback (same geometry, same calls per
 step). Attention-adjacent is the work the shared layer removes: permutes, head repeats and the standalone RoPE ops.
+A model with a fixed schedule runs the same steps in both runs; its per-step figures are the longer run's totals over
+its step count, counting only labels called a whole number of times per step (the denoiser's, not the encoders').
 Amdahl: a step-time reduction of f*(1 - 1/r) and an overall speedup of 1/((1 - f) + f/r) for attention speedup r.
 """
 import argparse
@@ -42,6 +44,14 @@ def step_ms(log, first=2):
     return round(statistics.fmean(ticks), 1) if ticks else None
 
 
+def run_steps(log):
+    """The step count a run actually took, from its [i/N] ticks."""
+    if not log.exists():
+        return None
+    ns = [int(m.group(2)) for m in re.finditer(r"\[(\d+)/(\d+)\]", log.read_text(errors="replace"))]
+    return max(ns) if ns else None
+
+
 def geometry(label):
     """(sq, skv, heads, d) of an attention label, to pair a token-major call with its head-major fallback."""
     m = re.match(r"SDPA-TM (\d+)x(\d+)x(\d+)x(\d+)", label)
@@ -73,7 +83,14 @@ def main():
             print(f"| {case.name} | missing profile | | | | | |" + " |" * len(rs))
             continue
         per, flagged = {}, set()
+        n1, n2 = run_steps(case / f"prof{s}.log"), run_steps(case / f"prof{2 * s}.log")
+        fixed = n2 if n1 is not None and n1 == n2 else None
         for label, (c2, m2) in t2.items():
+            if fixed:
+                if c2 and c2 % fixed == 0:
+                    per[label] = (c2 / fixed, m2 / fixed)
+                    flagged.add(label)
+                continue
             c1, m1 = t1.get(label, (0, 0.0))
             calls = (c2 - c1) / s
             # Per call: the run-to-run slope, unless a one-time cost (a plan build, a JIT, a cold weight upload) landed in
@@ -95,15 +112,17 @@ def main():
         denom = synced or sum(v[1] for v in per.values())
         f = attn_ms / denom if denom else float("nan")
         cells = [f"{f * (1 - 1 / r) * 100:.1f}% (×{1 / ((1 - f) + f / r):.2f})" for r in rs]
-        print(f"| {case.name} | {plain or 'NA'} | {synced or 'NA'} | {attn_ms:.1f} | {f * 100:.1f}% | {adj_ms:.1f} | "
+        name = f"{case.name} (fixed {fixed} steps)" if fixed else case.name
+        print(f"| {name} | {plain or 'NA'} | {synced or 'NA'} | {attn_ms:.1f} | {f * 100:.1f}% | {adj_ms:.1f} | "
               f"{adj_ms / denom * 100 if denom else float('nan'):.1f}% | " + " | ".join(cells) + " |")
         for k, (calls, ms) in sorted(attn.items(), key=lambda kv: -kv[1][1]):
-            shapes.append((case.name, k, calls, ms, k in nested, k in flagged))
+            shapes.append((case.name, k, calls, ms, k in nested, k in flagged, fixed))
     print("\nAttention calls per step (from the shape-split labels; the shape table is frozen from these):\n")
     print("| case | label | calls/step | ms/step | note |")
     print("|---|---|---|---|---|")
-    for case, k, calls, ms, nest, flag in shapes:
-        notes = [n for n, on in (("nested in SDPA-TM", nest), ("per-call cost from the longer run's average", flag)) if on]
+    for case, k, calls, ms, nest, flag, fixed in shapes:
+        notes = [n for n, on in (("nested in SDPA-TM", nest), (f"run total over its fixed {fixed} steps", fixed),
+                                 ("per-call cost from the longer run's average", flag and not fixed)) if on]
         print(f"| {case} | `{k}` | {calls:g} | {ms:.2f} | {'; '.join(notes)} |")
 
 
