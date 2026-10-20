@@ -8,7 +8,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>A MOSS-Image conditioning's reference images (the Ostris edit layout): their embedded tokens, and either the
 /// prepass RoPE tables plus one <see cref="ReferenceKvCache"/> per skipped-layer set (<see cref="ReferenceAttentionMode.CachedKv"/>)
 /// or the segment layout that gives them timestep-zero modulation inside the live sequence
-/// (<see cref="ReferenceAttentionMode.Joint"/>). Built by <see cref="MossImageTransformer.PrepareConditioning"/> and
+/// (<see cref="ReferenceAttentionMode.Joint"/>), or neither for <see cref="ReferenceAttentionMode.Inline"/>, whose tables are
+/// the conditioning's own. Built by <see cref="MossImageTransformer.PrepareConditioning"/> and
 /// owned by its <see cref="MossImageConditioning"/>; host tables are pinned as resident weights so a captured step
 /// graph reads them in place.</summary>
 public sealed class MossImageReferenceState : IDisposable

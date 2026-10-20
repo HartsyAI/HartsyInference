@@ -74,9 +74,9 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
 
     /// <summary>Generates an image. <paramref name="negative"/> is encoded whenever the CFG scale is not 1 (the reference
     /// runs both branches even below 1); an absent negative is the empty prompt. <see cref="TextToImageRequest.SigmaShift"/>
-    /// is the schedule's time shift (reference 5). With <paramref name="references"/> this is an edit (the Ostris /
-    /// ai-toolkit layout): both prompts' placeholder runs take the vision copies through the encoder, and the VAE copies
-    /// become the DiT's reference tokens.</summary>
+    /// is the schedule's time shift (reference 5). With <paramref name="references"/> this is an edit: the prompt's
+    /// placeholder run takes the vision copies through the encoder, and the VAE copies become the DiT's reference tokens.
+    /// The Ostris layouts also send the vision copies with the negative; the inline layout's negative encodes no image.</summary>
     public (byte[] rgbData, int width, int height, int seed) Generate(WeightedTokenSequence prompt, WeightedTokenSequence negative,
         TextToImageRequest request, MossImageGuidance guidance, Action<GenerationProgress>? onProgress = null,
         ReferenceImageInputs? references = null)
@@ -129,8 +129,10 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         try
         {
             IReadOnlyList<Tensor> vision = references?.Vision ?? [];
+            // The inline layout's negative is a plain encode of the prompt with no image, as the colorize node runs it.
+            IReadOnlyList<Tensor> negativeVision = references?.Options.Mode == ReferenceAttentionMode.Inline ? [] : vision;
             Tensor condText = EncodePrompt(prompt, CondSlot, vision);
-            Tensor? uncondText = guided ? EncodePrompt(negative, UncondSlot, vision) : null;
+            Tensor? uncondText = guided ? EncodePrompt(negative, UncondSlot, negativeVision) : null;
 
             if (encodes)
                 Backend.PreloadWeights(_vaeEncoder!.EnumerateWeights());
@@ -361,6 +363,8 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         if (references.Count > MossImageConfig.MaxReferenceImages)
             throw new ArgumentException($"{Family} conditions on at most {MossImageConfig.MaxReferenceImages} reference images, "
                 + $"got {references.Count}.");
+        if (references.Options.Mode == ReferenceAttentionMode.Inline && references.Count != 1)
+            throw new ArgumentException($"{Family}'s colorize layout conditions on exactly one reference, got {references.Count}.");
         if (_vaeEncoder is null)
             throw new InvalidOperationException($"{Family} reference images need the FLUX.2 VAE encoder.");
         if (references.Vision.Count > 0 && _textEncoder is not IMultimodalFinalHiddenStateEncoder { HasVision: true })

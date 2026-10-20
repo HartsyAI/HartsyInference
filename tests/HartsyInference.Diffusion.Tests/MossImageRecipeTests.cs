@@ -100,6 +100,51 @@ public sealed class MossImageRecipeTests : IDisposable
     }
 
     [Fact]
+    public void ReferenceLayout_ReadsTheExtra_AndRefusesUnknownNames()
+    {
+        Assert.Equal(MossImageReferenceLayout.Ostris, MossImageRecipePipeline.ReferenceLayoutFrom(null));
+        Assert.Equal(MossImageReferenceLayout.Colorize, MossImageRecipePipeline.ReferenceLayoutFrom(
+            new Dictionary<string, object> { [RequestExtras.ReferenceLayout] = " Colorize " }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => MossImageRecipePipeline.ReferenceLayoutFrom(
+            new Dictionary<string, object> { [RequestExtras.ReferenceLayout] = "colourize" }));
+    }
+
+    [Fact]
+    public void ColorizePolicy_CoversThePageAtTheRequestSize_AndHalvesItsVaeCopy()
+    {
+        ReferenceImagePolicy policy = MossImageRecipePipeline.ColorizePolicy(1024, 1024, null);
+        Assert.Equal(1, policy.MaxReferences);
+        Assert.Equal((1024, 1024), policy.FitTo);
+        Assert.Equal(2, policy.LatentSideDivisor);
+        Assert.Equal(16, policy.LatentMultiple);
+        Assert.Equal(1024 * 1024, policy.VisionTargetArea);
+        Assert.Equal((512, 512), ReferenceImageResolver.LatentSize(1024, 1024, policy));
+        Assert.Equal(3, MossImageRecipePipeline.ReferenceScaleFrom(new Dictionary<string, object> { [RequestExtras.ReferenceScale] = "3" }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => MossImageRecipePipeline.ReferenceScaleFrom(
+            new Dictionary<string, object> { [RequestExtras.ReferenceScale] = 0 }));
+    }
+
+    [Fact]
+    public void ColorizeVisionSize_IsTheNodesSmartResizeAtThePagesOwnPixelCount()
+    {
+        // The node budgets the vision copy at the page's area, so 1008×1040 takes that ceiling (992×1024), not 1024².
+        Assert.Equal((992, 1024), MossImageRecipePipeline.ColorizeVisionSize(1008, 1040, 1008L * 1040));
+        Assert.Equal((1024, 1024), MossImageRecipePipeline.ColorizeVisionSize(1024, 1024, 1024L * 1024));
+    }
+
+    [Fact]
+    public void Tokenize_ColorizePage_HasNoPictureLabel()
+    {
+        CharTokenizer chars = new();
+        VisionPlaceholderPrompt placeholders = new(chars);
+        string blocks = placeholders.Render([2], labelFormat: null);
+        Assert.Equal("<|vision_start|><|image_pad|><|image_pad|><|vision_end|>", blocks);
+        WeightedTokenSequence sequence = new MossImagePromptTokenizer(chars).Tokenize("touhou, purple eyes", blocks, 2, placeholders.ImagePadId);
+        Assert.Equal(chars.Encode(Prefix + blocks + "touhou, purple eyes" + Suffix, addSpecial: true), sequence.Tokens);
+        Assert.Equal(2, placeholders.CountPlaceholders(sequence.Tokens));
+    }
+
+    [Fact]
     public void SceneLayout_MatchesOpenMossCompiledFormat()
     {
         string layout = LayoutPromptBuilder.BuildSceneLayout("a poster <region:0.25,0.5,0.5,0.25> (a red \"cat\":1.2)", 1024, 1024);

@@ -605,14 +605,20 @@ Architecture and sources: [MOSS_IMAGE_ARCHITECTURE.md](../Research/MOSS_IMAGE_AR
   HF release do; OpenMOSS's `text_encoder/` and the GGUFs do not; `--vision-encoder` supplies one). The base model
   was not trained on references, so an edit needs an edit LoRA. Details in the
   [research doc](../Research/MOSS_IMAGE_ARCHITECTURE.md#reference-images-edits).
+- **Colorize layout (alpha.383).** `reference.layout=colorize` (`--reference-layout colorize`) runs
+  `sorryhyun/moss-image-colorize`, the one public LoRA trained with a reference: a single page between the image and
+  the text on RoPE `r = 1` with its grid stretched onto the target, under the live timestep, its VAE copy at
+  `1/reference.ref_scale` (2) per side, and no `Picture N:` label. Its defaults are the card's 30 steps on ER-SDE.
+  Tiny-config parity against the numpy transcription; the real LoRA is the GPU handoff's §3b.
 - **Verified so far:** tiny-config parity against the numpy transcription of OpenMOSS's ComfyUI module on CPU and on
   Vulkan (llvmpipe and an RTX 2060 SUPER), including step-graph replay, with edits in both attention modes; the
   Qwen3.5 image path (vision tower, splice, interleaved M-RoPE) against transformers on a tiny checkpoint; the
   schedule against SGLang's goldens; the device DeltaNet prefill against transformers on a tiny trunk; a synthetic
   end-to-end edit through the pipeline; detection, LoRA, layout, tokenizer and recipe unit tests.
   **Not verified:** the transcription against the torch module itself (`dump_moss_image_reference.py verify`, and the
-  Ostris node for edits), the real weights (`dump_moss_image_reference.py real` + `MossImageRealWeightTests`), an edit
-  with a real edit LoRA, CUDA, and the speed comparison with the Python pipeline.
+  Ostris node for edits and the colorize node), the real weights (`dump_moss_image_reference.py real` +
+  `MossImageRealWeightTests`), an edit with a real edit LoRA (the colorize LoRA included), CUDA, and the speed
+  comparison with the Python pipeline.
 
 ### Qwen-Image-Edit 2511
 

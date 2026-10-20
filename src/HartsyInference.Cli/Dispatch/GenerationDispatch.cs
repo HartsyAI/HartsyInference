@@ -1028,6 +1028,14 @@ public static class GenerationDispatch
         {
             extra[HartsyInference.Engine.Features.RequestExtras.ReferenceMaxPixels] = maxPixels;
         }
+        if (parameters.GetStringOrNull("reference-layout") is { Length: > 0 } layout)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceLayout] = layout;
+        }
+        if (parameters.GetIntOrNull("reference-scale") is { } refScale)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceScale] = refScale;
+        }
         if (parameters.GetIntOrNull("reference-vision-pixels") is { } visionPixels)
         {
             extra[HartsyInference.Engine.Features.RequestExtras.ReferenceVisionPixels] = visionPixels;

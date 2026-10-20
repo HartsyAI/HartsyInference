@@ -57,10 +57,13 @@ public static class ReferenceImageResolver
         List<Tensor> vision = new(ordered.Count);
         try
         {
-            foreach (ImageData reference in ordered)
+            foreach (ImageData source in ordered)
             {
+                ImageData reference = policy.FitTo is { } fit ? FeatureImaging.CoverCrop(source, fit.Width, fit.Height) : source;
                 (int latentW, int latentH) = LatentSize(reference.Width, reference.Height, policy);
-                latent.Add(FeatureImaging.RgbToTensorMinusOneOne(FeatureImaging.ResizeRgb24(reference, latentW, latentH), latentW, latentH));
+                ImageData latentSource = policy.FitTo is null ? reference : FeatureImaging.CoverCrop(reference, latentW, latentH);
+                byte[] latentRgb = FeatureImaging.ResizeRgb24(latentSource, latentW, latentH);
+                latent.Add(FeatureImaging.RgbToTensorMinusOneOne(latentRgb, latentW, latentH));
                 if (policy.VisionTargetArea <= 0)
                     continue;
                 (int visionW, int visionH) = VisionSize(reference.Width, reference.Height, policy);
@@ -78,11 +81,21 @@ public static class ReferenceImageResolver
         return new ResolvedReferences { Latent = latent, Vision = vision };
     }
 
-    /// <summary>The VAE copy's size: the image at the policy's budget (or its own size), sides rounded to the multiple.</summary>
+    /// <summary>The VAE copy's size: the image at the policy's budget (or its own size), sides rounded to the multiple; with a
+    /// <see cref="ReferenceImagePolicy.LatentSideDivisor"/>, each side divided by it instead.</summary>
     public static (int Width, int Height) LatentSize(int width, int height, ReferenceImagePolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
+        if (policy.LatentSideDivisor > 0)
+            return (SideAtDivisor(width, policy), SideAtDivisor(height, policy));
         return FeatureImaging.ScaleToArea(width, height, Budget(width, height, policy.LatentTargetArea, policy.LatentUpscale), policy.LatentMultiple);
+    }
+
+    /// <summary>One side divided by the policy's factor and snapped to its multiple, never below one multiple.</summary>
+    private static int SideAtDivisor(int side, ReferenceImagePolicy policy)
+    {
+        int multiple = policy.LatentMultiple;
+        return Math.Max(multiple, (int)Math.Round(side / (double)policy.LatentSideDivisor / multiple) * multiple);
     }
 
     /// <summary>The vision copy's budgeted size, before the tower's own resize.</summary>

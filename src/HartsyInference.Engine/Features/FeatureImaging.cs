@@ -36,6 +36,26 @@ public static class FeatureImaging
         return dst;
     }
 
+    /// <summary>Covers <paramref name="width"/>×<paramref name="height"/> at the image's own aspect (a bicubic scale, then the
+    /// smaller overhang centred and cropped away); the same size as the image returns it unchanged.</summary>
+    public static ImageData CoverCrop(ImageData image, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), $"Crop size must be positive; got {width}x{height}.");
+        if (image.Width == width && image.Height == height)
+            return image;
+        double scale = Math.Max(width / (double)image.Width, height / (double)image.Height);
+        int scaledW = Math.Max(width, (int)Math.Ceiling(image.Width * scale));
+        int scaledH = Math.Max(height, (int)Math.Ceiling(image.Height * scale));
+        byte[] scaled = ResizeRgb24(image, scaledW, scaledH);
+        int left = (scaledW - width) / 2, top = (scaledH - height) / 2;
+        byte[] cropped = new byte[(long)width * height * 3];
+        for (int row = 0; row < height; row++)
+            Buffer.BlockCopy(scaled, ((top + row) * scaledW + left) * 3, cropped, row * width * 3, width * 3);
+        return new ImageData { Rgb = cropped, Width = width, Height = height };
+    }
+
     /// <summary>Aspect-preserving rescale to <paramref name="targetArea"/> pixels, each side snapped to a multiple of
     /// <paramref name="multiple"/> (ComfyUI's <c>sqrt(total / (w·h))</c> scale, same banker's rounding).</summary>
     public static (int Width, int Height) ScaleToArea(int width, int height, int targetArea, int multiple)

@@ -76,10 +76,42 @@ public sealed unsafe class MossImageEditPipelineTests
         Assert.Throws<ArgumentException>(() => mismatched.Validate("test"));
     }
 
-    private static byte[] Run(MossImagePipeline pipeline, ReferenceImageInputs? references)
+    [Fact]
+    public void Colorize_PageInline_SeesTheImageOnlyInThePrompt()
+    {
+        using MossImageFixture fixture = new();
+        using SafeTensorsLoader vaeFile = new();
+        vaeFile.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", "MossImage", "flux2_vae_tiny.safetensors"));
+        Dictionary<string, Tensor> vaeWeights = vaeFile.GetAllTensors();
+        VaeEncoder vaeEncoder = new(TinyVae);
+        vaeEncoder.LoadWeights(vaeWeights);
+        VaeDecoder vaeDecoder = new(TinyVae);
+        vaeDecoder.LoadWeights(vaeWeights);
+        using MossImageTransformer transformer = new(fixture.Transformer.Config with { VaeLatentChannels = 4 });
+        transformer.LoadWeights(fixture.Weights);
+        StandInEncoder encoder = new();
+        using IBackend backend = new CpuBackend();
+        using MossImagePipeline pipeline = new(backend, encoder, transformer, vaeDecoder, vaeEncoder,
+            vaeWeights["bn.running_mean"], vaeWeights["bn.running_var"]);
+        using Tensor page = Pattern(new TensorShape(1, 3, 32, 48), -1f, 1f);
+        using Tensor pageVision = Pattern(new TensorShape(1, 3, 32, 32), 0f, 1f);
+
+        byte[] inline = Run(pipeline, Inputs(page, pageVision, ReferenceAttentionMode.Inline), negativePads: 0);
+        Assert.Equal(1, encoder.ImageCalls);
+        Assert.NotEqual(inline, Run(pipeline, Inputs(page, pageVision, ReferenceAttentionMode.Joint)));
+        ReferenceImageInputs two = new()
+        {
+            Latent = [page, page],
+            Vision = [pageVision, pageVision],
+            Options = new ReferenceConditioningOptions { Mode = ReferenceAttentionMode.Inline },
+        };
+        Assert.Throws<ArgumentException>(() => Run(pipeline, two, negativePads: 0));
+    }
+
+    private static byte[] Run(MossImagePipeline pipeline, ReferenceImageInputs? references, int? negativePads = null)
     {
         WeightedTokenSequence prompt = Tokens([1, 2, 3, 4, 5, 6, 7], references is null ? 0 : 4);
-        WeightedTokenSequence negative = Tokens([9, 8], references is null ? 0 : 4);
+        WeightedTokenSequence negative = Tokens([9, 8], negativePads ?? (references is null ? 0 : 4));
         TextToImageRequest request = new() { Prompt = "x", Width = Width, Height = Height, Steps = 3, CfgScale = 3f, Seed = 7 };
         (byte[] rgb, int width, int height, int _) = pipeline.Generate(prompt, negative, request,
             new MossImageGuidance { UncondSkipLayers = [1] }, null, references);

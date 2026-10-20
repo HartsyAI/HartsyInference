@@ -63,6 +63,10 @@ public sealed unsafe class MossImageAssetTests : IDisposable
     [InlineData("lora_unet_shared_block_modulation", "shared_block_modulation")]
     [InlineData("lora_transformer_layers_3_proj_k", "layers.3.proj.k")]
     [InlineData("lora_diffusion_model_layers_0_proj_ffn_up_gate", "layers.0.proj.ffn_up_gate")]
+    [InlineData("lora_unet_layers_41_proj_q", "layers.41.proj.q")]
+    [InlineData("lora_unet_layers_41_proj_v", "layers.41.proj.v")]
+    [InlineData("lora_unet_layers_41_proj_o", "layers.41.proj.o")]
+    [InlineData("lora_unet_layers_41_proj_ffn_down", "layers.41.proj.ffn_down")]
     public void TryResolve_MapsEachSpellingToTheTransformerModule(string root, string expected)
     {
         Assert.True(MossImageLoraMapper.TryResolve(root, out string module));

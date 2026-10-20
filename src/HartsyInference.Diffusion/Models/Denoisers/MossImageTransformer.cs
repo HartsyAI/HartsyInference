@@ -20,7 +20,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <para>Edits (the Ostris / ai-toolkit edit layout) add reference images as packed latent tokens through the same
 /// <c>video_embedder</c>, on RoPE index <c>i + 1</c> at timestep zero. They either ride in the sequence after the text
 /// (<see cref="ReferenceAttentionMode.Joint"/>) or run once in a prepass whose per-block keys and values every step
-/// appends (<see cref="ReferenceAttentionMode.CachedKv"/>, built by <see cref="EnsureReferenceCaches"/>).</para></summary>
+/// appends (<see cref="ReferenceAttentionMode.CachedKv"/>, built by <see cref="EnsureReferenceCaches"/>). The colorize
+/// LoRA's layout (<see cref="ReferenceAttentionMode.Inline"/>) puts one reference between the image and the text under
+/// the live modulation, with its RoPE stretched onto the image grid.</para></summary>
 public sealed class MossImageTransformer : IDisposable
 {
     private readonly MossImageConfig _config;
@@ -117,6 +119,11 @@ public sealed class MossImageTransformer : IDisposable
             throw new ArgumentException($"MOSS-Image conditions on at most {MossImageConfig.MaxReferenceImages} reference images, "
                 + $"got {references.Count}.", nameof(references));
         }
+        if (references is { Count: > 0 } && mode == ReferenceAttentionMode.Inline && references.Count != 1)
+        {
+            throw new ArgumentException("The inline MOSS-Image layout conditions on exactly one reference image, "
+                + $"got {references.Count}.", nameof(references));
+        }
         if (references is not null)
         {
             foreach (ReferenceLatentTokens reference in references) reference.Validate(_config.LatentChannels, "MOSS-Image");
@@ -185,6 +192,10 @@ public sealed class MossImageTransformer : IDisposable
             {
                 (cos, sin) = MossImageRope.Joint(hPacked, wPacked, length, grids, _config.HeadDim, _config.RopeBase);
                 layout = new TokenSegmentLayout([hPacked * wPacked + length, tokens], [0, 1]);
+            }
+            else if (mode == ReferenceAttentionMode.Inline)
+            {
+                (cos, sin) = MossImageRope.Inline(hPacked, wPacked, length, grids[0], _config.HeadDim, _config.RopeBase);
             }
             else
             {
@@ -368,7 +379,8 @@ public sealed class MossImageTransformer : IDisposable
         ReferenceEquals(packedLatent, _latentFixed) && GraphEligible(backend);
 
     /// <summary>One branch's velocity. Plain generation runs <c>[image ; text]</c>; cached references append their keys and
-    /// values in every block; joint references ride as a third segment under <paramref name="zeroModulation"/>.</summary>
+    /// values in every block; joint references ride as a third segment under <paramref name="zeroModulation"/>; the inline
+    /// reference sits between the image and the text under the step's own modulation.</summary>
     private Tensor ForwardCore(IBackend backend, Tensor packedLatent, MossImageConditioning conditioning, MossImageModulation modulation,
         MossImageModulation? zeroModulation, IReadOnlyCollection<int> skipLayers)
     {
@@ -376,6 +388,7 @@ public sealed class MossImageTransformer : IDisposable
         DType act = backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
         MossImageReferenceState? references = conditioning.References;
         bool joint = references is { Mode: ReferenceAttentionMode.Joint };
+        bool inline = references is { Mode: ReferenceAttentionMode.Inline };
         ReferenceKvCache? cache = null;
         if (references is { Mode: ReferenceAttentionMode.CachedKv } && !references.TryGetCache(SkipKey(skipLayers), out cache))
             throw new InvalidOperationException("MOSS-Image reference caches must be built before the step (EnsureReferenceCaches).");
@@ -401,6 +414,12 @@ public sealed class MossImageTransformer : IDisposable
                 ffn = SegmentModulation.Build(backend,
                     [(modulation.ShiftFfn, modulation.ScaleFfn, modulation.GateFfn),
                         (zeroModulation.ShiftFfn, zeroModulation.ScaleFfn, zeroModulation.GateFfn)], references.Layout!);
+            }
+            else if (inline)
+            {
+                x = new Tensor(new TensorShape(1, imageTokens + references!.TokenCount + conditioning.TextLength, _config.HiddenSize),
+                    DType.F32);
+                backend.Concat(x, [video, references.Embedded, conditioning.Text], 1);
             }
             else
             {

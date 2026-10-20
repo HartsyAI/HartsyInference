@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.383
+
+- **Added: MOSS-Image colorize reference layout** (`reference.layout=colorize`, CLI `--reference-layout colorize`), for
+  `sorryhyun/moss-image-colorize`, the public LoRA trained with a reference. One page goes between the image and the text
+  on RoPE `r = 1` with its grid stretched onto the target, under the live timestep, with full attention and no cache. The
+  page is cover-fit to the request size and its VAE copy is that size over `reference.ref_scale` per side (2 by default).
+  The prompt is one user turn with no `Picture` label, the vision copy is sized to the page's pixel count, and the negative
+  is a plain encode with no image. Defaults to 30 steps on ER-SDE, the card's sampler. Checked against the numpy
+  transcription on the tiny fixture (the Ostris and plain goldens are unchanged); real weights and CUDA not yet run.
+
 ## alpha.382
 
 - **Added: MOSS-Image reference-image edits, in the layout ai-toolkit's MOSS-Image edit LoRAs are trained on** (Ostris's

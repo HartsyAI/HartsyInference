@@ -56,6 +56,31 @@ public sealed class ReferenceImageResolverTests
         Assert.Equal((384, 384), (vw, vh));
     }
 
+    [Fact]
+    public void FitTo_CoversAndCentreCropsEachCopy_FromOnePage()
+    {
+        ReferenceImagePolicy page = Moss with
+        {
+            FitTo = (64, 48), LatentSideDivisor = 2, LatentTargetArea = 0, VisionTargetArea = 64 * 48,
+        };
+        // A 200×100 page covers 64×48 at scale 0.48 (96×48) and loses 16 columns per side.
+        using ResolvedReferences? references = ReferenceImageResolver.Resolve([Image(200, 100)], page);
+        Assert.NotNull(references);
+        Assert.Equal(new long[] { 1, 3, 32, 32 }, Dims(references!.Latent[0]));
+        Assert.Equal(new long[] { 1, 3, 48, 64 }, Dims(references.Vision[0]));
+        Assert.Equal((32, 32), ReferenceImageResolver.LatentSize(64, 48, page));
+    }
+
+    [Fact]
+    public void LatentSideDivisor_RoundsEachSideToTheMultipleWithPythonsTiesToEven()
+    {
+        ReferenceImagePolicy half = Moss with { LatentSideDivisor = 2, LatentMultiple = 16, LatentTargetArea = 0 };
+        Assert.Equal((512, 512), ReferenceImageResolver.LatentSize(1024, 1024, half));
+        // 1040 / 2 / 16 = 32.5 and 1008 / 2 / 16 = 31.5 both tie to the even neighbour, as Python's round() does.
+        Assert.Equal((512, 512), ReferenceImageResolver.LatentSize(1008, 1040, half));
+        Assert.Equal((336, 336), ReferenceImageResolver.LatentSize(1024, 1024, half with { LatentSideDivisor = 3 }));
+    }
+
     private static ImageData Image(int width, int height) => new() { Rgb = new byte[width * height * 3], Width = width, Height = height };
 
     private static long[] Dims(HartsyInference.Core.Tensors.Tensor t) => [t.Shape[0], t.Shape[1], t.Shape[2], t.Shape[3]];
