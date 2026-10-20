@@ -67,6 +67,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Distinct shapes refused at a head dim before the head dim itself is given up, when none ever ran.</summary>
     private const int CudnnSdpaRefusalsToDisableDim = 3;
 
+    /// <summary>Refused shapes kept per process; past it a refusal gives up its head dim, which bounds the set and its warnings.</summary>
+    private const int CudnnSdpaRefusedShapeCap = 64;
+
     /// <summary>The shapes cuDNN refused structurally in this process (diagnostics).</summary>
     public IReadOnlyCollection<string> CudnnSdpaRefusedShapes => [.. _cudnnSdpaRefusedShapes.Keys.Select(k => k.ToString())];
 
@@ -7421,9 +7424,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 // Scores live in F16 on the native-F16/fallback path, while the public additive-mask contract is
                 // F32. Convert once rather than reinterpreting packed float bytes as half values. Clamp to half the
-                // F16 range so a finite sentinel such as -1e30 plus any bounded score stays finite in the F16 add: an
-                // entirely masked row keeps the finite-sentinel/uniform-row convention instead of reaching -Inf and
-                // NaN in softmax, and a masked entry still contributes exactly zero.
+                // F16 range so a finite sentinel such as -1e30 plus a score within that range stays finite in the F16
+                // add: a fully masked row averages its highest-scoring keys instead of reaching -Inf and NaN in softmax,
+                // and a masked entry in a partly masked row still gets zero weight.
                 pMaskClamped = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(float)));
                 _kernels!.LaunchClamp(
                     pMaskClamped, opMask, -32_752f, 32_752f, (int)maskElemCount, _stream.Handle);
@@ -7642,6 +7645,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool TryFlashF16(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         int batch, int heads, int sq, int skv, int d, CudaKernels.FlashStrides so, CudaKernels.FlashStrides sQ, CudaKernels.FlashStrides sk, CudaKernels.FlashStrides sv)
     {
+        // An oversized grid is this call's limit, not a kernel failure, so it must not disable the kernel for the session.
+        if (!CudaKernels.GridYzFits(heads, batch)) return false;
         using OpScope _op = EnterOp();
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
         bool cached = false;
@@ -7818,6 +7823,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool TryCausalPrefillSdpa(Tensor output, Tensor query, Tensor key, Tensor value,
         int hq, int hkv, int tq, int kvLen, int qOffset, int window, int d, float scale)
     {
+        // A shape cuDNN already refused must not build the mask and widen K/V on every layer before declining.
+        if (_cudnnSdpaRefusedShapes.ContainsKey(new CudnnSdpaShape(1, hq, tq, kvLen, d, CudnnSdpa.SdpaLayout.HeadMajor, false, 1, 1, tq)))
+            return false;
         using OpScope _op = EnterOp();
         EnsureKernels();
         using Tensor mask = new(new TensorShape(1, 1, tq, kvLen), DType.F32);
@@ -7966,10 +7974,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (permanent)
             {
                 // Structural for this shape; the head dim goes only once several shapes failed and none ever ran.
-                if (_cudnnSdpaRefusedShapes.TryAdd(shape, 0))
+                if (_cudnnSdpaRefusedShapes.Count < CudnnSdpaRefusedShapeCap && _cudnnSdpaRefusedShapes.TryAdd(shape, 0))
                     HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] refused {shape} for the rest of the process: {ex.Message}");
                 int refusedAtDim = _cudnnSdpaRefusedShapes.Keys.Count(k => k.D == d);
-                if (!_cudnnSdpaWorkingDims.ContainsKey(d) && refusedAtDim >= CudnnSdpaRefusalsToDisableDim)
+                if (_cudnnSdpaRefusedShapes.Count >= CudnnSdpaRefusedShapeCap
+                    || (!_cudnnSdpaWorkingDims.ContainsKey(d) && refusedAtDim >= CudnnSdpaRefusalsToDisableDim))
                 {
                     _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
                     HartsyInference.Core.Logging.Logs.Warning(

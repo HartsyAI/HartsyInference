@@ -63,14 +63,14 @@ __global__ void lm_kv_append_f32(
 
     // Graph-capture decode: the write slot comes from a device buffer {kvLen, qOffset}; qOffset (dPos[1]) is
     // the position to append at. Null → use the host-passed offset (eager path / all other callers).
-    if (dPos != nullptr) offset = (unsigned int)dPos[1];
+    if (dPos != nullptr) { if (dPos[1] < 0) return; offset = (unsigned int)dPos[1]; }
 
     unsigned int d = (unsigned int)(i % headDim);
     unsigned long long rem = i / headDim;
     unsigned int ti = (unsigned int)(rem % tNew);
     unsigned int h = (unsigned int)(rem / tNew);
 
-    if (offset + ti >= maxSeq) return;
+    if ((unsigned long long)offset + ti >= maxSeq) return;
     unsigned long long bufIdx = (((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d;
     buffer[bufIdx] = newKv[i];
 }
@@ -94,14 +94,14 @@ __global__ void lm_kv_append_f16(
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
 
-    if (dPos != nullptr) offset = (unsigned int)dPos[1];
+    if (dPos != nullptr) { if (dPos[1] < 0) return; offset = (unsigned int)dPos[1]; }
 
     unsigned int d = (unsigned int)(i % headDim);
     unsigned long long rem = i / headDim;
     unsigned int ti = (unsigned int)(rem % tNew);
     unsigned int h = (unsigned int)(rem / tNew);
 
-    if (offset + ti >= maxSeq) return;
+    if ((unsigned long long)offset + ti >= maxSeq) return;
     unsigned long long bufIdx = (((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d;
     buffer[bufIdx] = __float2half(newKv[i]);
 }
@@ -415,7 +415,7 @@ __global__ void lm_qkv_rope_scatter_f32(
     unsigned long long total = qElems + 2ull * kvElems;
     if (gid >= total) return;
     int pos = devicePos[1];
-    if (gid >= qElems && (unsigned int)pos >= maxSeq) return;   // a slot past the capacity writes no K/V
+    if ((unsigned int)pos >= maxSeq) return;   // a position past the capacity writes nothing and reads no table row
 
     if (gid >= qElems + kvElems) {
         // v: plain copy into the cache slot (same addressing as lm_kv_append_f32 at tNew=1).
@@ -1328,7 +1328,7 @@ __global__ void lm_qknorm_rope_scatter_f32(
     unsigned int h = blockIdx.x;
     if (h >= nq + 2u * nkv) return;
     int pos = devicePos[1];
-    if (h >= nq && (unsigned int)pos >= maxSeq) return;   // a slot past the capacity writes no K/V
+    if ((unsigned int)pos >= maxSeq) return;   // a position past the capacity writes nothing and reads no table row
 
     if (h >= nq + nkv) {
         // v head: plain copy into the cache slot (identical addressing to lm_kv_append_f32, tNew=1).

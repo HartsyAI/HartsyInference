@@ -48,8 +48,11 @@ public sealed unsafe class CudaAttentionCorrectnessTests
     }
 
     [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void TiledKeyMask_EachBatchItemReadsItsOwnRow()
+    [Theory]
+    [InlineData(2, 1)]   // [B,1,1,Skv]: the shape the old (b*H+h) % B row got wrong
+    [InlineData(1, 3)]   // [1,H,1,Skv]
+    [InlineData(2, 3)]   // [B,H,1,Skv]
+    public void TiledKeyMask_EachBatchItemAndHeadReadsItsOwnRow(int maskBatch, int maskHeads)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int b = 2, h = 3, sq = 8, skv = 32, d = 64;
@@ -57,8 +60,8 @@ public sealed unsafe class CudaAttentionCorrectnessTests
         using Tensor q = Make(DType.F32, [b, h, sq, d], Noise(1, 1f));
         using Tensor k = Make(DType.F32, [b, h, skv, d], Noise(2, 1f));
         using Tensor v = Make(DType.F32, [b, h, skv, d], Noise(3, 1f));
-        // Batch 0 hides the first half of the keys, batch 1 the second: a row read from the wrong batch is visible.
-        using Tensor mask = Make(DType.F32, [b, 1, 1, skv], i => (i / skv == 0) == (i % skv < skv / 2) ? -1e4f : 0f);
+        // Each mask row hides a different half of the keys, so a row read for the wrong batch item or head is visible.
+        using Tensor mask = Make(DType.F32, [maskBatch, maskHeads, 1, skv], i => (i % skv + i / skv * 7) % skv < skv / 2 ? -1e4f : 0f);
         KnobStore.Set(EngineKnobs.SdpaCudnn, false);
         KnobStore.Set(EngineKnobs.SdpaForceTiled, true);
         try
@@ -71,7 +74,7 @@ public sealed unsafe class CudaAttentionCorrectnessTests
             float[] expected = Reference(e => AttentionCall.FromScaledDotProductAttention(e, q, k, v, mask, scale, false), [b, h, sq, d]);
             (double rel, double cos, double max) = AttnAssert.Agrees(AttnInvoker.ReadF32(o), expected, d,
                 AttnTolerance.For(AttnAchieved.Tf32), "on the tiled path with a per-batch key mask");
-            _output.WriteLine($"tiled per-batch key mask: relL2 {rel:E2}, min cos {cos:F7}, max |Δ| {max:E2}");
+            _output.WriteLine($"tiled key mask [{maskBatch},{maskHeads},1,{skv}]: relL2 {rel:E2}, min cos {cos:F7}, max |Δ| {max:E2}");
         }
         finally
         {
@@ -100,7 +103,7 @@ public sealed unsafe class CudaAttentionCorrectnessTests
             using Tensor o = new(new TensorShape(1, h, s, d), DType.F32);
             cuda.ScaledDotProductAttention(o, q, k, v, null, scale, allowF16: true);
             cuda.Sync();
-            _output.WriteLine($"route {CudaBackend.LastAttentionRoute}");
+            Assert.Equal("S.13", CudaBackend.LastAttentionRoute);
             float[] actual = AttnInvoker.ReadF32(o);
             Assert.All(actual, x => Assert.True(float.IsFinite(x), "a V value past the F16 range must clip, not become infinity"));
             float[] expected = Reference(e => AttentionCall.FromScaledDotProductAttention(e, q, k, vClamped, null, scale, false), [1, h, s, d]);
@@ -133,7 +136,7 @@ public sealed unsafe class CudaAttentionCorrectnessTests
             using Tensor o = new(new TensorShape(1, h, sq, d), DType.F16);
             cuda.ScaledDotProductAttention(o, q, k, v, mask, scale, allowF16: true);
             cuda.Sync();
-            _output.WriteLine($"route {CudaBackend.LastAttentionRoute}");
+            Assert.Equal("S.15", CudaBackend.LastAttentionRoute);
             float[] actual = AttnInvoker.ReadF32(o), values = AttnInvoker.ReadF32(v);
             float[] expected = Reference(e => AttentionCall.FromScaledDotProductAttention(e, q, k, v, mask, scale, true), [1, h, sq, d]);
             for (int head = 0; head < h; head++)
@@ -165,9 +168,10 @@ public sealed unsafe class CudaAttentionCorrectnessTests
 
     [Trait("Category", "GpuIntegration")]
     [Theory]
-    [InlineData("V.2", 48, false, true)]    // grouped-query decode kernel
-    [InlineData("V.2", 48, true, true)]
-    [InlineData("V.3", 48, false, false)]   // split-K
+    // Capacities whose split chunks overshoot the cache (3 x 67 > 200, 3 x 17 > 50), so the last chunk reaches past it.
+    [InlineData("V.2", 200, false, true)]   // grouped-query decode kernel
+    [InlineData("V.2", 200, true, true)]
+    [InlineData("V.3", 50, false, false)]   // split-K
     [InlineData("V.5", 24, false, false)]   // monolithic, below the split floor
     [InlineData("V.4", 24, true, false)]
     public void DevicePositionPastTheCache_ReadsNoFurtherThanTheCache(string route, int capacity, bool f16Kv, bool gqa)
@@ -205,16 +209,18 @@ public sealed unsafe class CudaAttentionCorrectnessTests
 
     [Trait("Category", "GpuIntegration")]
     [Theory]
-    [InlineData("append", false)]
-    [InlineData("append", true)]
-    [InlineData("qkv", false)]
-    [InlineData("qkv", true)]
-    [InlineData("qknorm", false)]
-    [InlineData("qknorm", true)]
-    [InlineData("qknormfull", false)]
-    [InlineData("qknormfull", true)]
-    [InlineData("qknormfull-composed", false)]
-    public void DevicePositionPastTheCache_WritesNoKv(string op, bool f16Cache)
+    [InlineData("append", false, 16)]
+    [InlineData("append", true, 16)]
+    [InlineData("append2", false, -1)]   // two new rows at -1: the unsigned slot used to wrap to row 0
+    [InlineData("append2", true, -1)]
+    [InlineData("qkv", false, 16)]
+    [InlineData("qkv", true, 16)]
+    [InlineData("qknorm", false, 16)]
+    [InlineData("qknorm", true, 16)]
+    [InlineData("qknormfull", false, 16)]
+    [InlineData("qknormfull", true, 16)]
+    [InlineData("qknormfull-composed", false, 16)]
+    public void DevicePositionOutsideTheCache_WritesNoKv(string op, bool f16Cache, int slot)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int hq = 4, hkv = 2, d = 64, maxSeq = 16;
@@ -228,7 +234,7 @@ public sealed unsafe class CudaAttentionCorrectnessTests
         using Tensor cos = Make(DType.F32, [maxSeq + 8, d], Noise(13, 1f)), sin = Make(DType.F32, [maxSeq + 8, d], Noise(14, 1f));
         using Tensor qkv = Make(DType.F32, [1, 1, (hq + 2 * hkv) * d], Noise(15, 1f));
         using Tensor qk = Make(DType.F32, [1, 1, (hq + hkv) * d], Noise(16, 1f));
-        using Tensor vIn = Make(DType.F32, [1, hkv, 1, d], Noise(17, 1f));
+        using Tensor vIn = Make(DType.F32, [1, hkv, 1, d], Noise(17, 1f)), vIn2 = Make(DType.F32, [1, hkv, 2, d], Noise(18, 1f));
         using Tensor qNorm = Make(DType.F32, [d], _ => 1f), kNorm = Make(DType.F32, [d], _ => 1f);
         using Tensor qNormFull = Make(DType.F32, [hq * d], _ => 1f), kNormFull = Make(DType.F32, [hkv * d], _ => 1f);
         KnobStore.Set(EngineKnobs.QknormFullScatter, op == "qknormfull");
@@ -236,12 +242,15 @@ public sealed unsafe class CudaAttentionCorrectnessTests
         ulong pos = cuda.AllocDevicePos();
         try
         {
-            cuda.WriteDevicePos(pos, maxSeq + 1, maxSeq);
+            cuda.WriteDevicePos(pos, slot + 1, slot);
             using Tensor qOut = new(new TensorShape(1, hq, 1, d), DType.F32);
             switch (op)
             {
                 case "append":
                     cuda.KvCacheAppendDev(kc, vIn, 0, pos);
+                    break;
+                case "append2":
+                    cuda.KvCacheAppendDev(kc, vIn2, 0, pos);
                     break;
                 case "qkv":
                     cuda.QkvRopeScatterDecodeStep(qOut, kc, vc, qkv, cos, sin, hq, hkv, d, d, false, pos);
@@ -256,7 +265,7 @@ public sealed unsafe class CudaAttentionCorrectnessTests
             cuda.Sync();
             Assert.Equal(kBefore, new ReadOnlySpan<byte>((void*)kc.DataPointer, kBefore.Length).ToArray());
             Assert.Equal(vBefore, new ReadOnlySpan<byte>((void*)vc.DataPointer, vBefore.Length).ToArray());
-            _output.WriteLine($"{op} f16 {f16Cache}: a slot past the capacity left both caches untouched");
+            _output.WriteLine($"{op} f16 {f16Cache} slot {slot}: both caches untouched");
         }
         finally
         {
