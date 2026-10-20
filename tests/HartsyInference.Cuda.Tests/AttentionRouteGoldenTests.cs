@@ -59,6 +59,7 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("tm-f16-d40", "tm", DType.F16, 4, 4, 256, 256, 40, "none", true, "M.3/S.15"),
         new("tm-f32-allowf16", "tm", DType.F32, 4, 4, 256, 256, 128, "none", true, "M.2"),
         new("tm-f32", "tm", DType.F32, 4, 4, 256, 256, 128, "none", false, "M.3/S.14"),
+        new("tm-gqa-f16-d128", "tm", DType.F16, 48, 12, 256, 256, 128, "none", true, "MG/S.3"),
         new("flash-decode", "flash", DType.F32, 8, 2, 1, 256, 128, "none", false, "F.4"),
         new("flash-decode-nogqa", "flash", DType.F32, 8, 2, 1, 256, 128, "none", false, "F.5",
             Knobs: () => KnobStore.Set(EngineKnobs.FlashDecodeGqa, false)),
@@ -180,7 +181,8 @@ public sealed unsafe class AttentionRouteGoldenTests
             "key" => Random(new TensorShape(1, 1, 1, c.Skv), DType.F32, 5, -2f, 2f),
             _ => null,
         };
-        if (tm) b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.D, scale, c.AllowF16);
+        if (tm && c.Hkv != c.Hq) b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.Hkv, c.D, scale, c.AllowF16);
+        else if (tm) b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.D, scale, c.AllowF16);
         else b.ScaledDotProductAttention(ot, qt, kt, vt, mask, scale, c.AllowF16);
     }
 }

@@ -1718,7 +1718,9 @@ public partial interface IBackend : IDisposable
         => throw new NotSupportedException("BuildRopeTableDevice requires GraphDecodeSupported.");
 
     /// <summary>RoPE on a single decode-step Q/K tensor <c>[1,numHeads,1,headDim]</c>, reading its row from the devicePos qOffset slot.</summary>
-    void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos) { }
+    /// <remarks>The default throws: a backend without the kernel must be refused, not silently leave Q/K unrotated.</remarks>
+    void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos) =>
+        throw new NotSupportedException("RopeApplyDecodeStep requires GraphDecodeSupported.");
 
     /// <summary>Gathers one row (id in the persistent tokenId buffer) from a GPU-resident embedding table into output <c>[1,1,hidden]</c>.</summary>
     void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId) { }

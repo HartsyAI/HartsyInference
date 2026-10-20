@@ -37,6 +37,19 @@ public sealed class KnobProfile
     {
         updated = this;
         object? knob = KnobRegistry.Find(id);
+        if (knob is null && KnobDeprecations.Find(id) is { } retired)
+        {
+            Console.Error.WriteLine(KnobDeprecations.Warning(retired));
+            if (retired.NewId is null)
+            {
+                error = null;
+                return true;
+            }
+            if (!TrySet(retired.NewId, rawValue, out updated, out error)) return false;
+            if (retired.MapValue is not null)
+                updated = new KnobProfile(Name, updated.Values.SetItem(retired.NewId, retired.MapValue(updated.Values[retired.NewId])));
+            return true;
+        }
         if (knob is null)
         {
             error = $"Unknown setting '{id}'.";
