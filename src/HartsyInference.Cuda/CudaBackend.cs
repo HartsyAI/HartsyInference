@@ -113,6 +113,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public long FlashF16ExecutionCount => Interlocked.Read(ref _flashF16ExecutionCount);
     private long _flashF16ExecutionCount;
 
+    /// <summary>The terminal dispatch branch the last attention call on this thread took: S.n (head-major), M.n
+    /// (token-major), F.n (FlashAttention), V.n (device positions), nested as "M.3/S.15". The route golden test pins them.</summary>
+    [ThreadStatic] private static string? t_attentionRoute;
+    internal static string? LastAttentionRoute => t_attentionRoute;
+
     /// <summary>Query-tiled attention calls this backend served (see <see cref="SdpaTiledF32Core"/>).</summary>
     internal long SdpaTiledExecutionCount => Interlocked.Read(ref _sdpaTiledExecutionCount);
     private long _sdpaTiledExecutionCount;
@@ -7304,6 +7309,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (SageF16Preferred(query, key, value, output, mask, sq, skv, d))
         {
             SageAttentionInt8(output, query, key, value, scale);
+            t_attentionRoute = "S.1";
             return;
         }
 
@@ -7313,6 +7319,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             && TryFlashF16(output, query, key, value, scale, (int)b, (int)h, (int)sq, (int)skv, (int)d,
                 HeadMajorStrides(h, sq, d), HeadMajorStrides(h, sq, d), HeadMajorStrides(h, skv, d), HeadMajorStrides(h, skv, d)))
         {
+            t_attentionRoute = "S.2";
             return;
         }
 
@@ -7321,6 +7328,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
             && TryCudnnSdpa(output, query, key, value, mask, scale))
         {
+            t_attentionRoute = "S.3";
             return;
         }
 
@@ -7358,6 +7366,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0))
                 {
                     SageAttentionInt8(output, query, key, value, scale);
+                    t_attentionRoute = "S.4";
                     return;
                 }
             }
@@ -7374,6 +7383,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled
                 && TryCudnnSdpa(output, query, key, value, mask, scale))
             {
+                t_attentionRoute = "S.5";
                 return;
             }
         }
@@ -7392,6 +7402,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0))
                 {
                     SageAttentionInt8(output, query, key, value, scale);
+                    t_attentionRoute = "S.6";
                     return;
                 }
             }
@@ -7402,11 +7413,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 && FlashAttentionV2ContractSatisfied(output, query, key, value, mask, scale, _allowTf32))
             {
                 FlashAttentionV2(output, query, key, value, scale);
+                t_attentionRoute = "S.7";
                 return;
             }
             if (EngineKnobs.SdpaForceFlash.Value)
             {
                 FlashAttention(output, query, key, value, (int)skv, kvGroup: 1, causal: false, qOffset: 0, scale);
+                t_attentionRoute = "S.8/" + t_attentionRoute;
                 return;
             }
             ulong scoreBytesEst = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
@@ -7414,6 +7427,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (EngineKnobs.SdpaForceTiled.Value || scoreBytesEst > (ulong)freeBytes / 2)
             {
                 SdpaTiledF32(output, query, key, value, scale);
+                t_attentionRoute = "S.9";
                 return;
             }
         }
@@ -7429,6 +7443,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (EngineKnobs.SdpaForceTiled.Value || keyBiasScoreBytes > (ulong)keyBiasFree / 2)
             {
                 SdpaTiledF32(output, query, key, value, scale, mask);
+                t_attentionRoute = "S.10";
                 return;
             }
         }
@@ -7527,11 +7542,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOut, outBytes);
                     cachedOutput = true;
+                    t_attentionRoute = "S.11";
                     return;
                 }
             }
 
             bool isF16 = opDtype == DType.F16;
+            t_attentionRoute = query.DType == DType.BF16 ? "S.12" : isF16 ? (query.DType == DType.F32 ? "S.13" : "S.15") : "S.14";
             int elemSize = opDtype.SizeInBytes;
             ulong opMask = pMaskBroadcast != 0 ? pMaskBroadcast : pMask;
             int maskElemSize = sizeof(float);
@@ -7715,6 +7732,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (TryFlashF16(output, query, key, value, scale, 1, heads, (int)sq, (int)skv, (int)d,
                     tokenMajor, tokenMajor, tokenMajor, tokenMajor))
             {
+                t_attentionRoute = "M.1";
                 return;
             }
         }
@@ -7741,6 +7759,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.TokenMajor,
                     1, heads, sq, skv, d))
             {
+                t_attentionRoute = "M.2";
                 return;
             }
         }
@@ -7755,6 +7774,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             Permute0213(vMh, value, (int)skv, heads, headDim);
             ScaledDotProductAttention(oMh, qMh, kMh, vMh, mask, scale, allowF16);
             Permute0213(output, oMh, heads, (int)sq, headDim);
+            t_attentionRoute = "M.3/" + t_attentionRoute;
         }
         finally { qMh.Dispose(); kMh.Dispose(); vMh.Dispose(); oMh.Dispose(); }
     }
@@ -9946,6 +9966,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (!kernelOk)
         {
             AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
+            t_attentionRoute = "F.1";
             return;
         }
 
@@ -9968,6 +9989,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             && CausalMaskFits(tq, kvLen, hq, d, kvGroup)
             && TryCausalPrefillSdpa(output, query, key, value, hq, hkv, tq, kvLen, qOffset, slidingWindow, d, scale))
         {
+            t_attentionRoute = "F.2";
             return;
         }
 
@@ -9979,6 +10001,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             && EngineKnobs.Fa2Prefill.Value)
         {
             FlashAttentionFa2(output, query, key, value, b, hq, hkv, tq, lk, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, slidingWindow, f16Kv);
+            t_attentionRoute = "F.3";
             return;
         }
 
@@ -10034,11 +10057,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
             if (gqaDecode)
             {
+                t_attentionRoute = "F.4";
                 RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, kvLen, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, softcap,
                     slidingWindow, 0, f16Kv);
             }
             else if (splits >= 2)
             {
+                t_attentionRoute = "F.5";
                 int chunk = (kvLen + splits - 1) / splits;
                 splits = (kvLen + chunk - 1) / chunk;   // exact # of non-empty chunks covering kvLen
                 long n = baseBlocks;
@@ -10060,10 +10085,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else if (f16Kv)
             {
+                t_attentionRoute = "F.6";
                 _kernels!.LaunchFlashAttentionF16Kv(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
             }
             else
             {
+                t_attentionRoute = "F.7";
                 _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -10263,6 +10290,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             || (!devF16Kv && (key.DType != DType.F32 || value.DType != DType.F32)))
         {
             FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
+            t_attentionRoute = "V.0/" + t_attentionRoute;
             return;
         }
         ValidateFlashAttentionContract(
@@ -10321,12 +10349,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             int grp = kvGroup <= 0 ? 1 : kvGroup;
             if (DecodeGqaEligible(tq, causal, hq, hkv, grp, d))
             {
+                t_attentionRoute = "V.2";
                 attnSidecar = TryAllocAttnCombineSidecar(b, tq, hq, d);
                 RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, lk, d, kvLen, grp, qOffset, scale, softcap, slidingWindow, devicePos, devF16Kv,
                     attnSidecar);
             }
             else if (splits >= 2)
             {
+                t_attentionRoute = "V.3";
                 long n = baseBlocks;
                 ulong pM = 0, pL = 0, pAcc = 0;
                 try
@@ -10353,11 +10383,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 if (devF16Kv)
                 {
+                    t_attentionRoute = "V.4";
                     _kernels!.LaunchFlashAttentionF16Kv(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
                         causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
                 }
                 else
                 {
+                    t_attentionRoute = "V.5";
                     _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
                         causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
                 }
