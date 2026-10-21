@@ -66,6 +66,20 @@ public interface IKvCapture
     void Capture(Tensor k, Tensor v);
 }
 
+/// <summary>Keeps the captured K and V for the caller, who disposes them (they are null if the call failed before its
+/// attention).</summary>
+public sealed class CapturedKv : IKvCapture
+{
+    /// <summary>The captured K.</summary>
+    public Tensor? Key { get; private set; }
+
+    /// <summary>The captured V.</summary>
+    public Tensor? Value { get; private set; }
+
+    /// <inheritdoc/>
+    public void Capture(Tensor k, Tensor v) => (Key, Value) = (k, v);
+}
+
 /// <summary>Reads named intermediates of a call for diagnostics. It must not keep or modify them, and is never set on a
 /// captured path.</summary>
 public interface IAttentionProbe

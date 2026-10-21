@@ -136,7 +136,7 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         int seq = (int)x.Shape[x.Shape.Rank - 2];
         Tensor modulated = ModulateNorm(backend, x, mod.Scale1Plus1, seq, x.DType);
         QkRotation rope = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, seq);
-        KvCache cache = new();
+        CapturedKv cache = new();
         Tensor attn = _attention!.Forward(backend, modulated, modulated, new AttentionCallContext
         {
             QueryRotation = rope, KeyRotation = rope, Bias = causalMask, KvCapture = cache, ReleaseInputs = true,
@@ -162,14 +162,6 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
             KvRewrite = prefixed ? new PrefixKv(prefixKey!, prefixValue!) : null,
         });
         return FinishBlock(backend, x, attn, mod, seq);
-    }
-
-    /// <summary>Keeps the prefix pass's rotated K/V as the target pass's cache.</summary>
-    private sealed class KvCache : IKvCapture
-    {
-        public Tensor? Key, Value;
-
-        public void Capture(Tensor k, Tensor v) => (Key, Value) = (k, v);
     }
 
     /// <summary>Prepends the cached prefix K/V to the target's own <c>[1, S, H, D]</c> K/V.</summary>
