@@ -26,13 +26,11 @@ namespace HartsyInference.Audio.Tests.Attention;
 /// masks are not backend ops, so only their results show, through the operand shapes.</summary>
 public sealed class AttentionWaveE2TraceTests
 {
-    private static string[] Run(Action<AttentionTraceBackend> site, bool serveConvs = false) => AttentionOpTrace.Run(site, serveConvs);
-
     private static Tensor T(params long[] dims) => new(new TensorShape(dims), DType.F32);
 
     private static void Pin(string site, string[] actual)
     {
-        if (!AttentionOpTrace.TryRecord(site, actual)) Assert.Equal(AttentionWaveE2TracePins.All[site], actual);
+        if (!AttentionTraceOps.TryRecord(site, actual)) Assert.Equal(AttentionWaveE2TracePins.All[site], actual);
     }
 
     private static object NewPrivate(Type owner, string nested, params object[] ctorArgs) =>
@@ -56,7 +54,7 @@ public sealed class AttentionWaveE2TraceTests
         w.AddNorm("l.final_layer_norm.weight", h); w.AddBias("l.final_layer_norm.bias", h);
         object layer = NewPrivate(typeof(Hubert), "Layer", cfg);
         Invoke(layer, "LoadWeights", w, "l");
-        Pin("hubert", Run(b => Invoke(layer, "Forward", b, T(1, t, h), t)));
+        Pin("hubert", AttentionTraceOps.Record(b => Invoke(layer, "Forward", b, T(1, t, h), t)));
     }
 
     [Fact]
@@ -71,7 +69,7 @@ public sealed class AttentionWaveE2TraceTests
         NeuCodecDecoder dec = new(cfg);
         object tx = typeof(NeuCodecDecoder).GetMethod("LoadTx", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [w, "b"])!;
         MethodInfo block = typeof(NeuCodecDecoder).GetMethod("TxBlock", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Pin("neucodec_txblock", Run(b => block.Invoke(dec, [b, T(1, t, dim), tx, t])));
+        Pin("neucodec_txblock", AttentionTraceOps.Record(b => block.Invoke(dec, [b, T(1, t, dim), tx, t])));
     }
 
     [Fact]
@@ -92,7 +90,7 @@ public sealed class AttentionWaveE2TraceTests
         w.Linear("m.proj", muqDim, hidden, true); w.Linear("m.muq_linear", lmHidden, muqDim, true);
         using MuqEmbedder muq = new(mels, muqDim, lmHidden, hidden, layers, 2, ffn);
         muq.LoadWeights(w, "m");
-        Pin("muq", Run(b => muq.Embed(b, T(1, mels, t), t), serveConvs: true));
+        Pin("muq", AttentionTraceOps.Record(b => muq.Embed(b, T(1, mels, t), t), serveConvs: true));
     }
 
     [Theory]
@@ -113,7 +111,7 @@ public sealed class AttentionWaveE2TraceTests
         w.Linear("r.slf_attn.fc", hidden, hidden, true); w.Linear("r.fc.fc", style, hidden, true);
         SoVitsRefEnc enc = new(mels, hidden, style, 2, kernel);
         enc.LoadWeights(w, "r");
-        Pin(fused ? "sovits_refenc_fused" : "sovits_refenc_split", Run(b => enc.Forward(b, T(1, mels, t), t), serveConvs: true));
+        Pin(fused ? "sovits_refenc_fused" : "sovits_refenc_split", AttentionTraceOps.Record(b => enc.Forward(b, T(1, mels, t), t), serveConvs: true));
     }
 
     [Fact]
@@ -127,7 +125,7 @@ public sealed class AttentionWaveE2TraceTests
         using ChatterboxPerceiver perceiver = new();
         perceiver.LoadWeights(w, "p");
         MethodInfo block = typeof(ChatterboxPerceiver).GetMethod("AttentionBlock", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Pin("chatterbox_perceiver", Run(b =>
+        Pin("chatterbox_perceiver", AttentionTraceOps.Record(b =>
         {
             Tensor queries = T(1, 32, dim), prompt = T(1, 11, dim);
             block.Invoke(perceiver, [b, queries, prompt]);
@@ -150,7 +148,7 @@ public sealed class AttentionWaveE2TraceTests
         S3Block block = new();
         block.LoadWeights(w, "b");
         float[] cos = new float[t * 32], sin = new float[t * 32];
-        Pin("s3_block", Run(b => block.Forward(b, T(1, t, n), t, cos, sin), serveConvs: true));
+        Pin("s3_block", AttentionTraceOps.Record(b => block.Forward(b, T(1, t, n), t, cos, sin), serveConvs: true));
     }
 
     [Fact]
@@ -166,7 +164,7 @@ public sealed class AttentionWaveE2TraceTests
         object block = NewPrivate(typeof(Text2Semantic), "Block", cfg);
         Invoke(block, "LoadWeights", w, "b");
         using Tensor mask = T(t, t);
-        Pin("text2semantic", Run(b => Invoke(block, "Forward", b, T(1, t, h), t, mask)));
+        Pin("text2semantic", AttentionTraceOps.Record(b => Invoke(block, "Forward", b, T(1, t, h), t, mask)));
     }
 
     // ── Operator stage only ─────────────────────────────────────────────────────────────────────────────────────
@@ -194,7 +192,7 @@ public sealed class AttentionWaveE2TraceTests
         MoonshineEncoderLayer layer = new(cfg);
         layer.LoadWeights(w, "l");
         (float[] cos, float[] sin) = RotaryEmbedding.GetTables(cfg.RotaryDim, cfg.RopeTheta, 64);
-        Pin("moonshine_enc", Run(b => layer.Forward(b, T(1, 10, 16), 10, cos, sin)));
+        Pin("moonshine_enc", AttentionTraceOps.Record(b => layer.Forward(b, T(1, 10, 16), 10, cos, sin)));
     }
 
     [Fact]
@@ -213,7 +211,7 @@ public sealed class AttentionWaveE2TraceTests
         layer.LoadWeights(w, "l");
         (float[] cos, float[] sin) = RotaryEmbedding.GetTables(cfg.RotaryDim, cfg.RopeTheta, 64);
         using Tensor selfK = T(1, 2, 16, 8), selfV = T(1, 2, 16, 8), crossK = T(1, 2, enc, 8), crossV = T(1, 2, enc, 8);
-        Pin("moonshine_dec", Run(b =>
+        Pin("moonshine_dec", AttentionTraceOps.Record(b =>
         {
             layer.PrecomputeCrossKv(b, T(1, enc, d), crossK, crossV, enc);
             layer.Forward(b, T(1, 3, d), selfK, selfV, crossK, crossV, 0, 3, cos, sin).Dispose();
@@ -239,7 +237,7 @@ public sealed class AttentionWaveE2TraceTests
         }
         MoonshineStreamingEncoderLayer a = new(cfg, (16, 4)), b2 = new(cfg, (16, 0));
         a.LoadWeights(w, "a"); b2.LoadWeights(w, "b");
-        Pin("moonshine_stream_enc", Run(b =>
+        Pin("moonshine_stream_enc", AttentionTraceOps.Record(b =>
         {
             a.Forward(b, T(1, 40, 12), 40).Dispose();
             b2.Forward(b, T(1, 40, 12), 40).Dispose();
@@ -270,7 +268,7 @@ public sealed class AttentionWaveE2TraceTests
     public void MimiForward_AttendsABatchOfTwoThroughTheWindowMask()
     {
         MimiTransformer tr = MimiTiny();
-        Pin("mimi_forward", Run(b => tr.Forward(b, T(2, 10, MmD), 2, 10)));
+        Pin("mimi_forward", AttentionTraceOps.Record(b => tr.Forward(b, T(2, 10, MmD), 2, 10)));
     }
 
     [Fact]
@@ -278,7 +276,7 @@ public sealed class AttentionWaveE2TraceTests
     {
         MimiTransformer tr = MimiTiny();
         using MimiTransformerCache cache = new();
-        Pin("mimi_stream", Run(b =>
+        Pin("mimi_stream", AttentionTraceOps.Record(b =>
         {
             tr.ForwardStreaming(b, T(1, 4, MmD), 4, cache).Dispose();
             tr.ForwardStreaming(b, T(1, 3, MmD), 3, cache).Dispose();
@@ -307,7 +305,7 @@ public sealed class AttentionWaveE2TraceTests
     {
         PocketTtsStreamingTransformer tr = new("p", PkD, PkHeads, PkLayers, PkFfn, context: 6, layerScale: true);
         tr.LoadWeights(PocketWeights(72, layerScale: true));
-        Pin("pockettts_backbone", Run(b => tr.Forward(b, T(2, 10, PkD), 2, 10)));
+        Pin("pockettts_backbone", AttentionTraceOps.Record(b => tr.Forward(b, T(2, 10, PkD), 2, 10)));
     }
 
     [Fact]
@@ -319,7 +317,7 @@ public sealed class AttentionWaveE2TraceTests
         open.LoadWeights(PocketWeights(73, layerScale: false));
         windowed.LoadWeights(PocketWeights(73, layerScale: false));
         Tensor[] pk = [T(1, PkHeads, prefixLen, hd), T(1, PkHeads, prefixLen, hd)], pv = [T(1, PkHeads, prefixLen, hd), T(1, PkHeads, prefixLen, hd)];
-        Pin("pockettts_primed", Run(b =>
+        Pin("pockettts_primed", AttentionTraceOps.Record(b =>
         {
             open.ForwardPrimed(b, T(1, t, PkD), t, pk, pv, prefixLen).Dispose();
             windowed.ForwardPrimed(b, T(1, t, PkD), t, pk, pv, prefixLen).Dispose();
@@ -356,7 +354,7 @@ public sealed class AttentionWaveE2TraceTests
         PocketTtsMimiDecoder dec = new();
         dec.LoadWeights(w);
         MethodInfo run = typeof(PocketTtsMimiDecoder).GetMethod("RunTransformer", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Pin("pockettts_mimi", Run(b => run.Invoke(dec, [b, T(1, 256, 512), 1, 256])));
+        Pin("pockettts_mimi", AttentionTraceOps.Record(b => run.Invoke(dec, [b, T(1, 256, 512), 1, 256])));
     }
 
     [Fact]
@@ -376,7 +374,7 @@ public sealed class AttentionWaveE2TraceTests
         MethodInfo forward = layerType.GetMethod("Forward")!;
         (float[] cos, float[] sin) = RotaryEmbedding.GetTables(hd, cfg.TransformerRopeTheta, 64);
         using Tensor mask = Qwen3TtsVocoder.BuildSlidingCausalMask(12, cfg.SlidingWindow);
-        Pin("qwen3tts_layer", Run(b =>
+        Pin("qwen3tts_layer", AttentionTraceOps.Record(b =>
         {
             forward.Invoke(layer, [b, T(1, 12, dim), 12, mask, cos, sin]);
             forward.Invoke(layer, [b, T(1, 1, dim), 1, null, cos, sin]);
@@ -404,7 +402,7 @@ public sealed class AttentionWaveE2TraceTests
             FfW1 = Wt("f1", c * mult, c), FfB1 = Bs("f1.b", c * mult), FfW2 = Wt("f2", c, c * mult), FfB2 = Bs("f2.b", c),
         };
         StyleTransformer1d net = new(c, heads, hf, c, mult, [layer], null, null, null, null, null, null, null, null);
-        Pin("style_transformer1d", Run(b =>
+        Pin("style_transformer1d", AttentionTraceOps.Record(b =>
         {
             Invoke(net, "SelfAttention", b, layer, T(1, 1, c));
             Invoke(net, "CrossAttention", b, layer, T(1, 1, c), T(1, ctxLen, c));
@@ -416,7 +414,7 @@ public sealed class AttentionWaveE2TraceTests
     {
         const int dim = 16, heads = 2, n = 7;
         Tensor qkvW = T(3 * dim, dim), qkvB = T(3 * dim), projW = T(dim, dim), projB = T(dim);
-        Pin("controlfoley_vit", Run(b => ControlFoleyVitOps.SelfAttention(b, T(2, n, dim), qkvW, qkvB, projW, projB, heads)));
+        Pin("controlfoley_vit", AttentionTraceOps.Record(b => ControlFoleyVitOps.SelfAttention(b, T(2, n, dim), qkvW, qkvB, projW, projB, heads)));
     }
 
     [Theory]
@@ -436,14 +434,14 @@ public sealed class AttentionWaveE2TraceTests
             w.Linear($"{p}.mlp.c_fc", width * ratio, width, true); w.Linear($"{p}.mlp.c_proj", width, width * ratio, true);
         }
         ControlFoleyClipTransformer tr = new(w, "c", 2, width, heads, ratio, 1e-5f);
-        Pin(causal ? "controlfoley_clip_text" : "controlfoley_clip_vision", Run(b => tr.Forward(b, new float[n * width], n, causal)));
+        Pin(causal ? "controlfoley_clip_text" : "controlfoley_clip_vision", AttentionTraceOps.Record(b => tr.Forward(b, new float[n * width], n, causal)));
     }
 
     [Fact]
     public void ControlFoleyBlockAttend_AttendsDenseUnmasked()
     {
         const int heads = 2, hd = 8, n = 7;
-        Pin("controlfoley_block_attend", Run(b => ControlFoleyBlock.Attend(b, T(2, heads, n, hd), T(2, heads, n, hd), T(2, heads, n, hd))));
+        Pin("controlfoley_block_attend", AttentionTraceOps.Record(b => ControlFoleyBlock.Attend(b, T(2, heads, n, hd), T(2, heads, n, hd), T(2, heads, n, hd))));
     }
 
     [Fact]
@@ -454,7 +452,7 @@ public sealed class AttentionWaveE2TraceTests
         w.AddTensor("a.qkv.weight", 0.3f, 3 * c, c, 1); w.AddTensor("a.proj_out.weight", 0.3f, c, c, 1);
         ControlFoleyVaeDecoder dec = new(new ControlFoleyVaeConfig { DataDim = 8, EmbedDim = 4, HiddenDim = 8 });
         object block = Invoke(dec, "Attn", w, "a", c)!;
-        Pin("controlfoley_vae_attn", Run(b => Invoke(dec, "AttnForward", b, T(1, c, t), block), serveConvs: true));
+        Pin("controlfoley_vae_attn", AttentionTraceOps.Record(b => Invoke(dec, "AttnForward", b, T(1, c, t), block), serveConvs: true));
     }
 
     [Fact]
@@ -467,7 +465,7 @@ public sealed class AttentionWaveE2TraceTests
         object attn = Activator.CreateInstance(attnType, T(3 * d, d), T(3 * d), T(d, d), T(d))!;
         int total = 1 + cfg.TemporalTokens * cfg.SpatialTokens;
         MethodInfo divided = typeof(ControlFoleySynchformer).GetMethod("DividedAttention", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Pin("controlfoley_synchformer_divided", Run(b =>
+        Pin("controlfoley_synchformer_divided", AttentionTraceOps.Record(b =>
         {
             ((Tensor)divided.Invoke(sync, [b, T(1, total, d), attn, true])!).Dispose();
             ((Tensor)divided.Invoke(sync, [b, T(1, total, d), attn, false])!).Dispose();
@@ -494,7 +492,7 @@ public sealed class AttentionWaveE2TraceTests
         using DemucsCastOwner casts = new();
         object layer = NewPrivate(typeof(DemucsCrossTransformer), "Layer", cfg, cross);
         Invoke(layer, "LoadWeights", w, "l", casts);
-        Pin(cross ? "demucs_cross" : "demucs_self", Run(b =>
+        Pin(cross ? "demucs_cross" : "demucs_self", AttentionTraceOps.Record(b =>
         {
             Tensor q = T(1, nq, dim);
             Invoke(layer, "Forward", b, q, cross ? T(1, nkv, dim) : q, nq, cross ? nkv : nq);
@@ -514,7 +512,7 @@ public sealed class AttentionWaveE2TraceTests
         typeof(ControlFoleySynchformer).GetField("_normW", inst)!.SetValue(sync, T(d));
         typeof(ControlFoleySynchformer).GetField("_normB", inst)!.SetValue(sync, T(d));
         MethodInfo aggregate = typeof(ControlFoleySynchformer).GetMethod("Aggregate", inst)!;
-        Pin("controlfoley_synchformer_aggregate", Run(b => aggregate.Invoke(sync, [b, T(1, 1 + cfg.TemporalTokens * cfg.SpatialTokens, d)])));
+        Pin("controlfoley_synchformer_aggregate", AttentionTraceOps.Record(b => aggregate.Invoke(sync, [b, T(1, 1 + cfg.TemporalTokens * cfg.SpatialTokens, d)])));
     }
 
     [Fact]
@@ -532,6 +530,6 @@ public sealed class AttentionWaveE2TraceTests
         foreach (string n in new[] { "QW", "KW", "VW", "OW" }) layerType.GetField(n)!.SetValue(layer, T(h, h));
         foreach (string n in new[] { "QB", "KB", "VB", "OB" }) layerType.GetField(n)!.SetValue(layer, T(h));
         MethodInfo attention = typeof(Wav2Vec2Encoder).GetMethod("Attention", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Pin("wav2vec2_attention", Run(b => attention.Invoke(enc, [b, T(t, h), layer, t])));
+        Pin("wav2vec2_attention", AttentionTraceOps.Record(b => attention.Invoke(enc, [b, T(t, h), layer, t])));
     }
 }

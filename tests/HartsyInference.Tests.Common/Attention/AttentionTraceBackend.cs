@@ -204,22 +204,14 @@ public sealed class AttentionTraceBackend : IBackend
     /// <summary>The legacy SDPA calls, in order.</summary>
     public List<SdpaCall> SdpaCalls { get; } = new();
 
-    /// <summary>The tensors of each legacy SDPA call, in order.</summary>
-    public List<SdpaOperands> SdpaTensors { get; } = new();
-
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
         Track(output, query, key, value);
         LiveAtAttention.Add(Live);
-        SdpaCalls.Add(new SdpaCall(scale, allowF16, mask is not null, query, key, value, mask, Operands(output, query, key, mask)));
-        SdpaTensors.Add(new SdpaOperands(output, query, key, value, mask));
+        SdpaCalls.Add(new SdpaCall(scale, allowF16, output, query, key, value, mask));
         Ops.Add($"SDPA scale={scale:0.######} allowF16={allowF16} masked={mask is not null}");
         if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
-
-    /// <summary>Output, query and key shapes and the output dtype of an attention call, spelled the same for the legacy and the layer entry.</summary>
-    public static string Operands(Tensor output, Tensor query, Tensor key, Tensor? mask) =>
-        $"out={output.Shape}:{output.DType} q={query.Shape} k={key.Shape} mask={(mask is null ? "-" : mask.Shape.ToString())}";
 
     /// <summary>The Flash calls, in order (the Flash entries are not <see cref="AttentionCall"/>s on this stub).</summary>
     public List<FlashCall> FlashCalls { get; } = new();
@@ -303,8 +295,4 @@ public sealed class AttentionTraceBackend : IBackend
 public readonly record struct FlashCall(int KvLen, int KvGroup, bool Causal, int QOffset, float Scale, float Softcap, bool HasSinks, int SlidingWindow, ulong DevicePos);
 
 /// <summary>One recorded legacy <c>ScaledDotProductAttention</c> call.</summary>
-public readonly record struct SdpaCall(float Scale, bool AllowF16, bool Masked, Tensor? Query = null, Tensor? Key = null, Tensor? Value = null,
-    Tensor? Mask = null, string Operands = "");
-
-/// <summary>The tensors of one legacy <c>ScaledDotProductAttention</c> call.</summary>
-public readonly record struct SdpaOperands(Tensor Output, Tensor Query, Tensor Key, Tensor Value, Tensor? Mask);
+public readonly record struct SdpaCall(float Scale, bool AllowF16, Tensor Output, Tensor Query, Tensor Key, Tensor Value, Tensor? Mask);

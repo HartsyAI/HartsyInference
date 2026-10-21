@@ -11,8 +11,13 @@ namespace HartsyInference.ThreeD.Tests.Attention;
 /// <summary>The op sequence of each 3D attention site on the recording stub (no compute): every backend op in order, with the attention call
 /// pinned to its scale, F16 assertion, operand shapes, output dtype and mask. The sequences were recorded from the code before the sites moved onto
 /// the shared layer and must not change. Ops the stub leaves to the interface's host defaults are not recorded.</summary>
-public sealed partial class AttentionWaveE3TraceTests
+public sealed class AttentionWaveE3TraceTests
 {
+    private static void Pin(string site, string[] actual)
+    {
+        if (!AttentionTraceOps.TryRecord(site, actual)) Assert.Equal(AttentionWaveE3TracePins.All[site], actual);
+    }
+
     private static Tensor T(params long[] dims) => new(new TensorShape(dims), DType.F32);
 
     private static void LayerNormW(Weights w, string name, int n) { w.AddNorm($"{name}.weight", n); w.AddBias($"{name}.bias", n); }
