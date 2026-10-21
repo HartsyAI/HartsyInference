@@ -35,14 +35,16 @@ public sealed class AceStepDitContextTests
     }
 
     [Fact]
-    public void BuildContext_RejectsABatchOfTwo()
+    public void BuildContext_RefusesAnythingButRowsOrABatchOfOne()
     {
         AceStepConfig config = AceStepSyntheticWeights.TinyConfig;
         using AceStepDit dit = new AceStepDit(config);
         dit.LoadWeights(AceStepSyntheticWeights.BuildDit(config));
         using CpuBackend backend = new CpuBackend();
-        using Tensor batch = new Tensor(new TensorShape(2, 3, config.TextDim), DType.F32);
+        using Tensor batchOfTwo = new Tensor(new TensorShape(2, 3, config.TextDim), DType.F32);
+        using Tensor rankFour = new Tensor(new TensorShape([1L, 1, 3, config.TextDim]), DType.F32);
 
-        Assert.Throws<ArgumentException>(() => dit.BuildContext(backend, batch, [], null));
+        Assert.Throws<ArgumentException>(() => dit.BuildContext(backend, batchOfTwo, [], null));
+        Assert.Throws<ArgumentException>(() => dit.BuildContext(backend, rankFour, [], null));
     }
 }

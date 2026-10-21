@@ -90,7 +90,7 @@ public sealed unsafe class AceStepDit : IDisposable
         int dim = _config.InnerDim;
         TensorShape shape = textEmbeds.Shape;
         int tText = (int)(shape.ElementCount / _config.TextDim);
-        if (shape.Rank < 2 || shape[shape.Rank - 1] != _config.TextDim || shape[shape.Rank - 2] != tText)
+        if (shape.Rank is < 2 or > 3 || shape[shape.Rank - 1] != _config.TextDim || shape[shape.Rank - 2] != tText)
             throw new ArgumentException($"text features must be [(1,) T, {_config.TextDim}]; got {shape}.",
                 nameof(textEmbeds));
         int tLyric = lyricIds.Length;
