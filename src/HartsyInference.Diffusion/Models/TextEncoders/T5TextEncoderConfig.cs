@@ -39,12 +39,9 @@ public sealed record T5TextEncoderConfig
     /// if false (v1.1 default), GELU.</summary>
     public bool UseReluActivation { get; init; } = false;
 
-    /// <summary>Attention score scale. T5 (all versions, per the Mesh-TensorFlow "avoid scaling before softmax"
-    /// design) uses <b>1.0</b> — the query is NOT divided by <c>sqrt(head_dim)</c>; the relative position bias and
-    /// initialization compensate. Set this to <c>1.0f</c> for a faithful T5 (MusicGen's <c>google/t5-base</c> needs
-    /// it). Left <c>null</c> the block falls back to <c>1/sqrt(head_dim)</c> (the prior engine default kept for the
-    /// already-shipping Flux/SD3 T5-XXL path until that path is bit-exactly re-validated).</summary>
-    public float? AttentionScale { get; init; }
+    /// <summary>Attention score scale. T5 and UMT5 never divide QK by <c>sqrt(d_kv)</c>; the relative position bias
+    /// carries the scale.</summary>
+    public float AttentionScale { get; init; } = 1.0f;
 
     /// <summary>If true, each encoder layer has its own learned relative position bias (UMT5 convention,
     /// used by Pile-T5-XL / AuraFlow). If false (T5 v1.1 default), only block 0 has a learned bias and
@@ -61,11 +58,6 @@ public sealed record T5TextEncoderConfig
         NumHeads = 64,
         NumLayers = 24,
         VocabSize = 32128,
-        AttentionScale = 1.0f,   // faithful T5 (all versions): no 1/sqrt(head_dim) scaling. The legacy null
-                                 // fallback (1/sqrt(dkv)) detuned every layer's softmax — same class of bug
-                                 // that produced Wan's flat videos via the Umt5Xxl preset. NOTE: this changes
-                                 // Flux/SD3/LTX conditioning (now matches the HF/Comfy reference); Flux/SD3
-                                 // outputs will shift and should be spot-checked.
     };
 
     /// <summary>Original T5 v1.0 base encoder preset (`google/t5-base`) — the text encoder MusicGen / AudioGen
@@ -82,7 +74,6 @@ public sealed record T5TextEncoderConfig
         VocabSize = 32128,
         GatedFeedForward = false,
         UseReluActivation = true,
-        AttentionScale = 1.0f,   // faithful T5: no 1/sqrt(head_dim) scaling.
         // UsePerLayerPositionBias stays false: T5 v1.0 learns the bias in block 0 and shares it.
     };
 
@@ -99,7 +90,6 @@ public sealed record T5TextEncoderConfig
         VocabSize = 32128,
         GatedFeedForward = false,
         UseReluActivation = true,
-        AttentionScale = 1.0f,
     };
 
     /// <summary>Pile-T5-XL (UMT5) encoder preset for AuraFlow text encoding (`EleutherAI/pile-t5-xl`).
@@ -119,7 +109,6 @@ public sealed record T5TextEncoderConfig
         NumLayers = 24,
         VocabSize = 32128,
         UsePerLayerPositionBias = true,
-        AttentionScale = 1.0f,   // faithful T5/Pile-T5: no 1/sqrt(head_dim) scaling (matches T5Base).
     };
 
     /// <summary>T5-11B encoder preset (`google-t5/t5-11b`) — the text encoder Cosmos-Predict1 Video2World conditions
@@ -138,8 +127,6 @@ public sealed record T5TextEncoderConfig
         VocabSize = 32128,
         GatedFeedForward = false,
         UseReluActivation = true,
-        AttentionScale = 1.0f,   // faithful T5 v1.0: no 1/sqrt(head_dim) scaling. UsePerLayerPositionBias stays false
-                                 // (v1.0 learns the bias in block 0 and shares it).
     };
 
     /// <summary>umT5-base encoder preset (`google/umt5-base`) used by ACE-Step's style/genre conditioning — 12 layers,
@@ -169,8 +156,5 @@ public sealed record T5TextEncoderConfig
         NumLayers = 24,
         VocabSize = 256384,
         UsePerLayerPositionBias = true,
-        AttentionScale = 1.0f,   // faithful T5/UMT5: no 1/sqrt(head_dim) scaling. Leaving this null (legacy
-                                 // 1/sqrt(dkv) fallback) detunes every encoder layer's softmax and produces
-                                 // semantically-garbage Wan conditioning — the flat/uniform-color video bug.
     };
 }

@@ -30,7 +30,7 @@ public sealed unsafe class T5Block
     private Tensor? _wiWeight;   // single projection — non-gated (v1.0) mode only
     private Tensor? _woWeight;   // output projection
 
-    public T5Block(int dModel, int numHeads, int headDim, float eps, bool gatedFeedForward = true, bool useReluActivation = false, float? attentionScale = null)
+    public T5Block(int dModel, int numHeads, int headDim, float eps, bool gatedFeedForward = true, bool useReluActivation = false, float attentionScale = 1f)
     {
         _dModel = dModel;
         _numHeads = numHeads;
@@ -38,7 +38,7 @@ public sealed unsafe class T5Block
         _eps = eps;
         _gatedFeedForward = gatedFeedForward;
         _useReluActivation = useReluActivation;
-        _attnScale = attentionScale ?? (1.0f / MathF.Sqrt(headDim));
+        _attnScale = attentionScale;
     }
 
     /// <summary>Loads weights for this block from named tensors using T5 HuggingFace naming.</summary>
@@ -125,11 +125,11 @@ public sealed unsafe class T5Block
         key.Dispose();
         value.Dispose();
 
-        // Attention: scores = Q @ K^T / sqrt(headDim) + positionBias [+ attentionMask]
+        // Attention: scores = Q @ K^T · scale + positionBias [+ attentionMask]
         // Build combined mask: positionBias + attentionMask
         Tensor? combinedMask = BuildAttentionMask(positionBias, attentionMask, batch, seqLen);
 
-        // T5 uses NO 1/sqrt(d) scaling (scale=1.0); the prior engine default is kept for configs that don't set it.
+        // T5 does not divide QK by sqrt(d_kv); the relative position bias carries the scale.
         Tensor attnOut = new Tensor(mhShape, DType.F32);
         backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, combinedMask, _attnScale);
         queryMh.Dispose();

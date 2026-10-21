@@ -153,7 +153,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         if (_posEmbd is not null)
         {
             backend.Sync();
-            AddInterpolatedPosEmbed(embed, gh, gw, m);
+            AddInterpolatedPosEmbed(embed, _posEmbd, _posGrid, Hidden, gh, gw, m);
         }
 
         // 4. 2D-RoPE cos/sin tables [np, headDim] in the same merge-block order.
@@ -253,13 +253,12 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         return result;
     }
 
-    /// <summary>Adds the learned position embedding to <paramref name="embed"/> (host [np, hidden] in merge-block order); the stored √P×√P grid is bilinearly interpolated (align_corners=false) to the (gh, gw) patch grid.</summary>
-    private void AddInterpolatedPosEmbed(Tensor embed, int gh, int gw, int m)
+    /// <summary>Adds the learned position embedding to <paramref name="embed"/> (host [np, hidden] in merge-block order); the stored √P×√P grid is bilinearly interpolated align-corners (HF and llama.cpp) to the (gh, gw) patch grid.</summary>
+    internal static void AddInterpolatedPosEmbed(Tensor embed, Tensor posEmbd, int bg, int hidden, int gh, int gw, int m)
     {
-        int hidden = Hidden, bg = _posGrid;
         float* e = (float*)embed.DataPointer;
-        float* pe = (float*)_posEmbd!.DataPointer;   // [bg*bg, hidden]
-        float sh = bg / (float)gh, sw = bg / (float)gw;
+        float* pe = (float*)posEmbd.DataPointer;   // [bg*bg, hidden]
+        float sh = gh == 1 ? 0f : (bg - 1) / (float)(gh - 1), sw = gw == 1 ? 0f : (bg - 1) / (float)(gw - 1);
         int idx = 0;
         for (int bh = 0; bh < gh / m; bh++)
             for (int bw = 0; bw < gw / m; bw++)
@@ -267,7 +266,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
                     for (int mw = 0; mw < m; mw++)
                     {
                         int th = bh * m + mh, tw = bw * m + mw;
-                        float fy = (th + 0.5f) * sh - 0.5f, fx = (tw + 0.5f) * sw - 0.5f;
+                        float fy = th * sh, fx = tw * sw;
                         int y0 = (int)MathF.Floor(fy), x0 = (int)MathF.Floor(fx);
                         float dy = fy - y0, dx = fx - x0;
                         int y0c = Math.Clamp(y0, 0, bg - 1), y1c = Math.Clamp(y0 + 1, 0, bg - 1);
