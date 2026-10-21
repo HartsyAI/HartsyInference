@@ -157,7 +157,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - The verbatim Qwen2.5-1.5B and Qwen3-4B `chat_template`s render tools, `tool_calls`, `<tool_response>` and the
   `enable_thinking` stub through `JinjaEngine` (unit fixtures in `JinjaToolsRenderTests`), so neither falls back to
   ChatML for a tool turn. Third-party Qwen2.5 GGUFs differ in one literal (`{"name": …}` vs `{{"name": …}}`); Jinja
-  renders each as written.
+  renders each as written, and the Hermes parser reads the doubled form (one outer brace pair removed).
 - [ ] End-to-end: a real Qwen3-4B tool turn yields a parsed call once the Tools package supplies the parser.
 
 ### CLI catalog

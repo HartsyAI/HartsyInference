@@ -16,7 +16,7 @@ internal static class ToolCallJson
     {
         try
         {
-            using JsonDocument doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = MaxDepth });
+            using JsonDocument doc = ParseCall(json);
             JsonElement root = doc.RootElement;
             if (presetName is not null)
             {
@@ -38,6 +38,26 @@ internal static class ToolCallJson
         {
             return false;
         }
+    }
+
+    /// <summary>Parses a call span; one wrapping brace pair a model doubled (<c>{{…}}</c>) is removed when the span does not parse as written.</summary>
+    private static JsonDocument ParseCall(string json)
+    {
+        try
+        {
+            return JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = MaxDepth });
+        }
+        catch (JsonException) when (IsDoubledOuterBraces(json))
+        {
+            return JsonDocument.Parse(json.Trim()[1..^1], new JsonDocumentOptions { MaxDepth = MaxDepth });
+        }
+    }
+
+    /// <summary>Whether the span starts with <c>{{</c> and ends with <c>}}</c>: an object wrapped in one extra brace pair.</summary>
+    private static bool IsDoubledOuterBraces(string json)
+    {
+        string trimmed = json.Trim();
+        return trimmed.Length >= 4 && trimmed.StartsWith("{{", System.StringComparison.Ordinal) && trimmed.EndsWith("}}", System.StringComparison.Ordinal);
     }
 
     /// <summary>The id for the call at <paramref name="index"/> under <paramref name="idPrefix"/>.</summary>
