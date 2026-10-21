@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -27,6 +28,8 @@ public sealed class FluxSingleStreamBlock
     // Output: proj_out combines attention output + MLP output → hidden
     private Tensor? _projOutWeight, _projOutBias;
 
+    private AttentionLayer? _attention;
+
     /// <summary>Creates a FluxSingleStreamBlock.</summary>
     /// <param name="hiddenSize">Model hidden dimension (3072 for Flux.1).</param>
     /// <param name="numHeads">Number of attention heads (24 for Flux.1).</param>
@@ -54,6 +57,12 @@ public sealed class FluxSingleStreamBlock
 
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+            },
+            new AttentionNormWeights(_normQ.Weight, _normK.Weight, _normQ.Eps, _normK.Eps));
 
         // Separate Q/K/V in diffusers format
         _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
@@ -124,7 +133,6 @@ public sealed class FluxSingleStreamBlock
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
         // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
         TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpDim);
 
         // ── 1. Modulation: 3 params (shift, scale, gate) ──
@@ -152,47 +160,11 @@ public sealed class FluxSingleStreamBlock
         backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();
 
-        // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor qNormed = new Tensor(headsShape, act);
-        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kNormed = new Tensor(headsShape, act);
-        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        // ── 5. RoPE BEFORE the head permute: the pre-permute [B(=1), S, H, D] layout is exactly
-        // WanRopeInterleaved's [S, heads·headDim] contract, so the whole joint Q/K rotates in one GPU-resident
-        // op (was a full D2H→host-trig→H2D excursion per block per step).
-        if (batch == 1)
-            rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
-
-        // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor qMh = new Tensor(mhShape, act);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        Tensor kMh = new Tensor(mhShape, act);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        kNormed.Dispose();
-        Tensor vMh = new Tensor(mhShape, act);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        v.Dispose();
-
-        // Host RoPE fallback (batched inference only; B=1 runs the GPU path at 5) ──
-        if (batch != 1)
-            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
-
-        // ── 7. SDPA ──
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        // ── 8. Permute attention output back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attnFlat = new Tensor(shape, act);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
+        // ── 4-8. QK-norm, RoPE, attention (QK RMS-norm bounds the scores), permuted back to [B, S, hidden] ──
+        AttentionCallContext context = batch == 1
+            ? new AttentionCallContext { Rotation = rope, Bias = attnBias }
+            : new AttentionCallContext { HeadMajorRotation = rope, Bias = attnBias };
+        Tensor attnFlat = _attention!.Attend(backend, q, k, v, shape, in context);
 
         // ── 9. GELU(tanh) on MLP input ── (F16 on GPU, matches mlpInput; CudaBackend.Gelu has an F16 path)
         Tensor mlpActivated = new Tensor(mlpShape, mlpAct);
@@ -200,12 +172,7 @@ public sealed class FluxSingleStreamBlock
         mlpInput.Dispose();
 
         // ── 10. Concatenate [attn_out, gelu(mlp)] → proj_out ──
-        // attnFlat is F32 (the attention path stays F32 — SDPA is fine in F32 and the
-        // attention activations are 4x smaller than the MLP ones). Cast it down to F16
-        // so concat operands match. The cast is small (53 MB at 1024x1024), a worthwhile
-        // tradeoff for a 134 MB concatted buffer at F16 instead of 267 MB at F32.
-        // backend.Concat at dim 2 is a raw byte-copy, dtype-agnostic — byte-identical to
-        // the old host ConcatAlongFeatureDim. (No-op cast on the CPU F32 path.)
+        // An F32 attnFlat is cast to the MLP branch's F16 so the concat operands match (a no-op on F16 and on the CPU).
         Tensor attnFlatCast = Utilities.DtypeCastHelper.EnsureDtype(backend, attnFlat, mlpAct);
 
         int concatDim = _hiddenSize + _mlpDim;
