@@ -13,6 +13,7 @@ public sealed partial class VulkanBackend
     internal static string? LastAttentionRoute => t_attentionRoute;
 
     /// <summary>The caller's FlashAttention <c>kvGroup</c> for the rows of the call in flight.</summary>
+    // TODO(attention phase 4): carry the raw kvGroup in AttentionCall and delete this side channel.
     [ThreadStatic] private static int t_flashKvGroup;
 
     /// <summary>The key-only mask expanded to every query row for the token-major call in flight; the cm2 row reads it,

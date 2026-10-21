@@ -16,7 +16,7 @@ public static class KnobDeprecations
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
-    /// <summary>Every retired id still accepted.</summary>
+    /// <summary>Every retired id still accepted (a snapshot).</summary>
     public static IReadOnlyCollection<Entry> All => [.. _entries.Values];
 
     /// <summary>The entry for <paramref name="id"/>, or null when it is not retired.</summary>
@@ -26,8 +26,21 @@ public static class KnobDeprecations
     public static string Resolve(string id) =>
         KnobRegistry.Find(id) is null && Find(id) is { NewId: { } renamed } ? renamed : id;
 
-    /// <summary>The text a value of a retired setting means for its replacement.</summary>
-    public static string MapText(Entry entry, string text) => entry.MapValue is null ? text : entry.MapValue(text);
+    /// <summary>The text a value of a retired setting means for its replacement; a value the mapping rejects throws
+    /// <see cref="InvalidOperationException"/> naming the setting and the value, like any other bad setting.</summary>
+    public static string MapText(Entry entry, string text)
+    {
+        if (entry.MapValue is null) return text;
+        try
+        {
+            return entry.MapValue(text);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Setting '{entry.OldId}' (now '{entry.NewId}') has a value '{text}' that does not carry over: {ex.Message}", ex);
+        }
+    }
 
     /// <summary>The warning a use of <paramref name="entry"/> prints.</summary>
     public static string Warning(Entry entry) => entry.NewId is null

@@ -45,7 +45,17 @@ public sealed class KnobProfile
                 error = null;
                 return true;
             }
-            return TrySet(retired.NewId, KnobDeprecations.MapText(retired, rawValue), out updated, out error);
+            string mapped;
+            try
+            {
+                mapped = KnobDeprecations.MapText(retired, rawValue);
+            }
+            catch (InvalidOperationException ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+            return TrySet(retired.NewId, mapped, out updated, out error);
         }
         if (knob is null)
         {

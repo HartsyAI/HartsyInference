@@ -11,6 +11,7 @@ public sealed partial class CudaBackend
 {
     /// <summary>The caller's FlashAttention <c>kvGroup</c> for the rows of the call in flight: kernels and the device-path
     /// validator take the raw value, and the descriptor only knows <c>Hq / Hkv</c>.</summary>
+    // TODO(attention phase 4): carry the raw kvGroup in AttentionCall and delete this side channel.
     [ThreadStatic] private static int t_flashKvGroup;
 
     private AttentionKernelRow[]? _denseRows, _tokenMajorRows, _tokenMajorGqaRows, _flashRows, _flashDeviceRows;

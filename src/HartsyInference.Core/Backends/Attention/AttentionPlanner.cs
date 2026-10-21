@@ -306,6 +306,13 @@ public static class AttentionPlanLog
         if (Seen.TryAdd(key, 0))
             Logs.Debug($"Attention {key}: {new AttentionPlan(row, row.Variant(in call), "ran", null).Describe()}");
     }
+
+    /// <summary>Warns once per backend type that its attention runs on the host because it declares no kernel rows.</summary>
+    public static void HostReference(string backend)
+    {
+        if (Seen.TryAdd("host-reference " + backend, 0))
+            Logs.Warning($"{backend} declares no attention rows: attention runs on the host reference.");
+    }
 }
 
 /// <summary>Chooses among a backend's rows. Rows are tried in preference order; the first whose capability covers the call

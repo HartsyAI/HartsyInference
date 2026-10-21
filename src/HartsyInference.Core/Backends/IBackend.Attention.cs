@@ -8,7 +8,11 @@ public partial interface IBackend
 {
     /// <summary>Runs one attention call (docs/ATTENTION_CONTRACT.md). A backend with kernel rows overrides this with its
     /// planner; the default computes the contract on the host and never calls the legacy entry points, so it cannot recurse.</summary>
-    void Attention(in AttentionCall call) => AttentionHostReference.Run(in call);
+    void Attention(in AttentionCall call)
+    {
+        AttentionPlanLog.HostReference(GetType().Name);
+        AttentionHostReference.Run(in call);
+    }
 
     /// <summary>The kernel <see cref="Attention"/> would run for <paramref name="call"/> and why; launches nothing.</summary>
     AttentionPlan PlanAttention(in AttentionCall call) => new(null, null, "host reference: this backend declares no attention rows", null);

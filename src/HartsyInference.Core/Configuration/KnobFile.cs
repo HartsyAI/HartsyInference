@@ -286,17 +286,24 @@ public static class KnobFile
     {
         if (entry.Value.ValueKind == JsonValueKind.Null) return null;
         string text = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString()! : entry.Value.GetRawText();
-        string probe = "{\"settings\":{" + JsonSerializer.Serialize(retired.NewId) + ":"
-            + JsonSerializer.Serialize(KnobDeprecations.MapText(retired, text)) + "}}";
+        string mapped;
+        try
+        {
+            mapped = KnobDeprecations.MapText(retired, text);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new InvalidOperationException($"Engine settings file '{origin}': {ex.Message}", ex);
+        }
+        string probe = "{\"settings\":{" + JsonSerializer.Serialize(retired.NewId) + ":" + JsonSerializer.Serialize(mapped) + "}}";
         using JsonDocument document = JsonDocument.Parse(probe);
         return ParseOne(document.RootElement.GetProperty("settings").EnumerateObject().First(), origin);
     }
 
-    /// <summary>One setting's value parsed to its knob's type (the knob named <paramref name="id"/>, else the entry's own),
-    /// or an exception naming what is wrong with it.</summary>
-    private static object? ParseOne(JsonProperty entry, string origin, string? id = null)
+    /// <summary>One setting's value parsed to its knob's type, or an exception naming what is wrong with it.</summary>
+    private static object? ParseOne(JsonProperty entry, string origin)
     {
-        object? knob = KnobRegistry.Find(id ?? entry.Name)
+        object? knob = KnobRegistry.Find(entry.Name)
             ?? throw new InvalidOperationException(
                 $"Engine settings file '{origin}' sets unknown setting '{entry.Name}'. Run 'hartsy settings list'.");
         Type declared = knob.GetType().GetGenericArguments()[0];
