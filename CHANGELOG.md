@@ -19,6 +19,11 @@ stable release will require. Dates are UTC.
 - **Faster: cuDNN fused attention takes every head dim that is a multiple of 8 from 32 to 256** (was 64 to 128 and 256)
   on its dense and token-major rows. SD1.5's 40- and 160-wide heads leave the materialized path; the cuDNN 9.24 probes ran
   each of these head dims correct on SM 86 and SM 89. LLM causal prefill keeps its 64 floor.
+- **Changed: video, UNet, VAE and adapter attention runs on the shared layer.** The Wan block (self, cross and I2V image
+  cross-attention, Animate-2's driving capture and frame-local splice, context parallel as a K/V rewrite), the S2V audio
+  injector, the Matrix-Game 3 action module, the SD1.5/SDXL UNet cross-attention (its constant text K/V cache is an
+  `ICachedKv`), ControlNet-Union fusion, VAE attention, the Wan 2.2 and Oasis ViT VAEs, the IP-Adapter resampler, SeedVR2's
+  windowed attention, MiniMax-H3's dense path and Oasis attend through `AttentionLayer`. Output is bit-identical.
 
 ## alpha.384
 
