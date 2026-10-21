@@ -801,16 +801,20 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
-    private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
+    /// <param name="saturate">Clamp an F32 value to the F16 range instead of overflowing to infinity (attention operands; BF16
+    /// attention computes in F32). Saturated casts never enter or come from the weight-cast cache, whose copies are not
+    /// saturated.</param>
+    private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want, bool saturate = false)
     {
         if (src.DType == want) return (srcBuf, null);
+        saturate &= want == DType.F16 && src.DType == DType.F32;
 
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
-        if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
+        if (!saturate && _xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
         long elements = src.ElementCount;
         // With CacheQuantizedWeightCasts off (the text path), a quantized weight's widened copy is per call: decode reads
         // the packed blocks through the GEMV, so the copy would only serve prefill at two to four times the weight's VRAM.
-        bool cacheThis = _xfer.ShouldCacheCast(src) && (CacheQuantizedWeightCasts || !src.DType.IsQuantized)
+        bool cacheThis = !saturate && _xfer.ShouldCacheCast(src) && (CacheQuantizedWeightCasts || !src.DType.IsQuantized)
             && CastFitsCache(elements * want.SizeInBytes);
 
         ulong outBytes = (ulong)(elements * want.SizeInBytes);
@@ -863,7 +867,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             _xfer.FreeDevice(mid);
             return FinishCast(src, want, dst, cacheThis);
         }
-        if (src.DType == DType.F32 && want == DType.F16) shader = "cast_f32_f16";
+        if (src.DType == DType.F32 && want == DType.F16) shader = saturate ? "cast_f32_f16_sat" : "cast_f32_f16";
         else if (src.DType == DType.F16 && want == DType.F32) shader = "cast_f16_f32";
         else if (src.DType == DType.BF16 && want == DType.F32) shader = "cast_bf16_f32";
         else if (src.DType == DType.F32 && want == DType.BF16) shader = "cast_f32_bf16";
@@ -1153,6 +1157,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             string castShader;
             if (computedDtype == DType.F16 && output.DType == DType.F32) castShader = "cast_f16_f32";
             else if (computedDtype == DType.F32 && output.DType == DType.F16) castShader = "cast_f32_f16";
+            else if (computedDtype == DType.F32 && output.DType == DType.BF16) castShader = "cast_f32_bf16";
             else throw new NotSupportedException($"{what} dtype mismatch {computedDtype.Name}->{output.DType.Name}");
 
             VulkanKernel castK = GetKernel(castShader, 2, _default1DSpec);
@@ -2383,17 +2388,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         using OpScope _op = EnterOp();
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
-
-        // A mask whose query axis is 1 stores one [Skv] row broadcast over every query (a bias that depends only
-        // on the key — Wan-Animate-2's log_scale band). Every shader below indexes it as [Sq, Skv], so expand it
-        // here; handing them the short buffer would read past the allocation and go unnoticed. Gated on F32/rank
-        // first: ExpandKeyOnlyMask reads the mask as float* unconditionally, so an F16 mask (which every shader
-        // below rejects anyway) must fail that check BEFORE this native read, not after.
-        long sqRows = query.Shape[2], skvRows = key.Shape[2];
-        using Tensor? expandedMask = mask is not null && mask.DType == DType.F32
-            && mask.Shape.Rank is 2 or 3 or 4 && MaskQueryRows(mask) == 1 && sqRows > 1
-            ? ExpandKeyOnlyMask(mask, sqRows, skvRows) : null;
-        mask = expandedMask ?? mask;
+        if (mask is not null) _ = AttentionMaskLayout.Of(mask, query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2]);
 
         RunAttentionRows(DenseAttentionRows, AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
     }
@@ -2404,20 +2399,24 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         float scale, bool causal, int qOffset, int slidingWindow, int skv, int kvGroup)
     {
         int batch = (int)query.Shape[0], hq = (int)query.Shape[1], sq = (int)query.Shape[2], headDim = (int)query.Shape[3];
+        if ((uint)sq > Vk.MaxComputeWorkGroupCountX || (uint)hq > Vk.MaxComputeWorkGroupCountY || (uint)batch > Vk.MaxComputeWorkGroupCountZ)
+            throw new NotSupportedException(
+                $"sdpa_flash dispatches one workgroup per (query row, head, batch); {sq}x{hq}x{batch} exceeds this device's "
+                + $"{Vk.MaxComputeWorkGroupCountX}x{Vk.MaxComputeWorkGroupCountY}x{Vk.MaxComputeWorkGroupCountZ} grid.");
 
-        DType dtype = ResolveGemmDtype(query.DType, key.DType, output.DType);
+        DType dtype = AttentionDtype(query, key, value, output);
         VulkanBuffer qBuf = GetBuffer(query);
         VulkanBuffer kBuf = GetBuffer(key);
         VulkanBuffer vBuf = GetBuffer(value);
-        (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype);
-        (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype);
-        (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype);
+        (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype, saturate: true);
+        (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype, saturate: true);
+        (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype, saturate: true);
 
         VulkanBuffer? maskBuf = null;
+        AttentionMaskLayout maskLayout = default;
         if (mask is not null)
         {
-            if (mask.DType != DType.F32)
-                throw new NotSupportedException($"sdpa_flash mask must be F32, got {mask.DType.Name}");
+            maskLayout = AttentionMaskLayout.Of(mask, batch, hq, sq, key.Shape[2]);
             maskBuf = GetBuffer(mask);
         }
 
@@ -2435,7 +2434,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             // (the number of valid positions to attend over) whenever the caller passes an
             // over-allocated KV-cache buffer (FlashAttention's kvLen < the buffer's real capacity).
             int kvCapacity = (int)key.Shape[2];
-            Span<byte> pc = stackalloc byte[10 * 4];
+            Span<byte> pc = stackalloc byte[(mask is null ? 10 : 13) * 4];
             BinaryWriteUInt(pc, 0, (uint)hq);
             BinaryWriteUInt(pc, 4, (uint)(hq / kvGroup));
             BinaryWriteUInt(pc, 8, (uint)sq);
@@ -2446,6 +2445,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             BinaryWriteUInt(pc, 28, causal ? 1u : 0u);
             BinaryWriteUInt(pc, 32, (uint)qOffset);
             BinaryWriteUInt(pc, 36, (uint)slidingWindow);
+            if (mask is not null)
+            {
+                BinaryWriteUInt(pc, 40, (uint)maskLayout.BatchStride);
+                BinaryWriteUInt(pc, 44, (uint)maskLayout.HeadStride);
+                BinaryWriteUInt(pc, 48, (uint)maskLayout.RowStride);
+            }
 
             Span<ulong> bufs = mask is null
                 ? stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, outBuf.Handle }
@@ -2532,6 +2537,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
+        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
+        if (kvLen < 0 || kvLen > key.Shape[2])
+            throw new ArgumentOutOfRangeException(nameof(kvLen), $"kvLen {kvLen} is outside the cache's {key.Shape[2]} rows.");
         AttentionCall call = AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink,
             slidingWindow, alibiSlopes);
         // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
@@ -2544,15 +2553,31 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         RunAttentionRows(FlashAttentionRows, in call, kvGroup);
     }
 
-    /// <summary>Query rows the additive mask stores; 1 means it depends only on the key.</summary>
-    private static long MaskQueryRows(Tensor mask)
-        => mask.Shape.Rank switch { 2 => mask.Shape[0], 3 => mask.Shape[1], _ => mask.Shape[2] };
+    /// <summary>The storage attention computes in: F32 when any operand is BF16 (more range than F16), else the GEMM rule.</summary>
+    private DType AttentionDtype(Tensor query, Tensor key, Tensor value, Tensor output) =>
+        query.DType == DType.BF16 || key.DType == DType.BF16 || value.DType == DType.BF16 || output.DType == DType.BF16
+            ? DType.F32 : ResolveGemmDtype(query.DType, key.DType, output.DType);
 
-    /// <summary>Materializes the <c>[blocks·Sq, Skv]</c> duplicate of a key-only mask row, which is the layout the mask_add dispatch indexes.</summary>
+    /// <summary>The FlashAttention head contract: <c>[B, Hq, S, D]</c> operands with <c>Hq = kvGroup·Hkv</c>, a group of 0 or
+    /// less meaning 1 as on CUDA. Returns the group to use.</summary>
+    private static int ValidateFlashGroup(Tensor query, Tensor key, Tensor value, int kvGroup)
+    {
+        int group = kvGroup <= 0 ? 1 : kvGroup;
+        if (query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4
+            || query.Shape[1] != (long)group * key.Shape[1] || value.Shape[1] != key.Shape[1] || value.Shape[2] != key.Shape[2])
+            throw new ArgumentException(
+                $"FlashAttention needs [B,Hq,S,D] operands with Hq = kvGroup x Hkv; got Q={query.Shape}, K={key.Shape}, V={value.Shape}, kvGroup={kvGroup}.");
+        return group;
+    }
+
+    /// <summary>A key-only mask with its row repeated for every query, as <c>[1|B, 1|H, Sq, Skv]</c>: the layout the cm2 kernel
+    /// and the naive path's mask_add read.</summary>
     private static unsafe Tensor ExpandKeyOnlyMask(Tensor mask, long sq, long skv)
     {
         long blocks = mask.ElementCount / skv;
-        Tensor full = new Tensor(new TensorShape(blocks * sq, skv), DType.F32);
+        int rank = mask.Shape.Rank;
+        long maskHeads = rank >= 3 ? mask.Shape[rank - 3] : 1, maskBatch = rank == 4 ? mask.Shape[0] : 1;
+        Tensor full = new Tensor(new TensorShape(maskBatch, maskHeads, sq, skv), DType.F32);
         float* src = (float*)mask.DataPointer, dst = (float*)full.DataPointer;
         for (long blk = 0; blk < blocks; blk++)
             for (long q = 0; q < sq; q++)
@@ -2571,32 +2596,37 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         long Sq = query.Shape[2];
         long D  = query.Shape[3];
         long Skv = key.Shape[2];
+        long Hkv = key.Shape[1];
+        if (Hkv <= 0 || H % Hkv != 0)
+            throw new ArgumentException($"SDPA query heads ({H}) must be a multiple of key/value heads ({Hkv}).");
         long totalHeads = B * H;
 
         // The product's dtype follows the operands; the output is cast once at the end when it differs.
-        DType dtype = ResolveGemmDtype(query.DType, key.DType, output.DType);
+        DType dtype = AttentionDtype(query, key, value, output);
 
         VulkanBuffer qBuf = GetBuffer(query);
         VulkanBuffer kBuf = GetBuffer(key);
         VulkanBuffer vBuf = GetBuffer(value);
 
-        (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype);
-        (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype);
-        (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype);
+        (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype, saturate: true);
+        (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype, saturate: true);
+        (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype, saturate: true);
 
         // Mask is always FP32 in the model code (CLIP causal mask). Keep it as F32 — the mask_add
         // kernel widens the score before adding regardless of score dtype.
+        // mask_add adds one whole [Sq, Skv] block, so a key-only mask is expanded here; the block for (b, h) starts at
+        // b·BatchStride + h·HeadStride.
         VulkanBuffer? maskBuf = null;
-        long maskBroadcastSize = 0;
-        long maskTotalSize = 0;
+        long maskBlock = 0;
+        AttentionMaskLayout maskLayout = default;
+        using Tensor? expandedMask = mask is not null && Sq > 1 && AttentionMaskLayout.Of(mask, B, H, Sq, Skv).RowStride == 0
+            ? ExpandKeyOnlyMask(mask, Sq, Skv) : null;
+        mask = expandedMask ?? mask;
         if (mask is not null)
         {
-            if (mask.DType != DType.F32)
-                throw new NotImplementedException($"SDPA mask must be F32, got {mask.DType.Name}");
+            maskLayout = AttentionMaskLayout.Of(mask, B, H, Sq, Skv);
             maskBuf = GetBuffer(mask);
-            // Mask shape may be [Sq, Skv] or [1, 1, Sq, Skv]; we only care about (per-head) elements.
-            maskBroadcastSize = (long)Sq * Skv;
-            maskTotalSize = mask.ElementCount;
+            maskBlock = Sq * Skv;
         }
 
         // Query tiling for the plain (no-mask) case: the full [B, H, Sq, Skv] score matrix OOMs at Wan-Video
@@ -2636,10 +2666,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                 // Per-head dispatch over this query tile.
                 for (long bh = 0; bh < totalHeads; bh++)
                 {
+                    long bIdx = bh / H, hIdx = bh % H, kvHead = bIdx * Hkv + hIdx / (H / Hkv);
                     uint qOff = (uint)(bh * Sq * D + q0 * D);
-                    uint kOff = (uint)(bh * Skv * D);
+                    uint kOff = (uint)(kvHead * Skv * D);
                     uint sOff = (uint)(bh * curBr * Skv);   // packed within the tile buffer
-                    uint vOff = (uint)(bh * Skv * D);
+                    uint vOff = (uint)(kvHead * Skv * D);
                     uint outOff = (uint)(bh * Sq * D + q0 * D);
 
                     // 1) scores = Q_tile @ K^T * scale  →  shape (curBr, Skv)
@@ -2656,11 +2687,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                     // original per-head offsets exactly.
                     if (maskBuf is not null)
                     {
-                        // The mask may be either [Sq, Skv] or [B, H, Sq, Skv]. We use modulo so a
-                        // [1, 1, Sq, Skv] broadcast cycles back to offset 0 for every head.
-                        uint maskOff = (uint)((bh * maskBroadcastSize) % maskTotalSize);
+                        uint maskOff = (uint)(bIdx * maskLayout.BatchStride + hIdx * maskLayout.HeadStride);
                         DispatchMaskAdd(scoresBuf.Handle, maskBuf.Handle, dtype,
-                            (uint)maskBroadcastSize, scoreOffset: sOff, maskOffset: maskOff);
+                            (uint)maskBlock, scoreOffset: sOff, maskOffset: maskOff);
                     }
 
                     // 2) softmax along last dim per row of scores  →  probsBuf (separate output)
@@ -3824,11 +3853,18 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         using OpScope _op = EnterOp();
         int heads = (int)buffer.Shape[1], maxSeq = (int)buffer.Shape[2], headDim = (int)buffer.Shape[3];
         int tNew = (int)newKv.Shape[2];
+        // F32 rows into an F16 cache convert, saturating, on write; any other mixed pair is refused, as on CUDA.
+        string shader = (buffer.DType == DType.F32 && newKv.DType == DType.F32) ? "kv_cache_append_f32"
+            : (buffer.DType == DType.F16 && newKv.DType == DType.F32) ? "kv_cache_append_f32_f16"
+            : (buffer.DType == DType.F16 && newKv.DType == DType.F16) ? "kv_cache_append_f16"
+            : throw new NotSupportedException(
+                $"Vulkan KvCacheAppend supports F32→F32, F32→F16 or F16→F16 storage; got buffer={buffer.DType}, newKv={newKv.DType}.");
+        if (offset < 0 || (long)offset + tNew > maxSeq)
+            throw new ArgumentOutOfRangeException(nameof(offset), $"Appending {tNew} rows at {offset} overruns a {maxSeq}-row cache.");
         VulkanBuffer bufBuf = GetBuffer(buffer);
         VulkanBuffer newBuf = GetBuffer(newKv);
         try
         {
-            string shader = "kv_cache_append" + DtypeSuffix(buffer.DType);
             VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
             Span<byte> pc = stackalloc byte[5 * 4];
             BinaryWriteUInt(pc, 0, (uint)heads);
@@ -4634,6 +4670,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer newBuf = GetBuffer(newKv);
         try
         {
+            // The shader drops rows past maxSeq; nothing reports them until the device status word exists (Phase 4).
             VulkanKernel k = GetKernel("kv_cache_append_dev", 3, _default1DSpec);
             Span<byte> pc = stackalloc byte[4 * 4];
             BinaryWriteUInt(pc, 0, (uint)heads);
@@ -4656,6 +4693,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {
+        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
             slidingWindow);
         if (!DeviceKernelEligible(in call))

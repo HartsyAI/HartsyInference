@@ -141,6 +141,10 @@ public sealed class VulkanCapabilities
     /// <summary>Whether <c>VK_NV_cooperative_matrix2</c> is available and exposes a usable FP16/FP32 workgroup-scope "flexible dimensions" configuration. NVIDIA-only (revision 1 confirmed on both RTX 4090 and RTX 3060); architecturally distinct from <see cref="HasCooperativeMatrix"/> — workgroup scope + tensor-layout addressing rather than subgroup-scope fixed 16x16x16 fragments.</summary>
     public required bool HasCooperativeMatrix2 { get; init; }
 
+    /// <summary>Whether the coopmat2 features the attention kernel uses beyond <see cref="HasCooperativeMatrix2"/> (row reductions,
+    /// accumulator-to-operand conversions, per-element operations) are offered, and so enabled.</summary>
+    public bool HasCoopMat2AttentionFeatures { get; init; }
+
     /// <summary>M-dimension granularity for the coopmat2 configuration selected in <see cref="HasCooperativeMatrix2"/> — kernel M tile size must be a multiple of this. 0 if unsupported.</summary>
     public required uint CoopMat2MGranularity { get; init; }
 

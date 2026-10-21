@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
@@ -16,9 +17,6 @@ public sealed partial class VulkanBackend
     // TODO(attention phase 4): carry the raw kvGroup in AttentionCall and delete this side channel.
     [ThreadStatic] private static int t_flashKvGroup;
 
-    /// <summary>The key-only mask expanded to every query row for the token-major call in flight; the cm2 row reads it,
-    /// the permute fallback hands the head-major entry point the original (which expands it again).</summary>
-    [ThreadStatic] private static Tensor? t_expandedMask;
 
     private AttentionKernelRow[]? _denseRows, _tokenMajorRows, _flashRows, _flashDeviceRows;
 
@@ -98,15 +96,30 @@ public sealed partial class VulkanBackend
         finally { t_flashKvGroup = saved; }
     }
 
-    /// <summary>B.1's admission. A key-only mask reaches cm2 as the <c>[Sq, Skv]</c> copy the token-major entry makes of it,
-    /// so a plan made before that copy exists judges it by the copy's shape.</summary>
+    /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>
     private bool TokenMajorCm2Admits(in AttentionCall c)
     {
-        Tensor? mask = t_expandedMask ?? c.Mask.Bias;
-        bool expandsToFull = t_expandedMask is null && mask is not null && mask.DType == DType.F32
-            && mask.ElementCount == c.KeyTokens && c.QueryTokens > 1;
-        return CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, expandsToFull ? null : mask);
+        bool f16Inputs = c.Query.DType == DType.F16 && c.Key.DType == DType.F16 && c.Value.DType == DType.F16;
+        return (c.Numerics.LegacyAssertedBounded || f16Inputs) && !AnyBf16(in c)
+            && CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.Mask.Bias);
     }
+
+    /// <summary>The scalar kernels launch one workgroup per (query row, head, batch item); a grid past the device limits
+    /// takes a slower row, which is logged once.</summary>
+    private bool ScalarGridFits(int queryRows, int heads, int batch)
+    {
+        bool fits = (uint)queryRows <= Vk.MaxComputeWorkGroupCountX && (uint)heads <= Vk.MaxComputeWorkGroupCountY
+            && (uint)batch <= Vk.MaxComputeWorkGroupCountZ;
+        if (!fits && Interlocked.Exchange(ref _scalarGridWarned, 1) == 0)
+            Logs.Warning($"Vulkan attention: {queryRows} query rows x {heads} heads x {batch} exceeds the scalar kernel's grid; a slower row runs.");
+        return fits;
+    }
+
+    private int _scalarGridWarned;
+
+    /// <summary>BF16 has more range than F16, so a BF16 call computes in F32 on the scalar kernel rather than narrowing.</summary>
+    private static bool AnyBf16(in AttentionCall c) =>
+        c.Query.DType == DType.BF16 || c.Key.DType == DType.BF16 || c.Value.DType == DType.BF16 || c.Output.DType == DType.BF16;
 
     private static AttentionKernelCapability Cap(string id, AttentionRoute entry, AttentionDTypes q, AttentionDTypes kv,
         AttentionLayouts layouts) => new() { Id = id, Entry = entry, QueryTypes = q, KvTypes = kv, Layouts = layouts };
@@ -125,12 +138,12 @@ public sealed partial class VulkanBackend
             new DelegateAttentionRow(Cap("cm2.flash", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
-                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast,
+                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "A.1",
                 (in AttentionCall c) =>
                 {
                     bool f16Inputs = c.Query.DType == DType.F16 && c.Key.DType == DType.F16 && c.Value.DType == DType.F16;
-                    return (c.Numerics.LegacyAssertedBounded || f16Inputs)
+                    return (c.Numerics.LegacyAssertedBounded || f16Inputs) && !AnyBf16(in c)
                         && CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.Mask.Bias);
                 },
                 (in AttentionCall c) =>
@@ -144,9 +157,10 @@ public sealed partial class VulkanBackend
                 }),
             new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
-                    MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast,
+                    MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "A.2",
-                static (in AttentionCall c) => c.QkHeadDim <= FlashMaxHeadDim && c.KvHeads > 0 && c.Heads % c.KvHeads == 0,
+                (in AttentionCall c) => c.QkHeadDim <= FlashMaxHeadDim && c.KvHeads > 0 && c.Heads % c.KvHeads == 0
+                    && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
                 (in AttentionCall c) =>
                 {
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
@@ -155,7 +169,7 @@ public sealed partial class VulkanBackend
                 }),
             new DelegateAttentionRow(Cap("naive", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
-                    Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast,
+                    Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast, Saturates = true,
                 }, "A.3",
                 static (in AttentionCall c) => true,
                 (in AttentionCall c) =>
@@ -178,13 +192,13 @@ public sealed partial class VulkanBackend
             new DelegateAttentionRow(Cap("cm2.flash", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
-                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast,
+                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "B.1",
                 (in AttentionCall c) => TokenMajorCm2Admits(in c),
                 (in AttentionCall c) =>
                 {
                     uint qRow = (uint)((long)c.Heads * c.QkHeadDim), kvRow = (uint)((long)c.KvHeads * c.QkHeadDim);
-                    DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, t_expandedMask ?? c.Mask.Bias, c.Scale,
+                    DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         batch: 1, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.QkHeadDim,
                         new AttnStrides(qRow, (uint)c.QkHeadDim, 0), new AttnStrides(kvRow, (uint)c.QkHeadDim, 0),
                         new AttnStrides(kvRow, (uint)c.QkHeadDim, 0), new AttnStrides(qRow, (uint)c.QkHeadDim, 0));
@@ -232,7 +246,7 @@ public sealed partial class VulkanBackend
             new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = RowCausalWindow, MinQueryTokens = 64,
-                    UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast,
+                    UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "C.2",
                 (in AttentionCall c) => FlashOnDevice(in c) && c.Mask.Causal,
                 (in AttentionCall c) =>
@@ -259,9 +273,9 @@ public sealed partial class VulkanBackend
                 }),
             new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
-                    MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = RowCausalWindow, Lowering = AttentionLowering.Cast,
+                    MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = RowCausalWindow, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "C.4",
-                (in AttentionCall c) => FlashOnDevice(in c),
+                (in AttentionCall c) => FlashOnDevice(in c) && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
                 (in AttentionCall c) =>
                 {
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, mask: null, c.Scale, c.Mask.Causal,
@@ -303,7 +317,8 @@ public sealed partial class VulkanBackend
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AttentionMaskSupport.Causal, LogitTerms = true, DevicePositions = true,
                     CaptureSafe = true,
                 }, "D.2",
-                (in AttentionCall c) => DeviceKernelEligible(in c) && c.Mask.LegacySlidingWindow == 0,
+                (in AttentionCall c) => DeviceKernelEligible(in c) && c.Mask.LegacySlidingWindow == 0
+                    && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
                 (in AttentionCall c) =>
                 {
                     DispatchFlashAttentionDev(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale, c.Mask.Causal,

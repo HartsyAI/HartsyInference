@@ -44,6 +44,17 @@ stable release will require. Dates are UTC.
   `hartsy settings` is accepted with a warning and mapped to its replacement until the release its entry names;
   `hartsy settings list` shows them.
 - **Changed:** `IBackend.RopeApplyDecodeStep`'s default throws instead of silently rotating nothing.
+- **Fixed: Vulkan attention with per-head or per-batch masks.** Every head and batch item read the first block of an
+  additive mask, so T5-conditioned models (Flux.1, Chroma, T5 encoders) ran on Vulkan with head 0's position bias in every
+  head. The masks now carry batch, head and query strides on the scalar and coopmat2 kernels.
+- **Fixed: Vulkan F16 KV cache.** Appending F32 rows to an F16 cache read them as F16 (MiniMax-Music-3 quantized, and any
+  `vram.kvF16` run). The append now converts with saturation, and MiniMax-Music-3 checks F16 cache support.
+- **Fixed: other Vulkan attention defects.** The naive path with grouped K/V above head dim 128 read past K and V
+  (Ideogram 4); casts of attention operands to F16 saturate; a sliding window without causal masking keeps later keys, as
+  on CUDA; device positions past the cache are clamped; BF16 attention computes in F32; the coopmat2 attention features
+  are enabled before use; an oversized grid falls back to the naive kernel; `FlashAttention` refuses a key length past
+  the cache instead of reading beyond it.
+- **Fixed: CPU attention refuses what it cannot compute** (dtypes, grouped K/V, shapes) instead of reading memory as F32.
 
 ## alpha.383
 

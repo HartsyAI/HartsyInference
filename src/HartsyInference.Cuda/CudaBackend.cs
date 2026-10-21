@@ -7732,25 +7732,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             || key.ElementCount > int.MaxValue || value.ElementCount > int.MaxValue)
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
 
-        if (mask is null) return;
-        if (mask.DType != DType.F32)
-            throw new NotSupportedException($"SDPA additive masks must be F32; got {mask.DType}.");
-        if (mask.ElementCount > int.MaxValue || sq * skv > int.MaxValue)
-            throw new ArgumentException("SDPA mask blocks currently support at most Int32.MaxValue elements.");
-
-        bool validMask = mask.Shape.Rank switch
-        {
-            2 => (mask.Shape[0] == 1 || mask.Shape[0] == sq) && mask.Shape[1] == skv,
-            3 => (mask.Shape[0] == 1 || mask.Shape[0] == h)
-                && (mask.Shape[1] == 1 || mask.Shape[1] == sq) && mask.Shape[2] == skv,
-            4 => (mask.Shape[0] == 1 || mask.Shape[0] == b) && (mask.Shape[1] == 1 || mask.Shape[1] == h)
-                && (mask.Shape[2] == 1 || mask.Shape[2] == sq) && mask.Shape[3] == skv,
-            _ => false,
-        };
-        if (!validMask)
-            throw new ArgumentException(
-                $"SDPA mask {mask.Shape} is not broadcastable to [{b},{h},{sq},{skv}]; "
-                + "expected [1|Sq,Skv], [1|H,1|Sq,Skv], or [1|B,1|H,1|Sq,Skv].");
+        if (mask is not null) _ = AttentionMaskLayout.Of(mask, b, h, sq, skv);
     }
 
     /// <summary>Query rows the additive mask actually stores. 1 means the mask depends only on the key and one row is broadcast over every query — the [Sq,Skv] duplicate of it is what makes a masked call expensive.</summary>

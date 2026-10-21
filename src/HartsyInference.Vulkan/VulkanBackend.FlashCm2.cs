@@ -18,7 +18,12 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public bool SupportsTokenMajorGqaAttention => FlashCm2Available;
 
-    private bool FlashCm2Available => EnableCoopMat2 && Vk.HasCooperativeMatrix2;
+    private bool FlashCm2Available => EnableCoopMat2 && Vk.HasCooperativeMatrix2 && Vk.HasCoopMat2AttentionFeatures
+        && FitsGranularity(FlashCm2QueryTile, Vk.CoopMat2MGranularity) && FitsGranularity(FlashCm2KeyTile, Vk.CoopMat2NGranularity)
+        && FitsGranularity(FlashCm2KeyTile, Vk.CoopMat2KGranularity);
+
+    /// <summary>A tile edge the configuration's granularity divides (QKᵀ is Br×Bc over D, PV is Br×D over Bc).</summary>
+    private static bool FitsGranularity(int edge, uint granularity) => granularity != 0 && edge % granularity == 0;
 
     /// <summary>Routes causal prefill attention through <c>sdpa_flash_cm2</c>; see <see cref="TryFlashCm2CausalPrefill"/>.</summary>
     public bool EnableFlashCm2Prefill { get; set; } = EngineKnobs.VkFlashCm2Prefill.Value;
@@ -44,8 +49,7 @@ public sealed partial class VulkanBackend
         }
         int sq = (int)(query.ElementCount / qWidth);
         int skv = (int)(key.ElementCount / kvWidth);
-        using Tensor? expandedMask = mask is not null && mask.DType == DType.F32 && mask.ElementCount == skv && sq > 1
-            ? ExpandKeyOnlyMask(mask, sq, skv) : null;
+        if (mask is not null) _ = AttentionMaskLayout.Of(mask, 1, heads, sq, skv);
         // Vulkan reads a token-major operand as one sequence whatever its rank, so the call is described that way.
         AttentionCall call = new()
         {
@@ -56,10 +60,7 @@ public sealed partial class VulkanBackend
             Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = AttentionNumerics.FromLegacy(allowF16),
             Route = AttentionRoute.TokenMajor,
         };
-        Tensor? saved = t_expandedMask;
-        t_expandedMask = expandedMask;
-        try { RunAttentionRows(TokenMajorAttentionRows, in call); }
-        finally { t_expandedMask = saved; }
+        RunAttentionRows(TokenMajorAttentionRows, in call);
     }
 
     /// <summary>Smallest query count worth a 64-row cooperative-matrix tile; decode (one row) and short chunks stay on the scalar kernel.</summary>
@@ -102,6 +103,25 @@ public sealed partial class VulkanBackend
     private void AttendTokenMajorViaHeadMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int kvHeads, int headDim, int sq, int skv, float scale, bool allowF16)
     {
+        if (query.DType == DType.BF16 || key.DType == DType.BF16 || value.DType == DType.BF16 || output.DType == DType.BF16)
+        {
+            // The permutes have no BF16 kernel, and BF16 has more range than F16: permute F32 copies and compute in F32.
+            Tensor q32 = F32Copy(query), k32 = F32Copy(key), v32 = F32Copy(value);
+            Tensor o32 = output.DType == DType.F32 ? output : new Tensor(output.Shape, DType.F32);
+            try
+            {
+                AttendTokenMajorViaHeadMajor(o32, q32, k32, v32, mask, heads, kvHeads, headDim, sq, skv, scale, allowF16: false);
+                if (!ReferenceEquals(o32, output)) CastToBf16(output, o32);
+            }
+            finally
+            {
+                if (!ReferenceEquals(q32, query)) q32.Dispose();
+                if (!ReferenceEquals(k32, key)) k32.Dispose();
+                if (!ReferenceEquals(v32, value)) v32.Dispose();
+                if (!ReferenceEquals(o32, output)) o32.Dispose();
+            }
+            return;
+        }
         TensorShape qShape = new TensorShape(1, heads, sq, headDim);
         TensorShape kvShape = new TensorShape(1, kvHeads, skv, headDim);
         using Tensor qMh = new Tensor(qShape, query.DType);
@@ -115,10 +135,28 @@ public sealed partial class VulkanBackend
         Permute0213(output, attnMh, heads, sq, headDim);
     }
 
+    /// <summary><paramref name="t"/> itself when it is F32, else an F32 copy the caller disposes.</summary>
+    private Tensor F32Copy(Tensor t)
+    {
+        if (t.DType == DType.F32) return t;
+        (_, VulkanBuffer? owned) = CastIfNeeded(t, GetBuffer(t), DType.F32);
+        if (owned is null) return t.CastTo(DType.F32);   // the cached weight cast stays cached; CastTo returns a fresh copy
+        Tensor copy = new Tensor(t.Shape, DType.F32);
+        CacheOutput(copy, owned);
+        return copy;
+    }
+
     /// <summary>Whether the cooperative-matrix-2 kernel serves this shape.</summary>
+    /// <remarks>Any mask the entry validated: a key-only one reaches the kernel as the <c>[Sq, Skv]</c> copy
+    /// <see cref="WithRowsForCm2"/> makes, since a zero row stride in a cooperative-matrix tensor layout is unproven.</remarks>
     private bool CanUseFlashCm2(int headDim, int hq, int hkv, int sq, int skv, Tensor? mask) =>
-        FlashCm2Available && headDim is 64 or 128 && hkv > 0 && hq % hkv == 0
-        && (mask is null || (mask.DType == DType.F32 && mask.ElementCount == (long)sq * skv));
+        FlashCm2Available && headDim is 64 or 128 && FitsGranularity(headDim, Vk.CoopMat2KGranularity)
+        && FitsGranularity(headDim, Vk.CoopMat2NGranularity) && hkv > 0 && hq % hkv == 0 && (mask is null || mask.DType == DType.F32);
+
+    /// <summary>A key-only mask expanded to one row per query for the cm2 kernel, else null.</summary>
+    private static Tensor? WithRowsForCm2(Tensor? mask, int batch, int heads, int sq, int skv) =>
+        mask is not null && sq > 1 && AttentionMaskLayout.Of(mask, batch, heads, sq, skv).RowStride == 0
+            ? ExpandKeyOnlyMask(mask, sq, skv) : null;
 
     /// <summary>The causal (and sliding-window) mask a cm2 prefill computes in the kernel: query row <c>i</c> sits at absolute
     /// position <see cref="QOffset"/> + i, and <see cref="Window"/> 0 means no window.</summary>
@@ -130,8 +168,17 @@ public sealed partial class VulkanBackend
     private void DispatchFlashCm2(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
         int batch, int hq, int hkv, int sq, int skv, int headDim, AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os)
     {
-        Span<byte> pc = stackalloc byte[17 * 4];
+        using Tensor? expanded = WithRowsForCm2(mask, batch, hq, sq, skv);
+        mask = expanded ?? mask;
+        Span<byte> pc = stackalloc byte[(mask is null ? 17 : 20) * 4];
         WriteFlashCm2Common(pc, hq, hkv, sq, skv, scale, qs, ks, vs, os);
+        if (mask is not null)
+        {
+            AttentionMaskLayout m = AttentionMaskLayout.Of(mask, batch, hq, sq, skv);
+            // A one-row mask still gets a real row stride: only row 0 is in bounds, and no layout stride is ever 0.
+            uint rowStride = m.RowStride == 0 ? (uint)skv : (uint)m.RowStride;
+            WriteStrides(pc, 68, new AttnStrides(rowStride, (uint)m.HeadStride, (uint)m.BatchStride));
+        }
         RunFlashCm2(output, query, key, value, mask, mask is null ? "sdpa_flash_cm2" : "sdpa_flash_cm2_mask", pc,
             batch, hq, sq, headDim);
     }
@@ -169,9 +216,9 @@ public sealed partial class VulkanBackend
     private void RunFlashCm2(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, string kernelName,
         ReadOnlySpan<byte> pc, int batch, int hq, int sq, int headDim)
     {
-        (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, GetBuffer(query), DType.F16);
-        (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, GetBuffer(key), DType.F16);
-        (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, GetBuffer(value), DType.F16);
+        (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, GetBuffer(query), DType.F16, saturate: true);
+        (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, GetBuffer(key), DType.F16, saturate: true);
+        (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, GetBuffer(value), DType.F16, saturate: true);
         VulkanBuffer? maskBuf = mask is null ? null : GetBuffer(mask);
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * DType.F16.SizeInBytes));
         try

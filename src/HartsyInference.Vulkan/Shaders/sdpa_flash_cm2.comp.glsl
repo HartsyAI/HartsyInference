@@ -4,8 +4,9 @@
 // lives in accumulator coopmats, with row reductions smeared across the row as ggml's flash_attn_cm2 does.
 // Q/K/V/O are addressed through per-tensor row/head/batch strides, so head-major [B,H,S,D] and token-major
 // [B,S,H,D] layouts need no permute, and grouped-query attention reads kv head h/(hq/hkv) directly.
-// HAS_MASK adds an F32 [Sq,Skv] mask broadcast across batch and head. Clamped tensor layouts zero out-of-bounds
-// loads and drop out-of-bounds stores, so Sq and Skv need not be tile multiples.
+// HAS_MASK adds an F32 additive mask addressed by per-batch and per-head offsets and a row stride (a zero batch or head
+// stride broadcasts). Clamped tensor layouts zero out-of-bounds loads and drop out-of-bounds stores, so Sq and Skv need
+// not be tile multiples.
 
 #version 460
 
@@ -57,6 +58,9 @@ layout(push_constant) uniform Push {
 #if CAUSAL == 1
     uint qOffset; uint window;
 #endif
+#if HAS_MASK == 1
+    uint mRow; uint mHead; uint mBatch;
+#endif
 } pc;
 
 #define NEG_HALF_MAX (-1.7014117e38)
@@ -105,6 +109,13 @@ void main() {
     uint vOff = b * pc.vBatch + kvh * pc.vHead;
     uint oOff = b * pc.oBatch + h * pc.oHead;
 
+#if HAS_MASK == 1
+    tensorLayoutNV<2, gl_CooperativeMatrixClampModeConstantNV> layoutM = createTensorLayoutNV(2, gl_CooperativeMatrixClampModeConstantNV);
+    layoutM = setTensorLayoutDimensionNV(layoutM, pc.sq, pc.skv);
+    layoutM = setTensorLayoutStrideNV(layoutM, pc.mRow, 1);
+    uint mOff = b * pc.mBatch + h * pc.mHead;
+#endif
+
     coopmat<float16_t, gl_ScopeWorkgroup, Br, D, gl_MatrixUseA> Qm;
     coopMatLoadTensorNV(Qm, q_data, qOff, sliceTensorLayoutNV(layoutQ, qTile * Br, Br, 0, D));
 
@@ -137,11 +148,8 @@ void main() {
         coopMatPerElementNV(S, S, causalMask, qBase, j * Bc, pc.window, pc.skv);
 #endif
 #if HAS_MASK == 1
-        tensorLayoutNV<2, gl_CooperativeMatrixClampModeConstantNV> layoutM = createTensorLayoutNV(2, gl_CooperativeMatrixClampModeConstantNV);
-        layoutM = setTensorLayoutDimensionNV(layoutM, pc.sq, pc.skv);
-        layoutM = setTensorLayoutStrideNV(layoutM, pc.skv, 1);
         coopmat<float, gl_ScopeWorkgroup, Br, Bc, gl_MatrixUseAccumulator> maskTile;
-        coopMatLoadTensorNV(maskTile, mask_data, 0, sliceTensorLayoutNV(layoutM, qTile * Br, Br, j * Bc, Bc));
+        coopMatLoadTensorNV(maskTile, mask_data, mOff, sliceTensorLayoutNV(layoutM, qTile * Br, Br, j * Bc, Bc));
         S += maskTile;
 #endif
         if ((j + 1) * Bc > pc.skv) {

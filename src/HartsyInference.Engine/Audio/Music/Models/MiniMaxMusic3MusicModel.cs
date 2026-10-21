@@ -125,7 +125,7 @@ internal static class MiniMaxMusic3MusicModel
 
         // The quantized variants are the small-card path, where an F32 KV cache is the difference between
         // a five-minute song fitting and not.
-        MiniMaxMusic3GlobalLm languageModel = new MiniMaxMusic3GlobalLm(halfPrecisionKv: quant is not null && context.Backend.Capabilities.SupportsF16);
+        MiniMaxMusic3GlobalLm languageModel = new MiniMaxMusic3GlobalLm(halfPrecisionKv: quant is not null && context.Backend.SupportsF16KvCache);
         languageModel.LoadWeights(preparedLanguage);
         MiniMaxMusic3DepthDecoder depthDecoder = new MiniMaxMusic3DepthDecoder();
         depthDecoder.LoadWeights(preparedDepth);
