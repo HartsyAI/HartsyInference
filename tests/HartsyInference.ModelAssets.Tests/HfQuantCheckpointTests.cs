@@ -1,8 +1,10 @@
+using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Nf4;
 using HartsyInference.ModelAssets.Quant;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
@@ -50,6 +52,57 @@ public sealed class HfQuantCheckpointTests : IDisposable
         Assert.Equal(new TensorShape(32, 4), w["model.layers.1.mlp.experts.1.down_proj.weight"].Shape);
         Assert.DoesNotContain("model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv", w.Keys);
         Assert.DoesNotContain("model.layers.1.mlp.experts.gate_up_proj", w.Keys);
+    }
+
+    [Fact]
+    public void Nf4_IndexesEachWeightOnce_AndDecodesWithinTheCodecBound()
+    {
+        const int rows = 8, cols = 40;
+        const string weightKey = "model.layers.0.mlp.experts.0.down_proj.weight";
+        float[] values = new float[rows * cols];
+        Random random = new(4);
+        for (int i = 0; i < values.Length; i++) values[i] = random.NextSingle() * 2f - 1f;
+        Dictionary<string, Tensor> tensors = Nf4Codec.QuantizeToCompanions(weightKey, values, rows, cols, "float32")
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        Tensor norm = new(new TensorShape(32), DType.F32);
+        norm.AsSpan<float>().Fill(0.5f);
+        tensors["model.norm.weight"] = norm;
+        string path = Path.Combine(_dir, "model.safetensors");
+        try
+        {
+            SafeTensorsWriter.Save(path, tensors);
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+
+        (byte[] packed, float[] absmax) = Nf4Codec.Quantize(values);
+        using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([path]);
+        Assert.Equal(2, checkpoint.Weights.Count);
+        HfQuantWeight weight = checkpoint.Weights[weightKey];
+        Assert.Equal(HfWeightStorage.Nf4, weight.Storage);
+        Assert.Equal(new TensorShape(rows, cols), weight.Shape);
+        Assert.Equal(HfWeightStorage.Plain, checkpoint.Weights["model.norm.weight"].Storage);
+
+        using Tensor decoded = checkpoint.DequantizeF32(weightKey);
+        ReadOnlySpan<float> got = decoded.AsReadOnlySpan<float>();
+        for (int i = 0; i < values.Length; i++)
+        {
+            int code = (i & 1) == 0 ? packed[i >> 1] >> 4 : packed[i >> 1] & 0x0F;
+            float scale = absmax[i / Nf4Codec.DefaultBlockSize];
+            Assert.Equal(Nf4Codec.Nf4Lut[code] * scale, got[i], 6);
+            Assert.True(MathF.Abs(got[i] - values[i]) <= scale * Nf4Codec.MaxBlockError + 1e-6f);
+        }
+    }
+
+    [Fact]
+    public void Nf4Expert_TargetsQ4_0AtNative_AndKeepsTheOtherPrecisions()
+    {
+        HfQuantWeight expert = new("model.layers.0.mlp.experts.0.down_proj.weight", new TensorShape(2048, 512),
+            HfWeightStorage.Nf4, DType.U8, "model.layers.0.mlp.experts.0.down_proj.weight");
+        Assert.Equal(DType.Q4_0, FishAudioDrama3Weights.TargetDType(expert, FishAudioDrama3Precision.Native));
+        Assert.Equal(DType.Q8_0, FishAudioDrama3Weights.TargetDType(expert, FishAudioDrama3Precision.Q8_0));
     }
 
     [Fact]
