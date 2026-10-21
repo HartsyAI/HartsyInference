@@ -40,12 +40,13 @@ public sealed class LoraStack : IDisposable
         IDictionary<string, Tensor>? transformerWeights = null,
         IDictionary<string, Tensor>? clipLWeights = null,
         IDictionary<string, Tensor>? clipGWeights = null,
-        IDictionary<string, Tensor>? textEncoder2Weights = null)
+        IDictionary<string, Tensor>? textEncoder2Weights = null,
+        IReadOnlyDictionary<string, string>? transformerNativeNames = null)
     {
         int total = 0;
         if (unetWeights is not null) total += ApplyTo(unetWeights, LoraTarget.UNet, backend);
         else WarnUnservedTarget(LoraTarget.UNet);
-        if (transformerWeights is not null) total += ApplyTo(transformerWeights, LoraTarget.Transformer, backend);
+        if (transformerWeights is not null) total += ApplyTo(transformerWeights, LoraTarget.Transformer, backend, transformerNativeNames);
         else WarnUnservedTarget(LoraTarget.Transformer);
         if (clipLWeights is not null) total += ApplyTo(clipLWeights, LoraTarget.ClipL, backend);
         else WarnUnservedTarget(LoraTarget.ClipL);
@@ -83,19 +84,34 @@ public sealed class LoraStack : IDisposable
     }
 
     /// <summary>Merges every stacked LoRA layer matching the given target into the weight dictionary. Replaces affected entries with freshly-allocated owned tensors. Returns the number of weights modified.</summary>
-    public int ApplyTo(IDictionary<string, Tensor> weights, LoraTarget target, IBackend backend)
+    /// <param name="nativeNames">Only for kohya <c>lora_unet_</c> layers that name modules by weight path: maps each checkpoint weight name to the key it holds in <paramref name="weights"/> when the loader renamed keys. Null means the dictionary keys are the model's own names.</param>
+    public int ApplyTo(IDictionary<string, Tensor> weights, LoraTarget target, IBackend backend,
+        IReadOnlyDictionary<string, string>? nativeNames = null)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentNullException.ThrowIfNull(backend);
 
         Dictionary<string, List<(LoraLayer layer, float strength)>> grouped = [];
+        KohyaUnderscoreIndex? kohyaIndex = null;
         foreach (Entry entry in _entries)
         {
             float strength = entry.StrengthFor(target);
-            foreach (LoraLayer layer in entry.File.Layers)
+            foreach (LoraLayer source in entry.File.Layers)
             {
-                if (layer.Target != target) continue;
+                if (source.Target != target) continue;
+                LoraLayer layer = source;
+                if (source.KohyaModuleName is not null)
+                {
+                    kohyaIndex ??= nativeNames is null
+                        ? KohyaUnderscoreIndex.Build(weights.Keys)
+                        : KohyaUnderscoreIndex.Build(nativeNames.Where(kv => weights.ContainsKey(kv.Value)));
+                    // An unresolved module keeps its source name, so the missing-target warning below reports it.
+                    if (kohyaIndex.TryResolve(source.KohyaModuleName, out string resolvedKey))
+                    {
+                        layer = source.WithResolvedTarget(resolvedKey);
+                    }
+                }
                 if (!grouped.TryGetValue(layer.TargetKey, out List<(LoraLayer, float)>? list))
                 {
                     list = [];

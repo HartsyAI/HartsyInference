@@ -13,6 +13,9 @@ public sealed record LoraMergeTargets
     /// <summary>The DiT / transformer weights.</summary>
     public IDictionary<string, Tensor>? Transformer { get; init; }
 
+    /// <summary>Only for a recipe that renames checkpoint keys on load: each checkpoint weight name mapped to its key in <see cref="Transformer"/>. Kohya <c>lora_unet_</c> files spell the checkpoint's own names, so they resolve through this; null when the dictionary keys already are the checkpoint's names.</summary>
+    public IReadOnlyDictionary<string, string>? TransformerNativeNames { get; init; }
+
     /// <summary>The CLIP-L text-encoder weights.</summary>
     public IDictionary<string, Tensor>? ClipL { get; init; }
 
