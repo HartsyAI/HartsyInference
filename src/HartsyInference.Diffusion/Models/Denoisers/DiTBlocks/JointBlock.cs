@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -51,6 +52,9 @@ public sealed class JointBlock
     private Tensor? _norm2CtxWeight, _norm2CtxBias;
     private bool _norm2CtxHasAffine;
     private readonly SwiGluFfn? _ctxFfn;
+
+    private JointAttention? _jointAttention;
+    private AttentionLayer? _dualAttention;
 
     /// <summary>Creates a JointTransformerBlock.</summary>
     /// <param name="hiddenSize">Model hidden dimension (1536 for SD3 Medium, 2432 for SD3.5 Large).</param>
@@ -179,7 +183,32 @@ public sealed class JointBlock
                 weights[$"{prefix}.ff_context.net.2.weight"],
                 weights[$"{prefix}.ff_context.net.2.bias"]);
         }
+
+        // A pre-only block's context stream has no output projection: its attention rows are dropped.
+        _jointAttention = new JointAttention(
+            new JointAttentionConfig { Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [1, 0], AllowF16 = false },
+            [Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight, _toOutBias, _normQ, _normK),
+             Stream(_addQWeight!, _addQBias, _addKWeight!, _addKBias, _addVWeight!, _addVBias, _toAddOutWeight, _toAddOutBias,
+                 _normAddedQ, _normAddedK)]);
+        _dualAttention = _useDualAttention
+            ? Stream(_attn2QWeight!, _attn2QBias, _attn2KWeight!, _attn2KBias, _attn2VWeight!, _attn2VBias, _attn2OutWeight,
+                _attn2OutBias, _attn2NormQ, _attn2NormK)
+            : null;
     }
+
+    private AttentionLayer Stream(Tensor q, Tensor? qBias, Tensor k, Tensor? kBias, Tensor v, Tensor? vBias, Tensor? output,
+        Tensor? outputBias, QkNorm? normQ, QkNorm? normK) => new(
+        new AttentionLayerConfig
+        {
+            Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim,
+            QkNorm = _useQkNorm ? AttentionQkNorm.PerHead : AttentionQkNorm.None, ComputeDType = DType.F32,
+        },
+        new AttentionLayerWeights
+        {
+            Query = q, QueryBias = qBias, Key = k, KeyBias = kBias, Value = v, ValueBias = vBias, Output = output,
+            OutputBias = outputBias, QueryNorm = normQ?.Weight, KeyNorm = normK?.Weight, QueryNormEps = normQ?.Eps ?? 0f,
+            KeyNormEps = normK?.Eps ?? 0f,
+        });
 
     /// <summary>Yields all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
@@ -245,17 +274,9 @@ public sealed class JointBlock
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
         int ctxSeqLen = (int)context.Shape[1];
-        int totalSeqLen = imgSeqLen + ctxSeqLen;
 
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape ctxShape = new TensorShape(batch, ctxSeqLen, _hiddenSize);
-        // [B, S, H, D] views (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
-        TensorShape imgHeads = new TensorShape(batch, imgSeqLen, _numHeads, _headDim);
-        TensorShape ctxHeads = new TensorShape(batch, ctxSeqLen, _numHeads, _headDim);
-        TensorShape jointHeads = new TensorShape(batch, totalSeqLen, _numHeads, _headDim);
-        TensorShape imgMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
-        TensorShape jointMhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
-        TensorShape jointFlat = new TensorShape(batch, totalSeqLen, _hiddenSize);
 
         // ── 1. AdaLN modulation ──
         Tensor[] imgMod = _imgModulation.Forward(backend, temb);
@@ -274,93 +295,11 @@ public sealed class JointBlock
 
         Tensor ctxModulated = DiTUtils.NormModulate(backend, context, ctxMod[0], ctxMod[1], ctxShape);
 
-        // ── 3. Joint Q/K/V projections (declared [B, S, H, D] so QK-norm + permute need no reshape view) ──
-        Tensor imgQ = new Tensor(imgHeads, DType.F32);
-        backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgHeads, DType.F32);
-        backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgHeads, DType.F32);
-        backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
-        imgModulated.Dispose();
-
-        Tensor ctxQ = new Tensor(ctxHeads, DType.F32);
-        backend.Linear(ctxQ, ctxModulated, _addQWeight!, _addQBias);
-        Tensor ctxK = new Tensor(ctxHeads, DType.F32);
-        backend.Linear(ctxK, ctxModulated, _addKWeight!, _addKBias);
-        Tensor ctxV = new Tensor(ctxHeads, DType.F32);
-        backend.Linear(ctxV, ctxModulated, _addVWeight!, _addVBias);
-        ctxModulated.Dispose();
-
-        // ── 4. Optional QK-norm (per-head RMSNorm over the last dim = headDim) ──
-        if (_useQkNorm)
-        {
-            Tensor imgQNormed = new Tensor(imgHeads, DType.F32);
-            backend.RmsNorm(imgQNormed, imgQ, _normQ!.Weight, _normQ.Eps);
-            Tensor imgKNormed = new Tensor(imgHeads, DType.F32);
-            backend.RmsNorm(imgKNormed, imgK, _normK!.Weight, _normK.Eps);
-            imgQ.Dispose(); imgK.Dispose();
-            imgQ = imgQNormed; imgK = imgKNormed;
-
-            Tensor ctxQNormed = new Tensor(ctxHeads, DType.F32);
-            backend.RmsNorm(ctxQNormed, ctxQ, _normAddedQ!.Weight, _normAddedQ.Eps);
-            Tensor ctxKNormed = new Tensor(ctxHeads, DType.F32);
-            backend.RmsNorm(ctxKNormed, ctxK, _normAddedK!.Weight, _normAddedK.Eps);
-            ctxQ.Dispose(); ctxK.Dispose();
-            ctxQ = ctxQNormed; ctxK = ctxKNormed;
-        }
-
-        // ── 5. Concatenate [ctx, img] along the seq dim PRE-permute ([B, S, H, D], context first — same token
-        // order the old post-permute ConcatAlongSeqDimMultiHead produced), then permute to [B, H, S, D] ──
-        Tensor jointQPre = new Tensor(jointHeads, DType.F32);
-        backend.Concat(jointQPre, new Tensor[] { ctxQ, imgQ }, 1);
-        ctxQ.Dispose(); imgQ.Dispose();
-        Tensor jointKPre = new Tensor(jointHeads, DType.F32);
-        backend.Concat(jointKPre, new Tensor[] { ctxK, imgK }, 1);
-        ctxK.Dispose(); imgK.Dispose();
-        Tensor jointVPre = new Tensor(jointHeads, DType.F32);
-        backend.Concat(jointVPre, new Tensor[] { ctxV, imgV }, 1);
-        ctxV.Dispose(); imgV.Dispose();
-
-        Tensor jointQ = new Tensor(jointMhShape, DType.F32);
-        backend.Permute0213(jointQ, jointQPre, totalSeqLen, _numHeads, _headDim);
-        jointQPre.Dispose();
-        Tensor jointK = new Tensor(jointMhShape, DType.F32);
-        backend.Permute0213(jointK, jointKPre, totalSeqLen, _numHeads, _headDim);
-        jointKPre.Dispose();
-        Tensor jointV = new Tensor(jointMhShape, DType.F32);
-        backend.Permute0213(jointV, jointVPre, totalSeqLen, _numHeads, _headDim);
-        jointVPre.Dispose();
-
-        // ── 6. Joint scaled dot-product attention ──
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
-        jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
-
-        // ── 7. Permute back [B, H, S, D] → [B, S, hidden], then split [ctx, img] ──
-        Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
-        backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
-        jointAttnOut.Dispose();
-
-        Tensor ctxAttn, imgAttn;
-        if (batch == 1)
-        {
-            // B=1: context rows then image rows are contiguous row-blocks → device SliceRows.
-            ctxAttn = new Tensor(ctxShape, DType.F32);
-            backend.SliceRows(ctxAttn, jointAttnFlat, 0);
-            imgAttn = new Tensor(imgShape, DType.F32);
-            backend.SliceRows(imgAttn, jointAttnFlat, ctxSeqLen);
-        }
-        else
-        {
-            (ctxAttn, imgAttn) = DiTUtils.SplitAlongSeqDim(jointAttnFlat, ctxSeqLen);   // host fallback, batched only
-        }
-        jointAttnFlat.Dispose();
-
-        // ── 8. Output projections ──
-        Tensor imgAttnProj = new Tensor(imgShape, DType.F32);
-        backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
-        imgAttn.Dispose();
+        // ── 3-8. Joint attention over [ctx, img], then the image output projection ──
+        Span<Tensor?> attended = [null, null];
+        _jointAttention!.Attend(backend, [imgModulated, ctxModulated], attended, new JointCallContext { ReleaseInputs = true });
+        Tensor imgAttnProj = _jointAttention.ProjectOutput(backend, 0, attended[0]!);
+        Tensor ctxAttn = attended[1]!;
 
         // ── 9. Optional dual-attention (SD3.5 MMDiT-X) ──
         Tensor? attn2Proj = null;
@@ -369,46 +308,7 @@ public sealed class JointBlock
             // Re-modulate the SAME imgNormed with shift_msa2/scale_msa2 (independent from joint)
             Tensor imgModulated2 = DiTUtils.Modulate(backend, imgNormed, imgMod[6], imgMod[7], imgShape);
 
-            // attn2 Q/K/V (image-only)
-            Tensor a2Q = new Tensor(imgHeads, DType.F32);
-            backend.Linear(a2Q, imgModulated2, _attn2QWeight!, _attn2QBias);
-            Tensor a2K = new Tensor(imgHeads, DType.F32);
-            backend.Linear(a2K, imgModulated2, _attn2KWeight!, _attn2KBias);
-            Tensor a2V = new Tensor(imgHeads, DType.F32);
-            backend.Linear(a2V, imgModulated2, _attn2VWeight!, _attn2VBias);
-            imgModulated2.Dispose();
-
-            if (_useQkNorm)
-            {
-                Tensor a2QNormed = new Tensor(imgHeads, DType.F32);
-                backend.RmsNorm(a2QNormed, a2Q, _attn2NormQ!.Weight, _attn2NormQ.Eps);
-                Tensor a2KNormed = new Tensor(imgHeads, DType.F32);
-                backend.RmsNorm(a2KNormed, a2K, _attn2NormK!.Weight, _attn2NormK.Eps);
-                a2Q.Dispose(); a2K.Dispose();
-                a2Q = a2QNormed; a2K = a2KNormed;
-            }
-
-            Tensor a2QMh = new Tensor(imgMhShape, DType.F32);
-            backend.Permute0213(a2QMh, a2Q, imgSeqLen, _numHeads, _headDim);
-            a2Q.Dispose();
-            Tensor a2KMh = new Tensor(imgMhShape, DType.F32);
-            backend.Permute0213(a2KMh, a2K, imgSeqLen, _numHeads, _headDim);
-            a2K.Dispose();
-            Tensor a2VMh = new Tensor(imgMhShape, DType.F32);
-            backend.Permute0213(a2VMh, a2V, imgSeqLen, _numHeads, _headDim);
-            a2V.Dispose();
-
-            Tensor a2OutMh = new Tensor(imgMhShape, DType.F32);
-            backend.ScaledDotProductAttention(a2OutMh, a2QMh, a2KMh, a2VMh, null, scale);
-            a2QMh.Dispose(); a2KMh.Dispose(); a2VMh.Dispose();
-
-            Tensor a2Out = new Tensor(imgShape, DType.F32);
-            backend.Permute0213(a2Out, a2OutMh, _numHeads, imgSeqLen, _headDim);
-            a2OutMh.Dispose();
-
-            attn2Proj = new Tensor(imgShape, DType.F32);
-            backend.Linear(attn2Proj, a2Out, _attn2OutWeight!, _attn2OutBias);
-            a2Out.Dispose();
+            attn2Proj = _dualAttention!.Forward(backend, imgModulated2, imgModulated2, new AttentionCallContext { ReleaseInputs = true });
         }
 
         imgNormed.Dispose();
@@ -431,9 +331,7 @@ public sealed class JointBlock
         Tensor ctxAfterAttn;
         if (!_isPreOnly)
         {
-            Tensor ctxAttnProj = new Tensor(ctxShape, DType.F32);
-            backend.Linear(ctxAttnProj, ctxAttn, _toAddOutWeight!, _toAddOutBias);
-            ctxAttn.Dispose();
+            Tensor ctxAttnProj = _jointAttention.ProjectOutput(backend, 1, ctxAttn);
             ctxAfterAttn = new Tensor(ctxShape, DType.F32);
             backend.GatedResidualLastDim(ctxAfterAttn, context, ctxAttnProj, ctxMod[2]);
             ctxAttnProj.Dispose();
