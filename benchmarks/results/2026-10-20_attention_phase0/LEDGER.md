@@ -37,3 +37,32 @@ Every later `bounded` gate is judged against these.
 The strict arm is the same build with `numerics.sdpaNoF16=true`, `numerics.sageAttn=false`, `numerics.fa2Prefill=false`
 and `numerics.flashF16=false`: no F16 narrowing of an F32 call, no INT8, no F16 prefill. CUDA's F32 attention GEMMs
 run TF32 whatever the settings say, so this arm is the strictest the engine can run today, not exact F32.
+
+Measured on the 4090, default arm vs strict arm on the same build: origin/main e845dcd9 (`4090/floors2.log`) and, for the
+pinned H3 row and the LLM rows, 27e36bf9 (`4090/floors3.log`). A row at 1.000000 ran no approximation at its shapes, so its
+floor is `identical`.
+
+| Case | Default vs strict, min SSIM | Floor | Step ms, default → strict |
+|---|---|---|---|
+| sd15 | 0.998215 | 0.988 | 69 → 82 |
+| krea2 | 0.966578 | 0.957 | 523 → 520 |
+| zimage | 0.936570 | 0.927 | 291 → 290 |
+| qwenimage-q4k | 0.988030 | 0.978 | 1621 → 2348 |
+| sdxl | 0.998141 | 0.988 | 259 → 364 |
+| flux1-dev | 1.000000 | identical | - |
+| wan5b | 0.994821 | 0.985 | 1124 → 1863 |
+| ideogram4 | 0.894457 | 0.884 | 821 → 946 |
+| chroma-hd | 1.000000 | identical | - |
+| lumina2 | 0.999098 | 0.989 | 688 → 1059 |
+| ltx25-dev | 0.964689 | 0.955 | 742 → 764 |
+| h3-fl2va-fp8, SDPA route pinned | 1.000000 | identical | 1656 → 1363 |
+
+- ideogram4's 0.894 is the lowest; both arms were inspected and both images are clean.
+- H3 unpinned read 0.39 because free VRAM moved the materialized/tiled choice between arms. Pinned
+  (`vram.sdpaForceTiled=true`, `numerics.sdpaTile=256`, `vram.h3ChunkRows=1000000`), the arms are identical.
+
+| LLM case | Mean \|Δ log p\| | Max \|Δ log p\| | Within the bar |
+|---|---|---|---|
+| llama32-1b | 0.0146 | 0.114 | yes |
+| qwen3-4b | 0.0145 | 0.238 | no: the max already exceeds 0.2 today, so 0.238 is this row's max floor |
+| gemma2-2b | 0 | 0 | identical |
