@@ -4,9 +4,11 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Tensors;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Nf4;
 using HartsyInference.ModelAssets.Metadata;
@@ -58,6 +60,8 @@ MERGE AND CAST (safetensors)
   --quant <nf4|nvfp4>   Quantize every 2D .weight (F32/BF16/F16) into the layout the engine loads: NF4 writes
                         .absmax, .quant_map and .quant_state.bitsandbytes__nf4; NVFP4 writes .weight_scale
                         (E4M3) and .weight_scale_2 (F32). 2D weights that fail the shape rule are left full precision and listed.
+                        An FP8 block-scaled single .safetensors with --quant nf4 is streamed one weight at a time to
+                        a single output file, with <output>.manifest.json beside it.
 
 LORA BAKING (safetensors)
   --lora <file>[:<strength>]  Merge an adapter into the weights it modifies and write a standalone model.
@@ -265,6 +269,13 @@ foreach (string spec in values.GetValueOrDefault("--lora") ?? [])
 string? quantName = values.GetValueOrDefault("--quant")?.Last()?.ToLowerInvariant();
 if (quantName is not null && quantName is not ("nf4" or "nvfp4"))
     return Usage($"--quant '{quantName}' is not supported; use nf4 or nvfp4.");
+if (quantName == "nf4" && inputs.Count == 1 && File.Exists(inputs[0]) && inputs[0].EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase)
+    && HasFp8Weights(inputs[0]))
+{
+    if (autoName || loras.Count > 0 || recipe is not null || inputs.Any(IsShardSet))
+        return Usage("An FP8 checkpoint is quantized to NF4 as one file: give a single .safetensors input and an output file path.");
+    return WriteNf4FromFp8(inputs[0], output, flags.Contains("--force"));
+}
 bool mergeMode = recipe is not null || inputs.Count > 1 || castTo is not null || values.ContainsKey("--prefix") || values.ContainsKey("--drop")
     || loras.Count > 0 || inputs.Any(IsShardSet) || quantName is not null;
 if (mergeMode)
@@ -823,6 +834,60 @@ static bool IsQuantTarget(string key, Tensor tensor, string quantName) =>
     && tensor.Shape.Rank == 2 && tensor.Shape[0] > 0 && tensor.Shape[1] > 0
     && SafeTensorsMerger.IsCastable(tensor.DType)
     && (quantName == "nf4" || tensor.Shape[1] % 16 == 0);
+
+static bool HasFp8Weights(string path)
+{
+    using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([path]);
+    return checkpoint.Weights.Values.Any(w => w.Storage == HfWeightStorage.Fp8Block);
+}
+
+static Dictionary<string, string> ReadSourceMetadata(string path)
+{
+    using FileStream stream = File.OpenRead(path);
+    Span<byte> length = stackalloc byte[sizeof(long)];
+    stream.ReadExactly(length);
+    byte[] header = new byte[System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(length)];
+    stream.ReadExactly(header);
+    Dictionary<string, string> metadata = new(StringComparer.Ordinal);
+    using JsonDocument document = JsonDocument.Parse(header);
+    if (document.RootElement.TryGetProperty("__metadata__", out JsonElement entries))
+    {
+        foreach (JsonProperty entry in entries.EnumerateObject()) metadata[entry.Name] = entry.Value.GetString() ?? "";
+    }
+    return metadata;
+}
+
+static int WriteNf4FromFp8(string input, string output, bool force)
+{
+    if (File.Exists(output) && !force)
+    {
+        Console.Error.WriteLine($"Output already exists: {output}. Add --force to replace it.");
+        return 1;
+    }
+    Dictionary<string, string> metadata = ReadSourceMetadata(input);
+    metadata["hartsy.quant"] = "nf4";
+    metadata["hartsy.converter"] = "CheckpointRepacker --quant nf4 (streaming)";
+    metadata.Remove("modelspec.hash_sha256");
+    using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([input]);
+    Stopwatch clock = Stopwatch.StartNew();
+    string sha = Nf4Codec.WriteFromFp8(source, output, metadata, message => Console.WriteLine($"  {message}"));
+    long bytes = new FileInfo(output).Length;
+    JsonObject manifest = new()
+    {
+        ["source"] = input,
+        ["source_bytes"] = new FileInfo(input).Length,
+        ["output"] = output,
+        ["output_bytes"] = bytes,
+        ["sha256"] = sha,
+        ["quant"] = "nf4",
+        ["block_size"] = Nf4Codec.DefaultBlockSize,
+        ["weights_quantized"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Fp8Block),
+        ["weights_plain"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Plain),
+    };
+    File.WriteAllText(output + ".manifest.json", manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    Console.WriteLine($"Wrote {output} ({bytes} bytes), sha256 {sha}, in {clock.Elapsed.TotalMinutes:F1} min.");
+    return 0;
+}
 
 static string ComputeDtypeName(DType dtype) =>
     dtype == DType.BF16 ? "bfloat16" : dtype == DType.F16 ? "float16" : "float32";

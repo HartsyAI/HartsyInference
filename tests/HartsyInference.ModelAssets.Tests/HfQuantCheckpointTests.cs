@@ -97,6 +97,58 @@ public sealed class HfQuantCheckpointTests : IDisposable
     }
 
     [Fact]
+    public void WriteFromFp8_StreamsEachExpertToNf4_WithinTheBlockBound()
+    {
+        const string expertName = "model.layers.0.mlp.experts.0.down_proj.weight";
+        string source = Path.Combine(_dir, "fp8.safetensors");
+        Tensor expert = Fp8(64, 128, seed: 6);
+        Tensor scale = new(new TensorShape(1, 1), DType.F32);
+        scale.AsSpan<float>()[0] = 0.03f;
+        Tensor norm = new(new TensorShape(16), DType.F32);
+        norm.AsSpan<float>().Fill(1.5f);
+        Dictionary<string, Tensor> tensors = new(StringComparer.Ordinal)
+        {
+            [expertName] = expert,
+            [expertName + "_scale_inv"] = scale,
+            ["model.norm.weight"] = norm,
+        };
+        try
+        {
+            SafeTensorsWriter.Save(source, tensors);
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+
+        string output = Path.Combine(_dir, "nf4.safetensors");
+        using (HfQuantCheckpoint src = HfQuantCheckpoint.OpenFiles([source]))
+        {
+            string sha = Nf4Codec.WriteFromFp8(src, output, new Dictionary<string, string> { ["hartsy.quant"] = "nf4" });
+            Assert.Equal(64, sha.Length);
+        }
+
+        using HfQuantCheckpoint dst = HfQuantCheckpoint.OpenFiles([output]);
+        Assert.Equal(2, dst.Weights.Count);
+        Assert.Equal(HfWeightStorage.Nf4, dst.Weights[expertName].Storage);
+        Assert.Equal(HfWeightStorage.Plain, dst.Weights["model.norm.weight"].Storage);
+        using HfQuantCheckpoint reference = HfQuantCheckpoint.OpenFiles([source]);
+        using Tensor want = reference.DequantizeF32(expertName);
+        using Tensor got = dst.DequantizeF32(expertName);
+        ReadOnlySpan<float> w = want.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> g = got.AsReadOnlySpan<float>();
+        Assert.Equal(w.Length, g.Length);
+        for (int b = 0; b < w.Length; b += Nf4Codec.DefaultBlockSize)
+        {
+            float blockMax = 0f;
+            int end = Math.Min(w.Length, b + Nf4Codec.DefaultBlockSize);
+            for (int i = b; i < end; i++) blockMax = MathF.Max(blockMax, MathF.Abs(w[i]));
+            for (int i = b; i < end; i++)
+                Assert.True(MathF.Abs(g[i] - w[i]) <= blockMax * Nf4Codec.MaxBlockError + 1e-6f, $"element {i}: nf4 {g[i]} vs fp8 {w[i]}");
+        }
+    }
+
+    [Fact]
     public void Nf4Expert_TargetsQ4_0AtNative_AndKeepsTheOtherPrecisions()
     {
         HfQuantWeight expert = new("model.layers.0.mlp.experts.0.down_proj.weight", new TensorShape(2048, 512),
