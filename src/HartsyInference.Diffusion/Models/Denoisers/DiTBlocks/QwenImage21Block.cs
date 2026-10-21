@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
@@ -34,6 +35,7 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
     private Tensor? _normQ, _normK;
     private Tensor? _gateUp, _mlpOut;
     private readonly List<Tensor> _owned = new();
+    private AttentionLayer? _attention;
 
     /// <summary>Creates a 2.1 block. Every projection is bias-free, so only weights are held.</summary>
     /// <param name="mlpDim">SwiGLU inner width (12288 for the released checkpoint); the stored <c>gate_up</c> is
@@ -80,6 +82,19 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
 
         if ((int)_gateUp.Shape[0] != 2 * _mlpDim)
             throw new ArgumentException($"{prefix}.img_mlp.gate_up.weight has {_gateUp.Shape[0]} rows; expected 2*{_mlpDim} (fused gate+up).");
+
+        // Head-major: the per-head QK RMSNorm needs the head dim last. Q and K are RMS-normed per head, so the call may
+        // narrow to F16.
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQ, Key = _toK, Value = _toV, Output = _toOut, QueryNorm = _normQ, KeyNorm = _normK, QueryNormEps = _eps,
+                KeyNormEps = _eps,
+            });
     }
 
     /// <inheritdoc/>
@@ -119,11 +134,15 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         Tensor ropeCos, Tensor ropeSin, Tensor causalMask, out Tensor keyCache, out Tensor valueCache)
     {
         int seq = (int)x.Shape[x.Shape.Rank - 2];
-        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, x, mod.Scale1Plus1, seq, ropeCos, ropeSin);
-        Tensor attn = Attend(backend, q, k, v, seq, seq, causalMask);
-        q.Dispose();
-        keyCache = k;
-        valueCache = v;
+        Tensor modulated = ModulateNorm(backend, x, mod.Scale1Plus1, seq, x.DType);
+        QkRotation rope = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, seq);
+        KvCache cache = new();
+        Tensor attn = _attention!.Forward(backend, modulated, modulated, new AttentionCallContext
+        {
+            QueryRotation = rope, KeyRotation = rope, Bias = causalMask, KvCapture = cache, ReleaseInputs = true,
+        });
+        keyCache = cache.Key!;
+        valueCache = cache.Value!;
         return FinishBlock(backend, x, attn, mod, seq);
     }
 
@@ -134,87 +153,52 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         Tensor ropeCos, Tensor ropeSin, Tensor? prefixKey, Tensor? prefixValue)
     {
         int seq = (int)x.Shape[x.Shape.Rank - 2];
-        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, x, mod.Scale1Plus1, seq, ropeCos, ropeSin);
-
-        int prefixLen = prefixKey is null ? 0 : (int)prefixKey.Shape[prefixKey.Shape.Rank - 3];
-        Tensor keys = k, values = v;
-        if (prefixLen > 0)
+        Tensor modulated = ModulateNorm(backend, x, mod.Scale1Plus1, seq, x.DType);
+        QkRotation rope = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, seq);
+        bool prefixed = prefixKey is not null && prefixKey.Shape[prefixKey.Shape.Rank - 3] > 0;
+        Tensor attn = _attention!.Forward(backend, modulated, modulated, new AttentionCallContext
         {
-            TensorShape joint = new TensorShape(1, prefixLen + seq, _numHeads, _headDim);
-            keys = new Tensor(joint, k.DType);
-            backend.Concat(keys, [prefixKey!, k], 1);
-            values = new Tensor(joint, v.DType);
-            backend.Concat(values, [prefixValue!, v], 1);
-            k.Dispose();
-            v.Dispose();
-        }
-
-        Tensor attn = Attend(backend, q, keys, values, seq, prefixLen + seq, null);
-        q.Dispose();
-        keys.Dispose();
-        values.Dispose();
+            QueryRotation = rope, KeyRotation = rope, ReleaseInputs = true,
+            KvRewrite = prefixed ? new PrefixKv(prefixKey!, prefixValue!) : null,
+        });
         return FinishBlock(backend, x, attn, mod, seq);
     }
 
-    /// <summary>Modulated LayerNorm, then the three projections, per-head QK RMSNorm and in-place interleaved RoPE.
-    /// Q/K/V are declared <c>[1, S, H, D]</c> so the RMSNorm's last dim is the head dim and the RoPE kernel — which
-    /// reads the same bytes as <c>[S, H·D]</c> — needs no reshape view.</summary>
-    private (Tensor Q, Tensor K, Tensor V) ProjectQkv(IBackend backend, Tensor x, Tensor scalePlus1, int seq,
-        Tensor ropeCos, Tensor ropeSin)
+    /// <summary>Keeps the prefix pass's rotated K/V as the target pass's cache.</summary>
+    private sealed class KvCache : IKvCapture
     {
-        DType act = x.DType;
-        Tensor modulated = ModulateNorm(backend, x, scalePlus1, seq, act);
-        TensorShape heads = new TensorShape(1, seq, _numHeads, _headDim);
+        public Tensor? Key, Value;
 
-        Tensor q = new Tensor(heads, act);
-        backend.Linear(q, modulated, _toQ!, null);
-        Tensor k = new Tensor(heads, act);
-        backend.Linear(k, modulated, _toK!, null);
-        Tensor v = new Tensor(heads, act);
-        backend.Linear(v, modulated, _toV!, null);
-        modulated.Dispose();
-
-        Tensor qn = new Tensor(heads, act);
-        backend.RmsNorm(qn, q, _normQ!, _eps);
-        q.Dispose();
-        Tensor kn = new Tensor(heads, act);
-        backend.RmsNorm(kn, k, _normK!, _eps);
-        k.Dispose();
-
-        backend.WanRopeInterleaved(qn, ropeCos, ropeSin, seq, _numHeads, _headDim);
-        backend.WanRopeInterleaved(kn, ropeCos, ropeSin, seq, _numHeads, _headDim);
-        return (qn, kn, v);
+        public void Capture(Tensor k, Tensor v) => (Key, Value) = (k, v);
     }
 
-    /// <summary>Attention plus the output projection, returning <c>[1, S, hidden]</c>.</summary>
-    /// <remarks>Head-major, not the token-major kernel. Token-major wants strict rank-2 <c>[S, heads·headDim]</c>,
-    /// but the per-head QK RMSNorm needs the head dim last, so Q/K/V must be rank-4 — and reshaping them into
-    /// rank-2 would hand the backend a NEW tensor object whose device-cache entry is keyed separately from its
-    /// parent's, so the kernel would read whatever stale bytes the view's host buffer holds. The explicit permute
-    /// is a real copy and is what every other DiT in this repo does.</remarks>
-    private Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int qSeq, int kvSeq, Tensor? mask)
+    /// <summary>Prepends the cached prefix K/V to the target's own <c>[1, S, H, D]</c> K/V.</summary>
+    private sealed class PrefixKv(Tensor key, Tensor value) : IKvRewrite
     {
-        DType act = q.DType;
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        // Q and K are RMS-normed per head, so pre-softmax scores are bounded and F16 accumulation is safe.
-        Tensor qh = new Tensor(new TensorShape(1, _numHeads, qSeq, _headDim), act);
-        backend.Permute0213(qh, q, qSeq, _numHeads, _headDim);
-        Tensor kh = new Tensor(new TensorShape(1, _numHeads, kvSeq, _headDim), act);
-        backend.Permute0213(kh, k, kvSeq, _numHeads, _headDim);
-        Tensor vh = new Tensor(new TensorShape(1, _numHeads, kvSeq, _headDim), act);
-        backend.Permute0213(vh, v, kvSeq, _numHeads, _headDim);
-        Tensor attn = new Tensor(new TensorShape(1, _numHeads, qSeq, _headDim), act);
-        backend.ScaledDotProductAttention(attn, qh, kh, vh, mask, scale, allowF16: true);
-        qh.Dispose(); kh.Dispose(); vh.Dispose();
-
-        Tensor flat = new Tensor(new TensorShape(1, qSeq, _hiddenSize), act);
-        backend.Permute0213(flat, attn, _numHeads, qSeq, _headDim);
-        attn.Dispose();
-
-        Tensor projected = new Tensor(new TensorShape(1, qSeq, _hiddenSize), act);
-        backend.Linear(projected, flat, _toOut!, null);
-        flat.Dispose();
-        return projected;
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
+        {
+            TensorShape joint = new(1, key.Shape[1] + k.Shape[1], k.Shape[2], k.Shape[3]);
+            Tensor? keys = null, values = null;
+            try
+            {
+                keys = new(joint, k.DType);
+                backend.Concat(keys, [key, k], 1);
+                values = new(joint, v.DType);
+                backend.Concat(values, [value, v], 1);
+                return (keys, values);
+            }
+            catch
+            {
+                keys?.Dispose();
+                values?.Dispose();
+                throw;
+            }
+            finally
+            {
+                k.Dispose();
+                v.Dispose();
+            }
+        }
     }
 
     /// <summary>The two gated residuals and the MLP between them: <c>x += gate1·attn</c>, then

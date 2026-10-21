@@ -14,6 +14,14 @@ public enum AttentionProjection
     /// otherwise gate and Q on the query input and K and V on the key/value input, so an int8 backend quantizes each input
     /// once.</summary>
     GroupedByInput,
+
+    /// <summary>One Linear of a fused <c>[q|k|v]</c> weight, then three <see cref="IBackend.SliceLastDim"/> copies;
+    /// self-attention only.</summary>
+    FusedSlice,
+
+    /// <summary>One Linear of a fused <c>[q|k|v]</c> weight, then <see cref="IBackend.QkvSplitNorm"/> splits it and norms Q
+    /// and K per head in one op; self-attention with a per-head norm of one epsilon.</summary>
+    FusedSplitNorm,
 }
 
 /// <summary>The normalization applied to Q and K before attention.</summary>
@@ -118,20 +126,32 @@ public sealed record AttentionLayerConfig
             throw new ArgumentException("The per-head gate is projected with the query, grouped by input.");
         if (QkNorm == AttentionQkNorm.FullWidthRms && TokenMajorRoute != AttentionRoute.Dense)
             throw new ArgumentException("The full-width RMS norm attends head-major.");
+        if (Projection is AttentionProjection.FusedSlice or AttentionProjection.FusedSplitNorm
+            && (KvHeads != Heads || Gate != AttentionGate.None))
+            throw new ArgumentException("A fused [q|k|v] projection has equal head counts and no gate.");
+        if (Projection == AttentionProjection.FusedSplitNorm && QkNorm != AttentionQkNorm.PerHead)
+            throw new ArgumentException("The fused split-norm projection norms Q and K per head.");
     }
 }
 
 /// <summary>The weights of one attention layer, borrowed from the model, which loads, slices and folds them.</summary>
 public sealed record AttentionLayerWeights
 {
-    /// <summary>Query projection.</summary>
-    public required Tensor Query { get; init; }
+    /// <summary>Query projection; null with a fused projection.</summary>
+    public Tensor? Query { get; init; }
 
-    /// <summary>Key projection.</summary>
-    public required Tensor Key { get; init; }
+    /// <summary>Key projection; null with a fused projection.</summary>
+    public Tensor? Key { get; init; }
 
-    /// <summary>Value projection.</summary>
-    public required Tensor Value { get; init; }
+    /// <summary>Value projection; null with a fused projection.</summary>
+    public Tensor? Value { get; init; }
+
+    /// <summary>Fused <c>[q|k|v]</c> projection, for <see cref="AttentionProjection.FusedSlice"/> and
+    /// <see cref="AttentionProjection.FusedSplitNorm"/>.</summary>
+    public Tensor? Qkv { get; init; }
+
+    /// <summary>Fused projection bias.</summary>
+    public Tensor? QkvBias { get; init; }
 
     /// <summary>Output projection; null for a stream whose attention output the model uses unprojected.</summary>
     public Tensor? Output { get; init; }

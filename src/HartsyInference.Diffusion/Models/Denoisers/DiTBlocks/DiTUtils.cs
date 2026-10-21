@@ -235,58 +235,6 @@ public static unsafe class DiTUtils
         }
     }
 
-    /// <summary>Concatenates two [B, H, S, D] tensors along the sequence dimension in head-major (multi-head) layout. Joint-attention path: stacks ctx then img per head.</summary>
-    public static void ConcatAlongSeqDimMultiHead(Tensor output, Tensor first, Tensor second,
-        int batch, int numHeads, int firstSeqLen, int secondSeqLen, int headDim)
-    {
-        float* firstPtr = (float*)first.DataPointer;
-        float* secondPtr = (float*)second.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int totalSeqLen = firstSeqLen + secondSeqLen;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < numHeads; h++)
-            {
-                int outBase = (b * numHeads + h) * totalSeqLen * headDim;
-                int firstBase = (b * numHeads + h) * firstSeqLen * headDim;
-                int secondBase = (b * numHeads + h) * secondSeqLen * headDim;
-
-                long firstBytes = (long)firstSeqLen * headDim * sizeof(float);
-                Buffer.MemoryCopy(firstPtr + firstBase, outPtr + outBase, firstBytes, firstBytes);
-
-                long secondBytes = (long)secondSeqLen * headDim * sizeof(float);
-                Buffer.MemoryCopy(secondPtr + secondBase, outPtr + outBase + firstSeqLen * headDim, secondBytes, secondBytes);
-            }
-        }
-    }
-
-    /// <summary>Splits a [B, H, S1+S2, D] tensor along the sequence dimension in head-major layout. Inverse of <see cref="ConcatAlongSeqDimMultiHead"/>.</summary>
-    public static void SplitAlongSeqDimMultiHead(Tensor first, Tensor second, Tensor input,
-        int batch, int numHeads, int firstSeqLen, int secondSeqLen, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* firstPtr = (float*)first.DataPointer;
-        float* secondPtr = (float*)second.DataPointer;
-        int totalSeqLen = firstSeqLen + secondSeqLen;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < numHeads; h++)
-            {
-                int inBase = (b * numHeads + h) * totalSeqLen * headDim;
-                int firstBase = (b * numHeads + h) * firstSeqLen * headDim;
-                int secondBase = (b * numHeads + h) * secondSeqLen * headDim;
-
-                long firstBytes = (long)firstSeqLen * headDim * sizeof(float);
-                Buffer.MemoryCopy(inPtr + inBase, firstPtr + firstBase, firstBytes, firstBytes);
-
-                long secondBytes = (long)secondSeqLen * headDim * sizeof(float);
-                Buffer.MemoryCopy(inPtr + inBase + firstSeqLen * headDim, secondPtr + secondBase, secondBytes, secondBytes);
-            }
-        }
-    }
-
     /// <summary>Reshapes [B, S, D] → [B, numHeads, S, headDim] returning a freshly allocated tensor.</summary>
     public static Tensor ReshapeToMultiHead(Tensor input, int batch, int seqLen, int numHeads, int headDim)
     {

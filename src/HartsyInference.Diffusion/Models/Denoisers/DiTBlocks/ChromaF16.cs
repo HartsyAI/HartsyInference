@@ -34,6 +34,9 @@ public static unsafe class ChromaF16
     private static bool TraceEnabled => EngineKnobs.ChromaF16trace.Value;
     private static int _traceCallsLeft = TraceEnabled ? 2000 : 0;
 
+    /// <summary>True while the trace still has probes to spend.</summary>
+    internal static bool Tracing => _traceCallsLeft > 0;
+
     /// <summary>Returns a value-scaled F32 copy of a bias tensor (weight damping rides the GEMM alpha, but the
     /// epilogue adds bias AFTER alpha, so the bias must carry the damp factor in its values).</summary>
     public static Tensor DampBias(Tensor bias, float damp)

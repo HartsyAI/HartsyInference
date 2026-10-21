@@ -202,6 +202,113 @@ public sealed class JointAttentionTests
         Assert.Empty(backend.Ops);
     }
 
+    [Fact]
+    public void ARotatedStream_RotatesItsOwnRowsAfterTheNormsAndBeforeTheConcat()
+    {
+        AttentionTraceBackend backend = new();
+        JointAttention joint = new(Config(0, 1), [Stream(1), Stream(2)]);
+        (Tensor img, Tensor txt) = Inputs();
+        Tensor table = new(new TensorShape(ImgRows, HeadDim), DType.F32);
+        QkRotation pairs = new(QkRotationKind.InterleavedPairs, table, table, ImgRows);
+        Span<Tensor?> attended = [null, null];
+
+        joint.Attend(backend, [img, txt], attended, new JointCallContext
+        {
+            RotatedStream = 0, StreamRotation = new AttentionCallContext { QueryRotation = pairs, KeyRotation = pairs },
+        });
+
+        int norms = backend.Ops.IndexOf("RmsNorm w207"), concat = backend.Ops.IndexOf("Concat rows 6+3");
+        Assert.Equal([norms + 1, norms + 2], backend.Ops.Select((op, i) => (op, i))
+            .Where(x => x.op == "WanRopeInterleaved heads=4 d=2 seq=6").Select(x => x.i));
+        Assert.Equal(norms + 3, concat);
+    }
+
+    [Fact]
+    public void ARotatedStreamWithAJointRotation_IsRefusedBeforeAnyOp()
+    {
+        AttentionTraceBackend backend = new();
+        JointAttention joint = new(Config(0, 1), [Stream(1), Stream(2)]);
+        (Tensor img, Tensor txt) = Inputs();
+        Tensor table = new(new TensorShape(ImgRows, HeadDim), DType.F32);
+        QkRotation pairs = new(QkRotationKind.InterleavedPairs, table, table, ImgRows);
+        JointCallContext both = new()
+        {
+            RotatedStream = 0, StreamRotation = new AttentionCallContext { QueryRotation = pairs, KeyRotation = pairs },
+            Joint = new AttentionCallContext { QueryRotation = pairs, KeyRotation = pairs },
+        };
+
+        Assert.Throws<ArgumentException>(() => joint.Attend(backend, [img, txt], new Tensor?[2], both));
+        Assert.Empty(backend.Ops);
+    }
+
+    [Fact]
+    public unsafe void ACaptureWhoseAttentionThrows_GetsItsKvFreed()
+    {
+        AttentionTraceBackend backend = new() { FailAttention = true };
+        AttentionLayer layer = Stream(1);
+        Tensor x = new(new TensorShape(1, ImgRows, Inner), DType.F32);
+        KvHolder capture = new();
+
+        Assert.Throws<OutOfMemoryException>(() => layer.Forward(backend, x, x, new AttentionCallContext { KvCapture = capture }));
+        Assert.Throws<ObjectDisposedException>(() => (nint)capture.Key!.DataPointer);
+        Assert.Throws<ObjectDisposedException>(() => (nint)capture.Value!.DataPointer);
+    }
+
+    [Fact]
+    public void AKvRewrite_ChangesTheKeyLength_AndACaptureKeepsTheRotatedKv()
+    {
+        AttentionTraceBackend backend = new();
+        AttentionLayer layer = Stream(1);
+        Tensor x = new(new TensorShape(1, ImgRows, Inner), DType.F32);
+        KvHolder capture = new();
+
+        layer.Forward(backend, x, x, new AttentionCallContext { KvRewrite = new Prepend(2, backend.Ops), KvCapture = capture });
+
+        Assert.Equal(["Rewrite", "Permute0213 6,4,2", "Permute0213 8,4,2", "Permute0213 8,4,2", "Attention Dense heads=4/4 bounded=False"],
+            backend.Ops.Skip(backend.Ops.IndexOf("Rewrite")).Take(5));
+        Assert.Equal(new TensorShape(1, ImgRows + 2, Heads, HeadDim), capture.Key!.Shape);
+        Assert.Equal(new TensorShape(1, ImgRows + 2, Heads, HeadDim), capture.Value!.Shape);
+    }
+
+    [Fact]
+    public unsafe void AFailingKvRewrite_Propagates_AndKeepsTheKvItTookOver()
+    {
+        AttentionLayer layer = Stream(1);
+        Tensor x = new(new TensorShape(1, ImgRows, Inner), DType.F32);
+        Failing failing = new();
+        Assert.Throws<InvalidOperationException>(() => layer.Forward(new AttentionTraceBackend(), x, x,
+            new AttentionCallContext { KvRewrite = failing }));
+        Assert.NotEqual(0, (nint)failing.Key!.DataPointer);
+    }
+
+    private sealed class Prepend(int rows, List<string> ops) : IKvRewrite
+    {
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
+        {
+            ops.Add("Rewrite");
+            TensorShape shape = new(k.Shape[0], k.Shape[1] + rows, k.Shape[2], k.Shape[3]);
+            return (new Tensor(shape, k.DType), new Tensor(shape, v.DType));
+        }
+    }
+
+    private sealed class Failing : IKvRewrite
+    {
+        public Tensor? Key;
+
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
+        {
+            Key = k;
+            throw new InvalidOperationException("peer aborted");
+        }
+    }
+
+    private sealed class KvHolder : IKvCapture
+    {
+        public Tensor? Key, Value;
+
+        public void Capture(Tensor k, Tensor v) => (Key, Value) = (k, v);
+    }
+
     private sealed class Rotation(List<string> ops) : IQkRotation, IHeadMajorQkRotation
     {
         public void RotateTokenMajor(IBackend backend, Tensor q, Tensor k, int heads, int kvHeads) =>

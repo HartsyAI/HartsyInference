@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
@@ -21,6 +22,8 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
     private Tensor? _toVWeight, _toVBias;
     private Tensor? _projMlpWeight, _projMlpBias;
     private Tensor? _projOutWeight, _projOutBias;
+
+    private AttentionLayer? _attention;
 
     /// <summary>Creates a single-stream block; requires <c>numHeads * headDim == hiddenSize</c>.</summary>
     public HunyuanImageSingleBlock(int hiddenSize, int numHeads, int headDim, int mlpDim, float qkNormEps = 1e-6f)
@@ -54,6 +57,13 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
 
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+        // Q/K are RMS-normed, so the scores are bounded and the call may narrow to F16.
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+            },
+            new AttentionNormWeights(_normQ.Weight, _normK.Weight, _normQ.Eps, _normK.Eps));
 
         _projMlpWeight = weights[$"{prefix}.proj_mlp.weight"];
         weights.TryGetValue($"{prefix}.proj_mlp.bias", out _projMlpBias);
@@ -87,16 +97,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
     }
 
     /// <summary>Forward pass on concatenated <c>[image, text]</c> sequence. Image-only RoPE is applied to the image portion of joint Q/K. Returns <c>(image, text)</c>.</summary>
-    // GPU-residency rewrite (mirrors the verified QwenImageBlock): every glue op (join concat / LayerNorm / AdaLN
-    // modulation / QK-norm / head reshape / feature-dim concat / gated residual / split) runs as an IBackend op so the
-    // activation stays device-resident — no per-op DataPointer D2H sync barriers (the old ConcatImageText /
-    // DiTUtils / QkNorm / AdaLNModulation / ConcatFeatureDim / SplitImageText host path D2H-synced every intermediate).
-    // Head reshape = declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so QK-norm runs over
-    // headDim with no reshape, then Permute0213 to/from [B, H, S, D]. The [img, txt] concat preserves image-first
-    // order (Concat dim 1); the output split takes each batch item's rows (image rows first). The ONLY op left on the CPU is the
-    // image-only RoPE and its image-portion extract/write (ApplyRopeToImagePortion) — the image sub-region of the
-    // joint [B, H, S, D] is per-head strided (not a contiguous row-block), so a clean GPU slice-write is not available;
-    // this is one contained host excursion over a small tensor, and RoPE itself is host-only (as in QwenImageBlock).
+    // A batch above one rotates the image rows on the host after the head permute.
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT = 1)
     {
@@ -104,7 +105,6 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
         int totalSeqLen = imgSeqLen + txtSeqLen;
-        float scale = 1.0f / MathF.Sqrt(_headDim);
 
         // Stream activation dtype follows the input (F16 on the numerics.ditF16 hot path; HunyuanImageTransformer
         // keeps its own streams F32 — see the comment at that cast site). Modulation params stay F32 (temb is
@@ -114,7 +114,6 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         TensorShape jointShape = new TensorShape(batch, totalSeqLen, _hiddenSize);
         // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
         TensorShape jointHeads = new TensorShape(batch, totalSeqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
         TensorShape mlpShape = new TensorShape(batch, totalSeqLen, _mlpDim);
 
         // ── 1. Concat [img, txt] along the seq dim (image first) ──
@@ -142,51 +141,12 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         backend.Gelu(mlpActivated, mlpProj);
         mlpProj.Dispose();
 
-        // ── 4. QK-norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor qn = new Tensor(jointHeads, act);
-        backend.RmsNorm(qn, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kn = new Tensor(jointHeads, act);
-        backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        // ── 5. Image-only RoPE on the leading image rows of joint Q/K, BEFORE the head permute: the pre-permute
-        // [B(=1), S, H, D] layout is exactly WanRopeInterleaved's [S, heads·headDim] contract with image tokens
-        // first, so seqLen=imgSeqLen rotates the image portion in place and leaves text rows untouched — the last
-        // host excursion in the block (full Q/K D2H per block per step) becomes one GPU-resident op.
-        if (batch == 1)
-        {
-            Span<int> ropeDims = imgPackedT > 1 ? stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW }
-                : stackalloc int[2] { imgPackedH, imgPackedW };
-            rope.ApplyGpu(backend, qn, kn, _numHeads, ropeDims);
-        }
-
-        // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor qMh = new Tensor(mhShape, act);
-        backend.Permute0213(qMh, qn, totalSeqLen, _numHeads, _headDim);
-        qn.Dispose();
-        Tensor kMh = new Tensor(mhShape, act);
-        backend.Permute0213(kMh, kn, totalSeqLen, _numHeads, _headDim);
-        kn.Dispose();
-        Tensor vMh = new Tensor(mhShape, act);
-        backend.Permute0213(vMh, v, totalSeqLen, _numHeads, _headDim);
-        v.Dispose();
-
-        if (batch != 1)   // host fallback (per-head strided extract + CPU rotation) — batched inference only
-            ApplyRopeToImagePortion(qMh, kMh, rope, batch, _numHeads, totalSeqLen, imgSeqLen, imgPackedH, imgPackedW, imgPackedT);
-
-        // ── 7. Joint scaled dot-product attention (no mask) ──
-        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
-        Tensor attnOut = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale, allowF16: true);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        // ── 8. Permute back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attnFlat = new Tensor(jointShape, act);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, totalSeqLen, _headDim);
-        attnOut.Dispose();
+        // ── 4-8. QK-norm, image-only RoPE on the leading image rows, attention (QK RMS-norm bounds the scores), permuted back ──
+        HunyuanImageRotation imageRope = new(rope, imgPackedT, imgPackedH, imgPackedW);
+        AttentionCallContext context = batch == 1
+            ? new AttentionCallContext { Rotation = imageRope }
+            : new AttentionCallContext { HeadMajorRotation = new LeadingRowsRotation(imgSeqLen, imageRope) };
+        Tensor attnFlat = _attention!.Attend(backend, q, k, v, jointShape, in context);
 
         // ── 9. Concat [attn, mlp] along the feature dim, then proj_out ──
         int concatDim = _hiddenSize + _mlpDim;
@@ -217,66 +177,5 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         result.Dispose();
 
         return (imgOut, txtOut);
-    }
-
-    /// <summary>Applies image-only RoPE to a joint <c>[B, H, S_img+S_txt, D]</c> Q/K. Image tokens occupy the first <paramref name="imgSeqLen"/> sequence positions.</summary>
-    private static void ApplyRopeToImagePortion(Tensor qMh, Tensor kMh, HunyuanImageRope rope,
-        int batch, int numHeads, int totalSeqLen, int imgSeqLen, int imgPackedH, int imgPackedW, int imgPackedT = 1)
-    {
-        int headDim = rope.HeadDim;
-        TensorShape imgPortionShape = new TensorShape(batch, numHeads, imgSeqLen, headDim);
-        Tensor qImg = new Tensor(imgPortionShape, DType.F32);
-        Tensor kImg = new Tensor(imgPortionShape, DType.F32);
-        ExtractImagePortion(qImg, qMh, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
-        ExtractImagePortion(kImg, kMh, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
-
-        if (imgPackedT > 1)
-        {
-            Span<int> dims = stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW };
-            rope.ApplyJoint(qImg, kImg, batch, numHeads, dims);
-        }
-        else
-            rope.ApplyImage(qImg, kImg, batch, numHeads, imgPackedH, imgPackedW);
-
-        WriteImagePortion(qMh, qImg, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
-        WriteImagePortion(kMh, kImg, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
-        qImg.Dispose();
-        kImg.Dispose();
-    }
-
-    private static void ExtractImagePortion(Tensor output, Tensor input,
-        int batch, int numHeads, int totalSeqLen, int imgSeqLen, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long copyBytes = (long)imgSeqLen * headDim * sizeof(float);
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < numHeads; h++)
-            {
-                long inOffset = ((long)b * numHeads + h) * totalSeqLen * headDim;
-                long outOffset = ((long)b * numHeads + h) * imgSeqLen * headDim;
-                Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, copyBytes, copyBytes);
-            }
-        }
-    }
-
-    private static void WriteImagePortion(Tensor output, Tensor input,
-        int batch, int numHeads, int totalSeqLen, int imgSeqLen, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long copyBytes = (long)imgSeqLen * headDim * sizeof(float);
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < numHeads; h++)
-            {
-                long outOffset = ((long)b * numHeads + h) * totalSeqLen * headDim;
-                long inOffset = ((long)b * numHeads + h) * imgSeqLen * headDim;
-                Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, copyBytes, copyBytes);
-            }
-        }
     }
 }

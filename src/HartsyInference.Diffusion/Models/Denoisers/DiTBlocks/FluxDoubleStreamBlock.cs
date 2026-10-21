@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -41,6 +42,8 @@ public sealed class FluxDoubleStreamBlock
 
     // Text MLP: GELU(tanh)
     private readonly SwiGluFfn _txtFfn;
+
+    private JointAttention? _attention;
 
     /// <summary>Creates a FluxDoubleStreamBlock.</summary>
     /// <param name="hiddenSize">Model hidden dimension (3072 for Flux.1).</param>
@@ -145,7 +148,24 @@ public sealed class FluxDoubleStreamBlock
             weights[$"{prefix}.ff_context.net.0.proj.bias"],
             txtFfnOutWeight,
             txtFfnOutBias);
+
+        // Built after the damp, which replaces the output biases. QK RMS-norm bounds the scores, so the call may narrow to F16.
+        _attention = new JointAttention(
+            new JointAttentionConfig { Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [1, 0], AllowF16 = true },
+            [Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!, _toOutBias, _normQ, _normK),
+             Stream(_addQWeight!, _addQBias, _addKWeight!, _addKBias, _addVWeight!, _addVBias, _toAddOutWeight!, _toAddOutBias,
+                 _normAddedQ, _normAddedK)]);
     }
+
+    private AttentionLayer Stream(Tensor q, Tensor? qBias, Tensor k, Tensor? kBias, Tensor v, Tensor? vBias, Tensor output,
+        Tensor? outputBias, QkNorm normQ, QkNorm normK) => new(
+        new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead },
+        new AttentionLayerWeights
+        {
+            Query = q, QueryBias = qBias, Key = k, KeyBias = kBias, Value = v, ValueBias = vBias, Output = output,
+            OutputBias = outputBias, QueryNorm = normQ.Weight, KeyNorm = normK.Weight, QueryNormEps = normQ.Eps,
+            KeyNormEps = normK.Eps,
+        });
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
@@ -183,24 +203,11 @@ public sealed class FluxDoubleStreamBlock
     /// <param name="temb">Timestep embedding [B, hidden].</param>
     /// <param name="rope">Precomputed FluxRope (must have Precompute called for current resolution).</param>
     /// <returns>Updated (image, text) tensors.</returns>
-    // GPU-residency rewrite (mirrors the verified HunyuanImageBlock): every glue op (LayerNorm / AdaLN modulation /
-    // QK-norm / head reshape / joint concat / split / gated residual) runs as an IBackend op so the activation stays
-    // device-resident across the whole block — no per-op DataPointer D2H sync barriers (the old LayerNormNoAffine /
-    // AdaLNModulation / QkNorm.Forward / ReshapeTo(From)MultiHead / ConcatAlongSeqDim / SplitAlongSeqDim host loops
-    // D2H-synced every intermediate around every GEMM). Head reshape = declaring Q/K/V directly as [B, S, H, D]
-    // (byte-identical to [B, S, hidden]) so QK-norm's RmsNorm runs over headDim with no reshape. The [txt, img]
-    // joint concat happens PRE-permute along the seq dim (Concat dim 1 of [B, S, H, D] — text first, matching the
-    // rope table order), so RoPE runs on the pre-permute joint via FluxRope.ApplyGpu (same interleaved-pair
-    // rotation, bit-identical to the host path), then one Permute0213 per joint tensor. The post-attention split is
-    // a permute-back to [B, S, hidden] + SliceRows (B=1: text rows first, then image); B>1 keeps host fallbacks for
-    // RoPE and the split, exactly like the Hunyuan blocks.
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
-        int totalSeqLen = imgSeqLen + txtSeqLen;
-        float scale = 1.0f / MathF.Sqrt(_headDim);
         // Activation dtype follows the INPUT (the Chroma/Krea2 pattern): FluxTransformer casts the token
         // streams to F16 once before the block loop on the numerics.ditF16 path; the AdaLN modulation vectors
         // stay F32 (F16 kernels take an F16 activation + F32 params). The F32 path is byte-identical.
@@ -208,12 +215,6 @@ public sealed class FluxDoubleStreamBlock
 
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
-        // [B, S, H, D] views (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
-        TensorShape imgHeads = new TensorShape(batch, imgSeqLen, _numHeads, _headDim);
-        TensorShape txtHeads = new TensorShape(batch, txtSeqLen, _numHeads, _headDim);
-        TensorShape jointHeads = new TensorShape(batch, totalSeqLen, _numHeads, _headDim);
-        TensorShape jointMhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
-        TensorShape jointFlat = new TensorShape(batch, totalSeqLen, _hiddenSize);
 
         // ── 1. AdaLN modulation ──
         Tensor[] imgMod = _imgModulation.Forward(backend, temb);
@@ -223,109 +224,18 @@ public sealed class FluxDoubleStreamBlock
         Tensor imgModulated = DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
         Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
 
-        // ── 3. Q/K/V projections (declared [B, S, H, D] so QK-norm + permute need no reshape view) ──
-        Tensor imgQ = new Tensor(imgHeads, act);
-        backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgHeads, act);
-        backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgHeads, act);
-        backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
-        imgModulated.Dispose();
-
-        Tensor txtQ = new Tensor(txtHeads, act);
-        backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
-        Tensor txtK = new Tensor(txtHeads, act);
-        backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
-        Tensor txtV = new Tensor(txtHeads, act);
-        backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
-        txtModulated.Dispose();
-
-        // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor imgQn = new Tensor(imgHeads, act);
-        backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
-        imgQ.Dispose();
-        Tensor imgKn = new Tensor(imgHeads, act);
-        backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
-        imgK.Dispose();
-
-        Tensor txtQn = new Tensor(txtHeads, act);
-        backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
-        txtQ.Dispose();
-        Tensor txtKn = new Tensor(txtHeads, act);
-        backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
-        txtK.Dispose();
-
-        // ── 5. Concatenate [txt, img] along the seq dim PRE-permute ([B, S, H, D], text first — same token
-        // order the old post-permute ConcatAlongSeqDim produced, and the order the rope tables were built in) ──
-        Tensor jointQPre = new Tensor(jointHeads, act);
-        backend.Concat(jointQPre, new Tensor[] { txtQn, imgQn }, 1);
-        txtQn.Dispose(); imgQn.Dispose();
-        Tensor jointKPre = new Tensor(jointHeads, act);
-        backend.Concat(jointKPre, new Tensor[] { txtKn, imgKn }, 1);
-        txtKn.Dispose(); imgKn.Dispose();
-        Tensor jointVPre = new Tensor(jointHeads, act);
-        backend.Concat(jointVPre, new Tensor[] { txtV, imgV }, 1);
-        txtV.Dispose(); imgV.Dispose();
-
-        // ── 6. RoPE BEFORE the head permute: the pre-permute [B(=1), S, H, D] layout is exactly
-        // WanRopeInterleaved's [S, heads·headDim] contract, so the whole joint Q/K rotates in one GPU-resident
-        // op (was a full D2H→host-trig→H2D excursion per block per step).
-        if (batch == 1)
-            rope.ApplyGpu(backend, jointQPre, jointKPre, _numHeads);
-
-        // ── 7. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor jointQ = new Tensor(jointMhShape, act);
-        backend.Permute0213(jointQ, jointQPre, totalSeqLen, _numHeads, _headDim);
-        jointQPre.Dispose();
-        Tensor jointK = new Tensor(jointMhShape, act);
-        backend.Permute0213(jointK, jointKPre, totalSeqLen, _numHeads, _headDim);
-        jointKPre.Dispose();
-        Tensor jointV = new Tensor(jointMhShape, act);
-        backend.Permute0213(jointV, jointVPre, totalSeqLen, _numHeads, _headDim);
-        jointVPre.Dispose();
-
-        // Host RoPE fallback (batched inference only; B=1 runs the GPU path at 6) ──
-        if (batch != 1)
-            rope.Forward(jointQ, jointK, batch, _numHeads, totalSeqLen);
-
-        // ── 8. Scaled dot-product attention ──
-        Tensor jointAttnOut = new Tensor(jointMhShape, act);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
-        jointQ.Dispose();
-        jointK.Dispose();
-        jointV.Dispose();
-
-        // ── 9. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] ──
-        Tensor jointAttnFlat = new Tensor(jointFlat, act);
-        backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
-        jointAttnOut.Dispose();
-
-        Tensor txtAttn, imgAttn;
-        if (batch == 1)
-        {
-            // B=1: text rows then image rows are contiguous row-blocks → device SliceRows.
-            txtAttn = new Tensor(txtShape, act);
-            backend.SliceRows(txtAttn, jointAttnFlat, 0);
-            imgAttn = new Tensor(imgShape, act);
-            backend.SliceRows(imgAttn, jointAttnFlat, txtSeqLen);
-        }
-        else
-        {
-            (txtAttn, imgAttn) = DiTUtils.SplitAlongSeqDim(jointAttnFlat, txtSeqLen);   // host fallback, batched only
-        }
-        jointAttnFlat.Dispose();
-
-        // ── 10. Output projections + gated residual (input + gate*value) ──
-        Tensor imgAttnProj = new Tensor(imgShape, act);
-        backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
-        imgAttn.Dispose();
+        // ── 3-10. Joint attention over [txt, img], output projections, gated residuals ──
+        AttentionCallContext joint = batch == 1
+            ? new AttentionCallContext { Rotation = rope, Bias = attnBias }
+            : new AttentionCallContext { HeadMajorRotation = rope, Bias = attnBias };
+        Span<Tensor?> attended = [null, null];
+        _attention!.Attend(backend, [imgModulated, txtModulated], attended, new JointCallContext { Joint = joint, ReleaseInputs = true });
+        Tensor imgAttnProj = _attention.ProjectOutput(backend, 0, attended[0]!);
         Tensor imgAfterAttn = new Tensor(imgShape, act);
         backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
         imgAttnProj.Dispose();
 
-        Tensor txtAttnProj = new Tensor(txtShape, act);
-        backend.Linear(txtAttnProj, txtAttn, _toAddOutWeight!, _toAddOutBias);
-        txtAttn.Dispose();
+        Tensor txtAttnProj = _attention.ProjectOutput(backend, 1, attended[1]!);
         Tensor txtAfterAttn = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
         txtAttnProj.Dispose();

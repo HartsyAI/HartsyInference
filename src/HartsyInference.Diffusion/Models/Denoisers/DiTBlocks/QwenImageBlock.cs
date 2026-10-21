@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
@@ -48,6 +49,8 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
 
     private readonly SwiGluFfn _imgFfn;
     private readonly SwiGluFfn _txtFfn;
+
+    private JointAttention? _attention;
 
     /// <summary>Creates a Qwen-Image dual-stream block.</summary>
     /// <param name="hiddenSize">Model hidden dimension (3072 for V1).</param>
@@ -147,6 +150,39 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
             weights[$"{prefix}.txt_mlp.net.0.proj.bias"],
             txtFfnOutWeight,
             txtFfnOutBias);
+
+        // Built after the damp, which replaces the output biases. QK RMS-norm bounds the scores, so the call may narrow to F16.
+        _attention = new JointAttention(
+            new JointAttentionConfig { Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [1, 0], AllowF16 = true },
+            [Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!, _toOutBias, _normQ, _normK),
+             Stream(_addQWeight!, _addQBias, _addKWeight!, _addKBias, _addVWeight!, _addVBias, _toAddOutWeight!, _toAddOutBias,
+                 _normAddedQ, _normAddedK)]);
+    }
+
+    private AttentionLayer Stream(Tensor q, Tensor? qBias, Tensor k, Tensor? kBias, Tensor v, Tensor? vBias, Tensor output,
+        Tensor? outputBias, QkNorm normQ, QkNorm normK) => new(
+        new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead },
+        new AttentionLayerWeights
+        {
+            Query = q, QueryBias = qBias, Key = k, KeyBias = kBias, Value = v, ValueBias = vBias, Output = output,
+            OutputBias = outputBias, QueryNorm = normQ.Weight, KeyNorm = normK.Weight, QueryNormEps = normQ.Eps,
+            KeyNormEps = normK.Eps,
+        });
+
+    /// <summary>The batched fallback: QwenImageRope's host rotation of the joint head-major Q and K.</summary>
+    private sealed class JointRowsRotation(QwenImageRope rope, int packedH, int packedW, int txtSeqLen, int txtPositionStart,
+        (int H, int W)[] refGrids) : IHeadMajorQkRotation
+    {
+        public void RotateHeadMajor(IBackend backend, Tensor q, Tensor k, int batch, int heads, int kvHeads, int tokens) =>
+            rope.ApplyJoint(q, k, batch, heads, packedH, packedW, txtSeqLen, txtPositionStart, refGrids);
+    }
+
+    /// <summary>The context-parallel K/V rendezvous: this rank's local <c>[txt ∥ img_rank]</c> K/V for <c>[txt ∥ img_full]</c>,
+    /// the text prefix from its own replica. Allocates and synchronizes, so a CP step is never captured.</summary>
+    private sealed class CpExchangeRewrite(CpKvExchange exchange, int rank, int prefixRows) : IKvRewrite
+    {
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v) =>
+            exchange.Exchange(rank, k, v, replicatedPrefixRows: prefixRows);
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -179,15 +215,7 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
     }
 
     /// <summary>Each modulation produces <c>[shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp]</c>. Joint attention concats <c>[txt, img]</c>; QK rotated by <see cref="QwenImageRope"/> separately for image (per-token <c>[0, row, col]</c>) and text (offset by <paramref name="txtPositionStart"/>) before concat. Returns <c>(image, text)</c>.</summary>
-    // GPU-residency rewrite (mirrors the verified ChromaDoubleStreamBlock): every glue op (LayerNorm / AdaLN
-    // modulation / QK-norm / reshape-to-heads / joint concat / split / gated residual) runs as an IBackend GPU op so
-    // the activation stays device-resident across the whole block — no per-op DataPointer reads / D2H sync barriers
-    // (the old DiTUtils/QkNorm/AdaLNModulation CPU path D2H-synced every ~50 MB intermediate, ~16 times per block ×
-    // 60 blocks × CFG, which was the 10+ min/gen cost). The only op left on the CPU is RoPE: QwenImageRope is
-    // interleaved (GPT-J / complex-polar pairing), and the CUDA ApplyRope kernel is rotate-half (NEOX) — no match —
-    // so the two per-stream rotations are fused into ONE joint pass (QwenImageRope.ApplyJoint, bit-identical since
-    // RoPE is per-row independent) over the already-GPU-concatenated [txt, img] sequence. Batch is always 1 here
-    // (QwenImagePipeline runs CFG as two batch-1 passes), which the seq-dim slice relies on.
+    // QwenImagePipeline runs CFG as two batch-1 passes; a batch above one rotates on the host after the head permute.
     /// <param name="refPackedH">Packed-grid height of the trailing Qwen-Image-Edit reference-latent token section
     /// (0 = no ref tokens). Ref tokens ride at the END of the image stream and get their own RoPE positions
     /// (frame axis 1, centered on the ref grid) — everything else in the block treats them as ordinary image tokens.</param>
@@ -210,7 +238,6 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
         int totalSeqLen = imgSeqLen + txtSeqLen;
-        float scale = 1.0f / MathF.Sqrt(_headDim);
         if (cp is not null && (batch != 1 || refGrids is { Length: > 0 } || tembZero is not null || image.DType != DType.F32))
             throw new InvalidOperationException(
                 "Context parallelism requires batch 1, F32 activations, and no edit-reference conditioning — the pipeline must gate these off.");
@@ -227,11 +254,6 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
         ChromaF16.Probe("qwen.blk.imgIn", image);
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
-        // [B, S, H, D] views (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
-        TensorShape imgHeads = new TensorShape(batch, imgSeqLen, _numHeads, _headDim);
-        TensorShape txtHeads = new TensorShape(batch, txtSeqLen, _numHeads, _headDim);
-        TensorShape jointFlat = new TensorShape(batch, totalSeqLen, _hiddenSize);
-        TensorShape jointMh = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
 
         // ── 1. LayerNorm (no affine, eps 1e-6) + AdaLN modulate: x*(1+scale)+shift ──
         Tensor imgModulated = imgModZero is null
@@ -239,123 +261,38 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
             : NormModulateSplit(backend, image, imgMod[0], imgMod[1], imgModZero[0], imgModZero[1], imgShape, timestepZeroIndex, _streamLnEps);
         Tensor txtModulated = NormModulate(backend, text, txtMod[0], txtMod[1], txtShape, _streamLnEps);
 
-        // ── 2. Q/K/V projections (declared [B, S, H, D] so QK-norm + permute need no reshape view) ──
-        Tensor imgQ = new Tensor(imgHeads, act);
-        backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgHeads, act);
-        backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgHeads, act);
-        backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
-        imgModulated.Dispose();
-
-        Tensor txtQ = new Tensor(txtHeads, act);
-        backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
-        Tensor txtK = new Tensor(txtHeads, act);
-        backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
-        Tensor txtV = new Tensor(txtHeads, act);
-        backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
-        txtModulated.Dispose();
-
-        // ── 3. QK-norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor imgQn = new Tensor(imgHeads, act);
-        backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
-        imgQ.Dispose();
-        Tensor imgKn = new Tensor(imgHeads, act);
-        backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
-        imgK.Dispose();
-        Tensor txtQn = new Tensor(txtHeads, act);
-        backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
-        txtQ.Dispose();
-        Tensor txtKn = new Tensor(txtHeads, act);
-        backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
-        txtK.Dispose();
-
-        // ── 4. Concat [txt, img] along the seq dim (contiguous row-concat in [B, S, hidden] layout) ──
-        Tensor jointQf = new Tensor(jointFlat, act);
-        backend.Concat(jointQf, new Tensor[] { txtQn, imgQn }, 1);
-        Tensor jointKf = new Tensor(jointFlat, act);
-        backend.Concat(jointKf, new Tensor[] { txtKn, imgKn }, 1);
-        Tensor jointVf = new Tensor(jointFlat, act);
-        backend.Concat(jointVf, new Tensor[] { txtV, imgV }, 1);
-        txtQn.Dispose(); imgQn.Dispose();
-        txtKn.Dispose(); imgKn.Dispose();
-        txtV.Dispose(); imgV.Dispose();
-
-        // ── 5. RoPE on the joint [txt, img(, ref)] Q,K — device kernel on the PRE-permute [B, S, H, D] layout
-        // (rope rotates each (s, h) vector independently, so applying before the head permute is identical to
-        // the old post-permute host pass). The cos/sin tables are position-only and cached across blocks/steps;
-        // the host ApplyJoint remains as the batch>1 fallback and the tests' numerical reference. ──
+        // ── 2-9. Joint attention over [txt, img(, ref)]: per-head QK-norm, RoPE on the joint rows (a CP rank's table slice
+        //         carries the global positions of its rows), the CP K/V rendezvous (queries stay local, keys cover the whole
+        //         sequence), attention (QK RMS-norm bounds the scores), split, output projections, gated residuals ──
+        AttentionCallContext joint;
         if (batch == 1)
         {
-            // CP: the rank's table slice carries the GLOBAL grid positions for its rows, so roping the local
-            // joint tensor is bit-identical to slicing a full-sequence rope (RoPE is per-row independent).
             (Tensor ropeCos, Tensor ropeSin) = cp is null
                 ? rope.GetOrBuildJointTables(backend, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids ?? [])
                 : rope.GetOrBuildJointTables(backend, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, [],
                     cp.Plan.Ranks[cp.Rank].TokenStart, imgSeqLen);
-            backend.WanRopeInterleaved(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
-            backend.WanRopeInterleaved(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
+            QkRotation pairs = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, totalSeqLen);
+            joint = new AttentionCallContext
+            {
+                QueryRotation = pairs, KeyRotation = pairs,
+                KvRewrite = cp is null ? null : new CpExchangeRewrite(cp.Exchange, cp.Rank, txtSeqLen),
+            };
         }
-
-        // ── 5b. Context-parallel K/V rendezvous: trade the local [txt ∥ img_rank] K/V for [txt ∥ img_FULL]
-        // (txt prefix comes from this rank's own deterministic replica; only img rows cross ranks). Queries stay
-        // local, so SDPA below is [Sq_local × Sk_full] — every local token attends over the whole sequence. ──
-        int kvSeqLen = totalSeqLen;
-        if (cp is not null)
+        else
         {
-            (jointKf, jointVf) = cp.Exchange.Exchange(cp.Rank, jointKf, jointVf, replicatedPrefixRows: txtSeqLen);
-            kvSeqLen = txtSeqLen + cp.Plan.TotalTokens;
+            joint = new AttentionCallContext
+            {
+                HeadMajorRotation = new JointRowsRotation(rope, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids ?? []),
+            };
         }
-
-        // ── 6. Permute [B, S, H, D] → [B, H, S, D] for SDPA ──
-        TensorShape kvMh = kvSeqLen == totalSeqLen ? jointMh : new TensorShape(batch, _numHeads, kvSeqLen, _headDim);
-        Tensor jointQ = new Tensor(jointMh, act);
-        backend.Permute0213(jointQ, jointQf, totalSeqLen, _numHeads, _headDim);
-        jointQf.Dispose();
-        Tensor jointK = new Tensor(kvMh, act);
-        backend.Permute0213(jointK, jointKf, kvSeqLen, _numHeads, _headDim);
-        jointKf.Dispose();
-        Tensor jointV = new Tensor(kvMh, act);
-        backend.Permute0213(jointV, jointVf, kvSeqLen, _numHeads, _headDim);
-        jointVf.Dispose();
-
-        if (batch != 1)
-        {
-            rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart,
-                refGrids ?? []);
-        }
-
-        // ── 7. Joint scaled dot-product attention (no mask) ──
-        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe and
-        // engages the cuDNN fused flash path (head_dim 128, no mask: the proven Krea2/Z-Image config).
-        Tensor jointAttnOut = new Tensor(jointMh, act);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: true);
-        jointQ.Dispose();
-        jointK.Dispose();
-        jointV.Dispose();
-
-        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] per batch item ──
-        Tensor jointAttnFlat = new Tensor(jointFlat, act);
-        backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
-        jointAttnOut.Dispose();
-
-        Tensor txtAttn = new Tensor(txtShape, act);
-        DiTUtils.SliceSeq(backend, txtAttn, jointAttnFlat, batch, totalSeqLen, 0);
-        Tensor imgAttn = new Tensor(imgShape, act);
-        DiTUtils.SliceSeq(backend, imgAttn, jointAttnFlat, batch, totalSeqLen, txtSeqLen);
-        jointAttnFlat.Dispose();
-
-        // ── 9. Output projections + gated residual (input + gate*value) ──
-        Tensor imgAttnProj = new Tensor(imgShape, act);
-        backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
-        imgAttn.Dispose();
+        Span<Tensor?> attended = [null, null];
+        _attention!.Attend(backend, [imgModulated, txtModulated], attended, new JointCallContext { Joint = joint, ReleaseInputs = true });
+        Tensor imgAttnProj = _attention.ProjectOutput(backend, 0, attended[0]!);
         Tensor imgAfterAttn = imgModZero is null ? GatedResidual(backend, image, imgAttnProj, imgMod[2], imgShape)
             : GatedResidualSplit(backend, image, imgAttnProj, imgMod[2], imgModZero[2], imgShape, timestepZeroIndex);
         imgAttnProj.Dispose();
 
-        Tensor txtAttnProj = new Tensor(txtShape, act);
-        backend.Linear(txtAttnProj, txtAttn, _toAddOutWeight!, _toAddOutBias);
-        txtAttn.Dispose();
+        Tensor txtAttnProj = _attention.ProjectOutput(backend, 1, attended[1]!);
         Tensor txtAfterAttn = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
         txtAttnProj.Dispose();

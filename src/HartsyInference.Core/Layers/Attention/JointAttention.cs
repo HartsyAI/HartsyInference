@@ -43,8 +43,15 @@ public sealed record JointAttentionConfig
 /// <summary>The per-call inputs of a joint attention. Every member is borrowed for the call.</summary>
 public readonly record struct JointCallContext
 {
-    /// <summary>The joint call's rotation, bias and probe, over the joint rows.</summary>
+    /// <summary>The joint call's rotation, bias, probe and K/V hooks, over the joint rows.</summary>
     public AttentionCallContext Joint { get; init; }
+
+    /// <summary>The one stream whose Q and K rotate alone, after the norms and before the concatenation (a model that rotates
+    /// its image rows only); null for none.</summary>
+    public int? RotatedStream { get; init; }
+
+    /// <summary>The rotation of <see cref="RotatedStream"/>: its tables or model rotation.</summary>
+    public AttentionCallContext StreamRotation { get; init; }
 
     /// <summary>Each stream input is disposed once its projections have read it.</summary>
     public bool ReleaseInputs { get; init; }
@@ -102,6 +109,10 @@ public sealed class JointAttention
         int n = _streams.Length;
         if (inputs.Length != n || attended.Length != n)
             throw new ArgumentException($"A joint attention over {n} streams takes {n} inputs and {n} outputs.");
+        if (context.RotatedStream is { } rotatedIndex && (uint)rotatedIndex >= (uint)n)
+            throw new ArgumentOutOfRangeException(nameof(context), $"Rotated stream {rotatedIndex} is not one of the {n} streams.");
+        if (context.RotatedStream is not null && HasRotation(context.Joint))
+            throw new ArgumentException("A rotated stream and a joint rotation would rotate that stream twice.", nameof(context));
         int batch = (int)inputs[0].Shape[0];
         for (int i = 0; i < n; i++)
             if (inputs[i].Shape.Rank != 3 || inputs[i].Shape[0] != batch)
@@ -125,6 +136,11 @@ public sealed class JointAttention
             if (_config.StageOrder == JointStageOrder.ProjectAllThenNorm)
                 for (int i = 0; i < n; i++)
                     _streams[i].NormalizeQk(backend, ref q[i], ref k[i]);
+            if (context.RotatedStream is { } rotated)
+            {
+                AttentionCallContext rotation = context.StreamRotation;
+                _streams[rotated].RotateQk(backend, q[rotated], k[rotated], in rotation);
+            }
 
             int total = 0;
             for (int i = 0; i < n; i++) total += rows[i];
@@ -195,6 +211,10 @@ public sealed class JointAttention
             ArrayPool<int>.Shared.Return(rented);
         }
     }
+
+    private static bool HasRotation(in AttentionCallContext context) =>
+        context.Rotation is not null || context.HeadMajorRotation is not null
+        || context.QueryRotation.Kind != QkRotationKind.None || context.KeyRotation.Kind != QkRotationKind.None;
 
     private Tensor ConcatInOrder(IBackend backend, ref StreamTensors parts, int n, TensorShape shape)
     {

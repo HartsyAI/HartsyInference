@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -22,6 +23,7 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
     private Tensor? _mlpIn;
     private Tensor? _attnOut;
     private Tensor? _mlpOut;
+    private AttentionLayer? _attention;
 
     /// <summary>Binds this block's weights under <paramref name="prefix"/>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -34,6 +36,12 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         _mlpOut = weights[$"{prefix}.mlp_out.weight"];
         _normQ.LoadWeights(weights[$"{prefix}.norm.query_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.norm.key_norm.weight"]);
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+            },
+            new AttentionNormWeights(_normQ.Weight, _normK.Weight, _normQ.Eps, _normK.Eps));
     }
 
     /// <summary>Every weight this block reads, for preloading and freeing.</summary>
@@ -60,7 +68,6 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         DType act = x.DType;
         TensorShape hiddenShape = new TensorShape(1, seqLen, _hiddenSize);
         TensorShape headsShape = new TensorShape(1, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(1, _numHeads, seqLen, _headDim);
 
         Tensor modulated = modulation.NormModulate(backend, x, _layerNormEps);
         Tensor q = new Tensor(headsShape, act);
@@ -73,32 +80,8 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         backend.Linear(gateUp, modulated, _mlpIn!, null);
         modulated.Dispose();
 
-        Tensor qNormed = new Tensor(headsShape, act);
-        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kNormed = new Tensor(headsShape, act);
-        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-        rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
-
-        Tensor qMh = new Tensor(mhShape, act);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        Tensor kMh = new Tensor(mhShape, act);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        kNormed.Dispose();
-        Tensor vMh = new Tensor(mhShape, act);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        v.Dispose();
-        Tensor attnMh = new Tensor(mhShape, act);
         // Q/K RMSNorm bounds the logits, which keeps the fused F16 attention path safe.
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-        Tensor attn = new Tensor(hiddenShape, act);
-        backend.Permute0213(attn, attnMh, _numHeads, seqLen, _headDim);
-        attnMh.Dispose();
+        Tensor attn = _attention!.Attend(backend, q, k, v, hiddenShape, new AttentionCallContext { Rotation = rope });
 
         Tensor branch = new Tensor(hiddenShape, act);
         backend.Linear(branch, attn, _attnOut!, null);
