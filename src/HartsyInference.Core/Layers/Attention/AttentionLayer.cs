@@ -45,6 +45,11 @@ public sealed class AttentionLayer
 
         (Tensor q, Tensor k, Tensor v, Tensor? gate) = Project(backend, w, qInput, kvInput, act, kvAct, in context);
         TensorShape flatShape = WithLastDim(qInput.Shape, _config.InnerDim);
+        if (context.ReleaseInputs)
+        {
+            qInput.Dispose();
+            if (!ReferenceEquals(kvInput, qInput)) kvInput.Dispose();
+        }
         Tensor flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, in context);
         return Output(backend, w, flat, gate, act);
     }

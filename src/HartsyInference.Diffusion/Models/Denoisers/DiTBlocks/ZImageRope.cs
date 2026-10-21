@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -8,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Multi-axis rotary position embedding for Z-Image (Lumina2/NextDiT). Splits the head dimension across 3 axes [frame, height, width] = [32, 48, 48] with θ=256. Caption tokens get position [0,0,0]; image tokens get [0, row, col]. Caption pad tokens and image pad tokens use the same axis-0=0 fallback so RoPE is well-defined for the entire concatenated sequence.</summary>
 /// <remarks>Host pairs come from <see cref="MultiAxisRopeTables"/>. The device rows are duplicated pairs in a
 /// <see cref="RopeTableCache"/>; the kernel reads only the even entries, and the odd entries are duplicates rather than zeros.</remarks>
-public sealed unsafe class ZImageRope
+public sealed unsafe class ZImageRope : IQkRotation, IHeadMajorQkRotation
 {
     private static readonly RopeTableSettings DeviceTableSettings = new()
     {
@@ -169,4 +170,17 @@ public sealed unsafe class ZImageRope
     /// <summary>Builds image-only position IDs for the noise_refiner stack. See <see cref="ZImagePosEmbed"/>.</summary>
     public static Tensor BuildImagePositionIds(int hPacked, int wPacked, int imgPaddedLen) =>
         ZImagePosEmbed.BuildImagePositionIds(hPacked, wPacked, imgPaddedLen);
+
+    /// <inheritdoc/>
+    void IQkRotation.RotateTokenMajor(IBackend backend, Tensor q, Tensor k, int heads, int kvHeads) =>
+        ApplyGpuGqa(backend, q, k, heads, kvHeads);
+
+    /// <inheritdoc/>
+    /// <remarks>Equal head counts only, as Z-Image's batched path runs.</remarks>
+    void IHeadMajorQkRotation.RotateHeadMajor(IBackend backend, Tensor q, Tensor k, int batch, int heads, int kvHeads, int tokens)
+    {
+        if (kvHeads != heads)
+            throw new NotSupportedException("ZImageRope rotates head-major Q and K with equal head counts only.");
+        Forward(q, k, batch, heads, tokens);
+    }
 }
