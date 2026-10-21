@@ -26,7 +26,7 @@ public sealed unsafe class Nvfp4DequantTests
     {
         // One row, one 16-element block (8 packed bytes). Values chosen to hit every e2m1 magnitude
         // plus both signs: nibble bits are [s e1 e0 m] → 0..7 = +{0, .5, 1, 1.5, 2, 3, 4, 6}, 8..15 = negated.
-        Tensor packed = new(new TensorShape(1, 8), DType.U8);
+        using Tensor packed = new(new TensorShape(1, 8), DType.U8);
         byte* p = (byte*)packed.DataPointer;
         p[0] = Pack(0, 1);   // elements 0,1 = 0, 0.5
         p[1] = Pack(2, 3);   // 1, 1.5
@@ -38,10 +38,10 @@ public sealed unsafe class Nvfp4DequantTests
         p[7] = Pack(15, 8);  // -6, -0
 
         // Block scale = 2.0 encoded as e4m3 (0x40: exp=8 → 2^(8-7) * 1.0), global scale 0.5 → net 1.0.
-        Tensor blockScales = new(new TensorShape(1, 1), DType.F8E4M3);
+        using Tensor blockScales = new(new TensorShape(1, 1), DType.F8E4M3);
         ((byte*)blockScales.DataPointer)[0] = 0x40;
 
-        Tensor result = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, globalScale: 0.5f);
+        using Tensor result = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, globalScale: 0.5f);
 
         Assert.Equal(DType.F16, result.DType);
         Assert.Equal(new long[] { 1, 16 }, new[] { result.Shape[0], result.Shape[1] });
@@ -56,21 +56,21 @@ public sealed unsafe class Nvfp4DequantTests
     {
         // Same 16-element block as the exact-values test, but dequantized to fp8 (block scale folded into value,
         // global scale on Fp8ScaleFactor). fp8_value * Fp8ScaleFactor must reproduce the F16 dequant.
-        Tensor packed = new(new TensorShape(1, 8), DType.U8);
+        using Tensor packed = new(new TensorShape(1, 8), DType.U8);
         byte* p = (byte*)packed.DataPointer;
         p[0] = Pack(0, 1); p[1] = Pack(2, 3); p[2] = Pack(4, 5); p[3] = Pack(6, 7);
         p[4] = Pack(9, 10); p[5] = Pack(11, 12); p[6] = Pack(13, 14); p[7] = Pack(15, 8);
-        Tensor blockScales = new(new TensorShape(1, 1), DType.F8E4M3);
+        using Tensor blockScales = new(new TensorShape(1, 1), DType.F8E4M3);
         ((byte*)blockScales.DataPointer)[0] = 0x40; // 2.0
         const float g = 0.5f;
 
-        Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, g);
-        Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, g);
+        using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, g);
+        using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, g);
 
         Assert.Equal(DType.F8E4M3, fp8.DType);
         Assert.Equal(g, fp8.Fp8ScaleFactor);
         // fp8 stores e2m1*block_scale (= the F16 value / g); real value = decoded_fp8 * Fp8ScaleFactor.
-        Tensor fp8AsF32 = fp8.CastTo(DType.F32);          // CastTo folds Fp8ScaleFactor into the value
+        using Tensor fp8AsF32 = fp8.CastTo(DType.F32);          // CastTo folds Fp8ScaleFactor into the value
         Half* a = (Half*)f16.DataPointer;
         float* b = (float*)fp8AsF32.DataPointer;
         for (int i = 0; i < 16; i++)
@@ -105,11 +105,11 @@ public sealed unsafe class Nvfp4DequantTests
             return e == 0 ? m / 8.0f * MathF.Pow(2, -6) : (1 + m / 8.0f) * MathF.Pow(2, e - 7);
         }
 
-        Tensor packed = new(new TensorShape(Rows, PackedCols), DType.U8);
+        using Tensor packed = new(new TensorShape(Rows, PackedCols), DType.U8);
         byte* p = (byte*)packed.DataPointer;
         for (long i = 0; i < packed.ElementCount; i++) p[i] = Pack(2, 4);   // e2m1 1.0 and 2.0
 
-        Tensor blockScales = new(new TensorShape(Rows, BlockCols), DType.F8E4M3);
+        using Tensor blockScales = new(new TensorShape(Rows, BlockCols), DType.F8E4M3);
         byte* s = (byte*)blockScales.DataPointer;
         for (int r = 0; r < Rows; r++)
         {
@@ -119,7 +119,7 @@ public sealed unsafe class Nvfp4DequantTests
             }
         }
 
-        Tensor result = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, globalScale: 1f);
+        using Tensor result = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, globalScale: 1f);
         Half* got = (Half*)result.DataPointer;
 
         for (int r = 0; r < Rows; r++)
