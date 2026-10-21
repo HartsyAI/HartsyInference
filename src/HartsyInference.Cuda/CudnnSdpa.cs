@@ -18,7 +18,7 @@ internal sealed class CudnnSdpa : IDisposable
     internal const long AlignElements = 8;
 
     /// <summary>Element offsets added to the device pointers at execute time; they are not part of the plan.</summary>
-    internal readonly record struct Offsets(long Q, long K, long V, long O, long Bias = 0)
+    internal readonly record struct Offsets(long Q, long K, long V, long O)
     {
         public static Offsets Of(in AttentionCall c) => new(c.Query.Offset, c.Key.Offset, c.Value.Offset, c.Output.Offset);
     }
@@ -136,9 +136,8 @@ internal sealed class CudnnSdpa : IDisposable
         if (key.HasBias != (biasF32 != 0))
             throw new ArgumentException("SDPA bias pointer and plan key disagree about whether a bias is present.");
         key.Validate();
-        if (offsets.Q < 0 || offsets.K < 0 || offsets.V < 0 || offsets.O < 0 || offsets.Bias < 0
-            || offsets.Q % AlignElements != 0 || offsets.K % AlignElements != 0 || offsets.V % AlignElements != 0 || offsets.O % AlignElements != 0
-            || offsets.Bias % (AlignElements / 2) != 0)
+        if (offsets.Q < 0 || offsets.K < 0 || offsets.V < 0 || offsets.O < 0
+            || offsets.Q % AlignElements != 0 || offsets.K % AlignElements != 0 || offsets.V % AlignElements != 0 || offsets.O % AlignElements != 0)
             throw new ArgumentException($"SDPA offsets must be non-negative and 16-byte aligned: {offsets}.");
         PlanKey planKey = key;
         Lazy<Plan> candidate = new(() => BuildPlan(planKey), LazyThreadSafetyMode.ExecutionAndPublication);
@@ -164,11 +163,11 @@ internal sealed class CudnnSdpa : IDisposable
             long n = key.HasBias ? 6 : 5;
             float scaleValue = scale;   // by-value tensors bind a host pointer that cuDNN must read inside cudnnBackendExecute
             long* uids = stackalloc long[6] { UidQ, UidK, UidV, UidO, UidScale, UidBias };
-            const ulong halfBytes = sizeof(ushort), floatBytes = sizeof(float);
+            const ulong halfBytes = sizeof(ushort);
             void** ptrs = stackalloc void*[6]
             {
                 (void*)(q + (ulong)offsets.Q * halfBytes), (void*)(k + (ulong)offsets.K * halfBytes), (void*)(v + (ulong)offsets.V * halfBytes),
-                (void*)(o + (ulong)offsets.O * halfBytes), &scaleValue, (void*)(biasF32 == 0 ? 0 : biasF32 + (ulong)offsets.Bias * floatBytes)
+                (void*)(o + (ulong)offsets.O * halfBytes), &scaleValue, (void*)biasF32
             };
             void* ws = (void*)plan.Workspace;
             SetAttr(vp, CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS, CUDNN_TYPE_INT64, n, uids);
