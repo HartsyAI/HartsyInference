@@ -1,5 +1,6 @@
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Tests.Common.Attention;
 using Xunit;
 
 namespace HartsyInference.Core.Tests.Layers;

@@ -2,8 +2,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Tests.Common.Attention;
-using Xunit;
 using Xunit.Abstractions;
+using Xunit;
 
 namespace HartsyInference.Cuda.Tests;
 

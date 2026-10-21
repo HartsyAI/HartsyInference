@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -20,6 +21,7 @@ public sealed class SeedVr2DitBlock
     private readonly bool _shared;
     private readonly bool _isLast;
     private readonly bool _shifted;
+    private readonly AttentionLayer _attention;
 
     private Tensor _qkvVidW = null!, _projVidW = null!, _projVidB = null!;
     private Tensor? _qkvTxtW, _projTxtW, _projTxtB;
@@ -44,10 +46,13 @@ public sealed class SeedVr2DitBlock
         _shared = index >= config.MmLayers;
         _isLast = index == config.NumLayers - 1;
         _shifted = index % 2 == 1;
+        _attention = new AttentionLayer(new AttentionLayerConfig { Heads = config.Heads, KvHeads = config.Heads, HeadDim = config.HeadDim });
     }
 
     /// <summary>Whether this block uses the shifted window partition (odd layers).</summary>
     public int Parity => _shifted ? 1 : 0;
+
+    internal AttentionLayer AttentionStage => _attention;
 
     /// <summary>Binds <c>blocks.{i}.*</c> checkpoint keys (verbatim names via the near-identity converter).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, int index)
@@ -368,25 +373,13 @@ public sealed class SeedVr2DitBlock
             int s = group.WindowTokens + lt;
             int g = group.WindowCount;
             long gs = (long)g * s;
-            Tensor gq = Gather(backend, catQ, group.Indices, gs, c);
-            Tensor gk = Gather(backend, catK, group.Indices, gs, c);
-            Tensor gv = Gather(backend, catV, group.Indices, gs, c);
+            Tensor gq = Gather(backend, catQ, group.Indices, g, s, c);
+            Tensor gk = Gather(backend, catK, group.Indices, g, s, c);
+            Tensor gv = Gather(backend, catV, group.Indices, g, s, c);
 
-            Tensor qp = PackHeads(backend, gq, g, s, heads, hd);
-            Tensor kp = PackHeads(backend, gk, g, s, heads, hd);
-            Tensor vp = PackHeads(backend, gv, g, s, heads, hd);
-            gq.Dispose(); gk.Dispose(); gv.Dispose();
-
-            Tensor attn = new Tensor(qp.Shape, DType.F32);
-            backend.ScaledDotProductAttention(attn, qp, kp, vp, null, 1f / MathF.Sqrt(hd));
-            qp.Dispose(); kp.Dispose(); vp.Dispose();
-
-            // [G, heads, s, hd] → [G, s, heads·hd] rows, scattered back through the same index list.
-            Tensor back = new Tensor(new TensorShape(gs, c), DType.F32);
-            backend.Permute0213(back, attn, heads, s, hd);
+            Tensor attn = _attention.AttendFlat(backend, gq, gk, gv, new TensorShape(g, s, c), default);
+            backend.RowScatterAdd(attnCat, attn, group.Indices, (int)gs, c);
             attn.Dispose();
-            backend.RowScatterAdd(attnCat, back, group.Indices, (int)gs, c);
-            back.Dispose();
         }
         catQ.Dispose(); catK.Dispose(); catV.Dispose();
 
@@ -406,18 +399,11 @@ public sealed class SeedVr2DitBlock
         return output;
     }
 
-    private static Tensor Gather(IBackend backend, Tensor src, Tensor indices, long rows, int channels)
+    // [g, s, c] groups: RowGather and RowScatterAdd read only m and channels, never the tensor shape.
+    private static Tensor Gather(IBackend backend, Tensor src, Tensor indices, int groups, int windowRows, int channels)
     {
-        Tensor output = new Tensor(new TensorShape(rows, channels), DType.F32);
-        backend.RowGather(output, src, indices, (int)rows, channels);
-        return output;
-    }
-
-    /// <summary>[G·s, heads·hd] rows → [G, heads, s, hd] SDPA layout.</summary>
-    private static Tensor PackHeads(IBackend backend, Tensor rows, int g, int s, int heads, int hd)
-    {
-        Tensor output = new Tensor(new TensorShape([(long)g, heads, s, hd]), DType.F32);
-        backend.Permute0213(output, rows, s, heads, hd);
+        Tensor output = new Tensor(new TensorShape(groups, windowRows, channels), DType.F32);
+        backend.RowGather(output, src, indices, (int)((long)groups * windowRows), channels);
         return output;
     }
 }

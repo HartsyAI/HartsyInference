@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -21,6 +22,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
     private readonly int _heads;
     private readonly int _headDim;
     private readonly int _mlpHidden;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _sModW, _sModB, _tModW, _tModB;       // adaLN: [6·dim, dim]
     private Tensor? _sQkvW, _sQkvB, _sOutW, _sOutB;
@@ -34,7 +36,17 @@ public sealed unsafe class OasisSpatioTemporalBlock
         _heads = c.NumHeads;
         _headDim = c.HiddenSize / c.NumHeads;
         _mlpHidden = (int)(c.HiddenSize * c.MlpRatio);
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = _heads,
+            KvHeads = _heads,
+            HeadDim = _headDim,
+            ComputeDType = DType.F32,
+            AllowF16 = true,
+        });
     }
+
+    internal AttentionLayer AttentionStage => _attention;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
@@ -134,13 +146,11 @@ public sealed unsafe class OasisSpatioTemporalBlock
         backend.OasisRopeInterleaved(q, cos, sin, batch: frames, heads: _heads, seq: sp, headDim: _headDim, rotDim);
         backend.OasisRopeInterleaved(k, cos, sin, batch: frames, heads: _heads, seq: sp, headDim: _headDim, rotDim);
 
-        Tensor attn = new Tensor(new TensorShape([(long)frames, _heads, sp, _headDim]), DType.F32);
         if (Prof) { backend.Sync(); TSdpa -= Now(); }
         // cuDNN fused flash attention: mask-null, D=64, F16-tolerant (verified corr>0.9999) — collapses the
         // materialized QKᵀ→softmax→PV path that is catastrophic for these batched small-seq shapes.
-        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
         if (Prof) { backend.Sync(); TSdpa += Now(); }
-        q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);
         backend.OasisMergeHeads(merged, attn, frames, sp, _heads, _headDim, temporal: false);
@@ -166,12 +176,10 @@ public sealed unsafe class OasisSpatioTemporalBlock
         backend.OasisRopeInterleaved(q, cos, sin, batch: sp, heads: _heads, seq: frames, headDim: _headDim, rotDim);
         backend.OasisRopeInterleaved(k, cos, sin, batch: sp, heads: _heads, seq: frames, headDim: _headDim, rotDim);
 
-        Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, frames, _headDim]), DType.F32);
         if (Prof) { backend.Sync(); TSdpa -= Now(); }
         // Temporal causal mask is [1,1,T,T] — a cuDNN-eligible [B,1,Sq,Skv] additive F32 mask; F16-tolerant.
-        backend.ScaledDotProductAttention(attn, q, k, v, causalMask, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, new AttentionCallContext { Bias = causalMask });
         if (Prof) { backend.Sync(); TSdpa += Now(); }
-        q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);
         backend.OasisMergeHeads(merged, attn, frames, sp, _heads, _headDim, temporal: true);

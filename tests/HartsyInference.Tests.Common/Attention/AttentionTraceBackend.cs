@@ -3,10 +3,10 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Tests.Layers;
+namespace HartsyInference.Tests.Common.Attention;
 
 /// <summary>Records the ops an attention layer issues, in order, without computing anything (no tensor is ever read).</summary>
-internal sealed class AttentionTraceBackend : IBackend
+public sealed class AttentionTraceBackend : IBackend
 {
     /// <summary>Every recorded op, in order.</summary>
     public List<string> Ops { get; } = new();
