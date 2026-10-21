@@ -18,6 +18,9 @@ internal sealed class AttentionTraceBackend : IBackend
 
     public bool SupportsTokenMajorGqaAttention { get; init; }
 
+    /// <summary>Makes every attention call throw after it is recorded.</summary>
+    public bool FailAttention { get; init; }
+
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias) => Ops.Add($"Linear {Name(weight)}");
 
     public void LinearMulti(Tensor input, ReadOnlySpan<LinearOp> ops)
@@ -70,6 +73,7 @@ internal sealed class AttentionTraceBackend : IBackend
     {
         Calls.Add(call);
         Ops.Add($"Attention {call.Route} heads={call.Heads}/{call.KvHeads} bounded={call.Numerics.LegacyAssertedBounded}");
+        if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
 
     /// <summary>Weights are named by their first dim so a trace says which projection ran.</summary>

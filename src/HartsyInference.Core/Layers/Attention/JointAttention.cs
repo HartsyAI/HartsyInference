@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -105,37 +106,60 @@ public sealed class JointAttention
         for (int i = 0; i < n; i++)
             if (inputs[i].Shape.Rank != 3 || inputs[i].Shape[0] != batch)
                 throw new ArgumentException($"Joint stream inputs are [B, S, C] with one batch size; got {inputs[i].Shape}.", nameof(inputs));
+        DType act = _streams[0].Config.ComputeDType ?? inputs[0].DType;
+        if (batch > 1 && act != DType.F32)
+            throw new NotSupportedException($"A batched joint attention splits F32 rows; got {act} at batch {batch}.");
 
         StreamTensors q = default, k = default, v = default;
+        Tensor? jq = null, jk = null, jv = null, flat = null;
         Span<int> rows = stackalloc int[MaxStreams];
-        for (int i = 0; i < n; i++)
+        try
         {
-            rows[i] = (int)inputs[i].Shape[1];
-            (q[i], k[i], v[i]) = _streams[i].ProjectSelf(backend, inputs[i], context.ReleaseInputs);
-            if (_config.StageOrder == JointStageOrder.ProjectNormPerStream)
-                _streams[i].NormalizeQk(backend, ref q[i], ref k[i]);
-        }
-        if (_config.StageOrder == JointStageOrder.ProjectAllThenNorm)
             for (int i = 0; i < n; i++)
-                _streams[i].NormalizeQk(backend, ref q[i], ref k[i]);
+            {
+                rows[i] = (int)inputs[i].Shape[1];
+                (q[i], k[i], v[i]) = _streams[i].ProjectSelf(backend, inputs[i], context.ReleaseInputs);
+                if (_config.StageOrder == JointStageOrder.ProjectNormPerStream)
+                    _streams[i].NormalizeQk(backend, ref q[i], ref k[i]);
+            }
+            if (_config.StageOrder == JointStageOrder.ProjectAllThenNorm)
+                for (int i = 0; i < n; i++)
+                    _streams[i].NormalizeQk(backend, ref q[i], ref k[i]);
 
-        int total = 0;
-        for (int i = 0; i < n; i++) total += rows[i];
-        int inner = _config.Heads * _config.HeadDim;
-        TensorShape jointShape = new(batch, total, inner);
-        Tensor jq = ConcatInOrder(backend, ref q, n, jointShape);
-        Tensor jk = ConcatInOrder(backend, ref k, n, jointShape);
-        Tensor jv = ConcatInOrder(backend, ref v, n, jointShape);
+            int total = 0;
+            for (int i = 0; i < n; i++) total += rows[i];
+            int inner = _config.Heads * _config.HeadDim;
+            TensorShape jointShape = new(batch, total, inner);
+            jq = ConcatInOrder(backend, ref q, n, jointShape);
+            jk = ConcatInOrder(backend, ref k, n, jointShape);
+            jv = ConcatInOrder(backend, ref v, n, jointShape);
 
-        AttentionCallContext joint = context.Joint;
-        Tensor flat = (batch == 1 ? _joint : _jointBatched).AttendFlat(backend, jq, jk, jv, jointShape, in joint);
-        int offset = 0;
-        foreach (int stream in _config.ConcatOrder)
+            AttentionCallContext joint = context.Joint;
+            flat = (batch == 1 ? _joint : _jointBatched).AttendFlat(backend, jq, jk, jv, jointShape, in joint);
+            int offset = 0;
+            foreach (int stream in _config.ConcatOrder)
+            {
+                Tensor part = new(new TensorShape(batch, rows[stream], inner), flat.DType);
+                attended[stream] = part;
+                SplitRows(backend, part, flat, batch, total, offset);
+                offset += rows[stream];
+            }
+        }
+        catch
         {
-            Tensor part = new(new TensorShape(batch, rows[stream], inner), flat.DType);
-            SplitRows(backend, part, flat, batch, total, offset);
-            attended[stream] = part;
-            offset += rows[stream];
+            for (int i = 0; i < n; i++)
+            {
+                q[i]?.Dispose();
+                k[i]?.Dispose();
+                v[i]?.Dispose();
+                attended[i]?.Dispose();
+                attended[i] = null;
+            }
+            jq?.Dispose();
+            jk?.Dispose();
+            jv?.Dispose();
+            flat?.Dispose();
+            throw;
         }
         flat.Dispose();
     }
@@ -158,10 +182,18 @@ public sealed class JointAttention
             throw new NotSupportedException($"A batched joint split gathers F32 rows; got {input.DType} at batch {batch}.");
         long width = input.ElementCount / ((long)batch * seq);
         int count = (int)(output.ElementCount / ((long)batch * width));
-        int[] index = new int[batch * count];
-        for (int b = 0; b < batch; b++)
-            for (int r = 0; r < count; r++) index[b * count + r] = b * seq + offset + r;
-        backend.GatherRows(output, input, index);
+        int[] rented = ArrayPool<int>.Shared.Rent(batch * count);
+        try
+        {
+            Span<int> index = rented.AsSpan(0, batch * count);
+            for (int b = 0; b < batch; b++)
+                for (int r = 0; r < count; r++) index[b * count + r] = b * seq + offset + r;
+            backend.GatherRows(output, input, index);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(rented);
+        }
     }
 
     private Tensor ConcatInOrder(IBackend backend, ref StreamTensors parts, int n, TensorShape shape)

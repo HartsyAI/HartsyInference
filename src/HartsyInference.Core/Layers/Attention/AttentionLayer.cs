@@ -106,6 +106,9 @@ public sealed class AttentionLayer
             throw new InvalidOperationException("A QK norm needs the layer's norm weights.");
         if (_config.TokenMajorRoute != AttentionRoute.Dense)
             throw new NotSupportedException("Flat operands attend head-major.");
+        if (context.QueryRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs)
+            || context.KeyRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs))
+            throw new NotSupportedException("Flat operands take interleaved-pair tables or a rotation adapter; the other table kinds read [.., heads, D].");
         if (q.Shape.Rank != 3 || k.Shape.Rank != 3 || v.Shape.Rank != 3 || q.Shape[2] != _config.InnerDim
             || k.Shape[2] != (long)_config.KvHeads * _config.HeadDim || v.Shape[2] != k.Shape[2])
             throw new ArgumentException($"AttendFlat takes [B, S, heads·D] operands of this layer's widths; got {q.Shape}, {k.Shape}, {v.Shape}.");

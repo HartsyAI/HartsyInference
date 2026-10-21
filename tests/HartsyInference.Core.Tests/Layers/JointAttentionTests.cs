@@ -152,7 +152,37 @@ public sealed class JointAttentionTests
         AttentionLayer plain = new(new AttentionLayerConfig { Heads = Heads, KvHeads = Heads, HeadDim = HeadDim });
         Tensor narrow = new(new TensorShape(1, 5, Inner / 2), DType.F32);
         Assert.Throws<ArgumentException>(() => plain.AttendFlat(backend, narrow, narrow, narrow, narrow.Shape, default));
+        Tensor table = new(new TensorShape(5, HeadDim), DType.F32);
+        foreach (QkRotationKind kind in (QkRotationKind[])[QkRotationKind.RotateHalf, QkRotationKind.RotateHalfPaired])
+        {
+            QkRotation rotation = new(kind, table, table);
+            Assert.Throws<NotSupportedException>(() => plain.AttendFlat(backend, flat, flat, flat, flat.Shape,
+                new AttentionCallContext { QueryRotation = rotation, KeyRotation = rotation }));
+        }
         Assert.Empty(backend.Ops);
+    }
+
+    [Fact]
+    public void ABatchedF16JointCall_IsRefusedBeforeAnyOp()
+    {
+        AttentionTraceBackend backend = new();
+        JointAttention joint = new(Config(0, 1), [Stream(1), Stream(2)]);
+        Tensor img = new(new TensorShape(2, ImgRows, Inner), DType.F16), txt = new(new TensorShape(2, TxtRows, Inner), DType.F16);
+
+        Assert.Throws<NotSupportedException>(() => joint.Attend(backend, [img, txt], new Tensor?[2], new JointCallContext()));
+        Assert.Empty(backend.Ops);
+    }
+
+    [Fact]
+    public void AFailedJointAttention_HandsBackNoPartialOutputs()
+    {
+        AttentionTraceBackend backend = new() { FailAttention = true };
+        JointAttention joint = new(Config(1, 0), [Stream(1), Stream(2)]);
+        (Tensor img, Tensor txt) = Inputs();
+        Tensor?[] attended = [null, null];
+
+        Assert.Throws<OutOfMemoryException>(() => joint.Attend(backend, [img, txt], attended, new JointCallContext()));
+        Assert.All(attended, Assert.Null);
     }
 
     [Fact]
