@@ -32,6 +32,12 @@ stable release will require. Dates are UTC.
 
 ## alpha.385
 
+- **Fixed: ACE-Step v1 lyric rows on bf16 checkpoints, and two smaller ACE-Step v1 faults.** The DiT looks lyric tokens
+  up in its embedding table on the host through `float*`, and the Comfy all-in-one checkpoint ships that table as bf16,
+  so every lyric row was misread, and ids past 3346 read beyond the table. The table is now widened to F32 at load like
+  the DiT's other host-read tensors. The vocoder's weight-norm fusion let the GC free its F32 casts while still reading
+  them, an intermittent access violation at load. Double-condition CFG's text-only context now counts text rows the way
+  the DiT does.
 - **Fixed: SeedVR2 output differed run to run on CUDA.** Every window of a shape group sent the same text rows back
   through one `RowScatterAdd`, whose CUDA kernel adds without atomics, so the text tokens lost updates and two identical
   restores on an RTX 3060 differed (SSIM 0.9991). The video rows now scatter alone, each once, and the text rows are
