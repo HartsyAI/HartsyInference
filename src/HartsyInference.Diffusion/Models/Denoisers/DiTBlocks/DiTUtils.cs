@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -6,26 +7,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Shared utility methods for DiT/MMDiT transformers. Consolidates helpers duplicated across FluxTransformer, Sd3Transformer, and future DiT models.</summary>
 public static unsafe class DiTUtils
 {
-    /// <summary>Rows <c>[offset, offset + output rows)</c> of each batch item of a <c>[B, seq, W]</c> tensor into
-    /// <paramref name="output"/> <c>[B, rows, W]</c>, on the device: the split of a joint text/image sequence. At B = 1 it
-    /// is one contiguous <see cref="IBackend.SliceRows"/>; above, each batch item's rows are gathered (F32, as every
-    /// B &gt; 1 path here runs), since one contiguous block would hand batch 0's rows to every item.</summary>
-    public static void SliceSeq(IBackend backend, Tensor output, Tensor input, int batch, int seq, int offset)
-    {
-        if (batch == 1)
-        {
-            backend.SliceRows(output, input, offset);
-            return;
-        }
-        if (input.DType != DType.F32 || output.DType != DType.F32)
-            throw new NotSupportedException($"A batched joint split gathers F32 rows; got {input.DType} at batch {batch}.");
-        long width = input.ElementCount / ((long)batch * seq);
-        int rows = (int)(output.ElementCount / ((long)batch * width));
-        int[] index = new int[batch * rows];
-        for (int b = 0; b < batch; b++)
-            for (int r = 0; r < rows; r++) index[b * rows + r] = b * seq + offset + r;
-        backend.GatherRows(output, input, index);
-    }
+    /// <summary>The split of a joint text/image sequence; see <see cref="JointAttention.SplitRows"/>.</summary>
+    public static void SliceSeq(IBackend backend, Tensor output, Tensor input, int batch, int seq, int offset) =>
+        JointAttention.SplitRows(backend, output, input, batch, seq, offset);
 
     /// <summary>A [n] tensor of ones — the unit affine for RmsNorm calls where the checkpoint has no weight
     /// (IBackend has LayerNormNoAffine but no no-affine RmsNorm overload, so callers synthesize one).</summary>

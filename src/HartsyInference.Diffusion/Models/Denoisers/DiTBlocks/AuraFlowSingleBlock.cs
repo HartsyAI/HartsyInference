@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -21,6 +22,8 @@ public sealed unsafe class AuraFlowSingleBlock
     private readonly QkNorm _normK;
 
     private readonly SwiGluFfn _ffn;
+
+    private AttentionLayer? _attention;
 
     /// <summary>Creates an AuraFlow single-stream block. <paramref name="headDim"/> is explicit (256 for v0.3); <c>numHeads * headDim</c> must equal <paramref name="hiddenSize"/>.</summary>
     public AuraFlowSingleBlock(int hiddenSize, int numHeads, int headDim, int mlpDim, float qkNormEps = 1e-5f)
@@ -59,26 +62,28 @@ public sealed unsafe class AuraFlowSingleBlock
             weights[$"{prefix}.ff.linear_1.weight"], null,
             weights[$"{prefix}.ff.linear_2.weight"], null,
             weights[$"{prefix}.ff.out_projection.weight"], null);
+
+        // QK-RMS-normed, so the call may narrow to F16 (the cuDNN fused config at D=256).
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead,
+                ComputeDType = DType.F32, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQWeight, Key = _toKWeight, Value = _toVWeight, Output = _toOutWeight, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
     }
 
     /// <summary>Forward pass on the joint <c>[txt, img]</c> token stream. Per <c>AuraFlowSingleTransformerBlock.forward</c> lines 171-191.</summary>
-    // GPU-residency rewrite (mirrors ChromaSingleStreamBlock / Krea2Attention): every glue op — LayerNorm+AdaLN
-    // modulation, per-head FP32 QK-norm, head split/merge, gated residual — runs as an IBackend op so the activation
-    // stays device-resident across the block (no per-op DataPointer D2H sync barriers around every GEMM). Head split =
-    // declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim
-    // with no reshape, then Permute0213 to/from [B, H, S, D]. AuraFlow has no RoPE, so nothing is left on the host.
-    // Numerics are bit-identical to the old host helpers: DiTUtils.NormModulate reproduces LayerNormNoAffine +
-    // x*(1+scale)+shift; backend.RmsNorm reproduces QkNorm.Forward; backend.GatedResidualLastDim reproduces
-    // AdaLNModulation.ApplyGatedResidual.
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor temb)
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
 
         TensorShape hidShape = new TensorShape(batch, seqLen, _hiddenSize);
-        // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
-        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // ── 1. AdaLN-Zero (norm + modulate via shift_msa, scale_msa) returning gate_msa, shift_mlp, scale_mlp, gate_mlp ──
         // The reference's `norm1(hidden, emb=temb)` computes `norm(x) * (1 + scale_msa) + shift_msa` internally
@@ -90,48 +95,8 @@ public sealed unsafe class AuraFlowSingleBlock
         // ── 2. LayerNorm (no affine, eps 1e-6) + modulate: x*(1+scale_msa)+shift_msa ──
         Tensor normHidden = DiTUtils.NormModulate(backend, hidden, mod[0], mod[1], hidShape);
 
-        // ── 3. Self-attention Q/K/V (bias-free), declared [B, S, H, D] for per-head RMSNorm ──
-        Tensor q = new Tensor(heads, DType.F32);
-        backend.Linear(q, normHidden, _toQWeight!, null);
-        Tensor k = new Tensor(heads, DType.F32);
-        backend.Linear(k, normHidden, _toKWeight!, null);
-        Tensor v = new Tensor(heads, DType.F32);
-        backend.Linear(v, normHidden, _toVWeight!, null);
-        normHidden.Dispose();
-
-        // ── 4. FP32 QK-norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor qNormed = new Tensor(heads, DType.F32);
-        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kNormed = new Tensor(heads, DType.F32);
-        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        // ── 5. Permute [B, S, H, D] → [B, H, S, D] then run SDPA ──
-        Tensor qMh = new Tensor(mhShape, DType.F32);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        kNormed.Dispose();
-        Tensor vMh = new Tensor(mhShape, DType.F32);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        v.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale, allowF16: true);   // QK-RMS-normed, mask-null, D=256 — the proven cuDNN fused config
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        // ── 6. Permute back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attn = new Tensor(hidShape, DType.F32);
-        backend.Permute0213(attn, attnMh, _numHeads, seqLen, _headDim);
-        attnMh.Dispose();
-
-        // ── 7. Output projection ──
-        Tensor attnProj = new Tensor(hidShape, DType.F32);
-        backend.Linear(attnProj, attn, _toOutWeight!, null);
-        attn.Dispose();
+        // ── 3-7. Self-attention: bias-free projections, FP32 per-head QK-norm, output projection ──
+        Tensor attnProj = _attention!.Forward(backend, normHidden, normHidden, new AttentionCallContext { ReleaseInputs = true });
 
         // ── 8. Post-attention path (lines 187-191):
         //   h_post  = norm2(residual + gate_msa * attn)

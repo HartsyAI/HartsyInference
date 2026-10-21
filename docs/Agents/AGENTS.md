@@ -35,6 +35,9 @@ commit message or PR body, and none in the changelog.
      included) against the branch, interleaved on the same seeds, reporting wall clock, per-step ms, VRAM and
      SSIM or raw-pixel digest per pair, via `tests/regression-ab.sh`. State up front whether the expectation
      is identical (refactor) or bounded (numerics change, with a floor and a reason). Table goes in the PR body.
+     CUDA picks the F32 attention route and tile height (and MiniMax-H3 its chunk rows) from free VRAM, so a change
+     that only frees memory earlier can move bits on a card near the line: before calling an identity failure a bug,
+     rerun both arms with `vram.sdpaForceTiled=true`, `numerics.sdpaTile=256` and `vram.h3ChunkRows=1000000` pinned.
 4. Final pass: comment/doc cleanup. Bump only for a new feature or a large bug fix: then add a `## alpha.N` section
    in `CHANGELOG.md` and the matching `Directory.Build.props` `VersionSuffix` bump, one per PR. Small changes,
    docs-only ones included, skip both. A merge to `main` that touches `src/` publishes whatever version is already

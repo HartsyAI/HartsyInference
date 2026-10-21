@@ -75,6 +75,10 @@ stable release will require. Dates are UTC.
   the projections, the QK norm and rotation, the attention call and the output gate and projection. LTX-2, Krea 2,
   Z-Image and its context refiner, Lumina 2 (single item), OmniGen2 (rope modes), Boogu and Lance run on it instead of
   wiring attention themselves. Output is bit-identical.
+- **Changed: joint (MMDiT) attention is one shared component.** `JointAttention` runs each stream's projection and QK
+  norm through its own `AttentionLayer`, concatenates the streams' rows in the model's order, attends once over the joint
+  sequence and splits the output back. SD3 (and its dual attention), AuraFlow, HiDream, Anima, Ernie-Image and the
+  HunyuanVideo token refiner use it or the shared layer. Output is bit-identical.
 
 ## alpha.383
 
