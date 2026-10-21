@@ -137,7 +137,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         Tensor? onlyTextCtx = !doDualCondition ? null
             : useErgLyric
                 ? _dit.BuildContext(Backend, textEmbeds, lyricIds, null, lyricQScale: (4, 6, 0.01f))
-                : BuildOnlyTextContext(ctx, (int)textEmbeds.Shape[0]);
+                : BuildOnlyTextContext(ctx, textEmbeds, _config.TextDim);
 
         Tensor z = SeedGenerator.CreateNoise(new TensorShape([1L, _config.InChannels, _config.LatentHeight, fLat]), actualSeed);
         using AceStepGuidance.MomentumBuffer momentum = new();
@@ -278,11 +278,11 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Clones the full context and zeroes the lyric rows (everything after speaker + text), leaving the speaker + UMT5 text conditioning active — the "text-only" branch for double-condition CFG.</summary>
-    private Tensor BuildOnlyTextContext(Tensor ctx, int textRows)
+    internal static Tensor BuildOnlyTextContext(Tensor ctx, Tensor textEmbeds, int textDim)
     {
         Tensor o = Clone(ctx);
         int dim = (int)ctx.Shape[1];
-        int lyricStart = 1 + textRows;   // row 0 = speaker, rows 1..textRows = text.
+        int lyricStart = 1 + (int)(textEmbeds.Shape.ElementCount / textDim);   // speaker row + text rows
         long rows = ctx.Shape[0];
         if (lyricStart < rows)
         {
