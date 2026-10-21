@@ -189,6 +189,103 @@ public sealed class AttentionLayer
         return Output(backend, w, flat, null, flat.DType, logical);
     }
 
+    /// <summary>The query stage of a shared-query branch: Q of <paramref name="qInput"/> (<c>[B, S, C]</c> or <c>[S, C]</c>), normed
+    /// and rotated per the config and context, permuted to head-major <c>[B, heads, S, D]</c>. Disposes <paramref name="qInput"/>
+    /// when <paramref name="releaseInput"/> is set, right after the projection. The caller owns the result.</summary>
+    public Tensor ProjectQueryHeadMajor(IBackend backend, Tensor qInput, bool releaseInput, in AttentionCallContext context)
+    {
+        AttentionLayerWeights w = BranchWeights(in context);
+        int rank = qInput.Shape.Rank;
+        int batch = rank >= 3 ? (int)qInput.Shape[0] : 1;
+        int sq = (int)qInput.Shape[rank - 2];
+        DType act = _config.ComputeDType ?? qInput.DType;
+        Tensor q = new(BranchShape(qInput.Shape, _config.Heads), act);
+        backend.Linear(q, qInput, w.Query!, w.QueryBias);
+        if (releaseInput) qInput.Dispose();
+        if (_config.QkNorm != AttentionQkNorm.None)
+        {
+            AttentionNormWeights n = _norms!.Value;
+            q = NormPerHead(backend, q, n.Query, n.QueryEps);
+        }
+        RotateWithTables(backend, q, context.QueryRotation, _config.Heads);
+        Tensor qMh = new(new TensorShape(batch, _config.Heads, sq, _config.HeadDim), q.DType);
+        backend.Permute0213(qMh, q, sq, _config.Heads, _config.HeadDim);
+        q.Dispose();
+        return qMh;
+    }
+
+    /// <summary>One attention branch over <paramref name="qMh"/> from <see cref="ProjectQueryHeadMajor"/>: K and V of
+    /// <paramref name="kvInput"/> (<c>[B, Skv, C]</c>) come from <see cref="AttentionCallContext.CachedKv"/> or are projected, normed,
+    /// rotated and permuted head-major, then offered to it. <paramref name="qMh"/>, <paramref name="kvInput"/> and cached K/V stay the
+    /// caller's; K/V the cache did not take are disposed. Returns the head-major <c>[B, heads, Sq, D]</c> output; the caller owns it.</summary>
+    public Tensor AttendBranchHeadMajor(IBackend backend, Tensor qMh, Tensor kvInput, in AttentionCallContext context)
+    {
+        AttentionLayerWeights w = BranchWeights(in context);
+        if (_config.KvHeads != _config.Heads)
+            throw new NotSupportedException("Head-major operands carry one head per query head; grouped key/value heads attend through Attend.");
+        int rank = kvInput.Shape.Rank;
+        int batch = rank >= 3 ? (int)kvInput.Shape[0] : 1;
+        int skv = (int)kvInput.Shape[rank - 2];
+        if (qMh.Shape.Rank != 4 || qMh.Shape[0] != batch || qMh.Shape[1] != _config.Heads || qMh.Shape[3] != _config.HeadDim)
+            throw new ArgumentException($"AttendBranchHeadMajor takes [{batch}, {_config.Heads}, S, {_config.HeadDim}] queries; got {qMh.Shape}.");
+        Tensor keyMh = null!, valueMh = null!;
+        bool borrowed = context.CachedKv?.TryGet(backend, kvInput, out keyMh, out valueMh) == true;
+        bool stored = false;
+        if (!borrowed)
+        {
+            DType kvAct = _config.ComputeDType ?? kvInput.DType;
+            TensorShape projected = BranchShape(kvInput.Shape, _config.KvHeads);
+            Tensor k = new(projected, kvAct);
+            backend.Linear(k, kvInput, w.Key!, w.KeyBias);
+            Tensor v = new(projected, kvAct);
+            backend.Linear(v, kvInput, w.Value!, w.ValueBias);
+            if (_config.QkNorm != AttentionQkNorm.None)
+            {
+                AttentionNormWeights n = _norms!.Value;
+                k = NormPerHead(backend, k, n.Key, n.KeyEps);
+            }
+            RotateWithTables(backend, k, context.KeyRotation, _config.KvHeads);
+            TensorShape headMajor = new(batch, _config.KvHeads, skv, _config.HeadDim);
+            keyMh = new Tensor(headMajor, k.DType);
+            backend.Permute0213(keyMh, k, skv, _config.KvHeads, _config.HeadDim);
+            k.Dispose();
+            valueMh = new Tensor(headMajor, v.DType);
+            backend.Permute0213(valueMh, v, skv, _config.KvHeads, _config.HeadDim);
+            v.Dispose();
+            stored = context.CachedKv?.TryStore(backend, kvInput, keyMh, valueMh) == true;
+        }
+        return RunAttention(backend, qMh, keyMh, valueMh, _config.ComputeDType ?? qMh.DType, in context,
+            borrowed || stored ? OperandOwnership.None : OperandOwnership.Key | OperandOwnership.Value);
+    }
+
+    /// <summary>The permute back to <paramref name="flatShape"/> (<c>[B, S, heads·D]</c>) of a branch's head-major output, which is
+    /// disposed; the caller owns the result.</summary>
+    public Tensor MergeHeads(IBackend backend, Tensor attnMh, TensorShape flatShape)
+    {
+        Tensor flat = new(flatShape, attnMh.DType);
+        backend.Permute0213(flat, attnMh, _config.Heads, (int)attnMh.Shape[2], _config.HeadDim);
+        attnMh.Dispose();
+        return flat;
+    }
+
+    private AttentionLayerWeights BranchWeights(in AttentionCallContext context)
+    {
+        AttentionLayerWeights w = _weights ?? throw new InvalidOperationException("This attention layer has no projection weights.");
+        if (_config.Projection != AttentionProjection.PerWeight || _config.Gate != AttentionGate.None || _config.QkNorm == AttentionQkNorm.FullWidth)
+            throw new NotSupportedException("The branch stages run per-weight projections with no gate and no fused full-width norm.");
+        if (context.Rotation is not null || context.HeadMajorRotation is not null
+            || context.QueryRotation.Kind == QkRotationKind.RotateHalfPaired || context.KeyRotation.Kind == QkRotationKind.RotateHalfPaired)
+            throw new NotSupportedException("A branch stage rotates through per-tensor tables, not a rotation adapter or a paired rotation.");
+        if (context.ValueRowScale is not null || context.KvRewrite is not null || context.KvCapture is not null
+            || context.ReleaseInputs || context.ReleaseQueryAfterProjection)
+            throw new ArgumentException("A branch stage runs no value row-scale, K/V rewrite or capture and releases through its arguments.", nameof(context));
+        return w;
+    }
+
+    /// <summary>Projections keep the model's flat <c>[.., heads·D]</c> shape unless a per-head norm needs <c>[.., heads, D]</c>.</summary>
+    private TensorShape BranchShape(TensorShape input, int heads) =>
+        _config.QkNorm == AttentionQkNorm.None ? WithLastDim(input, heads * _config.HeadDim) : ProjectedShape(input, heads);
+
     /// <summary>The projections; with <paramref name="release"/> the inputs are disposed as soon as nothing reads them.</summary>
     private (Tensor Q, Tensor K, Tensor V, Tensor? Gate) Project(IBackend backend, AttentionLayerWeights w, Tensor qInput,
         Tensor kvInput, DType act, DType kvAct, bool release, in AttentionCallContext context)
@@ -323,6 +420,8 @@ public sealed class AttentionLayer
     /// <summary>Refuses what the configured norm cannot apply, before anything is allocated.</summary>
     private void ValidateContext(in AttentionCallContext context, int batch)
     {
+        if (context.CachedKv is not null)
+            throw new ArgumentException("A cached key/value attends through AttendBranchHeadMajor.", nameof(context));
         bool fullWidth = _config.QkNorm == AttentionQkNorm.FullWidth;
         if (fullWidth && batch != 1)
             throw new NotSupportedException($"The full-width QK norm runs one batch item; got {batch}.");
@@ -352,6 +451,8 @@ public sealed class AttentionLayer
             throw new ArgumentException("The operator stage runs no rotation.", nameof(context));
         if (context.ValueRowScale is not null || context.KvRewrite is not null || context.KvCapture is not null)
             throw new ArgumentException("The operator stage runs no value row-scale, K/V rewrite or K/V capture.", nameof(context));
+        if (context.CachedKv is not null)
+            throw new ArgumentException("The operator stage has no key/value projection to cache.", nameof(context));
         if (context.ReleaseInputs || context.ReleaseQueryAfterProjection)
             throw new ArgumentException("The operator stage has no projection inputs to release; name the operands in consume.", nameof(context));
     }

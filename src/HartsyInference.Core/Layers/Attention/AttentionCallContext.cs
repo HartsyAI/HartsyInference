@@ -80,6 +80,18 @@ public sealed class CapturedKv : IKvCapture
     public void Capture(Tensor k, Tensor v) => (Key, Value) = (k, v);
 }
 
+/// <summary>Head-major key and value projections of a constant key/value input, kept across calls by the caller's cache. The
+/// cache owns what it stores; a hit is borrowed.</summary>
+public interface ICachedKv
+{
+    /// <summary>The cached <c>[B, heads, Skv, D]</c> key and value of <paramref name="kvInput"/> on <paramref name="backend"/>;
+    /// the caller must not dispose them.</summary>
+    bool TryGet(IBackend backend, Tensor kvInput, out Tensor keyMh, out Tensor valueMh);
+
+    /// <summary>Offers the projected head-major key and value; true when the cache took ownership of both.</summary>
+    bool TryStore(IBackend backend, Tensor kvInput, Tensor keyMh, Tensor valueMh);
+}
+
 /// <summary>Reads named intermediates of a call for diagnostics. It must not keep or modify them, and is never set on a
 /// captured path.</summary>
 public interface IAttentionProbe
@@ -118,6 +130,9 @@ public readonly record struct AttentionCallContext
 
     /// <summary>Keeps the rotated K and V (after any rewrite) for the caller.</summary>
     public IKvCapture? KvCapture { get; init; }
+
+    /// <summary>Constant head-major key and value for <see cref="AttentionLayer.AttendBranchHeadMajor"/>.</summary>
+    public ICachedKv? CachedKv { get; init; }
 
     /// <summary>The layer disposes the query input, and a distinct key/value input, once the projections have read them; a
     /// failure after that point leaves nothing for the caller to dispose.</summary>
