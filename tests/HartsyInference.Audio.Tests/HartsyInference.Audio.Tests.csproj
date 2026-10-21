@@ -45,6 +45,7 @@
     <None Include="Fixtures\zipvoice_frontend_parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\f5_reference_parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\f5_reference_speech_24k.wav" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Attention\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

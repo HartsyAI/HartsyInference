@@ -16,4 +16,8 @@
     <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Fixtures\Attention\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

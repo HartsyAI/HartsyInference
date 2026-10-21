@@ -7,7 +7,7 @@ namespace HartsyInference.LLM.Seq2Seq;
 /// <summary>T5/FLAN-T5 encoder-decoder loaded from a llama.cpp <c>t5</c> GGUF, handling T5's quirks: inner attention dim = n_heads·key_length (≠ d_model), <b>no 1/√d attention scaling</b>, learned <b>relative position bias</b> (bucketed, shared across layers, weights on block 0; bidirectional for the encoder, causal for the decoder self-attn, none for cross-attn), T5LayerNorm = RMSNorm (no bias), GeGLU FFN (FLAN).</summary>
 public sealed unsafe class T5Model : IDisposable
 {
-    private readonly GgufModelLoader.LoadedGgufModel _handle;
+    private readonly GgufModelLoader.LoadedGgufModel? _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
     private int _disposed;
 
@@ -23,13 +23,18 @@ public sealed unsafe class T5Model : IDisposable
     public float Eps { get; }
     private const int MaxDistance = 128;
 
-    private T5Model(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w,
+    private T5Model(GgufModelLoader.LoadedGgufModel? handle, IReadOnlyDictionary<string, Tensor> w,
         int dModel, int layers, int heads, int headDim, int inter, int vocab, int buckets, int decStart, float eps)
     {
         _handle = handle; _w = w;
         DModel = dModel; NumLayers = layers; NumHeads = heads; HeadDim = headDim; Inner = heads * headDim;
         Intermediate = inter; VocabSize = vocab; NumBuckets = buckets; DecoderStartToken = decStart; Eps = eps <= 0f ? 1e-6f : eps;
     }
+
+    /// <summary>Test seam: a model over an in-memory weight dictionary (GGUF-named tensors) instead of a GGUF file.</summary>
+    internal static T5Model FromWeights(IReadOnlyDictionary<string, Tensor> w, int dModel, int layers, int heads, int headDim, int inter,
+        int buckets, int decStart, float eps) =>
+        new(null, w, dModel, layers, heads, headDim, inter, (int)w["token_embd.weight"].Shape[0], buckets, decStart, eps);
 
     public static T5Model Load(string ggufPath)
     {
@@ -250,6 +255,6 @@ public sealed unsafe class T5Model : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _handle.Dispose();
+        _handle?.Dispose();
     }
 }

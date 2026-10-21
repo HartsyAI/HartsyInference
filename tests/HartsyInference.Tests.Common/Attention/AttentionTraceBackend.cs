@@ -84,8 +84,56 @@ public sealed class AttentionTraceBackend : IBackend
         if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
 
+    public void BatchedMatMul(Tensor output, Tensor a, Tensor b) => Ops.Add($"BatchedMatMul {a.Shape} x {b.Shape}");
+
+    public void LayerNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps) => Ops.Add($"LayerNorm {Name(weight)}");
+
+    public void Transpose2D(Tensor output, Tensor input, int d1, int d2) => Ops.Add($"Transpose2D {d1},{d2}");
+
+    public void Add(Tensor output, Tensor a, Tensor b) => Ops.Add("Add");
+
+    public void Gelu(Tensor output, Tensor input) => Ops.Add("Gelu");
+
+    public void KvCacheAppend(Tensor buffer, Tensor newKv, int offset) => Ops.Add($"KvCacheAppend @{offset} {newKv.Shape}");
+
+    public void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos) => Ops.Add($"KvCacheAppendDev @{offset} dev={devicePos != 0}");
+
+    public void SliceTimeRange(Tensor output, Tensor input, int start, int len) => Ops.Add($"SliceTimeRange {start}+{len}");
+
+    /// <summary>The legacy SDPA calls, in order.</summary>
+    public List<SdpaCall> SdpaCalls { get; } = new();
+
+    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
+    {
+        SdpaCalls.Add(new SdpaCall(scale, allowF16, mask is not null));
+        Ops.Add($"SDPA scale={scale:0.######} allowF16={allowF16} masked={mask is not null}");
+        if (FailAttention) throw new OutOfMemoryException("attention failed");
+    }
+
+    /// <summary>The Flash calls, in order (the Flash entries are not <see cref="AttentionCall"/>s on this stub).</summary>
+    public List<FlashCall> FlashCalls { get; } = new();
+
+    public void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale,
+        float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
+    {
+        FlashCalls.Add(new FlashCall(kvLen, kvGroup, causal, qOffset, scale, softcap, sink is not null, slidingWindow, DevicePos: 0));
+        Ops.Add($"FlashAttention kv={kvLen} group={kvGroup} causal={causal} qOffset={qOffset} window={slidingWindow} sinks={sink is not null}");
+        if (FailAttention) throw new OutOfMemoryException("attention failed");
+    }
+
+    public void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale,
+        ulong devicePos, float softcap = 0f, int slidingWindow = 0)
+    {
+        FlashCalls.Add(new FlashCall(kvLen, kvGroup, causal, qOffset, scale, softcap, false, slidingWindow, devicePos));
+        Ops.Add($"FlashAttentionDev kv={kvLen} group={kvGroup} causal={causal} qOffset={qOffset} window={slidingWindow} dev={devicePos != 0}");
+        if (FailAttention) throw new OutOfMemoryException("attention failed");
+    }
+
     /// <summary>Weights are named by their first dim so a trace says which projection ran.</summary>
     private static string Name(Tensor t) => t.Shape.Rank == 0 ? "?" : $"w{t.Shape[0]}";
+
+    /// <summary>Lets the resident (device-cache Flash) decode branches run against the stub.</summary>
+    public bool FlashDecodeSupported { get; init; }
 
     public IStreamingWeightCache? StreamingCache => null;
     public void TrimMemoryPool() { }
@@ -101,24 +149,18 @@ public sealed class AttentionTraceBackend : IBackend
     public void Dispose() { }
 
     public void MatMul(Tensor output, Tensor a, Tensor b) => throw Unused();
-    public void BatchedMatMul(Tensor output, Tensor a, Tensor b) => throw Unused();
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW) => throw Unused();
     public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias, int stride, int padding, int dilation, int groups, int outputPadding) => throw Unused();
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias, int stride, int padding, int dilation, int groups, int outputPadding) => throw Unused();
     public void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps) => throw Unused();
-    public void LayerNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps) => throw Unused();
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps) => throw Unused();
-    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false) => throw Unused();
-    public void Gelu(Tensor output, Tensor input) => throw Unused();
     public void Silu(Tensor output, Tensor input) => throw Unused();
     public void Tanh(Tensor output, Tensor input) => throw Unused();
     public void Elu(Tensor output, Tensor input, float alpha) => throw Unused();
     public void LeakyRelu(Tensor output, Tensor input, float slope) => throw Unused();
     public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta) => throw Unused();
-    public void Add(Tensor output, Tensor a, Tensor b) => throw Unused();
     public void Scale(Tensor output, Tensor input, float scalar) => throw Unused();
     public void Clamp(Tensor output, Tensor input, float min, float max) => throw Unused();
-    public void Transpose2D(Tensor output, Tensor input, int d1, int d2) => throw Unused();
     public void GeGlu(Tensor output, Tensor input) => throw Unused();
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial) => throw Unused();
     public void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim) => throw Unused();
@@ -133,3 +175,9 @@ public sealed class AttentionTraceBackend : IBackend
     private static Exception Unused([CallerMemberName] string member = "") =>
         new NotSupportedException($"{member} is not reachable from an attention layer.");
 }
+
+/// <summary>One recorded <c>FlashAttention</c> / <c>FlashAttentionDev</c> call.</summary>
+public readonly record struct FlashCall(int KvLen, int KvGroup, bool Causal, int QOffset, float Scale, float Softcap, bool HasSinks, int SlidingWindow, ulong DevicePos);
+
+/// <summary>One recorded legacy <c>ScaledDotProductAttention</c> call.</summary>
+public readonly record struct SdpaCall(float Scale, bool AllowF16, bool Masked);

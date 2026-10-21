@@ -31,14 +31,26 @@ public sealed unsafe class MoshiDepformer : IDisposable
     private readonly Tensor?[] _embW = new Tensor?[DepQ - 1];      // depformer_emb[k] lookup [2049,128]
     private readonly Tensor?[] _embLr = new Tensor?[DepQ - 1];     // depformer_emb[k].low_rank [1024,128]
     private Tensor? _textW, _textOut1, _textOut2;                  // depformer_text_emb (demux)
-    private readonly Tensor?[,] _selfIn = new Tensor?[Layers, Sets];   // per-set QKV proj [3072,1024]
-    private readonly Tensor?[,] _selfOut = new Tensor?[Layers, Sets];  // per-set out proj [1024,1024]
-    private readonly Tensor?[,] _gateInGate = new Tensor?[Layers, Sets];  // gate half of gating.linear_in [2048,1024]
-    private readonly Tensor?[,] _gateInUp = new Tensor?[Layers, Sets];    // up half [2048,1024]
-    private readonly Tensor?[,] _gateOut = new Tensor?[Layers, Sets];     // [1024,2048]
-    private readonly Tensor?[] _norm1 = new Tensor?[Layers], _norm2 = new Tensor?[Layers];
+    private readonly int _layers;
+    private readonly Tensor?[,] _selfIn;     // per-set QKV proj [3072,1024]
+    private readonly Tensor?[,] _selfOut;    // per-set out proj [1024,1024]
+    private readonly Tensor?[,] _gateInGate; // gate half of gating.linear_in [2048,1024]
+    private readonly Tensor?[,] _gateInUp;   // up half [2048,1024]
+    private readonly Tensor?[,] _gateOut;    // [1024,2048]
+    private readonly Tensor?[] _norm1, _norm2;
     private readonly Tensor?[] _heads = new Tensor?[DepQ];         // linears[cb] [2048,1024]
     private int _disposed;
+
+    public MoshiDepformer() : this(Layers) { }
+
+    /// <summary>Test seam: a depth transformer with fewer than <see cref="Layers"/> layers.</summary>
+    internal MoshiDepformer(int layers)
+    {
+        _layers = layers;
+        _selfIn = new Tensor?[layers, Sets]; _selfOut = new Tensor?[layers, Sets];
+        _gateInGate = new Tensor?[layers, Sets]; _gateInUp = new Tensor?[layers, Sets]; _gateOut = new Tensor?[layers, Sets];
+        _norm1 = new Tensor?[layers]; _norm2 = new Tensor?[layers];
+    }
 
     private static int[] BuildSchedule()
     {
@@ -58,7 +70,7 @@ public sealed unsafe class MoshiDepformer : IDisposable
         _textW = WhisperOps.EnsureF32(w["depformer_text_emb.weight"]);
         _textOut1 = WhisperOps.EnsureF32(w["depformer_text_emb.out1.weight"]);
         _textOut2 = WhisperOps.EnsureF32(w["depformer_text_emb.out2.weight"]);
-        for (int l = 0; l < Layers; l++)
+        for (int l = 0; l < _layers; l++)
         {
             string p = $"depformer.layers.{l}";
             // Pre-slice the per-weight-set projections at load. Slicing them fresh each Block call allocated a new
@@ -93,7 +105,7 @@ public sealed unsafe class MoshiDepformer : IDisposable
         // Device-resident depth KV cache (FixedKvCache + FlashAttention) instead of the per-block host-pointer
         // copies (WriteStep/Prefix/HeadSlice/HeadsToFlat) that forced ~Layers·8 D2H drains per codebook — ~1000
         // host round-trips per frame on a GPU backend, the dominant cost of Kyutai TTS generation.
-        using FixedKvCache depthCache = new(Layers, batch: 1, numKvHeads: Heads, headDim: HeadDim, maxSequenceLength: DepQ);
+        using FixedKvCache depthCache = new(_layers, batch: 1, numKvHeads: Heads, headDim: HeadDim, maxSequenceLength: DepQ);
         int prev = textToken;
         for (int cb = 0; cb < DepQ; cb++)
         {
@@ -103,7 +115,7 @@ public sealed unsafe class MoshiDepformer : IDisposable
             Tensor x = new(new TensorShape(1, 1, Dim), DType.F32);
             backend.Add(x, depIn, emb); depIn.Dispose(); emb.Dispose();
 
-            for (int l = 0; l < Layers; l++)
+            for (int l = 0; l < _layers; l++)
                 x = Block(backend, x, l, set, cb, depthCache);
             depthCache.AdvanceLength(1);   // all Layers appended this codebook's row at position cb; advance once
 

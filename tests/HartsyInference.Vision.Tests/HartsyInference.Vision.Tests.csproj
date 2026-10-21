@@ -20,6 +20,10 @@
     <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Fixtures\Attention\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- Test fixture: small RGB PNG (Ultralytics' bus.jpg → PNG). Used by PngDecoderTests and the
        YOLO end-to-end test for a real-image inference path. -->
   <ItemGroup>
