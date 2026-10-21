@@ -49,11 +49,11 @@ public static class GgufConfigFactory
             : metadata.GetFloat32($"{arch}.attention.layer_norm_epsilon", 1e-6f);
         if (rmsEps <= 0f) rmsEps = 1e-6f;   // some DeepSeek GGUFs store 0.0 → use a sane default
 
-        // Vocab from the embedding table. GGUF stores token_embd with dims [hidden, vocab] (reverse of the
-        // safetensors [vocab, hidden] order), so derive it from the total element count to be order-agnostic.
+        // Vocab is the logit width: an untied head's rows, which can be fewer than the table's (mllama's table adds 8 image-token
+        // rows). GGUF stores both as [hidden, vocab] (reverse of safetensors), so count elements to stay order-agnostic.
         if (!weights.TryGetValue("model.embed_tokens.weight", out Tensor? embed))
             throw new ArgumentException("GGUF weights missing model.embed_tokens.weight (cannot infer vocab).", nameof(weights));
-        int vocab = (int)(embed.ElementCount / hidden);
+        int vocab = (int)((weights.TryGetValue("lm_head.weight", out Tensor? head) ? head : embed).ElementCount / hidden);
 
         // Structural feature detection from the remapped layer-0 keys.
         bool attentionBias = weights.ContainsKey("model.layers.0.self_attn.q_proj.bias");

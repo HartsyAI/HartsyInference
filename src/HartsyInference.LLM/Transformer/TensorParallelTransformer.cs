@@ -352,12 +352,14 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         int h = _cfg.HiddenSize;
         float* op = (float*)output.DataPointer;
         float* ep = (float*)_embed.DataPointer;
+        // The table can hold rows past the logit width (mllama's image tokens).
+        long rows = _embed.ElementCount / h;
         for (int s = 0; s < tokenIds.Length; s++)
         {
             int id = tokenIds[s];
-            if ((uint)id >= (uint)_cfg.VocabSize)
+            if ((uint)id >= (ulong)rows)
             {
-                throw new ArgumentException($"token id {id} out of range [0, {_cfg.VocabSize}).");
+                throw new ArgumentException($"token id {id} out of range [0, {rows}).");
             }
             Buffer.MemoryCopy(ep + (long)id * h, op + (long)s * h, h * 4, h * 4);
         }

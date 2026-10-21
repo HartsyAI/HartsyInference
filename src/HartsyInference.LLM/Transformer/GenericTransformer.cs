@@ -793,8 +793,11 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         if (StagesGraphDecodeEmbedRows(backend)) return 0;
         if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
             return ReferenceEquals(quant, _lmHeadQuant) ? 0 : Tensor.ComputeByteSize(quant.Shape, quant.DType);
-        return (long)_cfg.VocabSize * _cfg.HiddenSize * sizeof(float);
+        return (long)EmbedRows * _cfg.HiddenSize * sizeof(float);
     }
+
+    /// <summary>Rows of the token-embedding table, which can exceed the logit width (<see cref="TransformerConfig.VocabSize"/>).</summary>
+    private int EmbedRows => (int)(_embed!.ElementCount / _cfg.HiddenSize);
 
     /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>
     public void EnsurePleResidentForGraphDecode(IBackend backend)
@@ -1074,8 +1077,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     public unsafe nint GraphDecodeEmbedRow(int tokenId)
     {
         ThrowIfDisposed();
-        if ((uint)tokenId >= (uint)_cfg.VocabSize)
-            throw new ArgumentException($"token id {tokenId} out of range [0, {_cfg.VocabSize}).", nameof(tokenId));
+        if ((uint)tokenId >= (uint)EmbedRows)
+            throw new ArgumentException($"token id {tokenId} out of range [0, {EmbedRows}).", nameof(tokenId));
         int h = _cfg.HiddenSize;
         float* row = (float*)_embed!.DataPointer + (long)tokenId * h;
         if (_cfg.EmbeddingScale == 1f) return (nint)row;
@@ -1093,11 +1096,12 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         int h = _cfg.HiddenSize;
         float* op = (float*)output.DataPointer;
         float* ep = (float*)_embed!.DataPointer;
+        int rows = EmbedRows;
         for (int s = 0; s < tokenIds.Length; s++)
         {
             int id = tokenIds[s];
-            if ((uint)id >= (uint)_cfg.VocabSize)
-                throw new ArgumentException($"token id {id} out of range [0, {_cfg.VocabSize}).");
+            if ((uint)id >= (uint)rows)
+                throw new ArgumentException($"token id {id} out of range [0, {rows}).");
             Buffer.MemoryCopy(ep + (long)id * h, op + (long)s * h, h * 4, h * 4);
         }
         // Gemma scales token embeddings by sqrt(hidden) (the embedding normalizer); 1.0 for Qwen/Llama.
