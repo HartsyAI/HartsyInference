@@ -39,6 +39,10 @@ stable release will require. Dates are UTC.
 - **LTX-2 rotary runs on the GPU under Vulkan.** `Ltx2SplitRope` had no Vulkan kernel, so every LTX-2 attention
   call copied Q and K to the host, rotated them there and uploaded them again. The new kernel keeps each product unfused,
   so its output is bit-identical to the host loop.
+- **Changed: cuDNN fused attention reads strided operand views.** Q, K, V and the output can be any view with a contiguous
+  head dim: any batch, column slices of one fused QKV projection, and mixed head-major and token-major layouts. Offsets stay
+  out of the plan key. The token-major cuDNN rows take the same masks as head-major (per-batch, per-head, key-only). Today's
+  calls build the graphs they built before; this is what lets later changes drop the permutes around attention.
 
 ## alpha.384
 
