@@ -39,8 +39,9 @@ and `numerics.flashF16=false`: no F16 narrowing of an F32 call, no INT8, no F16 
 run TF32 whatever the settings say, so this arm is the strictest the engine can run today, not exact F32.
 
 Measured on the 4090, default arm vs strict arm on the same build: origin/main e845dcd9 (`4090/floors2.log`) and, for the
-pinned H3 row and the LLM rows, 27e36bf9 (`4090/floors3.log`). A row at 1.000000 ran no approximation at its shapes, so its
-floor is `identical`.
+pinned H3 row and the LLM rows, 27e36bf9 (`4090/floors3.log`). Compare a row only with a later run of the same row. A floor is
+the min SSIM over the seed pairs minus 0.01, rounded down to three decimals; a row at 1.000000 ran no approximation at its
+shapes, so its floor is `identical`. Step ms is the harness's median over the warm seeds.
 
 | Case | Default vs strict, min SSIM | Floor | Step ms, default → strict |
 |---|---|---|---|
@@ -55,14 +56,18 @@ floor is `identical`.
 | chroma-hd | 1.000000 | identical | - |
 | lumina2 | 0.999098 | 0.989 | 688 → 1059 |
 | ltx25-dev | 0.964689 | 0.955 | 742 → 764 |
-| h3-fl2va-fp8, SDPA route pinned | 1.000000 | identical | 1656 → 1363 |
+| h3-fl2va-fp8, SDPA route pinned | 1.000000 | identical | 1656 → 1363, under the pin (not production speed) |
 
 - ideogram4's 0.894 is the lowest; both arms were inspected and both images are clean.
 - H3 unpinned read 0.39 because free VRAM moved the materialized/tiled choice between arms. Pinned
-  (`vram.sdpaForceTiled=true`, `numerics.sdpaTile=256`, `vram.h3ChunkRows=1000000`), the arms are identical.
+  (`vram.sdpaForceTiled=true`, `numerics.sdpaTile=256`, `vram.h3ChunkRows=1000000`), the arms are identical. The pin forces
+  the tiled F32 path, so that row's step ms says nothing about production speed.
 
-| LLM case | Mean \|Δ log p\| | Max \|Δ log p\| | Within the bar |
-|---|---|---|---|
-| llama32-1b | 0.0146 | 0.114 | yes |
-| qwen3-4b | 0.0145 | 0.238 | no: the max already exceeds 0.2 today, so 0.238 is this row's max floor |
-| gemma2-2b | 0 | 0 | identical |
+| LLM case | Mean \|Δ log p\| | Max \|Δ log p\| | Top-token flips | Within the bar |
+|---|---|---|---|---|
+| llama32-1b | 0.0146 | 0.114 | 2/256 | yes |
+| qwen3-4b | 0.0145 | 0.238 | 1/256 | no: the max already exceeds 0.2 today, so 0.238 is this row's max floor |
+| gemma2-2b | 0 | 0 | 0/256 | identical |
+
+The log's `FAIL` on llama32-1b and qwen3-4b is the harness's equality check, not the floor. The flips are today's
+default against strict on the forced tokens; a later bounded change may not add flips beyond these counts.
