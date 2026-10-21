@@ -59,7 +59,7 @@ __device__ __forceinline__ void flashAttnSplitBody(
 
     // Graph-capture decode: read this step's position {kvLen, qOffset} from device so one captured graph replays
     // at every step with a FIXED split count (chunk is sized to capacity; splits past kvLen early-exit below).
-    if (dPos != nullptr) { kvLen = (unsigned int)dPos[0]; qOffset = dPos[1]; }
+    if (dPos != nullptr) { kvLen = min((unsigned int)max(dPos[0], 0), Lk); qOffset = dPos[1]; }
 
     extern __shared__ float sdata[];
     size_t qBase = (((size_t)b * Hq + h) * Tq + r) * D;

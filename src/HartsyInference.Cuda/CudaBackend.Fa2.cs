@@ -54,9 +54,9 @@ public sealed partial class CudaBackend
     }
 
     /// <summary>True when the grouped-query flash-decoding kernel can serve this single-row decode call.</summary>
-    private bool DecodeGqaEligible(int tq, bool causal, int hq, int hkv, int kvGroup, int d) =>
+    private bool DecodeGqaEligible(int b, int tq, bool causal, int hq, int hkv, int kvGroup, int d) =>
         tq == 1 && causal && hkv > 0 && hq == hkv * kvGroup && _kernels is { HasDecodeGqa: true } && CudaKernels.DecodeGqaSupports(d, kvGroup)
-        && EngineKnobs.FlashDecodeGqa.Value;
+        && CudaKernels.GridYzFits(hkv, b) && EngineKnobs.FlashDecodeGqa.Value;
 
     /// <summary>Grouped-query flash-decoding into <paramref name="pOut"/>: partial states per (split, KV head), then the shared combine.
     /// With <paramref name="devicePos"/> the split count follows the cache capacity <paramref name="keySpan"/> so a captured graph keeps its grid.</summary>

@@ -3119,7 +3119,15 @@ public sealed partial class CudaKernels : IDisposable
 
     /// <summary>Element strides of one attention operand: consecutive batches, heads and rows.</summary>
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-    public readonly record struct FlashStrides(ulong Batch, ulong Head, ulong Row);
+    public readonly record struct FlashStrides(ulong Batch, ulong Head, ulong Row)
+    {
+        /// <summary>Whether every row a base at <paramref name="basePtr"/> addresses starts on a 16-byte boundary (F16 elements).</summary>
+        public bool RowsAligned(ulong basePtr) => ((basePtr | (Batch * 2) | (Head * 2) | (Row * 2)) & 15) == 0;
+    }
+
+    /// <summary>The 16-byte row alignment <c>flash_attn_f16</c>'s cp.async loads and stores need, for all four operands.</summary>
+    public static bool FlashF16RowsAligned(ulong o, ulong q, ulong k, ulong v, FlashStrides so, FlashStrides sq, FlashStrides sk, FlashStrides sv) =>
+        so.RowsAligned(o) && sq.RowsAligned(q) && sk.RowsAligned(k) && sv.RowsAligned(v);
 
     /// <summary>F16 fused attention over strided operands: grid <c>(ceil(sq/128), heads, batch)</c>, 256 threads.
     /// <paramref name="scaleLog2"/> is the softmax scale times log2(e). Every row must start 16-byte aligned.</summary>
@@ -3138,6 +3146,8 @@ public sealed partial class CudaKernels : IDisposable
         };
         if (batch <= 0 || batch > 65_535 || heads <= 0 || heads > 65_535 || sqLen <= 0 || skvLen <= 0)
             throw new ArgumentOutOfRangeException(nameof(batch), $"F16 flash attention dims out of range: B={batch} H={heads} Sq={sqLen} Skv={skvLen}.");
+        if (!FlashF16RowsAligned(o, q, k, v, so, sq, sk, sv))
+            throw new ArgumentException("F16 flash attention needs every operand row 16-byte aligned.");
         ulong oA = o, qA = q, kA = k, vA = v;
         FlashStrides soA = so, sqA = sq, skA = sk, svA = sv;
         uint sqN = (uint)sqLen, skvN = (uint)skvLen;

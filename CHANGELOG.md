@@ -55,6 +55,13 @@ stable release will require. Dates are UTC.
   are enabled before use; an oversized grid falls back to the naive kernel; `FlashAttention` refuses a key length past
   the cache instead of reading beyond it.
 - **Fixed: CPU attention refuses what it cannot compute** (dtypes, grouped K/V, shapes) instead of reading memory as F32.
+- **Fixed: CUDA attention defects.** The query-tiled path gave every batch item of a `[B,1,1,Skv]` key mask the wrong
+  row when B > 1. The materialized F16 path casts F32 operands with saturation, as cuDNN does, and clamps the mask so a
+  fully masked row no longer turns to NaN. Decode kernels reading the position from device memory clamp it to the cache,
+  and appends and fused scatters write nothing outside it. The causal cuDNN prefill counts its F16 copies when checking
+  memory. Oversized grids and misaligned rows are refused instead of failing at launch.
+- **Changed: a cuDNN attention refusal no longer disables cuDNN for the whole head dim.** It holds for the refused shape;
+  the head dim is given up only after three shapes are refused with none succeeding.
 
 ## alpha.383
 

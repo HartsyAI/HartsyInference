@@ -75,6 +75,15 @@ public sealed partial class CudaKernels
     /// <summary>Head dimensions the kernel is built for.</summary>
     public static bool Fa2SupportsHeadDim(int d) => d == 64 || d == 128;
 
+    /// <summary>The device limit on a grid's y and z extents.</summary>
+    public const int MaxGridYz = 65_535;
+
+    /// <summary>Whether a launch's grid y and z extents stay inside <see cref="MaxGridYz"/>.</summary>
+    public static bool GridYzFits(long y, long z) => y is > 0 and <= MaxGridYz && z is > 0 and <= MaxGridYz;
+
+    /// <summary>Whether <see cref="LaunchKvToF16"/>'s grid covers <paramref name="kvLen"/> positions of <paramref name="d"/> dims.</summary>
+    public static bool KvToF16GridFits(long kvLen, long d) => (kvLen * d / 4 + 255) / 256 <= MaxGridYz;
+
     /// <summary>Dynamic shared memory of one block: a key tile and a value tile of 64 rows at the padded stride.</summary>
     private static int Fa2SharedBytes(int d) => 2 * 64 * (d + 8) * sizeof(ushort);
 

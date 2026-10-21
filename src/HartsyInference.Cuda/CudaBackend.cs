@@ -49,6 +49,30 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private sealed record DimFailureState(int ConsecutiveFailures, long NextRetryAtTicks, bool Permanent);
     private readonly ConcurrentDictionary<long, DimFailureState> _cudnnSdpaDimState = new();
 
+    /// <summary>One cuDNN SDPA plan's shape: what a structural refusal (no engine config, an unsupported layout) is about.</summary>
+    private readonly record struct CudnnSdpaShape(long B, long H, long Sq, long Skv, long D, CudnnSdpa.SdpaLayout Layout,
+        bool F16Input, long BiasB, long BiasH, long BiasSq)
+    {
+        public override string ToString() =>
+            $"b{B} h{H} sq{Sq} skv{Skv} d{D} {Layout} {(F16Input ? "f16" : "f32")}{(BiasSq > 0 ? $" bias[{BiasB},{BiasH},{BiasSq},{Skv}]" : "")}";
+    }
+
+    /// <summary>Shapes cuDNN refused structurally. A refusal holds for its own shape only: one shape with no deterministic
+    /// engine must not take cuDNN away from every model at that head dim.</summary>
+    private readonly ConcurrentDictionary<CudnnSdpaShape, byte> _cudnnSdpaRefusedShapes = new();
+
+    /// <summary>Head dims cuDNN has run at least once; a head dim with a success is never disabled by its refusals.</summary>
+    private readonly ConcurrentDictionary<long, byte> _cudnnSdpaWorkingDims = new();
+
+    /// <summary>Distinct shapes refused at a head dim before the head dim itself is given up, when none ever ran.</summary>
+    private const int CudnnSdpaRefusalsToDisableDim = 3;
+
+    /// <summary>Refusals warned about per process; later ones are recorded without a warning.</summary>
+    private const int CudnnSdpaRefusalWarnings = 64;
+
+    /// <summary>The shapes cuDNN refused structurally in this process (diagnostics).</summary>
+    public IReadOnlyCollection<string> CudnnSdpaRefusedShapes => [.. _cudnnSdpaRefusedShapes.Keys.Select(k => k.ToString())];
+
     /// <summary>Test-only fault hook for <see cref="TryCudnnSdpa"/>: a non-null return from this is thrown instead of the real call.</summary>
     /// <remarks>Exists so the classify/retry/backoff behavior can be tested deterministically — a real
     /// host-RAM-starvation failure can't be reproduced on demand in a fast unit test. Null in production.</remarks>
@@ -7361,11 +7385,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // F16 tensor cores. Scores are bounded (scale·RMS-normed Q·K), and softmax subtracts the row max, so
                 // no F16 overflow. Output is cast back to F32 after AV.
                 pQCast = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
-                _kernels!.LaunchCastF32ToF16(pQCast, pQ, (int)query.ElementCount, _stream.Handle);
+                CastAttentionOperandToF16(pQCast, pQ, query.ElementCount);
                 pKCast = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
-                _kernels!.LaunchCastF32ToF16(pKCast, pK, (int)key.ElementCount, _stream.Handle);
+                CastAttentionOperandToF16(pKCast, pK, key.ElementCount);
                 pVCast = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
-                _kernels!.LaunchCastF32ToF16(pVCast, pV, (int)value.ElementCount, _stream.Handle);
+                CastAttentionOperandToF16(pVCast, pV, value.ElementCount);
                 pOutCast = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
                 opQ = pQCast;
                 opK = pKCast;
@@ -7382,7 +7406,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 (nuint castFree, _) = _context.GetMemoryInfo();
                 if (EngineKnobs.SdpaForceTiled.Value || castScoreBytes > (ulong)castFree / 2)
                 {
-                    SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, biasBlocks: 0);
+                    SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOut, outBytes);
                     cachedOutput = true;
@@ -7399,13 +7423,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (mask is not null && isF16)
             {
                 // Scores live in F16 on the native-F16/fallback path, while the public additive-mask contract is
-                // F32. Convert once rather than reinterpreting packed float bytes as half values. Clamp before
-                // conversion so common finite hard-mask sentinels such as -1e30 become -65504 rather than -Inf:
-                // an entirely masked row then retains the repository's finite-sentinel/uniform-row convention
-                // instead of evaluating -Inf - -Inf inside softmax and producing NaNs.
+                // F32. Convert once rather than reinterpreting packed float bytes as half values. Clamp to half the
+                // F16 range so a finite sentinel such as -1e30 plus a score within that range stays finite in the F16
+                // add: a fully masked row averages its highest-scoring keys instead of reaching -Inf and NaN in softmax,
+                // and a masked entry in a partly masked row still gets zero weight.
                 pMaskClamped = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(float)));
                 _kernels!.LaunchClamp(
-                    pMaskClamped, opMask, -65_504f, 65_504f, (int)maskElemCount, _stream.Handle);
+                    pMaskClamped, opMask, -32_752f, 32_752f, (int)maskElemCount, _stream.Handle);
                 pMaskCast = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(ushort)));
                 _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)maskElemCount, _stream.Handle);
                 opMask = pMaskCast;
@@ -7590,6 +7614,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 with { Route = AttentionRoute.TokenMajorGqa });
     }
 
+    /// <summary>F32 → F16 for an attention operand: saturating at ±65504 as cuDNN's input cast does, so a value past the F16
+    /// range clips instead of becoming infinity. Falls back to the plain cast when kv_scatter_f16.ptx lacks the kernel.</summary>
+    private void CastAttentionOperandToF16(ulong output, ulong input, long count)
+    {
+        if (_kernels!.HasCastF32ToF16Sat) _kernels.LaunchCastF32ToF16Sat(output, input, (int)count, _stream.Handle);
+        else _kernels.LaunchCastF32ToF16(output, input, (int)count, _stream.Handle);
+    }
+
     /// <summary>Rows of a token-major operand: <c>[S, heads*headDim]</c> and <c>[1, S, heads, headDim]</c> share one layout.</summary>
     private static long TokenMajorRows(Tensor t) => t.Shape.Rank is 3 or 4 ? t.Shape[1] : t.Shape[0];
 
@@ -7613,6 +7645,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool TryFlashF16(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         int batch, int heads, int sq, int skv, int d, CudaKernels.FlashStrides so, CudaKernels.FlashStrides sQ, CudaKernels.FlashStrides sk, CudaKernels.FlashStrides sv)
     {
+        // An oversized grid is this call's limit, not a kernel failure, so it must not disable the kernel for the session.
+        if (!CudaKernels.GridYzFits(heads, batch)) return false;
         using OpScope _op = EnterOp();
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
         bool cached = false;
@@ -7623,6 +7657,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pV = GpuTransferHelper.CopyToDevice(value);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            if (!CudaKernels.FlashF16RowsAligned(pOut, pQ, pK, pV, so, sQ, sk, sv)) return false;
             _kernels!.LaunchFlashAttnF16(d, pOut, pQ, pK, pV, so, sQ, sk, sv, batch, heads, sq, skv,
                 scale * 1.4426950408889634f, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -7774,8 +7809,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
         ulong widenBytes = kvGroup > 1 ? 2UL * (ulong)hq * (ulong)kvLen * (ulong)d * sizeof(float) : 0UL;
+        // The F16 copies of Q, O and the (widened) K and V that the cuDNN call casts the F32 operands into.
+        ulong castBytes = 2UL * sizeof(ushort) * (ulong)hq * (ulong)d * ((ulong)tq + (ulong)kvLen);
         (nuint freeBytes, _) = _context.GetMemoryInfo();
-        return maskBytes + widenBytes < (ulong)freeBytes / 2;
+        return maskBytes + widenBytes + castBytes < (ulong)freeBytes / 2;
     }
 
     /// <summary>Causal prefill through cuDNN's fused engine, with the causal rule carried as an additive bias.
@@ -7786,6 +7823,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool TryCausalPrefillSdpa(Tensor output, Tensor query, Tensor key, Tensor value,
         int hq, int hkv, int tq, int kvLen, int qOffset, int window, int d, float scale)
     {
+        // A shape cuDNN already refused must not build the mask and widen K/V on every layer before declining.
+        if (_cudnnSdpaRefusedShapes.ContainsKey(new CudnnSdpaShape(1, hq, tq, kvLen, d, CudnnSdpa.SdpaLayout.HeadMajor, false, 1, 1, tq)))
+            return false;
         using OpScope _op = EnterOp();
         EnsureKernels();
         using Tensor mask = new(new TensorShape(1, 1, tq, kvLen), DType.F32);
@@ -7833,6 +7873,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
         bool cachedOutput = false;
+        CudnnSdpaShape shape = new(b, h, sq, skv, d, layout, query.DType == DType.F16,
+            mask is null ? 0 : mask.Shape.Rank == 4 ? mask.Shape[0] : 1,
+            mask is null ? 0 : mask.Shape.Rank >= 3 ? mask.Shape[mask.Shape.Rank - 3] : 1,
+            mask is null ? 0 : MaskQueryRows(mask));
+        if (_cudnnSdpaRefusedShapes.ContainsKey(shape)) return false;
         try
         {
             if (_cudnnSdpa is null)
@@ -7887,6 +7932,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
             long executionCount = Interlocked.Increment(ref _cudnnSdpaExecutionCount);
+            _cudnnSdpaWorkingDims.TryAdd(d, 0);
             if (_cudnnSdpaDimState.TryRemove(d, out DimFailureState? recovered))
             {
                 HartsyInference.Core.Logging.Logs.Info(
@@ -7927,10 +7973,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             };
             if (permanent)
             {
-                _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
-                HartsyInference.Core.Logging.Logs.Warning(
-                    $"[cuDNN SDPA] D={d} permanently disabled (structural failure) — this is the steady " +
-                    $"state for the rest of the process: {ex.Message}");
+                // Structural for this shape; the head dim goes only once several shapes failed and none ever ran.
+                if (_cudnnSdpaRefusedShapes.TryAdd(shape, 0) && _cudnnSdpaRefusedShapes.Count <= CudnnSdpaRefusalWarnings)
+                    HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] refused {shape} for the rest of the process: {ex.Message}");
+                int refusedAtDim = _cudnnSdpaRefusedShapes.Keys.Count(k => k.D == d);
+                if (!_cudnnSdpaWorkingDims.ContainsKey(d) && refusedAtDim >= CudnnSdpaRefusalsToDisableDim)
+                {
+                    _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
+                    HartsyInference.Core.Logging.Logs.Warning(
+                        $"[cuDNN SDPA] D={d} permanently disabled after {refusedAtDim} refused shapes and no success.");
+                }
             }
             else
             {
@@ -8147,7 +8199,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long totalHeads = b * h;
 
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0, pBias = 0;
-        long biasBlocks = 0;
+        AttentionMaskLayout biasLayout = default;
         bool cachedOutput = false;
         try
         {
@@ -8157,14 +8209,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (keyBias is not null)
             {
                 pBias = GpuTransferHelper.CopyToDevice(keyBias);
-                // The mask may carry one row per batch/head ([H,1,Skv] or [B,H,1,Skv]), not just a single row
-                // broadcast over everything — bh below indexes into it modulo this so each head/batch gets its
-                // own row instead of every row silently reusing block 0's.
-                biasBlocks = Math.Max(1, keyBias.ElementCount / skv);
+                // One row per batch item and/or head ([B,1,1,Skv], [1,H,1,Skv], ...): each (b, h) reads its own.
+                biasLayout = AttentionMaskLayout.Of(keyBias, b, h, sq, skv);
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            SdpaTiledF32Core(pQ, pK, pV, pOut, totalHeads, sq, skv, d, scale, pBias, biasBlocks);
+            SdpaTiledF32Core(pQ, pK, pV, pOut, totalHeads, sq, skv, d, scale, pBias, h, biasLayout);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -8181,7 +8231,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>The query-tiled loop of <see cref="SdpaTiledF32"/> over F32 device buffers, shared with the BF16 path
     /// of <see cref="ScaledDotProductAttention"/>, which runs it on its F32 casts.</summary>
     private unsafe void SdpaTiledF32Core(ulong pQ, ulong pK, ulong pV, ulong pOut, long totalHeads, long sq, long skv,
-        long d, float scale, ulong pBias, long biasBlocks)
+        long d, float scale, ulong pBias, long heads, AttentionMaskLayout biasLayout)
     {
         ulong scoresBuf = 0, pOnes = 0;
         try
@@ -8237,7 +8287,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     for (long bh = 0; bh < totalHeads; bh++)
                     {
                         ulong sPtr = scoresBuf + (ulong)(bh * tileStride * sizeof(float));
-                        ulong biasPtr = pBias + (ulong)((bh % biasBlocks) * skv * sizeof(float));
+                        long biasRow = bh / heads * biasLayout.BatchStride + bh % heads * biasLayout.HeadStride;
+                        ulong biasPtr = pBias + (ulong)(biasRow * sizeof(float));
                         AccumulateKeyBias(sPtr, biasPtr, pOnes, curBr, skv, skv, beta: 1f);
                     }
                 }
@@ -9781,7 +9832,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // merge with a combine kernel. Numerically exact vs the monolithic kernel (same per-key scores,
             // online-softmax merge). Sink/ALiBi/soft-cap/sliding-window keep the proven monolithic path.
             int baseBlocks = b * hq * tq;
-            bool gqaDecode = pSink == 0 && pAlibi == 0 && kvLen >= 64 && DecodeGqaEligible(tq, causal, hq, hkv, kvGroup <= 0 ? 1 : kvGroup, d);
+            bool gqaDecode = pSink == 0 && pAlibi == 0 && kvLen >= 64 && DecodeGqaEligible(b, tq, causal, hq, hkv, kvGroup <= 0 ? 1 : kvGroup, d);
             // Soft-cap and sliding-window are handled inside the split kernel (per-logit transform / key-range
             // clamp — see flash_attn_f32_split.cu); only sink and ALiBi still require the monolithic kernel.
             // This matters enormously for low-head-count windowed models: gemma3-1b decodes with FOUR query
@@ -10113,7 +10164,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             int grp = kvGroup <= 0 ? 1 : kvGroup;
-            if (DecodeGqaEligible(tq, causal, hq, hkv, grp, d))
+            if (DecodeGqaEligible(b, tq, causal, hq, hkv, grp, d))
             {
                 t_attentionRoute = "V.2";
                 attnSidecar = TryAllocAttnCombineSidecar(b, tq, hq, d);
