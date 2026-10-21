@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.Nf4;
@@ -69,6 +70,82 @@ public static unsafe class Nf4Codec
         }
 
         return output;
+    }
+
+    /// <summary>Quantizes F32 weights to plain NF4: one absmax per block, each element rounded to its nearest codebook entry.</summary>
+    /// <returns>The packed nibbles (high nibble = even element) and one F32 absmax per block. Dequantize reproduces each element within <see cref="MaxBlockError"/> of its block absmax.</returns>
+    /// <exception cref="ArgumentException">The block size is not positive, or a value is NaN or infinite.</exception>
+    public static (byte[] Packed, float[] Absmax) Quantize(ReadOnlySpan<float> values, int blockSize = DefaultBlockSize)
+    {
+        if (blockSize <= 0)
+            throw new ArgumentException("blockSize must be positive.", nameof(blockSize));
+
+        int n = values.Length;
+        float[] absmax = new float[((long)n + blockSize - 1) / blockSize];
+        for (int b = 0; b < absmax.Length; b++)
+        {
+            int start = b * blockSize;
+            int end = Math.Min(n, start + blockSize);
+            float m = 0f;
+            for (int i = start; i < end; i++)
+            {
+                if (!float.IsFinite(values[i]))
+                    throw new ArgumentException("NF4 input must be finite; got NaN or infinity.", nameof(values));
+                m = MathF.Max(m, MathF.Abs(values[i]));
+            }
+            absmax[b] = m;
+        }
+
+        byte[] codes = new byte[n];
+        fixed (float* src = values)
+        fixed (byte* dst = codes)
+        {
+            nint srcAddr = (nint)src, dstAddr = (nint)dst;
+            CpuParallel.For(absmax.Length, n, b =>
+            {
+                float inv = absmax[b] > 0f ? 1f / absmax[b] : 0f;
+                int start = b * blockSize;
+                int end = Math.Min(n, start + blockSize);
+                float* s = (float*)srcAddr;
+                byte* c = (byte*)dstAddr;
+                for (int i = start; i < end; i++)
+                    c[i] = (byte)NearestCode(s[i] * inv);
+            });
+        }
+
+        byte[] packed = new byte[(n + 1) / 2];
+        for (int i = 0; i < n; i++)
+            packed[i >> 1] |= (byte)((i & 1) == 0 ? codes[i] << 4 : codes[i]);
+
+        return (packed, absmax);
+    }
+
+    /// <summary>Largest reconstruction error for one element, as a fraction of its block absmax: half the widest gap between adjacent codebook entries.</summary>
+    public static float MaxBlockError
+    {
+        get
+        {
+            float widest = 0f;
+            for (int i = 1; i < Nf4Lut.Length; i++)
+                widest = MathF.Max(widest, Nf4Lut[i] - Nf4Lut[i - 1]);
+            return widest / 2f;
+        }
+    }
+
+    private static int NearestCode(float normalized)
+    {
+        int best = 0;
+        float bestError = float.MaxValue;
+        for (int c = 0; c < Nf4Lut.Length; c++)
+        {
+            float error = MathF.Abs(normalized - Nf4Lut[c]);
+            if (error < bestError)
+            {
+                bestError = error;
+                best = c;
+            }
+        }
+        return best;
     }
 
     /// <summary>Rebuilds the F32 per-block <c>absmax</c> for a bitsandbytes double-quantized NF4 tensor: <c>absmax[b] = nestedCodebook[ qAbsmax[b] ] · nestedAbsmax[b / nestedBlockSize] + offset</c>. Feed the result to <see cref="Dequantize"/>.</summary>
