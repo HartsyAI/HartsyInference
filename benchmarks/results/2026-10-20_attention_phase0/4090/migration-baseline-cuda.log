@@ -1,0 +1,5 @@
+building the CLI from e845dcd9...
+case	backend	result	digest	source
+sd15	cuda	recorded	4901a4e0936d6c70f3de7a73becfc23d	e845dcd9
+krea2	cuda	recorded	dc18b16d180c609aa59f77132e3375a9	e845dcd9
+llama32-1b	cuda	recorded	987bdb2f2cf355219395939f962c6e4c	e845dcd9

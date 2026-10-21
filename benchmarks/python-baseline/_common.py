@@ -20,6 +20,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -119,7 +120,7 @@ def write_software_fingerprint(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     parts: list[str] = []
 
-    parts.append(f"## python\n{platform.python_version()}\n{shutil.which('python3') or 'n/a'}\n")
+    parts.append(f"## python\n{platform.python_version()}\n{sys.executable}\n")
     parts.append(f"## torch\n{torch.__version__}\n")
     parts.append(f"## torch.version.cuda\n{torch.version.cuda}\n")
     parts.append(f"## torch.backends.cudnn version / enabled\n{torch.backends.cudnn.version()} / {torch.backends.cudnn.enabled}\n")
@@ -131,7 +132,7 @@ def write_software_fingerprint(out_dir: Path) -> None:
         except Exception as e:  # noqa: BLE001
             return f"# error: {e}"
 
-    parts.append(f"## pip freeze (filtered)\n{_run(['pip', 'freeze'])}\n")
+    parts.append(f"## pip freeze (filtered)\n{_run([sys.executable, '-m', 'pip', 'freeze'])}\n")
     parts.append(f"## nvcc --version\n{_run(['nvcc', '--version'])}\n")
     parts.append(f"## git rev-parse HEAD\n{_run(['git', 'rev-parse', 'HEAD'])}\n")
     parts.append(f"## git status --porcelain\n{_run(['git', 'status', '--porcelain'])}\n")

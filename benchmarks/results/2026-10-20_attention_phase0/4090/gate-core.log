@@ -1,0 +1,24 @@
+[ab] building e5853ff0 from /home/hartsy/Desktop/regression-ab/src-e5853ff0 ...
+[ab] building e845dcd9 from /home/hartsy/Desktop/regression-ab/src-e845dcd9 ...
+[ab] stopping swarmui.service for the run (restored on exit)
+[ab] ── sd15 on cuda
+[ab] ── krea2 on cuda
+[ab] ── zimage on cuda
+[ab] ── qwenimage-q4k on cuda
+[ab] ── llama32-1b on cuda
+# Regression gate — e845dcd9 vs e5853ff0
+
+- when: 2026-10-20T21:07:56Z UTC · GPU: NVIDIA GeForce RTX 4090, 595.99.02 · expectation: identical · warm reps: 3 · speed tolerance: ±5%
+- runs: /home/hartsy/Desktop/regression-ab/runs · pairs: /home/hartsy/Desktop/regression-ab/reports/20261020-205521-e845dcd9-vs-e5853ff0/pairs
+
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| sd15 | cuda | PASS | 5.34 → 5.30 | -0.7 | 71 → 70 | -1.4 | 3919 → 3917 | -0.1 | 1.000000 | equal |  |
+| krea2 | cuda | PASS | 10.85 → 11.12 | +2.5 | 524 → 523 | -0.2 | 17689 → 17689 | +0.0 | 1.000000 | equal |  |
+| zimage | cuda | PASS | 10.12 → 10.28 | +1.6 | 292 → 292 | +0.0 | 10197 → 10165 | -0.3 | 1.000000 | equal |  |
+| qwenimage-q4k | cuda | PASS | 40.45 → 40.26 | -0.5 | 1621 → 1620 | -0.1 | 18891 → 17255 | -8.7 | 1.000000 | equal |  |
+| llama32-1b | cuda | PASS | 4.49 → 4.26 | -5.1 | 5.20 → 5.32 | +2.3 | 5385 → 5388 | +0.1 | - | equal |  |
+
+Step ms is the median over warm seeds of the CLI's per-step interval (per token for text, as the CLI streams it — not the engine decode rate). SSIM is the minimum over seed pairs; digests compare decoded pixels.
+[ab] report: /home/hartsy/Desktop/regression-ab/reports/20261020-205521-e845dcd9-vs-e5853ff0/report.md
+[ab] all 5 case(s) passed the gate

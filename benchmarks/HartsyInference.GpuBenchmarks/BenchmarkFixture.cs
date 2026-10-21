@@ -73,8 +73,11 @@ public sealed class BenchmarkFixture : IDisposable
             {
                 throw new DirectoryNotFoundException($"SPIR-V directory not found at {spvDir}. The csproj should copy `src/HartsyInference.Vulkan/Spirv/*.spv` here on build.");
             }
-            // Ranked, not raw index 0: a box that also exposes a software rasterizer would otherwise benchmark that.
-            Backend = new VulkanBackend(deviceOrdinal: null, spvDir: spvDir);
+            // HARTSYINFERENCE_BENCH_VULKAN_DEVICE pins an ordinal; unset ranks devices, so a box that also exposes a
+            // software rasterizer still benchmarks the GPU.
+            string? pinned = Environment.GetEnvironmentVariable("HARTSYINFERENCE_BENCH_VULKAN_DEVICE");
+            int? ordinal = string.IsNullOrWhiteSpace(pinned) ? null : int.Parse(pinned, System.Globalization.CultureInfo.InvariantCulture);
+            Backend = new VulkanBackend(deviceOrdinal: ordinal, spvDir: spvDir);
         }
     }
 

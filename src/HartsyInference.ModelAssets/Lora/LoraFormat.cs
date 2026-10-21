@@ -44,4 +44,7 @@ public enum LoraFormat
 
     /// <summary>MOSS-Image in any of its spellings — diffusers/PEFT under <c>transformer.</c>, ComfyUI under <c>diffusion_model.</c>, bare, or kohya <c>lora_unet_</c> — recognized by the modules only MOSS-Image has (<c>layers.{i}.proj.ffn_up_gate</c>, <c>shared_block_modulation</c>, …).</summary>
     MossImage,
+
+    /// <summary>Kohya/musubi-tuner <c>lora_unet_&lt;module path with '.' written as '_'&gt;</c> keys no specific kohya layout claims (Krea 2: <c>lora_unet_blocks_0_attn_wq</c>). The module names are resolved against the target model's own weight names when the LoRA is applied, as ComfyUI does, so any DiT works without a per-family table. Detected after every other format.</summary>
+    KohyaGeneric,
 }

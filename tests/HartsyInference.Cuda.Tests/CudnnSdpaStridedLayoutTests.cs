@@ -64,6 +64,7 @@ public sealed unsafe class CudnnSdpaStridedLayoutTests
         return (hm, tm);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4, 64, 64)]
     [InlineData(32, 512, 128)]

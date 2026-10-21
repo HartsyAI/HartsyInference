@@ -13,6 +13,7 @@ you're looking for a performance number, start here — not in the README, not i
 | [`AUDIO.md`](AUDIO.md) | TTS / STT / Music / VC / Fx | Model-specific Python reference (`moshi`, `qwen_tts`, etc.) or self-comparison — no shared engine exists for audio | RTX 3060, RTX 4090, some CPU |
 | [`LLM.md`](LLM.md) | LLM decode throughput | `llama.cpp` / `llama-cpp-python`, same GGUF quant both sides | RTX 3060 |
 | [`VULKAN.md`](VULKAN.md) | Backend comparisons | CUDA / reference, per row | See dated measurements |
+| [`ATTENTION.md`](ATTENTION.md) | Attention kernels, per model shape | PyTorch SDPA backends, Comfy Kitchen `int8_attention` | RTX 4090, RTX 3060 |
 | [`THREED.md`](THREED.md) | Image → 3D mesh | Python reference (`tsr` for TripoSR, `hy3dgen` for Hunyuan3D-2) | RTX 4090 |
 
 **Coverage.** Vision and World have no dedicated scoreboard here; some world-model placement measurements live in [Multi-GPU](../../docs/MULTI_GPU.md). Absence of a scoreboard row is not absence of implementation or evidence.

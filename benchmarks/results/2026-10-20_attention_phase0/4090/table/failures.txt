@@ -1,0 +1,2 @@
+rc=1 krea2-2048 mat-f16
+rc=1 wan14b-480p mat-f16

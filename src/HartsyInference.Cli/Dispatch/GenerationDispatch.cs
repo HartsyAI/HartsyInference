@@ -115,6 +115,27 @@ public static class GenerationDispatch
         return artifact;
     }
 
+    /// <summary>The token ids of a <c>--scores-out</c> TSV, in order (its <c>token_id</c> column).</summary>
+    private static int[] ReadScoredTokenIds(string path)
+    {
+        string[] lines = File.ReadAllLines(path);
+        if (lines.Length < 2 || lines[0].Split('\t') is not [_, "token_id", ..])
+            throw new FormatException($"{path} is not a --scores-out TSV (header 'index\ttoken_id\t...').");
+        return [.. lines.Skip(1).Where(l => l.Length > 0).Select(l => int.Parse(l.Split('\t')[1], CultureInfo.InvariantCulture))];
+    }
+
+    /// <summary>Writes one row per completion token; log-probabilities round-trip exactly ("R"), so two runs compare bit for bit.</summary>
+    private static void WriteTokenScores(string path, IReadOnlyList<TokenLogProb> scores)
+    {
+        StringBuilder sb = new("index\ttoken_id\tlogprob\ttop_id\ttop_logprob\n");
+        for (int i = 0; i < scores.Count; i++)
+        {
+            TokenLogProb s = scores[i];
+            sb.Append(CultureInfo.InvariantCulture, $"{i}\t{s.TokenId}\t{s.LogProb.ToString("R", CultureInfo.InvariantCulture)}\t{s.TopTokenId}\t{s.TopLogProb.ToString("R", CultureInfo.InvariantCulture)}\n");
+        }
+        File.WriteAllText(path, sb.ToString());
+    }
+
     /// <summary>Chat completion through <see cref="ITextService"/>; streams live unless <c>--quiet</c> takes the one-shot path.</summary>
     private static async Task<GeneratedArtifact> TextAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
@@ -126,6 +147,8 @@ public static class GenerationDispatch
             foreach (string path in imagePaths.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                 images.Add(LoadImage(path));
         }
+        string? scoresOut = parameters.GetStringOrNull("scores-out");
+        IReadOnlyList<int>? forced = parameters.GetStringOrNull("teacher-force") is { Length: > 0 } forcePath ? ReadScoredTokenIds(forcePath) : null;
         TextRequest request = new TextRequest
         {
             // "cuda:0" pins an ordinal; the composite "cuda:0+cuda:1" form requests the LLM layer split
@@ -133,7 +156,9 @@ public static class GenerationDispatch
             Device = parameters.GetStringOrNull("device"),
             Messages = [new TextMessage { Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null }],
             SystemPrompt = parameters.GetStringOrNull("system"),
-            MaxTokens = parameters.GetInt("max-tokens", 256),
+            MaxTokens = forced?.Count ?? parameters.GetInt("max-tokens", 256),
+            ForcedTokenIds = forced,
+            ReturnTokenScores = scoresOut is not null,
             Temperature = temperature,
             TopP = parameters.GetFloat("top-p", 0.95f),
             TopK = parameters.GetIntOrNull("top-k"),
@@ -157,11 +182,14 @@ public static class GenerationDispatch
         // Decode rate over the streamed pieces after the first (the first carries prefill), for the regression gate.
         System.Diagnostics.Stopwatch decodeClock = new();
         int pieces = 0;
-        if (quiet)
+        if (quiet || scoresOut is not null)
         {
+            // Scores ride the one-shot result, so a scored run takes this path even without --quiet.
             TextResult result = await engine.Text.GenerateAsync(spec, request, cancel).ConfigureAwait(false);
             text.Append(result.Text);
             stop = result.Stop;
+            if (scoresOut is not null)
+                WriteTokenScores(scoresOut, result.TokenScores ?? []);
         }
         else
         {

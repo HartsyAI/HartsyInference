@@ -48,7 +48,8 @@ public static class RecipeLoraMerge
                 transformerWeights: targets.Transformer,
                 clipLWeights: targets.ClipL,
                 clipGWeights: targets.ClipG,
-                textEncoder2Weights: targets.TextEncoder2);
+                textEncoder2Weights: targets.TextEncoder2,
+                transformerNativeNames: targets.TransformerNativeNames);
             if (merged == 0)
             {
                 // A zero-match LoRA used to warn and proceed — a generation that succeeds and looks unaffected,

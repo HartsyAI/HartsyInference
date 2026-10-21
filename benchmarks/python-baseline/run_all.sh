@@ -3,12 +3,13 @@
 # Usage:
 #   bash run_all.sh --output benchmarks/results/run_<utc>_<gpu>_pytorch_baseline [--trials 5] [--skip-e2e]
 #
-# This script intentionally does NOT activate a venv — invoke it from inside an activated venv that
-# has installed `requirements.txt`. This keeps the path predictable for cloud-runner orchestration.
+# This script does not activate a venv: run it from an activated venv that has `requirements.txt`, or point
+# PYTHON= at that venv's interpreter.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${PYTHON:-python3}"   # the interpreter that has torch; this box keeps it in the SwarmUI ComfyUI venv
 
 OUT_DIR=""
 TRIALS=5
@@ -35,7 +36,7 @@ echo "[run_all] Output: $OUT_DIR"
 echo "[run_all] Trials: $TRIALS"
 
 # Step 1: write fingerprints (mirror of the bash blocks in PROFILING_METHODOLOGY.md)
-python3 - <<PY
+"$PY" - <<PY
 from pathlib import Path
 import sys
 sys.path.insert(0, "$SCRIPT_DIR")
@@ -51,19 +52,19 @@ E2E_CSV="$OUT_DIR/e2e.csv"
 
 # Step 2: microbenches (each appends to microbench.csv)
 echo "[run_all] matmul..."
-python3 "$SCRIPT_DIR/bench_pytorch_matmul.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
+"$PY" "$SCRIPT_DIR/bench_pytorch_matmul.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
 
 echo "[run_all] conv2d..."
-python3 "$SCRIPT_DIR/bench_pytorch_conv2d.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
+"$PY" "$SCRIPT_DIR/bench_pytorch_conv2d.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
 
 echo "[run_all] norms..."
-python3 "$SCRIPT_DIR/bench_pytorch_norms.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
+"$PY" "$SCRIPT_DIR/bench_pytorch_norms.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
 
-echo "[run_all] sdpa..."
-python3 "$SCRIPT_DIR/bench_pytorch_sdpa.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
+echo "[run_all] attention (attention_shapes.json)..."
+"$PY" -s "$SCRIPT_DIR/bench_attention.py" --output "$OUT_DIR/attention.tsv"
 
 echo "[run_all] elementwise..."
-python3 "$SCRIPT_DIR/bench_pytorch_elementwise.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
+"$PY" "$SCRIPT_DIR/bench_pytorch_elementwise.py" --output "$MICROBENCH_CSV" --trials "$TRIALS"
 
 # Step 3: end-to-end (slower, optional)
 if [[ "$SKIP_E2E" -eq 0 ]]; then

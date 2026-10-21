@@ -1,0 +1,5 @@
+building the CLI from e845dcd9...
+case	backend	result	digest	source
+sd15	vulkan	recorded	deeb46e6912f82b534fbea3a7b848af8	e845dcd9
+krea2	vulkan	recorded	b10a12ea352185da98563f698ccc105c	e845dcd9
+llama32-1b	vulkan	recorded	b7c9b12340ff49cbcdf11d8ebd82f020	e845dcd9

@@ -12,8 +12,19 @@ public sealed class LoraLayer
     /// <summary>Which model component this layer applies to.</summary>
     public required LoraTarget Target { get; init; }
 
+    /// <summary>Underscored kohya module name (<c>blocks_0_attn_wq</c>) still waiting to be resolved against the target model's weight names; null once <see cref="TargetKey"/> is canonical. While set, <see cref="TargetKey"/> holds the source <c>lora_unet_</c> name.</summary>
+    public string? KohyaModuleName { get; init; }
+
     /// <summary>The decomposition that produces this layer's ΔW.</summary>
     public required LoraDelta Delta { get; init; }
+
+    /// <summary>The same adapter bound to the resolved canonical weight key.</summary>
+    public LoraLayer WithResolvedTarget(string targetKey) => new()
+    {
+        TargetKey = targetKey,
+        Target = Target,
+        Delta = Delta,
+    };
 
     /// <summary>Decomposition variant, derived from <see cref="Delta"/>.</summary>
     public LoraVariant Variant => Delta.Variant;

@@ -1,0 +1,10 @@
+utc_start=2026-10-20T21:56:12Z
+git=25842b5d280e2d6ff2a2bf0b104fca8fc444ac9f
+dirty=0
+name, uuid, driver_version, vbios_version, pci.bus_id, power.limit [W], clocks.max.sm [MHz], memory.total [MiB]
+NVIDIA GeForce RTX 3060, GPU-b2198524-73ad-f200-16ef-6fc368d0599f, 595.99.02, 94.06.2F.00.9A, 00000000:03:00.0, 170.00 W, 2130 MHz, 12288 MiB
+libcublas.so.13
+libcudnn.so.9
+libcudnn.so.9.24.0
+10.0.113
+6.8.0-147-generic
