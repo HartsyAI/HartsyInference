@@ -41,6 +41,11 @@ stable release will require. Dates are UTC.
   its F32 casts while still reading them, an intermittent access violation at load. Double-condition CFG's text-only
   context now zeroes exactly the lyric rows, which the DiT appends last, instead of counting text rows from the leading
   dim of the `[1, T, 768]` features.
+- **Fixed: ACE-Step v1's music DCAE decoded a distorted mel.** Its EfficientViT attention took head h's query, key and
+  value from column h·d of each projection, while the reference cuts heads from the channel-concatenated `[q|k|v]`
+  stream in blocks of 3·d (columns h·3d, h·3d + d and h·3d + 2d). From the first EfficientViT stage on, the decode
+  diverged from the reference: the right channel came out quieter and the two channels nearly uncorrelated. A reference
+  latent now decodes to the reference's mel stage for stage, which changes every ACE-Step v1 generation.
 
 ## alpha.385
 
@@ -54,11 +59,6 @@ stable release will require. Dates are UTC.
 - **Fixed: ACE-Step v1 style conditioning.** Its UMT5-base encoder divided the attention scores by √64, which T5 and UMT5
   never do, so the style tags reached the DiT far from the reference encoding (hidden-state relative L2 1.2 against HF; 6e-6
   now). T5's attention scale now defaults to 1.0 rather than falling back to 1/√d_kv when a preset leaves it unset.
-- **Fixed: ACE-Step v1's music DCAE decoded a distorted mel.** Its EfficientViT attention took head h's query, key and
-  value from column h·d of each projection, while the reference cuts heads from the channel-concatenated `[q|k|v]`
-  stream in blocks of 3·d (columns h·3d, h·3d + d and h·3d + 2d). From the first EfficientViT stage on, the decode
-  diverged from the reference: the right channel came out quieter and the two channels nearly uncorrelated. A reference
-  latent now decodes to the reference's mel stage for stage, which changes every ACE-Step v1 generation.
 - **Fixed: Qwen3-VL position embeddings (LLM vision).** The learned table was resized half-pixel; HF and llama.cpp resize it
   align-corners. Images that reach the stored grid size are unchanged.
 - **Faster: cuDNN fused attention takes every head dim that is a multiple of 8 from 32 to 256** (was 64 to 128 and 256)
