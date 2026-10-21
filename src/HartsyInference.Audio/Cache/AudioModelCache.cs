@@ -59,15 +59,6 @@ public static class AudioModelCache
         return dir;
     }
 
-    /// <summary>Resolves a single file to a local path, downloading it from HuggingFace
-    /// if not already cached. Returns the absolute path to the file.</summary>
-    /// <param name="hfRepoId">Repo id such as <c>"openai/whisper-large-v3-turbo"</c>.</param>
-    /// <param name="filename">File path within the repo, e.g. <c>"model.safetensors"</c>
-    /// or <c>"tokenizer.json"</c>. Subdirectories are allowed.</param>
-    /// <param name="category">The audio category this model belongs to — see <see cref="GetRepoDirectory"/>.</param>
-    /// <param name="revision">Optional git revision (branch / tag / commit SHA).
-    /// Defaults to <c>"main"</c>.</param>
-    /// <param name="progress">Optional progress callback receiving downloaded-byte counts.</param>
     /// <summary>Returns the local path of <paramref name="filename"/> if it is already on disk (directly or via a
     /// stand-in link), without touching the network. Null when the file is absent.</summary>
     public static string? TryGetLocal(string hfRepoId, string filename, string category)
@@ -78,6 +69,15 @@ public static class AudioModelCache
         return IsUsableFile(localPath) ? localPath : null;
     }
 
+    /// <summary>Resolves a single file to a local path, downloading it from HuggingFace
+    /// if not already cached. Returns the absolute path to the file.</summary>
+    /// <param name="hfRepoId">Repo id such as <c>"openai/whisper-large-v3-turbo"</c>.</param>
+    /// <param name="filename">File path within the repo, e.g. <c>"model.safetensors"</c>
+    /// or <c>"tokenizer.json"</c>. Subdirectories are allowed.</param>
+    /// <param name="category">The audio category this model belongs to — see <see cref="GetRepoDirectory"/>.</param>
+    /// <param name="revision">Optional git revision (branch / tag / commit SHA).
+    /// Defaults to <c>"main"</c>.</param>
+    /// <param name="progress">Optional progress callback receiving downloaded-byte counts.</param>
     public static async Task<string> GetAsync(
         string hfRepoId,
         string filename,

@@ -96,15 +96,27 @@ internal static class AudioCheckpoints
             {
                 Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
                 List<IDisposable> loaders = [];
-                foreach (string shardPath in shardPaths)
+                try
                 {
-                    SafeTensorsLoader shardLoader = new SafeTensorsLoader();
-                    shardLoader.Load(shardPath);
-                    loaders.Add(shardLoader);
-                    foreach (KeyValuePair<string, Tensor> entry in FilterByPrefix(shardLoader.GetAllTensors(), keyPrefixes))
+                    foreach (string shardPath in shardPaths)
                     {
-                        merged[entry.Key] = entry.Value;
+                        SafeTensorsLoader shardLoader = new SafeTensorsLoader();
+                        shardLoader.Load(shardPath);
+                        loaders.Add(shardLoader);
+                        foreach (KeyValuePair<string, Tensor> entry in FilterByPrefix(shardLoader.GetAllTensors(), keyPrefixes))
+                        {
+                            merged[entry.Key] = entry.Value;
+                        }
                     }
+                }
+                catch
+                {
+                    // A later shard failed: release the mmaps already opened before the error propagates.
+                    foreach (IDisposable opened in loaders)
+                    {
+                        opened.Dispose();
+                    }
+                    throw;
                 }
                 return (merged, [.. loaders]);
             }
