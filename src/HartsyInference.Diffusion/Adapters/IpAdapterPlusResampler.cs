@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Adapters;
@@ -144,6 +145,7 @@ internal sealed unsafe class ResamplerLayer
     private readonly int _headDim;
     private readonly int _innerDim;
     private readonly int _ffInnerDim;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _norm1Weight, _norm1Bias; // applied to x
     private Tensor? _norm2Weight, _norm2Bias; // applied to latents
@@ -162,6 +164,7 @@ internal sealed unsafe class ResamplerLayer
         _headDim = headDim;
         _innerDim = innerDim;
         _ffInnerDim = hiddenDim * ffMultiplier;
+        _attention = new AttentionLayer(new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = headDim, ComputeDType = DType.F32 });
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -223,13 +226,7 @@ internal sealed unsafe class ResamplerLayer
         Tensor vMh = ToMultiHead(v, batch, kvSeqLen, _numHeads, _headDim);
         v.Dispose();
 
-        TensorShape attnOutShape = new TensorShape(batch, _numHeads, numLatents, _headDim);
-        Tensor attnOut = new Tensor(attnOutShape, DType.F32);
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default);
 
         // Reshape back: [B, heads, numLatents, headDim] → [B, numLatents, innerDim]
         Tensor merged = FromMultiHead(attnOut, batch, numLatents, _numHeads, _headDim);

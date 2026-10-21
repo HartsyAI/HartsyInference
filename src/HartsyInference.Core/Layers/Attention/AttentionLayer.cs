@@ -133,6 +133,24 @@ public sealed class AttentionLayer
         return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, in context);
     }
 
+    /// <summary>The attention call alone over operands the caller laid out head-major: <paramref name="qMh"/> <c>[B, heads, Sq, D]</c>,
+    /// <paramref name="kMh"/> and <paramref name="vMh"/> <c>[B, heads, Skv, D]</c>. Applies no transform, so it takes only the bias and
+    /// probe of the context. Disposes the operands named in <paramref name="consume"/> once the call has run, also when it
+    /// throws; returns the head-major <c>[B, heads, Sq, D]</c> output, which the caller owns.</summary>
+    public Tensor AttendHeadMajorOperands(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, in AttentionCallContext context,
+        OperandOwnership consume = OperandOwnership.All)
+    {
+        if (_config.KvHeads != _config.Heads)
+            throw new NotSupportedException("Head-major operands carry one head per query head; grouped key/value heads attend through Attend.");
+        ValidateOperandContext(in context);
+        if (qMh.Shape.Rank != 4 || kMh.Shape.Rank != 4 || vMh.Shape.Rank != 4)
+            throw new ArgumentException($"AttendHeadMajorOperands takes [B, heads, S, D] operands; got {qMh.Shape}, {kMh.Shape}, {vMh.Shape}.");
+        if (qMh.Shape[1] != _config.Heads || qMh.Shape[3] != _config.HeadDim || kMh.Shape[0] != qMh.Shape[0]
+            || kMh.Shape[1] != _config.Heads || kMh.Shape[3] != _config.HeadDim || !vMh.Shape.Equals(kMh.Shape))
+            throw new ArgumentException($"Operands do not match {_config.Heads} heads of {_config.HeadDim}: {qMh.Shape}, {kMh.Shape}, {vMh.Shape}.");
+        return RunAttention(backend, qMh, kMh, vMh, _config.ComputeDType ?? qMh.DType, in context, consume);
+    }
+
     /// <summary>The projection stage alone, for self-attention: Q, K and V of <paramref name="input"/>, which is disposed once
     /// they are read when <paramref name="releaseInput"/> is set. The caller owns the three tensors.</summary>
     public (Tensor Q, Tensor K, Tensor V) ProjectSelf(IBackend backend, Tensor input, bool releaseInput)
@@ -327,6 +345,17 @@ public sealed class AttentionLayer
             throw new ArgumentException("A paired rotate-half rotation is set on both Q and K with the same tables.", nameof(context));
     }
 
+    private static void ValidateOperandContext(in AttentionCallContext context)
+    {
+        if (context.QueryRotation.Kind != QkRotationKind.None || context.KeyRotation.Kind != QkRotationKind.None
+            || context.Rotation is not null || context.HeadMajorRotation is not null)
+            throw new ArgumentException("The operator stage runs no rotation.", nameof(context));
+        if (context.ValueRowScale is not null || context.KvRewrite is not null || context.KvCapture is not null)
+            throw new ArgumentException("The operator stage runs no value row-scale, K/V rewrite or K/V capture.", nameof(context));
+        if (context.ReleaseInputs || context.ReleaseQueryAfterProjection)
+            throw new ArgumentException("The operator stage has no projection inputs to release; name the operands in consume.", nameof(context));
+    }
+
     private Tensor Transform(IBackend backend, Tensor q, Tensor k, Tensor v, int batch, int sq, int skv, DType act,
         TensorShape flatShape, in AttentionCallContext context)
     {
@@ -483,14 +512,24 @@ public sealed class AttentionLayer
             vMh.Dispose();
             vMh = vRep;
         }
-        return RunHeadMajor(backend, qMh, kMh, vMh, batch, sq, act, flatShape, in context);
+        return RunHeadMajor(backend, qMh, kMh, vMh, sq, act, flatShape, in context);
     }
 
     /// <summary>The head-major call over permuted, head-repeated operands, then the permute back to <paramref name="flatShape"/>.</summary>
-    private Tensor RunHeadMajor(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, int batch, int sq, DType act, TensorShape flatShape,
+    private Tensor RunHeadMajor(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, int sq, DType act, TensorShape flatShape,
         in AttentionCallContext context)
     {
-        Tensor attn = new(new TensorShape(batch, _config.Heads, sq, _config.HeadDim), act);
+        Tensor attn = RunAttention(backend, qMh, kMh, vMh, act, in context, OperandOwnership.All);
+        Tensor flat = new(flatShape, act);
+        backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
+        attn.Dispose();
+        return flat;
+    }
+
+    private Tensor RunAttention(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, DType act, in AttentionCallContext context,
+        OperandOwnership consume)
+    {
+        Tensor attn = new(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), act);
         try
         {
             AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
@@ -504,15 +543,12 @@ public sealed class AttentionLayer
         }
         finally
         {
-            qMh.Dispose();
-            kMh.Dispose();
-            vMh.Dispose();
+            if (consume.HasFlag(OperandOwnership.Query)) qMh.Dispose();
+            if (consume.HasFlag(OperandOwnership.Key)) kMh.Dispose();
+            if (consume.HasFlag(OperandOwnership.Value)) vMh.Dispose();
         }
         context.Probe?.Observe("attention", attn);
-        Tensor flat = new(flatShape, act);
-        backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
-        attn.Dispose();
-        return flat;
+        return attn;
     }
 
     /// <summary>The full-width norm and rotation as one op that emits the attention layout directly (LTX-2), with K and V
@@ -534,7 +570,7 @@ public sealed class AttentionLayer
         Tensor kMh = NormRotateHeadMajor(backend, k, kNorm, context.KeyRotation, skv, act);
         Tensor vMh = ToHeadMajor(backend, v, skv, act);
         v.Dispose();
-        return RunHeadMajor(backend, qMh, kMh, vMh, 1, sq, act, flatShape, in context);
+        return RunHeadMajor(backend, qMh, kMh, vMh, sq, act, flatShape, in context);
     }
 
     private Tensor NormRotateHeadMajor(IBackend backend, Tensor x, Tensor normWeight, in QkRotation rotation, int s, DType act)
@@ -672,4 +708,24 @@ public sealed class AttentionLayer
         dims[shape.Rank - 1] = last;
         return new TensorShape(dims);
     }
+}
+
+/// <summary>The operands of <see cref="AttentionLayer.AttendHeadMajorOperands"/> the layer disposes after the call.</summary>
+[Flags]
+public enum OperandOwnership
+{
+    /// <summary>The caller disposes all three.</summary>
+    None = 0,
+
+    /// <summary>The query.</summary>
+    Query = 1,
+
+    /// <summary>The key.</summary>
+    Key = 2,
+
+    /// <summary>The value.</summary>
+    Value = 4,
+
+    /// <summary>All three.</summary>
+    All = Query | Key | Value,
 }
