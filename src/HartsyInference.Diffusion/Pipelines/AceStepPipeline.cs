@@ -10,12 +10,9 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>ACE-Step v1 (ACE Studio + StepFun, Apache-2.0) text/lyrics-to-music pipeline — the 3.5B flow-matching DiT over Music-DCAE mel latents: pre-computed UMT5-base features + VoiceBpe lyric ids → tri-source cross-attention context → shift-3 flow-match denoise (Euler / Heun / PingPong) with CFG / APG / CFG-Zero★ guidance → DCAE decode to stereo log-mel → ADaMoS HiFi-GAN per channel → 44.1 kHz stereo waveform. Token rate ≈ 10.77 Hz (a 4-minute song ≈ 2585 DiT tokens). Encode UMT5 upstream with the shared <c>T5TextEncoder</c> (<c>T5TextEncoderConfig.Umt5Base</c>) and tokenize lyrics with <c>AceStepLyricTokenizer</c>. <b>Status: built, first-run validation pending</b> — guidance defaults (CFG 7.0 / 27 steps) per the model card; APG momentum drifts from the Python reference by design (validation uses plain CFG).
-/// <para><b>CUDA (3060/12 GB):</b> runs end-to-end with bf16 weights resident (F32 won't fit), but the bf16 GEMM
-/// truncates F32 activations and the latent NaNs over the CFG loop. The caller MUST set
-/// <c>CudaBackend.HighPrecisionGemm = true</c> before constructing this pipeline — it upcasts bf16 weights to F32 for
-/// the GEMM (weights stay bf16-resident) and yields finite audio (verified: 4 s / 8 steps ≈ 27 s on a 3060). The
-/// Diffusion package can't reference the Cuda backend, so this is wired at the call site (SwarmUI loader / tests).</para></summary>
+/// <summary>ACE-Step v1 (ACE Studio + StepFun, Apache-2.0) text/lyrics-to-music pipeline — the 3.5B flow-matching DiT over Music-DCAE mel latents: pre-computed UMT5-base features + VoiceBpe lyric ids → tri-source cross-attention context → shift-3 flow-match denoise (Euler / Heun / PingPong) with CFG / APG / CFG-Zero★ guidance → DCAE decode to stereo log-mel → ADaMoS HiFi-GAN per channel → 44.1 kHz stereo waveform. Token rate ≈ 10.77 Hz (a 4-minute song ≈ 2585 DiT tokens). Encode UMT5 upstream with the shared <c>T5TextEncoder</c> (<c>T5TextEncoderConfig.Umt5Base</c>) and tokenize lyrics with <c>AceStepLyricTokenizer</c>. <b>Status: generates on CUDA; not yet compared with the reference implementation</b> — guidance defaults (CFG 7.0 / 27 steps) per the model card; APG momentum drifts from the Python reference by design (validation uses plain CFG).
+/// <para>The bf16 weights stay resident; <see cref="Generate"/> runs with <see cref="IBackend.HighPrecisionGemm"/> on, because a
+/// bf16 GEMM against F32 activations NaNs the latent over the CFG loop.</para></summary>
 public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
 {
     /// <summary>Guidance modes (research § 2.9).</summary>
@@ -66,6 +63,26 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         Tensor? ergTextEmbeds = null, bool useErgLyric = false, bool useErgDiffusion = false)
     {
         ThrowIfDisposed();
+        bool previous = Backend.HighPrecisionGemm;
+        Backend.HighPrecisionGemm = true;
+        try
+        {
+            return GenerateCore(textEmbeds, lyricIds, durationSeconds, steps, guidance, guidanceMode, sampler, seed, speakerVec,
+                guidanceInterval, guidanceIntervalDecay, minGuidanceScale, omegaScale, guidanceScaleText, guidanceScaleLyric,
+                ossSteps, onProgress, ergTextEmbeds, useErgLyric, useErgDiffusion);
+        }
+        finally
+        {
+            Backend.HighPrecisionGemm = previous;
+        }
+    }
+
+    private (float[] Left, float[] Right, int SampleRate, int Seed) GenerateCore(
+        Tensor textEmbeds, int[] lyricIds, double durationSeconds, int? steps, float? guidance, GuidanceMode guidanceMode,
+        SamplerMode sampler, int? seed, float[]? speakerVec, float? guidanceInterval, float? guidanceIntervalDecay,
+        float? minGuidanceScale, float? omegaScale, float? guidanceScaleText, float? guidanceScaleLyric, int[]? ossSteps,
+        Action<GenerationProgress>? onProgress, Tensor? ergTextEmbeds, bool useErgLyric, bool useErgDiffusion)
+    {
         if (durationSeconds < 1 || durationSeconds > 600)
             throw new ArgumentOutOfRangeException(nameof(durationSeconds), "duration must be 1..600 s.");
 
