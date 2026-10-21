@@ -203,6 +203,22 @@ public sealed class AttentionLayerTests
     }
 
     [Fact]
+    public void EqualHeadTokenMajor_HoldsABatchedOutputInTheShapeTheEntryTakes()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        AttentionLayer layer = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor },
+            Weights(gate: false));
+        Tensor x = new(new TensorShape(1, 6, 8), DType.F32);
+
+        Tensor y = layer.Forward(backend, x, x, default);
+
+        Assert.Equal(new TensorShape(1, 6, 2, 4), backend.Calls[0].Output.Storage.Shape);
+        Assert.Equal(new TensorShape(1, 6, 8), y.Shape);
+        Assert.Throws<ArgumentException>(() => layer.Attend(backend, new Tensor(new TensorShape(1, 6, 2, 4), DType.F32),
+            new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new TensorShape(1, 6, 8), default));
+    }
+
+    [Fact]
     public void TableRotations_RotateEachTensorWithItsOwnHeadCount()
     {
         AttentionTraceBackend backend = new();
