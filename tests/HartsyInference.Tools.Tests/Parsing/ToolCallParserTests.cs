@@ -22,6 +22,26 @@ public sealed class ToolCallParserTests
         Assert.Equal("{\"reason\": \"done\"}", call.Arguments);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public void HermesCallWithDoubledOuterBracesIsParsed(int seed)
+    {
+        const string doubled = "Sure. <tool_call>\n{{\"name\": \"hang_up\", \"arguments\": {\"reason\": \"done\"}}}\n</tool_call> Bye.";
+        (string forwarded, List<NativeToolCall> calls) = ParserDriver.Drive(ToolCallFormat.Hermes, doubled, seed);
+        Assert.Equal("Sure. Bye.", forwarded);
+        NativeToolCall call = Assert.Single(calls);
+        Assert.Equal("hang_up", call.Name);
+        Assert.Equal("{\"reason\": \"done\"}", call.Arguments);
+    }
+
+    [Fact]
+    public void HermesDoubledBracesWithoutTheirPairStayUnparsed()
+    {
+        (_, List<NativeToolCall> calls) = ParserDriver.Drive(ToolCallFormat.Hermes, "<tool_call>{{\"name\": \"hang_up\", \"arguments\": {}}</tool_call>", 1);
+        Assert.Empty(calls);
+    }
+
     [Fact]
     public void HermesCallEndsAtTheBalancedObjectWhenTheClosingTagIsMissing()
     {
