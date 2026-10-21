@@ -59,6 +59,16 @@ public static class AudioModelCache
         return dir;
     }
 
+    /// <summary>Returns the local path of <paramref name="filename"/> if it is already on disk (directly or via a
+    /// stand-in link), without touching the network. Null when the file is absent.</summary>
+    public static string? TryGetLocal(string hfRepoId, string filename, string category)
+    {
+        string localPath = Path.Combine(GetRepoDirectory(hfRepoId, category), filename);
+        if (IsUsableFile(localPath)) return localPath;
+        AudioStandIns.Resync(CacheRoot);
+        return IsUsableFile(localPath) ? localPath : null;
+    }
+
     /// <summary>Resolves a single file to a local path, downloading it from HuggingFace
     /// if not already cached. Returns the absolute path to the file.</summary>
     /// <param name="hfRepoId">Repo id such as <c>"openai/whisper-large-v3-turbo"</c>.</param>

@@ -18,6 +18,41 @@ public sealed class AudioModelCacheTests
         Assert.True(Directory.Exists(dir));
     }
 
+    [Fact]
+    public void TryGetLocal_ReturnsPath_WhenFileIsOnDisk_WithoutNetwork()
+    {
+        // A unique repo id keeps this off any real checkpoint; the file is removed on exit.
+        string repo = $"hartsy-test/local-{Guid.NewGuid():N}";
+        string dir = AudioModelCache.GetRepoDirectory(repo, "misc");
+        string file = Path.Combine(dir, "present.bin");
+        try
+        {
+            File.WriteAllBytes(file, [1, 2, 3, 4]);
+            string? found = AudioModelCache.TryGetLocal(repo, "present.bin", "misc");
+            Assert.Equal(file, found);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryGetLocal_ReturnsNull_WhenFileIsAbsent()
+    {
+        // No download is attempted: a missing file is null, not an exception from the network path.
+        string repo = $"hartsy-test/absent-{Guid.NewGuid():N}";
+        string dir = AudioModelCache.GetRepoDirectory(repo, "misc");
+        try
+        {
+            Assert.Null(AudioModelCache.TryGetLocal(repo, "missing.safetensors", "misc"));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     [Fact(Skip = "Network test — run manually with: dotnet test --filter Network=Real")]
     [Trait("Network", "Real")]
     public async Task FetchAllAsync_ResolvesEveryRequiredFile_AndToleratesMissingOptional()

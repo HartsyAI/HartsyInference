@@ -14,6 +14,13 @@ internal static class AudioCheckpoints
     internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadAsync(string repo, string category, CancellationToken cancel,
         IReadOnlyList<string>? keyPrefixes = null)
     {
+        // Local first: a complete checkpoint already on disk loads with no request at all.
+        (IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)? local = TryLoadLocal(repo, category, keyPrefixes);
+        if (local is not null)
+        {
+            return local.Value;
+        }
+
         try
         {
             string path = await AudioModelCache.GetAsync(repo, "model.safetensors", category, ct: cancel).ConfigureAwait(false);
@@ -54,6 +61,75 @@ internal static class AudioCheckpoints
         AnyFormatCheckpointLoader pickle = new AnyFormatCheckpointLoader();
         pickle.Load(binPath);
         return (FilterByPrefix(pickle.GetAllTensors(), keyPrefixes), [pickle]);
+    }
+
+    /// <summary>Loads from local files only, in <see cref="LoadAsync"/>'s order: single-file safetensors, then a
+    /// sharded set with every shard present, then a pickle. Returns null when no candidate is complete, so the
+    /// caller falls through to the network. An index with a missing shard is not complete.</summary>
+    private static (IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)? TryLoadLocal(
+        string repo, string category, IReadOnlyList<string>? keyPrefixes)
+    {
+        string? single = AudioModelCache.TryGetLocal(repo, "model.safetensors", category);
+        if (single is not null)
+        {
+            SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(single);
+            return (FilterByPrefix(loader.GetAllTensors(), keyPrefixes), [loader]);
+        }
+
+        string? indexPath = AudioModelCache.TryGetLocal(repo, "model.safetensors.index.json", category);
+        if (indexPath is not null)
+        {
+            List<string> shardPaths = [];
+            bool complete = true;
+            foreach (string shard in ReadShardNames(indexPath, keyPrefixes))
+            {
+                string? shardPath = AudioModelCache.TryGetLocal(repo, shard, category);
+                if (shardPath is null)
+                {
+                    complete = false;
+                    break;
+                }
+                shardPaths.Add(shardPath);
+            }
+            if (complete)
+            {
+                Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
+                List<IDisposable> loaders = [];
+                try
+                {
+                    foreach (string shardPath in shardPaths)
+                    {
+                        SafeTensorsLoader shardLoader = new SafeTensorsLoader();
+                        shardLoader.Load(shardPath);
+                        loaders.Add(shardLoader);
+                        foreach (KeyValuePair<string, Tensor> entry in FilterByPrefix(shardLoader.GetAllTensors(), keyPrefixes))
+                        {
+                            merged[entry.Key] = entry.Value;
+                        }
+                    }
+                }
+                catch
+                {
+                    // A later shard failed: release the mmaps already opened before the error propagates.
+                    foreach (IDisposable opened in loaders)
+                    {
+                        opened.Dispose();
+                    }
+                    throw;
+                }
+                return (merged, [.. loaders]);
+            }
+        }
+
+        string? bin = AudioModelCache.TryGetLocal(repo, "pytorch_model.bin", category);
+        if (bin is not null)
+        {
+            AnyFormatCheckpointLoader pickle = new AnyFormatCheckpointLoader();
+            pickle.Load(bin);
+            return (FilterByPrefix(pickle.GetAllTensors(), keyPrefixes), [pickle]);
+        }
+        return null;
     }
 
     /// <summary>Names the files <see cref="LoadAsync"/> would read, without loading any tensors — for
