@@ -416,7 +416,6 @@ public sealed class TextGenerationPipeline
         return i;
     }
 
-    /// <summary>Tensor-parallel generation: prefill + eager decode over per-rank KV caches; no graph/speculative decode (structurally unreachable — <c>ForwardTp</c> is the only forward) and no last-row gather optimization yet (prefill projects all rows, correctness-first).</summary>
     /// <summary>The next completion token: the forced id at <paramref name="index"/>, else the sampler's pick. With
     /// <paramref name="scores"/> it also records that token's log-probability and the top token's from the raw row.</summary>
     private static int NextToken(Span<float> row, SamplerChain sampler, List<int> generated, IReadOnlyList<int>? forced, int index,
@@ -448,6 +447,7 @@ public sealed class TextGenerationPipeline
         return next;
     }
 
+    /// <summary>Tensor-parallel generation: prefill + eager decode over per-rank KV caches; no graph/speculative decode (structurally unreachable — <c>ForwardTp</c> is the only forward) and no last-row gather optimization yet (prefill projects all rows, correctness-first).</summary>
     private GenerationResult GenerateTp(GenerationRequest request, int[] promptIds, SamplerChain sampler,
         HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {

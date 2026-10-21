@@ -20,7 +20,8 @@
 # the minimum SSIM to clear the floor. Either way a step time more than --speed-tolerance percent slower fails the case.
 # A text case also gets a teacher-forced probe when both builds have `--scores-out`: the base build scores its own greedy
 # stream (seed 42) and the head build scores those same tokens, so a logit shift that has not yet flipped a token still
-# shows. `identical` needs every log-probability bit-equal; `bounded` needs mean and max |Δ log p| within --logp-floor.
+# shows. `identical` needs every log-probability bit-equal; `bounded` needs mean and max |Δ log p| within --logp-floor
+# (top-token flips are reported there, not enforced).
 #
 # Arms alternate seed by seed (A s0, B s0, A s1, B s1, …) so thermal drift and page-cache state land on both equally.
 set -uo pipefail
@@ -286,7 +287,7 @@ def rows(p):
         return [l.rstrip("\n").split("\t") for l in f if l.strip()]
 a, b = rows(sys.argv[1]), rows(sys.argv[2])
 n = min(len(a), len(b))
-if n == 0 or any(a[i][1] != b[i][1] for i in range(n)):
+if n == 0 or len(a) != len(b) or any(a[i][1] != b[i][1] for i in range(n)):
     print("nan nan nan 0"); sys.exit()
 d = [abs(float(a[i][2]) - float(b[i][2])) for i in range(n)]
 flips = sum(1 for i in range(n) if a[i][3] != b[i][3])
@@ -379,7 +380,7 @@ for backend in ${BACKENDS//,/ }; do
                 if [ -s "$b_tf" ] && [ -s "$h_tf" ]; then
                     read -r lp_mean lp_max lp_flips lp_n < <(compare_scores "$b_tf" "$h_tf")
                     notes+="logp Δ mean $lp_mean max $lp_max, top-token flips $lp_flips/$lp_n; "
-                    if [ "$lp_mean" = nan ]; then logp_fail="forced token ids differ"
+                    if [ "$lp_mean" = nan ]; then logp_fail="forced token streams differ"
                     elif [ -z "$SSIM_FLOOR" ]; then
                         awk -v m="$lp_max" -v f="$lp_flips" 'BEGIN { exit !(m > 0 || f > 0) }' && logp_fail="log-probabilities moved"
                     else
@@ -389,6 +390,8 @@ for backend in ${BACKENDS//,/ }; do
                 else
                     notes+="teacher-forced probe did not run (see tf/*.log); "
                 fi
+            else
+                notes+="teacher-forced probe skipped (a build lacks --scores-out); "
             fi
         fi
         h_wall_m="$(printf '%s' "$hw" | median)"; h_step_m="$(printf '%s' "$hs" | median)"; h_peak_m="$(printf '%s' "$hv" | median)"

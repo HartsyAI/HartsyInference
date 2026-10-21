@@ -69,6 +69,25 @@ public sealed class TeacherForcingTests
     }
 
     [Fact]
+    public void AForcedStopToken_IsCommitted_AndDoesNotEndTheRun()
+    {
+        (GenericTransformer model, PrefixCacheTestModel rig, TransformerConfig cfg) = Build();
+        using GenericTransformer _ = model;
+        using CpuBackend backend = new();
+        int[] prompt = [.. Enumerable.Range(0, 5).Select(_ => rig.NextToken(cfg.VocabSize))];
+        int[] chosen = [rig.NextToken(cfg.VocabSize), PrefixCacheTestModel.EosId, rig.NextToken(cfg.VocabSize), PrefixCacheTestModel.EosId];
+
+        GenerationResult forced = new TextGenerationPipeline(model, new PrefixCacheTestModel.StubTokenizer(), backend).Generate(new GenerationRequest
+        {
+            RawTokenIds = prompt, Sampling = SamplingOptions.Default with { Greedy = true }, ForcedTokenIds = chosen,
+        });
+
+        Assert.Equal(chosen, forced.TokenIds);
+        Assert.False(forced.StoppedOnStopToken);
+        Assert.Equal(chosen.Length, forced.TokenScores!.Count);
+    }
+
+    [Fact]
     public void AForcedIdOutsideTheVocabulary_IsRefused()
     {
         (GenericTransformer model, _, TransformerConfig cfg) = Build();
