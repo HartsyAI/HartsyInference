@@ -10,8 +10,12 @@ public sealed class CudnnSdpaPolicyTests
     private const long H = 8, Sq = 64, Sk = 96, D = 128;
 
     private static CudnnSdpa.PlanKey Key(long hKv = H, CudnnSdpa.SdpaDtype dtype = CudnnSdpa.SdpaDtype.F16,
-        CudnnSdpa.SdpaLayout layout = CudnnSdpa.SdpaLayout.HeadMajor, long biasB = 0, long biasH = 0, long biasSq = 0) =>
-        new(2, H, hKv, Sq, Sk, D, dtype, layout, biasB, biasH, biasSq);
+        bool tokenMajor = false, long biasB = 0, long biasH = 0, long biasSq = 0)
+    {
+        Func<long, long, long, long, CudnnSdpa.View> view = tokenMajor ? CudnnSdpa.View.TokenMajor : CudnnSdpa.View.HeadMajor;
+        return new(dtype, D, view(2, H, Sq, D), view(2, hKv, Sk, D), view(2, hKv, Sk, D), view(2, H, Sq, D),
+            CudnnSdpa.View.Bias(new CudnnBias(biasB, biasH, biasSq), Sk));
+    }
 
     // ── plan key ──────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -34,7 +38,7 @@ public sealed class CudnnSdpaPolicyTests
     public void PlanKey_DistinguishesDtypeAndLayout()
     {
         Assert.NotEqual(Key(), Key(dtype: CudnnSdpa.SdpaDtype.BF16));
-        Assert.NotEqual(Key(), Key(layout: CudnnSdpa.SdpaLayout.TokenMajor));
+        Assert.NotEqual(Key(), Key(tokenMajor: true));
     }
 
     [Theory]
@@ -159,7 +163,7 @@ public sealed class CudnnSdpaPolicyTests
     public void Signature_OfACall_ReadsItsOperandsAndMask()
     {
         using Tensor mask = Mask(1, 48, 16, 16);
-        CudnnSdpaSignature s = CudnnSdpaSignature.Of(Call(DType.BF16, 48, 12, mask: mask), 1);
+        CudnnSdpaSignature s = CudnnSdpaSignature.Of(Call(DType.BF16, 48, 12, mask: mask));
         Assert.Equal(new CudnnSdpaSignature(CudnnSdpa.SdpaDtype.BF16, true, CudnnSdpaMask.Bias, CudnnBiasAxes.Head | CudnnBiasAxes.Query, 128), s);
     }
 
@@ -171,7 +175,8 @@ public sealed class CudnnSdpaPolicyTests
     private static readonly CudnnSdpaSignature Biased = CudnnSdpaSignature.For(DType.F16, 16, 16, 128, new CudnnBias(1, 16, 64));
 
     private static CudnnSdpaShape Shape(CudnnSdpaSignature s, long sq) =>
-        new(s, DType.F16, CudnnSdpa.SdpaLayout.HeadMajor, 1, 16, 16, sq, sq);
+        new(s, DType.F16, new(CudnnSdpa.SdpaDtype.F16, 128, CudnnSdpa.View.HeadMajor(1, 16, sq, 128), CudnnSdpa.View.HeadMajor(1, 16, sq, 128),
+            CudnnSdpa.View.HeadMajor(1, 16, sq, 128), CudnnSdpa.View.HeadMajor(1, 16, sq, 128)));
 
     [Fact]
     public void RefusedBf16Plans_NeverDisableTheFp16PathAtTheSameHeadDim()
@@ -289,7 +294,7 @@ public sealed class CudnnSdpaPolicyTests
 
     /// <summary>A row's call-only verdict: its declared limits, then the shared rules.</summary>
     private static bool Reaches(AttentionKernelCapability row, in AttentionCall c) =>
-        row.Excludes(in c) == AttentionExclusion.None && CudnnSdpaRows.Covers(in c, c.Batch);
+        row.Excludes(in c) == AttentionExclusion.None && CudnnSdpaRows.Covers(in c);
 
     [Fact]
     public void Capability_DeclaresPerHeadBiasAndBf16_AndGqaOnlyWhenAsked()
@@ -361,7 +366,7 @@ public sealed class CudnnSdpaPolicyTests
 
         using Tensor wrongHeads = Mask(1, 4, 16, 16);
         AttentionCall mismatch = Call(DType.F16, 8, 8, mask: wrongHeads);
-        Assert.False(CudnnSdpaRows.MaskFits(in mismatch, 1));
+        Assert.False(CudnnSdpaRows.MaskFits(in mismatch));
         Assert.False(Reaches(HalfRow, in mismatch));
     }
 
@@ -384,7 +389,7 @@ public sealed class CudnnSdpaPolicyTests
             Mask = AttentionMask.Additive(perBatchMask),
         };
         Assert.True(Reaches(HalfRow, in batched));
-        Assert.False(CudnnSdpaRows.MaskFits(in batched, 1));   // the token-major rows read one sequence
+        Assert.True(CudnnSdpaRows.MaskFits(in batched));
     }
 
     [Fact]

@@ -7549,7 +7549,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int headDim, float scale, AttentionNumerics numerics)
     {
-        ValidateTokenMajorAttentionContract(output, query, key, value, mask, heads, headDim, scale);
+        ValidateTokenMajorAttentionContract(output, query, key, value, heads, headDim, scale);
         long sq = TokenMajorRows(query), skv = TokenMajorRows(key), d = headDim;
         using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
             ? $"SDPA-TM {sq}x{skv}x{heads}x{headDim}" : "SDPA-TM");
@@ -7570,7 +7570,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor? mask, int heads, int kvHeads, int headDim, float scale, AttentionNumerics numerics)
     {
         // Equal heads too: Krea2's text-fusion blocks issued the head-major sequence, not the token-major cuDNN call.
-        // The mask is validated by the head-major entry, as it was when callers issued that sequence themselves.
+        // The mask is checked when the rows are planned: the cuDNN row takes any bias the head-major entry takes, the widening row what that entry takes.
         ValidateTokenMajorGqaAttentionContract(output, query, key, value, heads, kvHeads, headDim, scale);
         RunAttentionRows(TokenMajorGqaAttentionRows,
             AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, false)
@@ -7644,9 +7644,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the token-major SDPA entry point.</summary>
+    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the token-major SDPA entry point; the mask is checked when the rows are planned.</summary>
     internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
-        Tensor? mask, int heads, int headDim, float scale)
+        int heads, int headDim, float scale)
     {
         if (heads <= 0 || headDim <= 0)
             throw new ArgumentException($"Token-major SDPA needs positive heads/headDim; got heads={heads}, headDim={headDim}.");
@@ -7679,20 +7679,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
         if (sq * skv > int.MaxValue || query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
-        if (mask is null) return;
-        if (mask.DType != DType.F32)
-            throw new NotSupportedException($"SDPA additive masks must be F32; got {mask.DType}.");
-        bool validMask = mask.Shape.Rank switch
-        {
-            2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
-            3 => (mask.Shape[0] == 1 || mask.Shape[0] == heads) && mask.Shape[1] == sq && mask.Shape[2] == skv,
-            4 => mask.Shape[0] == 1 && (mask.Shape[1] == 1 || mask.Shape[1] == heads)
-                && mask.Shape[2] == sq && mask.Shape[3] == skv,
-            _ => false,
-        };
-        if (!validMask)
-            throw new ArgumentException(
-                $"SDPA mask {mask.Shape} is not broadcastable to [1,{heads},{sq},{skv}].");
     }
 
     /// <summary>Validates the canonical rank-4 MHA contract shared by every SDPA dispatch branch.</summary>
@@ -7744,10 +7730,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     internal static bool MaskIsKeyOnly(Tensor? mask, long sq)
         => mask is not null && mask.DType == DType.F32 && sq > 1 && MaskQueryRows(mask) == 1;
 
-    /// <summary>cuDNN fused attention: fp16/bf16 run in place, F32 through a saturating F16 cast. False means the caller falls through; Q/out [B,H,Sq,D], K/V [B,Hkv,Skv,D].</summary>
-    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
-        => TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
-            query.Shape[0], query.Shape[1], key.Shape[1], query.Shape[2], key.Shape[2], query.Shape[3]);
+    /// <summary>cuDNN fused attention over the call's operand views: fp16/bf16 run in place, F32 (whole tensors only) through a saturating F16 cast. False means the caller falls through.</summary>
+    private unsafe bool TryCudnnSdpa(in AttentionCall c)
+        => TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, c.QkHeadDim,
+            CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c));
 
     /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit in half of free VRAM (cuMemGetInfo counts pool reservations as used).</summary>
     private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
@@ -7768,7 +7754,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         // A refused shape must not build the mask before declining.
         CudnnSdpaSignature signature = CudnnSdpaSignature.For(DType.F32, hq, hkv, d, new CudnnBias(1, 1, tq));
-        if (_cudnnSdpaHealth.Refused(new CudnnSdpaShape(signature, DType.F32, CudnnSdpa.SdpaLayout.HeadMajor, 1, hq, hkv, tq, kvLen)))
+        CudnnSdpa.View q = CudnnSdpa.View.HeadMajor(1, hq, tq, d), k = CudnnSdpa.View.HeadMajor(1, hkv, kvLen, d);
+        CudnnSdpa.View v = k, o = q;
+        if (_cudnnSdpaHealth.Refused(new CudnnSdpaShape(signature, DType.F32, CudnnSdpa.PlanKey.Of(signature.Dtype, d, q, k, v, o, new CudnnBias(1, 1, tq)))))
             return false;
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -7777,12 +7765,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ulong pMask = GpuTransferHelper.AllocateDevice(maskBytes);
         _kernels!.LaunchCausalBiasMask(pMask, tq, kvLen, qOffset, window, _stream.Handle);
         GpuTransferHelper.CacheActivation(mask, pMask, maskBytes);
-        return TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor, 1, hq, hkv, tq, kvLen, d);
+        return TryCudnnSdpa(output, query, key, value, mask, scale, d, q, k, v, o, default);
     }
 
-    /// <summary>Layout-explicit form: the token-major caller's tensors are rank-2, so the dims cannot be read off the shapes.</summary>
-    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        CudnnSdpa.SdpaLayout layout, long b, long h, long hKv, long sq, long skv, long d)
+    /// <summary>The view form: the operands' dims and strides come from the caller, so a rank-2 token-major tensor or a column of a wider one reads the same as a whole head-major one.</summary>
+    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, long d,
+        in CudnnSdpa.View q, in CudnnSdpa.View k, in CudnnSdpa.View v, in CudnnSdpa.View o, in CudnnSdpa.Offsets offsets)
     {
         lock (_cudnnSdpaLock)
         {
@@ -7793,22 +7781,22 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // a queued request cannot bypass a newly established backoff window.
             // An F32 Q/K/V needs the saturating cast; without it (kv_scatter_f16.ptx missing) the materialized path keeps the call.
             if (_cudnnSdpaDead || (query.DType != DType.F16 && query.DType != DType.BF16 && _kernels is not { HasCastF32ToF16Sat: true })
-                || !CudnnBias.TryFrom(mask, b, h, sq, skv, out CudnnBias bias))
+                || !CudnnBias.TryFrom(mask, q.B, q.H, q.S, k.S, out CudnnBias bias))
                 return false;
-            CudnnSdpaSignature signature = CudnnSdpaSignature.For(query.DType, h, hKv, d, bias);
+            CudnnSdpaSignature signature = CudnnSdpaSignature.For(query.DType, q.H, k.H, d, bias, CudnnSdpa.IsStrided(d, q, k, v, o, offsets));
             if (!_cudnnSdpaHealth.Eligible(signature, Environment.TickCount64)) return false;
 
-            return TryCudnnSdpaLocked(output, query, key, value, mask, scale, layout, b, h, hKv, sq, skv, d, signature, bias);
+            return TryCudnnSdpaLocked(output, query, key, value, mask, scale, CudnnSdpa.PlanKey.Of(signature.Dtype, d, q, k, v, o, bias), offsets, signature);
         }
     }
 
     private unsafe bool TryCudnnSdpaLocked(
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        CudnnSdpa.SdpaLayout layout, long b, long h, long hKv, long sq, long skv, long d, CudnnSdpaSignature signature, CudnnBias bias)
+        in CudnnSdpa.PlanKey plan, in CudnnSdpa.Offsets offsets, CudnnSdpaSignature signature)
     {
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
         bool cachedOutput = false;
-        CudnnSdpaShape shape = new(signature, query.DType, layout, b, h, hKv, sq, skv);
+        CudnnSdpaShape shape = new(signature, query.DType, plan);
         if (_cudnnSdpaHealth.Refused(shape)) return false;
         try
         {
@@ -7833,12 +7821,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (mask is not null) pMask = GpuTransferHelper.CopyToDevice(mask);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            CudnnSdpa.PlanKey plan = new(b, h, hKv, sq, skv, d, signature.Dtype, layout, bias.B, bias.H, bias.Sq);
 
             if (query.DType == DType.F16 || query.DType == DType.BF16)
             {
                 // Native F16/BF16 Q/K/V/output — the engine's I/O dtype already; execute directly, zero casts.
-                _cudnnSdpa.Execute(pQ, pK, pV, pOut, plan, scale, pMask);
+                _cudnnSdpa.Execute(pQ, pK, pV, pOut, plan, scale, pMask, offsets);
             }
             else
             {
@@ -7851,7 +7838,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 _kernels!.LaunchCastF32ToF16Sat(kF16, pK, (int)key.ElementCount, _stream.Handle);
                 _kernels!.LaunchCastF32ToF16Sat(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, plan, scale, pMask);
+                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, plan, scale, pMask, offsets);
 
                 _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
             }

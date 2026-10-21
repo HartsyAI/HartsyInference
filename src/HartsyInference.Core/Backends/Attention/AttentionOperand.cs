@@ -39,9 +39,10 @@ public readonly record struct AttentionOperand(Tensor Storage, AttentionLayout L
         return new(t, AttentionLayout.TokenMajor, batch, heads, tokens, headDim, 0, tokens * row, headDim, row);
     }
 
-    /// <summary>Heads <c>[columnOffset, columnOffset + heads·headDim)</c> of each <paramref name="rowWidth"/>-wide row.</summary>
-    public static AttentionOperand Packed(Tensor rows, int tokens, int rowWidth, int columnOffset, int heads, int headDim)
-        => new(rows, AttentionLayout.PackedRows, 1, heads, tokens, headDim, columnOffset, (long)tokens * rowWidth, headDim, rowWidth);
+    /// <summary>Heads <c>[columnOffset, columnOffset + heads·headDim)</c> of each <paramref name="rowWidth"/>-wide row;
+    /// <paramref name="rows"/> holds <paramref name="batch"/> × <paramref name="tokens"/> rows.</summary>
+    public static AttentionOperand Packed(Tensor rows, int tokens, int rowWidth, int columnOffset, int heads, int headDim, int batch = 1)
+        => new(rows, AttentionLayout.PackedRows, batch, heads, tokens, headDim, columnOffset, (long)tokens * rowWidth, headDim, rowWidth);
 
     /// <summary>The storage dtype.</summary>
     public DType DType => Storage.DType;
@@ -51,5 +52,32 @@ public readonly record struct AttentionOperand(Tensor Storage, AttentionLayout L
 
     /// <summary>True when the view is its whole storage in that layout's natural strides.</summary>
     public bool IsPlain => Offset == 0 && Layout != AttentionLayout.PackedRows
-        && (long)Batch * Heads * Tokens * HeadDim == Storage.ElementCount;
+        && (long)Batch * Heads * Tokens * HeadDim == Storage.ElementCount
+        && (Layout == AttentionLayout.HeadMajor
+            ? BatchStride == (long)Heads * Tokens * HeadDim && HeadStride == (long)Tokens * HeadDim && TokenStride == HeadDim
+            : BatchStride == (long)Tokens * Heads * HeadDim && HeadStride == HeadDim && TokenStride == (long)Heads * HeadDim);
+
+    /// <summary>True when the view reaches every element of its storage exactly once, in any axis order.</summary>
+    public bool CoversStorage
+    {
+        get
+        {
+            if (Offset != 0 || (long)Batch * Heads * Tokens * HeadDim != Storage.ElementCount) return false;
+            // Axes of extent 1 carry no stride; the rest must tile the storage with no gap or overlap once ordered by stride.
+            Span<(long Extent, long Stride)> axes = stackalloc (long, long)[3];
+            int n = 0;
+            if (Batch > 1) axes[n++] = (Batch, BatchStride);
+            if (Heads > 1) axes[n++] = (Heads, HeadStride);
+            if (Tokens > 1) axes[n++] = (Tokens, TokenStride);
+            axes = axes[..n];
+            axes.Sort(static (a, b) => a.Stride.CompareTo(b.Stride));
+            long expected = HeadDim;
+            foreach ((long extent, long stride) in axes)
+            {
+                if (stride != expected) return false;
+                expected *= extent;
+            }
+            return true;
+        }
+    }
 }

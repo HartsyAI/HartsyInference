@@ -9,12 +9,12 @@ namespace HartsyInference.Cuda.Tests;
 [Collection("CudaSerial")]
 public sealed unsafe class CudnnSdpaVariantTests
 {
-    private const double F16Tolerance = 3e-3, Bf16Tolerance = 8e-3;   // ATTENTION_CONTRACT §8
+    internal const double F16Tolerance = 3e-3, Bf16Tolerance = 8e-3;   // ATTENTION_CONTRACT §8
 
     private readonly ITestOutputHelper _output;
     public CudnnSdpaVariantTests(ITestOutputHelper output) => _output = output;
 
-    private static string PtxDir()
+    internal static string PtxDir()
     {
         string dir = Path.Combine(AppContext.BaseDirectory, "Ptx");
         return Directory.Exists(dir)
@@ -32,7 +32,7 @@ public sealed unsafe class CudnnSdpaVariantTests
 
     // ── host helpers: head-major is [b, h, s, d], token-major [b, s, h, d] ──
 
-    private static float[] Gauss(Random rng, long n, float sigma = 1f)
+    internal static float[] Gauss(Random rng, long n, float sigma = 1f)
     {
         float[] x = new float[n];
         for (long i = 0; i < n; i++)
@@ -43,7 +43,7 @@ public sealed unsafe class CudnnSdpaVariantTests
         return x;
     }
 
-    private static Tensor Make(float[] values, TensorShape shape, DType dtype)
+    internal static Tensor Make(float[] values, TensorShape shape, DType dtype)
     {
         Tensor f32 = new(shape, DType.F32);
         values.AsSpan().CopyTo(new Span<float>(f32.DataPointer, values.Length));
@@ -52,20 +52,20 @@ public sealed unsafe class CudnnSdpaVariantTests
         finally { f32.Dispose(); }
     }
 
-    private static float[] Read(Tensor t)
+    internal static float[] Read(Tensor t)
     {
         using Tensor f32 = t.CastTo(DType.F32);
         return new Span<float>(f32.DataPointer, (int)f32.ElementCount).ToArray();
     }
 
     /// <summary>What a <paramref name="dtype"/> tensor holds for <paramref name="values"/>, so the reference sees what the kernel read.</summary>
-    private static float[] Quantize(float[] values, DType dtype)
+    internal static float[] Quantize(float[] values, DType dtype)
     {
         using Tensor t = Make(values, new TensorShape(values.Length), dtype);
         return Read(t);
     }
 
-    private static float[] Transpose(float[] x, int b, int h, int s, int d)   // [b,h,s,d] <-> [b,s,h,d]: swaps the two middle axes
+    internal static float[] Transpose(float[] x, int b, int h, int s, int d)   // [b,h,s,d] <-> [b,s,h,d]: swaps the two middle axes
     {
         float[] y = new float[x.Length];
         for (int bi = 0; bi < b; bi++)
@@ -76,7 +76,7 @@ public sealed unsafe class CudnnSdpaVariantTests
     }
 
     /// <summary>float64 softmax(scale·QKᵀ + bias)·V over head-major operands; the bias <c>[biasB, biasH, biasSq, skv]</c> broadcasts extents of 1.</summary>
-    private static float[] Reference(float[] q, float[] k, float[] v, float[]? bias, int b, int hq, int hkv, int sq, int skv, int d,
+    internal static float[] Reference(float[] q, float[] k, float[] v, float[]? bias, int b, int hq, int hkv, int sq, int skv, int d,
         float scale, int biasB = 1, int biasH = 1, int biasSq = 1)
     {
         float[] o = new float[(long)b * hq * sq * d];
@@ -110,7 +110,7 @@ public sealed unsafe class CudnnSdpaVariantTests
         return o;
     }
 
-    private static double RelL2(float[] got, float[] want)
+    internal static double RelL2(float[] got, float[] want)
     {
         double err = 0, norm = 0;
         for (int i = 0; i < want.Length; i++)
@@ -123,7 +123,7 @@ public sealed unsafe class CudnnSdpaVariantTests
         return Math.Sqrt(err) / Math.Max(Math.Sqrt(norm), 1e-12);
     }
 
-    private static Tensor? BiasTensor(string kind, Random rng, int b, int hq, int sq, int skv, out int biasB, out int biasH, out int biasSq,
+    internal static Tensor? BiasTensor(string kind, Random rng, int b, int hq, int sq, int skv, out int biasB, out int biasH, out int biasSq,
         out float[]? values)
     {
         (biasB, biasH, biasSq, int[] shape) = kind switch
@@ -378,7 +378,8 @@ public sealed unsafe class CudnnSdpaVariantTests
         float[] scales = [1f / MathF.Sqrt(d), 0.05f, 0.3f];
         Random rng = new(15);
         float[] qv = Quantize(Gauss(rng, n), DType.F16), kv = Quantize(Gauss(rng, n), DType.F16), vv = Quantize(Gauss(rng, n), DType.F16);
-        CudnnSdpa.PlanKey key = new(1, h, h, s, s, d, CudnnSdpa.SdpaDtype.F16, CudnnSdpa.SdpaLayout.HeadMajor);
+        CudnnSdpa.View view = CudnnSdpa.View.HeadMajor(1, h, s, d);
+        CudnnSdpa.PlanKey key = new(CudnnSdpa.SdpaDtype.F16, d, view, view, view, view);
 
         using CudaBackend backend = new(0, PtxDir());
         using CudnnSdpa sdpa = new(backend.Stream.Handle);

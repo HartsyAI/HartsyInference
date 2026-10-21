@@ -79,8 +79,10 @@ public static class AttnInvoker
     {
         // Head-major SDPA takes K/V with Q's head count on CUDA and the CPU; grouped callers go token-major or flash.
         "cuda" when !c.Flash && c.Layout == AttnLayout.HeadMajor && c.KvHeads != c.Heads => AttnOutcome.Refused,
-        // CUDA's equal-head token-major entry takes a [Sq, Skv] mask; the grouped overload runs head-major, which takes a key row.
+        // CUDA's equal-head token-major entry takes a key row on cuDNN only (F16, or F32 with the F16 permission); its permute row
+        // takes a [Sq, Skv] mask. The grouped overload runs head-major, which takes a key row.
         "cuda" when c.Layout == AttnLayout.TokenMajor && c.Mask == AttnMask.KeyOnly && c.Sq > 1 && c.KvHeads == c.Heads
+            && !(c.DType == AttnDType.F16 || (c.DType == AttnDType.F32 && c.AllowF16))
             => AttnOutcome.Refused,
         "cpu" when !c.Flash && c.KvHeads != c.Heads => AttnOutcome.Refused,
         "cpu" when c.DType != AttnDType.F32 => AttnOutcome.Refused,

@@ -117,8 +117,14 @@ public sealed record AttentionKernelCapability
     /// <summary>Key/value dtypes.</summary>
     public required AttentionDTypes KvTypes { get; init; }
 
-    /// <summary>Layouts.</summary>
+    /// <summary>Layouts of each of Q, K, V and the output; they may differ.</summary>
     public required AttentionLayouts Layouts { get; init; }
+
+    /// <summary>Reads operands through their offsets and strides; otherwise only a whole tensor in its layout's natural strides.</summary>
+    public bool StridedViews { get; init; }
+
+    /// <summary>Largest batch.</summary>
+    public int MaxBatch { get; init; } = int.MaxValue;
 
     /// <summary>Smallest head dim.</summary>
     public int MinHeadDim { get; init; }
@@ -166,7 +172,10 @@ public sealed record AttentionKernelCapability
         if (call.Route != AttentionRoute.Auto && call.Route != Entry) return AttentionExclusion.Entry;
         if (!Has(QueryTypes, call.Query.DType) || !Has(QueryTypes, call.Output.DType)) return AttentionExclusion.QueryType;
         if (!Has(KvTypes, call.Key.DType) || !Has(KvTypes, call.Value.DType)) return AttentionExclusion.KvType;
-        if ((Layouts & Of(call.Query.Layout)) == 0 || (Layouts & Of(call.Key.Layout)) == 0) return AttentionExclusion.Layout;
+        if ((Layouts & Of(call.Query.Layout)) == 0 || (Layouts & Of(call.Key.Layout)) == 0
+            || (Layouts & Of(call.Value.Layout)) == 0 || (Layouts & Of(call.Output.Layout)) == 0) return AttentionExclusion.Layout;
+        if (!StridedViews && !(call.Query.IsPlain && call.Key.IsPlain && call.Value.IsPlain && call.Output.IsPlain)) return AttentionExclusion.Strides;
+        if (call.Batch > MaxBatch) return AttentionExclusion.Batch;
         if (call.QkHeadDim < MinHeadDim || call.QkHeadDim > MaxHeadDim) return AttentionExclusion.HeadDim;
         if (call.KvHeads != call.Heads && !Gqa) return AttentionExclusion.GroupedKv;
         if (call.QueryTokens < MinQueryTokens || call.QueryTokens > MaxQueryTokens) return AttentionExclusion.QueryRows;
@@ -216,6 +225,12 @@ public enum AttentionExclusion
 
     /// <summary>Operand layout.</summary>
     Layout,
+
+    /// <summary>An offset or strided operand on a row that reads whole tensors.</summary>
+    Strides,
+
+    /// <summary>Batch.</summary>
+    Batch,
 
     /// <summary>Head dim.</summary>
     HeadDim,

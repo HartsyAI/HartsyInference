@@ -6,7 +6,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Plain fp16 MHA output digests before and after the by-value scale; public API only, so this file also compiles on the base tree.
+/// <summary>Plain fp16 MHA output digests before and after the by-value scale and the strided plan key (head-major and token-major B=1); public API only, so this file also compiles on the base tree.
 /// <c>HARTSY_SDPA_BASELINE_MODE=record</c> on base writes them to <c>HARTSY_SDPA_BASELINE_DIR</c>; on head they are compared (unset dir skips).</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class CudnnSdpaDigestTests
@@ -33,11 +33,13 @@ public sealed unsafe class CudnnSdpaDigestTests
 
     [Trait("Category", "GpuIntegration")]
     [Theory]
-    [InlineData("mha-h24-s1024-d128", 1, 24, 1024, 128, false, 0.08838835f)]
-    [InlineData("mha-h24-s1024-d128-scale03", 1, 24, 1024, 128, false, 0.3f)]
-    [InlineData("mha-h8-s512-d64-bias-b2", 2, 8, 512, 64, true, 0.125f)]
-    [InlineData("mha-h4-s256-d96", 1, 4, 256, 96, false, 0.102062073f)]
-    public void Fp16Mha_OutputDigest_IsUnchangedByTheByValueScale(string name, int b, int h, int s, int d, bool bias, float scale)
+    [InlineData("mha-h24-s1024-d128", 1, 24, 1024, 128, false, 0.08838835f, false)]
+    [InlineData("mha-h24-s1024-d128-scale03", 1, 24, 1024, 128, false, 0.3f, false)]
+    [InlineData("mha-h8-s512-d64-bias-b2", 2, 8, 512, 64, true, 0.125f, false)]
+    [InlineData("mha-h4-s256-d96", 1, 4, 256, 96, false, 0.102062073f, false)]
+    [InlineData("tm-h24-s1024-d128", 1, 24, 1024, 128, false, 0.08838835f, true)]
+    [InlineData("tm-h8-s512-d64-bias", 1, 8, 512, 64, true, 0.125f, true)]
+    public void Fp16Mha_OutputDigest_IsUnchangedByTheByValueScaleAndTheStridedKey(string name, int b, int h, int s, int d, bool bias, float scale, bool tokenMajor)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         CudnnRuntime.EnsureProbed();
@@ -47,7 +49,7 @@ public sealed unsafe class CudnnSdpaDigestTests
         bool record = string.Equals(Environment.GetEnvironmentVariable("HARTSY_SDPA_BASELINE_MODE"), "record", StringComparison.OrdinalIgnoreCase);
 
         Random rng = new(name.Aggregate(17, (a, c) => a * 31 + c));   // string.GetHashCode is randomized per process
-        TensorShape shape = new(b, h, s, d);
+        TensorShape shape = tokenMajor ? new(s, h * d) : new(b, h, s, d);   // token-major B=1: [S, H·D]
         using Tensor q = Make(Gauss(rng, shape.ElementCount), shape, DType.F16);
         using Tensor k = Make(Gauss(rng, shape.ElementCount), shape, DType.F16);
         using Tensor v = Make(Gauss(rng, shape.ElementCount), shape, DType.F16);
@@ -58,7 +60,8 @@ public sealed unsafe class CudnnSdpaDigestTests
         if (!Directory.Exists(ptxDir))
             ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
         using CudaBackend backend = new(0, ptxDir);
-        ((IBackend)backend).ScaledDotProductAttention(o, q, k, v, mask, scale, allowF16: true);
+        if (tokenMajor) ((IBackend)backend).ScaledDotProductAttentionTokenMajor(o, q, k, v, mask, h, d, scale, allowF16: true);
+        else ((IBackend)backend).ScaledDotProductAttention(o, q, k, v, mask, scale, allowF16: true);
         backend.Sync();
         Assert.True(backend.CudnnSdpaEngaged, $"{name} did not run on cuDNN, so it says nothing about the plan");
         string digest = Convert.ToHexString(SHA256.HashData(new ReadOnlySpan<byte>(o.DataPointer, checked((int)(o.ElementCount * sizeof(ushort))))));

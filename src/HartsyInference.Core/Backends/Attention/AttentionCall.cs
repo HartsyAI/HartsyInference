@@ -88,19 +88,29 @@ public readonly record struct AttentionCall
     /// <summary>What the legacy entry point for <see cref="Route"/> cannot carry, or null when it can carry the whole call.
     /// A backend that serves <see cref="IBackend.Attention"/> by re-entering that entry point refuses the rest rather than
     /// dropping it.</summary>
-    public string? LegacyGap()
+    public string? LegacyGap() => Gap(operands: true);
+
+    /// <summary>What a row of the pinned route cannot carry once the operand views are set aside: the mask terms, logit terms
+    /// and positions of a legacy entry. A backend whose rows take strided views plans over its rows when this is null.</summary>
+    public string? TermsGap() => Gap(operands: false);
+
+    private string? Gap(bool operands)
     {
         AttentionMask m = Mask;
         AttentionLayout layout = Route is AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa
             ? AttentionLayout.TokenMajor : AttentionLayout.HeadMajor;
-        if (Query.Layout != layout || Key.Layout != layout || Value.Layout != layout || Output.Layout != layout)
-            return $"{Query.Layout} operands on the {Route} route";
-        if (!Query.IsPlain || !Key.IsPlain || !Value.IsPlain || !Output.IsPlain) return "strided operands";
+        if (operands)
+        {
+            if (Query.Layout != layout || Key.Layout != layout || Value.Layout != layout || Output.Layout != layout)
+                return $"{Query.Layout} operands on the {Route} route";
+            if (!Query.IsPlain || !Key.IsPlain || !Value.IsPlain || !Output.IsPlain) return "strided operands";
+        }
         if (m.WindowRight is not null || m.BlockSize > 0) return "a right window or a block-causal mask";
         switch (Route)
         {
             case AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa:
-                if (layout == AttentionLayout.TokenMajor && Batch > 1) return "a batch above 1 (the token-major entry reads one sequence)";
+                if (operands && layout == AttentionLayout.TokenMajor && Batch > 1)
+                    return "a batch above 1 (the token-major entry reads one sequence)";
                 if (m.Causal || m.WindowLeft is not null) return "a causal or windowed mask (it takes an additive bias)";
                 if (Logits.Any) return "a softcap, sinks or ALiBi";
                 if (Positions.OnDevice || (Positions.Bounded && (Positions.KvLength != Key.Tokens || Positions.QueryOffset != 0)))
