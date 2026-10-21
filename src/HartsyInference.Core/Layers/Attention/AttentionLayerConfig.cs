@@ -28,6 +28,10 @@ public enum AttentionQkNorm
     /// <summary>RMSNorm over the full inner width, run with the rotation as one backend op (LTX-2): Q, K and V are declared
     /// <c>[.., S, heads·headDim]</c>.</summary>
     FullWidth,
+
+    /// <summary>RMSNorm over the full inner width as its own op, any batch (HiDream): Q, K and V are declared
+    /// <c>[.., S, heads·headDim]</c>.</summary>
+    FullWidthRms,
 }
 
 /// <summary>How the attention output is gated before the output projection.</summary>
@@ -112,6 +116,8 @@ public sealed record AttentionLayerConfig
             throw new ArgumentException("The full-width QK norm runs with equal query and key/value heads.");
         if (Gate == AttentionGate.PerHeadDoubledSigmoid && Projection != AttentionProjection.GroupedByInput)
             throw new ArgumentException("The per-head gate is projected with the query, grouped by input.");
+        if (QkNorm == AttentionQkNorm.FullWidthRms && TokenMajorRoute != AttentionRoute.Dense)
+            throw new ArgumentException("The full-width RMS norm attends head-major.");
     }
 }
 
@@ -127,8 +133,8 @@ public sealed record AttentionLayerWeights
     /// <summary>Value projection.</summary>
     public required Tensor Value { get; init; }
 
-    /// <summary>Output projection.</summary>
-    public required Tensor Output { get; init; }
+    /// <summary>Output projection; null for a stream whose attention output the model uses unprojected.</summary>
+    public Tensor? Output { get; init; }
 
     /// <summary>Query projection bias.</summary>
     public Tensor? QueryBias { get; init; }
@@ -160,3 +166,6 @@ public sealed record AttentionLayerWeights
     /// <summary>Epsilon of a per-head key norm.</summary>
     public float KeyNormEps { get; init; }
 }
+
+/// <summary>The Q and K norm weights of a layer whose projections the model runs itself.</summary>
+public readonly record struct AttentionNormWeights(Tensor Query, Tensor Key, float QueryEps, float KeyEps);

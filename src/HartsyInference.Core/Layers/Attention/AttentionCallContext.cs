@@ -20,6 +20,9 @@ public enum QkRotationKind
 
     /// <summary>The LTX-0.9 lineage: interleaved pairs over the full inner width after the full-width norm.</summary>
     FullWidthInterleaved,
+
+    /// <summary>Rotate-half on Q and K together, <see cref="IBackend.ApplyRope"/>: set on both, with one table pair.</summary>
+    RotateHalfPaired,
 }
 
 /// <summary>One tensor's rotation tables for this call; <paramref name="Tokens"/> is the row count the tables cover.</summary>

@@ -43,6 +43,19 @@ internal sealed class AttentionTraceBackend : IBackend
 
     public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0) => Ops.Add("ApplyRopeSingle");
 
+    public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin) => Ops.Add("ApplyRope");
+
+    public void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
+    {
+        List<string> rows = new();
+        foreach (Tensor t in inputs) rows.Add(t.Shape[1].ToString());
+        Ops.Add($"Concat rows {string.Join("+", rows)}");
+    }
+
+    public void SliceRows(Tensor output, Tensor input, int rowOffset) => Ops.Add($"SliceRows {output.Shape[1]}@{rowOffset}");
+
+    public void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices) => Ops.Add($"GatherRows {rowIndices.Length}");
+
     public void CastToF16(Tensor output, Tensor input) => Ops.Add($"CastToF16 {input.Shape}");
 
     public void Permute0213(Tensor output, Tensor input, int s, int h, int d) => Ops.Add($"Permute0213 {s},{h},{d}");
@@ -96,7 +109,6 @@ internal sealed class AttentionTraceBackend : IBackend
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2) => throw Unused();
     public void GeGlu(Tensor output, Tensor input) => throw Unused();
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial) => throw Unused();
-    public void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim) => throw Unused();
     public void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim) => throw Unused();
     public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW) => throw Unused();
     public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW) => throw Unused();
