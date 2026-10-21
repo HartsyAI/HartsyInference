@@ -130,7 +130,7 @@ Each probe built a fused SDPA graph in its own process, ran it and compared it w
 | Card | Result |
 |---|---|
 | RTX 3060 (SM 86) | All 15 probes pass. Supported and correct: BF16 I/O, grouped K/V (48/12, 16/8), head dims 32 to 256 in steps of 8 (40 and 160 included; 36 and 44 refused), per-head, per-batch and key-only bias, causal as one band op, sliding window, LSE output, sinks, softcap, ALiBi, padding, a by-value scale. A unified block mask is not supported. Plan build about 45 ms. |
-| RTX 4090 (SM 89) | Pending. |
+| RTX 4090 (SM 89) | The same outcome as the RTX 3060 on every probe. |
 
 ## End to end against ComfyUI
 
