@@ -165,7 +165,7 @@ public sealed class AttentionLayer
             || kMh.Shape[1] != _config.Heads || kMh.Shape[3] != _config.HeadDim || !vMh.Shape.Equals(kMh.Shape))
             throw new ArgumentException($"Operands do not match {_config.Heads} heads of {_config.HeadDim}: {qMh.Shape}, {kMh.Shape}, {vMh.Shape}.");
         DType act = _config.ComputeDType ?? qMh.DType;
-        ValidateOutput(output, qMh, act);
+        ValidateOutput(output, qMh, kMh, vMh, act);
         return RunAttention(backend, qMh, kMh, vMh, act, in context, consume, output);
     }
 
@@ -191,7 +191,7 @@ public sealed class AttentionLayer
         if (view.KvLength < 0 || view.KvLength > keyCache.Shape[2])
             throw new ArgumentException($"The cache view names {view.KvLength} keys of a {keyCache.Shape[2]}-row cache.", nameof(view));
         DType act = _config.ComputeDType ?? qMh.DType;
-        ValidateOutput(output, qMh, act);
+        ValidateOutput(output, qMh, keyCache, valueCache, act);
         bool owned = output is null;
         Tensor attn = output ?? new(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), act);
         try
@@ -763,9 +763,11 @@ public sealed class AttentionLayer
         if (consume.HasFlag(OperandOwnership.Value)) vMh.Dispose();
     }
 
-    private void ValidateOutput(Tensor? output, Tensor qMh, DType act)
+    private void ValidateOutput(Tensor? output, Tensor qMh, Tensor keys, Tensor values, DType act)
     {
         if (output is null) return;
+        if (ReferenceEquals(output, qMh) || ReferenceEquals(output, keys) || ReferenceEquals(output, values))
+            throw new ArgumentException("The output cannot be one of the attention's operands.", nameof(output));
         TensorShape expected = new(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim);
         if (!output.Shape.Equals(expected) || output.DType != act)
             throw new ArgumentException($"The output is {output.Shape} {output.DType} but the attention writes {expected} {act}.", nameof(output));

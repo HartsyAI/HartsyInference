@@ -195,6 +195,7 @@ public sealed class AttentionCachedStageTests
 
         Assert.Throws<ArgumentException>(() => Layer().AttendCachedHeadMajor(backend, q, k, v, view, output: Query(tokens: 2)));
         Assert.Throws<ArgumentException>(() => Layer().AttendCachedHeadMajor(backend, q, k, v, view, output: Query(dtype: DType.F16)));
+        Assert.Throws<ArgumentException>(() => Layer().AttendCachedHeadMajor(backend, q, k, v, view, output: q));
 
         Assert.Empty(backend.Ops);
         Assert.All((Tensor[])[q, k, v], t => Assert.False(IsDisposed(t)));
