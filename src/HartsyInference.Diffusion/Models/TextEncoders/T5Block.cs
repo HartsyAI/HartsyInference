@@ -30,7 +30,7 @@ public sealed unsafe class T5Block
     private Tensor? _wiWeight;   // single projection — non-gated (v1.0) mode only
     private Tensor? _woWeight;   // output projection
 
-    public T5Block(int dModel, int numHeads, int headDim, float eps, bool gatedFeedForward = true, bool useReluActivation = false, float? attentionScale = null)
+    public T5Block(int dModel, int numHeads, int headDim, float eps, bool gatedFeedForward = true, bool useReluActivation = false, float attentionScale = 1f)
     {
         _dModel = dModel;
         _numHeads = numHeads;
@@ -38,7 +38,7 @@ public sealed unsafe class T5Block
         _eps = eps;
         _gatedFeedForward = gatedFeedForward;
         _useReluActivation = useReluActivation;
-        _attnScale = attentionScale ?? (1.0f / MathF.Sqrt(headDim));
+        _attnScale = attentionScale;
     }
 
     /// <summary>Loads weights for this block from named tensors using T5 HuggingFace naming.</summary>

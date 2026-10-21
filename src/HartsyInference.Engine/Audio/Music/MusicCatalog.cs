@@ -179,7 +179,6 @@ internal static class MusicCatalog
                 VocabSize = 32128,
                 GatedFeedForward = false,
                 UseReluActivation = true,
-                AttentionScale = 1.0f,
             }
             : T5TextEncoderConfig.T5Base;
         T5TextEncoder textEncoder = new T5TextEncoder(textConfig);
