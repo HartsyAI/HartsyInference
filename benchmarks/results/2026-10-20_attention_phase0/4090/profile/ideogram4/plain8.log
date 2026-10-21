@@ -1,14 +1,0 @@
-[38;2;154;164;175mmodel[0m [38;2;46;165;224mideogram4[0m   [38;2;154;164;175mbackend[0m [38;2;46;165;224mcuda:1[0m
-[WRN] [Ideogram4] Prompt fed verbatim — supply a structured JSON caption for reliable results (magic-prompt expansion is host-side and not wired here).
-[WRN] Ideogram 4 runs TWO 9.3B transformers concurrently (asymmetric CFG) — expect very high VRAM use.
-[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
-libnvToolsExt.so.1: cannot open shared object file: No such file or directory
-
-  denoise [1/12]  denoise [2/12] 835 ms  denoise [3/12] 820 ms  denoise [4/12] 826 ms  denoise [5/12] 821 ms  denoise [6/12] 824 ms  denoise [7/12] 821 ms  denoise [8/12] 821 ms  denoise [9/12] 820 ms  denoise [10/12] 821 ms  denoise [11/12] 818 ms  denoise [12/12] 819 ms[WRN] [CudaMemory] OOM on async first attempt: requested=1017.0 MB, free=54.1 MB, total=24082.4 MB (0.2% free)
-
-[38;2;154;164;175m1024x1024 image (seed 42)[0m
-[38;2;154;164;175msize 1024x1024 · seed 42 · arch ideogram4 · steps 12 · preset V4_TURBO_12[0m
-[38;2;154;164;175msaved[0m 
-[38;2;46;165;224m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
-[38;2;46;165;224mon_phase0/4090/profile/ideogram4/out-plain8/high-level-description-a-cinem-0001.[0m
-[38;2;46;165;224mpng[0m

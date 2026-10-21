@@ -1,14 +1,0 @@
-[38;2;46;165;224mFlux.1-dev[0m [38;2;154;164;175mneeds 1 file(s) not on disk:[0m
-  [38;2;154;164;175mtransformer:[0m Comfy-Org/flux1-dev/flux1-dev-fp8.safetensors [38;2;154;164;175m→ [0m
-[38;2;154;164;175mModels/Stable-Diffusion/Flux/[0m
-[38;2;46;165;224mDownload these now?[0m [38;2;154;164;175m[y/N]: [0m[38;2;154;164;175mmodel[0m [38;2;46;165;224mflux1[0m   [38;2;154;164;175mbackend[0m [38;2;46;165;224mcuda:1[0m
-[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
-libnvToolsExt.so.1: cannot open shared object file: No such file or directory
-
-  denoise [1/8]  denoise [2/8] 454 ms  denoise [3/8] 141 ms  denoise [4/8] 916 ms  denoise [5/8] 0 ms  denoise [6/8] 0 ms  denoise [7/8] 0 ms  denoise [8/8] 1809 ms
-[38;2;154;164;175m1024x1024 image (seed 42)[0m
-[38;2;154;164;175msize 1024x1024 · seed 42 · arch flux1 · steps 8[0m
-[38;2;154;164;175msaved[0m 
-[38;2;46;165;224m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
-[38;2;46;165;224mon_phase0/4090/profile/flux1-dev/out-plain8/a-red-apple-on-a-wooden-table-0001.p[0m
-[38;2;46;165;224mng[0m

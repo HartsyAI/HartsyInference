@@ -1,13 +1,0 @@
-[38;2;154;164;175mmodel[0m [38;2;46;165;224mltx-2.5[0m   [38;2;154;164;175mbackend[0m [38;2;46;165;224mcuda:1[0m
-[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
-libnvToolsExt.so.1: cannot open shared object file: No such file or directory
-
-  denoise [1/8]  denoise [2/8] 801 ms  denoise [3/8] 781 ms  denoise [4/8] 782 ms  denoise [5/8] 781 ms  denoise [6/8] 780 ms  denoise [7/8] 782 ms  denoise [8/8] 780 ms
-[38;2;154;164;175m49 frames (768x512) → [0m
-[38;2;154;164;175m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
-[38;2;154;164;175mon_phase0/4090/profile/ltx25-dev/out-plain8/a-red-fox-trotting-through-a-s-frame[0m
-[38;2;154;164;175ms-001 + 2.0s audio.wav + video.mp4[0m
-[38;2;154;164;175mframes 49 · size 768x512 · mp4 [0m
-[38;2;154;164;175m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
-[38;2;154;164;175mon_phase0/4090/profile/ltx25-dev/out-plain8/a-red-fox-trotting-through-a-s-frame[0m
-[38;2;154;164;175ms-001/video.mp4[0m

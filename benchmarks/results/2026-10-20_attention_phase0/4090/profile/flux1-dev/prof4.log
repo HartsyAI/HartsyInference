@@ -1,23 +1,0 @@
-[38;2;154;164;175msettings[0m [38;2;46;165;224mcli (4 setting(s))[0m
-[38;2;46;165;224mFlux.1-dev[0m [38;2;154;164;175mneeds 1 file(s) not on disk:[0m
-  [38;2;154;164;175mtransformer:[0m Comfy-Org/flux1-dev/flux1-dev-fp8.safetensors [38;2;154;164;175m→ [0m
-[38;2;154;164;175mModels/Stable-Diffusion/Flux/[0m
-[38;2;46;165;224mDownload these now?[0m [38;2;154;164;175m[y/N]: [0m[38;2;154;164;175mmodel[0m [38;2;46;165;224mflux1[0m   [38;2;154;164;175mbackend[0m [38;2;46;165;224mcuda:1[0m
-[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
-libnvToolsExt.so.1: cannot open shared object file: No such file or directory
-
-  denoise [1/4]  denoise [2/4] 483 ms[WRN] [Cuda] step-graph capture aborted mid-window — purged 1 graph-private cache entries that would otherwise dangle (CUDA_ERROR_INVALID_VALUE on the next free).
-[WRN] [Flux graph] capture invalidated — falling back to eager: HartsyInference.Cuda.CudaException: CUDA error 901: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED — operation failed due to a previous error during capture
-   at HartsyInference.Cuda.CudaErrorChecking.ThrowCudaError(Int32 errorCode)
-   at HartsyInference.Cuda.CudaMemory.AllocateAsync(UIntPtr byteSize, IntPtr stream)
-   at HartsyInference.Cuda.CudaBackend.Silu(Tensor output, Tensor input)
-   at HartsyInference.Diffusion.Models.Denoisers.FluxTransformer.ComputeTembFromSin(IBackend backend, Tensor sinEmbed, Tensor guidanceSin, Tensor clipPooled, Int32 batch)
-   at HartsyInference.Diffusion.Models.Denoisers.FluxTransformer.RunStepIntoFixed(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, Tensor clipPooled, Int32 txtSeqLen, Int32 hPacked, Int32 wPacked)
-   at HartsyInference.Diffusion.Models.Denoisers.FluxTransformer.ForwardGraphable(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, Single sigma, Tensor clipPooled, Single guidanceScale, Int32 txtSeqLen, Int32 hPacked, Int32 wPacked, DeviceFeatureCache stepCache)
-  denoise [3/4] 509 ms  denoise [4/4] 503 ms
-[38;2;154;164;175m1024x1024 image (seed 42)[0m
-[38;2;154;164;175msize 1024x1024 · seed 42 · arch flux1 · steps 4[0m
-[38;2;154;164;175msaved[0m 
-[38;2;46;165;224m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
-[38;2;46;165;224mon_phase0/4090/profile/flux1-dev/out-prof4/a-red-apple-on-a-wooden-table-0001.pn[0m
-[38;2;46;165;224mg[0m

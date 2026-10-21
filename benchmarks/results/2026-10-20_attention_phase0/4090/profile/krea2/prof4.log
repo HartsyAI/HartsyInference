@@ -1,12 +1,0 @@
-[38;2;154;164;175msettings[0m [38;2;46;165;224mcli (4 setting(s))[0m
-[38;2;154;164;175mmodel[0m [38;2;46;165;224mkrea2[0m   [38;2;154;164;175mbackend[0m [38;2;46;165;224mcuda:1[0m
-[WRN] [ModelVariant] krea2 'krea2_turbo_fp8_scaled.safetensors' → Krea 2 Turbo [turbo] from Filename: file name 'krea2_turbo_fp8_scaled' has token(s) turbo. The file name is only a guess: set the model's class in SwarmUI, pass -m krea2:<variant>, or stamp modelspec.architecture to make it definitive.
-[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
-libnvToolsExt.so.1: cannot open shared object file: No such file or directory
-
-  denoise [1/4]  denoise [2/4] 580 ms  denoise [3/4] 575 ms  denoise [4/4] 577 ms
-[38;2;154;164;175m1024x1024 image (seed 42)[0m
-[38;2;154;164;175msize 1024x1024 · seed 42 · arch krea2 · variant turbo · steps 4 · cfg 1[0m
-[38;2;154;164;175msaved[0m 
-[38;2;46;165;224m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
-[38;2;46;165;224mon_phase0/4090/profile/krea2/out-prof4/a-red-apple-on-a-wooden-table-0001.png[0m

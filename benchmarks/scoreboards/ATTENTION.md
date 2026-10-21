@@ -9,8 +9,9 @@ Comfy Kitchen 0.2.37's `int8_attention`, on the same card. Recorded 2026-10-20 a
 relative L2 against an F32 reference with TF32 off, over sampled query rows. An arm is timed as `kernel` (the attention
 kernel alone) or `path` (the whole entry point, casts, copies and permutes included). "Production default" is the F16
 entry point as the models call it. Ratios are ours over theirs, so below 1× is faster. Cells read
-`arm timing: kernel ms (relL2)`. Raw rows, per-arm GPU telemetry and the harness versions are in
-[`results/2026-10-20_attention_phase0/`](../results/2026-10-20_attention_phase0/).
+`arm timing: kernel ms (relL2)`. The full tables, probe results, environment and ledger are in
+[`results/2026-10-20_attention_phase0/`](../results/2026-10-20_attention_phase0/); per-arm logs and GPU telemetry are not
+committed.
 
 **Hardware:** RTX 4090 (450 W) and RTX 3060 12 GB (170 W), driver 595.99.02, CUDA 13, cuDNN 9.24.0.
 

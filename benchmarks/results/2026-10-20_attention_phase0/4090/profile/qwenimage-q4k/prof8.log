@@ -1,12 +1,0 @@
-[38;2;154;164;175msettings[0m [38;2;46;165;224mcli (4 setting(s))[0m
-[38;2;154;164;175mmodel[0m [38;2;46;165;224mqwen-image[0m   [38;2;154;164;175mbackend[0m [38;2;46;165;224mcuda:1[0m
-[HartsyInference.Cuda.Profiling] NVTX disabled: DllNotFoundException: Unable to load shared library 'libnvToolsExt.so.1' or one of its dependencies. In order to help diagnose loading problems, consider using a tool like strace. If you're using glibc, consider setting the LD_DEBUG environment variable: 
-libnvToolsExt.so.1: cannot open shared object file: No such file or directory
-
-  denoise [1/8]  denoise [2/8] 1722 ms  denoise [3/8] 1714 ms  denoise [4/8] 1707 ms  denoise [5/8] 1720 ms  denoise [6/8] 1730 ms  denoise [7/8] 1719 ms  denoise [8/8] 1709 ms
-[38;2;154;164;175m1024x1024 image (seed 42)[0m
-[38;2;154;164;175msize 1024x1024 · seed 42 · arch qwen-image · steps 8 · cfg 4[0m
-[38;2;154;164;175msaved[0m 
-[38;2;46;165;224m/home/hartsy/Desktop/hartsy-wt/attn-phase0/benchmarks/results/2026-10-20_attenti[0m
-[38;2;46;165;224mon_phase0/4090/profile/qwenimage-q4k/out-prof8/a-bowl-of-ramen-on-a-wooden-co-00[0m
-[38;2;46;165;224m01.png[0m
