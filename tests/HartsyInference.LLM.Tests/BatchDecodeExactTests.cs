@@ -5,7 +5,7 @@ using Xunit;
 namespace HartsyInference.LLM.Tests;
 
 /// <summary>The batched decode step projects K/V for every layer at one head dim and has no V-norm, latent attention,
-/// cross-attention or per-layer embedding inputs. A model using any of those decodes one sequence at a time instead of
+/// cross-attention, per-layer embedding, absolute position or embedding-norm stage. A model using any of those decodes one sequence at a time instead of
 /// running the batched step with the feature silently dropped.</summary>
 public sealed class BatchDecodeExactTests
 {
@@ -25,6 +25,8 @@ public sealed class BatchDecodeExactTests
         Assert.False((Plain with { HeadDimSwa = 8 }).BatchDecodeExact);
         Assert.False((Plain with { PerLayerEmbeddingDim = 8 }).BatchDecodeExact);
         Assert.False((Plain with { CrossAttnLayers = ImmutableHashSet.Create(1) }).BatchDecodeExact);
+        Assert.False((Plain with { AbsolutePositionEmbeddings = true }).BatchDecodeExact);   // GPT-2, StarCoder, OPT
+        Assert.False((Plain with { EmbeddingLayerNorm = true }).BatchDecodeExact);           // BLOOM
         Assert.False((Plain with
         {
             Mla = new MlaConfig { KvLoraRank = 8, QkNopeHeadDim = 4, QkRopeHeadDim = 2, VHeadDim = 4 },

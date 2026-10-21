@@ -124,16 +124,16 @@ public sealed record T5TextEncoderConfig
 
     /// <summary>T5-11B encoder preset (`google-t5/t5-11b`) — the text encoder Cosmos-Predict1 Video2World conditions
     /// its per-layer cross-attention on (<c>context_dim = 1024 = d_model</c>). NOT T5-XXL (which is 4096-dim); T5-11B is
-    /// the original T5 v1.0 family: <c>d_model=1024, d_ff=65536, d_kv=128, num_heads=64, num_layers=24</c>, non-gated
+    /// the original T5 v1.0 family: <c>d_model=1024, d_ff=65536, d_kv=128, num_heads=128, num_layers=24</c>, non-gated
     /// ReLU feed-forward, block-0-shared relative position bias, standard 32k T5 SentencePiece vocab. Cosmos encodes at
-    /// <c>max_length=512</c> and zero-masks positions past the real prompt length. The wide <c>d_kv=128</c> (inner
-    /// attention dim <c>64·128 = 8192</c>, distinct from <c>d_model=1024</c>) is the T5-11B signature.</summary>
+    /// <c>max_length=512</c> and zero-masks positions past the real prompt length. The wide attention (inner dim
+    /// <c>128·128 = 16384</c>, distinct from <c>d_model=1024</c>) is the T5-11B signature.</summary>
     public static T5TextEncoderConfig T5_11B => new()
     {
         DModel = 1024,
         DFf = 65536,
         DKv = 128,
-        NumHeads = 64,
+        NumHeads = 128,
         NumLayers = 24,
         VocabSize = 32128,
         GatedFeedForward = false,

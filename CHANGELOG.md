@@ -63,12 +63,13 @@ stable release will require. Dates are UTC.
 - **Changed: a cuDNN attention refusal no longer disables cuDNN for the whole head dim.** It holds for the refused shape;
   the head dim is given up only after three shapes are refused with none succeeding.
 - **Fixed: model-side attention defects.** Qwen-Image 2.1's text-prefix pass applies its causal mask. The joint blocks of
-  Chroma, Qwen-Image, HunyuanImage, AuraFlow, Lens and HiDream split each batch item's rows, so batches above one no longer
-  mix them. Gemma-3 text encoders apply the sliding window on their local layers for prompts longer than the window.
+  Chroma, Qwen-Image, HunyuanImage, AuraFlow, Lens and HiDream split each batch item's own rows above batch size one
+  (AuraFlow's transformer still runs one item at a time). Gemma-3 text encoders apply the sliding window on their local layers for prompts longer than the window.
   `CrossAttentionBlock` honours its group count and epsilon (the default epsilon is now the 1e-6 that already ran, so
   SD1.5 and SDXL are unchanged). `T5Block` sizes attention by heads times `d_kv`.
 - **Fixed: batched decode runs only for models it computes exactly.** Models with V-norm, KV sharing, per-layer head
-  dimensions, MLA or cross-attention layers decode one sequence at a time.
+  dimensions, MLA, cross-attention layers, an absolute position table (GPT-2, StarCoder, OPT) or an embedding norm (BLOOM)
+  decode one sequence at a time.
 
 ## alpha.383
 

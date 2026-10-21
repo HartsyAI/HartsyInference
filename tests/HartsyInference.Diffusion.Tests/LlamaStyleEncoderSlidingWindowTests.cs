@@ -12,14 +12,16 @@ public sealed class LlamaStyleEncoderSlidingWindowTests
 {
     private const int Hidden = 16, Heads = 2, HeadDim = 8, Vocab = 8, Window = 2, Seq = 5;
 
-    [Fact]
-    public void ASlidingLayerSeesOnlyItsWindow()
+    [Theory]
+    [InlineData("sliding_attention", true)]
+    [InlineData("full_attention", false)]   // control: a full layer still sees token 0 from token 4
+    public void ASlidingLayerSeesOnlyItsWindow(string layerType, bool windowed)
     {
         LlamaStyleEncoderConfig config = new()
         {
             HiddenSize = Hidden, NumLayers = 1, NumQueryHeads = Heads, NumKvHeads = Heads, HeadDim = HeadDim,
             IntermediateSize = 2 * Hidden, VocabSize = Vocab, HasFinalNorm = false,
-            LayerAttentionTypes = ["sliding_attention"], SlidingWindow = Window,
+            LayerAttentionTypes = [layerType], SlidingWindow = Window,
         };
         using CpuBackend backend = new();
         using LlamaStyleEncoder encoder = new(config);
@@ -31,7 +33,8 @@ public sealed class LlamaStyleEncoderSlidingWindowTests
         float[] Row(Tensor t, int token) => t.AsReadOnlySpan<float>().Slice(token * Hidden, Hidden).ToArray();
 
         // Token 4's window is tokens 3 and 4, so token 0 cannot reach it; token 1's window holds token 0.
-        Assert.Equal(Row(a, 4), Row(b, 4));
+        if (windowed) Assert.Equal(Row(a, 4), Row(b, 4));
+        else Assert.NotEqual(Row(a, 4), Row(b, 4));
         Assert.NotEqual(Row(a, 1), Row(b, 1));
         foreach (Tensor t in weights.Values) t.Dispose();
     }
