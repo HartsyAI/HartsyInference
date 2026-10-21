@@ -8,6 +8,9 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: ACE-Step v1 generated silence on CUDA.** Its bf16 GEMMs against F32 activations turned the latent to NaN
+  over the guidance loop, and the written audio was all zeros. The pipeline now runs with high-precision GEMM (bf16 weights
+  upcast for the multiply, still bf16-resident), which its notes required of every caller and the engine's loader never set.
 - **Fixed: ACE-Step v1 style conditioning.** Its UMT5-base encoder divided the attention scores by √64, which T5 and UMT5
   never do, so the style tags reached the DiT far from the reference encoding (hidden-state relative L2 1.2 against HF; 6e-6
   now). T5's attention scale now defaults to 1.0 rather than falling back to 1/√d_kv when a preset leaves it unset.
