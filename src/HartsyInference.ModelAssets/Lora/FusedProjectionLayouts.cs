@@ -35,6 +35,10 @@ public static class FusedProjectionLayouts
         new(".attention.to_q.weight", ".attention.qkv.weight", 0, 3),
         new(".attention.to_k.weight", ".attention.qkv.weight", 1, 3),
         new(".attention.to_v.weight", ".attention.qkv.weight", 2, 3),
+        // MOSS-Image: its LoRAs name layers.{i}.proj.q/k/v; the Comfy checkpoint fuses them.
+        new(".proj.q.weight", ".proj.qkv.weight", 0, 3),
+        new(".proj.k.weight", ".proj.qkv.weight", 1, 3),
+        new(".proj.v.weight", ".proj.qkv.weight", 2, 3),
         // F-Lite: blocks.{i}.qkv.weight — no attention segment at all.
         new(".to_q.weight", ".qkv.weight", 0, 3),
         new(".to_k.weight", ".qkv.weight", 1, 3),

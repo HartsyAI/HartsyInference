@@ -6,6 +6,12 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: MOSS-Image LoRAs skipped attention on the Comfy checkpoint.** MOSS LoRAs name `layers.N.proj.q/k/v`, while the
+  ComfyUI checkpoint fuses them as `proj.qkv`, so every Q/K/V delta was skipped with a "target not present" warning and only
+  the output and feed-forward deltas applied. They now merge into their thirds of the fused weight.
+
 ## alpha.383
 
 - **Added: MOSS-Image colorize reference layout** (`reference.layout=colorize`, CLI `--reference-layout colorize`), for

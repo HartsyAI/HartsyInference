@@ -113,6 +113,41 @@ public sealed unsafe class MossImageAssetTests : IDisposable
     }
 
     [Fact]
+    public void Merge_SplitQkvAdapters_LandOnTheirThirdsOfTheFusedComfyWeight()
+    {
+        // A = 0.5 and alpha = rank, so each delta is 2·0.5·B = B: q, k and v rows get 0.25, 0.5 and 0.75.
+        Dictionary<string, Tensor> tensors = new()
+        {
+            ["lora_unet_layers_0_proj_q.lora_down.weight"] = Filled([Rank, Hidden], _ => 0.5f),
+            ["lora_unet_layers_0_proj_q.lora_up.weight"] = Filled([Hidden, Rank], _ => 0.25f),
+            ["lora_unet_layers_0_proj_k.lora_down.weight"] = Filled([Rank, Hidden], _ => 0.5f),
+            ["lora_unet_layers_0_proj_k.lora_up.weight"] = Filled([Hidden, Rank], _ => 0.5f),
+            ["lora_unet_layers_0_proj_v.lora_down.weight"] = Filled([Rank, Hidden], _ => 0.5f),
+            ["lora_unet_layers_0_proj_v.lora_up.weight"] = Filled([Hidden, Rank], _ => 0.75f),
+            ["lora_unet_layers_0_proj_ffn_up_gate.lora_down.weight"] = Filled([Rank, Hidden], _ => 0.5f),
+            ["lora_unet_layers_0_proj_ffn_up_gate.lora_up.weight"] = Filled([Hidden, Rank], _ => 0f),
+        };
+        string path = Save("fused_qkv", tensors);
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["layers.0.proj.qkv.weight"] = Filled([3 * Hidden, Hidden], _ => 1f),
+            ["layers.0.proj.ffn_up_gate.weight"] = Filled([Hidden, Hidden], _ => 1f),
+        };
+        Dictionary<string, Tensor> originals = new(weights);
+        using CpuBackend backend = new();
+        using LoraStack stack = new();
+        stack.AddFromPath(path, strength: 1.0f);
+        Assert.Equal(2, stack.ApplyTo(weights, LoraTarget.Transformer, backend));
+        foreach (Tensor tensor in originals.Values) tensor.Dispose();
+
+        float[] fused = weights["layers.0.proj.qkv.weight"].AsReadOnlySpan<float>().ToArray();
+        int third = Hidden * Hidden;
+        Assert.All(fused[..third], v => Assert.Equal(1.25f, v, 5));
+        Assert.All(fused[third..(2 * third)], v => Assert.Equal(1.5f, v, 5));
+        Assert.All(fused[(2 * third)..], v => Assert.Equal(1.75f, v, 5));
+    }
+
+    [Fact]
     public void ModuleTemplates_ResolveKohyaNamesWithManyIndices()
     {
         LoraModuleTemplates templates = new(["blocks.{i}.attn.{i}.to_q", "blocks.{i}.ff"]);
