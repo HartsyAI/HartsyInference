@@ -34,6 +34,16 @@ stable release will require. Dates are UTC.
   claimed (Krea 2's musubi-tuner LoRAs) failed with "Could not detect LoRA format". Its modules now resolve against the
   target model's own weight names when the LoRA is applied, as ComfyUI resolves them, through the checkpoint-to-loaded-key
   map where a recipe renames keys (Krea 2). A module name two weights collapse to is refused rather than guessed.
+- **Added: one attention contract and call.** `docs/ATTENTION_CONTRACT.md` states attention's semantics: operands and
+  positions, the score order, composable masks, the fully excluded row, numerical permissions, fallback and ownership.
+  `IBackend.Attention(in AttentionCall)` takes one descriptor for every attention form and `IBackend.PlanAttention` says
+  which kernel a call would run and why. The CUDA, Vulkan and CPU attention entry points now walk declared kernel rows
+  in their old order, so every existing call keeps its kernel. CUDA serves the grouped-query token-major overload.
+  Debug logging names the kernel each attention shape class ran on.
+- **Added: retired setting ids keep working.** A renamed or removed id in the settings file, a profile, `--set` or
+  `hartsy settings` is accepted with a warning and mapped to its replacement until the release its entry names;
+  `hartsy settings list` shows them.
+- **Changed:** `IBackend.RopeApplyDecodeStep`'s default throws instead of silently rotating nothing.
 
 ## alpha.383
 

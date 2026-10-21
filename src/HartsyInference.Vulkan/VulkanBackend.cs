@@ -2395,26 +2395,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             ? ExpandKeyOnlyMask(mask, sqRows, skvRows) : null;
         mask = expandedMask ?? mask;
 
-        int hq = (int)query.Shape[1], hkv = (int)key.Shape[1], headDim = (int)query.Shape[3];
-        int batch = (int)query.Shape[0], sq = (int)sqRows, skv = (int)skvRows;
-        bool f16Inputs = query.DType == DType.F16 && key.DType == DType.F16 && value.DType == DType.F16;
-        if ((allowF16 || f16Inputs) && CanUseFlashCm2(headDim, hq, hkv, sq, skv, mask))
-        {
-            uint qHead = (uint)(sq * headDim), kvHead = (uint)(skv * headDim);
-            DispatchFlashCm2(output, query, key, value, mask, scale, batch, hq, hkv, sq, skv, headDim,
-                new AttnStrides((uint)headDim, qHead, qHead * (uint)hq), new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
-                new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new AttnStrides((uint)headDim, qHead, qHead * (uint)hq));
-            return;
-        }
-        if (headDim <= FlashMaxHeadDim && hkv > 0 && hq % hkv == 0)
-        {
-            DispatchFlashAttention(output, query, key, value, mask, scale,
-                causal: false, qOffset: 0, slidingWindow: 0, skv: (int)key.Shape[2], kvGroup: hq / hkv);
-            return;
-        }
-        // Head dim exceeds the flash kernel's shared-memory tile, or Q/K head counts aren't an integer
-        // GQA ratio — fall back to the materialized (but still correct) 3-pass path.
-        ScaledDotProductAttentionNaive(output, query, key, value, mask, scale, allowF16);
+        RunAttentionRows(DenseAttentionRows, AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
     }
 
     /// <summary>Fused online-softmax SDPA — never materializes the [Sq,Skv] score matrix. Shared by both <see cref="ScaledDotProductAttention"/> (causal=false, kvGroup/skv derived from tensor shapes) and <see cref="FlashAttention"/> (explicit kvLen/kvGroup — the KV-cache buffer may be over-allocated beyond the currently-valid length, and causal/qOffset/slidingWindow are real for decode).</summary>
@@ -2551,23 +2532,16 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
-        int headDim = (int)query.Shape[query.Shape.Rank - 1];
-        if (softcap == 0f && sink is null && alibiSlopes is null && headDim <= FlashMaxHeadDim)
+        AttentionCall call = AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink,
+            slidingWindow, alibiSlopes);
+        // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
+        if (!FlashOnDevice(in call))
         {
-            using OpScope _op = EnterOp();
-            if (causal && TryFlashCm2CausalPrefill(output, query, key, value, kvLen, kvGroup, qOffset, scale, slidingWindow))
-                return;
-            // A single query row (decode) takes the flash-decoding pair; the same contract checks as the scalar path apply.
-            if (kvLen >= 1 && kvLen <= key.Shape[2] && qOffset >= 0 && slidingWindow >= 0 && (!causal || qOffset < kvLen)
-                && CanUseFlashDecode(output, query, key, value, kvGroup))
-            {
-                DispatchFlashDecode(output, query, key, value, scale, causal, qOffset, slidingWindow, kvLen, kvGroup, devicePos: 0);
-                return;
-            }
-            DispatchFlashAttention(output, query, key, value, mask: null, scale, causal, qOffset, slidingWindow, skv: kvLen, kvGroup);
+            RunAttentionRows(FlashAttentionRows, in call, kvGroup);
             return;
         }
-        AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
+        using OpScope _op = EnterOp();
+        RunAttentionRows(FlashAttentionRows, in call, kvGroup);
     }
 
     /// <summary>Query rows the additive mask stores; 1 means it depends only on the key.</summary>
@@ -4682,32 +4656,15 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {
-        int headDim = (int)query.Shape[query.Shape.Rank - 1];
-        if (devicePos != 0 && _scalarBuffers.ContainsKey(devicePos)
-            && softcap == 0f && headDim <= FlashMaxHeadDim
-            && query.DType == DType.F32 && key.DType == DType.F32 && value.DType == DType.F32 && output.DType == DType.F32)
+        AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
+            slidingWindow);
+        if (!DeviceKernelEligible(in call))
         {
-            using OpScope _op = EnterOp();
-            // A single query row takes the flash-decoding pair, which handles a sliding window as well.
-            if (CanUseFlashDecode(output, query, key, value, kvGroup))
-            {
-                DispatchFlashDecode(output, query, key, value, scale, causal, qOffset: 0, slidingWindow, kvLen: 0, kvGroup, devicePos);
-                return;
-            }
-            if (slidingWindow == 0)
-            {
-                DispatchFlashAttentionDev(output, query, key, value, scale, causal, kvGroup, devicePos);
-                return;
-            }
+            RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+            return;
         }
-        // The eager path is correct only if kvLen/qOffset are the real values. With a valid device position the caller
-        // passed placeholders, so a shape this kernel excludes (softcap, large head dim, non-F32, or a window outside
-        // the single-row kernel) has nothing correct to fall back to and fails loudly instead of attending over zero keys.
-        if (devicePos != 0 && _scalarBuffers.ContainsKey(devicePos))
-            throw new NotSupportedException("FlashAttentionDev on Vulkan covers F32 attention without a soft-cap and with head dim <= "
-                + $"{FlashMaxHeadDim}; a sliding window needs a single query row whose head dim the subgroup divides into at most 4 dims per lane. "
-                + $"Got headDim={headDim}, softcap={softcap}, window={slidingWindow}, dtype={query.DType}. Leave graph decode off for this model.");
-        FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
+        using OpScope _op = EnterOp();
+        RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
     }
 
     private void DispatchFlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, float scale, bool causal, int kvGroup, ulong devicePos)

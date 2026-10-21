@@ -113,6 +113,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public long FlashF16ExecutionCount => Interlocked.Read(ref _flashF16ExecutionCount);
     private long _flashF16ExecutionCount;
 
+    /// <summary>The terminal dispatch branch the last attention call on this thread took: S.n (head-major), M.n
+    /// (token-major), F.n (FlashAttention), V.n (device positions), nested as "M.3/S.15". The route golden test pins them.</summary>
+    [ThreadStatic] private static string? t_attentionRoute;
+    internal static string? LastAttentionRoute => t_attentionRoute;
+
     /// <summary>Query-tiled attention calls this backend served (see <see cref="SdpaTiledF32Core"/>).</summary>
     internal long SdpaTiledExecutionCount => Interlocked.Read(ref _sdpaTiledExecutionCount);
     private long _sdpaTiledExecutionCount;
@@ -7273,165 +7278,19 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ValidateScaledDotProductAttentionContract(output, query, key, value, mask, scale);
         using OpScope _op = EnterOp();
         EnsureKernels();
+        RunAttentionRows(DenseAttentionRows, AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
+    }
 
+    /// <summary>The materialized cuBLAS path (S.11-S.15): the score matrix in memory, or for BF16 the query-tiled core when
+    /// it would not fit. Takes every head-major call no earlier row served.</summary>
+    private unsafe void SdpaMaterialized(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16)
+    {
         long b = query.Shape[0];
         long h = query.Shape[1];
         long sq = query.Shape[2];
         long d = query.Shape[3];
         long skv = key.Shape[2];
-
         long totalHeads = b * h;
-
-        // Memory-efficient dispatch: the GEMM path below materializes a [totalHeads, Sq, Skv] score matrix. For very
-        // long sequences (Wan-Video full-res self-attention: 24 heads × ~14040² × 4B ≈ 19 GB) that OOMs alongside the
-        // model weights. For the plain case — F32, no additive mask, full bidirectional MHA — avoid the full matrix:
-        //   • default large-seq path = QUERY-TILED GEMM (SdpaTiledF32NoMask): tiles the query axis so only
-        //     [totalHeads, Br, Skv] is materialized per tile, reusing the same TF32 tensor-core GEMMs + softmax kernel
-        //     (numerically identical to the small-seq GEMM path, and ~10× faster than the online-softmax flash kernel
-        //     which re-reads all K/V per query row).
-        //   • numerics.sdpaForceFlash=true forces the online-softmax flash kernel (O(1) score memory; validation/fallback).
-        // Gated on the score matrix eating most of free VRAM so small/medium attention keeps the plain GEMM path;
-        // masked (Matrix-Game block-causal) callers always keep the plain GEMM path.
-        // cuDNN fused flash-attention for NATIVE F16 Q/K/V/output (the DiT F16-activation path): zero casts —
-        // the tensors are already in the engine's fp16 I/O dtype, so this is the pure fused execute (the F32 route
-        // below pays 3+1 F32↔F16 cast kernels). The caller choosing F16 activations already asserts bounded scores
-        // (RMS-normed Q/K), so no allowF16 gate. Same session kill-switch on any cuDNN failure.
-        // An additive F32 [B,1,Sq,Skv]-broadcast mask (Chroma / padded-conditioning models) rides the fused
-        // engine as a bias score-modifier; incompatible mask layouts fall through to the materialized path.
-        // SageAttention F16-ingest (opt-in): native-F16 Q/K/V/out via the f16h prologues + f16io flash
-        // kernel. Competes with the CAST-FREE cuDNN branch below, which Sage only beats at long seq —
-        // gate high (numerics.sageF16MinSkv, default 8192) until the crossover is measured per-arch.
-        if (SageF16Preferred(query, key, value, output, mask, sq, skv, d))
-        {
-            SageAttentionInt8(output, query, key, value, scale);
-            return;
-        }
-
-        // The engine's own F16 flash kernel where cuDNN is the slow path (head dim 256: one engine config, about
-        // half FlashAttention-2's throughput on Ada). Same F16 I/O and F32 accumulation as the cuDNN branch below.
-        if (FlashF16Eligible(query, key, value, output, mask, d)
-            && TryFlashF16(output, query, key, value, scale, (int)b, (int)h, (int)sq, (int)skv, (int)d,
-                HeadMajorStrides(h, sq, d), HeadMajorStrides(h, sq, d), HeadMajorStrides(h, skv, d), HeadMajorStrides(h, skv, d)))
-        {
-            return;
-        }
-
-        if (CudnnMaskCompatible(mask, b, sq, skv) && query.DType == DType.F16 && key.DType == DType.F16
-            && value.DType == DType.F16 && output.DType == DType.F16
-            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
-            && TryCudnnSdpa(output, query, key, value, mask, scale))
-        {
-            return;
-        }
-
-        if (query.DType == DType.F32)
-        {
-            // ── HAZARD: the SageAttention branches below do NOT honor `allowF16`. ──────────────────────────
-            // Sage quantizes Q/K to INT8 (smoothed, so their range is handled) but materializes V as an F16
-            // transpose (LaunchSageVF16T). Any architecture whose |V| exceeds F16's 65504 therefore gets INF in
-            // V, which softmax·V smears across every query row.
-            //
-            // This path now requires numerics.sageUnsafeF32VNarrow=true in addition to numerics.sageAttn=1.
-            // allowF16 is not a V-range contract and therefore cannot make this narrowing safe.
-            //
-            // Diagnostic fingerprint, if a future model renders black/NaN: exactly ONE bad element per token in
-            // the SDPA output (a single overflowing (head, dim) column of V, spread over all query rows by the
-            // softmax). Check max|V| per block against 65504. Lens hit this at block 45 with max|V| growing
-            // 18940 → 31281 → 71583 across forwards; its fix (LensTransformerBlock) scales V by 1/256 before
-            // SDPA and back after — exact, since attention is linear in V, and power-of-two so exponent-only.
-            //
-            // MiniMax-H3 was measured against this and is CLEAR: peak max|V| = 1201 (1.83% of 65504, a 55x margin)
-            // over a full 30-step generation, 1500 block-probes, zero non-finite (diagnostics.h3Vprobe=true, 2026-08-08).
-            // It grows with depth (81 at block 0 to ~1200 at block 48) but oscillates in a band across steps rather
-            // than compounding like Lens did. Its documented ~2.7e6 residual never reaches V: norm1 precedes the
-            // qkv projection, so V is a projection of a NORMALIZED tensor, not of the raw residual stream.
-            // A model-agnostic fix belongs inside SageAttentionInt8, not here: a blanket V damp would push small
-            // values toward F16 subnormals, so it needs its own range analysis.
-            // ──────────────────────────────────────────────────────────────────────────────────────────────
-            // SageAttention preference (opt-in, numerics.sageAttn=true): for no-mask F32 calls the INT8 flash
-            // path beats the cuDNN-F16-cast branch below at large seq (110.6 vs 130.4 ms at 16384²/D=128,
-            // 2026-07-22 BDN A/B) — and unlike it, keeps F32-fidelity accumulation. Gate on Skv ≥ 2048:
-            // below that the quant prologue outweighs the win (small-seq shapes measured 0.93× vs cuDNN).
-            if (SageF32ValueNarrowingEnabled && mask is null && (d == 64 || d == 128) && skv >= 2048)
-            {
-                EnsureKernels();
-                if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0))
-                {
-                    SageAttentionInt8(output, query, key, value, scale);
-                    return;
-                }
-            }
-
-            // cuDNN fused flash-attention (numerics.sdpaCudnn): a single fused kernel — no materialized
-            // [heads,Sq,Skv] score matrix — via cuDNN's runtime-compiled attention engine. ~34× over the
-            // materialized cuBLAS path at Krea2 shape. MHA only, D∈{64,128}. Safe for RMS-normed-Q/K archs
-            // (bounded scores) since we run fp16 I/O; callers gate the same way as the F16 path (allowF16).
-            // Masked callers: the additive F32 mask is added to the fp32 scores INSIDE the engine (bias
-            // score-modifier), so the mask never rounds through F16 — only Q/K/V do, same as unmasked.
-            // Self-disables for the session if cuDNN init/exec ever throws, falling back to the paths below.
-            if (CudnnMaskCompatible(mask, b, sq, skv)
-                && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
-                && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled
-                && TryCudnnSdpa(output, query, key, value, mask, scale))
-            {
-                return;
-            }
-        }
-
-        if (mask is null && query.DType == DType.F32)
-        {
-
-            // SageAttention-v1 INT8 flash attention (sage_attn_int8*.ptx): K-smoothed per-row INT8 QK^T on
-            // the IMMA tensor cores, online softmax + PV in registers (mma.sync v1; wmma v0 fallback needs
-            // Sq%32==0 — its WMMA Q-tile loads are unguarded). F32 V narrowing requires two explicit flags;
-            // no-mask MHA, D∈{64,128}, Skv≥1024 (tiny-seq shapes keep the F32 fallback — prologue-bound).
-            // Falls through when the PTX isn't built.
-            if (SageF32ValueNarrowingEnabled && (d == 64 || d == 128) && skv >= 1024)
-            {
-                EnsureKernels();
-                if (_kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0))
-                {
-                    SageAttentionInt8(output, query, key, value, scale);
-                    return;
-                }
-            }
-
-            // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
-            // validating (numerics.sdpaV2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
-            if (EngineKnobs.SdpaV2.Value
-                && FlashAttentionV2ContractSatisfied(output, query, key, value, mask, scale, _allowTf32))
-            {
-                FlashAttentionV2(output, query, key, value, scale);
-                return;
-            }
-            if (EngineKnobs.SdpaForceFlash.Value)
-            {
-                FlashAttention(output, query, key, value, (int)skv, kvGroup: 1, causal: false, qOffset: 0, scale);
-                return;
-            }
-            ulong scoreBytesEst = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
-            (nuint freeBytes, _) = _context.GetMemoryInfo();
-            if (EngineKnobs.SdpaForceTiled.Value || scoreBytesEst > (ulong)freeBytes / 2)
-            {
-                SdpaTiledF32(output, query, key, value, scale);
-                return;
-            }
-        }
-
-        // A key-only bias (one [Skv] row broadcast over every query) is compatible with the query-tiled path, so
-        // a masked call whose score matrix would not fit is no longer forced into the full materialization. Without
-        // this, a single transient cuDNN failure mid-generation demotes to a [heads,Sq,Skv] allocation that is far
-        // larger than whatever the fused path could not get (Wan-Animate-2 at 480x800/61f: 5836 MB).
-        if (query.DType == DType.F32 && MaskIsKeyOnly(mask, sq))
-        {
-            ulong keyBiasScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
-            (nuint keyBiasFree, _) = _context.GetMemoryInfo();
-            if (EngineKnobs.SdpaForceTiled.Value || keyBiasScoreBytes > (ulong)keyBiasFree / 2)
-            {
-                SdpaTiledF32(output, query, key, value, scale, mask);
-                return;
-            }
-        }
 
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pMaskClamped = 0, pMaskCast = 0, pOut = 0, scoresBuf = 0;
         ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0, pMaskBroadcast = 0, pMaskOnes = 0;
@@ -7527,11 +7386,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOut, outBytes);
                     cachedOutput = true;
+                    t_attentionRoute = "S.11";
                     return;
                 }
             }
 
             bool isF16 = opDtype == DType.F16;
+            t_attentionRoute = query.DType == DType.BF16 ? "S.12" : isF16 ? (query.DType == DType.F32 ? "S.13" : "S.15") : "S.14";
             int elemSize = opDtype.SizeInBytes;
             ulong opMask = pMaskBroadcast != 0 ? pMaskBroadcast : pMask;
             int maskElemSize = sizeof(float);
@@ -7709,58 +7570,28 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long sq = TokenMajorRows(query), skv = TokenMajorRows(key), d = headDim;
         using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
             ? $"SDPA-TM {sq}x{skv}x{heads}x{headDim}" : "SDPA-TM");
-        if (FlashF16Eligible(query, key, value, output, mask, d))
-        {
-            CudaKernels.FlashStrides tokenMajor = new(0, (ulong)headDim, (ulong)heads * (ulong)headDim);
-            if (TryFlashF16(output, query, key, value, scale, 1, heads, (int)sq, (int)skv, (int)d,
-                    tokenMajor, tokenMajor, tokenMajor, tokenMajor))
-            {
-                return;
-            }
-        }
-        // SageAttention has no token-major kernel, so this entry point reaches cuDNN and a long-sequence DiT
-        // (LTX-2.5 at 17480 video tokens) runs fp16 flash while the INT8 path it qualifies for sits unused.
-        // Declining cuDNN here routes the call through the permute pair below into the head-major dispatch, which
-        // owns the Sage gate.
-        //
-        // OPT-IN, and here is the whole measurement. LTX-2.5 1280x736x145f on a 4090: the CLI harness (4 interleaved
-        // reps, ~25 ms/step spread) puts it at a clean **-71 ms/step**, every pair the same sign. It still does not
-        // ship on, for two reasons the CLI cannot see. (1) Through SwarmUI, N=3 warm per arm, it is unresolvable —
-        // that harness drifts monotonically within a session and spans 8.4 s, so a 1.4 s effect is invisible.
-        // (2) Sage's Q8/K8/scale/V-transpose workspaces raise peak VRAM by **494 MiB** (23539 -> 24033 of 24564),
-        // and this geometry already runs 531 MiB from the ceiling — spending that headroom for 0.9% of wall clock
-        // is the wrong trade for a user one setting away from an OOM. Quality is a third, smaller reason: SSIM
-        // 0.9927 (min 0.9908) against the fp16 arm over 145 frames, audio relL2 0.18 at matched seed.
-        if (!(SageTokenMajorDetour && SageF16Preferred(query, key, value, output, mask, sq, skv, d))
-            && CudnnMaskCompatible(mask, 1, sq, skv)
-            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
-            && (query.DType == DType.F16 || (query.DType == DType.F32 && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled)))
-        {
-            using OpScope _op = EnterOp();
-            EnsureKernels();
-            if (TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.TokenMajor,
-                    1, heads, sq, skv, d))
-            {
-                return;
-            }
-        }
-        Tensor qMh = new Tensor(new TensorShape(1, heads, sq, headDim), query.DType);
-        Tensor kMh = new Tensor(new TensorShape(1, heads, skv, headDim), key.DType);
-        Tensor vMh = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
-        Tensor oMh = new Tensor(new TensorShape(1, heads, sq, headDim), output.DType);
-        try
-        {
-            Permute0213(qMh, query, (int)sq, heads, headDim);
-            Permute0213(kMh, key, (int)skv, heads, headDim);
-            Permute0213(vMh, value, (int)skv, heads, headDim);
-            ScaledDotProductAttention(oMh, qMh, kMh, vMh, mask, scale, allowF16);
-            Permute0213(output, oMh, heads, (int)sq, headDim);
-        }
-        finally { qMh.Dispose(); kMh.Dispose(); vMh.Dispose(); oMh.Dispose(); }
+        RunAttentionRows(TokenMajorAttentionRows,
+            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16));
+    }
+
+    /// <inheritdoc/>
+    public bool SupportsTokenMajorGqaAttention => true;
+
+    /// <summary>Token-major grouped-query SDPA. No kernel reads grouped K/V in this layout yet, so the call lowers to the
+    /// head-major sequence its callers used to issue themselves: permute in, repeat K/V heads, SDPA, permute out.</summary>
+    public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
+        Tensor? mask, int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
+    {
+        // Equal heads too: Krea2's text-fusion blocks issued the head-major sequence, not the token-major cuDNN call.
+        // The mask is validated by the head-major entry, as it was when callers issued that sequence themselves.
+        ValidateTokenMajorGqaAttentionContract(output, query, key, value, heads, kvHeads, headDim, scale);
+        RunAttentionRows(TokenMajorGqaAttentionRows,
+            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16)
+                with { Route = AttentionRoute.TokenMajorGqa });
     }
 
     /// <summary>Rows of a token-major operand: <c>[S, heads*headDim]</c> and <c>[1, S, heads, headDim]</c> share one layout.</summary>
-    private static long TokenMajorRows(Tensor t) => t.Shape.Rank == 4 ? t.Shape[1] : t.Shape[0];
+    private static long TokenMajorRows(Tensor t) => t.Shape.Rank is 3 or 4 ? t.Shape[1] : t.Shape[0];
 
     /// <summary>Element strides of a contiguous head-major <c>[B, H, S, D]</c> operand.</summary>
     private static CudaKernels.FlashStrides HeadMajorStrides(long heads, long rows, long d) =>
@@ -9936,53 +9767,20 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             ? $"FlashAttention q{query.Shape} k{key.Shape} {key.DType} kv={kvLen}{(causal ? " causal" : "")}" : "FlashAttention");
         ValidateFlashAttentionContract(
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
+        RunAttentionRows(FlashAttentionRows,
+            AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes),
+            kvGroup);
+    }
+
+    /// <summary>The decode-shaped kernels (F.4-F.7): grouped decode, split-K, or the per-row kernel. Takes every
+    /// FlashAttention call no earlier row served.</summary>
+    private unsafe void FlashAttentionDecode(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal,
+        int qOffset, float scale, float softcap, Tensor? sink, int slidingWindow, Tensor? alibiSlopes)
+    {
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
-        bool kernelOk = d > 0 && d <= 1024;
-        // F16-storage KV cache (halved VRAM): key/value are the FixedKvCache buffers, which under kvDtype=F16
-        // are __half-typed; Q/out/sink/alibi are unaffected (still F32). Both the monolithic and the split-K
-        // path have an F16 twin, so the dtype no longer decides which kernel runs — only sink/alibi do.
         bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
-        if (!kernelOk)
-        {
-            AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
-            return;
-        }
-
-        // PREFILL is a different shape from the decode this kernel is tuned for — thousands of query rows, not one
-        // against a long cache — and the cost of running it here is severe: measured at 4096 tokens (D=128, 16q/8kv,
-        // RTX 4090) 64.8 ms a layer against 9.5 ms through cuDNN's fused engine with an additive causal bias, and on
-        // YuE2's 8,664-token prefill 6.74 s across 28 layers. Route the plain causal prefill there.
-        //
-        // Deliberately narrow, because everything outside the gate has no bias-shaped equivalent: a soft-cap is a
-        // tanh on the scores, an attention sink is an extra softmax denominator term, and ALiBi is per-head while
-        // cuDNN's bias broadcasts over heads. A sliding window IS expressible and is folded into the mask. The
-        // key/value buffer must be tight (a FixedKvCache hands back its whole capacity, whose seq stride is not
-        // kvLen), and cuDNN must be able to take the head dim at all. Any failure inside TryCudnnSdpa returns false
-        // and the call falls through to the general kernel below.
-        if (causal && tq > 1 && b == 1 && lk == kvLen
-            && softcap == 0f && sink is null && alibiSlopes is null
-            && query.DType == DType.F32 && output.DType == DType.F32 && !f16Kv && value.DType == DType.F32
-            && _kernels is not null && _kernels.HasCausalMaskKernel
-            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
-            && CausalMaskFits(tq, kvLen, hq, d, kvGroup)
-            && TryCausalPrefillSdpa(output, query, key, value, hq, hkv, tq, kvLen, qOffset, slidingWindow, d, scale))
-        {
-            return;
-        }
-
-        // Prefill-shaped causal attention (a block of query rows): the tensor-core FlashAttention-2 kernel. The per-row kernel below
-        // is built for decode and costs hundreds of milliseconds a layer once thousands of query rows share it.
-        if (causal && tq >= Fa2MinQueryRows && sink is null && alibiSlopes is null && softcap == 0f
-            && query.DType == DType.F32 && output.DType == DType.F32 && (key.DType == DType.F32 || f16Kv) && value.DType == key.DType
-            && _kernels is { HasFa2Causal: true } && CudaKernels.Fa2SupportsHeadDim(d) && hq % Math.Max(1, hkv) == 0
-            && EngineKnobs.Fa2Prefill.Value)
-        {
-            FlashAttentionFa2(output, query, key, value, b, hq, hkv, tq, lk, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, slidingWindow, f16Kv);
-            return;
-        }
-
-        using OpScope _op = EnterOp();
+        using OpScope _op = EnterOp(nameof(FlashAttention));
         EnsureKernels();
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0, pSink = 0, pAlibi = 0;
         bool cachedOutput = false;
@@ -10034,11 +9832,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
             if (gqaDecode)
             {
+                t_attentionRoute = "F.4";
                 RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, kvLen, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, softcap,
                     slidingWindow, 0, f16Kv);
             }
             else if (splits >= 2)
             {
+                t_attentionRoute = "F.5";
                 int chunk = (kvLen + splits - 1) / splits;
                 splits = (kvLen + chunk - 1) / chunk;   // exact # of non-empty chunks covering kvLen
                 long n = baseBlocks;
@@ -10060,10 +9860,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else if (f16Kv)
             {
+                t_attentionRoute = "F.6";
                 _kernels!.LaunchFlashAttentionF16Kv(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
             }
             else
             {
+                t_attentionRoute = "F.7";
                 _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -10263,12 +10065,22 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             || (!devF16Kv && (key.DType != DType.F32 || value.DType != DType.F32)))
         {
             FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
+            t_attentionRoute = AttentionRouteText.Nested("V.0/", t_attentionRoute);
             return;
         }
         ValidateFlashAttentionContract(
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap,
             sink: null, slidingWindow, alibiSlopes: null, positionOnDevice: true);
+        RunAttentionRows(FlashAttentionDeviceRows,
+            AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap, slidingWindow),
+            kvGroup);
+    }
 
+    /// <summary>The device-position kernels (V.2-V.5) for an F32-query call with a device position buffer.</summary>
+    private unsafe void FlashAttentionDeviceDecode(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal,
+        int qOffset, float scale, ulong devicePos, float softcap, int slidingWindow)
+    {
+        bool devF16Kv = key.DType == DType.F16 && value.DType == DType.F16;
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         bool kernelOk = d > 0 && d <= 1024;
@@ -10280,7 +10092,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             throw new NotSupportedException("Device-position FlashAttention supports head dimensions up to 1024.");
         }
-        using OpScope _op = EnterOp();
+        using OpScope _op = EnterOp(nameof(FlashAttentionDev));
         EnsureKernels();
 
         // Fixed split count from CAPACITY (lk) so the grid never changes across steps. Target ~16× SM occupancy
@@ -10321,12 +10133,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             int grp = kvGroup <= 0 ? 1 : kvGroup;
             if (DecodeGqaEligible(tq, causal, hq, hkv, grp, d))
             {
+                t_attentionRoute = "V.2";
                 attnSidecar = TryAllocAttnCombineSidecar(b, tq, hq, d);
                 RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, lk, d, kvLen, grp, qOffset, scale, softcap, slidingWindow, devicePos, devF16Kv,
                     attnSidecar);
             }
             else if (splits >= 2)
             {
+                t_attentionRoute = "V.3";
                 long n = baseBlocks;
                 ulong pM = 0, pL = 0, pAcc = 0;
                 try
@@ -10353,11 +10167,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 if (devF16Kv)
                 {
+                    t_attentionRoute = "V.4";
                     _kernels!.LaunchFlashAttentionF16Kv(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
                         causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
                 }
                 else
                 {
+                    t_attentionRoute = "V.5";
                     _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
                         causal, qOffset, scale, softcap, 0, slidingWindow, 0, _stream.Handle, devicePos);
                 }

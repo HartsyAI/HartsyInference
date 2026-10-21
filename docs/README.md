@@ -9,6 +9,7 @@ git preserves removed history.
 | Coding rules | [CODE_STYLE.md](CODE_STYLE.md) |
 | Architecture, task routing, PR workflow | [Agents/AGENTS.md](Agents/AGENTS.md) |
 | Tensor, CUDA, planning and pipeline patterns | [Agents/ENGINE_PATTERNS.md](Agents/ENGINE_PATTERNS.md) |
+| Attention semantics, numerical permissions and kernel planning | [ATTENTION_CONTRACT.md](ATTENTION_CONTRACT.md) |
 | Current model support and model-specific gaps | [Checklists/MODEL_STATUS.md](Checklists/MODEL_STATUS.md) |
 | Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |
 | Vulkan LLM and MoE: measured gap to CUDA and the port plan | [VULKAN_MOE_PLAN.md](VULKAN_MOE_PLAN.md) |

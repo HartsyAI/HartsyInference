@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -45,17 +46,20 @@ public sealed partial class VulkanBackend
         int skv = (int)(key.ElementCount / kvWidth);
         using Tensor? expandedMask = mask is not null && mask.DType == DType.F32 && mask.ElementCount == skv && sq > 1
             ? ExpandKeyOnlyMask(mask, sq, skv) : null;
-        if (!CanUseFlashCm2(headDim, heads, kvHeads, sq, skv, expandedMask ?? mask))
+        // Vulkan reads a token-major operand as one sequence whatever its rank, so the call is described that way.
+        AttentionCall call = new()
         {
-            AttendTokenMajorViaHeadMajor(output, query, key, value, mask, heads, kvHeads, headDim, sq, skv, scale, allowF16);
-            return;
-        }
-        mask = expandedMask ?? mask;
-        uint qRow = (uint)qWidth;
-        uint kvRow = (uint)kvWidth;
-        DispatchFlashCm2(output, query, key, value, mask, scale, batch: 1, heads, kvHeads, sq, skv, headDim,
-            new AttnStrides(qRow, (uint)headDim, 0), new AttnStrides(kvRow, (uint)headDim, 0),
-            new AttnStrides(kvRow, (uint)headDim, 0), new AttnStrides(qRow, (uint)headDim, 0));
+            Query = new(query, AttentionLayout.TokenMajor, 1, heads, sq, headDim, 0, qWidth * sq, headDim, qWidth),
+            Key = new(key, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
+            Value = new(value, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
+            Output = new(output, AttentionLayout.TokenMajor, 1, heads, sq, headDim, 0, qWidth * sq, headDim, qWidth),
+            Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = AttentionNumerics.FromLegacy(allowF16),
+            Route = AttentionRoute.TokenMajor,
+        };
+        Tensor? saved = t_expandedMask;
+        t_expandedMask = expandedMask;
+        try { RunAttentionRows(TokenMajorAttentionRows, in call); }
+        finally { t_expandedMask = saved; }
     }
 
     /// <summary>Smallest query count worth a 64-row cooperative-matrix tile; decode (one row) and short chunks stay on the scalar kernel.</summary>

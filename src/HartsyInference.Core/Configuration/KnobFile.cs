@@ -119,6 +119,13 @@ public static class KnobFile
         // A process's first load applies the whole file, so it must not run after this point: it would put the
         // setting's old value back over the one being saved.
         EnsureLoaded();
+        if (KnobRegistry.Find(id) is null && KnobDeprecations.Find(id) is { } retired)
+        {
+            Console.Error.WriteLine(KnobDeprecations.Warning(retired));
+            if (retired.NewId is null) return null;
+            id = retired.NewId;
+            rawValue = KnobDeprecations.MapText(retired, rawValue);
+        }
         object knob = KnobRegistry.Find(id)
             ?? throw new InvalidOperationException($"Unknown setting '{id}'. Run 'hartsy settings list' to see them all.");
 
@@ -155,6 +162,13 @@ public static class KnobFile
             {
                 foreach (JsonProperty entry in s.EnumerateObject())
                 {
+                    if (KnobRegistry.Find(entry.Name) is null && KnobDeprecations.Find(entry.Name) is { } old)
+                    {
+                        // Rewritten under its replacement with the value mapped, dropped when removed or already named.
+                        if (old.NewId is not null && !s.TryGetProperty(old.NewId, out _))
+                            settings[old.NewId] = JsonSerializer.SerializeToElement(ParseRetired(entry, old, Path));
+                        continue;
+                    }
                     settings[entry.Name] = entry.Value.Clone();
                 }
             }
@@ -246,7 +260,7 @@ public static class KnobFile
             {
                 foreach (JsonProperty entry in settings.EnumerateObject())
                 {
-                    ApplyOne(entry, origin);
+                    ApplyOne(entry, settings, origin);
                     applied++;
                 }
             }
@@ -254,8 +268,37 @@ public static class KnobFile
         }
     }
 
-    private static void ApplyOne(JsonProperty entry, string origin)
-        => KnobStore.SetByIdRaw(entry.Name, ParseOne(entry, origin), "settings file");
+    private static void ApplyOne(JsonProperty entry, JsonElement settings, string origin)
+    {
+        if (KnobRegistry.Find(entry.Name) is null && KnobDeprecations.Find(entry.Name) is { } retired)
+        {
+            // Stderr, not the logger: the logger reads settings, and this runs while they load.
+            Console.Error.WriteLine($"Engine settings file '{origin}': {KnobDeprecations.Warning(retired)}");
+            if (retired.NewId is null || settings.TryGetProperty(retired.NewId, out _)) return;
+            KnobStore.SetByIdRaw(retired.NewId, ParseRetired(entry, retired, origin), "settings file");
+            return;
+        }
+        KnobStore.SetByIdRaw(entry.Name, ParseOne(entry, origin), "settings file");
+    }
+
+    /// <summary>A retired setting's value as its replacement's: the entry's text mapped, then parsed by the new setting.</summary>
+    private static object? ParseRetired(JsonProperty entry, KnobDeprecations.Entry retired, string origin)
+    {
+        if (entry.Value.ValueKind == JsonValueKind.Null) return null;
+        string text = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString()! : entry.Value.GetRawText();
+        string mapped;
+        try
+        {
+            mapped = KnobDeprecations.MapText(retired, text);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new InvalidOperationException($"Engine settings file '{origin}': {ex.Message}", ex);
+        }
+        string probe = "{\"settings\":{" + JsonSerializer.Serialize(retired.NewId) + ":" + JsonSerializer.Serialize(mapped) + "}}";
+        using JsonDocument document = JsonDocument.Parse(probe);
+        return ParseOne(document.RootElement.GetProperty("settings").EnumerateObject().First(), origin);
+    }
 
     /// <summary>One setting's value parsed to its knob's type, or an exception naming what is wrong with it.</summary>
     private static object? ParseOne(JsonProperty entry, string origin)

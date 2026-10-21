@@ -594,6 +594,129 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
     }
 
     /// <summary><paramref name="f32"/> itself for F32, else its F16 cast (disposing <paramref name="f32"/>).</summary>
+    /// <summary>Head-major SDPA against the contract reference, with and without a shared bias, and with grouped K/V where
+    /// the entry point takes it (CUDA's requires MHA K/V). F32 operands without the F16 permission; CUDA runs these GEMMs
+    /// in TF32, hence the tolerance.</summary>
+    [Theory]
+    [InlineData("cuda", false, 4)]
+    [InlineData("cuda", true, 4)]
+    [InlineData("vulkan", false, 4)]
+    [InlineData("vulkan", true, 4)]
+    [InlineData("vulkan", false, 2)]
+    public void Sdpa_Matches_The_Reference(string kind, bool masked, int kvHeads)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        const int heads = 4, sq = 33, skv = 47, d = 64;
+        using Tensor q = Random(new TensorShape(1, heads, sq, d), 21);
+        using Tensor k = Random(new TensorShape(1, kvHeads, skv, d), 22);
+        using Tensor v = Random(new TensorShape(1, kvHeads, skv, d), 23);
+        using Tensor? mask = masked ? Random(new TensorShape(1, 1, sq, skv), 24) : null;
+        using Tensor actual = new(q.Shape, DType.F32);
+        using Tensor expected = new(q.Shape, DType.F32);
+        float scale = 1f / MathF.Sqrt(d);
+
+        backend.ScaledDotProductAttention(actual, q, k, v, mask, scale);
+        AttentionHostReference.Run(AttentionCall.FromScaledDotProductAttention(expected, q, k, v, mask, scale, allowF16: false));
+
+        TensorAssert.Close(actual, expected, rtol: 3e-3f, because: $"on {kind}");
+    }
+
+    /// <summary>Token-major SDPA (MHA and grouped) against the head-major reference of the same call.</summary>
+    [Theory]
+    [InlineData("cuda", 4)]
+    [InlineData("cuda", 2)]
+    [InlineData("vulkan", 4)]
+    [InlineData("vulkan", 2)]
+    public void SdpaTokenMajor_Matches_The_Reference(string kind, int kvHeads)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        const int heads = 4, s = 40, d = 64;
+        if (!backend.SupportsTokenMajorAttention || (kvHeads != heads && !backend.SupportsTokenMajorGqaAttention))
+        {
+            _out.WriteLine($"SKIPPED on {kind}: token-major {(kvHeads == heads ? "MHA" : "GQA")} not served");
+            return;
+        }
+        using Tensor q = Random(new TensorShape(s, heads * d), 31);
+        using Tensor k = Random(new TensorShape(s, kvHeads * d), 32);
+        using Tensor v = Random(new TensorShape(s, kvHeads * d), 33);
+        using Tensor actual = new(q.Shape, DType.F32);
+        using Tensor expected = new(q.Shape, DType.F32);
+        float scale = 1f / MathF.Sqrt(d);
+
+        if (kvHeads == heads) backend.ScaledDotProductAttentionTokenMajor(actual, q, k, v, null, heads, d, scale);
+        else backend.ScaledDotProductAttentionTokenMajor(actual, q, k, v, null, heads, kvHeads, d, scale);
+        AttentionHostReference.Run(AttentionCall.FromTokenMajor(expected, q, k, v, null, heads, kvHeads, d, scale, allowF16: false));
+
+        TensorAssert.Close(actual, expected, rtol: 3e-3f, because: $"on {kind}");
+    }
+
+    /// <summary>FlashAttention decode and chunked prefill over a cache whose capacity exceeds the valid length, grouped,
+    /// causal, with and without a window, against the host reference the CPU backend runs.</summary>
+    [Theory]
+    [InlineData("cuda", 1, 0)]
+    [InlineData("cuda", 1, 24)]
+    [InlineData("cuda", 16, 0)]
+    [InlineData("vulkan", 1, 0)]
+    [InlineData("vulkan", 1, 24)]
+    [InlineData("vulkan", 16, 0)]
+    public void FlashAttention_Matches_The_Reference(string kind, int sq, int window)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        const int heads = 8, kvHeads = 2, capacity = 96, kvLen = 70, d = 64;
+        using Tensor q = Random(new TensorShape(1, heads, sq, d), 41);
+        using Tensor k = Random(new TensorShape(1, kvHeads, capacity, d), 42);
+        using Tensor v = Random(new TensorShape(1, kvHeads, capacity, d), 43);
+        using Tensor actual = new(q.Shape, DType.F32);
+        using Tensor expected = new(q.Shape, DType.F32);
+        float scale = 1f / MathF.Sqrt(d);
+        int qOffset = kvLen - sq;
+
+        backend.FlashAttention(actual, q, k, v, kvLen, heads / kvHeads, causal: true, qOffset, scale, slidingWindow: window);
+        AttentionReference.FlashAttention(expected, q, k, v, kvLen, heads / kvHeads, true, qOffset, scale, slidingWindow: window);
+
+        // Prefill may take an F16 path on CUDA (its F32 contract narrows without a permission), hence the looser bound.
+        TensorAssert.Close(actual, expected, rtol: sq > 1 ? 1e-2f : 3e-3f, because: $"on {kind}");
+    }
+
+    /// <summary>The two copies the head-major attention wrappers issue around every call: exact on every backend.</summary>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void Permute0213_And_RepeatKvHeads_Match_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+        const int s = 37, h = 6, d = 40, kvHeads = 3, group = 2;
+        using Tensor tokenMajor = Random(new TensorShape(1, s, h, d), 51);
+        using Tensor actualPermuted = new(new TensorShape(1, h, s, d), DType.F32);
+        using Tensor expectedPermuted = new(new TensorShape(1, h, s, d), DType.F32);
+        backend.Permute0213(actualPermuted, tokenMajor, s, h, d);
+        cpu.Permute0213(expectedPermuted, tokenMajor, s, h, d);
+        TensorAssert.Identical(actualPermuted, expectedPermuted, because: $"Permute0213 on {kind}");
+
+        using Tensor kv = Random(new TensorShape(1, kvHeads, s, d), 52);
+        using Tensor actualRepeated = new(new TensorShape(1, kvHeads * group, s, d), DType.F32);
+        using Tensor expectedRepeated = new(new TensorShape(1, kvHeads * group, s, d), DType.F32);
+        backend.RepeatKvHeads(actualRepeated, kv, kvHeads, group);
+        ((IBackend)cpu).RepeatKvHeads(expectedRepeated, kv, kvHeads, group);
+        TensorAssert.Identical(actualRepeated, expectedRepeated, because: $"RepeatKvHeads on {kind}");
+    }
+
     private static Tensor InDtype(Tensor f32, DType dtype, CpuBackend cpu)
     {
         if (dtype == DType.F32)

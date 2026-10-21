@@ -32,7 +32,8 @@ public static class SettingsEndpoints
         }));
 
         app.MapGet("/settings/engine/{id}", (string id) =>
-            KnobRegistry.Find(id) is null
+            Retired(id) is { } removed ? Results.Ok(removed)
+            : KnobRegistry.Find(KnobDeprecations.Resolve(id)) is null
                 ? Results.NotFound(new { error = $"Unknown setting '{id}'." })
                 : Results.Ok(One(id)));
 
@@ -42,6 +43,10 @@ public static class SettingsEndpoints
             if (body?.Value is null)
             {
                 return Results.BadRequest(new { error = "Body must be {\"value\": \"...\"}." });
+            }
+            if (Retired(id) is { } removed)
+            {
+                return Results.Ok(removed);
             }
             try
             {
@@ -56,22 +61,22 @@ public static class SettingsEndpoints
         });
     }
 
-    private static object One(string id)
+    /// <summary>The answer for a setting that was removed outright: accepted, ignored, and said so.</summary>
+    private static object? Retired(string id) =>
+        KnobRegistry.Find(id) is null && KnobDeprecations.Find(id) is { NewId: null } entry
+            ? new { id, removed = true, warning = KnobDeprecations.Warning(entry) }
+            : null;
+
+    /// <summary>The setting <paramref name="requested"/> names, under its current id; a renamed id carries the warning.</summary>
+    private static EngineSettingView One(string requested)
     {
+        string id = KnobDeprecations.Resolve(requested);
         object knob = KnobRegistry.Find(id)!;
         (string _, string type, object? declared, KnobScope scope, KnobDomain domain, string summary) = KnobRegistry.Describe(knob);
-        return new
-        {
-            id,
-            value = KnobRegistry.ValueOf(knob),
-            source = KnobStore.SourceOf(id),
-            type,
-            @default = declared,
-            domain = domain.ToString(),
-            // A Construction setting is written now but bound when the engine is built, so a caller is told to restart.
-            appliesAt = scope == KnobScope.Construction ? "restart" : "next run",
-            summary,
-        };
+        // A Construction setting is written now but bound when the engine is built, so a caller is told to restart.
+        return new EngineSettingView(id, KnobRegistry.ValueOf(knob), KnobStore.SourceOf(id), type, declared, domain.ToString(),
+            scope == KnobScope.Construction ? "restart" : "next run", summary,
+            id == requested ? null : KnobDeprecations.Warning(KnobDeprecations.Find(requested)!));
     }
 
     private static List<object> Describe()
@@ -81,6 +86,13 @@ public static class SettingsEndpoints
             .OrderBy(k => k.Id, StringComparer.Ordinal)
             .Select(k => One(k.Id))];
 }
+
+/// <summary>One engine setting as the settings endpoints report it.</summary>
+/// <param name="Warning">Set when the request named a renamed id: what it is called now.</param>
+public sealed record EngineSettingView(string Id, object? Value, string Source, string Type, object? Default, string Domain,
+    string AppliesAt, string Summary,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? Warning);
 
 /// <summary>Body of <c>PUT /settings/engine/{id}</c>.</summary>
 /// <remarks>The value is a string so one shape covers every knob type; it is parsed with the same rules the

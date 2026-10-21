@@ -1718,13 +1718,18 @@ public partial interface IBackend : IDisposable
         => throw new NotSupportedException("BuildRopeTableDevice requires GraphDecodeSupported.");
 
     /// <summary>RoPE on a single decode-step Q/K tensor <c>[1,numHeads,1,headDim]</c>, reading its row from the devicePos qOffset slot.</summary>
-    void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos) { }
+    /// <remarks>The default throws: a backend without the kernel must be refused, not silently leave Q/K unrotated.</remarks>
+    void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos) =>
+        throw new NotSupportedException("RopeApplyDecodeStep requires GraphDecodeSupported.");
 
     /// <summary>Gathers one row (id in the persistent tokenId buffer) from a GPU-resident embedding table into output <c>[1,1,hidden]</c>.</summary>
-    void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId) { }
+    /// <remarks>The default throws, like every decode step that writes an output.</remarks>
+    void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId) =>
+        throw new NotSupportedException("EmbedGatherDecodeStep requires GraphDecodeSupported.");
 
     /// <summary>Argmax over the last dim, writing into a persistent buffer (e.g. <see cref="AllocDeviceTokenId"/>) to chain decode.</summary>
-    void ArgMaxInto(ulong outputTokenId, Tensor input) { }
+    void ArgMaxInto(ulong outputTokenId, Tensor input) =>
+        throw new NotSupportedException("ArgMaxInto requires GraphDecodeSupported.");
 
     #endregion
 
@@ -1751,10 +1756,12 @@ public partial interface IBackend : IDisposable
     void WriteDeviceCounter(ulong handle, int value) { }
 
     /// <summary>Appends tokenId's value into history at the historyCount index, then increments the counter (fixed 1-thread launch).</summary>
-    void AppendTokenHistoryStep(ulong history, ulong historyCount, ulong tokenId) { }
+    void AppendTokenHistoryStep(ulong history, ulong historyCount, ulong tokenId) =>
+        throw new NotSupportedException("AppendTokenHistoryStep requires GraphDecodeSupported.");
 
     /// <summary>Applies HF-convention repetition penalty (divide positive/multiply negative logits) to every history token.</summary>
-    void ApplyRepetitionPenaltyStep(Tensor logits, ulong history, ulong historyCount, float penalty) { }
+    void ApplyRepetitionPenaltyStep(Tensor logits, ulong history, ulong historyCount, float penalty) =>
+        throw new NotSupportedException("ApplyRepetitionPenaltyStep requires GraphDecodeSupported.");
 
     #endregion
 

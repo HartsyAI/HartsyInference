@@ -75,7 +75,7 @@ public sealed record RequestSettings
             {
                 throw new ArgumentException(error);
             }
-            if (KnobRegistry.Find(id) is { } k && KnobRegistry.Describe(k).Scope == KnobScope.Construction)
+            if (KnobRegistry.Find(KnobDeprecations.Resolve(id)) is { } k && KnobRegistry.Describe(k).Scope == KnobScope.Construction)
             {
                 unreachable.Add(id);
             }
