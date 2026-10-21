@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.Tests.Common.Attention;
 using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Tests.Attention;
@@ -17,6 +18,12 @@ internal sealed unsafe class DevicePositionShimBackend(bool graphDecodeSupported
 
     public bool GraphDecodeSupported => graphDecodeSupported;
 
+    /// <summary>When set, the permutes and attention calls are logged here in order (the shim still forwards them).</summary>
+    public List<string>? Trace { get; init; }
+
+    /// <summary>The attention calls, in order, when <see cref="Trace"/> is set.</summary>
+    public List<AttentionCall> Calls { get; } = [];
+
     public bool LlmGraphDecodeSupported => true;
 
     public void Dispose() => _cpu.Dispose();
@@ -29,6 +36,12 @@ internal sealed unsafe class DevicePositionShimBackend(bool graphDecodeSupported
     }
 
     public void WriteDevicePos(ulong handle, int kvLen, int qOffset) => _positions[handle] = (kvLen, qOffset);
+
+    public void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
+    {
+        Trace?.Add($"KvCacheAppend @{offset}");
+        _cpu.KvCacheAppend(buffer, newKv, offset);
+    }
 
     public void FreeDevicePos(ulong handle) => _positions.Remove(handle);
 
@@ -110,6 +123,11 @@ internal sealed unsafe class DevicePositionShimBackend(bool graphDecodeSupported
     /// <summary>Serves a device-position call through this shim's <see cref="FlashAttentionDev"/>, as a real backend re-enters its own legacy entry.</summary>
     public void Attention(in AttentionCall call)
     {
+        if (Trace is not null)
+        {
+            Trace.Add(AttentionTraceBackend.Describe(in call));
+            Calls.Add(call);
+        }
         if (call.Route == AttentionRoute.FlashDevice && call.LegacyGap() is null)
             FlashAttentionDev(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage, call.ValidKvLength, call.KvGroup,
                 call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
@@ -149,7 +167,11 @@ internal sealed unsafe class DevicePositionShimBackend(bool graphDecodeSupported
     public void Scale(Tensor output, Tensor input, float scalar) => _cpu.Scale(output, input, scalar);
     public void Clamp(Tensor output, Tensor input, float min, float max) => _cpu.Clamp(output, input, min, max);
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2) => _cpu.Transpose2D(output, input, d1, d2);
-    public void Permute0213(Tensor output, Tensor input, int s, int h, int d) => _cpu.Permute0213(output, input, s, h, d);
+    public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
+    {
+        Trace?.Add($"Permute0213 {s},{h},{d}");
+        _cpu.Permute0213(output, input, s, h, d);
+    }
     public void GeGlu(Tensor output, Tensor input) => _cpu.GeGlu(output, input);
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial) => _cpu.BroadcastAdd(hidden, bias, channels, spatial);
     public void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim) => _cpu.Concat(output, inputs, dim);

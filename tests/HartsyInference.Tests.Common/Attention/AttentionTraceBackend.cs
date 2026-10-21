@@ -150,10 +150,7 @@ public sealed class AttentionTraceBackend : IBackend
         // Otherwise the Flash routes re-enter their legacy entry, as the real backends do, so the call lands in FlashCalls.
         if (flash && FlashAsAttention)
         {
-            if (!Silent)
-                Ops.Add($"Attention {call.Route} heads={call.Heads}/{call.KvHeads} kv={call.ValidKvLength} q@{call.Positions.QueryOffset} "
-                    + $"{(call.Mask.Causal ? "causal" : "full")} window={call.Mask.LegacySlidingWindow} softcap={call.Logits.Softcap.ToString(CultureInfo.InvariantCulture)}"
-                    + (call.Positions.OnDevice ? $" dev={call.Positions.DeviceHandle}" : ""));
+            if (!Silent) Ops.Add(Describe(in call));
             if (FailAttention) throw new OutOfMemoryException("attention failed");
             return;
         }
@@ -169,9 +166,16 @@ public sealed class AttentionTraceBackend : IBackend
                 call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
             return;
         }
-        if (!Silent) Ops.Add($"Attention {call.Route} heads={call.Heads}/{call.KvHeads} bounded={call.Numerics.LegacyAssertedBounded}");
+        if (!Silent) Ops.Add(Describe(in call));
         if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
+
+    /// <summary>The trace line of an attention call.</summary>
+    public static string Describe(in AttentionCall call) => call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice
+        ? $"Attention {call.Route} heads={call.Heads}/{call.KvHeads} kv={call.ValidKvLength} q@{call.Positions.QueryOffset} "
+            + $"{(call.Mask.Causal ? "causal" : "full")} window={call.Mask.LegacySlidingWindow} softcap={call.Logits.Softcap.ToString(CultureInfo.InvariantCulture)}"
+            + (call.Positions.OnDevice ? $" dev={call.Positions.DeviceHandle}" : "")
+        : $"Attention {call.Route} heads={call.Heads}/{call.KvHeads} bounded={call.Numerics.LegacyAssertedBounded}";
 
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b) => Ops.Add($"BatchedMatMul {a.Shape} x {b.Shape}");
 
@@ -289,7 +293,11 @@ public sealed class AttentionTraceBackend : IBackend
     public void Elu(Tensor output, Tensor input, float alpha) => throw Unused();
     public void LeakyRelu(Tensor output, Tensor input, float slope) => throw Unused();
     public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta) => throw Unused();
-    public void Scale(Tensor output, Tensor input, float scalar) => throw Unused();
+    public void Scale(Tensor output, Tensor input, float scalar)
+    {
+        Track(output, input);
+        Ops.Add("Scale");
+    }
     public void Clamp(Tensor output, Tensor input, float min, float max) => throw Unused();
     public void GeGlu(Tensor output, Tensor input) => throw Unused();
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial) => throw Unused();
