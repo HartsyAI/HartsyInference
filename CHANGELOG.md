@@ -41,6 +41,9 @@ stable release will require. Dates are UTC.
   its F32 casts while still reading them, an intermittent access violation at load. Double-condition CFG's text-only
   context now zeroes exactly the lyric rows, which the DiT appends last, instead of counting text rows from the leading
   dim of the `[1, T, 768]` features.
+
+## alpha.385
+
 - **Fixed: SeedVR2 output differed run to run on CUDA.** Every window of a shape group sent the same text rows back
   through one `RowScatterAdd`, whose CUDA kernel adds without atomics, so the text tokens lost updates and two identical
   restores on an RTX 3060 differed (SSIM 0.9991). The video rows now scatter alone, each once, and the text rows are
