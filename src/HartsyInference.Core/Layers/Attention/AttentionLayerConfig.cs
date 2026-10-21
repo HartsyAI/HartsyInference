@@ -137,7 +137,7 @@ public sealed record AttentionLayerConfig
 /// <summary>The weights of one attention layer, borrowed from the model, which loads, slices and folds them.</summary>
 public sealed record AttentionLayerWeights
 {
-    /// <summary>Query projection; null with a fused projection.</summary>
+    /// <summary>Query projection; null with a fused projection, or in a key/value-only weight set.</summary>
     public Tensor? Query { get; init; }
 
     /// <summary>Key projection; null with a fused projection.</summary>
@@ -187,5 +187,5 @@ public sealed record AttentionLayerWeights
     public float KeyNormEps { get; init; }
 }
 
-/// <summary>The Q and K norm weights of a layer whose projections the model runs itself.</summary>
-public readonly record struct AttentionNormWeights(Tensor Query, Tensor Key, float QueryEps, float KeyEps);
+/// <summary>The Q and K norm weights of a layer whose projections the model runs itself; a key/value-only layer has no Q norm.</summary>
+public readonly record struct AttentionNormWeights(Tensor? Query, Tensor? Key, float QueryEps, float KeyEps);

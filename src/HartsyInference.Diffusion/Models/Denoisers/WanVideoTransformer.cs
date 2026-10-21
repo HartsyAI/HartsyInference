@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
@@ -174,8 +175,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         Tensor cur = hidden;
         _fwdCounter++;
         string? vramLog = EngineKnobs.WanVram.Value;
-        Func<Tensor, Tensor, (Tensor K, Tensor V)>? kvExchange =
-            cp is null ? null : (k, v) => cp.Exchange.Exchange(cp.Rank, k, v);
+        IKvRewrite? kvRewrite = cp is null ? null : new CpExchangeRewrite(cp.Exchange, cp.Rank, 0);
 
         // Across-step First-Block cache (single-stream FBC; QwenImageTransformer holds the dual-stream
         // reference wiring): block 0 always runs and its output is the gate indicator. Hit ⇒ blocks 1..N−1
@@ -213,7 +213,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvExchange: kvExchange);
+                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvRewrite: kvRewrite);
             if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();
             cur = next;
             WanVideoDebugDump.Dump($"blocks.{i}", cur);

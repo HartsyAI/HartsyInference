@@ -23,6 +23,9 @@ public enum QkRotationKind
 
     /// <summary>Rotate-half on Q and K together, <see cref="IBackend.ApplyRope"/>: set on both, with one table pair.</summary>
     RotateHalfPaired,
+
+    /// <summary>Interleaved pairs with per-head tables <c>[heads, S, D]</c>, <see cref="IBackend.WanRopeInterleavedPerHead"/>.</summary>
+    InterleavedPairsPerHead,
 }
 
 /// <summary>One tensor's rotation tables for this call; <paramref name="Tokens"/> is the row count the tables cover.</summary>
@@ -92,6 +95,14 @@ public interface ICachedKv
     bool TryStore(IBackend backend, Tensor kvInput, Tensor keyMh, Tensor valueMh);
 }
 
+/// <summary>Observes the normed Q, K and V of a call before any rotation, and keeps none of them: it copies what it needs.</summary>
+public interface IQkvTap
+{
+    /// <summary>Called once per call after the QK norm and before the rotation, with token-major <paramref name="q"/>,
+    /// <paramref name="k"/> and <paramref name="v"/>; the layer still owns all three.</summary>
+    void Observe(IBackend backend, Tensor q, Tensor k, Tensor v);
+}
+
 /// <summary>Reads named intermediates of a call for diagnostics. It must not keep or modify them, and is never set on a
 /// captured path.</summary>
 public interface IAttentionProbe
@@ -130,6 +141,9 @@ public readonly record struct AttentionCallContext
 
     /// <summary>Keeps the rotated K and V (after any rewrite) for the caller.</summary>
     public IKvCapture? KvCapture { get; init; }
+
+    /// <summary>Observes Q, K and V after the QK norm and before the rotation.</summary>
+    public IQkvTap? Tap { get; init; }
 
     /// <summary>Constant head-major key and value for <see cref="AttentionLayer.AttendBranchHeadMajor"/>.</summary>
     public ICachedKv? CachedKv { get; init; }

@@ -12,7 +12,7 @@ public sealed class AttentionLayer
     private readonly AttentionNormWeights? _norms;
 
     /// <summary>Creates a layer. Without <paramref name="weights"/> only <see cref="Attend"/> and <see cref="AttendFlat"/> can
-    /// run, and only without a QK norm.</summary>
+    /// run, and only without a QK norm. Weights without a query projection serve <see cref="AttendBranchHeadMajor"/> alone.</summary>
     public AttentionLayer(AttentionLayerConfig config, AttentionLayerWeights? weights = null)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -21,15 +21,16 @@ public sealed class AttentionLayer
         {
             if (config.Gate != AttentionGate.None && weights.Gate is null)
                 throw new ArgumentException($"A {config.Gate} gate needs a gate projection.", nameof(weights));
-            if (config.QkNorm != AttentionQkNorm.None && (weights.QueryNorm is null || weights.KeyNorm is null))
-                throw new ArgumentException($"A {config.QkNorm} QK norm needs both norm weights.", nameof(weights));
             bool fused = config.Projection is AttentionProjection.FusedSlice or AttentionProjection.FusedSplitNorm;
-            if (fused ? weights.Qkv is null : weights.Query is null || weights.Key is null || weights.Value is null)
+            if (fused ? weights.Qkv is null : weights.Key is null || weights.Value is null)
                 throw new ArgumentException($"A {config.Projection} projection needs its weights.", nameof(weights));
+            bool hasQuery = fused || weights.Query is not null;
+            if (config.QkNorm != AttentionQkNorm.None && (hasQuery && weights.QueryNorm is null || weights.KeyNorm is null))
+                throw new ArgumentException($"A {config.QkNorm} QK norm needs the norm weights of the projections the weights have.", nameof(weights));
             if (config.Projection == AttentionProjection.FusedSplitNorm && weights.QueryNormEps != weights.KeyNormEps)
                 throw new ArgumentException("The fused split-norm projection takes one epsilon for Q and K.", nameof(weights));
             if (config.QkNorm != AttentionQkNorm.None)
-                _norms = new AttentionNormWeights(weights.QueryNorm!, weights.KeyNorm!, weights.QueryNormEps, weights.KeyNormEps);
+                _norms = new AttentionNormWeights(weights.QueryNorm, weights.KeyNorm, weights.QueryNormEps, weights.KeyNormEps);
         }
         _config = config;
         _weights = weights;
@@ -88,7 +89,7 @@ public sealed class AttentionLayer
         Tensor flat;
         try
         {
-            flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, in context);
+            flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, FlatOperands, in context);
         }
         catch
         {
@@ -110,11 +111,12 @@ public sealed class AttentionLayer
         if (!AttentionShape(flatShape).Equals(flatShape))
             throw new ArgumentException($"On the token-major route Attend writes [S, heads·D] or [1, S, heads, D]; got {flatShape}.");
         ValidateContext(in context, (int)q.Shape[0]);
-        return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, in context);
+        return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, flat: false, in context);
     }
 
     /// <summary><see cref="Attend"/> over flat operands: <paramref name="q"/> <c>[B, S, heads·D]</c>, <paramref name="k"/> and
-    /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout), head-major only.</summary>
+    /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout), head-major only; rank-2
+    /// <c>[S, heads·D]</c> operands are one batch item.</summary>
     public Tensor AttendFlat(IBackend backend, Tensor q, Tensor k, Tensor v, TensorShape flatShape, in AttentionCallContext context)
     {
         if (_config.QkNorm is not (AttentionQkNorm.None or AttentionQkNorm.FullWidthRms))
@@ -126,11 +128,13 @@ public sealed class AttentionLayer
         if (context.QueryRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs)
             || context.KeyRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs))
             throw new NotSupportedException("Flat operands take interleaved-pair tables or a rotation adapter; the other table kinds read [.., heads, D].");
-        if (q.Shape.Rank != 3 || k.Shape.Rank != 3 || v.Shape.Rank != 3 || q.Shape[2] != _config.InnerDim
-            || k.Shape[2] != (long)_config.KvHeads * _config.HeadDim || v.Shape[2] != k.Shape[2])
-            throw new ArgumentException($"AttendFlat takes [B, S, heads·D] operands of this layer's widths; got {q.Shape}, {k.Shape}, {v.Shape}.");
-        ValidateContext(in context, (int)q.Shape[0]);
-        return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, in context);
+        int rank = q.Shape.Rank;
+        if (rank is not (2 or 3) || k.Shape.Rank != rank || v.Shape.Rank != rank || q.Shape[rank - 1] != _config.InnerDim
+            || k.Shape[rank - 1] != (long)_config.KvHeads * _config.HeadDim || v.Shape[rank - 1] != k.Shape[rank - 1])
+            throw new ArgumentException($"AttendFlat takes [B, S, heads·D] or [S, heads·D] operands of this layer's widths; got {q.Shape}, {k.Shape}, {v.Shape}.");
+        int batch = rank == 3 ? (int)q.Shape[0] : 1;
+        ValidateContext(in context, batch);
+        return Transform(backend, q, k, v, batch, (int)q.Shape[rank - 2], (int)k.Shape[rank - 2], q.DType, flatShape, flat: true, in context);
     }
 
     /// <summary>The attention call alone over operands the caller laid out head-major: <paramref name="qMh"/> <c>[B, heads, Sq, D]</c>,
@@ -172,8 +176,8 @@ public sealed class AttentionLayer
         if (_config.QkNorm == AttentionQkNorm.FullWidth)
             throw new NotSupportedException("The fused full-width norm runs inside the attention call.");
         AttentionNormWeights n = _norms ?? throw new InvalidOperationException("A QK norm needs the layer's norm weights.");
-        q = NormPerHead(backend, q, n.Query, n.QueryEps);
-        k = NormPerHead(backend, k, n.Key, n.KeyEps);
+        q = NormPerHead(backend, q, Have(n.Query), n.QueryEps);
+        k = NormPerHead(backend, k, Have(n.Key), n.KeyEps);
     }
 
     /// <summary>The output stage alone: the output projection of <paramref name="flat"/> (<c>[.., heads·D]</c> or
@@ -195,6 +199,8 @@ public sealed class AttentionLayer
     public Tensor ProjectQueryHeadMajor(IBackend backend, Tensor qInput, bool releaseInput, in AttentionCallContext context)
     {
         AttentionLayerWeights w = BranchWeights(in context);
+        if (w.Query is null)
+            throw new InvalidOperationException("This attention layer's weights have no query projection.");
         int rank = qInput.Shape.Rank;
         int batch = rank >= 3 ? (int)qInput.Shape[0] : 1;
         int sq = (int)qInput.Shape[rank - 2];
@@ -205,7 +211,7 @@ public sealed class AttentionLayer
         if (_config.QkNorm != AttentionQkNorm.None)
         {
             AttentionNormWeights n = _norms!.Value;
-            q = NormPerHead(backend, q, n.Query, n.QueryEps);
+            q = NormPerHead(backend, q, Have(n.Query), n.QueryEps);
         }
         RotateWithTables(backend, q, context.QueryRotation, _config.Heads);
         Tensor qMh = new(new TensorShape(batch, _config.Heads, sq, _config.HeadDim), q.DType);
@@ -242,7 +248,7 @@ public sealed class AttentionLayer
             if (_config.QkNorm != AttentionQkNorm.None)
             {
                 AttentionNormWeights n = _norms!.Value;
-                k = NormPerHead(backend, k, n.Key, n.KeyEps);
+                k = NormPerHead(backend, k, Have(n.Key), n.KeyEps);
             }
             RotateWithTables(backend, k, context.KeyRotation, _config.KvHeads);
             TensorShape headMajor = new(batch, _config.KvHeads, skv, _config.HeadDim);
@@ -276,9 +282,9 @@ public sealed class AttentionLayer
         if (context.Rotation is not null || context.HeadMajorRotation is not null
             || context.QueryRotation.Kind == QkRotationKind.RotateHalfPaired || context.KeyRotation.Kind == QkRotationKind.RotateHalfPaired)
             throw new NotSupportedException("A branch stage rotates through per-tensor tables, not a rotation adapter or a paired rotation.");
-        if (context.ValueRowScale is not null || context.KvRewrite is not null || context.KvCapture is not null
+        if (context.ValueRowScale is not null || context.KvRewrite is not null || context.KvCapture is not null || context.Tap is not null
             || context.ReleaseInputs || context.ReleaseQueryAfterProjection)
-            throw new ArgumentException("A branch stage runs no value row-scale, K/V rewrite or capture and releases through its arguments.", nameof(context));
+            throw new ArgumentException("A branch stage runs no value row-scale, K/V rewrite, capture or tap and releases through its arguments.", nameof(context));
         return w;
     }
 
@@ -292,6 +298,8 @@ public sealed class AttentionLayer
     {
         if (_config.Projection is AttentionProjection.FusedSlice or AttentionProjection.FusedSplitNorm)
             return ProjectFused(backend, w, qInput, kvInput, act, release);
+        if (w.Query is null)
+            throw new InvalidOperationException("This attention layer's weights have no query projection.");
         Tensor? gate = _config.Gate switch
         {
             AttentionGate.Sigmoid => new Tensor(WithLastDim(qInput.Shape, _config.InnerDim), act),
@@ -355,7 +363,7 @@ public sealed class AttentionLayer
             if (_config.Projection == AttentionProjection.FusedSplitNorm)
             {
                 AttentionNormWeights n = _norms!.Value;
-                backend.QkvSplitNorm(q, k, v, qkv, n.Query, n.Key, n.QueryEps);
+                backend.QkvSplitNorm(q, k, v, qkv, n.Query!, n.Key!, n.QueryEps);
             }
             else
             {
@@ -382,6 +390,8 @@ public sealed class AttentionLayer
     private (Tensor Q, Tensor K, Tensor V, Tensor? Gate) ProjectReleasingQuery(IBackend backend, AttentionLayerWeights w, Tensor qInput,
         Tensor kvInput, DType act, DType kvAct)
     {
+        if (w.Query is null)
+            throw new InvalidOperationException("This attention layer's weights have no query projection.");
         Tensor q = new(ProjectedShape(qInput.Shape, _config.Heads), act);
         try
         {
@@ -435,8 +445,8 @@ public sealed class AttentionLayer
         }
         if (fullWidth && (context.Rotation is not null || context.HeadMajorRotation is not null))
             throw new NotSupportedException("The full-width QK norm rotates through its tables; a rotation adapter cannot run with it.");
-        if (fullWidth && (context.KvRewrite is not null || context.KvCapture is not null))
-            throw new NotSupportedException("The full-width QK norm attends its own K and V; a rewrite or capture cannot run with it.");
+        if (fullWidth && (context.KvRewrite is not null || context.KvCapture is not null || context.Tap is not null))
+            throw new NotSupportedException("The full-width QK norm attends its own K and V; a rewrite, capture or tap cannot run with it.");
         if ((context.QueryRotation.Kind == QkRotationKind.RotateHalfPaired || context.KeyRotation.Kind == QkRotationKind.RotateHalfPaired)
             && (context.QueryRotation.Kind != context.KeyRotation.Kind || context.QueryRotation.Cos is null || context.QueryRotation.Sin is null
                 || !ReferenceEquals(context.QueryRotation.Cos, context.KeyRotation.Cos)
@@ -449,16 +459,19 @@ public sealed class AttentionLayer
         if (context.QueryRotation.Kind != QkRotationKind.None || context.KeyRotation.Kind != QkRotationKind.None
             || context.Rotation is not null || context.HeadMajorRotation is not null)
             throw new ArgumentException("The operator stage runs no rotation.", nameof(context));
-        if (context.ValueRowScale is not null || context.KvRewrite is not null || context.KvCapture is not null)
-            throw new ArgumentException("The operator stage runs no value row-scale, K/V rewrite or K/V capture.", nameof(context));
+        if (context.ValueRowScale is not null || context.KvRewrite is not null || context.KvCapture is not null || context.Tap is not null)
+            throw new ArgumentException("The operator stage runs no value row-scale, K/V rewrite, K/V capture or tap.", nameof(context));
         if (context.CachedKv is not null)
             throw new ArgumentException("The operator stage has no key/value projection to cache.", nameof(context));
         if (context.ReleaseInputs || context.ReleaseQueryAfterProjection)
             throw new ArgumentException("The operator stage has no projection inputs to release; name the operands in consume.", nameof(context));
     }
 
+    /// <summary>Whether Q, K and V are declared flat <c>[.., S, heads·D]</c> rather than <c>[.., S, heads, D]</c>.</summary>
+    private bool FlatOperands => _config.QkNorm is AttentionQkNorm.FullWidth or AttentionQkNorm.FullWidthRms;
+
     private Tensor Transform(IBackend backend, Tensor q, Tensor k, Tensor v, int batch, int sq, int skv, DType act,
-        TensorShape flatShape, in AttentionCallContext context)
+        TensorShape flatShape, bool flat, in AttentionCallContext context)
     {
         if (context.Probe is { } probe)
         {
@@ -479,6 +492,7 @@ public sealed class AttentionLayer
                 normProbe.Observe("kNormed", k);
             }
         }
+        context.Tap?.Observe(backend, q, k, v);
         RotateQk(backend, q, k, in context);
         if (context.KvRewrite is { } rewrite)
         {
@@ -491,7 +505,7 @@ public sealed class AttentionLayer
                 q.Dispose();
                 throw;
             }
-            skv = (int)k.Shape[1];
+            skv = (int)k.Shape[k.Shape.Rank - (flat ? 2 : 3)];
         }
         bool ownsKv = context.KvCapture is null;
         context.KvCapture?.Capture(k, v);
@@ -535,6 +549,9 @@ public sealed class AttentionLayer
         && (_config.TokenMajorRoute == AttentionRoute.TokenMajorGqa
             ? backend.SupportsTokenMajorGqaAttention : backend.SupportsTokenMajorAttention);
 
+    private static Tensor Have(Tensor? norm) =>
+        norm ?? throw new InvalidOperationException("This attention layer's weights have no norm for that projection.");
+
     private static Tensor NormPerHead(IBackend backend, Tensor x, Tensor weight, float eps)
     {
         Tensor normed = new(x.Shape, x.DType);
@@ -551,6 +568,9 @@ public sealed class AttentionLayer
                 break;
             case QkRotationKind.InterleavedPairs:
                 backend.WanRopeInterleaved(x, rotation.Cos!, rotation.Sin!, rotation.Tokens, heads, _config.HeadDim);
+                break;
+            case QkRotationKind.InterleavedPairsPerHead:
+                backend.WanRopeInterleavedPerHead(x, rotation.Cos!, rotation.Sin!, rotation.Tokens, heads, _config.HeadDim);
                 break;
             case QkRotationKind.RotateHalf:
                 backend.ApplyRopeSingle(x, rotation.Cos!, rotation.Sin!);
@@ -658,7 +678,7 @@ public sealed class AttentionLayer
         bool tokenMajor, in AttentionCallContext context)
     {
         AttentionNormWeights norms = _norms!.Value;
-        Tensor qNorm = norms.Query, kNorm = norms.Key;
+        Tensor qNorm = Have(norms.Query), kNorm = Have(norms.Key);
         if (tokenMajor)
         {
             Tensor qTm = NormRotateTokenMajor(backend, q, qNorm, context.QueryRotation, sq, act);

@@ -210,7 +210,7 @@ internal static unsafe class AttentionWaveCGoldenCases
                 {
                     using CpuBackend backend = new();
                     outs[rank] = block.Forward(backend, localHidden, ctx, temb, rope, localCos, localSin, range.TokenCount,
-                        selfAttnKvExchange: (k, v) => exchange.Exchange(rank, k, v));
+                        selfAttnKvRewrite: new CpExchangeRewrite(exchange, rank, 0));
                 }
                 catch (Exception e)
                 {

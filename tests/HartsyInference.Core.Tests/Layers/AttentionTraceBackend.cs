@@ -44,6 +44,9 @@ internal sealed class AttentionTraceBackend : IBackend
     public void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim) =>
         Ops.Add($"WanRopeInterleaved heads={heads} d={headDim} seq={seqLen}");
 
+    public void WanRopeInterleavedPerHead(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim) =>
+        Ops.Add($"WanRopeInterleavedPerHead heads={heads} d={headDim} seq={seqLen}");
+
     public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0) => Ops.Add("ApplyRopeSingle");
 
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin) => Ops.Add("ApplyRope");
