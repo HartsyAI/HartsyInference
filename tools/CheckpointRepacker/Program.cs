@@ -57,7 +57,7 @@ MERGE AND CAST (safetensors)
                         e.g. --keep-dtype '*norm*' keeps norms in F32 under a bf16 cast.
   --quant <nf4|nvfp4>   Quantize every 2D .weight (F32/BF16/F16) into the layout the engine loads: NF4 writes
                         .absmax, .quant_map and .quant_state.bitsandbytes__nf4; NVFP4 writes .weight_scale
-                        (E4M3) and .weight_scale_2 (F32). Use --drop to leave a tensor, e.g. an embedding, in place.
+                        (E4M3) and .weight_scale_2 (F32). 2D weights that fail the shape rule are left full precision and listed.
 
 LORA BAKING (safetensors)
   --lora <file>[:<strength>]  Merge an adapter into the weights it modifies and write a standalone model.
@@ -596,22 +596,35 @@ try
             if (quantName is not null)
             {
                 List<KeyValuePair<string, Tensor>> quantized = [];
+                List<string> skipped = [];
                 int quantizedCount = 0;
                 foreach ((string key, Tensor tensor) in all)
                 {
                     if (!IsQuantTarget(key, tensor, quantName))
                     {
+                        // A 2D float weight that fails the shape rule (NVFP4 needs cols % 16 == 0) stays full precision; report it.
+                        if (key.EndsWith(".weight", StringComparison.Ordinal) && tensor.Shape.Rank == 2 && SafeTensorsMerger.IsCastable(tensor.DType))
+                            skipped.Add(key);
                         quantized.Add(new(key, tensor));
                         continue;
                     }
+                    // The F32 copy only feeds the encoder; dispose it as soon as the companions exist.
                     Tensor f32 = tensor.DType == DType.F32 ? tensor : tensor.CastTo(DType.F32);
-                    if (!ReferenceEquals(f32, tensor))
-                        ownedTensors.Add(f32);
-                    ReadOnlySpan<float> weights = f32.AsReadOnlySpan<float>();
+                    bool ownsF32 = !ReferenceEquals(f32, tensor);
                     long rows = tensor.Shape[0], cols = tensor.Shape[1];
-                    List<KeyValuePair<string, Tensor>> companions = quantName == "nf4"
-                        ? Nf4Codec.QuantizeToCompanions(key, weights, rows, cols, ComputeDtypeName(tensor.DType))
-                        : ModelOptNvfp4Codec.QuantizeToCompanions(key, weights, rows, cols);
+                    List<KeyValuePair<string, Tensor>> companions;
+                    try
+                    {
+                        ReadOnlySpan<float> weights = f32.AsReadOnlySpan<float>();
+                        companions = quantName == "nf4"
+                            ? Nf4Codec.QuantizeToCompanions(key, weights, rows, cols, ComputeDtypeName(tensor.DType))
+                            : ModelOptNvfp4Codec.QuantizeToCompanions(key, weights, rows, cols);
+                    }
+                    finally
+                    {
+                        if (ownsF32)
+                            f32.Dispose();
+                    }
                     foreach (KeyValuePair<string, Tensor> companion in companions)
                     {
                         ownedTensors.Add(companion.Value);
@@ -622,6 +635,8 @@ try
                 }
                 all = quantized;
                 Console.WriteLine($"Quantized {quantizedCount} weight(s) to {quantName}.");
+                if (skipped.Count > 0)
+                    Console.WriteLine($"Left {skipped.Count} 2D weight(s) unquantized (not eligible for {quantName}): {string.Join(", ", skipped.Take(10))}{(skipped.Count > 10 ? ", ..." : "")}");
             }
             bool Keep(string key) => keeps.Any(k => k.IsMatch(key)) || quantKeep.Contains(key);
             if (ResolveOutput(all.Select(kv => (castTo is { } c && SafeTensorsMerger.IsCastable(kv.Value.DType) && !Keep(kv.Key) ? c : kv.Value.DType,
