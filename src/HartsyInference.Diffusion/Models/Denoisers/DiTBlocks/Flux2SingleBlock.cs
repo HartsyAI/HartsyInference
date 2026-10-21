@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -22,6 +23,8 @@ public sealed unsafe class Flux2SingleBlock
 
     // linear2: fused [attn_out (hidden) || swiglu_out (mlp_inner)] → hidden
     private Tensor? _toOutWeight, _toOutBias;
+
+    private AttentionLayer? _attention;
 
     // Per-head Q/K RMSNorm (pre-RoPE)
     private readonly QkNorm _normQ;
@@ -68,6 +71,12 @@ public sealed unsafe class Flux2SingleBlock
         // Per-head Q/K RMSNorm
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+            },
+            new AttentionNormWeights(_normQ.Weight, _normK.Weight, _normQ.Eps, _normK.Eps));
 
         if (branchDamp != 1.0f)
         {
@@ -105,14 +114,12 @@ public sealed unsafe class Flux2SingleBlock
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
-        float scale = 1.0f / MathF.Sqrt(_headDim);
 
         // F16 activation path: activations follow the incoming stream dtype (see Flux2DoubleBlock).
         DType act = hidden.DType;
         TensorShape hiddenShape = new TensorShape(batch, seqLen, _hiddenSize);
         TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpInner);
         TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // ── 1. LayerNorm (no affine) + modulate x*(1+scale)+shift ──
         Tensor modulated = DiTUtils.NormModulate(backend, hidden, mod[0], mod[1], hiddenShape, _layerNormEps);
@@ -130,42 +137,11 @@ public sealed unsafe class Flux2SingleBlock
         backend.Linear(up, modulated, _upWeight!, _upBias);
         modulated.Dispose();
 
-        // ── 3. QK-Norm (per-head RMSNorm over the last dim = headDim, pre-RoPE) ──
-        Tensor qNormed = new Tensor(headsShape, act);
-        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kNormed = new Tensor(headsShape, act);
-        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        // ── 4. RoPE BEFORE the head permute (B=1 GPU path; identical pairwise rotation) ──
-        if (batch == 1)
-            rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
-
-        // ── 5. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor qMh = new Tensor(mhShape, act);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        Tensor kMh = new Tensor(mhShape, act);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        kNormed.Dispose();
-        Tensor vMh = new Tensor(mhShape, act);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        v.Dispose();
-
-        // Host RoPE fallback (batched inference only; B=1 runs the GPU path at 4) ──
-        if (batch != 1)
-            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
-
-        // ── 6. SDPA ──
-        Tensor attnOutMh = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOutMh, qMh, kMh, vMh, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        // ── 7. Permute attn output back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attnOut = new Tensor(hiddenShape, act);
-        backend.Permute0213(attnOut, attnOutMh, _numHeads, seqLen, _headDim);
-        attnOutMh.Dispose();
+        // ── 3-7. QK-norm, RoPE, attention (QK RMS-norm bounds the scores), permuted back to [B, S, hidden] ──
+        AttentionCallContext context = batch == 1
+            ? new AttentionCallContext { Rotation = rope, Bias = attnBias }
+            : new AttentionCallContext { HeadMajorRotation = rope, Bias = attnBias };
+        Tensor attnOut = _attention!.Attend(backend, q, k, v, hiddenShape, in context);
 
         // ── 8. SwiGLU activation: silu(gate) * up ──
         Tensor gateActivated = new Tensor(mlpShape, act);
