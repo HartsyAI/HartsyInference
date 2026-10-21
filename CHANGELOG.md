@@ -27,6 +27,10 @@ stable release will require. Dates are UTC.
   one card by name; four cuDNN SDPA tests the GPU sweep never ran are tagged `GpuIntegration`; `regression-ab.sh`
   leaves SwarmUI running when the run is on a card it does not use.
 - **Fixed:** `hartsy text --help` stopped with a markup error at the `--reasoning-effort` description.
+- **Fixed: kohya LoRAs for models with no kohya table.** A `lora_unet_<module path>` file that no specific kohya layout
+  claimed (Krea 2's musubi-tuner LoRAs) failed with "Could not detect LoRA format". Its modules now resolve against the
+  target model's own weight names when the LoRA is applied, as ComfyUI resolves them, through the checkpoint-to-loaded-key
+  map where a recipe renames keys (Krea 2). A module name two weights collapse to is refused rather than guessed.
 
 ## alpha.383
 

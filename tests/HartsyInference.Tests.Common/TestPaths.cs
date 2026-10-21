@@ -286,6 +286,10 @@ public static class TestPaths
     {
         public static string BaseDir  => Resolve("KREA2_BASE_DIR",  Path.Combine(ModelsDir, "Stable-Diffusion", "Krea2", "Base"));
         public static string TurboDir => Resolve("KREA2_TURBO_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "Krea2", "Turbo"));
+        public static string TurboCheckpoint => Resolve("KREA2_TURBO_CHECKPOINT", Path.Combine(TurboDir, "krea2_turbo_fp8_scaled.safetensors"));
+
+        /// <summary>A kohya/musubi-tuner Krea 2 LoRA (<c>lora_unet_&lt;native path, '.'→'_'&gt;</c> keys, <c>ss_base_model_version: krea2</c>).</summary>
+        public static string GpkLora => Resolve("KREA2_GPK_LORA_PATH", Path.Combine(ModelsDir, "Lora", "krea2gpklora-v01-0_1-krea-2-lora-fp32.safetensors"));
     }
 
     /// <summary>Boogu-Image 0.1 (10B OmniGen2/Lumina lineage). Comfy fp8_scaled, staged as <c>Boogu/{Base,Turbo,Edit}/</c>
