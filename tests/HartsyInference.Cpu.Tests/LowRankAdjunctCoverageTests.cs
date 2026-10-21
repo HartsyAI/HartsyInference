@@ -58,6 +58,7 @@ public sealed class LowRankAdjunctCoverageTests
         ["ChannelLayerNorm3d"] = AdjunctCoverage.NotATarget,
         ["RmsNorm"] = AdjunctCoverage.NotATarget,
         ["RmsNormAdd"] = AdjunctCoverage.NotATarget,
+        ["RmsNormModulate"] = AdjunctCoverage.NotATarget,   // its weight is the RMSNorm's
         ["RmsNormEmitQ8"] = AdjunctCoverage.NotATarget,
         ["AddRmsNorm"] = AdjunctCoverage.NotATarget,
         ["AddRmsNormEmitQ8"] = AdjunctCoverage.NotATarget,
