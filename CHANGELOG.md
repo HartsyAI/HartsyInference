@@ -8,6 +8,9 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: MOSS-Image LoRAs skipped attention on the Comfy checkpoint.** MOSS LoRAs name `layers.N.proj.q/k/v`, while the
+  ComfyUI checkpoint fuses them as `proj.qkv`, so every Q/K/V delta was skipped with a "target not present" warning and only
+  the output and feed-forward deltas applied. They now merge into their thirds of the fused weight.
 - **Added: teacher-forced text scoring.** `TextRequest.ForcedTokenIds` commits exactly the given tokens and
   `TextRequest.ReturnTokenScores` reports each completion token's log-probability and the top token's, from the raw
   logits (`TextResult.TokenScores`); CLI `--scores-out`, `--teacher-force` and `--prompt-file`. `tests/regression-ab.sh`

@@ -11,8 +11,9 @@ public readonly record struct FusedProjectionLayout(string SplitSuffix, string F
 /// <remarks><para>fp8 builds of the Flux-lineage checkpoints keep attention fused (<c>attn.qkv</c>,
 /// <c>attn.add_qkv</c>) while a LoRA's canonical keys are the split names. Without this mapping every attention delta
 /// missed on those builds, the stack still merged the non-attention weights and reported success, and the image came
-/// out subtly under-LoRA'd with nothing to point at. Two families keep attention fused in their ORDINARY layout too:
-/// Ideogram 4 (<c>layers.{i}.attention.qkv.weight</c>) and F-Lite (<c>blocks.{i}.qkv.weight</c>). MiniMax-H3 is the
+/// out subtly under-LoRA'd with nothing to point at. Three families keep attention fused in their ORDINARY layout too:
+/// Ideogram 4 (<c>layers.{i}.attention.qkv.weight</c>), F-Lite (<c>blocks.{i}.qkv.weight</c>) and MOSS-Image's ComfyUI
+/// file (<c>layers.{i}.proj.qkv.weight</c>). MiniMax-H3 is the
 /// third — <c>blocks.{i}.attn.qkv_proj.weight</c> — and is the one the GGUF rollout needs.</para>
 /// <para>A miss is safe by construction: the fallback only fires when the split key is absent from the dictionary AND
 /// the fused candidate is present, so it can never capture a key the direct lookup would have served.</para></remarks>
@@ -35,6 +36,10 @@ public static class FusedProjectionLayouts
         new(".attention.to_q.weight", ".attention.qkv.weight", 0, 3),
         new(".attention.to_k.weight", ".attention.qkv.weight", 1, 3),
         new(".attention.to_v.weight", ".attention.qkv.weight", 2, 3),
+        // MOSS-Image: its LoRAs name layers.{i}.proj.q/k/v; the Comfy checkpoint fuses them.
+        new(".proj.q.weight", ".proj.qkv.weight", 0, 3),
+        new(".proj.k.weight", ".proj.qkv.weight", 1, 3),
+        new(".proj.v.weight", ".proj.qkv.weight", 2, 3),
         // F-Lite: blocks.{i}.qkv.weight — no attention segment at all.
         new(".to_q.weight", ".qkv.weight", 0, 3),
         new(".to_k.weight", ".qkv.weight", 1, 3),
