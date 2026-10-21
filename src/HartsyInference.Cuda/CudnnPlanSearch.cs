@@ -60,6 +60,7 @@ internal static class CudnnPlanSearch
     internal static string DtypeName(int dataType) => dataType switch
     {
         CUDNN_DATA_HALF => "f16",
+        CUDNN_DATA_BFLOAT16 => "bf16",
         CUDNN_DATA_FLOAT => "f32",
         _ => $"dtype{dataType}",
     };
