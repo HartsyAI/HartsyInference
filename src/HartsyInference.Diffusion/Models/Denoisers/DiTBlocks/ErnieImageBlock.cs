@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -42,6 +43,8 @@ public sealed unsafe class ErnieImageBlock
     private Tensor? _upProjWeight;
     private Tensor? _linearFc2Weight;
 
+    private AttentionLayer? _attention;
+
     public ErnieImageBlock(int hidden, int numHeads, int ffnHidden, float eps = 1e-6f)
     {
         if (hidden % numHeads != 0)
@@ -73,6 +76,19 @@ public sealed unsafe class ErnieImageBlock
         _gateProjWeight = weights[$"{prefix}.mlp.gate_proj.weight"];
         _upProjWeight = weights[$"{prefix}.mlp.up_proj.weight"];
         _linearFc2Weight = weights[$"{prefix}.mlp.linear_fc2.weight"];
+
+        // QK-RMSNorm bounds the scores, so the call may narrow to F16; the padding mask rides as an F32 bias.
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead,
+                ComputeDType = DType.F32, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQWeight, Key = _toKWeight, Value = _toVWeight, Output = _toOutWeight, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
     }
 
     /// <summary>Enumerates all weights for GPU preloading.</summary>
@@ -109,75 +125,16 @@ public sealed unsafe class ErnieImageBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         TensorShape shape = new TensorShape(batch, seqLen, _hidden);
-        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // ── Attention sub-block ────────────────────────────────────────────
-        // GPU-residency rewrite (mirrors the verified Krea2Block / FluxSingleStreamBlock ports): the two AdaLN
-        // (1+scale)·norm+shift affines, the two gated residuals, the head-split/merge reshapes and the QK-norm all
-        // run as IBackend ops so the activation chain stays device-resident — no per-op DataPointer D2H sync barriers
-        // around the attention/FFN GEMMs. ApplyShiftScale → DiTUtils.Modulate; ApplyGatedResidual →
-        // GatedResidualLastDim; the ReshapeFlatToHeads/PermuteBshdToBhsd/PermuteBhsdToBsh host loops →
-        // Permute0213 (+ declaring Q/K/V directly as [B, S, H, D], byte-identical to [B, S, hidden]). RoPE is now
-        // GPU-resident too: the non-interleaved Megatron "rotate_half" (pairs (i, i+halfDim)) is applied via
-        // backend.ApplyRope (which computes exactly x·cos + rotate_half(x)·sin) after slicing the packed freqs into
-        // cos/sin on-device — see ErnieImageRope.ApplyRotaryEmbGpu. The block forward is fully device-resident.
         Tensor norm1 = new Tensor(shape, DType.F32);
         backend.RmsNorm(norm1, x, _adaLnSaWeight!, _eps);
         Tensor modulated = DiTUtils.Modulate(backend, norm1, shiftMsa, scaleMsa, shape); // x·(1+scale_msa) + shift_msa
         norm1.Dispose();
 
-        // Separate Q, K, V projections; bias=False. Q/K/V declared directly as [B, S, H, D] (byte-identical to
-        // [B, S, hidden]) so RmsNorm normalizes over headDim and Permute0213 runs with no explicit reshape.
-        Tensor qHeads = new Tensor(headsShape, DType.F32);
-        Tensor kHeads = new Tensor(headsShape, DType.F32);
-        Tensor v = new Tensor(headsShape, DType.F32);
-        backend.Linear(qHeads, modulated, _toQWeight!, null);
-        backend.Linear(kHeads, modulated, _toKWeight!, null);
-        backend.Linear(v, modulated, _toVWeight!, null);
-        modulated.Dispose();
-
-        // QK-RMSNorm over the last dim (headDim); weight already F32. Identical to the old QkNorm host loop.
-        Tensor qNormed = new Tensor(headsShape, DType.F32);
-        Tensor kNormed = new Tensor(headsShape, DType.F32);
-        backend.RmsNorm(qNormed, qHeads, _normQ.Weight, _normQ.Eps);
-        backend.RmsNorm(kNormed, kHeads, _normK.Weight, _normK.Eps);
-        qHeads.Dispose();
-        kHeads.Dispose();
-
-        // 3D RoPE (in-place on qNormed/kNormed, both still [B, S, numHeads, headDim]) — GPU-resident via
-        // backend.ApplyRope (rotate_half) on the pre-sliced cos/sin tables. Bit-identical to the host path.
-        backend.ApplyRope(qNormed, kNormed, ropeCos, ropeSin);
-
-        // SDPA expects [B, numHeads, S, headDim]. Permute (B, S, H, D) → (B, H, S, D).
-        Tensor qMh = new Tensor(mhShape, DType.F32);
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        Tensor vMh = new Tensor(mhShape, DType.F32);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        kNormed.Dispose();
-        v.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
-        // allowF16: QK-RMS-norm bounds the scores, and the [B,1,Sq,Skv] F32 padding mask rides the cuDNN fused
-        // engine's fp32 bias path (added to fp32 scores inside the engine, never rounded through F16) — the
-        // proven Chroma/Z-Image config. Falls back to the materialized F32 path when cuDNN is unavailable.
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale, allowF16: true);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        // [B, H, S, D] → [B, S, hidden]
-        Tensor attnFlat = new Tensor(shape, DType.F32);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(shape, DType.F32);
-        backend.Linear(projected, attnFlat, _toOutWeight!, null);
-        attnFlat.Dispose();
+        QkRotation rope = new(QkRotationKind.RotateHalfPaired, ropeCos, ropeSin);
+        Tensor projected = _attention!.Forward(backend, modulated, modulated,
+            new AttentionCallContext { QueryRotation = rope, KeyRotation = rope, Bias = attentionMask, ReleaseInputs = true });
 
         Tensor afterAttn = new Tensor(shape, DType.F32);
         backend.GatedResidualLastDim(afterAttn, x, projected, gateMsa);   // x + gate_msa·attn_out
