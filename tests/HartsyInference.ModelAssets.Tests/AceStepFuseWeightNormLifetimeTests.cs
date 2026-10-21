@@ -12,7 +12,7 @@ public sealed unsafe class AceStepFuseWeightNormLifetimeTests
     [Fact]
     public void FuseWeightNorm_UnderForcedCollections_KeepsItsCastsAlive()
     {
-        // Past glibc's 32 MB mmap ceiling, so a freed cast is unmapped rather than recycled.
+        // Past glibc's 32 MB mmap ceiling a freed cast is unmapped, not recycled; other allocators may not fault.
         const int outChannels = 4096, perChannel = 4096;
         using Tensor gFull = new Tensor(new TensorShape(outChannels, 1, 1), DType.F32);
         using Tensor vFull = new Tensor(new TensorShape(outChannels, perChannel, 1), DType.F32);

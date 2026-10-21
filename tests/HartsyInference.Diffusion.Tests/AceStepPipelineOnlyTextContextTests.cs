@@ -4,23 +4,31 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Double-condition CFG's text-only context keeps the speaker and text rows and zeroes the lyric rows. The
-/// engine passes the UMT5 features as <c>[1, T, 768]</c>, so the text rows are not the leading dim.</summary>
+/// <summary>Double-condition CFG's text-only context zeroes the lyric rows, which the DiT's context appends last.
+/// Counting them from the front took the text row count from the leading dim of the engine's <c>[1, T, 768]</c>
+/// features.</summary>
 public sealed class AceStepPipelineOnlyTextContextTests
 {
     [Fact]
-    public void BuildOnlyTextContext_BatchOfOneText_ZeroesOnlyTheLyricRows()
+    public void BuildOnlyTextContext_ZeroesExactlyTheTrailingLyricRows()
     {
-        const int textRows = 3, lyricRows = 2, dim = 4, textDim = 6;
+        const int textRows = 3, lyricRows = 2, dim = 4;
         int rows = 1 + textRows + lyricRows;
         using Tensor ctx = new Tensor(new TensorShape(rows, dim), DType.F32);
         ctx.AsSpan<float>().Fill(1f);
-        using Tensor text = new Tensor(new TensorShape(1, textRows, textDim), DType.F32);
 
-        using Tensor onlyText = AceStepPipeline.BuildOnlyTextContext(ctx, text, textDim);
+        using Tensor onlyText = AceStepPipeline.BuildOnlyTextContext(ctx, lyricRows);
 
         float[] expected = new float[rows * dim];
         expected.AsSpan(0, (1 + textRows) * dim).Fill(1f);
         Assert.Equal(expected, onlyText.AsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void BuildOnlyTextContext_RefusesMoreLyricRowsThanTheContextHolds()
+    {
+        using Tensor ctx = new Tensor(new TensorShape(3, 4), DType.F32);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => AceStepPipeline.BuildOnlyTextContext(ctx, 3));
     }
 }

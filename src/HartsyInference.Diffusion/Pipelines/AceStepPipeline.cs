@@ -137,7 +137,7 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         Tensor? onlyTextCtx = !doDualCondition ? null
             : useErgLyric
                 ? _dit.BuildContext(Backend, textEmbeds, lyricIds, null, lyricQScale: (4, 6, 0.01f))
-                : BuildOnlyTextContext(ctx, textEmbeds, _config.TextDim);
+                : BuildOnlyTextContext(ctx, lyricIds.Length);
 
         Tensor z = SeedGenerator.CreateNoise(new TensorShape([1L, _config.InChannels, _config.LatentHeight, fLat]), actualSeed);
         using AceStepGuidance.MomentumBuffer momentum = new();
@@ -277,18 +277,19 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         return vCond;
     }
 
-    /// <summary>Clones the full context and zeroes the lyric rows (everything after speaker + text), leaving the speaker + UMT5 text conditioning active — the "text-only" branch for double-condition CFG.</summary>
-    internal static Tensor BuildOnlyTextContext(Tensor ctx, Tensor textEmbeds, int textDim)
+    /// <summary>Clones the full context and zeroes its <paramref name="lyricRows"/> lyric rows, which
+    /// <see cref="AceStepDit.BuildContext"/> appends last, leaving the speaker + UMT5 text conditioning active — the
+    /// "text-only" branch for double-condition CFG.</summary>
+    internal static Tensor BuildOnlyTextContext(Tensor ctx, int lyricRows)
     {
+        long rows = ctx.Shape[0];
+        if (lyricRows < 0 || lyricRows >= rows)
+            throw new ArgumentOutOfRangeException(nameof(lyricRows),
+                $"{lyricRows} lyric rows in a {rows}-row context.");
         Tensor o = Clone(ctx);
         int dim = (int)ctx.Shape[1];
-        int lyricStart = 1 + (int)(textEmbeds.Shape.ElementCount / textDim);   // speaker row + text rows
-        long rows = ctx.Shape[0];
-        if (lyricStart < rows)
-        {
-            float* p = (float*)o.DataPointer;
-            new Span<float>(p + (long)lyricStart * dim, (int)((rows - lyricStart) * dim)).Clear();
-        }
+        float* p = (float*)o.DataPointer;
+        new Span<float>(p + (rows - lyricRows) * dim, lyricRows * dim).Clear();
         return o;
     }
 
