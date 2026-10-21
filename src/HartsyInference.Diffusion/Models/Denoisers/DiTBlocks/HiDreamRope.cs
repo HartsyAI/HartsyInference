@@ -1,10 +1,12 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>3-axis Rotary Position Embedding for HiDream-I1. The rotation math matches BFL/Flux's pair-rotation RoPE exactly (same "stack [cos, -sin, sin, cos] then einsum" convention used by <c>apply_rope</c> in <c>transformer_hidream_image.py</c>), so this is a thin wrapper around <see cref="FluxRope"/> with the HiDream axes [64, 32, 32] and a different position-id layout.
 /// <para>Position ids per token are <c>(layer_axis, row, col)</c>: image tokens always use layer_axis = 0 and their patch (row, col); text tokens use the same 3-tuple but all zeros, so the text path collapses to identity rotations.</para></summary>
-public sealed class HiDreamRope
+public sealed class HiDreamRope : IQkRotation, IHeadMajorQkRotation
 {
     private readonly FluxRope _inner;
 
@@ -56,6 +58,12 @@ public sealed class HiDreamRope
         _inner.Forward(q, k, batch, numHeads, seqLen);
 
     /// <summary>GPU-resident rope on the PRE-permute <c>[1, S, H, D]</c> layout (see <see cref="FluxRope.ApplyGpu"/> — bit-identical interleaved-pair rotation, device cos/sin tables). S must equal the precomputed sequence length; zero-position text tokens rotate by identity, so applying over the full joint sequence equals the old image-only host rotation. Batch-1 only.</summary>
-    public void ApplyGpu(HartsyInference.Core.Backends.IBackend backend, Tensor q, Tensor k, int numHeads) =>
-        _inner.ApplyGpu(backend, q, k, numHeads);
+    public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads) => _inner.ApplyGpu(backend, q, k, numHeads);
+
+    /// <inheritdoc/>
+    public void RotateTokenMajor(IBackend backend, Tensor q, Tensor k, int heads, int kvHeads) => ApplyGpu(backend, q, k, heads);
+
+    /// <inheritdoc/>
+    public void RotateHeadMajor(IBackend backend, Tensor q, Tensor k, int batch, int heads, int kvHeads, int tokens) =>
+        Forward(q, k, batch, heads, tokens);
 }

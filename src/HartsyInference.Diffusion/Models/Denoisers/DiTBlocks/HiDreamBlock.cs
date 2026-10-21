@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -24,6 +25,9 @@ public sealed unsafe class HiDreamBlock
     private readonly bool _isSingle;
     private readonly float _qkNormEps;
     private readonly int _numActivatedExperts;
+
+    private JointAttention? _jointAttention;
+    private AttentionLayer? _selfAttention, _selfAttentionBatched;
 
     // AdaLN: 12 params (double) or 6 params (single). All produced from a single SiLU+Linear MLP.
     private Tensor? _adaLnLinearWeight, _adaLnLinearBias;
@@ -138,7 +142,41 @@ public sealed unsafe class HiDreamBlock
             _ffTW2 = weights[$"{prefix}.ff_t.w2.weight"];
             _ffTW3 = weights[$"{prefix}.ff_t.w3.weight"];
         }
+
+        // Q/K are RMS-normed over the full width, so one batch item may narrow to F16; a batch keeps F32 attention.
+        AttentionLayer image = Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!, _toOutBias,
+            _qRmsNormWeight!, _kRmsNormWeight!, allowF16: true);
+        if (_isSingle)
+        {
+            _selfAttention = image;
+            _selfAttentionBatched = Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!,
+                _toOutBias, _qRmsNormWeight!, _kRmsNormWeight!, allowF16: false);
+        }
+        else
+        {
+            _jointAttention = new JointAttention(
+                new JointAttentionConfig
+                {
+                    Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = true, AllowF16Batched = false,
+                    StageOrder = JointStageOrder.ProjectNormPerStream,
+                },
+                [image, Stream(_toQTWeight!, _toQTBias, _toKTWeight!, _toKTBias, _toVTWeight!, _toVTBias, _toOutTWeight!, _toOutTBias,
+                    _qRmsNormTWeight!, _kRmsNormTWeight!, allowF16: true)]);
+        }
     }
+
+    private AttentionLayer Stream(Tensor q, Tensor? qBias, Tensor k, Tensor? kBias, Tensor v, Tensor? vBias, Tensor output,
+        Tensor? outputBias, Tensor qNorm, Tensor kNorm, bool allowF16) => new(
+        new AttentionLayerConfig
+        {
+            Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.FullWidthRms,
+            ComputeDType = DType.F32, AllowF16 = allowF16,
+        },
+        new AttentionLayerWeights
+        {
+            Query = q, QueryBias = qBias, Key = k, KeyBias = kBias, Value = v, ValueBias = vBias, Output = output,
+            OutputBias = outputBias, QueryNorm = qNorm, KeyNorm = kNorm, QueryNormEps = _qkNormEps, KeyNormEps = _qkNormEps,
+        });
 
     /// <summary>Yields every weight tensor in this block, including all routed experts (all of which participate in the top-k routed forward).</summary>
     public IEnumerable<Tensor> EnumerateWeights()
@@ -198,7 +236,6 @@ public sealed unsafe class HiDreamBlock
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
-        int totalSeqLen = imgSeqLen + txtSeqLen;
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
 
@@ -222,7 +259,7 @@ public sealed unsafe class HiDreamBlock
 
         // ── 3. Joint MM-attention ──
         Tensor imgAttnOut, txtAttnOut;
-        (imgAttnOut, txtAttnOut) = JointAttention(backend, imgMod, txtMod, rope, totalRopeSeqLen, batch, imgSeqLen, txtSeqLen);
+        (imgAttnOut, txtAttnOut) = JointStreamAttention(backend, imgMod, txtMod, rope, batch, imgSeqLen);
         imgMod.Dispose();
         txtMod.Dispose();
 
@@ -271,7 +308,6 @@ public sealed unsafe class HiDreamBlock
 
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
-        int txtSeqLen = seqLen - imgSeqLen;
         TensorShape hiddenShape = new TensorShape(batch, seqLen, _hiddenSize);
 
         // ── 1. AdaLN: 6 params ──
@@ -285,7 +321,7 @@ public sealed unsafe class HiDreamBlock
         preAttn.Dispose();
 
         // ── 3. Self-attention over the joint sequence (only image side has RoPE; text positions are zero) ──
-        Tensor attnOut = SingleStreamSelfAttention(backend, preAttnMod, rope, totalRopeSeqLen, batch, seqLen, imgSeqLen, txtSeqLen);
+        Tensor attnOut = SingleStreamSelfAttention(backend, preAttnMod, rope, batch);
         preAttnMod.Dispose();
 
         Tensor afterAttn = GpuGatedResidual(backend, hidden, attnOut, mods[2], batch, seqLen, _hiddenSize);
@@ -343,215 +379,29 @@ public sealed unsafe class HiDreamBlock
         return output;
     }
 
-    /// <summary>Joint MM-attention shared between image and text in double-stream blocks. Image and text each get their own Q/K/V (image via <c>to_q/k/v</c>, text via <c>to_q_t/k_t/v_t</c>); both are RMS-normed per stream, RoPE is applied to the image-side Q/K (text positions are zero so RoPE is identity), then SDPA is run over the concatenated [img_tokens, text_tokens] sequence and the result is split back.</summary>
-    private (Tensor img, Tensor txt) JointAttention(IBackend backend, Tensor img, Tensor txt,
-        HiDreamRope rope, int totalRopeSeqLen, int batch, int imgSeqLen, int txtSeqLen)
+    /// <summary>Joint MM-attention: image and text project and RMS-norm over the full width with their own weights, then one
+    /// attention over <c>[img, txt]</c> and the split back. One batch item rotates the whole joint sequence on the device (text
+    /// positions are zero, an identity); a batch rotates the image rows only.</summary>
+    private (Tensor img, Tensor txt) JointStreamAttention(IBackend backend, Tensor img, Tensor txt, HiDreamRope rope, int batch,
+        int imgSeqLen)
     {
-        TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
-        TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
-        int totalSeqLen = imgSeqLen + txtSeqLen;
-        TensorShape totalMhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
-
-        // Q/K/V projections (image side)
-        Tensor imgQ = LinearAlloc(backend, img, _toQWeight!, _toQBias, imgShape);
-        Tensor imgK = LinearAlloc(backend, img, _toKWeight!, _toKBias, imgShape);
-        Tensor imgV = LinearAlloc(backend, img, _toVWeight!, _toVBias, imgShape);
-
-        // RMSNorm Q and K over the flat last dim (= inner_dim).
-        Tensor imgQNormed = new Tensor(imgShape, DType.F32);
-        Tensor imgKNormed = new Tensor(imgShape, DType.F32);
-        backend.RmsNorm(imgQNormed, imgQ, _qRmsNormWeight!, _qkNormEps);
-        backend.RmsNorm(imgKNormed, imgK, _kRmsNormWeight!, _qkNormEps);
-        imgQ.Dispose(); imgK.Dispose();
-
-        // Q/K/V projections (text side)
-        Tensor txtQ = LinearAlloc(backend, txt, _toQTWeight!, _toQTBias, txtShape);
-        Tensor txtK = LinearAlloc(backend, txt, _toKTWeight!, _toKTBias, txtShape);
-        Tensor txtV = LinearAlloc(backend, txt, _toVTWeight!, _toVTBias, txtShape);
-
-        Tensor txtQNormed = new Tensor(txtShape, DType.F32);
-        Tensor txtKNormed = new Tensor(txtShape, DType.F32);
-        backend.RmsNorm(txtQNormed, txtQ, _qRmsNormTWeight!, _qkNormEps);
-        backend.RmsNorm(txtKNormed, txtK, _kRmsNormTWeight!, _qkNormEps);
-        txtQ.Dispose(); txtK.Dispose();
-
-        Tensor imgAttn;
-        Tensor txtAttn;
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        if (batch == 1)
-        {
-            // GPU-resident path (the Chroma double-stream idiom): concat [img; txt] in the flat [B, S, H·D]
-            // layout (contiguous device row-concat), rope PRE-permute over the FULL joint sequence (text
-            // positions are all-zero in the table → identity, bit-identical to the old image-only host
-            // rotation), Permute0213 to heads, fused SDPA, permute back, row-slice split. The old path ran
-            // 6 ReshapeToMultiHead + 3 concat + 1 split + 2 reshape-back HOST loops reading DataPointer —
-            // a full pipeline drain around every double block.
-            TensorShape jointFlat = new TensorShape(batch, totalSeqLen, _hiddenSize);
-            Tensor jointQf = new Tensor(jointFlat, DType.F32);
-            backend.Concat(jointQf, new Tensor[] { imgQNormed, txtQNormed }, 1);
-            Tensor jointKf = new Tensor(jointFlat, DType.F32);
-            backend.Concat(jointKf, new Tensor[] { imgKNormed, txtKNormed }, 1);
-            Tensor jointVf = new Tensor(jointFlat, DType.F32);
-            backend.Concat(jointVf, new Tensor[] { imgV, txtV }, 1);
-            imgQNormed.Dispose(); imgKNormed.Dispose(); imgV.Dispose();
-            txtQNormed.Dispose(); txtKNormed.Dispose(); txtV.Dispose();
-
-            rope.ApplyGpu(backend, jointQf, jointKf, _numHeads);
-
-            Tensor jointQ = new Tensor(totalMhShape, DType.F32);
-            backend.Permute0213(jointQ, jointQf, totalSeqLen, _numHeads, _headDim);
-            jointQf.Dispose();
-            Tensor jointK = new Tensor(totalMhShape, DType.F32);
-            backend.Permute0213(jointK, jointKf, totalSeqLen, _numHeads, _headDim);
-            jointKf.Dispose();
-            Tensor jointV = new Tensor(totalMhShape, DType.F32);
-            backend.Permute0213(jointV, jointVf, totalSeqLen, _numHeads, _headDim);
-            jointVf.Dispose();
-
-            // allowF16: Q/K are RMS-normed above (flat inner-dim norm) so scores are bounded — the fused
-            // cuDNN engine applies (the D=128 unmasked case).
-            Tensor jointAttn = new Tensor(totalMhShape, DType.F32);
-            backend.ScaledDotProductAttention(jointAttn, jointQ, jointK, jointV, null, scale, allowF16: true);
-            jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
-
-            Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
-            backend.Permute0213(jointAttnFlat, jointAttn, _numHeads, totalSeqLen, _headDim);
-            jointAttn.Dispose();
-
-            imgAttn = new Tensor(imgShape, DType.F32);
-            backend.SliceRows(imgAttn, jointAttnFlat, 0);
-            txtAttn = new Tensor(txtShape, DType.F32);
-            backend.SliceRows(txtAttn, jointAttnFlat, imgSeqLen);
-            jointAttnFlat.Dispose();
-        }
-        else
-        {
-            // Host fallback (B>1): the original reshape/concat/split loops.
-            TensorShape imgMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
-            TensorShape txtMhShape = new TensorShape(batch, _numHeads, txtSeqLen, _headDim);
-
-            Tensor imgQMh = new Tensor(imgMhShape, DType.F32);
-            Tensor imgKMh = new Tensor(imgMhShape, DType.F32);
-            Tensor imgVMh = new Tensor(imgMhShape, DType.F32);
-            DiTUtils.ReshapeToMultiHead(imgQMh, imgQNormed, batch, imgSeqLen, _numHeads, _headDim);
-            DiTUtils.ReshapeToMultiHead(imgKMh, imgKNormed, batch, imgSeqLen, _numHeads, _headDim);
-            DiTUtils.ReshapeToMultiHead(imgVMh, imgV, batch, imgSeqLen, _numHeads, _headDim);
-            imgQNormed.Dispose(); imgKNormed.Dispose(); imgV.Dispose();
-
-            Tensor txtQMh = new Tensor(txtMhShape, DType.F32);
-            Tensor txtKMh = new Tensor(txtMhShape, DType.F32);
-            Tensor txtVMh = new Tensor(txtMhShape, DType.F32);
-            DiTUtils.ReshapeToMultiHead(txtQMh, txtQNormed, batch, txtSeqLen, _numHeads, _headDim);
-            DiTUtils.ReshapeToMultiHead(txtKMh, txtKNormed, batch, txtSeqLen, _numHeads, _headDim);
-            DiTUtils.ReshapeToMultiHead(txtVMh, txtV, batch, txtSeqLen, _numHeads, _headDim);
-            txtQNormed.Dispose(); txtKNormed.Dispose(); txtV.Dispose();
-
-            ApplyRopeImageOnly(imgQMh, imgKMh, rope, batch, imgSeqLen);
-
-            Tensor jointQ = new Tensor(totalMhShape, DType.F32);
-            Tensor jointK = new Tensor(totalMhShape, DType.F32);
-            Tensor jointV = new Tensor(totalMhShape, DType.F32);
-            DiTUtils.ConcatAlongSeqDimMultiHead(jointQ, imgQMh, txtQMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-            DiTUtils.ConcatAlongSeqDimMultiHead(jointK, imgKMh, txtKMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-            DiTUtils.ConcatAlongSeqDimMultiHead(jointV, imgVMh, txtVMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-            imgQMh.Dispose(); imgKMh.Dispose(); imgVMh.Dispose();
-            txtQMh.Dispose(); txtKMh.Dispose(); txtVMh.Dispose();
-
-            Tensor jointAttn = new Tensor(totalMhShape, DType.F32);
-            backend.ScaledDotProductAttention(jointAttn, jointQ, jointK, jointV, null, scale);
-            jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
-
-            Tensor imgAttnMh = new Tensor(imgMhShape, DType.F32);
-            Tensor txtAttnMh = new Tensor(txtMhShape, DType.F32);
-            DiTUtils.SplitAlongSeqDimMultiHead(imgAttnMh, txtAttnMh, jointAttn, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-            jointAttn.Dispose();
-
-            imgAttn = new Tensor(imgShape, DType.F32);
-            txtAttn = new Tensor(txtShape, DType.F32);
-            DiTUtils.ReshapeFromMultiHead(imgAttn, imgAttnMh, batch, imgSeqLen, _numHeads, _headDim);
-            DiTUtils.ReshapeFromMultiHead(txtAttn, txtAttnMh, batch, txtSeqLen, _numHeads, _headDim);
-            imgAttnMh.Dispose(); txtAttnMh.Dispose();
-        }
-
-        // Output projections
-        Tensor imgOut = LinearAlloc(backend, imgAttn, _toOutWeight!, _toOutBias, imgShape);
-        Tensor txtOut = LinearAlloc(backend, txtAttn, _toOutTWeight!, _toOutTBias, txtShape);
-        imgAttn.Dispose();
-        txtAttn.Dispose();
-
+        AttentionCallContext joint = batch == 1
+            ? new AttentionCallContext { Rotation = rope }
+            : new AttentionCallContext { HeadMajorRotation = new LeadingRowsRotation(imgSeqLen, rope) };
+        Span<Tensor?> attended = [null, null];
+        _jointAttention!.Attend(backend, [img, txt], attended, new JointCallContext { Joint = joint });
+        Tensor imgOut = _jointAttention.ProjectOutput(backend, 0, attended[0]!);
+        Tensor txtOut = _jointAttention.ProjectOutput(backend, 1, attended[1]!);
         return (imgOut, txtOut);
     }
 
-    /// <summary>Self-attention over the concatenated single-stream sequence. The image-side weights (<c>to_q/k/v</c>) are reused for the entire sequence; only the image-token Q/K positions get RoPE (text positions in the rope table are zeros and are passed through unchanged by the rotation).</summary>
-    private Tensor SingleStreamSelfAttention(IBackend backend, Tensor hidden, HiDreamRope rope, int totalRopeSeqLen,
-        int batch, int seqLen, int imgSeqLen, int txtSeqLen)
+    /// <summary>Self-attention over the single-stream sequence with the image-side weights; text positions rotate by identity.</summary>
+    private Tensor SingleStreamSelfAttention(IBackend backend, Tensor hidden, HiDreamRope rope, int batch)
     {
-        TensorShape hiddenShape = new TensorShape(batch, seqLen, _hiddenSize);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-
-        Tensor q = LinearAlloc(backend, hidden, _toQWeight!, _toQBias, hiddenShape);
-        Tensor k = LinearAlloc(backend, hidden, _toKWeight!, _toKBias, hiddenShape);
-        Tensor v = LinearAlloc(backend, hidden, _toVWeight!, _toVBias, hiddenShape);
-
-        Tensor qNormed = new Tensor(hiddenShape, DType.F32);
-        Tensor kNormed = new Tensor(hiddenShape, DType.F32);
-        backend.RmsNorm(qNormed, q, _qRmsNormWeight!, _qkNormEps);
-        backend.RmsNorm(kNormed, k, _kRmsNormWeight!, _qkNormEps);
-        q.Dispose(); k.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attn;
-        if (batch == 1)
-        {
-            // GPU-resident path: rope PRE-permute on the flat [B, S, H·D] layout (zero-position text tokens
-            // rotate by identity — bit-identical to the old post-permute host rotation), then Permute0213 →
-            // fused SDPA (allowF16: Q/K RMS-normed → bounded scores) → permute back. Replaces the 3
-            // ReshapeToMultiHead + 1 ReshapeFromMultiHead host loops (a pipeline drain per single block).
-            rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
-
-            Tensor qMh = new Tensor(mhShape, DType.F32);
-            backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-            qNormed.Dispose();
-            Tensor kMh = new Tensor(mhShape, DType.F32);
-            backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-            kNormed.Dispose();
-            Tensor vMh = new Tensor(mhShape, DType.F32);
-            backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-            v.Dispose();
-
-            Tensor attnMh = new Tensor(mhShape, DType.F32);
-            backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale, allowF16: true);
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-            attn = new Tensor(hiddenShape, DType.F32);
-            backend.Permute0213(attn, attnMh, _numHeads, seqLen, _headDim);
-            attnMh.Dispose();
-        }
-        else
-        {
-            Tensor qMh = new Tensor(mhShape, DType.F32);
-            Tensor kMh = new Tensor(mhShape, DType.F32);
-            Tensor vMh = new Tensor(mhShape, DType.F32);
-            DiTUtils.ReshapeToMultiHead(qMh, qNormed, batch, seqLen, _numHeads, _headDim);
-            DiTUtils.ReshapeToMultiHead(kMh, kNormed, batch, seqLen, _numHeads, _headDim);
-            DiTUtils.ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
-            qNormed.Dispose(); kNormed.Dispose(); v.Dispose();
-
-            // RoPE applies position-by-position; zero-position text tokens just rotate by 0 (identity).
-            ApplyRopeFullSeq(qMh, kMh, rope, batch, seqLen);
-
-            Tensor attnMh = new Tensor(mhShape, DType.F32);
-            backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-            attn = new Tensor(hiddenShape, DType.F32);
-            DiTUtils.ReshapeFromMultiHead(attn, attnMh, batch, seqLen, _numHeads, _headDim);
-            attnMh.Dispose();
-        }
-
-        Tensor outProj = LinearAlloc(backend, attn, _toOutWeight!, _toOutBias, hiddenShape);
-        attn.Dispose();
-        return outProj;
+        AttentionCallContext context = batch == 1
+            ? new AttentionCallContext { Rotation = rope }
+            : new AttentionCallContext { HeadMajorRotation = rope };
+        return (batch == 1 ? _selfAttention! : _selfAttentionBatched!).Forward(backend, hidden, hidden, in context);
     }
 
     /// <summary>MoE SwiGLU FFN: <c>shared_experts(x) + sum_k(topk_weight_k * experts[idx_k](x))</c>.
@@ -630,33 +480,4 @@ public sealed unsafe class HiDreamBlock
         gated.Dispose();
         return output;
     }
-
-    /// <summary>Allocates an output tensor of shape <paramref name="outShape"/> and runs <c>backend.Linear</c> from <paramref name="input"/> through <paramref name="weight"/> + optional <paramref name="bias"/>.</summary>
-    private static Tensor LinearAlloc(IBackend backend, Tensor input, Tensor weight, Tensor? bias, TensorShape outShape)
-    {
-        Tensor output = new Tensor(outShape, DType.F32);
-        backend.Linear(output, input, weight, bias);
-        return output;
-    }
-
-    /// <summary>Applies the image-side rope to the first imgSeqLen positions of Q and K; the text segment (positions imgSeqLen..total) is left untouched. The rope was precomputed in the caller for the full image+text sequence with text positions = 0, so a single Forward call over <paramref name="imgSeqLen"/> rotates exactly the image tokens.</summary>
-    private static void ApplyRopeImageOnly(Tensor q, Tensor k, HiDreamRope rope, int batch, int imgSeqLen)
-    {
-        // The rope cache is sized by the latest Precompute call. Forward rotates the first
-        // imgSeqLen positions of each [B, H, S, D] tensor — anything beyond is ignored by Forward.
-        rope.Forward(q, k, batch, q.ShapeValue(1), imgSeqLen);
-    }
-
-    /// <summary>Applies rope across the full single-stream sequence. Text tokens have all-zero positions in the rope table (set by HiDreamRope.BuildPositionIds), so their rotation is the identity.</summary>
-    private static void ApplyRopeFullSeq(Tensor q, Tensor k, HiDreamRope rope, int batch, int seqLen)
-    {
-        rope.Forward(q, k, batch, q.ShapeValue(1), seqLen);
-    }
-
-}
-
-/// <summary>Tiny helper to read a tensor shape dim by index without a managed cast for every use site.</summary>
-internal static class HiDreamTensorExtensions
-{
-    public static int ShapeValue(this Tensor t, int axis) => (int)t.Shape[axis];
 }
