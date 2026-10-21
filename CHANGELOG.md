@@ -79,6 +79,11 @@ stable release will require. Dates are UTC.
   norm through its own `AttentionLayer`, concatenates the streams' rows in the model's order, attends once over the joint
   sequence and splits the output back. SD3 (and its dual attention), AuraFlow, HiDream, Anima, Ernie-Image and the
   HunyuanVideo token refiner use it or the shared layer. Output is bit-identical.
+- **Changed: the flagship MMDiTs attend through the shared components.** Flux, Flux.2, Flux.3, Chroma (fused or split
+  QKV), Qwen-Image (its context-parallel K/V exchange is a K/V rewrite), Qwen-Image 2.1 (the prefix pass captures its
+  K/V, the target pass prepends them) and HunyuanImage (the image stream rotates alone) run on `JointAttention` and
+  `AttentionLayer`. Output is bit-identical; HunyuanImage's double block now concatenates before permuting (one concat and
+  three permutes instead of six permutes and a head-major concat).
 
 ## alpha.383
 
