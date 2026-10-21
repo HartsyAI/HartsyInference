@@ -103,6 +103,7 @@ DTYPE_KERNELS=(
     sdpa_flash
     affine_broadcast_last_dim
     wan_rope_interleaved
+    ltx2_split_rope
     repeat_kv_heads
     gated_residual_last_dim
     situ_glu
