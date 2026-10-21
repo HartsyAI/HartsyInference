@@ -96,7 +96,7 @@ public sealed unsafe class ConstantKvCacheTests
     }
 
     [Fact]
-    public void AThirdBackendEvictsSlotZeroAndLeavesSlotOne()
+    public void AThirdBackendStoresNothingAndEvictsNeitherSlot()
     {
         using CpuBackend a = new();
         using CpuBackend b = new();
@@ -106,15 +106,14 @@ public sealed unsafe class ConstantKvCacheTests
         cache.TryStore(a, ctxA, keyA, valueA);
         cache.TryStore(b, ctxB, keyB, valueB);
 
-        cache.TryStore(c, ctxC, keyC, valueC);
+        Assert.False(cache.TryStore(c, ctxC, keyC, valueC));
 
-        Assert.True(IsDisposed(keyA));
-        Assert.True(IsDisposed(valueA));
+        Assert.False(IsDisposed(keyA));
         Assert.False(IsDisposed(keyB));
-        Assert.False(cache.TryGet(a, ctxA, out _, out _));
+        Assert.False(IsDisposed(keyC));
+        Assert.True(cache.TryGet(a, ctxA, out _, out _));
         Assert.True(cache.TryGet(b, ctxB, out _, out _));
-        Assert.True(cache.TryGet(c, ctxC, out Tensor hitC, out _));
-        Assert.Same(keyC, hitC);
+        Assert.False(cache.TryGet(c, ctxC, out _, out _));
     }
 
     [Fact]

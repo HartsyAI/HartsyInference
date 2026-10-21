@@ -54,12 +54,11 @@ internal sealed class ConstantKvCache : ICachedKv
     {
         lock (_lock)
         {
-            // Reuse this backend's own slot when it has one; otherwise claim an empty slot; otherwise
-            // (a third backend, unsupported today) evict slot 0. Each backend only ever installs into
-            // its own slot across calls, so the two CFG-parallel threads never contend for the same
-            // slot's tensors once both have run once.
-            bool useSlot0 = ReferenceEquals(_slot0.Backend, backend) || _slot0.Backend is null
-                || (!ReferenceEquals(_slot1.Backend, backend) && _slot1.Backend is not null);
+            // This backend's own slot, else an empty one. A third backend stores nothing: evicting another backend's
+            // slot could free K/V that backend's thread is attending over.
+            bool useSlot0 = ReferenceEquals(_slot0.Backend, backend) || _slot0.Backend is null;
+            if (!useSlot0 && !ReferenceEquals(_slot1.Backend, backend) && _slot1.Backend is not null)
+                return false;
             if (useSlot0)
             {
                 _slot0.KeyMh?.Dispose();

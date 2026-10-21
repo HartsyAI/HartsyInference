@@ -250,6 +250,7 @@ public sealed class WanAttentionTraceTests
 
         Assert.Throws<InvalidOperationException>(() => image.ProjectQueryHeadMajor(new AttentionTraceBackend(), Rows(Tokens), false, default));
         Assert.Throws<InvalidOperationException>(() => image.ProjectSelf(new AttentionTraceBackend(), Rows(Tokens), false));
+        Assert.Throws<InvalidOperationException>(() => image.Forward(new AttentionTraceBackend(), Rows(Tokens), Rows(Tokens), default));
         Assert.Throws<ArgumentException>(() => new AttentionLayer(Config(), new AttentionLayerWeights
         {
             Key = W(112), Value = W(113),

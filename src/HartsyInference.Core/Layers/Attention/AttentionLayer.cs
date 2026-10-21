@@ -206,16 +206,26 @@ public sealed class AttentionLayer
         int sq = (int)qInput.Shape[rank - 2];
         DType act = _config.ComputeDType ?? qInput.DType;
         Tensor q = new(BranchShape(qInput.Shape, _config.Heads), act);
-        backend.Linear(q, qInput, w.Query!, w.QueryBias);
-        if (releaseInput) qInput.Dispose();
-        if (_config.QkNorm != AttentionQkNorm.None)
+        Tensor? qMh = null;
+        try
         {
-            AttentionNormWeights n = _norms!.Value;
-            q = NormPerHead(backend, q, Have(n.Query), n.QueryEps);
+            backend.Linear(q, qInput, w.Query!, w.QueryBias);
+            if (releaseInput) qInput.Dispose();
+            if (_config.QkNorm != AttentionQkNorm.None)
+            {
+                AttentionNormWeights n = _norms!.Value;
+                q = NormPerHead(backend, q, Have(n.Query), n.QueryEps);
+            }
+            RotateWithTables(backend, q, context.QueryRotation, _config.Heads);
+            qMh = new(new TensorShape(batch, _config.Heads, sq, _config.HeadDim), q.DType);
+            backend.Permute0213(qMh, q, sq, _config.Heads, _config.HeadDim);
         }
-        RotateWithTables(backend, q, context.QueryRotation, _config.Heads);
-        Tensor qMh = new(new TensorShape(batch, _config.Heads, sq, _config.HeadDim), q.DType);
-        backend.Permute0213(qMh, q, sq, _config.Heads, _config.HeadDim);
+        catch
+        {
+            qMh?.Dispose();
+            q.Dispose();
+            throw;
+        }
         q.Dispose();
         return qMh;
     }
@@ -241,23 +251,37 @@ public sealed class AttentionLayer
         {
             DType kvAct = _config.ComputeDType ?? kvInput.DType;
             TensorShape projected = BranchShape(kvInput.Shape, _config.KvHeads);
-            Tensor k = new(projected, kvAct);
-            backend.Linear(k, kvInput, w.Key!, w.KeyBias);
-            Tensor v = new(projected, kvAct);
-            backend.Linear(v, kvInput, w.Value!, w.ValueBias);
-            if (_config.QkNorm != AttentionQkNorm.None)
+            Tensor? k = null, v = null;
+            try
             {
-                AttentionNormWeights n = _norms!.Value;
-                k = NormPerHead(backend, k, Have(n.Key), n.KeyEps);
+                k = new Tensor(projected, kvAct);
+                backend.Linear(k, kvInput, w.Key!, w.KeyBias);
+                v = new Tensor(projected, kvAct);
+                backend.Linear(v, kvInput, w.Value!, w.ValueBias);
+                if (_config.QkNorm != AttentionQkNorm.None)
+                {
+                    AttentionNormWeights n = _norms!.Value;
+                    k = NormPerHead(backend, k, Have(n.Key), n.KeyEps);
+                }
+                RotateWithTables(backend, k, context.KeyRotation, _config.KvHeads);
+                TensorShape headMajor = new(batch, _config.KvHeads, skv, _config.HeadDim);
+                keyMh = new Tensor(headMajor, k.DType);
+                backend.Permute0213(keyMh, k, skv, _config.KvHeads, _config.HeadDim);
+                k.Dispose();
+                k = null;
+                valueMh = new Tensor(headMajor, v.DType);
+                backend.Permute0213(valueMh, v, skv, _config.KvHeads, _config.HeadDim);
+                v.Dispose();
+                v = null;
             }
-            RotateWithTables(backend, k, context.KeyRotation, _config.KvHeads);
-            TensorShape headMajor = new(batch, _config.KvHeads, skv, _config.HeadDim);
-            keyMh = new Tensor(headMajor, k.DType);
-            backend.Permute0213(keyMh, k, skv, _config.KvHeads, _config.HeadDim);
-            k.Dispose();
-            valueMh = new Tensor(headMajor, v.DType);
-            backend.Permute0213(valueMh, v, skv, _config.KvHeads, _config.HeadDim);
-            v.Dispose();
+            catch
+            {
+                k?.Dispose();
+                v?.Dispose();
+                keyMh?.Dispose();
+                valueMh?.Dispose();
+                throw;
+            }
             stored = context.CachedKv?.TryStore(backend, kvInput, keyMh, valueMh) == true;
         }
         return RunAttention(backend, qMh, keyMh, valueMh, _config.ComputeDType ?? qMh.DType, in context,
