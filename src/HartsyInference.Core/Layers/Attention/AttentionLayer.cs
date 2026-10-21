@@ -41,7 +41,7 @@ public sealed class AttentionLayer
         int skv = (int)kvInput.Shape[kvInput.Shape.Rank - 2];
         DType act = _config.ComputeDType ?? qInput.DType;
         DType kvAct = _config.ComputeDType ?? kvInput.DType;
-        ValidateContext(in context);
+        ValidateContext(in context, batch);
         if (context.ValueRowScale is { } rowScale)
         {
             if (_config.Projection == AttentionProjection.GroupedByInput)
@@ -73,7 +73,7 @@ public sealed class AttentionLayer
             throw new InvalidOperationException("A QK norm needs the layer's norm weights.");
         if (q.Shape.Rank != 4 || k.Shape.Rank != 4 || v.Shape.Rank != 4)
             throw new ArgumentException($"Attend takes [B, S, heads, D] operands; got {q.Shape}, {k.Shape}, {v.Shape}.");
-        ValidateContext(in context);
+        ValidateContext(in context, (int)q.Shape[0]);
         return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, in context);
     }
 
@@ -121,10 +121,12 @@ public sealed class AttentionLayer
         return (q, k, v, gate);
     }
 
-    /// <summary>Refuses a rotation the configured norm cannot apply, before anything is allocated.</summary>
-    private void ValidateContext(in AttentionCallContext context)
+    /// <summary>Refuses what the configured norm cannot apply, before anything is allocated.</summary>
+    private void ValidateContext(in AttentionCallContext context, int batch)
     {
         bool fullWidth = _config.QkNorm == AttentionQkNorm.FullWidth;
+        if (fullWidth && batch != 1)
+            throw new NotSupportedException($"The full-width QK norm runs one batch item; got {batch}.");
         foreach (QkRotationKind kind in (ReadOnlySpan<QkRotationKind>)[context.QueryRotation.Kind, context.KeyRotation.Kind])
         {
             bool fullWidthKind = kind is QkRotationKind.FullWidthSplit or QkRotationKind.FullWidthInterleaved;

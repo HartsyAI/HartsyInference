@@ -186,6 +186,8 @@ public sealed class AttentionLayerTests
         Assert.Throws<NotSupportedException>(() => ltx.Forward(backend, x, x, new AttentionCallContext { QueryRotation = half }));
         Assert.Throws<NotSupportedException>(() => ltx.Forward(backend, x, x,
             new AttentionCallContext { QueryRotation = split, KeyRotation = split, Rotation = new TraceRotation(new List<string>()) }));
+        Assert.Throws<NotSupportedException>(() => ltx.Forward(backend, new Tensor(new TensorShape(2, 6, 8), DType.F16),
+            new Tensor(new TensorShape(2, 6, 8), DType.F16), new AttentionCallContext { QueryRotation = split, KeyRotation = split }));
         AttentionLayer krea2 = new(Krea2(), Weights(gate: true));
         Assert.Throws<NotSupportedException>(() => krea2.Forward(backend, new Tensor(new TensorShape(1, 6, 16), DType.F16),
             new Tensor(new TensorShape(1, 6, 16), DType.F16), new AttentionCallContext { KeyRotation = split }));

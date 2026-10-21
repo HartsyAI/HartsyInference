@@ -78,6 +78,7 @@ public readonly record struct AttentionCallContext
     /// <summary>Diagnostics; null in production.</summary>
     public IAttentionProbe? Probe { get; init; }
 
-    /// <summary>The layer disposes the query input, and a distinct key/value input, once the projections have read them.</summary>
+    /// <summary>The layer disposes the query input, and a distinct key/value input, once the projections have read them; a
+    /// failure after that point leaves nothing for the caller to dispose.</summary>
     public bool ReleaseInputs { get; init; }
 }
