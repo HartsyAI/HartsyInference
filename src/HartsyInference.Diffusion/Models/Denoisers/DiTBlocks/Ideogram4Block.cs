@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
@@ -53,6 +54,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
     // Attention: fused QKV + output, all bias=False.
     private Tensor? _qkvWeight;
     private Tensor? _oWeight;
+    private AttentionLayer? _attention;
 
     // SwiGLU FFN, bias=False.
     private Tensor? _w1; // gate
@@ -116,6 +118,19 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
 
         _adalnWeight = weights[$"{prefix}.adaln_modulation.weight"];
         weights.TryGetValue($"{prefix}.adaln_modulation.bias", out _adalnBias);
+
+        // Fused [q|k|v], per-head QK-RMSNorm (which bounds the scores: F16 allowed), MRoPE, token-major when served.
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, Projection = AttentionProjection.FusedSlice,
+                QkNorm = AttentionQkNorm.PerHead, TokenMajorRoute = AttentionRoute.TokenMajor, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Qkv = _qkvWeight, Output = _oWeight, QueryNorm = _normQ.Weight, KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps,
+                KeyNormEps = _normK.Eps,
+            });
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -169,7 +184,8 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
 
         System.Diagnostics.Stopwatch? attnSw = null;
         if (Ideogram4Profile.Enabled) { backend.Sync(); attnSw = System.Diagnostics.Stopwatch.StartNew(); }
-        Tensor attn = Attention(backend, mod1, cos, sin, attentionMask, batch, seqLen);
+        QkRotation mrope = new(QkRotationKind.RotateHalfPaired, cos, sin);
+        Tensor attn = _attention!.Forward(backend, mod1, mod1, new AttentionCallContext { QueryRotation = mrope, KeyRotation = mrope, Bias = attentionMask });
         if (Ideogram4Profile.Enabled) { backend.Sync(); Ideogram4Profile.AttentionMs += attnSw!.Elapsed.TotalMilliseconds; }
         mod1.Dispose();
 
@@ -208,82 +224,6 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         scaleMlp.Dispose();
         gateMlp.Dispose();
         return result;
-    }
-
-    /// <summary>Self-attention: fused QKV → per-head QK-RMSNorm → MRoPE → SDPA → output proj. All backend ops; reshape-to-heads is free (outputs allocated with the consumer's shape, identical byte layout) and the head permutes reuse <c>Permute0213</c>.</summary>
-    private Tensor Attention(IBackend backend, Tensor input, Tensor cos, Tensor sin,
-        Tensor? attentionMask, int batch, int seqLen)
-    {
-        TensorShape flat = new TensorShape(batch, seqLen, _hidden);
-        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mh = new TensorShape(batch, _numHeads, seqLen, _headDim);
-        long headsTotal = (long)batch * seqLen * _hidden;
-
-        Tensor qkv = new Tensor(new TensorShape(batch, seqLen, 3 * _hidden), input.DType);
-        backend.Linear(qkv, input, _qkvWeight!, null);
-
-        // Split fused [B, L, 3*hidden] (layout [q|k|v]) directly into [B, L, numHeads, headDim] chunks —
-        // the slice is a contiguous gather and the reshape is just the declared output shape.
-        Tensor q = new Tensor(heads, input.DType);
-        Tensor k = new Tensor(heads, input.DType);
-        Tensor v = new Tensor(heads, input.DType);
-        backend.SliceLastDim(q, qkv, 0);
-        backend.SliceLastDim(k, qkv, _hidden);
-        backend.SliceLastDim(v, qkv, 2 * _hidden);
-        qkv.Dispose();
-
-        Tensor qN = new Tensor(heads, input.DType);
-        Tensor kN = new Tensor(heads, input.DType);
-        backend.RmsNorm(qN, q, _normQ.Weight, _normQ.Eps);
-        backend.RmsNorm(kN, k, _normK.Weight, _normK.Eps);
-        q.Dispose();
-        k.Dispose();
-
-        backend.ApplyRope(qN, kN, cos, sin);
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe.
-        if (batch == 1 && backend.SupportsTokenMajorAttention)
-        {
-            // The rotated [1, L, heads, headDim] tensors are already token-major, and the flat [L, hidden] output is
-            // what the out-projection reads — no permute on either side.
-            Tensor attnTm = new Tensor(new TensorShape(seqLen, _hidden), input.DType);
-            backend.ScaledDotProductAttentionTokenMajor(attnTm, qN, kN, v, attentionMask, _numHeads, _headDim, scale, allowF16: true);
-            qN.Dispose();
-            kN.Dispose();
-            v.Dispose();
-            Tensor projectedTm = new Tensor(flat, input.DType);
-            backend.Linear(projectedTm, attnTm, _oWeight!, null);
-            attnTm.Dispose();
-            return projectedTm;
-        }
-
-        // Permute [B, L, numHeads, headDim] → [B, numHeads, L, headDim] for SDPA.
-        Tensor qMh = new Tensor(mh, input.DType);
-        Tensor kMh = new Tensor(mh, input.DType);
-        Tensor vMh = new Tensor(mh, input.DType);
-        backend.Permute0213(qMh, qN, seqLen, _numHeads, _headDim);
-        backend.Permute0213(kMh, kN, seqLen, _numHeads, _headDim);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        qN.Dispose();
-        kN.Dispose();
-        v.Dispose();
-
-        Tensor attnOut = new Tensor(mh, input.DType);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale, allowF16: true);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        // Permute back [B, numHeads, L, headDim] → [B, L, numHeads, headDim]; declared flat [B, L, hidden].
-        Tensor attnFlat = new Tensor(flat, input.DType);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(flat, input.DType);
-        backend.Linear(projected, attnFlat, _oWeight!, null);
-        attnFlat.Dispose();
-        return projected;
     }
 
     /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c> (numerics.fusedFfn) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
