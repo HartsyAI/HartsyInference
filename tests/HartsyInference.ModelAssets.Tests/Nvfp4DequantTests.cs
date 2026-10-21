@@ -250,6 +250,49 @@ public sealed unsafe class Nvfp4DequantTests
         }
     }
 
+    [Fact]
+    public void QuantizeToCompanions_RoundTripsThroughProductionLoader()
+    {
+        const int rows = 4, cols = 48;
+        float[] src = new float[rows * cols];
+        Random rng = new(5);
+        for (int i = 0; i < src.Length; i++) src[i] = (float)(rng.NextDouble() * 2 - 1) * (1 + i % 5);
+        string dir = Directory.CreateTempSubdirectory("nvfp4-companions-").FullName;
+        string path = Path.Combine(dir, "nvfp4.safetensors");
+        try
+        {
+            List<KeyValuePair<string, Tensor>> companions = ModelOptNvfp4Codec.QuantizeToCompanions("layer.weight", src, rows, cols);
+            SafeTensorsMerger.Write(path, companions);
+            foreach (KeyValuePair<string, Tensor> c in companions) c.Value.Dispose();
+
+            (List<KeyValuePair<string, Tensor>> tensors, List<SafeTensorsLoader> loaders) = SafeTensorsMerger.Open(path);
+            try
+            {
+                Dictionary<string, Tensor> byKey = tensors.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+                Assert.Equal(3, byKey.Count);
+                Tensor weight = byKey["layer.weight"], scale = byKey["layer.weight_scale"], scale2 = byKey["layer.weight_scale_2"];
+                Assert.Equal(DType.U8, weight.DType);
+                Assert.Equal(DType.F8E4M3, scale.DType);
+                Assert.Equal(DType.F32, scale2.DType);
+
+                byte[] packed = weight.AsReadOnlySpan<byte>().ToArray();
+                byte[] scales = scale.AsReadOnlySpan<byte>().ToArray();
+                float global = scale2.AsReadOnlySpan<float>()[0];
+                float[] dec = Decode(packed, scales, global, rows, cols);
+
+                AssertWithinBlockBound(src, dec, rows, cols, global);
+            }
+            finally
+            {
+                foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     /// <summary>Decodes a row-major NVFP4 matrix through the production dequantizer.</summary>
     private static float[] Decode(byte[] packed, byte[] scales, float global, int rows, int cols)
     {

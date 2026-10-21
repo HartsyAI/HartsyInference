@@ -6,7 +6,9 @@ using HartsyInference.Core.Tensors;
 using System.Text.Json;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
+using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Lora;
+using HartsyInference.ModelAssets.Nf4;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -53,6 +55,9 @@ MERGE AND CAST (safetensors)
                         for a head tied to the embeddings.
   --keep-dtype <pattern>  Keep matching tensors in their stored dtype through --dtype. Repeatable.
                         e.g. --keep-dtype '*norm*' keeps norms in F32 under a bf16 cast.
+  --quant <nf4|nvfp4>   Quantize every 2D .weight (F32/BF16/F16) into the layout the engine loads: NF4 writes
+                        .absmax, .quant_map and .quant_state.bitsandbytes__nf4; NVFP4 writes .weight_scale
+                        (E4M3) and .weight_scale_2 (F32). 2D weights that fail the shape rule are left full precision and listed.
 
 LORA BAKING (safetensors)
   --lora <file>[:<strength>]  Merge an adapter into the weights it modifies and write a standalone model.
@@ -96,7 +101,7 @@ EXAMPLES
 // The tool prints its own progress; the engine's info lines would repeat it.
 Logs.MinLevel = LogLevel.Warning;
 string[] pickleExtensions = [".pt", ".pth", ".bin", ".th", ".ckpt"];
-string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha", "--stands-in-for"];
+string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha", "--stands-in-for", "--quant"];
 string[] flagOptions = ["--recursive", "--allow-partial", "--no-metadata", "--force", "--help", "-h", "--list-models", "--tokenizer-from-tiktoken"];
 
 List<string> positionals = [];
@@ -257,8 +262,11 @@ foreach (string spec in values.GetValueOrDefault("--lora") ?? [])
     }
     loras.Add((file, strength, loraAlpha ?? alpha, rs));
 }
+string? quantName = values.GetValueOrDefault("--quant")?.Last()?.ToLowerInvariant();
+if (quantName is not null && quantName is not ("nf4" or "nvfp4"))
+    return Usage($"--quant '{quantName}' is not supported; use nf4 or nvfp4.");
 bool mergeMode = recipe is not null || inputs.Count > 1 || castTo is not null || values.ContainsKey("--prefix") || values.ContainsKey("--drop")
-    || loras.Count > 0 || inputs.Any(IsShardSet);
+    || loras.Count > 0 || inputs.Any(IsShardSet) || quantName is not null;
 if (mergeMode)
 {
     foreach (string p in inputs)
@@ -584,7 +592,53 @@ try
                     return 1;
                 }
             }
-            bool Keep(string key) => keeps.Any(k => k.IsMatch(key));
+            HashSet<string> quantKeep = new(StringComparer.Ordinal);
+            if (quantName is not null)
+            {
+                List<KeyValuePair<string, Tensor>> quantized = [];
+                List<string> skipped = [];
+                int quantizedCount = 0;
+                foreach ((string key, Tensor tensor) in all)
+                {
+                    if (!IsQuantTarget(key, tensor, quantName))
+                    {
+                        // A 2D float weight that fails the shape rule (NVFP4 needs cols % 16 == 0) stays full precision; report it.
+                        if (key.EndsWith(".weight", StringComparison.Ordinal) && tensor.Shape.Rank == 2 && SafeTensorsMerger.IsCastable(tensor.DType))
+                            skipped.Add(key);
+                        quantized.Add(new(key, tensor));
+                        continue;
+                    }
+                    // The F32 copy only feeds the encoder; dispose it as soon as the companions exist.
+                    Tensor f32 = tensor.DType == DType.F32 ? tensor : tensor.CastTo(DType.F32);
+                    bool ownsF32 = !ReferenceEquals(f32, tensor);
+                    long rows = tensor.Shape[0], cols = tensor.Shape[1];
+                    List<KeyValuePair<string, Tensor>> companions;
+                    try
+                    {
+                        ReadOnlySpan<float> weights = f32.AsReadOnlySpan<float>();
+                        companions = quantName == "nf4"
+                            ? Nf4Codec.QuantizeToCompanions(key, weights, rows, cols, ComputeDtypeName(tensor.DType))
+                            : ModelOptNvfp4Codec.QuantizeToCompanions(key, weights, rows, cols);
+                    }
+                    finally
+                    {
+                        if (ownsF32)
+                            f32.Dispose();
+                    }
+                    foreach (KeyValuePair<string, Tensor> companion in companions)
+                    {
+                        ownedTensors.Add(companion.Value);
+                        quantKeep.Add(companion.Key);
+                    }
+                    quantized.AddRange(companions);
+                    quantizedCount++;
+                }
+                all = quantized;
+                Console.WriteLine($"Quantized {quantizedCount} weight(s) to {quantName}.");
+                if (skipped.Count > 0)
+                    Console.WriteLine($"Left {skipped.Count} 2D weight(s) unquantized (not eligible for {quantName}): {string.Join(", ", skipped.Take(10))}{(skipped.Count > 10 ? ", ..." : "")}");
+            }
+            bool Keep(string key) => keeps.Any(k => k.IsMatch(key)) || quantKeep.Contains(key);
             if (ResolveOutput(all.Select(kv => (castTo is { } c && SafeTensorsMerger.IsCastable(kv.Value.DType) && !Keep(kv.Key) ? c : kv.Value.DType,
                 kv.Value.Shape.ElementCount))) is not string named)
             {
@@ -595,7 +649,7 @@ try
             long inBytes = mergeSources.Sum(f => new FileInfo(f).Length);
             Console.WriteLine($"Writing {all.Count} tensors from {loaders.Count} file(s) ({Size(inBytes)})"
                 + (castTo is { } t ? $", cast to {t.Name}" : "") + $" to {Path.GetFileName(output)}...");
-            payloadSha = SafeTensorsMerger.Write(output, all, castTo, metadata, keeps.Count > 0 ? Keep : null);
+            payloadSha = SafeTensorsMerger.Write(output, all, castTo, metadata, keeps.Count > 0 || quantKeep.Count > 0 ? Keep : null);
             tensorCount = all.Count;
         }
         finally
@@ -763,6 +817,15 @@ static string Precision(IEnumerable<(DType DType, long Elements)> tensors)
         string other => other.ToLowerInvariant(),
     };
 }
+
+static bool IsQuantTarget(string key, Tensor tensor, string quantName) =>
+    key.EndsWith(".weight", StringComparison.Ordinal)
+    && tensor.Shape.Rank == 2 && tensor.Shape[0] > 0 && tensor.Shape[1] > 0
+    && SafeTensorsMerger.IsCastable(tensor.DType)
+    && (quantName == "nf4" || tensor.Shape[1] % 16 == 0);
+
+static string ComputeDtypeName(DType dtype) =>
+    dtype == DType.BF16 ? "bfloat16" : dtype == DType.F16 ? "float16" : "float32";
 
 static Regex Glob(string pattern) =>
     new("^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$", RegexOptions.CultureInvariant);
