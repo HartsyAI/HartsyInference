@@ -8,6 +8,25 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: teacher-forced text scoring.** `TextRequest.ForcedTokenIds` commits exactly the given tokens and
+  `TextRequest.ReturnTokenScores` reports each completion token's log-probability and the top token's, from the raw
+  logits (`TextResult.TokenScores`); CLI `--scores-out`, `--teacher-force` and `--prompt-file`. `tests/regression-ab.sh`
+  uses it on text cases: the head build scores the base build's greedy tokens, so a logit shift shows before it flips one.
+- **Added: attention shape table.** `benchmarks/attention/run_attention_table.sh` times every attention kernel arm per
+  shape in its own process and reports the kernel that actually ran, the error against a float64 oracle, peak VRAM and
+  throttling; `benchmarks/python-baseline/bench_attention.py` times torch's SDPA backends and Comfy Kitchen's INT8
+  attention on the same `attention_shapes.json`. They replace `SdpaGpuBenchmarks`, `FlashAttnGpuBenchmarks`,
+  `SageSdpaMicroBench` and `bench_pytorch_sdpa.py`.
+- **Added: attention baselines.** `benchmarks/attention/profile_attention_share.sh` measures attention's share of a denoise
+  step per case (synced profiler at S and 2S steps, so load, encoding and decode cancel); `bench_comfy_e2e.py` times
+  ComfyUI with and without `--use-ck-attention` against this engine on the same models; `tests/cudnn-probes.sh` runs the
+  cuDNN 9.24 SDPA capability probes (GQA, BF16, head dims, bias shapes, band-op causal, window, sinks, softcap), one
+  isolated process each, every one executed and compared with a float64 reference.
+- **Tests:** an `attention` regression tag (17 existing cases and 13 new: LoRA, LTX-2.5, MiniMax-H3, HunyuanVideo,
+  Wan 2.1 14B, SD3.5, AuraFlow, Qwen3, Gemma-2); `tests/gpu-suite.sh` runs a test project with CUDA and Vulkan pinned to
+  one card by name; four cuDNN SDPA tests the GPU sweep never ran are tagged `GpuIntegration`; `regression-ab.sh`
+  leaves SwarmUI running when the run is on a card it does not use.
+- **Fixed:** `hartsy text --help` stopped with a markup error at the `--reasoning-effort` description.
 - **Fixed: kohya LoRAs for models with no kohya table.** A `lora_unet_<module path>` file that no specific kohya layout
   claimed (Krea 2's musubi-tuner LoRAs) failed with "Could not detect LoRA format". Its modules now resolve against the
   target model's own weight names when the LoRA is applied, as ComfyUI resolves them, through the checkpoint-to-loaded-key

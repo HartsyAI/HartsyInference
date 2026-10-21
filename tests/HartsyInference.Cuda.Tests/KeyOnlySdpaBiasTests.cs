@@ -93,6 +93,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
 
     /// <summary>Wan-Animate-2's real bias — the <c>[hw, 2hw)</c> key band at <c>log_scale = -1.3</c> — broadcast
     /// from one row must match the duplicate form on the fused cuDNN path.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudnnFusedPath_KeyOnlyBias_MatchesTheDuplicate()
     {
@@ -120,6 +121,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
 
     /// <summary>The memory-bounded query-tiled path is what catches a masked call whose score matrix does not fit.
     /// It must apply the same bias — the rank-1 accumulate is a different mechanism from cuDNN's score modifier.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TiledPath_KeyOnlyBias_MatchesTheCudnnResult()
     {
@@ -221,6 +223,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
     /// <summary>A VRAM shortfall inside the fused path must never disable it permanently. The fallback it demotes
     /// to allocates the whole <c>[heads, Sq, Skv]</c> score matrix — strictly MORE memory than the allocation that
     /// just failed — so treating an OOM as structural guarantees the next call fails harder.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void OutOfVram_IsTransient_NotAStructuralKill()
     {

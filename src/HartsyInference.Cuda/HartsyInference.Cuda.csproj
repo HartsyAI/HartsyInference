@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Cuda.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.GpuBenchmarks" />
   </ItemGroup>
 
   <!-- PTX kernel files, loaded from disk at runtime (CudaBackend: BaseDirectory/Ptx). -->

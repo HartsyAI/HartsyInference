@@ -359,6 +359,7 @@ public sealed class TextService : ITextService, IDisposable
                 PrefillMilliseconds = outcome.PrefillMilliseconds,
                 DecodeMilliseconds = outcome.DecodeMilliseconds,
                 Reasoning = outcome.Reasoning,
+                TokenScores = outcome.TokenScores,
             };
         }
         catch (OperationCanceledException)
@@ -500,6 +501,8 @@ public sealed class TextService : ITextService, IDisposable
             try
             {
                 ImageData? image = LastImage(request);
+                if ((request.ForcedTokenIds is not null || request.ReturnTokenScores) && (image is not null || slot.SsmPipeline is not null))
+                    throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
                 outcome = image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
                     : RunText(slot, request, sink, diagnosticId, cancel);
@@ -524,7 +527,8 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>Whether a request may take a slot's scheduler. A prefix-cache request stays on the pipeline, since the scheduler keeps no retained sequences; an image goes to the vision path; and AlwaysFreeMemory unloads the slot after its request, which only the pipeline does.</summary>
     internal static bool ScheduledRouteAllowed(TextRequest request, bool hasImage) =>
-        request.PrefixCacheKey is not { Length: > 0 } && request.AlwaysFreeMemory != true && !hasImage;
+        request.PrefixCacheKey is not { Length: > 0 } && request.AlwaysFreeMemory != true && !hasImage
+        && request.ForcedTokenIds is null && !request.ReturnTokenScores;
 
     /// <summary>The continuous-batching scheduler for a model just loaded on <paramref name="slot"/>, or null when the knob is off or the model cannot batch its decode (the pipeline serves it then). Rounds take the device gate on <paramref name="gateOrdinals"/>; a host-backed model passes none, and its rounds run ungated.</summary>
     private DynamicBatchScheduler? CreateScheduler(TextDeviceSlot slot, IGenerationModel model, ILlmTokenizer tokenizer,
@@ -779,10 +783,10 @@ public sealed class TextService : ITextService, IDisposable
             if (FilterSink is null)
             {
                 return new GenOutcome(FinalText(Parser, calls.Count, result.Text), resolved, result.PromptTokens, result.TokenIds.Count, calls,
-                    result.PrefillMilliseconds, result.DecodeMilliseconds, Parser?.Result.Reasoning ?? "");
+                    result.PrefillMilliseconds, result.DecodeMilliseconds, Parser?.Result.Reasoning ?? "", ToLogProbs(result.TokenScores));
             }
             return new GenOutcome(FilterSink.Text, resolved, result.PromptTokens, result.TokenIds.Count, calls,
-                result.PrefillMilliseconds, result.DecodeMilliseconds, Parser?.Result.Reasoning ?? "");
+                result.PrefillMilliseconds, result.DecodeMilliseconds, Parser?.Result.Reasoning ?? "", ToLogProbs(result.TokenScores));
         }
 
         /// <summary>The outcome of a request the filter stopped: ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.</summary>
@@ -1926,6 +1930,8 @@ public sealed class TextService : ITextService, IDisposable
         GenerationRequest genRequest = new GenerationRequest
         {
             MaxTokens = request.MaxTokens > 0 ? request.MaxTokens : 4096,
+            ForcedTokenIds = request.ForcedTokenIds,
+            RecordTokenScores = request.ReturnTokenScores,
             Sampling = sampling,
             GraphDecode = request.GraphDecode,
             SpeculativeDecode = request.SpeculativeDecode,
@@ -2116,9 +2122,12 @@ public sealed class TextService : ITextService, IDisposable
         return backend;
     }
 
+    private static IReadOnlyList<TokenLogProb>? ToLogProbs(IReadOnlyList<TokenScore>? scores) =>
+        scores?.Select(s => new TokenLogProb(s.TokenId, s.LogProb, s.TopTokenId, s.TopLogProb)).ToList();
+
     /// <summary>The outcome of one generation: full text, stop reason, token counts, and the tool call a stream filter completed (null without one).</summary>
     private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens, IReadOnlyList<NativeToolCall>? ToolCalls = null,
-        double PrefillMilliseconds = 0, double DecodeMilliseconds = 0, string Reasoning = "")
+        double PrefillMilliseconds = 0, double DecodeMilliseconds = 0, string Reasoning = "", IReadOnlyList<TokenLogProb>? TokenScores = null)
     {
         /// <summary>The last tool call the generation completed, or null.</summary>
         public NativeToolCall? ToolCall => ToolCalls is { Count: > 0 } calls ? calls[^1] : null;

@@ -18,6 +18,10 @@
 # stream, and audio the digest of its decoded F32 samples (no SSIM, so a bounded run fails on any audio change).
 # `--expect identical` (a refactor) needs every digest to match; `--expect bounded:<ssim>` (a numerics change) needs
 # the minimum SSIM to clear the floor. Either way a step time more than --speed-tolerance percent slower fails the case.
+# A text case also gets a teacher-forced probe when both builds have `--scores-out`: the base build scores its own greedy
+# stream (seed 42) and the head build scores those same tokens, so a logit shift that has not yet flipped a token still
+# shows. `identical` needs every log-probability bit-equal; `bounded` needs mean and max |Δ log p| within --logp-floor
+# (top-token flips are reported there, not enforced).
 #
 # Arms alternate seed by seed (A s0, B s0, A s1, B s1, …) so thermal drift and page-cache state land on both equally.
 set -uo pipefail
@@ -45,6 +49,7 @@ NO_BASE=0
 FRESH=0
 SPEED_TOL=5
 TIMEOUT=1800
+LOGP_FLOOR="0.02,0.2"   # bounded text: mean and max |Δ log p| in nats over the forced tokens
 # Bumped whenever what a digest covers changes, so a cached run is regenerated instead of compared across formats.
 # 2: every frame of a video (and its audio), not just the first file found.
 DIGEST_FORMAT=2
@@ -66,6 +71,7 @@ while [ $# -gt 0 ]; do
         --fresh)    FRESH=1; shift ;;
         --speed-tolerance) SPEED_TOL="$2"; shift 2 ;;
         --timeout)  TIMEOUT="$2"; shift 2 ;;
+        --logp-floor) LOGP_FLOOR="$2"; shift 2 ;;
         --out)      OUT="$2"; shift 2 ;;
         -h|--help)  sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -124,7 +130,8 @@ build_arm() {
     else
         log "building $label from $src ..."
         rm -rf "$dir"
-        if ! dotnet build "$src/src/HartsyInference.Cli" -c Release -f net10.0 -o "$dir" --nologo -v q >"$OUT/build-$label.log" 2>&1; then
+        # No reused MSBuild nodes: they outlive the build holding every fd it inherited, so a caller's GPU lock stays taken.
+        if ! dotnet build "$src/src/HartsyInference.Cli" -c Release -f net10.0 -o "$dir" --nologo -v q -nodeReuse:false >"$OUT/build-$label.log" 2>&1; then
             tail -30 "$OUT/build-$label.log" >&2
             die "build of $label failed"
         fi
@@ -148,11 +155,22 @@ knob_label() { printf '%s' "$*" | md5sum | cut -c1-6; }
 [ ${#BASE_SET[@]} -gt 0 ] && BASE_LABEL="$BASE_LABEL+set-$(knob_label "${BASE_SET[@]}")"
 
 # ── the card must be ours for the duration ───────────────────────────────────────────────────────────────────
+# SwarmUI is stopped only when it holds this card, or holds none and this is the card it generates on (the 4090):
+# stopping it for a run on another card would restart it for nothing.
 SWARM_WAS_UP=0
-systemctl --user is-active --quiet swarmui.service 2>/dev/null && SWARM_WAS_UP=1
+SWARM_STOP=0
+if systemctl --user is-active --quiet swarmui.service 2>/dev/null; then
+    swarm_pid="$(systemctl --user show -p MainPID --value swarmui.service 2>/dev/null)"
+    swarm_cards="$(nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader | awk -F', ' -v p="$swarm_pid" '$2 == p { print $1 }' | sort -u)"
+    if printf '%s\n' "$swarm_cards" | grep -qx "$GPU_UUID" || { [ -z "$swarm_cards" ] && [[ "$GPU_LABEL" == *4090* ]]; }; then
+        SWARM_WAS_UP=1; SWARM_STOP=1
+    else
+        log "swarmui.service is not on $GPU_LABEL; leaving it running"
+    fi
+fi
 restore() { [ "$SWARM_WAS_UP" = 1 ] && systemctl --user start swarmui.service >/dev/null 2>&1; }
 trap restore EXIT INT TERM
-if [ "$SWARM_WAS_UP" = 1 ]; then
+if [ "$SWARM_STOP" = 1 ]; then
     log "stopping swarmui.service for the run (restored on exit)"
     systemctl --user stop swarmui.service
     sleep 5
@@ -245,6 +263,38 @@ run_one() {
     return 0
 }
 
+# ── teacher-forced text probe ──────────────────────────────────────────────────────────────────────────────────
+has_scores() { grep -qa -- '--scores-out' "$1/HartsyInference.Cli.dll"; }
+# run_scores <build> <label> <ckpt> <positional> <args> <backend> <out.tsv> [extra CLI args...]; a clean commit's file is reused.
+run_scores() {
+    local build="$1" label="$2" ckpt="$3" positional="$4" args="$5" backend="$6" out="$7"
+    shift 7
+    if [ "$FRESH" = 0 ] && [[ "$label" != *+dirty* ]] && [ -s "$out" ]; then return 0; fi
+    mkdir -p "$(dirname "$out")"
+    local sel="$backend"
+    [ "$backend" = cuda ] && sel="cuda:$GPU_INDEX"
+    # shellcheck disable=SC2086
+    timeout "$TIMEOUT" dotnet "$build/HartsyInference.Cli.dll" text "$positional" --model-path "$(ckpt_path "$ckpt")" -b "$sel" \
+        -o "$(dirname "$out")/out" --seed "$SEED0" $args "$@" --scores-out "$out" >"${out%.tsv}.log" 2>&1 </dev/null
+}
+# compare_scores <base.tsv> <head.tsv> -> "mean max flips n" (Δ in nats over matching token positions)
+compare_scores() {
+    python3 - "$1" "$2" <<'PY'
+import sys
+def rows(p):
+    with open(p) as f:
+        next(f)
+        return [l.rstrip("\n").split("\t") for l in f if l.strip()]
+a, b = rows(sys.argv[1]), rows(sys.argv[2])
+n = min(len(a), len(b))
+if n == 0 or len(a) != len(b) or any(a[i][1] != b[i][1] for i in range(n)):
+    print("nan nan nan 0"); sys.exit()
+d = [abs(float(a[i][2]) - float(b[i][2])) for i in range(n)]
+flips = sum(1 for i in range(n) if a[i][3] != b[i][3])
+print(f"{sum(d) / n:.6g} {max(d):.6g} {flips} {n}")
+PY
+}
+
 # ── the run ──────────────────────────────────────────────────────────────────────────────────────────────────
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 REPORT_DIR="$OUT/reports/$STAMP-${BASE_LABEL//\//_}-vs-${HEAD_LABEL//\//_}"
@@ -262,7 +312,7 @@ pct() {   # pct <base> <head> -> signed percent, or -
 
 for backend in ${BACKENDS//,/ }; do
     # A backend other than cuda runs the cases tagged with its name; cuda runs the whole selection.
-    backend_tag=""; [ "$backend" != cuda ] && backend_tag="$backend"
+    backend_tag=""; [ "$backend" != cuda ] && backend_tag="${backend%%:*}"
     while IFS=$'\t' read -r id ckpt spec; do
         [ -z "$id" ] && continue
         if [ -n "$FILTER" ] && [[ ",$FILTER," != *",$id,"* ]]; then continue; fi
@@ -319,6 +369,31 @@ for backend in ${BACKENDS//,/ }; do
                     if [ "$b_digest" != "$h_digest" ]; then diff -u "$b_art" "$h_art" >"$REPORT_DIR/pairs/${id}_${backend}_s${seed}.diff" 2>/dev/null; fi ;;
             esac
         done
+        logp_fail=""
+        if [ "$cmd" = text ] && [ "$NO_BASE" = 0 ] && [ "$h_crashes" -eq 0 ] && [ "$b_crashes" -eq 0 ]; then
+            if [ -z "${SCORES_OK+x}" ]; then SCORES_OK=0; has_scores "$BASE_BUILD" && has_scores "$HEAD_BUILD" && SCORES_OK=1; fi
+            if [ "$SCORES_OK" = 1 ]; then
+                b_tf="$OUT/runs/$BASE_LABEL/$backend/$id/tf/scores.tsv"; h_tf="$OUT/runs/$HEAD_LABEL/$backend/$id/tf-on-$BASE_LABEL/scores.tsv"
+                run_scores "$BASE_BUILD" "$BASE_LABEL" "$ckpt" "$positional" "$args" "$backend" "$b_tf" "${BASE_SET[@]}"
+                [ -s "$b_tf" ] && run_scores "$HEAD_BUILD" "$HEAD_LABEL" "$ckpt" "$positional" "$args" "$backend" "$h_tf" \
+                    --teacher-force "$b_tf" "${HEAD_SET[@]}"
+                if [ -s "$b_tf" ] && [ -s "$h_tf" ]; then
+                    read -r lp_mean lp_max lp_flips lp_n < <(compare_scores "$b_tf" "$h_tf")
+                    notes+="logp Δ mean $lp_mean max $lp_max, top-token flips $lp_flips/$lp_n; "
+                    if [ "$lp_mean" = nan ]; then logp_fail="forced token streams differ"
+                    elif [ -z "$SSIM_FLOOR" ]; then
+                        awk -v m="$lp_max" -v f="$lp_flips" 'BEGIN { exit !(m > 0 || f > 0) }' && logp_fail="log-probabilities moved"
+                    else
+                        awk -v a="$lp_mean" -v b="$lp_max" -v fl="$LOGP_FLOOR" 'BEGIN { split(fl, t, ","); exit !(a > t[1] || b > t[2]) }' \
+                            && logp_fail="log-probabilities beyond $LOGP_FLOOR"
+                    fi
+                else
+                    notes+="teacher-forced probe did not run (see tf/*.log); "
+                fi
+            else
+                notes+="teacher-forced probe skipped (a build lacks --scores-out); "
+            fi
+        fi
         h_wall_m="$(printf '%s' "$hw" | median)"; h_step_m="$(printf '%s' "$hs" | median)"; h_peak_m="$(printf '%s' "$hv" | median)"
         if [ "$NO_BASE" = 1 ]; then
             [ "$h_crashes" -gt 0 ] && verdict="FAIL crash"
@@ -361,6 +436,7 @@ for backend in ${BACKENDS//,/ }; do
                 notes+="faster by ${speed#-}%; "
             fi
         fi
+        [ -n "$logp_fail" ] && [ "$verdict" = PASS ] && { verdict="FAIL"; notes+="$logp_fail; "; }
         [ "$verdict" != PASS ] && [ "$verdict" != CRASH-both ] && FAILURES=$((FAILURES + 1))
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$id" "$backend" "$verdict" "$b_wall_m" "$h_wall_m" "$d_wall" "$b_step_m" "$h_step_m" "$d_step" \

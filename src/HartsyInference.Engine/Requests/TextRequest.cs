@@ -13,6 +13,15 @@ public sealed record TextRequest
     /// <see cref="Messages"/>, which is then not read. Null (the default) renders <see cref="Messages"/> as usual.</summary>
     public IReadOnlyList<int>? RawTokenIds { get; init; }
 
+    /// <summary>Teacher forcing, for numerics checks: the completion is exactly these token ids, whatever the model would pick, and
+    /// <see cref="TextResult.TokenScores"/> reports each one's log-probability. Decodes eagerly on the single-request route; refused on
+    /// the tensor-parallel, state-space and vision routes. Null samples normally.</summary>
+    public IReadOnlyList<int>? ForcedTokenIds { get; init; }
+
+    /// <summary>Report each completion token's log-probability and the top token's in <see cref="TextResult.TokenScores"/>. Decodes
+    /// eagerly on the single-request route, so a scored run measures the plain prefill and decode kernels.</summary>
+    public bool ReturnTokenScores { get; init; }
+
     /// <summary>System prompt applied ahead of <see cref="Messages"/>; null/empty for none.</summary>
     public string? SystemPrompt { get; init; }
 

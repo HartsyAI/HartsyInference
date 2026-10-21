@@ -32,4 +32,11 @@ public sealed record TextResult
 
     /// <summary>Decode wall time in milliseconds (first token onward); 0 when the path did not time it.</summary>
     public double DecodeMilliseconds { get; init; }
+
+    /// <summary>One entry per completion token when <see cref="TextRequest.ReturnTokenScores"/> or <see cref="TextRequest.ForcedTokenIds"/>
+    /// asked for them; null otherwise.</summary>
+    public IReadOnlyList<TokenLogProb>? TokenScores { get; init; }
 }
+
+/// <summary>A completion token's natural-log probability under the raw logits, with the most likely token at that position.</summary>
+public readonly record struct TokenLogProb(int TokenId, float LogProb, int TopTokenId, float TopLogProb);
