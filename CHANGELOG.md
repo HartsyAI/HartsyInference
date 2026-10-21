@@ -66,6 +66,9 @@ stable release will require. Dates are UTC.
   Stable Audio, ACE-Step 1.5 and others), the T5, CLIP, BERT and Qwen-VL encoders, DINO, SAM2, Swin, RT-DETR and the
   Hunyuan3D, TRELLIS and TripoSR blocks attend through `AttentionLayer`. Output is bit-identical; SAM2 and Hiera no longer
   leak their attention operands, and BERT's head reshapes run on the device instead of the host.
+- **Fixed: ACE-Step v1 on the CPU backend.** The Comfy all-in-one checkpoint is bf16 and the CPU kernels are F32-only, so
+  generation stopped at the DiT's first bf16 bias. On the CPU backend the engine now loads the checkpoint as F32 (about
+  15 GB of weights, 22 GB peak RSS for a 2 s clip); other backends keep reading the bf16 weights.
 
 ## alpha.384
 

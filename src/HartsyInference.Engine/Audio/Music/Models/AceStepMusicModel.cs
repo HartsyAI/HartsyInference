@@ -507,9 +507,11 @@ internal static class AceStepMusicModel
         string lyricVocabPath = AudioModelRoot.SharedFile("acestep_v1_lyric_tokenizer.json");
         await AudioFileFetcher.EnsureAsync(V1LyricVocabUrl, lyricVocabPath, cancel).ConfigureAwait(false);
 
+        // The CPU kernels are F32-only; GPU backends read the bf16 checkpoint as it is.
+        bool castToF32 = context.Backend.Device.IsCpu;
         (Dictionary<string, Tensor> ditWeights, Dictionary<string, Tensor> dcaeWeights,
             Dictionary<string, Tensor> vocoderWeights, Dictionary<string, Tensor> textWeights,
-            SafeTensorsLoader loader) = AceStepCheckpointConverter.LoadV1AllInOne(mainPath);
+            SafeTensorsLoader loader) = AceStepCheckpointConverter.LoadV1AllInOne(mainPath, castToF32);
 
         AceStepConfig config = new AceStepConfig();
         AceStepDit dit = new AceStepDit(config);
@@ -616,7 +618,7 @@ internal static class AceStepMusicModel
             }
         }
 
-        // MusicDcaeDecoder / AdaMosHiFiGanV1 are not IDisposable — their tensors belong to the loader.
+        // MusicDcaeDecoder / AdaMosHiFiGanV1 are not IDisposable: their tensors are loader views (F32 copies on CPU).
         return new MusicRunner(44100, Synth,
             pipeline as IDisposable, dit as IDisposable, textEncoder as IDisposable, loader);
     }
