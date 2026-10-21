@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.Moonshine;  // RotaryEmbedding (interleaved x
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.F5Tts;
@@ -38,6 +39,7 @@ internal sealed unsafe class F5DitBlock
     private Tensor? _oW, _oB;
     private Tensor? _ffW1, _ffB1;                    // [ff_inner, dim] / [ff_inner]
     private Tensor? _ffW2, _ffB2;                    // [dim, ff_inner] / [dim]
+    private AttentionLayer? _attn;
 
     public F5DitBlock(F5TtsConfig cfg) { _cfg = cfg; }
 
@@ -57,6 +59,12 @@ internal sealed unsafe class F5DitBlock
         _ffB1 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.0.0.bias"]);
         _ffW2 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.2.weight"]);
         _ffB2 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.2.bias"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _cfg.Heads, KvHeads = _cfg.Heads, HeadDim = _cfg.HeadDim, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _oW, OutputBias = _oB,
+            });
     }
 
     /// <summary><paramref name="siluTimeEmb"/> is the <c>[1, dim]</c> SiLU'd timestep embedding (computed once per step by the caller); <paramref name="ropeCos"/>/<paramref name="ropeSin"/> are <c>[maxPos, headDim]</c> GPU-ready tables.</summary>
@@ -66,8 +74,6 @@ internal sealed unsafe class F5DitBlock
     public Tensor Forward(IBackend backend, Tensor x, Tensor siluTimeEmb, int t, Tensor ropeCos, Tensor ropeSin)
     {
         int dim = _cfg.Dim;
-        int heads = _cfg.Heads;
-        int headDim = _cfg.HeadDim;
         int ffInner = _cfg.FfInner;
         if (Prof) { backend.Sync(); _swBlk.Restart(); }
 
@@ -91,51 +97,21 @@ internal sealed unsafe class F5DitBlock
         backend.AffineBroadcastLastDim(modded, normed, scaleMsa, shiftMsa);
         normed.Dispose();
 
-        // 3. Self-attention with RoPE on Q, K. The projections write straight into [1, T, heads, headDim]
-        //    tensors (shape is metadata to Linear), so RoPE applies in place with no reshape, and the
-        //    head transpose for SDPA runs on-device via Permute0213.
-        TensorShape packed = new(1, t, heads, headDim);
-        Tensor q = new(packed, DType.F32);
-        Tensor k = new(packed, DType.F32);
-        Tensor v = new(packed, DType.F32);
+        // 3. Self-attention with RoPE on Q, K, on-device (WanRopeInterleaved has a CUDA kernel; ApplyRopeInterleaved does not).
+        //    The ropes are the layer's own QueryRotation/KeyRotation, so q/k stay [1, T, heads, headDim].
         if (Prof) { backend.Sync(); _swQkv.Restart(); }
-        backend.Linear(q, modded, _qW!, _qB);
-        backend.Linear(k, modded, _kW!, _kB);
-        backend.Linear(v, modded, _vW!, _vB);
+        (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, modded, releaseInput: true);
         if (Prof) { backend.Sync(); _tQkv += _swQkv.Elapsed.TotalMilliseconds; }
-        modded.Dispose();
 
-        // On-device interleaved RoPE (WanRopeInterleaved has a CUDA kernel; ApplyRopeInterleaved does not).
-        // q/k are [1, t, heads, headDim] — flat layout == [t, heads, headDim], which the kernel indexes directly.
-        backend.WanRopeInterleaved(q, ropeCos, ropeSin, t, heads, headDim);
-        backend.WanRopeInterleaved(k, ropeCos, ropeSin, t, heads, headDim);
-
-        TensorShape mh = new(1, heads, t, headDim);
-        Tensor qMh = new(mh, DType.F32);
-        Tensor kMh = new(mh, DType.F32);
-        Tensor vMh = new(mh, DType.F32);
-        backend.Permute0213(qMh, q, t, heads, headDim);
-        backend.Permute0213(kMh, k, t, heads, headDim);
-        backend.Permute0213(vMh, v, t, heads, headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
-        // SDPA (no mask, non-causal MHA): routes to the TF32 tensor-core GEMM path — ~12× faster than the
+        // No mask, non-causal MHA through the Dense route: the TF32 tensor-core GEMM path — ~12× faster than the
         // monolithic online-softmax flash kernel at DiT lengths (7.1→0.58 ms/call at [1,16,454,64], maxDiff
         // 6e-5), and auto-tiles the query axis if T ever grows large enough to threaten the score matrix.
-        float scale = 1f / MathF.Sqrt(headDim);
-        Tensor attnOut = new(mh, DType.F32);
+        QkRotation rope = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, t);
         if (Prof) { backend.Sync(); _swAttn.Restart(); }
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
+        Tensor merged = _attn.Attend(backend, q, k, v, x.Shape, new AttentionCallContext { QueryRotation = rope, KeyRotation = rope });
         if (Prof) { backend.Sync(); _tAttn += _swAttn.Elapsed.TotalMilliseconds; }
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        // [1, heads, T, headDim] → [1, T, heads*headDim] (inverse transpose, still on-device).
-        Tensor merged = new(x.Shape, DType.F32);
-        backend.Permute0213(merged, attnOut, heads, t, headDim);
-        attnOut.Dispose();
-
-        Tensor attnProj = WhisperOps.ProjectLinear(backend, merged, _oW!, _oB, 1, t, dim, dim);
-        merged.Dispose();
+        Tensor attnProj = _attn.ProjectOutput(backend, merged);
 
         // 4. Gated residual: x = x + gate_msa * attn_proj
         Tensor afterAttn = new(x.Shape, DType.F32);

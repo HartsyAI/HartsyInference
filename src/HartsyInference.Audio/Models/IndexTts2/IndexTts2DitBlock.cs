@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.DiT;
 using HartsyInference.Audio.Models.Moonshine;   // RotaryEmbedding (interleaved convention)
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.IndexTts2;
@@ -32,6 +33,7 @@ internal sealed unsafe class IndexTts2DitBlock
     private Tensor? _wo;
     private Tensor? _w1, _w2, _w3;
     private Tensor? _skipInW, _skipInB;
+    private AttentionLayer? _attn;
 
     public IndexTts2DitBlock(int hidden, int heads, int ffnDim)
     {
@@ -59,6 +61,9 @@ internal sealed unsafe class IndexTts2DitBlock
         _wk = _wqkvOwned.SliceRows(_hidden, _hidden);
         _wv = _wqkvOwned.SliceRows(2 * _hidden, _hidden);
         _wo = WhisperOps.EnsureF32(w[$"{prefix}.attention.wo.weight"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32 },
+            new AttentionLayerWeights { Query = _wq, Key = _wk, Value = _wv, Output = _wo });
 
         _w1 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward.w1.weight"]);
         _w2 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward.w2.weight"]);
@@ -108,38 +113,11 @@ internal sealed unsafe class IndexTts2DitBlock
         return output;
     }
 
+    // The fused wqkv is read as three row views (_wq/_wk/_wv); the rope tables are the interleaved-pair layout c[2i] == c[2i+1].
     private Tensor Attention(IBackend backend, Tensor normed, int t, Tensor ropeCos, Tensor ropeSin)
     {
-        TensorShape packed = new(1, t, _heads, _headDim);
-        Tensor q = new(packed, DType.F32);
-        Tensor k = new(packed, DType.F32);
-        Tensor v = new(packed, DType.F32);
-        backend.Linear(q, normed, _wq!, null);
-        backend.Linear(k, normed, _wk!, null);
-        backend.Linear(v, normed, _wv!, null);
-
-        backend.WanRopeInterleaved(q, ropeCos, ropeSin, t, _heads, _headDim);
-        backend.WanRopeInterleaved(k, ropeCos, ropeSin, t, _heads, _headDim);
-
-        TensorShape mh = new(1, _heads, t, _headDim);
-        Tensor qMh = new(mh, DType.F32), kMh = new(mh, DType.F32), vMh = new(mh, DType.F32);
-        backend.Permute0213(qMh, q, t, _heads, _headDim);
-        backend.Permute0213(kMh, k, t, _heads, _headDim);
-        backend.Permute0213(vMh, v, t, _heads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
-        float scale = 1f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor merged = new(new TensorShape(1, t, _hidden), DType.F32);
-        backend.Permute0213(merged, attnOut, _heads, t, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = WhisperOps.ProjectLinear(backend, merged, _wo!, null, 1, t, _hidden, _hidden);
-        merged.Dispose();
-        return projected;
+        QkRotation rope = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, t);
+        return _attn!.Forward(backend, normed, normed, new AttentionCallContext { QueryRotation = rope, KeyRotation = rope });
     }
 
     private Tensor Ffn(IBackend backend, Tensor normed, int t)

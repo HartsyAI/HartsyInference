@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -34,6 +35,7 @@ public sealed unsafe class MoshiDepformer : IDisposable
     private readonly int _layers;
     private readonly Tensor?[,] _selfIn;     // per-set QKV proj [3072,1024]
     private readonly Tensor?[,] _selfOut;    // per-set out proj [1024,1024]
+    private readonly AttentionLayer?[,] _attn;  // one per (layer, set): the set's fused qkv and out projections
     private readonly Tensor?[,] _gateInGate; // gate half of gating.linear_in [2048,1024]
     private readonly Tensor?[,] _gateInUp;   // up half [2048,1024]
     private readonly Tensor?[,] _gateOut;    // [1024,2048]
@@ -47,7 +49,7 @@ public sealed unsafe class MoshiDepformer : IDisposable
     internal MoshiDepformer(int layers)
     {
         _layers = layers;
-        _selfIn = new Tensor?[layers, Sets]; _selfOut = new Tensor?[layers, Sets];
+        _selfIn = new Tensor?[layers, Sets]; _selfOut = new Tensor?[layers, Sets]; _attn = new AttentionLayer?[layers, Sets];
         _gateInGate = new Tensor?[layers, Sets]; _gateInUp = new Tensor?[layers, Sets]; _gateOut = new Tensor?[layers, Sets];
         _norm1 = new Tensor?[layers]; _norm2 = new Tensor?[layers];
     }
@@ -84,6 +86,12 @@ public sealed unsafe class MoshiDepformer : IDisposable
             {
                 _selfIn[l, s] = SliceRows(inAll, s * 3 * Dim, 3 * Dim, Dim);
                 _selfOut[l, s] = SliceRows(outAll, s * Dim, Dim, Dim);
+                _attn[l, s] = new AttentionLayer(
+                    new AttentionLayerConfig
+                    {
+                        Heads = Heads, KvHeads = Heads, HeadDim = HeadDim, Projection = AttentionProjection.FusedSlice, ComputeDType = DType.F32,
+                    },
+                    new AttentionLayerWeights { Qkv = _selfIn[l, s], Output = _selfOut[l, s] });
                 // Pre-split the fused gate|up projection ([2·GateInner, Dim]) so the SwiGLU runs entirely on the
                 // device (Silu + Mul) instead of a per-call host loop that drains the GPU for every codebook.
                 Tensor gin = WhisperOps.EnsureF32(w[$"{p}.gating.{s}.linear_in.weight"]);
@@ -141,28 +149,21 @@ public sealed unsafe class MoshiDepformer : IDisposable
         backend.RmsNorm(pre, x, _norm1[layer]!, RmsEps);
 
         // Packed QKV via the pre-sliced per-set in_proj [3·dim, dim] (stable → device-cacheable).
-        Tensor qkv = WhisperOps.ProjectLinear(backend, pre, _selfIn[layer, set]!, null, 1, 1, Dim, 3 * Dim);
-        pre.Dispose();
+        AttentionLayer attention = _attn[layer, set]!;
+        (Tensor q, Tensor k, Tensor v) = attention.ProjectSelf(backend, pre, releaseInput: true);
 
-        // Slice q/k/v and reshape to heads entirely on-device (SliceLastDim + Permute0213), append this codebook's
-        // K/V into the device cache, and FlashAttention over the [0..cb] prefix — no host pointer copies, no D2H.
-        Tensor q1 = new(sh, DType.F32); backend.SliceLastDim(q1, qkv, 0);
-        Tensor k1 = new(sh, DType.F32); backend.SliceLastDim(k1, qkv, Dim);
-        Tensor v1 = new(sh, DType.F32); backend.SliceLastDim(v1, qkv, 2 * Dim);
-        qkv.Dispose();
-        Tensor qMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(qMh, q1, 1, Heads, HeadDim); q1.Dispose();
-        Tensor kMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(kMh, k1, 1, Heads, HeadDim); k1.Dispose();
-        Tensor vMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(vMh, v1, 1, Heads, HeadDim); v1.Dispose();
+        // Reshape to heads entirely on-device (Permute0213), append this codebook's K/V into the device cache, and
+        // FlashAttention over the [0..cb] prefix — no host pointer copies, no D2H.
+        Tensor qMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(qMh, q, 1, Heads, HeadDim); q.Dispose();
+        Tensor kMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(kMh, k, 1, Heads, HeadDim); k.Dispose();
+        Tensor vMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32); backend.Permute0213(vMh, v, 1, Heads, HeadDim); v.Dispose();
         depthCache.AppendStep(backend, layer, kMh, vMh); kMh.Dispose(); vMh.Dispose();
 
-        Tensor attn = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32);
-        backend.FlashAttention(attn, qMh, depthCache.KeyPrefix(layer), depthCache.ValuePrefix(layer),
-            kvLen: cb + 1, kvGroup: 1, causal: true, qOffset: cb, scale: 1f / MathF.Sqrt(HeadDim));
-        qMh.Dispose();
-        Tensor attnFlat = new(sh, DType.F32); backend.Permute0213(attnFlat, attn, Heads, 1, HeadDim); attn.Dispose();
+        Tensor attn = attention.AttendCachedHeadMajor(backend, qMh, depthCache.KeyPrefix(layer), depthCache.ValuePrefix(layer),
+            new AttentionCacheView(cb + 1, cb, Causal: true));
+        Tensor attnFlat = attention.MergeHeads(backend, attn, sh);
 
-        Tensor o = WhisperOps.ProjectLinear(backend, attnFlat, _selfOut[layer, set]!, null, 1, 1, Dim, Dim);
-        attnFlat.Dispose();
+        Tensor o = attention.ProjectOutput(backend, attnFlat);
         Tensor afterAttn = new(sh, DType.F32);
         backend.Add(afterAttn, x, o); o.Dispose(); x.Dispose();
 

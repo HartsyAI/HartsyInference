@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Auk;
@@ -35,23 +37,14 @@ public static class AukOps
         return result;
     }
 
-    /// <summary>Non-causal unmasked attention over q/k/v <c>[1, n, heads, headDim]</c>; returns <c>[1, n, heads*headDim]</c> and leaves the inputs to the caller.</summary>
+    private static readonly ConcurrentDictionary<(int Heads, int HeadDim), AttentionLayer> Layers = new();
+
+    /// <summary>Non-causal unmasked attention over q/k/v <c>[1, n, heads, headDim]</c>, which it takes over and disposes; returns <c>[1, n, heads*headDim]</c>.</summary>
     public static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int n, int heads, int headDim)
     {
-        TensorShape mh = new(1, heads, n, headDim);
-        Tensor qMh = new(mh, DType.F32);
-        Tensor kMh = new(mh, DType.F32);
-        Tensor vMh = new(mh, DType.F32);
-        backend.Permute0213(qMh, q, n, heads, headDim);
-        backend.Permute0213(kMh, k, n, heads, headDim);
-        backend.Permute0213(vMh, v, n, heads, headDim);
-        Tensor attn = new(mh, DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1f / MathF.Sqrt(headDim));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-        Tensor merged = new(new TensorShape(1, n, heads * headDim), DType.F32);
-        backend.Permute0213(merged, attn, heads, n, headDim);
-        attn.Dispose();
-        return merged;
+        AttentionLayer layer = Layers.GetOrAdd((heads, headDim), static key => new AttentionLayer(
+            new AttentionLayerConfig { Heads = key.Heads, KvHeads = key.Heads, HeadDim = key.HeadDim, ComputeDType = DType.F32 }));
+        return layer.Attend(backend, q, k, v, new TensorShape(1, n, heads * headDim), default);
     }
 
     /// <summary>AdaLayerNorm_Final: <c>LN(x) * (1 + scale) + shift</c> with chunk order (scale, shift) from <c>Linear(silu(t))</c>.</summary>

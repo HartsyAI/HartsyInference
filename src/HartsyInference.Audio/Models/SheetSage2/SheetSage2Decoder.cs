@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -282,6 +283,10 @@ internal sealed unsafe class SheetSage2DecoderLayer(SheetSage2Config config)
 {
     private readonly SheetSage2Config _config = config;
 
+    // Operator stage only: the projections, permutes and caches stay here, on scratch the layer never allocates.
+    private readonly AttentionLayer _selfAttention = new(new AttentionLayerConfig { Heads = config.NumHeads, KvHeads = config.NumHeads, HeadDim = config.HeadDim });
+    private readonly AttentionLayer _crossAttention = new(new AttentionLayerConfig { Heads = config.NumHeads, KvHeads = config.NumHeads, HeadDim = config.HeadDim, AllowF16 = true });
+
     private Tensor? _selfQWeight, _selfQBias, _selfKWeight, _selfKBias, _selfVWeight, _selfVBias, _selfOutWeight, _selfOutBias;
     private Tensor? _selfNormWeight, _selfNormBias;
     private Tensor? _crossQWeight, _crossQBias, _crossKWeight, _crossKBias, _crossVWeight, _crossVBias, _crossOutWeight, _crossOutBias;
@@ -341,7 +346,6 @@ internal sealed unsafe class SheetSage2DecoderLayer(SheetSage2Config config)
     {
         int heads = _config.NumHeads;
         int headDim = _config.HeadDim;
-        float scale = _config.AttentionScale;
 
         backend.Linear(scratch.Query, scratch.Hidden, _selfQWeight!, _selfQBias);
         backend.Linear(scratch.Key, scratch.Hidden, _selfKWeight!, _selfKBias);
@@ -353,15 +357,15 @@ internal sealed unsafe class SheetSage2DecoderLayer(SheetSage2Config config)
         backend.KvCacheAppend(selfValue, scratch.ValueHeads, position);
         if (chunk == 1)
         {
-            backend.FlashAttention(scratch.Attention, scratch.QueryHeads, selfKey, selfValue,
-                kvLen: position + 1, kvGroup: 1, causal: true, qOffset: position, scale);
+            _selfAttention.AttendCachedHeadMajor(backend, scratch.QueryHeads, selfKey, selfValue,
+                new AttentionCacheView(position + 1, position, Causal: true), consume: OperandOwnership.None, output: scratch.Attention);
         }
         else
         {
             // A prefill starts from an empty cache, so the keys it just wrote are the whole prefix and the
             // over-allocated cache never has to be sliced back out.
-            backend.ScaledDotProductAttention(scratch.Attention, scratch.QueryHeads, scratch.KeyHeads,
-                scratch.ValueHeads, scratch.CausalMask, scale);
+            _selfAttention.AttendHeadMajorOperands(backend, scratch.QueryHeads, scratch.KeyHeads, scratch.ValueHeads,
+                new AttentionCallContext { Bias = scratch.CausalMask }, OperandOwnership.None, scratch.Attention);
         }
         backend.Permute0213(scratch.AttentionFlat, scratch.Attention, heads, chunk, headDim);
         backend.Linear(scratch.Projected, scratch.AttentionFlat, _selfOutWeight!, _selfOutBias);
@@ -372,8 +376,8 @@ internal sealed unsafe class SheetSage2DecoderLayer(SheetSage2Config config)
         backend.Permute0213(scratch.QueryHeads, scratch.Query, chunk, heads, headDim);
         // Encoder-shaped work at thousands of memory tokens, where this repo's decode-tuned flash kernel is far
         // slower; F16 is in range on this memory (scores ~1.4e3, |V| ~22, both measured against the encoder's own).
-        backend.ScaledDotProductAttention(scratch.Attention, scratch.QueryHeads, crossKey, crossValue,
-            mask: null, scale, allowF16: true);
+        _crossAttention.AttendHeadMajorOperands(backend, scratch.QueryHeads, crossKey, crossValue, default,
+            OperandOwnership.None, scratch.Attention);
         backend.Permute0213(scratch.AttentionFlat, scratch.Attention, heads, chunk, headDim);
         backend.Linear(scratch.Projected, scratch.AttentionFlat, _crossOutWeight!, _crossOutBias);
         backend.Add(scratch.ResidualSum, scratch.Normed, scratch.Projected);

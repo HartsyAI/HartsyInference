@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
@@ -310,13 +311,14 @@ internal sealed unsafe class CausalResnet1D
 /// <summary>Matcha/diffusers BasicTransformerBlock (self-attention only): pre-LN self-attn (no qkv bias, out proj has bias, scale 1/√head_dim) + residual, then pre-LN GELU feed-forward + residual. Operates on <c>[1, T, C]</c>.</summary>
 internal sealed unsafe class MatchaTransformerBlock
 {
-    private readonly int _ch, _heads, _headDim, _inner;
+    private readonly int _ch, _heads, _headDim;
     private Tensor? _norm1W, _norm1B, _qW, _kW, _vW, _oW, _oB;
     private Tensor? _norm3W, _norm3B, _ff0W, _ff0B, _ff2W, _ff2B;
+    private AttentionLayer? _attn;
 
     public MatchaTransformerBlock(int ch, int heads, int headDim)
     {
-        _ch = ch; _heads = heads; _headDim = headDim; _inner = heads * headDim;
+        _ch = ch; _heads = heads; _headDim = headDim;
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
@@ -328,6 +330,10 @@ internal sealed unsafe class MatchaTransformerBlock
         _vW = WhisperOps.EnsureF32(w[$"{prefix}.attn1.to_v.weight"]);
         _oW = WhisperOps.EnsureF32(w[$"{prefix}.attn1.to_out.0.weight"]);
         _oB = WhisperOps.EnsureF32(w[$"{prefix}.attn1.to_out.0.bias"]);
+        // OutDim: the attention is heads·headDim wide against the model width.
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, OutDim = _ch, ComputeDType = DType.F32 },
+            new AttentionLayerWeights { Query = _qW, Key = _kW, Value = _vW, Output = _oW, OutputBias = _oB });
         _norm3W = WhisperOps.EnsureF32(w[$"{prefix}.norm3.weight"]);
         _norm3B = WhisperOps.EnsureF32(w[$"{prefix}.norm3.bias"]);
         _ff0W = WhisperOps.EnsureF32(w[$"{prefix}.ff.net.0.proj.weight"]);
@@ -342,26 +348,9 @@ internal sealed unsafe class MatchaTransformerBlock
         // Self-attention sub-layer.
         Tensor normed = new(seq.Shape, DType.F32);
         backend.LayerNorm(normed, seq, _norm1W!, _norm1B!, 1e-5f);
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _qW!, null, 1, t, c, _inner);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _kW!, null, 1, t, c, _inner);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _vW!, null, 1, t, c, _inner);
-        normed.Dispose();
-
-        // [1, T, inner] → [1, H, T, d] for SDPA (contiguous inner = H·d, so this is a plain 0213 permute).
-        Tensor qH = new(new TensorShape(1, _heads, t, _headDim), DType.F32); backend.Permute0213(qH, q, t, _heads, _headDim);
-        Tensor kH = new(new TensorShape(1, _heads, t, _headDim), DType.F32); backend.Permute0213(kH, k, t, _heads, _headDim);
-        Tensor vH = new(new TensorShape(1, _heads, t, _headDim), DType.F32); backend.Permute0213(vH, v, t, _heads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor attn = new(new TensorShape(1, _heads, t, _headDim), DType.F32);
         // attnMask null = today's exact non-streaming behavior (full, unmasked attention) — additive, not a
         // rewrite; a real mask (MaskBuilder.BuildChunkCausalMask) opts into the chunk-causal training mode.
-        backend.ScaledDotProductAttention(attn, qH, kH, vH, attnMask, 1f / MathF.Sqrt(_headDim));
-        qH.Dispose(); kH.Dispose(); vH.Dispose();
-        Tensor merged = new(new TensorShape(1, t, _inner), DType.F32);   // [1, H, T, d] → [1, T, inner]
-        backend.Permute0213(merged, attn, _heads, t, _headDim);
-        attn.Dispose();
-        Tensor o = WhisperOps.ProjectLinear(backend, merged, _oW!, _oB, 1, t, _inner, c);
-        merged.Dispose();
+        Tensor o = _attn!.Forward(backend, normed, normed, new AttentionCallContext { Bias = attnMask, ReleaseInputs = true });
         Tensor x = new(seq.Shape, DType.F32);
         backend.Add(x, seq, o); o.Dispose();
 

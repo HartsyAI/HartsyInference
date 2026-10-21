@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -24,6 +25,9 @@ public sealed unsafe class MoshiTransformer : IDisposable
 {
     public const int Dim = 2048, Heads = 16, HeadDim = 128, GateInner = 5632;
     private const float RmsEps = 1e-5f, LnEps = 1e-5f, RopeTheta = 10_000f;
+
+    // Operator stage only: the projections, RoPE and head glue stay on the host as before.
+    private static readonly AttentionLayer Attn = new(new AttentionLayerConfig { Heads = Heads, KvHeads = Heads, HeadDim = HeadDim });
 
     private readonly int _layers;
     private readonly Tensor?[] _selfIn, _selfOut, _crossQ, _crossKV, _crossOut, _gateIn, _gateOut;
@@ -199,10 +203,8 @@ public sealed unsafe class MoshiTransformer : IDisposable
         cache.AppendStep(backend, layer, kMh, vMh);   // writes at offset == cache.CurrentLength == pos
         kMh.Dispose(); vMh.Dispose();
 
-        Tensor attn = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32);
-        backend.FlashAttention(attn, qMh, cache.KeyPrefix(layer), cache.ValuePrefix(layer),
-            kvLen: pos + 1, kvGroup: 1, causal: false, qOffset: 0, scale: 1f / MathF.Sqrt(HeadDim));
-        qMh.Dispose();
+        Tensor attn = Attn.AttendCachedHeadMajor(backend, qMh, cache.KeyPrefix(layer), cache.ValuePrefix(layer),
+            new AttentionCacheView(pos + 1, 0, Causal: false));
 
         Tensor flat = FlattenHeads(attn, 1);
         attn.Dispose();
@@ -282,9 +284,7 @@ public sealed unsafe class MoshiTransformer : IDisposable
         Tensor qMh = new(new TensorShape(1, Heads, tq, HeadDim), DType.F32);
         backend.Permute0213(qMh, q, tq, Heads, HeadDim);
 
-        Tensor attn = new(new TensorShape(1, Heads, tq, HeadDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, 1f / MathF.Sqrt(HeadDim));
-        qMh.Dispose();
+        Tensor attn = Attn.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask }, OperandOwnership.Query);
 
         Tensor flat = FlattenHeads(attn, tq);
         attn.Dispose();

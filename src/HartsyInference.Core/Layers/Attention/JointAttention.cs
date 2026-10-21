@@ -122,7 +122,6 @@ public sealed class JointAttention
             throw new NotSupportedException($"A batched joint attention splits F32 rows; got {act} at batch {batch}.");
 
         StreamTensors q = default, k = default, v = default;
-        Tensor? jq = null, jk = null, jv = null, flat = null;
         Span<int> rows = stackalloc int[MaxStreams];
         try
         {
@@ -142,6 +141,71 @@ public sealed class JointAttention
                 _streams[rotated].RotateQk(backend, q[rotated], k[rotated], in rotation);
             }
 
+            AttentionCallContext joint = context.Joint;
+            AttendJoint(backend, ref q, ref k, ref v, rows, batch, attended, in joint);
+        }
+        catch
+        {
+            for (int i = 0; i < n; i++)
+            {
+                q[i]?.Dispose();
+                k[i]?.Dispose();
+                v[i]?.Dispose();
+                attended[i]?.Dispose();
+                attended[i] = null;
+            }
+            throw;
+        }
+    }
+
+    /// <summary>The concatenation, attention and split over streams already projected, normed and rotated by the model:
+    /// token-major <paramref name="q"/>, <paramref name="k"/> and <paramref name="v"/> of each stream, <c>[B, S_i, heads, D]</c>, in
+    /// stream index order, all taken over and disposed, also when it throws. <paramref name="attended"/>[i] receives stream i's rows
+    /// as in <see cref="Attend"/>.</summary>
+    public void AttendProjected(IBackend backend, ReadOnlySpan<Tensor> q, ReadOnlySpan<Tensor> k, ReadOnlySpan<Tensor> v,
+        Span<Tensor?> attended, in AttentionCallContext joint)
+    {
+        int n = _streams.Length;
+        if (q.Length != n || k.Length != n || v.Length != n || attended.Length != n)
+            throw new ArgumentException($"A joint attention over {n} streams takes {n} each of q, k, v and outputs.");
+        int batch = (int)q[0].Shape[0];
+        Span<int> rows = stackalloc int[MaxStreams];
+        for (int i = 0; i < n; i++)
+        {
+            if (q[i].Shape.Rank < 3 || q[i].Shape[0] != batch || k[i].Shape[0] != batch || v[i].Shape[0] != batch
+                || k[i].Shape[1] != q[i].Shape[1] || v[i].Shape[1] != q[i].Shape[1])
+                throw new ArgumentException($"Joint stream operands are [B, S, ..] with one batch size and length per stream; got {q[i].Shape}, {k[i].Shape}, {v[i].Shape}.");
+            rows[i] = (int)q[i].Shape[1];
+        }
+        if (batch > 1 && (_streams[0].Config.ComputeDType ?? q[0].DType) != DType.F32)
+            throw new NotSupportedException($"A batched joint attention splits F32 rows; got {q[0].DType} at batch {batch}.");
+        StreamTensors qs = default, ks = default, vs = default;
+        for (int i = 0; i < n; i++) (qs[i], ks[i], vs[i]) = (q[i], k[i], v[i]);
+        try
+        {
+            AttendJoint(backend, ref qs, ref ks, ref vs, rows, batch, attended, in joint);
+        }
+        catch
+        {
+            for (int i = 0; i < n; i++)
+            {
+                qs[i]?.Dispose();
+                ks[i]?.Dispose();
+                vs[i]?.Dispose();
+                attended[i]?.Dispose();
+                attended[i] = null;
+            }
+            throw;
+        }
+    }
+
+    private void AttendJoint(IBackend backend, ref StreamTensors q, ref StreamTensors k, ref StreamTensors v, ReadOnlySpan<int> rows,
+        int batch, Span<Tensor?> attended, in AttentionCallContext joint)
+    {
+        int n = _streams.Length;
+        Tensor? jq = null, jk = null, jv = null, flat = null;
+        try
+        {
             int total = 0;
             for (int i = 0; i < n; i++) total += rows[i];
             int inner = _config.Heads * _config.HeadDim;
@@ -150,7 +214,6 @@ public sealed class JointAttention
             jk = ConcatInOrder(backend, ref k, n, jointShape);
             jv = ConcatInOrder(backend, ref v, n, jointShape);
 
-            AttentionCallContext joint = context.Joint;
             flat = (batch == 1 ? _joint : _jointBatched).AttendFlat(backend, jq, jk, jv, jointShape, in joint);
             int offset = 0;
             foreach (int stream in _config.ConcatOrder)
@@ -163,14 +226,6 @@ public sealed class JointAttention
         }
         catch
         {
-            for (int i = 0; i < n; i++)
-            {
-                q[i]?.Dispose();
-                k[i]?.Dispose();
-                v[i]?.Dispose();
-                attended[i]?.Dispose();
-                attended[i] = null;
-            }
             jq?.Dispose();
             jk?.Dispose();
             jv?.Dispose();

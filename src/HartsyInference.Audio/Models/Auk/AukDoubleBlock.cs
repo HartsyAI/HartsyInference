@@ -47,7 +47,6 @@ public sealed class AukDoubleBlock(AukConfig config)
         Tensor v = Join(backend, joint, vx, vc);
         qx.Dispose(); qc.Dispose(); kx.Dispose(); kc.Dispose(); vx.Dispose(); vc.Dispose();
         Tensor merged = AukOps.Attend(backend, q, k, v, total, heads, headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor mergedX = new(new TensorShape(1, n, dim), DType.F32);
         Tensor mergedC = new(new TensorShape(1, nt, dim), DType.F32);

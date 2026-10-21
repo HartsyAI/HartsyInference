@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Kokoro;
@@ -166,6 +167,7 @@ internal sealed unsafe class AlbertLayer
     private Tensor? _ffnUpW, _ffnUpB;     // 768 → 2048
     private Tensor? _ffnDownW, _ffnDownB; // 2048 → 768
     private Tensor? _fullLnW, _fullLnB;
+    private AttentionLayer? _attn;
 
     public AlbertLayer(KokoroConfig.PlBertConfig cfg) { _cfg = cfg; }
 
@@ -187,6 +189,16 @@ internal sealed unsafe class AlbertLayer
         _ffnDownB = WhisperOps.EnsureF32(w[$"{prefix}.ffn_output.bias"]);
         _fullLnW = WhisperOps.EnsureF32(w[$"{prefix}.full_layer_layer_norm.weight"]);
         _fullLnB = WhisperOps.EnsureF32(w[$"{prefix}.full_layer_layer_norm.bias"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _cfg.NumAttentionHeads, KvHeads = _cfg.NumAttentionHeads, HeadDim = _cfg.HiddenSize / _cfg.NumAttentionHeads,
+                ComputeDType = DType.F32,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _oW, OutputBias = _oB,
+            });
     }
 
     /// <summary>Forward pass. <paramref name="x"/> is <c>[1, T, hidden]</c> in F32.
@@ -194,36 +206,9 @@ internal sealed unsafe class AlbertLayer
     public Tensor Forward(IBackend backend, Tensor x, int t)
     {
         int hidden = _cfg.HiddenSize;
-        int heads = _cfg.NumAttentionHeads;
-        int headDim = hidden / heads;
         int ffnInner = _cfg.IntermediateSize;
-        float scale = 1f / MathF.Sqrt(headDim);
 
-        // ── Self-attention ───────────────────────────────────────────────
-        Tensor q = WhisperOps.ProjectLinear(backend, x, _qW!, _qB, 1, t, hidden, hidden);
-        Tensor k = WhisperOps.ProjectLinear(backend, x, _kW!, _kB, 1, t, hidden, hidden);
-        Tensor v = WhisperOps.ProjectLinear(backend, x, _vW!, _vB, 1, t, hidden, hidden);
-
-        // [1, T, H·D] → [1, H, T, D] is permute(0,2,1,3) of the [1, T, H, D] view; the inverse is the same
-        // permute with the roles of T and H swapped. Both stay on device.
-        TensorShape mhShape = new(1, heads, t, headDim);
-        Tensor qMh = new(mhShape, DType.F32);
-        Tensor kMh = new(mhShape, DType.F32);
-        Tensor vMh = new(mhShape, DType.F32);
-        backend.Permute0213(qMh, q, t, heads, headDim); q.Dispose();
-        backend.Permute0213(kMh, k, t, heads, headDim); k.Dispose();
-        backend.Permute0213(vMh, v, t, heads, headDim); v.Dispose();
-
-        Tensor attnMh = new(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask: null, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor attnFlat = new(new TensorShape(1, t, hidden), DType.F32);
-        backend.Permute0213(attnFlat, attnMh, heads, t, headDim);
-        attnMh.Dispose();
-
-        Tensor attnProj = WhisperOps.ProjectLinear(backend, attnFlat, _oW!, _oB, 1, t, hidden, hidden);
-        attnFlat.Dispose();
+        Tensor attnProj = _attn!.Forward(backend, x, x, default);
 
         // Residual + post-attention LayerNorm.
         Tensor sum1 = new(x.Shape, DType.F32);

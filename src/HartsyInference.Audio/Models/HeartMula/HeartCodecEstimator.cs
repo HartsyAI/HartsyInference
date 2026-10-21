@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
@@ -283,6 +284,7 @@ public sealed unsafe class HeartCodecEstimator
         private Tensor? _attnNorm, _mlpNorm, _ssTable;
         private Tensor? _qW, _kW, _vW, _oW;
         private Tensor? _gateW, _upW, _downW;
+        private AttentionLayer? _attn;
 
         public Block(int dim, int heads, int headDim) { _dim = dim; _heads = heads; _headDim = headDim; }
 
@@ -295,6 +297,10 @@ public sealed unsafe class HeartCodecEstimator
             _kW = WhisperOps.EnsureF32(w[$"{p}.attn.k_proj.weight"]);
             _vW = WhisperOps.EnsureF32(w[$"{p}.attn.v_proj.weight"]);
             _oW = WhisperOps.EnsureF32(w[$"{p}.attn.o_proj.weight"]);
+            // Dense keeps the Sage-INT8/cuDNN engines for D in {64,128}; allowF16 is asserted as before, but Q/K are not normed here, so nothing bounds it.
+            _attn = new AttentionLayer(
+                new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32, AllowF16 = true },
+                new AttentionLayerWeights { Query = _qW, Key = _kW, Value = _vW, Output = _oW });
             _gateW = WhisperOps.EnsureF32(w[$"{p}.mlp.gate.weight"]);
             _upW = WhisperOps.EnsureF32(w[$"{p}.mlp.up.weight"]);
             _downW = WhisperOps.EnsureF32(w[$"{p}.mlp.down.weight"]);
@@ -363,36 +369,9 @@ public sealed unsafe class HeartCodecEstimator
 
         private Tensor Attention(IBackend backend, Tensor x, int b, int t, Tensor ropeCos, Tensor ropeSin)
         {
-            int d = _dim, h = _heads, hd = _headDim;
-            // Projections write straight into [b,t,heads,headDim] (shape is metadata to Linear).
-            TensorShape packed = new(b, t, h, hd);
-            Tensor q = new(packed, DType.F32), k = new(packed, DType.F32), v = new(packed, DType.F32);
-            backend.Linear(q, x, _qW!, null);
-            backend.Linear(k, x, _kW!, null);
-            backend.Linear(v, x, _vW!, null);
-            // Interleaved (GPT-J) RoPE; flat q is [b*t, heads, headDim] so seqLen = b*t.
-            backend.WanRopeInterleaved(q, ropeCos, ropeSin, b * t, h, hd);
-            backend.WanRopeInterleaved(k, ropeCos, ropeSin, b * t, h, hd);
-            TensorShape mh = new(b, h, t, hd);
-            Tensor qMh = new(mh, DType.F32), kMh = new(mh, DType.F32), vMh = new(mh, DType.F32);
-            backend.Permute0213(qMh, q, t, h, hd);
-            backend.Permute0213(kMh, k, t, h, hd);
-            backend.Permute0213(vMh, v, t, h, hd);
-            q.Dispose(); k.Dispose(); v.Dispose();
-            // Bidirectional (no mask), scale 1/sqrt(head_dim). ScaledDotProductAttention instead of the LM
-            // FlashAttention API: same [b,h,t,hd] contract, but it dispatches to the Sage-INT8/cuDNN fused
-            // engines for D∈{64,128} — this full-sequence attention was the codec's single largest GPU cost
-            // (300 monolithic lm_flash_attn_f32 calls × ~5.7 ms on a 10 s song, 2026-07-25 nsys). allowF16
-            // is safe here: Q/K are RMS-normed (bounded scores), the same gate the LM prefill path uses.
-            Tensor attn = new(mh, DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1f / MathF.Sqrt(hd), allowF16: true);
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-            Tensor merged = new(new TensorShape(b, t, d), DType.F32);
-            backend.Permute0213(merged, attn, h, t, hd);
-            attn.Dispose();
-            Tensor proj = WhisperOps.ProjectLinear(backend, merged, _oW!, null, b, t, d, d);
-            merged.Dispose();
-            return proj;
+            // Interleaved (GPT-J) RoPE; flat q is [b*t, heads, headDim] so the tables cover b*t rows.
+            QkRotation rope = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, b * t);
+            return _attn!.Forward(backend, x, x, new AttentionCallContext { QueryRotation = rope, KeyRotation = rope });
         }
 
         private Tensor Mlp(IBackend backend, Tensor x, int b, int t)

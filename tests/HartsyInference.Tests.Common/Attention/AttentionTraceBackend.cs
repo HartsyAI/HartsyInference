@@ -80,6 +80,19 @@ public sealed class AttentionTraceBackend : IBackend
     public void Attention(in AttentionCall call)
     {
         Calls.Add(call);
+        // The Flash routes re-enter their legacy entry, as the real backends do, so the call lands in FlashCalls.
+        if (call.Route == AttentionRoute.Flash)
+        {
+            FlashAttention(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage, call.ValidKvLength, call.KvGroup,
+                call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Logits.Softcap, call.Logits.Sinks, call.Mask.LegacySlidingWindow);
+            return;
+        }
+        if (call.Route == AttentionRoute.FlashDevice)
+        {
+            FlashAttentionDev(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage, call.ValidKvLength, call.KvGroup,
+                call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
+            return;
+        }
         Ops.Add($"Attention {call.Route} heads={call.Heads}/{call.KvHeads} bounded={call.Numerics.LegacyAssertedBounded}");
         if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
@@ -93,6 +106,10 @@ public sealed class AttentionTraceBackend : IBackend
     public void Add(Tensor output, Tensor a, Tensor b) => Ops.Add("Add");
 
     public void Gelu(Tensor output, Tensor input) => Ops.Add("Gelu");
+
+    public void Silu(Tensor output, Tensor input) => Ops.Add("Silu");
+
+    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0) => Ops.Add("ApplyRopeInterleaved");
 
     public void KvCacheAppend(Tensor buffer, Tensor newKv, int offset) => Ops.Add($"KvCacheAppend @{offset} {newKv.Shape}");
 
@@ -154,7 +171,6 @@ public sealed class AttentionTraceBackend : IBackend
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias, int stride, int padding, int dilation, int groups, int outputPadding) => throw Unused();
     public void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps) => throw Unused();
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps) => throw Unused();
-    public void Silu(Tensor output, Tensor input) => throw Unused();
     public void Tanh(Tensor output, Tensor input) => throw Unused();
     public void Elu(Tensor output, Tensor input, float alpha) => throw Unused();
     public void LeakyRelu(Tensor output, Tensor input, float slope) => throw Unused();
