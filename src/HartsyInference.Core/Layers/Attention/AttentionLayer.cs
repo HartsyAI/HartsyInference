@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Layers.Attention;
@@ -564,9 +565,9 @@ public sealed partial class AttentionLayer
             probe.Observe("k", k);
             probe.Observe("v", v);
         }
-        bool tokenMajor = TokenMajorServed(backend, batch, in context);
         if (_config.QkNorm == AttentionQkNorm.FullWidth)
-            return AttendFullWidth(backend, q, k, v, sq, skv, act, flatShape, tokenMajor, in context);
+            return AttendFullWidth(backend, q, k, v, sq, skv, act, flatShape, TokenMajorServed(backend, batch, sq, skv, act, in context),
+                in context);
 
         if (_config.QkNorm != AttentionQkNorm.None)
         {
@@ -594,6 +595,7 @@ public sealed partial class AttentionLayer
         }
         bool ownsKv = context.KvCapture is null;
         context.KvCapture?.Capture(k, v);
+        bool tokenMajor = TokenMajorServed(backend, batch, sq, skv, act, in context);
         try
         {
             return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, flatShape, ownsKv, in context)
@@ -627,12 +629,19 @@ public sealed partial class AttentionLayer
     }
 
     /// <summary>The token-major entry runs for one batch item when the config names one, its switch is on, no host rotation
-    /// needs the head-major layout, and the backend serves it.</summary>
-    private bool TokenMajorServed(IBackend backend, int batch, in AttentionCallContext context) =>
+    /// needs the head-major layout, <see cref="AttentionLayerConfig.HeadMajorForSage"/> does not keep the call head-major, and the
+    /// backend serves it.</summary>
+    private bool TokenMajorServed(IBackend backend, int batch, int sq, int skv, DType act, in AttentionCallContext context) =>
         _config.TokenMajorRoute != AttentionRoute.Dense && batch == 1 && context.HeadMajorRotation is null
         && (_config.TokenMajorKnob?.Value ?? true)
+        && !(_config.HeadMajorForSage && SageServesHeadMajor(sq, skv, act, context.Bias))
         && (_config.TokenMajorRoute == AttentionRoute.TokenMajorGqa
             ? backend.SupportsTokenMajorGqaAttention : backend.SupportsTokenMajorAttention);
+
+    /// <summary>The CUDA head-major Sage row's admission (S.1), less the kernel check only the backend can make.</summary>
+    private bool SageServesHeadMajor(int sq, int skv, DType act, Tensor? bias) =>
+        act == DType.F16 && bias is null && _config.HeadDim is 64 or 128 && EngineKnobs.SageAttn.Value
+        && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value;
 
     private static Tensor Have(Tensor? norm) =>
         norm ?? throw new InvalidOperationException("This attention layer's weights have no norm for that projection.");

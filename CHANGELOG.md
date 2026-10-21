@@ -16,6 +16,12 @@ stable release will require. Dates are UTC.
   decode, the graph-decode step, MLA), the tensor-parallel ranks, Looped, Qwen3.5, Mllama cross-attention and Cosmos AR
   append to and read their KV caches through `AttentionLayer`'s KV stage; `IKvCache` is an `IAttentionKvSource`. Output is
   bit-identical.
+- **Faster: Z-Image Turbo, the SD1.5/SDXL UNet's self-attention and Krea 2's text-fusion refiner attend token-major.**
+  Attention reads Q, K and V where their projections wrote them, so each call drops three permutes in and one out, on
+  backends that serve the token-major entry. A call the head-major entry would run through SageAttention (F16, head dim
+  64 or 128, unmasked, both sequences at least `numerics.sageF16MinSkv`, as Z-Image at 2048²) stays head-major, since
+  the token-major entry has no Sage kernel. Z-Image Base, SDXL's batched CFG forward and the UNet's cross-attention keep
+  the head-major layout.
 
 ## alpha.385
 
