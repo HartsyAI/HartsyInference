@@ -859,6 +859,16 @@ static Dictionary<string, string> ReadSourceMetadata(string path)
 
 static int WriteNf4FromFp8(string input, string output, bool force)
 {
+    // Resolve symlinks on both sides: writing over the source would truncate it while it is still being read.
+    string inputFull = new FileInfo(input).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? Path.GetFullPath(input);
+    string outputFull = File.Exists(output)
+        ? new FileInfo(output).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? Path.GetFullPath(output)
+        : Path.GetFullPath(output);
+    if (string.Equals(inputFull, outputFull, StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine($"Output is the input checkpoint: {output}. Choose a different output path.");
+        return 1;
+    }
     if (File.Exists(output) && !force)
     {
         Console.Error.WriteLine($"Output already exists: {output}. Add --force to replace it.");

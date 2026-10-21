@@ -249,45 +249,62 @@ public static unsafe class Nf4Codec
         json.CopyTo(headerBytes, 0);
         Array.Fill(headerBytes, (byte)' ', json.Length, headerBytes.Length - json.Length);
 
-        using FileStream file = new(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        void Emit(ReadOnlySpan<byte> bytes)
+        // Stream into a sibling .partial file: the final path only ever holds a complete, length-checked checkpoint.
+        string partial = outputPath + ".partial";
+        try
         {
-            file.Write(bytes);
-            hash.AppendData(bytes);
+            string sha;
+            using (FileStream file = new(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+            using (IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            {
+                void Emit(ReadOnlySpan<byte> bytes)
+                {
+                    file.Write(bytes);
+                    hash.AppendData(bytes);
+                }
+
+                Span<byte> length = stackalloc byte[sizeof(long)];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(length, headerBytes.Length);
+                Emit(length);
+                Emit(headerBytes);
+
+                foreach (HfQuantWeight w in plain)
+                {
+                    using Tensor view = source.Borrow(w.Name);
+                    ReadOnlySpan<byte> raw = view.AsReadOnlySpan<byte>();
+                    if (raw.Length != Tensor.ComputeByteSize(w.Shape, w.StoredDType))
+                        throw new InvalidDataException($"'{w.Name}' holds {raw.Length} bytes; its shape {w.Shape} needs {Tensor.ComputeByteSize(w.Shape, w.StoredDType)}.");
+                    Emit(raw);
+                }
+
+                int done = 0;
+                foreach (HfQuantWeight w in quantized)
+                {
+                    long rows = w.Shape[0], cols = w.Shape[1];
+                    using Tensor f32 = source.DequantizeF32(w.Name);
+                    (byte[] packed, float[] absmax) = Quantize(f32.AsReadOnlySpan<float>());
+                    Emit(packed);
+                    Emit(MemoryMarshal.AsBytes(absmax.AsSpan()));
+                    Emit(MemoryMarshal.AsBytes(Nf4Lut.AsSpan()));
+                    Emit(Encoding.ASCII.GetBytes(StateText(rows, cols)));
+                    if (++done % 500 == 0) progress?.Invoke($"{done}/{quantized.Count} FP8 weights written");
+                }
+                file.Flush();
+                long expected = 8 + headerBytes.Length + offset;
+                if (file.Length != expected)
+                    throw new InvalidDataException($"Wrote {file.Length} bytes to '{partial}'; the header declares {expected}.");
+                sha = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            }
+
+            File.Move(partial, outputPath, overwrite: true);
+            return sha;
         }
-
-        Span<byte> length = stackalloc byte[sizeof(long)];
-        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(length, headerBytes.Length);
-        Emit(length);
-        Emit(headerBytes);
-
-        foreach (HfQuantWeight w in plain)
+        catch
         {
-            using Tensor view = source.Borrow(w.Name);
-            ReadOnlySpan<byte> raw = view.AsReadOnlySpan<byte>();
-            if (raw.Length != Tensor.ComputeByteSize(w.Shape, w.StoredDType))
-                throw new InvalidDataException($"'{w.Name}' holds {raw.Length} bytes; its shape {w.Shape} needs {Tensor.ComputeByteSize(w.Shape, w.StoredDType)}.");
-            Emit(raw);
+            // The stream is already closed here; remove the incomplete file so nothing mistakes it for a checkpoint.
+            File.Delete(partial);
+            throw;
         }
-
-        int done = 0;
-        foreach (HfQuantWeight w in quantized)
-        {
-            long rows = w.Shape[0], cols = w.Shape[1];
-            using Tensor f32 = source.DequantizeF32(w.Name);
-            (byte[] packed, float[] absmax) = Quantize(f32.AsReadOnlySpan<float>());
-            Emit(packed);
-            Emit(MemoryMarshal.AsBytes(absmax.AsSpan()));
-            Emit(MemoryMarshal.AsBytes(Nf4Lut.AsSpan()));
-            Emit(Encoding.ASCII.GetBytes(StateText(rows, cols)));
-            if (++done % 500 == 0) progress?.Invoke($"{done}/{quantized.Count} FP8 weights written");
-        }
-        file.Flush();
-        long expected = 8 + headerBytes.Length + offset;
-        if (file.Length != expected)
-            throw new InvalidDataException($"Wrote {file.Length} bytes to '{outputPath}'; the header declares {expected}.");
-        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
     private static string StateText(long rows, long cols) =>
