@@ -13,6 +13,9 @@ stable release will require. Dates are UTC.
   now). T5's attention scale now defaults to 1.0 rather than falling back to 1/√d_kv when a preset leaves it unset.
 - **Fixed: Qwen3-VL position embeddings (LLM vision).** The learned table was resized half-pixel; HF and llama.cpp resize it
   align-corners. Images that reach the stored grid size are unchanged.
+- **Faster: cuDNN fused attention takes every head dim that is a multiple of 8 from 32 to 256** (was 64 to 128 and 256)
+  on its dense and token-major rows. SD1.5's 40- and 160-wide heads leave the materialized path; the cuDNN 9.24 probes ran
+  each of these head dims correct on SM 86 and SM 89. LLM causal prefill keeps its 64 floor.
 
 ## alpha.384
 

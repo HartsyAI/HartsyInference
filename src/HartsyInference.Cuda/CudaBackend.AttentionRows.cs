@@ -129,7 +129,7 @@ public sealed partial class CudaBackend
                 }),
             new DelegateAttentionRow(Cap("cudnn.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, HM) with
                 {
-                    MinHeadDim = 64, MaxHeadDim = 256, Masks = AttentionMaskSupport.HeadSharedBias,
+                    MinHeadDim = CudnnSdpa.MinHeadDim, MaxHeadDim = CudnnSdpa.MaxHeadDim, Masks = AttentionMaskSupport.HeadSharedBias,
                     UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16,
                 }, "S.3",
                 (in AttentionCall c) => CudnnMaskCompatible(c.Mask.Bias, c.Batch, c.QueryTokens, c.KeyTokens)
@@ -146,7 +146,8 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => { SageAttentionInt8(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("cudnn.f32.sat", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
-                    MinHeadDim = 64, MaxHeadDim = 256, Masks = AttentionMaskSupport.HeadSharedBias, UsesQueryKey = AttentionFormats.F16,
+                    MinHeadDim = CudnnSdpa.MinHeadDim, MaxHeadDim = CudnnSdpa.MaxHeadDim, Masks = AttentionMaskSupport.HeadSharedBias,
+                    UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Saturates = true, Lowering = AttentionLowering.Cast,
                 }, "S.5",
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnMaskCompatible(c.Mask.Bias, c.Batch, c.QueryTokens, c.KeyTokens)
@@ -244,7 +245,8 @@ public sealed partial class CudaBackend
             new DelegateAttentionRow(Cap("cudnn.tokenmajor", E, AttentionDTypes.F16 | AttentionDTypes.F32,
                     AttentionDTypes.F16 | AttentionDTypes.F32, TM) with
                 {
-                    MinHeadDim = 64, MaxHeadDim = 256, Masks = AttentionMaskSupport.HeadSharedBias, UsesQueryKey = AttentionFormats.F16,
+                    MinHeadDim = CudnnSdpa.MinHeadDim, MaxHeadDim = CudnnSdpa.MaxHeadDim, Masks = AttentionMaskSupport.HeadSharedBias,
+                    UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Saturates = true,
                 }, "M.2",
                 (in AttentionCall c) => !(SageTokenMajorDetour && SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage,
@@ -364,6 +366,7 @@ public sealed partial class CudaBackend
                         c.Mask.LegacySlidingWindow, c.Logits.AlibiSlopes);
                     return true;
                 }),
+            // Causal prefill keeps 64: LLM prefill below that head dim has not been measured on cuDNN.
             new DelegateAttentionRow(Cap("cudnn.causal", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 256, Gqa = true, Masks = CW, MinQueryTokens = 2, UsesQueryKey = AttentionFormats.F16,

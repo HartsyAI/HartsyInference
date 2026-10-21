@@ -37,7 +37,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private volatile bool _cudnnSdpaDead;   // set if cuDNN INIT throws once — never retry, fall back for the session
 
     /// <summary>Per-head-dim failure/backoff state — replaces a plain permanent-dead set.</summary>
-    /// <remarks>A structural failure (e.g. D=256 on a build whose fused engine tops out at 128 — <see
+    /// <remarks>A structural failure (e.g. a head dim the installed cuDNN refuses — <see
     /// cref="CudnnStatusException.IsPermanent"/>) disables that dim forever, same as before; a transient failure
     /// (e.g. the host-RAM allocation error that motivated this — see the plan notes referenced from <see
     /// cref="TryCudnnSdpa"/>) gets bounded backoff instead, since the resource pressure that caused it is typically
@@ -7955,8 +7955,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 return false;
             }
             // A failure AFTER a working init: classify by cuDNN's own status category
-            // (CudnnStatusException.IsPermanent) when we can — structural failures (e.g. D=256 on a build
-            // whose fused engine tops out at 128) are genuinely never going to succeed and stay permanently
+            // (CudnnStatusException.IsPermanent) when we can — structural failures (e.g. a head dim the
+            // installed cuDNN refuses) are genuinely never going to succeed and stay permanently
             // disabled for this dim, same as before. Everything else, including the exact class of failure
             // that motivated this (a transient host-RAM allocation error), gets bounded backoff instead of
             // a permanent kill: the resource pressure that causes it is typically external to this process
