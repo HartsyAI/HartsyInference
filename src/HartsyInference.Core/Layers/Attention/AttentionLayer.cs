@@ -77,8 +77,14 @@ public sealed class AttentionLayer
                     nameof(context));
         }
 
+        if (context.ReleaseQueryAfterProjection && (context.ReleaseInputs || ReferenceEquals(qInput, kvInput)
+            || _config.Projection != AttentionProjection.PerWeight || _config.Gate != AttentionGate.None || context.ValueRowScale is not null))
+            throw new ArgumentException("Releasing the query after its projection needs a distinct K/V input, per-weight projections, "
+                + "no gate, no value row-scale and no ReleaseInputs.", nameof(context));
         TensorShape flatShape = WithLastDim(qInput.Shape, _config.InnerDim);
-        (Tensor q, Tensor k, Tensor v, Tensor? gate) = Project(backend, w, qInput, kvInput, act, kvAct, context.ReleaseInputs, in context);
+        (Tensor q, Tensor k, Tensor v, Tensor? gate) = context.ReleaseQueryAfterProjection
+            ? ProjectReleasingQuery(backend, w, qInput, kvInput, act, kvAct)
+            : Project(backend, w, qInput, kvInput, act, kvAct, context.ReleaseInputs, in context);
         Tensor flat;
         try
         {
@@ -251,6 +257,20 @@ public sealed class AttentionLayer
         {
             qkv.Dispose();
         }
+    }
+
+    /// <summary>Q first, its input disposed, then K and V: a cross-attention's query input never coexists with K and V.</summary>
+    private (Tensor Q, Tensor K, Tensor V, Tensor? Gate) ProjectReleasingQuery(IBackend backend, AttentionLayerWeights w, Tensor qInput,
+        Tensor kvInput, DType act, DType kvAct)
+    {
+        Tensor q = new(ProjectedShape(qInput.Shape, _config.Heads), act);
+        backend.Linear(q, qInput, w.Query!, w.QueryBias);
+        qInput.Dispose();
+        Tensor k = new(ProjectedShape(kvInput.Shape, _config.KvHeads), kvAct);
+        backend.Linear(k, kvInput, w.Key!, w.KeyBias);
+        Tensor v = new(ProjectedShape(kvInput.Shape, _config.KvHeads), kvAct);
+        backend.Linear(v, kvInput, w.Value!, w.ValueBias);
+        return (q, k, v, null);
     }
 
     private static void Release(Tensor qInput, Tensor kvInput)

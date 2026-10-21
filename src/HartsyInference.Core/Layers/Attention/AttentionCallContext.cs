@@ -108,4 +108,8 @@ public readonly record struct AttentionCallContext
     /// <summary>The layer disposes the query input, and a distinct key/value input, once the projections have read them; a
     /// failure after that point leaves nothing for the caller to dispose.</summary>
     public bool ReleaseInputs { get; init; }
+
+    /// <summary>A cross-attention disposes its query input right after the Q projection, before K and V are allocated; the
+    /// key/value input stays the caller's.</summary>
+    public bool ReleaseQueryAfterProjection { get; init; }
 }
