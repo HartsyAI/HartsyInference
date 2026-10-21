@@ -23,6 +23,11 @@ public sealed class AttentionLayer
                 throw new ArgumentException($"A {config.Gate} gate needs a gate projection.", nameof(weights));
             if (config.QkNorm != AttentionQkNorm.None && (weights.QueryNorm is null || weights.KeyNorm is null))
                 throw new ArgumentException($"A {config.QkNorm} QK norm needs both norm weights.", nameof(weights));
+            bool fused = config.Projection is AttentionProjection.FusedSlice or AttentionProjection.FusedSplitNorm;
+            if (fused ? weights.Qkv is null : weights.Query is null || weights.Key is null || weights.Value is null)
+                throw new ArgumentException($"A {config.Projection} projection needs its weights.", nameof(weights));
+            if (config.Projection == AttentionProjection.FusedSplitNorm && weights.QueryNormEps != weights.KeyNormEps)
+                throw new ArgumentException("The fused split-norm projection takes one epsilon for Q and K.", nameof(weights));
             if (config.QkNorm != AttentionQkNorm.None)
                 _norms = new AttentionNormWeights(weights.QueryNorm!, weights.KeyNorm!, weights.QueryNormEps, weights.KeyNormEps);
         }
@@ -72,13 +77,8 @@ public sealed class AttentionLayer
                     nameof(context));
         }
 
-        (Tensor q, Tensor k, Tensor v, Tensor? gate) = Project(backend, w, qInput, kvInput, act, kvAct, in context);
         TensorShape flatShape = WithLastDim(qInput.Shape, _config.InnerDim);
-        if (context.ReleaseInputs)
-        {
-            qInput.Dispose();
-            if (!ReferenceEquals(kvInput, qInput)) kvInput.Dispose();
-        }
+        (Tensor q, Tensor k, Tensor v, Tensor? gate) = Project(backend, w, qInput, kvInput, act, kvAct, context.ReleaseInputs, in context);
         Tensor flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, in context);
         return Output(backend, w, flat, gate, act);
     }
@@ -124,8 +124,7 @@ public sealed class AttentionLayer
         if (_config.Gate != AttentionGate.None)
             throw new NotSupportedException("A gated layer projects through Forward.");
         DType act = _config.ComputeDType ?? input.DType;
-        (Tensor q, Tensor k, Tensor v, _) = Project(backend, w, input, input, act, act, default);
-        if (releaseInput) input.Dispose();
+        (Tensor q, Tensor k, Tensor v, _) = Project(backend, w, input, input, act, act, releaseInput, default);
         return (q, k, v);
     }
 
@@ -133,7 +132,7 @@ public sealed class AttentionLayer
     /// originals are disposed; nothing happens without a norm.</summary>
     public void NormalizeQk(IBackend backend, ref Tensor q, ref Tensor k)
     {
-        if (_config.QkNorm == AttentionQkNorm.None)
+        if (_config.QkNorm == AttentionQkNorm.None || _config.Projection == AttentionProjection.FusedSplitNorm)
             return;
         if (_config.QkNorm == AttentionQkNorm.FullWidth)
             throw new NotSupportedException("The fused full-width norm runs inside the attention call.");
@@ -153,9 +152,12 @@ public sealed class AttentionLayer
         return Output(backend, w, flat, null, flat.DType);
     }
 
+    /// <summary>The projections; with <paramref name="release"/> the inputs are disposed as soon as nothing reads them.</summary>
     private (Tensor Q, Tensor K, Tensor V, Tensor? Gate) Project(IBackend backend, AttentionLayerWeights w, Tensor qInput,
-        Tensor kvInput, DType act, DType kvAct, in AttentionCallContext context)
+        Tensor kvInput, DType act, DType kvAct, bool release, in AttentionCallContext context)
     {
+        if (_config.Projection is AttentionProjection.FusedSlice or AttentionProjection.FusedSplitNorm)
+            return ProjectFused(backend, w, qInput, kvInput, act, release);
         Tensor? gate = _config.Gate switch
         {
             AttentionGate.Sigmoid => new Tensor(WithLastDim(qInput.Shape, _config.InnerDim), act),
@@ -170,21 +172,22 @@ public sealed class AttentionLayer
             if (ReferenceEquals(qInput, kvInput))
             {
                 backend.LinearMulti(qInput, gate is null
-                    ? [new(q, w.Query, w.QueryBias), new(k, w.Key, w.KeyBias), new(v, w.Value, w.ValueBias)]
-                    : [new(gate, w.Gate!, w.GateBias), new(q, w.Query, w.QueryBias), new(k, w.Key, w.KeyBias), new(v, w.Value, w.ValueBias)]);
+                    ? [new(q, w.Query!, w.QueryBias), new(k, w.Key!, w.KeyBias), new(v, w.Value!, w.ValueBias)]
+                    : [new(gate, w.Gate!, w.GateBias), new(q, w.Query!, w.QueryBias), new(k, w.Key!, w.KeyBias), new(v, w.Value!, w.ValueBias)]);
             }
             else
             {
-                backend.LinearMulti(qInput, gate is null ? [new LinearOp(q, w.Query, w.QueryBias)]
-                    : [new(gate, w.Gate!, w.GateBias), new(q, w.Query, w.QueryBias)]);
-                backend.LinearMulti(kvInput, [new LinearOp(k, w.Key, w.KeyBias), new(v, w.Value, w.ValueBias)]);
+                backend.LinearMulti(qInput, gate is null ? [new LinearOp(q, w.Query!, w.QueryBias)]
+                    : [new(gate, w.Gate!, w.GateBias), new(q, w.Query!, w.QueryBias)]);
+                backend.LinearMulti(kvInput, [new LinearOp(k, w.Key!, w.KeyBias), new(v, w.Value!, w.ValueBias)]);
             }
+            if (release) Release(qInput, kvInput);
             return (q, k, v, gate);
         }
 
-        backend.Linear(q, qInput, w.Query, w.QueryBias);
-        backend.Linear(k, kvInput, w.Key, w.KeyBias);
-        backend.Linear(v, kvInput, w.Value, w.ValueBias);
+        backend.Linear(q, qInput, w.Query!, w.QueryBias);
+        backend.Linear(k, kvInput, w.Key!, w.KeyBias);
+        backend.Linear(v, kvInput, w.Value!, w.ValueBias);
         if (context.ValueRowScale is { } rowScale)
         {
             Tensor scaled = new(v.Shape, v.DType);
@@ -194,7 +197,41 @@ public sealed class AttentionLayer
         }
         if (gate is not null)
             backend.Linear(gate, qInput, w.Gate!, w.GateBias);
+        if (release) Release(qInput, kvInput);
         return (q, k, v, gate);
+    }
+
+    /// <summary>One Linear of the fused <c>[q|k|v]</c> weight, the input released right after it, then the split (with the
+    /// per-head norm for <see cref="AttentionProjection.FusedSplitNorm"/>).</summary>
+    private (Tensor Q, Tensor K, Tensor V, Tensor? Gate) ProjectFused(IBackend backend, AttentionLayerWeights w, Tensor input,
+        Tensor kvInput, DType act, bool release)
+    {
+        if (!ReferenceEquals(input, kvInput))
+            throw new NotSupportedException("A fused [q|k|v] projection is self-attention only.");
+        TensorShape projected = ProjectedShape(input.Shape, _config.Heads);
+        Tensor qkv = new(WithLastDim(input.Shape, 3 * _config.InnerDim), act);
+        backend.Linear(qkv, input, w.Qkv!, w.QkvBias);
+        if (release) input.Dispose();
+        Tensor q = new(projected, act), k = new(projected, act), v = new(projected, act);
+        if (_config.Projection == AttentionProjection.FusedSplitNorm)
+        {
+            AttentionNormWeights n = _norms!.Value;
+            backend.QkvSplitNorm(q, k, v, qkv, n.Query, n.Key, n.QueryEps);
+        }
+        else
+        {
+            backend.SliceLastDim(q, qkv, 0);
+            backend.SliceLastDim(k, qkv, _config.InnerDim);
+            backend.SliceLastDim(v, qkv, 2 * _config.InnerDim);
+        }
+        qkv.Dispose();
+        return (q, k, v, null);
+    }
+
+    private static void Release(Tensor qInput, Tensor kvInput)
+    {
+        qInput.Dispose();
+        if (!ReferenceEquals(kvInput, qInput)) kvInput.Dispose();
     }
 
     /// <summary>Refuses what the configured norm cannot apply, before anything is allocated.</summary>

@@ -48,6 +48,11 @@ internal sealed class AttentionTraceBackend : IBackend
 
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin) => Ops.Add("ApplyRope");
 
+    public void QkvSplitNorm(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps) =>
+        Ops.Add($"QkvSplitNorm {Name(qWeight)},{Name(kWeight)} {qkv.Shape}");
+
+    public void SliceLastDim(Tensor output, Tensor input, int offset) => Ops.Add($"SliceLastDim @{offset}");
+
     public void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
         List<string> rows = new();
