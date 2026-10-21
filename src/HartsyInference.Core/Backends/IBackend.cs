@@ -3321,7 +3321,7 @@ public partial interface IBackend : IDisposable
     }
 
     /// <summary>Row scatter-add: <c>output[indices[j]] += input[j]</c>, accumulating onto existing output. Indices must be
-    /// unique within a call: GPU backends add without atomics, so a repeated row races and loses updates.</summary>
+    /// unique within a call: the CUDA kernel adds without atomics, so a repeated row races and loses updates.</summary>
     unsafe void RowScatterAdd(Tensor output, Tensor input, Tensor indices, int m, int channels)
     {
         float* o = (float*)output.DataPointer, i = (float*)input.DataPointer; int* idx = (int*)indices.DataPointer;
