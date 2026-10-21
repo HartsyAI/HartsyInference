@@ -38,6 +38,8 @@ public sealed partial class AttentionLayer
                 values = source.ValueBuffer(kvLayer);
             }
             CheckKvOperands(qMh, keys);
+            if (call.KvLength > keys.Shape[2] || call.KvLength > values.Shape[2])
+                throw new ArgumentException($"{call.KvLength} keys do not fit buffers of {keys.Shape[2]} and {values.Shape[2]} rows.", nameof(call));
             attn = new Tensor(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
             backend.Attention(AttentionCall.FromFlashAttention(attn, qMh, keys, values, call.KvLength, !call.Bidirectional,
                 call.QueryOffset, _config.EffectiveScale, call.Softcap, call.Sinks, call.SlidingWindow, call.AlibiSlopes));
@@ -70,6 +72,7 @@ public sealed partial class AttentionLayer
             throw new ArgumentException("Key and value are both given or both null.", nameof(k));
         int t = (int)q.Shape[1];
         Tensor? qMh = null, kMh = null, vMh = null;
+        // The operands are consumed on every path: here until the permutes are done, then by AttendOverKvHeadMajor.
         try
         {
             qMh = new Tensor(new TensorShape(1, _config.Heads, t, _config.HeadDim), _config.ComputeDType ?? q.DType);

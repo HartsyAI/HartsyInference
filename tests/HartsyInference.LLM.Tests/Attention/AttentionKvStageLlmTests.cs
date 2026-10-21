@@ -127,6 +127,27 @@ public sealed unsafe class AttentionKvStageLlmTests
     }
 
     [Fact]
+    public void LoadWeights_RefusesKvHeadsThatDoNotDivideTheQueryHeads()
+    {
+        TransformerConfig c = new()
+        {
+            HiddenSize = Hidden, NumLayers = Layers, NumHeads = 4, NumKvHeads = 3, HeadDim = 8, IntermediateSize = Inter, VocabSize = Vocab,
+            MaxPositionEmbeddings = 64, RopeTheta = 10_000f, TieWordEmbeddings = false,
+        };
+        Dictionary<string, Tensor> w = Weights(c);
+        try
+        {
+            using GenericTransformer model = new(c);
+            ArgumentException e = Assert.Throws<ArgumentException>(() => model.LoadWeights(w, "model"));
+            Assert.Contains("must be a multiple of key/value heads", e.Message);
+        }
+        finally
+        {
+            foreach (Tensor t in w.Values) t.Dispose();
+        }
+    }
+
+    [Fact]
     public void TheDefaultSourceMembersForwardToTheCacheMethods()
     {
         List<string> log = [];
