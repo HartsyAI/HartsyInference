@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -10,16 +11,15 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 ///
 /// <para>The zero-centered RMSNorm scales (<c>weight + 1</c>) are folded to plain RMSNorm weights at load time (the
 /// caller adds 1.0), so the per-head norm runs through <see cref="IBackend.RmsNorm"/> unchanged.</para></summary>
-public sealed unsafe class Krea2Attention
+public sealed class Krea2Attention
 {
-    private readonly int _hidden;
     private readonly int _numHeads;
     private readonly int _numKvHeads;
     private readonly int _headDim;
-    private readonly int _kvGroup;
     private readonly float _eps;
 
     private Tensor? _toQ, _toK, _toV, _toGate, _toOut, _normQ, _normK;
+    private AttentionLayer? _layer;
 
     /// <summary>Creates an attention module. <paramref name="numKvHeads"/> &lt; <paramref name="numHeads"/> enables GQA.</summary>
     public Krea2Attention(int hidden, int numHeads, int numKvHeads, float eps = 1e-5f)
@@ -28,11 +28,9 @@ public sealed unsafe class Krea2Attention
             throw new ArgumentException($"hidden {hidden} must be divisible by numHeads {numHeads}.");
         if (numHeads % numKvHeads != 0)
             throw new ArgumentException($"numHeads {numHeads} must be divisible by numKvHeads {numKvHeads}.");
-        _hidden = hidden;
         _numHeads = numHeads;
         _numKvHeads = numKvHeads;
         _headDim = hidden / numHeads;
-        _kvGroup = numHeads / numKvHeads;
         _eps = eps;
     }
 
@@ -46,6 +44,19 @@ public sealed unsafe class Krea2Attention
         _toOut = w[$"{p}.to_out.0.weight"];
         _normQ = Krea2Norm.LoadZeroCentered(w[$"{p}.norm_q.weight"]);
         _normK = Krea2Norm.LoadZeroCentered(w[$"{p}.norm_k.weight"]);
+        // Q and K are RMS-normed per head, so the scores are bounded and the call may narrow to F16. The grouped token-major
+        // entry serves the text-fusion blocks' equal heads too.
+        _layer = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numKvHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead,
+                Gate = AttentionGate.Sigmoid, TokenMajorRoute = AttentionRoute.TokenMajorGqa, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQ, Key = _toK, Value = _toV, Gate = _toGate, Output = _toOut, QueryNorm = _normQ, KeyNorm = _normK,
+                QueryNormEps = _eps, KeyNormEps = _eps,
+            });
     }
 
     /// <summary>Enumerates weight tensors for GPU preload.</summary>
@@ -56,165 +67,20 @@ public sealed unsafe class Krea2Attention
     }
 
     /// <summary>Runs attention over <paramref name="x"/> <c>[B, S, hidden]</c>. Pass <paramref name="rope"/> (already <c>Precompute</c>d for this sequence) for the main blocks; pass null for the text-fusion blocks.</summary>
-    // GPU-residency rewrite (mirrors the verified FluxSingleStreamBlock / HunyuanImageSingleBlock): every glue op
-    // (head split/merge, per-head QK-norm, GQA K/V repeat, the sigmoid output gate) runs as an IBackend op so the
-    // activation chain stays device-resident — no per-op DataPointer D2H sync barriers (the old ReshapeTo/FromMultiHead
-    // + host RepeatKvHeads loops D2H-synced every intermediate around every GEMM). Head split = declaring Q/K/V
-    // directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim with no reshape,
-    // then Permute0213 to/from [B, H, S, D]. RoPE is GPU-resident for B=1 (the pipeline case) via
-    // FluxRope.ApplyGpuGqa — WanRopeInterleaved is single-tensor with an explicit head count, so GQA
-    // (numHeads != numKvHeads) rotates Q and K with their own counts on the pre-permute [B, S, H, D] layout,
-    // bit-identical to the host ForwardSingle. B>1 keeps the host ForwardSingle fallback (post-permute).
     /// <param name="vRowScale">SwarmUI's <c>attn1_token_weight_patch</c> value-row scale, already expanded to
     /// <c>v</c>'s own shape and dtype so the multiply is a plain elementwise op. Null on every path but Krea 2's
     /// weighted joint attention.</param>
     public Tensor Forward(IBackend backend, Tensor x, FluxRope? rope, int batch, int seqLen, Tensor? attnBias = null,
         Tensor? vRowScale = null)
     {
-        TensorShape qHeads = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape kvHeads = new TensorShape(batch, seqLen, _numKvHeads, _headDim);
-        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-        TensorShape kvMhShape = new TensorShape(batch, _numKvHeads, seqLen, _headDim);
-        TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
-
-        // Activation dtype follows the INPUT: the main blocks feed preIn in DitDtype.Act (F16 on the
-        // numerics.ditF16 path), while the text-fusion blocks (whose surrounding ops are F32 and cached
-        // once per prompt) feed F32 and keep the baseline path. Weights stay packed fp8; the norm weights
-        // (_normQ/_normK) are F32 — the F16 RmsNorm/RoPE/Sigmoid/RepeatKv kernels take F16 activation + F32 params.
-        DType act = x.DType;
-
-        // Q/K/V declared [B, S, H, D] (byte-identical to [B, S, H·D]) + gate [B, S, hidden].
-        Tensor q = new Tensor(qHeads, act);
-        backend.Linear(q, x, _toQ!, null);
-        Tensor k = new Tensor(kvHeads, act);
-        backend.Linear(k, x, _toK!, null);
-        Tensor v = new Tensor(kvHeads, act);
-        backend.Linear(v, x, _toV!, null);
-        if (vRowScale is not null)
+        AttentionLayer layer = _layer ?? throw new InvalidOperationException("Krea2Attention.LoadWeights has not run.");
+        // The rope rotates on the device for one batch item; a batched call rotates on the host after the head permute.
+        AttentionCallContext context = new()
         {
-            if (vRowScale.ElementCount != v.ElementCount || vRowScale.DType != act)
-            {
-                // The caller expands the scale from the config's kv geometry; a block built with different
-                // geometry would make Mul read past the end of the smaller buffer rather than fail.
-                throw new ArgumentException(
-                    $"Value-row scale is {vRowScale.Shape} {vRowScale.DType} but v is {v.Shape} {act}.", nameof(vRowScale));
-            }
-            // Post-projection and before the head permute: [B, S, H_kv, D] is byte-identical to the [B, S, H_kv*D]
-            // that SwarmUI indexes, so scaling a token position scales it across every kv head, as the patch does.
-            // Elementwise Mul rather than MaskRows because MaskRows is F32-only and this activation is F16 on the
-            // DiT fast path; the expanded scale is built once per forward and shared by all 28 blocks.
-            Tensor scaled = new Tensor(kvHeads, act);
-            backend.Mul(scaled, v, vRowScale);
-            v.Dispose();
-            v = scaled;
-        }
-        Tensor gate = new Tensor(flatShape, act);
-        backend.Linear(gate, x, _toGate!, null);
-
-        // Per-head zero-centered RMSNorm on Q and K (weight already folded +1 at load), over the last dim = headDim.
-        Tensor qNorm = new Tensor(qHeads, act);
-        backend.RmsNorm(qNorm, q, _normQ!, _eps);
-        q.Dispose();
-        Tensor kNorm = new Tensor(kvHeads, act);
-        backend.RmsNorm(kNorm, k, _normK!, _eps);
-        k.Dispose();
-
-        // RoPE (main blocks only; text-fusion passes null). B=1 (the only case pipelines exercise): GPU-resident
-        // on the pre-permute [B, S, H, D] layout (device WanRopeInterleaved with per-tensor GQA head counts —
-        // bit-identical interleaved-pair rotation, no D2H). B>1: host ForwardSingle on the post-permute layout.
-        bool gpuRope = rope is not null && batch == 1;
-        if (gpuRope)
-        {
-            rope!.ApplyGpuGqa(backend, qNorm, kNorm, _numHeads, _numKvHeads);
-        }
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnFlat;
-        if (batch == 1 && (rope is null || gpuRope) && backend.SupportsTokenMajorGqaAttention)
-        {
-            // The rotated [B, S, H, D] tensors are already token-major, so a backend reading GQA K/V in place skips
-            // all four permutes and both head repeats.
-            attnFlat = new Tensor(flatShape, act);
-            backend.ScaledDotProductAttentionTokenMajor(attnFlat, qNorm, kNorm, v, attnBias, _numHeads, _numKvHeads, _headDim,
-                scale, allowF16: true);
-            qNorm.Dispose();
-            kNorm.Dispose();
-            v.Dispose();
-        }
-        else
-        {
-            attnFlat = AttendHeadMajor(backend, qNorm, kNorm, v, rope, gpuRope, attnBias, batch, seqLen, qMhShape, kvMhShape,
-                flatShape, act, scale);
-        }
-
-        // out = attn · sigmoid(gate)
-        Tensor sig = new Tensor(flatShape, act);
-        backend.Sigmoid(sig, gate);
-        gate.Dispose();
-        Tensor gated = new Tensor(flatShape, act);
-        backend.Mul(gated, attnFlat, sig);
-        attnFlat.Dispose();
-        sig.Dispose();
-
-        Tensor outp = new Tensor(flatShape, act);
-        backend.Linear(outp, gated, _toOut!, null);
-        gated.Dispose();
-        return outp;
-    }
-
-    /// <summary>Permutes to head-major, repeats GQA K/V heads, runs SDPA and permutes back to <c>[B, S, hidden]</c>.</summary>
-    private Tensor AttendHeadMajor(IBackend backend, Tensor qNorm, Tensor kNorm, Tensor v, FluxRope? rope, bool gpuRope,
-        Tensor? attnBias, int batch, int seqLen, TensorShape qMhShape, TensorShape kvMhShape, TensorShape flatShape, DType act,
-        float scale)
-    {
-        // Permute [B, S, H, D] → [B, H, S, D] for SDPA.
-        Tensor qMh = new Tensor(qMhShape, act);
-        backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
-        qNorm.Dispose();
-        Tensor kMh = new Tensor(kvMhShape, act);
-        backend.Permute0213(kMh, kNorm, seqLen, _numKvHeads, _headDim);
-        kNorm.Dispose();
-        Tensor vMh = new Tensor(kvMhShape, act);
-        backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
-        v.Dispose();
-
-        if (rope is not null && !gpuRope)
-        {
-            rope.ForwardSingle(qMh, batch, _numHeads, seqLen);
-            rope.ForwardSingle(kMh, batch, _numKvHeads, seqLen);
-        }
-
-        // GQA K/V head repeat (device). group == 1 (text-fusion, full MHA) skips the copy.
-        Tensor kRep, vRep;
-        if (_kvGroup == 1)
-        {
-            kRep = kMh;
-            vRep = vMh;
-        }
-        else
-        {
-            kRep = new Tensor(qMhShape, act);
-            backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroup);
-            vRep = new Tensor(qMhShape, act);
-            backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroup);
-            kMh.Dispose();
-            vMh.Dispose();
-        }
-
-        Tensor attnMh = new Tensor(qMhShape, act);
-        // allowF16: Krea2 applies zero-centered RMSNorm to Q and K (per-head, over headDim) before attention, so
-        // pre-softmax scores are bounded and the F16 SDPA path (half the score-matrix HBM traffic + F16 tensor
-        // cores) is numerically safe — same condition Wan/LTX use. SDPA is ~55% of Krea2 GPU time (sync-profiled).
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, attnBias, scale, allowF16: true);   // bias broadcasts [1,1,S,S] against the post-GQA-repeat head count — computed the same as non-GQA SDPA
-        qMh.Dispose();
-        kRep.Dispose();   // when _kvGroup == 1, kRep/vRep alias kMh/vMh — disposed exactly once here.
-        vRep.Dispose();
-
-        // Permute [B, H, S, D] → [B, S, hidden].
-        Tensor attnFlat = new Tensor(flatShape, act);
-        backend.Permute0213(attnFlat, attnMh, _numHeads, seqLen, _headDim);
-        attnMh.Dispose();
-        return attnFlat;
+            Rotation = batch == 1 ? rope : null, HeadMajorRotation = batch == 1 ? null : rope, Bias = attnBias,
+            ValueRowScale = vRowScale,
+        };
+        return layer.Forward(backend, x, x, in context);
     }
 }
 
