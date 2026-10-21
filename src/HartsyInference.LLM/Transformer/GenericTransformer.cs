@@ -792,7 +792,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         if (StagesGraphDecodeEmbedRows(backend)) return 0;
         if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
             return ReferenceEquals(quant, _lmHeadQuant) ? 0 : Tensor.ComputeByteSize(quant.Shape, quant.DType);
-        return (long)_cfg.VocabSize * _cfg.HiddenSize * sizeof(float);
+        return (long)EmbedRows * _cfg.HiddenSize * sizeof(float);
     }
 
     /// <summary>Rows of the token-embedding table, which can exceed the logit width (<see cref="TransformerConfig.VocabSize"/>).</summary>
