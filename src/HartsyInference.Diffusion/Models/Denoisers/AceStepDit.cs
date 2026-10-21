@@ -82,12 +82,17 @@ public sealed unsafe class AceStepDit : IDisposable
     }
 
     /// <summary>Builds the cross-attention context <c>[1 + T_text + T_lyric, 2560]</c>: projected speaker token (zero
-    /// vector when absent), projected UMT5 features <c>[T_text, 768]</c>, and the Conformer-encoded projected lyric
-    /// token ids. Pass an empty <paramref name="lyricIds"/> for instrumental-only via tags in the prompt.</summary>
+    /// vector when absent), projected UMT5 features (<c>[T_text, 768]</c> or <c>[1, T_text, 768]</c>), and the
+    /// Conformer-encoded projected lyric token ids. Pass an empty <paramref name="lyricIds"/> for instrumental-only via
+    /// tags in the prompt.</summary>
     public Tensor BuildContext(IBackend backend, Tensor textEmbeds, ReadOnlySpan<int> lyricIds, float[]? speakerVec, (int Min, int Max, float Tau)? lyricQScale = null)
     {
         int dim = _config.InnerDim;
-        int tText = (int)textEmbeds.Shape[0];
+        TensorShape shape = textEmbeds.Shape;
+        int tText = (int)(shape.ElementCount / _config.TextDim);
+        if (shape.Rank < 2 || shape[shape.Rank - 1] != _config.TextDim || shape[shape.Rank - 2] != tText)
+            throw new ArgumentException($"text features must be [(1,) T, {_config.TextDim}]; got {shape}.",
+                nameof(textEmbeds));
         int tLyric = lyricIds.Length;
 
         Tensor ctx = new Tensor(new TensorShape(1 + tText + tLyric, dim), DType.F32);
