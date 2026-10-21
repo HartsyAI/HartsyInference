@@ -52,7 +52,8 @@ stable release will require. Dates are UTC.
 - **Fixed: other Vulkan attention defects.** The naive path with grouped K/V above head dim 128 read past K and V
   (Ideogram 4); casts of attention operands to F16 saturate; a sliding window without causal masking keeps later keys, as
   on CUDA; device positions past the cache are clamped; BF16 attention computes in F32; the coopmat2 attention features
-  are enabled before use; an oversized grid falls back to the naive kernel.
+  are enabled before use; an oversized grid falls back to the naive kernel; `FlashAttention` refuses a key length past
+  the cache instead of reading beyond it.
 - **Fixed: CPU attention refuses what it cannot compute** (dtypes, grouped K/V, shapes) instead of reading memory as F32.
 
 ## alpha.383

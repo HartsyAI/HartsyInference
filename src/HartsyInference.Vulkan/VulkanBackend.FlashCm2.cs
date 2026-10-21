@@ -140,7 +140,7 @@ public sealed partial class VulkanBackend
     {
         if (t.DType == DType.F32) return t;
         (_, VulkanBuffer? owned) = CastIfNeeded(t, GetBuffer(t), DType.F32);
-        if (owned is null) return t.CastTo(DType.F32);   // a preloaded weight's cast belongs to the weight-cast cache
+        if (owned is null) return t.CastTo(DType.F32);   // the cached weight cast stays cached; CastTo returns a fresh copy
         Tensor copy = new Tensor(t.Shape, DType.F32);
         CacheOutput(copy, owned);
         return copy;

@@ -801,12 +801,13 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
-    /// <param name="saturate">Clamp an F32 or BF16 value to the F16 range instead of overflowing to infinity (attention
-    /// operands). Saturated casts never enter or come from the weight-cast cache, whose copies are not saturated.</param>
+    /// <param name="saturate">Clamp an F32 value to the F16 range instead of overflowing to infinity (attention operands; BF16
+    /// attention computes in F32). Saturated casts never enter or come from the weight-cast cache, whose copies are not
+    /// saturated.</param>
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want, bool saturate = false)
     {
         if (src.DType == want) return (srcBuf, null);
-        saturate &= want == DType.F16 && (src.DType == DType.F32 || src.DType == DType.BF16);
+        saturate &= want == DType.F16 && src.DType == DType.F32;
 
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
         if (!saturate && _xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
@@ -875,7 +876,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             // BF16 -> F16 = BF16 -> F32 -> F16 (two-stage; no direct kernel, BF16/F16 share no exponent
             // range shortcut worth a dedicated shader for how rarely this specific pair is hit).
             (VulkanBuffer mid, _) = CastIfNeeded(src, srcBuf, DType.F32);
-            VulkanKernel kk = GetKernel(saturate ? "cast_f32_f16_sat" : "cast_f32_f16", storageBufferCount: 2, _default1DSpec);
+            VulkanKernel kk = GetKernel("cast_f32_f16", storageBufferCount: 2, _default1DSpec);
             Span<byte> pc2 = stackalloc byte[4]; BinaryWriteUInt(pc2, 0, (uint)elements);
             Span<ulong> bufs2 = stackalloc ulong[] { mid.Handle, dst.Handle };
             Dispatch(kk, bufs2, pc2, GroupCount(elements, LocalX1D));
@@ -4669,6 +4670,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer newBuf = GetBuffer(newKv);
         try
         {
+            // The shader drops rows past maxSeq; nothing reports them until the device status word exists (Phase 4).
             VulkanKernel k = GetKernel("kv_cache_append_dev", 3, _default1DSpec);
             Span<byte> pc = stackalloc byte[4 * 4];
             BinaryWriteUInt(pc, 0, (uint)heads);

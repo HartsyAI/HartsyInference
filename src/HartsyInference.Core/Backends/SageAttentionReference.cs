@@ -11,6 +11,10 @@ public static class SageAttentionReference
     public static float[] Run(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v, int seqQ, int seqK, int dim,
         float scale, bool smoothK)
     {
+        if (seqQ < 0 || seqK <= 0 || dim <= 0)
+            throw new ArgumentOutOfRangeException(nameof(seqK), $"Needs at least one key and a positive dim; got seqQ {seqQ}, seqK {seqK}, dim {dim}.");
+        if (q.Length < seqQ * dim || k.Length < seqK * dim || v.Length < seqK * dim)
+            throw new ArgumentException($"Q, K and V hold {q.Length}, {k.Length} and {v.Length} values; [{seqQ}|{seqK}, {dim}] needs more.");
         float[] kWork = k.ToArray();
         if (smoothK)
         {
@@ -62,6 +66,8 @@ public static class SageAttentionReference
     /// <summary>Per-row absmax INT8: scale = absmax / 127 (1 for an all-zero row), round to nearest, clamp to ±127.</summary>
     public static void QuantizeRows(ReadOnlySpan<float> src, Span<sbyte> dst, Span<float> scales, int rows, int dim)
     {
+        if (src.Length < rows * dim || dst.Length < rows * dim || scales.Length < rows)
+            throw new ArgumentException($"[{rows}, {dim}] needs {rows * dim} values and {rows} scales.");
         for (int r = 0; r < rows; r++)
         {
             float amax = 0f;

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
@@ -103,10 +104,18 @@ public sealed partial class VulkanBackend
             && CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.Mask.Bias);
     }
 
-    /// <summary>The scalar kernels launch one workgroup per (query row, head, batch item).</summary>
-    private bool ScalarGridFits(int queryRows, int heads, int batch) =>
-        (uint)queryRows <= Vk.MaxComputeWorkGroupCountX && (uint)heads <= Vk.MaxComputeWorkGroupCountY
-        && (uint)batch <= Vk.MaxComputeWorkGroupCountZ;
+    /// <summary>The scalar kernels launch one workgroup per (query row, head, batch item); a grid past the device limits
+    /// takes a slower row, which is logged once.</summary>
+    private bool ScalarGridFits(int queryRows, int heads, int batch)
+    {
+        bool fits = (uint)queryRows <= Vk.MaxComputeWorkGroupCountX && (uint)heads <= Vk.MaxComputeWorkGroupCountY
+            && (uint)batch <= Vk.MaxComputeWorkGroupCountZ;
+        if (!fits && Interlocked.Exchange(ref _scalarGridWarned, 1) == 0)
+            Logs.Warning($"Vulkan attention: {queryRows} query rows x {heads} heads x {batch} exceeds the scalar kernel's grid; a slower row runs.");
+        return fits;
+    }
+
+    private int _scalarGridWarned;
 
     /// <summary>BF16 has more range than F16, so a BF16 call computes in F32 on the scalar kernel rather than narrowing.</summary>
     private static bool AnyBf16(in AttentionCall c) =>
