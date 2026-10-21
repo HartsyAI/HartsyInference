@@ -9,23 +9,30 @@ namespace HartsyInference.Diffusion.Tests;
 /// instead decodes a different mel from the same latent.</summary>
 public sealed class AceStepEfficientVitHeadGroupingTests
 {
-    [Fact]
-    public void LinearAttentionHeads_CutHeadsFromTheConcatenatedQkvStream()
+    [Theory]
+    [InlineData(0)]   // base branch: the first half of the attention output
+    [InlineData(1)]   // multiscale branch: the second half
+    public void LinearAttentionHeads_CutHeadsFromTheConcatenatedQkvStream(int branch)
     {
-        const int Channels = 8, HeadDim = 4, Tokens = 5;
+        const int Channels = 8, HeadDim = 4, Tokens = 5, Width = 2 * Channels;
         using Tensor q = Values(Tokens, Channels, 1);
         using Tensor k = Values(Tokens, Channels, 2);
         using Tensor v = Values(Tokens, Channels, 3);
-        using Tensor actual = new Tensor(new TensorShape(Tokens, Channels), DType.F32);
+        using Tensor actual = new Tensor(new TensorShape(Tokens, Width), DType.F32);
 
-        EfficientVitBlock.LinearAttentionHeads(q, k, v, actual, Channels, Tokens, headOffset: 0, HeadDim);
+        EfficientVitBlock.LinearAttentionHeads(q, k, v, actual, Channels, Tokens, headOffset: branch * Channels, HeadDim);
 
         float[] expected = Reference(q.AsSpan<float>().ToArray(), k.AsSpan<float>().ToArray(), v.AsSpan<float>().ToArray(),
             Channels, Tokens, HeadDim);
         float[] got = actual.AsSpan<float>().ToArray();
-        for (int i = 0; i < expected.Length; i++)
+        for (int i = 0; i < Tokens; i++)
         {
-            Assert.Equal(expected[i], got[i], 5);
+            for (int c = 0; c < Width; c++)
+            {
+                int column = c - branch * Channels;
+                float want = column is >= 0 and < Channels ? expected[i * Channels + column] : 0f;
+                Assert.Equal(want, got[i * Width + c], 5);
+            }
         }
     }
 
@@ -71,7 +78,7 @@ public sealed class AceStepEfficientVitHeadGroupingTests
         Span<float> values = t.AsSpan<float>();
         for (int i = 0; i < values.Length; i++)
         {
-            values[i] = 0.4f + 0.6f * MathF.Sin(seed * 7.31f + i * 1.17f);
+            values[i] = 0.1f + 0.6f * MathF.Sin(seed * 7.31f + i * 1.17f);   // about 40% negative, so the ReLU bites
         }
         return t;
     }
