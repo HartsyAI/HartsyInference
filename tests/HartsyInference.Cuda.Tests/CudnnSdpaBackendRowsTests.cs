@@ -13,10 +13,10 @@ public sealed class CudnnSdpaBackendRowsTests
 
     private static readonly AttentionNumerics GrantsBf16 = new() { QueryKey = AttentionFormats.Bf16, ProbValue = AttentionFormats.Bf16 };
 
-    private static void Set(CudaBackend backend, string field, object value) =>
+    internal static void Set(CudaBackend backend, string field, object value) =>
         (typeof(CudaBackend).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic) ?? throw new MissingFieldException(field)).SetValue(backend, value);
 
-    private static CudaBackend Backend(bool cudnn = true, bool dead = false, CudnnSdpaHealth? health = null)
+    internal static CudaBackend Backend(bool cudnn = true, bool dead = false, CudnnSdpaHealth? health = null)
     {
         CudaBackend backend = (CudaBackend)RuntimeHelpers.GetUninitializedObject(typeof(CudaBackend));
         GC.SuppressFinalize(backend);   // the finalizer would tear down state the constructor never built
@@ -26,7 +26,7 @@ public sealed class CudnnSdpaBackendRowsTests
         return backend;
     }
 
-    private static AttentionKernelRow[] Rows(CudaBackend backend, string builder) =>
+    internal static AttentionKernelRow[] Rows(CudaBackend backend, string builder) =>
         (AttentionKernelRow[])(typeof(CudaBackend).GetMethod(builder, BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new MissingMethodException(builder)).Invoke(backend, null)!;
 
@@ -137,7 +137,9 @@ public sealed class CudnnSdpaBackendRowsTests
         CudnnSdpaHealth health = new();
         CudnnSdpaSignature gqa = CudnnSdpaSignature.For(DType.F16, 48, 12, D, CudnnBias.None);
         for (int i = 0; i < CudnnSdpaHealth.RefusalsToDisable; i++)
-            health.RecordFailure(new CudnnSdpaShape(gqa, DType.F16, CudnnSdpa.SdpaLayout.TokenMajor, 1, 48, 12, S + i, S + i), permanent: true, 0);
+            health.RecordFailure(new CudnnSdpaShape(gqa, DType.F16, new(CudnnSdpa.SdpaDtype.F16, D, CudnnSdpa.View.TokenMajor(1, 48, S + i, D),
+                CudnnSdpa.View.TokenMajor(1, 12, S + i, D), CudnnSdpa.View.TokenMajor(1, 12, S + i, D), CudnnSdpa.View.TokenMajor(1, 48, S + i, D))),
+                permanent: true, 0);
         CudaBackend backend = Backend(health: health);
         Assert.Equal("permute.widen.dense", Plan(backend, "BuildTokenMajorGqaRows", in grouped));
 

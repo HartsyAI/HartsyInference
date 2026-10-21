@@ -81,7 +81,8 @@ public static class AttentionHostReference
 
     /// <summary>The geometry the computation indexes by: shared heads that divide, matching extents, every operand inside
     /// its tensor, a bias broadcastable on every axis.</summary>
-    private static void Validate(in AttentionCall call)
+    /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
+    public static void Validate(in AttentionCall call)
     {
         AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
         if (q.Batch <= 0 || q.Heads <= 0 || q.Tokens <= 0 || q.HeadDim <= 0 || k.Heads <= 0 || k.Tokens <= 0 || v.HeadDim <= 0)
