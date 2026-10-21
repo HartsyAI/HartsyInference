@@ -43,6 +43,11 @@ stable release will require. Dates are UTC.
   head dim: any batch, column slices of one fused QKV projection, and mixed head-major and token-major layouts. Offsets stay
   out of the plan key. The token-major cuDNN rows take the same masks as head-major (per-batch, per-head, key-only). Today's
   calls build the graphs they built before; this is what lets later changes drop the permutes around attention.
+- **Changed: audio, encoder, vision and 3-D attention runs on the shared layer.** The TTS, ASR, music and codec models
+  (F5, IndexTTS2, Kokoro, CosyVoice, Whisper, Moonshine, MusicGen, Moshi and Mimi, Dia, YuE2, MiniMax-Music-3, HeartMuLa,
+  Stable Audio, ACE-Step 1.5 and others), the T5, CLIP, BERT and Qwen-VL encoders, DINO, SAM2, Swin, RT-DETR and the
+  Hunyuan3D, TRELLIS and TripoSR blocks attend through `AttentionLayer`. Output is bit-identical; SAM2 and Hiera no longer
+  leak their attention operands, and BERT's head reshapes run on the device instead of the host.
 
 ## alpha.384
 
