@@ -137,6 +137,7 @@ public sealed unsafe class MossImageAssetTests : IDisposable
         using CpuBackend backend = new();
         using LoraStack stack = new();
         stack.AddFromPath(path, strength: 1.0f);
+        // The three Q/K/V adapters land on one fused weight, so two weights change: proj.qkv and ffn_up_gate.
         Assert.Equal(2, stack.ApplyTo(weights, LoraTarget.Transformer, backend));
         foreach (Tensor tensor in originals.Values) tensor.Dispose();
 
