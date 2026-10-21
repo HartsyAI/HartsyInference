@@ -1,7 +1,7 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
@@ -155,18 +155,7 @@ public sealed unsafe class Nvfp4DequantTests
         (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, rows, cols);
         float[] dec = Decode(packed, scales, global, rows, cols);
 
-        for (int r = 0; r < rows; r++)
-        for (int blk = 0; blk < cols / 16; blk++)
-        {
-            float blockMax = 0f;
-            for (int j = 0; j < 16; j++) blockMax = MathF.Max(blockMax, MathF.Abs(src[r * cols + blk * 16 + j]));
-            for (int j = 0; j < 16; j++)
-            {
-                int i = r * cols + blk * 16 + j;
-                Assert.True(MathF.Abs(dec[i] - src[i]) <= blockMax * ModelOptNvfp4Codec.MaxRoundTripError + 1e-5f,
-                    $"element {i}: {dec[i]} vs {src[i]}");
-            }
-        }
+        AssertWithinBlockBound(src, dec, rows, cols, global);
     }
 
     [Fact]
@@ -182,6 +171,74 @@ public sealed unsafe class Nvfp4DequantTests
     public void Quantize_RejectsColumnsNotMultipleOf16()
     {
         Assert.Throws<ArgumentException>(() => ModelOptNvfp4Codec.Quantize(new float[2 * 12], 2, 12));
+    }
+
+    [Theory]
+    [InlineData(-1L, -16L)]
+    [InlineData(0L, 16L)]
+    [InlineData(2L, -16L)]
+    public void Quantize_RejectsNonPositiveDimensions(long rows, long cols)
+    {
+        Assert.Throws<ArgumentException>(() => ModelOptNvfp4Codec.Quantize(new float[16], rows, cols));
+    }
+
+    [Fact]
+    public void Quantize_RejectsOverflowingDimensions()
+    {
+        Assert.Throws<ArgumentException>(() => ModelOptNvfp4Codec.Quantize(new float[16], long.MaxValue / 8, 16));
+    }
+
+    [Theory]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    [InlineData(float.NegativeInfinity)]
+    public void Quantize_RejectsNonFiniteValues(float bad)
+    {
+        float[] src = new float[16];
+        src[7] = bad;
+        Assert.Throws<ArgumentException>(() => ModelOptNvfp4Codec.Quantize(src, 1, 16));
+    }
+
+    [Fact]
+    public void Quantize_BlockBelowNormalScaleRange_StaysWithinSubnormalBound()
+    {
+        // The first block is 1e-6 of the tensor maximum: its E4M3 scale falls below the normal range and
+        // can underflow to zero, so it is held to the absolute subnormal bound instead of the relative one.
+        const int cols = 32;
+        float[] src = new float[cols];
+        for (int j = 0; j < 16; j++) src[j] = (j % 2 == 0 ? 1f : -1f) * 1e-6f * (1 + j % 5);
+        for (int j = 16; j < 32; j++) src[j] = (j % 3 - 1) * 1f;
+
+        (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, 1, cols);
+        float[] dec = Decode(packed, scales, global, 1, cols);
+
+        AssertWithinBlockBound(src, dec, 1, cols, global);
+    }
+
+    /// <summary>Asserts each element is within the bound that <see cref="ModelOptNvfp4Codec.Quantize"/> guarantees for its block.
+    /// Blocks whose maximum is at least <see cref="ModelOptNvfp4Codec.NormalScaleBlockFraction"/> of the tensor maximum get
+    /// <see cref="ModelOptNvfp4Codec.MaxRoundTripError"/> of their block maximum; smaller blocks get
+    /// <see cref="ModelOptNvfp4Codec.SubnormalBlockError"/> of the global scale.</summary>
+    private static void AssertWithinBlockBound(float[] src, float[] dec, int rows, int cols, float global, string label = "element")
+    {
+        float amax = 0f;
+        foreach (float v in src) amax = MathF.Max(amax, MathF.Abs(v));
+        float normalThreshold = amax * ModelOptNvfp4Codec.NormalScaleBlockFraction;
+
+        for (int r = 0; r < rows; r++)
+        for (int blk = 0; blk < cols / 16; blk++)
+        {
+            float blockMax = 0f;
+            for (int j = 0; j < 16; j++) blockMax = MathF.Max(blockMax, MathF.Abs(src[r * cols + blk * 16 + j]));
+            float bound = blockMax >= normalThreshold
+                ? blockMax * ModelOptNvfp4Codec.MaxRoundTripError
+                : ModelOptNvfp4Codec.SubnormalBlockError * global;
+            for (int j = 0; j < 16; j++)
+            {
+                int i = r * cols + blk * 16 + j;
+                Assert.True(MathF.Abs(dec[i] - src[i]) <= bound * (1f + 1e-5f), $"{label}[{i}]: {dec[i]} vs {src[i]}, bound {bound}");
+            }
+        }
     }
 
     /// <summary>Decodes a row-major NVFP4 matrix through the production dequantizer.</summary>
@@ -209,6 +266,7 @@ public sealed unsafe class Nvfp4DequantTests
     }
 
     [Fact]
+    [Trait("Category", "Integration")]
     public void Quantize_RealTensor_RoundTripsWithinBound()
     {
         string? path = Environment.GetEnvironmentVariable("HARTSY_QUANT_TEST_SAFETENSORS");
@@ -219,20 +277,10 @@ public sealed unsafe class Nvfp4DequantTests
         SafeTensorDescriptor d = loader.Descriptors.Values.First(x => x.DType == DType.F32 && x.Shape.Rank == 2 && x.Shape[1] % 16 == 0 && x.Shape.ElementCount >= 4096);
         using Tensor w = loader.GetTensor(d.Name);
         int rows = (int)w.Shape[0], cols = (int)w.Shape[1];
-        float[] src = w.AsReadOnlySpan<float>().ToArray();
+        ReadOnlySpan<float> src = w.AsReadOnlySpan<float>();
 
         (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, rows, cols);
         float[] dec = Decode(packed, scales, global, rows, cols);
-        for (int r = 0; r < rows; r++)
-        for (int blk = 0; blk < cols / 16; blk++)
-        {
-            float blockMax = 0f;
-            for (int j = 0; j < 16; j++) blockMax = MathF.Max(blockMax, MathF.Abs(src[r * cols + blk * 16 + j]));
-            for (int j = 0; j < 16; j++)
-            {
-                int i = r * cols + blk * 16 + j;
-                Assert.True(MathF.Abs(dec[i] - src[i]) <= blockMax * ModelOptNvfp4Codec.MaxRoundTripError + 1e-5f, $"{d.Name}[{i}]");
-            }
-        }
+        AssertWithinBlockBound(src.ToArray(), dec, rows, cols, global, d.Name);
     }
 }

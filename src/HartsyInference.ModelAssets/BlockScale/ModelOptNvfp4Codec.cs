@@ -11,8 +11,24 @@ namespace HartsyInference.ModelAssets.BlockScale;
 /// <remarks>Not <see cref="Nvfp4.Nvfp4Codec"/>, which reads the Comfy layout. Nibble 8 decodes to +0.0; the input scale is not read and a zero, NaN or inf global scale decodes as written.</remarks>
 public static unsafe class ModelOptNvfp4Codec
 {
+    /// <summary>Largest per-element error of <see cref="Quantize"/> then <see cref="DequantRows"/>, as a fraction of the block maximum: half the widest e2m1 step (1 scale unit = block maximum / 6) plus the E4M3 rounding of the block scale (1/16). Holds for blocks whose maximum is at least <see cref="NormalScaleBlockFraction"/> of the tensor maximum.</summary>
+    public const float MaxRoundTripError = 1f / 6f + 1f / 16f;
+
+    /// <summary>Block maxima below this fraction of the tensor maximum get an E4M3 block scale below the normal range (2^-6), where the scale has fewer significant bits and can underflow to zero. For those blocks <see cref="SubnormalBlockError"/> applies instead of <see cref="MaxRoundTripError"/>.</summary>
+    public const float NormalScaleBlockFraction = 1f / 28672f;
+
+    /// <summary>Absolute error bound, in units of the global scale, for blocks below <see cref="NormalScaleBlockFraction"/>. Such a block decodes to zero or to a subnormal-scale grid whose step is at most 2^-6 of the global scale.</summary>
+    public const float SubnormalBlockError = 1f / 32f;
+
+    private const int BlockWidth = 16;
+    private const float E2m1Max = 6f;
+    private const float E4M3Max = 448f;
+
     private static readonly DType[] ScaleTypes = [DType.F8E4M3];
     private static readonly float[] Lut = Mxfp4E8M0Codec.ZeroPositiveLut();
+    private static readonly float[] E2m1Magnitudes = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
+    private static readonly byte[] PositiveE4M3Codes = [.. Enumerable.Range(0, 0x7F).Select(c => (byte)c).OrderBy(c => CheckpointConvertUtils.E4M3Table[c])];
+    private static readonly float[] PositiveE4M3Values = [.. PositiveE4M3Codes.Select(c => CheckpointConvertUtils.E4M3Table[c])];
 
     /// <summary>Dequantizes <paramref name="rowCount"/> rows from <paramref name="rowOffset"/> to F32.</summary>
     /// <param name="packed">The recipe's whole packed matrix, <c>LogicalRows * LogicalCols / 2</c> bytes.</param>
@@ -68,63 +84,71 @@ public static unsafe class ModelOptNvfp4Codec
     }
 
     /// <summary>Quantizes a row-major F32 matrix to ModelOpt NVFP4: one E4M3 scale per 16 consecutive elements of a row and one F32 global scale (<c>amax / (6 * 448)</c>).</summary>
-    /// <returns>Low-nibble-first packed e2m1 (<c>rows * cols / 2</c> bytes), row-major E4M3 scale codes (<c>rows * cols / 16</c> bytes) and the global scale. Decoding with <see cref="DequantRows"/> reproduces each element within <see cref="MaxRoundTripError"/> of its block maximum.</returns>
+    /// <returns>Low-nibble-first packed e2m1 (<c>rows * cols / 2</c> bytes), row-major E4M3 scale codes (<c>rows * cols / 16</c> bytes) and the global scale. Decoding with <see cref="DequantRows"/> reproduces each element within <see cref="MaxRoundTripError"/> of its block maximum, or within <see cref="SubnormalBlockError"/> of the global scale for blocks below <see cref="NormalScaleBlockFraction"/>.</returns>
+    /// <exception cref="ArgumentException">A dimension is not positive, <paramref name="cols"/> is not a multiple of 16, the length does not match, or a value is NaN or infinite.</exception>
     public static (byte[] Packed, byte[] Scales, float GlobalScale) Quantize(ReadOnlySpan<float> values, long rows, long cols)
     {
+        if (rows <= 0 || cols <= 0)
+            throw new ArgumentException($"Nvfp4 matrix dimensions must be positive; got {rows}x{cols}.", nameof(rows));
         if (cols % BlockWidth != 0)
             throw new ArgumentException($"Nvfp4 needs columns in multiples of {BlockWidth}; got {cols}.", nameof(cols));
-        if (values.Length != rows * cols)
-            throw new ArgumentException($"Expected {rows * cols} values for a {rows}x{cols} matrix; got {values.Length}.", nameof(values));
+        long count;
+        try
+        {
+            count = checked(rows * cols);
+        }
+        catch (OverflowException)
+        {
+            throw new ArgumentException($"Nvfp4 matrix {rows}x{cols} is too large.", nameof(cols));
+        }
+        if (values.Length != count)
+            throw new ArgumentException($"Expected {count} values for a {rows}x{cols} matrix; got {values.Length}.", nameof(values));
 
         float amax = 0f;
         foreach (float v in values)
+        {
+            if (!float.IsFinite(v))
+                throw new ArgumentException("Nvfp4 input must be finite; got NaN or infinity.", nameof(values));
             amax = MathF.Max(amax, MathF.Abs(v));
+        }
         float global = amax > 0f ? amax / (E2m1Max * E4M3Max) : 1f;
 
         long blocksPerRow = cols / BlockWidth;
-        byte[] packed = new byte[rows * cols / 2];
+        byte[] packed = new byte[count / 2];
         byte[] scales = new byte[rows * blocksPerRow];
         float[] e4m3 = CheckpointConvertUtils.E4M3Table;
-        for (long r = 0; r < rows; r++)
+        fixed (float* src = values)
+        fixed (byte* packedPtr = packed)
+        fixed (byte* scalePtr = scales)
         {
-            for (long blk = 0; blk < blocksPerRow; blk++)
+            nint srcAddr = (nint)src, packedAddr = (nint)packedPtr, scaleAddr = (nint)scalePtr;
+            CpuParallel.For((int)rows, count, r =>
             {
-                long start = r * cols + blk * BlockWidth;
-                float blockMax = 0f;
-                for (int j = 0; j < BlockWidth; j++)
-                    blockMax = MathF.Max(blockMax, MathF.Abs(values[(int)start + j]));
-
-                byte scaleCode = NearestE4M3Code(blockMax / E2m1Max / global);
-                scales[r * blocksPerRow + blk] = scaleCode;
-                float scale = e4m3[scaleCode] * global;
-                float inv = scale > 0f ? 1f / scale : 0f;
-                for (int j = 0; j < BlockWidth; j++)
+                float* rowSrc = (float*)srcAddr + r * cols;
+                byte* rowPacked = (byte*)packedAddr + r * cols / 2;
+                byte* rowScale = (byte*)scaleAddr + r * blocksPerRow;
+                for (long blk = 0; blk < blocksPerRow; blk++)
                 {
-                    long i = start + j;
-                    byte nibble = E2m1Nibble(values[(int)i] * inv);
-                    packed[i >> 1] |= (byte)((i & 1) == 0 ? nibble : nibble << 4);
+                    float* block = rowSrc + blk * BlockWidth;
+                    float blockMax = 0f;
+                    for (int j = 0; j < BlockWidth; j++)
+                        blockMax = MathF.Max(blockMax, MathF.Abs(block[j]));
+
+                    byte scaleCode = NearestE4M3Code(blockMax / E2m1Max / global);
+                    rowScale[blk] = scaleCode;
+                    float scale = e4m3[scaleCode] * global;
+                    float inv = scale > 0f ? 1f / scale : 0f;
+                    for (int j = 0; j < BlockWidth; j++)
+                    {
+                        byte nibble = E2m1Nibble(block[j] * inv);
+                        long idx = blk * BlockWidth + j;
+                        rowPacked[idx >> 1] |= (byte)((j & 1) == 0 ? nibble : nibble << 4);
+                    }
                 }
-            }
+            });
         }
 
         return (packed, scales, global);
-    }
-
-    /// <summary>Largest per-element error of <see cref="Quantize"/> then <see cref="DequantRows"/>, as a fraction of the block maximum: half the widest e2m1 step (1 scale unit = block maximum / 6) plus the E4M3 rounding of the block scale (1/16).</summary>
-    public const float MaxRoundTripError = 1f / 6f + 1f / 16f;
-
-    private const int BlockWidth = 16;
-    private const float E2m1Max = 6f;
-    private const float E4M3Max = 448f;
-    private static readonly float[] PositiveE4M3Values;
-    private static readonly byte[] PositiveE4M3Codes;
-
-    static ModelOptNvfp4Codec()
-    {
-        float[] table = CheckpointConvertUtils.E4M3Table;
-        PositiveE4M3Codes = [.. Enumerable.Range(0, 0x7F).Select(c => (byte)c)];
-        PositiveE4M3Values = [.. PositiveE4M3Codes.Select(c => table[c])];
-        Array.Sort(PositiveE4M3Values, PositiveE4M3Codes);
     }
 
     private static byte NearestE4M3Code(float magnitude)
@@ -160,6 +184,4 @@ public static unsafe class ModelOptNvfp4Codec
             return 0;
         return (byte)(normalized < 0f ? 8 | best : best);
     }
-
-    private static readonly float[] E2m1Magnitudes = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
 }

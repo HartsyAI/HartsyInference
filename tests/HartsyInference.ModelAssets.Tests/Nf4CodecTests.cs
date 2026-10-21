@@ -107,6 +107,38 @@ public sealed unsafe class Nf4CodecTests
     }
 
     [Fact]
+    public void Quantize_RoundTrip_OddLengthPartialLastBlock()
+    {
+        const int n = 21, blockSize = 16;
+        float[] src = new float[n];
+        Random rng = new(3);
+        for (int i = 0; i < n; i++) src[i] = (float)(rng.NextDouble() * 2 - 1) * (1 + i % 4);
+
+        (byte[] packed, float[] absmax) = Nf4Codec.Quantize(src, blockSize);
+        Assert.Equal((n + 1) / 2, packed.Length);
+        Assert.Equal(2, absmax.Length);
+        using Tensor pk = U8(packed.Length);
+        packed.AsSpan().CopyTo(pk.AsSpan<byte>());
+        using Tensor am = F32(absmax);
+        using Tensor outT = Nf4Codec.Dequantize(pk, am, new TensorShape(n), blockSize);
+
+        ReadOnlySpan<float> o = outT.AsReadOnlySpan<float>();
+        for (int i = 0; i < n; i++)
+            Assert.True(MathF.Abs(o[i] - src[i]) <= absmax[i / blockSize] * Nf4Codec.MaxBlockError + Tol, $"element {i}");
+    }
+
+    [Theory]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    [InlineData(float.NegativeInfinity)]
+    public void Quantize_RejectsNonFiniteValues(float bad)
+    {
+        float[] src = new float[32];
+        src[5] = bad;
+        Assert.Throws<ArgumentException>(() => Nf4Codec.Quantize(src, blockSize: 16));
+    }
+
+    [Fact]
     public void Quantize_ZeroBlock_DecodesToZero()
     {
         float[] src = new float[20];
@@ -120,6 +152,7 @@ public sealed unsafe class Nf4CodecTests
     }
 
     [Fact]
+    [Trait("Category", "Integration")]
     public void Quantize_RealTensor_RoundTripsWithinBound()
     {
         string? path = Environment.GetEnvironmentVariable("HARTSY_QUANT_TEST_SAFETENSORS");
@@ -131,7 +164,7 @@ public sealed unsafe class Nf4CodecTests
         using Tensor w = loader.GetTensor(d.Name);
         ReadOnlySpan<float> src = w.AsReadOnlySpan<float>();
         long n = w.Shape.ElementCount;
-        (byte[] packed, float[] absmax) = Nf4Codec.Quantize(src.ToArray(), blockSize: 64);
+        (byte[] packed, float[] absmax) = Nf4Codec.Quantize(src, blockSize: 64);
         using Tensor pk = U8(packed.Length);
         packed.AsSpan().CopyTo(pk.AsSpan<byte>());
         using Tensor am = F32(absmax);
