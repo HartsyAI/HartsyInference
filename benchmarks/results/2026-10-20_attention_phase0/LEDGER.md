@@ -15,6 +15,9 @@ Later phases gate on "no new failure by name" against this list.
 Failing on main, unrelated to attention:
 - `HartsyInference.Cpu.Tests.LowRankAdjunctCoverageTests.EveryBackendEntryTakingAWeightIsClassified` — IBackend gained
   `RmsNormModulate` without a LoRA-coverage classification.
+- `HartsyInference.Diffusion.Tests.HiDreamDitShardingTests.ForwardSharded_MatchesUnsharded_BitParity` (all five
+  `splitBlock` cases, 249/256 values differ). Found running the DiT sharding classes on the 3060; same count on main and
+  on the stack.
 
 Caveat: tests that `return` early when a resource is missing count as passed (xUnit has no skip from inside a fact);
 the GPU and PTX were present, so the GPU suites ran their bodies. TRX files with per-test results are under `trx/`.
