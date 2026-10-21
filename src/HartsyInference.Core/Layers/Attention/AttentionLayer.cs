@@ -268,13 +268,32 @@ public sealed class AttentionLayer
         Tensor kvInput, DType act, DType kvAct)
     {
         Tensor q = new(ProjectedShape(qInput.Shape, _config.Heads), act);
-        backend.Linear(q, qInput, w.Query!, w.QueryBias);
+        try
+        {
+            backend.Linear(q, qInput, w.Query!, w.QueryBias);
+        }
+        catch
+        {
+            q.Dispose();
+            throw;
+        }
         qInput.Dispose();
-        Tensor k = new(ProjectedShape(kvInput.Shape, _config.KvHeads), kvAct);
-        backend.Linear(k, kvInput, w.Key!, w.KeyBias);
-        Tensor v = new(ProjectedShape(kvInput.Shape, _config.KvHeads), kvAct);
-        backend.Linear(v, kvInput, w.Value!, w.ValueBias);
-        return (q, k, v, null);
+        Tensor? k = null, v = null;
+        try
+        {
+            k = new(ProjectedShape(kvInput.Shape, _config.KvHeads), kvAct);
+            backend.Linear(k, kvInput, w.Key!, w.KeyBias);
+            v = new(ProjectedShape(kvInput.Shape, _config.KvHeads), kvAct);
+            backend.Linear(v, kvInput, w.Value!, w.ValueBias);
+            return (q, k, v, null);
+        }
+        catch
+        {
+            q.Dispose();
+            k?.Dispose();
+            v?.Dispose();
+            throw;
+        }
     }
 
     private static void Release(Tensor qInput, Tensor kvInput)

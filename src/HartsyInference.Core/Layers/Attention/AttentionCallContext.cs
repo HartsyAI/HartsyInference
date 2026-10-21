@@ -124,6 +124,6 @@ public readonly record struct AttentionCallContext
     public bool ReleaseInputs { get; init; }
 
     /// <summary>A cross-attention disposes its query input right after the Q projection, before K and V are allocated; the
-    /// key/value input stays the caller's.</summary>
+    /// key/value input stays the caller's, and so does the query input if its projection throws.</summary>
     public bool ReleaseQueryAfterProjection { get; init; }
 }

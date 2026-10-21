@@ -271,7 +271,7 @@ public sealed class JointAttentionTests
     }
 
     [Fact]
-    public void ACrossAttention_CanReleaseItsQueryInputBeforeKAndVExist()
+    public unsafe void ACrossAttention_CanReleaseItsQueryInputBeforeKAndVExist()
     {
         AttentionTraceBackend backend = new();
         AttentionLayer layer = Stream(1);
@@ -281,6 +281,8 @@ public sealed class JointAttentionTests
 
         Assert.Equal(["Linear w101", "Linear w102", "Linear w103", "RmsNorm w106", "RmsNorm w107", "Permute0213 6,4,2", "Permute0213 3,4,2"],
             backend.Ops.Take(7));
+        Assert.Throws<ObjectDisposedException>(() => (nint)x.DataPointer);
+        Assert.NotEqual(0, (nint)text.DataPointer);
         Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, x, new AttentionCallContext { ReleaseQueryAfterProjection = true }));
         Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, text,
             new AttentionCallContext { ReleaseQueryAfterProjection = true, ReleaseInputs = true }));
