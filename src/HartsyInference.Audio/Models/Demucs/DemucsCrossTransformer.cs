@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Dia;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Demucs;
@@ -168,6 +169,7 @@ public sealed unsafe class DemucsCrossTransformer : IDisposable
         private readonly HtDemucsConfig _cfg;
         private readonly bool _cross;
         private readonly int _dim, _heads, _hd, _ffn;
+        private readonly AttentionLayer _attention;
         private Tensor? _inW, _inB, _oW, _oB;            // fused in_proj [3dim,dim], out_proj
         private Tensor? _n1W, _n1B, _n2W, _n2B, _n3W, _n3B, _noW, _noB;
         private Tensor? _f1W, _f1B, _f2W, _f2B, _g1, _g2;
@@ -175,6 +177,7 @@ public sealed unsafe class DemucsCrossTransformer : IDisposable
         public Layer(HtDemucsConfig cfg, bool cross)
         {
             _cfg = cfg; _cross = cross; _dim = cfg.TransformerWidth; _heads = cfg.THeads; _hd = cfg.TransformerHeadDim; _ffn = cfg.TransformerFfn;
+            _attention = AttentionLayer.Shared(_heads, _hd);
         }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, DemucsCastOwner casts)
@@ -233,9 +236,7 @@ public sealed unsafe class DemucsCrossTransformer : IDisposable
             DiaHeads.FlatToHeads(qM, qp, nq, _heads, _hd); qp.Dispose();
             DiaHeads.FlatToHeads(kM, kp, nkv, _heads, _hd); kp.Dispose();
             DiaHeads.FlatToHeads(vM, vp, nkv, _heads, _hd); vp.Dispose();
-            Tensor attn = new(new TensorShape(1, _heads, nq, _hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, qM, kM, vM, null, 1f / MathF.Sqrt(_hd));
-            qM.Dispose(); kM.Dispose(); vM.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qM, kM, vM, default);
             Tensor flat = new(new TensorShape(1, nq, _dim), DType.F32);
             DiaHeads.HeadsToFlat(flat, attn, nq, _heads, _hd); attn.Dispose();
             Tensor outT = WhisperOps.ProjectLinear(backend, flat, _oW!, _oB, 1, nq, _dim, _dim); flat.Dispose();

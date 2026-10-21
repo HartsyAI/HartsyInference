@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ControlFoley;
@@ -13,6 +14,7 @@ internal sealed unsafe class ControlFoleyClipTransformer
     private readonly int _hidden;
     private readonly float _eps;
     private readonly Block[] _blocks;
+    private readonly AttentionLayer _attention;
 
     private sealed record Block(Tensor Ln1W, Tensor Ln1B, Tensor InW, Tensor InB, Tensor OutW, Tensor OutB,
         Tensor Ln2W, Tensor Ln2B, Tensor FcW, Tensor FcB, Tensor ProjW, Tensor ProjB);
@@ -29,6 +31,7 @@ internal sealed unsafe class ControlFoleyClipTransformer
         _heads = heads;
         _hidden = width * mlpRatio;
         _eps = eps;
+        _attention = AttentionLayer.Shared(heads, width / heads);
         _blocks = new Block[layers];
         for (int i = 0; i < layers; i++)
         {
@@ -145,8 +148,7 @@ internal sealed unsafe class ControlFoleyClipTransformer
             }
         }
 
-        using Tensor ctx = new(headShape, DType.F32);
-        backend.ScaledDotProductAttention(ctx, q, k, v, mask, 1f / MathF.Sqrt(headDim));
+        using Tensor ctx = _attention.AttendHeadMajorOperands(backend, q, k, v, new AttentionCallContext { Bias = mask }, OperandOwnership.None);
         float[] merged = new float[n * _width];
         float* cp = (float*)ctx.DataPointer;
         for (int t = 0; t < n; t++)

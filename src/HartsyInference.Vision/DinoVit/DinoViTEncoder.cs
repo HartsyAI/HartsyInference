@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.DinoVit;
@@ -170,6 +171,7 @@ internal sealed unsafe class DinoViTLayer
     private readonly float _eps;
     private Tensor? _lnBeforeW, _lnBeforeB, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB;
     private Tensor? _lnAfterW, _lnAfterB, _interW, _interB, _outW, _outB;
+    private AttentionLayer? _attn;
 
     public DinoViTLayer(int hidden, int numHeads, int inter, float eps)
     {
@@ -186,6 +188,12 @@ internal sealed unsafe class DinoViTLayer
         _lnAfterW = DinoViTEncoder.F32(w[$"{prefix}.layernorm_after.weight"]); _lnAfterB = DinoViTEncoder.F32(w[$"{prefix}.layernorm_after.bias"]);
         _interW = DinoViTEncoder.F32(w[$"{prefix}.intermediate.dense.weight"]); _interB = DinoViTEncoder.F32(w[$"{prefix}.intermediate.dense.bias"]);
         _outW = DinoViTEncoder.F32(w[$"{prefix}.output.dense.weight"]); _outB = DinoViTEncoder.F32(w[$"{prefix}.output.dense.bias"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _oW, OutputBias = _oB,
+            });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -200,7 +208,7 @@ internal sealed unsafe class DinoViTLayer
         TensorShape shape = new(batch, seq, _hidden);
 
         Tensor n1 = new(shape, DType.F32); backend.LayerNorm(n1, x, _lnBeforeW!, _lnBeforeB!, _eps);
-        Tensor attn = Attention(backend, n1, batch, seq); n1.Dispose();
+        Tensor attn = _attn!.Forward(backend, n1, n1, default); n1.Dispose();
         Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attn); attn.Dispose();
 
         Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _lnAfterW!, _lnAfterB!, _eps);
@@ -209,25 +217,6 @@ internal sealed unsafe class DinoViTLayer
         Tensor f2 = new(shape, DType.F32); backend.Linear(f2, f1, _outW!, _outB!); f1.Dispose();
         Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, f2); r1.Dispose(); f2.Dispose();
         return r2;
-    }
-
-    private Tensor Attention(IBackend backend, Tensor input, int batch, int seq)
-    {
-        Tensor q = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        Tensor k = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        Tensor v = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        backend.Linear(q, input, _qW!, _qB!); backend.Linear(k, input, _kW!, _kB!); backend.Linear(v, input, _vW!, _vB!);
-        Tensor qh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(qh, q, seq, _numHeads, _headDim);
-        Tensor kh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(kh, k, seq, _numHeads, _headDim);
-        Tensor vh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(vh, v, seq, _numHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor ao = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(ao, qh, kh, vh, null, 1f / MathF.Sqrt(_headDim));
-        qh.Dispose(); kh.Dispose(); vh.Dispose();
-        Tensor merged = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Permute0213(merged, ao, _numHeads, seq, _headDim); ao.Dispose();
-        Tensor proj = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        backend.Linear(proj, merged, _oW!, _oB!); merged.Dispose();
-        return proj;
     }
 
 }

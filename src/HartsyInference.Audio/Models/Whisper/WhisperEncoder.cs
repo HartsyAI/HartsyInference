@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Whisper;
@@ -261,6 +262,7 @@ internal sealed unsafe class WhisperEncoderLayer
     private Tensor? _fc2Bias;
     private Tensor? _finalLnWeight;
     private Tensor? _finalLnBias;
+    private AttentionLayer? _attn;
 
     public WhisperEncoderLayer(WhisperConfig cfg) { _cfg = cfg; }
 
@@ -276,6 +278,12 @@ internal sealed unsafe class WhisperEncoderLayer
         _vBias = WhisperOps.EnsureF32(weights[$"{prefix}.self_attn.v_proj.bias"]);
         _outWeight = WhisperOps.EnsureF32(weights[$"{prefix}.self_attn.out_proj.weight"]);
         _outBias = WhisperOps.EnsureF32(weights[$"{prefix}.self_attn.out_proj.bias"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _cfg.NumHeads, KvHeads = _cfg.NumHeads, HeadDim = _cfg.HeadDim, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = _qWeight, QueryBias = _qBias, Key = _kWeight, Value = _vWeight, ValueBias = _vBias, Output = _outWeight, OutputBias = _outBias,
+            });
 
         _fc1Weight = WhisperOps.EnsureF32(weights[$"{prefix}.fc1.weight"]);
         _fc1Bias = WhisperOps.EnsureF32(weights[$"{prefix}.fc1.bias"]);
@@ -297,32 +305,7 @@ internal sealed unsafe class WhisperEncoderLayer
         Tensor normed = new(shape, DType.F32);
         backend.LayerNorm(normed, hidden, _attnLnWeight!, _attnLnBias!, _cfg.LayerNormEps);
 
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _qWeight!, _qBias, batch, seqLen, d, d);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _kWeight!, bias: null, batch, seqLen, d, d);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _vWeight!, _vBias, batch, seqLen, d, d);
-        normed.Dispose();
-
-        // Head split and merge are backend permutes: the projections and the attention stay on the device.
-        TensorShape mh = new(batch, _cfg.NumHeads, seqLen, _cfg.HeadDim);
-        Tensor qMh = new(mh, DType.F32);
-        Tensor kMh = new(mh, DType.F32);
-        Tensor vMh = new(mh, DType.F32);
-        backend.Permute0213(qMh, q, seqLen, _cfg.NumHeads, _cfg.HeadDim);
-        backend.Permute0213(kMh, k, seqLen, _cfg.NumHeads, _cfg.HeadDim);
-        backend.Permute0213(vMh, v, seqLen, _cfg.NumHeads, _cfg.HeadDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
-        float scale = 1f / MathF.Sqrt(_cfg.HeadDim);
-        Tensor attnOut = new(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, mask: null, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor merged = new(shape, DType.F32);
-        backend.Permute0213(merged, attnOut, _cfg.NumHeads, seqLen, _cfg.HeadDim);
-        attnOut.Dispose();
-
-        Tensor projected = WhisperOps.ProjectLinear(backend, merged, _outWeight!, _outBias, batch, seqLen, d, d);
-        merged.Dispose();
+        Tensor projected = _attn!.Forward(backend, normed, normed, new AttentionCallContext { ReleaseInputs = true });
 
         Tensor residual1 = new(shape, DType.F32);
         backend.Add(residual1, hidden, projected);

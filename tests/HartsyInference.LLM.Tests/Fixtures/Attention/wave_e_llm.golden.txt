@@ -1,0 +1,5 @@
+# Golden digests of the Wave E LLM attention sites' forward outputs (T5Model encoder and decoder through its internal weight-dictionary seam).
+# Captured from the PRE-MIGRATION attention code (attn-c-rebased at 2c234c18, before any Wave E move onto the shared attention layer), run on HartsyInference.Cpu.CpuBackend.
+# Format: <case> <label>=<sha256 of the little-endian output bits> [...]. Regenerate only for an intentional numeric change.
+t5model_encode enc=c71090a8dd9a8b4a1ec9542bea2f6d6bc164044ce0a4f12745541fd2843dc10b
+t5model_decode step1=5337cc6d550b86bab8d3bc189424fcfeb55fc907d52736d682d381f1f3cafc61 step2=c8d182953304062dfb9dbdaab526a5728cc06749282b5953d2eb4470a3138027 step3=fe766b26a5671ca988334c027d9f88d457b5eddef7ab4f75842f91ab3007bc11 step4=96e909f5f3145d42abcf596850cf628e9c2ef277cb8115e3aef63937b52e3053

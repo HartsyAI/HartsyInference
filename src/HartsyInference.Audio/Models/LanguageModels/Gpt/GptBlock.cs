@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -15,6 +16,7 @@ public sealed unsafe class GptBlock : IDisposable
     private Tensor? _ln1G, _ln1B, _ln2G, _ln2B;
     private Tensor? _attW, _attB, _outW, _outB;         // att_proj [3H, H], out_proj [H, H]
     private Tensor? _mlpInW, _mlpInB, _mlpOutW, _mlpOutB;    // [4H, H], [H, 4H]
+    private AttentionLayer? _attn;
 
     public GptBlock(GptConfig cfg) => _cfg = cfg;
 
@@ -26,6 +28,13 @@ public sealed unsafe class GptBlock : IDisposable
         _attB = LoadProjectionBias(w, $"{prefix}.attn.att_proj.bias", 3 * _cfg.Hidden);
         _outW = WhisperOps.EnsureF32(w[$"{prefix}.attn.out_proj.weight"]);
         _outB = LoadProjectionBias(w, $"{prefix}.attn.out_proj.bias", _cfg.Hidden);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _cfg.NumHeads, KvHeads = _cfg.NumHeads, HeadDim = _cfg.HeadDim, Projection = AttentionProjection.FusedSlice,
+                ComputeDType = DType.F32,
+            },
+            new AttentionLayerWeights { Qkv = _attW, QkvBias = _attB, Output = _outW, OutputBias = _outB });
         _ln2G = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_2.weight"]);
         _ln2B = LoadBiasOrZero(w, $"{prefix}.layernorm_2.bias", _ln2G);
         _mlpInW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.in_proj.weight"]);
@@ -48,43 +57,14 @@ public sealed unsafe class GptBlock : IDisposable
     {
         int t = (int)x.Shape[1];
         int h = _cfg.Hidden;
-        int nh = _cfg.NumHeads;
-        int d = _cfg.HeadDim;
 
         // ── Attention ──
         Tensor ln1 = new(x.Shape, DType.F32);
         backend.LayerNorm(ln1, x, _ln1G!, _ln1B!, 1e-5f);
-        Tensor qkv = WhisperOps.ProjectLinear(backend, ln1, _attW!, _attB, 1, t, h, 3 * h);
-        ln1.Dispose();
 
-        // Split the fused QKV on-device (last-dim slices), then permute [1,t,h] → [1,nh,t,d]. Keeping the
-        // split/permute/residual on the backend (rather than host loops) avoids a device→host sync per layer —
+        // Fused QKV split on-device, then head-permuted and attended by the layer: no device→host sync per layer —
         // the non-causal Bark-Fine stage runs six full 1024-frame passes, so this glue dominated otherwise.
-        Tensor q = new(new TensorShape(1, t, h), DType.F32);
-        Tensor k = new(new TensorShape(1, t, h), DType.F32);
-        Tensor v = new(new TensorShape(1, t, h), DType.F32);
-        backend.SliceLastDim(q, qkv, 0);
-        backend.SliceLastDim(k, qkv, h);
-        backend.SliceLastDim(v, qkv, 2 * h);
-        qkv.Dispose();
-
-        Tensor qMh = new(new TensorShape(1, nh, t, d), DType.F32);
-        Tensor kMh = new(new TensorShape(1, nh, t, d), DType.F32);
-        Tensor vMh = new(new TensorShape(1, nh, t, d), DType.F32);
-        backend.Permute0213(qMh, q, t, nh, d);
-        backend.Permute0213(kMh, k, t, nh, d);
-        backend.Permute0213(vMh, v, t, nh, d);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
-        Tensor attn = new(new TensorShape(1, nh, t, d), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, causalMask, 1f / MathF.Sqrt(d));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor attnFlat = new(new TensorShape(1, t, h), DType.F32);
-        backend.Permute0213(attnFlat, attn, nh, t, d);
-        attn.Dispose();
-        Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, _outW!, _outB, 1, t, h, h);
-        attnFlat.Dispose();
+        Tensor attnOut = _attn!.Forward(backend, ln1, ln1, new AttentionCallContext { Bias = causalMask, ReleaseInputs = true });
 
         Tensor res1 = new(x.Shape, DType.F32);
         backend.Add(res1, x, attnOut);
@@ -118,17 +98,9 @@ public sealed unsafe class GptBlock : IDisposable
         // ── Attention ──
         Tensor ln1 = new(x.Shape, DType.F32);
         backend.LayerNorm(ln1, x, _ln1G!, _ln1B!, 1e-5f);
-        Tensor qkv = WhisperOps.ProjectLinear(backend, ln1, _attW!, _attB, 1, t, h, 3 * h);
-        ln1.Dispose();
 
         // Split the fused QKV on-device (last-dim slices), then permute [1,t,h] → [1,nh,t,d].
-        Tensor q = new(new TensorShape(1, t, h), DType.F32);
-        Tensor k = new(new TensorShape(1, t, h), DType.F32);
-        Tensor v = new(new TensorShape(1, t, h), DType.F32);
-        backend.SliceLastDim(q, qkv, 0);
-        backend.SliceLastDim(k, qkv, h);
-        backend.SliceLastDim(v, qkv, 2 * h);
-        qkv.Dispose();
+        (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, ln1, releaseInput: true);
 
         Tensor qMh = new(new TensorShape(1, nh, t, d), DType.F32);
         Tensor kMh = new(new TensorShape(1, nh, t, d), DType.F32);
@@ -143,17 +115,13 @@ public sealed unsafe class GptBlock : IDisposable
 
         // FlashAttention over the valid prefix [0, qOffset+t): MHA (group 1), causal via the absolute query
         // offset. The cache buffer's seq stride exceeds the valid length, so the valid key count is passed
-        // explicitly.
+        // explicitly. attn is allocated before the prefix is read: a paged cache gathers it into scratch there.
         Tensor attn = new(new TensorShape(1, nh, t, d), DType.F32);
-        backend.FlashAttention(attn, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
-            qOffset + t, kvGroup: 1, causal: true, qOffset: qOffset, 1f / MathF.Sqrt(d));
-        qMh.Dispose();
+        _attn.AttendCachedHeadMajor(backend, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
+            new AttentionCacheView(qOffset + t, qOffset, Causal: true), output: attn);
 
-        Tensor attnFlat = new(new TensorShape(1, t, h), DType.F32);
-        backend.Permute0213(attnFlat, attn, nh, t, d);
-        attn.Dispose();
-        Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, _outW!, _outB, 1, t, h, h);
-        attnFlat.Dispose();
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, h));
+        Tensor attnOut = _attn.ProjectOutput(backend, attnFlat);
 
         Tensor res1 = new(x.Shape, DType.F32);
         backend.Add(res1, x, attnOut);

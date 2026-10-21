@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Mert2;
@@ -14,7 +15,7 @@ namespace HartsyInference.Audio.Models.Mert2;
 internal sealed class Mert2ConformerLayer
 {
     private readonly Mert2Config _config;
-    private readonly float _attentionScale;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _ffn1NormWeight;
     private Tensor? _ffn1NormBias;
@@ -56,7 +57,10 @@ internal sealed class Mert2ConformerLayer
     public Mert2ConformerLayer(Mert2Config config)
     {
         _config = config;
-        _attentionScale = 1f / MathF.Sqrt(config.HeadDim);
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = config.Heads, KvHeads = config.Heads, HeadDim = config.HeadDim, ComputeDType = DType.F32, AllowF16 = true,
+        });
     }
 
     /// <summary>Loads the layer from <c>encoder.layers.N</c>; converted tensors are appended to
@@ -179,8 +183,8 @@ internal sealed class Mert2ConformerLayer
         backend.Permute0213(scratch.QueryHeads, scratch.Query, tokens, heads, headDim);
         backend.Permute0213(scratch.KeyHeads, scratch.Key, tokens, heads, headDim);
         backend.Permute0213(scratch.ValueHeads, scratch.Value, tokens, heads, headDim);
-        backend.ScaledDotProductAttention(scratch.AttentionHeads, scratch.QueryHeads, scratch.KeyHeads,
-            scratch.ValueHeads, null, _attentionScale, allowF16: true);
+        _attention.AttendHeadMajorOperands(backend, scratch.QueryHeads, scratch.KeyHeads, scratch.ValueHeads, default,
+            OperandOwnership.None, scratch.AttentionHeads);
         backend.Permute0213(scratch.AttentionTokens, scratch.AttentionHeads, heads, tokens, headDim);
 
         backend.Linear(scratch.Attention, scratch.AttentionTokens, _outWeight!, _outBias);

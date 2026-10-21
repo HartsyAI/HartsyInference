@@ -1,5 +1,8 @@
-using System.Security.Cryptography;
 using HartsyInference.Core.Backends;
+using HartsyInference.Tests.Common.Attention;
+using static HartsyInference.Tests.Common.Attention.AttentionGolden;
+using Weights = HartsyInference.Tests.Common.Attention.GoldenWeights;
+using Owner = HartsyInference.Tests.Common.Attention.GoldenOwner;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
@@ -742,31 +745,6 @@ internal static unsafe class AttentionWaveCGoldenCases
 
     // ── Harness ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private sealed class Owner : List<Tensor>
-    {
-        public Tensor Own(Tensor t) { Add(t); return t; }
-    }
-
-    /// <summary>Digests the outputs, then releases every tensor the case allocated.</summary>
-    private static string Finish(List<Tensor> owned, params (string Label, Tensor Tensor)[] outputs)
-    {
-        string digests = string.Join(' ', outputs.Select(entry => Digest(entry.Label, entry.Tensor)));
-        foreach (Tensor t in owned) t.Dispose();
-        return digests;
-    }
-
-    /// <summary>SHA-256 of the tensor's bits; rejects non-finite values.</summary>
-    private static string Digest(string label, Tensor t)
-    {
-        Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-        for (long i = 0; i < f32.ElementCount; i++)
-            if (!float.IsFinite(((float*)f32.DataPointer)[i]))
-                throw new InvalidOperationException($"Non-finite value in '{label}' at {i}.");
-        if (!ReferenceEquals(f32, t)) f32.Dispose();
-        ReadOnlySpan<byte> bytes = new(t.DataPointer, checked((int)(t.ElementCount * t.DType.SizeInBytes)));
-        return $"{label}={Convert.ToHexStringLower(SHA256.HashData(bytes))}";
-    }
-
     /// <summary>Additive F32 mask <c>[1, 1, rows, cols]</c>: 0 where <paramref name="allowed"/>, a large negative elsewhere.</summary>
     private static Tensor AdditiveMask(int rows, int cols, Func<int, int, bool> allowed)
     {
@@ -793,51 +771,5 @@ internal static unsafe class AttentionWaveCGoldenCases
         new ReadOnlySpan<float>((float*)src.DataPointer + start * width, checked((int)(count * width)))
             .CopyTo(new Span<float>((float*)t.DataPointer, checked((int)(count * width))));
         return t;
-    }
-
-    private static Tensor Seeded(TensorShape shape, uint seed, float scale = 1f)
-    {
-        Tensor tensor = new(shape, DType.F32);
-        float* data = (float*)tensor.DataPointer;
-        uint state = seed * 2654435761u + 0x9E3779B9u;
-        for (long i = 0; i < tensor.ElementCount; i++)
-        {
-            state = state * 1664525u + 1013904223u;
-            data[i] = (((state >> 8) & 0xFFFF) / 32768f - 1f) * scale;
-        }
-        return tensor;
-    }
-
-    /// <summary>A checkpoint stand-in: each tensor is seeded from its own name (FNV-1a) plus a per-case salt.</summary>
-    private sealed class Weights(uint salt) : Dictionary<string, Tensor>
-    {
-        public void Add(string name, long rows, long cols) => base.Add(name, Seeded(new TensorShape(rows, cols), Seed(name), 0.3f));
-
-        public void AddShape(string name, long[] shape, float scale) => base.Add(name, Seeded(new TensorShape(shape), Seed(name), scale));
-
-        public void AddBias(string name, long n) => base.Add(name, Seeded(new TensorShape(n), Seed(name), 0.1f));
-
-        /// <summary>A weight <c>[out, in]</c> under <c>prefix.weight</c>, plus <c>prefix.bias</c> when asked.</summary>
-        public void Linear(string prefix, long outFeatures, long inFeatures, bool bias = false)
-        {
-            Add($"{prefix}.weight", outFeatures, inFeatures);
-            if (bias) AddBias($"{prefix}.bias", outFeatures);
-        }
-
-        /// <summary>Norm scale near 1.</summary>
-        public void AddNorm(string name, long n)
-        {
-            Tensor t = Seeded(new TensorShape(n), Seed(name), 0.25f);
-            float* p = (float*)t.DataPointer;
-            for (long i = 0; i < n; i++) p[i] += 1f;
-            base.Add(name, t);
-        }
-
-        private uint Seed(string name)
-        {
-            uint h = 2166136261u ^ salt;
-            foreach (char c in name) h = (h ^ c) * 16777619u;
-            return h;
-        }
     }
 }

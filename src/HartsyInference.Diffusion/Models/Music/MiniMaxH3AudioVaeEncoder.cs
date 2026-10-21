@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Music;
@@ -253,8 +254,8 @@ public sealed unsafe class MiniMaxH3AudioVaeEncoder : IDisposable
         using Tensor v = new Tensor(new TensorShape(batch, heads, frames, headDim), DType.F32);
         SplitHeads(qkv, q, k, v, batch, frames, heads, headDim);
         using Tensor mask = CausalMask(frames);
-        using Tensor attn = new Tensor(new TensorShape(batch, heads, frames, headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, k, v, mask, 1f / MathF.Sqrt(headDim));
+        using Tensor attn = AttentionLayer.Shared(heads, headDim)
+            .AttendHeadMajorOperands(backend, q, k, v, new AttentionCallContext { Bias = mask }, OperandOwnership.None);
 
         // Mean over heads, then an adaptive average pool down to the latent width — this is the reference's whole
         // channel reduction, not a projection.

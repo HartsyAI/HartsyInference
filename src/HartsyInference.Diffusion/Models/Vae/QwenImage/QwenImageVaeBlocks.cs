@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae.QwenImage;
@@ -165,6 +166,7 @@ public sealed class QwenImageResidualBlock
 public sealed class QwenImageAttentionBlock
 {
     private readonly int _dim;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _normGamma;     // [dim] (flattened from [dim, 1, 1])
     private Tensor? _qkvWeight;     // [3*dim, dim, 1, 1]
@@ -172,7 +174,11 @@ public sealed class QwenImageAttentionBlock
     private Tensor? _projWeight;    // [dim, dim, 1, 1]
     private Tensor? _projBias;      // [dim]
 
-    public QwenImageAttentionBlock(int dim) { _dim = dim; }
+    public QwenImageAttentionBlock(int dim)
+    {
+        _dim = dim;
+        _attention = new(new AttentionLayerConfig { Heads = 1, KvHeads = 1, HeadDim = dim });
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
@@ -239,12 +245,7 @@ public sealed class QwenImageAttentionBlock
         qkv.Dispose();
 
         // 4. SDPA: scale = 1 / sqrt(dim). Output [B, 1, seqLen, dim].
-        float scale = 1.0f / MathF.Sqrt(_dim);
-        Tensor attnOut = new Tensor(qkvHeadShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, q, k, v, mask: null, scale);
-        q.Dispose();
-        k.Dispose();
-        v.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
 
         // 5. Reshape [B, 1, seqLen, dim] back to [B, dim, H, W] — the inverse transpose, on-device for B=1.
         Tensor reshaped = new Tensor(x.Shape, DType.F32);

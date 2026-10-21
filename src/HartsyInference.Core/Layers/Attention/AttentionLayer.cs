@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -10,6 +11,16 @@ public sealed class AttentionLayer
     private readonly AttentionLayerConfig _config;
     private readonly AttentionLayerWeights? _weights;
     private readonly AttentionNormWeights? _norms;
+
+    private static readonly ConcurrentDictionary<(int Heads, int HeadDim, float Scale, DType? ComputeDType), AttentionLayer> SharedLayers = new();
+
+    /// <summary>The weightless layer of <paramref name="heads"/> equal query and key/value heads for a site that builds its own operands,
+    /// one per geometry and shared, as it holds no state; <paramref name="scale"/> 0 means <c>1/√headDim</c>.</summary>
+    public static AttentionLayer Shared(int heads, int headDim, float scale = 0f, DType? computeDType = null) =>
+        SharedLayers.GetOrAdd((heads, headDim, scale, computeDType), static key => new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = key.Heads, KvHeads = key.Heads, HeadDim = key.HeadDim, Scale = key.Scale, ComputeDType = key.ComputeDType,
+        }));
 
     /// <summary>Creates a layer. Without <paramref name="weights"/> only <see cref="Attend"/> and <see cref="AttendFlat"/> can
     /// run, and only without a QK norm. Weights without a query projection serve <see cref="AttendBranchHeadMajor"/> alone.</summary>
@@ -139,10 +150,11 @@ public sealed class AttentionLayer
 
     /// <summary>The attention call alone over operands the caller laid out head-major: <paramref name="qMh"/> <c>[B, heads, Sq, D]</c>,
     /// <paramref name="kMh"/> and <paramref name="vMh"/> <c>[B, heads, Skv, D]</c>. Applies no transform, so it takes only the bias and
-    /// probe of the context. Disposes the operands named in <paramref name="consume"/> once the call has run, also when it
-    /// throws; returns the head-major <c>[B, heads, Sq, D]</c> output, which the caller owns.</summary>
+    /// probe of the context. Disposes the operands named in <paramref name="consume"/> once the call has run, also when the call
+    /// throws (a refused argument takes nothing over); returns the head-major <c>[B, heads, Sq, D]</c> output, which the caller owns. A caller-provided
+    /// <paramref name="output"/> of that shape and dtype is written and returned instead, and is never disposed.</summary>
     public Tensor AttendHeadMajorOperands(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, in AttentionCallContext context,
-        OperandOwnership consume = OperandOwnership.All)
+        OperandOwnership consume = OperandOwnership.All, Tensor? output = null)
     {
         if (_config.KvHeads != _config.Heads)
             throw new NotSupportedException("Head-major operands carry one head per query head; grouped key/value heads attend through Attend.");
@@ -152,7 +164,56 @@ public sealed class AttentionLayer
         if (qMh.Shape[1] != _config.Heads || qMh.Shape[3] != _config.HeadDim || kMh.Shape[0] != qMh.Shape[0]
             || kMh.Shape[1] != _config.Heads || kMh.Shape[3] != _config.HeadDim || !vMh.Shape.Equals(kMh.Shape))
             throw new ArgumentException($"Operands do not match {_config.Heads} heads of {_config.HeadDim}: {qMh.Shape}, {kMh.Shape}, {vMh.Shape}.");
-        return RunAttention(backend, qMh, kMh, vMh, _config.ComputeDType ?? qMh.DType, in context, consume);
+        DType act = _config.ComputeDType ?? qMh.DType;
+        ValidateOutput(output, qMh, kMh, vMh, act);
+        return RunAttention(backend, qMh, kMh, vMh, act, in context, consume, output);
+    }
+
+    /// <summary>The attention call over a head-major key/value cache through the Flash entry: <paramref name="qMh"/>
+    /// <c>[B, heads, Sq, D]</c>, the caches <c>[B, kvHeads, capacity, D]</c> of which <paramref name="view"/> names the valid rows
+    /// and the query position, grouped heads native. Applies no transform, so the context carries at most a probe. Disposes the
+    /// operands named in <paramref name="consume"/> (the query by default) once the call has run, also when the call throws (a refused argument takes nothing over); returns
+    /// the head-major <c>[B, heads, Sq, D]</c> output, which the caller owns. A caller-provided <paramref name="output"/> is
+    /// written and returned instead, and is never disposed.</summary>
+    public Tensor AttendCachedHeadMajor(IBackend backend, Tensor qMh, Tensor keyCache, Tensor valueCache, in AttentionCacheView view,
+        in AttentionCallContext context = default, OperandOwnership consume = OperandOwnership.Query, Tensor? output = null)
+    {
+        ValidateOperandContext(in context);
+        if (context.Bias is not null)
+            throw new ArgumentException("The Flash entry takes no additive bias.", nameof(context));
+        if (view.DevicePositions != 0 && view.Sinks is not null)
+            throw new ArgumentException("Device positions cannot carry sinks.", nameof(view));
+        if (qMh.Shape.Rank != 4 || keyCache.Shape.Rank != 4 || !valueCache.Shape.Equals(keyCache.Shape))
+            throw new ArgumentException($"AttendCachedHeadMajor takes [B, heads, S, D] operands; got {qMh.Shape}, {keyCache.Shape}, {valueCache.Shape}.");
+        if (qMh.Shape[1] != _config.Heads || qMh.Shape[3] != _config.HeadDim || keyCache.Shape[0] != qMh.Shape[0]
+            || keyCache.Shape[1] != _config.KvHeads || keyCache.Shape[3] != _config.HeadDim)
+            throw new ArgumentException($"Operands do not match {_config.Heads}/{_config.KvHeads} heads of {_config.HeadDim}: {qMh.Shape}, {keyCache.Shape}.");
+        if (view.KvLength < 0 || view.KvLength > keyCache.Shape[2])
+            throw new ArgumentException($"The cache view names {view.KvLength} keys of a {keyCache.Shape[2]}-row cache.", nameof(view));
+        DType act = _config.ComputeDType ?? qMh.DType;
+        ValidateOutput(output, qMh, keyCache, valueCache, act);
+        bool owned = output is null;
+        Tensor attn = output ?? new(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), act);
+        try
+        {
+            AttentionCall call = view.DevicePositions != 0
+                ? AttentionCall.FromFlashAttentionDev(attn, qMh, keyCache, valueCache, view.KvLength, view.Causal, view.QueryOffset,
+                    _config.EffectiveScale, view.DevicePositions, view.Softcap, view.SlidingWindow)
+                : AttentionCall.FromFlashAttention(attn, qMh, keyCache, valueCache, view.KvLength, view.Causal, view.QueryOffset,
+                    _config.EffectiveScale, view.Softcap, view.Sinks, view.SlidingWindow, null);
+            backend.Attention(in call);
+        }
+        catch
+        {
+            if (owned) attn.Dispose();
+            throw;
+        }
+        finally
+        {
+            Consume(consume, qMh, keyCache, valueCache);
+        }
+        context.Probe?.Observe("attention", attn);
+        return attn;
     }
 
     /// <summary>The projection stage alone, for self-attention: Q, K and V of <paramref name="input"/>, which is disposed once
@@ -672,9 +733,10 @@ public sealed class AttentionLayer
     }
 
     private Tensor RunAttention(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, DType act, in AttentionCallContext context,
-        OperandOwnership consume)
+        OperandOwnership consume, Tensor? output = null)
     {
-        Tensor attn = new(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), act);
+        bool owned = output is null;
+        Tensor attn = output ?? new(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), act);
         try
         {
             AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
@@ -683,17 +745,32 @@ public sealed class AttentionLayer
         }
         catch
         {
-            attn.Dispose();
+            if (owned) attn.Dispose();
             throw;
         }
         finally
         {
-            if (consume.HasFlag(OperandOwnership.Query)) qMh.Dispose();
-            if (consume.HasFlag(OperandOwnership.Key)) kMh.Dispose();
-            if (consume.HasFlag(OperandOwnership.Value)) vMh.Dispose();
+            Consume(consume, qMh, kMh, vMh);
         }
         context.Probe?.Observe("attention", attn);
         return attn;
+    }
+
+    private static void Consume(OperandOwnership consume, Tensor qMh, Tensor kMh, Tensor vMh)
+    {
+        if (consume.HasFlag(OperandOwnership.Query)) qMh.Dispose();
+        if (consume.HasFlag(OperandOwnership.Key)) kMh.Dispose();
+        if (consume.HasFlag(OperandOwnership.Value)) vMh.Dispose();
+    }
+
+    private void ValidateOutput(Tensor? output, Tensor qMh, Tensor keys, Tensor values, DType act)
+    {
+        if (output is null) return;
+        if (ReferenceEquals(output, qMh) || ReferenceEquals(output, keys) || ReferenceEquals(output, values))
+            throw new ArgumentException("The output cannot be one of the attention's operands.", nameof(output));
+        TensorShape expected = new(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim);
+        if (!output.Shape.Equals(expected) || output.DType != act)
+            throw new ArgumentException($"The output is {output.Shape} {output.DType} but the attention writes {expected} {act}.", nameof(output));
     }
 
     /// <summary>The full-width norm and rotation as one op that emits the attention layout directly (LTX-2), with K and V
@@ -874,3 +951,9 @@ public enum OperandOwnership
     /// <summary>All three.</summary>
     All = Query | Key | Value,
 }
+
+/// <summary>The valid rows and positions of a head-major key/value cache for <see cref="AttentionLayer.AttendCachedHeadMajor"/>:
+/// <paramref name="KvLength"/> rows are attended, query row 0 sits at <paramref name="QueryOffset"/>, and a nonzero
+/// <paramref name="DevicePositions"/> buffer supplies both on the device instead (the host values are the eager fallback's).</summary>
+public readonly record struct AttentionCacheView(int KvLength, int QueryOffset, bool Causal,
+    int SlidingWindow = 0, float Softcap = 0f, Tensor? Sinks = null, ulong DevicePositions = 0);

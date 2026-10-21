@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -440,6 +441,7 @@ internal sealed unsafe class ClipTransformerLayer
     private readonly int _intermediateSize;
     private readonly float _layerNormEps;
     private readonly bool _useQuickGelu;
+    private readonly AttentionLayer _attention;
 
     // Layer norm 1 (before self-attention)
     private Tensor? _layerNorm1Weight;
@@ -473,6 +475,7 @@ internal sealed unsafe class ClipTransformerLayer
         _intermediateSize = intermediateSize;
         _layerNormEps = layerNormEps;
         _useQuickGelu = useQuickGelu;
+        _attention = new(new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = _headDim });
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -572,12 +575,7 @@ internal sealed unsafe class ClipTransformerLayer
             seqLen * seqLen * sizeof(float), seqLen * seqLen * sizeof(float));
 
         // Scaled dot-product attention with causal mask
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, causalMask4D, scale);
-        queryMh.Dispose();
-        keyMh.Dispose();
-        valueMh.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, queryMh, keyMh, valueMh, new AttentionCallContext { Bias = causalMask4D });
         causalMask4D.Dispose();
 
         // Reshape back: [B, numHeads, seqLen, headDim] → [B, seqLen, hiddenSize]

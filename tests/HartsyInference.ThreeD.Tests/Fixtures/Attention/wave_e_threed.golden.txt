@@ -1,0 +1,10 @@
+# Golden digests of the Wave E 3D attention sites' forward outputs (TripoSR block, Hunyuan3D shape-VAE blocks and DiT double/single blocks, Trellis sparse-structure flow and Gaussian decoder blocks).
+# Captured from the PRE-MIGRATION attention code (attn-c-rebased at 2c234c18, before any Wave E move onto the shared attention layer), run on HartsyInference.Cpu.CpuBackend.
+# Format: <case> <label>=<sha256 of the little-endian output bits> [...]. Regenerate only for an intentional numeric change.
+triposr_self_cross_block self=f6be3705227881c36b80aa41be709e4a4bb8c1b76608cfa59e357e23c02630d6 cross=ecbc7e62f74abc3775ce9cd611797d4e8f31bba502b7b772e2d2aa3f39ec482f block=018124c82604ffb015c7e0237ac892fe3f10546efb5c0ed5d43cc4331db96b6d
+hunyuan3d_vae_resblock out=0dd2786bdf8a9832ef2fa37ffadd599917a11aae826ad37848067cd810991ef5
+hunyuan3d_geo_query_chunked chunk0=e20885582134f8f056da9c5d21be90f8189a8111d4a1aa7c7aba22d8e8327456 chunk1=a9085c1069a8a9953cb441ad814736b6e726fbc0e973dfcc1f995b40d645e186 k=62e7f3647c15dd68095f2c655ef3a3537c0f4464f10f6538c8223532c0e3d304 v=5beaa30c0da4e8b17ffd3a59a9b52a6da06727fcdbf0cbdde48c9d1fbc6aac34
+hunyuan3d_dit_double img=48d151a6e7158878dbc22f969a7dcb46a846eda1b743428c8a5a478963fa1770 txt=e3ab4ed09e3bc74d4afe2e74ad76c3a48712db12f67a8ab068bf19a88dd5ffb2
+hunyuan3d_dit_single out=cfe138d78f2fb428445ad6d7e643120bf5644b7f3334c66d1456f1daba5ae572
+trellis_ssflow out=364363cd6076501928dde95370287f3221388670e91632cc007a51fb7a924328
+trellis_gs out=7d6b67c4e91971deb97d4c9fdba4e0a9a4880e382a29578456901e4ff33bcd7e

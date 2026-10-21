@@ -1,5 +1,6 @@
 using System;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.TextEncoders.Bert;
@@ -91,6 +92,7 @@ internal sealed unsafe class BertLayer
     private readonly BertConfig _cfg;
     private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _aoW, _aoB, _aoLnW, _aoLnB;
     private Tensor? _interW, _interB, _outW, _outB, _outLnW, _outLnB;
+    private AttentionLayer? _attn;
 
     public BertLayer(BertConfig cfg) => _cfg = cfg;
 
@@ -104,32 +106,18 @@ internal sealed unsafe class BertLayer
         _interW = BertOps.EnsureF32(w[$"{prefix}.intermediate.dense.weight"]); _interB = BertOps.EnsureF32(w[$"{prefix}.intermediate.dense.bias"]);
         _outW = BertOps.EnsureF32(w[$"{prefix}.output.dense.weight"]); _outB = BertOps.EnsureF32(w[$"{prefix}.output.dense.bias"]);
         _outLnW = BertOps.EnsureF32(w[$"{prefix}.output.LayerNorm.weight"]); _outLnB = BertOps.EnsureF32(w[$"{prefix}.output.LayerNorm.bias"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _cfg.NumHeads, KvHeads = _cfg.NumHeads, HeadDim = _cfg.HeadDim, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _aoW, OutputBias = _aoB,
+            });
     }
 
     public Tensor Forward(IBackend backend, Tensor x, int t, Tensor? additiveAttnMask)
     {
-        int h = _cfg.Hidden, nh = _cfg.NumHeads, hd = _cfg.HeadDim;
-        Tensor q = BertOps.ProjectLinear(backend, x, _qW!, _qB, 1, t, h);
-        Tensor k = BertOps.ProjectLinear(backend, x, _kW!, _kB, 1, t, h);
-        Tensor v = BertOps.ProjectLinear(backend, x, _vW!, _vB, 1, t, h);
-
-        Tensor qH = new(new TensorShape(1, nh, t, hd), DType.F32);
-        Tensor kH = new(new TensorShape(1, nh, t, hd), DType.F32);
-        Tensor vH = new(new TensorShape(1, nh, t, hd), DType.F32);
-        BertOps.ReshapeToMultiHead4D(qH, q, 1, t, nh, hd);
-        BertOps.ReshapeToMultiHead4D(kH, k, 1, t, nh, hd);
-        BertOps.ReshapeToMultiHead4D(vH, v, 1, t, nh, hd);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
-        Tensor attn = new(new TensorShape(1, nh, t, hd), DType.F32);
-        backend.ScaledDotProductAttention(attn, qH, kH, vH, additiveAttnMask, 1f / MathF.Sqrt(hd));
-        qH.Dispose(); kH.Dispose(); vH.Dispose();
-
-        Tensor ctx = new(new TensorShape(1, t, h), DType.F32);
-        BertOps.ReshapeFromMultiHead4D(ctx, attn, 1, t, nh, hd);
-        attn.Dispose();
-        Tensor ao = BertOps.ProjectLinear(backend, ctx, _aoW!, _aoB, 1, t, h);
-        ctx.Dispose();
+        int h = _cfg.Hidden;
+        Tensor ao = _attn!.Forward(backend, x, x, new AttentionCallContext { Bias = additiveAttnMask });
         AddInPlace(ao, x);                                  // residual (x + attn_out)
         Tensor x1 = new(ao.Shape, DType.F32);
         backend.LayerNorm(x1, ao, _aoLnW!, _aoLnB!, _cfg.LayerNormEps);
@@ -172,34 +160,6 @@ internal static unsafe class BertOps
         Tensor output = new(new TensorShape(batch, seqLen, outDim), DType.F32);
         backend.Linear(output, input, weight, bias);
         return output;
-    }
-
-    public static void ReshapeToMultiHead4D(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-                for (int hh = 0; hh < numHeads; hh++)
-                {
-                    int inOffset = (b * seqLen + s) * (numHeads * headDim) + hh * headDim;
-                    int outOffset = ((b * numHeads + hh) * seqLen + s) * headDim;
-                    for (int d = 0; d < headDim; d++) outPtr[outOffset + d] = inPtr[inOffset + d];
-                }
-    }
-
-    public static void ReshapeFromMultiHead4D(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-                for (int hh = 0; hh < numHeads; hh++)
-                {
-                    int inOffset = ((b * numHeads + hh) * seqLen + s) * headDim;
-                    int outOffset = (b * seqLen + s) * (numHeads * headDim) + hh * headDim;
-                    for (int d = 0; d < headDim; d++) outPtr[outOffset + d] = inPtr[inOffset + d];
-                }
     }
 
     /// <summary>Exact erf-GELU in place (BERT/DETR use the erf form, not the tanh approximation).</summary>

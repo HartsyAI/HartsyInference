@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.GptSoVits;
@@ -22,10 +23,13 @@ public sealed unsafe class SoVitsRefEnc
     private Tensor? _attnQW, _attnQB, _attnKW, _attnKB, _attnVW, _attnVB;
     private bool _fusedQkv;
     private Tensor? _fcW, _fcB;
+    private readonly AttentionLayer _attention;
 
     public SoVitsRefEnc(int nMels = 704, int hidden = 128, int styleDim = 512, int nHead = 2, int kernel = 5)
     {
         _nMels = nMels; _hidden = hidden; _styleDim = styleDim; _nHead = nHead;
+        // StyleSpeech MultiHeadAttention temperature is sqrt(d_model), not sqrt(head_dim).
+        _attention = AttentionLayer.Shared(nHead, hidden / nHead, 1f / MathF.Sqrt(hidden));
         _ = kernel;     // kernel is read from the conv weight shape at GLU time; param kept for the call contract
     }
 
@@ -107,8 +111,6 @@ public sealed unsafe class SoVitsRefEnc
     private Tensor SelfAttention(IBackend backend, Tensor x, int t)
     {
         int hd = _hidden / _nHead;
-        // StyleSpeech MultiHeadAttention temperature is sqrt(d_model), not sqrt(head_dim).
-        float scale = 1f / MathF.Sqrt(_hidden);
         Tensor q, k, v;
         if (_fusedQkv)
         {
@@ -128,9 +130,7 @@ public sealed unsafe class SoVitsRefEnc
         WhisperOps.ReshapeToMultiHead4D(k4, k, 1, t, _nHead, hd);
         WhisperOps.ReshapeToMultiHead4D(v4, v, 1, t, _nHead, hd);
         q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor ctx4 = new(new TensorShape(1, _nHead, t, hd), DType.F32);
-        backend.ScaledDotProductAttention(ctx4, q4, k4, v4, null, scale);
-        q4.Dispose(); k4.Dispose(); v4.Dispose();
+        Tensor ctx4 = _attention.AttendHeadMajorOperands(backend, q4, k4, v4, default);
         Tensor ctx = new(new TensorShape(1, t, _hidden), DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(ctx, ctx4, 1, t, _nHead, hd); ctx4.Dispose();
         Tensor outT = WhisperOps.ProjectLinear(backend, ctx, _attnOW!, _attnOB, 1, t, _hidden, _hidden); ctx.Dispose();

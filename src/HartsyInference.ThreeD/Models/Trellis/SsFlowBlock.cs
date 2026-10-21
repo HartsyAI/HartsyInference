@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
@@ -7,7 +8,8 @@ namespace HartsyInference.ThreeD.Models.Trellis;
 internal sealed unsafe class SsFlowBlock
 {
     private const int W = 1024, H = 16, Hd = 64, Mlp = 4096;
-    private static readonly float Scale = 1f / MathF.Sqrt(Hd);
+    private static readonly AttentionLayer Attn = new(
+        new AttentionLayerConfig { Heads = H, KvHeads = H, HeadDim = Hd, ComputeDType = DType.F32, AllowF16 = true });
 
     private Tensor _modW = null!, _modB = null!;
     private Tensor _n2W = null!, _n2B = null!;
@@ -58,8 +60,7 @@ internal sealed unsafe class SsFlowBlock
         Tensor q = Head(backend, qkv, 0, n), k = Head(backend, qkv, W, n), v = Head(backend, qkv, 2 * W, n); qkv.Dispose();
         Tensor qP = PermQkNorm(backend, q, n, _qGamma, ones64), kP = PermQkNorm(backend, k, n, _kGamma, ones64);
         Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, n, H, Hd); v.Dispose();
-        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, Scale, allowF16: true);
-        qP.Dispose(); kP.Dispose(); vP.Dispose();
+        Tensor attn = Attn.AttendHeadMajorOperands(backend, qP, kP, vP, default);
         Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, H, n, Hd); attn.Dispose();
         Tensor sOut = new(flat, DType.F32); backend.Linear(sOut, attnFlat, _oW, _oB); attnFlat.Dispose();
         Tensor x1 = new(flat, DType.F32); backend.GatedResidualLastDim(x1, x, sOut, m[2]); sOut.Dispose(); x.Dispose();
@@ -76,8 +77,7 @@ internal sealed unsafe class SsFlowBlock
         TensorShape kvMh = new(1, H, lc, Hd);
         Tensor ckP = new(kvMh, DType.F32); backend.Permute0213(ckP, ck, lc, H, Hd); ck.Dispose();
         Tensor cvP = new(kvMh, DType.F32); backend.Permute0213(cvP, cv, lc, H, Hd); cv.Dispose();
-        Tensor cAttn = new(mh, DType.F32); backend.ScaledDotProductAttention(cAttn, cqP, ckP, cvP, null, Scale, allowF16: true);
-        cqP.Dispose(); ckP.Dispose(); cvP.Dispose();
+        Tensor cAttn = Attn.AttendHeadMajorOperands(backend, cqP, ckP, cvP, default);
         Tensor cAttnFlat = new(flat, DType.F32); backend.Permute0213(cAttnFlat, cAttn, H, n, Hd); cAttn.Dispose();
         Tensor cOut = new(flat, DType.F32); backend.Linear(cOut, cAttnFlat, _coW, _coB); cAttnFlat.Dispose();
         Tensor x2 = new(flat, DType.F32); backend.Add(x2, x1, cOut); x1.Dispose(); cOut.Dispose();

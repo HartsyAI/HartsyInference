@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
@@ -205,7 +206,13 @@ internal sealed unsafe class MoonshineDecoderLayer
     private Tensor? _finalLnW;
     private Tensor? _fc1W, _fc1B, _fc2W, _fc2B;
 
-    public MoonshineDecoderLayer(MoonshineConfig cfg) { _cfg = cfg; }
+    private readonly AttentionLayer _attention;
+
+    public MoonshineDecoderLayer(MoonshineConfig cfg)
+    {
+        _cfg = cfg;
+        _attention = AttentionLayer.Shared(cfg.NumHeads, cfg.HeadDim);
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
@@ -280,10 +287,8 @@ internal sealed unsafe class MoonshineDecoderLayer
         // Incremental causal mask: new position s (= posStart+s) sees cache [0..posStart+s].
         Tensor causalMask = BuildIncrementalCausalMask(posStart, newCount, totalPos);
 
-        float scale = 1f / MathF.Sqrt(_cfg.HeadDim);
-        Tensor attnOut = new(mhNew, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kCached, vCached, causalMask, scale);
-        qMh.Dispose(); kCached.Dispose(); vCached.Dispose(); causalMask.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, qMh, kCached, vCached, new AttentionCallContext { Bias = causalMask });
+        causalMask.Dispose();
 
         Tensor merged = new(inShape, DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(merged, attnOut, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
@@ -303,9 +308,7 @@ internal sealed unsafe class MoonshineDecoderLayer
         WhisperOps.ReshapeToMultiHead4D(crossQMh, crossQ, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
         crossQ.Dispose();
 
-        Tensor crossAttn = new(mhNew, DType.F32);
-        backend.ScaledDotProductAttention(crossAttn, crossQMh, crossK, crossV, mask: null, scale);
-        crossQMh.Dispose();
+        Tensor crossAttn = _attention.AttendHeadMajorOperands(backend, crossQMh, crossK, crossV, default, OperandOwnership.Query);
 
         Tensor crossMerged = new(inShape, DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(crossMerged, crossAttn, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);

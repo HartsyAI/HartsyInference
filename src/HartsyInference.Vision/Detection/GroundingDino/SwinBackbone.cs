@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.Detection.GroundingDino;
@@ -228,7 +229,6 @@ public sealed unsafe class SwinBackbone : IDisposable
         int hd = dim / heads;
         int wa = ws * ws;
         int nWh = hp / ws, nWw = wp / ws, nW = nWh * nWw;
-        float scale = 1f / MathF.Sqrt(hd);
 
         Tensor qWin = PartitionWindows(q, hp, wp, ws, dim);
         Tensor kWin = PartitionWindows(k, hp, wp, ws, dim);
@@ -239,9 +239,8 @@ public sealed unsafe class SwinBackbone : IDisposable
         qWin.Dispose(); kWin.Dispose(); vWin.Dispose();
 
         Tensor mask = BuildWindowMask(nW, heads, wa, ws, nWw, shift, relTable, hp, wp);
-        Tensor attn = new(new TensorShape(nW, heads, wa, hd), DType.F32);
-        backend.ScaledDotProductAttention(attn, qh, kh, vh, mask, scale);
-        qh.Dispose(); kh.Dispose(); vh.Dispose(); mask.Dispose();
+        Tensor attn = AttentionLayer.Shared(heads, hd, computeDType: DType.F32).AttendHeadMajorOperands(backend, qh, kh, vh, new AttentionCallContext { Bias = mask });
+        mask.Dispose();
 
         // Merge heads [nW, heads, wa, hd] -> [nW, wa, heads*hd], then stitch windows back to the grid.
         Tensor merged = new(new TensorShape(nW, wa, heads, hd), DType.F32);
