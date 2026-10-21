@@ -113,15 +113,6 @@ public sealed class FluxSingleStreamBlock
     /// <param name="temb">Timestep embedding [B, hidden].</param>
     /// <param name="rope">Precomputed FluxRope.</param>
     /// <returns>Updated x tensor [B, totalSeqLen, hidden].</returns>
-    // GPU-residency rewrite (mirrors the verified HunyuanImageSingleBlock): every glue op (LayerNorm / AdaLN
-    // modulation / QK-norm / head reshape / feature-dim concat / gated residual) runs as an IBackend op so the
-    // activation stays device-resident — no per-op DataPointer D2H sync barriers (the old LayerNormNoAffine /
-    // AdaLNModulation / QkNorm.Forward / ReshapeTo(From)MultiHead / ConcatAlongFeatureDim host loops D2H-synced
-    // every intermediate around every GEMM). Head reshape = declaring Q/K/V directly as [B, S, H, D]
-    // (byte-identical to [B, S, hidden]) so QK-norm's RmsNorm runs over headDim with no reshape, then Permute0213
-    // to/from [B, H, S, D]. RoPE runs pre-permute via FluxRope.ApplyGpu (same interleaved-pair rotation, identity
-    // on the zero-position text rows, bit-identical to the host path); B>1 keeps the host rope on the permuted
-    // layout, exactly as before.
     public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)x.Shape[0];

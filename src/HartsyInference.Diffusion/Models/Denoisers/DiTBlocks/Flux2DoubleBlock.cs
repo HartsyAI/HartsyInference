@@ -164,15 +164,6 @@ public sealed unsafe class Flux2DoubleBlock
     }
 
     /// <summary>Forward pass. Modulation tensors (<paramref name="imgMod"/>, <paramref name="txtMod"/>) are 6 elements each: <c>(shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)</c>, shape <c>[B, hidden]</c>. Computed once at the top level (shared modulation) and passed unchanged to every double block.</summary>
-    // GPU-residency rewrite (mirrors the verified FluxDoubleStreamBlock): every glue op (LayerNorm / AdaLN
-    // modulation / QK-norm / head reshape / joint concat / split / gated residual) runs as an IBackend op so the
-    // activation stays device-resident across the whole block — the old host loops D2H-synced every intermediate
-    // around every GEMM (Flux2DoubleBlock cpu=33 in the residency audit). Q/K/V are declared [B, S, H, D]
-    // (byte-identical to [B, S, hidden]) so QK-norm's RmsNorm runs over headDim with no reshape; the [txt, img]
-    // joint concat happens PRE-permute along the seq dim (text first — the token order the rope tables were built
-    // in), RoPE rotates the pre-permute joint on-device via FluxRope.ApplyGpu (bit-identical rotation), then one
-    // Permute0213 per joint tensor. The post-attention split is a permute-back + SliceRows (B=1); B>1 keeps the
-    // host fallbacks for RoPE and the split, exactly like the Flux.1 blocks.
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor[] imgMod,
         Tensor[] txtMod, FluxRope rope, Tensor? attnBias = null)
     {

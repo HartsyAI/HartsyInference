@@ -105,11 +105,6 @@ public sealed unsafe class Flux2SingleBlock
     }
 
     /// <summary>Forward pass on the concatenated <c>[txt, img]</c> sequence. <paramref name="mod"/> has 3 elements <c>(shift, scale, gate)</c>, shape <c>[B, hidden]</c>, shared across all single blocks (computed once at the top level).</summary>
-    // GPU-residency rewrite (mirrors the verified FluxSingleStreamBlock / the Flux2DoubleBlock port): every glue
-    // op (LayerNorm / modulation / QK-norm / head reshape / SwiGLU activation / last-dim concat / gated residual)
-    // runs as an IBackend op so the activation stays device-resident across the whole block (Flux2SingleBlock
-    // cpu=29 in the residency audit). Q/K/V declared [B, S, H, D] so QK-norm's RmsNorm runs over headDim with no
-    // reshape; RoPE rotates pre-permute on-device (B=1; host fallback for batch).
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor[] mod, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)hidden.Shape[0];

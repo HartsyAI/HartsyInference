@@ -203,17 +203,6 @@ public sealed class FluxDoubleStreamBlock
     /// <param name="temb">Timestep embedding [B, hidden].</param>
     /// <param name="rope">Precomputed FluxRope (must have Precompute called for current resolution).</param>
     /// <returns>Updated (image, text) tensors.</returns>
-    // GPU-residency rewrite (mirrors the verified HunyuanImageBlock): every glue op (LayerNorm / AdaLN modulation /
-    // QK-norm / head reshape / joint concat / split / gated residual) runs as an IBackend op so the activation stays
-    // device-resident across the whole block — no per-op DataPointer D2H sync barriers (the old LayerNormNoAffine /
-    // AdaLNModulation / QkNorm.Forward / ReshapeTo(From)MultiHead / ConcatAlongSeqDim / SplitAlongSeqDim host loops
-    // D2H-synced every intermediate around every GEMM). Head reshape = declaring Q/K/V directly as [B, S, H, D]
-    // (byte-identical to [B, S, hidden]) so QK-norm's RmsNorm runs over headDim with no reshape. The [txt, img]
-    // joint concat happens PRE-permute along the seq dim (Concat dim 1 of [B, S, H, D] — text first, matching the
-    // rope table order), so RoPE runs on the pre-permute joint via FluxRope.ApplyGpu (same interleaved-pair
-    // rotation, bit-identical to the host path), then one Permute0213 per joint tensor. The post-attention split is
-    // a permute-back to [B, S, hidden] + SliceRows (B=1: text rows first, then image); B>1 keeps host fallbacks for
-    // RoPE and the split, exactly like the Hunyuan blocks.
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)image.Shape[0];
