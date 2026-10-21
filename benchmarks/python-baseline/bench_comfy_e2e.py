@@ -28,8 +28,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-COMFY = Path("/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI")
-VENV_PY = COMFY / "venv" / "bin" / "python"
+SWARM_COMFY = Path("/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI")
+VENV_PY = SWARM_COMFY / "venv" / "bin" / "python"
+COMFY = SWARM_COMFY   # --comfy runs another checkout of ComfyUI's code with the same venv
 MODELS = Path("/mnt/model-storage/Models")
 REPO = Path(__file__).resolve().parents[2]
 
@@ -213,11 +214,16 @@ def main():
     ap.add_argument("--models", default="krea2,flux1dev,wan5b,ltx25")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--port", type=int, default=8299)
+    ap.add_argument("--comfy", default=str(SWARM_COMFY), help="ComfyUI code to run (with the Swarm venv's packages)")
     ap.add_argument("--cli", required=True, help="HartsyInference.Cli.dll of the engine build to time")
     ap.add_argument("--gpu-index", default=os.environ.get("CUDA_VISIBLE_DEVICES", "0"), help="the engine's -b cuda:<n> under PCI order")
     a = ap.parse_args()
+    global COMFY
+    COMFY = Path(a.comfy)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    commit = subprocess.run(["git", "-C", str(COMFY), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    (out / "comfy.txt").write_text(f"{COMFY}\n{commit or 'unknown commit'}\n")
     models = [m for m in a.models.split(",") if m]
     rows = []
     seed = 1000
