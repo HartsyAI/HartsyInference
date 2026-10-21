@@ -291,8 +291,6 @@ public sealed class AttentionLayer
             catch
             {
                 q.Dispose();
-                k.Dispose();
-                v.Dispose();
                 throw;
             }
             skv = (int)k.Shape[1];

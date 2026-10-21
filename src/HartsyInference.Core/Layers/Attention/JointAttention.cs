@@ -109,6 +109,8 @@ public sealed class JointAttention
         int n = _streams.Length;
         if (inputs.Length != n || attended.Length != n)
             throw new ArgumentException($"A joint attention over {n} streams takes {n} inputs and {n} outputs.");
+        if (context.RotatedStream is { } rotatedIndex && (uint)rotatedIndex >= (uint)n)
+            throw new ArgumentOutOfRangeException(nameof(context), $"Rotated stream {rotatedIndex} is not one of the {n} streams.");
         int batch = (int)inputs[0].Shape[0];
         for (int i = 0; i < n; i++)
             if (inputs[i].Shape.Rank != 3 || inputs[i].Shape[0] != batch)

@@ -178,13 +178,26 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
         {
             TensorShape joint = new(1, key.Shape[1] + k.Shape[1], k.Shape[2], k.Shape[3]);
-            Tensor keys = new(joint, k.DType);
-            backend.Concat(keys, [key, k], 1);
-            Tensor values = new(joint, v.DType);
-            backend.Concat(values, [value, v], 1);
-            k.Dispose();
-            v.Dispose();
-            return (keys, values);
+            Tensor? keys = null, values = null;
+            try
+            {
+                keys = new(joint, k.DType);
+                backend.Concat(keys, [key, k], 1);
+                values = new(joint, v.DType);
+                backend.Concat(values, [value, v], 1);
+                return (keys, values);
+            }
+            catch
+            {
+                keys?.Dispose();
+                values?.Dispose();
+                throw;
+            }
+            finally
+            {
+                k.Dispose();
+                v.Dispose();
+            }
         }
     }
 

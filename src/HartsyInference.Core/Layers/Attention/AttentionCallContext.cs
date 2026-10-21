@@ -53,7 +53,7 @@ public interface IHeadMajorQkRotation
 public interface IKvRewrite
 {
     /// <summary>The K and V to attend over, <c>[B, Skv', kvHeads·D]</c> or <c>[B, Skv', kvHeads, D]</c> of any length; it takes
-    /// over <paramref name="k"/> and <paramref name="v"/>.</summary>
+    /// over <paramref name="k"/> and <paramref name="v"/>, also when it throws (another rank may still be reading them).</summary>
     (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v);
 }
 

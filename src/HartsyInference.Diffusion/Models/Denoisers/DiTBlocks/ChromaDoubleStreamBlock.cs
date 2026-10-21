@@ -277,8 +277,8 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         // ── 3-12. Joint attention over [txt, img] (each stream projects fused or split and norms per head; the shared
         //          [B,1,S,S] mask is borrowed, never disposed here), output projections, gated residuals ──
         AttentionCallContext joint = batch == 1
-            ? new AttentionCallContext { Rotation = rope, Bias = sdpaMask, Probe = TraceProbe.Instance }
-            : new AttentionCallContext { HeadMajorRotation = rope, Bias = sdpaMask, Probe = TraceProbe.Instance };
+            ? new AttentionCallContext { Rotation = rope, Bias = sdpaMask, Probe = ChromaF16.Tracing ? TraceProbe.Instance : null }
+            : new AttentionCallContext { HeadMajorRotation = rope, Bias = sdpaMask, Probe = ChromaF16.Tracing ? TraceProbe.Instance : null };
         Span<Tensor?> attended = [null, null];
         _attention!.Attend(backend, [imgModulated, txtModulated], attended, new JointCallContext { Joint = joint, ReleaseInputs = true });
         Tensor imgAttnProj = _attention.ProjectOutput(backend, 0, attended[0]!);

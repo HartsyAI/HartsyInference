@@ -240,12 +240,14 @@ public sealed class JointAttentionTests
     }
 
     [Fact]
-    public void AFailingKvRewrite_Propagates()
+    public unsafe void AFailingKvRewrite_Propagates_AndKeepsTheKvItTookOver()
     {
         AttentionLayer layer = Stream(1);
         Tensor x = new(new TensorShape(1, ImgRows, Inner), DType.F32);
+        Failing failing = new();
         Assert.Throws<InvalidOperationException>(() => layer.Forward(new AttentionTraceBackend(), x, x,
-            new AttentionCallContext { KvRewrite = new Failing() }));
+            new AttentionCallContext { KvRewrite = failing }));
+        Assert.NotEqual(0, (nint)failing.Key!.DataPointer);
     }
 
     private sealed class Prepend(int rows, List<string> ops) : IKvRewrite
@@ -260,7 +262,13 @@ public sealed class JointAttentionTests
 
     private sealed class Failing : IKvRewrite
     {
-        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v) => throw new InvalidOperationException("peer aborted");
+        public Tensor? Key;
+
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
+        {
+            Key = k;
+            throw new InvalidOperationException("peer aborted");
+        }
     }
 
     private sealed class KvHolder : IKvCapture
