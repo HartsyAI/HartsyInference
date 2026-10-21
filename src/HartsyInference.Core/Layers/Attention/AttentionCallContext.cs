@@ -53,11 +53,13 @@ public interface IHeadMajorQkRotation
 public interface IKvRewrite
 {
     /// <summary>The K and V to attend over, <c>[B, Skv', kvHeads·D]</c> or <c>[B, Skv', kvHeads, D]</c> of any length; it takes
-    /// over <paramref name="k"/> and <paramref name="v"/>, also when it throws (another rank may still be reading them).</summary>
+    /// over <paramref name="k"/> and <paramref name="v"/>, also when it throws (another rank may still be reading them). A
+    /// context bias must already span the rewritten keys.</summary>
     (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v);
 }
 
-/// <summary>Receives the rotated K and V a call attends over; the receiver owns them once the call returns.</summary>
+/// <summary>Receives the rotated K and V a call attends over; the receiver owns them once the call returns, and a call that
+/// throws after the capture disposes them.</summary>
 public interface IKvCapture
 {
     /// <summary>Takes <paramref name="k"/> and <paramref name="v"/>; the layer reads but no longer disposes them.</summary>

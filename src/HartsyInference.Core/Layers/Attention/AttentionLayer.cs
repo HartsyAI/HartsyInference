@@ -79,7 +79,16 @@ public sealed class AttentionLayer
 
         TensorShape flatShape = WithLastDim(qInput.Shape, _config.InnerDim);
         (Tensor q, Tensor k, Tensor v, Tensor? gate) = Project(backend, w, qInput, kvInput, act, kvAct, context.ReleaseInputs, in context);
-        Tensor flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, in context);
+        Tensor flat;
+        try
+        {
+            flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, in context);
+        }
+        catch
+        {
+            gate?.Dispose();
+            throw;
+        }
         return Output(backend, w, flat, gate, act);
     }
 
@@ -210,22 +219,38 @@ public sealed class AttentionLayer
             throw new NotSupportedException("A fused [q|k|v] projection is self-attention only.");
         TensorShape projected = ProjectedShape(input.Shape, _config.Heads);
         Tensor qkv = new(WithLastDim(input.Shape, 3 * _config.InnerDim), act);
-        backend.Linear(qkv, input, w.Qkv!, w.QkvBias);
-        if (release) input.Dispose();
-        Tensor q = new(projected, act), k = new(projected, act), v = new(projected, act);
-        if (_config.Projection == AttentionProjection.FusedSplitNorm)
+        Tensor? q = null, k = null, v = null;
+        try
         {
-            AttentionNormWeights n = _norms!.Value;
-            backend.QkvSplitNorm(q, k, v, qkv, n.Query, n.Key, n.QueryEps);
+            backend.Linear(qkv, input, w.Qkv!, w.QkvBias);
+            if (release) input.Dispose();
+            q = new(projected, act);
+            k = new(projected, act);
+            v = new(projected, act);
+            if (_config.Projection == AttentionProjection.FusedSplitNorm)
+            {
+                AttentionNormWeights n = _norms!.Value;
+                backend.QkvSplitNorm(q, k, v, qkv, n.Query, n.Key, n.QueryEps);
+            }
+            else
+            {
+                backend.SliceLastDim(q, qkv, 0);
+                backend.SliceLastDim(k, qkv, _config.InnerDim);
+                backend.SliceLastDim(v, qkv, 2 * _config.InnerDim);
+            }
+            return (q, k, v, null);
         }
-        else
+        catch
         {
-            backend.SliceLastDim(q, qkv, 0);
-            backend.SliceLastDim(k, qkv, _config.InnerDim);
-            backend.SliceLastDim(v, qkv, 2 * _config.InnerDim);
+            q?.Dispose();
+            k?.Dispose();
+            v?.Dispose();
+            throw;
         }
-        qkv.Dispose();
-        return (q, k, v, null);
+        finally
+        {
+            qkv.Dispose();
+        }
     }
 
     private static void Release(Tensor qInput, Tensor kvInput)
@@ -297,8 +322,17 @@ public sealed class AttentionLayer
         }
         bool ownsKv = context.KvCapture is null;
         context.KvCapture?.Capture(k, v);
-        return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, flatShape, ownsKv, in context)
-            : AttendHeadMajor(backend, q, k, v, batch, sq, skv, act, flatShape, ownsKv, in context);
+        try
+        {
+            return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, flatShape, ownsKv, in context)
+                : AttendHeadMajor(backend, q, k, v, batch, sq, skv, act, flatShape, ownsKv, in context);
+        }
+        catch when (!ownsKv)
+        {
+            k.Dispose();
+            v.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The rotation stage alone: the context's model rotation, paired table or per-tensor tables, in place on

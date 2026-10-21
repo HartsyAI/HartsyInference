@@ -224,6 +224,37 @@ public sealed class JointAttentionTests
     }
 
     [Fact]
+    public void ARotatedStreamWithAJointRotation_IsRefusedBeforeAnyOp()
+    {
+        AttentionTraceBackend backend = new();
+        JointAttention joint = new(Config(0, 1), [Stream(1), Stream(2)]);
+        (Tensor img, Tensor txt) = Inputs();
+        Tensor table = new(new TensorShape(ImgRows, HeadDim), DType.F32);
+        QkRotation pairs = new(QkRotationKind.InterleavedPairs, table, table, ImgRows);
+        JointCallContext both = new()
+        {
+            RotatedStream = 0, StreamRotation = new AttentionCallContext { QueryRotation = pairs, KeyRotation = pairs },
+            Joint = new AttentionCallContext { QueryRotation = pairs, KeyRotation = pairs },
+        };
+
+        Assert.Throws<ArgumentException>(() => joint.Attend(backend, [img, txt], new Tensor?[2], both));
+        Assert.Empty(backend.Ops);
+    }
+
+    [Fact]
+    public unsafe void ACaptureWhoseAttentionThrows_GetsItsKvFreed()
+    {
+        AttentionTraceBackend backend = new() { FailAttention = true };
+        AttentionLayer layer = Stream(1);
+        Tensor x = new(new TensorShape(1, ImgRows, Inner), DType.F32);
+        KvHolder capture = new();
+
+        Assert.Throws<OutOfMemoryException>(() => layer.Forward(backend, x, x, new AttentionCallContext { KvCapture = capture }));
+        Assert.Throws<ObjectDisposedException>(() => (nint)capture.Key!.DataPointer);
+        Assert.Throws<ObjectDisposedException>(() => (nint)capture.Value!.DataPointer);
+    }
+
+    [Fact]
     public void AKvRewrite_ChangesTheKeyLength_AndACaptureKeepsTheRotatedKv()
     {
         AttentionTraceBackend backend = new();
