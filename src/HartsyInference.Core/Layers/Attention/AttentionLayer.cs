@@ -82,8 +82,6 @@ public sealed class AttentionLayer
             throw new ArgumentException("Releasing the query after its projection needs a distinct K/V input, per-weight projections, "
                 + "no gate, no value row-scale and no ReleaseInputs.", nameof(context));
         TensorShape flatShape = WithLastDim(qInput.Shape, _config.InnerDim);
-        if (_config.Gate != AttentionGate.None && !AttentionShape(flatShape).Equals(flatShape))
-            throw new NotSupportedException("A gated equal-head token-major layer takes [S, hidden] inputs.");
         (Tensor q, Tensor k, Tensor v, Tensor? gate) = context.ReleaseQueryAfterProjection
             ? ProjectReleasingQuery(backend, w, qInput, kvInput, act, kvAct)
             : Project(backend, w, qInput, kvInput, act, kvAct, context.ReleaseInputs, in context);
@@ -110,7 +108,7 @@ public sealed class AttentionLayer
         if (q.Shape.Rank != 4 || k.Shape.Rank != 4 || v.Shape.Rank != 4)
             throw new ArgumentException($"Attend takes [B, S, heads, D] operands; got {q.Shape}, {k.Shape}, {v.Shape}.");
         if (!AttentionShape(flatShape).Equals(flatShape))
-            throw new ArgumentException($"The equal-head token-major entry writes [S, heads·D] or [1, S, heads, D]; got {flatShape}.");
+            throw new ArgumentException($"On the token-major route Attend writes [S, heads·D] or [1, S, heads, D]; got {flatShape}.");
         ValidateContext(in context, (int)q.Shape[0]);
         return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, in context);
     }
@@ -417,14 +415,25 @@ public sealed class AttentionLayer
         in AttentionCallContext context)
     {
         Tensor flat = new(AttentionShape(flatShape), act);
-        AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
-            _config.HeadDim, _config.EffectiveScale, _config.AllowF16) with { Route = _config.TokenMajorRoute };
-        backend.Attention(in call);
-        q.Dispose();
-        if (ownsKv)
+        try
         {
-            k.Dispose();
-            v.Dispose();
+            AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
+                _config.HeadDim, _config.EffectiveScale, _config.AllowF16) with { Route = _config.TokenMajorRoute };
+            backend.Attention(in call);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            q.Dispose();
+            if (ownsKv)
+            {
+                k.Dispose();
+                v.Dispose();
+            }
         }
         return flat;
     }
@@ -463,12 +472,23 @@ public sealed class AttentionLayer
         in AttentionCallContext context)
     {
         Tensor attn = new(new TensorShape(batch, _config.Heads, sq, _config.HeadDim), act);
-        AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
-            _config.AllowF16);
-        backend.Attention(in call);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
+        try
+        {
+            AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
+                _config.AllowF16);
+            backend.Attention(in call);
+        }
+        catch
+        {
+            attn.Dispose();
+            throw;
+        }
+        finally
+        {
+            qMh.Dispose();
+            kMh.Dispose();
+            vMh.Dispose();
+        }
         context.Probe?.Observe("attention", attn);
         Tensor flat = new(flatShape, act);
         backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
@@ -607,10 +627,11 @@ public sealed class AttentionLayer
     }
 
     /// <summary>The shape the attention output is held in: the equal-head token-major entry takes <c>[S, heads·D]</c> or
-    /// <c>[1, S, heads, D]</c>, so a <c>[1, S, heads·D]</c> output is held as the latter, the same bytes.</summary>
+    /// <c>[1, S, heads, D]</c>, so a <c>[1, S, heads·D]</c> output is held as the <c>[S, heads·D]</c> rows the output
+    /// projection reads (backends pick Linear fast paths by the input's shape).</summary>
     private TensorShape AttentionShape(TensorShape flatShape) =>
-        _config.TokenMajorRoute == AttentionRoute.TokenMajor && flatShape.Rank == 3
-            ? new TensorShape(flatShape[0], flatShape[1], _config.Heads, _config.HeadDim)
+        _config.TokenMajorRoute == AttentionRoute.TokenMajor && flatShape.Rank == 3 && flatShape[0] == 1
+            ? new TensorShape(flatShape[1], flatShape[2])
             : flatShape;
 
     /// <summary>The projection's shape: <c>[.., heads, D]</c> for a per-head norm, else <c>[.., heads·D]</c>.</summary>

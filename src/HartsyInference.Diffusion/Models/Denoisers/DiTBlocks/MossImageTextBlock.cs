@@ -77,9 +77,11 @@ public sealed class MossImageTextBlock(int hidden, int numHeads, int ffnHidden, 
 
         Tensor n1 = new(flat, DType.F32);
         backend.RmsNorm(n1, x, _norm1!, _eps);
+        (Tensor q, Tensor k, Tensor v) = _attention!.ProjectSelf(backend, n1, releaseInput: true);
         QkRotation rope = new(QkRotationKind.RotateHalfPaired, cos, sin);
-        Tensor projected = _attention!.Forward(backend, n1, n1,
-            new AttentionCallContext { QueryRotation = rope, KeyRotation = rope, ReleaseInputs = true });
+        // Stages, not Forward: the output projection reads [1, S, heads, D], where Forward would hand it [S, hidden].
+        Tensor attn = _attention.Attend(backend, q, k, v, q.Shape, new AttentionCallContext { QueryRotation = rope, KeyRotation = rope });
+        Tensor projected = _attention.ProjectOutput(backend, attn);
         Tensor x1 = new(flat, DType.F32);
         backend.Add(x1, x, projected);
         projected.Dispose();

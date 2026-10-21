@@ -130,7 +130,7 @@ follows both.
 - **Engine.** `ReferenceImageResolver` with `MossImageRecipePipeline.ReferencePolicy` (Ostris) or `ColorizePolicy`
   prepares both copies; `Qwen35VisionTower` / `Qwen35TextEncoder.Encode(ids, images)` the text side;
   `MossImageTransformer.PrepareConditioning` with `ReferenceLatentTokens` and `EnsureReferenceCaches` the DiT side, on
-  the shared `ReferenceKvCache`, `SegmentModulation` and `TokenMajorAttention`. Extras `reference.kv_cache` (default true,
+  the shared `ReferenceKvCache`, `SegmentModulation` and `AttentionLayer` (references appended through a K/V rewrite). Extras `reference.kv_cache` (default true,
   Ostris only; refused under colorize), `reference.max_pixels` (1 048 576, 0 keeps the size) and `reference.vision_pixels`
   (147 456), both Ostris only; `reference.layout` (`ostris` default, or `colorize`) and `reference.ref_scale` (colorize,
   1–8, default 2). CLI `--reference-kv-cache`, `--reference-max-pixels`, `--reference-vision-pixels`,

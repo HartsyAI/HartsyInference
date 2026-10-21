@@ -203,7 +203,7 @@ public sealed class AttentionLayerTests
     }
 
     [Fact]
-    public void EqualHeadTokenMajor_HoldsABatchedOutputInTheShapeTheEntryTakes()
+    public void EqualHeadTokenMajor_HoldsABatchedOutputAsTheRowsTheProjectionReads()
     {
         AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
         AttentionLayer layer = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor },
@@ -212,10 +212,24 @@ public sealed class AttentionLayerTests
 
         Tensor y = layer.Forward(backend, x, x, default);
 
-        Assert.Equal(new TensorShape(1, 6, 2, 4), backend.Calls[0].Output.Storage.Shape);
+        Assert.Equal(new TensorShape(6, 8), backend.Calls[0].Output.Storage.Shape);
         Assert.Equal(new TensorShape(1, 6, 8), y.Shape);
         Assert.Throws<ArgumentException>(() => layer.Attend(backend, new Tensor(new TensorShape(1, 6, 2, 4), DType.F32),
             new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new TensorShape(1, 6, 8), default));
+    }
+
+    [Fact]
+    public unsafe void AFailedAttentionCall_FreesTheOperandsItWasGiven()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, FailAttention = true };
+        AttentionLayer layer = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor });
+        Tensor q = new(new TensorShape(1, 6, 2, 4), DType.F32), k = new(new TensorShape(1, 6, 2, 4), DType.F32),
+            v = new(new TensorShape(1, 6, 2, 4), DType.F32);
+
+        Assert.Throws<OutOfMemoryException>(() => layer.Attend(backend, q, k, v, q.Shape, default));
+
+        foreach (Tensor t in (Tensor[])[q, k, v])
+            Assert.Throws<ObjectDisposedException>(() => (nint)t.DataPointer);
     }
 
     [Fact]
