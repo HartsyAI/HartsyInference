@@ -68,6 +68,16 @@ public static class AudioModelCache
     /// <param name="revision">Optional git revision (branch / tag / commit SHA).
     /// Defaults to <c>"main"</c>.</param>
     /// <param name="progress">Optional progress callback receiving downloaded-byte counts.</param>
+    /// <summary>Returns the local path of <paramref name="filename"/> if it is already on disk (directly or via a
+    /// stand-in link), without touching the network. Null when the file is absent.</summary>
+    public static string? TryGetLocal(string hfRepoId, string filename, string category)
+    {
+        string localPath = Path.Combine(GetRepoDirectory(hfRepoId, category), filename);
+        if (IsUsableFile(localPath)) return localPath;
+        AudioStandIns.Resync(CacheRoot);
+        return IsUsableFile(localPath) ? localPath : null;
+    }
+
     public static async Task<string> GetAsync(
         string hfRepoId,
         string filename,
