@@ -86,13 +86,13 @@ public sealed unsafe class CudnnSdpaStridedLayoutTests
         {
             dq = Upload(qh); dk = Upload(kh); dv = Upload(vh);
             doHm = CudaMemory.Allocate((nuint)(n * sizeof(ushort)));
-            sdpa.Execute(dq, dk, dv, doHm, 1, heads, s, s, d, scale, CudnnSdpa.SdpaLayout.HeadMajor);
+            sdpa.Execute(dq, dk, dv, doHm, new CudnnSdpa.PlanKey(1, heads, heads, s, s, d, CudnnSdpa.SdpaDtype.F16, CudnnSdpa.SdpaLayout.HeadMajor), scale);
             backend.Sync();
             Half[] outHm = Download(doHm, n);
 
             dqT = Upload(qt); dkT = Upload(kt); dvT = Upload(vt);
             doTm = CudaMemory.Allocate((nuint)(n * sizeof(ushort)));
-            sdpa.Execute(dqT, dkT, dvT, doTm, 1, heads, s, s, d, scale, CudnnSdpa.SdpaLayout.TokenMajor);
+            sdpa.Execute(dqT, dkT, dvT, doTm, new CudnnSdpa.PlanKey(1, heads, heads, s, s, d, CudnnSdpa.SdpaDtype.F16, CudnnSdpa.SdpaLayout.TokenMajor), scale);
             backend.Sync();
             Half[] outTm = Download(doTm, n);
 

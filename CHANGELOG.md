@@ -24,6 +24,14 @@ stable release will require. Dates are UTC.
   injector, the Matrix-Game 3 action module, the SD1.5/SDXL UNet cross-attention (its constant text K/V cache is an
   `ICachedKv`), ControlNet-Union fusion, VAE attention, the Wan 2.2 and Oasis ViT VAEs, the IP-Adapter resampler, SeedVR2's
   windowed attention, MiniMax-H3's dense path and Oasis attend through `AttentionLayer`. Output is bit-identical.
+- **Changed: cuDNN fused attention reads grouped-query K/V in place, takes bf16 and per-head or per-batch bias, and binds the
+  scale by value.** K/V carry their own head count in the graph, so Krea2's grouped token-major call and the causal LLM prefill no
+  longer repeat K/V heads first (new route `G.1`; the Sage and F16-flash routes still take their calls before it). A bf16 call
+  reaches cuDNN only when its numerics grant bf16 multiplies, which no caller does yet, and `Attention` now hands a call's own
+  numerics to the rows instead of only the legacy `allowF16`. Bias `[1|B, 1|H, 1|Sq, Skv]` rides the fused engine, so per-head
+  masks on calls that permit F16 leave the materialized path. The scale is no longer part of a plan: one plan serves every scale and the
+  per-plan device scalar is gone. cuDNN failures are remembered per capability signature (dtype, grouped, mask kind, bias axes,
+  head dim), so a refused bf16 or grouped plan cannot switch off the fp16 path at the same head dim.
 
 ## alpha.384
 

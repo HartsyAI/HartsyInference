@@ -37,7 +37,6 @@ internal static class CudnnProbeApi
     // cudnnBackendAttributeName_t
     internal const int CUDNN_ATTR_POINTWISE_AXIS = 9;                              // :484
     internal const int CUDNN_ATTR_OPERATION_POINTWISE_TDESC = 758;                 // :550
-    internal const int CUDNN_ATTR_TENSOR_IS_BY_VALUE = 908;                        // :590
     internal const int CUDNN_ATTR_MATMUL_PADDING_VALUE = 1503;                     // :621
     internal const int CUDNN_ATTR_OPERATION_MATMUL_GEMM_M_OVERRIDE_DESC = 1525;    // :628
     internal const int CUDNN_ATTR_OPERATION_MATMUL_GEMM_N_OVERRIDE_DESC = 1526;    // :629

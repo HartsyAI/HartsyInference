@@ -183,7 +183,7 @@ public sealed unsafe class CudnnSdpaTests
         }
     }
 
-    /// <summary>Plans with identical shapes but different scales must not share the device scale scalar.</summary>
+    /// <summary>One plan serves every scale: the scale is bound by value per call, so identical shapes with different scales must each match their own reference.</summary>
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudnnSdpa_SameShapeDifferentScale_MatchesEachReference()
