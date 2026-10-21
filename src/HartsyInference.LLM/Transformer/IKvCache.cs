@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -8,7 +9,7 @@ namespace HartsyInference.LLM.Transformer;
 /// <para>Ownership contract: <see cref="GetK"/>/<see cref="GetV"/> return a tensor <b>owned by the cache</b> and valid until the next <see cref="Append"/> on that layer (or <see cref="Reset"/>/dispose) — callers must NOT dispose it. The returned tensor is the exact populated prefix <c>[1, num_kv_heads, length, head_dim]</c> (no padding), ready for the GQA repeat + SDPA.</para>
 /// <para>Extends <see cref="IDisposable"/> so a decode cache can be created via a factory (<see cref="KvCaches.ForDecode"/>) and scoped with <c>using</c> without the caller naming the concrete type. All implementations (device <c>KvCache</c>, host <c>StreamingKvCache</c>, <c>FixedKvCache</c>) are disposable.</para>
 /// </remarks>
-public interface IKvCache : ISequenceState
+public interface IKvCache : ISequenceState, IAttentionKvSource
 {
     /// <summary>Number of layers this cache stores.</summary>
     int NumLayers { get; }
@@ -27,6 +28,12 @@ public interface IKvCache : ISequenceState
 
     /// <summary>Advances the shared position counter by <paramref name="by"/> (once per step, after all layers).</summary>
     void AdvanceLength(int by);
+
+    void IAttentionKvSource.AppendKv(IBackend backend, int layer, Tensor k, Tensor v) => AppendStep(backend, layer, k, v);
+
+    Tensor IAttentionKvSource.KeyBuffer(int layer) => KeyPrefix(layer);
+
+    Tensor IAttentionKvSource.ValueBuffer(int layer) => ValuePrefix(layer);
 
     /// <summary>Tokens committed to the sequence; maps <see cref="CurrentLength"/> so existing implementers satisfy <see cref="ISequenceState"/> unchanged.</summary>
     int ISequenceState.Length => CurrentLength;

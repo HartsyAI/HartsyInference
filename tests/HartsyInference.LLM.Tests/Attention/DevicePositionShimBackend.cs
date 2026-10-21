@@ -107,7 +107,15 @@ internal sealed unsafe class DevicePositionShimBackend(bool graphDecodeSupported
 
     // CpuBackend's own members, forwarded.
 #nullable disable
-    public void Attention(in AttentionCall call) => _cpu.Attention(in call);
+    /// <summary>Serves a device-position call through this shim's <see cref="FlashAttentionDev"/>, as a real backend re-enters its own legacy entry.</summary>
+    public void Attention(in AttentionCall call)
+    {
+        if (call.Route == AttentionRoute.FlashDevice && call.LegacyGap() is null)
+            FlashAttentionDev(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage, call.ValidKvLength, call.KvGroup,
+                call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
+        else
+            _cpu.Attention(in call);
+    }
     public AttentionPlan PlanAttention(in AttentionCall call) => _cpu.PlanAttention(in call);
     public void SparseLatentAttention(Tensor output, Tensor query, in LatentSource window, in LatentSource main, Tensor indices, int windowSlots, Tensor sink, float scale) => _cpu.SparseLatentAttention(output, query, in window, in main, indices, windowSlots, sink, scale);
     public void IndexerScores(Tensor scores, Tensor query, in LatentSource keys, Tensor headWeights, Tensor compressLens, Tensor candidates, float scale) => _cpu.IndexerScores(scores, query, in keys, headWeights, compressLens, candidates, scale);
