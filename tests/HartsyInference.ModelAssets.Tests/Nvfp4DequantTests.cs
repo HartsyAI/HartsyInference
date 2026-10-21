@@ -64,13 +64,13 @@ public sealed unsafe class Nvfp4DequantTests
         ((byte*)blockScales.DataPointer)[0] = 0x40; // 2.0
         const float g = 0.5f;
 
-        Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, g);
-        Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, g);
+        using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, g);
+        using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, g);
 
         Assert.Equal(DType.F8E4M3, fp8.DType);
         Assert.Equal(g, fp8.Fp8ScaleFactor);
         // fp8 stores e2m1*block_scale (= the F16 value / g); real value = decoded_fp8 * Fp8ScaleFactor.
-        Tensor fp8AsF32 = fp8.CastTo(DType.F32);          // CastTo folds Fp8ScaleFactor into the value
+        using Tensor fp8AsF32 = fp8.CastTo(DType.F32);          // CastTo folds Fp8ScaleFactor into the value
         Half* a = (Half*)f16.DataPointer;
         float* b = (float*)fp8AsF32.DataPointer;
         for (int i = 0; i < 16; i++)
