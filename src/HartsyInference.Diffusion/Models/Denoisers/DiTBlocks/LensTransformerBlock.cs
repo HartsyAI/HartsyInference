@@ -284,15 +284,15 @@ public sealed unsafe class LensTransformerBlock
         backend.Scale(jointAttnOut, jointAttnDamped, 1.0f / ValueF16Damp);
         jointAttnDamped.Dispose();
 
-        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [img, txt] (B=1: contiguous rows) ──
+        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [img, txt] per batch item ──
         Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
         backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
         Tensor imgAttn = new Tensor(imgShape, DType.F32);
-        backend.SliceRows(imgAttn, jointAttnFlat, 0);
+        DiTUtils.SliceSeq(backend, imgAttn, jointAttnFlat, batch, totalSeqLen, 0);
         Tensor txtAttn = new Tensor(txtShape, DType.F32);
-        backend.SliceRows(txtAttn, jointAttnFlat, imgSeqLen);
+        DiTUtils.SliceSeq(backend, txtAttn, jointAttnFlat, batch, totalSeqLen, imgSeqLen);
         jointAttnFlat.Dispose();
 
         // ── 9. Output projections + gated residual (input + gate*value) ──

@@ -35,18 +35,25 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         private readonly Tensor[] _owned;
         private int _disposed;
 
-        public ForwardConstants(Tensor causalMask, Tensor globalCos, Tensor globalSin, Tensor? localCos, Tensor? localSin)
+        public ForwardConstants(Tensor causalMask, Tensor? localMask, Tensor globalCos, Tensor globalSin, Tensor? localCos, Tensor? localSin)
         {
             CausalMask = causalMask;
+            LocalMask = localMask;
             GlobalCos = globalCos;
             GlobalSin = globalSin;
             LocalCos = localCos;
             LocalSin = localSin;
-            _owned = localCos is null ? [causalMask, globalCos, globalSin]
-                : [causalMask, globalCos, globalSin, localCos, localSin!];
+            List<Tensor> owned = [causalMask, globalCos, globalSin];
+            if (localMask is not null) owned.Add(localMask);
+            if (localCos is not null) owned.AddRange([localCos, localSin!]);
+            _owned = [.. owned];
         }
 
         public Tensor CausalMask { get; }
+
+        /// <summary>The causal mask limited to the sliding window, for sliding layers; null when every key of the
+        /// request already lies inside the window.</summary>
+        public Tensor? LocalMask { get; }
         public Tensor GlobalCos { get; }
         public Tensor GlobalSin { get; }
         public Tensor? LocalCos { get; }
@@ -163,7 +170,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             for (int i = 0; i < _config.NumLayers; i++)
             {
                 (Tensor rcos, Tensor rsin) = RopeForLayer(i, constants);
-                Tensor next = _blocks[i].Forward(backend, hidden, constants.CausalMask, rcos, rsin, seqLen);
+                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), rcos, rsin, seqLen);
                 Tensor previous = hidden;
                 hidden = next;
                 TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous layer activation");
@@ -253,7 +260,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             for (int i = 0; i < _config.NumLayers; i++)
             {
                 Tensor next = _blocks[i].Forward(
-                    backend, hidden, constants.CausalMask, constants.GlobalCos, constants.GlobalSin, seqLen);
+                    backend, hidden, MaskForLayer(i, constants), constants.GlobalCos, constants.GlobalSin, seqLen);
                 Tensor previous = hidden;
                 hidden = next;
                 TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous M-RoPE layer activation");
@@ -378,7 +385,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             for (int i = 0; i < _config.NumLayers && requestIdx < K; i++)
             {
                 (Tensor rcos, Tensor rsin) = RopeForLayer(i, constants);
-                Tensor next = _blocks[i].Forward(backend, hidden, constants.CausalMask, rcos, rsin, seqLen);
+                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), rcos, rsin, seqLen);
                 Tensor previous = hidden;
                 hidden = next;
                 if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous multi-layer activation");
@@ -502,6 +509,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
         int keyLimit = padding?.ValidLength ?? int.MaxValue;
         Tensor? mask = null;
+        Tensor? localMask = null;
         Tensor? gCos = null;
         Tensor? gSin = null;
         Tensor? lCos = null;
@@ -510,6 +518,9 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         {
             mask = TextEncoderTensorHelpers.MakeResidentCopy(
                 backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue, keyLimit));
+            if (seqLen > _config.SlidingWindow && Enumerable.Range(0, _config.NumLayers).Any(IsSlidingLayer))
+                localMask = TextEncoderTensorHelpers.MakeResidentCopy(
+                    backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, _config.SlidingWindow, keyLimit));
             gCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
                 TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalCos, batch, seqLen, _config.HeadDim));
             gSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
@@ -523,12 +534,12 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                 lSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
                     TextEncoderTensorHelpers.BuildFullWidthRopeTable(localSin, batch, seqLen, _config.HeadDim));
             }
-            return new ForwardConstants(mask, gCos, gSin, lCos, lSin);
+            return new ForwardConstants(mask, localMask, gCos, gSin, lCos, lSin);
         }
         catch
         {
             // Construction is transactional: a failed later upload must not strand the successfully-created prefix.
-            Tensor?[] created = [mask, gCos, gSin, lCos, lSin];
+            Tensor?[] created = [mask, localMask, gCos, gSin, lCos, lSin];
             foreach (Tensor? tensor in created)
             {
                 try { tensor?.Dispose(); }
@@ -538,16 +549,19 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
     }
 
-    private (Tensor Cos, Tensor Sin) RopeForLayer(int layerIndex, ForwardConstants constants)
-    {
-        if (constants.LocalCos is not null && _config.LayerAttentionTypes is { } types && layerIndex < types.Length
-            && !string.Equals(types[layerIndex], "full", StringComparison.Ordinal)
-            && !string.Equals(types[layerIndex], "full_attention", StringComparison.Ordinal))
-        {
-            return (constants.LocalCos, constants.LocalSin!);
-        }
-        return (constants.GlobalCos, constants.GlobalSin);
-    }
+    private (Tensor Cos, Tensor Sin) RopeForLayer(int layerIndex, ForwardConstants constants) =>
+        constants.LocalCos is not null && IsSlidingLayer(layerIndex)
+            ? (constants.LocalCos, constants.LocalSin!) : (constants.GlobalCos, constants.GlobalSin);
+
+    /// <summary>The mask a layer attends with: the windowed one on a sliding layer, the plain causal one elsewhere.</summary>
+    private Tensor MaskForLayer(int layerIndex, ForwardConstants constants) =>
+        constants.LocalMask is { } local && IsSlidingLayer(layerIndex) ? local : constants.CausalMask;
+
+    /// <summary>Whether <paramref name="layerIndex"/> is a local (sliding-window) layer in <see cref="LlamaStyleEncoderConfig.LayerAttentionTypes"/>.</summary>
+    private bool IsSlidingLayer(int layerIndex) =>
+        _config.LayerAttentionTypes is { } types && layerIndex < types.Length
+        && !string.Equals(types[layerIndex], "full", StringComparison.Ordinal)
+        && !string.Equals(types[layerIndex], "full_attention", StringComparison.Ordinal);
 
     /// <summary>Precomputes RoPE cos/sin tables once for any seq_len up to <c>maxLenSeen</c>. Cache grows on demand.</summary>
     private void EnsureRopeTable(int seqLen)

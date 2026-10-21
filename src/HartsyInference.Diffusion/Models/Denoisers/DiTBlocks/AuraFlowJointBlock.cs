@@ -197,9 +197,9 @@ public sealed unsafe class AuraFlowJointBlock
         jointAttnOut.Dispose();
 
         Tensor txtAttn = new Tensor(txtShape, DType.F32);
-        backend.SliceRows(txtAttn, jointAttnFlat, 0);
+        DiTUtils.SliceSeq(backend, txtAttn, jointAttnFlat, batch, totalSeqLen, 0);
         Tensor imgAttn = new Tensor(imgShape, DType.F32);
-        backend.SliceRows(imgAttn, jointAttnFlat, txtSeqLen);
+        DiTUtils.SliceSeq(backend, imgAttn, jointAttnFlat, batch, totalSeqLen, txtSeqLen);
         jointAttnFlat.Dispose();
 
         // ── 9. Output projections (bias-free) ──

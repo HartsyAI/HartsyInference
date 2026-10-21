@@ -8,6 +8,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 public sealed class CrossAttentionBlock
 {
     private readonly int _numTransformerBlocks;
+    private readonly int _normGroups;
+    private readonly float _normEps;
 
     /// <summary>How many cross-attention layers this block contains. Equal to the BasicTransformerBlock count — each transformer block has one cross-attention sub-layer that an IP-Adapter injects K_ip/V_ip into.</summary>
     public int NumTransformerBlocks => _numTransformerBlocks;
@@ -31,10 +33,12 @@ public sealed class CrossAttentionBlock
     /// <param name="crossAttentionDim">Dimension of the cross-attention context (text encoder hidden size).</param>
     /// <param name="numTransformerBlocks">Number of BasicTransformerBlocks. SD1.5=1, SDXL=[1,2,10] per level.</param>
     /// <param name="normGroups">Number of groups for the input GroupNorm.</param>
-    /// <param name="normEps">GroupNorm epsilon.</param>
-    public CrossAttentionBlock(int channels, int numHeads, int crossAttentionDim, int numTransformerBlocks = 1, int normGroups = 32, float normEps = 1e-5f)
+    /// <param name="normEps">GroupNorm epsilon (1e-6 for the SD1.5 and SDXL UNets).</param>
+    public CrossAttentionBlock(int channels, int numHeads, int crossAttentionDim, int numTransformerBlocks = 1, int normGroups = 32, float normEps = 1e-6f)
     {
         _numTransformerBlocks = numTransformerBlocks;
+        _normGroups = normGroups;
+        _normEps = normEps;
 
         _selfAttns = new TransformerSubBlock[numTransformerBlocks];
         _crossAttns = new TransformerSubBlock[numTransformerBlocks];
@@ -107,7 +111,7 @@ public sealed class CrossAttentionBlock
         // 1. GroupNorm on spatial input
         TensorShape spatialShape = new TensorShape(batch, channels, height, width);
         Tensor normed = new Tensor(spatialShape, dtype);
-        backend.GroupNorm(normed, input, _normWeight!, _normBias!, 32, 1e-6f);
+        backend.GroupNorm(normed, input, _normWeight!, _normBias!, _normGroups, _normEps);
 
         // 2. [B, C, H, W] → [B, spatial, C] via batched transpose and project in. Transpose2D takes
         // explicit dims and reads the buffer flat, so normed is passed directly — a Reshape view here

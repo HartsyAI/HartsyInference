@@ -97,8 +97,8 @@ public sealed record LlamaStyleEncoderConfig
     /// <summary>Per-layer attention pattern. <c>null</c> (default) → uniform causal attention with no
     /// windowing. Non-null → must contain one entry per layer; each entry must be either
     /// <c>"full_attention"</c> or <c>"sliding_attention"</c>. GPT-OSS alternates sliding/full starting
-    /// with sliding at layer 0. When a layer is sliding, only positions within
-    /// <see cref="SlidingWindow"/> tokens to the left are attended (plus the current token).</summary>
+    /// with sliding at layer 0. When a layer is sliding, each query attends <see cref="SlidingWindow"/> positions
+    /// in total: itself and the <c>SlidingWindow - 1</c> before it.</summary>
     public string[]? LayerAttentionTypes { get; init; }
 
     /// <summary>Sliding-window size (number of attended positions including current) for any layer
@@ -423,12 +423,7 @@ public sealed record LlamaStyleEncoderConfig
     /// sandwich norms, per-head QK-norm (new in Gemma 3), embeddings ×sqrt(hidden). Attention interleaves
     /// LOCAL (sliding-1024, rope θ=1e4) and GLOBAL (rope θ=1e6) layers, 5 local : 1 global (every 6th layer
     /// full) — see <see cref="LayerAttentionTypes"/> + <see cref="LocalRopeTheta"/>. attn_logit_softcapping
-    /// is null in Gemma 3 (removed vs Gemma 2).
-    ///
-    /// <para>PARITY STATUS: the dual local/global rope theta + per-head QK-norm (+1) require the encoder
-    /// forward's per-layer rope path (Phase 1b) — until that lands this preset runs every layer at θ=1e6,
-    /// which is NOT Gemma-3-correct. Sliding-window masking is approximated as full attention (only affects
-    /// &gt;1024-token prompts).</para></summary>
+    /// is null in Gemma 3 (removed vs Gemma 2).</summary>
     public static LlamaStyleEncoderConfig Gemma3_12B => new()
     {
         HiddenSize = 3840,
