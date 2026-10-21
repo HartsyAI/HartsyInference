@@ -140,7 +140,11 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
                 context,
-                new LoraMergeTargets { Transformer = ditWeights, TransformerNativeNames = NativeNames(ditSource, ditWeights) },
+                new LoraMergeTargets
+                {
+                    Transformer = ditWeights,
+                    TransformerNativeNames = context.Loras is null ? null : NativeNames(ditSource, ditWeights),
+                },
                 "Krea2Recipe");
             transformer.LoadWeights(ditWeights);
 

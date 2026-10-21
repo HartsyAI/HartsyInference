@@ -13,6 +13,7 @@ public static class KohyaGenericMapper
     {
         ArgumentNullException.ThrowIfNull(loader);
         Dictionary<(LoraTarget, string), LoraGroupBuffer> groups = [];
+        int foreign = 0;
         foreach (string key in loader.Descriptors.Keys)
         {
             if (!LoraRoleSuffix.TryStrip(key, out string root, out LoraRole role))
@@ -26,12 +27,14 @@ public static class KohyaGenericMapper
             }
             if (!root.StartsWith(Prefix, StringComparison.Ordinal))
             {
-                Logs.Warning($"Kohya LoRA key '{key}' is not a lora_unet_ module; skipping.");
+                foreign++;
                 continue;
             }
             LoraGroupBuffer.GetOrCreate(groups, LoraTarget.Transformer, root, key).Assign(role, loader.GetTensor(key));
         }
 
+        if (foreign > 0)
+            Logs.Warning($"Kohya LoRA: skipped {foreign} keys outside lora_unet_ (text-encoder adapters are not applied for this format).");
         IReadOnlyList<LoraLayer> built = LoraGroupBuffer.BuildLayers(groups,
             sourceKey => $"Kohya LoRA group '{sourceKey}' is missing a matrix its decomposition needs; skipping.");
         List<LoraLayer> layers = new(built.Count);

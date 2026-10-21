@@ -254,6 +254,14 @@ public sealed unsafe class LoraKohyaGenericTests : IDisposable
 
     /// <summary>The real Krea 2 LoRA against the real Krea 2 checkpoint, headers only: the file is detected, and every module it adapts names a checkpoint weight — directly, and through the converter's rename into the dictionary key the recipe merges into.</summary>
     [Fact]
+    public void WithResolvedTarget_CopiesEverySettableProperty()
+    {
+        // WithResolvedTarget lists the properties by hand; a new one must be copied there too.
+        string[] settable = typeof(LoraLayer).GetProperties().Where(p => p.SetMethod is not null).Select(p => p.Name).Order().ToArray();
+        Assert.Equal(["Delta", "KohyaModuleName", "Target", "TargetKey"], settable);
+    }
+
+    [Fact]
     [Trait("Category", "Integration")]
     [Trait("Category", "RealWeights")]
     public void RealKreaLora_EveryModuleResolvesToACheckpointWeight()
