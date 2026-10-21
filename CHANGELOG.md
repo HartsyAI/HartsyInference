@@ -21,7 +21,8 @@ stable release will require. Dates are UTC.
   backends that serve the token-major entry. A call the head-major entry would run through SageAttention (F16, head dim
   64 or 128, unmasked, both sequences at least `numerics.sageF16MinSkv`, as Z-Image at 2048²) stays head-major, since
   the token-major entry has no Sage kernel. Z-Image Base, SDXL's batched CFG forward and the UNet's cross-attention keep
-  the head-major layout.
+  the head-major layout. Output is bit-identical: at these models' shapes the token-major cuDNN row returns the bits of
+  the head-major row it replaces.
 
 ## alpha.385
 
