@@ -181,7 +181,7 @@ public sealed unsafe class HieraBlock
         Tensor kHeads = ToHeads(backend, kFlat, b, n);
         Tensor vHeads = ToHeads(backend, vFlat, b, n);
 
-        Tensor attn = MultiHeadOperator.For(_heads, _headDim).AttendHeadMajorOperands(backend, qHeads, kHeads, vHeads, default);
+        Tensor attn = AttentionLayer.Shared(_heads, _headDim, computeDType: DType.F32).AttendHeadMajorOperands(backend, qHeads, kHeads, vHeads, default);
 
         // [B,heads,Nq,hd] → [B,Nq,heads,hd] → [B,Nq,dimOut]
         Tensor merged = new Tensor(new TensorShape(b, nq, _heads, _headDim), DType.F32);

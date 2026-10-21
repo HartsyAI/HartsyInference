@@ -160,7 +160,7 @@ public sealed class JointAttention
 
     /// <summary>The concatenation, attention and split over streams already projected, normed and rotated by the model:
     /// token-major <paramref name="q"/>, <paramref name="k"/> and <paramref name="v"/> of each stream, <c>[B, S_i, heads, D]</c>, in
-    /// stream index order, all taken over and disposed, also when it throws. <paramref name="attended"/>[i] receives stream i's rows
+    /// stream index order, all taken over and disposed, also when the call throws (a refused argument takes nothing over). <paramref name="attended"/>[i] receives stream i's rows
     /// as in <see cref="Attend"/>.</summary>
     public void AttendProjected(IBackend backend, ReadOnlySpan<Tensor> q, ReadOnlySpan<Tensor> k, ReadOnlySpan<Tensor> v,
         Span<Tensor?> attended, in AttentionCallContext joint)

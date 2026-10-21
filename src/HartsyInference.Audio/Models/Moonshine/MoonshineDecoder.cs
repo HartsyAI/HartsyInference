@@ -211,7 +211,7 @@ internal sealed unsafe class MoonshineDecoderLayer
     public MoonshineDecoderLayer(MoonshineConfig cfg)
     {
         _cfg = cfg;
-        _attention = OperatorAttention.Create(cfg.NumHeads, cfg.HeadDim);
+        _attention = AttentionLayer.Shared(cfg.NumHeads, cfg.HeadDim);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)

@@ -36,7 +36,7 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
         }
 
         _config = config;
-        _attention = OperatorAttention.Create(config.Heads, config.EmbedDim / config.Heads);
+        _attention = AttentionLayer.Shared(config.Heads, config.EmbedDim / config.Heads);
     }
 
     /// <summary>Geometry this instance was built for.</summary>

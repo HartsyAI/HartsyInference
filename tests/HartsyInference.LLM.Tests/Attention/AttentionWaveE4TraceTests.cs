@@ -54,4 +54,12 @@ public sealed class AttentionWaveE4TraceTests
             using Tensor enc = new(new TensorShape(1, 6, D), DType.F32);
             model.DecodeLogits(b, enc, 6, [0, 4, 11]);
         }));
+
+    [Fact]
+    public void DecodeLogits_RefusesAnEncoderOutputThatIsNotEncLenRows()
+    {
+        using Tensor enc = new(new TensorShape(1, 8, D), DType.F32);
+        ArgumentException e = Assert.Throws<ArgumentException>(() => Model().DecodeLogits(new AttentionTraceBackend(), enc, 6, [0, 4, 11]));
+        Assert.Equal("encLen", e.ParamName);
+    }
 }

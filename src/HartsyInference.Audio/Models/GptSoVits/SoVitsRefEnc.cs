@@ -29,7 +29,7 @@ public sealed unsafe class SoVitsRefEnc
     {
         _nMels = nMels; _hidden = hidden; _styleDim = styleDim; _nHead = nHead;
         // StyleSpeech MultiHeadAttention temperature is sqrt(d_model), not sqrt(head_dim).
-        _attention = OperatorAttention.Create(nHead, hidden / nHead, 1f / MathF.Sqrt(hidden));
+        _attention = AttentionLayer.Shared(nHead, hidden / nHead, 1f / MathF.Sqrt(hidden));
         _ = kernel;     // kernel is read from the conv weight shape at GLU time; param kept for the call contract
     }
 

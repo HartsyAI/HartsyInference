@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
@@ -37,14 +36,10 @@ public static class AukOps
         return result;
     }
 
-    private static readonly ConcurrentDictionary<(int Heads, int HeadDim), AttentionLayer> Layers = new();
-
     /// <summary>Non-causal unmasked attention over q/k/v <c>[1, n, heads, headDim]</c>, which it takes over and disposes; returns <c>[1, n, heads*headDim]</c>.</summary>
     public static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int n, int heads, int headDim)
     {
-        AttentionLayer layer = Layers.GetOrAdd((heads, headDim), static key => new AttentionLayer(
-            new AttentionLayerConfig { Heads = key.Heads, KvHeads = key.Heads, HeadDim = key.HeadDim, ComputeDType = DType.F32 }));
-        return layer.Attend(backend, q, k, v, new TensorShape(1, n, heads * headDim), default);
+        return AttentionLayer.Shared(heads, headDim, computeDType: DType.F32).Attend(backend, q, k, v, new TensorShape(1, n, heads * headDim), default);
     }
 
     /// <summary>AdaLayerNorm_Final: <c>LN(x) * (1 + scale) + shift</c> with chunk order (scale, shift) from <c>Linear(silu(t))</c>.</summary>

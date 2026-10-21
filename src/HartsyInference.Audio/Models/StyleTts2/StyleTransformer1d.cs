@@ -56,7 +56,7 @@ public sealed unsafe class StyleTransformer1d
         _innerDim = numHeads * headFeatures;
         _contextFeatures = contextFeatures;
         _ffDim = channels * multiplier;
-        _attention = OperatorAttention.Create(numHeads, headFeatures);
+        _attention = AttentionLayer.Shared(numHeads, headFeatures);
         _layers = layers ?? throw new ArgumentNullException(nameof(layers));
         _timeW1 = timeW1; _timeB1 = timeB1; _timeW2 = timeW2; _timeB2 = timeB2;
         _inW = inW; _inB = inB; _outW = outW; _outB = outB;

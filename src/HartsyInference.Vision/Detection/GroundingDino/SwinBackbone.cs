@@ -239,7 +239,7 @@ public sealed unsafe class SwinBackbone : IDisposable
         qWin.Dispose(); kWin.Dispose(); vWin.Dispose();
 
         Tensor mask = BuildWindowMask(nW, heads, wa, ws, nWw, shift, relTable, hp, wp);
-        Tensor attn = MultiHeadOperator.For(heads, hd).AttendHeadMajorOperands(backend, qh, kh, vh, new AttentionCallContext { Bias = mask });
+        Tensor attn = AttentionLayer.Shared(heads, hd, computeDType: DType.F32).AttendHeadMajorOperands(backend, qh, kh, vh, new AttentionCallContext { Bias = mask });
         mask.Dispose();
 
         // Merge heads [nW, heads, wa, hd] -> [nW, wa, heads*hd], then stitch windows back to the grid.

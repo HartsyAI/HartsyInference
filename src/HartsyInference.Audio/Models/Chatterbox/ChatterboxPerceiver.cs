@@ -18,7 +18,7 @@ public sealed unsafe class ChatterboxPerceiver : IDisposable
     private const int NumQueries = 32;
 
     private Tensor? _query;          // pre_attention_query [1, 32, 1024]
-    private readonly AttentionLayer _attention = OperatorAttention.Create(Heads, HeadDim);
+    private readonly AttentionLayer _attention = AttentionLayer.Shared(Heads, HeadDim);
     private Tensor? _normW, _normB, _qW, _qB, _kW, _kB, _vW, _vB, _outW, _outB;
     private int _disposed;
 

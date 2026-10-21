@@ -21,7 +21,7 @@ namespace HartsyInference.Audio.Models.PocketTts;
 /// reproducing the streaming modules run with a fresh state. Verified by <c>SnacParityTests</c>-style oracle.</summary>
 internal sealed unsafe class PocketTtsMimiDecoder(string prefix = "mimi")
 {
-    private readonly AttentionLayer _attention = OperatorAttention.Create(NHeads, HeadDim);
+    private readonly AttentionLayer _attention = AttentionLayer.Shared(NHeads, HeadDim);
 
     private const int LatentDim = 32;
     private const int Dim = 512;          // outer_dim / d_model

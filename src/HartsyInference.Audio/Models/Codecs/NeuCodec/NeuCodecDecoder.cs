@@ -45,7 +45,7 @@ public sealed unsafe class NeuCodecDecoder : IDisposable
     public NeuCodecDecoder(NeuCodecConfig cfg)
     {
         _cfg = cfg;
-        _attention = OperatorAttention.Create(cfg.NumHeads, cfg.HeadDim);
+        _attention = AttentionLayer.Shared(cfg.NumHeads, cfg.HeadDim);
         _prior = new ResnetWeights[cfg.PriorResnetBlocks];
         _post = new ResnetWeights[cfg.PostResnetBlocks];
         _blocks = new TxWeights[cfg.Depth];

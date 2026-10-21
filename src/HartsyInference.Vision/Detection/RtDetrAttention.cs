@@ -28,7 +28,7 @@ public static class RtDetrAttention
         backend.Permute0213(kh, k, skv, heads, headDim);
         backend.Permute0213(vh, v, skv, heads, headDim);
 
-        Tensor attn = MultiHeadOperator.For(heads, headDim).AttendHeadMajorOperands(backend, qh, kh, vh,
+        Tensor attn = AttentionLayer.Shared(heads, headDim, computeDType: DType.F32).AttendHeadMajorOperands(backend, qh, kh, vh,
             new AttentionCallContext { Bias = additiveMask });
 
         // Merge heads: [1, heads, Sq, headDim] -> [1, Sq, heads*headDim].

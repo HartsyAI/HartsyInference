@@ -371,7 +371,7 @@ public sealed unsafe class Qwen3TtsVocoder : IDisposable
         public TransformerLayer(Qwen3TtsVocoderConfig cfg)
         {
             _cfg = cfg;
-            _attention = OperatorAttention.Create(cfg.TransformerHeads, cfg.TransformerHeadDim);
+            _attention = AttentionLayer.Shared(cfg.TransformerHeads, cfg.TransformerHeadDim);
         }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)

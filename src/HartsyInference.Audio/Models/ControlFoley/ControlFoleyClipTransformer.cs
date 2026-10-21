@@ -31,7 +31,7 @@ internal sealed unsafe class ControlFoleyClipTransformer
         _heads = heads;
         _hidden = width * mlpRatio;
         _eps = eps;
-        _attention = OperatorAttention.Create(heads, width / heads);
+        _attention = AttentionLayer.Shared(heads, width / heads);
         _blocks = new Block[layers];
         for (int i = 0; i < layers; i++)
         {

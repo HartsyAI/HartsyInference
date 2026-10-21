@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -10,6 +11,16 @@ public sealed class AttentionLayer
     private readonly AttentionLayerConfig _config;
     private readonly AttentionLayerWeights? _weights;
     private readonly AttentionNormWeights? _norms;
+
+    private static readonly ConcurrentDictionary<(int Heads, int HeadDim, float Scale, DType? ComputeDType), AttentionLayer> SharedLayers = new();
+
+    /// <summary>The weightless layer of <paramref name="heads"/> equal query and key/value heads for a site that builds its own operands,
+    /// one per geometry and shared, as it holds no state; <paramref name="scale"/> 0 means <c>1/√headDim</c>.</summary>
+    public static AttentionLayer Shared(int heads, int headDim, float scale = 0f, DType? computeDType = null) =>
+        SharedLayers.GetOrAdd((heads, headDim, scale, computeDType), static key => new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = key.Heads, KvHeads = key.Heads, HeadDim = key.HeadDim, Scale = key.Scale, ComputeDType = key.ComputeDType,
+        }));
 
     /// <summary>Creates a layer. Without <paramref name="weights"/> only <see cref="Attend"/> and <see cref="AttendFlat"/> can
     /// run, and only without a QK norm. Weights without a query projection serve <see cref="AttendBranchHeadMajor"/> alone.</summary>
@@ -139,8 +150,8 @@ public sealed class AttentionLayer
 
     /// <summary>The attention call alone over operands the caller laid out head-major: <paramref name="qMh"/> <c>[B, heads, Sq, D]</c>,
     /// <paramref name="kMh"/> and <paramref name="vMh"/> <c>[B, heads, Skv, D]</c>. Applies no transform, so it takes only the bias and
-    /// probe of the context. Disposes the operands named in <paramref name="consume"/> once the call has run, also when it
-    /// throws; returns the head-major <c>[B, heads, Sq, D]</c> output, which the caller owns. A caller-provided
+    /// probe of the context. Disposes the operands named in <paramref name="consume"/> once the call has run, also when the call
+    /// throws (a refused argument takes nothing over); returns the head-major <c>[B, heads, Sq, D]</c> output, which the caller owns. A caller-provided
     /// <paramref name="output"/> of that shape and dtype is written and returned instead, and is never disposed.</summary>
     public Tensor AttendHeadMajorOperands(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, in AttentionCallContext context,
         OperandOwnership consume = OperandOwnership.All, Tensor? output = null)
@@ -161,7 +172,7 @@ public sealed class AttentionLayer
     /// <summary>The attention call over a head-major key/value cache through the Flash entry: <paramref name="qMh"/>
     /// <c>[B, heads, Sq, D]</c>, the caches <c>[B, kvHeads, capacity, D]</c> of which <paramref name="view"/> names the valid rows
     /// and the query position, grouped heads native. Applies no transform, so the context carries at most a probe. Disposes the
-    /// operands named in <paramref name="consume"/> (the query by default) once the call has run, also when it throws; returns
+    /// operands named in <paramref name="consume"/> (the query by default) once the call has run, also when the call throws (a refused argument takes nothing over); returns
     /// the head-major <c>[B, heads, Sq, D]</c> output, which the caller owns. A caller-provided <paramref name="output"/> is
     /// written and returned instead, and is never disposed.</summary>
     public Tensor AttendCachedHeadMajor(IBackend backend, Tensor qMh, Tensor keyCache, Tensor valueCache, in AttentionCacheView view,

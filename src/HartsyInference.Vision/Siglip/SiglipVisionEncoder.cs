@@ -74,6 +74,8 @@ public sealed unsafe class SiglipVisionEncoder
         _headAttnInProjBias = EnsureF32(weights[$"{prefix}.head.attention.in_proj_bias"]);
         _headAttnOutProjWeight = EnsureF32(weights[$"{prefix}.head.attention.out_proj.weight"]);
         _headAttnOutProjBias = EnsureF32(weights[$"{prefix}.head.attention.out_proj.bias"]);
+        if (_headSlices is not null) foreach (Tensor? t in _headSlices) t?.Dispose();
+        _headSlices = null;
         _headAttention = null;
         _headLnWeight = EnsureF32(weights[$"{prefix}.head.layernorm.weight"]);
         _headLnBias = EnsureF32(weights[$"{prefix}.head.layernorm.bias"]);

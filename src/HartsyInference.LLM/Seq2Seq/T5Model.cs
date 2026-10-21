@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
@@ -11,6 +12,7 @@ public sealed unsafe class T5Model : IDisposable
     private readonly GgufModelLoader.LoadedGgufModel? _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
     private readonly AttentionLayerConfig _attention;
+    private readonly ConcurrentDictionary<string, AttentionLayer> _layers = new();
     private int _disposed;
 
     public int DModel { get; }
@@ -115,14 +117,11 @@ public sealed unsafe class T5Model : IDisposable
     }
 
     /// <summary>Multi-head attention with T5 conventions: no 1/√d scaling, additive per-head mask carrying the relative-position bias; <paramref name="kvSrc"/> is the source of K/V (self = x, cross = encoder output).</summary>
-    private Tensor Attention(IBackend backend, Tensor x, Tensor kvSrc, string prefix, Tensor mask)
-    {
-        AttentionLayerWeights weights = new()
+    private Tensor Attention(IBackend backend, Tensor x, Tensor kvSrc, string prefix, Tensor mask) =>
+        _layers.GetOrAdd(prefix, static (p, model) => new AttentionLayer(model._attention, new AttentionLayerWeights
         {
-            Query = W($"{prefix}_q.weight"), Key = W($"{prefix}_k.weight"), Value = W($"{prefix}_v.weight"), Output = W($"{prefix}_o.weight"),
-        };
-        return new AttentionLayer(_attention, weights).Forward(backend, x, kvSrc, new AttentionCallContext { Bias = mask });
-    }
+            Query = model.W($"{p}_q.weight"), Key = model.W($"{p}_k.weight"), Value = model.W($"{p}_v.weight"), Output = model.W($"{p}_o.weight"),
+        }), this).Forward(backend, x, kvSrc, new AttentionCallContext { Bias = mask });
 
     private Tensor Ffn(IBackend backend, Tensor x, int len, string p)
     {
@@ -178,6 +177,8 @@ public sealed unsafe class T5Model : IDisposable
     /// <summary>Runs the decoder over <paramref name="decIds"/> (teacher-forced) against the encoder output and returns the last-position logits.</summary>
     public float[] DecodeLogits(IBackend backend, Tensor enc, int encLen, IReadOnlyList<int> decIds)
     {
+        if (enc.Shape.Rank != 3 || enc.Shape[1] != encLen)
+            throw new ArgumentException($"The encoder output {enc.Shape} does not hold {encLen} rows.", nameof(encLen));
         int seq = decIds.Count, d = DModel;
         Tensor h = Embed(decIds);
         using Tensor selfMask = RelBiasMask(seq, seq, bidirectional: false, causal: true, W("dec.blk.0.attn_rel_b.weight"));

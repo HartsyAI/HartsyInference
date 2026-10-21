@@ -149,7 +149,7 @@ internal sealed unsafe class ControlFoleyBlock
     /// <summary>Scaled dot-product attention over <c>[B, H, N, headDim]</c> tensors.</summary>
     internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v)
     {
-        return OperatorAttention.Create((int)q.Shape[1], (int)q.Shape[3])
+        return AttentionLayer.Shared((int)q.Shape[1], (int)q.Shape[3])
             .AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
     }
 

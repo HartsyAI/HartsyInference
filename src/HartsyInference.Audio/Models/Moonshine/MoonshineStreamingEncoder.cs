@@ -154,7 +154,7 @@ internal sealed unsafe class MoonshineStreamingEncoderLayer
     {
         _cfg = cfg;
         _window = window;
-        _attention = OperatorAttention.Create(cfg.EncoderNumHeads, cfg.EncoderHeadDim);
+        _attention = AttentionLayer.Shared(cfg.EncoderNumHeads, cfg.EncoderHeadDim);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)

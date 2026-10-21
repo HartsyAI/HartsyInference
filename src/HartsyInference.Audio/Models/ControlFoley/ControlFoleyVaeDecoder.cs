@@ -184,7 +184,7 @@ public sealed unsafe class ControlFoleyVaeDecoder : IDisposable
                 for (int ci = 0; ci < c; ci++) dst[(long)ti * c + ci] = yp[(long)(3 * ci + j) * t + ti] * inv;
             }
         }
-        using Tensor attended = OperatorAttention.Create(1, c).AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
+        using Tensor attended = AttentionLayer.Shared(1, c).AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
         using Tensor channelsFirst = new(new TensorShape(1, c, t), DType.F32);
         backend.Transpose2D(channelsFirst, attended, t, c);
         Tensor h = Convolve(backend, channelsFirst, block.ProjOut);

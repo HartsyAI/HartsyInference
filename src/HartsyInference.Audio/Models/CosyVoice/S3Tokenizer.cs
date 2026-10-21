@@ -155,7 +155,7 @@ internal sealed unsafe class S3Block
 {
     private const int NState = 1280, NHead = 20, HeadDim = 64, FsmnKernel = 31;
 
-    private readonly AttentionLayer _attention = OperatorAttention.Create(NHead, HeadDim);
+    private readonly AttentionLayer _attention = AttentionLayer.Shared(NHead, HeadDim);
     private Tensor? _attnLnW, _attnLnB, _qW, _qB, _kW, _vW, _vB, _oW, _oB, _fsmnW;
     private Tensor? _mlpLnW, _mlpLnB, _mlp0W, _mlp0B, _mlp2W, _mlp2B;
 

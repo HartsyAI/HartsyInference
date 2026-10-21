@@ -27,7 +27,7 @@ internal sealed unsafe class PocketTtsStreamingTransformer
     {
         _p = prefix; _dim = dim; _heads = heads; _headDim = dim / heads; _layers = layers; _ffn = ffn;
         _context = context; _layerScale = layerScale; _maxPeriod = maxPeriod;
-        _attention = OperatorAttention.Create(heads, _headDim);
+        _attention = AttentionLayer.Shared(heads, _headDim);
         _n1W = new Tensor?[layers]; _n1B = new Tensor?[layers]; _n2W = new Tensor?[layers]; _n2B = new Tensor?[layers];
         _inProjW = new Tensor?[layers]; _outProjW = new Tensor?[layers]; _lin1W = new Tensor?[layers]; _lin2W = new Tensor?[layers];
         _ls1 = new Tensor?[layers]; _ls2 = new Tensor?[layers];

@@ -34,7 +34,7 @@ public sealed unsafe class MuqEmbedder : IDisposable
         _heads = heads;
         if (hidden % heads != 0) throw new ArgumentException($"hidden ({hidden}) must be divisible by heads ({heads}).");
         _headDim = hidden / heads;
-        _attention = OperatorAttention.Create(heads, _headDim);
+        _attention = AttentionLayer.Shared(heads, _headDim);
         _ffn = ffn > 0 ? ffn : hidden * 4;
         _stemStrides = stemStrides ?? [2, 2];
         _stemW = new Tensor?[_stemStrides.Length]; _stemB = new Tensor?[_stemStrides.Length];

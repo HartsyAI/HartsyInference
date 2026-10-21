@@ -203,7 +203,7 @@ public sealed unsafe class Text2Semantic : IDisposable
         public Block(Text2SemanticConfig cfg)
         {
             _cfg = cfg;
-            _attention = OperatorAttention.Create(cfg.NumHeads, cfg.HeadDim);
+            _attention = AttentionLayer.Shared(cfg.NumHeads, cfg.HeadDim);
         }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)

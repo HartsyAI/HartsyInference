@@ -177,7 +177,7 @@ public sealed unsafe class DemucsCrossTransformer : IDisposable
         public Layer(HtDemucsConfig cfg, bool cross)
         {
             _cfg = cfg; _cross = cross; _dim = cfg.TransformerWidth; _heads = cfg.THeads; _hd = cfg.TransformerHeadDim; _ffn = cfg.TransformerFfn;
-            _attention = OperatorAttention.Create(_heads, _hd);
+            _attention = AttentionLayer.Shared(_heads, _hd);
         }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, DemucsCastOwner casts)

@@ -59,7 +59,7 @@ internal static unsafe class DiamondOps
         Tensor k = SplitHeads(qkv, 1 * c, c, nHead, hd, hw);
         Tensor v = SplitHeads(qkv, 2 * c, c, nHead, hd, hw);
         qkv.Dispose();
-        Tensor att = new AttentionLayer(new AttentionLayerConfig { Heads = nHead, KvHeads = nHead, HeadDim = hd })
+        Tensor att = AttentionLayer.Shared(nHead, hd)
             .AttendHeadMajorOperands(backend, q, k, v, default);
         Tensor y = MergeHeads(att, c, nHead, hd, h, w); att.Dispose();     // [1,C,H,W]
         Tensor proj = Conv(backend, y, outW, outB, 1, 0, c); y.Dispose();  // out_proj (1x1)

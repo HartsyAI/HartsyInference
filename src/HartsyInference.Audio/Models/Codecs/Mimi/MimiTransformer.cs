@@ -28,7 +28,7 @@ internal sealed unsafe class MimiTransformer
         _cfg = cfg; _prefix = prefix;
         _layers = cfg.TransformerLayers; _heads = cfg.TransformerHeads; _dim = cfg.TransformerDim;
         _headDim = _dim / _heads; _ffn = cfg.TransformerFfnDim;
-        _attention = OperatorAttention.Create(_heads, _headDim);
+        _attention = AttentionLayer.Shared(_heads, _headDim);
         _n1W = new Tensor?[_layers]; _n1B = new Tensor?[_layers]; _n2W = new Tensor?[_layers]; _n2B = new Tensor?[_layers];
         _qW = new Tensor?[_layers]; _kW = new Tensor?[_layers]; _vW = new Tensor?[_layers]; _oW = new Tensor?[_layers];
         _fc1W = new Tensor?[_layers]; _fc2W = new Tensor?[_layers]; _ls1 = new Tensor?[_layers]; _ls2 = new Tensor?[_layers];
