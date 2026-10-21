@@ -84,6 +84,14 @@ stable release will require. Dates are UTC.
   K/V, the target pass prepends them) and HunyuanImage (the image stream rotates alone) run on `JointAttention` and
   `AttentionLayer`. Output is bit-identical; HunyuanImage's double block now concatenates before permuting (one concat and
   three permutes instead of six permutes and a head-major concat).
+- **Changed: Ideogram 4, Kandinsky 5 and MOSS-Image attend through the shared layer.** Ideogram 4 runs its fused
+  `[q|k|v]` projection and paired MRoPE through it; Kandinsky 5's decoder cross-attention frees its query input before K
+  and V exist; MOSS-Image appends cached reference K/V through a K/V rewrite and its text refiner uses the fused split-norm
+  projection. `TokenMajorAttention` is gone. Output is bit-identical.
+- **Fixed: a batched token-major attention output on CUDA.** A `[1, S, heads·D]` attention output threw in CUDA's equal-head
+  token-major entry; the shared layer now holds it as `[1, S, heads, D]`.
+- **Fixed: MOSS-Image's split of a fused `proj.qkv` keeps a runtime LoRA.** Q, K and V each take their rows of a LoRA
+  carried on the fused weight, as they already took their rows of the quantization companion.
 
 ## alpha.383
 
