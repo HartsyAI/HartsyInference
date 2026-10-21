@@ -6,13 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.384
+## Unreleased
 
 - **Fixed: ACE-Step v1 style conditioning.** Its UMT5-base encoder divided the attention scores by √64, which T5 and UMT5
   never do, so the style tags reached the DiT far from the reference encoding (hidden-state relative L2 1.2 against HF; 6e-6
   now). T5's attention scale now defaults to 1.0 rather than falling back to 1/√d_kv when a preset leaves it unset.
 - **Fixed: Qwen3-VL position embeddings (LLM vision).** The learned table was resized half-pixel; HF and llama.cpp resize it
   align-corners. Images that reach the stored grid size are unchanged.
+
+## alpha.384
+
 - **Fixed: MOSS-Image LoRAs skipped attention on the Comfy checkpoint.** MOSS LoRAs name `layers.N.proj.q/k/v`, while the
   ComfyUI checkpoint fuses them as `proj.qkv`, so every Q/K/V delta was skipped with a "target not present" warning and only
   the output and feed-forward deltas applied. They now merge into their thirds of the fused weight.

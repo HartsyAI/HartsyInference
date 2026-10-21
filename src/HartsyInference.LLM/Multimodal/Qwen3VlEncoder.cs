@@ -153,7 +153,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         if (_posEmbd is not null)
         {
             backend.Sync();
-            AddInterpolatedPosEmbed(embed, _posEmbd!, _posGrid, Hidden, gh, gw, m);
+            AddInterpolatedPosEmbed(embed, _posEmbd, _posGrid, Hidden, gh, gw, m);
         }
 
         // 4. 2D-RoPE cos/sin tables [np, headDim] in the same merge-block order.

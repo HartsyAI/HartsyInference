@@ -48,14 +48,18 @@ public sealed class T5AttentionScaleTests
             ["b.layer.1.DenseReluDense.wi_1.weight"] = T(16 * DModel, 16, DModel),
             ["b.layer.1.DenseReluDense.wo.weight"] = T(DModel * 16, DModel, 16),
         };
-        T5Block byDefault = new(DModel, Heads, HeadDim, 1e-6f), unscaled = new(DModel, Heads, HeadDim, 1e-6f, attentionScale: 1f);
+        T5Block byDefault = new(DModel, Heads, HeadDim, 1e-6f), unscaled = new(DModel, Heads, HeadDim, 1e-6f, attentionScale: 1f),
+            scaled = new(DModel, Heads, HeadDim, 1e-6f, attentionScale: 0.5f);
         byDefault.LoadWeights(w, "b");
         unscaled.LoadWeights(w, "b");
+        scaled.LoadWeights(w, "b");
         using CpuBackend backend = new();
         using Tensor input = T(Seq * DModel, 1, Seq, DModel);
         using Tensor bias = T(Heads * Seq * Seq, 1, Heads, Seq, Seq);
         using Tensor a = byDefault.Forward(backend, input, bias, null), b = unscaled.Forward(backend, input, bias, null);
+        using Tensor c = scaled.Forward(backend, input, bias, null);
         Assert.Equal(b.AsReadOnlySpan<float>().ToArray(), a.AsReadOnlySpan<float>().ToArray());
+        Assert.NotEqual(c.AsReadOnlySpan<float>().ToArray(), a.AsReadOnlySpan<float>().ToArray());
         foreach (Tensor t in w.Values) t.Dispose();
     }
 }
