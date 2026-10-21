@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -123,6 +124,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _projW, _projB;
         private Tensor? _mlp0W, _mlp0B, _mlp2W, _mlp2B;
         private Tensor? _modW, _modB;   // adaLN_modulation.1 [2*hidden, hidden]
+        private AttentionLayer? _attention;
 
         public RefinerBlock(int hidden, int numHeads, int headDim, int mlpDim)
         { _hidden = hidden; _numHeads = numHeads; _headDim = headDim; _mlpDim = mlpDim; }
@@ -141,6 +143,12 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             _mlp0W = TensorCasts.EnsureF32(w[$"{p}mlp.0.weight"]); _mlp0B = TensorCasts.EnsureF32(w[$"{p}mlp.0.bias"]);
             _mlp2W = TensorCasts.EnsureF32(w[$"{p}mlp.2.weight"]); _mlp2B = TensorCasts.EnsureF32(w[$"{p}mlp.2.bias"]);
             _modW = TensorCasts.EnsureF32(w[$"{p}adaLN_modulation.1.weight"]); _modB = TensorCasts.EnsureF32(w[$"{p}adaLN_modulation.1.bias"]);
+            _attention = new AttentionLayer(
+                new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
+                new AttentionLayerWeights
+                {
+                    Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _projW, OutputBias = _projB,
+                });
         }
 
         public IEnumerable<Tensor> EnumerateWeights()
@@ -160,22 +168,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             // Self-attention.
             Tensor norm1 = LayerNormAffine(x, _n1W!, _n1B!, b, L, _hidden);
             TensorShape sh = new(b, L, _hidden);
-            Tensor q = new(sh, DType.F32); backend.Linear(q, norm1, _qW!, _qB!);
-            Tensor k = new(sh, DType.F32); backend.Linear(k, norm1, _kW!, _kB!);
-            Tensor v = new(sh, DType.F32); backend.Linear(v, norm1, _vW!, _vB!);
-            norm1.Dispose();
-
-            TensorShape mh = new(b, _numHeads, L, _headDim);
-            Tensor qMh = new(mh, DType.F32), kMh = new(mh, DType.F32), vMh = new(mh, DType.F32);
-            DiTUtils.ReshapeToMultiHead(qMh, q, b, L, _numHeads, _headDim); q.Dispose();
-            DiTUtils.ReshapeToMultiHead(kMh, k, b, L, _numHeads, _headDim); k.Dispose();
-            DiTUtils.ReshapeToMultiHead(vMh, v, b, L, _numHeads, _headDim); v.Dispose();
-
-            Tensor attnMh = new(mh, DType.F32);
-            backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, 1f / MathF.Sqrt(_headDim));
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-            Tensor attnFlat = new(sh, DType.F32); DiTUtils.ReshapeFromMultiHead(attnFlat, attnMh, b, L, _numHeads, _headDim); attnMh.Dispose();
-            Tensor attn = new(sh, DType.F32); backend.Linear(attn, attnFlat, _projW!, _projB!); attnFlat.Dispose();
+            Tensor attn = _attention!.Forward(backend, norm1, norm1, new AttentionCallContext { ReleaseInputs = true });
 
             Tensor x1 = AdaLNModulation.ApplyGatedResidual(x, attn, gateMsa, b, L, _hidden);
             attn.Dispose(); gateMsa.Dispose();

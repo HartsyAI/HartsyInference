@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -59,6 +60,8 @@ public sealed unsafe class AnimaBlock
     private Tensor? _crossK, _crossV; // [hidden, kvDim] where kvDim is the LlmAdapter hidden (1024).
     private Tensor? _crossOut;        // [hidden, hidden]
 
+    private AttentionLayer? _selfAttention, _crossAttention;
+
     // MLP (no biases).
     private Tensor? _mlp1, _mlp2;
 
@@ -117,7 +120,21 @@ public sealed unsafe class AnimaBlock
         // ── MLP ──
         _mlp1 = weights[$"{prefix}.mlp.layer1.weight"];
         _mlp2 = weights[$"{prefix}.mlp.layer2.weight"];
+
+        _selfAttention = Attention(_selfQ, _selfK, _selfV, _selfOut, _selfQNorm, _selfKNorm);
+        _crossAttention = Attention(_crossQ, _crossK, _crossV, _crossOut, _crossQNorm, _crossKNorm);
     }
+
+    private AttentionLayer Attention(Tensor q, Tensor k, Tensor v, Tensor output, QkNorm normQ, QkNorm normK) => new(
+        new AttentionLayerConfig
+        {
+            Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, ComputeDType = DType.F32,
+        },
+        new AttentionLayerWeights
+        {
+            Query = q, Key = k, Value = v, Output = output, QueryNorm = normQ.Weight, KeyNorm = normK.Weight, QueryNormEps = _qkEps,
+            KeyNormEps = _qkEps,
+        });
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -165,13 +182,12 @@ public sealed unsafe class AnimaBlock
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
-        int textSeq = (int)encoderHidden.Shape[1];
         TensorShape hiddenShape = new TensorShape(batch, seqLen, _hidden);
 
         // ── 1. AdaLN-LoRA #1 + self-attention ──
         (Tensor norm1, Tensor gate1) = ApplyAdaLnLora(backend, hidden, embeddedTimestep, temb,
             _adaSelfL1!, _adaSelfL2!, batch, seqLen);
-        Tensor attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch, seqLen);
+        Tensor attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch);
         norm1.Dispose();
         Tensor afterAttn1 = new Tensor(hiddenShape, DType.F32);
         backend.GatedResidualLastDim(afterAttn1, hidden, attn1Out, gate1);
@@ -181,7 +197,7 @@ public sealed unsafe class AnimaBlock
         // ── 2. AdaLN-LoRA #2 + cross-attention ──
         (Tensor norm2, Tensor gate2) = ApplyAdaLnLora(backend, afterAttn1, embeddedTimestep, temb,
             _adaCrossL1!, _adaCrossL2!, batch, seqLen);
-        Tensor attn2Out = CrossAttention(backend, norm2, encoderHidden, crossAttentionMask, batch, seqLen, textSeq);
+        Tensor attn2Out = CrossAttention(backend, norm2, encoderHidden, crossAttentionMask);
         norm2.Dispose();
         Tensor afterAttn2 = new Tensor(hiddenShape, DType.F32);
         backend.GatedResidualLastDim(afterAttn2, afterAttn1, attn2Out, gate2);
@@ -253,122 +269,27 @@ public sealed unsafe class AnimaBlock
         return (modulated, gate);
     }
 
-    /// <summary>Self-attention with QK-RMSNorm and 3D RoPE on Q,K.</summary>
-    // Q/K/V are declared directly as [B, S, H, D] — byte-identical to [B, S, H·D], so the head split costs
-    // nothing, RmsNorm normalizes over headDim with no reshape, and the rotary runs on the pre-permute layout
-    // (IBackend.ApplyRope indexes cos/sin at row = b·S + s, which for B=1 is exactly AnimaRope's s·headDim
-    // offset and the identical rotate-half formula). Permute0213 then produces SDPA's [B, H, S, D].
-    private Tensor SelfAttention(IBackend backend, Tensor x, Tensor ropeCos, Tensor ropeSin, AnimaRope rope, int batch, int seqLen)
+    /// <summary>Self-attention with QK-RMSNorm and 3D RoPE on Q,K. One batch item rotates before the head permute on the device;
+    /// AnimaRope's table is position-only, so a batch rotates on the host after it.</summary>
+    private Tensor SelfAttention(IBackend backend, Tensor x, Tensor ropeCos, Tensor ropeSin, AnimaRope rope, int batch)
     {
-        TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
-        TensorShape headShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-
-        Tensor q = new Tensor(headShape, DType.F32);
-        Tensor k = new Tensor(headShape, DType.F32);
-        Tensor v = new Tensor(headShape, DType.F32);
-        backend.Linear(q, x, _selfQ!, null);
-        backend.Linear(k, x, _selfK!, null);
-        backend.Linear(v, x, _selfV!, null);
-
-        Tensor qNorm = new Tensor(headShape, DType.F32);
-        Tensor kNorm = new Tensor(headShape, DType.F32);
-        backend.RmsNorm(qNorm, q, _selfQNorm.Weight, _qkEps);
-        backend.RmsNorm(kNorm, k, _selfKNorm.Weight, _qkEps);
-        q.Dispose();
-        k.Dispose();
-
-        // The device rotary broadcasts one cos/sin row per (batch, position); AnimaRope's table is position-only,
-        // so B > 1 keeps the host applier on the post-permute layout.
-        bool gpuRope = batch == 1;
-        if (gpuRope)
-        {
-            backend.ApplyRope(qNorm, kNorm, ropeCos, ropeSin);
-        }
-
-        Tensor qMh = new Tensor(mhShape, DType.F32);
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        Tensor vMh = new Tensor(mhShape, DType.F32);
-        backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
-        backend.Permute0213(kMh, kNorm, seqLen, _numHeads, _headDim);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        qNorm.Dispose();
-        kNorm.Dispose();
-        v.Dispose();
-
-        if (!gpuRope)
-        {
-            rope.ApplyRotation(qMh, kMh, ropeCos, ropeSin, batch, _numHeads, seqLen);
-        }
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        Tensor flat = new Tensor(flatShape, DType.F32);
-        backend.Permute0213(flat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(flatShape, DType.F32);
-        backend.Linear(projected, flat, _selfOut!, null);
-        flat.Dispose();
-        return projected;
+        QkRotation paired = new(QkRotationKind.RotateHalfPaired, ropeCos, ropeSin);
+        AttentionCallContext context = batch == 1
+            ? new AttentionCallContext { QueryRotation = paired, KeyRotation = paired }
+            : new AttentionCallContext { HeadMajorRotation = new HostRotation(rope, ropeCos, ropeSin) };
+        return _selfAttention!.Forward(backend, x, x, in context);
     }
 
-    /// <summary>Cross-attention from image tokens (Q) to text tokens (K, V from the LlmAdapter output).
-    /// No RoPE. K/V projections are rectangular (<c>[hidden, kvDim]</c>) since the LlmAdapter emits a
-    /// 1024-dim stream while the DiT operates at 2048-dim.</summary>
-    private Tensor CrossAttention(IBackend backend, Tensor x, Tensor encoderHidden, Tensor? attnMask,
-        int batch, int seqLen, int textSeq)
+    /// <summary>Cross-attention from image tokens (Q) to text tokens (K, V from the LlmAdapter output). No RoPE; the K/V
+    /// projections are rectangular since the LlmAdapter stream is narrower than the DiT.</summary>
+    private Tensor CrossAttention(IBackend backend, Tensor x, Tensor encoderHidden, Tensor? attnMask) =>
+        _crossAttention!.Forward(backend, x, encoderHidden, new AttentionCallContext { Bias = attnMask });
+
+    /// <summary>AnimaRope's host rotation of head-major Q and K.</summary>
+    private sealed class HostRotation(AnimaRope rope, Tensor cos, Tensor sin) : IHeadMajorQkRotation
     {
-        TensorShape qShape = new TensorShape(batch, seqLen, _hidden);
-        TensorShape qHeadShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape kvHeadShape = new TensorShape(batch, textSeq, _numHeads, _headDim);
-        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-        TensorShape kvMhShape = new TensorShape(batch, _numHeads, textSeq, _headDim);
-
-        Tensor q = new Tensor(qHeadShape, DType.F32);
-        Tensor k = new Tensor(kvHeadShape, DType.F32);
-        Tensor v = new Tensor(kvHeadShape, DType.F32);
-        backend.Linear(q, x, _crossQ!, null);
-        backend.Linear(k, encoderHidden, _crossK!, null);
-        backend.Linear(v, encoderHidden, _crossV!, null);
-
-        Tensor qNorm = new Tensor(qHeadShape, DType.F32);
-        Tensor kNorm = new Tensor(kvHeadShape, DType.F32);
-        backend.RmsNorm(qNorm, q, _crossQNorm.Weight, _qkEps);
-        backend.RmsNorm(kNorm, k, _crossKNorm.Weight, _qkEps);
-        q.Dispose();
-        k.Dispose();
-
-        Tensor qMh = new Tensor(qMhShape, DType.F32);
-        Tensor kMh = new Tensor(kvMhShape, DType.F32);
-        Tensor vMh = new Tensor(kvMhShape, DType.F32);
-        backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
-        backend.Permute0213(kMh, kNorm, textSeq, _numHeads, _headDim);
-        backend.Permute0213(vMh, v, textSeq, _numHeads, _headDim);
-        qNorm.Dispose();
-        kNorm.Dispose();
-        v.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(qMhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnMask, scale);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        Tensor flat = new Tensor(qShape, DType.F32);
-        backend.Permute0213(flat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(qShape, DType.F32);
-        backend.Linear(projected, flat, _crossOut!, null);
-        flat.Dispose();
-        return projected;
+        public void RotateHeadMajor(IBackend backend, Tensor q, Tensor k, int batch, int heads, int kvHeads, int tokens) =>
+            rope.ApplyRotation(q, k, cos, sin, batch, heads, tokens);
     }
 
     /// <summary>FFN: <c>Linear[ffn, hidden] → GELU → Linear[hidden, ffn]</c>. No biases.</summary>
