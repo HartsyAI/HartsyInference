@@ -40,8 +40,7 @@ public sealed unsafe class LanceMoTBlock
         _ffn = ffn;
         _eps = eps;
         _qkNorm = qkNorm;
-        // Lance projects and outputs through its role-routed weights; the layer runs rotation and attention between them.
-        // Its QK-RMSNorm bounds the scores and the additive mask is finite (-1e9), so the call may narrow to F16.
+        // Role-routed projections stay here; normed Q/K and the finite -1e9 mask let the layer's call narrow to F16.
         _attention = new AttentionLayer(new AttentionLayerConfig
         {
             Heads = numHeads, KvHeads = numKvHeads, HeadDim = _headDim, AllowF16 = true,

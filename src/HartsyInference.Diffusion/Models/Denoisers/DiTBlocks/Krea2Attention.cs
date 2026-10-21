@@ -44,8 +44,7 @@ public sealed class Krea2Attention
         _toOut = w[$"{p}.to_out.0.weight"];
         _normQ = Krea2Norm.LoadZeroCentered(w[$"{p}.norm_q.weight"]);
         _normK = Krea2Norm.LoadZeroCentered(w[$"{p}.norm_k.weight"]);
-        // Q and K are RMS-normed per head, so the scores are bounded and the call may narrow to F16. The grouped token-major
-        // entry serves the text-fusion blocks' equal heads too.
+        // Per-head RMS-normed Q/K bound the scores (F16 allowed); the grouped token-major entry also serves equal heads.
         _layer = new AttentionLayer(
             new AttentionLayerConfig
             {

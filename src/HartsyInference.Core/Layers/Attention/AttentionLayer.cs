@@ -3,9 +3,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Layers.Attention;
 
-/// <summary>One attention layer as a composition of stages: the projection, the Q/K/V transforms (norm and rotation), the
-/// attention call (docs/ATTENTION_CONTRACT.md) and the output gate and projection. Each stage issues the same backend ops in
-/// the same order the models it replaces did, and every intermediate is disposed right after its last use.</summary>
+/// <summary>One attention layer composed of stages: projection, Q/K norm and rotation, the attention call
+/// (docs/ATTENTION_CONTRACT.md), output gate and projection; each intermediate is disposed after its last use.</summary>
 public sealed class AttentionLayer
 {
     private readonly AttentionLayerConfig _config;
@@ -42,6 +41,17 @@ public sealed class AttentionLayer
         int skv = (int)kvInput.Shape[kvInput.Shape.Rank - 2];
         DType act = _config.ComputeDType ?? qInput.DType;
         DType kvAct = _config.ComputeDType ?? kvInput.DType;
+        ValidateContext(in context);
+        if (context.ValueRowScale is { } rowScale)
+        {
+            if (_config.Projection == AttentionProjection.GroupedByInput)
+                throw new NotSupportedException("A value row-scale needs per-weight projections.");
+            // A scale built for other geometry would make Mul read past the smaller buffer rather than fail.
+            TensorShape vShape = ProjectedShape(kvInput.Shape, _config.KvHeads);
+            if (rowScale.ElementCount != vShape.ElementCount || rowScale.DType != kvAct)
+                throw new ArgumentException($"Value-row scale is {rowScale.Shape} {rowScale.DType} but v is {vShape} {kvAct}.",
+                    nameof(context));
+        }
 
         (Tensor q, Tensor k, Tensor v, Tensor? gate) = Project(backend, w, qInput, kvInput, act, kvAct, in context);
         TensorShape flatShape = WithLastDim(qInput.Shape, _config.InnerDim);
@@ -61,6 +71,9 @@ public sealed class AttentionLayer
     {
         if (_config.QkNorm != AttentionQkNorm.None && _weights is null)
             throw new InvalidOperationException("A QK norm needs the layer's norm weights.");
+        if (q.Shape.Rank != 4 || k.Shape.Rank != 4 || v.Shape.Rank != 4)
+            throw new ArgumentException($"Attend takes [B, S, heads, D] operands; got {q.Shape}, {k.Shape}, {v.Shape}.");
+        ValidateContext(in context);
         return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, in context);
     }
 
@@ -78,8 +91,6 @@ public sealed class AttentionLayer
         Tensor v = new(ProjectedShape(kvInput.Shape, _config.KvHeads), kvAct);
         if (_config.Projection == AttentionProjection.GroupedByInput)
         {
-            if (context.ValueRowScale is not null)
-                throw new NotSupportedException("A value row-scale needs per-weight projections.");
             if (ReferenceEquals(qInput, kvInput))
             {
                 backend.LinearMulti(qInput, gate is null
@@ -100,10 +111,6 @@ public sealed class AttentionLayer
         backend.Linear(v, kvInput, w.Value, w.ValueBias);
         if (context.ValueRowScale is { } rowScale)
         {
-            // A scale built for other geometry would make Mul read past the smaller buffer rather than fail.
-            if (rowScale.ElementCount != v.ElementCount || rowScale.DType != v.DType)
-                throw new ArgumentException($"Value-row scale is {rowScale.Shape} {rowScale.DType} but v is {v.Shape} {v.DType}.",
-                    nameof(context));
             Tensor scaled = new(v.Shape, v.DType);
             backend.Mul(scaled, v, rowScale);
             v.Dispose();
@@ -112,6 +119,22 @@ public sealed class AttentionLayer
         if (gate is not null)
             backend.Linear(gate, qInput, w.Gate!, w.GateBias);
         return (q, k, v, gate);
+    }
+
+    /// <summary>Refuses a rotation the configured norm cannot apply, before anything is allocated.</summary>
+    private void ValidateContext(in AttentionCallContext context)
+    {
+        bool fullWidth = _config.QkNorm == AttentionQkNorm.FullWidth;
+        foreach (QkRotationKind kind in (ReadOnlySpan<QkRotationKind>)[context.QueryRotation.Kind, context.KeyRotation.Kind])
+        {
+            bool fullWidthKind = kind is QkRotationKind.FullWidthSplit or QkRotationKind.FullWidthInterleaved;
+            if (kind != QkRotationKind.None && fullWidthKind != fullWidth)
+                throw new NotSupportedException(fullWidth
+                    ? $"The full-width QK norm runs only a full-width rotation, not {kind}."
+                    : $"A {kind} rotation runs only with the full-width QK norm.");
+        }
+        if (fullWidth && (context.Rotation is not null || context.HeadMajorRotation is not null))
+            throw new NotSupportedException("The full-width QK norm rotates through its tables; a rotation adapter cannot run with it.");
     }
 
     private Tensor Transform(IBackend backend, Tensor q, Tensor k, Tensor v, int batch, int sq, int skv, DType act,

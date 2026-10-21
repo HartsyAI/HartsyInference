@@ -182,9 +182,7 @@ public sealed unsafe class ZImageBlock
         norm1.Dispose();
         if (trace) Trace("modulated-msa", modulated);
 
-        // Per-head QK norm bounds the scores but not V: Base has produced V above F16's 65504 in late blocks, so its variant
-        // policy keeps the call in F32 (allowF16 false) while Turbo keeps the fused F16 path. The rope rotates on the
-        // device for one batch item and on the host after the head permute for a batch.
+        // The QK norm bounds the scores but not V, so Base keeps the call F32; a batch rotates on the host after the permute.
         AttentionCallContext context = new()
         {
             Rotation = batch == 1 ? rope : null, HeadMajorRotation = batch == 1 ? null : rope, Bias = attnBias,

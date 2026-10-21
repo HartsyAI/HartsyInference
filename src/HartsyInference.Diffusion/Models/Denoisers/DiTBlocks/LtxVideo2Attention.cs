@@ -51,9 +51,7 @@ public sealed class LtxVideo2Attention
         // Per-head output gating is a 2.3-only feature; earlier LTX-2 (e.g. 19B) omits it (ungated attention).
         if (w.TryGetValue($"{p}.to_gate_logits.weight", out Tensor? gw)) { _gateW = gw; w.TryGetValue($"{p}.to_gate_logits.bias", out _gateB); }
 
-        // Grouped by input: an int8 backend rotates and quantizes each input once for all its projections. The F32 text
-        // connectors feed F16 blocks, so an F32 K/V stream is widened onto the query's dtype. Q and K are RMS-normed, so the
-        // scores are bounded and the attention call may narrow to F16; token-major whenever the backend serves it.
+        // Grouped by input so an int8 backend quantizes each input once; RMS-normed Q/K bound the scores, so F16 is allowed.
         AttentionLayerConfig config = new()
         {
             Heads = _heads, KvHeads = _heads, HeadDim = _headDim, OutDim = _outDim,

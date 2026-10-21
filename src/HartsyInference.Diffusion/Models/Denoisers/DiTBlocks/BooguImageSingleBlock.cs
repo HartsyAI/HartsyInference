@@ -21,15 +21,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <para>GPU-residency (mirrors <see cref="BooguImageDoubleBlock"/> / the verified <see cref="QwenImageBlock"/>): every
 /// glue op runs as an <see cref="IBackend"/> GPU op (RMSNorm-zero split via <c>SliceLastDim</c>, <c>(1+scale)</c> via
 /// <c>AddScalar</c>+<c>AffineBroadcastLastDim</c>, tanh gate via <c>Tanh</c>+<c>GatedResidualLastDim</c>, heads via
-/// <c>Permute0213</c>+<c>RepeatKvHeads</c>+SDPA). Only the interleaved-pairing RoPE stays on the CPU
-/// (<c>rope.Apply</c>) — bit-for-bit the old path.</para></summary>
+/// the shared <see cref="AttentionLayer"/>, which rotates with the interleaved-pair tables on the device).</para></summary>
 public sealed unsafe class BooguImageSingleBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numQHeads;
     private readonly int _numKvHeads;
     private readonly int _headDim;
-    private readonly int _kvGroupSize;
     private readonly int _ffnInnerDim;
     private readonly int _conditioningDim;
     private readonly bool _modulation;
@@ -64,7 +62,6 @@ public sealed unsafe class BooguImageSingleBlock
         _numQHeads = numAttentionHeads;
         _numKvHeads = numKvHeads;
         _headDim = headDim;
-        _kvGroupSize = numAttentionHeads / numKvHeads;
         _ffnInnerDim = ffnInnerDim;
         _conditioningDim = conditioningDim;
         _modulation = modulation;

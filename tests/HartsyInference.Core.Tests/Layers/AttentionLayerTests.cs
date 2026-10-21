@@ -169,8 +169,35 @@ public sealed class AttentionLayerTests
         layer.Forward(backend, x, x, new AttentionCallContext { ValueRowScale = new Tensor(new TensorShape(1, 6, 2, 4), DType.F16) });
         Assert.Equal(["Linear w101", "Linear w102", "Linear w103", "Mul", "Linear w105"], backend.Ops.Take(5));
 
+        backend.Ops.Clear();
         Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, x,
             new AttentionCallContext { ValueRowScale = new Tensor(new TensorShape(1, 6, 4, 4), DType.F16) }));
+        Assert.Empty(backend.Ops);   // refused before any projection
+    }
+
+    [Fact]
+    public void ARotationTheNormCannotApply_IsRefusedBeforeAnyOp()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        Tensor x = new(new TensorShape(6, 8), DType.F16), table = new(new TensorShape(6, 4), DType.F32);
+        AttentionLayer ltx = new(Ltx(gated: false), Weights(gate: false));
+        QkRotation half = new(QkRotationKind.RotateHalf, table, table), split = new(QkRotationKind.FullWidthSplit, table, table);
+
+        Assert.Throws<NotSupportedException>(() => ltx.Forward(backend, x, x, new AttentionCallContext { QueryRotation = half }));
+        Assert.Throws<NotSupportedException>(() => ltx.Forward(backend, x, x,
+            new AttentionCallContext { QueryRotation = split, KeyRotation = split, Rotation = new TraceRotation(new List<string>()) }));
+        AttentionLayer krea2 = new(Krea2(), Weights(gate: true));
+        Assert.Throws<NotSupportedException>(() => krea2.Forward(backend, new Tensor(new TensorShape(1, 6, 16), DType.F16),
+            new Tensor(new TensorShape(1, 6, 16), DType.F16), new AttentionCallContext { KeyRotation = split }));
+        Assert.Empty(backend.Ops);
+    }
+
+    [Fact]
+    public void Attend_RefusesOperandsWithoutABatchAxis()
+    {
+        AttentionLayer layer = new(new AttentionLayerConfig { Heads = 4, KvHeads = 2, HeadDim = 4 });
+        Assert.Throws<ArgumentException>(() => layer.Attend(new AttentionTraceBackend(), new Tensor(new TensorShape(6, 4, 4), DType.F32),
+            new Tensor(new TensorShape(6, 2, 4), DType.F32), new Tensor(new TensorShape(6, 2, 4), DType.F32), new TensorShape(6, 16), default));
     }
 
     [Fact]

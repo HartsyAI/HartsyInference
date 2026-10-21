@@ -18,8 +18,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// h = h + tanh(gate_mlp).unsqueeze(1) * ffn_norm2(ffn(ffn_norm1(h) * (1 + scale_mlp.unsqueeze(1))))
 /// </code></para>
 /// <para>Non-modulated forward (used by <c>context_refiner</c>): same structure with no gates and no MLP scale.</para>
-/// <para>RoPE is applied to Q and K outside the block (in the transformer's RoPE pass) before this method is
-/// called — the block expects already-rotated Q/K in its internal attention call.</para></summary>
+/// <para>The block rotates Q and K itself: on the device through the shared attention layer on the rope-mode path, on
+/// the host on the table path.</para></summary>
 public sealed unsafe class OmniGen2Block
 {
     private readonly int _hiddenSize;
