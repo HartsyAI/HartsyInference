@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: SeedVR2 output differed run to run on CUDA.** Every window of a shape group sent the same text rows back
+  through one `RowScatterAdd`, whose CUDA kernel adds without atomics, so the text tokens lost updates and two identical
+  restores on an RTX 3060 differed (SSIM 0.9991). The video rows now scatter alone, each once, and the text rows are
+  summed over the windows in a fixed order (`MoeCombine`) before the mean.
 - **Fixed: ACE-Step v1 generated silence on CUDA.** Its bf16 GEMMs against F32 activations turned the latent to NaN
   over the guidance loop, and the written audio was all zeros. The pipeline now runs with high-precision GEMM (bf16 weights
   upcast for the multiply, still bf16-resident), which its notes required of every caller and the engine's loader never set.

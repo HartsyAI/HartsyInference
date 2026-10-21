@@ -13,8 +13,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <c>WanRopeInterleaved</c> over <see cref="SeedVr2DevicePlan"/>'s global-token-order tables, window
 /// gather/scatter via <c>RowGather</c>/<c>RowScatterAdd</c> index tensors, same-shape windows batched into
 /// one SDPA call. Text is REPLICATED into every window and MEAN-pooled across windows afterwards
-/// (scatter-add + 1/N scale). The emb+ada modulation vectors are additive constants per timestep, combined
-/// once and cached (<see cref="PrepareMod"/>).</para></summary>
+/// (fixed-order <c>MoeCombine</c> sum + 1/N scale). The emb+ada modulation vectors are additive constants per
+/// timestep, combined once and cached (<see cref="PrepareMod"/>).</para></summary>
 public sealed class SeedVr2DitBlock
 {
     private readonly SeedVr2Config _config;
@@ -363,31 +363,44 @@ public sealed class SeedVr2DitBlock
         vq.Dispose(); vk.Dispose(); vv.Dispose();
         tq.Dispose(); tk.Dispose(); tv.Dispose();
 
-        // Scatter-add target: vid rows are written once (windows partition the grid); txt rows accumulate
-        // across every window and are mean-pooled below (reference unconcat_coalesce .mean).
-        Tensor attnCat = new Tensor(new TensorShape(lv + lt, c), DType.F32);
-        backend.Fill(attnCat, 0f);
+        (Tensor vidOut, Tensor txtOut) = AttendWindows(backend, _attention, catQ, catK, catV, part, lv, lt);
+        catQ.Dispose(); catK.Dispose(); catV.Dispose();
+        return (vidOut, txtOut);
+    }
+
+    /// <summary>Joint attention inside every window over the <c>[vid ; txt]</c> rows of <paramref name="catQ"/>,
+    /// <paramref name="catK"/>, <paramref name="catV"/>: a video row comes back from its one window, a text row as
+    /// its mean over all windows (reference unconcat_coalesce .mean).</summary>
+    internal static (Tensor Vid, Tensor Txt) AttendWindows(IBackend backend, AttentionLayer attention, Tensor catQ, Tensor catK, Tensor catV,
+        SeedVr2DevicePlan.Partition part, int lv, int lt)
+    {
+        int c = (int)catQ.Shape[1];
+        Tensor vidOut = new Tensor(new TensorShape(lv, c), DType.F32);
+        Tensor txtOut = new Tensor(new TensorShape(lt, c), DType.F32);
+        backend.Fill(vidOut, 0f);
+        backend.Fill(txtOut, 0f);
 
         foreach (SeedVr2DevicePlan.ShapeGroup group in part.Groups)
         {
-            int s = group.WindowTokens + lt;
-            int g = group.WindowCount;
-            long gs = (long)g * s;
+            int g = group.WindowCount, wt = group.WindowTokens;
+            int s = wt + lt;
             Tensor gq = Gather(backend, catQ, group.Indices, g, s, c);
             Tensor gk = Gather(backend, catK, group.Indices, g, s, c);
             Tensor gv = Gather(backend, catV, group.Indices, g, s, c);
 
-            Tensor attn = _attention.AttendFlat(backend, gq, gk, gv, new TensorShape(g, s, c), default);
-            backend.RowScatterAdd(attnCat, attn, group.Indices, (int)gs, c);
-            attn.Dispose();
-        }
-        catQ.Dispose(); catK.Dispose(); catV.Dispose();
+            // [G, s, heads·hd] out, split into each window's video rows and its text rows.
+            Tensor back = attention.AttendFlat(backend, gq, gk, gv, new TensorShape(g, s, c), default);
+            Tensor vidRows = new Tensor(new TensorShape(g, wt, c), DType.F32);
+            Tensor txtRows = new Tensor(new TensorShape(g, lt, c), DType.F32);
+            backend.Split([vidRows, txtRows], back, dim: 1);
+            back.Dispose();
 
-        Tensor vidOut = new Tensor(new TensorShape(lv, c), DType.F32);
-        backend.SliceRows(vidOut, attnCat, 0);
-        Tensor txtOut = new Tensor(new TensorShape(lt, c), DType.F32);
-        backend.SliceRows(txtOut, attnCat, lv);
-        attnCat.Dispose();
+            backend.RowScatterAdd(vidOut, vidRows, group.VidIndices, g * wt, c);
+            // Every window repeats the text rows: sum them in window order, never by scatter (it is not atomic).
+            backend.MoeCombine(txtOut, txtRows, group.TxtSlots, group.TxtWeights, g, accumulate: true);
+            vidRows.Dispose();
+            txtRows.Dispose();
+        }
         backend.Scale(txtOut, txtOut, 1f / part.WindowCount);
         return (vidOut, txtOut);
     }
