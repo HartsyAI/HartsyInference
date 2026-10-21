@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
@@ -34,6 +35,9 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
 
     private Tensor? _projOutWeight, _projOutBias;
 
+    // Q and K arrive normed (QkvSplitNorm or the block's RmsNorm), which bounds the scores: F16 allowed.
+    private readonly AttentionLayer _attention;
+
     /// <summary>Creates a ChromaSingleStreamBlock.</summary>
     /// <param name="hiddenSize">Model hidden dimension (3072 for Chroma v1).</param>
     /// <param name="numHeads">Number of attention heads (24 for v1).</param>
@@ -48,6 +52,7 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
 
         _normQ = new QkNorm(_headDim, qkNormEps);
         _normK = new QkNorm(_headDim, qkNormEps);
+        _attention = new AttentionLayer(new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = headDim, AllowF16 = true });
     }
 
     /// <summary>Loads weights from named tensors using diffusers naming
@@ -124,14 +129,10 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
     /// <param name="temb">Modulation slice [B, 3, hidden] (shift, scale, gate).</param>
     /// <param name="rope">Precomputed FluxRope for the joint sequence.</param>
     /// <param name="sdpaMask">Optional additive [B, 1, S, S] SDPA mask, pre-built once per forward by ChromaTransformer (shared; not disposed here).</param>
-    // GPU-residency rewrite (Chroma-only): all glue runs as IBackend GPU ops; only RoPE stays on the CPU
-    // (interleaved/GPT-J convention, no CUDA kernel — ~5s/run). Mirrors ChromaDoubleStreamBlock; batch is always 1
-    // for Chroma.
     public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? sdpaMask)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
-        float scale = 1.0f / MathF.Sqrt(_headDim);
         // Activation dtype follows the INPUT (see ChromaDoubleStreamBlock.Forward): F16 on the
         // numerics.ditF16 path; modulation vectors and the SDPA mask stay F32.
         DType act = x.DType;
@@ -144,7 +145,6 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
 
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
         TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpDim);
 
         // ── 2. LayerNorm (no affine) + modulate: x*(1+scale)+shift ──
@@ -192,44 +192,11 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
             k.Dispose();
         }
 
-        // ── 5. RoPE. B=1 (pipeline case): GPU-resident on the pre-permute [B, S, H, D] layout
-        //       (device WanRopeInterleaved, no D2H). B>1: host Forward post-permute. ──
-        bool gpuRope = batch == 1;
-        if (gpuRope)
-        {
-            rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
-        }
-
-        // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor qMh = new Tensor(mhShape, act);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        Tensor kMh = new Tensor(mhShape, act);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        kNormed.Dispose();
-        Tensor vMh = new Tensor(mhShape, act);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        v.Dispose();
-
-        if (!gpuRope)
-        {
-            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
-        }
-
-        // ── 7. SDPA. The additive [B,1,S,S] mask is built ONCE per forward by ChromaTransformer and shared
-        //       across all blocks — use it directly, do NOT dispose here.
-        //       allowF16 is safe: Q/K are RMS-normed (QkNorm) so scores are bounded; the mask rides the cuDNN
-        //       fused engine as an fp32 bias score-modifier, never rounded through F16. ──
-        Tensor attnOut = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, sdpaMask, scale, allowF16: true);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        // ── 8. Permute attention back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attnFlat = new Tensor(shape, act);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
+        // ── 5-8. RoPE, attention over the normed Q/K (the shared [B,1,S,S] mask is borrowed), permuted back ──
+        AttentionCallContext context = batch == 1
+            ? new AttentionCallContext { Rotation = rope, Bias = sdpaMask }
+            : new AttentionCallContext { HeadMajorRotation = rope, Bias = sdpaMask };
+        Tensor attnFlat = _attention!.Attend(backend, qNormed, kNormed, v, shape, in context);
 
         // ── 9. GELU(tanh) on MLP input ──
         Tensor mlpActivated = new Tensor(mlpShape, act);
