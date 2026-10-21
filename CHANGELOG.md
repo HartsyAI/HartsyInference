@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## Unreleased
+## alpha.385
 
 - **Fixed: SeedVR2 output differed run to run on CUDA.** Every window of a shape group sent the same text rows back
   through one `RowScatterAdd`, whose CUDA kernel adds without atomics, so the text tokens lost updates and two identical
