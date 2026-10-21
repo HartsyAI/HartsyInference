@@ -11,6 +11,8 @@ internal static class ToolCallJson
 
     private const int MaxDepth = 64;
 
+    private static readonly JsonDocumentOptions ParseOptions = new() { MaxDepth = MaxDepth };
+
     /// <summary>Parses <paramref name="json"/> into <paramref name="into"/>, numbering ids from <paramref name="firstIndex"/> under <paramref name="idPrefix"/>; false when the text is not valid JSON or is not shaped like a call.</summary>
     public static bool TryParse(string json, IReadOnlyList<string> argumentKeys, string? presetName, List<NativeToolCall> into, int firstIndex, string idPrefix)
     {
@@ -45,11 +47,11 @@ internal static class ToolCallJson
     {
         try
         {
-            return JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = MaxDepth });
+            return JsonDocument.Parse(json, ParseOptions);
         }
         catch (JsonException) when (IsDoubledOuterBraces(json))
         {
-            return JsonDocument.Parse(json.Trim()[1..^1], new JsonDocumentOptions { MaxDepth = MaxDepth });
+            return JsonDocument.Parse(json.Trim()[1..^1], ParseOptions);
         }
     }
 
