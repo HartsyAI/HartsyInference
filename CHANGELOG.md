@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
+  never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
+  buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The
+  logit width now comes from the head; embedding lookups still read every table row.
+
 ## alpha.385
 
 - **Fixed: SeedVR2 output differed run to run on CUDA.** Every window of a shape group sent the same text rows back
