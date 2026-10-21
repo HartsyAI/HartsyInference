@@ -68,11 +68,12 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
     }
 
     /// <summary>The <paramref name="index"/>th run of <paramref name="hidden"/> rows of a fused projection, as a view that
-    /// carries its own slice of the per-row quantization companion.</summary>
+    /// carries its own slice of the per-row quantization companion and of a LoRA adjunct.</summary>
     private static Tensor HiddenRows(Tensor fused, int index, int hidden, string key)
     {
         Tensor rows = fused.SliceRows(index * hidden, hidden);
         rows.QuantInfo = fused.QuantInfo?.SliceRows(index * hidden, hidden, key);
+        rows.LowRankAdjunct = fused.LowRankAdjunct?.SliceRows(index * hidden, hidden);
         return rows;
     }
 

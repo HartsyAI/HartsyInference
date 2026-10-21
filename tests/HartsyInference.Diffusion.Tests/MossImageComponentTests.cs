@@ -170,17 +170,7 @@ public sealed class MossImageComponentTests
         const int hidden = 4;
         Tensor qkv = new(new TensorShape(3 * hidden, hidden), DType.F32);
         for (int i = 0; i < 3 * hidden * hidden; i++) qkv.AsSpan<float>()[i] = i;
-        Dictionary<string, Tensor> weights = new(StringComparer.Ordinal)
-        {
-            ["layers.0.norm1.weight"] = Make([1, 1, 1, 1]),
-            ["layers.0.norm2.weight"] = Make([1, 1, 1, 1]),
-            ["layers.0.q_norm.weight"] = Make([1, 1]),
-            ["layers.0.k_norm.weight"] = Make([1, 1]),
-            ["layers.0.proj.qkv.weight"] = qkv,
-            ["layers.0.proj.o.weight"] = new Tensor(new TensorShape(hidden, hidden), DType.F32),
-            ["layers.0.proj.ffn_up_gate.weight"] = new Tensor(new TensorShape(8, hidden), DType.F32),
-            ["layers.0.proj.ffn_down.weight"] = new Tensor(new TensorShape(hidden, 4), DType.F32),
-        };
+        Dictionary<string, Tensor> weights = JointBlockWeights(hidden, qkv);
         MossImageBlock block = new(hidden, numHeads: 2, ffnHidden: 4, eps: 1e-6f);
 
         block.LoadWeights(weights, "layers.0");
@@ -193,6 +183,40 @@ public sealed class MossImageComponentTests
         Assert.Equal(all[(2 * third)..], bound[4].AsSpan<float>().ToArray());
         foreach (Tensor t in weights.Values) t.Dispose();
     }
+
+    [Fact]
+    public void JointBlock_GivesEachProjectionItsRowsOfAFusedQkvLora()
+    {
+        const int hidden = 4;
+        Tensor up = new(new TensorShape(3 * hidden, 1), DType.F32);
+        for (int i = 0; i < 3 * hidden; i++) up.AsSpan<float>()[i] = i;
+        LowRankAdjunct lora = new() { Terms = [new LowRankAdjunctTerm { Down = new Tensor(new TensorShape(1, hidden), DType.F32), Up = up, Scale = 1f }] };
+        using Tensor qkv = new(new TensorShape(3 * hidden, hidden), DType.F32);
+        Dictionary<string, Tensor> weights = JointBlockWeights(hidden, qkv.WithLowRankAdjunct(lora));
+        MossImageBlock block = new(hidden, numHeads: 2, ffnHidden: 4, eps: 1e-6f);
+
+        block.LoadWeights(weights, "layers.0");
+        List<Tensor> bound = [.. block.EnumerateWeights()];
+
+        for (int p = 0; p < 3; p++)
+        {
+            LowRankAdjunct window = Assert.IsType<LowRankAdjunct>(bound[2 + p].LowRankAdjunct);
+            Assert.Equal(Enumerable.Range(p * hidden, hidden).Select(i => (float)i), window.Terms[0].Up!.AsSpan<float>().ToArray());
+        }
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
+    private static Dictionary<string, Tensor> JointBlockWeights(int hidden, Tensor qkv) => new(StringComparer.Ordinal)
+    {
+        ["layers.0.norm1.weight"] = Make([1, 1, 1, 1]),
+        ["layers.0.norm2.weight"] = Make([1, 1, 1, 1]),
+        ["layers.0.q_norm.weight"] = Make([1, 1]),
+        ["layers.0.k_norm.weight"] = Make([1, 1]),
+        ["layers.0.proj.qkv.weight"] = qkv,
+        ["layers.0.proj.o.weight"] = new Tensor(new TensorShape(hidden, hidden), DType.F32),
+        ["layers.0.proj.ffn_up_gate.weight"] = new Tensor(new TensorShape(8, hidden), DType.F32),
+        ["layers.0.proj.ffn_down.weight"] = new Tensor(new TensorShape(hidden, 4), DType.F32),
+    };
 
     private static Tensor Make(float[] values)
     {
