@@ -237,13 +237,16 @@ def main():
                 for m in models:
                     s = GRAPHS[m]["steps"]
                     times = {}
+                    # Discarded warm-up, so both timed runs pay the same load (page cache, ComfyUI's per-process caches) and the slope cancels it.
+                    if arm == "engine":
+                        run_engine(a.cli, a.gpu_index, m, s, seed + 500, work / "warmup" / m)
+                    else:
+                        run_comfy(a.port, m, s, seed + 500)
                     for n in (s, 2 * s):
                         seed += 1
                         if arm == "engine":
                             times[n] = run_engine(a.cli, a.gpu_index, m, n, seed, work / m)
                         else:
-                            if n == s and rnd == 0:
-                                run_comfy(a.port, m, s, seed + 500)   # warm-up: loads, encoders, plan caches
                             times[n] = run_comfy(a.port, m, n, seed)
                     per_step = (times[2 * s] - times[s]) / s
                     rows.append({"round": rnd, "arm": arm, "model": m, "steps": s, "t_s": times[s], "t_2s": times[2 * s],
