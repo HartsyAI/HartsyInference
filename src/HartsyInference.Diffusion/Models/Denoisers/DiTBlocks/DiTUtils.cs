@@ -17,6 +17,8 @@ public static unsafe class DiTUtils
             backend.SliceRows(output, input, offset);
             return;
         }
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException($"A batched joint split gathers F32 rows; got {input.DType} at batch {batch}.");
         long width = input.ElementCount / ((long)batch * seq);
         int rows = (int)(output.ElementCount / ((long)batch * width));
         int[] index = new int[batch * rows];
