@@ -415,7 +415,7 @@ __global__ void lm_qkv_rope_scatter_f32(
     unsigned long long total = qElems + 2ull * kvElems;
     if (gid >= total) return;
     int pos = devicePos[1];
-    if ((unsigned int)pos >= maxSeq) return;   // a position past the capacity writes nothing and reads no table row
+    if ((unsigned int)pos >= maxSeq) return;   // past the capacity nothing is written, Q included; reporting it is Phase 4
 
     if (gid >= qElems + kvElems) {
         // v: plain copy into the cache slot (same addressing as lm_kv_append_f32 at tNew=1).
@@ -1328,7 +1328,7 @@ __global__ void lm_qknorm_rope_scatter_f32(
     unsigned int h = blockIdx.x;
     if (h >= nq + 2u * nkv) return;
     int pos = devicePos[1];
-    if ((unsigned int)pos >= maxSeq) return;   // a position past the capacity writes nothing and reads no table row
+    if ((unsigned int)pos >= maxSeq) return;   // past the capacity nothing is written, Q included; reporting it is Phase 4
 
     if (h >= nq + nkv) {
         // v head: plain copy into the cache slot (identical addressing to lm_kv_append_f32, tNew=1).

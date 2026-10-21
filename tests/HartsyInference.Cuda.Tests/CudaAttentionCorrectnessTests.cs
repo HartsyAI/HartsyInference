@@ -212,6 +212,40 @@ public sealed unsafe class CudaAttentionCorrectnessTests
 
     [Trait("Category", "GpuIntegration")]
     [Theory]
+    [InlineData("V.2", 200, false, true)]
+    [InlineData("V.2", 200, true, true)]
+    [InlineData("V.3", 50, false, false)]
+    [InlineData("V.5", 24, false, false)]
+    [InlineData("V.4", 24, true, false)]
+    public void ANegativeDeviceQueryPosition_SeesNoKeysAndWritesZero(string route, int capacity, bool f16Kv, bool gqa)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int hq = 4, hkv = 2, d = 64;
+        DType kvType = f16Kv ? DType.F16 : DType.F32;
+        using Tensor q = Make(DType.F32, [1, hq, 1, d], Noise(13, 1f));
+        using Tensor k = Make(kvType, [1, hkv, capacity, d], Noise(14, 1f));
+        using Tensor v = Make(kvType, [1, hkv, capacity, d], Noise(15, 1f));
+        KnobStore.Set(EngineKnobs.FlashDecodeGqa, gqa);
+        using CudaBackend cuda = new(0, PtxDir());
+        ulong pos = cuda.AllocDevicePos();
+        try
+        {
+            cuda.WriteDevicePos(pos, capacity, -3);
+            using Tensor o = Make(DType.F32, [1, hq, 1, d], Noise(16, 1f));
+            cuda.FlashAttentionDev(o, q, k, v, 0, hq / hkv, causal: true, 0, 1f / MathF.Sqrt(d), pos);
+            cuda.Sync();
+            Assert.Equal(route, CudaBackend.LastAttentionRoute);
+            Assert.All(AttnInvoker.ReadF32(o), x => Assert.Equal(0f, x));
+        }
+        finally
+        {
+            cuda.FreeDevicePos(pos);
+            KnobStore.Clear(EngineKnobs.FlashDecodeGqa);
+        }
+    }
+
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
     [InlineData("append", false, 16)]
     [InlineData("append", true, 16)]
     [InlineData("append2", false, -1)]   // two new rows at -1: the unsigned slot used to wrap to row 0

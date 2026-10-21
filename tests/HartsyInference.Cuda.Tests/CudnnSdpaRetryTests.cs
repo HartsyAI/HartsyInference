@@ -175,4 +175,41 @@ public sealed unsafe class CudnnSdpaRetryTests
             KnobStore.Clear(EngineKnobs.SdpaCudnn);
         }
     }
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void AHeadDimThatRan_KeepsCudnnThroughAnyNumberOfRefusedShapes()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        CudnnRuntime.EnsureProbed();
+        if (!CudnnRuntime.SupportsSdpa) { _output.WriteLine($"SKIPPED: {CudnnRuntime.Reason}"); return; }
+        string ptxDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Ptx");
+
+        const int d = 128, heads = 2;
+        float scale = 1f / MathF.Sqrt(d);
+        KnobStore.Set(EngineKnobs.SdpaCudnn, true);
+        try
+        {
+            using CudaBackend backend = new(0, ptxDir);
+            bool refuse = false;
+            backend.TestCudnnSdpaFaultInjector = _ => refuse ? new CudnnStatusException(3000, "injected structural failure") : null;
+            void Run(int s)
+            {
+                using Tensor q = Rnd(1, heads, s, d), k = Rnd(1, heads, s, d), v = Rnd(1, heads, s, d);
+                using Tensor outT = new(new TensorShape(1, heads, s, d), DType.F32);
+                backend.ScaledDotProductAttention(outT, q, k, v, null, scale, allowF16: true);
+            }
+
+            Run(32);
+            Assert.True(backend.CudnnSdpaEngaged);
+            refuse = true;
+            for (int s = 40; s < 40 + 70 * 8; s += 8) Run(s);   // more refusals than the warning budget
+            Assert.Equal(70, backend.CudnnSdpaRefusedShapes.Count);
+            Assert.False(backend.CudnnSdpaDimDiagnostics.TryGetValue(d, out (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt) diag)
+                && diag.Permanent);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
+        }
+    }
 }

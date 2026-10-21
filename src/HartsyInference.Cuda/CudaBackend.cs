@@ -67,8 +67,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Distinct shapes refused at a head dim before the head dim itself is given up, when none ever ran.</summary>
     private const int CudnnSdpaRefusalsToDisableDim = 3;
 
-    /// <summary>Refused shapes kept per process; past it a refusal gives up its head dim, which bounds the set and its warnings.</summary>
-    private const int CudnnSdpaRefusedShapeCap = 64;
+    /// <summary>Refusals warned about per process; later ones are recorded without a warning.</summary>
+    private const int CudnnSdpaRefusalWarnings = 64;
 
     /// <summary>The shapes cuDNN refused structurally in this process (diagnostics).</summary>
     public IReadOnlyCollection<string> CudnnSdpaRefusedShapes => [.. _cudnnSdpaRefusedShapes.Keys.Select(k => k.ToString())];
@@ -7974,11 +7974,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (permanent)
             {
                 // Structural for this shape; the head dim goes only once several shapes failed and none ever ran.
-                if (_cudnnSdpaRefusedShapes.Count < CudnnSdpaRefusedShapeCap && _cudnnSdpaRefusedShapes.TryAdd(shape, 0))
+                if (_cudnnSdpaRefusedShapes.TryAdd(shape, 0) && _cudnnSdpaRefusedShapes.Count <= CudnnSdpaRefusalWarnings)
                     HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] refused {shape} for the rest of the process: {ex.Message}");
                 int refusedAtDim = _cudnnSdpaRefusedShapes.Keys.Count(k => k.D == d);
-                if (_cudnnSdpaRefusedShapes.Count >= CudnnSdpaRefusedShapeCap
-                    || (!_cudnnSdpaWorkingDims.ContainsKey(d) && refusedAtDim >= CudnnSdpaRefusalsToDisableDim))
+                if (!_cudnnSdpaWorkingDims.ContainsKey(d) && refusedAtDim >= CudnnSdpaRefusalsToDisableDim)
                 {
                     _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
                     HartsyInference.Core.Logging.Logs.Warning(
