@@ -78,14 +78,6 @@ public sealed unsafe class AuraFlowSingleBlock
     }
 
     /// <summary>Forward pass on the joint <c>[txt, img]</c> token stream. Per <c>AuraFlowSingleTransformerBlock.forward</c> lines 171-191.</summary>
-    // GPU-residency rewrite (mirrors ChromaSingleStreamBlock / Krea2Attention): every glue op — LayerNorm+AdaLN
-    // modulation, per-head FP32 QK-norm, head split/merge, gated residual — runs as an IBackend op so the activation
-    // stays device-resident across the block (no per-op DataPointer D2H sync barriers around every GEMM). Head split =
-    // declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim
-    // with no reshape, then Permute0213 to/from [B, H, S, D]. AuraFlow has no RoPE, so nothing is left on the host.
-    // Numerics are bit-identical to the old host helpers: DiTUtils.NormModulate reproduces LayerNormNoAffine +
-    // x*(1+scale)+shift; backend.RmsNorm reproduces QkNorm.Forward; backend.GatedResidualLastDim reproduces
-    // AdaLNModulation.ApplyGatedResidual.
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor temb)
     {
         int batch = (int)hidden.Shape[0];

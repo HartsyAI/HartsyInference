@@ -260,15 +260,6 @@ public sealed class JointBlock
     }
 
     /// <summary>Forward pass through the joint block. Image and context streams share one joint attention; in dual-attention layers the image gets a parallel image-only second attention. Then independent MLPs.</summary>
-    // GPU-residency rewrite (mirrors the verified HunyuanImageBlock): every glue op (LayerNorm / AdaLN modulation /
-    // QK-norm / head reshape / joint concat / split / gated residual) runs as an IBackend op so the activation stays
-    // device-resident across the whole block — no per-op DataPointer D2H sync barriers (the old DiTUtils / QkNorm /
-    // AdaLNModulation host loops D2H-synced every intermediate around every GEMM). Head reshape = declaring Q/K/V
-    // directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so QK-norm's RmsNorm runs over headDim with no
-    // reshape. The [ctx, img] joint concat happens PRE-permute along the seq dim (Concat dim 1 — same token order
-    // the old post-permute ConcatAlongSeqDimMultiHead produced), then one Permute0213 per joint tensor; the
-    // post-attention split is a permute-back to [B, S, hidden] + SliceRows (B=1: context rows first, then image);
-    // B>1 keeps a host fallback for the split. No RoPE in SD3.
     public (Tensor image, Tensor context) Forward(IBackend backend, Tensor image, Tensor context, Tensor temb)
     {
         int batch = (int)image.Shape[0];

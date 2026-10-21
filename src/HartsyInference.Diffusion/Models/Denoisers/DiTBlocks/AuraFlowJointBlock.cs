@@ -119,15 +119,6 @@ public sealed unsafe class AuraFlowJointBlock
         });
 
     /// <summary>Forward pass through the dual-stream block. Returns <c>(image, text)</c> matching SD3 C# convention; diffusers reference returns <c>(text, image)</c> from <c>AuraFlowJointTransformerBlock.forward</c>.</summary>
-    // GPU-residency rewrite (mirrors ChromaDoubleStreamBlock): every glue op — LayerNorm+AdaLN modulation, per-head
-    // FP32 QK-norm, head split/merge, the joint [txt, img] concat/split, gated residuals — runs as an IBackend op so
-    // the activation stays device-resident across the block (no per-op DataPointer D2H sync barriers around every
-    // GEMM). Q/K/V are declared [B, S, H, D] (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim
-    // with no reshape; the [txt, img] concat happens in [B, S, hidden] layout then a single Permute0213 lifts to
-    // [B, H, S, D] for SDPA (equivalent to the old per-head ConcatAlongSeqDimMultiHead). AuraFlow has no RoPE, so
-    // nothing is left on the host. Numerics are bit-identical to the old host helpers: DiTUtils.NormModulate
-    // reproduces LayerNormNoAffine + x*(1+scale)+shift; backend.RmsNorm reproduces QkNorm.Forward;
-    // backend.GatedResidualLastDim reproduces AdaLNModulation.ApplyGatedResidual.
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb)
     {
         int batch = (int)image.Shape[0];

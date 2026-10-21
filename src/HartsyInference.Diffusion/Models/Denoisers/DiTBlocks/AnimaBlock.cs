@@ -170,11 +170,6 @@ public sealed unsafe class AnimaBlock
     /// <param name="ropeSin">RoPE sin table <c>[S, headDim]</c> for image self-attn.</param>
     /// <param name="rope">RoPE applier (re-used across blocks).</param>
     /// <param name="crossAttentionMask">Optional cross-attn mask <c>[B, 1, 1, T]</c>.</param>
-    // GPU-residency rewrite (mirrors the verified Krea2Block / Krea2Attention ports): every glue op — the
-    // AdaLN-LoRA temb add + 3-way chunk, the LayerNorm+modulate, the head split/merge, the per-head QK-RMSNorm,
-    // the rotary, and the gated residuals — now runs as an IBackend op, so the activation chain stays
-    // device-resident. The previous host `float*` loops D2H-synced (and freed) every Linear/SDPA output around
-    // every GEMM: 14 pipeline drains per block × 28 blocks × 2 CFG passes = 792 D2H syncs per denoise step.
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoderHidden,
         Tensor embeddedTimestep, Tensor temb,
         Tensor ropeCos, Tensor ropeSin, AnimaRope rope,
