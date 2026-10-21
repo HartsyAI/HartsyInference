@@ -16,6 +16,16 @@ public sealed class AttentionDispatchContractTests
         Assert.Equal(expected, CudnnRuntime.IsSdpaVersionSupported(version));
     }
 
+    [Theory]
+    [InlineData(24, false)]
+    [InlineData(32, true)]
+    [InlineData(36, false)]
+    [InlineData(40, true)]
+    [InlineData(160, true)]
+    [InlineData(256, true)]
+    [InlineData(264, false)]
+    public void CudnnSdpa_HeadDims_AreTheProbedEnvelope(long d, bool expected) => Assert.Equal(expected, CudnnSdpa.ShapeSupported(d));
+
     /// <summary>F32 Sage dispatch requires both the feature opt-in and the explicit unsafe V-narrowing opt-in.</summary>
     [Fact]
     public void SageF32Dispatch_RequiresTwoExplicitOptIns()

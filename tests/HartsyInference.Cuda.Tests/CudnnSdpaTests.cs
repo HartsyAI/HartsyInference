@@ -7,8 +7,8 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Validates the cuDNN fused flash-attention SDPA fast path (HARTSY_SDPA_CUDNN) against a CPU
-/// reference at the Krea2-style head dim (D=128, no mask, MHA). fp16 I/O so tolerance is fp16-scale.</summary>
+/// <summary>Validates the cuDNN fused flash-attention SDPA fast path against a CPU reference across its head-dim envelope
+/// (MHA, with and without a mask). fp16 I/O so tolerance is fp16-scale.</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class CudnnSdpaTests
 {
@@ -29,8 +29,13 @@ public sealed unsafe class CudnnSdpaTests
 
     [Trait("Category", "GpuIntegration")]
     [Theory]
+    [InlineData(32)]
+    [InlineData(40)]
     [InlineData(64)]
+    [InlineData(72)]
     [InlineData(128)]
+    [InlineData(160)]
+    [InlineData(256)]
     public void CudnnSdpa_MatchesCpuReference(int d)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -101,8 +106,10 @@ public sealed unsafe class CudnnSdpaTests
     /// uniform-softmax garbage by convention in BOTH paths and are skipped.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
+    [InlineData(40)]
     [InlineData(64)]
     [InlineData(128)]
+    [InlineData(160)]
     public void CudnnSdpa_Masked_MatchesCpuReference(int d)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
