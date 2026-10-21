@@ -29,6 +29,7 @@ public static class LoraFormatDetector
         bool hasDiffusersMiniMaxH3 = false;
         bool hasFlux3 = false;
         bool hasMossImage = false;
+        bool hasKohyaGeneric = false;
 
         foreach (string key in descriptors.Keys)
         {
@@ -141,6 +142,11 @@ public static class LoraFormatDetector
             {
                 hasKohyaUnetBlocks = true;
             }
+            // Any other `lora_unet_` module: only the target model's weight names can say what it is (see KohyaUnderscoreIndex).
+            else if (key.StartsWith("lora_unet_", StringComparison.Ordinal) && HasLoraSuffix(key))
+            {
+                hasKohyaGeneric = true;
+            }
 
             if (key.StartsWith("lora_te2_", StringComparison.Ordinal))
             {
@@ -161,6 +167,7 @@ public static class LoraFormatDetector
         if (hasKohyaUnetBlocks) return LoraFormat.KohyaSd15;
         if (hasDiffusersMiniMaxH3) return LoraFormat.DiffusersMiniMaxH3;
         if (hasBareDit) return LoraFormat.DiffusersBareDit;
+        if (hasKohyaGeneric) return LoraFormat.KohyaGeneric;
 
         return LoraFormat.Unknown;
     }

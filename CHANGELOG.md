@@ -6,6 +6,13 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## Unreleased
+
+- **Fixed: kohya LoRAs for models with no kohya table.** A `lora_unet_<module path>` file that no specific kohya layout
+  claimed (Krea 2's musubi-tuner LoRAs) failed with "Could not detect LoRA format". Its modules now resolve against the
+  target model's own weight names when the LoRA is applied, as ComfyUI resolves them, through the checkpoint-to-loaded-key
+  map where a recipe renames keys (Krea 2). A module name two weights collapse to is refused rather than guessed.
+
 ## alpha.383
 
 - **Added: MOSS-Image colorize reference layout** (`reference.layout=colorize`, CLI `--reference-layout colorize`), for
