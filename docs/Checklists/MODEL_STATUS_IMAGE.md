@@ -90,7 +90,7 @@ per-model architecture notes and build plans.
 | **Hunyuan Image 2.1** | ✅ **FIRST E2E 07-10** (`44.52-local`): sharp 2048²/20st/cfg3.5 astronaut, warm **~50.0s** (**ComfyUI baseline 48.08 s → 1.04× MATCHED**; 07-18 A/B on `alpha.61`: F16 50.1 s ≈ F32 49.9 s. ([details](#hunyuan-image-21)) |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
 | **FLUX.3 Klein** (5.6B, full + step-distilled) | 🔧 Built 2026-10-15. Text-to-image, img2img, inpaint, up to 10 reference images, the native layout table, and LoRA (diffusers/PEFT, ComfyUI and kohya names). Tiny-config parity against ComfyUI passes; no real-weight or GPU run yet. ([details](#flux3-klein)) |
-| **MOSS-Image** (5B DiT + Qwen3.5-9B, Base + SFT) | 🔧 Built 2026-10-16. Text-to-image, img2img, inpaint, the native layout JSON, two- and three-pass skip-layer guidance, LoRA (PEFT, ComfyUI, kohya names), reference-image edits in the Ostris / ai-toolkit layout (up to 3, cached or joint), every weight format through `CheckpointSource` and GGUF, a one-launch CUDA step graph and Vulkan kernels. Tiny-config parity passes on CPU and Vulkan, edits included; no real-weight, CUDA or speed run yet. ([details](#moss-image)) |
+| **MOSS-Image** (5B DiT + Qwen3.5-9B, Base + SFT) | 🔧 Built 2026-10-16; real weights on CUDA 2026-10-20 (text-to-image, reference edits, colorize LoRA, inpaint; no A/B or speed run yet). Text-to-image, img2img, inpaint, the native layout JSON, two- and three-pass skip-layer guidance, LoRA (PEFT, ComfyUI, kohya names), reference-image edits in the Ostris / ai-toolkit layout (up to 3, cached or joint), every weight format through `CheckpointSource` and GGUF, a one-launch CUDA step graph and Vulkan kernels. Tiny-config parity passes on CPU and Vulkan, edits included; no speed run yet. ([details](#moss-image)) |
 
 ## Edit / image-conditioned variants (🔧 — to download + e2e test)
 
@@ -585,7 +585,7 @@ Architecture and sources: [FLUX3_KLEIN_ARCHITECTURE.md](../Research/FLUX3_KLEIN_
 
 ### MOSS-Image
 
-**Built, not yet run on real weights (2026-10-16).** Family id `moss-image` (SwarmUI class `moss-image`). OpenMOSS ships
+**Built (2026-10-16); first real-weight run on CUDA (2026-10-20).** Family id `moss-image` (SwarmUI class `moss-image`). OpenMOSS ships
 Base and SFT as diffusers folders; pass the folder, any file in it, or the ComfyUI export's `diffusion_models` file
 with `--model-path`. The catalog entry downloads only the fallback side models (the Qwen3.5-9B Q8_0 GGUF and the
 Flux.2 VAE), used when the checkpoint is not inside a full folder.
@@ -615,10 +615,28 @@ Architecture and sources: [MOSS_IMAGE_ARCHITECTURE.md](../Research/MOSS_IMAGE_AR
   Qwen3.5 image path (vision tower, splice, interleaved M-RoPE) against transformers on a tiny checkpoint; the
   schedule against SGLang's goldens; the device DeltaNet prefill against transformers on a tiny trunk; a synthetic
   end-to-end edit through the pipeline; detection, LoRA, layout, tokenizer and recipe unit tests.
-  **Not verified:** the transcription against the torch module itself (`dump_moss_image_reference.py verify`, and the
-  Ostris node for edits and the colorize node), the real weights (`dump_moss_image_reference.py real` +
-  `MossImageRealWeightTests`), an edit with a real edit LoRA (the colorize LoRA included), CUDA, and the speed
-  comparison with the Python pipeline.
+- **Real weights, RTX 4090 (`cuda:0`), 2026-10-20** (Comfy-Org `moss-image-base-1_0-moss-image-base-bf16`, `qwen35_9b_bf16`
+  with its vision tower, `flux2-vae_small`; base model, 30 steps, CFG 3, seed 7 unless noted):
+  - `MossImageGpuParityTests` (8/8, incl. `Edit_MatchesReference` and `StepGraph_ReplaysEditBranches`), MOSS and reference
+    CPU lane (79/79), `MRopeTests` (6/6), and `MossImageComponentTests` / `MossImageParityTests` on the colorize branch (32/32).
+  - Text-to-image: on-prompt and coherent at 1024² via the CLI and via SwarmUI (same image, same seed). The CLI logged one
+    async-allocation OOM that recovered.
+  - Reference edits ("turn the bicycle blue", 1024²): cached, joint (`--reference-kv-cache off`), init-as-Picture-1 and
+    two references all run and give coherent images. The base model does not follow the edit, as expected without an edit
+    LoRA. The cached run fell back to eager execution after graph-instantiation OOMs. The per-layer cache-size and token-count
+    log lines do not print at default verbosity, so those counts are unconfirmed.
+  - Colorize (`reference.layout=colorize` with `moss_colorize_ref_v1`, 768² and smaller): the LoRA adds colour to some
+    subjects (portrait, teapot, fox, anime) and not others (samurai, landscape, city, interior, ramen stay grey). A no-LoRA
+    control stays grey on every subject. The layout runs up to 1792²; 2048² exceeds the 4096-token prompt limit because
+    the vision copy is sized to the target.
+  - Inpaint (`--init-image` + `--mask`, Auto mode, `--creativity`): the change stays inside the mask (mean difference inside
+    about 4 to 28 units, outside 0.1 to 0.3). Visible repaints at creativity 0.9 include a teapot to gold, a fox to a wolf,
+    an armchair to red and ramen broth to green. Creativity 0.4 to 0.8 barely changes the image, then 0.9 repaints it. The
+    step from 0.8 to 0.9 is sharp.
+  - **Still not verified:** the transcription against the torch module (`dump_moss_image_reference.py verify`), the
+    Ostris node for edits and the colorize node, the real-weight numeric parity (`dump_moss_image_reference.py real` +
+    `MossImageRealWeightTests`), a faithful edit with an edit LoRA, the no-reference A/B against the pre-#458 base, and
+    the speed comparison with the Python pipeline.
 
 ### Qwen-Image-Edit 2511
 
