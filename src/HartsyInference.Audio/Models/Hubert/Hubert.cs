@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Hubert;
@@ -205,7 +206,13 @@ public sealed unsafe class Hubert : IDisposable
         private readonly HubertConfig _cfg;
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _ln1W, _ln1B, _ff1W, _ff1B, _ff2W, _ff2B, _ln2W, _ln2B;
 
-        public Layer(HubertConfig cfg) => _cfg = cfg;
+        private readonly AttentionLayer _attention;
+
+        public Layer(HubertConfig cfg)
+        {
+            _cfg = cfg;
+            _attention = OperatorAttention.Create(cfg.NumHeads, cfg.HeadDim);
+        }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
@@ -231,9 +238,7 @@ public sealed unsafe class Hubert : IDisposable
             Dia.DiaHeads.FlatToHeads(qM, q, t, heads, hd); q.Dispose();
             Dia.DiaHeads.FlatToHeads(kM, k, t, heads, hd); k.Dispose();
             Dia.DiaHeads.FlatToHeads(vM, v, t, heads, hd); v.Dispose();
-            Tensor attn = new(new TensorShape(1, heads, t, hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, qM, kM, vM, null, 1f / MathF.Sqrt(hd));
-            qM.Dispose(); kM.Dispose(); vM.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qM, kM, vM, default);
             Tensor flat = new(new TensorShape(1, t, h), DType.F32);
             Dia.DiaHeads.HeadsToFlat(flat, attn, t, heads, hd); attn.Dispose();
             Tensor attnOut = WhisperOps.ProjectLinear(backend, flat, _oW!, _oB, 1, t, h, h); flat.Dispose();

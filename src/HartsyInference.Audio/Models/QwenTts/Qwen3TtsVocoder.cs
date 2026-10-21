@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.QwenTts;
@@ -365,7 +366,13 @@ public sealed unsafe class Qwen3TtsVocoder : IDisposable
         private readonly Qwen3TtsVocoderConfig _cfg;
         private Tensor? _inNorm, _postNorm, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _gateW, _upW, _downW, _ls1, _ls2;
 
-        public TransformerLayer(Qwen3TtsVocoderConfig cfg) => _cfg = cfg;
+        private readonly AttentionLayer _attention;
+
+        public TransformerLayer(Qwen3TtsVocoderConfig cfg)
+        {
+            _cfg = cfg;
+            _attention = OperatorAttention.Create(cfg.TransformerHeads, cfg.TransformerHeadDim);
+        }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
@@ -401,9 +408,7 @@ public sealed unsafe class Qwen3TtsVocoder : IDisposable
             Moonshine.RotaryEmbedding.ApplyInPlace(qM, heads, t, hd, hd, 0, cos, sin);
             Moonshine.RotaryEmbedding.ApplyInPlace(kM, heads, t, hd, hd, 0, cos, sin);
 
-            Tensor attn = new(new TensorShape(1, heads, t, hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, qM, kM, vM, mask, 1f / MathF.Sqrt(hd));
-            qM.Dispose(); kM.Dispose(); vM.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qM, kM, vM, new AttentionCallContext { Bias = mask });
             Tensor flat = new(new TensorShape(1, t, heads * hd), DType.F32);
             Dia.DiaHeads.HeadsToFlat(flat, attn, t, heads, hd); attn.Dispose();
             Tensor attnOut = WhisperOps.ProjectLinear(backend, flat, _oW!, _oB, 1, t, heads * hd, dim); flat.Dispose();

@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Chatterbox;
@@ -17,6 +18,7 @@ public sealed unsafe class ChatterboxPerceiver : IDisposable
     private const int NumQueries = 32;
 
     private Tensor? _query;          // pre_attention_query [1, 32, 1024]
+    private readonly AttentionLayer _attention = OperatorAttention.Create(Heads, HeadDim);
     private Tensor? _normW, _normB, _qW, _qB, _kW, _kB, _vW, _vB, _outW, _outB;
     private int _disposed;
 
@@ -64,9 +66,7 @@ public sealed unsafe class ChatterboxPerceiver : IDisposable
 
         Tensor qH = ToHeads(q, sq), kH = ToHeads(k, sk), vH = ToHeads(v, sk);
         q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor attn = new(new TensorShape(1, Heads, sq, HeadDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qH, kH, vH, mask: null, 1f / MathF.Sqrt(HeadDim));
-        qH.Dispose(); kH.Dispose(); vH.Dispose();
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, qH, kH, vH, default);
         Tensor merged = FromHeads(attn, sq);
         attn.Dispose();
         Tensor proj = WhisperOps.ProjectLinear(backend, merged, _outW!, _outB, 1, sq, Dim, Dim);

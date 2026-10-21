@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.Siglip;
@@ -31,6 +32,8 @@ public sealed unsafe class SiglipVisionEncoder
     private Tensor? _headAttnInProjBias;   // [3*hidden]
     private Tensor? _headAttnOutProjWeight; // [hidden, hidden]
     private Tensor? _headAttnOutProjBias;   // [hidden]
+    private Tensor?[]? _headSlices;         // in_proj Q/K/V weight then bias slices, copied once
+    private AttentionLayer? _headAttention;
     private Tensor? _headLnWeight, _headLnBias;
     private Tensor? _headMlpFc1Weight, _headMlpFc1Bias;
     private Tensor? _headMlpFc2Weight, _headMlpFc2Bias;
@@ -71,12 +74,14 @@ public sealed unsafe class SiglipVisionEncoder
         _headAttnInProjBias = EnsureF32(weights[$"{prefix}.head.attention.in_proj_bias"]);
         _headAttnOutProjWeight = EnsureF32(weights[$"{prefix}.head.attention.out_proj.weight"]);
         _headAttnOutProjBias = EnsureF32(weights[$"{prefix}.head.attention.out_proj.bias"]);
+        _headAttention = null;
         _headLnWeight = EnsureF32(weights[$"{prefix}.head.layernorm.weight"]);
         _headLnBias = EnsureF32(weights[$"{prefix}.head.layernorm.bias"]);
         _headMlpFc1Weight = EnsureF32(weights[$"{prefix}.head.mlp.fc1.weight"]);
         _headMlpFc1Bias = EnsureF32(weights[$"{prefix}.head.mlp.fc1.bias"]);
         _headMlpFc2Weight = EnsureF32(weights[$"{prefix}.head.mlp.fc2.weight"]);
         _headMlpFc2Bias = EnsureF32(weights[$"{prefix}.head.mlp.fc2.bias"]);
+        HeadAttention();
     }
 
     private Tensor? _postLnWeight, _postLnBias;
@@ -95,6 +100,7 @@ public sealed unsafe class SiglipVisionEncoder
             _headLnWeight, _headLnBias,
             _headMlpFc1Weight, _headMlpFc1Bias, _headMlpFc2Weight, _headMlpFc2Bias];
         foreach (Tensor? t in head) if (t is not null) yield return t;
+        if (_headSlices is not null) foreach (Tensor? t in _headSlices) if (t is not null) yield return t;
     }
 
     /// <summary>Encodes a preprocessed image into a <c>[1, embeddingDim]</c> tensor (un-normalized; caller L2-normalizes as needed).</summary>
@@ -190,76 +196,34 @@ public sealed unsafe class SiglipVisionEncoder
         for (int b = 0; b < batch; b++)
             new ReadOnlySpan<float>(probeSrc, hidden).CopyTo(new Span<float>(probePtr + b * hidden, hidden));
 
-        // Q from probe; K, V from patch tokens. In_proj_weight is [3*D, D] = [Q | K | V] stacked.
-        // For Q: only probe (1 token) needs projection. For K and V: all patch tokens.
-        // Easier path: project ALL three from concat([probe, patchTokens]) and then slice.
-        // But that wastes work. Direct: Q = probe @ Wq^T + bq, K = patchTokens @ Wk^T + bk, V = patchTokens @ Wv^T + bv.
-
-        int totalProj = (int)_headAttnInProjWeight!.Shape[0]; // 3*hidden
-        Tensor q = new Tensor(new TensorShape(batch, 1, hidden), DType.F32);
-        Tensor k = new Tensor(new TensorShape(batch, _numPatches, hidden), DType.F32);
-        Tensor v = new Tensor(new TensorShape(batch, _numPatches, hidden), DType.F32);
-        SplitProj(backend, probe, q, _headAttnInProjWeight!, _headAttnInProjBias!, batch, 1, hidden, projectSlice: 0);
-        SplitProj(backend, patchTokens, k, _headAttnInProjWeight!, _headAttnInProjBias!, batch, _numPatches, hidden, projectSlice: 1);
-        SplitProj(backend, patchTokens, v, _headAttnInProjWeight!, _headAttnInProjBias!, batch, _numPatches, hidden, projectSlice: 2);
-        probe.Dispose();
-
-        // Reshape to multi-head [B, H, S, D] and run SDPA.
-        int numHeads = _preset.NumHeads;
-        int headDim = hidden / numHeads;
-        Tensor qMh = new Tensor(new TensorShape(batch, numHeads, 1, headDim), DType.F32);
-        Tensor kMh = new Tensor(new TensorShape(batch, numHeads, _numPatches, headDim), DType.F32);
-        Tensor vMh = new Tensor(new TensorShape(batch, numHeads, _numPatches, headDim), DType.F32);
-        backend.Permute0213(qMh, q, 1, numHeads, headDim);
-        backend.Permute0213(kMh, k, _numPatches, numHeads, headDim);
-        backend.Permute0213(vMh, v, _numPatches, numHeads, headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
-        Tensor attnOut = new Tensor(new TensorShape(batch, numHeads, 1, headDim), DType.F32);
-        float scale = 1f / MathF.Sqrt(headDim);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        // Merge heads → [B, 1, hidden].
-        Tensor merged = new Tensor(new TensorShape(batch, 1, hidden), DType.F32);
-        backend.Permute0213(merged, attnOut, numHeads, 1, headDim);
-        attnOut.Dispose();
-
-        // out_proj.
-        Tensor outProj = new Tensor(new TensorShape(batch, 1, hidden), DType.F32);
-        ApplyLinear(backend, merged, outProj, _headAttnOutProjWeight!, _headAttnOutProjBias!, batch, 1, hidden, hidden);
-        merged.Dispose();
-        return outProj;
+        // Q from probe; K, V from patch tokens, each from its slice of the combined in_proj weight.
+        return HeadAttention().Forward(backend, probe, patchTokens, new AttentionCallContext { ReleaseQueryAfterProjection = true });
     }
 
-    /// <summary>Project a subset of the combined in_proj_weight. The weight is [3*D, D] in
-    /// PyTorch nn.MultiheadAttention layout (Q stacked atop K stacked atop V); we slice the D
-    /// rows for the requested projection (0=Q, 1=K, 2=V) and apply standard linear.</summary>
-    private void SplitProj(IBackend backend, Tensor input, Tensor output, Tensor combinedWeight, Tensor combinedBias,
-        int batch, int seq, int hidden, int projectSlice)
+    /// <summary>The pooling head's attention layer. The combined in_proj weight is <c>[3*D, D]</c> in PyTorch nn.MultiheadAttention layout
+    /// (Q stacked atop K stacked atop V); its three <c>[D, D]</c> slices are copied once.</summary>
+    private AttentionLayer HeadAttention()
     {
-        // Allocate sliced weight + bias (managed copies — small).
-        TensorShape wShape = new TensorShape(hidden, hidden);
-        Tensor wSlice = new Tensor(wShape, DType.F32);
-        Tensor bSlice = new Tensor(new TensorShape(hidden), DType.F32);
-        float* wDst = (float*)wSlice.DataPointer;
-        float* bDst = (float*)bSlice.DataPointer;
-        float* wSrc = (float*)combinedWeight.DataPointer;
-        float* bSrc = (float*)combinedBias.DataPointer;
-        long rowOffset = (long)projectSlice * hidden * hidden;
-        new ReadOnlySpan<float>(wSrc + rowOffset, hidden * hidden).CopyTo(new Span<float>(wDst, hidden * hidden));
-        new ReadOnlySpan<float>(bSrc + (long)projectSlice * hidden, hidden).CopyTo(new Span<float>(bDst, hidden));
-
-        try { ApplyLinear(backend, input, output, wSlice, bSlice, batch, seq, hidden, hidden); }
-        finally { wSlice.Dispose(); bSlice.Dispose(); }
-    }
-
-    /// <summary>Standard linear projection: <c>output = input @ weight^T + bias</c> where
-    /// <c>weight</c> is <c>[out_dim, in_dim]</c> (PyTorch convention). Uses <see cref="IBackend.Linear"/>.</summary>
-    private static void ApplyLinear(IBackend backend, Tensor input, Tensor output, Tensor weight, Tensor bias,
-        int batch, int seq, int inDim, int outDim)
-    {
-        backend.Linear(output, input, weight, bias);
+        if (_headAttention is not null) return _headAttention;
+        int hidden = _preset.HiddenSize, heads = _preset.NumHeads;
+        Tensor[] s = new Tensor[6];
+        for (int i = 0; i < 3; i++)
+        {
+            s[i] = new Tensor(new TensorShape(hidden, hidden), DType.F32);
+            new ReadOnlySpan<float>((float*)_headAttnInProjWeight!.DataPointer + (long)i * hidden * hidden, hidden * hidden)
+                .CopyTo(new Span<float>((float*)s[i].DataPointer, hidden * hidden));
+            s[3 + i] = new Tensor(new TensorShape(hidden), DType.F32);
+            new ReadOnlySpan<float>((float*)_headAttnInProjBias!.DataPointer + (long)i * hidden, hidden)
+                .CopyTo(new Span<float>((float*)s[3 + i].DataPointer, hidden));
+        }
+        _headSlices = s;
+        return _headAttention = new AttentionLayer(
+            new AttentionLayerConfig { Heads = heads, KvHeads = heads, HeadDim = hidden / heads, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = s[0], QueryBias = s[3], Key = s[1], KeyBias = s[4], Value = s[2], ValueBias = s[5],
+                Output = _headAttnOutProjWeight, OutputBias = _headAttnOutProjBias,
+            });
     }
 
     /// <summary>Head MLP: <c>output = pooled + Fc2(GELU(Fc1(LN(pooled))))</c>. Standard residual transformer FFN.</summary>
@@ -313,6 +277,7 @@ internal sealed unsafe class SiglipTransformerLayer
 
     private Tensor? _ln1W, _ln1B, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB;
     private Tensor? _ln2W, _ln2B, _fc1W, _fc1B, _fc2W, _fc2B;
+    private AttentionLayer? _attn;
 
     public SiglipTransformerLayer(int hidden, int numHeads, int interSize, float lnEps)
     {
@@ -341,6 +306,12 @@ internal sealed unsafe class SiglipTransformerLayer
         _fc1B = EnsureF32(weights[$"{prefix}.mlp.fc1.bias"]);
         _fc2W = EnsureF32(weights[$"{prefix}.mlp.fc2.weight"]);
         _fc2B = EnsureF32(weights[$"{prefix}.mlp.fc2.bias"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _oW, OutputBias = _oB,
+            });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -358,7 +329,7 @@ internal sealed unsafe class SiglipTransformerLayer
         // LN → MHA.
         Tensor normed1 = new Tensor(shape, DType.F32);
         backend.LayerNorm(normed1, hidden, _ln1W!, _ln1B!, _lnEps);
-        Tensor attnOut = Attention(backend, normed1, batch, seq);
+        Tensor attnOut = _attn!.Forward(backend, normed1, normed1, default);
         normed1.Dispose();
         Tensor residual1 = new Tensor(shape, DType.F32);
         backend.Add(residual1, hidden, attnOut);
@@ -374,39 +345,6 @@ internal sealed unsafe class SiglipTransformerLayer
         residual1.Dispose();
         mlpOut.Dispose();
         return residual2;
-    }
-
-    private Tensor Attention(IBackend backend, Tensor input, int batch, int seq)
-    {
-        // Project Q, K, V.
-        Tensor q = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
-        Tensor k = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
-        Tensor v = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
-        backend.Linear(q, input, _qW!, _qB!);
-        backend.Linear(k, input, _kW!, _kB!);
-        backend.Linear(v, input, _vW!, _vB!);
-
-        // Reshape to multi-head [B, H, S, D].
-        Tensor qMh = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        Tensor kMh = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        Tensor vMh = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        backend.Permute0213(qMh, q, seq, _numHeads, _headDim);
-        backend.Permute0213(kMh, k, seq, _numHeads, _headDim);
-        backend.Permute0213(vMh, v, seq, _numHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-
-        Tensor attnOut = new Tensor(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, 1f / MathF.Sqrt(_headDim));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor merged = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
-        backend.Permute0213(merged, attnOut, _numHeads, seq, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(new TensorShape(batch, seq, _hidden), DType.F32);
-        backend.Linear(projected, merged, _oW!, _oB!);
-        merged.Dispose();
-        return projected;
     }
 
     private Tensor Mlp(IBackend backend, Tensor input, int batch, int seq)

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.Segmentation.Sam2;
@@ -17,6 +18,7 @@ public sealed class DecoderAttention
     private Tensor? _kW, _kB;
     private Tensor? _vW, _vB;
     private Tensor? _outW, _outB;
+    private AttentionLayer? _attn;
 
     /// <summary>Creates the attention with a fixed head count; per-projection dims come from the weights.</summary>
     public DecoderAttention(int heads)
@@ -42,6 +44,7 @@ public sealed class DecoderAttention
         if (_internalDim % _heads != 0)
             throw new ArgumentException($"Attention internal dim {_internalDim} not divisible by heads {_heads}.");
         _headDim = _internalDim / _heads;
+        _attn = new AttentionLayer(new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32 });
     }
 
     /// <summary>Yields every loaded weight tensor.</summary>
@@ -71,28 +74,11 @@ public sealed class DecoderAttention
         Tensor vp = new Tensor(new TensorShape(b, nk, _internalDim), DType.F32);
         backend.Linear(vp, value, _vW!, _vB);
 
-        Tensor qh = ToHeads(backend, qp, b, nq);
-        Tensor kh = ToHeads(backend, kp, b, nk);
-        Tensor vh = ToHeads(backend, vp, b, nk);
-
-        Tensor attn = new Tensor(new TensorShape(b, _heads, nq, _headDim), DType.F32);
-        float scale = 1f / MathF.Sqrt(_headDim);
-        backend.ScaledDotProductAttention(attn, qh, kh, vh, null, scale);
-
-        Tensor merged = new Tensor(new TensorShape(b, nq, _heads, _headDim), DType.F32);
-        backend.Permute0213(merged, attn, _heads, nq, _headDim);
-        Tensor mergedFlat = merged.Reshape(new TensorShape(b, nq, _internalDim));
+        Tensor merged = _attn!.AttendFlat(backend, qp, kp, vp, new TensorShape(b, nq, _internalDim), default);
 
         Tensor outT = new Tensor(new TensorShape(b, nq, embedDim), DType.F32);
-        backend.Linear(outT, mergedFlat, _outW!, _outB);
-        return outT;
-    }
-
-    private Tensor ToHeads(IBackend backend, Tensor x, int b, int n)
-    {
-        Tensor reshaped = x.Reshape(new TensorShape(b, n, _heads, _headDim));
-        Tensor outT = new Tensor(new TensorShape(b, _heads, n, _headDim), DType.F32);
-        backend.Permute0213(outT, reshaped, n, _heads, _headDim);
+        backend.Linear(outT, merged, _outW!, _outB);
+        merged.Dispose();
         return outT;
     }
 

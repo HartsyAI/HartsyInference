@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
@@ -11,6 +12,7 @@ public sealed unsafe class T5Block
     private readonly int _headDim;
     private readonly float _eps;
     private readonly float _attnScale;
+    private readonly AttentionLayer _attention;
     // FFN flavor: v1.1/UMT5 use a gated FFN (wi_0/wi_1, GELU gate); v1.0 (google/t5-base, MusicGen) uses a
     // single wi projection with a ReLU activation. Both share the wo output projection and the layer_norm.
     private readonly bool _gatedFeedForward;
@@ -39,6 +41,7 @@ public sealed unsafe class T5Block
         _gatedFeedForward = gatedFeedForward;
         _useReluActivation = useReluActivation;
         _attnScale = attentionScale;
+        _attention = new(new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = headDim, Scale = _attnScale });
     }
 
     /// <summary>Loads weights for this block from named tensors using T5 HuggingFace naming.</summary>
@@ -130,11 +133,7 @@ public sealed unsafe class T5Block
         Tensor? combinedMask = BuildAttentionMask(positionBias, attentionMask, batch, seqLen);
 
         // T5 does not divide QK by sqrt(d_kv); the relative position bias carries the scale.
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, combinedMask, _attnScale);
-        queryMh.Dispose();
-        keyMh.Dispose();
-        valueMh.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, queryMh, keyMh, valueMh, new AttentionCallContext { Bias = combinedMask });
         // BuildAttentionMask's batch==1/no-mask fast path returns positionBias itself (not a copy) — that
         // tensor is caller-owned (T5TextEncoder's shared or per-layer cache, reused across blocks/calls), so
         // only dispose combinedMask when it's a distinct tensor this method actually allocated.

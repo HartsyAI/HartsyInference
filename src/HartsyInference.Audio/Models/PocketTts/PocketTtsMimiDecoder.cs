@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.PocketTts;
@@ -20,6 +21,8 @@ namespace HartsyInference.Audio.Models.PocketTts;
 /// reproducing the streaming modules run with a fresh state. Verified by <c>SnacParityTests</c>-style oracle.</summary>
 internal sealed unsafe class PocketTtsMimiDecoder(string prefix = "mimi")
 {
+    private readonly AttentionLayer _attention = OperatorAttention.Create(NHeads, HeadDim);
+
     private const int LatentDim = 32;
     private const int Dim = 512;          // outer_dim / d_model
     private const int NHeads = 8;
@@ -150,9 +153,7 @@ internal sealed unsafe class PocketTtsMimiDecoder(string prefix = "mimi")
             ApplyRopeInterleaved(qMh, batch, NHeads, t, HeadDim, RopeMaxPeriod);
             ApplyRopeInterleaved(kMh, batch, NHeads, t, HeadDim, RopeMaxPeriod);
 
-            Tensor attn = new(qMh.Shape, DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, 1f / MathF.Sqrt(HeadDim));
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask });
 
             Tensor attnFlat = new(new TensorShape(batch, t, Dim), DType.F32);
             MergeHeads(attn, attnFlat, batch, t);

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
@@ -11,6 +12,7 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 public sealed unsafe class Wav2Vec2Encoder
 {
     private readonly Wav2Vec2EncoderConfig _config;
+    private readonly AttentionLayer _attention;
 
     private Tensor?[] _convW = [], _convB = [];
     private Tensor? _conv0NormW, _conv0NormB;           // group norm on conv layer 0 (group mode)
@@ -29,6 +31,8 @@ public sealed unsafe class Wav2Vec2Encoder
     public Wav2Vec2Encoder(Wav2Vec2EncoderConfig config)
     {
         _config = config;
+        int headDim = config.Hidden / config.NumHeads;
+        _attention = new AttentionLayer(new AttentionLayerConfig { Heads = config.NumHeads, KvHeads = config.NumHeads, HeadDim = headDim });
         _layers = new Layer[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++) _layers[i] = new Layer();
     }
@@ -270,9 +274,7 @@ public sealed unsafe class Wav2Vec2Encoder
         Tensor qMh = ToBhsd(q, t, heads, hd); q.Dispose();
         Tensor kMh = ToBhsd(k, t, heads, hd); k.Dispose();
         Tensor vMh = ToBhsd(v, t, heads, hd); v.Dispose();
-        Tensor attn = new Tensor(new TensorShape(1, heads, t, hd), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1f / MathF.Sqrt(hd));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default);
         Tensor flat = FromBhsd(attn, t, heads, hd); attn.Dispose();
         Tensor o = new Tensor(new TensorShape(t, dim), DType.F32); backend.Linear(o, flat, l.OW!, l.OB); flat.Dispose();
         return o;

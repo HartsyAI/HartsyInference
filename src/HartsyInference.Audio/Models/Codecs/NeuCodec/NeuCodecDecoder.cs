@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.Dia;
 using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
@@ -24,6 +25,7 @@ namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 public sealed unsafe class NeuCodecDecoder : IDisposable
 {
     private readonly NeuCodecConfig _cfg;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _projOutW, _projOutB;     // quantizer.project_out : FSQ 8 → 2048
     private Tensor? _fcW, _fcB;               // acoustic_decoder.fc   : 2048 → 1024
@@ -43,6 +45,7 @@ public sealed unsafe class NeuCodecDecoder : IDisposable
     public NeuCodecDecoder(NeuCodecConfig cfg)
     {
         _cfg = cfg;
+        _attention = OperatorAttention.Create(cfg.NumHeads, cfg.HeadDim);
         _prior = new ResnetWeights[cfg.PriorResnetBlocks];
         _post = new ResnetWeights[cfg.PostResnetBlocks];
         _blocks = new TxWeights[cfg.Depth];
@@ -193,9 +196,7 @@ public sealed unsafe class NeuCodecDecoder : IDisposable
         DiaHeads.FlatToHeads(kMh, kFlat, t, heads, hd); kFlat.Dispose();
         DiaHeads.FlatToHeads(vMh, vFlat, t, heads, hd); vFlat.Dispose();
 
-        Tensor attn = new(new TensorShape(1, heads, t, hd), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1f / MathF.Sqrt(hd));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default);
         Tensor attnFlat = new(new TensorShape(1, t, dim), DType.F32);
         DiaHeads.HeadsToFlat(attnFlat, attn, t, heads, hd); attn.Dispose();
         Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, b.OW!, null, 1, t, dim, dim); attnFlat.Dispose();

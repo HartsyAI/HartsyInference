@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
@@ -13,6 +14,7 @@ public sealed unsafe class MuqEmbedder : IDisposable
     private readonly int _melBins, _muqDim, _hidden, _layers, _heads, _headDim, _ffn, _lmHidden;
     private readonly int[] _stemStrides;
     private readonly float _eps = 1e-5f;
+    private readonly AttentionLayer _attention;
 
     private readonly Tensor?[] _stemW, _stemB;
     private readonly Tensor?[] _ln1W, _ln1B, _ln2W, _ln2B;
@@ -32,6 +34,7 @@ public sealed unsafe class MuqEmbedder : IDisposable
         _heads = heads;
         if (hidden % heads != 0) throw new ArgumentException($"hidden ({hidden}) must be divisible by heads ({heads}).");
         _headDim = hidden / heads;
+        _attention = OperatorAttention.Create(heads, _headDim);
         _ffn = ffn > 0 ? ffn : hidden * 4;
         _stemStrides = stemStrides ?? [2, 2];
         _stemW = new Tensor?[_stemStrides.Length]; _stemB = new Tensor?[_stemStrides.Length];
@@ -100,7 +103,6 @@ public sealed unsafe class MuqEmbedder : IDisposable
             for (int j = 0; j < seq; j++) sp[(long)j * _hidden + c] = fp[(long)c * seq + j];
         if (ownFeat) feat.Dispose();
 
-        float scale = 1f / MathF.Sqrt(_headDim);
         for (int i = 0; i < _layers; i++)
         {
             // Pre-norm self-attention.
@@ -119,9 +121,7 @@ public sealed unsafe class MuqEmbedder : IDisposable
             WhisperOps.ReshapeToMultiHead4D(v4, v, 1, seq, _heads, _headDim);
             q.Dispose(); k.Dispose(); v.Dispose();
 
-            Tensor a4 = new(new TensorShape(1, _heads, seq, _headDim), DType.F32);
-            backend.ScaledDotProductAttention(a4, q4, k4, v4, null, scale);
-            q4.Dispose(); k4.Dispose(); v4.Dispose();
+            Tensor a4 = _attention.AttendHeadMajorOperands(backend, q4, k4, v4, default);
 
             Tensor attn = new(new TensorShape(1, seq, _hidden), DType.F32);
             WhisperOps.ReshapeFromMultiHead4D(attn, a4, 1, seq, _heads, _headDim);

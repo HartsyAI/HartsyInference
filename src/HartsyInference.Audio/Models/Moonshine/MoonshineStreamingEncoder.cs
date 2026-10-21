@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
@@ -142,6 +143,7 @@ internal sealed unsafe class MoonshineStreamingEncoderLayer
 {
     private readonly MoonshineConfig _cfg;
     private readonly (int Left, int Right) _window;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _inputLnGamma;
     private Tensor? _qW, _kW, _vW, _oW;
@@ -152,6 +154,7 @@ internal sealed unsafe class MoonshineStreamingEncoderLayer
     {
         _cfg = cfg;
         _window = window;
+        _attention = OperatorAttention.Create(cfg.EncoderNumHeads, cfg.EncoderHeadDim);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -193,10 +196,8 @@ internal sealed unsafe class MoonshineStreamingEncoderLayer
         // No RoPE — the streaming encoder has no positional embedding of any kind at this stage.
 
         Tensor mask = MoonshineStreamingOps.BuildSlidingWindowMask(seqLen, _window.Left, _window.Right);
-        float scale = 1f / MathF.Sqrt(hd);
-        Tensor attnOut = new(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, mask, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose(); mask.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask });
+        mask.Dispose();
 
         Tensor merged = new(shape, DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(merged, attnOut, 1, seqLen, heads, hd);

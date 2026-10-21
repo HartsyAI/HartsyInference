@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ControlFoley;
@@ -148,9 +149,8 @@ internal sealed unsafe class ControlFoleyBlock
     /// <summary>Scaled dot-product attention over <c>[B, H, N, headDim]</c> tensors.</summary>
     internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v)
     {
-        Tensor o = new(q.Shape, DType.F32);
-        backend.ScaledDotProductAttention(o, q, k, v, null, 1f / MathF.Sqrt(q.Shape[3]));
-        return o;
+        return OperatorAttention.Create((int)q.Shape[1], (int)q.Shape[3])
+            .AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
     }
 
     /// <summary>Tokens <c>[offset, offset + length)</c> of a head-major attention output as <c>[B, length, H * headDim]</c>.</summary>

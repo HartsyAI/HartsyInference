@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.Dia;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.GptSoVits;
@@ -197,7 +198,13 @@ public sealed unsafe class Text2Semantic : IDisposable
         private readonly Text2SemanticConfig _cfg;
         private Tensor? _inW, _inB, _outW, _outB, _l1W, _l1B, _l2W, _l2B, _n1W, _n1B, _n2W, _n2B;
 
-        public Block(Text2SemanticConfig cfg) => _cfg = cfg;
+        private readonly AttentionLayer _attention;
+
+        public Block(Text2SemanticConfig cfg)
+        {
+            _cfg = cfg;
+            _attention = OperatorAttention.Create(cfg.NumHeads, cfg.HeadDim);
+        }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
@@ -220,9 +227,7 @@ public sealed unsafe class Text2Semantic : IDisposable
             float* p = (float*)qkv.DataPointer;
             Split(p, qM, 0, t, heads, hd, h); Split(p, kM, h, t, heads, hd, h); Split(p, vM, 2 * h, t, heads, hd, h);
             qkv.Dispose();
-            Tensor attn = new(new TensorShape(1, heads, t, hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, qM, kM, vM, mask, 1f / MathF.Sqrt(hd));
-            qM.Dispose(); kM.Dispose(); vM.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qM, kM, vM, new AttentionCallContext { Bias = mask });
             Tensor flat = new(new TensorShape(1, t, h), DType.F32);
             DiaHeads.HeadsToFlat(flat, attn, t, heads, hd); attn.Dispose();
             Tensor attnOut = WhisperOps.ProjectLinear(backend, flat, _outW!, _outB, 1, t, h, h); flat.Dispose();

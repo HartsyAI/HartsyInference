@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
@@ -16,6 +17,7 @@ internal sealed unsafe class MimiTransformer
     private readonly MimiConfig _cfg;
     private readonly string _prefix;
     private readonly int _layers, _heads, _headDim, _dim, _ffn;
+    private readonly AttentionLayer _attention;
     private bool _interleavedRope;   // moshi/DSM checkpoints rotate interleaved pairs; HF permutes → split-half
     private const float LnEps = 1e-5f;
 
@@ -26,6 +28,7 @@ internal sealed unsafe class MimiTransformer
         _cfg = cfg; _prefix = prefix;
         _layers = cfg.TransformerLayers; _heads = cfg.TransformerHeads; _dim = cfg.TransformerDim;
         _headDim = _dim / _heads; _ffn = cfg.TransformerFfnDim;
+        _attention = OperatorAttention.Create(_heads, _headDim);
         _n1W = new Tensor?[_layers]; _n1B = new Tensor?[_layers]; _n2W = new Tensor?[_layers]; _n2B = new Tensor?[_layers];
         _qW = new Tensor?[_layers]; _kW = new Tensor?[_layers]; _vW = new Tensor?[_layers]; _oW = new Tensor?[_layers];
         _fc1W = new Tensor?[_layers]; _fc2W = new Tensor?[_layers]; _ls1 = new Tensor?[_layers]; _ls2 = new Tensor?[_layers];
@@ -115,9 +118,7 @@ internal sealed unsafe class MimiTransformer
             ApplyRoPE(qMh, batch, _heads, t, _headDim, _cfg.TransformerRopeTheta, _interleavedRope);
             ApplyRoPE(kMh, batch, _heads, t, _headDim, _cfg.TransformerRopeTheta, _interleavedRope);
 
-            Tensor attn = new(qMh.Shape, DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, 1f / MathF.Sqrt(_headDim));
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask });
 
             Tensor flat = new(new TensorShape(batch, t, _dim), DType.F32);
             float* ap = (float*)attn.DataPointer; float* fp = (float*)flat.DataPointer;
@@ -189,9 +190,7 @@ internal sealed unsafe class MimiTransformer
             kNewMh.Dispose(); vNewMh.Dispose();
             int totalKv = priorLen + t;
 
-            Tensor attn = new(qMh.Shape, DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kAll, vAll, mask, 1f / MathF.Sqrt(_headDim));
-            qMh.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kAll, vAll, new AttentionCallContext { Bias = mask }, OperandOwnership.Query);
             // kAll/vAll are owned by the cache now (it returns its own stored tensors) — do not dispose here.
             _ = totalKv;
 

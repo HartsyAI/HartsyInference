@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;  // Reuse WhisperOps (Linear, MultiHead reshapes)
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Moonshine;
@@ -156,7 +157,13 @@ internal sealed unsafe class MoonshineEncoderLayer
     private Tensor? _postAttnLnW;
     private Tensor? _fc1W, _fc1B, _fc2W, _fc2B;
 
-    public MoonshineEncoderLayer(MoonshineConfig cfg) { _cfg = cfg; }
+    private readonly AttentionLayer _attention;
+
+    public MoonshineEncoderLayer(MoonshineConfig cfg)
+    {
+        _cfg = cfg;
+        _attention = OperatorAttention.Create(cfg.NumHeads, cfg.HeadDim);
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
@@ -199,10 +206,7 @@ internal sealed unsafe class MoonshineEncoderLayer
         RotaryEmbedding.ApplyInPlace(qMh, _cfg.NumHeads, seqLen, _cfg.HeadDim, _cfg.RotaryDim, posStart: 0, cos, sin);
         RotaryEmbedding.ApplyInPlace(kMh, _cfg.NumHeads, seqLen, _cfg.HeadDim, _cfg.RotaryDim, posStart: 0, cos, sin);
 
-        float scale = 1f / MathF.Sqrt(_cfg.HeadDim);
-        Tensor attnOut = new(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, mask: null, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default);
 
         Tensor merged = new(shape, DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(merged, attnOut, 1, seqLen, _cfg.NumHeads, _cfg.HeadDim);

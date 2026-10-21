@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -12,10 +13,17 @@ namespace HartsyInference.Diffusion.Models.Music;
 internal sealed unsafe class AceStep15Attention
 {
     private readonly AceStep15Config _c;
+    private readonly AttentionLayer _attention, _attentionF16;
 
     private Tensor? _qW, _kW, _vW, _oW, _qNorm, _kNorm;
 
-    public AceStep15Attention(AceStep15Config config) => _c = config;
+    public AceStep15Attention(AceStep15Config config)
+    {
+        _c = config;
+        AttentionLayerConfig attention = new() { Heads = config.NumHeads, KvHeads = config.NumHeads, HeadDim = config.HeadDim };
+        _attention = new(attention);
+        _attentionF16 = new(attention with { AllowF16 = true });
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
@@ -100,9 +108,8 @@ internal sealed unsafe class AceStep15Attention
             kMh.Dispose(); vMh.Dispose();
         }
 
-        Tensor attn = new Tensor(new TensorShape(1, heads, s, hd), act);
-        backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, 1f / MathF.Sqrt(hd), allowF16: act == DType.F16);
-        qMh.Dispose(); kRep.Dispose(); vRep.Dispose();
+        Tensor attn = (act == DType.F16 ? _attentionF16 : _attention)
+            .AttendHeadMajorOperands(backend, qMh, kRep, vRep, new AttentionCallContext { Bias = mask });
 
         Tensor attnFlat = new Tensor(new TensorShape(1, s, heads * hd), act);
         backend.Permute0213(attnFlat, attn, heads, s, hd);

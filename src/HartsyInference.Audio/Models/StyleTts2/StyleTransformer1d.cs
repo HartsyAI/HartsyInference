@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.StyleTts2;
@@ -25,7 +26,7 @@ public sealed unsafe class StyleTransformer1d
     private readonly int _innerDim;
     private readonly int _contextFeatures;
     private readonly int _ffDim;
-    private readonly float _attnScale;
+    private readonly AttentionLayer _attention;
     private readonly StyleTransformerLayer[] _layers;
 
     // Timestep MLP: sinusoidal(t) → Linear → SiLU → Linear (channels-wide time features).
@@ -55,7 +56,7 @@ public sealed unsafe class StyleTransformer1d
         _innerDim = numHeads * headFeatures;
         _contextFeatures = contextFeatures;
         _ffDim = channels * multiplier;
-        _attnScale = 1f / MathF.Sqrt(headFeatures);
+        _attention = OperatorAttention.Create(numHeads, headFeatures);
         _layers = layers ?? throw new ArgumentNullException(nameof(layers));
         _timeW1 = timeW1; _timeB1 = timeB1; _timeW2 = timeW2; _timeB2 = timeB2;
         _inW = inW; _inB = inB; _outW = outW; _outB = outB;
@@ -201,9 +202,7 @@ public sealed unsafe class StyleTransformer1d
         WhisperOps.ReshapeToMultiHead4D(k4, k, 1, seqKv, _numHeads, _headFeatures);
         WhisperOps.ReshapeToMultiHead4D(v4, v, 1, seqKv, _numHeads, _headFeatures);
 
-        Tensor attn4 = new(new TensorShape(1, _numHeads, seqQ, _headFeatures), DType.F32);
-        backend.ScaledDotProductAttention(attn4, q4, k4, v4, null, _attnScale);
-        q4.Dispose(); k4.Dispose(); v4.Dispose();
+        Tensor attn4 = _attention.AttendHeadMajorOperands(backend, q4, k4, v4, default);
 
         Tensor ctx = new(new TensorShape(1, seqQ, _innerDim), DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(ctx, attn4, 1, seqQ, _numHeads, _headFeatures);

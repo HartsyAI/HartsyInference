@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ControlFoley;
@@ -183,8 +184,7 @@ public sealed unsafe class ControlFoleyVaeDecoder : IDisposable
                 for (int ci = 0; ci < c; ci++) dst[(long)ti * c + ci] = yp[(long)(3 * ci + j) * t + ti] * inv;
             }
         }
-        using Tensor attended = new(new TensorShape(1, 1, t, c), DType.F32);
-        backend.ScaledDotProductAttention(attended, q, k, v, null, invSqrtC);
+        using Tensor attended = OperatorAttention.Create(1, c).AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
         using Tensor channelsFirst = new(new TensorShape(1, c, t), DType.F32);
         backend.Transpose2D(channelsFirst, attended, t, c);
         Tensor h = Convolve(backend, channelsFirst, block.ProjOut);

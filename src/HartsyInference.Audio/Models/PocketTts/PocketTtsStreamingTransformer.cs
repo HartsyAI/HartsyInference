@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.PocketTts;
@@ -16,6 +17,7 @@ internal sealed unsafe class PocketTtsStreamingTransformer
     private readonly int? _context;
     private readonly bool _layerScale;
     private readonly float _maxPeriod;
+    private readonly AttentionLayer _attention;
     private const float LnEps = 1e-5f;
 
     private readonly Tensor?[] _n1W, _n1B, _n2W, _n2B, _inProjW, _outProjW, _lin1W, _lin2W, _ls1, _ls2;
@@ -25,6 +27,7 @@ internal sealed unsafe class PocketTtsStreamingTransformer
     {
         _p = prefix; _dim = dim; _heads = heads; _headDim = dim / heads; _layers = layers; _ffn = ffn;
         _context = context; _layerScale = layerScale; _maxPeriod = maxPeriod;
+        _attention = OperatorAttention.Create(heads, _headDim);
         _n1W = new Tensor?[layers]; _n1B = new Tensor?[layers]; _n2W = new Tensor?[layers]; _n2B = new Tensor?[layers];
         _inProjW = new Tensor?[layers]; _outProjW = new Tensor?[layers]; _lin1W = new Tensor?[layers]; _lin2W = new Tensor?[layers];
         _ls1 = new Tensor?[layers]; _ls2 = new Tensor?[layers];
@@ -73,9 +76,7 @@ internal sealed unsafe class PocketTtsStreamingTransformer
             qkv.Dispose();
             Rope(q, batch, t); Rope(k, batch, t);
 
-            Tensor attn = new(q.Shape, DType.F32);
-            backend.ScaledDotProductAttention(attn, q, k, v, mask, 1f / MathF.Sqrt(_headDim));
-            q.Dispose(); k.Dispose(); v.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, new AttentionCallContext { Bias = mask });
             Tensor flat = new(new TensorShape(batch, t, _dim), DType.F32);
             Merge(attn, flat, batch, t);
             attn.Dispose();
@@ -130,9 +131,7 @@ internal sealed unsafe class PocketTtsStreamingTransformer
             Tensor vFull = ConcatSeq(prefixV[i], v, prefixLen, t);
             k.Dispose(); v.Dispose();
 
-            Tensor attn = new(q.Shape, DType.F32);
-            backend.ScaledDotProductAttention(attn, q, kFull, vFull, mask, 1f / MathF.Sqrt(_headDim));
-            q.Dispose(); kFull.Dispose(); vFull.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, q, kFull, vFull, new AttentionCallContext { Bias = mask });
             Tensor flat = new(new TensorShape(batch, t, _dim), DType.F32);
             Merge(attn, flat, batch, t);
             attn.Dispose();

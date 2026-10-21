@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
@@ -154,6 +155,7 @@ internal sealed unsafe class S3Block
 {
     private const int NState = 1280, NHead = 20, HeadDim = 64, FsmnKernel = 31;
 
+    private readonly AttentionLayer _attention = OperatorAttention.Create(NHead, HeadDim);
     private Tensor? _attnLnW, _attnLnB, _qW, _qB, _kW, _vW, _vB, _oW, _oB, _fsmnW;
     private Tensor? _mlpLnW, _mlpLnB, _mlp0W, _mlp0B, _mlp2W, _mlp2B;
 
@@ -194,9 +196,7 @@ internal sealed unsafe class S3Block
         RopeHalf(qH, t, cos, sin);
         RopeHalf(kH, t, cos, sin);
 
-        Tensor attn = new(new TensorShape(1, NHead, t, HeadDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qH, kH, vH, null, 1f / MathF.Sqrt(HeadDim));
-        qH.Dispose(); kH.Dispose(); vH.Dispose();
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, qH, kH, vH, default);
 
         Tensor wv = new(new TensorShape(1, t, NState), DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(wv, attn, 1, t, NHead, HeadDim);

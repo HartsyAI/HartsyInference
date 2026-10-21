@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -199,12 +200,17 @@ public sealed unsafe class StableAudioDit : IDisposable
     private sealed class Block
     {
         private readonly StableAudioDitConfig _c;
+        private readonly AttentionLayer _attention;
         private Tensor? _preNormW, _preNormB, _crossNormW, _crossNormB, _ffNormW, _ffNormB;
         private Tensor? _selfQkvW, _selfQNormW, _selfQNormB, _selfKNormW, _selfKNormB, _selfOutW;
         private Tensor? _crossQW, _crossKvW, _crossQNormW, _crossQNormB, _crossKNormW, _crossKNormB, _crossOutW;
         private Tensor? _ff0W, _ff0B, _ff2W, _ff2B;
 
-        public Block(StableAudioDitConfig c) => _c = c;
+        public Block(StableAudioDitConfig c)
+        {
+            _c = c;
+            _attention = new(new AttentionLayerConfig { Heads = c.NumHeads, KvHeads = c.NumHeads, HeadDim = c.HeadDim });
+        }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
@@ -292,9 +298,7 @@ public sealed unsafe class StableAudioDit : IDisposable
             backend.Permute0213(v, vFlat, rows, heads, hd);
             vFlat.Dispose();
 
-            Tensor attn = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, q, k, v, null, 1f / MathF.Sqrt(hd));
-            q.Dispose(); k.Dispose(); v.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
 
             Tensor merged = new Tensor(new TensorShape(1, rows, dim), DType.F32);
             backend.Permute0213(merged, attn, heads, rows, hd);
@@ -341,9 +345,7 @@ public sealed unsafe class StableAudioDit : IDisposable
                 kHeads.Dispose(); vHeads.Dispose();
             }
 
-            Tensor attn = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, q, kRep, vRep, null, 1f / MathF.Sqrt(hd));
-            q.Dispose(); kRep.Dispose(); vRep.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, q, kRep, vRep, default);
 
             Tensor merged = new Tensor(new TensorShape(1, rows, dim), DType.F32);
             backend.Permute0213(merged, attn, heads, rows, hd);

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ControlFoley;
@@ -92,8 +93,8 @@ internal static unsafe class ControlFoleyVitOps
         using Tensor qkv = ControlFoleyOps.Linear(backend, x, qkvW, qkvB);
         (Tensor q, Tensor k, Tensor v) = SplitQkv(qkv, heads);
         using Tensor qd = q, kd = k, vd = v;
-        using Tensor ctx = new(q.Shape, DType.F32);
-        backend.ScaledDotProductAttention(ctx, q, k, v, null, 1f / MathF.Sqrt((float)q.Shape[3]));
+        using Tensor ctx = OperatorAttention.Create(heads, (int)q.Shape[3])
+            .AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
         using Tensor merged = MergeHeads(ctx);
         return ControlFoleyOps.Linear(backend, merged, projW, projB);
     }
