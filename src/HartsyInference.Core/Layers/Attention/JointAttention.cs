@@ -43,8 +43,15 @@ public sealed record JointAttentionConfig
 /// <summary>The per-call inputs of a joint attention. Every member is borrowed for the call.</summary>
 public readonly record struct JointCallContext
 {
-    /// <summary>The joint call's rotation, bias and probe, over the joint rows.</summary>
+    /// <summary>The joint call's rotation, bias, probe and K/V hooks, over the joint rows.</summary>
     public AttentionCallContext Joint { get; init; }
+
+    /// <summary>The one stream whose Q and K rotate alone, after the norms and before the concatenation (a model that rotates
+    /// its image rows only); null for none.</summary>
+    public int? RotatedStream { get; init; }
+
+    /// <summary>The rotation of <see cref="RotatedStream"/>: its tables or model rotation.</summary>
+    public AttentionCallContext StreamRotation { get; init; }
 
     /// <summary>Each stream input is disposed once its projections have read it.</summary>
     public bool ReleaseInputs { get; init; }
@@ -125,6 +132,11 @@ public sealed class JointAttention
             if (_config.StageOrder == JointStageOrder.ProjectAllThenNorm)
                 for (int i = 0; i < n; i++)
                     _streams[i].NormalizeQk(backend, ref q[i], ref k[i]);
+            if (context.RotatedStream is { } rotated)
+            {
+                AttentionCallContext rotation = context.StreamRotation;
+                _streams[rotated].RotateQk(backend, q[rotated], k[rotated], in rotation);
+            }
 
             int total = 0;
             for (int i = 0; i < n; i++) total += rows[i];

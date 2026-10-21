@@ -48,6 +48,22 @@ public interface IHeadMajorQkRotation
     void RotateHeadMajor(IBackend backend, Tensor q, Tensor k, int batch, int heads, int kvHeads, int tokens);
 }
 
+/// <summary>Replaces the rotated K and V before the head permute (a context-parallel exchange, a cached prefix, appended
+/// references).</summary>
+public interface IKvRewrite
+{
+    /// <summary>The K and V to attend over, <c>[B, Skv', kvHeads·D]</c> or <c>[B, Skv', kvHeads, D]</c> of any length; it takes
+    /// over <paramref name="k"/> and <paramref name="v"/>.</summary>
+    (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v);
+}
+
+/// <summary>Receives the rotated K and V a call attends over; the receiver owns them once the call returns.</summary>
+public interface IKvCapture
+{
+    /// <summary>Takes <paramref name="k"/> and <paramref name="v"/>; the layer reads but no longer disposes them.</summary>
+    void Capture(Tensor k, Tensor v);
+}
+
 /// <summary>Reads named intermediates of a call for diagnostics. It must not keep or modify them, and is never set on a
 /// captured path.</summary>
 public interface IAttentionProbe
@@ -80,6 +96,12 @@ public readonly record struct AttentionCallContext
 
     /// <summary>Diagnostics; null in production.</summary>
     public IAttentionProbe? Probe { get; init; }
+
+    /// <summary>Replaces the rotated K and V before the head permute.</summary>
+    public IKvRewrite? KvRewrite { get; init; }
+
+    /// <summary>Keeps the rotated K and V (after any rewrite) for the caller.</summary>
+    public IKvCapture? KvCapture { get; init; }
 
     /// <summary>The layer disposes the query input, and a distinct key/value input, once the projections have read them; a
     /// failure after that point leaves nothing for the caller to dispose.</summary>

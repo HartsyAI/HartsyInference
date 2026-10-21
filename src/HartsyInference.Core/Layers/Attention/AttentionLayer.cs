@@ -250,6 +250,8 @@ public sealed class AttentionLayer
         }
         if (fullWidth && (context.Rotation is not null || context.HeadMajorRotation is not null))
             throw new NotSupportedException("The full-width QK norm rotates through its tables; a rotation adapter cannot run with it.");
+        if (fullWidth && (context.KvRewrite is not null || context.KvCapture is not null))
+            throw new NotSupportedException("The full-width QK norm attends its own K and V; a rewrite or capture cannot run with it.");
         if ((context.QueryRotation.Kind == QkRotationKind.RotateHalfPaired || context.KeyRotation.Kind == QkRotationKind.RotateHalfPaired)
             && (context.QueryRotation.Kind != context.KeyRotation.Kind || context.QueryRotation.Cos is null || context.QueryRotation.Sin is null
                 || !ReferenceEquals(context.QueryRotation.Cos, context.KeyRotation.Cos)
@@ -279,6 +281,32 @@ public sealed class AttentionLayer
                 normProbe.Observe("kNormed", k);
             }
         }
+        RotateQk(backend, q, k, in context);
+        if (context.KvRewrite is { } rewrite)
+        {
+            try
+            {
+                (k, v) = rewrite.Rewrite(backend, k, v);
+            }
+            catch
+            {
+                q.Dispose();
+                k.Dispose();
+                v.Dispose();
+                throw;
+            }
+            skv = (int)k.Shape[1];
+        }
+        bool ownsKv = context.KvCapture is null;
+        context.KvCapture?.Capture(k, v);
+        return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, flatShape, ownsKv, in context)
+            : AttendHeadMajor(backend, q, k, v, batch, sq, skv, act, flatShape, ownsKv, in context);
+    }
+
+    /// <summary>The rotation stage alone: the context's model rotation, paired table or per-tensor tables, in place on
+    /// token-major Q and K.</summary>
+    public void RotateQk(IBackend backend, Tensor q, Tensor k, in AttentionCallContext context)
+    {
         if (context.Rotation is { } rotation)
         {
             rotation.RotateTokenMajor(backend, q, k, _config.Heads, _config.KvHeads);
@@ -292,8 +320,6 @@ public sealed class AttentionLayer
             RotateWithTables(backend, q, context.QueryRotation, _config.Heads);
             RotateWithTables(backend, k, context.KeyRotation, _config.KvHeads);
         }
-        return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, flatShape, in context)
-            : AttendHeadMajor(backend, q, k, v, batch, sq, skv, act, flatShape, in context);
     }
 
     /// <summary>The token-major entry runs for one batch item when the config names one, its switch is on, no host rotation
@@ -329,7 +355,7 @@ public sealed class AttentionLayer
         }
     }
 
-    private Tensor AttendTokenMajor(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape flatShape,
+    private Tensor AttendTokenMajor(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape flatShape, bool ownsKv,
         in AttentionCallContext context)
     {
         Tensor flat = new(flatShape, act);
@@ -337,13 +363,16 @@ public sealed class AttentionLayer
             _config.HeadDim, _config.EffectiveScale, _config.AllowF16) with { Route = _config.TokenMajorRoute };
         backend.Attention(in call);
         q.Dispose();
-        k.Dispose();
-        v.Dispose();
+        if (ownsKv)
+        {
+            k.Dispose();
+            v.Dispose();
+        }
         return flat;
     }
 
     private Tensor AttendHeadMajor(IBackend backend, Tensor q, Tensor k, Tensor v, int batch, int sq, int skv, DType act,
-        TensorShape flatShape, in AttentionCallContext context)
+        TensorShape flatShape, bool ownsKv, in AttentionCallContext context)
     {
         int heads = _config.Heads, kvHeads = _config.KvHeads, d = _config.HeadDim;
         Tensor qMh = new(new TensorShape(batch, heads, sq, d), q.DType);
@@ -351,10 +380,10 @@ public sealed class AttentionLayer
         q.Dispose();
         Tensor kMh = new(new TensorShape(batch, kvHeads, skv, d), k.DType);
         backend.Permute0213(kMh, k, skv, kvHeads, d);
-        k.Dispose();
+        if (ownsKv) k.Dispose();
         Tensor vMh = new(new TensorShape(batch, kvHeads, skv, d), v.DType);
         backend.Permute0213(vMh, v, skv, kvHeads, d);
-        v.Dispose();
+        if (ownsKv) v.Dispose();
         context.HeadMajorRotation?.RotateHeadMajor(backend, qMh, kMh, batch, heads, kvHeads, sq);
         if (kvHeads != heads)
         {
@@ -402,7 +431,7 @@ public sealed class AttentionLayer
             Tensor kTm = NormRotateTokenMajor(backend, k, kNorm, context.KeyRotation, skv, act);
             Tensor vTm = v.DType == act ? v : Widen(backend, v, act);
             if (!ReferenceEquals(vTm, v)) v.Dispose();
-            return AttendTokenMajor(backend, qTm, kTm, vTm, act, flatShape, in context);
+            return AttendTokenMajor(backend, qTm, kTm, vTm, act, flatShape, ownsKv: true, in context);
         }
         Tensor qMh = NormRotateHeadMajor(backend, q, qNorm, context.QueryRotation, sq, act);
         Tensor kMh = NormRotateHeadMajor(backend, k, kNorm, context.KeyRotation, skv, act);
