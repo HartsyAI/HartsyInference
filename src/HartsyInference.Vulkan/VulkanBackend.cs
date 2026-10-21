@@ -3816,6 +3816,35 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>LTX-2's split rotary on the device; the interface default is a host loop over <c>x.DataPointer</c>, which
+    /// round-trips Q and K through host memory on every attention call.</summary>
+    public void Ltx2SplitRope(Tensor x, Tensor cos, Tensor sin, int seqLen, int numHeads, int headDim)
+    {
+        using OpScope _op = EnterOp();
+        if ((x.DType != DType.F32 && x.DType != DType.F16) || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException($"Ltx2SplitRope takes F32 or F16 x with F32 tables; got {x.DType}, {cos.DType}, {sin.DType}.");
+        VulkanBuffer xBuf = GetBuffer(x);
+        VulkanBuffer cosBuf = GetBuffer(cos);
+        VulkanBuffer sinBuf = GetBuffer(sin);
+        try
+        {
+            VulkanKernel kernel = GetKernel("ltx2_split_rope" + DtypeSuffix(x.DType), 3,
+                [SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)]);
+            Span<byte> pc = stackalloc byte[3 * 4];
+            BinaryWriteUInt(pc, 0, (uint)seqLen);
+            BinaryWriteUInt(pc, 4, (uint)numHeads);
+            BinaryWriteUInt(pc, 8, (uint)headDim);
+            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosBuf.Handle, sinBuf.Handle };
+            Dispatch(kernel, bufs, pc, GroupCount((long)seqLen * numHeads * (headDim / 2), LocalX1D));
+            CacheOutput(x, xBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan Ltx2SplitRope dispatch failed", ex);
+            throw;
+        }
+    }
+
     // Real GPU dispatch, NOT the IBackend CPU-loop default: the default throws on non-F32 (Krea2's
     // GQA K/V is F16), and even for F32 it would force a D2H/H2D round trip on a GPU-resident tensor.
     public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)

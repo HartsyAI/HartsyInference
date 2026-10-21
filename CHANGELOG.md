@@ -36,6 +36,9 @@ stable release will require. Dates are UTC.
   masks on calls that permit F16 leave the materialized path. The scale is no longer part of a plan: one plan serves every scale and the
   per-plan device scalar is gone. cuDNN failures are remembered per capability signature (dtype, grouped, mask kind, bias axes,
   head dim), so a refused bf16 or grouped plan cannot switch off the fp16 path at the same head dim.
+- **LTX-2 rotary runs on the GPU under Vulkan.** `Ltx2SplitRope` had no Vulkan kernel, so every LTX-2 attention
+  call copied Q and K to the host, rotated them there and uploaded them again. The new kernel keeps each product unfused,
+  so its output is bit-identical to the host loop.
 
 ## alpha.384
 
