@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
@@ -17,6 +18,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     private const string FunControlWeightPrefix = "__fun_control.";
 
     private readonly MiniMaxH3Config _config;
+    private readonly AttentionLayer _attention;
     private readonly Dictionary<string, Tensor> _weights = new Dictionary<string, Tensor>();
     private readonly List<MiniMaxH3FunControlNet> _funControlNets = new List<MiniMaxH3FunControlNet>();
     private bool _disposed;
@@ -29,7 +31,19 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         _ => 0,
     };
 
-    public MiniMaxH3Transformer(MiniMaxH3Config config) => _config = config;
+    public MiniMaxH3Transformer(MiniMaxH3Config config)
+    {
+        _config = config;
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = config.NumAttentionHeads,
+            KvHeads = config.NumAttentionHeads,
+            HeadDim = config.AttentionHeadDim,
+            ComputeDType = DType.F32,
+        });
+    }
+
+    internal AttentionLayer AttentionStage => _attention;
 
     public MiniMaxH3Config Config => _config;
 
@@ -746,11 +760,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             }
 
             ProbeV(v, prefix);
-            Tensor attn = new Tensor(headed, DType.F32);
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
             try
             {
-                backend.ScaledDotProductAttention(attn, q, k, v, null, 1f / MathF.Sqrt(hd));
-
                 Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
                 backend.Permute0213(merged, attn, heads, seq, hd);
                 // Body dtype, not x's: x may be the fp8 form emitted by the fused modulate, and out_proj's

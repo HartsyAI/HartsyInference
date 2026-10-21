@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
@@ -197,29 +198,9 @@ internal sealed class TransformerSubBlock
     private Tensor? _toOutWeight;
     private Tensor? _toOutBias;
 
-    // Cross-attention K/V cache: the projections of the text conditioning are step-invariant (the
-    // context tensor is fixed across the denoise loop), so the k/v Linears + head-split permutes run
-    // once per generation instead of once per step (~140 GEMMs + 140 permutes/step on SDXL). Keyed on
-    // (backend, context) reference pairs across TWO slots — CFG-branch parallelism (SDXL CFG-parallel)
-    // calls this Forward concurrently from two threads against two different backends and two different
-    // (fixed, step-invariant) context tensors; a single unkeyed slot would race (torn metadata, or one
-    // thread's eviction Dispose freeing a tensor the other thread is mid-SDPA against — this instance is
-    // SHARED across both threads, only the backend argument differs per call). The lock below guards only
-    // the slot lookup/install, never the GPU compute (Linear/Permute0213), so the two branches' actual work
-    // still overlaps. The fused single-GPU loop only ever touches slot 0 (one backend, cache hits every
-    // step after the first). Per-step slicing callers (legacy CFG loop) build a fresh context tensor every
-    // call, so they never hit either slot and behave exactly as before.
-    private readonly object _kvCacheLock = new object();
-    private KvCacheSlot _kvSlot0;
-    private KvCacheSlot _kvSlot1;
-
-    private struct KvCacheSlot
-    {
-        public IBackend? Backend;
-        public Tensor? Context;
-        public Tensor? KeyMh;
-        public Tensor? ValueMh;
-    }
+    private readonly ConstantKvCache _kvCache = new();
+    private readonly AttentionLayerConfig _attentionConfig;
+    private AttentionLayer? _attention;
 
     public TransformerSubBlock(int channels, int numHeads, int contextDim)
     {
@@ -227,6 +208,7 @@ internal sealed class TransformerSubBlock
         _numHeads = numHeads;
         _headDim = channels / numHeads;
         _contextDim = contextDim;
+        _attentionConfig = new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = _headDim, AllowF16 = true };
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string attnPrefix, string normPrefix)
@@ -243,6 +225,12 @@ internal sealed class TransformerSubBlock
         weights.TryGetValue($"{attnPrefix}.to_q.bias", out _toQBias);
         weights.TryGetValue($"{attnPrefix}.to_k.bias", out _toKBias);
         weights.TryGetValue($"{attnPrefix}.to_v.bias", out _toVBias);
+
+        _attention = new AttentionLayer(_attentionConfig, new AttentionLayerWeights
+        {
+            Query = _toQWeight, QueryBias = _toQBias, Key = _toKWeight, KeyBias = _toKBias, Value = _toVWeight, ValueBias = _toVBias,
+            Output = _toOutWeight, OutputBias = _toOutBias,
+        });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -271,7 +259,6 @@ internal sealed class TransformerSubBlock
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
-        int ctxLen = (int)context.Shape[1];
 
         DType dtype = hidden.DType;
         bool hasIpa = ipaImageTokens is not null && toKIp is not null && toVIp is not null && ipaScale != 0f;
@@ -280,162 +267,69 @@ internal sealed class TransformerSubBlock
         Tensor normed = new Tensor(hidShape, dtype);
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
 
-        // Q from normed hidden; K/V from normed hidden (self-attn) or raw context (cross-attn)
-        bool isSelfAttn = ReferenceEquals(hidden, context);
-        Tensor kvSource = isSelfAttn ? normed : context;
-        int kvSeqLen = isSelfAttn ? seqLen : ctxLen;
-
-        Tensor query = new Tensor(hidShape, dtype);
-        backend.Linear(query, normed, _toQWeight!, _toQBias);
-
-        // Multi-head split shapes. Permute0213 takes the (seq, heads, headDim) split explicitly and
-        // reads the buffer flat, so the projections are passed directly — Reshape views would each
-        // force a GPU→host sync + re-upload of a multi-MB activation (see CrossAttentionBlock.Forward).
-        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-        TensorShape kvMhShape = new TensorShape(batch, _numHeads, kvSeqLen, _headDim);
-
-        // Cross-attention K/V: step-invariant per generation (see cache fields above) — reuse when the
-        // same (backend, context) pair comes back; the cache owns the reused tensors' lifetime.
-        bool kvFromCache = false;
-        Tensor keyMh = null!, valueMh = null!;
-        if (!isSelfAttn)
+        AttentionLayer attention = _attention!;
+        Tensor projected;
+        if (ReferenceEquals(hidden, context))
         {
-            lock (_kvCacheLock)
+            projected = attention.Forward(backend, normed, normed, new AttentionCallContext { ReleaseInputs = true });
+        }
+        else
+        {
+            TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+            Tensor queryMh = attention.ProjectQueryHeadMajor(backend, normed, releaseInput: true, default);
+            Tensor attnOut = attention.AttendBranchHeadMajor(backend, queryMh, context, new AttentionCallContext { CachedKv = _kvCache });
+
+            // SDPA — image branch (IP-Adapter). Reuses queryMh; produces attention against
+            // image-prompt tokens projected through to_k_ip / to_v_ip. Result is added on top of
+            // the text attention before to_out, scaled by ipaScale (the user's "IP-Adapter strength").
+            if (hasIpa)
             {
-                if (ReferenceEquals(_kvSlot0.Backend, backend) && ReferenceEquals(_kvSlot0.Context, context) && _kvSlot0.KeyMh is not null)
+                // Fail fast on a K_ip/V_ip row-count mismatch: a wrong-layer weight (e.g. a
+                // misordered checkpoint list) would otherwise under-fill or overrun the GEMM
+                // output buffer — silent NaN / memory corruption instead of an error.
+                if ((int)toKIp!.Shape[0] != _channels || (int)toVIp!.Shape[0] != _channels)
                 {
-                    keyMh = _kvSlot0.KeyMh; valueMh = _kvSlot0.ValueMh!; kvFromCache = true;
+                    throw new HartsyInferenceException(
+                        $"IP-Adapter K_ip/V_ip weight rows ({toKIp!.Shape[0]}/{toVIp!.Shape[0]}) don't match this cross-attention layer's inner dim ({_channels}). " +
+                        "The per-layer K/V list is misordered or from a different UNet config (expected diffusers attn_processors order: down → up → mid).");
                 }
-                else if (ReferenceEquals(_kvSlot1.Backend, backend) && ReferenceEquals(_kvSlot1.Context, context) && _kvSlot1.KeyMh is not null)
-                {
-                    keyMh = _kvSlot1.KeyMh; valueMh = _kvSlot1.ValueMh!; kvFromCache = true;
-                }
+                int imgSeqLen = (int)ipaImageTokens!.Shape[1];
+                // Project to_k_ip and to_v_ip — shape [_channels, contextDim], no bias.
+                Tensor ipKeyFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
+                backend.Linear(ipKeyFlat, ipaImageTokens, toKIp!, null);
+                Tensor ipValueFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
+                backend.Linear(ipValueFlat, ipaImageTokens, toVIp!, null);
+
+                // Multi-head split: [B, imgSeqLen, H*D] → [B, H, imgSeqLen, D] (direct, no Reshape views)
+                TensorShape ipMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
+                Tensor ipKeyMh = new Tensor(ipMhShape, dtype);
+                backend.Permute0213(ipKeyMh, ipKeyFlat, imgSeqLen, _numHeads, _headDim);
+                ipKeyFlat.Dispose();
+
+                Tensor ipValueMh = new Tensor(ipMhShape, dtype);
+                backend.Permute0213(ipValueMh, ipValueFlat, imgSeqLen, _numHeads, _headDim);
+                ipValueFlat.Dispose();
+
+                // Image attention against the same Q
+                Tensor imgAttnOut = attention.AttendHeadMajorOperands(backend, queryMh, ipKeyMh, ipValueMh, default,
+                    OperandOwnership.Key | OperandOwnership.Value);
+
+                // attnOut = attnOut + ipaScale * imgAttnOut, entirely on-device (a host
+                // DataPointer accumulate here would drain the stream twice per layer per branch
+                // and re-upload the attention output — the classic mid-forward host-glue trap).
+                Tensor imgScaled = new Tensor(qMhShape, dtype);
+                backend.Scale(imgScaled, imgAttnOut, ipaScale);
+                imgAttnOut.Dispose();
+                Tensor combined = new Tensor(qMhShape, dtype);
+                backend.Add(combined, attnOut, imgScaled);
+                imgScaled.Dispose();
+                attnOut.Dispose();
+                attnOut = combined;
             }
+            queryMh.Dispose();
+
+            projected = attention.ProjectOutput(backend, attention.MergeHeads(backend, attnOut, hidShape));
         }
-        if (!kvFromCache)
-        {
-            TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
-            Tensor key = new Tensor(kvOutShape, dtype);
-            backend.Linear(key, kvSource, _toKWeight!, _toKBias);
-            Tensor value = new Tensor(kvOutShape, dtype);
-            backend.Linear(value, kvSource, _toVWeight!, _toVBias);
-
-            keyMh = new Tensor(kvMhShape, dtype);
-            backend.Permute0213(keyMh, key, kvSeqLen, _numHeads, _headDim);
-            key.Dispose();
-            valueMh = new Tensor(kvMhShape, dtype);
-            backend.Permute0213(valueMh, value, kvSeqLen, _numHeads, _headDim);
-            value.Dispose();
-
-            if (!isSelfAttn)
-            {
-                lock (_kvCacheLock)
-                {
-                    // Reuse this backend's own slot when it has one; otherwise claim an empty slot; otherwise
-                    // (a third backend, unsupported today) evict slot 0. Each backend only ever installs into
-                    // its own slot across calls, so the two CFG-parallel threads never contend for the same
-                    // slot's tensors once both have run once.
-                    bool useSlot0 = ReferenceEquals(_kvSlot0.Backend, backend) || _kvSlot0.Backend is null
-                        || (!ReferenceEquals(_kvSlot1.Backend, backend) && _kvSlot1.Backend is not null);
-                    if (useSlot0)
-                    {
-                        _kvSlot0.KeyMh?.Dispose();
-                        _kvSlot0.ValueMh?.Dispose();
-                        _kvSlot0.Backend = backend;
-                        _kvSlot0.Context = context;
-                        _kvSlot0.KeyMh = keyMh;
-                        _kvSlot0.ValueMh = valueMh;
-                    }
-                    else
-                    {
-                        _kvSlot1.KeyMh?.Dispose();
-                        _kvSlot1.ValueMh?.Dispose();
-                        _kvSlot1.Backend = backend;
-                        _kvSlot1.Context = context;
-                        _kvSlot1.KeyMh = keyMh;
-                        _kvSlot1.ValueMh = valueMh;
-                    }
-                }
-                kvFromCache = true;
-            }
-        }
-        normed.Dispose();
-
-        Tensor queryMh = new Tensor(qMhShape, dtype);
-        backend.Permute0213(queryMh, query, seqLen, _numHeads, _headDim);
-        query.Dispose();
-
-        // SDPA — text branch. allowF16: SDXL/SD1.5 attention is universally run in fp16 by the reference
-        // engines (the checkpoints themselves ship F16); when this UNet loads F32 the flag lets the
-        // cuDNN fused path engage via the F32↔F16 cast route instead of materializing [H,Sq,Skv] scores.
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(qMhShape, dtype);
-        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale, allowF16: true);
-        if (!kvFromCache)
-        {
-            keyMh.Dispose();
-            valueMh.Dispose();
-        }
-
-        // SDPA — image branch (IP-Adapter). Reuses queryMh; produces attention against
-        // image-prompt tokens projected through to_k_ip / to_v_ip. Result is added on top of
-        // the text attention before to_out, scaled by ipaScale (the user's "IP-Adapter strength").
-        if (hasIpa)
-        {
-            // Fail fast on a K_ip/V_ip row-count mismatch: a wrong-layer weight (e.g. a
-            // misordered checkpoint list) would otherwise under-fill or overrun the GEMM
-            // output buffer — silent NaN / memory corruption instead of an error.
-            if ((int)toKIp!.Shape[0] != _channels || (int)toVIp!.Shape[0] != _channels)
-            {
-                throw new HartsyInferenceException(
-                    $"IP-Adapter K_ip/V_ip weight rows ({toKIp!.Shape[0]}/{toVIp!.Shape[0]}) don't match this cross-attention layer's inner dim ({_channels}). " +
-                    "The per-layer K/V list is misordered or from a different UNet config (expected diffusers attn_processors order: down → up → mid).");
-            }
-            int imgSeqLen = (int)ipaImageTokens!.Shape[1];
-            // Project to_k_ip and to_v_ip — shape [_channels, contextDim], no bias.
-            Tensor ipKeyFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
-            backend.Linear(ipKeyFlat, ipaImageTokens, toKIp!, null);
-            Tensor ipValueFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
-            backend.Linear(ipValueFlat, ipaImageTokens, toVIp!, null);
-
-            // Multi-head split: [B, imgSeqLen, H*D] → [B, H, imgSeqLen, D] (direct, no Reshape views)
-            TensorShape ipMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
-            Tensor ipKeyMh = new Tensor(ipMhShape, dtype);
-            backend.Permute0213(ipKeyMh, ipKeyFlat, imgSeqLen, _numHeads, _headDim);
-            ipKeyFlat.Dispose();
-
-            Tensor ipValueMh = new Tensor(ipMhShape, dtype);
-            backend.Permute0213(ipValueMh, ipValueFlat, imgSeqLen, _numHeads, _headDim);
-            ipValueFlat.Dispose();
-
-            // Image attention against the same Q
-            Tensor imgAttnOut = new Tensor(qMhShape, dtype);
-            backend.ScaledDotProductAttention(imgAttnOut, queryMh, ipKeyMh, ipValueMh, null, scale, allowF16: true);
-            ipKeyMh.Dispose();
-            ipValueMh.Dispose();
-
-            // attnOut = attnOut + ipaScale * imgAttnOut, entirely on-device (a host
-            // DataPointer accumulate here would drain the stream twice per layer per branch
-            // and re-upload the attention output — the classic mid-forward host-glue trap).
-            Tensor imgScaled = new Tensor(qMhShape, dtype);
-            backend.Scale(imgScaled, imgAttnOut, ipaScale);
-            imgAttnOut.Dispose();
-            Tensor combined = new Tensor(qMhShape, dtype);
-            backend.Add(combined, attnOut, imgScaled);
-            imgScaled.Dispose();
-            attnOut.Dispose();
-            attnOut = combined;
-        }
-        queryMh.Dispose();
-
-        // Permute back — allocated as the final [B, seqLen, C] merged shape directly (no Reshape).
-        Tensor merged = new Tensor(hidShape, dtype);
-        backend.Permute0213(merged, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(hidShape, dtype);
-        backend.Linear(projected, merged, _toOutWeight!, _toOutBias);
-        merged.Dispose();
 
         Tensor output = new Tensor(hidShape, dtype);
         backend.Add(output, hidden, projected);

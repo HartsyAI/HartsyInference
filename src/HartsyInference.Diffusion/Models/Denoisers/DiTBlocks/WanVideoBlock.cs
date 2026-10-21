@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
@@ -21,6 +22,11 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     private Tensor? _ffProjW, _ffProjB, _ffOutW, _ffOutB;
     // I2V image cross-attention KV (cross-attn to CLIP image context); present only when the checkpoint ships them.
     private Tensor? _addK, _addKB, _addV, _addVB, _normAddedK;
+    private AttentionLayer? _selfAttention, _crossAttention, _imageAttention;
+
+    internal AttentionLayer? SelfAttentionStage => _selfAttention;
+    internal AttentionLayer? CrossAttentionStage => _crossAttention;
+    internal AttentionLayer? ImageAttentionStage => _imageAttention;
 
     public WanVideoBlock(WanVideoConfig c, bool crossAttnNorm)
     {
@@ -51,6 +57,28 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         long bytes = 0;
         foreach (Tensor t in EnumerateWeights()) bytes += t.DType.ComputeByteCount(t.ElementCount);
         EstimatedWeightBytes = bytes;
+        BuildAttention();
+    }
+
+    private void BuildAttention()
+    {
+        // allowF16: Q and K are RMS-normed, so the scores are bounded.
+        AttentionLayerConfig config = new()
+        {
+            Heads = _heads, KvHeads = _heads, HeadDim = _headDim, QkNorm = AttentionQkNorm.FullWidthRms, ComputeDType = DType.F32,
+            AllowF16 = true,
+        };
+        AttentionLayerWeights Weights(int i) => new()
+        {
+            Query = _q[i], QueryBias = _qB[i], Key = _k[i], KeyBias = _kB[i], Value = _v[i], ValueBias = _vB[i], Output = _o[i],
+            OutputBias = _oB[i], QueryNorm = _nq[i], KeyNorm = _nk[i], QueryNormEps = _eps, KeyNormEps = _eps,
+        };
+        _selfAttention = new AttentionLayer(config, Weights(0));
+        _crossAttention = new AttentionLayer(config, Weights(1));
+        _imageAttention = _addK is null ? null : new AttentionLayer(config, new AttentionLayerWeights
+        {
+            Key = _addK, KeyBias = _addKB, Value = _addV, ValueBias = _addVB, KeyNorm = _normAddedK, KeyNormEps = _eps,
+        });
     }
 
     /// <inheritdoc/>
@@ -89,10 +117,11 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.
     /// <paramref name="animate2"/> replaces self-attention with Wan-Animate-2's frame-local splice against the
     /// driving stream's re-projected K/V; <paramref name="selfAttnKvCapture"/> hands the caller this block's
-    /// self-attention input (the Animate-2 driving prepass, which is otherwise an ordinary block forward).</summary>
+    /// self-attention input (the Animate-2 driving prepass, which is otherwise an ordinary block forward).
+    /// <paramref name="selfAttnKvRewrite"/> trades the local K/V for the full sequence's (context parallel).</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
-        Action<Tensor>? postSelfAttnHook = null, Func<Tensor, Tensor, (Tensor K, Tensor V)>? selfAttnKvExchange = null,
+        Action<Tensor>? postSelfAttnHook = null, IKvRewrite? selfAttnKvRewrite = null,
         WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? selfAttnKvCapture = null)
     {
         int s = (int)hidden.Shape[0];
@@ -102,8 +131,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         // 1. self-attn
         Tensor n1 = ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s), scaleMsa, shiftMsa, s, tokensPerGroup);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
-        Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask, selfAttnKvExchange,
-            animate2, selfAttnKvCapture);
+        Tensor attn1 = SelfAttention(backend, n1, cos, sin, s, selfAttnMask, selfAttnKvRewrite, animate2, selfAttnKvCapture);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
         n1.Dispose();
         Tensor h1 = GatedAdd(backend, hidden, attn1, gateMsa, s, tokensPerGroup);
@@ -140,77 +168,40 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         return outT;
     }
 
-    private Tensor Attention(IBackend backend, Tensor qInput, Tensor kvInput, int idx, bool applyRope,
-        WanRope rope, Tensor cos, Tensor sin, int sq, int sk, Tensor? mask = null,
-        Func<Tensor, Tensor, (Tensor K, Tensor V)>? kvExchange = null,
-        WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? kvCapture = null)
+    private Tensor SelfAttention(IBackend backend, Tensor input, Tensor cos, Tensor sin, int s, Tensor? mask, IKvRewrite? kvRewrite,
+        WanAnimate2SelfAttnContext? animate2, WanAnimate2KvCapture? kvCapture)
     {
-        Tensor q = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(q, qInput, _q[idx]!, _qB[idx]);
-        Tensor k = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(k, kvInput, _k[idx]!, _kB[idx]);
-        Tensor v = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(v, kvInput, _v[idx]!, _vB[idx]);
-
-        Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq[idx]!, _eps); q.Dispose();
-        Tensor kn = new Tensor(k.Shape, DType.F32); backend.RmsNorm(kn, k, _nk[idx]!, _eps); k.Dispose();
-
-        if (kvCapture is not null)   // pre-projection, so the generation stream re-projects and rotates on read
+        // Rank-2 cos is shared across heads; the rank-3 per-head sigma_theta table needs its own kernel.
+        QkRotation rotation = new(cos.Shape.Rank == 2 ? QkRotationKind.InterleavedPairs : QkRotationKind.InterleavedPairsPerHead, cos, sin, s);
+        IQkvTap? tap = kvCapture is null ? null : new Animate2Tap(this, kvCapture, input, s);
+        AttentionCallContext context = new()
         {
-            kvCapture.Input = CloneRows(backend, kvInput, sk);
-            if (kvCapture.CaptureProjected)
+            QueryRotation = rotation, KeyRotation = rotation, Bias = mask, Tap = tap, KvRewrite = kvRewrite,
+        };
+        if (animate2 is null)
+            return _selfAttention!.Forward(backend, input, input, in context);
+
+        (Tensor qn, Tensor kn, Tensor v) = _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
+        _selfAttention.NormalizeQk(backend, ref qn, ref kn);
+        tap?.Observe(backend, qn, kn, v);
+        _selfAttention.RotateQk(backend, qn, kn, in context);
+        Tensor spliced = Animate2FrameLocalAttention(backend, qn, kn, v, s, 0, animate2);
+        qn.Dispose(); kn.Dispose(); v.Dispose();
+        return _selfAttention.ProjectOutput(backend, spliced);
+    }
+
+    /// <summary>Clones the Animate-2 prepass's block input and its post-norm, pre-RoPE K and V, so the generation stream re-projects and rotates on read.</summary>
+    private sealed class Animate2Tap(WanVideoBlock block, WanAnimate2KvCapture capture, Tensor input, int rows) : IQkvTap
+    {
+        public void Observe(IBackend backend, Tensor q, Tensor k, Tensor v)
+        {
+            capture.Input = block.CloneRows(backend, input, rows);
+            if (capture.CaptureProjected)
             {
-                kvCapture.K = CloneRows(backend, kn, sk);
-                kvCapture.V = CloneRows(backend, v, sk);
+                capture.K = block.CloneRows(backend, k, rows);
+                capture.V = block.CloneRows(backend, v, rows);
             }
         }
-
-        if (applyRope)   // per-head; [S,dim] is contiguous as [S,heads,headDim]
-        {
-            // GPU RoPE for the standard shared-cos path (cos rank-2 [S, headDim]) — keeps qn/kn on-device so the
-            // whole attention chain stays GPU-resident. The per-head sigma_theta variant (rank-3 cos) keeps the CPU ref.
-            if (cos.Shape.Rank == 2)
-            {
-                backend.WanRopeInterleaved(qn, cos, sin, sq, _heads, _headDim);
-                backend.WanRopeInterleaved(kn, cos, sin, sk, _heads, _headDim);
-            }
-            else
-            {
-                // Per-head sigma_theta rope (rank-3 cos) — GPU kernel keeps qn/kn device-resident (the host
-                // ApplyRotary loop was the dominant MG3 backbone cost); CPU falls back to the identical default impl.
-                backend.WanRopeInterleavedPerHead(qn, cos, sin, sq, _heads, _headDim);
-                backend.WanRopeInterleavedPerHead(kn, cos, sin, sk, _heads, _headDim);
-            }
-        }
-
-        if (animate2 is not null)
-        {
-            Tensor spliced = Animate2FrameLocalAttention(backend, qn, kn, v, sq, idx, animate2);
-            qn.Dispose(); kn.Dispose(); v.Dispose();
-            Tensor outA2 = new Tensor(new TensorShape(sq, _dim), DType.F32);
-            backend.Linear(outA2, spliced, _o[idx]!, _oB[idx]);
-            spliced.Dispose();
-            return outA2;
-        }
-
-        if (kvExchange is not null)   // context parallel: trade local post-RoPE K/V for the full sequence's
-        {
-            (kn, v) = kvExchange(kn, v);   // consumes the locals; returns [S, dim]
-            sk = (int)kn.Shape[0];
-        }
-
-        Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
-        Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();
-        Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
-        // allowF16: Wan RMS-norms Q and K (qn/kn above), so pre-softmax scores are bounded → F16 attention is safe
-        // and ~halves the (dominant) score-matrix memory traffic. The engine still keeps F32 when a mask is present.
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale, allowF16: true);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();
-        Tensor outT = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(outT, flat, _o[idx]!, _oB[idx]);
-        flat.Dispose();
-        return outT;
     }
 
     /// <summary>Wan-Animate-2 frame-local self-attention: one attention call per generation latent frame, over all
@@ -291,7 +282,6 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         return (kn, v);
     }
 
-    /// <summary>Writes driving frame <paramref name="frame"/>'s <c>hw</c> tokens into the splice buffer's tail rows.</summary>
     /// <summary>ComfyUI Animate-2's <c>v[:, :hw] *= ref_strength</c>: scales the reference-image slot's V rows
     /// <c>[0, hw)</c> in place, leaving every other row untouched; exact no-op at 1.0.</summary>
     internal static void ScaleReferenceRows(IBackend backend, Tensor v, int hw, int dim, float strength)
@@ -303,6 +293,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         backend.ScatterRowsGeneric(v, rows, 0);
     }
 
+    /// <summary>Writes driving frame <paramref name="frame"/>'s <c>hw</c> tokens into the splice buffer's tail rows.</summary>
     private void ScatterDrivingFrame(IBackend backend, Tensor buffer, Tensor source, int frame, int hw, int tailOffset)
     {
         using Tensor rows = new Tensor(new TensorShape(hw, _dim), DType.F32);
@@ -328,19 +319,19 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         int sq = (int)qInput.Shape[0];
         int l = (int)encoder.Shape[0];
         int textLen = l - imageContextLen;
+        TensorShape flatShape = new(sq, _dim);
+        AttentionLayer main = _crossAttention!;
 
-        Tensor q = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(q, qInput, _q[1]!, _qB[1]);
-        Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq[1]!, _eps); q.Dispose();
-        Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
+        Tensor qMh = main.ProjectQueryHeadMajor(backend, qInput, releaseInput: false, default);
 
         Tensor textRows = imageContextLen > 0 ? SliceRows(backend, encoder, imageContextLen, textLen) : encoder;
-        Tensor flat = AttnBranch(backend, qMh, textRows, _k[1]!, _kB[1], _v[1]!, _vB[1], _nk[1]!, sq, textLen);
+        Tensor flat = main.MergeHeads(backend, main.AttendBranchHeadMajor(backend, qMh, textRows, default), flatShape);
         if (imageContextLen > 0) textRows.Dispose();
 
-        if (imageContextLen > 0 && _addK is not null)
+        if (imageContextLen > 0 && _imageAttention is { } image)
         {
             Tensor imgRows = SliceRows(backend, encoder, 0, imageContextLen);
-            Tensor flatImg = AttnBranch(backend, qMh, imgRows, _addK!, _addKB, _addV!, _addVB, _normAddedK!, sq, imageContextLen);
+            Tensor flatImg = image.MergeHeads(backend, image.AttendBranchHeadMajor(backend, qMh, imgRows, default), flatShape);
             imgRows.Dispose();
             // Device add — the old host AddInPlace pointer-loop drained BOTH [sq, dim] branch outputs D2H, summed on
             // the CPU, and re-uploaded on next use: ~0.5 GB of synchronous PCIe round-trips per block per forward
@@ -352,28 +343,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         }
         qMh.Dispose();
 
-        Tensor outT = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(outT, flat, _o[1]!, _oB[1]);
-        flat.Dispose();
-        return outT;
-    }
-
-    /// <summary>One cross-attention KV branch: project + QK-norm the key, SDPA against the shared multi-head query
-    /// <paramref name="qMh"/> <c>[1, heads, sq, headDim]</c>, return the flattened <c>[sq, dim]</c> (pre output-proj).</summary>
-    private Tensor AttnBranch(IBackend backend, Tensor qMh, Tensor kvRows, Tensor kW, Tensor? kB, Tensor vW, Tensor? vB,
-        Tensor kNorm, int sq, int sk)
-    {
-        Tensor k = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(k, kvRows, kW, kB);
-        Tensor v = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(v, kvRows, vW, vB);
-        Tensor kn = new Tensor(k.Shape, DType.F32); backend.RmsNorm(kn, k, kNorm, _eps); k.Dispose();
-        Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();
-        Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
-        // allowF16: cross-attn Q and K are RMS-normed too (qn / kNorm) → bounded scores → F16-safe.
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, scale, allowF16: true);
-        kMh.Dispose(); vMh.Dispose();
-        Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();
-        return flat;
+        return main.ProjectOutput(backend, flat);
     }
 
     /// <summary>Device row slice of the encoder context — a host <c>Buffer.MemoryCopy</c> here produced a FRESH

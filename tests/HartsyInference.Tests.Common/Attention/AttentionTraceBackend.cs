@@ -3,10 +3,10 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Tests.Layers;
+namespace HartsyInference.Tests.Common.Attention;
 
 /// <summary>Records the ops an attention layer issues, in order, without computing anything (no tensor is ever read).</summary>
-internal sealed class AttentionTraceBackend : IBackend
+public sealed class AttentionTraceBackend : IBackend
 {
     /// <summary>Every recorded op, in order.</summary>
     public List<string> Ops { get; } = new();
@@ -43,6 +43,9 @@ internal sealed class AttentionTraceBackend : IBackend
 
     public void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim) =>
         Ops.Add($"WanRopeInterleaved heads={heads} d={headDim} seq={seqLen}");
+
+    public void WanRopeInterleavedPerHead(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim) =>
+        Ops.Add($"WanRopeInterleavedPerHead heads={heads} d={headDim} seq={seqLen}");
 
     public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0) => Ops.Add("ApplyRopeSingle");
 

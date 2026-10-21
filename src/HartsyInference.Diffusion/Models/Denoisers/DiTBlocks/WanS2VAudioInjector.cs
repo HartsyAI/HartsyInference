@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -20,6 +21,9 @@ public sealed unsafe class WanS2VAudioInjector
     private readonly int _dim, _heads, _headDim;
     private readonly float _eps;
     private readonly Inj[] _inj;
+    private readonly AttentionLayer _attention;
+
+    internal AttentionLayer AttentionStage => _attention;
 
     private sealed class Inj
     {
@@ -33,6 +37,10 @@ public sealed unsafe class WanS2VAudioInjector
         _heads = heads;
         _headDim = headDim;
         _eps = eps;
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = heads, KvHeads = heads, HeadDim = headDim, ComputeDType = DType.F32,
+        });
         _inj = new Inj[count];
         for (int i = 0; i < count; i++) _inj[i] = new Inj();
     }
@@ -116,22 +124,13 @@ public sealed unsafe class WanS2VAudioInjector
 
         // Per-frame attention: frame ti's n video tokens attend only to its nTok audio tokens. All slicing stays
         // on-device; per-frame outputs are concatenated once at the end.
-        float scale = 1f / MathF.Sqrt(_headDim);
         Tensor[] frameOuts = new Tensor[t];
         for (int ti = 0; ti < t; ti++)
         {
             Tensor qF = new Tensor(new TensorShape(n, _dim), DType.F32); backend.SliceRows(qF, qn, ti * n);
             Tensor kF = new Tensor(new TensorShape(nTok, _dim), DType.F32); backend.SliceRows(kF, kn, ti * nTok);
             Tensor vF = new Tensor(new TensorShape(nTok, _dim), DType.F32); backend.SliceRows(vF, v, ti * nTok);
-            Tensor qMh = ToBhsd(backend, qF, n); qF.Dispose();
-            Tensor kMh = ToBhsd(backend, kF, nTok); kF.Dispose();
-            Tensor vMh = ToBhsd(backend, vF, nTok); vF.Dispose();
-            Tensor attn = new Tensor(new TensorShape(1, _heads, n, _headDim), DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, scale);
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-            frameOuts[ti] = new Tensor(new TensorShape(n, _dim), DType.F32);
-            backend.Permute0213(frameOuts[ti], attn, _heads, n, _headDim);
-            attn.Dispose();
+            frameOuts[ti] = _attention.AttendFlat(backend, qF, kF, vF, new TensorShape(n, _dim), default);
         }
         qn.Dispose(); kn.Dispose(); v.Dispose();
 
@@ -157,13 +156,6 @@ public sealed unsafe class WanS2VAudioInjector
         backend.Concat(outFull, [topAdded, rest], 0);
         topAdded.Dispose(); rest.Dispose();
         return outFull;
-    }
-
-    private Tensor ToBhsd(IBackend backend, Tensor x, int s)
-    {
-        Tensor o = new Tensor(new TensorShape(1, _heads, s, _headDim), DType.F32);
-        backend.Permute0213(o, x, s, _heads, _headDim);
-        return o;
     }
 
     /// <summary>Row-wise split of a <c>[2·rows, …]</c> weight (or <c>[2·rows]</c> bias) into its two halves —

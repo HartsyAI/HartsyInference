@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Tests.Common.Attention;
-using Xunit;
 using Xunit.Abstractions;
+using Xunit;
 
 namespace HartsyInference.Cpu.Tests.Attention;
 

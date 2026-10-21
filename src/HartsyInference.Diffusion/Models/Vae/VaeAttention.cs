@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -9,6 +10,7 @@ public sealed class VaeAttention(int channels, int normGroups = 32, float normEp
     private readonly int _channels = channels;
     private readonly int _normGroups = normGroups;
     private readonly float _normEps = normEps;
+    private readonly AttentionLayer _attention = new(new AttentionLayerConfig { Heads = 1, KvHeads = 1, HeadDim = channels });
 
     // GroupNorm before attention projections
     private Tensor? _groupNormWeight;
@@ -125,12 +127,7 @@ public sealed class VaeAttention(int channels, int normGroups = 32, float normEp
         backend.Linear(value, normedTransposed, _toVWeight!, _toVBias!);
         normedTransposed.Dispose();
 
-        float scale = 1.0f / MathF.Sqrt(channels);
-        Tensor attnOut = new Tensor(attn4DShape, dtype);
-        backend.ScaledDotProductAttention(attnOut, query, key, value, mask, scale);
-        query.Dispose();
-        key.Dispose();
-        value.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, query, key, value, new AttentionCallContext { Bias = mask });
 
         // Output projection back to [B, seqLen, C], then channel-first in the input's native shape.
         Tensor projected = new Tensor(seqShape, dtype);

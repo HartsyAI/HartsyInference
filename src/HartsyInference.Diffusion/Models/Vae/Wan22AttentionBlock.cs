@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -8,12 +9,14 @@ public sealed unsafe class Wan22AttentionBlock
 {
     private readonly int _dim;
     private readonly WanRmsNorm _norm;
+    private readonly AttentionLayer _attention;
     private Tensor? _qkvW, _qkvB, _projW, _projB;
 
     public Wan22AttentionBlock(int dim)
     {
         _dim = dim;
         _norm = new WanRmsNorm(dim);
+        _attention = new AttentionLayer(new AttentionLayerConfig { Heads = 1, KvHeads = 1, HeadDim = dim, ComputeDType = DType.F32 });
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -68,10 +71,7 @@ public sealed unsafe class Wan22AttentionBlock
         backend.SplitVaeQkv(q, k, v, qkv, bt, c, hw);
         qkv.Dispose();
 
-        float scale = 1.0f / MathF.Sqrt(c);
-        Tensor attn = new Tensor(new TensorShape(bt, 1, hw, c), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, k, v, null, scale);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
 
         Tensor attn4d = new Tensor(new TensorShape(bt, c, h, w), DType.F32);
         backend.VaeTokensToFrame(attn4d, attn, bt, c, hw);

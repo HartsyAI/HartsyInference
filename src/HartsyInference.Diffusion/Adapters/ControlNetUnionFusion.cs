@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 
@@ -13,6 +14,7 @@ public sealed class ControlNetUnionFusion : IDisposable
     private readonly int _numHeads;
     private readonly int _headDim;
     private readonly int _additionTimeEmbedDim;
+    private readonly AttentionLayerConfig _attentionConfig;
     private int _disposed;
 
     // ── Owned tensors (allocated at LoadWeights from checkpoint data) ──
@@ -38,6 +40,7 @@ public sealed class ControlNetUnionFusion : IDisposable
         _numHeads = numHeads;
         _headDim = channels / numHeads;
         _additionTimeEmbedDim = additionTimeEmbedDim;
+        _attentionConfig = new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = _headDim };
         _controlAddEmbedding = new TimestepEmbedding(additionTimeEmbedDim * numControlTypes, timeDim);
     }
 
@@ -94,6 +97,12 @@ public sealed class ControlNetUnionFusion : IDisposable
                 ProjWeight = weights[$"{p}.mlp.c_proj.weight"],
                 ProjBias = weights[$"{p}.mlp.c_proj.bias"],
             };
+            TransformerLayer built = _layers[i];
+            built.Attention = new AttentionLayer(_attentionConfig, new AttentionLayerWeights
+            {
+                Query = built.QWeight, QueryBias = built.QBias, Key = built.KWeight, KeyBias = built.KBias,
+                Value = built.VWeight, ValueBias = built.VBias, Output = built.OutWeight, OutputBias = built.OutBias,
+            });
         }
 
         _spatialProjWeight = weights["spatial_ch_projs.weight"];
@@ -179,42 +188,11 @@ public sealed class ControlNetUnionFusion : IDisposable
     {
         int tokens = (int)x.Shape[0];
         TensorShape stackShape = new TensorShape(tokens, batch, _channels);
-        TensorShape mhShape = new TensorShape(tokens, _numHeads, batch, _headDim);
 
         Tensor normed = new Tensor(stackShape, dtype);
         backend.LayerNorm(normed, x, layer.Ln1Weight!, layer.Ln1Bias!, 1e-5f);
 
-        Tensor query = new Tensor(stackShape, dtype);
-        backend.Linear(query, normed, layer.QWeight!, layer.QBias);
-        Tensor key = new Tensor(stackShape, dtype);
-        backend.Linear(key, normed, layer.KWeight!, layer.KBias);
-        Tensor value = new Tensor(stackShape, dtype);
-        backend.Linear(value, normed, layer.VWeight!, layer.VBias);
-        normed.Dispose();
-
-        Tensor queryMh = new Tensor(mhShape, dtype);
-        backend.Permute0213(queryMh, query, batch, _numHeads, _headDim);
-        query.Dispose();
-        Tensor keyMh = new Tensor(mhShape, dtype);
-        backend.Permute0213(keyMh, key, batch, _numHeads, _headDim);
-        key.Dispose();
-        Tensor valueMh = new Tensor(mhShape, dtype);
-        backend.Permute0213(valueMh, value, batch, _numHeads, _headDim);
-        value.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, dtype);
-        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale);
-        queryMh.Dispose();
-        keyMh.Dispose();
-        valueMh.Dispose();
-
-        Tensor merged = new Tensor(stackShape, dtype);
-        backend.Permute0213(merged, attnOut, _numHeads, batch, _headDim);
-        attnOut.Dispose();
-        Tensor projected = new Tensor(stackShape, dtype);
-        backend.Linear(projected, merged, layer.OutWeight!, layer.OutBias);
-        merged.Dispose();
+        Tensor projected = layer.Attention!.Forward(backend, normed, normed, new AttentionCallContext { ReleaseInputs = true });
         Tensor afterAttn = new Tensor(stackShape, dtype);
         backend.Add(afterAttn, x, projected);
         projected.Dispose();
@@ -334,6 +312,7 @@ public sealed class ControlNetUnionFusion : IDisposable
         public Tensor? Ln2Weight, Ln2Bias;
         public Tensor? FcWeight, FcBias;
         public Tensor? ProjWeight, ProjBias;
+        public AttentionLayer? Attention;
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
@@ -351,6 +330,7 @@ public sealed class ControlNetUnionFusion : IDisposable
             OutWeight = null; OutBias = null; Ln1Weight = null; Ln1Bias = null;
             Ln2Weight = null; Ln2Bias = null; FcWeight = null; FcBias = null;
             ProjWeight = null; ProjBias = null;
+            Attention = null;
         }
     }
 }
