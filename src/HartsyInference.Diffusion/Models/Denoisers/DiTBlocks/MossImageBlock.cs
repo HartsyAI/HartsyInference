@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -27,6 +28,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
     private readonly QkNorm _normK = new(hidden / numHeads, eps);
     private Tensor? _norm1, _norm2;
     private Tensor? _q, _k, _v, _o, _ffnUpGate, _ffnDown;
+    private AttentionLayer? _attention;
 
     /// <summary>Binds this block's weights under <paramref name="prefix"/> (<c>layers.N</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -52,14 +54,26 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         _o = weights[$"{prefix}.proj.o.weight"];
         _ffnUpGate = weights[$"{prefix}.proj.ffn_up_gate.weight"];
         _ffnDown = weights[$"{prefix}.proj.ffn_down.weight"];
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead,
+                TokenMajorRoute = AttentionRoute.TokenMajor, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _q, Key = _k, Value = _v, QueryNorm = _normQ.Weight, KeyNorm = _normK.Weight,
+                QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
     }
 
     /// <summary>The <paramref name="index"/>th run of <paramref name="hidden"/> rows of a fused projection, as a view that
-    /// carries its own slice of the per-row quantization companion.</summary>
+    /// carries its own slice of the per-row quantization companion and of a LoRA adjunct.</summary>
     private static Tensor HiddenRows(Tensor fused, int index, int hidden, string key)
     {
         Tensor rows = fused.SliceRows(index * hidden, hidden);
         rows.QuantInfo = fused.QuantInfo?.SliceRows(index * hidden, hidden, key);
+        rows.LowRankAdjunct = fused.LowRankAdjunct?.SliceRows(index * hidden, hidden);
         return rows;
     }
 
@@ -94,29 +108,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         TensorShape flat = new(1, seq, _hidden);
         Tensor y = new(flat, act);
         backend.RmsNormModulate(y, x, _norm1!, modulation.ScaleAttn, modulation.ShiftAttn, _eps);
-        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, y, seq, act, cos, sin);
-        int kvSeq = seq;
-        if (cachedKeys is not null)
-        {
-            try
-            {
-                Tensor keys = ReferenceKvCache.ConcatTokens(backend, k, cachedKeys);
-                k.Dispose();
-                k = keys;
-                Tensor values = ReferenceKvCache.ConcatTokens(backend, v, cachedValues!);
-                v.Dispose();
-                v = values;
-            }
-            catch
-            {
-                q.Dispose();
-                k.Dispose();
-                v.Dispose();
-                throw;
-            }
-            kvSeq = (int)k.Shape[1];
-        }
-        Tensor attn = TokenMajorAttention.Run(backend, q, k, v, seq, kvSeq, _numHeads, _headDim);
+        Tensor attn = Attend(backend, y, cos, sin, cachedKeys is null ? null : new ReferenceAppend(cachedKeys, cachedValues!), null);
         return Finish(backend, x, attn, modulation, act);
     }
 
@@ -131,35 +123,21 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         int seq = (int)x.Shape[1];
         Tensor y = new(new TensorShape(1, seq, _hidden), act);
         backend.RmsNormModulate(y, x, _norm1!, modulation.ScaleAttn, modulation.ShiftAttn, _eps);
-        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, y, seq, act, cos, sin);
-        Tensor attn;
-        try
-        {
-            attn = TokenMajorAttention.Run(backend, q, k, v, seq, seq, _numHeads, _headDim, disposeInputs: false);
-        }
-        catch
-        {
-            k.Dispose();
-            v.Dispose();
-            throw;
-        }
-        finally
-        {
-            q.Dispose();
-        }
+        CapturedKv captured = new();
         Tensor result;
         try
         {
+            Tensor attn = Attend(backend, y, cos, sin, null, captured);
             result = Finish(backend, x, attn, modulation, act);
         }
         catch
         {
-            k.Dispose();
-            v.Dispose();
+            captured.Key?.Dispose();
+            captured.Value?.Dispose();
             throw;
         }
-        keys = k;
-        values = v;
+        keys = captured.Key!;
+        values = captured.Value!;
         return result;
     }
 
@@ -173,8 +151,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         ArgumentNullException.ThrowIfNull(ffn);
         int seq = (int)x.Shape[1];
         Tensor y = NormSegmented(backend, x, _norm1!, attention, act);
-        (Tensor q, Tensor k, Tensor v) = ProjectQkv(backend, y, seq, act, cos, sin);
-        Tensor attn = TokenMajorAttention.Run(backend, q, k, v, seq, seq, _numHeads, _headDim);
+        Tensor attn = Attend(backend, y, cos, sin, null, null);
         Tensor projected = OutProject(backend, attn, seq);
         Tensor x1 = attention.GatedResidual(backend, x, projected);
         projected.Dispose();
@@ -187,25 +164,40 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         return result;
     }
 
-    /// <summary>Normalized, rotated Q and K and raw V from the modulated input <paramref name="y"/>, which it disposes.</summary>
-    private (Tensor Q, Tensor K, Tensor V) ProjectQkv(IBackend backend, Tensor y, int seq, DType act, Tensor cos, Tensor sin)
+    /// <summary>Token-major <c>[1, S, heads, headDim]</c> attention of the modulated input <paramref name="y"/>, which it
+    /// disposes once projected.</summary>
+    private Tensor Attend(IBackend backend, Tensor y, Tensor cos, Tensor sin, IKvRewrite? rewrite, IKvCapture? capture)
     {
-        TensorShape heads = new(1, seq, _numHeads, _headDim);
-        Tensor q = new(heads, act);
-        backend.Linear(q, y, _q!, null);
-        Tensor k = new(heads, act);
-        backend.Linear(k, y, _k!, null);
-        Tensor v = new(heads, act);
-        backend.Linear(v, y, _v!, null);
-        y.Dispose();
-        Tensor qNormed = new(heads, act);
-        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kNormed = new(heads, act);
-        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-        backend.ApplyRope(qNormed, kNormed, cos, sin);
-        return (qNormed, kNormed, v);
+        (Tensor q, Tensor k, Tensor v) = _attention!.ProjectSelf(backend, y, releaseInput: true);
+        QkRotation rope = new(QkRotationKind.RotateHalfPaired, cos, sin);
+        return _attention.Attend(backend, q, k, v, q.Shape, new AttentionCallContext
+        {
+            QueryRotation = rope, KeyRotation = rope, KvRewrite = rewrite, KvCapture = capture,
+        });
+    }
+
+    /// <summary>Appends the cached reference K/V after the live ones.</summary>
+    private sealed class ReferenceAppend(Tensor cachedKeys, Tensor cachedValues) : IKvRewrite
+    {
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
+        {
+            Tensor? keys = null;
+            try
+            {
+                keys = ReferenceKvCache.ConcatTokens(backend, k, cachedKeys);
+                k.Dispose();
+                Tensor values = ReferenceKvCache.ConcatTokens(backend, v, cachedValues);
+                v.Dispose();
+                return (keys, values);
+            }
+            catch
+            {
+                keys?.Dispose();
+                k.Dispose();
+                v.Dispose();
+                throw;
+            }
+        }
     }
 
     /// <summary>The attention output projection, the gated residual and the feed-forward half under the uniform

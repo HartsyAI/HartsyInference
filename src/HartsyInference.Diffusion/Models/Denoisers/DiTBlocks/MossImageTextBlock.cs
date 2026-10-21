@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -23,6 +24,7 @@ public sealed class MossImageTextBlock(int hidden, int numHeads, int ffnHidden, 
     private Tensor? _norm1, _norm2;
     private Tensor? _qkv, _qkvBias, _proj, _projBias;
     private Tensor? _ffnGate, _ffnGateBias, _ffnUp, _ffnUpBias, _ffnDown, _ffnDownBias;
+    private AttentionLayer? _attention;
 
     /// <summary>Binds this block's weights under <paramref name="prefix"/> (<c>text_embedder.blocks.N</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -41,6 +43,17 @@ public sealed class MossImageTextBlock(int hidden, int numHeads, int ffnHidden, 
         _ffnUpBias = TensorCasts.LoadF32(weights, $"{prefix}.ffn_up.bias");
         _ffnDown = weights[$"{prefix}.ffn_down.weight"];
         _ffnDownBias = TensorCasts.LoadF32(weights, $"{prefix}.ffn_down.bias");
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, Projection = AttentionProjection.FusedSplitNorm,
+                QkNorm = AttentionQkNorm.PerHead, TokenMajorRoute = AttentionRoute.TokenMajor, ComputeDType = DType.F32, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Qkv = _qkv, QkvBias = _qkvBias, Output = _proj, OutputBias = _projBias, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _eps, KeyNormEps = _eps,
+            });
     }
 
     /// <summary>Every weight this block reads.</summary>
@@ -61,23 +74,14 @@ public sealed class MossImageTextBlock(int hidden, int numHeads, int ffnHidden, 
     {
         int seq = (int)x.Shape[1];
         TensorShape flat = new(1, seq, _hidden);
-        TensorShape heads = new(1, seq, _numHeads, _headDim);
 
         Tensor n1 = new(flat, DType.F32);
         backend.RmsNorm(n1, x, _norm1!, _eps);
-        Tensor qkv = new(new TensorShape(1, seq, 3 * _hidden), DType.F32);
-        backend.Linear(qkv, n1, _qkv!, _qkvBias);
-        n1.Dispose();
-        Tensor q = new(heads, DType.F32);
-        Tensor k = new(heads, DType.F32);
-        Tensor v = new(heads, DType.F32);
-        backend.QkvSplitNorm(q, k, v, qkv, _normQ.Weight, _normK.Weight, _eps);
-        qkv.Dispose();
-        backend.ApplyRope(q, k, cos, sin);
-        Tensor attn = TokenMajorAttention.Run(backend, q, k, v, seq, seq, _numHeads, _headDim);
-        Tensor projected = new(flat, DType.F32);
-        backend.Linear(projected, attn, _proj!, _projBias);
-        attn.Dispose();
+        (Tensor q, Tensor k, Tensor v) = _attention!.ProjectSelf(backend, n1, releaseInput: true);
+        QkRotation rope = new(QkRotationKind.RotateHalfPaired, cos, sin);
+        // Stages, not Forward: the output projection reads [1, S, heads, D], where Forward would hand it [S, hidden].
+        Tensor attn = _attention.Attend(backend, q, k, v, q.Shape, new AttentionCallContext { QueryRotation = rope, KeyRotation = rope });
+        Tensor projected = _attention.ProjectOutput(backend, attn);
         Tensor x1 = new(flat, DType.F32);
         backend.Add(x1, x, projected);
         projected.Dispose();

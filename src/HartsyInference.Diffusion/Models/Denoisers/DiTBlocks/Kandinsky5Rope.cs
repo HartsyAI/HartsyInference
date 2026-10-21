@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -23,7 +24,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 ///
 /// Host pairs are computed by <see cref="Kandinsky5PosEmbed"/>, which owns the coordinate scales. The device rows are
 /// duplicated pairs in a <see cref="RopeTableCache"/> whose host writer copies those pairs.</summary>
-public sealed unsafe class Kandinsky5Rope
+public sealed unsafe class Kandinsky5Rope : IQkRotation, IHeadMajorQkRotation
 {
     private static readonly RopeTableSettings DeviceTableSettings = new()
     {
@@ -204,4 +205,12 @@ public sealed unsafe class Kandinsky5Rope
             vec[2 * i + 1] = sin[i] * x0 + cos[i] * x1;
         }
     }
+
+    /// <inheritdoc/>
+    void IQkRotation.RotateTokenMajor(IBackend backend, Tensor q, Tensor k, int heads, int kvHeads) =>
+        ApplyGpu(backend, q, k, heads, (int)q.Shape[1]);
+
+    /// <inheritdoc/>
+    void IHeadMajorQkRotation.RotateHeadMajor(IBackend backend, Tensor q, Tensor k, int batch, int heads, int kvHeads, int tokens) =>
+        Apply(q, k, batch, heads, tokens);
 }

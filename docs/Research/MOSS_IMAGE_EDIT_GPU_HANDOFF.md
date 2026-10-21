@@ -150,8 +150,8 @@ Triage a failed colouring run:
 - A wrong sampler: the layout defaults to `er_sde` and 30 steps only when the request names neither.
 
 Triage if an edit fails or looks broken:
-- Cached fails, joint works: the cache path (`ReferenceKvCache`, `MossImageBlock.ForwardPrefix`, `TokenMajorAttention`
-  with `kvSeq > qSeq`).
+- Cached fails, joint works: the cache path (`ReferenceKvCache`, `MossImageBlock.ForwardPrefix`, the block's
+  `ReferenceAppend` K/V rewrite, so K/V are longer than Q).
 - Both fail under CUDA but pass with `hartsy settings set numerics.ditGraph false`: step-graph capture (fixed buffers,
   `BranchSignature`, pinned caches). Restore the knob afterwards.
 - F16 issues: retry with `numerics.ditF16=false`.

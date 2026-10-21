@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -6,6 +7,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Kandinsky 5 transformer encoder block (text stream) — ports <c>Kandinsky5TransformerEncoderBlock.forward</c>: self-attention only (biased Q/K/V/Out, RMSNorm QK-norm), 1D RoPE on Q/K. GPU-resident end to end (mirrors QwenImageBlock/ChromaDoubleStreamBlock), including RoPE for batch 1 via <see cref="Kandinsky5Rope.ApplyGpu"/>; <see cref="Kandinsky5Rope.Apply"/> is the batched host fallback.</summary>
 public sealed unsafe class Kandinsky5EncoderBlock
 {
+    private AttentionLayer? _attention;
     private readonly int _modelDim;
     private readonly int _timeDim;
     private readonly int _ffDim;
@@ -55,6 +57,8 @@ public sealed unsafe class Kandinsky5EncoderBlock
 
         _ffIn  = weights[$"{prefix}.feed_forward.in_layer.weight"];
         _ffOut = weights[$"{prefix}.feed_forward.out_layer.weight"];
+        _attention = Kandinsky5BlockOps.Attention(_numHeads, _headDim, _qkNormEps, _qWeight, _qBias, _kWeight, _kBias, _vWeight,
+            _vBias, _outWeight, _outBias, _qNormWeight, _kNormWeight);
     }
 
     /// <summary>Yields all weight tensors for GPU preloading.</summary>
@@ -82,68 +86,21 @@ public sealed unsafe class Kandinsky5EncoderBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         int dim = _modelDim;
-        float attnScale = 1.0f / MathF.Sqrt(_headDim);
 
         Tensor[] mod = Kandinsky5BlockOps.ProduceModulation(backend, temb, _modWeight!, _modBias, batch, _timeDim, dim, 6);
         Tensor saShift = mod[0], saScale = mod[1], saGate = mod[2];
         Tensor ffShift = mod[3], ffScale = mod[4], ffGate = mod[5];
 
         TensorShape flat = new TensorShape(batch, seqLen, dim);
-        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mh = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // ── Self-attention sub-block ──
         Tensor saIn = Kandinsky5BlockOps.NormModulate(backend, x, saShift, saScale, flat);
 
-        Tensor q = new Tensor(heads, DType.F32);
-        backend.Linear(q, saIn, _qWeight!, _qBias);
-        Tensor k = new Tensor(heads, DType.F32);
-        backend.Linear(k, saIn, _kWeight!, _kBias);
-        Tensor v = new Tensor(heads, DType.F32);
-        backend.Linear(v, saIn, _vWeight!, _vBias);
-        saIn.Dispose();
-
-        // QK-norm (per-head RMSNorm over the last dim = headDim).
-        Tensor qn = new Tensor(heads, DType.F32);
-        backend.RmsNorm(qn, q, _qNormWeight!, _qkNormEps);
-        q.Dispose();
-        Tensor kn = new Tensor(heads, DType.F32);
-        backend.RmsNorm(kn, k, _kNormWeight!, _qkNormEps);
-        k.Dispose();
-
-        // RoPE BEFORE the head permute: [B(=1), S, H, D] is exactly WanRopeInterleaved's [S, heads·headDim]
-        // contract and the rotation is the same interleaved pairing — one GPU-resident op instead of the
-        // per-block Q/K D2H → host-trig → H2D excursion (the dominant per-step cost).
-        if (batch == 1)
-            rope.ApplyGpu(backend, qn, kn, _numHeads, seqLen);
-
-        // Permute [B, S, H, D] → [B, H, S, D] for SDPA.
-        Tensor qMh = new Tensor(mh, DType.F32);
-        backend.Permute0213(qMh, qn, seqLen, _numHeads, _headDim);
-        qn.Dispose();
-        Tensor kMh = new Tensor(mh, DType.F32);
-        backend.Permute0213(kMh, kn, seqLen, _numHeads, _headDim);
-        kn.Dispose();
-        Tensor vMh = new Tensor(mh, DType.F32);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        v.Dispose();
-
-        if (batch != 1)   // host fallback (batched inference only)
-            rope.Apply(qMh, kMh, batch, _numHeads, seqLen);
-
-        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
-        Tensor attnMh = new Tensor(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, attnScale, allowF16: true);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        // Permute back [B, H, S, D] → [B, S, hidden].
-        Tensor attnFlat = new Tensor(flat, DType.F32);
-        backend.Permute0213(attnFlat, attnMh, _numHeads, seqLen, _headDim);
-        attnMh.Dispose();
-
-        Tensor attnOut = new Tensor(flat, DType.F32);
-        backend.Linear(attnOut, attnFlat, _outWeight!, _outBias);
-        attnFlat.Dispose();
+        // QK RMS-norm bounds the scores (F16 allowed); 1D RoPE on the device for one batch item, on the host for a batch.
+        AttentionCallContext saContext = batch == 1
+            ? new AttentionCallContext { Rotation = rope, ReleaseInputs = true }
+            : new AttentionCallContext { HeadMajorRotation = rope, ReleaseInputs = true };
+        Tensor attnOut = _attention!.Forward(backend, saIn, saIn, in saContext);
 
         Tensor afterAttn = new Tensor(flat, DType.F32);
         backend.GatedResidualLastDim(afterAttn, x, attnOut, saGate);
@@ -177,6 +134,7 @@ public sealed unsafe class Kandinsky5EncoderBlock
 /// <summary>Kandinsky 5 transformer decoder block (visual stream) — ports <c>Kandinsky5TransformerDecoderBlock.forward</c>: self-attention with 3D RoPE on Q/K, then cross-attention to text (no RoPE), then FFN, each gated by its own modulation triple. GPU-resident; see <see cref="Kandinsky5EncoderBlock"/> for the rationale.</summary>
 public sealed unsafe class Kandinsky5DecoderBlock
 {
+    private AttentionLayer? _selfAttention, _crossAttention;
     private readonly int _modelDim;
     private readonly int _timeDim;
     private readonly int _ffDim;
@@ -237,6 +195,10 @@ public sealed unsafe class Kandinsky5DecoderBlock
 
         _ffIn  = weights[$"{prefix}.feed_forward.in_layer.weight"];
         _ffOut = weights[$"{prefix}.feed_forward.out_layer.weight"];
+        _selfAttention = Kandinsky5BlockOps.Attention(_numHeads, _headDim, _qkNormEps, _saQ, _saQB, _saK, _saKB, _saV, _saVB, _saO,
+            _saOB, _saQNorm, _saKNorm);
+        _crossAttention = Kandinsky5BlockOps.Attention(_numHeads, _headDim, _qkNormEps, _xaQ, _xaQB, _xaK, _xaKB, _xaV, _xaVB, _xaO,
+            _xaOB, _xaQNorm, _xaKNorm);
     }
 
     /// <summary>Yields all weight tensors for GPU preloading.</summary>
@@ -263,9 +225,7 @@ public sealed unsafe class Kandinsky5DecoderBlock
     {
         int batch = (int)visual.Shape[0];
         int sV = (int)visual.Shape[1];
-        int sT = (int)text.Shape[1];
         int dim = _modelDim;
-        float attnScale = 1.0f / MathF.Sqrt(_headDim);
 
         Tensor[] mod = Kandinsky5BlockOps.ProduceModulation(backend, temb, _modWeight!, _modBias, batch, _timeDim, dim, 9);
         // Order: (sa_shift, sa_scale, sa_gate, xa_shift, xa_scale, xa_gate, ff_shift, ff_scale, ff_gate).
@@ -274,58 +234,15 @@ public sealed unsafe class Kandinsky5DecoderBlock
         Tensor ffShift = mod[6], ffScale = mod[7], ffGate = mod[8];
 
         TensorShape vFlat = new TensorShape(batch, sV, dim);
-        TensorShape vHeads = new TensorShape(batch, sV, _numHeads, _headDim);
-        TensorShape vMh = new TensorShape(batch, _numHeads, sV, _headDim);
-        TensorShape tHeads = new TensorShape(batch, sT, _numHeads, _headDim);
-        TensorShape tMh = new TensorShape(batch, _numHeads, sT, _headDim);
 
         // ── 1. Self-attention with 3D RoPE on Q/K ──
         Tensor saIn = Kandinsky5BlockOps.NormModulate(backend, visual, saShift, saScale, vFlat);
 
-        Tensor q = new Tensor(vHeads, DType.F32);
-        backend.Linear(q, saIn, _saQ!, _saQB);
-        Tensor k = new Tensor(vHeads, DType.F32);
-        backend.Linear(k, saIn, _saK!, _saKB);
-        Tensor v = new Tensor(vHeads, DType.F32);
-        backend.Linear(v, saIn, _saV!, _saVB);
-        saIn.Dispose();
-
-        Tensor qn = new Tensor(vHeads, DType.F32);
-        backend.RmsNorm(qn, q, _saQNorm!, _qkNormEps);
-        q.Dispose();
-        Tensor kn = new Tensor(vHeads, DType.F32);
-        backend.RmsNorm(kn, k, _saKNorm!, _qkNormEps);
-        k.Dispose();
-
-        // GPU RoPE pre-permute — see the encoder block note.
-        if (batch == 1)
-            rope.ApplyGpu(backend, qn, kn, _numHeads, sV);
-
-        Tensor qMh = new Tensor(vMh, DType.F32);
-        backend.Permute0213(qMh, qn, sV, _numHeads, _headDim);
-        qn.Dispose();
-        Tensor kMh = new Tensor(vMh, DType.F32);
-        backend.Permute0213(kMh, kn, sV, _numHeads, _headDim);
-        kn.Dispose();
-        Tensor vMhT = new Tensor(vMh, DType.F32);
-        backend.Permute0213(vMhT, v, sV, _numHeads, _headDim);
-        v.Dispose();
-
-        if (batch != 1)   // host fallback (batched inference only)
-            rope.Apply(qMh, kMh, batch, _numHeads, sV);
-
-        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
-        Tensor attnMh = new Tensor(vMh, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMhT, null, attnScale, allowF16: true);
-        qMh.Dispose(); kMh.Dispose(); vMhT.Dispose();
-
-        Tensor attnFlat = new Tensor(vFlat, DType.F32);
-        backend.Permute0213(attnFlat, attnMh, _numHeads, sV, _headDim);
-        attnMh.Dispose();
-
-        Tensor saOut = new Tensor(vFlat, DType.F32);
-        backend.Linear(saOut, attnFlat, _saO!, _saOB);
-        attnFlat.Dispose();
+        // 3D RoPE on the device for one batch item, on the host for a batch.
+        AttentionCallContext saContext = batch == 1
+            ? new AttentionCallContext { Rotation = rope, ReleaseInputs = true }
+            : new AttentionCallContext { HeadMajorRotation = rope, ReleaseInputs = true };
+        Tensor saOut = _selfAttention!.Forward(backend, saIn, saIn, in saContext);
 
         Tensor afterSa = new Tensor(vFlat, DType.F32);
         backend.GatedResidualLastDim(afterSa, visual, saOut, saGate);
@@ -334,44 +251,8 @@ public sealed unsafe class Kandinsky5DecoderBlock
         // ── 2. Cross-attention to text (no RoPE) ──
         Tensor xaIn = Kandinsky5BlockOps.NormModulate(backend, afterSa, xaShift, xaScale, vFlat);
 
-        Tensor qX = new Tensor(vHeads, DType.F32);
-        backend.Linear(qX, xaIn, _xaQ!, _xaQB);
-        xaIn.Dispose();
-
-        Tensor kX = new Tensor(tHeads, DType.F32);
-        backend.Linear(kX, text, _xaK!, _xaKB);
-        Tensor vX = new Tensor(tHeads, DType.F32);
-        backend.Linear(vX, text, _xaV!, _xaVB);
-
-        Tensor qXn = new Tensor(vHeads, DType.F32);
-        backend.RmsNorm(qXn, qX, _xaQNorm!, _qkNormEps);
-        qX.Dispose();
-        Tensor kXn = new Tensor(tHeads, DType.F32);
-        backend.RmsNorm(kXn, kX, _xaKNorm!, _qkNormEps);
-        kX.Dispose();
-
-        Tensor qXMh = new Tensor(vMh, DType.F32);
-        backend.Permute0213(qXMh, qXn, sV, _numHeads, _headDim);
-        qXn.Dispose();
-        Tensor kXMh = new Tensor(tMh, DType.F32);
-        backend.Permute0213(kXMh, kXn, sT, _numHeads, _headDim);
-        kXn.Dispose();
-        Tensor vXMh = new Tensor(tMh, DType.F32);
-        backend.Permute0213(vXMh, vX, sT, _numHeads, _headDim);
-        vX.Dispose();
-
-        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
-        Tensor xaMh = new Tensor(vMh, DType.F32);
-        backend.ScaledDotProductAttention(xaMh, qXMh, kXMh, vXMh, null, attnScale, allowF16: true);
-        qXMh.Dispose(); kXMh.Dispose(); vXMh.Dispose();
-
-        Tensor xaFlat = new Tensor(vFlat, DType.F32);
-        backend.Permute0213(xaFlat, xaMh, _numHeads, sV, _headDim);
-        xaMh.Dispose();
-
-        Tensor xaOut = new Tensor(vFlat, DType.F32);
-        backend.Linear(xaOut, xaFlat, _xaO!, _xaOB);
-        xaFlat.Dispose();
+        // The query input is freed right after the Q projection, before K and V exist.
+        Tensor xaOut = _crossAttention!.Forward(backend, xaIn, text, new AttentionCallContext { ReleaseQueryAfterProjection = true });
 
         Tensor afterXa = new Tensor(vFlat, DType.F32);
         backend.GatedResidualLastDim(afterXa, afterSa, xaOut, xaGate);
@@ -406,6 +287,20 @@ public sealed unsafe class Kandinsky5DecoderBlock
 /// <summary>Shared GPU-resident modulation helpers for the Kandinsky 5 encoder/decoder blocks. Keeps the AdaLN math on the device (no host DataPointer reads): the modulation projection is split with <c>SliceLastDim</c> and modulation is <c>LayerNormNoAffine → x*(1+scale)+shift</c> via <c>AddScalar</c> + <c>AffineBroadcastLastDim</c>, bit-identical to the prior CPU <c>DiTUtils</c>/<c>AdaLNModulation</c> path.</summary>
 internal static class Kandinsky5BlockOps
 {
+    /// <summary>One self- or cross-attention: biased projections, per-head QK RMSNorm (the raw norm weights pass through),
+    /// F32, and the F16 permission the bounded scores allow.</summary>
+    internal static AttentionLayer Attention(int heads, int headDim, float eps, Tensor? q, Tensor? qBias, Tensor? k, Tensor? kBias,
+        Tensor? v, Tensor? vBias, Tensor? output, Tensor? outputBias, Tensor? qNorm, Tensor? kNorm) => new(
+        new AttentionLayerConfig
+        {
+            Heads = heads, KvHeads = heads, HeadDim = headDim, QkNorm = AttentionQkNorm.PerHead, ComputeDType = DType.F32, AllowF16 = true,
+        },
+        new AttentionLayerWeights
+        {
+            Query = q, QueryBias = qBias, Key = k, KeyBias = kBias, Value = v, ValueBias = vBias, Output = output, OutputBias = outputBias,
+            QueryNorm = qNorm, KeyNorm = kNorm, QueryNormEps = eps, KeyNormEps = eps,
+        });
+
     /// <summary>Computes <c>Linear(SiLU(temb)) → count * model_dim</c> then slices into <paramref name="count"/> <c>[B, dim]</c> tensors (chunk order matches diffusers' nested <c>torch.chunk</c>), all on the GPU.</summary>
     public static Tensor[] ProduceModulation(IBackend backend, Tensor temb, Tensor modWeight, Tensor? modBias,
         int batch, int timeDim, int dim, int count)
