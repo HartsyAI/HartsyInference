@@ -148,6 +148,41 @@ public static unsafe class Nf4Codec
         return best;
     }
 
+    #region Companion tensors
+
+    /// <summary>Quantizes a weight into the bitsandbytes companion tensors <see cref="Nf4CompanionFold"/> reads back: the
+    /// packed U8 weight, F32 <c>.absmax</c>, the 16-entry F32 <c>.quant_map</c>, and the U8 JSON
+    /// <c>.quant_state.bitsandbytes__nf4</c> blob that gives the shape, block size and compute dtype.</summary>
+    /// <param name="weightKey">Key of the weight; the companions are named from it.</param>
+    /// <param name="computeDtype">Torch dtype name the weight dequantizes back to: <c>float32</c>, <c>float16</c> or <c>bfloat16</c>.</param>
+    /// <returns>Every tensor, weight first. The caller owns and disposes them.</returns>
+    public static List<KeyValuePair<string, Tensor>> QuantizeToCompanions(string weightKey, ReadOnlySpan<float> values, long rows, long cols,
+        string computeDtype, int blockSize = DefaultBlockSize)
+    {
+        (byte[] packed, float[] absmax) = Quantize(values, blockSize);
+
+        Tensor weight = new(new TensorShape(packed.Length), DType.U8);
+        packed.AsSpan().CopyTo(weight.AsSpan<byte>());
+        Tensor scales = new(new TensorShape(absmax.Length), DType.F32);
+        absmax.AsSpan().CopyTo(scales.AsSpan<float>());
+        Tensor codebook = new(new TensorShape(Nf4Lut.Length), DType.F32);
+        Nf4Lut.AsSpan().CopyTo(codebook.AsSpan<float>());
+        byte[] state = System.Text.Encoding.ASCII.GetBytes(
+            $"{{\"shape\":[{rows},{cols}],\"blocksize\":{blockSize},\"dtype\":\"{computeDtype}\"}}");
+        Tensor stateBlob = new(new TensorShape(state.Length), DType.U8);
+        state.AsSpan().CopyTo(stateBlob.AsSpan<byte>());
+
+        return
+        [
+            new(weightKey, weight),
+            new(weightKey + ".absmax", scales),
+            new(weightKey + ".quant_map", codebook),
+            new(weightKey + ".quant_state.bitsandbytes__nf4", stateBlob),
+        ];
+    }
+
+    #endregion
+
     /// <summary>Rebuilds the F32 per-block <c>absmax</c> for a bitsandbytes double-quantized NF4 tensor: <c>absmax[b] = nestedCodebook[ qAbsmax[b] ] · nestedAbsmax[b / nestedBlockSize] + offset</c>. Feed the result to <see cref="Dequantize"/>.</summary>
     /// <param name="qAbsmax">U8 quantized absmax codes, one per primary block.</param>
     /// <param name="nestedAbsmaxF32">F32 scales for the nested blocks.</param>

@@ -139,6 +139,53 @@ public sealed unsafe class Nf4CodecTests
     }
 
     [Fact]
+    public void QuantizeToCompanions_RoundTripsThroughProductionLoader()
+    {
+        const int rows = 8, cols = 40, blockSize = 64;
+        float[] src = new float[rows * cols];
+        Random rng = new(21);
+        for (int i = 0; i < src.Length; i++) src[i] = (float)(rng.NextDouble() * 2 - 1) * (1 + i % 6);
+        string dir = Directory.CreateTempSubdirectory("nf4-companions-").FullName;
+        string path = Path.Combine(dir, "nf4.safetensors");
+        try
+        {
+            List<KeyValuePair<string, Tensor>> companions = Nf4Codec.QuantizeToCompanions("layer.weight", src, rows, cols, "float32", blockSize);
+            SafeTensorsMerger.Write(path, companions);
+            foreach (KeyValuePair<string, Tensor> c in companions) c.Value.Dispose();
+
+            (List<KeyValuePair<string, Tensor>> tensors, List<SafeTensorsLoader> loaders) = SafeTensorsMerger.Open(path);
+            try
+            {
+                Assert.Equal(4, tensors.Count);
+                List<Tensor> allocated = [];
+                Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(tensors.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal), allocated);
+                try
+                {
+                    Tensor weight = folded["layer.weight"];
+                    Assert.Equal(DType.F32, weight.DType);
+                    ReadOnlySpan<float> decoded = weight.AsReadOnlySpan<float>();
+                    Assert.Equal(src.Length, decoded.Length);
+                    (byte[] _, float[] absmax) = Nf4Codec.Quantize(src, blockSize);
+                    for (int i = 0; i < src.Length; i++)
+                        Assert.True(MathF.Abs(decoded[i] - src[i]) <= absmax[i / blockSize] * Nf4Codec.MaxBlockError + Tol, $"element {i}");
+                }
+                finally
+                {
+                    foreach (Tensor t in allocated) t.Dispose();
+                }
+            }
+            finally
+            {
+                foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Quantize_ZeroBlock_DecodesToZero()
     {
         float[] src = new float[20];

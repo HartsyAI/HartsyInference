@@ -151,6 +151,36 @@ public static unsafe class ModelOptNvfp4Codec
         return (packed, scales, global);
     }
 
+    #region Companion tensors
+
+    /// <summary>Quantizes a weight into the ModelOpt companion tensors <see cref="DequantRows"/> reads: the packed U8 weight
+    /// <c>[rows, cols / 2]</c>, the E4M3 <c>.weight_scale</c> <c>[rows, cols / 16]</c>, and the scalar F32 <c>.weight_scale_2</c>.</summary>
+    /// <param name="weightKey">Key of the weight, which must end in <c>.weight</c>; the companions are named from its stem.</param>
+    /// <returns>Every tensor, weight first. The caller owns and disposes them.</returns>
+    public static List<KeyValuePair<string, Tensor>> QuantizeToCompanions(string weightKey, ReadOnlySpan<float> values, long rows, long cols)
+    {
+        if (!weightKey.EndsWith(".weight", StringComparison.Ordinal))
+            throw new ArgumentException($"NVFP4 weight key must end in '.weight'; got '{weightKey}'.", nameof(weightKey));
+        string stem = weightKey[..^".weight".Length];
+        (byte[] packed, byte[] scales, float global) = Quantize(values, rows, cols);
+
+        Tensor weight = new(new TensorShape(rows, cols / 2), DType.U8);
+        packed.AsSpan().CopyTo(weight.AsSpan<byte>());
+        Tensor blockScale = new(new TensorShape(rows, cols / BlockWidth), DType.F8E4M3);
+        scales.AsSpan().CopyTo(blockScale.AsSpan<byte>());
+        Tensor globalScale = new(new TensorShape(1), DType.F32);
+        globalScale.AsSpan<float>()[0] = global;
+
+        return
+        [
+            new(weightKey, weight),
+            new(stem + ".weight_scale", blockScale),
+            new(stem + ".weight_scale_2", globalScale),
+        ];
+    }
+
+    #endregion
+
     private static byte NearestE4M3Code(float magnitude)
     {
         int idx = Array.BinarySearch(PositiveE4M3Values, magnitude);
