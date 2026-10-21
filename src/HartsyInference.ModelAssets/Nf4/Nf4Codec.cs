@@ -81,7 +81,7 @@ public static unsafe class Nf4Codec
             throw new ArgumentException("blockSize must be positive.", nameof(blockSize));
 
         int n = values.Length;
-        float[] absmax = new float[(n + blockSize - 1) / blockSize];
+        float[] absmax = new float[((long)n + blockSize - 1) / blockSize];
         for (int b = 0; b < absmax.Length; b++)
         {
             int start = b * blockSize;

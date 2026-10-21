@@ -1,6 +1,7 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Nf4;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests.Common;
 using Xunit;
 
 namespace HartsyInference.ModelAssets.Tests;
@@ -155,8 +156,8 @@ public sealed unsafe class Nf4CodecTests
     [Trait("Category", "Integration")]
     public void Quantize_RealTensor_RoundTripsWithinBound()
     {
-        string? path = Environment.GetEnvironmentVariable("HARTSY_QUANT_TEST_SAFETENSORS");
-        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+        string path = Environment.GetEnvironmentVariable("HARTSY_QUANT_TEST_SAFETENSORS") ?? "";
+        if (!RealWeightGate.Require(Console.WriteLine, path)) return;
 
         using SafeTensorsLoader loader = new();
         loader.Load(path);

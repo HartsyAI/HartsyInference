@@ -112,6 +112,8 @@ public static unsafe class ModelOptNvfp4Codec
             amax = MathF.Max(amax, MathF.Abs(v));
         }
         float global = amax > 0f ? amax / (E2m1Max * E4M3Max) : 1f;
+        if (amax > 0f && !float.IsNormal(global))
+            throw new ArgumentException($"Nvfp4 input magnitude {amax} is too small: the global scale would underflow.", nameof(values));
 
         long blocksPerRow = cols / BlockWidth;
         byte[] packed = new byte[count / 2];

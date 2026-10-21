@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -200,6 +201,14 @@ public sealed unsafe class Nvfp4DequantTests
     }
 
     [Fact]
+    public void Quantize_RejectsMagnitudeWhoseGlobalScaleUnderflows()
+    {
+        float[] src = new float[16];
+        src[0] = 1e-40f;
+        Assert.Throws<ArgumentException>(() => ModelOptNvfp4Codec.Quantize(src, 1, 16));
+    }
+
+    [Fact]
     public void Quantize_BlockBelowNormalScaleRange_StaysWithinSubnormalBound()
     {
         // The first block is 1e-6 of the tensor maximum: its E4M3 scale falls below the normal range and
@@ -269,8 +278,8 @@ public sealed unsafe class Nvfp4DequantTests
     [Trait("Category", "Integration")]
     public void Quantize_RealTensor_RoundTripsWithinBound()
     {
-        string? path = Environment.GetEnvironmentVariable("HARTSY_QUANT_TEST_SAFETENSORS");
-        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+        string path = Environment.GetEnvironmentVariable("HARTSY_QUANT_TEST_SAFETENSORS") ?? "";
+        if (!RealWeightGate.Require(_output.WriteLine, path)) return;
 
         using SafeTensorsLoader loader = new();
         loader.Load(path);
