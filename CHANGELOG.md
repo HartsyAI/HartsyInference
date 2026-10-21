@@ -71,6 +71,10 @@ stable release will require. Dates are UTC.
 - **Fixed: batched decode runs only for models it computes exactly.** Models with V-norm, KV sharing, per-layer head
   dimensions, MLA, cross-attention layers, an absolute position table (GPT-2, StarCoder, OPT) or an embedding norm
   (BLOOM) decode one sequence at a time.
+- **Changed: the first models attend through one shared attention layer.** `Core.Layers.Attention.AttentionLayer` composes
+  the projections, the QK norm and rotation, the attention call and the output gate and projection. LTX-2, Krea 2,
+  Z-Image and its context refiner, Lumina 2 (single item), OmniGen2 (rope modes), Boogu and Lance run on it instead of
+  wiring attention themselves. Output is bit-identical.
 
 ## alpha.383
 
