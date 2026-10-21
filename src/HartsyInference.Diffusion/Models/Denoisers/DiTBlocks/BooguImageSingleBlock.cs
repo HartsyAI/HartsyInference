@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -35,6 +36,7 @@ public sealed unsafe class BooguImageSingleBlock
     private readonly float _normEps;
 
     private Tensor? _toQWeight, _toKWeight, _toVWeight, _toOutWeight;
+    private AttentionLayer? _attention;
 
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
@@ -85,6 +87,17 @@ public sealed unsafe class BooguImageSingleBlock
 
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numQHeads, KvHeads = _numKvHeads, HeadDim = _headDim, OutDim = _hiddenSize, QkNorm = AttentionQkNorm.PerHead,
+                ComputeDType = DType.F32, AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQWeight, Key = _toKWeight, Value = _toVWeight, Output = _toOutWeight, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
 
         _ffnLinear1Weight = weights[$"{prefix}.feed_forward.linear_1.weight"];
         _ffnLinear2Weight = weights[$"{prefix}.feed_forward.linear_2.weight"];
@@ -221,58 +234,9 @@ public sealed unsafe class BooguImageSingleBlock
     {
         if (batch != 1)
             throw new NotSupportedException("BooguImageSingleBlock device-rope path requires batch == 1.");
-        // Q/K/V projected into [B, S, H, D] (byte-identical to [B, S, H·D]) so RmsNorm QK-norm normalizes over the
-        // head dim and Permute0213 needs no reshape view.
-        Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
-        backend.Linear(q, input, _toQWeight!, null);
-        Tensor k = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
-        backend.Linear(k, input, _toKWeight!, null);
-        Tensor v = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
-        backend.Linear(v, input, _toVWeight!, null);
-
-        Tensor qn = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
-        backend.RmsNorm(qn, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kn = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
-        backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        // Device RoPE on the pre-permute [1, S, H, D] layout (rotation is per (s, h) vector — permute-order
-        // independent, bit-equivalent to the old post-permute host loop).
-        backend.WanRopeInterleaved(qn, ropeCos, ropeSin, seqLen, _numQHeads, _headDim);
-        backend.WanRopeInterleaved(kn, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim);
-
-        Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
-        backend.Permute0213(qMh, qn, seqLen, _numQHeads, _headDim);
-        qn.Dispose();
-        Tensor kMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
-        backend.Permute0213(kMh, kn, seqLen, _numKvHeads, _headDim);
-        kn.Dispose();
-        Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
-        backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
-        v.Dispose();
-
-        Tensor kRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
-        backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroupSize);
-        Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
-        backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroupSize);
-        kMh.Dispose(); vMh.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
-        // allowF16: QK-RMS-norm bounds the scores and the mask is null — the proven cuDNN fused
-        // flash-attention config (falls back to the materialized F32 path when cuDNN is unavailable).
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale, allowF16: true);
-        qMh.Dispose(); kRep.Dispose(); vRep.Dispose();
-
-        Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.Permute0213(attnFlat, attnMh, _numQHeads, seqLen, _headDim);
-        attnMh.Dispose();
-
-        Tensor projected = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.Linear(projected, attnFlat, _toOutWeight!, null);
-        attnFlat.Dispose();
-        return projected;
+        // F32 throughout; the per-head QK norm bounds the scores and there is no mask, so the call may narrow to F16.
+        QkRotation rotation = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, seqLen);
+        return _attention!.Forward(backend, input, input, new AttentionCallContext { QueryRotation = rotation, KeyRotation = rotation });
     }
 
     /// <summary>Lumina <c>RMSNormZero</c>, GPU-resident. Chunks the <c>[B, 4·hidden]</c> modulation projection into
