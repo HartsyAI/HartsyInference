@@ -44,7 +44,9 @@ internal sealed class CudnnSdpa : IDisposable
 
     /// <summary>Head dims the fused engine runs: multiples of 8 from 32 to 256 (cuDNN 9.24 on SM 86 and 89). A build that
     /// refuses one falls back for that head dim only.</summary>
-    public static bool ShapeSupported(long d) => d >= 32 && d <= 256 && d % 8 == 0;
+    public static bool ShapeSupported(long d) => d >= MinHeadDim && d <= MaxHeadDim && d % 8 == 0;
+
+    internal const int MinHeadDim = 32, MaxHeadDim = 256;
 
     /// <summary> Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D] (Q/O with Sq rows, K/V with Skv rows). <paramref name="scale"/> is the softmax pre-scale (1/√D typically). <paramref name="biasF32"/> (optional, 0 = none) is a device fp32 additive attention bias/mask laid out as [biasB,1,biasSq,Skv], broadcast over heads (and over batch when biasB==1 &lt; b), added to the scaled scores before softmax — the cudnn-frontend Bias score-modifier pattern, which still hits the fused engine. <paramref name="biasSq"/> of 1 broadcasts one [Skv] row over every query, which is what a bias that depends only on the key needs (Wan-Animate-2's log_scale band) — a full [Sq,Skv] buffer for it is pure duplication. </summary>
     public unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16, long b, long h, long sq, long sk, long d,
