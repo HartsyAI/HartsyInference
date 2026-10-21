@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -13,6 +14,7 @@ public sealed unsafe class LanceMoTBlock
     private readonly int _hidden;
     private readonly int _numHeads;
     private readonly int _numKvHeads;
+    private readonly AttentionLayer _attention;
     private readonly int _headDim;
     private readonly int _ffn;
     private readonly float _eps;
@@ -38,6 +40,11 @@ public sealed unsafe class LanceMoTBlock
         _ffn = ffn;
         _eps = eps;
         _qkNorm = qkNorm;
+        // Role-routed projections stay here; normed Q/K and the finite -1e9 mask let the layer's call narrow to F16.
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = numHeads, KvHeads = numKvHeads, HeadDim = _headDim, AllowF16 = true,
+        });
         if (qkNorm)
         {
             _qNorm = new QkNorm(_headDim, eps);
@@ -132,45 +139,14 @@ public sealed unsafe class LanceMoTBlock
     private Tensor Attention(IBackend backend, Tensor normed, Tensor cos, Tensor sin,
         int nPre, int nGen, Tensor? mask, int seq)
     {
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-
         // Role-routed Q/K/V over the three contiguous segments, concatenated back into joint [1, seq, H, D]
         // ([B, L, H, D] views over the flat rows — dim-0 concat is a contiguous device copy).
         (Tensor q, Tensor k, Tensor v) = ProjectQkvJoint(backend, normed, nPre, nGen, seq);
 
-        // RoPE (rotate-half, cos/sin broadcast over heads) on the pre-permute layout; per-tensor kernel because
-        // GQA Q (16 heads) and K (2 heads) stride differently.
-        backend.ApplyRopeSingle(q, cos, sin);
-        backend.ApplyRopeSingle(k, cos, sin);
-
-        // [1, L, H, D] → [1, H, L, D]; GQA-expand K/V to the query head count.
-        int rep = _numHeads / _numKvHeads;
-        Tensor qMh = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
-        backend.Permute0213(qMh, q, seq, _numHeads, _headDim);
-        q.Dispose();
-        Tensor kSmall = new Tensor(new TensorShape(1, _numKvHeads, seq, _headDim), DType.F32);
-        backend.Permute0213(kSmall, k, seq, _numKvHeads, _headDim);
-        k.Dispose();
-        Tensor vSmall = new Tensor(new TensorShape(1, _numKvHeads, seq, _headDim), DType.F32);
-        backend.Permute0213(vSmall, v, seq, _numKvHeads, _headDim);
-        v.Dispose();
-
-        Tensor kMh = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
-        backend.RepeatKvHeads(kMh, kSmall, _numKvHeads, rep);
-        kSmall.Dispose();
-        Tensor vMh = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
-        backend.RepeatKvHeads(vMh, vSmall, _numKvHeads, rep);
-        vSmall.Dispose();
-
-        // Joint SDPA. allowF16: Lance ships QK-RMSNorm (bounded scores) and the additive mask is finite (-1e9),
-        // so the cuDNN fused engine (mask as an fp32 bias score-modifier) is range-safe.
-        Tensor attnOut = new Tensor(new TensorShape(1, _numHeads, seq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, mask, scale, allowF16: true);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor flat = new Tensor(new TensorShape(seq, _hidden), DType.F32);
-        backend.Permute0213(flat, attnOut, _numHeads, seq, _headDim);
-        attnOut.Dispose();
+        // RoPE (rotate-half, cos/sin broadcast over heads) on the pre-permute layout, then joint attention.
+        QkRotation rotation = new(QkRotationKind.RotateHalf, cos, sin);
+        Tensor flat = _attention.Attend(backend, q, k, v, new TensorShape(seq, _hidden),
+            new AttentionCallContext { QueryRotation = rotation, KeyRotation = rotation, Bias = mask });
 
         // o_proj (role-routed, bias-less).
         Tensor outProj = RoleLinear(backend, flat, nPre, nGen, seq, _hidden, _oW!, null, _oWg!, null);

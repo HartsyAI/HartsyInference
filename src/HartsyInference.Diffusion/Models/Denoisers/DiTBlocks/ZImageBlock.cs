@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
@@ -41,6 +42,7 @@ public sealed unsafe class ZImageBlock
 
     // Output projection: Linear(hidden → hidden), no bias.
     private Tensor? _attnOutWeight;
+    private AttentionLayer? _attention;
 
     // RMSNorm scales
     private Tensor? _attnNorm1Weight, _attnNorm2Weight;
@@ -85,6 +87,16 @@ public sealed unsafe class ZImageBlock
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.k_norm.weight"]);
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = _allowF16Attention,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQWeight, Key = _toKWeight, Value = _toVWeight, Output = _attnOutWeight, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
 
         // CudaBackend.RmsNorm reads weight as float* directly, so RMSNorm scales MUST be F32.
         // BF16-stored norms (e.g., from a BF16 or nvfp8-mixed checkpoint) would otherwise be
@@ -137,8 +149,6 @@ public sealed unsafe class ZImageBlock
         // take an F16 activation + F32 params); the classic F32 path is byte-identical to the baseline.
         DType act = x.DType;
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
-        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // GPU-residency rewrite (mirrors the verified ErnieImageBlock / FluxSingleStreamBlock ports): the scale-only
         // AdaLN affines, the two gated residuals, the QK-norm and the head-split/merge reshapes all run as IBackend
@@ -172,69 +182,13 @@ public sealed unsafe class ZImageBlock
         norm1.Dispose();
         if (trace) Trace("modulated-msa", modulated);
 
-        // Separate Q/K/V projections declared directly as [B, S, H, D] so RmsNorm normalizes over headDim and
-        // Permute0213 runs with no explicit reshape.
-        Tensor qHeads = new Tensor(headsShape, act);
-        Tensor kHeads = new Tensor(headsShape, act);
-        Tensor v = new Tensor(headsShape, act);
-        backend.Linear(qHeads, modulated, _toQWeight!, null);
-        backend.Linear(kHeads, modulated, _toKWeight!, null);
-        backend.Linear(v, modulated, _toVWeight!, null);
-        modulated.Dispose();
-        if (trace) { Trace("qHeads", qHeads); Trace("kHeads", kHeads); Trace("vHeads", v); }
-
-        Tensor qNormed = new Tensor(headsShape, act);
-        Tensor kNormed = new Tensor(headsShape, act);
-        backend.RmsNorm(qNormed, qHeads, _normQ.Weight, _normQ.Eps);
-        backend.RmsNorm(kNormed, kHeads, _normK.Weight, _normK.Eps);
-        qHeads.Dispose();
-        kHeads.Dispose();
-        if (trace) { Trace("qNormed", qNormed); Trace("kNormed", kNormed); }
-
-        // RoPE on the PRE-permute [B, S, H, D] layout, device-resident for B=1 (bit-identical: RoPE indexes only
-        // (position, dim)). The old post-permute host rope.Forward D2H-round-tripped the full ~63 MB Q and K
-        // every block every step — the dominant residual Z-Image cost. B>1 keeps the host path post-permute.
-        bool gpuRope = rope is not null && batch == 1;
-        if (gpuRope)
+        // The QK norm bounds the scores but not V, so Base keeps the call F32; a batch rotates on the host after the permute.
+        AttentionCallContext context = new()
         {
-            rope!.ApplyGpu(backend, qNormed, kNormed, _numHeads);
-        }
-
-        // [B, S, H, D] → [B, H, S, D] for SDPA.
-        Tensor qMh = new Tensor(mhShape, act);
-        Tensor kMh = new Tensor(mhShape, act);
-        Tensor vMh = new Tensor(mhShape, act);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        kNormed.Dispose();
-        v.Dispose();
-
-        if (rope is not null && !gpuRope)
-        {
-            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
-        }
-
-        // Q/K RMS normalization bounds the scores, but that alone does NOT bound V. Base has produced V values
-        // above F16's 65504 ceiling in late main blocks, so its variant policy disables the internal F16 SDPA
-        // narrowing even though this tensor stream is F32. Turbo retains the validated fused F16 path.
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, act);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: _allowF16Attention);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-        if (trace) Trace("attnOut", attnOut);
-
-        // [B, H, S, D] → [B, S, hidden]
-        Tensor attnFlat = new Tensor(shape, act);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(shape, act);
-        backend.Linear(projected, attnFlat, _attnOutWeight!, null);
-        attnFlat.Dispose();
+            Rotation = batch == 1 ? rope : null, HeadMajorRotation = batch == 1 ? null : rope, Bias = attnBias,
+            Probe = trace ? AttentionTrace.Instance : null, ReleaseInputs = true,
+        };
+        Tensor projected = _attention!.Forward(backend, modulated, modulated, in context);
         if (trace) Trace("attnProjected", projected);
 
         Tensor postAttnNorm = new Tensor(shape, act);
@@ -329,6 +283,17 @@ public sealed unsafe class ZImageBlock
         backend.ModulationSplit4(results[0], results[1], results[2], results[3], projected);
         projected.Dispose();
         return results;
+    }
+
+    /// <summary>The attention layer's intermediates under the trace's names.</summary>
+    private sealed class AttentionTrace : IAttentionProbe
+    {
+        public static readonly AttentionTrace Instance = new();
+
+        public void Observe(string point, Tensor value) => Trace(point switch
+        {
+            "q" => "qHeads", "k" => "kHeads", "v" => "vHeads", "attention" => "attnOut", _ => point,
+        }, value);
     }
 
     /// <summary>Debug probe (diagnostics.zimageF16trace): min/max/nan of a tensor, F16 or F32. D2H-drains.</summary>

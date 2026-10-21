@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -17,8 +18,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// h = h + tanh(gate_mlp).unsqueeze(1) * ffn_norm2(ffn(ffn_norm1(h) * (1 + scale_mlp.unsqueeze(1))))
 /// </code></para>
 /// <para>Non-modulated forward (used by <c>context_refiner</c>): same structure with no gates and no MLP scale.</para>
-/// <para>RoPE is applied to Q and K outside the block (in the transformer's RoPE pass) before this method is
-/// called — the block expects already-rotated Q/K in its internal attention call.</para></summary>
+/// <para>The block rotates Q and K itself: on the device through the shared attention layer on the rope-mode path, on
+/// the host on the table path.</para></summary>
 public sealed unsafe class OmniGen2Block
 {
     private readonly int _hiddenSize;
@@ -32,6 +33,7 @@ public sealed unsafe class OmniGen2Block
     private readonly float _normEps;
 
     private Tensor? _toQWeight, _toKWeight, _toVWeight, _toOutWeight;
+    private AttentionLayer? _attention;
 
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
@@ -95,6 +97,18 @@ public sealed unsafe class OmniGen2Block
 
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+        // The rope-mode path; the table path rotates on the host and keeps its own attention for now.
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numQHeads, KvHeads = _numKvHeads, HeadDim = _headDim, OutDim = _hiddenSize, QkNorm = AttentionQkNorm.PerHead,
+                AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQWeight, Key = _toKWeight, Value = _toVWeight, Output = _toOutWeight, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
 
         _ffnLinear1Weight = weights[$"{prefix}.feed_forward.linear_1.weight"];
         _ffnLinear2Weight = weights[$"{prefix}.feed_forward.linear_2.weight"];
@@ -171,7 +185,7 @@ public sealed unsafe class OmniGen2Block
             backend.RmsNorm(norm1Out, hidden, _norm1Weight!, _normEps);
         }
 
-        Tensor attnOut = ComputeSelfAttention(backend, norm1Out, rope, ropeMode, hPacked, wPacked, timeOffset, batch, seqLen);
+        Tensor attnOut = ComputeSelfAttention(backend, norm1Out, rope, ropeMode, hPacked, wPacked, timeOffset, seqLen);
         norm1Out.Dispose();
 
         Tensor norm2Out = new Tensor(hShape, act);
@@ -414,29 +428,10 @@ public sealed unsafe class OmniGen2Block
     }
 
     private Tensor ComputeSelfAttention(IBackend backend, Tensor input, OmniGen2Rope rope, RopeApplyMode ropeMode,
-        int hPacked, int wPacked, int timeOffset, int batch, int seqLen)
+        int hPacked, int wPacked, int timeOffset, int seqLen)
     {
-        // Q/K/V projected as [B, S, H, D] (byte-identical to [B, S, H·D]) so QK-norm RmsNorm normalizes over the
-        // head dim and Permute0213 needs no reshape view. Fully GPU-resident. `act` = the stream dtype (F16 on the
-        // numerics.ditF16 hot path, else F32); QK-norm bounds the attention scores so F16 SDPA is safe.
-        DType act = input.DType;
-        Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), act);
-        backend.Linear(q, input, _toQWeight!, null);
-        Tensor k = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), act);
-        backend.Linear(k, input, _toKWeight!, null);
-        Tensor v = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), act);
-        backend.Linear(v, input, _toVWeight!, null);
-
-        Tensor qn = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), act);
-        backend.RmsNorm(qn, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kn = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), act);
-        backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        // Device RoPE on the pre-permute [B, S, H, D] layout: rotation is per-(s, h) independent, so applying it
-        // here is bit-equivalent to the old post-permute host pass — minus the per-block Q/K D2H drain + re-upload
-        // that made this the dominant host cost. Tables are position-only, cached across every block and step.
+        // Per-head QK norm bounds the scores, so the call may narrow to F16. The tables are position-only, cached across
+        // every block and step; the rotation runs on the device before the head permute.
         (Tensor ropeCos, Tensor ropeSin) = ropeMode switch
         {
             RopeApplyMode.Text => rope.GetOrBuildTextTables(seqLen),
@@ -445,42 +440,8 @@ public sealed unsafe class OmniGen2Block
             _ => throw new ArgumentOutOfRangeException(nameof(ropeMode), ropeMode,
                 "OmniGen2Block requires a Text/Image/Joint RoPE mode."),
         };
-        backend.WanRopeInterleaved(qn, ropeCos, ropeSin, seqLen, _numQHeads, _headDim);
-        backend.WanRopeInterleaved(kn, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim);
-
-        Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), act);
-        backend.Permute0213(qMh, qn, seqLen, _numQHeads, _headDim);
-        qn.Dispose();
-        Tensor kMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), act);
-        backend.Permute0213(kMh, kn, seqLen, _numKvHeads, _headDim);
-        kn.Dispose();
-        Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), act);
-        backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
-        v.Dispose();
-
-        Tensor kRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), act);
-        backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroupSize);
-        Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), act);
-        backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroupSize);
-        kMh.Dispose();
-        vMh.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), act);
-        // cuDNN F16 flash attention (head_dim 120 is admitted by the widened cuDNN gate); softmax-bounded, safe.
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale, allowF16: true);
-        qMh.Dispose();
-        kRep.Dispose();
-        vRep.Dispose();
-
-        Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), act);
-        backend.Permute0213(attnFlat, attnMh, _numQHeads, seqLen, _headDim);
-        attnMh.Dispose();
-
-        Tensor projected = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), act);
-        backend.Linear(projected, attnFlat, _toOutWeight!, null);
-        attnFlat.Dispose();
-        return projected;
+        QkRotation rotation = new(QkRotationKind.InterleavedPairs, ropeCos, ropeSin, seqLen);
+        return _attention!.Forward(backend, input, input, new AttentionCallContext { QueryRotation = rotation, KeyRotation = rotation });
     }
 
     private Tensor ApplyLuminaSwiGluFfn(IBackend backend, Tensor input, int batch, int seqLen)

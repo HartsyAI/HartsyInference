@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -19,6 +20,7 @@ public sealed unsafe class ZImageContextRefinerBlock
     // Fused QKV split into separate Q/K/V weights at load (GPU-residency rewrite); see ZImageBlock.SplitQkv.
     private Tensor? _toQWeight, _toKWeight, _toVWeight;
     private Tensor? _attnOutWeight;
+    private AttentionLayer? _attention;
 
     private Tensor? _attnNorm1Weight;
     private Tensor? _attnNorm2Weight;
@@ -49,6 +51,17 @@ public sealed unsafe class ZImageContextRefinerBlock
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.k_norm.weight"]);
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, ComputeDType = DType.F32,
+                AllowF16 = _allowF16Attention,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQWeight, Key = _toKWeight, Value = _toVWeight, Output = _attnOutWeight, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
 
         // RMSNorm scales must be F32 (CudaBackend.RmsNorm reads weight as float* directly).
         _attnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
@@ -85,8 +98,6 @@ public sealed unsafe class ZImageContextRefinerBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
-        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // GPU-residency rewrite — see ZImageBlock.Forward for the full rationale. This block has no AdaLN
         // (caption refinement is timestep-independent), so the residuals stay plain backend.Add.
@@ -95,60 +106,12 @@ public sealed unsafe class ZImageContextRefinerBlock
         Tensor pre = new Tensor(shape, DType.F32);
         backend.RmsNorm(pre, x, _attnNorm1Weight!, _eps);
 
-        Tensor qHeads = new Tensor(headsShape, DType.F32);
-        Tensor kHeads = new Tensor(headsShape, DType.F32);
-        Tensor v = new Tensor(headsShape, DType.F32);
-        backend.Linear(qHeads, pre, _toQWeight!, null);
-        backend.Linear(kHeads, pre, _toKWeight!, null);
-        backend.Linear(v, pre, _toVWeight!, null);
-        pre.Dispose();
-
-        Tensor qNormed = new Tensor(headsShape, DType.F32);
-        Tensor kNormed = new Tensor(headsShape, DType.F32);
-        backend.RmsNorm(qNormed, qHeads, _normQ.Weight, _normQ.Eps);
-        backend.RmsNorm(kNormed, kHeads, _normK.Weight, _normK.Eps);
-        qHeads.Dispose();
-        kHeads.Dispose();
-
-        // Device RoPE on the pre-permute layout for B=1 (see ZImageBlock — bit-identical, kills the host
-        // D2H round-trip of Q/K); B>1 keeps the host path after the permute.
-        bool gpuRope = rope is not null && batch == 1;
-        if (gpuRope)
+        // Q/K normalization bounds the scores but not V: Base keeps every attention call in F32, Turbo its fused path.
+        AttentionCallContext context = new()
         {
-            rope!.ApplyGpu(backend, qNormed, kNormed, _numHeads);
-        }
-
-        Tensor qMh = new Tensor(mhShape, DType.F32);
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        Tensor vMh = new Tensor(mhShape, DType.F32);
-        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
-        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
-        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        kNormed.Dispose();
-        v.Dispose();
-
-        if (rope is not null && !gpuRope)
-        {
-            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
-        }
-
-        // Q/K normalization bounds scores but not V. Base disables internal F16 narrowing for every attention
-        // site; Turbo retains its validated fused path.
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale, allowF16: _allowF16Attention);
-        qMh.Dispose();
-        kMh.Dispose();
-        vMh.Dispose();
-
-        Tensor attnFlat = new Tensor(shape, DType.F32);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-
-        Tensor projected = new Tensor(shape, DType.F32);
-        backend.Linear(projected, attnFlat, _attnOutWeight!, null);
-        attnFlat.Dispose();
+            Rotation = batch == 1 ? rope : null, HeadMajorRotation = batch == 1 ? null : rope, ReleaseInputs = true,
+        };
+        Tensor projected = _attention!.Forward(backend, pre, pre, in context);
 
         Tensor postAttnNorm = new Tensor(shape, DType.F32);
         backend.RmsNorm(postAttnNorm, projected, _attnNorm2Weight!, _eps);

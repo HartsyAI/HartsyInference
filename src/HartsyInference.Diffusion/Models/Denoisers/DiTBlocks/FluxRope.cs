@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -7,7 +8,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Axial Rotary Position Embedding for Flux. Computes RoPE rotation matrices across 3 axes [16, 56, 56] with theta=10000, then applies 2x2 rotation to each Q/K pair. Precomputes cos/sin tables per resolution for caching.</summary>
-public sealed unsafe class FluxRope : IDisposable
+public sealed unsafe class FluxRope : IDisposable, IQkRotation, IHeadMajorQkRotation
 {
     /// <summary>Q/K vectors rotated per range of the host fan-out: a vector is only a few hundred operations, so a
     /// range of them amortizes dispatch, and the ranges depend only on the vector count.</summary>
@@ -115,6 +116,17 @@ public sealed unsafe class FluxRope : IDisposable
 
     /// <summary>Releases the device tables. Outstanding leases keep theirs until released.</summary>
     public void Dispose() => _deviceTables.Dispose();
+
+    /// <inheritdoc/>
+    void IQkRotation.RotateTokenMajor(IBackend backend, Tensor q, Tensor k, int heads, int kvHeads) =>
+        ApplyGpuGqa(backend, q, k, heads, kvHeads);
+
+    /// <inheritdoc/>
+    void IHeadMajorQkRotation.RotateHeadMajor(IBackend backend, Tensor q, Tensor k, int batch, int heads, int kvHeads, int tokens)
+    {
+        ForwardSingle(q, batch, heads, tokens);
+        ForwardSingle(k, batch, kvHeads, tokens);
+    }
 
     private void CheckGpuPrecondition(string method, Tensor q)
     {

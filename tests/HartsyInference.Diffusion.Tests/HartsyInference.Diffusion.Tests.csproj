@@ -44,6 +44,7 @@
     <None Include="Fixtures\MossImage\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Qwen35Vl\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Rope\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Attention\**\*" CopyToOutputDirectory="PreserveNewest" />
 
   </ItemGroup>
 

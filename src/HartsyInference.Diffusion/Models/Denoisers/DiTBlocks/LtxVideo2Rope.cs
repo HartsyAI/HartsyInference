@@ -47,6 +47,9 @@ public sealed unsafe class LtxVideo2Rope
     /// <see cref="RopeType.Split"/>; an interleaved rope must keep the unfused sequence.</summary>
     public RopeType Flavor => _ropeType;
 
+    /// <summary>The full inner width the rotation applies to.</summary>
+    public int Dim => _dim;
+
     /// <summary>Storage dtype of the cos/sin tables <see cref="BuildVideo"/>/<see cref="BuildAudio"/> emit. At the
     /// LTX-2.5 video shape the pair is ~2×40.9 MB of F32 against a 40 MB activation — about half the fused rope
     /// kernel's traffic, and that kernel is bandwidth-bound. <see cref="DType.F16"/> halves it; the kernel still

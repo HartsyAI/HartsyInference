@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -35,6 +36,7 @@ public sealed unsafe class Lumina2Block
 
     // Output projection: Linear(numHeads*headDim → hidden), no bias.
     private Tensor? _toOutWeight;
+    private AttentionLayer? _attention;
 
     // norm2: post-attention RMSNorm scale [hidden].
     private Tensor? _norm2Weight;
@@ -80,6 +82,18 @@ public sealed unsafe class Lumina2Block
 
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+        // The single-item device path; the batched host path keeps its own attention until it moves to the device.
+        _attention = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _numHeads, KvHeads = _numKvHeads, HeadDim = _headDim, OutDim = _hiddenSize, QkNorm = AttentionQkNorm.PerHead,
+                AllowF16 = true,
+            },
+            new AttentionLayerWeights
+            {
+                Query = _toQWeight, Key = _toKWeight, Value = _toVWeight, Output = _toOutWeight, QueryNorm = _normQ.Weight,
+                KeyNorm = _normK.Weight, QueryNormEps = _normQ.Eps, KeyNormEps = _normK.Eps,
+            });
 
         _norm2Weight = TensorCasts.LoadF32(weights, $"{prefix}.norm2.weight");
         _ffnNorm1Weight = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
@@ -123,10 +137,6 @@ public sealed unsafe class Lumina2Block
         int seqLen = (int)x.Shape[1];
         DType act = x.DType;
         TensorShape shape = new TensorShape(1, seqLen, _hiddenSize);
-        TensorShape qHeads = new TensorShape(1, seqLen, _numHeads, _headDim);
-        TensorShape kvHeads = new TensorShape(1, seqLen, _numKvHeads, _headDim);
-        TensorShape qMhShape = new TensorShape(1, _numHeads, seqLen, _headDim);
-        TensorShape kvMhShape = new TensorShape(1, _numKvHeads, seqLen, _headDim);
 
         // ── 1. norm1 RMSNorm + AdaLN(SiLU(temb)) → (scale_msa, tanh(gate_msa), scale_mlp, tanh(gate_mlp)) ──
         Tensor normed1 = new Tensor(shape, act);
@@ -135,63 +145,9 @@ public sealed unsafe class Lumina2Block
         Tensor normedScaled = ScaleDevice(backend, normed1, mod[0], shape, act);
         normed1.Dispose();
 
-        // ── 2. Q/K/V ([1, S, H, D] — byte-identical to [1, S, H·D], so QK-norm + rope + permute need no reshape) ──
-        Tensor q = new Tensor(qHeads, act);
-        backend.Linear(q, normedScaled, _toQWeight!, null);
-        Tensor k = new Tensor(kvHeads, act);
-        backend.Linear(k, normedScaled, _toKWeight!, null);
-        Tensor v = new Tensor(kvHeads, act);
-        backend.Linear(v, normedScaled, _toVWeight!, null);
-        normedScaled.Dispose();
-
-        // ── 3. QK-norm (per-head RMSNorm over headDim) ──
-        Tensor qN = new Tensor(qHeads, act);
-        backend.RmsNorm(qN, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kN = new Tensor(kvHeads, act);
-        backend.RmsNorm(kN, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        // ── 4. RoPE on the pre-permute layout (per-tensor head counts — GQA-safe) ──
-        rope?.ApplyGpuGqa(backend, qN, kN, _numHeads, _numKvHeads);
-
-        // ── 5. Permute [1, S, H, D] → [1, H, S, D]; GQA-expand K/V to the Q head count ──
-        Tensor qMh = new Tensor(qMhShape, act);
-        backend.Permute0213(qMh, qN, seqLen, _numHeads, _headDim);
-        qN.Dispose();
-        Tensor kMh = new Tensor(kvMhShape, act);
-        backend.Permute0213(kMh, kN, seqLen, _numKvHeads, _headDim);
-        kN.Dispose();
-        Tensor vMh = new Tensor(kvMhShape, act);
-        backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
-        v.Dispose();
-
-        Tensor kFull = kMh, vFull = vMh;
-        if (_numKvHeads != _numHeads)
-        {
-            int groupSize = _numHeads / _numKvHeads;
-            kFull = new Tensor(qMhShape, act);
-            backend.RepeatKvHeads(kFull, kMh, _numKvHeads, groupSize);
-            kMh.Dispose();
-            vFull = new Tensor(qMhShape, act);
-            backend.RepeatKvHeads(vFull, vMh, _numKvHeads, groupSize);
-            vMh.Dispose();
-        }
-
-        // ── 6. SDPA (QK-norm bounds scores → F16-safe, engages the cuDNN fused flash path) ──
-        Tensor attnOut = new Tensor(qMhShape, act);
-        backend.ScaledDotProductAttention(attnOut, qMh, kFull, vFull, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
-        qMh.Dispose();
-        kFull.Dispose();
-        vFull.Dispose();
-
-        // ── 7. Out-proj + sandwich norm2 + tanh-gated residual ──
-        Tensor attnFlat = new Tensor(new TensorShape(1, seqLen, _qDim), act);
-        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
-        attnOut.Dispose();
-        Tensor projected = new Tensor(shape, act);
-        backend.Linear(projected, attnFlat, _toOutWeight!, null);
-        attnFlat.Dispose();
+        // ── 2-6. Attention: per-head QK norm (bounded scores, so the call may narrow to F16), rope on the device ──
+        Tensor projected = _attention!.Forward(backend, normedScaled, normedScaled,
+            new AttentionCallContext { Rotation = rope, ReleaseInputs = true });
         Tensor postAttnNorm = new Tensor(shape, act);
         backend.RmsNorm(postAttnNorm, projected, _norm2Weight!, _eps);
         projected.Dispose();
