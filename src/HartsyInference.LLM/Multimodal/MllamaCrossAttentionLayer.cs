@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -17,6 +18,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
     private readonly int _hidden, _numHeads, _numKvHeads, _headDim, _inter;
     private readonly float _rmsEps;
     private readonly bool _lowVram;
+    private readonly AttentionLayer _attn;
 
     private Tensor _inNorm = null!, _postAttnNorm = null!;
     private Tensor _qW = null!, _kW = null!, _vW = null!, _oW = null!;
@@ -28,6 +30,10 @@ public sealed unsafe class MllamaCrossAttentionLayer
     {
         _hidden = hidden; _numHeads = numHeads; _numKvHeads = numKvHeads; _headDim = headDim;
         _inter = intermediate; _rmsEps = rmsEps; _lowVram = lowVram;
+        _attn = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = numHeads, KvHeads = numKvHeads, HeadDim = headDim, ComputeDType = DType.F32, Scale = 1f / MathF.Sqrt(headDim),
+        });
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
@@ -50,7 +56,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
     /// <summary>Cross-attention + gated FFN: <paramref name="text"/> is <c>[1, t, hidden]</c> (the decoder query), <paramref name="vision"/> is <c>[1, L, hidden]</c> (the encoded image features); returns <c>[1, t, hidden]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor text, int t, Tensor vision, int visionLen)
     {
-        int hq = _numHeads, hkv = _numKvHeads, d = _headDim, group = hq / hkv;
+        int hq = _numHeads, hkv = _numKvHeads, d = _headDim;
         TensorShape flat = new(1, t, _hidden);
 
         // --- Cross attention ---
@@ -78,13 +84,9 @@ public sealed unsafe class MllamaCrossAttentionLayer
         Tensor vMh = new(new TensorShape(1, hkv, visionLen, d), DType.F32); backend.Permute0213(vMh, v, visionLen, hkv, d);
         qN.Dispose(); kN.Dispose(); v.Dispose();
 
-        Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-        backend.FlashAttention(attn, qMh, kMh, vMh, visionLen, group, causal: false, qOffset: 0, 1f / MathF.Sqrt(d));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0, new KvAttentionCall { KvLength = visionLen, Bidirectional = true });
 
-        Tensor attnFlat = new(new TensorShape(1, t, hq * d), DType.F32);
-        backend.Permute0213(attnFlat, attn, hq, t, d);
-        attn.Dispose();
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hq * d));
         Tensor attnOut = new(flat, DType.F32);
         GenericTransformer.Project(backend, attnOut, attnFlat, _oW, null, lowVram: _lowVram);
         attnFlat.Dispose();

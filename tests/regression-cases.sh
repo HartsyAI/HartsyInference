@@ -88,6 +88,12 @@ h3-vsa-int8	attention,video	Stable-Diffusion/MiniMaxH3/flat/diffusion_models/min
 hunyuanvideo	attention,video	Stable-Diffusion/hunyuan-video-t2v-720p-1_0-hunyuan-video-base-bf16.safetensors	video|a red fox trotting through a sunlit snowy forest, cinematic|-m hunyuan-video --width 512 --height 320 --frames 25 --steps 10
 qwen3-4b	attention	llm/qwen3/Qwen3-4B-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0 --no-thinking
 gemma2-2b	attention	llm/gemma2/gemma-2-2b-it-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
+llama32-1b-graph	attention	llm/llama32-1b/llama-3.2-1b-instruct-q8_0.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0 --graph-decode
+qwen3-4b-graph	attention	llm/qwen3/Qwen3-4B-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0 --no-thinking --graph-decode
+gemma2-2b-graph	attention	llm/gemma2/gemma-2-2b-it-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0 --graph-decode
+qwen35-0.8b	attention	llm/qwen35/Qwen3.5-0.8B-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
+qwen35-0.8b-graph	attention	llm/qwen35/Qwen3.5-0.8B-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0 --graph-decode
+llama32-vision	attention	llm/llama32-vision/Llama-3.2-11B-Vision-Instruct.Q4_K_M.gguf	text|Describe this image in detail.|--max-tokens 128 --temperature 0 -i /mnt/model-storage/Models/TestAssets/vision/bus.png
 seedvr2-3b	video	Video/SeedVr2/seedvr2_ema_3b_fp16.safetensors	restore|/mnt/model-storage/Models/TestAssets/restore/bbb9.mp4|-m seedvr2-3b --width 640 --height 360
 oasis	video,attention	World/Oasis/oasis500m.safetensors	world|/mnt/model-storage/Models/TestAssets/world/oasis_first_frame.png|-m oasis --vae-path /mnt/model-storage/Models/World/Oasis/vit-l-20.safetensors --frames 8 --steps 10
 MATRIX

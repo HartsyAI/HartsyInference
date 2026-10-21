@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
@@ -23,6 +24,7 @@ public sealed class AttentionTraceBackend : IBackend
 
     private void Track(params Tensor[] tensors)
     {
+        if (Silent) return;
         foreach (Tensor t in tensors) _seen.Add(t);
     }
 
@@ -35,6 +37,12 @@ public sealed class AttentionTraceBackend : IBackend
 
     /// <summary>Makes every attention call throw after it is recorded.</summary>
     public bool FailAttention { get; init; }
+
+    /// <summary>Records nothing from <see cref="Permute0213"/>, <see cref="Attention"/> and <see cref="FlashAttention"/>, so an allocation measurement sees only the caller's.</summary>
+    public bool Silent { get; init; }
+
+    /// <summary>Records a Flash-route call as one <c>Attention</c> line with its stage parameters instead of re-entering the legacy entry.</summary>
+    public bool FlashAsAttention { get; init; }
 
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
@@ -112,7 +120,7 @@ public sealed class AttentionTraceBackend : IBackend
     public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
     {
         Track(output, input);
-        Ops.Add($"Permute0213 {s},{h},{d}");
+        if (!Silent) Ops.Add($"Permute0213 {s},{h},{d}");
     }
 
     public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize) => Ops.Add($"RepeatKvHeads {kvHeads}x{groupSize}");
@@ -131,13 +139,21 @@ public sealed class AttentionTraceBackend : IBackend
 
     public void Attention(in AttentionCall call)
     {
+        if (Silent) return;
         Calls.Add(call);
-        if (call.Route is not (AttentionRoute.Flash or AttentionRoute.FlashDevice))
+        bool flash = call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice;
+        if (!flash)
         {
             Track(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage);
             LiveAtAttention.Add(Live);
         }
-        // The Flash routes re-enter their legacy entry, as the real backends do, so the call lands in FlashCalls.
+        // Otherwise the Flash routes re-enter their legacy entry, as the real backends do, so the call lands in FlashCalls.
+        if (flash && FlashAsAttention)
+        {
+            if (!Silent) Ops.Add(Describe(in call));
+            if (FailAttention) throw new OutOfMemoryException("attention failed");
+            return;
+        }
         if (call.Route == AttentionRoute.Flash)
         {
             FlashAttention(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage, call.ValidKvLength, call.KvGroup,
@@ -150,9 +166,16 @@ public sealed class AttentionTraceBackend : IBackend
                 call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
             return;
         }
-        Ops.Add($"Attention {call.Route} heads={call.Heads}/{call.KvHeads} bounded={call.Numerics.LegacyAssertedBounded}");
+        if (!Silent) Ops.Add(Describe(in call));
         if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
+
+    /// <summary>The trace line of an attention call.</summary>
+    public static string Describe(in AttentionCall call) => call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice
+        ? $"Attention {call.Route} heads={call.Heads}/{call.KvHeads} kv={call.ValidKvLength} q@{call.Positions.QueryOffset} "
+            + $"{(call.Mask.Causal ? "causal" : "full")} window={call.Mask.LegacySlidingWindow} softcap={call.Logits.Softcap.ToString(CultureInfo.InvariantCulture)}"
+            + (call.Positions.OnDevice ? $" dev={call.Positions.DeviceHandle}" : "")
+        : $"Attention {call.Route} heads={call.Heads}/{call.KvHeads} bounded={call.Numerics.LegacyAssertedBounded}";
 
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b) => Ops.Add($"BatchedMatMul {a.Shape} x {b.Shape}");
 
@@ -220,7 +243,7 @@ public sealed class AttentionTraceBackend : IBackend
         float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
         FlashCalls.Add(new FlashCall(kvLen, kvGroup, causal, qOffset, scale, softcap, sink is not null, slidingWindow, DevicePos: 0));
-        Ops.Add($"FlashAttention kv={kvLen} group={kvGroup} causal={causal} qOffset={qOffset} window={slidingWindow} sinks={sink is not null}");
+        if (!Silent) Ops.Add($"FlashAttention kv={kvLen} group={kvGroup} causal={causal} qOffset={qOffset} window={slidingWindow} sinks={sink is not null}");
         if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
 
@@ -228,7 +251,7 @@ public sealed class AttentionTraceBackend : IBackend
         ulong devicePos, float softcap = 0f, int slidingWindow = 0)
     {
         FlashCalls.Add(new FlashCall(kvLen, kvGroup, causal, qOffset, scale, softcap, false, slidingWindow, devicePos));
-        Ops.Add($"FlashAttentionDev kv={kvLen} group={kvGroup} causal={causal} qOffset={qOffset} window={slidingWindow} dev={devicePos != 0}");
+        if (!Silent) Ops.Add($"FlashAttentionDev kv={kvLen} group={kvGroup} causal={causal} qOffset={qOffset} window={slidingWindow} dev={devicePos != 0}");
         if (FailAttention) throw new OutOfMemoryException("attention failed");
     }
 
@@ -270,7 +293,11 @@ public sealed class AttentionTraceBackend : IBackend
     public void Elu(Tensor output, Tensor input, float alpha) => throw Unused();
     public void LeakyRelu(Tensor output, Tensor input, float slope) => throw Unused();
     public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta) => throw Unused();
-    public void Scale(Tensor output, Tensor input, float scalar) => throw Unused();
+    public void Scale(Tensor output, Tensor input, float scalar)
+    {
+        Track(output, input);
+        Ops.Add("Scale");
+    }
     public void Clamp(Tensor output, Tensor input, float min, float max) => throw Unused();
     public void GeGlu(Tensor output, Tensor input) => throw Unused();
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial) => throw Unused();

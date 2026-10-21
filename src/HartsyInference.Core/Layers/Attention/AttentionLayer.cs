@@ -6,7 +6,7 @@ namespace HartsyInference.Core.Layers.Attention;
 
 /// <summary>One attention layer composed of stages: projection, Q/K norm and rotation, the attention call
 /// (docs/ATTENTION_CONTRACT.md), output gate and projection; each intermediate is disposed after its last use.</summary>
-public sealed class AttentionLayer
+public sealed partial class AttentionLayer
 {
     private readonly AttentionLayerConfig _config;
     private readonly AttentionLayerWeights? _weights;

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -12,6 +13,7 @@ public sealed unsafe class CosmosArBlock
 {
     private readonly CosmosArConfig _cfg;
     private readonly bool _hasCross;
+    private readonly AttentionLayer _attn;   // self- and cross-attention share the head geometry and scale
 
     private Tensor _attnNorm = null!;
     private Tensor _wq = null!, _wk = null!, _wv = null!, _wo = null!;
@@ -24,6 +26,10 @@ public sealed unsafe class CosmosArBlock
     {
         _cfg = cfg;
         _hasCross = cfg.HasCrossAttn(layerIndex);
+        _attn = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = cfg.NumHeads, KvHeads = cfg.NumKvHeads, HeadDim = cfg.HeadDim, ComputeDType = DType.F32, Scale = 1f / MathF.Sqrt(cfg.HeadDim),
+        });
     }
 
     /// <summary>Loads this layer's weights from a Cosmos-named state dict under <paramref name="prefix"/>
@@ -70,7 +76,7 @@ public sealed unsafe class CosmosArBlock
     public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart, IKvCache cache, int layerIndex,
         Tensor cos, Tensor sin, Tensor? context, int ctxLen)
     {
-        int hq = _cfg.NumHeads, hkv = _cfg.NumKvHeads, d = _cfg.HeadDim, group = _cfg.KvGroup, dim = _cfg.Dim;
+        int hq = _cfg.NumHeads, hkv = _cfg.NumKvHeads, d = _cfg.HeadDim, dim = _cfg.Dim;
         TensorShape flat = new(1, t, dim);
 
         // --- Self-attention ---
@@ -103,19 +109,10 @@ public sealed unsafe class CosmosArBlock
         Tensor vMh = new(new TensorShape(1, hkv, t, d), DType.F32); backend.Permute0213(vMh, v, t, hkv, d);
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        cache.AppendStep(backend, layerIndex, kMh, vMh);
-        kMh.Dispose(); vMh.Dispose();
-        Tensor kFull = cache.KeyPrefix(layerIndex);
-        Tensor vFull = cache.ValuePrefix(layerIndex);
+        Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, cache, layerIndex, layerIndex,
+            new KvAttentionCall { KvLength = posStart + t, QueryOffset = posStart });
 
-        int kvLen = posStart + t;
-        Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-        backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, 1f / MathF.Sqrt(d));
-        qMh.Dispose();
-
-        Tensor attnFlat = new(new TensorShape(1, t, hq * d), DType.F32);
-        backend.Permute0213(attnFlat, attn, hq, t, d);
-        attn.Dispose();
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hq * d));
         Tensor attnOut = new(flat, DType.F32);
         Project(backend, attnOut, attnFlat, _wo, null);
         attnFlat.Dispose();
@@ -147,7 +144,7 @@ public sealed unsafe class CosmosArBlock
 
     private Tensor CrossAttention(IBackend backend, Tensor h, int t, Tensor context, int ctxLen)
     {
-        int hq = _cfg.NumHeads, hkv = _cfg.NumKvHeads, d = _cfg.HeadDim, group = _cfg.KvGroup, dim = _cfg.Dim;
+        int hq = _cfg.NumHeads, hkv = _cfg.NumKvHeads, d = _cfg.HeadDim, dim = _cfg.Dim;
         TensorShape flat = new(1, t, dim);
 
         Tensor pre = new(flat, DType.F32);
@@ -166,13 +163,9 @@ public sealed unsafe class CosmosArBlock
         Tensor vMh = new(new TensorShape(1, hkv, ctxLen, d), DType.F32); backend.Permute0213(vMh, v, ctxLen, hkv, d);
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-        backend.FlashAttention(attn, qMh, kMh, vMh, ctxLen, group, causal: false, qOffset: 0, 1f / MathF.Sqrt(d));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0, new KvAttentionCall { KvLength = ctxLen, Bidirectional = true });
 
-        Tensor attnFlat = new(new TensorShape(1, t, hq * d), DType.F32);
-        backend.Permute0213(attnFlat, attn, hq, t, d);
-        attn.Dispose();
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hq * d));
         Tensor cout = new(flat, DType.F32);
         Project(backend, cout, attnFlat, _cwo!, null);
         attnFlat.Dispose();

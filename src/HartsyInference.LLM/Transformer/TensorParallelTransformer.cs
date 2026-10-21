@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -13,6 +14,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
     private readonly TransformerConfig _cfg;
     private readonly TpPlacement _placement;
     private readonly RankLayer[][] _layers;   // [rank][layer]
+    private readonly AttentionLayer _attn;    // one rank's heads; stateless, the backend and cache are per-call, so every rank shares it
     private readonly List<Tensor> _owned = [];
     private Tensor? _embed;       // F32 table for the host embedding gather (rank-0-owned)
     private bool _ownsEmbed;
@@ -34,6 +36,11 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         ValidateConfig(cfg, placement.Degree);
         _cfg = cfg;
         _placement = placement;
+        _attn = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = cfg.NumHeads / placement.Degree, KvHeads = cfg.NumKvHeads / placement.Degree, HeadDim = cfg.HeadDim,
+            ComputeDType = DType.F32, Scale = cfg.AttnScale,
+        });
         _layers = new RankLayer[placement.Degree][];
         for (int r = 0; r < placement.Degree; r++)
         {
@@ -412,31 +419,10 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
             backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
         }
 
-        Tensor qMh = new(new TensorShape(1, hqR, t, d), DType.F32);
-        backend.Permute0213(qMh, q, t, hqR, d);
-        q.Dispose();
-        Tensor kMh = new(new TensorShape(1, hkvR, t, d), DType.F32);
-        Tensor vMh = new(new TensorShape(1, hkvR, t, d), DType.F32);
-        backend.Permute0213(kMh, k, t, hkvR, d);
-        backend.Permute0213(vMh, v, t, hkvR, d);
-        k.Dispose();
-        v.Dispose();
-        cache.AppendStep(backend, layer, kMh, vMh);
-        kMh.Dispose();
-        vMh.Dispose();
-        Tensor kFull = cache.KeyPrefix(layer);
-        Tensor vFull = cache.ValuePrefix(layer);
-
         // GQA group is degree-invariant: (hq/deg) / (hkv/deg) == KvGroup, so each rank's Q-head slice reads
         // exactly its own KV-head slice — no cross-rank attention traffic in the dense TP shape.
-        int kvLen = posStart + t;
-        Tensor attn = new(new TensorShape(1, hqR, t, d), DType.F32);
-        backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, _cfg.KvGroup, causal: true, qOffset: posStart, _cfg.AttnScale);
-        qMh.Dispose();
-
-        Tensor attnFlat = new(new TensorShape(1, t, hqR * d), DType.F32);
-        backend.Permute0213(attnFlat, attn, hqR, t, d);
-        attn.Dispose();
+        Tensor attn = _attn.AttendOverKv(backend, q, k, v, cache, layer, layer, new KvAttentionCall { KvLength = posStart + t, QueryOffset = posStart });
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hqR * d));
         Tensor outp = new(flat, DType.F32);
         GenericTransformer.Project(backend, outp, attnFlat, rl.OW, rl.OB, _cfg.LowVramQuant);
         attnFlat.Dispose();

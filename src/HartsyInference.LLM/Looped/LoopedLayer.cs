@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -15,6 +16,7 @@ internal sealed class LoopedLayer : IDisposable
     private readonly LoopedTransformerConfig _cfg;
     private readonly LoopedNormVectors _norms;
     private readonly int _physical;
+    private readonly AttentionLayer? _attn;   // the attention operator and KV stage; null on an MLP layer
     // Tensors built here (baked scales, fused projections): owned and disposed by this layer. Checkpoint weights are the loader's.
     private readonly List<Tensor> _owned = [];
     private Tensor? _qW, _kW, _vW, _oW, _gateW, _qkvW;
@@ -30,6 +32,13 @@ internal sealed class LoopedLayer : IDisposable
         _cfg = cfg;
         _norms = norms;
         _physical = physical;
+        if (IsAttention)
+        {
+            _attn = new AttentionLayer(new AttentionLayerConfig
+            {
+                Heads = cfg.NumHeads, KvHeads = cfg.NumKvHeads, HeadDim = cfg.HeadDim, ComputeDType = DType.F32, Scale = AttentionScale,
+            });
+        }
     }
 
     /// <summary>What this layer computes.</summary>
@@ -165,17 +174,10 @@ internal sealed class LoopedLayer : IDisposable
         backend.Permute0213(kHeads, kNormed, t, hkv, d);
         kNormed.Dispose();
         Tensor vHeads = ToHeadMajor(backend, v, t, hkv, d);
-        cache.AppendStep(backend, slot, kHeads, vHeads);
-        kHeads.Dispose();
-        vHeads.Dispose();
-        Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-        backend.FlashAttention(attn, qScaled, cache.KeyPrefix(slot), cache.ValuePrefix(slot), posStart + t, _cfg.KvGroup, causal: true,
-            qOffset: posStart, AttentionScale, 0f, null, Window, null);
-        qScaled.Dispose();
+        Tensor attn = _attn!.AttendOverKvHeadMajor(backend, qScaled, kHeads, vHeads, cache, slot, slot,
+            new KvAttentionCall { KvLength = posStart + t, QueryOffset = posStart, SlidingWindow = Window });
         if (single) return GateAndProject(backend, attn, gate, 1);
-        Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
-        backend.Permute0213(attnFlat, attn, hq, t, d);
-        attn.Dispose();
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, _cfg.QDim));
         return GateAndProject(backend, attnFlat, gate, t);
     }
 
@@ -215,9 +217,7 @@ internal sealed class LoopedLayer : IDisposable
         backend.KvCacheAppendDev(vFull, v, 0, devicePos);
         kNormed.Dispose();
         v.Dispose();
-        Tensor attn = new(new TensorShape(1, hq, 1, d), DType.F32);
-        backend.FlashAttentionDev(attn, qScaled, kFull, vFull, 0, _cfg.KvGroup, causal: true, 0, AttentionScale, devicePos, 0f, Window);
-        qScaled.Dispose();
+        Tensor attn = _attn!.AttendDevice(backend, qScaled, kFull, vFull, devicePos, new KvAttentionCall { SlidingWindow = Window });
         return GateAndProject(backend, attn, gate, 1);
     }
 
@@ -249,15 +249,9 @@ internal sealed class LoopedLayer : IDisposable
             backend.AffineBroadcastLastDim(qScaled, qHeads, _qkScale!, null);
             qHeads.Dispose();
             IKvCache cache = caches[s];
-            cache.AppendStep(backend, slot, kHeads, vHeads);
-            kHeads.Dispose();
-            vHeads.Dispose();
             int position = cache.CurrentLength;
-            Tensor segment = new(new TensorShape(1, hq, 1, d), DType.F32);
-            backend.FlashAttention(segment, qScaled, cache.KeyPrefix(slot), cache.ValuePrefix(slot), position + 1, _cfg.KvGroup, causal: true,
-                qOffset: position, AttentionScale, 0f, null, Window, null);
-            qScaled.Dispose();
-            segments[s] = segment;
+            segments[s] = _attn!.AttendOverKvHeadMajor(backend, qScaled, kHeads, vHeads, cache, slot, slot,
+                new KvAttentionCall { KvLength = position + 1, QueryOffset = position, SlidingWindow = Window });
         }
         qNormed.Dispose();
         kNormed.Dispose();
