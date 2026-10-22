@@ -364,8 +364,37 @@ public sealed class AttentionLayerTests
             ops.Add($"RotateHeadMajor b={batch} {heads}/{kvHeads} s={tokens}");
     }
 
+    /// <summary>A probe that throws on the output it is shown leaves no output behind, on either entry.</summary>
+    [Theory]
+    [InlineData(AttentionRoute.Dense)]
+    [InlineData(AttentionRoute.TokenMajor)]
+    public unsafe void AThrowingProbe_FreesTheOutputItWasShown(AttentionRoute route)
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        ThrowingProbe probe = new();
+        AttentionLayer layer = new(Krea2(4, 4) with { Gate = AttentionGate.None, TokenMajorRoute = route }, Weights(gate: false));
+        Tensor x = new(new TensorShape(1, 6, 16), DType.F32);
+
+        Assert.Throws<InvalidOperationException>(() => layer.Forward(backend, x, x, new AttentionCallContext { Probe = probe }));
+
+        Assert.Equal(route, Assert.Single(backend.Calls).Route);
+        Assert.Throws<ObjectDisposedException>(() => (nint)probe.Output!.DataPointer);
+    }
+
     private sealed class TraceProbe(List<string> points) : IAttentionProbe
     {
         public void Observe(string point, Tensor value) => points.Add(point);
+    }
+
+    private sealed class ThrowingProbe : IAttentionProbe
+    {
+        public Tensor? Output;
+
+        public void Observe(string point, Tensor value)
+        {
+            if (point != "attention") return;
+            Output = value;
+            throw new InvalidOperationException("probe failed");
+        }
     }
 }

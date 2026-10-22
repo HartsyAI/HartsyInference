@@ -271,8 +271,31 @@ public sealed class AttentionCachedStageTests
         Assert.False(IsDisposed(q));
     }
 
+    [Fact]
+    public void AThrowingProbe_FreesTheOutputItWasShown()
+    {
+        AttentionTraceBackend backend = new();
+        ThrowingProbe probe = new();
+
+        Assert.Throws<InvalidOperationException>(() => Layer().AttendCachedHeadMajor(backend, Query(), Cache(), Cache(),
+            new AttentionCacheView(1, 0, Causal: true), new AttentionCallContext { Probe = probe }));
+
+        Assert.True(IsDisposed(probe.Output!));
+    }
+
     private sealed class Probe(List<string> points) : IAttentionProbe
     {
         public void Observe(string point, Tensor value) => points.Add(point);
+    }
+
+    private sealed class ThrowingProbe : IAttentionProbe
+    {
+        public Tensor? Output;
+
+        public void Observe(string point, Tensor value)
+        {
+            Output = value;
+            throw new InvalidOperationException("probe failed");
+        }
     }
 }

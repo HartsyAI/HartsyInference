@@ -202,6 +202,7 @@ public sealed partial class AttentionLayer
                 : AttentionCall.FromFlashAttention(attn, qMh, keyCache, valueCache, view.KvLength, view.Causal, view.QueryOffset,
                     _config.EffectiveScale, view.Softcap, view.Sinks, view.SlidingWindow, null);
             backend.Attention(in call);
+            context.Probe?.Observe("attention", attn);
         }
         catch
         {
@@ -212,7 +213,6 @@ public sealed partial class AttentionLayer
         {
             Consume(consume, qMh, keyCache, valueCache);
         }
-        context.Probe?.Observe("attention", attn);
         return attn;
     }
 
@@ -686,6 +686,7 @@ public sealed partial class AttentionLayer
             AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
                 _config.HeadDim, _config.EffectiveScale, _config.AllowF16) with { Route = _config.TokenMajorRoute };
             backend.Attention(in call);
+            context.Probe?.Observe("attention", flat);
         }
         catch
         {
@@ -701,7 +702,6 @@ public sealed partial class AttentionLayer
                 v.Dispose();
             }
         }
-        context.Probe?.Observe("attention", flat);
         return flat;
     }
 
@@ -755,6 +755,7 @@ public sealed partial class AttentionLayer
             AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
                 _config.AllowF16);
             backend.Attention(in call);
+            context.Probe?.Observe("attention", attn);
         }
         catch
         {
@@ -765,7 +766,6 @@ public sealed partial class AttentionLayer
         {
             Consume(consume, qMh, kMh, vMh);
         }
-        context.Probe?.Observe("attention", attn);
         return attn;
     }
 
