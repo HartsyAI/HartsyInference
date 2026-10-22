@@ -61,7 +61,7 @@ public sealed class ArchitectureGateTests
             IReadOnlyList<string> skipped = backend.SkippedKernelModules;
             _output.WriteLine($"skipped {skipped.Count}: {string.Join(", ", skipped)}");
             Assert.All(skipped, module => Assert.True(TargetOf(module) > 75, module));
-            Assert.Contains(skipped, module => module.StartsWith("flash_attn_v2_tf32 ", StringComparison.Ordinal));
+            Assert.Contains(skipped, module => module.StartsWith("flash_attn_f32 ", StringComparison.Ordinal));
             Assert.Contains(skipped, module => module.StartsWith("sage_attn_int8 ", StringComparison.Ordinal));
             Assert.Contains(skipped, module => module.StartsWith("moe_prefill ", StringComparison.Ordinal));
             Assert.DoesNotContain(skipped, module => module.StartsWith("elementwise_f32 ", StringComparison.Ordinal));

@@ -117,7 +117,7 @@ public sealed partial class CudaBackend
     private const AttentionDTypes AnyFloat = AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16;
     private const AttentionMaskSupport AnyBias = AttentionMaskSupport.HeadSharedBias | AttentionMaskSupport.PerHeadBias;
 
-    // ── head-major ScaledDotProductAttention: S.1-S.15 ─────────────────────────────────────────────────────────────
+    // ── head-major ScaledDotProductAttention: S.1-S.15 (S.4, S.6-S.8 retired) ───────────────────────────────────────
 
     private AttentionKernelRow[] BuildDenseRows()
     {
@@ -147,14 +147,6 @@ public sealed partial class CudaBackend
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f16", E, AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView), "S.3",
                 (in AttentionCall c) => CudnnSdpaRows.Covers(in c) && CudnnReady(in c),
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
-            // The F32 Sage rows narrow V to F16 with no range check (|V| > 65504 becomes Inf), hence the two opt-in flags.
-            new DelegateAttentionRow(Cap("sage.int8.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
-                }, "S.4",
-                (in AttentionCall c) => c.Query.DType == DType.F32 && SageF32ValueNarrowingEnabled && c.Mask.Bias is null
-                    && (c.QkHeadDim == 64 || c.QkHeadDim == 128) && c.KeyTokens >= 2048 && SageF32KernelsReady(c.QueryTokens),
-                (in AttentionCall c) => { SageAttentionInt8(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.sat", E, AttentionDTypes.F32, HM, strided: false) with
                 {
                     Saturates = true, Lowering = AttentionLowering.Cast,
@@ -162,29 +154,6 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c) && CudnnReady(in c)
                     && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled,
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
-            new DelegateAttentionRow(Cap("sage.int8.f32.short", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
-                }, "S.6",
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && SageF32ValueNarrowingEnabled
-                    && (c.QkHeadDim == 64 || c.QkHeadDim == 128) && c.KeyTokens >= 1024 && SageF32KernelsReady(c.QueryTokens),
-                (in AttentionCall c) => { SageAttentionInt8(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("fa2.tf32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32, CaptureSafe = true,
-                }, "S.7",
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && EngineKnobs.SdpaV2.Value
-                    && FlashAttentionV2ContractSatisfied(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, _allowTf32),
-                (in AttentionCall c) => { FlashAttentionV2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("flash.forced", E, AttentionDTypes.F32, AttentionDTypes.F32, HM), null,
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && EngineKnobs.SdpaForceFlash.Value,
-                (in AttentionCall c) =>
-                {
-                    FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.KeyTokens, kvGroup: 1, causal: false, qOffset: 0,
-                        c.Scale);
-                    t_attentionRoute = AttentionRouteText.Nested("S.8/", t_attentionRoute);
-                    return true;
-                }),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,
@@ -214,13 +183,6 @@ public sealed partial class CudaBackend
                     return true;
                 }),
         ];
-    }
-
-    /// <summary>The F32 Sage branches' kernel check: the module loaded, and the v0 kernel's full-tile rule when v1 is absent.</summary>
-    private bool SageF32KernelsReady(int sq)
-    {
-        EnsureKernels();
-        return _kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0);
     }
 
     /// <summary>The query-tiled gate: forced, or an F32 score matrix larger than half of free VRAM.</summary>
