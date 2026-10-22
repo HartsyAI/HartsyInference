@@ -117,7 +117,7 @@ public sealed partial class CudaBackend
     private const AttentionDTypes AnyFloat = AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16;
     private const AttentionMaskSupport AnyBias = AttentionMaskSupport.HeadSharedBias | AttentionMaskSupport.PerHeadBias;
 
-    // ── head-major ScaledDotProductAttention: S.1-S.15 (S.4, S.6-S.8 retired) ───────────────────────────────────────
+    // ── head-major ScaledDotProductAttention: S.1-S.16 (S.4, S.6-S.8 retired) ───────────────────────────────────────
 
     private AttentionKernelRow[] BuildDenseRows()
     {
@@ -155,6 +155,14 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c) && CudnnReady(in c)
                     && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled,
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.bf16", E, AttentionDTypes.F32, HM, strided: false) with
+                {
+                    UsesQueryKey = AttentionFormats.Bf16, UsesProbValue = AttentionFormats.Bf16, NarrowsF32To = AttentionFormats.Bf16,
+                    Lowering = AttentionLowering.Cast,
+                }, "S.16",
+                (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
+                    && CudnnReady(in c, CudnnSdpa.SdpaDtype.BF16) && Bf16CastFits(in c),
+                (in AttentionCall c) => TryCudnnSdpa(in c, CudnnSdpa.SdpaDtype.BF16)),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
@@ -219,9 +227,19 @@ public sealed partial class CudaBackend
         if (!OneRowTiles(in c)) return false;
         if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
         ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
-        (nuint free, _) = _context.GetMemoryInfo();
-        return scoreBytes > (ulong)free / 2;
+        return scoreBytes > (ulong)FreeVram() / 2;
     }
+
+    /// <summary>The BF16 copies of Q, K, V and the output fit in half of free VRAM.</summary>
+    private bool Bf16CastFits(in AttentionCall c)
+    {
+        ulong castBytes = sizeof(ushort) * ((ulong)c.Query.Storage.ElementCount + (ulong)c.Key.Storage.ElementCount
+            + (ulong)c.Value.Storage.ElementCount + (ulong)c.Output.Storage.ElementCount);
+        return castBytes <= (ulong)FreeVram() / 2;
+    }
+
+    /// <summary>Free device memory the attention rows budget against.</summary>
+    private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
 
     // ── token-major ScaledDotProductAttentionTokenMajor: M.1-M.3, and the grouped-query lowering ────────────────────
 
@@ -281,10 +299,11 @@ public sealed partial class CudaBackend
             (in AttentionCall c) => { GroupedTokenMajorViaHeadMajor(in c); return true; }),
     ];
 
-    /// <summary>The knob, the session, the head dim and this call's signature health.</summary>
-    private bool CudnnReady(in AttentionCall c) =>
+    /// <summary>The knob, the session, the head dim and the health of the signature the call runs under, F32 operands cast to
+    /// <paramref name="castTarget"/>.</summary>
+    private bool CudnnReady(in AttentionCall c, CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16) =>
         _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(c.QkHeadDim)
-        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c), Environment.TickCount64);
+        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c, castTarget), Environment.TickCount64);
 
     /// <summary>One sequence of whole tensors: all the permuting and widening rows take.</summary>
     private static bool WholeSequence(in AttentionCall c) =>

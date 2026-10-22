@@ -14,8 +14,13 @@ stable release will require. Dates are UTC.
 - **Added: a BF16 attention grant.** `AttentionNumerics.Bf16Storage` permits BF16 storage and multiply of Q, K, P and V
   with F32 scores, softmax and accumulation; `AttentionLayerConfig.AllowBf16` and `JointAttentionConfig.AllowBf16` carry
   it, and a config that also sets `AllowF16` is refused. The planner now excludes a row that narrows F32 operands to a
-  format the call does not permit (`AttentionKernelCapability.NarrowsF32To`, exclusion `Numerics`). No row narrows and no
-  model grants yet, so output is unchanged.
+  format the call does not permit (`AttentionKernelCapability.NarrowsF32To`, exclusion `Numerics`). No model grants yet,
+  so output is unchanged.
+- **Added: a BF16 attention row on CUDA.** A head-major F32 call that carries the BF16 grant runs cuDNN's fused attention
+  on BF16 copies of Q, K and V (row S.16, `cudnn.f32.bf16`, after the saturating F16 row). BF16 keeps F32's range, so a
+  value past F16's 65504 stays finite instead of clipping. The row declines when the copies do not fit half of free VRAM.
+  cuDNN failure state is keyed by the dtype the graph runs in, so a refused BF16 plan cannot disable the F16 path. Nothing
+  grants BF16 yet, so output is unchanged.
 
 ## alpha.387
 
