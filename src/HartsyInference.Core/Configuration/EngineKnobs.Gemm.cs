@@ -12,16 +12,6 @@ namespace HartsyInference.Core.Configuration;
 /// names the code already used.</para></remarks>
 public static partial class EngineKnobs
 {
-    /// <summary>Opts into the experimental fused FlashAttention-2 kernel (TF32 tensor cores, F32 accumulate, MHA only).</summary>
-    public static readonly Knob<bool> SdpaV2 =
-        Bool("numerics.sdpaV2", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Opts into the experimental fused FlashAttention-2 kernel (TF32 tensor cores, F32 accumulate, MHA only).");
-
-    /// <summary>Forces the FlashAttention path for every SDPA call rather than letting the backend choose.</summary>
-    public static readonly Knob<bool> SdpaForceFlash =
-        Bool("numerics.sdpaForceFlash", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Forces the FlashAttention path for every SDPA call rather than letting the backend choose.");
-
     /// <summary>Forces F16 SDPA on for all callers; normally it is gated per call because unbounded-score architectures must not use it.</summary>
     public static readonly Knob<bool> SdpaF16 =
         Bool("numerics.sdpaF16", false, KnobScope.Runtime, KnobDomain.Numerics,
@@ -41,13 +31,6 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> FlashSplitOff =
         Bool("numerics.flashSplitOff", false, KnobScope.Runtime, KnobDomain.Numerics,
             "Kill-switch for split-K flash attention, which is otherwise a large LLM-decode win.");
-
-    /// <summary>Accepts Sage attention's F32-to-F16 V-storage narrowing; only takes effect alongside an explicit Sage opt-in.</summary>
-    /// <remarks>Quarantines a genuinely unsafe path: the Sage prologue materializes V as F16, so an F32 value
-    /// outside the finite F16 range becomes infinity. Requires a second opt-in on purpose.</remarks>
-    public static readonly Knob<bool> SageUnsafeF32VNarrow =
-        Bool("numerics.sageUnsafeF32VNarrow", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Accepts Sage attention's unsafe F32-to-F16 V narrowing; only effective alongside an explicit Sage opt-in.");
 
     /// <summary>Enables the tensor-core GEMM path.</summary>
     public static readonly Knob<bool> TensorcoreGemm =

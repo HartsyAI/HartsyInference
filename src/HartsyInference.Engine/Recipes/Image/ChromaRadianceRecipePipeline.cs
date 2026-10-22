@@ -25,13 +25,14 @@ public sealed class ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.DefaultSteps;
-        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
+        int steps = settings.Steps;
+        float cfgScale = settings.CfgScale;
 
         // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar.
         (int[] promptTokens, float[]? promptWeights) = T5WeightedConditioning.Tokenize(_tokenizer, prompt);
@@ -42,7 +43,7 @@ public sealed class ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline
 
         // Radiance is pixel-space, so no VAE encoder is involved — the source pixels are the clean sample. The
         // pipeline validates against the unpadded request size and pads source and mask alongside the latent itself.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
@@ -53,8 +54,8 @@ public sealed class ChromaRadianceRecipePipeline(ChromaRadiancePipeline pipeline
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
+                Width = settings.Width,
+                Height = settings.Height,
                 Steps = steps,
                 CfgScale = cfgScale,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),

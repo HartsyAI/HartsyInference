@@ -39,9 +39,8 @@ public sealed unsafe class AttentionExecutionCacheReleaseTests
         const int Heads = 2, Sequence = 32, HeadDim = 64;
         float scale = 1f / MathF.Sqrt(HeadDim);
         KnobStore.Set(EngineKnobs.SdpaCudnn, true);
-        // Ambient HARTSY_SAGE_ATTN=1 would let Sage claim these calls ahead of cuDNN and break the
+        // A configured numerics.sageAttn would let Sage claim these calls ahead of cuDNN and break the
         // exact CudnnSdpaExecutionCount assertions below.
-        KnobStore.Set(EngineKnobs.SageAttnExplicit, false);
         KnobStore.Set(EngineKnobs.SageAttn, false);
         try
         {
@@ -94,7 +93,6 @@ public sealed unsafe class AttentionExecutionCacheReleaseTests
         finally
         {
             KnobStore.Clear(EngineKnobs.SdpaCudnn);
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
             KnobStore.Clear(EngineKnobs.SageAttn);
         }
     }

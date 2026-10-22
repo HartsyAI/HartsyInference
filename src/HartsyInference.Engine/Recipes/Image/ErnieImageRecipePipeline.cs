@@ -27,13 +27,14 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? ErnieImageRecipe.FamilyDefaults.Steps;
-        float cfg = request.CfgScale ?? ErnieImageRecipe.FamilyDefaults.CfgScale;
+        int steps = settings.Steps;
+        float cfg = settings.CfgScale;
 
         // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner, regional prompting and
         // ImageRequest.Components overrides are deferred — text-to-image only.
@@ -43,7 +44,7 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
         int[] promptTokens = promptSequence.Tokens;
         int[] negTokens = negSequence.Tokens;
 
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
@@ -53,8 +54,8 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
+                Width = settings.Width,
+                Height = settings.Height,
                 Steps = steps,
                 CfgScale = cfg,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),

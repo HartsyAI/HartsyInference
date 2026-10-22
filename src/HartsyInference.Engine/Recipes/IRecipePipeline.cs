@@ -8,8 +8,10 @@ namespace HartsyInference.Engine.Recipes;
 /// across requests; disposed when the model is evicted.</summary>
 public interface IRecipePipeline : IDisposable
 {
-    /// <summary>Generates one image for <paramref name="request"/>, reporting step progress.</summary>
-    ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel);
+    /// <summary>Generates one image for <paramref name="request"/> at the resolved <paramref name="settings"/>,
+    /// reporting step progress.</summary>
+    ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel);
 
     /// <summary>The official defaults for the specific variant this pipeline was constructed for (Flux schnell vs dev,
     /// Krea 2 Turbo vs Base, Lens Turbo vs standard), or null when the recipe's family-level

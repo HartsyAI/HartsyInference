@@ -21,7 +21,8 @@ public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenize
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
@@ -35,9 +36,9 @@ public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenize
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
 
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
-        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(RecipeRequestMapper.ToTextToImage(request, negative), img2img);
+        TextToImageRequest inner = RecipeImg2ImgBinder.Apply(RecipeRequestMapper.ToTextToImage(request, settings, negative), img2img);
 
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
@@ -56,7 +57,7 @@ public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenize
                 ["arch"] = "auraflow",
                 ["size"] = $"{width}x{height}",
                 ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = (request.Steps ?? AuraFlowRecipe.FamilyDefaults.Steps).ToString(CultureInfo.InvariantCulture),
+                ["steps"] = (settings.Steps).ToString(CultureInfo.InvariantCulture),
             },
         };
     }

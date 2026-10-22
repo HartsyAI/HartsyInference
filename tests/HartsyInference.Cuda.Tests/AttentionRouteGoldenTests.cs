@@ -47,14 +47,6 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("f32-d40-allowf16", "sdpa", DType.F32, 4, 4, 256, 256, 40, "none", true, "S.5"),
         new("f32-allowf16-nof16", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", true, "S.14",
             Knobs: () => KnobStore.Set(EngineKnobs.SdpaNoF16, true)),
-        new("f32-sage-2k", "sdpa", DType.F32, 2, 2, 2048, 2048, 128, "none", false, "S.4",
-            Knobs: () => { KnobStore.Set(EngineKnobs.SageAttnExplicit, true); KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true); }),
-        new("f32-sage-1k", "sdpa", DType.F32, 2, 2, 1024, 1024, 128, "none", false, "S.6",
-            Knobs: () => { KnobStore.Set(EngineKnobs.SageAttnExplicit, true); KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true); }),
-        new("f32-sdpav2", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", false, "S.7",
-            Knobs: () => KnobStore.Set(EngineKnobs.SdpaV2, true)),
-        new("f32-forceflash", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", false, "S.8/F.7",
-            Knobs: () => KnobStore.Set(EngineKnobs.SdpaForceFlash, true)),
         new("bf16", "sdpa", DType.BF16, 4, 4, 256, 256, 128, "none", true, "S.12"),
         new("bf16-forcetiled", "sdpa", DType.BF16, 4, 4, 256, 256, 128, "none", true, "S.11",
             Knobs: () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true)),
@@ -110,9 +102,7 @@ public sealed unsafe class AttentionRouteGoldenTests
     private static readonly Action[] ClearKnobs =
     [
         () => KnobStore.Clear(EngineKnobs.SdpaCudnn), () => KnobStore.Clear(EngineKnobs.SdpaForceTiled),
-        () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.SageAttnExplicit),
-        () => KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow), () => KnobStore.Clear(EngineKnobs.SdpaV2),
-        () => KnobStore.Clear(EngineKnobs.SdpaForceFlash), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
+        () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
         () => KnobStore.Clear(EngineKnobs.FlashSplitOff), () => KnobStore.Clear(EngineKnobs.Fa2Prefill),
     ];
 

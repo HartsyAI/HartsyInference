@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -69,24 +70,25 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: _config.VaeTemporalCompression);
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
+        int steps = settings.Steps;
+        int numFrames = settings.Frames;
+        float cfgScale = settings.CfgScale;
 
         // TODO(E-IMG-4/5): the SigmaShift T2IParam override is not on the native contract — the ComfyUI default is used.
         int width, height;
         if (request.InitImage is not null)
         {
-            (width, height) = VideoRecipeUtils.ResolveI2VResolution(request, request.InitImage.Width, request.InitImage.Height, _config.VaeSpatialCompression);
+            (width, height) = VideoRecipeUtils.ResolveI2VResolution(request, settings, request.InitImage.Width, request.InitImage.Height, _config.VaeSpatialCompression);
         }
         else
         {
-            (width, height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
+            (width, height) = VideoRecipeUtils.ResolveResolution(settings, _config.VaeSpatialCompression);
         }
 
         (Tensor promptEmbeds, Tensor negEmbeds) = EncodeWeightedPrompts(prompt, negative);
@@ -188,7 +190,8 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     public bool SupportsStreaming => true;
 
     /// <summary>Streaming sibling of <see cref="Generate"/> (Tier 3.5). Scoped tight and honestly: plain T2V only today — no init image / end frame (the concat-I2V and TI2V-conditioned paths both add extra encode/dispose bookkeeping around the denoise call that hasn't been exercised through this path, so they throw rather than silently reusing the buffered branch's logic unverified). Text-encode setup is a deliberate near-duplicate of <see cref="Generate"/>'s (not extracted into a shared helper) — the two methods' cleanup shapes differ enough (a plain try/finally here vs. <see cref="Generate"/>'s multi-tensor try/finally covering branches this method never takes) that a shared helper would need its own parameter surface for "which of these five tensors exist," which isn't simpler than the duplication.</summary>
-    public async IAsyncEnumerable<VideoFrame> GenerateFramesAsync(VideoRequest request, IProgress<StepPreview>? progress,
+    public async IAsyncEnumerable<VideoFrame> GenerateFramesAsync(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
@@ -205,10 +208,10 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
 
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: _config.VaeTemporalCompression);
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
+        int steps = settings.Steps;
+        int numFrames = settings.Frames;
+        float cfgScale = settings.CfgScale;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, _config.VaeSpatialCompression);
 
         (Tensor promptEmbeds, Tensor negEmbeds) = EncodeWeightedPrompts(prompt, negative);
 

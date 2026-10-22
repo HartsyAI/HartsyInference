@@ -35,11 +35,12 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
     private readonly bool _turbo = turbo;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        int steps = request.Steps ?? QwenImage21Recipe.FamilyDefaults.Steps;
-        float cfg = request.CfgScale ?? QwenImage21Recipe.FamilyDefaults.CfgScale;
+        int steps = settings.Steps;
+        float cfg = settings.CfgScale;
         float[]? explicitSigmas = null;
         if (_turbo)
         {
@@ -60,7 +61,7 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
         }
         // 16x VAE and no patchify, so the image dims must be a multiple of 16. ComfyUI's own template rounds
         // reference and output sizes to 32; 16 is this pipeline's hard floor and what it snaps to.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int width = Math.Max(QwenImage21Pipeline.VaeScale, reqWidth / QwenImage21Pipeline.VaeScale * QwenImage21Pipeline.VaeScale);
         int height = Math.Max(QwenImage21Pipeline.VaeScale, reqHeight / QwenImage21Pipeline.VaeScale * QwenImage21Pipeline.VaeScale);
 

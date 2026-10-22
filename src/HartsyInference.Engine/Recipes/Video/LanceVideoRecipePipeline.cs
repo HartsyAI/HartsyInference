@@ -3,6 +3,7 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -40,15 +41,16 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumTimesteps;
-        float cfgScale = request.CfgScale ?? _config.CfgTextScale;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, SizeMultiple);
-        int numFrames = Math.Min(MaxFrames, VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: 4));
+        int steps = settings.Steps;
+        float cfgScale = settings.CfgScale;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, SizeMultiple);
+        int numFrames = Math.Min(MaxFrames, settings.Frames);
 
         // An empty negative replicates the upstream uncond (caption dropped); a non-empty one substitutes it.
         int[] promptTokens = _tokenizer.EncodeOrdinary(prompt);

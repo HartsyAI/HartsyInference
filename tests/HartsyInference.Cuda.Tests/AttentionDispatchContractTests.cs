@@ -1,4 +1,3 @@
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -26,71 +25,18 @@ public sealed class AttentionDispatchContractTests
     [InlineData(264, false)]
     public void CudnnSdpa_HeadDims_AreTheProbedEnvelope(long d, bool expected) => Assert.Equal(expected, CudnnSdpa.ShapeSupported(d));
 
-    /// <summary>F32 Sage dispatch requires both the feature opt-in and the explicit unsafe V-narrowing opt-in.</summary>
-    [Fact]
-    public void SageF32Dispatch_RequiresTwoExplicitOptIns()
-    {
-        try
-        {
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-            Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
-
-            KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
-            Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
-
-            KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
-            Assert.True(CudaBackend.SageF32ValueNarrowingEnabled);
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-        }
-    }
-
-    /// <summary>FlashAttention-v2 accepts only exact F32 MHA shapes with complete query tiles on TF32 hardware.</summary>
-    [Fact]
-    public void FlashV2Contract_RejectsMixedDtypesAndPartialTiles()
-    {
-        const float Scale = 0.125f;
-        using Tensor query = new Tensor(new TensorShape(1, 2, 32, 64), DType.F32);
-        using Tensor key = new Tensor(new TensorShape(1, 2, 17, 64), DType.F32);
-        using Tensor value = new Tensor(new TensorShape(1, 2, 17, 64), DType.F32);
-        using Tensor output = new Tensor(query.Shape, DType.F32);
-        Assert.True(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, Scale, tf32Available: true));
-
-        using Tensor tailQuery = new Tensor(new TensorShape(1, 2, 33, 64), DType.F32);
-        using Tensor tailOutput = new Tensor(tailQuery.Shape, DType.F32);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            tailOutput, tailQuery, key, value, null, Scale, tf32Available: true));
-
-        using Tensor f16Key = new Tensor(key.Shape, DType.F16);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, f16Key, value, null, Scale, tf32Available: true));
-
-        using Tensor wrongHeads = new Tensor(new TensorShape(1, 1, 17, 64), DType.F32);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, wrongHeads, wrongHeads, null, Scale, tf32Available: true));
-
-        using Tensor f16Output = new Tensor(query.Shape, DType.F16);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            f16Output, query, key, value, null, Scale, tf32Available: true));
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, float.NaN, tf32Available: true));
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, Scale, tf32Available: false));
-    }
-
+    /// <summary>The Sage V stride: whole 16-byte rows, and never a power of two from 2048 up (those alias in L2).</summary>
     [Theory]
-    [InlineData(65_535, 1, true)]
-    [InlineData(0, 1, false)]
-    [InlineData(65_536, 1, false)]
-    public void FlashV2GridContract_EnforcesCudaYzLimits(long batch, long heads, bool expected)
-    {
-        Assert.Equal(expected, CudaBackend.FlashAttentionV2GridDimensionsSupported(batch, heads));
-    }
+    [InlineData(1, 8)]
+    [InlineData(250, 256)]
+    [InlineData(1024, 1024)]
+    [InlineData(1025, 1032)]
+    [InlineData(2040, 2040)]
+    [InlineData(2048, 2056)]
+    [InlineData(2041, 2056)]
+    [InlineData(8192, 8200)]
+    [InlineData(17480, 17480)]
+    public void SageSkvPad_IsWholeRowsAndNeverALargePowerOfTwo(long skv, long expected) => Assert.Equal(expected, CudaKernels.SageSkvPad(skv));
 
     [Fact]
     public void SdpaContract_RejectsMismatchedBuffersAndMaskAxes()

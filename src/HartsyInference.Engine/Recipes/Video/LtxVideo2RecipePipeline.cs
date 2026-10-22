@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -44,16 +45,17 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 121, step: _config.VaeTemporalCompression);
-        int frameRate = request.Fps ?? 24;
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
+        int steps = settings.Steps;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, _config.VaeSpatialCompression);
+        int numFrames = settings.Frames;
+        int frameRate = settings.Fps;
+        float cfgScale = settings.CfgScale;
 
         // Conditioning length is family-specific (Gemma 3 pads to 256, Gemma 4 to 1024) and is part of the
         // conditioning, not padding — the connector replaces learnable registers positionally.

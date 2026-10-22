@@ -80,7 +80,8 @@ public sealed class SigmaShiftOverrideTests
     public void RecipeMapper_RefusesABadStaticShiftByTheRequestField(double shift)
     {
         ImageRequest request = new ImageRequest { Prompt = "p", SigmaShift = shift };
-        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => RecipeRequestMapper.ToTextToImage(request, ""));
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => RecipeRequestMapper.ToTextToImage(request, TestImageRecipes.Settings(), ""));
         Assert.Equal(nameof(ImageRequest.SigmaShift), error.ParamName);
     }
 
@@ -116,8 +117,8 @@ public sealed class SigmaShiftOverrideTests
     public void RecipeMapper_CarriesTheShiftOntoTheDiffusionRequest()
     {
         ImageRequest request = new ImageRequest { Prompt = "p", SigmaShift = 6.0 };
-        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, "");
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, TestImageRecipes.Settings(), "");
         Assert.Equal(6.0f, inner.SigmaShift);
-        Assert.Null(RecipeRequestMapper.ToTextToImage(request with { SigmaShift = null }, "").SigmaShift);
+        Assert.Null(RecipeRequestMapper.ToTextToImage(request with { SigmaShift = null }, TestImageRecipes.Settings(), "").SigmaShift);
     }
 }

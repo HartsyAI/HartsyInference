@@ -1,6 +1,7 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Cuda;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
@@ -96,7 +97,8 @@ public sealed class WanAnimate2RealWeightGenerationTests
                     [WanAnimate2RecipePipeline.ReferenceImageKey] = ReferenceImage(),
                 },
             };
-            return pipeline.Generate(request, progress: null, cancel: default);
+            VideoEffectiveSettings settings = TestVideoRecipes.Settings(width, height, frames, fps: 16, steps: 6, cfgScale: 1f);
+            return pipeline.Generate(request, settings, progress: null, cancel: default);
         }
         finally
         {

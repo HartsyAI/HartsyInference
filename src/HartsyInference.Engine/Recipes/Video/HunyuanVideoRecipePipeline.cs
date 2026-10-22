@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -30,14 +31,15 @@ public sealed class HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPip
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         IBackend backend = _backend;
         string prompt = request.Prompt;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, multiple: 16);
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 25, step: 4);
-        int steps = request.Steps ?? 20;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, multiple: 16);
+        int numFrames = settings.Frames;
+        int steps = settings.Steps;
 
         Tensor? promptEmbeds = null;
         Tensor? pooled = null;

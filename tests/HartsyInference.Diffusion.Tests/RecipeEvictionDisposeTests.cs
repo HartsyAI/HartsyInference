@@ -103,7 +103,8 @@ public sealed class RecipeEvictionDisposeTests
     {
         public int DisposeCalls { get; private set; }
 
-        public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel) =>
+        public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings,
+            IProgress<StepPreview>? progress, CancellationToken cancel) =>
             throw new NotSupportedException("Eviction tests never generate.");
 
         public void Dispose()

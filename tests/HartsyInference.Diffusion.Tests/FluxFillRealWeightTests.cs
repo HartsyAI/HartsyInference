@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -105,7 +106,8 @@ public sealed class FluxFillRealWeightTests
                 Inpaint = new Inpaint { Mask = mask },
             };
 
-            ImageResult result = recipePipeline.Generate(request, progress: null, cancel: default);
+            (ImageRequest resolved, ImageEffectiveSettings settings) = TestImageRecipes.Resolve(Flux1Recipe.FamilyDefaults, request);
+            ImageResult result = recipePipeline.Generate(resolved, settings, progress: null, cancel: default);
 
             Assert.Equal(width, result.Width);
             Assert.Equal(height, result.Height);

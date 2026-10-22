@@ -121,14 +121,15 @@ internal sealed class SdxlRefinerRecipePipeline : IRecipePipeline
     }
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? SdxlRefinerRecipe.FamilyDefaults.Steps;
-        float cfg = request.CfgScale ?? SdxlRefinerRecipe.FamilyDefaults.CfgScale;
-        (int width, int height) = RecipeRequestMapper.Size(request);
+        int steps = settings.Steps;
+        float cfg = settings.CfgScale;
+        (int width, int height) = (settings.Width, settings.Height);
 
         (int[] tokensG, float[]? weightsG) = EncodeWeighted(prompt);
         (int[] negG, float[]? negWeightsG) = EncodeWeighted(negative);

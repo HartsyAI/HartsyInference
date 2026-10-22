@@ -57,17 +57,18 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
     public bool HasLora { get; init; }
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
         ImageDefaults defaults = MossImageRecipe.FamilyDefaults;
         MossImageReferenceLayout layout = ReferenceLayoutFrom(request.Extra);
         bool colorize = layout == MossImageReferenceLayout.Colorize;
-        int steps = request.Steps ?? (colorize ? ColorizeSteps : defaults.Steps);
-        float cfg = request.CfgScale ?? defaults.CfgScale;
+        int steps = settings.Steps;
+        float cfg = settings.CfgScale;
         int unit = config.VaeDownscaleFactor;
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int width = Math.Max(unit, reqWidth / unit * unit);
         int height = Math.Max(unit, reqHeight / unit * unit);
         if (width != reqWidth || height != reqHeight)
