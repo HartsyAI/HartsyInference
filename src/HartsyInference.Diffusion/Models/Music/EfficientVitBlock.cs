@@ -102,10 +102,10 @@ public sealed unsafe class EfficientVitBlock(int dim, int headDim = 32)
 
         // ReLU linear attention per head over [base heads | multiscale heads].
         Tensor outTokens = new Tensor(new TensorShape(s, c * (qm is null ? 1 : 2)), DType.F32);
-        LinearAttentionHeads(q, k, v, outTokens, c, s, headOffset: 0);
+        LinearAttentionHeads(q, k, v, outTokens, c, s, headOffset: 0, _headDim);
         if (qm is not null)
         {
-            LinearAttentionHeads(qm, km!, vm!, outTokens, c, s, headOffset: c);
+            LinearAttentionHeads(qm, km!, vm!, outTokens, c, s, headOffset: c, _headDim);
             qm.Dispose(); km!.Dispose(); vm!.Dispose();
         }
         q.Dispose(); k.Dispose(); v.Dispose();
@@ -121,25 +121,30 @@ public sealed unsafe class EfficientVitBlock(int dim, int headDim = 32)
     }
 
     /// <summary>Per-head Sana LiteLA: <c>q' = relu(q), k' = relu(k); out = (V_aug·K'ᵀ·Q'ᵀ) row-normalized by the
-    /// padded ones row</c> — linear in sequence length.</summary>
-    private void LinearAttentionHeads(Tensor q, Tensor k, Tensor v, Tensor outTokens, int channels, long s, int headOffset)
+    /// padded ones row</c> — linear in sequence length. As diffusers' <c>SanaMultiscaleLinearAttention</c> does, heads
+    /// are cut from the channel-concatenated <c>[q|k|v]</c> stream in blocks of 3·d: head h reads its query, key and
+    /// value at stream columns h·3d, h·3d + d and h·3d + 2d, not at column h·d of each projection.</summary>
+    internal static void LinearAttentionHeads(Tensor q, Tensor k, Tensor v, Tensor outTokens, int channels, long s,
+        int headOffset, int headDim)
     {
-        int heads = channels / _headDim, d = _headDim;
+        int heads = channels / headDim, d = headDim;
         int outDim = (int)outTokens.Shape[1];
-        float* qp = (float*)q.DataPointer;
-        float* kp = (float*)k.DataPointer;
-        float* vp = (float*)v.DataPointer;
+        float* qs = (float*)q.DataPointer;
+        float* ks = (float*)k.DataPointer;
+        float* vs = (float*)v.DataPointer;
         float* op = (float*)outTokens.DataPointer;
         double[,] vk = new double[d + 1, d];
         double[] acc = new double[d];
         for (int h = 0; h < heads; h++)
         {
             Array.Clear(vk);
-            int baseC = h * d;
+            float* qp = StreamColumn(qs, ks, vs, channels, h * 3 * d);
+            float* kp = StreamColumn(qs, ks, vs, channels, h * 3 * d + d);
+            float* vp = StreamColumn(qs, ks, vs, channels, h * 3 * d + 2 * d);
             // Accumulate VK = Σ_s v_aug(s) ⊗ relu(k(s)).
             for (long i = 0; i < s; i++)
             {
-                long off = i * channels + baseC;
+                long off = i * channels;
                 for (int dk = 0; dk < d; dk++)
                 {
                     float kv = MathF.Max(kp[off + dk], 0f);
@@ -151,7 +156,7 @@ public sealed unsafe class EfficientVitBlock(int dim, int headDim = 32)
             // Per token: out = VK·relu(q) / (norm + eps).
             for (long i = 0; i < s; i++)
             {
-                long off = i * channels + baseC;
+                long off = i * channels;
                 double norm = 0;
                 Array.Clear(acc);
                 for (int dk = 0; dk < d; dk++)
@@ -162,10 +167,19 @@ public sealed unsafe class EfficientVitBlock(int dim, int headDim = 32)
                     norm += vk[d, dk] * qv;
                 }
                 float inv = (float)(1.0 / (norm + 1e-15));
-                long dst = i * outDim + headOffset + baseC;
+                long dst = i * outDim + headOffset + h * d;
                 for (int dv = 0; dv < d; dv++) op[dst + dv] = (float)(acc[dv] * inv);
             }
         }
+    }
+
+    /// <summary>Column <paramref name="column"/> of the <c>[q|k|v]</c> stream as a pointer into the projection that
+    /// holds it, whose rows are <paramref name="channels"/> wide. A head's d columns never span two projections:
+    /// channels is a multiple of d.</summary>
+    private static float* StreamColumn(float* q, float* k, float* v, int channels, int column)
+    {
+        float* projection = (column / channels) switch { 0 => q, 1 => k, _ => v };
+        return projection + column % channels;
     }
 
     private Tensor GlumbConv(IBackend backend, Tensor x)

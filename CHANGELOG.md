@@ -41,6 +41,11 @@ stable release will require. Dates are UTC.
   its F32 casts while still reading them, an intermittent access violation at load. Double-condition CFG's text-only
   context now zeroes exactly the lyric rows, which the DiT appends last, instead of counting text rows from the leading
   dim of the `[1, T, 768]` features.
+- **Fixed: ACE-Step v1's music DCAE decoded a distorted mel.** Its EfficientViT attention took head h's query, key and
+  value from column h·d of each projection, while the reference cuts heads from the channel-concatenated `[q|k|v]`
+  stream in blocks of 3·d (columns h·3d, h·3d + d and h·3d + 2d). From the first EfficientViT stage on, the decode
+  diverged from the reference: the right channel came out quieter and the two channels nearly uncorrelated. A reference
+  latent now decodes to the reference's mel stage for stage, which changes every ACE-Step v1 generation.
 
 ## alpha.385
 
