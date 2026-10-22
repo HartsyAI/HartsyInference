@@ -199,7 +199,8 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's cuDNN rows read Q, K, V and the output as strided views (head dim contiguous, offset and strides multiples of 8
   elements, F16 or BF16; the output must cover its whole tensor) and are the only rows that take a strided or batched
   token-major call; no row stages a copy, so a view none of them takes is refused at planning. F32 operands are cast whole
-  and so must be whole tensors.
+  and so must be whole tensors. A layer takes the token-major entry for a batch of per-head operands only where its config
+  sets `TokenMajorBatches` and the backend plans a row for the call; Vulkan's token-major rows read one sequence and plan none.
 - CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
   dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
   permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
