@@ -1,18 +1,5 @@
 namespace HartsyInference.Cuda;
 
-/// <summary>The PV formats INT8 attention v2's kernel entries run.</summary>
-internal enum Int8AttentionV2Pv
-{
-    /// <summary>u8 P times s8 V with one V scale per channel over the sequence.</summary>
-    U8SequenceScales,
-
-    /// <summary>u8 P times s8 V with one V scale per channel per key tile.</summary>
-    U8TileScales,
-
-    /// <summary>F16 P times F16 V against the running maximum (the sm_86 fallback).</summary>
-    F16,
-}
-
 /// <summary>Where INT8 attention v2's buffers sit in its workspace for one call shape (Kernels/attention/int8_attn_v2.cu).</summary>
 /// <remarks>The stats launch's completion counters sit at offset 0 for every shape: they are zeroed once when the workspace is
 /// allocated and every launch leaves the slots it used at zero.</remarks>

@@ -1,11 +1,9 @@
-using System.Runtime.InteropServices;
-
 namespace HartsyInference.Cuda;
 
 // INT8 attention v2 (Kernels/attention/int8_attn_v2.cu): the stats, quant and attention launches over a caller's workspace.
 public sealed partial class CudaKernels
 {
-    private const int Int8V2PrologueThreads = 256;
+    private const int Int8V2StatsThreads = 128, Int8V2QuantThreads = 256;
     private const int Int8V2QueryRowsPerQuantBlock = 64;
 
     private CudaModule? _int8V2Module;
@@ -78,7 +76,7 @@ public sealed partial class CudaKernels
         void** a = stackalloc void*[13];
         a[0] = &kA; a[1] = &ks; a[2] = &vA; a[3] = &vs; a[4] = &kPartial; a[5] = &vPartial; a[6] = &kMean; a[7] = &vScale;
         a[8] = &counters; a[9] = &hA; a[10] = &kvA; a[11] = &chunks; a[12] = &seqV;
-        CudaDriverApi.cuLaunchKernel(f32 ? _int8V2StatsF32 : _int8V2StatsF16, chunks, (uint)heads, (uint)batch, Int8V2PrologueThreads, 1, 1,
+        CudaDriverApi.cuLaunchKernel(f32 ? _int8V2StatsF32 : _int8V2StatsF16, chunks, (uint)heads, (uint)batch, Int8V2StatsThreads, 1, 1,
             0, stream, (nint)a, 0).ThrowOnError();
     }
 
@@ -101,7 +99,7 @@ public sealed partial class CudaKernels
         a[10] = &v8; a[11] = &vScale; a[12] = &kMean; a[13] = &vScale; a[14] = &hA; a[15] = &sqA; a[16] = &kvA; a[17] = &tiles;
         a[18] = &qBlocks; a[19] = &vTile;
         CudaDriverApi.cuLaunchKernel(_int8V2Quant[(f32 ? 2 : 0) + (pvF16 ? 1 : 0)], qBlocks + 2 * tiles, (uint)heads, (uint)batch,
-            Int8V2PrologueThreads, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+            Int8V2QuantThreads, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>The attention kernel over the quantized workspace into a strided output. Grid (⌈Sq/BR⌉, H, B), 2·BR threads.</summary>
@@ -146,33 +144,4 @@ public sealed partial class CudaKernels
         a[0] = &oA; a[1] = &iA; a[2] = &nA;
         CudaDriverApi.cuLaunchKernel(_int8V2Ex2, (uint)((count + 255) / 256), 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
-}
-
-/// <summary>A trace entry's target (b, h, query tile) and its device buffers (Kernels/attention/int8_attn_v2.cu, V2Trace).</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct Int8V2TraceArgs
-{
-    /// <summary>INT32 QK products <c>[BR, kvPad]</c>.</summary>
-    public ulong Dots;
-
-    /// <summary>P bytes <c>[BR, kvPad]</c> in logical key order.</summary>
-    public ulong Probabilities;
-
-    /// <summary>Score maximum per row and tile <c>[BR, tiles]</c>.</summary>
-    public ulong TileMax;
-
-    /// <summary>Byte sum per row and tile <c>[BR, tiles]</c>.</summary>
-    public ulong Sums;
-
-    /// <summary>INT32 PV partials <c>[BR, tiles, 128]</c>.</summary>
-    public ulong Partials;
-
-    /// <summary>Traced batch.</summary>
-    public uint Batch;
-
-    /// <summary>Traced head.</summary>
-    public uint Head;
-
-    /// <summary>Traced query tile.</summary>
-    public uint QueryTile;
 }

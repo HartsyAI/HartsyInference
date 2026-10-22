@@ -78,7 +78,7 @@ ptxas_check() {
     fi
     for arch in "$@"; do
         out="$("$PTXAS" -arch="sm_${arch}" -v "$ptx" -o /dev/null 2>&1)" || { echo "$out" >&2; exit 1; }
-        echo "$out" | awk -v a="sm_${arch}" -v q="'" '/Compiling entry function/ { fn = $5; gsub(q, "", fn) }
+        echo "$out" | awk -v a="sm_${arch}" -v q="'" '/Compiling entry function/ { fn = $7; gsub(q, "", fn) }
             /Used [0-9]+ registers/ { for (i = 1; i <= NF; i++) if ($i == "Used") printf "  ptxas %s %s: %s registers\n", a, fn, $(i + 1) }'
         if echo "$out" | grep -qE '[1-9][0-9]* bytes spill (stores|loads)'; then
             echo "ERROR: ${ptx##*/} spills on sm_${arch}:" >&2

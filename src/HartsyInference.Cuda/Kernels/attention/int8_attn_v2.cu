@@ -120,7 +120,12 @@ template<> __device__ __forceinline__ void v2_ld4<float>(const float* p, float v
     v[0] = raw.x; v[1] = raw.y; v[2] = raw.z; v[3] = raw.w;
 }
 
-// ── Stats launch: grid (chunks, H, B), 256 threads (0-127 K channels, 128-255 V channels) ─────────────────────────────
+// Two consecutive elements; the dispatcher guarantees 16-byte aligned rows, so an even channel is aligned.
+template<typename T> __device__ __forceinline__ float2 v2_ld2(const T* p);
+template<> __device__ __forceinline__ float2 v2_ld2<__half>(const __half* p) { return __half22float2(*(const __half2*)p); }
+template<> __device__ __forceinline__ float2 v2_ld2<float>(const float* p) { return *(const float2*)p; }
+
+// ── Stats launch: grid (chunks, H, B), 128 threads (0-63 two K channels each, 64-127 two V channels each) ─────────────
 
 template<typename T>
 __device__ __forceinline__ void v2_stats(const T* __restrict__ K, V2View vk, const T* __restrict__ V, V2View vv,
@@ -128,23 +133,35 @@ __device__ __forceinline__ void v2_stats(const T* __restrict__ K, V2View vk, con
     unsigned* __restrict__ counters, unsigned H, unsigned kvLen, unsigned chunks, unsigned seqV)
 {
     const unsigned chunk = blockIdx.x, h = blockIdx.y, b = blockIdx.z, bh = b * H + h;
-    const unsigned c = threadIdx.x & 127;
-    const bool isV = threadIdx.x >= 128;
+    const unsigned c = 2 * (threadIdx.x & 63);
+    const bool isV = threadIdx.x >= 64;
     const unsigned j0 = chunk * V2_MEAN_CHUNK, j1 = min(j0 + V2_MEAN_CHUNK, kvLen);
     const size_t at = ((size_t)bh * chunks + chunk) * V2_D + c;
     if (!isV)
     {
         const T* p = K + b * vk.batch + h * vk.head + c;
-        float partial = 0.0f;
-        for (unsigned j = j0; j < j1; j++) partial = __fadd_rn(partial, v2_ld(p + j * vk.row));
-        kPartial[at] = partial;
+        float s0 = 0.0f, s1 = 0.0f;
+        #pragma unroll 8
+        for (unsigned j = j0; j < j1; j++)
+        {
+            const float2 x = v2_ld2(p + j * vk.row);
+            s0 = __fadd_rn(s0, x.x);
+            s1 = __fadd_rn(s1, x.y);
+        }
+        *(float2*)&kPartial[at] = make_float2(s0, s1);
     }
     else if (seqV)
     {
         const T* p = V + b * vv.batch + h * vv.head + c;
-        float m = 0.0f;
-        for (unsigned j = j0; j < j1; j++) m = v2_max_nan(m, fabsf(v2_ld(p + j * vv.row)));
-        vPartial[at] = m;
+        float m0 = 0.0f, m1 = 0.0f;
+        #pragma unroll 8
+        for (unsigned j = j0; j < j1; j++)
+        {
+            const float2 x = v2_ld2(p + j * vv.row);
+            m0 = v2_max_nan(m0, fabsf(x.x));
+            m1 = v2_max_nan(m1, fabsf(x.y));
+        }
+        *(float2*)&vPartial[at] = make_float2(m0, m1);
     }
     // The last chunk block of this (b, h) folds every chunk's partial, in chunk order.
     __shared__ unsigned last;
@@ -156,27 +173,37 @@ __device__ __forceinline__ void v2_stats(const T* __restrict__ K, V2View vk, con
     __threadfence();
     if (!isV)
     {
-        float total = 0.0f;
-        for (unsigned i = 0; i < chunks; i++) total = __fadd_rn(total, __ldcg(&kPartial[((size_t)bh * chunks + i) * V2_D + c]));
-        kMean[(size_t)bh * V2_D + c] = __fdiv_rn(total, (float)kvLen);
+        float t0 = 0.0f, t1 = 0.0f;
+        for (unsigned i = 0; i < chunks; i++)
+        {
+            const float2 x = __ldcg((const float2*)&kPartial[((size_t)bh * chunks + i) * V2_D + c]);
+            t0 = __fadd_rn(t0, x.x);
+            t1 = __fadd_rn(t1, x.y);
+        }
+        *(float2*)&kMean[(size_t)bh * V2_D + c] = make_float2(__fdiv_rn(t0, (float)kvLen), __fdiv_rn(t1, (float)kvLen));
     }
     else if (seqV)
     {
-        float m = 0.0f;
-        for (unsigned i = 0; i < chunks; i++) m = v2_max_nan(m, __ldcg(&vPartial[((size_t)bh * chunks + i) * V2_D + c]));
-        vScale[(size_t)bh * V2_D + c] = v2_scale(m, 127.0f);
+        float m0 = 0.0f, m1 = 0.0f;
+        for (unsigned i = 0; i < chunks; i++)
+        {
+            const float2 x = __ldcg((const float2*)&vPartial[((size_t)bh * chunks + i) * V2_D + c]);
+            m0 = v2_max_nan(m0, x.x);
+            m1 = v2_max_nan(m1, x.y);
+        }
+        *(float2*)&vScale[(size_t)bh * V2_D + c] = make_float2(v2_scale(m0, 127.0f), v2_scale(m1, 127.0f));
     }
     if (threadIdx.x == 0) counters[bh] = 0;
 }
 
-extern "C" __global__ void __launch_bounds__(256) int8v2_stats_f16(const __half* __restrict__ K, V2View vk,
+extern "C" __global__ void __launch_bounds__(128) int8v2_stats_f16(const __half* __restrict__ K, V2View vk,
     const __half* __restrict__ V, V2View vv, float* kPartial, float* vPartial, float* kMean, float* vScale, unsigned* counters,
     unsigned H, unsigned kvLen, unsigned chunks, unsigned seqV)
 {
     v2_stats<__half>(K, vk, V, vv, kPartial, vPartial, kMean, vScale, counters, H, kvLen, chunks, seqV);
 }
 
-extern "C" __global__ void __launch_bounds__(256) int8v2_stats_f32(const float* __restrict__ K, V2View vk,
+extern "C" __global__ void __launch_bounds__(128) int8v2_stats_f32(const float* __restrict__ K, V2View vk,
     const float* __restrict__ V, V2View vv, float* kPartial, float* vPartial, float* kMean, float* vScale, unsigned* counters,
     unsigned H, unsigned kvLen, unsigned chunks, unsigned seqV)
 {
@@ -197,55 +224,75 @@ __device__ __forceinline__ void v2_quant_v(const T* __restrict__ V, V2View vv, u
     unsigned tile, unsigned kvLen, unsigned tiles, unsigned vTile, const float* __restrict__ vScaleSeq,
     float* __restrict__ vScaleTile, void* __restrict__ v8, unsigned char* smem)
 {
-    const unsigned warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const unsigned c = 32 * (warp & 3) + lane, half = warp >> 2;
-    const unsigned key0 = tile * V2_BC + 64 * half;
+    // Thread t: channels 2(t mod 64), +1 over the tile's 32-key chunk t / 64.
+    const unsigned c = 2 * (threadIdx.x & 63), chunk = threadIdx.x >> 6;
+    const unsigned key0 = tile * V2_BC + 32 * chunk;
     const size_t kvPad = (size_t)tiles * V2_BC;
     const T* src = V + b * vv.batch + h * vv.head + c;
-    float v[64];
+    float2 v[32];
     #pragma unroll
-    for (unsigned i = 0; i < 64; i++)
-        v[i] = key0 + i < kvLen ? v2_ld(src + (key0 + i) * vv.row) : 0.0f;
+    for (unsigned i = 0; i < 32; i++)
+        v[i] = key0 + i < kvLen ? v2_ld2(src + (key0 + i) * vv.row) : make_float2(0.0f, 0.0f);
     if (PV_F16)
     {
         // F16 V in natural key order, [ch][kvPad] halves.
-        __half* dst = (__half*)v8 + ((size_t)bh * V2_D + c) * kvPad + key0;
+        __half* dst0 = (__half*)v8 + ((size_t)bh * V2_D + c) * kvPad + key0;
+        __half* dst1 = dst0 + kvPad;
         #pragma unroll
-        for (unsigned i = 0; i < 64; i += 2)
-            *(__half2*)(dst + i) = __halves2half2(__float2half_rn(v[i]), __float2half_rn(v[i + 1]));
+        for (unsigned i = 0; i < 32; i += 2)
+        {
+            *(__half2*)(dst0 + i) = __halves2half2(__float2half_rn(v[i].x), __float2half_rn(v[i + 1].x));
+            *(__half2*)(dst1 + i) = __halves2half2(__float2half_rn(v[i].y), __float2half_rn(v[i + 1].y));
+        }
         return;
     }
-    float* xmax = (float*)smem;   // [2][128]
-    float scale;
+    float scale0, scale1;
     if (vTile)
     {
-        float m = 0.0f;
+        float* xmax = (float*)smem;   // [4 chunks][128]
+        float m0 = 0.0f, m1 = 0.0f;
         #pragma unroll
-        for (unsigned i = 0; i < 64; i++) m = v2_max_nan(m, fabsf(v[i]));
-        xmax[half * V2_D + c] = m;
+        for (unsigned i = 0; i < 32; i++)
+        {
+            m0 = v2_max_nan(m0, fabsf(v[i].x));
+            m1 = v2_max_nan(m1, fabsf(v[i].y));
+        }
+        *(float2*)&xmax[chunk * V2_D + c] = make_float2(m0, m1);
         __syncthreads();
-        scale = v2_scale(v2_max_nan(xmax[c], xmax[V2_D + c]), 127.0f);
-        if (half == 0) vScaleTile[((size_t)bh * tiles + tile) * V2_D + c] = scale;
+        #pragma unroll
+        for (unsigned q = 0; q < 4; q++)
+        {
+            if (q == chunk) continue;
+            const float2 o = *(const float2*)&xmax[q * V2_D + c];
+            m0 = v2_max_nan(m0, o.x);
+            m1 = v2_max_nan(m1, o.y);
+        }
+        scale0 = v2_scale(m0, 127.0f);
+        scale1 = v2_scale(m1, 127.0f);
+        if (chunk == 0) *(float2*)&vScaleTile[((size_t)bh * tiles + tile) * V2_D + c] = make_float2(scale0, scale1);
         __syncthreads();
     }
     else
     {
-        scale = vScaleSeq[(size_t)bh * V2_D + c];
+        const float2 sc = *(const float2*)&vScaleSeq[(size_t)bh * V2_D + c];
+        scale0 = sc.x;
+        scale1 = sc.y;
     }
-    const float inv = __frcp_rn(scale);
-    // Transpose through shared memory: 128 rows of 128 bytes at a 132-byte stride (conflict-free u32 stores).
+    const float inv0 = __frcp_rn(scale0), inv1 = __frcp_rn(scale1);
+    // Transpose through shared memory: 128 rows of 128 bytes at a 132-byte stride. Physical word w = 4·h16 + t of a chunk holds
+    // logical keys 16·h16 + 2t + {0, 1, 8, 9}.
     unsigned* rows = (unsigned*)smem;
     #pragma unroll
-    for (unsigned grp = 0; grp < 16; grp++)
+    for (unsigned w = 0; w < 8; w++)
     {
-        // Physical group grp of this half: chunk q = grp / 8, inside it h16 = (grp / 4) % 2, t = grp % 4.
-        const unsigned q = grp >> 3, h16 = (grp >> 2) & 1, t = grp & 3;
-        const unsigned r = 32 * q + 16 * h16 + 2 * t;
-        const int b0 = v2_s8(__fmul_rn(v[r], inv)), b1 = v2_s8(__fmul_rn(v[r + 1], inv));
-        const int b2 = v2_s8(__fmul_rn(v[r + 8], inv)), b3 = v2_s8(__fmul_rn(v[r + 9], inv));
-        rows[c * 33 + 16 * half + grp] = v2_pack4(b0, b1, b2, b3);
+        const unsigned r = 16 * (w >> 2) + 2 * (w & 3);
+        rows[c * 33 + 8 * chunk + w] = v2_pack4(v2_s8(__fmul_rn(v[r].x, inv0)), v2_s8(__fmul_rn(v[r + 1].x, inv0)),
+            v2_s8(__fmul_rn(v[r + 8].x, inv0)), v2_s8(__fmul_rn(v[r + 9].x, inv0)));
+        rows[(c + 1) * 33 + 8 * chunk + w] = v2_pack4(v2_s8(__fmul_rn(v[r].y, inv1)), v2_s8(__fmul_rn(v[r + 1].y, inv1)),
+            v2_s8(__fmul_rn(v[r + 8].y, inv1)), v2_s8(__fmul_rn(v[r + 9].y, inv1)));
     }
     __syncthreads();
+    const unsigned warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     unsigned char* dst = (unsigned char*)v8 + (size_t)bh * V2_D * kvPad + (size_t)tile * V2_BC;
     for (unsigned row = warp; row < V2_D; row += 8)
         *(unsigned*)(dst + (size_t)row * kvPad + 4 * lane) = rows[row * 33 + lane];
@@ -265,12 +312,18 @@ __device__ __forceinline__ void v2_quant(const T* __restrict__ Q, V2View vq, con
     if (blockIdx.x < qBlocks)
     {
         const T* base = Q + b * vq.batch + h * vq.head + 4 * lane;
-        for (unsigned i = 0; i < V2_Q_ROWS_PER_BLOCK / 8; i++)
+        constexpr unsigned ROWS = V2_Q_ROWS_PER_BLOCK / 8;
+        const unsigned row0 = blockIdx.x * V2_Q_ROWS_PER_BLOCK + warp * ROWS;
+        float x[ROWS][4];
+        #pragma unroll
+        for (unsigned i = 0; i < ROWS; i++)
+            if (row0 + i < Sq) v2_ld4(base + (row0 + i) * vq.row, x[i]);
+        #pragma unroll
+        for (unsigned i = 0; i < ROWS; i++)
         {
-            const unsigned row = blockIdx.x * V2_Q_ROWS_PER_BLOCK + warp * (V2_Q_ROWS_PER_BLOCK / 8) + i;
+            const unsigned row = row0 + i;
             if (row >= Sq) break;
-            float v[4];
-            v2_ld4(base + row * vq.row, v);
+            const float* v = x[i];
             float m = v2_max_nan(v2_max_nan(fabsf(v[0]), fabsf(v[1])), v2_max_nan(fabsf(v[2]), fabsf(v[3])));
             #pragma unroll
             for (unsigned off = 16; off > 0; off >>= 1) m = v2_max_nan(m, __shfl_xor_sync(V2_FULL, m, off));
