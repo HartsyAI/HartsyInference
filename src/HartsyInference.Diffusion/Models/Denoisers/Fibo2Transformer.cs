@@ -18,6 +18,7 @@ public sealed unsafe class Fibo2Transformer : IDisposable
     private readonly ZImageRope _imageRope;
     private readonly ZImageRope _streamRope;
     private readonly int _patchVolume;
+    private readonly List<Tensor> _ownedCasts = [];
 
     private Tensor? _xEmbedderWeight, _xEmbedderBias;
     private Tensor? _timeMlp1Weight, _timeMlp1Bias, _timeMlp2Weight, _timeMlp2Bias;
@@ -58,8 +59,9 @@ public sealed unsafe class Fibo2Transformer : IDisposable
         _timeMlp2Weight = Require(weights, "t_embedder.mlp.2.weight", Fibo2Config.TimestepEmbeddingDim, -1);
         _timeMlp2Bias = Require(weights, "t_embedder.mlp.2.bias", Fibo2Config.TimestepEmbeddingDim);
         _timeMlpWidth = (int)_timeMlp1Weight.Shape[0];
-        _latentQueries = Require(weights, "perceiver.latent_queries", _config.PerceiverQueries, dim);
-        _perceiverNormOut = TensorCasts.LoadF32(weights, "perceiver.norm_out.weight");
+        // Both are read through raw float pointers (the queries in PerceiverForward), so a half-precision checkpoint is copied to F32.
+        _latentQueries = EnsureOwnedF32(Require(weights, "perceiver.latent_queries", _config.PerceiverQueries, dim));
+        _perceiverNormOut = EnsureOwnedF32(weights["perceiver.norm_out.weight"]);
         _finalAdaLnWeight = Require(weights, "final_layer.adaLN_modulation.1.weight", dim, Fibo2Config.TimestepEmbeddingDim);
         _finalAdaLnBias = Require(weights, "final_layer.adaLN_modulation.1.bias", dim);
         _finalLinearWeight = Require(weights, "final_layer.linear.weight", _patchVolume, dim);
@@ -158,6 +160,17 @@ public sealed unsafe class Fibo2Transformer : IDisposable
             block.Dispose();
         foreach (Fibo2PerceiverLayer layer in _perceiver)
             layer.Dispose();
+        foreach (Tensor cast in _ownedCasts)
+            cast.Dispose();
+    }
+
+    /// <summary>F32 form of a borrowed weight. A half-precision source is copied, and the copy is kept until <see cref="Dispose"/>.</summary>
+    private Tensor EnsureOwnedF32(Tensor stored)
+    {
+        Tensor f32 = TensorCasts.EnsureF32(stored);
+        if (!ReferenceEquals(f32, stored))
+            _ownedCasts.Add(f32);
+        return f32;
     }
 
     private Tensor RunRefiners(IBackend backend, Tensor image, Tensor noisyEmbedding, int gridH, int gridW)
