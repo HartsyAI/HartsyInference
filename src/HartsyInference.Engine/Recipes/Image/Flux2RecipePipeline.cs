@@ -33,9 +33,6 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
 
     private readonly MergedLoraStack? _loraStack = loraStack;
 
-    /// <summary>A Klein checkpoint (no guidance embedding) is CFG-distilled and few-step, so it resolves against <see cref="Flux2Recipe.KleinDefaults"/> rather than Dev's 50 steps.</summary>
-    public ImageDefaults? VariantDefaults => _config.GuidanceEmbed ? Flux2Recipe.FamilyDefaults : Flux2Recipe.KleinDefaults;
-
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
         CancellationToken cancel)

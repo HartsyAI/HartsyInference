@@ -142,8 +142,7 @@ public sealed class AnimaRecipe : IArchitectureRecipe
 
             AnimaPipeline pipeline = new AnimaPipeline(context.Backend, transformer, llmAdapter, vae, vaeEncoder, animaConfig);
             Logs.Info("[AnimaRecipe] Anima ready (scheduler=FlowMatchEuler shift=3.0).");
-            return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, checkpoint, loaders, loraStack,
-                DefaultsFor(context.ResolveVariant(AnimaVariants.Catalog)));
+            return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, checkpoint, loaders, loraStack);
         }
         catch (Exception ex)
         {

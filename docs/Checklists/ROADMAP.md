@@ -118,9 +118,8 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] LoRA extraction/checkpoint-diff utility.
 - [ ] PAG/SAG attention hooks and per-pipeline regional-tag handling.
 - [ ] Declare variant catalogs (`ENGINE_PATTERNS.md#model-variants`) for the families still ignoring theirs: SD3.5
-  Large-Turbo and Flux.2 Klein base get their own defaults. Flux.1
-  Kontext/Fill/Depth/Canny and HiDream-Edit get an explicit refusal until those paths exist. LTX-Video 0.9.5/13B
-  still mixes its key probe with a filename check.
+  Large-Turbo gets its own defaults. Flux.1 Kontext/Fill/Depth/Canny and HiDream-Edit get an explicit refusal until
+  those paths exist. LTX-Video 0.9.5/13B still mixes its key probe with a filename check.
 - [ ] Real-weight check of Qwen-Image-Edit v1 through its own template, and of the Auto-mode edit path.
 - [ ] Wan 2.2 TI2V-5B to ComfyUI parity (warm 6.6 s vs 4.5 s at 512×320, 25 f, 20 steps on a 4090). The gap is the
   denoise: GEMMs already run near the card's F16 rate, and ~1.5 s per generation is per-op glue across ~330 ops per

@@ -430,15 +430,13 @@ public sealed class InferenceEngine : IInferenceEngine
         VideoRecipeRegistry.Resolve(ModelCapabilities.VideoFamilyIdFor(spec))?.PromptWeighting
         ?? Diffusion.Prompting.PromptWeightingMode.None;
 
-    /// <summary>The officially recommended defaults for <paramref name="spec"/>: the constructed pipeline's
-    /// variant-resolved numbers when it declares them, else the recipe's family-level ones. Resolved through the same
-    /// family-id + registry lookup <see cref="GetOrConstructRecipe"/> uses, so the answer can never disagree with the
-    /// pipeline that will actually run.</summary>
-    internal ImageDefaults DefaultsFor(ModelSpec spec, IRecipePipeline pipeline)
+    /// <summary>The officially recommended defaults for <paramref name="spec"/>'s resolved variant. The variant catalog is
+    /// the only source, resolved through the same lookup <see cref="ModelCapabilities"/> answers hosts with, so the
+    /// numbers a host is told and the numbers the pipeline runs are the same.</summary>
+    internal ImageDefaults DefaultsFor(ModelSpec spec)
     {
-        ArgumentNullException.ThrowIfNull(pipeline);
         IArchitectureRecipe recipe = ResolveRecipe(spec);
-        return pipeline.VariantDefaults ?? recipe.DefaultsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
+        return recipe.DefaultsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
     }
 
     /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>

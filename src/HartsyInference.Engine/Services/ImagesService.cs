@@ -42,7 +42,7 @@ public sealed class ImagesService : IImagesService
                 string? keepRefiner = request.Refiner?.Model;
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner, cancel: cancel);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
-                ImageDefaults defaults = _engine.DefaultsFor(spec, pipeline);
+                ImageDefaults defaults = _engine.DefaultsFor(spec);
                 ImageRequest resolved = defaults.Apply(request);
 
                 // Upstream of every pipeline AND of the segment/region parsing below, so no pipeline sees a raw

@@ -45,7 +45,6 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
     private int _disposed;
 
     /// <inheritdoc/>
-    public ImageDefaults? VariantDefaults => MossImageRecipe.FamilyDefaults;
 
     /// <summary>The encoder that reads reference images, or null when it has no vision tower (text-to-image only).</summary>
     public IMultimodalFinalHiddenStateEncoder? ReferenceEncoder { get; init; }
@@ -62,7 +61,6 @@ public sealed class MossImageRecipePipeline(MossImagePipeline pipeline, MossImag
     {
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
-        ImageDefaults defaults = MossImageRecipe.FamilyDefaults;
         MossImageReferenceLayout layout = ReferenceLayoutFrom(request.Extra);
         bool colorize = layout == MossImageReferenceLayout.Colorize;
         int steps = settings.Steps;
