@@ -5,7 +5,7 @@ using HartsyInference.Diffusion.Utilities;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Unit coverage for <see cref="CfgBranchRunner.Run"/>: genuine concurrency (not just "runs both
-/// eventually"), correct result pairing, and exception propagation from either side.</summary>
+/// eventually"), correct result pairing, and exception propagation from either side and from both.</summary>
 public sealed class CfgBranchRunnerTests
 {
     private static unsafe Tensor Scalar(float value)
@@ -41,6 +41,30 @@ public sealed class CfgBranchRunnerTests
                 () => throw new InvalidOperationException("cond failed"),
                 () => Scalar(1f)));
         Assert.Equal("cond failed", thrown.Message);
+    }
+
+    /// <summary>A context-parallel rank aborts on its peer's failure, so the calling branch's exception is often only the
+    /// consequence: both reach the caller, the calling branch's first.</summary>
+    [Fact]
+    public void Run_BothThrow_PropagatesBothExceptions_CondFirst()
+    {
+        using ManualResetEventSlim uncondFailed = new();
+        AggregateException thrown = Assert.Throws<AggregateException>(() =>
+            CfgBranchRunner.Run(
+                () =>
+                {
+                    Assert.True(uncondFailed.Wait(TimeSpan.FromSeconds(5)), "uncond never failed.");
+                    throw new InvalidOperationException("peer aborted");
+                },
+                () =>
+                {
+                    try { throw new NotSupportedException("uncond failed"); }
+                    finally { uncondFailed.Set(); }
+                }));
+
+        Assert.Collection(thrown.InnerExceptions,
+            e => Assert.Equal("peer aborted", Assert.IsType<InvalidOperationException>(e).Message),
+            e => Assert.Equal("uncond failed", Assert.IsType<NotSupportedException>(e).Message));
     }
 
     [Fact]
