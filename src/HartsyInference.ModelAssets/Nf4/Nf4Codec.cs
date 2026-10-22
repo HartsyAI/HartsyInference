@@ -157,8 +157,8 @@ public static unsafe class Nf4Codec
     #region Companion tensors
 
     /// <summary>Quantizes a weight into the bitsandbytes companion tensors <see cref="Nf4CompanionFold"/> reads back: the
-    /// packed U8 weight, F32 <c>.absmax</c>, the 16-entry F32 <c>.quant_map</c>, and the U8 JSON
-    /// <c>.quant_state.bitsandbytes__nf4</c> blob that gives the shape, block size and compute dtype.</summary>
+    /// packed U8 weight shaped <c>[n/2, 1]</c> as bitsandbytes stores it, F32 <c>.absmax</c>, the 16-entry F32 <c>.quant_map</c>,
+    /// and the U8 JSON <c>.quant_state.bitsandbytes__nf4</c> blob that gives the shape, block size and compute dtype.</summary>
     /// <param name="weightKey">Key of the weight; the companions are named from it.</param>
     /// <param name="computeDtype">Torch dtype name the weight dequantizes back to: <c>float32</c>, <c>float16</c> or <c>bfloat16</c>.</param>
     /// <returns>Every tensor, weight first. The caller owns and disposes them.</returns>
@@ -167,7 +167,7 @@ public static unsafe class Nf4Codec
     {
         (byte[] packed, float[] absmax) = Quantize(values, blockSize);
 
-        Tensor weight = new(new TensorShape(packed.Length), DType.U8);
+        Tensor weight = new(new TensorShape(packed.Length, 1), DType.U8);
         packed.AsSpan().CopyTo(weight.AsSpan<byte>());
         Tensor scales = new(new TensorShape(absmax.Length), DType.F32);
         absmax.AsSpan().CopyTo(scales.AsSpan<float>());
@@ -191,8 +191,8 @@ public static unsafe class Nf4Codec
     #region Streaming FP8 source to NF4 file
 
     /// <summary>Writes a block-FP8 checkpoint as one NF4 safetensors file, one weight at a time: each FP8 weight is dequantized,
-    /// quantized and written before the next is read, so memory holds one weight rather than the checkpoint. Plain tensors are
-    /// copied byte for byte. The F32 <c>weight_scale_inv</c> grids are consumed by the dequantization and not written.</summary>
+    /// quantized and written before the next is read, so memory holds one weight rather than the checkpoint. Plain tensors of
+    /// any dtype are copied byte for byte. The F32 <c>weight_scale_inv</c> grids are consumed by the dequantization and not written.</summary>
     /// <returns>Lowercase hex SHA-256 of the file.</returns>
     public static string WriteFromFp8(HfQuantCheckpoint source, string outputPath, IReadOnlyDictionary<string, string> metadata,
         Action<string>? progress = null)
@@ -231,13 +231,14 @@ public static unsafe class Nf4Codec
         }
         foreach (HfQuantWeight w in plain)
         {
-            Declare(w.Name, PlainDTypeName(w.StoredDType), DimsOf(w.Shape), Tensor.ComputeByteSize(w.Shape, w.StoredDType));
+            Declare(w.Name, w.StoredDType.Name, DimsOf(w.Shape), Tensor.ComputeByteSize(w.Shape, w.StoredDType));
         }
         foreach (HfQuantWeight w in quantized)
         {
             long rows = w.Shape[0], cols = w.Shape[1], elements = rows * cols;
-            long blocks = (elements + DefaultBlockSize - 1) / DefaultBlockSize;
-            Declare(w.Name, "U8", [(elements + 1) / 2], (elements + 1) / 2);
+            long blocks = (elements + DefaultBlockSize - 1) / DefaultBlockSize, packedBytes = (elements + 1) / 2;
+            // bitsandbytes' own [n/2, 1] layout, so its loaders read the file as well as ours.
+            Declare(w.Name, "U8", [packedBytes, 1], packedBytes);
             Declare(w.Name + ".absmax", "F32", [blocks], blocks * sizeof(float));
             Declare(w.Name + ".quant_map", "F32", [Nf4Lut.Length], Nf4Lut.Length * sizeof(float));
             long stateBytes = Encoding.ASCII.GetByteCount(StateText(rows, cols, DefaultBlockSize, "float32"));
@@ -315,19 +316,12 @@ public static unsafe class Nf4Codec
         }
     }
 
-    /// <summary>The quant-state JSON bitsandbytes writes beside an NF4 weight: its logical shape, block size and compute dtype.</summary>
+    /// <summary>The quant-state JSON bitsandbytes writes beside an NF4 weight: its type, logical shape, block size and compute
+    /// dtype. bitsandbytes' own loader requires the type.</summary>
     private static string StateText(long rows, long cols, int blockSize, string computeDtype) =>
-        $"{{\"shape\":[{rows},{cols}],\"blocksize\":{blockSize},\"dtype\":\"{computeDtype}\"}}";
+        $"{{\"quant_type\":\"nf4\",\"shape\":[{rows},{cols}],\"blocksize\":{blockSize},\"dtype\":\"{computeDtype}\"}}";
 
     private static long[] DimsOf(TensorShape shape) => Enumerable.Range(0, shape.Rank).Select(i => shape[i]).ToArray();
-
-    private static string PlainDTypeName(DType dtype)
-    {
-        if (dtype == DType.F32) return "F32";
-        if (dtype == DType.F16) return "F16";
-        if (dtype == DType.BF16) return "BF16";
-        throw new NotSupportedException($"A plain {dtype.Name} tensor cannot be copied into an NF4 file.");
-    }
 
     #endregion
 

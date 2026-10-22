@@ -1,3 +1,4 @@
+using System.Text.Json;
 using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
@@ -124,28 +125,7 @@ public sealed class HfQuantCheckpointTests : IDisposable
     [Fact]
     public void WriteFromFp8_StreamsEachExpertToNf4_WithinTheBlockBound()
     {
-        const string expertName = "model.layers.0.mlp.experts.0.down_proj.weight";
-        string source = Path.Combine(_dir, "fp8.safetensors");
-        Tensor expert = Fp8(64, 128, seed: 6);
-        Tensor scale = new(new TensorShape(1, 1), DType.F32);
-        scale.AsSpan<float>()[0] = 0.03f;
-        Tensor norm = new(new TensorShape(16), DType.F32);
-        norm.AsSpan<float>().Fill(1.5f);
-        Dictionary<string, Tensor> tensors = new(StringComparer.Ordinal)
-        {
-            [expertName] = expert,
-            [expertName + "_scale_inv"] = scale,
-            ["model.norm.weight"] = norm,
-        };
-        try
-        {
-            SafeTensorsWriter.Save(source, tensors);
-        }
-        finally
-        {
-            foreach (Tensor t in tensors.Values) t.Dispose();
-        }
-
+        string source = WriteFp8Source(Path.Combine(_dir, "fp8.safetensors"));
         string output = Path.Combine(_dir, "nf4.safetensors");
         using (HfQuantCheckpoint src = HfQuantCheckpoint.OpenFiles([source]))
         {
@@ -153,23 +133,40 @@ public sealed class HfQuantCheckpointTests : IDisposable
             Assert.Equal(64, sha.Length);
         }
 
-        using HfQuantCheckpoint dst = HfQuantCheckpoint.OpenFiles([output]);
-        Assert.Equal(2, dst.Weights.Count);
-        Assert.Equal(HfWeightStorage.Nf4, dst.Weights[expertName].Storage);
-        Assert.Equal(HfWeightStorage.Plain, dst.Weights["model.norm.weight"].Storage);
-        using HfQuantCheckpoint reference = HfQuantCheckpoint.OpenFiles([source]);
-        using Tensor want = reference.DequantizeF32(expertName);
-        using Tensor got = dst.DequantizeF32(expertName);
-        ReadOnlySpan<float> w = want.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> g = got.AsReadOnlySpan<float>();
-        Assert.Equal(w.Length, g.Length);
-        for (int b = 0; b < w.Length; b += Nf4Codec.DefaultBlockSize)
+        // bitsandbytes' layout: packed nibbles as [n/2, 1], and a quant state its loader reads the type from.
+        using (ShardedSafeTensorSet written = ShardedSafeTensorSet.OpenFiles([output]))
+        using (Tensor state = written.GetTensor(Expert(0) + ".quant_state.bitsandbytes__nf4"))
         {
-            float blockMax = 0f;
-            int end = Math.Min(w.Length, b + Nf4Codec.DefaultBlockSize);
-            for (int i = b; i < end; i++) blockMax = MathF.Max(blockMax, MathF.Abs(w[i]));
-            for (int i = b; i < end; i++)
-                Assert.True(MathF.Abs(g[i] - w[i]) <= blockMax * Nf4Codec.MaxBlockError + 1e-6f, $"element {i}: nf4 {g[i]} vs fp8 {w[i]}");
+            Assert.Equal(new TensorShape(64 * 128 / 2, 1), written.Inventory[Expert(0)].Shape);
+            using JsonDocument json = JsonDocument.Parse(state.AsReadOnlySpan<byte>().ToArray());
+            Assert.Equal("nf4", json.RootElement.GetProperty("quant_type").GetString());
+        }
+        using HfQuantCheckpoint dst = HfQuantCheckpoint.OpenFiles([output]);
+        using HfQuantCheckpoint reference = HfQuantCheckpoint.OpenFiles([source]);
+        Assert.Equal(4, dst.Weights.Count);
+        Assert.Equal(HfWeightStorage.Plain, dst.Weights["model.norm.weight"].Storage);
+        Assert.Equal(DType.I64, dst.Weights["model.position_ids"].StoredDType);
+        using (Tensor storedIds = reference.Borrow("model.position_ids"))
+        using (Tensor copiedIds = dst.Borrow("model.position_ids"))
+        {
+            Assert.Equal(storedIds.AsReadOnlySpan<byte>().ToArray(), copiedIds.AsReadOnlySpan<byte>().ToArray());
+        }
+        for (int e = 0; e < 2; e++)
+        {
+            Assert.Equal(HfWeightStorage.Nf4, dst.Weights[Expert(e)].Storage);
+            using Tensor want = reference.DequantizeF32(Expert(e));
+            using Tensor got = dst.DequantizeF32(Expert(e));
+            ReadOnlySpan<float> w = want.AsReadOnlySpan<float>();
+            ReadOnlySpan<float> g = got.AsReadOnlySpan<float>();
+            Assert.Equal(w.Length, g.Length);
+            for (int b = 0; b < w.Length; b += Nf4Codec.DefaultBlockSize)
+            {
+                float blockMax = 0f;
+                int end = Math.Min(w.Length, b + Nf4Codec.DefaultBlockSize);
+                for (int i = b; i < end; i++) blockMax = MathF.Max(blockMax, MathF.Abs(w[i]));
+                for (int i = b; i < end; i++)
+                    Assert.True(MathF.Abs(g[i] - w[i]) <= blockMax * Nf4Codec.MaxBlockError + 1e-6f, $"element {i}: nf4 {g[i]} vs fp8 {w[i]}");
+            }
         }
         Assert.False(File.Exists(output + ".partial"));
     }
@@ -337,6 +334,37 @@ public sealed class HfQuantCheckpointTests : IDisposable
             bytes[i] = b;
         }
         return t;
+    }
+
+    private static string Expert(int index) => $"model.layers.0.mlp.experts.{index}.down_proj.weight";
+
+    // Two block-FP8 experts, a plain F32 norm and a plain I64 buffer.
+    private static string WriteFp8Source(string path)
+    {
+        Dictionary<string, Tensor> tensors = new(StringComparer.Ordinal);
+        try
+        {
+            for (int e = 0; e < 2; e++)
+            {
+                tensors[Expert(e)] = Fp8(64, 128, seed: 6 + e);
+                Tensor scale = new(new TensorShape(1, 1), DType.F32);
+                scale.AsSpan<float>()[0] = 0.03f;
+                tensors[Expert(e) + "_scale_inv"] = scale;
+            }
+            Tensor norm = new(new TensorShape(16), DType.F32);
+            norm.AsSpan<float>().Fill(1.5f);
+            tensors["model.norm.weight"] = norm;
+            Tensor ids = new(new TensorShape(5), DType.I64);
+            Span<long> idValues = ids.AsSpan<long>();
+            for (int i = 0; i < idValues.Length; i++) idValues[i] = (long)i << 40;
+            tensors["model.position_ids"] = ids;
+            SafeTensorsWriter.Save(path, tensors);
+            return path;
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
     }
 
     public void Dispose()
