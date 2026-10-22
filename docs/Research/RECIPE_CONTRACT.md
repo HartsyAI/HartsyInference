@@ -209,9 +209,10 @@ Audio speech and transcription recipes are not yet typed; their defaults stay in
 
 ## Verification
 
-Every value above was checked against the code and SwarmUI's source, and the CPU lane is green. Later real-weight
-runs (the attention work in `alpha.387`, for example) used the regression cases, which pin their settings, so none
-has generated with a recipe default left unset, and no live SwarmUI session has checked them. The GPU passes and the
+Every value above was checked against the code and SwarmUI's source, and the CPU lane is green. The dedicated
+default-change passes and a live SwarmUI session have not run. Later real-weight runs of the regression cases (the
+`alpha.387` attention work) cover only what those cases leave unset: `wan5b` and `wan5b-720p` set no fps, so they ran
+Wan 2.2 5B's new 22 fps. The GPU passes and the
 live SwarmUI checks that close this are in
 [RECIPE_DEFAULTS_GPU_HANDOFF.md](RECIPE_DEFAULTS_GPU_HANDOFF.md).
 
