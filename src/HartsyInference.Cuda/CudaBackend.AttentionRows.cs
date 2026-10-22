@@ -193,8 +193,9 @@ public sealed partial class CudaBackend
                 static (in AttentionCall c) => ScoresPastMaterialized(in c),
                 static (in AttentionCall c) => throw new AttentionUnsupportedException(
                     $"No bounded CUDA row serves this {c.Query.DType} head-major attention: its {(long)c.Batch * c.Heads * c.QueryTokens * c.KeyTokens} "
-                    + $"score elements are past the 2^32 ({MaterializedMaxScores}) the materialized row addresses, and past that only unmasked "
-                    + "calls and F32 calls with a key-only mask run query-tiled.")),
+                    + $"score elements are past the 2^32 ({MaterializedMaxScores}) the materialized row addresses, and past that a call runs "
+                    + "query-tiled only when it is unmasked or F32 with a key-only mask and one query row across its heads, "
+                    + $"{(long)c.Batch * c.Heads * c.KeyTokens} score elements, fits too.")),
         ];
     }
 

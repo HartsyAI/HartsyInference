@@ -222,13 +222,14 @@ public sealed class CudnnSdpaBackendRowsTests
     }
 
     /// <summary>The query tile: a quarter of free VRAM in F32 scores or the height <c>numerics.sdpaTile</c> forces, never past the 2^32
-    /// score elements the softmax addresses (65075 rows over 66000 keys, however much memory is free or the knob asks), and a call whose
-    /// one query row is already past them is refused rather than tiled.</summary>
+    /// score elements the softmax addresses (65075 rows over 66000 keys, however much memory is free or the knob asks), no division by an
+    /// empty key set, and a call whose one query row is already past them is refused rather than tiled.</summary>
     [Theory]
     [InlineData(12L << 30, 24, 4480, 4480, 0, 4480)]
     [InlineData(80L << 30, 1, 66000, 66000, 0, 65075)]
     [InlineData(1L << 30, 1, 66000, 66000, 66000, 65075)]
     [InlineData(1L << 30, 1, 66000, 66000, 100, 100)]
+    [InlineData(1L << 30, 1, 64, 0, 0, 64)]
     public void TheTileHeightNeverPassesTheBound(long freeBytes, int heads, int sq, int skv, int forced, long rows)
     {
         Assert.Equal(rows, CudaBackend.TileRows((ulong)freeBytes, heads, sq, skv, forced == 0 ? null : forced));

@@ -8108,15 +8108,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
     internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced)
     {
+        long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
+        if (cap < 1)
+            throw new AttentionUnsupportedException(
+                $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
         long perRow = totalHeads * skv * sizeof(float);
         long rows = (long)(freeBytes / 4) / Math.Max(1, perRow);
         if (rows < 1) rows = 1;
         if (rows > sq) rows = sq;
         if (forced is int f && f > 0) rows = Math.Min(f, sq);
-        long cap = MaterializedMaxScores / (totalHeads * skv);
-        if (cap < 1)
-            throw new AttentionUnsupportedException(
-                $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
         return Math.Min(rows, cap);
     }
 
