@@ -16,6 +16,15 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> AnimatePoseDump =
         Str("diagnostics.animatePoseDump", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Directory to write the Wan-Animate rendered pose-skeleton frames as PPMs before they are VAE-encoded.");
 
+    /// <summary>Directory where CUDA attention calls of at least 1024 query rows and keys are listed per shape, and the calls
+    /// <see cref="AttentionCaptureCalls"/> names have four heads of Q (512 rows), K and V written; unset captures nothing.</summary>
+    public static readonly Knob<string?> AttentionCaptureDir =
+        Str("diagnostics.attentionCaptureDir", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Directory where CUDA attention calls of at least 1024 query rows and keys are listed per shape (calls.tsv), and the calls diagnostics.attentionCaptureCalls names have four heads of Q, K and V written; unset captures nothing.");
+
+    /// <summary>Ordinals, per call shape, of the attention calls <see cref="AttentionCaptureDir"/> writes, comma-separated.</summary>
+    public static readonly Knob<string?> AttentionCaptureCalls =
+        Str("diagnostics.attentionCaptureCalls", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Ordinals, per call shape, of the attention calls diagnostics.attentionCaptureDir writes, comma-separated; unset only lists them.");
+
     /// <summary>Throws instead of falling back when a CUDA helper resolves state ambient-lessly with 2+ backends live.</summary>
     public static readonly Knob<bool> AssertAmbient =
         Bool("diagnostics.assertAmbient", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Throws instead of falling back when a CUDA helper resolves state ambient-lessly with 2+ backends live.");

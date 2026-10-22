@@ -25,6 +25,7 @@ public sealed partial class CudaBackend
     /// <summary>Runs the first row of <paramref name="rows"/> that covers, admits and completes the call, and records its route.</summary>
     private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call, int flashKvGroup = 0)
     {
+        if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
         int saved = t_flashKvGroup;
         t_flashKvGroup = flashKvGroup;
         try
