@@ -37,7 +37,11 @@ stable release will require. Dates are UTC.
   (`AttentionLayerConfig.RefusedFormats`), which excludes every attention row that multiplies in a refused format. The text
   cross-attention K/V cache holds F16 for those forwards. A Wan 2.2 A14B expert pair, image-to-video, per-frame timesteps,
   context parallelism, the step cache, the 1.3B and the S2V, VACE, Animate and Matrix-Game models keep F32, as do
-  `numerics.ditF16=false` and the `reference` profile.
+  `numerics.ditF16=false` and the `reference` profile. Measured on an RTX 4090 against main at seeds 42-44: wan5b
+  (832×480×49) 1092 → 886 ms per step (−18.9%), first-frame SSIM 0.979 / 0.994 / 0.997; wan5b-long (832×480×121)
+  3025 → 2527 ms (−16.5%), first-frame SSIM 0.998 / 0.997 / 0.994. wan5b at seed 42 drifts below its 0.985 floor, to 0.979
+  on the first frame and 0.952 on the last: the same scene and subject, the subject's position and pose shifted, no
+  artifacts.
 
 ## alpha.386
 

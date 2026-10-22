@@ -254,6 +254,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         {
             RecordCfgParallelDecision("fell-back(moe-two-expert)");
         }
+        // The reserve is sized from these two switches; every forward of the loop, the CFG worker's included, runs under them.
+        using IDisposable switches = PinBranchSwitches();
         DType blockAct = DenoiseActivation(firstFrameLatent is null && lastFrameLatent is null);
         // Single-expert only: the MoE path already frees and reloads a whole expert per step (SwapToExpert), so
         // a sliding window underneath that would re-upload the same bytes twice. Streaming is decided by the
@@ -960,6 +962,12 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     /// it never undercounts.</summary>
     private DType DenoiseActivation(bool singleGroup) => DenoiseActivation(_transformer, Backend, CfgParallelBackend,
         CpBackends?.Count ?? 0, StepCacheEnv.ReadThreshold() > 0f, singleGroup);
+
+    /// <summary>Pins <c>numerics.wanF16</c> and <c>numerics.ditF16</c> at their current values on this async flow, over the request's
+    /// own settings, so a settings change mid-generation cannot run a forward in a dtype the reserve was not sized for.</summary>
+    internal static IDisposable PinBranchSwitches() =>
+        (KnobProfileScope.Current ?? KnobProfile.Create("wan-denoise")).With(EngineKnobs.WanF16, EngineKnobs.WanF16.Value)
+            .With(EngineKnobs.DitF16, EngineKnobs.DitF16.Value).Push();
 
     /// <summary><see cref="DenoiseActivation(bool)"/> over explicit inputs.</summary>
     internal static DType DenoiseActivation(WanVideoTransformer transformer, IBackend backend, IBackend? cfgParallel,
