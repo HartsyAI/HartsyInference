@@ -71,3 +71,19 @@ shapes, so its floor is `identical`. Step ms is the harness's median over the wa
 
 The log's `FAIL` on llama32-1b and qwen3-4b is the harness's equality check, not the floor. The flips are today's
 default against strict on the forced tokens; a later bounded change may not add flips beyond these counts.
+
+## BF16 opt-in floors (Phase 4 item 2)
+
+Declared before any model takes the BF16 grant (#523's exact knob, #524's row S.16). Default vs exact is one build with and
+without `numerics.sdpaNoTf32=true`. The control changes summation order only (`vram.sdpaForceTiled=true`; for a row that
+already tiles, the default arm run a second time). The null is SSIM between two seeds of the default arm. Seeds 42-44, RTX
+4090, logs in `4090/floors-bf16.log`. Floor = min(default vs exact) - 0.01.
+
+| Case | Default vs exact, per seed | Control, min | Null | Floor |
+|---|---|---|---|---|
+| lens-mxfp8 | 0.986963 / 0.992546 / 0.988716 | 0.979848 | 0.166-0.170 | 0.977 |
+| lens-2048 | not yet measured | | | |
+
+- lens-mxfp8 is borderline: the control's own minimum (0.980) sits at the 0.98 threshold below which SSIM is too chaotic to
+  judge a row, so a candidate near 0.977 is within summation-order noise. 0.977 rounds to the nearest thousandth, which is
+  0.001 stricter than the round-down rule above. Measured on #523's head `6c0355dd`, whose default path is main's.
