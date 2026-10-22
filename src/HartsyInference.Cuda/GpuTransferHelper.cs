@@ -354,6 +354,21 @@ internal static unsafe class GpuTransferHelper
 
         protected override void MakeCurrent() => Context?.EnsureCurrent();
 
+        protected override nint CaptureCurrent() => CudaDriverApi.cuCtxGetCurrent(out nint current) == 0 ? current : 0;
+
+        protected override void RestoreCurrent(nint previous)
+        {
+            if (previous == 0 || CudaDriverApi.cuCtxGetCurrent(out nint current) != 0 || current == previous)
+            {
+                return;
+            }
+            int status = CudaDriverApi.cuCtxSetCurrent(previous);
+            if (status != 0)
+            {
+                Logs.Warning($"[Cuda] A residency callback could not rebind its caller's context (CUDA error {status}).");
+            }
+        }
+
         /// <summary>Buffers bump-allocated from a graph-capture arena, recorded at ALLOCATION time.</summary>
         /// <remarks>Asking "is this address inside a live arena?" at free time is not the same question. A captured
         /// graph's arena leaves <see cref="LiveArenas"/> when the graph is disposed, and after that every buffer it
@@ -994,7 +1009,10 @@ internal static unsafe class GpuTransferHelper
             Logs.Debug($"[Cuda][H2D] {(long)byteSize >> 20} MB {source.DType} "
                 + $"[{string.Join("x", Enumerable.Range(0, source.Shape.Rank).Select(i => source.Shape[i]))}]");
         }
-        CudaMemory.CopyHostToDeviceAsync(destination, source.DataPointer, byteSize, stream);
+        // The host read can run another backend's hook on a shared tensor, which leaves that backend's context current.
+        void* host = source.DataPointer;
+        s.Context?.EnsureCurrent();
+        CudaMemory.CopyHostToDeviceAsync(destination, host, byteSize, stream);
     }
 
     /// <summary>True when the pointer lies inside ANY live graph-capture arena (never individually freed).</summary>

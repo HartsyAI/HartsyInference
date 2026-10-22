@@ -164,6 +164,12 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <summary>Makes this cache's device current, where the API has such a notion. A no-op elsewhere.</summary>
     protected abstract void MakeCurrent();
 
+    /// <summary>The device binding current on the calling thread, where the API has such a notion; 0 elsewhere.</summary>
+    protected virtual nint CaptureCurrent() => 0;
+
+    /// <summary>Rebinds what <see cref="CaptureCurrent"/> returned, if a callback's <see cref="MakeCurrent"/> moved it.</summary>
+    protected virtual void RestoreCurrent(nint previous) { }
+
     // ── Hooks for the parts that really are per-backend ──────────────────────────────────────────────────
 
     /// <summary>Called after a fresh upload that was not cached, for a backend that tracks transient buffers so it
@@ -388,7 +394,9 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// with another backend's thread throws instead (see <see cref="ResidencyLock"/>). A release or a demotion only
     /// gives up a device copy, so when another thread holds the cache it is queued and runs as soon as the lock is
     /// free, by whichever thread then finds it so. The lock comes before <see cref="TryEnterCallback"/>, so a retiring
-    /// backend that drains claimed callbacks while holding the lock never waits on one blocked behind it.</remarks>
+    /// backend that drains claimed callbacks while holding the lock never waits on one blocked behind it. A callback can
+    /// fire inside another backend's op (a host read of a tensor both hold), so the caller's device binding is put back
+    /// on the way out, queued callbacks drained here included.</remarks>
     private void RunCallback(Tensor tensor, Callback kind)
     {
         // Disposal first, before any collection is touched: this callback was planted on a tensor that can outlive
@@ -397,6 +405,19 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             return;
         }
+        nint previous = CaptureCurrent();
+        try
+        {
+            RunCallbackLocked(tensor, kind);
+        }
+        finally
+        {
+            RestoreCurrent(previous);
+        }
+    }
+
+    private void RunCallbackLocked(Tensor tensor, Callback kind)
+    {
         if (kind == Callback.Sync)
         {
             _exclusive.Enter();
