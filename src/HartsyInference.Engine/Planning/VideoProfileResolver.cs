@@ -2967,8 +2967,8 @@ internal static class VideoProfileResolver
                 .ToString("R", CultureInfo.InvariantCulture))
             .Append(",sampler=").Append((defaults.Sampler ?? string.Empty).ToLowerInvariant())
             .Append(",scheduler=").Append((defaults.Scheduler ?? string.Empty).ToLowerInvariant())
-            .Append(",width=").Append(defaults.Width?.ToString(CultureInfo.InvariantCulture) ?? "null")
-            .Append(",height=").Append(defaults.Height?.ToString(CultureInfo.InvariantCulture) ?? "null")
+            .Append(",width=").Append(defaults.Width.ToString(CultureInfo.InvariantCulture))
+            .Append(",height=").Append(defaults.Height.ToString(CultureInfo.InvariantCulture))
             .Append(",referenceSizing=").Append((int)defaults.ReferenceSizing)
             .Append(",locked=").Append((int)defaults.LockedFields).Append(';');
         foreach (KeyValuePair<string, string> entry in hashes.OrderBy(entry => entry.Key, StringComparer.Ordinal))

@@ -23,8 +23,15 @@ public sealed class LanceVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lance-video", StringComparison.OrdinalIgnoreCase);
 
+    // Fps is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
     /// <summary>Lance Video's official sampling settings: 30 steps at text-CFG 4.0, 512x512, 25 frames (<c>LanceConfig.NumTimesteps</c>/<c>CfgTextScale</c>; <c>LanceVideoGenerationTests</c> verified 512x512 coherent, using a shorter 9-frame clip only to keep the smoke test fast).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 30, CfgScale = 4.0f, Width = 512, Height = 512, Frames = 25 };
+    public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 30, CfgScale = 4.0f, Width = 512, Height = 512, Frames = 25, Fps = 25,
+    };
+
+    /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(4, FrameNormalization.SnapNearest, LanceVideoRecipePipeline.MaxFrames) };
 
     /// <inheritdoc/>
     /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). Image-to-video is tracked separately: the Wan 2.2 VAE this family loads already has a verified encoder half, so it is wiring rather than a port.</remarks>

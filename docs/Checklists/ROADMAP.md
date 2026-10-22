@@ -116,8 +116,8 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] F16 input/output Sage attention and loadable few-step accelerators, subject to quality gates.
 - [ ] LoRA extraction/checkpoint-diff utility.
 - [ ] PAG/SAG attention hooks and per-pipeline regional-tag handling.
-- [ ] Declare variant catalogs (`ENGINE_PATTERNS.md#model-variants`) for the families still ignoring theirs: HiDream
-  Full/Dev/Fast, Boogu Turbo, SD3.5 Large-Turbo and Flux.2 Klein base get their own defaults. Flux.1
+- [ ] Declare variant catalogs (`ENGINE_PATTERNS.md#model-variants`) for the families still ignoring theirs: SD3.5
+  Large-Turbo and Flux.2 Klein base get their own defaults. Flux.1
   Kontext/Fill/Depth/Canny and HiDream-Edit get an explicit refusal until those paths exist. LTX-Video 0.9.5/13B
   still mixes its key probe with a filename check.
 - [ ] Real-weight check of Qwen-Image-Edit v1 through its own template, and of the Auto-mode edit path.
@@ -135,6 +135,10 @@ Model-specific SDXL refiner/segment gaps belong in [image status](MODEL_STATUS_I
 - [ ] Scope a target model and request/result contract before creating a new modality package or checklist.
 
 ## 8. SwarmUI extensions
+
+- [ ] Recipe contract follow-ups ([RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md#open)): planner with parameter
+  provenance, strict variant resolution, pipelines on resolved plans only, audio recipes, host descriptor API, then
+  SwarmUI-aligned defaults per the ledger.
 
 - [ ] 3D and world-model UI extensions, thin over Engine.
 - [ ] Validate package/extension compatibility for newly exposed features; H3 gates live in video status.

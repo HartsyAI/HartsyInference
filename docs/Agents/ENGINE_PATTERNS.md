@@ -57,6 +57,16 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
 - Planning errors and non-bypassable release gates return before backend probing or model construction, and
   execution rechecks planned artifact stamps, so a replaced checkpoint needs a new plan.
 
+## Recipe Contract
+- A recipe is the only owner of a family's defaults. `Defaults` (and a video recipe's `Constraints`) are abstract
+  with `required` non-nullable members, so a missing value fails to compile; `RecipeRegistryValidator` rejects the
+  values a type cannot (zero frame rate, off-grid frames, sizes off the multiple of 8, a shadowed name) when the
+  registry loads. There is no generic fallback: an unregistered family throws `RecipeNotRegisteredException`.
+- No pipeline and no host decides an omitted user-configurable parameter. Architecture constants stay in model
+  configs; capability limits go in `Constraints`, not defaults.
+- A default that differs from SwarmUI's documented one, or comes from upstream where SwarmUI has none, carries a
+  one-line comment saying why. Design and the per-family ledger: [RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md).
+
 ## GPU Weight Management
 - Preload with `backend.PreloadWeights(model.EnumerateWeights())`; dispose CPU weight tensors afterwards only if
   the residency policy guarantees they are not needed for streaming, recaching or fallback.

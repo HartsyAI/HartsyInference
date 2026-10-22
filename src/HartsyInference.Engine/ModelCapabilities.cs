@@ -50,11 +50,13 @@ public static class ModelCapabilities
     }
 
     /// <summary>The officially recommended video defaults for <paramref name="spec"/>'s resolved variant.</summary>
+    /// <exception cref="RecipeNotRegisteredException">The family has no video recipe, so it has no defaults.</exception>
     public static VideoDefaults VideoDefaultsFor(ModelSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
         (IVideoRecipe? recipe, ResolvedModelVariant? variant) = ResolveVideo(spec);
-        return recipe?.DefaultsFor(variant) ?? VideoDefaults.Standard;
+        return recipe?.DefaultsFor(variant) ?? throw new RecipeNotRegisteredException(
+            Modality.Video, VideoFamilyIdFor(spec), VideoRecipeRegistry.RegisteredNames);
     }
 
     /// <summary>The sampler/schedule selection the video recipe for <paramref name="spec"/> accepts for its resolved variant.</summary>
