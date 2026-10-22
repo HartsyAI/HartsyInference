@@ -33,7 +33,8 @@ stable release will require. Dates are UTC.
   - Video: every Wan 81 frames; Wan 2.1 and VACE CFG 6 at 24 fps; Wan 2.2 5B 22 fps; LTX-Video 768×512 at 24 fps;
     LTX-2 and LTX-2.5 distilled CFG 3 and 97 frames; Kandinsky 5 Video CFG 1, 640×640, 73 frames; HunyuanVideo
     720×720, 73 frames. Wan, LTX-2 and MiniMax-H3 keep their native sizes.
-  - Music: ACE-Step 1.5 120 s (turbo declares CFG 1), MiniMax Music 3 120 s at CFG 1.5, YuE2 300 s.
+  - Music: ACE-Step 1.5 120 s (turbo declares CFG 1), MiniMax Music 3 120 s, YuE2 300 s. An unset duration now
+    renders 12× to 30× the audio it used to.
 
 - **Added: the executable specification of INT8 attention v2.** `Int8AttentionV2Reference` runs on the CPU the stats pass,
   quantization and online recurrence the coming INT8 kernel must reproduce: u8 P against each key tile's own maximum, s8 V,
