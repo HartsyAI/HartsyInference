@@ -3,7 +3,9 @@ using HartsyInference.Diffusion.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Music;
 
-/// <summary>MiniMax Music 3: a 25 Hz frame grid caps the clip at <see cref="MiniMaxMusic3ArPipeline.MaxAudioFrames"/> frames.</summary>
+/// <summary>MiniMax Music 3: a 25 Hz frame grid caps the clip at <see cref="MiniMaxMusic3ArPipeline.MaxAudioFrames"/> frames.
+/// Duration 120 s and CFG 1.5 are SwarmUI core's (<c>WorkflowGenerator.cs</c>: 120 s, <c>cfg_scale</c> 1.5 on
+/// <c>MiniMaxMusic3TextEncode</c>); the docs and the pipeline's own default say CFG 1.7.</summary>
 public sealed class MiniMaxMusic3MusicRecipe : IMusicRecipe
 {
     /// <inheritdoc/>
@@ -15,10 +17,10 @@ public sealed class MiniMaxMusic3MusicRecipe : IMusicRecipe
     /// <inheritdoc/>
     public MusicDefaults Defaults { get; } = new MusicDefaults
     {
-        Duration = 10,
+        Revision = 2,
+        Duration = 120,
         Steps = MiniMaxMusic3FlowPipeline.DefaultSteps,
-        // The pipeline's float default, written as a decimal so the declared value is exact.
-        CfgScale = 1.7,
+        CfgScale = 1.5,
     };
 
     /// <inheritdoc/>
