@@ -26,22 +26,27 @@ public sealed unsafe class EfficientVitBlock(int dim, int headDim = 32)
         _qW = w[$"{p}.attn.to_q.weight"];
         _kW = w[$"{p}.attn.to_k.weight"];
         _vW = w[$"{p}.attn.to_v.weight"];
-        if (w.TryGetValue($"{p}.attn.to_qkv_multiscale.0.proj_in.weight", out _msProjInW))
+        // The multiscale convs, the depth conv and the norm biases are read on the host, so they must be F32.
+        _msProjInW = TensorCasts.LoadF32Opt(w, $"{p}.attn.to_qkv_multiscale.0.proj_in.weight");
+        if (_msProjInW is not null)
         {
-            w.TryGetValue($"{p}.attn.to_qkv_multiscale.0.proj_in.bias", out _msProjInB);
-            w.TryGetValue($"{p}.attn.to_qkv_multiscale.0.proj_out.weight", out _msProjOutW);
-            w.TryGetValue($"{p}.attn.to_qkv_multiscale.0.proj_out.bias", out _msProjOutB);
+            _msProjInB = TensorCasts.LoadF32Opt(w, $"{p}.attn.to_qkv_multiscale.0.proj_in.bias");
+            _msProjOutW = TensorCasts.LoadF32Opt(w, $"{p}.attn.to_qkv_multiscale.0.proj_out.weight");
+            _msProjOutB = TensorCasts.LoadF32Opt(w, $"{p}.attn.to_qkv_multiscale.0.proj_out.bias");
         }
         if (!w.TryGetValue($"{p}.attn.to_out.weight", out _projOutW))
             _projOutW = w[$"{p}.attn.proj_out.weight"];
         if (!w.TryGetValue($"{p}.attn.to_out.bias", out _projOutB))
             w.TryGetValue($"{p}.attn.proj_out.bias", out _projOutB);
-        _attnNormW = TensorCasts.LoadF32(w, $"{p}.attn.norm_out.weight"); w.TryGetValue($"{p}.attn.norm_out.bias", out _attnNormB);
+        _attnNormW = TensorCasts.LoadF32(w, $"{p}.attn.norm_out.weight");
+        _attnNormB = TensorCasts.LoadF32Opt(w, $"{p}.attn.norm_out.bias");
 
         _ffInvW = w[$"{p}.conv_out.conv_inverted.weight"]; w.TryGetValue($"{p}.conv_out.conv_inverted.bias", out _ffInvB);
-        _ffDepthW = w[$"{p}.conv_out.conv_depth.weight"]; w.TryGetValue($"{p}.conv_out.conv_depth.bias", out _ffDepthB);
+        _ffDepthW = TensorCasts.LoadF32(w, $"{p}.conv_out.conv_depth.weight");
+        _ffDepthB = TensorCasts.LoadF32Opt(w, $"{p}.conv_out.conv_depth.bias");
         _ffPointW = w[$"{p}.conv_out.conv_point.weight"];
-        _ffNormW = TensorCasts.LoadF32(w, $"{p}.conv_out.norm.weight"); w.TryGetValue($"{p}.conv_out.norm.bias", out _ffNormB);
+        _ffNormW = TensorCasts.LoadF32(w, $"{p}.conv_out.norm.weight");
+        _ffNormB = TensorCasts.LoadF32Opt(w, $"{p}.conv_out.norm.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

@@ -52,7 +52,7 @@ public sealed unsafe class AceStepDit : IDisposable
         _speakerB = PickOpt(w, "speaker_embedder.bias", "speaker_embedder.linear.bias");
         _genreW = Pick(w, "genre_embedder.weight", "caption_projection.linear.weight", "caption_projection.weight");
         _genreB = PickOpt(w, "genre_embedder.bias", "caption_projection.linear.bias", "caption_projection.bias");
-        _lyricEmbs = w["lyric_embs.weight"];
+        _lyricEmbs = PickF32(w, "lyric_embs.weight");
         _lyricProjW = Pick(w, "lyric_proj.weight", "lyric_proj.linear.weight");
         _lyricProjB = PickOpt(w, "lyric_proj.bias", "lyric_proj.linear.bias");
         _lyricEncoder.LoadWeights(w, "lyric_encoder");

@@ -118,27 +118,36 @@ public sealed class AceStepCheckpointConverter
             if (key.EndsWith(".weight_g", StringComparison.Ordinal))
             {
                 string baseKey = key[..^".weight_g".Length];
-                Tensor g = value.DType == DType.F32 ? value : value.CastTo(DType.F32);
                 Tensor vRaw = raw[$"{baseKey}.weight_v"];
-                Tensor v = vRaw.DType == DType.F32 ? vRaw : vRaw.CastTo(DType.F32);
-                long outC = v.Shape[0];
-                long per = v.Shape.ElementCount / outC;
-                Tensor fused = new Tensor(v.Shape, DType.F32);
-                float* gp = (float*)g.DataPointer;
-                float* vp = (float*)v.DataPointer;
-                float* fp = (float*)fused.DataPointer;
-                for (long o = 0; o < outC; o++)
+                Tensor g = TensorCasts.EnsureF32(value);
+                Tensor v = TensorCasts.EnsureF32(vRaw);
+                try
                 {
-                    double normSq = 0;
-                    for (long i = 0; i < per; i++)
+                    long outC = v.Shape[0];
+                    long per = v.Shape.ElementCount / outC;
+                    Tensor fused = new Tensor(v.Shape, DType.F32);
+                    float* gp = (float*)g.DataPointer;
+                    float* vp = (float*)v.DataPointer;
+                    float* fp = (float*)fused.DataPointer;
+                    for (long o = 0; o < outC; o++)
                     {
-                        float val = vp[o * per + i];
-                        normSq += (double)val * val;
+                        double normSq = 0;
+                        for (long i = 0; i < per; i++)
+                        {
+                            float val = vp[o * per + i];
+                            normSq += (double)val * val;
+                        }
+                        float scale = gp[o] / (float)Math.Max(Math.Sqrt(normSq), 1e-12);
+                        for (long i = 0; i < per; i++) fp[o * per + i] = vp[o * per + i] * scale;
                     }
-                    float scale = gp[o] / (float)Math.Max(Math.Sqrt(normSq), 1e-12);
-                    for (long i = 0; i < per; i++) fp[o * per + i] = vp[o * per + i] * scale;
+                    result[$"{baseKey}.weight"] = fused;
                 }
-                result[$"{baseKey}.weight"] = fused;
+                finally
+                {
+                    // Released only here: the loop reads the casts through pointers the GC does not track.
+                    if (!ReferenceEquals(g, value)) g.Dispose();
+                    if (!ReferenceEquals(v, vRaw)) v.Dispose();
+                }
             }
             else if (!key.EndsWith(".weight_v", StringComparison.Ordinal))
             {

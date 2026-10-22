@@ -32,14 +32,14 @@ public sealed unsafe class AceStepLyricEncoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _embedW = w[$"{prefix}.embed.out.0.weight"]; w.TryGetValue($"{prefix}.embed.out.0.bias", out _embedB);
-        _embedNormW = GetF32(w, $"{prefix}.embed.out.1.weight"); w.TryGetValue($"{prefix}.embed.out.1.bias", out _embedNormB);
+        _embedNormW = GetF32(w, $"{prefix}.embed.out.1.weight"); _embedNormB = GetF32(w, $"{prefix}.embed.out.1.bias");
         _layers = new Layer[_numLayers];
         for (int i = 0; i < _numLayers; i++)
         {
             _layers[i] = new Layer(this);
             _layers[i].LoadWeights(w, $"{prefix}.encoders.{i}");
         }
-        _afterNormW = GetF32(w, $"{prefix}.after_norm.weight"); w.TryGetValue($"{prefix}.after_norm.bias", out _afterNormB);
+        _afterNormW = GetF32(w, $"{prefix}.after_norm.weight"); _afterNormB = GetF32(w, $"{prefix}.after_norm.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -148,9 +148,9 @@ public sealed unsafe class AceStepLyricEncoder
             {
                 _ffMacaron1W = w[$"{p}.feed_forward_macaron.w_1.weight"]; w.TryGetValue($"{p}.feed_forward_macaron.w_1.bias", out _ffMacaron1B);
                 _ffMacaron2W = w[$"{p}.feed_forward_macaron.w_2.weight"]; w.TryGetValue($"{p}.feed_forward_macaron.w_2.bias", out _ffMacaron2B);
-                _normFfMacaronW = GetF32(w, $"{p}.norm_ff_macaron.weight"); w.TryGetValue($"{p}.norm_ff_macaron.bias", out _normFfMacaronB);
+                _normFfMacaronW = GetF32(w, $"{p}.norm_ff_macaron.weight"); _normFfMacaronB = GetF32(w, $"{p}.norm_ff_macaron.bias");
             }
-            _normMhaW = GetF32(w, $"{p}.norm_mha.weight"); w.TryGetValue($"{p}.norm_mha.bias", out _normMhaB);
+            _normMhaW = GetF32(w, $"{p}.norm_mha.weight"); _normMhaB = GetF32(w, $"{p}.norm_mha.bias");
             _qW = w[$"{p}.self_attn.linear_q.weight"]; w.TryGetValue($"{p}.self_attn.linear_q.bias", out _qB);
             _kW = w[$"{p}.self_attn.linear_k.weight"]; w.TryGetValue($"{p}.self_attn.linear_k.bias", out _kB);
             _vW = w[$"{p}.self_attn.linear_v.weight"]; w.TryGetValue($"{p}.self_attn.linear_v.bias", out _vB);
@@ -161,15 +161,15 @@ public sealed unsafe class AceStepLyricEncoder
 
             if (w.ContainsKey($"{p}.conv_module.pointwise_conv1.weight"))
             {
-                _normConvW = GetF32(w, $"{p}.norm_conv.weight"); w.TryGetValue($"{p}.norm_conv.bias", out _normConvB);
+                _normConvW = GetF32(w, $"{p}.norm_conv.weight"); _normConvB = GetF32(w, $"{p}.norm_conv.bias");
                 _pw1W = w[$"{p}.conv_module.pointwise_conv1.weight"]; w.TryGetValue($"{p}.conv_module.pointwise_conv1.bias", out _pw1B);
                 _dwW = w[$"{p}.conv_module.depthwise_conv.weight"]; w.TryGetValue($"{p}.conv_module.depthwise_conv.bias", out _dwB);
                 _pw2W = w[$"{p}.conv_module.pointwise_conv2.weight"]; w.TryGetValue($"{p}.conv_module.pointwise_conv2.bias", out _pw2B);
                 FuseConvNorm(w, p);
-                _normFinalW = GetF32(w, $"{p}.norm_final.weight"); w.TryGetValue($"{p}.norm_final.bias", out _normFinalB);
+                _normFinalW = GetF32(w, $"{p}.norm_final.weight"); _normFinalB = GetF32(w, $"{p}.norm_final.bias");
             }
 
-            _normFfW = GetF32(w, $"{p}.norm_ff.weight"); w.TryGetValue($"{p}.norm_ff.bias", out _normFfB);
+            _normFfW = GetF32(w, $"{p}.norm_ff.weight"); _normFfB = GetF32(w, $"{p}.norm_ff.bias");
             _ff1W = w[$"{p}.feed_forward.w_1.weight"]; w.TryGetValue($"{p}.feed_forward.w_1.bias", out _ff1B);
             _ff2W = w[$"{p}.feed_forward.w_2.weight"]; w.TryGetValue($"{p}.feed_forward.w_2.bias", out _ff2B);
         }
@@ -181,12 +181,14 @@ public sealed unsafe class AceStepLyricEncoder
             {
                 Tensor varT = w[$"{p}.conv_module.norm.running_var"];
                 Tensor? gw = GetF32(w, $"{p}.conv_module.norm.weight");
-                w.TryGetValue($"{p}.conv_module.norm.bias", out Tensor? gb);
+                Tensor? gb = GetF32(w, $"{p}.conv_module.norm.bias");
                 int c = (int)meanT.Shape[0];
                 _bnScale = new float[c];
                 _bnShift = new float[c];
-                float* mp = (float*)meanT.CastTo(DType.F32).DataPointer;
-                float* vp = (float*)varT.CastTo(DType.F32).DataPointer;
+                using Tensor mean = meanT.CastTo(DType.F32);
+                using Tensor variance = varT.CastTo(DType.F32);
+                float* mp = (float*)mean.DataPointer;
+                float* vp = (float*)variance.DataPointer;
                 float* gwp = gw is null ? null : (float*)gw.DataPointer;
                 float* gbp = gb is null ? null : (float*)gb.DataPointer;
                 for (int i = 0; i < c; i++)
@@ -195,11 +197,14 @@ public sealed unsafe class AceStepLyricEncoder
                     _bnScale[i] = scale;
                     _bnShift[i] = (gbp is null ? 0f : gbp[i]) - mp[i] * scale;
                 }
+                // The loop reads the casts through raw pointers; keep them from being finalized under it.
+                GC.KeepAlive(gw);
+                GC.KeepAlive(gb);
             }
             else if (w.TryGetValue($"{p}.conv_module.norm.weight", out Tensor? lnW))
             {
                 _convLnW = lnW.DType == DType.F32 ? lnW : lnW.CastTo(DType.F32);
-                w.TryGetValue($"{p}.conv_module.norm.bias", out _convLnB);
+                _convLnB = GetF32(w, $"{p}.conv_module.norm.bias");
             }
         }
 
