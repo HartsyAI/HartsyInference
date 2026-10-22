@@ -558,7 +558,8 @@ public sealed partial class AttentionLayer
     private bool FlatOperands => _config.QkNorm is AttentionQkNorm.FullWidth or AttentionQkNorm.FullWidthRms;
 
     /// <summary>The norm, rotation and attention stages: a head-major output is permuted into <paramref name="flatShape"/>, a
-    /// token-major one written in <paramref name="tokenMajorShape"/>, which holds the same bytes.</summary>
+    /// token-major one written in <paramref name="tokenMajorShape"/>, which holds the same bytes. Only <see cref="Forward"/> passes
+    /// a different shape there (<see cref="AttentionShape"/>); <see cref="Attend"/> and <see cref="AttendFlat"/> pass the same.</summary>
     private Tensor Transform(IBackend backend, Tensor q, Tensor k, Tensor v, int batch, int sq, int skv, DType act,
         TensorShape flatShape, TensorShape tokenMajorShape, bool flat, in AttentionCallContext context)
     {

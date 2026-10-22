@@ -33,8 +33,8 @@ stable release will require. Dates are UTC.
   `AttentionLayer.Attend` now writes the caller's `[1, S, heads·D]` output on the token-major entry instead of refusing
   it (CUDA's equal-head entry takes that shape, as its grouped one already did), so each call drops three permutes in and
   one out at one batch item. Calls SageAttention would take (F16, head dim 64 or 128, unmasked, both sequences at least
-  `numerics.sageF16MinSkv`, as Flux.1 at 1536²) and batched forwards stay head-major. Output is bit-identical: at these
-  models' shapes, Chroma's padding mask included, the token-major cuDNN row returns the head-major row's bits.
+  `numerics.sageF16MinSkv`, as Flux.1 at 1536²) and batched forwards stay head-major. On CUDA the output is bit-identical:
+  at these models' shapes, Chroma's padding mask included, the token-major cuDNN row returns the head-major row's bits.
 
 ## alpha.385
 
