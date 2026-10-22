@@ -80,6 +80,8 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             throw new ArgumentException(
                 "negativeCaptionEmbeddings is required when cfgScale > 1.0. Lumina 2.0's diffusers pipeline always uses a negative prompt at cfg=4.0.",
                 nameof(negativeCaptionEmbeddings));
+        DenoiserProbe.Condition("cond", captionEmbeddings);
+        DenoiserProbe.Condition("uncond", negativeCaptionEmbeddings);
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width;
@@ -134,6 +136,7 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             DitShardBackend.PreloadWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _transformer.BlockCount));
         }
 
+        DenoiserProbe? probe = DenoiserProbe.Open(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = plan.StartStep; i < steps; i++)
         {
@@ -143,13 +146,23 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             // Lumina 2.0's diffusers pipeline inverts the timestep before feeding it to the transformer
             // (`current_timestep = 1 - t/num_train_timesteps`). See pipeline_lumina2.py:757.
             float invertedSigma = 1.0f - sigma;
-            Tensor velocity = RunForward(latent, captionEmbeddings, invertedSigma);
-
             // VALIDATION-PENDING: verify against diffusers Lumina2Pipeline (pipeline_lumina2.py:724-757):
             // do_classifier_free_truncation = (i+1)/num_inference_steps > cfg_trunc_ratio. When truncated, guidance is
             // skipped and the conditional prediction is used directly (noise_pred = noise_pred_cond). Otherwise CFG is
             // combined and, when cfg_normalization is on, rescaled back to the conditional's per-token L2 norm.
-            bool doClassifierFreeTruncation = (float)(i + 1) / steps > cfgTruncRatio;
+            bool guided = cfgScale > 1.0f && !((float)(i + 1) / steps > cfgTruncRatio);
+            bool probed = probe?.Takes(i) == true;
+            if (probed && probe!.Replays)
+            {
+                Tensor recorded = probe.ReplayInputs(i, sigma, [latent])[0];
+                probe.ReplayOutputs(i, [RunForward(recorded, captionEmbeddings, invertedSigma),
+                    guided ? RunForward(recorded, negativeCaptionEmbeddings!, invertedSigma) : null]);
+            }
+            else if (probed)
+            {
+                probe!.RecordInputs(i, sigma, [latent]);
+            }
+            Tensor velocity = RunForward(latent, captionEmbeddings, invertedSigma);
             Tensor? uncondVelocity = null;
             try
             {
@@ -157,13 +170,16 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
                 // delta=-dt keeps the carried latent and both predictions device-resident. The normalized
                 // path reduces independently over the last latent dimension, exactly like diffusers.
                 float delta = -scheduler.Dt(i);
-                if (cfgScale > 1.0f && !doClassifierFreeTruncation)
-                {
+                if (guided)
                     uncondVelocity = RunForward(latent, negativeCaptionEmbeddings!, invertedSigma);
+                if (probed && !probe!.Replays)
+                    probe.RecordOutputs(i, guided && !cfgNormalization ? cfgScale : 0f, ["cond", "uncond"], [velocity, uncondVelocity]);
+                if (guided)
+                {
                     if (cfgNormalization)
-                        Backend.CfgNormalizedEulerStep(latent, velocity, uncondVelocity, cfgScale, delta);
+                        Backend.CfgNormalizedEulerStep(latent, velocity, uncondVelocity!, cfgScale, delta);
                     else
-                        Backend.CfgEulerStep(latent, velocity, uncondVelocity, cfgScale, delta);
+                        Backend.CfgEulerStep(latent, velocity, uncondVelocity!, cfgScale, delta);
                 }
                 else
                 {

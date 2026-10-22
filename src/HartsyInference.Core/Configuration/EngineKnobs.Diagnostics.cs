@@ -36,6 +36,24 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> ChromaF16trace =
         Bool("diagnostics.chromaF16trace", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Logs min/max/NaN/Inf of Chroma F16 block intermediates (D2H-draining) to locate F16 overflow sites.");
 
+    /// <summary>The teacher-forced denoiser probe: <c>record</c> writes the denoiser's conditioning, and its inputs and outputs at
+    /// the probed steps; <c>replay</c> takes the recorded conditioning, runs one more forward at each probed step on the recorded
+    /// inputs and reports its distance from the recorded outputs.</summary>
+    public static readonly Knob<string?> DenoiserProbe =
+        Str("diagnostics.denoiserProbe", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Teacher-forced denoiser probe: record writes the conditioning and the denoiser's inputs and outputs at the probed steps; replay takes that conditioning and runs one more forward per probed step on the recorded inputs, reporting the distance. Unset disables it.");
+
+    /// <summary>Directory of the denoiser probe's record: written by <c>record</c>, read by <c>replay</c>.</summary>
+    public static readonly Knob<string?> DenoiserProbeDir =
+        Str("diagnostics.denoiserProbeDir", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Directory of the denoiser probe's record: written by record, read by replay.");
+
+    /// <summary>Directory the denoiser probe's replay writes its outputs and probe.tsv to; unset means <c>replay</c> under the record.</summary>
+    public static readonly Knob<string?> DenoiserProbeOut =
+        Str("diagnostics.denoiserProbeOut", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Directory the denoiser probe's replay writes its outputs and probe.tsv to; unset means replay/ under the record.");
+
+    /// <summary>Steps the denoiser probe takes: comma-separated indices or first, mid, last, or all; unset means first,mid,last.</summary>
+    public static readonly Knob<string?> DenoiserProbeSteps =
+        Str("diagnostics.denoiserProbeSteps", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Steps the denoiser probe takes: comma-separated indices or first, mid, last, or all; unset means first,mid,last.");
+
     /// <summary>Adds per-block device syncs around the Ideogram 4 attention/MLP sublayers and accumulates their timings.</summary>
     public static readonly Knob<bool> DitProfile =
         Bool("diagnostics.ditProfile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Adds per-block device syncs around the Ideogram 4 attention/MLP sublayers and accumulates their timings.");
