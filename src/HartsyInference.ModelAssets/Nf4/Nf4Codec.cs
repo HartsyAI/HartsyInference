@@ -194,7 +194,7 @@ public static unsafe class Nf4Codec
     /// quantized and written before the next is read, so memory holds one weight rather than the checkpoint. Plain tensors of
     /// any dtype are copied byte for byte. The F32 <c>weight_scale_inv</c> grids are consumed by the dequantization and not written.</summary>
     /// <remarks>A failed or cancelled write removes its <c>.partial</c> file and leaves any file already at
-    /// <paramref name="outputPath"/> untouched.</remarks>
+    /// <paramref name="outputPath"/> untouched. Cancellation is checked between tensors.</remarks>
     /// <returns>Lowercase hex SHA-256 of the file.</returns>
     /// <exception cref="ArgumentException"><paramref name="outputPath"/> or its <c>.partial</c> file is one of the source's files.</exception>
     public static string WriteFromFp8(HfQuantCheckpoint source, string outputPath, IReadOnlyDictionary<string, string> metadata,
@@ -258,7 +258,7 @@ public static unsafe class Nf4Codec
         json.CopyTo(headerBytes, 0);
         Array.Fill(headerBytes, (byte)' ', json.Length, headerBytes.Length - json.Length);
 
-        // Only a partial file this call opened is removed: one it could not open may be another run's, still being written.
+        // Removed only if this call opened it: after a failed open the file may be another run's, even if empty.
         bool opened = false;
         try
         {

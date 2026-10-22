@@ -835,7 +835,7 @@ static bool IsQuantTarget(string key, Tensor tensor, string quantName) =>
     && SafeTensorsMerger.IsCastable(tensor.DType)
     && (quantName == "nf4" || tensor.Shape[1] % 16 == 0);
 
-// From the header alone, so a file the NF4 writer does not take falls through to the merge path and its own errors.
+// HfQuantCheckpoint's block FP8 (an F8_E4M3 weight beside its _scale_inv), from the header; others take the merge path.
 static bool HasFp8Weights(string path)
 {
     try
@@ -843,7 +843,8 @@ static bool HasFp8Weights(string path)
         IReadOnlyDictionary<string, SafeTensorDescriptor> tensors = SafeTensorHeaderReader.Read(path).Tensors;
         return tensors.Values.Any(t => t.DType == DType.F8E4M3 && tensors.ContainsKey(t.Name + "_scale_inv"));
     }
-    catch (HartsyInference.Core.Exceptions.HartsyInferenceException)
+    catch (Exception ex) when (ex is HartsyInference.Core.Exceptions.HartsyInferenceException or IOException
+        or UnauthorizedAccessException)
     {
         return false;
     }
@@ -868,7 +869,10 @@ static int WriteNf4FromFp8(string input, string output, bool force)
     {
         using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([input]);
         if (source.IsSourceFile(output))
-            return Usage($"The output is the input checkpoint: {output}. Choose a different output path.");
+        {
+            Console.Error.WriteLine($"Output is the input checkpoint: {output}. Choose a different output path.");
+            return 1;
+        }
         if (File.Exists(output) && !force)
         {
             Console.Error.WriteLine($"Output already exists: {output}. Add --force to replace it.");
