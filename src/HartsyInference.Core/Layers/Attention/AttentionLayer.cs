@@ -135,6 +135,8 @@ public sealed partial class AttentionLayer
             throw new NotSupportedException($"Flat operands cannot take a {_config.QkNorm} QK norm.");
         if (_config.QkNorm != AttentionQkNorm.None && _norms is null)
             throw new InvalidOperationException("A QK norm needs the layer's norm weights.");
+        if (_config.QkNorm != AttentionQkNorm.None && _config.TokenMajorRoute != AttentionRoute.Dense)
+            throw new NotSupportedException("Flat operands take the token-major entry without a QK norm.");
         if (context.QueryRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs)
             || context.KeyRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs))
             throw new NotSupportedException("Flat operands take interleaved-pair tables or a rotation adapter; the other table kinds read [.., heads, D].");

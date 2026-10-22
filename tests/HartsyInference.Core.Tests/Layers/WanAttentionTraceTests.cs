@@ -28,6 +28,13 @@ public sealed class WanAttentionTraceTests
             QueryNormEps = 1e-6f, KeyNormEps = 1e-6f,
         });
 
+    private static AttentionLayer TokenMajorSelf() => new(
+        Config() with { TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true }, new AttentionLayerWeights
+        {
+            Query = W(101), Key = W(102), Value = W(103), Output = W(104), QueryNorm = W(106), KeyNorm = W(107),
+            QueryNormEps = 1e-6f, KeyNormEps = 1e-6f,
+        });
+
     private static AttentionLayer ImageBranch() => new(Config(), new AttentionLayerWeights
     {
         Key = W(112), Value = W(113), KeyNorm = W(117), KeyNormEps = 1e-6f,
@@ -76,6 +83,48 @@ public sealed class WanAttentionTraceTests
         Assert.Equal(new TensorShape(Tokens, Dim), output.Shape);
         Assert.Equal(DType.F32, output.DType);
         Assert.False(IsDisposed(x));
+    }
+
+    /// <summary>Wan's self-attention config: the full-width norm and rotation over the projected rows, then one token-major call that
+    /// reads them in place and writes the rows the output projection reads; the mask rides along.</summary>
+    [Fact]
+    public void TokenMajorSelfAttentionAttendsTheNormedRowsInPlace()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        Tensor x = Rows(Tokens), mask = new(new TensorShape(1, 1, Tokens, Tokens), DType.F32);
+        AttentionCallContext context = Rotated(QkRotationKind.InterleavedPairs, Table(2)) with { Bias = mask };
+
+        Tensor output = TokenMajorSelf().Forward(backend, x, x, in context);
+
+        Assert.Equal(["Linear w101", "Linear w102", "Linear w103", "RmsNorm w106", "RmsNorm w107",
+            "WanRopeInterleaved heads=2 d=4 seq=3", "WanRopeInterleaved heads=2 d=4 seq=3",
+            "Attention TokenMajor heads=2/2 bounded=True", "Linear w104"], backend.Ops);
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Same(mask, call.Mask.Bias);
+        Assert.Null(call.LegacyGap());
+        Assert.Equal(new TensorShape(Tokens, Dim), call.Query.Storage.Shape);
+        Assert.Equal(new TensorShape(Tokens, Dim), call.Output.Storage.Shape);
+        Assert.Equal(new TensorShape(Tokens, Dim), output.Shape);
+        Assert.False(IsDisposed(x));
+    }
+
+    /// <summary>A context-parallel rank attends its local query rows over the exchanged full-sequence K/V on the token-major entry.</summary>
+    [Fact]
+    public void TokenMajorSelfAttentionAttendsTheRewrittenKeyValueRows()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        Tensor x = Rows(Tokens);
+        AttentionCallContext context = Rotated(QkRotationKind.InterleavedPairs, Table(2)) with { KvRewrite = new ExchangeRewrite(CtxTokens) };
+
+        Tensor output = TokenMajorSelf().Forward(backend, x, x, in context);
+
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(AttentionRoute.TokenMajor, call.Route);
+        Assert.Equal(Tokens, call.Query.Tokens);
+        Assert.Equal(CtxTokens, call.Key.Tokens);
+        Assert.Equal(CtxTokens, call.Value.Tokens);
+        Assert.DoesNotContain(backend.Ops, op => op.StartsWith("Permute0213", StringComparison.Ordinal));
+        Assert.Equal(new TensorShape(Tokens, Dim), output.Shape);
     }
 
     [Fact]

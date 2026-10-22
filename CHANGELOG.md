@@ -21,6 +21,12 @@ stable release will require. Dates are UTC.
   value past F16's 65504 stays finite instead of clipping. The row declines when the copies do not fit half of free VRAM.
   cuDNN failure state is keyed by the dtype the graph runs in, so a refused BF16 plan cannot disable the F16 path. Nothing
   grants BF16 yet, so output is unchanged.
+- **Faster: Wan's self-attention and HiDream's single-stream blocks run token-major.** A full-width RMS QK norm no longer
+  forces the head-major entry, so the self-attention of the Wan-family blocks (Wan 2.1 and 2.2, VACE, S2V, Animate,
+  Matrix-Game) and of HiDream's single-stream blocks reads the normed, rotated `[S, heads·D]` rows where the projections
+  wrote them and drops three permutes in and one out per call at one batch item; their F32 calls take the token-major cuDNN
+  row's cast branch, as the head-major row cast them. The cross-attention and Wan's image branch, the Animate-2 splice and
+  HiDream's batched forward stay head-major, and `AttendFlat` takes the token-major entry for norm-free configs only.
 
 ## alpha.387
 

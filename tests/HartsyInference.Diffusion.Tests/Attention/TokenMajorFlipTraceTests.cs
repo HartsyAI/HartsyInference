@@ -1,8 +1,11 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
+using HartsyInference.Tests.Common;
 using HartsyInference.Tests.Common.Attention;
 using Xunit;
 using Weights = HartsyInference.Tests.Common.Attention.GoldenWeights;
@@ -247,6 +250,97 @@ public sealed class TokenMajorFlipTraceTests
         Assert.True(call.Numerics.LegacyAssertedBounded);
         Assert.Equal(new TensorShape(1, seq, Hidden), call.Query.Storage.Shape);
         Assert.Equal(new TensorShape(1, seq, Hidden), call.Output.Storage.Shape);
+    }
+
+    /// <summary>Wan's self-attention takes the token-major entry over the block's rank-2 <c>[S, dim]</c> rows with no permute,
+    /// carrying Matrix-Game 2's mask and a context-parallel rank's exchanged K/V; the text and image cross-attention keep the
+    /// head-major branch stages (a query permute, then K, V and the merge per branch).</summary>
+    [Theory]
+    [InlineData("t2v", 1)]
+    [InlineData("i2v", 2)]
+    [InlineData("masked", 1)]
+    [InlineData("cp", 1)]
+    public void WanBlock_SelfAttentionAttendsTokenMajor_CrossAttentionStaysOnTheBranchStages(string site, int crossCalls)
+    {
+        const int frames = 2, gh = 2, gw = 3, seq = frames * gh * gw, text = 5, image = 4, exchanged = 2 * seq;
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = Heads, HeadDim = HeadDim, TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 1,
+            ImageDim = site == "i2v" ? 16 : 0,
+        };
+        WanVideoBlock block = new(cfg, crossAttnNorm: true);
+        block.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg), "blocks.0");
+        WanRope rope = new(cfg.HeadDim, cfg.RopeTheta, cfg.RopeMaxSeqLen);
+        (Tensor cos, Tensor sin) = rope.BuildCosSin(frames, gh, gw);
+        int context = site == "i2v" ? image + text : text;
+        Tensor? mask = site == "masked" ? new Tensor(new TensorShape(1, 1, seq, seq), DType.F32) : null;
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+
+        block.Forward(backend, new Tensor(new TensorShape(seq, Hidden), DType.F32), new Tensor(new TensorShape(context, Hidden), DType.F32),
+            new Tensor(new TensorShape(1, 6, Hidden), DType.F32), rope, cos, sin, seq, selfAttnMask: mask,
+            imageContextLen: site == "i2v" ? image : 0, selfAttnKvRewrite: site == "cp" ? new ExchangedRows(exchanged) : null);
+
+        AttentionCall self = backend.Calls[0];
+        Assert.Equal(AttentionRoute.TokenMajor, self.Route);
+        Assert.True(self.Numerics.LegacyAssertedBounded);
+        Assert.Same(mask, self.Mask.Bias);
+        Assert.Equal(new TensorShape(seq, Hidden), self.Query.Storage.Shape);
+        Assert.Equal(site == "cp" ? exchanged : seq, self.Key.Tokens);
+        Assert.Equal(crossCalls, backend.Calls.Count - 1);
+        Assert.All(backend.Calls.Skip(1), c => Assert.Equal(AttentionRoute.Dense, c.Route));
+        Assert.Equal(1 + 3 * crossCalls, Permutes(backend));
+    }
+
+    /// <summary>HiDream's single-stream blocks take the token-major entry over <c>[1, S, hidden]</c> at one batch item; a batch rotates
+    /// on the host and keeps the head-major call and its four permutes.</summary>
+    [Theory]
+    [InlineData(1, AttentionRoute.TokenMajor)]
+    [InlineData(2, AttentionRoute.Dense)]
+    public void HiDreamSingleStreamBlock_AttendsTokenMajorAtOneBatchItem(int batch, AttentionRoute route)
+    {
+        const int experts = 4, img = GridH * GridW;
+        HiDreamBlock block = new(Hidden, Heads, HeadDim, 4 * Hidden, isSingle: true, experts, numActivatedExperts: 2);
+        Weights w = new(47);
+        w.Linear("b.adaLN_modulation.1", 6 * Hidden, Hidden, true);
+        foreach (string n in new[] { "to_q", "to_k", "to_v", "to_out" }) w.Linear($"b.attn1.{n}", Hidden, Hidden);
+        foreach (string n in new[] { "q_rms_norm", "k_rms_norm" }) w.AddNorm($"b.attn1.{n}.weight", Hidden);
+        AddSwiGlu(w, "b.ff_i.shared_experts", Mlp);
+        for (int e = 0; e < experts; e++) AddSwiGlu(w, $"b.ff_i.experts.{e}", Mlp);
+        w.Linear("b.ff_i.gate", experts, Hidden);
+        block.LoadWeights(w, "b");
+        HiDreamRope rope = new([32, 16, 16]);
+        Tensor ids = HiDreamRope.BuildPositionIds(img, GridH, GridW, Txt);
+        rope.Precompute(ids);
+        ids.Dispose();
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true };
+
+        try
+        {
+            block.ForwardSingle(backend, new Tensor(new TensorShape(batch, Seq, Hidden), DType.F32),
+                new Tensor(new TensorShape(batch, Hidden), DType.F32), rope, img, Seq);
+        }
+        catch (NotSupportedException) when (backend.Calls.Count == 1)
+        {
+            // An op past the attention has no stub body; the attention is recorded by then.
+        }
+
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
+        Assert.Equal(batch == 1, call.Numerics.LegacyAssertedBounded);
+        Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, Permutes(backend));
+        if (route == AttentionRoute.TokenMajor) Assert.Equal(new TensorShape(1, Seq, Hidden), call.Query.Storage.Shape);
+    }
+
+    /// <summary>A context-parallel K/V exchange: this rank's K and V traded for the whole sequence's rows.</summary>
+    private sealed class ExchangedRows(int rows) : IKvRewrite
+    {
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
+        {
+            Tensor full = new(new TensorShape(rows, k.Shape[k.Shape.Rank - 1]), k.DType), fullV = new(full.Shape, v.DType);
+            k.Dispose();
+            v.Dispose();
+            return (full, fullV);
+        }
     }
 
     private static void RunDoubleStream(AttentionTraceBackend backend, string site, int batch, DType act)

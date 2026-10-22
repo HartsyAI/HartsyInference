@@ -393,6 +393,61 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         Assert.Equal(0, differing);
     }
 
+    /// <summary>Wan's self-attention rows, the attention call alone: the token-major config reads F32 [S, H·D] Q, K and V through B.1 with
+    /// the bits of the head-major config's permutes and A.1, at Wan 2.2 5B's and Wan 2.1 14B's lengths, with Matrix-Game 2's block
+    /// mask, and for a context-parallel rank's local queries over the whole sequence's keys.</summary>
+    [Theory]
+    [InlineData("wan5b-49f", 24, 5070, 5070, false)]
+    [InlineData("wan21-14b", 40, 4480, 4480, false)]
+    [InlineData("matrixgame2-masked", 12, 2640, 2640, true)]
+    [InlineData("wan5b-cp-rank", 24, 2730, 5070, false)]
+    public void WanRows_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int sq, int skv, bool masked)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        const int d = 128;
+        float[] q = Half(Random(sq * h * d, 61)), k = Half(Random(skv * h * d, 62)), v = Half(Random(skv * h * d, 63));
+        float[]? bias = masked ? BlockCausalMask(sq, frames: 3) : null;
+        TensorShape qRows = new(sq, h * d), kvRows = new(skv, h * d);
+
+        float[] Run(AttentionRoute route)
+        {
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, AllowF16 = true, TokenMajorRoute = route, HeadMajorForSage = true,
+            });
+            using Tensor? mask = bias is null ? null : FromHost(new TensorShape(1, 1, sq, skv), bias);
+            using Tensor o = layer.AttendFlat(backend, Operand(q, qRows, DType.F32), Operand(k, kvRows, DType.F32), Operand(v, kvRows, DType.F32),
+                qRows, new AttentionCallContext { Bias = mask });
+            Assert.Equal(qRows, o.Shape);
+            return o.AsReadOnlySpan<float>().ToArray();
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        string? headMajor = VulkanBackend.LastAttentionRoute;
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        string? tokenMajor = VulkanBackend.LastAttentionRoute;
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        output.WriteLine($"{name}: {headMajor} vs {tokenMajor}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal("A.1", headMajor);
+        Assert.Equal("B.1", tokenMajor);
+        Assert.Equal(0, differing);
+    }
+
+    /// <summary>Matrix-Game 2's additive block-causal mask over equal frames: a query sees its own frame and the earlier ones.</summary>
+    private static float[] BlockCausalMask(int s, int frames)
+    {
+        int perFrame = s / frames;
+        float[] mask = new float[(long)s * s];
+        for (int i = 0; i < s; i++)
+            for (int j = 0; j < s; j++)
+                mask[(long)i * s + j] = j / perFrame <= i / perFrame ? 0f : -1e9f;
+        return mask;
+    }
+
     /// <summary>Chroma's additive mask over a [text; image] sequence: a pair is kept only when both tokens are, and the text past
     /// <paramref name="kept"/> is padding.</summary>
     private static float[] PaddingMask(int s, int txt, int kept)
