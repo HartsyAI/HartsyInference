@@ -39,6 +39,9 @@ NVCC="${HARTSY_NVCC:-$(command -v nvcc || true)}"
 if [[ -z "$NVCC" && -x "${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc" ]]; then
     NVCC="${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc"
 fi
+# The assembler beside that nvcc, else one on PATH; without either, emitted PTX goes unassembled (see compile_one).
+PTXAS=""
+if [[ -n "$NVCC" && -x "$(dirname "$NVCC")/ptxas" ]]; then PTXAS="$(dirname "$NVCC")/ptxas"; else PTXAS="$(command -v ptxas || true)"; fi
 # NVCC_BUILT kernels are this release's output; another nvcc release emits different PTX even at ISA 9.0.
 NVCC_RELEASE="release 13.0, V13.0.88"
 # A pip-installed nvcc can ship without CCCL, which cuda_fp16.h includes (<nv/target>); borrow the nvrtc header set's.
@@ -113,6 +116,17 @@ compile_one() {
             exit 1
         fi
     fi
+    # nvrtc and nvcc -ptx stop before the assembler, so an operand the target refuses ships and takes the whole backend
+    # down at module load — how a 16-bit e2m1 cvt destination made every CC 12.0 card unusable. Assemble when we can.
+    if [[ -n "$PTXAS" ]]; then
+        if ! "$PTXAS" -arch="sm_${arch}" "$ptx" -o /dev/null 2>"${ptx}.ptxas.log"; then
+            echo "ERROR: ${kernel}${suffix}.ptx does not assemble for sm_${arch}:" >&2
+            head -5 "${ptx}.ptxas.log" >&2
+            rm -f "${ptx}.ptxas.log"
+            exit 1
+        fi
+        rm -f "${ptx}.ptxas.log"
+    fi
     if $INSTALL; then
         cp "$ptx" "${PTX_OUT}/${kernel}${suffix}.ptx"
         echo "  → ${PTX_OUT}/${kernel}${suffix}.ptx"
@@ -145,6 +159,7 @@ build_all() {
             *)  ONLY+=("$1"); shift ;;
         esac
     done
+    [[ -n "$PTXAS" ]] || echo "UNASSEMBLED: no ptxas beside nvcc or on PATH, so nothing emitted here is assembled; point HARTSY_NVCC at a full CUDA 13.0 toolkit"
     for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
     for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 75; done
     for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done

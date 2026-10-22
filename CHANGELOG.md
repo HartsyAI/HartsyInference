@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: the sm_120a block-quant kernel builds from source again.** `block_scale.cuh` had gone back to a 16-bit
+  destination for `cvt.rn.satfinite.e2m1x2.f32` (reverted in `81ad529b1`), so rebuilding `block_quant.sm120.ptx` would
+  reproduce the module no CC 12.0 card can load; only the shipped PTX had been patched by hand. The source writes through
+  a `.b8` temporary again, the shipped variant is regenerated from it (identical to the hand-patched file except at the 16
+  cvt sites), the kernel build assembles everything it emits with `ptxas` when one is found, and `CudaKernelDriftTests`
+  rebuilds each `Ptx/<kernel>.sm<NNN>.ptx` with `--arch` and fails on a PTX the assembler refuses. Cards below CC 12.0 load
+  the unchanged baseline PTX.
 - **Fixed: NVFP4 weights folded to fp8 no longer clip.** Off Blackwell, FLUX.3, MOSS, Ideogram 4 and the Flux.2 text
   encoder unpack NVFP4 to fp8 at open, and `e2m1 · block_scale` reaches 6 · 448 = 2688 where e4m3 stops at 448: every
   value past it was clipped, 2.4 % of FLUX.3 Klein's weights (22 % of its worst layer) and 0.5 % of Ideogram 4's. The
