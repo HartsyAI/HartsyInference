@@ -638,7 +638,8 @@ public sealed partial class AttentionLayer
         && (_config.TokenMajorRoute == AttentionRoute.TokenMajorGqa
             ? backend.SupportsTokenMajorGqaAttention : backend.SupportsTokenMajorAttention);
 
-    /// <summary>The CUDA head-major Sage row's admission (S.1), less the kernel check only the backend can make.</summary>
+    /// <summary>The CUDA head-major Sage row's admission (S.1, <c>CudaBackend.SageF16Preferred</c>), less the kernel check only the backend
+    /// can make; a change to either side must change the other.</summary>
     private bool SageServesHeadMajor(int sq, int skv, DType act, Tensor? bias) =>
         act == DType.F16 && bias is null && _config.HeadDim is 64 or 128 && EngineKnobs.SageAttn.Value
         && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value;
