@@ -31,11 +31,11 @@ public sealed class Flux1VariantTests
     }
 
     [Fact]
-    public void DefaultsFor_MatchesTheValuesThePipelineUsedToReturn()
+    public void DefaultsFor_ReturnsTheResolvedVariantsDefaults()
     {
         Flux1Recipe recipe = new Flux1Recipe();
         Assert.Equal((28, 3.5f, 1024, 1024), Numbers(recipe.DefaultsFor(Classify(Transformer, "guidance_in.in_layer.weight"))));
-        Assert.Equal((4, 3.5f, 1024, 1024), Numbers(recipe.DefaultsFor(Classify(Transformer))));
+        Assert.Equal((4, 1.0f, 1024, 1024), Numbers(recipe.DefaultsFor(Classify(Transformer))));
     }
 
     [Theory]

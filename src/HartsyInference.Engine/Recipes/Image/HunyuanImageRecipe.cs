@@ -43,8 +43,8 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>HunyuanImage 2.1's official sampling settings: 50 steps at CFG 3.5 and a native 2048x2048.</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 2048, Height = 2048 };
+    /// <summary>HunyuanImage 2.1's sampling settings: 20 steps at CFG 3.5 and a native 2048x2048 (SwarmUI <c>Model Support.md</c>, HunyuanImage 2.1: steps around 20). Upstream's reference script uses 50 steps.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 20, CfgScale = 3.5f, Width = 2048, Height = 2048 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;

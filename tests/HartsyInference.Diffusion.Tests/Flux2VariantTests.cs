@@ -83,15 +83,15 @@ public sealed class Flux2VariantTests
     }
 
     [Fact]
-    public void DefaultsFor_MatchesTheValuesThePipelineUsedToReturn()
+    public void DefaultsFor_ReturnsTheResolvedVariantsDefaults()
     {
         Flux2Recipe recipe = new Flux2Recipe();
         ImageDefaults klein4B = recipe.DefaultsFor(Classify(Probe("img_in.weight", 3072, 128)));
         ImageDefaults klein9B = recipe.DefaultsFor(Classify(Probe("img_in.weight", 4096, 128)));
         ImageDefaults dev = recipe.DefaultsFor(Classify(Probe("img_in.weight", 6144, 128)));
-        Assert.Equal((4, 1.0f, 1024, 1024), (klein4B.Steps, klein4B.CfgScale, klein4B.Width, klein4B.Height));
-        Assert.Equal((4, 1.0f), (klein9B.Steps, klein9B.CfgScale));
-        Assert.Equal((50, 4.0f, 1024, 1024), (dev.Steps, dev.CfgScale, dev.Width, dev.Height));
+        Assert.Equal((8, 1.0f, 1024, 1024), (klein4B.Steps, klein4B.CfgScale, klein4B.Width, klein4B.Height));
+        Assert.Equal((8, 1.0f), (klein9B.Steps, klein9B.CfgScale));
+        Assert.Equal((50, 3.5f, 1024, 1024), (dev.Steps, dev.CfgScale, dev.Width, dev.Height));
     }
 
     [Fact]
