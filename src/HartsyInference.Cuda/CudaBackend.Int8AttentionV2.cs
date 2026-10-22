@@ -47,12 +47,12 @@ public sealed partial class CudaBackend
     /// <summary>Whether a head-major call of this shape with no mask would take S.16; the grouped token-major row yields to it.</summary>
     private bool Int8V2TakesWidened(in AttentionCall c)
     {
-        if (!EngineKnobs.Int8AttnV2.Value || Int8V2F16Pv || c.Mask.Bias is not null || c.QkHeadDim != Int8AttentionV2Layout.HeadDim
+        if (!EngineKnobs.Int8AttnV2.Value || c.Mask.Bias is not null || c.QkHeadDim != Int8AttentionV2Layout.HeadDim
             || c.ValueHeadDim != Int8AttentionV2Layout.HeadDim || (c.Query.DType != DType.F16 && c.Query.DType != DType.F32) || !(c.Scale > 0f)
             || Math.Min(c.QueryTokens, c.KeyTokens) < EngineKnobs.Int8AttnV2MinTokens.Value || !CudaKernels.GridYzFits(c.Heads, c.Batch))
             return false;
         EnsureKernels();
-        return _kernels!.HasInt8AttentionV2;
+        return Int8V2F16Pv ? _kernels!.HasInt8AttentionV2F16Pv : _kernels!.HasInt8AttentionV2;
     }
 
     /// <summary>Offset and strides in whole 8-element steps: every row the quant and epilogue touch starts 16-byte aligned.</summary>
