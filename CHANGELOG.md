@@ -16,7 +16,7 @@ stable release will require. Dates are UTC.
   `reference` profile pins it off; SageAttention v1 stays the default.
 - **Changed: attention kernels build with a register check.** `attention/build.sh` builds `int8_attn_v2` with nvcc and
   `--arch sm_89` adds its `.sm89.ptx`; `build_common.sh` accepts a plain `--arch` and fails a `PTXAS_SPILL_CHECK` kernel
-  that spills.
+  that spills on sm_80, sm_86 or sm_89, and logs its sm_120 registers and spills (the 50-series JIT target).
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch

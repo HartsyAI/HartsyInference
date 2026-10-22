@@ -15,7 +15,8 @@
 #                  CudaKernels.PtxPath loads only on that exact compute capability
 #   NVCC_BUILT     kernels whose shipped PTX is CUDA 13.0.88 nvcc output rather than nvrtc output
 #   PTXAS_SPILL_CHECK  kernels whose every entry must assemble without a spill (ptxas -v, register counts logged): the
-#                  baseline for sm_80, sm_86 and sm_89, a variant for its own arch
+#                  baseline for sm_80, sm_86 and sm_89, a variant for its own arch; the baseline's sm_120 JIT target
+#                  is assembled and logged too, its spills reported without failing (no card to measure their cost)
 #
 # Each kernel has one compiler. nvcc and nvrtc of the same release stamp the same PTX header but still emit different
 # PTX (instruction selection, register numbering), so taking whichever is on PATH would rewrite benchmarked kernels.
@@ -68,9 +69,12 @@ if [[ -z "$PTXAS" && -n "$NVCC" && -x "$(dirname "$NVCC")/ptxas" ]]; then PTXAS=
 ptx_version() { head -20 "$1" | sed -n 's/^\.version \([0-9.]*\)$/\1/p' | head -1; }
 ptx_isa_ok() { local v; v="$(ptx_version "$1")"; [[ -n "$v" && "$(printf '%s\n' "$v" 9.0 | sort -V | tail -1)" == "9.0" ]]; }
 
-# ptxas_check <ptx> <arch>...: logs each entry's register count and fails on any spill store or load.
+# ptxas_check [--report] <ptx> <arch>...: logs each entry's register count and fails on any spill store or load
+# (--report: logs the spills and goes on).
 ptxas_check() {
-    local ptx="$1" arch out
+    local report=0 ptx arch out
+    if [[ "$1" == --report ]]; then report=1; shift; fi
+    ptx="$1"
     shift
     if [[ -z "$PTXAS" ]]; then
         echo "ERROR: ${ptx##*/} is in PTXAS_SPILL_CHECK and no ptxas was found; set HARTSY_PTXAS" >&2
@@ -81,9 +85,10 @@ ptxas_check() {
         echo "$out" | awk -v a="sm_${arch}" -v q="'" '/Compiling entry function/ { fn = $7; gsub(q, "", fn) }
             /Used [0-9]+ registers/ { for (i = 1; i <= NF; i++) if ($i == "Used") printf "  ptxas %s %s: %s registers\n", a, fn, $(i + 1) }'
         if echo "$out" | grep -qE '[1-9][0-9]* bytes spill (stores|loads)'; then
-            echo "ERROR: ${ptx##*/} spills on sm_${arch}:" >&2
-            echo "$out" | grep -E "Compiling entry|[1-9][0-9]* bytes spill" >&2
-            exit 1
+            echo "$( ((report)) && echo WARNING || echo ERROR ): ${ptx##*/} spills on sm_${arch}:" >&2
+            echo "$out" | awk -v q="'" '/Compiling entry function/ { fn = $7; gsub(q, "", fn) }
+                /[1-9][0-9]* bytes spill/ { sub(/^ +/, ""); print "  " fn ": " $0 }' >&2
+            ((report)) || exit 1
         fi
     done
 }
@@ -122,7 +127,7 @@ compile_one() {
         cat "$tmp" > "$ptx"
         rm -f "$tmp"
         if listed "$kernel" "${PTXAS_SPILL_CHECK[@]}"; then
-            if [[ -n "$variant" ]]; then ptxas_check "$ptx" "${arch%[a-z]}"; else ptxas_check "$ptx" 80 86 89; fi
+            if [[ -n "$variant" ]]; then ptxas_check "$ptx" "${arch%[a-z]}"; else ptxas_check "$ptx" 80 86 89; ptxas_check --report "$ptx" 120; fi
         fi
     else
         if [[ ! -x "$NVRTC" ]]; then
