@@ -507,6 +507,15 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
         Assert.All(sinks.Emulate(Base, lse), x => Assert.Equal(0f, x));
         Assert.Equal(0.25f, lse[0], 5);
         Assert.Equal(-2f, lse[8], 5);
+
+        // A −∞ sink is no sink at all: an excluded row stays zero with LSE −∞, a visible one is untouched bit for bit.
+        using Int8V2Case none = Int8V2Case.FromArrays(spec with { Sinks = [float.NegativeInfinity, -2f] }, c.Q, c.K, c.V);
+        Assert.All(none.Emulate(Base, lse), x => Assert.Equal(0f, x));
+        Assert.Equal(float.NegativeInfinity, lse[0]);
+        using Int8V2Case open = Int8V2Case.FromArrays(spec with { KeyBias = null }, c.Q, c.K, c.V);
+        using Int8V2Case openNone = Int8V2Case.FromArrays(spec with { KeyBias = null, Sinks = [float.NegativeInfinity, float.NegativeInfinity] },
+            c.Q, c.K, c.V);
+        Assert.Equal(open.Emulate(Base), openNone.Emulate(Base));
     }
 
     [Fact]

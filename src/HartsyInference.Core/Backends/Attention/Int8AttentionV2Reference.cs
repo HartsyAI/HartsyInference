@@ -577,7 +577,8 @@ public static class Int8AttentionV2Reference
                 else if (_u8) U8Tile(b * heads + h, row, j0, j1, tileMax, tileVScales, ref valid, ref m, ref d);
                 else RunningTile(j0, j1, tileMax, tileVScales, ref valid, ref m, ref d);
             }
-            if (_sinks.Length > 0 && !poisoned)
+            // A −∞ sink logit carries no mass (contract §3); it must not become exp2(−∞ + ∞).
+            if (_sinks.Length > 0 && !poisoned && !float.IsNegativeInfinity(_sinks[h]))
             {
                 float sink = _sinks[h] * Log2E - frame;
                 if (float.IsNaN(sink)) poisoned = true;
