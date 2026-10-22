@@ -2389,8 +2389,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 pInputPacked = CudaMemory.Allocate((nuint)format.OperandType().ComputeByteCount(count));
                 pInputScale = CudaMemory.Allocate((nuint)((long)paddedRows * paddedCols));
                 pBlockScratch = CudaMemory.Allocate((nuint)(CudaKernels.BlockQuantScratchFloats(count) * sizeof(float)));
-                _kernels!.LaunchBlockQuant(format, pInputPacked, pInputScale, pBlockScratch, pInput, input.DType,
-                    m, k, paddedRows, paddedCols, blockScales.ScaleFactor * blockScales.GlobalScale, _stream.Handle);
+                // The weight's own Fp8ScaleFactor rides in alpha like every cuBLAS path's: the F16 damps scale it.
+                _kernels!.LaunchBlockQuant(format, pInputPacked, pInputScale, pBlockScratch, pInput, input.DType, m, k,
+                    paddedRows, paddedCols, weight.Fp8ScaleFactor * blockScales.ScaleFactor * blockScales.GlobalScale,
+                    _stream.Handle);
                 BlockScaledExecutor.Run(weight: pWeight, weightBlockScale: blockScales.BlockScaleDevice,
                     input: pInputPacked, inputBlockScale: pInputScale, outPtr: pOutput, m: m, n: n, k: k,
                     alphaBetaDev: pBlockScratch + sizeof(float), stream: _stream.Handle, format: format,

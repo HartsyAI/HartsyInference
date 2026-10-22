@@ -88,6 +88,67 @@ public sealed class BlockScaledGemmTests
         _output.WriteLine($"TIMING {m}x{n}x{k}: native {nativeMs:F3} ms/Linear, unpack {unpackMs:F3} ms/Linear ({unpackMs / nativeMs:F2}x)");
     }
 
+    /// <summary>The weight's own <see cref="Tensor.Fp8ScaleFactor"/> is part of alpha on every GEMM path — it is what Z-Image's
+    /// and the Flux blocks' F16 damps scale. A native path that dropped it ran those projections 64× hot and decoded NaN.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public unsafe void NativeNvfp4Gemm_AppliesTheWeightScaleFactor()
+    {
+        const int m = 64, n = 256, k = 128;
+        const float factor = 1.0f / 64.0f;
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        using CudaBackend backend = new CudaBackend(0, ptxDir);
+        if (!backend.BlockScaledExecutor.IsSupported)
+        {
+            _output.WriteLine($"SKIPPED: block-scaled GEMM needs Blackwell (this GPU is SM " +
+                $"{backend.Context.ComputeCapabilityMajor}.{backend.Context.ComputeCapabilityMinor}).");
+            return;
+        }
+
+        int paddedRows = (n + 127) / 128 * 128, paddedCols = (k / 16 + 3) / 4 * 4;
+        using Tensor packed = new Tensor(new TensorShape(n, k / 2), DType.U8);
+        using Tensor scales = new Tensor(new TensorShape(paddedRows, paddedCols), DType.F8E4M3);
+        using Tensor global = new Tensor(new TensorShape(1), DType.F32);
+        using Tensor input = new Tensor(new TensorShape(m, k), DType.F32);
+        using Tensor plain = new Tensor(new TensorShape(m, n), DType.F32);
+        using Tensor damped = new Tensor(new TensorShape(m, n), DType.F32);
+        using Tensor unpacked = new Tensor(new TensorShape(m, n), DType.F32);
+        Random rng = new Random(41);
+        byte* wp = (byte*)packed.DataPointer;
+        for (long i = 0; i < (long)n * (k / 2); i++) wp[i] = (byte)rng.Next(256);
+        byte* sp = (byte*)scales.DataPointer;
+        for (long i = 0; i < (long)paddedRows * paddedCols; i++) sp[i] = (byte)(0x20 + rng.Next(0x21));
+        ((float*)global.DataPointer)[0] = 0.01f;
+        for (long i = 0; i < (long)m * k; i++) ((float*)input.DataPointer)[i] = (float)(rng.NextDouble() * 8.0 - 4.0);
+        Assert.True(Nvfp4Codec.TryAttachResident(packed, scales, global, hasPreQuantScale: false, out Tensor weight));
+
+        backend.EnableNativeFp4Gemm = true;
+        backend.Linear(plain, input, weight, null);
+        backend.Sync();
+        weight.Fp8ScaleFactor = factor;
+        backend.Linear(damped, input, weight, null);
+        backend.Sync();
+        backend.EnableNativeFp4Gemm = false;
+        backend.Linear(unpacked, input, weight, null);
+        backend.Sync();
+
+        double scaledDiff = 0, unpackDiff = 0, sumDamped = 0;
+        float* pp = (float*)plain.DataPointer, dp = (float*)damped.DataPointer, up = (float*)unpacked.DataPointer;
+        for (long i = 0; i < (long)m * n; i++)
+        {
+            scaledDiff += Math.Abs(dp[i] - pp[i] * factor);
+            unpackDiff += Math.Abs(dp[i] - up[i]);
+            sumDamped += Math.Abs(dp[i]);
+        }
+        double scaledErr = scaledDiff / Math.Max(sumDamped, 1e-12), unpackErr = unpackDiff / Math.Max(sumDamped, 1e-12);
+        _output.WriteLine($"native with factor vs native·factor: {scaledErr:E3}; vs the unpack path: {unpackErr:E3}");
+        Assert.True(scaledErr < 1e-5, $"the native path did not apply the weight's scale factor ({scaledErr:E3})");
+        Assert.True(unpackErr < 8e-2, $"the native and unpack paths disagree once the weight carries a factor ({unpackErr:E3})");
+    }
+
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
