@@ -34,8 +34,9 @@ stable release will require. Dates are UTC.
   it (CUDA's equal-head entry takes that shape, as its grouped one already did), so each call drops three permutes in and
   one out at one batch item. Calls SageAttention would take (F16, head dim 64 or 128, unmasked, both sequences at least
   `numerics.sageF16MinSkv`, as Flux.1 at 1536²) and batched forwards stay head-major. Measured bit-identical: Flux.1 (1024²
-  and 1536²), Flux.2 and Chroma images on CUDA, and the attention call at the Flux.1, Flux.2, Chroma (padding mask
-  included) and HunyuanImage single-block shapes on CUDA's cuDNN row and on Vulkan's cooperative-matrix-2 kernel.
+  and 1536²), Flux.2 and Chroma images on CUDA, Flux.1 images on Vulkan, and the attention call at the Flux.1, Flux.2,
+  Chroma (padding mask included) and HunyuanImage single-block shapes on CUDA's cuDNN row and Vulkan's cooperative-matrix-2
+  kernel.
 
 ## alpha.385
 
