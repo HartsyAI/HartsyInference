@@ -68,6 +68,11 @@ The value is a string in both cases and is parsed with the file's rules, so `"tr
 the same thing everywhere. An unknown id, a wrong type or an out-of-range value is rejected at the point of
 setting, not at the next startup.
 
+A retired id is not unknown: for 100 releases after it was retired, the file, `--set`, a request and the API accept
+it with a warning that names its replacement or says it was removed and is ignored. Saving a renamed id writes its
+replacement; saving a removed one writes nothing. `hartsy settings list` ends with the retired ids and the release
+each is accepted through.
+
 ## Which value wins
 
 ```

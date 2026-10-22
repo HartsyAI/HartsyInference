@@ -193,8 +193,6 @@ public sealed partial class CudaKernels : IDisposable
     // Optional: F16-I/O fused attention with F32 accumulation (flash_attn_f16.ptx), strided so it reads head-major,
     // token-major and fused-projection layouts alike. Absent PTX ⇒ HasFlashAttnF16 is false and callers keep cuDNN.
     private readonly CudaModule? _flashF16Module;
-    private readonly nint _flashF16D64;
-    private readonly nint _flashF16D128;
     private readonly nint _flashF16D256;
     private readonly nint _flashAttnF32Combine;
 
@@ -1181,11 +1179,8 @@ public sealed partial class CudaKernels : IDisposable
         if (CanLoad(flashF16Path))
         {
             _flashF16Module = LoadOwnedModule(flashF16Path);
-            _flashF16D64 = _flashF16Module.GetFunction("flash_attn_f16_d64");
-            _flashF16D128 = _flashF16Module.GetFunction("flash_attn_f16_d128");
             _flashF16D256 = _flashF16Module.GetFunction("flash_attn_f16_d256");
             // The Q, K and V tiles exceed the 48 KB default at D=256 (CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8).
-            CudaDriverApi.cuFuncSetAttribute(_flashF16D128, 8, FlashAttnF16SharedBytes(128));
             CudaDriverApi.cuFuncSetAttribute(_flashF16D256, 8, FlashAttnF16SharedBytes(256));
         }
 
@@ -3043,13 +3038,8 @@ public sealed partial class CudaKernels : IDisposable
     {
         if (_flashF16Module is null)
             throw new InvalidOperationException("flash_attn_f16.ptx is not loaded; gate on HasFlashAttnF16 first.");
-        nint fn = d switch
-        {
-            64 => _flashF16D64,
-            128 => _flashF16D128,
-            256 => _flashF16D256,
-            _ => throw new ArgumentOutOfRangeException(nameof(d), $"F16 flash attention serves head dims 64/128/256, not {d}."),
-        };
+        if (d != 256)
+            throw new ArgumentOutOfRangeException(nameof(d), $"F16 flash attention serves head dim 256, not {d}.");
         if (batch <= 0 || batch > 65_535 || heads <= 0 || heads > 65_535 || sqLen <= 0 || skvLen <= 0)
             throw new ArgumentOutOfRangeException(nameof(batch), $"F16 flash attention dims out of range: B={batch} H={heads} Sq={sqLen} Skv={skvLen}.");
         if (!FlashF16RowsAligned(o, q, k, v, so, sq, sk, sv))
@@ -3062,7 +3052,7 @@ public sealed partial class CudaKernels : IDisposable
         args[0] = &oA; args[1] = &qA; args[2] = &kA; args[3] = &vA;
         args[4] = &soA; args[5] = &sqA; args[6] = &skA; args[7] = &svA;
         args[8] = &sqN; args[9] = &skvN; args[10] = &scA;
-        CudaDriverApi.cuLaunchKernel(fn, (uint)((sqLen + FlashF16QueryRows - 1) / FlashF16QueryRows), (uint)heads, (uint)batch,
+        CudaDriverApi.cuLaunchKernel(_flashF16D256, (uint)((sqLen + FlashF16QueryRows - 1) / FlashF16QueryRows), (uint)heads, (uint)batch,
             FlashF16Threads, 1, 1,
             (uint)FlashAttnF16SharedBytes(d), stream, (nint)args, 0).ThrowOnError();
     }
