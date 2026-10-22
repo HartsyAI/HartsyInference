@@ -215,7 +215,7 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         {
             Assert.Equal(50, ZImageRecipe.BaseDefaults.Steps);
             Assert.Equal(5.0f, ZImageRecipe.BaseDefaults.CfgScale);
-            Assert.Equal(6.0, ZImageRecipe.BaseDefaults.SigmaShift);
+            Assert.Equal(3.0, ZImageRecipe.BaseDefaults.SigmaShift);
         }
     }
 

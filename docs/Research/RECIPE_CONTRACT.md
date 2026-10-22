@@ -149,6 +149,27 @@ been re-read; until then it is an audit finding, not a specification.
 Rows marked "today" with 25 fps or 704×480 that SwarmUI does not list are the old generic fallback, kept so the
 change that made defaults total moved no output.
 
+Image families whose defaults were moved to SwarmUI's documented values (`docs/Model Support.md` = MS,
+`docs/Obscure Model Support.md` = OMS, read 2026-10-22). Image families not listed already matched, or SwarmUI gives
+only an example value, so the upstream value stays.
+
+| Family / variant | Was | Now | Source |
+|---|---|---|---|
+| chroma | 35 / 5.0 | 26 / 3.5 | MS Chroma: official 26 steps, CFG around 3.5 |
+| flux1 schnell | 4 / 3.5 | 4 / 1.0 | MS Flux: CFG 1, Flux Guidance does not apply to Schnell |
+| flux2 dev | 50 / 4.0 | 50 / 3.5 | MS Flux.2: Flux Guidance defaults to 3.5 |
+| flux2 klein (4B, 9B) | 4 / 1.0 | 8 / 1.0 | MS Flux.2 Klein: distilled, 8 steps, CFG 1 |
+| flux3 distilled | 15 / 1.0 | 16 / 1.0 | MS Flux 3 Image: 16 steps for 'sd' |
+| hunyuan-image | 50 / 3.5 | 20 / 3.5 | MS HunyuanImage 2.1: steps around 20 |
+| omnigen2 | 28 / 4.0 | 20 / 5.0 | OMS OmniGen2: steps ~20, CFG 5 to 7 |
+| lens, lens turbo | 1024² | 1440² | OMS Lens: 1440 is the official default side |
+| boogu base | 25 / 3.5 | 20 / 4.0 | MS Boogu: 20 steps, CFG around 4 |
+| mage-flow base | 30 / 5.0 | 20 / 5.0 | OMS Mage Flow: 20-ish steps |
+| z-image base | shift 6 | shift 3 | MS Z-Image: default sigma shift 3 |
+
+Lance image stays at 1024² (upstream's official size). The SwarmUI bridge registers its class at 768² and Lance
+video at 832×480; those are host-declared sizes, which this contract replaces with `IInferenceEngine.Recipes`.
+
 ## Audio
 
 Music families follow the same contract through `IMusicRecipe` and `MusicRecipeRegistry`, which mirror the video

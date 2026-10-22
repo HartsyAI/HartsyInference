@@ -86,7 +86,7 @@ public sealed record ZImageConfig
         SchedulerShift = 3.0f,
     };
 
-    /// <summary>Z-Image-Base preset (6B, un-distilled foundation model, full CFG). Architecturally identical to Turbo per Tongyi-MAI/Z-Image transformer/config.json (released 2026-01-28); only difference is the un-distilled weights and the sampling regime — recommended <c>cfgScale=3.0..5.0</c> with a negative prompt and 28–50 steps. SchedulerShift=6.0 (Turbo uses 3.0).</summary>
+    /// <summary>Z-Image-Base preset (6B, un-distilled foundation model, full CFG). Architecturally identical to Turbo per Tongyi-MAI/Z-Image transformer/config.json (released 2026-01-28); only difference is the un-distilled weights and the sampling regime — recommended <c>cfgScale=3.0..5.0</c> with a negative prompt and 28–50 steps. SchedulerShift=6.0 (Turbo uses 3.0) is upstream's; a generation runs the request's sigma shift, which the engine recipe defaults to SwarmUI's 3 (<c>ZImageRecipe.BaseDefaults</c>).</summary>
     public static ZImageConfig Base => new()
     {
         HiddenSize = 3840,

@@ -45,8 +45,8 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
         // consuming one would hand the encoder the literal tag text as prose.
         | ImageFeatures.PromptScheduling;
 
-    /// <summary>Base Mage-Flow: 30 steps at CFG 5.0, 1024×1024 (model card).</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 5.0f, Width = 1024, Height = 1024 };
+    /// <summary>Base Mage-Flow: 20 steps at CFG 5.0, 1024×1024 (SwarmUI <c>Obscure Model Support.md</c>, Mage Flow: 20-ish steps, 5-ish CFG). The model card uses 30 steps.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 20, CfgScale = 5.0f, Width = 1024, Height = 1024 };
     /// <summary>Mage-Flow-*-Turbo: 4 distilled steps, guidance-free (CFG 1.0).</summary>
     public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
     public ImageDefaults Defaults => FamilyDefaults;

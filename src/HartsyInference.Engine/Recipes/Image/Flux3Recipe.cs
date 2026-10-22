@@ -25,8 +25,8 @@ public sealed class Flux3Recipe : IArchitectureRecipe
     /// <summary>The full build's sampling settings (ComfyUI template): 25 steps at true-CFG 3.5, 1024².</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 25, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
-    /// <summary>The step-distilled build's settings: 15 steps (4–16) at CFG 1.</summary>
-    public static ImageDefaults DistilledDefaults { get; } = new ImageDefaults { Steps = 15, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+    /// <summary>The step-distilled build's settings: 16 steps (4–16) at CFG 1 (SwarmUI <c>Model Support.md</c>, Flux 3 Image 'sd').</summary>
+    public static ImageDefaults DistilledDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 16, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public string Name => "flux3";

@@ -50,8 +50,8 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
-    /// <summary>Flux.1 Schnell's official sampling settings: 4 steps, guidance-free by distillation.</summary>
-    public static ImageDefaults SchnellDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+    /// <summary>Flux.1 Schnell's official sampling settings: 4 steps, guidance-free by distillation, so CFG 1 (SwarmUI <c>Model Support.md</c>, Flux; Flux Guidance does not apply to Schnell).</summary>
+    public static ImageDefaults SchnellDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ModelVariantCatalog? Variants => Flux1Variants.Catalog;
