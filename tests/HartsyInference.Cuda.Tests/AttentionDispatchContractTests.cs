@@ -133,7 +133,8 @@ public sealed class AttentionDispatchContractTests
             }
         }
 
-        using Tensor query = new(new TensorShape(1, S, Heads, HeadDim), DType.F16), key = new(query.Shape, DType.F16), value = new(query.Shape, DType.F16);
+        using Tensor query = new(new TensorShape(1, S, Heads, HeadDim), DType.F16), key = new(query.Shape, DType.F16);
+        using Tensor value = new(query.Shape, DType.F16);
         using Tensor batched = new(new TensorShape(2, S, Inner), DType.F16), wide = new(new TensorShape(1, S, Inner + HeadDim), DType.F16);
         using Tensor short3 = new(new TensorShape(1, S - 1, Inner), DType.F16);
         foreach (Tensor output in (Tensor[])[batched, wide, short3])

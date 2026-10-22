@@ -7644,7 +7644,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the token-major SDPA entry point; the mask is checked when the rows are planned.</summary>
+    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the
+    /// token-major SDPA entry point; the mask is checked when the rows are planned.</summary>
     internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
         int heads, int headDim, float scale)
     {
@@ -7662,7 +7663,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             };
             if (!tokenMajor)
                 throw new ArgumentException(
-                    $"Token-major SDPA requires [S, heads*headDim], [1, S, heads*headDim] or [1, S, heads, headDim] tensors with heads={heads}, headDim={headDim}; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
+                    $"Token-major SDPA requires [S, heads*headDim], [1, S, heads*headDim] or [1, S, heads, headDim] tensors with heads={heads}, "
+                    + $"headDim={headDim}; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
         }
         if (TokenMajorRows(output) != TokenMajorRows(query))
             throw new ArgumentException($"Token-major SDPA output must have Q's row count; got output={output.Shape}, Q={query.Shape}.");

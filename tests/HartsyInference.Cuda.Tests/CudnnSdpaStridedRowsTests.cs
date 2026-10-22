@@ -173,9 +173,9 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
         return mask;
     }
 
-    /// <summary>Q, K and V are <see cref="AttentionOperand.Packed"/> column views of one [b·s, 3·h·d] F16 tensor. Asserted: the reference tolerance and the
-    /// cuDNN route (no permute, no staging). Reported, not asserted: whether the output equals bit for bit the same call over plain copies of the columns,
-    /// whose plan has other strides and so may pick another engine.</summary>
+    /// <summary>Q, K and V are <see cref="AttentionOperand.Packed"/> column views of one [b·s, 3·h·d] F16 tensor. Asserted: the
+    /// reference tolerance and the cuDNN route (no permute, no staging). Reported, not asserted: whether the output equals bit for
+    /// bit the same call over plain copies of the columns, whose plan has other strides and so may pick another engine.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1)]
