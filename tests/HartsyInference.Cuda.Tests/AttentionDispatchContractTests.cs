@@ -116,6 +116,31 @@ public sealed class AttentionDispatchContractTests
             CudaBackend.ValidateScaledDotProductAttentionContract(output, query, key, value, invalidMask, 0.125f));
     }
 
+    /// <summary>The equal-head token-major entry takes one sequence as <c>[S, H·D]</c>, <c>[1, S, H·D]</c> or <c>[1, S, H, D]</c>, the
+    /// shapes the grouped entry takes, and refuses a batch or a width that is not H·D.</summary>
+    [Fact]
+    public void TokenMajorContract_TakesOneSequenceInEachLayout_AndRefusesABatch()
+    {
+        const int Heads = 2, HeadDim = 8, S = 5, Inner = Heads * HeadDim;
+        TensorShape[] layouts = [new(S, Inner), new(1, S, Inner), new(1, S, Heads, HeadDim)];
+        foreach (TensorShape operands in layouts)
+        {
+            foreach (TensorShape output in layouts)
+            {
+                using Tensor q = new(operands, DType.F16), k = new(operands, DType.F16), v = new(operands, DType.F16), o = new(output, DType.F16);
+                CudaBackend.ValidateTokenMajorAttentionContract(o, q, k, v, Heads, HeadDim, 0.25f);
+                CudaBackend.ValidateTokenMajorGqaAttentionContract(o, q, k, v, Heads, Heads, HeadDim, 0.25f);
+            }
+        }
+
+        using Tensor query = new(new TensorShape(1, S, Heads, HeadDim), DType.F16), key = new(query.Shape, DType.F16);
+        using Tensor value = new(query.Shape, DType.F16);
+        using Tensor batched = new(new TensorShape(2, S, Inner), DType.F16), wide = new(new TensorShape(1, S, Inner + HeadDim), DType.F16);
+        using Tensor short3 = new(new TensorShape(1, S - 1, Inner), DType.F16);
+        foreach (Tensor output in (Tensor[])[batched, wide, short3])
+            Assert.Throws<ArgumentException>(() => CudaBackend.ValidateTokenMajorAttentionContract(output, query, key, value, Heads, HeadDim, 0.25f));
+    }
+
     [Fact]
     public void FlashContract_RejectsInvalidCapacityGqaAndAuxiliaryLengths()
     {

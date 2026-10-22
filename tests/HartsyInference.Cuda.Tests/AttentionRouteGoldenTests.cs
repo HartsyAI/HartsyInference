@@ -67,6 +67,9 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("tm-f32-d160-allowf16", "tm", DType.F32, 4, 4, 256, 256, 160, "none", true, "M.2"),
         new("tm-f32", "tm", DType.F32, 4, 4, 256, 256, 128, "none", false, "M.3/S.14"),
         new("tm-f16-d128-perhead", "tm", DType.F16, 4, 4, 256, 256, 128, "perhead", true, "M.2"),
+        new("single-f16-d128", "single", DType.F16, 24, 24, 256, 256, 128, "none", true, "M.2"),
+        new("single-f16-d128-bias", "single", DType.F16, 24, 24, 256, 256, 128, "bias", true, "M.2"),
+        new("single-f32-allowf16", "single", DType.F32, 24, 24, 256, 256, 128, "none", true, "M.2"),
         new("tm-gqa-f16-d128", "tmg", DType.F16, 48, 12, 256, 256, 128, "none", true, "G.1"),
         new("tm-gqa-f16-16-8", "tmg", DType.F16, 16, 8, 256, 256, 128, "none", true, "G.1"),
         new("tm-gqa-f16-sage-8k", "tmg", DType.F16, 4, 2, 8192, 8192, 128, "none", true, "MG/S.1"),
@@ -184,13 +187,14 @@ public sealed unsafe class AttentionRouteGoldenTests
             }
             return;
         }
-        bool tm = c.Entry is "tm" or "tmg" or "krea2";
+        bool tm = c.Entry is "tm" or "tmg" or "krea2" or "single";
         TensorShape qs = tm ? new(1, c.Sq, c.Hq, c.D) : new(1, c.Hq, c.Sq, c.D);
         TensorShape ks = tm ? new(1, c.Skv, c.Hkv, c.D) : new(1, c.Hkv, c.Skv, c.D);
         using Tensor qt = Random(qs, c.Dtype, 1);
         using Tensor kt = Random(ks, c.Dtype, 2);
         using Tensor vt = Random(ks, c.Dtype, 3);
-        using Tensor ot = new(c.Entry == "krea2" ? new TensorShape(1, c.Sq, c.Hq * c.D) : qs, c.Dtype);
+        // Krea 2 and the single-stream blocks hand the entry a [1, S, H·D] output.
+        using Tensor ot = new(c.Entry is "krea2" or "single" ? new TensorShape(1, c.Sq, c.Hq * c.D) : qs, c.Dtype);
         using Tensor? mask = c.Mask switch
         {
             "bias" => Random(new TensorShape(1, 1, c.Sq, c.Skv), DType.F32, 5, -2f, 2f),

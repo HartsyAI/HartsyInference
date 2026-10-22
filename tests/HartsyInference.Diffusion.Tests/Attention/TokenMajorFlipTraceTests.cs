@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
@@ -12,6 +13,9 @@ namespace HartsyInference.Diffusion.Tests.Attention;
 /// each issues one token-major attention call and no head permute, and the configurations that keep head-major still do.</summary>
 public sealed class TokenMajorFlipTraceTests
 {
+    // Single-stream geometry: head dim 64 is one the Sage row takes; 3 text rows ahead of a 2x3 image grid.
+    private const int Heads = 2, HeadDim = 64, Hidden = Heads * HeadDim, Mlp = 64, Txt = 3, GridH = 2, GridW = 3, Seq = Txt + GridH * GridW;
+
     private static int Permutes(AttentionTraceBackend backend) =>
         backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal));
 
@@ -115,6 +119,174 @@ public sealed class TokenMajorFlipTraceTests
 
         Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
         Assert.Equal(4, Permutes(backend));
+    }
+
+    /// <summary>The single-stream blocks attend through <c>Attend</c>: one batch item takes the token-major entry and writes the
+    /// caller's <c>[1, S, hidden]</c>. A batch, and an F16 call the Sage row would take (the knob lowered to this sequence, or
+    /// Flux.1's 9728 tokens at 1536² against the default), keep the head-major call and its four permutes; a bias rules Sage out,
+    /// so Chroma's masked call still flips.</summary>
+    [Theory]
+    [InlineData("flux", 1, false, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux", 1, true, true, AttentionRoute.Dense)]
+    [InlineData("flux", 2, false, false, AttentionRoute.Dense)]
+    [InlineData("flux-1024", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux-1536", 1, true, false, AttentionRoute.Dense)]
+    [InlineData("chroma", 1, false, false, AttentionRoute.TokenMajor)]
+    [InlineData("chroma", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("chroma", 1, true, true, AttentionRoute.Dense)]
+    [InlineData("chroma", 2, false, false, AttentionRoute.Dense)]
+    [InlineData("chroma-fused", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("chroma-masked", 1, true, true, AttentionRoute.TokenMajor)]
+    [InlineData("chroma-masked", 2, false, false, AttentionRoute.Dense)]
+    [InlineData("flux2", 1, false, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux2", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux2", 1, true, true, AttentionRoute.Dense)]
+    [InlineData("flux2", 2, false, false, AttentionRoute.Dense)]
+    [InlineData("flux3", 1, false, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux3", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux3", 1, true, true, AttentionRoute.Dense)]
+    [InlineData("hunyuanimage", 1, false, false, AttentionRoute.TokenMajor)]
+    [InlineData("hunyuanimage", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("hunyuanimage", 1, true, true, AttentionRoute.Dense)]
+    [InlineData("hunyuanimage", 2, false, false, AttentionRoute.Dense)]
+    public void SingleStreamBlocks_AttendTokenMajorAtOneBatchItem(string site, int batch, bool f16, bool lowerSageKnob, AttentionRoute route)
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true };
+        (int txt, int gridH, int gridW) = Geometry(site);
+        int seq = txt + gridH * gridW;
+        try
+        {
+            if (lowerSageKnob) KnobStore.Set(EngineKnobs.SageF16MinSkv, seq);
+            RunSingleStream(backend, site, batch, f16 ? DType.F16 : DType.F32);
+        }
+        catch (NotSupportedException) when (backend.Calls.Count == 1)
+        {
+            // The F16 gated residual past the attention has no stub body; the attention is recorded by then.
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.SageF16MinSkv);
+        }
+
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
+        Assert.True(call.Numerics.LegacyAssertedBounded);
+        Assert.Equal(site == "chroma-masked", call.Mask.Bias is not null);
+        Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, Permutes(backend));
+        if (route == AttentionRoute.TokenMajor) Assert.Equal(new TensorShape(1, seq, Hidden), call.Output.Storage.Shape);
+    }
+
+    /// <summary>Text rows and image grid: Flux.1's own at 1024² and 1536² (512 text rows), the small default otherwise.</summary>
+    private static (int Txt, int GridH, int GridW) Geometry(string site) => site switch
+    {
+        "flux-1024" => (512, 64, 64),
+        "flux-1536" => (512, 96, 96),
+        _ => (Txt, GridH, GridW),
+    };
+
+    private static void RunSingleStream(AttentionTraceBackend backend, string site, int batch, DType act)
+    {
+        Tensor Rows(int rows) => new(new TensorShape(batch, rows, Hidden), act);
+        Tensor Mod() => new(new TensorShape(batch, Hidden), DType.F32);
+        Weights w = new(45);
+        switch (site)
+        {
+            case "flux" or "flux-1024" or "flux-1536":
+            {
+                (int txt, int gridH, int gridW) = Geometry(site);
+                FluxSingleStreamBlock block = new(Hidden, Heads, Mlp);
+                w.Linear("b.norm.linear", 3 * Hidden, Hidden, true);
+                AddPerHeadNorms(w, "b.attn.norm_q", "b.attn.norm_k");
+                foreach (string n in new[] { "to_q", "to_k", "to_v" }) w.Linear($"b.attn.{n}", Hidden, Hidden, true);
+                w.Linear("b.proj_mlp", Mlp, Hidden, true);
+                w.Linear("b.proj_out", Hidden, Hidden + Mlp, true);
+                block.LoadWeights(w, "b");
+                using FluxRope rope = Rope(FluxRope.BuildPositionIds(txt, gridH, gridW), [16, 24, 24]);
+                block.Forward(backend, Rows(txt + gridH * gridW), Mod(), rope);
+                break;
+            }
+            case "chroma" or "chroma-fused" or "chroma-masked":
+            {
+                const int chromaMlp = 4 * Hidden;
+                ChromaSingleStreamBlock block = new(Hidden, Heads, HeadDim);
+                AddPerHeadNorms(w, "b.attn.norm_q", "b.attn.norm_k");
+                if (site == "chroma-fused")
+                {
+                    w.Linear("b.linear1", 3 * Hidden + chromaMlp, Hidden, true);
+                }
+                else
+                {
+                    foreach (string n in new[] { "to_q", "to_k", "to_v" }) w.Linear($"b.attn.{n}", Hidden, Hidden, true);
+                    w.Linear("b.proj_mlp", chromaMlp, Hidden, true);
+                }
+                w.Linear("b.proj_out", Hidden, Hidden + chromaMlp, true);
+                block.LoadWeights(w, "b");
+                using FluxRope rope = Rope(FluxRope.BuildPositionIds(Txt, GridH, GridW), [16, 24, 24]);
+                Tensor? mask = site == "chroma-masked" ? new Tensor(new TensorShape(batch, 1, Seq, Seq), DType.F32) : null;
+                block.Forward(backend, Rows(Seq), new Tensor(new TensorShape(batch, 3, Hidden), DType.F32), rope, mask);
+                break;
+            }
+            case "flux2":
+            {
+                Flux2SingleBlock block = new(Hidden, Heads, Mlp);
+                foreach (string n in new[] { "to_q", "to_k", "to_v" }) w.Linear($"b.attn.{n}", Hidden, Hidden);
+                w.Linear("b.attn.linear_in_gate", Mlp, Hidden);
+                w.Linear("b.attn.linear_in_up", Mlp, Hidden);
+                w.Linear("b.attn.to_out", Hidden, Hidden + Mlp);
+                AddPerHeadNorms(w, "b.attn.norm_q", "b.attn.norm_k");
+                block.LoadWeights(w, "b");
+                using FluxRope rope = Rope(Flux2PosEmbed.BuildPositionIds(Txt, GridH, GridW), [16, 16, 16, 16]);
+                block.Forward(backend, Rows(Seq), [Mod(), Mod(), Mod()], rope);
+                break;
+            }
+            case "flux3":
+            {
+                Flux3Block block = new(Hidden, Heads, Mlp, 1e-6f, 1e-6f);
+                foreach (string n in new[] { "q_proj", "k_proj", "v_proj" }) w.Linear($"b.{n}", Hidden, Hidden);
+                w.Linear("b.mlp_in", 2 * Mlp, Hidden);
+                w.Linear("b.attn_out", Hidden, Hidden);
+                w.Linear("b.mlp_out", Hidden, Mlp);
+                AddPerHeadNorms(w, "b.norm.query_norm", "b.norm.key_norm");
+                block.LoadWeights(w, "b");
+                Tensor text = Flux3PosEmbed.TextIds(Txt), image = Flux3PosEmbed.ImageIds(GridH, GridW, 0f, 1f);
+                using FluxRope rope = Rope(Flux3PosEmbed.Concat(text, image), [16, 16, 16, 16]);
+                text.Dispose();
+                image.Dispose();
+                using Flux3Modulation modulation = Flux3Modulation.Uniform(Mod(), Mod(), Mod());
+                block.Forward(backend, Rows(Seq), modulation, rope);
+                break;
+            }
+            case "hunyuanimage":
+            {
+                HunyuanImageSingleBlock block = new(Hidden, Heads, HeadDim, Mlp);
+                w.Linear("b.norm.linear", 3 * Hidden, Hidden, true);
+                foreach (string n in new[] { "to_q", "to_k", "to_v" }) w.Linear($"b.attn.{n}", Hidden, Hidden, true);
+                AddPerHeadNorms(w, "b.attn.norm_q", "b.attn.norm_k");
+                w.Linear("b.proj_mlp", Mlp, Hidden, true);
+                w.Linear("b.proj_out", Hidden, Hidden + Mlp, true);
+                block.LoadWeights(w, "b");
+                using HunyuanImageRope rope = new([32, 32]);
+                block.Forward(backend, Rows(GridH * GridW), Rows(Txt), Mod(), rope, GridH, GridW);
+                break;
+            }
+            default:
+                throw new ArgumentOutOfRangeException(nameof(site));
+        }
+    }
+
+    private static FluxRope Rope(Tensor ids, int[] axes)
+    {
+        FluxRope rope = new(axes);
+        rope.Precompute(ids);
+        ids.Dispose();
+        return rope;
+    }
+
+    private static void AddPerHeadNorms(Weights w, string query, string key)
+    {
+        w.AddNorm($"{query}.weight", HeadDim);
+        w.AddNorm($"{key}.weight", HeadDim);
     }
 
     private static TransformerSubBlock SubBlock(int channels, int heads, int contextDim)

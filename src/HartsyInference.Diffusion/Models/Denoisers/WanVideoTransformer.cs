@@ -3,6 +3,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Models.Denoisers.UNetBlocks;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Core.MemoryManagement;
 
@@ -32,6 +33,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     private (int T, int H, int W) _ropeKey = (-1, -1, -1);
     private Tensor? _cosC, _sinC;
     private readonly Dictionary<Tensor, (Tensor Ctx, int ImageContextLen, Tensor? ImgKey)> _ctxCache = new(ReferenceEqualityComparer.Instance);
+    private ConstantKvCache[]? _textKv;
 
     public WanVideoTransformer(WanVideoConfig config)
     {
@@ -173,6 +175,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         (Tensor encoderProj, int imageContextLen) = GetOrBuildContext(backend, encoder, imageEmbeds, dim);
 
         Tensor cur = hidden;
+        ConstantKvCache[]? textKv = _textKv;
         _fwdCounter++;
         string? vramLog = EngineKnobs.WanVram.Value;
         IKvRewrite? kvRewrite = cp is null ? null : new CpExchangeRewrite(cp.Exchange, cp.Rank, 0);
@@ -189,7 +192,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block 0: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen, dbg: "b0");
+                imageContextLen: imageContextLen, dbg: "b0", textKv: textKv?[0]);
             cur.Dispose();
             cur = block0;
             WanVideoDebugDump.Dump("blocks.0", cur);
@@ -213,7 +216,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvRewrite: kvRewrite);
+                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvRewrite: kvRewrite, textKv: textKv?[i]);
             if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();
             cur = next;
             WanVideoDebugDump.Dump($"blocks.{i}", cur);
@@ -239,6 +242,33 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         projected.Dispose();
         WanVideoDebugDump.DumpOutput(outVel);
         return outVel;
+    }
+
+    /// <summary>Keeps every block's text cross-attention K/V, per backend and context, pinned across the per-step activation
+    /// sweep until the returned scope is disposed. The contexts must not be rewritten in place while it is open.</summary>
+    public IDisposable CacheTextCrossAttentionKv()
+    {
+        ConstantKvCache[] caches = new ConstantKvCache[_blocks.Length];
+        for (int i = 0; i < caches.Length; i++) caches[i] = new ConstantKvCache(contextsPerBackend: 2, pinned: true);
+        if (Interlocked.CompareExchange(ref _textKv, caches, null) is not null)
+            throw new InvalidOperationException("The text cross-attention K/V cache is already open.");
+        return new TextKvScope(this, caches);
+    }
+
+    /// <summary>Device bytes the cache holds for <paramref name="contexts"/> contexts of <paramref name="contextTokens"/> rows on one backend.</summary>
+    public long TextCrossAttentionKvBytes(int contextTokens, int contexts) =>
+        (long)_blocks.Length * contexts * 2L * contextTokens * _config.InnerDim * sizeof(float);
+
+    private sealed class TextKvScope(WanVideoTransformer owner, ConstantKvCache[] caches) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            Interlocked.CompareExchange(ref owner._textKv, null, caches);
+            foreach (ConstantKvCache cache in caches) cache.Clear();
+        }
     }
 
     private void BuildRopeCache(int gt, int gh, int gw)

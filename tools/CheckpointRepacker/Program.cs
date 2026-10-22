@@ -4,9 +4,11 @@ using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Tensors;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Nf4;
 using HartsyInference.ModelAssets.Metadata;
@@ -58,6 +60,8 @@ MERGE AND CAST (safetensors)
   --quant <nf4|nvfp4>   Quantize every 2D .weight (F32/BF16/F16) into the layout the engine loads: NF4 writes
                         .absmax, .quant_map and .quant_state.bitsandbytes__nf4; NVFP4 writes .weight_scale
                         (E4M3) and .weight_scale_2 (F32). 2D weights that fail the shape rule are left full precision and listed.
+                        An FP8 block-scaled single .safetensors with --quant nf4 is streamed one weight at a time to
+                        a single output file, with <output>.manifest.json beside it.
 
 LORA BAKING (safetensors)
   --lora <file>[:<strength>]  Merge an adapter into the weights it modifies and write a standalone model.
@@ -265,6 +269,13 @@ foreach (string spec in values.GetValueOrDefault("--lora") ?? [])
 string? quantName = values.GetValueOrDefault("--quant")?.Last()?.ToLowerInvariant();
 if (quantName is not null && quantName is not ("nf4" or "nvfp4"))
     return Usage($"--quant '{quantName}' is not supported; use nf4 or nvfp4.");
+if (quantName == "nf4" && inputs.Count == 1 && File.Exists(inputs[0]) && inputs[0].EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase)
+    && HasFp8Weights(inputs[0]))
+{
+    if (autoName || loras.Count > 0 || recipe is not null || inputs.Any(IsShardSet))
+        return Usage("An FP8 checkpoint is quantized to NF4 as one file: give a single .safetensors input and an output file path.");
+    return WriteNf4FromFp8(inputs[0], output, flags.Contains("--force"));
+}
 bool mergeMode = recipe is not null || inputs.Count > 1 || castTo is not null || values.ContainsKey("--prefix") || values.ContainsKey("--drop")
     || loras.Count > 0 || inputs.Any(IsShardSet) || quantName is not null;
 if (mergeMode)
@@ -823,6 +834,93 @@ static bool IsQuantTarget(string key, Tensor tensor, string quantName) =>
     && tensor.Shape.Rank == 2 && tensor.Shape[0] > 0 && tensor.Shape[1] > 0
     && SafeTensorsMerger.IsCastable(tensor.DType)
     && (quantName == "nf4" || tensor.Shape[1] % 16 == 0);
+
+// HfQuantCheckpoint's block FP8 (an F8_E4M3 weight beside its _scale_inv), from the header; others take the merge path.
+static bool HasFp8Weights(string path)
+{
+    try
+    {
+        IReadOnlyDictionary<string, SafeTensorDescriptor> tensors = SafeTensorHeaderReader.Read(path).Tensors;
+        return tensors.Values.Any(t => t.DType == DType.F8E4M3 && tensors.ContainsKey(t.Name + "_scale_inv"));
+    }
+    catch (Exception ex) when (ex is HartsyInference.Core.Exceptions.HartsyInferenceException or IOException
+        or UnauthorizedAccessException)
+    {
+        return false;
+    }
+}
+
+static Dictionary<string, string> ReadSourceMetadata(string path)
+{
+    IReadOnlyDictionary<string, string>? metadata = SafeTensorHeaderReader.Read(path).Metadata;
+    return new Dictionary<string, string>(metadata ?? new Dictionary<string, string>(), StringComparer.Ordinal);
+}
+
+static int WriteNf4FromFp8(string input, string output, bool force)
+{
+    using CancellationTokenSource stop = new();
+    int signals = 0;
+    // The first signal stops the write between weights, so its partial file is removed; a second ends the process.
+    void Stop(PosixSignalContext context)
+    {
+        context.Cancel = Interlocked.Increment(ref signals) == 1;
+        stop.Cancel();
+    }
+    try
+    {
+        using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([input]);
+        if (source.IsSourceFile(output))
+        {
+            Console.Error.WriteLine($"Output is the input checkpoint: {output}. Choose a different output path.");
+            return 1;
+        }
+        if (File.Exists(output) && !force)
+        {
+            Console.Error.WriteLine($"Output already exists: {output}. Add --force to replace it.");
+            return 1;
+        }
+        Dictionary<string, string> metadata = ReadSourceMetadata(input);
+        metadata["hartsy.quant"] = "nf4";
+        metadata["hartsy.converter"] = "CheckpointRepacker --quant nf4 (streaming)";
+        metadata.Remove("modelspec.hash_sha256");
+        Stopwatch clock = Stopwatch.StartNew();
+        // Held through the manifest: a signal after the last weight lets the move and the manifest finish.
+        using (PosixSignalRegistration.Create(PosixSignal.SIGINT, Stop))
+        using (PosixSignalRegistration.Create(PosixSignal.SIGTERM, Stop))
+        {
+            string sha = Nf4Codec.WriteFromFp8(source, output, metadata,
+                message => Console.WriteLine($"  {message}"), stop.Token);
+            long bytes = new FileInfo(output).Length;
+            JsonObject manifest = new()
+            {
+                ["source"] = Path.GetFullPath(input),
+                ["source_bytes"] = new FileInfo(input).Length,
+                ["output"] = Path.GetFullPath(output),
+                ["output_bytes"] = bytes,
+                ["sha256"] = sha,
+                ["quant"] = "nf4",
+                ["block_size"] = Nf4Codec.DefaultBlockSize,
+                ["weights_quantized"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Fp8Block),
+                ["weights_plain"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Plain),
+            };
+            File.WriteAllText(output + ".manifest.json",
+                manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"Wrote {output} ({bytes} bytes), sha256 {sha}, in {clock.Elapsed.TotalMinutes:F1} min.");
+        }
+        return 0;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine($"Stopped; {output} was not written.");
+        return 130;
+    }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException or InvalidDataException
+        or IOException or HartsyInference.Core.Exceptions.HartsyInferenceException)
+    {
+        Console.Error.WriteLine($"Could not convert {Path.GetFileName(input)}: {ex.Message}");
+        return 1;
+    }
+}
 
 static string ComputeDtypeName(DType dtype) =>
     dtype == DType.BF16 ? "bfloat16" : dtype == DType.F16 ? "float16" : "float32";

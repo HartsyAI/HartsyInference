@@ -41,6 +41,7 @@ public static class ParameterProvenance
     }
 
     /// <summary>A seed: the caller's when it named one, otherwise drawn at random.</summary>
+    /// <remarks>A caller's seed outside the 31-bit range the samplers take is wrapped into it, so it reports as normalized.</remarks>
     public static ResolvedParameter Seed(long requested, long effective) =>
         RecipeRequestMapper.MapSeed(requested) is null
             ? new ResolvedParameter(Format(effective), ParameterSource.Derived, "random")
