@@ -14,7 +14,7 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Flux.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FluxPipeline"/> owns the CLIP-L + T5-XXL encoders, so this tokenizes the prompt with both (CLIP-L for the pooled EOS vector, T5-XXL per-token plus its attention mask) and calls <see cref="FluxPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FluxLoader.Generate</c> vanilla text-to-image drive path. Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable.</summary>
-/// <param name="isDev">Selects the step fallback and whether the embedded distilled guidance is applied.</param>
+/// <param name="isDev">Whether the embedded distilled guidance is applied (Dev) or the guidance is dropped (Schnell).</param>
 /// <param name="loaders">Whatever keeps the weights alive: the open checkpoint — either container, plus any copies the backend needed widened — and one loader per component resolved as a separate file.</param>
 public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev,
     List<IDisposable> loaders, MergedLoraStack? loraStack, IBackend backend) : IRecipePipeline
@@ -26,9 +26,6 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
     private readonly List<IDisposable> _loaders = loaders;
     private readonly MergedLoraStack? _loraStack = loraStack;
     private readonly IBackend _backend = backend;
-
-    /// <summary>A Schnell checkpoint (no guidance embedding) is a 4-step distilled model, so it resolves against <see cref="Flux1Recipe.SchnellDefaults"/> rather than Dev's 28 steps.</summary>
-    public ImageDefaults? VariantDefaults => _isDev ? Flux1Recipe.FamilyDefaults : Flux1Recipe.SchnellDefaults;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,

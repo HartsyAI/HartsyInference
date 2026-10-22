@@ -32,7 +32,6 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     private readonly Tensor[] _ownedVaeWeights;
     private readonly IBackend _backend;
     private readonly IBackend _textBackend;
-    private readonly ImageDefaults _variantDefaults;
     private readonly IDisposable _checkpoint;
     private readonly SafeTensorsLoader _qwenLoader;
     private readonly SafeTensorsLoader _vaeLoader;
@@ -52,7 +51,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer,
         ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder, Tensor[] transformerWeightTensors,
         Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights, IBackend backend, IBackend textBackend,
-        ImageDefaults variantDefaults, IDisposable checkpoint, SafeTensorsLoader qwenLoader,
+        IDisposable checkpoint, SafeTensorsLoader qwenLoader,
         SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
@@ -67,14 +66,10 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         _ownedVaeWeights = ownedVaeWeights;
         _backend = backend;
         _textBackend = textBackend;
-        _variantDefaults = variantDefaults;
         _checkpoint = checkpoint;
         _qwenLoader = qwenLoader;
         _vaeLoader = vaeLoader;
     }
-
-    /// <inheritdoc/>
-    public ImageDefaults? VariantDefaults => _variantDefaults;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,

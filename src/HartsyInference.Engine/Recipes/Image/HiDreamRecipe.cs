@@ -197,8 +197,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
                 DitShardSplitBlock = ditShardSplitBlock,
             };
             Logs.Info("[HiDreamRecipe] HiDream ready (4 text encoders; scheduler=flow-match).");
-            return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders, loraStack,
-                DefaultsFor(context.ResolveVariant(HiDreamVariants.Catalog)));
+            return new HiDreamRecipePipeline(pipeline, new ClipTokenizer(), new T5Tokenizer(maxLength: 256), new LlamaTokenizer(maxLength: 256), t5, llama, transformer, loaders, loraStack);
         }
         catch (Exception ex)
         {

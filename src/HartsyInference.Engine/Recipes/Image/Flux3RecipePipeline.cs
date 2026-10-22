@@ -33,15 +33,11 @@ public sealed class Flux3RecipePipeline(Flux3Pipeline pipeline, Qwen3Tokenizer t
     private int _disposed;
 
     /// <inheritdoc/>
-    public ImageDefaults? VariantDefaults => _config.FlowMap ? Flux3Recipe.DistilledDefaults : Flux3Recipe.FamilyDefaults;
-
-    /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
         CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
-        ImageDefaults defaults = VariantDefaults!;
         int steps = settings.Steps;
         float cfg = _config.FlowMap ? 1f : settings.CfgScale;
         (int reqWidth, int reqHeight) = (settings.Width, settings.Height);

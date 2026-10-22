@@ -127,7 +127,9 @@ change that made defaults total moved no output.
 - Image sizes are still snapped inside the pipelines (multiples of 16, area clamps), after provenance is recorded;
   that moves into planning with the pipeline migration, so a snapped size reports as a normalization.
 - Variant resolution refuses an unresolved variant instead of taking the catalog default, and filename guesses for
-  families whose variants differ in defaults; Flux.1, Flux.2, Z-Image and LTX variant defaults move out of pipelines.
-- Pipelines take the resolved plan only; pipeline `??` fallbacks, `GenerationDefaults` and `VariantDefaults` go.
+  families whose variants differ in defaults. Variant defaults now come from the catalog alone, and `VariantDefaults`
+  is gone. Flux.2's filename guess remains the last resort for prefixed checkpoints, whose names its structural rule
+  does not read; LTX-Video's filename clauses in `SupportsFor` remain.
+- Pipelines take the resolved plan only; pipeline `??` fallbacks and `GenerationDefaults` go.
 - Audio recipes (music, speech, transcription identity and defaults).
 - A side-effect-free descriptor (`IInferenceEngine.Recipes`) and HTTP endpoints for hosts.

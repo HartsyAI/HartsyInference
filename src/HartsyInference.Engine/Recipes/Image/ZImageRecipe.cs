@@ -185,7 +185,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             Logs.Info("[ZImageRecipe] Z-Image ready.");
             return new ZImageRecipePipeline(pipeline, qwen, tokenizer, transformer, vae, vaeEncoder,
                 transformerWeightTensors, qwenWeightTensors, ownedVaeWeights, context.Backend,
-                context.TextEncoderBackendOrDefault, isBase ? BaseDefaults : FamilyDefaults, checkpoint, qwenLoader,
+                context.TextEncoderBackendOrDefault, checkpoint, qwenLoader,
                 vaeLoader, loraStack);
         }
         catch

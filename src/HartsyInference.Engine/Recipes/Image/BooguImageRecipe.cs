@@ -141,8 +141,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 4096);
             BooguImagePipeline pipeline = new BooguImagePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[BooguImageRecipe] Boogu-Image ready (text-to-image).");
-            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack,
-                DefaultsFor(context.ResolveVariant(BooguImageVariants.Catalog)));
+            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack);
         }
         catch (Exception ex)
         {

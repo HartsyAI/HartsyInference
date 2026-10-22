@@ -14,10 +14,11 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Flux.2 recipe (BFL; Klein 4B / Klein 9B / Dev). Variant is detected from the converted transformer's hidden size (3072 → Klein 4B, 4096 → Klein 9B, 6144 → Dev). Lifted from the SwarmUI backend's <c>Flux2Loader</c>: the checkpoint is the transformer; the matching text encoder — Qwen3-4B (<see cref="SideModels.Qwen3_4B"/>), Qwen3-8B (<see cref="SideModels.Qwen3_8B_Fp4Mixed"/>), or Mistral-Small-3 (<see cref="SideModels.MistralSmallFlux2"/>) — and the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>, 32-channel latent + BatchNorm stats) resolve as side models. Constructs and drives through <see cref="Flux2RecipePipeline"/>.</summary>
+/// <summary>Flux.2 recipe (BFL; Klein 4B / Klein 9B / Dev). Variant comes from <see cref="Flux2Variants"/>, which reads the transformer's hidden size (3072 → Klein 4B, 4096 → Klein 9B, 6144 → Dev). Lifted from the SwarmUI backend's <c>Flux2Loader</c>: the checkpoint is the transformer; the matching text encoder — Qwen3-4B (<see cref="SideModels.Qwen3_4B"/>), Qwen3-8B (<see cref="SideModels.Qwen3_8B_Fp4Mixed"/>), or Mistral-Small-3 (<see cref="SideModels.MistralSmallFlux2"/>) — and the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>, 32-channel latent + BatchNorm stats) resolve as side models. Constructs and drives through <see cref="Flux2RecipePipeline"/>.</summary>
 public sealed class Flux2Recipe : IArchitectureRecipe
 {
     /// <summary>Flux.2 Dev system prompt — verbatim from ComfyUI <c>comfy/text_encoders/flux.py</c> (the newline mid-sentence is in the original).</summary>
@@ -48,7 +49,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 4.0, 1024x1024 (<c>GenerationDefaults.Flux2</c>); the distilled Klein variants narrow this via <see cref="Flux2RecipePipeline.VariantDefaults"/>.</summary>
+    /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 4.0, 1024x1024 (<c>GenerationDefaults.Flux2</c>); the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
@@ -57,6 +58,13 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <summary>Flux.2 Klein's sampling settings: 4 steps, guidance-free (CFG 1.0), the official settings for the distilled
     /// Klein checkpoints, which carry no guidance embedding. <see cref="Flux2RecipePipeline"/> does not read CfgScale yet.</summary>
     public static ImageDefaults KleinDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => Flux2Variants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && (variant.Is(Flux2Variants.Klein4B) || variant.Is(Flux2Variants.Klein9B)) ? KleinDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -83,7 +91,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
                 castWeights[kvp.Key] = kvp.Value.DType == DType.BF16 ? kvp.Value.CastTo(DType.F16) : kvp.Value;
             }
 
-            Flux2Config config = DetectConfigFromTransformerWeights(castWeights, GuessConfigFromFilename(Path.GetFileName(context.CheckpointPath)) ?? Flux2Config.Klein4B);
+            Flux2Config config = Flux2Variants.ConfigFor(context.ResolveVariant(Flux2Variants.Catalog));
             Logs.Info($"[Flux2Recipe] Architecture: hidden={config.HiddenSize}, depth={config.Depth} double + {config.DepthSingleBlocks} single → {DescribeConfig(config)}.");
 
             int mlpInner = (int)(config.HiddenSize * config.MlpRatio);
@@ -162,54 +170,6 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             checkpoint?.Dispose();
             throw;
         }
-    }
-
-    /// <summary>Filename-based variant guess, used only as the fallback when hidden-size detection is inconclusive.</summary>
-    private static Flux2Config? GuessConfigFromFilename(string? name)
-    {
-        if (string.IsNullOrEmpty(name))
-        {
-            return null;
-        }
-        string n = name.ToLowerInvariant();
-        if (n.Contains("klein-4b") || n.Contains("klein_4b") || n.Contains("klein4b"))
-        {
-            return Flux2Config.Klein4B;
-        }
-        if (n.Contains("klein-9b") || n.Contains("klein_9b") || n.Contains("klein9b"))
-        {
-            return Flux2Config.Klein9B;
-        }
-        if (n.Contains("flux2_dev") || n.Contains("flux-2-dev") || n.Contains("flux2-dev"))
-        {
-            return Flux2Config.Dev;
-        }
-        return null;
-    }
-
-    /// <summary>Confirms the variant by reading the actual hidden size from the converted transformer's <c>img_in.weight</c> (the authoritative answer — filename hints can lie).</summary>
-    private static Flux2Config DetectConfigFromTransformerWeights(Dictionary<string, Tensor> weights, Flux2Config fallback)
-    {
-        Tensor? probe = null;
-        foreach (string k in new[] { "img_in.weight", "x_embedder.weight", "patch_embed.proj.weight" })
-        {
-            if (weights.TryGetValue(k, out probe))
-            {
-                break;
-            }
-        }
-        if (probe is null || probe.Shape.Rank < 1)
-        {
-            return fallback;
-        }
-        int hidden = (int)probe.Shape[0];
-        return hidden switch
-        {
-            3072 => Flux2Config.Klein4B,
-            4096 => Flux2Config.Klein9B,
-            6144 => Flux2Config.Dev,
-            _ => fallback,
-        };
     }
 
     /// <summary>Picks the LlamaStyleEncoder preset + side-model asset for the variant. Klein 4B → Qwen3-4B; Klein 9B → Qwen3-8B (nvfp4-mixed, dequantized at load); Dev → Mistral-Small-3.</summary>
