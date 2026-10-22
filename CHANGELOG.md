@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: the native NVFP4 GEMM (`numerics.fp4Native`, Blackwell) is safe to switch on.**
+  - It multiplies by the weight's own scale factor, the alpha the F16 damps of Z-Image, Flux.1, Chroma and Flux.2
+    scale, so Z-Image's NVFP4 build no longer decodes NaN (RTX 5090: 131 ms per step, against 278 for the F16 build).
+  - A shape cuBLASLt declines falls back to the per-GEMM unpack path, and that weight stays there, instead of failing
+    the generation.
+  - A block-scale tensor whose rows are not padded to the 128-row tile is refused at load instead of read past its end.
+  - The unload summary counts weights per route as well as calls, and keeps the first refusal even when the first
+    dispatch went native.
 - **Fixed: the sm_120a block-quant kernel builds from source again.** `block_scale.cuh` had gone back to a 16-bit
   destination for `cvt.rn.satfinite.e2m1x2.f32` (reverted in `81ad529b1`), so rebuilding `block_quant.sm120.ptx` would
   reproduce the module no CC 12.0 card can load; only the shipped PTX had been patched by hand. The source writes through
