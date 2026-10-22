@@ -145,7 +145,7 @@ public sealed partial class CudaBackend
         const AttentionDTypes Half = AttentionDTypes.F16 | AttentionDTypes.BF16;
         return
         [
-            .. Int8V2Rows(E, HM, "S.16", "S.17"),
+            .. Int8V2Rows(E, HM, "S.17", "S.18"),
             new DelegateAttentionRow(Cap("sage.int8.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,

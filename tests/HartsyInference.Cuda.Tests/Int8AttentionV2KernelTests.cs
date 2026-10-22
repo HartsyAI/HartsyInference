@@ -413,7 +413,7 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>The planner's choice with the knob on: S.16 and M.4 for F16 and F32, the widened grouped call through S.16, and every
+    /// <summary>The planner's choice with the knob on: S.17 and M.4 for F16 and F32, the widened grouped call through S.17, and every
     /// call v2 does not run refused before launch (bias, head dim, BF16, grouped K/V on its own route, a non-positive scale, the
     /// engage length), with the plan unchanged with the knob off.</summary>
     [Trait("Category", "GpuIntegration")]

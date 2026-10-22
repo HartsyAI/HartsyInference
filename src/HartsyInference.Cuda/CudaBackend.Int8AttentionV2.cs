@@ -5,7 +5,7 @@ using HartsyInference.Cuda.Profiling;
 
 namespace HartsyInference.Cuda;
 
-// INT8 attention v2 rows (S.16/S.17, M.4/M.5): admission, the persistent workspace and the three launches.
+// INT8 attention v2 rows (S.17/S.18, M.4/M.5): admission, the persistent workspace and the three launches.
 public sealed partial class CudaBackend
 {
     private ulong _int8V2Workspace;
@@ -44,7 +44,7 @@ public sealed partial class CudaBackend
         return f16Pv ? _kernels!.HasInt8AttentionV2F16Pv : _kernels!.HasInt8AttentionV2;
     }
 
-    /// <summary>Whether a head-major call of this shape with no mask would take S.16; the grouped token-major row yields to it.</summary>
+    /// <summary>Whether a head-major call of this shape with no mask would take S.17; the grouped token-major row yields to it.</summary>
     private bool Int8V2TakesWidened(in AttentionCall c)
     {
         if (!EngineKnobs.Int8AttnV2.Value || c.Mask.Bias is not null || c.QkHeadDim != Int8AttentionV2Layout.HeadDim
