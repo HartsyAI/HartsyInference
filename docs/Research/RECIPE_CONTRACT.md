@@ -142,12 +142,33 @@ been re-read; until then it is an audit finding, not a specification.
 | kandinsky5-video | 50 / 5.0 / 512×512 / 25 @ 24 | none in SwarmUI; pipeline fallback was 121 | unverified |
 | lance-video | 30 / 4.0 / 512×512 / 25 @ 25 | none in SwarmUI; pipeline fallback was 81, cap 121 | unverified |
 | minimax-h3 | 30 / 1.0 / 1344×768 / 124 @ 24 | 124 frames (17k+5, rounded up), 24 fps, cfg 1, `res_multistep` / `simple` | unverified |
-| ace-step 1.5 (audio) | loader table | 120 s (max 600), turbo cfg 1 / 8 steps / shift 3 | unverified |
-| minimax-music-3 (audio) | `MiniMaxMusic3MusicRecipe`: 10 s, 30 steps, cfg 1.7 | 120 s max, cfg 1.7, 30 steps; frame grid caps at 360 s | unverified |
-| yue2 (audio) | `Yue2MusicRecipe`: 10 s, 32 ODE steps; cfg owned by the planning mode | 300 s max, cfg 1, 20 steps; protocol caps at 900 s | unverified |
+| ace-step 1.5 (audio) | 120 s; turbo 8 / cfg 1 / shift 3, sft 50 and base 32 at cfg 7 / shift 1 | 120 s (max 600), turbo cfg 1 / 8 steps / shift 3 | verified 2026-10-22 |
+| minimax-music-3 (audio) | 120 s, 30 steps, flow cfg 1.7 | core: 120 s; docs: flow cfg 1.7 official, 30 steps. Core's `cfg_scale` 1.5 on `MiniMaxMusic3TextEncode` is the code LM's guidance, which `MiniMaxMusic3ArPipeline` already runs at 1.5; frame grid caps at 360 s | verified 2026-10-22 |
+| yue2 (audio) | 300 s, 32 ODE steps; cfg owned by the planning mode | 300 s, cfg 1, steps "eg 20" (an example, so 32 stays); protocol caps at 900 s | verified 2026-10-22 |
 
 Rows marked "today" with 25 fps or 704×480 that SwarmUI does not list are the old generic fallback, kept so the
 change that made defaults total moved no output.
+
+Image families whose defaults were moved to SwarmUI's documented values (`docs/Model Support.md` = MS,
+`docs/Obscure Model Support.md` = OMS, read 2026-10-22). Image families not listed already matched, or SwarmUI gives
+only an example value, so the upstream value stays.
+
+| Family / variant | Was | Now | Source |
+|---|---|---|---|
+| chroma | 35 / 5.0 | 26 / 3.5 | MS Chroma: official 26 steps, CFG around 3.5 |
+| flux1 schnell | 4 / 3.5 | 4 / 1.0 | MS Flux: CFG 1, Flux Guidance does not apply to Schnell |
+| flux2 dev | 50 / 4.0 | 50 / 3.5 | MS Flux.2: Flux Guidance defaults to 3.5 |
+| flux2 klein (4B, 9B) | 4 / 1.0 | 8 / 1.0 | MS Flux.2 Klein: distilled, 8 steps, CFG 1 |
+| flux3 distilled | 15 / 1.0 | 16 / 1.0 | MS Flux 3 Image: 16 steps for 'sd' |
+| hunyuan-image | 50 / 3.5 | 20 / 3.5 | MS HunyuanImage 2.1: steps around 20 |
+| omnigen2 | 28 / 4.0 | 20 / 5.0 | OMS OmniGen2: steps ~20, CFG 5 to 7 |
+| lens, lens turbo | 1024² | 1440² | OMS Lens: 1440 is the official default side |
+| boogu base | 25 / 3.5 | 20 / 4.0 | MS Boogu: 20 steps, CFG around 4 |
+| mage-flow base | 30 / 5.0 | 20 / 5.0 | OMS Mage Flow: 20-ish steps |
+| z-image base | shift 6 | shift 3 | MS Z-Image: default sigma shift 3 |
+
+Lance image stays at 1024² (upstream's official size). The SwarmUI bridge registers its class at 768² and Lance
+video at 832×480; those are host-declared sizes, which this contract replaces with `IInferenceEngine.Recipes`.
 
 ## Audio
 

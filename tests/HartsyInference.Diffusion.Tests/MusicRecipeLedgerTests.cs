@@ -95,12 +95,14 @@ public sealed class MusicRecipeLedgerTests
     public void MusicRecipe_AceStepFamilyDefaultsMatchTheLoaders()
     {
         IMusicRecipe recipe = MusicRecipeRegistry.Resolve("acestep")!;
-        // AceStepMusicModel.cs:189 clamps to 600 s on 1.5; MusicRequest.cs:16/76/82/85/88/91/94/155 and
+        // AceStepMusicModel.cs:189 clamps to 600 s on 1.5; MusicRequest.cs:76/82/85/88/91/94/155 and
         // AceStepMusicModel.cs:256 (InferMethod "ode") and :545 (GuidanceType "apg" when UseAdg was false).
+        // Duration 120 s is SwarmUI's (Audio Model Support.md, ACE-Step; WorkflowGenerator.cs), revision 2.
         Assert.Equal(
             new MusicDefaults
             {
-                Duration = 10,
+                Revision = 2,
+                Duration = 120,
                 InferMethod = "ode",
                 GuidanceType = "apg",
                 CfgIntervalStart = 0,
@@ -117,21 +119,22 @@ public sealed class MusicRecipeLedgerTests
     }
 
     [Theory]
-    [InlineData("turbo", 8, 3)]
-    [InlineData("turbo-shift1", 8, 1)]
-    [InlineData("turbo-shift3", 8, 3)]
-    [InlineData("turbo-continuous", 8, 3)]
-    [InlineData("sft", 50, 1)]
-    [InlineData("base", 32, 1)]
-    [InlineData("xl-turbo", 8, 3)]
-    [InlineData("xl-sft", 50, 1)]
-    [InlineData("xl-base", 32, 1)]
-    [InlineData("acestep", 8, 3)]
-    public void MusicRecipe_AceStepVariantsMatchTheLoaderTable(string variant, int steps, double shift)
+    [InlineData("turbo", 8, 3, 1)]
+    [InlineData("turbo-shift1", 8, 1, 1)]
+    [InlineData("turbo-shift3", 8, 3, 1)]
+    [InlineData("turbo-continuous", 8, 3, 1)]
+    [InlineData("sft", 50, 1, 7)]
+    [InlineData("base", 32, 1, 7)]
+    [InlineData("xl-turbo", 8, 3, 1)]
+    [InlineData("xl-sft", 50, 1, 7)]
+    [InlineData("xl-base", 32, 1, 7)]
+    [InlineData("acestep", 8, 3, 1)]
+    public void MusicRecipe_AceStepVariantsMatchTheLoaderTable(string variant, int steps, double shift, double cfg)
     {
-        // AceStepMusicModel.cs:627-641 (VariantDefaults) and :251 (CfgScale 7f on the 1.5 path).
+        // AceStepMusicModel.cs:627-641 (VariantDefaults) and :251 (CfgScale 7f on the 1.5 path). Turbo declares
+        // SwarmUI's CFG 1 (Audio Model Support.md), which the 1.5 pipeline's turbo clamp already ran.
         MusicDefaults defaults = MusicRecipeRegistry.Resolve("acestep")!.DefaultsFor(variant);
-        Assert.Equal((steps, shift, 7d), (defaults.Steps, defaults.Shift, defaults.CfgScale));
+        Assert.Equal((steps, shift, cfg), (defaults.Steps, defaults.Shift, defaults.CfgScale));
     }
 
     [Fact]
@@ -149,7 +152,8 @@ public sealed class MusicRecipeLedgerTests
     {
         IMusicRecipe recipe = MusicRecipeRegistry.Resolve("yue2")!;
         // Yue2Config.cs:51 (OdeSteps = 32, read through Yue2Config.V1 at Yue2MusicModel.cs:264); Yue2Protocol.cs:83 caps at 900 s.
-        Assert.Equal(new MusicDefaults { Duration = 10, Steps = 32 }, recipe.Defaults);
+        // Duration 300 s is SwarmUI's (Audio Model Support.md, YuE2; WorkflowGenerator.cs max_duration), revision 2.
+        Assert.Equal(new MusicDefaults { Revision = 2, Duration = 300, Steps = 32 }, recipe.Defaults);
         Assert.Equal(new MusicConstraints { MaxDurationSeconds = 900 }, recipe.Constraints);
     }
 
@@ -168,7 +172,8 @@ public sealed class MusicRecipeLedgerTests
         IMusicRecipe recipe = MusicRecipeRegistry.Resolve("minimaxmusic3")!;
         // MiniMaxMusic3FlowPipeline.cs:37 (30 steps) and :34 (1.7 CFG), applied by MiniMaxMusic3MusicModel.cs:158-160;
         // the frame grid caps the clip at MaxAudioFrames / FrameRate = 9000 / 25 s (MiniMaxMusic3MusicModel.cs:156-157).
-        Assert.Equal(new MusicDefaults { Duration = 10, Steps = 30, CfgScale = 1.7 }, recipe.Defaults);
+        // Duration 120 s is SwarmUI core's (WorkflowGenerator.cs), revision 2.
+        Assert.Equal(new MusicDefaults { Revision = 2, Duration = 120, Steps = 30, CfgScale = 1.7 }, recipe.Defaults);
         Assert.Equal(new MusicConstraints { MaxDurationSeconds = 360 }, recipe.Constraints);
     }
 
