@@ -135,8 +135,21 @@ Each probe built a fused SDPA graph in its own process, ran it and compared it w
 
 ## End to end against ComfyUI
 
-Pending: ComfyUI default and `--use-ck-attention` against this engine on Krea2-Turbo, Flux.1-dev, Wan 2.2 5B and
-LTX-2.5, per-step time by the slope method.
+RTX 4090, 2026-10-21, engine at the Phase 0 baseline (e845dcd9), ComfyUI from the Swarm venv with and without
+`--use-ck-attention` (commit in `results/2026-10-20_attention_phase0/4090/e2e/comfy.txt`). Per-step time is the slope
+(T(2S) − T(S)) / S after a discarded warm-up per arm and model, median of two rounds, so model load cancels
+([`bench_comfy_e2e.py`](../python-baseline/bench_comfy_e2e.py), rows in `e2e/e2e.json`).
+
+| model (steps S) | ComfyUI ms/step | ComfyUI + CK attention | engine | engine ÷ CK |
+|---|---|---|---|---|
+| Krea2-Turbo (8) | 683.8 | 647.4 | 531.1 | 0.82× |
+| Flux.1-dev (20) | 563.8 | 510.6 | 454.5 | 0.89× |
+| Wan 2.2 5B (20) | 779.7 | 742.3 | 1140.9 | 1.54× |
+| LTX-2.5 distilled (8) | not comparable | | | |
+
+- LTX-2.5's slope moves ±25% between rounds on both engines (the two-stage recipe's refine stage does not scale with S)
+  and the engine's first round went negative, so no ratio is quoted.
+- The engines compute at different precisions (ComfyUI bf16, the engine F16/F32 by layer), so these rows are speed only.
 
 ## Reading the numbers
 
