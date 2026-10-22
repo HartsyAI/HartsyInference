@@ -185,7 +185,30 @@ public sealed class MusicService : IMusicService
         IMusicRecipe recipe = MusicRecipeRegistry.Resolve(selector.Id)
             ?? throw new NotSupportedException($"No music recipe is registered for '{selector.Id}'.");
         MusicDefaults defaults = selector.LocalPath is null ? recipe.DefaultsFor(selector.Variant) : recipe.Defaults;
-        return defaults.Apply(request);
+        MusicRequest resolved = defaults.Apply(request);
+        RejectInvalidTunables(resolved);
+        return resolved;
+    }
+
+    /// <summary>Refuses a step count or guidance scale no sampler can run, by name, instead of passing it to the
+    /// pipeline or quietly substituting the recipe's value.</summary>
+    internal static void RejectInvalidTunables(MusicRequest request)
+    {
+        if (request.InferSteps is int steps && steps < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MusicRequest.InferSteps), steps,
+                "Music steps must be at least 1; leave it unset to use the model's default.");
+        }
+        if (request.CfgScale is double cfg && (!double.IsFinite(cfg) || cfg < 0))
+        {
+            throw new ArgumentOutOfRangeException(nameof(MusicRequest.CfgScale), cfg,
+                "Music guidance must be finite and not negative; leave it unset to use the model's default.");
+        }
+        if (request.Duration is double seconds && (!double.IsFinite(seconds) || seconds <= 0))
+        {
+            throw new ArgumentOutOfRangeException(nameof(MusicRequest.Duration), seconds,
+                "Music duration must be a positive number of seconds; leave it unset to use the model's default.");
+        }
     }
 
     /// <summary>Gates the audio-conditioned editing modes: they are mutually exclusive, and only ACE-Step 1.5 has an edit path (its DiT reads <c>context_latents = [src_latent ‖ chunk_mask]</c>) — every other music family is text-conditioned only and is refused by name. ACE-Step requests fall through to <c>AceStepMusicModel</c>, which decodes the clip and builds the src/mask/start-sigma plan. <b>Parity-pending:</b> the edit modes have not been validated against real weights, and cover approximates upstream's FSQ-detokenized 5 Hz hints with raw 25 Hz Oobleck latents.</summary>

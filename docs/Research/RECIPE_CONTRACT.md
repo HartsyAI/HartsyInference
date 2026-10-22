@@ -116,6 +116,9 @@ Audio speech and transcription recipes are not yet typed; their defaults stay in
 
 ## Open
 
+- ACE-Step steps, shift and guidance for a checkpoint placed on disk are still applied by the loader, which tells v1
+  from 1.5 only after reading it. A structural ACE-Step variant catalog moves them into the recipe, as for Flux.
+
 - What `SnapNearest` and `SnapUp` do when the snapped count would pass a grid's `Max` (refuse, or clamp down onto
   the grid), decided where the planner first applies the grid.
 - Planner with per-parameter provenance (recipe default, user override, normalization, lock) on every plan and

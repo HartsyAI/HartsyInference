@@ -1,5 +1,6 @@
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Services;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -220,4 +221,23 @@ public sealed class MusicRecipeLedgerTests
         LmTopK = defaults.LmTopK,
         LmTopP = defaults.LmTopP,
     };
+
+    [Theory]
+    [InlineData(0, null, null)]
+    [InlineData(-3, null, null)]
+    [InlineData(null, -1.0, null)]
+    [InlineData(null, double.NaN, null)]
+    [InlineData(null, null, 0.0)]
+    public void ExplicitTunablesNoSamplerCanRun_AreRefusedByName(int? steps, double? cfg, double? duration)
+    {
+        MusicRequest request = new MusicRequest { Prompt = "p", InferSteps = steps, CfgScale = cfg, Duration = duration };
+
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => MusicService.RejectInvalidTunables(request));
+        Assert.Contains(error.ParamName, new[] { "InferSteps", "CfgScale", "Duration" });
+    }
+
+    [Fact]
+    public void UnsetAndPositiveTunables_PassValidation() =>
+        MusicService.RejectInvalidTunables(new MusicRequest { Prompt = "p", InferSteps = 8, CfgScale = 0, Duration = 10 });
 }
