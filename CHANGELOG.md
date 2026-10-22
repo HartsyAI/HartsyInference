@@ -23,6 +23,12 @@ stable release will require. Dates are UTC.
   the token-major entry has no Sage kernel. Z-Image Base, SDXL's batched CFG forward and the UNet's cross-attention keep
   the head-major layout. Output is bit-identical: at these models' shapes the token-major cuDNN row returns the bits of
   the head-major row it replaces.
+- **Fixed: ACE-Step v1 on the CPU backend.** The Comfy all-in-one checkpoint is bf16 and the CPU kernels are F32-only, so
+  generation stopped at the DiT's first bf16 bias. On the CPU backend the engine now loads the checkpoint as F32 (about
+  15 GB of weights, 22 GB peak RSS for a 2 s clip); other backends keep reading the bf16 weights. The DiT also took its
+  text-token count from the leading dim of the `[1, T, 768]` UMT5 features the engine passes, so it conditioned on the first
+  tag token alone and its projection wrote T rows into a one-row output (an exception on CPU, an out-of-bounds write on
+  CUDA). It now counts rows as `Linear` does, which changes CUDA output.
 
 ## alpha.385
 

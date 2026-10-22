@@ -157,6 +157,10 @@ public static class TestPaths
         public static string Umt5BaseDir => Path.Combine(RootDir, "umt5-base");
         public static string LyricVocabPath => Resolve("ACE_STEP_LYRIC_VOCAB", Path.Combine(RootDir, "vocab.json"));
         public static string LyricMergesPath => Resolve("ACE_STEP_LYRIC_MERGES", Path.Combine(RootDir, "merges.txt"));
+
+        /// <summary>The Comfy-Org all-in-one v1 file (DiT, DCAE, vocoder and UMT5 together), SwarmUI layout.</summary>
+        public static string AllInOnePath =>
+            Path.Combine(ModelsDir, "Stable-Diffusion", "AceStepV1", "ace_step_v1_3.5b.safetensors");
     }
 
     /// <summary>ERNIE-Image paths. Diffusers folder layout (transformer/, text_encoder/, vae/, scheduler/, tokenizer/).</summary>
