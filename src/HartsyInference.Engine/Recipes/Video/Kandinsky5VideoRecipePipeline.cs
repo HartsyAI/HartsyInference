@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -43,15 +44,16 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        float cfg = request.CfgScale ?? 5.0f;
+        float cfg = settings.CfgScale;
         bool useCfg = cfg > 1.0f;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, multiple: 8);
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 121, step: 4);
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, multiple: 8);
+        int numFrames = settings.Frames;
 
         // Image-to-video: the start frame is VAE-encoded once and pinned as latent frame 0, so only frames 1..
         // denoise. Resized to the resolved generation size first, matching the other i2v families.
@@ -90,7 +92,7 @@ public sealed class Kandinsky5VideoRecipePipeline : IVideoRecipePipeline
                 NegativePrompt = negative,
                 Width = width,
                 Height = height,
-                Steps = request.Steps ?? 50,
+                Steps = settings.Steps,
                 CfgScale = cfg,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —

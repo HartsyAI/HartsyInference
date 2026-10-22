@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -48,7 +49,8 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         // TODO(E-IMG-4/5): a real control VIDEO (and the reactive/inactive control mask) needs the host-side video
@@ -60,10 +62,10 @@ public sealed class WanVaceRecipePipeline : IVideoRecipePipeline
 
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: _config.VaeTemporalCompression);
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
-        (int width, int height) = VideoRecipeUtils.ResolveI2VResolution(request, control.Width, control.Height, _config.VaeSpatialCompression);
+        int steps = settings.Steps;
+        int numFrames = settings.Frames;
+        float cfgScale = settings.CfgScale;
+        (int width, int height) = VideoRecipeUtils.ResolveI2VResolution(request, settings, control.Width, control.Height, _config.VaeSpatialCompression);
 
         byte[] controlRgb = VideoRecipeUtils.ResizeRgb24(control, width, height);
         Tensor controlClip = VideoRecipeUtils.TileRgbToClip(controlRgb, width, height, numFrames);

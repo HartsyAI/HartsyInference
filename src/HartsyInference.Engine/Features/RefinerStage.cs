@@ -188,7 +188,7 @@ public static class RefinerStage
             Steps = spec.Steps,
             CfgScale = spec.CfgScale,
         };
-        ImageResult refined = engine.GenerateWithVramCleanup(() => refinerPipeline.Generate(resolvedRefine, progress, cancel));
+        ImageResult refined = engine.GenerateWithVramCleanup(() => refinerPipeline.Generate(resolvedRefine, ImageEffectiveSettings.Of(resolvedRefine), progress, cancel));
         Dictionary<string, string> meta = new Dictionary<string, string>(refined.Meta, StringComparer.OrdinalIgnoreCase)
         {
             ["refiner_model"] = Path.GetFileName(spec.Model),

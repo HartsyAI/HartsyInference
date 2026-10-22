@@ -35,13 +35,14 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.DefaultSteps;
-        float cfg = request.CfgScale ?? _config.DefaultCfgScale;
+        int steps = settings.Steps;
+        float cfg = settings.CfgScale;
         int penultimateIdx = _qwen.NumLayers - 1;
 
         // Bulk-upload the Qwen3 weights, encode, then free them — the same staging Z-Image uses for this encoder.
@@ -53,7 +54,7 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
         _backend.FreeWeights(_qwen.EnumerateWeights());
 
         // Pixel-space: no VAE encoder, the source pixels are noised directly at sigma[startStep].
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
@@ -64,8 +65,8 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
+                Width = settings.Width,
+                Height = settings.Height,
                 Steps = steps,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —

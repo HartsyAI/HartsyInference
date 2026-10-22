@@ -53,13 +53,14 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? QwenImageRecipe.FamilyDefaults.Steps;
-        float cfg = request.CfgScale ?? QwenImageRecipe.FamilyDefaults.CfgScale;
+        int steps = settings.Steps;
+        float cfg = settings.CfgScale;
 
         // TODO(E-IMG-5): regional prompting is deferred — the SwarmUI loader resolved it from T2IParamInput too.
         // Reference routes the images to the in-context edit tokens, Denoise to the classic noised start; Auto follows
@@ -82,7 +83,7 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         }
         bool refEdit = hasExtraReferences || mode == Img2ImgMode.Reference
             || (mode == Img2ImgMode.Auto && _editTemplate is not null && request.Img2Img?.InitImage is not null && request.Inpaint is null);
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? img2img = refEdit
             ? null : RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         // References carry their own aspect-preserving rescales (~1 MP for the VAE, the template's area for the vision tower), so they
@@ -123,8 +124,8 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
+                Width = settings.Width,
+                Height = settings.Height,
                 Steps = steps,
                 CfgScale = cfg,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),

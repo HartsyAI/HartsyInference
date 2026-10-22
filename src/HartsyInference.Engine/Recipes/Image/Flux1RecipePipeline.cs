@@ -31,12 +31,13 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
     public ImageDefaults? VariantDefaults => _isDev ? Flux1Recipe.FamilyDefaults : Flux1Recipe.SchnellDefaults;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
-        int steps = request.Steps ?? (_isDev ? Flux1Recipe.FamilyDefaults.Steps : Flux1Recipe.SchnellDefaults.Steps);
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        int steps = settings.Steps;
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
 
         // TODO(E-IMG-4/5): Flux guidance came from the FluxGuidanceScale T2IParam (default 3.5 for Dev, ignored by
         // Schnell) — defaulted here. True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so
@@ -117,8 +118,8 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                     VariationSeed = request.VariationSeed?.Seed ?? -1,
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                     Prompt = prompt,
-                    Width = request.Width,
-                    Height = request.Height,
+                    Width = settings.Width,
+                    Height = settings.Height,
                     Steps = steps,
                     Seed = RecipeRequestMapper.MapSeed(request.Seed),
                     // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —

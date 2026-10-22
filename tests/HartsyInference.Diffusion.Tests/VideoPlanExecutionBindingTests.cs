@@ -187,8 +187,8 @@ public sealed class VideoPlanExecutionBindingTests
 
         public VideoRequest? LastRequest { get; private set; }
 
-        public VideoGenerationResult Generate(
-            VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+        public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+            IProgress<StepPreview>? progress, CancellationToken cancel)
         {
             GenerateCalls++;
             LastRequest = request;

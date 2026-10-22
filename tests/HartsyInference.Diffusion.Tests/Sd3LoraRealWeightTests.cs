@@ -93,7 +93,8 @@ public sealed class Sd3LoraRealWeightTests
             Loras = loras,
         };
         using IRecipePipeline pipeline = new Sd3Recipe().Construct(context);
-        ImageResult result = pipeline.Generate(request, progress: null, cancel: default);
+        (ImageRequest resolved, ImageEffectiveSettings settings) = TestImageRecipes.Resolve(Sd3Recipe.FamilyDefaults, request);
+        ImageResult result = pipeline.Generate(resolved, settings, progress: null, cancel: default);
         return result.Rgb;
     }
 }

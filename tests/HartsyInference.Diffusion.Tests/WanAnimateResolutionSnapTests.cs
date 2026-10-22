@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
 using Xunit;
@@ -15,8 +16,7 @@ public sealed class WanAnimateResolutionSnapTests
     [InlineData(840, 488, 832, 480)]    // exact midpoints round to even, per Math.Round's default
     public void ResolutionSnapsToTheSixteenGrid(int width, int height, int expectedWidth, int expectedHeight)
     {
-        VideoRequest request = new VideoRequest { Prompt = "", Width = width, Height = height };
-        (int w, int h) = VideoRecipeUtils.ResolveResolution(request, 16);
+        (int w, int h) = VideoRecipeUtils.ResolveResolution(TestVideoRecipes.Settings(width, height), 16);
         Assert.Equal(expectedWidth, w);
         Assert.Equal(expectedHeight, h);
     }
@@ -27,10 +27,10 @@ public sealed class WanAnimateResolutionSnapTests
         bool eightEverOdd = false;
         for (int size = 1; size <= 2048; size++)
         {
-            VideoRequest request = new VideoRequest { Prompt = "", Width = size, Height = size };
-            (int wide, int _) = VideoRecipeUtils.ResolveResolution(request, 8);
+            VideoEffectiveSettings settings = TestVideoRecipes.Settings(size, size);
+            (int wide, int _) = VideoRecipeUtils.ResolveResolution(settings, 8);
             eightEverOdd |= (wide / 8) % 2 != 0;
-            (int aligned, int _) = VideoRecipeUtils.ResolveResolution(request, 16);
+            (int aligned, int _) = VideoRecipeUtils.ResolveResolution(settings, 16);
             Assert.Equal(0, (aligned / 8) % 2);
         }
         Assert.True(eightEverOdd, "the 8-multiple snap must be able to produce the odd latent grid this guards against");

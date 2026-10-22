@@ -23,6 +23,14 @@ internal static class TestVideoRecipes
     /// <summary>A plan identity for tests that build a <see cref="VideoPlan"/> by hand.</summary>
     internal static RecipeIdentity Identity(string familyId) => new RecipeIdentity { FamilyId = familyId, Revision = 1 };
 
+    /// <summary>Planned settings for tests that drive a pipeline directly with an explicit geometry and schedule.</summary>
+    internal static VideoEffectiveSettings Settings(int width = 832, int height = 480, int frames = 33, int fps = 16,
+        int steps = 20, float cfgScale = 5f) => new VideoEffectiveSettings
+    {
+        Width = width, Height = height, Frames = frames, Fps = fps, Steps = steps, CfgScale = cfgScale, Seed = 1,
+        ReferenceSizing = VideoReferenceSizing.Native, LockedFields = VideoLockedFields.None,
+    };
+
     /// <summary>Empty provenance for hand-built plans whose tests do not inspect it.</summary>
     internal static IReadOnlyDictionary<string, ResolvedParameter> NoProvenance { get; } =
         new Dictionary<string, ResolvedParameter>(StringComparer.Ordinal);

@@ -306,7 +306,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 VideoArtifactFileBinding.RequireUnchanged(executionPlan);
                 IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
                     executionPlan.Model, effectiveRequest, executionPlan);
-                VideoGenerationResult result = pipeline.Generate(effectiveRequest, progress, cancel);
+                VideoGenerationResult result = pipeline.Generate(effectiveRequest, executionPlan.EffectiveSettings, progress, cancel);
                 // An explicit request fps always wins; else a pipeline-pinned rate (e.g. a decoded driving clip's,
                 // so motion speed matches the driving video); else the family default the resolver applied.
                 int? fps = executionRequest.Fps ?? result.Fps ?? effectiveRequest.Fps;
@@ -372,7 +372,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             try
             {
-                await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, progress, cancel).WithCancellation(cancel).ConfigureAwait(false))
+                await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, executionPlan.EffectiveSettings, progress, cancel).WithCancellation(cancel).ConfigureAwait(false))
                 {
                     await channel.Writer.WriteAsync(frame, cancel).ConfigureAwait(false);
                 }

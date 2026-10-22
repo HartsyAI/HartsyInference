@@ -28,14 +28,15 @@ public sealed class LanceImageRecipePipeline(LanceImagePipeline pipeline, LanceC
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumTimesteps;
-        float cfgScale = request.CfgScale ?? _config.CfgTextScale;
-        (int width, int height) = RecipeRequestMapper.Size(request);
+        int steps = settings.Steps;
+        float cfgScale = settings.CfgScale;
+        (int width, int height) = (settings.Width, settings.Height);
         if (width % SizeMultiple != 0 || height % SizeMultiple != 0)
         {
             int fixedW = Math.Max(SizeMultiple, width / SizeMultiple * SizeMultiple);

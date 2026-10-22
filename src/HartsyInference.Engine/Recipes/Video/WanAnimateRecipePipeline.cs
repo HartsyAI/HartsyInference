@@ -9,6 +9,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -64,7 +65,8 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         if (request.DrivingVideo is null && request.InitImage is null)
@@ -108,14 +110,14 @@ public sealed class WanAnimateRecipePipeline : IVideoRecipePipeline
         // Swarm sends an unset negative as "", not null, so upstream's falsy check is the one to mirror.
         string negative = string.IsNullOrWhiteSpace(request.NegativePrompt) ? WanVideoRecipe.DefaultNegativePrompt
             : request.NegativePrompt;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 77, step: _config.VaeTemporalCompression);
+        int steps = settings.Steps;
+        int numFrames = settings.Frames;
         if (numFrames < 5)
         {
             throw new InvalidOperationException("Wan-Animate needs at least 5 frames (the face pathway downsamples 4x).");
         }
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request,
+        float cfgScale = settings.CfgScale;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings,
             VideoRecipeUtils.PatchAlignedMultiple(_config.VaeSpatialCompression, _config.PatchSize));
 
         string cacheKey = BuildConditioningKey(request, reference, width, height, numFrames);

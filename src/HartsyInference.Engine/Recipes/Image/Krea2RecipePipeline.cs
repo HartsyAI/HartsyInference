@@ -42,18 +42,19 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
 
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
         // Turbo: 8 steps, guidance off. Base: 28 steps, CFG 4.5.
-        int steps = request.Steps ?? (_isTurbo ? Krea2Recipe.TurboDefaults.Steps : Krea2Recipe.FamilyDefaults.Steps);
-        float cfg = _isTurbo ? Krea2Recipe.TurboDefaults.CfgScale : (request.CfgScale ?? Krea2Recipe.FamilyDefaults.CfgScale);
+        int steps = settings.Steps;
+        float cfg = _isTurbo ? Krea2Recipe.TurboDefaults.CfgScale : (settings.CfgScale);
         bool useCfg = cfg > 1.0f;
 
         // Width/height must be multiples of 16 (2×2 patchify × 8× VAE), clamped to 128–4096.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int width = Math.Clamp(reqWidth / 16 * 16, 128, 4096);
         int height = Math.Clamp(reqHeight / 16 * 16, 128, 4096);
         if (width != reqWidth || height != reqHeight)

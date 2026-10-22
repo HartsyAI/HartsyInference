@@ -153,12 +153,12 @@ public unsafe class WanAnimate2StrengthParamTests
             null!, null!, null!, null!, null!, null!, null!, null, []);
         ImageData still = new ImageData { Rgb = new byte[3], Width = 1, Height = 1 };
         VideoRequest bad = new VideoRequest { Prompt = "x", InitImage = still, AnimatePoseStrength = 1.5, AnimateReferenceImageStrength = 0.5 };
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => v1.Generate(bad, null, CancellationToken.None));
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => v1.Generate(bad, TestVideoRecipes.Settings(), null, CancellationToken.None));
         Assert.Contains(nameof(VideoRequest.AnimatePoseStrength), ex.Message);
         Assert.Contains(nameof(VideoRequest.AnimateReferenceImageStrength), ex.Message);
 
         VideoRequest toggledDefault = new VideoRequest { Prompt = "x", InitImage = still, AnimatePoseStrength = 1.0, AnimateReferenceImageStrength = 1.0 };
-        InvalidOperationException past = Assert.Throws<InvalidOperationException>(() => v1.Generate(toggledDefault, null, CancellationToken.None));
+        InvalidOperationException past = Assert.Throws<InvalidOperationException>(() => v1.Generate(toggledDefault, TestVideoRecipes.Settings(), null, CancellationToken.None));
         Assert.Contains("character identity image", past.Message);
     }
 }

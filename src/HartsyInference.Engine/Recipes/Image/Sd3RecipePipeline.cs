@@ -22,7 +22,8 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
@@ -56,10 +57,10 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
         }
 
         // Sd3Pipeline validates the source against the unsnapped request size, so resolve at exactly that.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
-            RecipeRequestMapper.ToTextToImage(request, negative) with
+            RecipeRequestMapper.ToTextToImage(request, settings, negative) with
             {
                 ClipSkip = RecipeRequestMapper.MapClipSkip(request.ClipSkip),
             },
@@ -88,7 +89,7 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
                 ["arch"] = "sd3",
                 ["size"] = $"{width}x{height}",
                 ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = (request.Steps ?? Sd3Recipe.FamilyDefaults.Steps).ToString(CultureInfo.InvariantCulture),
+                ["steps"] = (settings.Steps).ToString(CultureInfo.InvariantCulture),
             },
         };
     }
