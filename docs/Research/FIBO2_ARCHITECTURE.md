@@ -1,10 +1,7 @@
 # Fibo 2.0 (Bria AI)
 
-Source snapshot: ComfyUI `comfy/ldm/fibo2/model.py`, `comfy/text_encoders/fibo2.py`, `comfy_extras/nodes_fibo2.py`,
-`comfy/supported_models.py` (`Fibo2`), read 2026-10-21. Checkpoint headers: `Comfy-Org/Fibo-2.0`. Upstream diffusers
-`transformers/transformer_bria_fibo2.py` (main, 2026-10-21) for the module structure. The diffusers pipeline for 2.0 does
-not exist; `pipeline_bria_fibo.py` is the v1 model. Licence: weights CC-BY-NC-4.0 (non-commercial; commercial use needs a
-Bria agreement).
+Weights: CC-BY-NC-4.0 (non-commercial; commercial use needs a Bria agreement). The licence should be surfaced in the catalog
+entry when the recipe lands.
 
 ## Checkpoints (`Comfy-Org/Fibo-2.0`)
 
@@ -20,15 +17,15 @@ Bria agreement).
 | `vae/flux2-vae` | 0.34 GB | 32-channel FLUX.2 VAE |
 
 The checkpoint keeps ComfyUI's native names and fusions. The `briaai/Fibo-2.0-*` HF repos are gated for this account, so
-the converter's source files cannot be read there.
+the converter's source files cannot be read there. Headers were read on 2026-10-21.
 
 ## Denoiser
 
 - In/out channels 32, patch 2 (`x_embedder` 128 → 3584). Latent layout is the FLUX.2 VAE's.
 - `dim` 3584, 28 heads, head_dim 128, RMSNorm eps 1e-5 on Q and K per head.
 - `layers.0..43` main blocks; `noise_refiner.0..1` global-modulation blocks run before the Perceiver.
-- Injection blocks (gated cross-attention) at 6, 14, 22, 30, 38. The checkpoint header confirms 14, 22, 30; 6 and 38 come from
-  ComfyUI's `injection_layers` default.
+- Injection blocks (gated cross-attention) at `injection_layers` = 6, 14, 22, 30, 38. See open items for the two the
+  checkpoint header does not show.
 - Attention: `attention.qkv` is fused `[3·dim, dim]` (q, k, v). Injection and Perceiver `to_kv` is fused
   `[2·dim, cap_feat_dim]` with K first, then V.
 - FFN: `feed_forward.w13` is fused `[2·H, dim]`, SwiGLU, where H is the zero-padded hidden width. The checkpoint has H = 9728,
@@ -36,10 +33,11 @@ the converter's source files cannot be read there.
   diffusers formula `(dim·8//3)//64·64` gives 9536, which does not match this checkpoint. Read H from `w2`'s shape.
 - AdaLN: `adaLN_modulation` is `Linear(256 → 4·dim)`, chunked into scale_msa, gate_msa, scale_mlp, gate_mlp. Output is
   `x·(1+scale)`; gates are `tanh`. Final layer is scale-only (`LayerNorm(no affine)·(1+scale)` then `linear`).
-- Timestep: sinusoidal embedding of width 256 → MLP (1024) → 256 via `t_embedder`. Noisy tokens get `t·1000` (t = 1 is pure
-  noise). Clean tokens (gist, reference images) get the embedding of t = 0. In the main blocks each token selects its
-  modulation by mask.
-- Refiner blocks run global modulation on the image tokens alone, before the Perceiver.
+- Timestep: the sigma from the sampler is `t`, with 1 = pure noise. The model multiplies it by 1000 before the sinusoidal
+  embedding of width 256 → MLP (1024) → 256 (`t_embedder`). The sampler therefore passes sigma, not 1 − sigma. This is
+  derived from the model code; confirm it in the engine sampler.
+- Noisy tokens (image) use the embedding of `t·1000`. Clean tokens (gist, reference images) use the embedding of t = 0.
+  Main blocks pick the modulation per token by mask. Refiner blocks use global modulation on the image tokens alone.
 
 ## Position ids (RoPE θ 256, axes `[32, 48, 48]`, interleaved pairs)
 
@@ -55,36 +53,51 @@ the converter's source files cannot be read there.
 - Each tap is normalised with weightless RMS (`x·rsqrt(mean(x²)+1e-6)`) per token, then the three taps of a bundle are
   concatenated: 3·2560 = 7680 = `cap_feat_dim`.
 - Bundle 0 → Perceiver (512 learned queries, 2 layers, cross-attention then self-attention then FFN, RMSNorm output).
-  Bundles 1..5 → injection blocks 6, 14, 22, 30, 38 in order.
-- Gist count from the text length in tokens: linear in `[256, 2048] → [256, 512]`, rounded up to a multiple of 64, clamped.
+  Bundles 1..5 → injection blocks in `injection_layers` order.
+- **Gist count** from the prompt length `n` in tokens (ComfyUI `gist_count`):
+  `ratio = clamp((n − 256) / (2048 − 256), 0, 1)`, then
+  `count = clamp(ceil((256 + ratio·(512 − 256)) / 64) · 64, 256, 512)`.
   The gist tokens are placed before the image tokens in the stream.
 - Template: `<|im_start|>user\n{caption}<|im_end|>\n<|im_start|>assistant\n`, where caption is JSON. An empty prompt uses a
   fixed null caption (negative / CFG). Do not change the template: the output depends on it.
-
-### Open (not implemented, deliberately deferred)
-
-- **Glyph text images.** Official ComfyUI renders each `text_render` entry to an image through the Qwen3-VL vision tower
-  (`VISION_MARKER`). It is on by default and switched off above sigma 0.9 (`TEXT_IMAGES_START`). This is a separate
-  component and the first engine PR does not include it. Captions with `text_render` entries therefore will not match
-  ComfyUI until it lands.
-- Reference-image editing (`context_latents`) and the edit-turbo conditioning node.
 
 ## Sampling
 
 - Flow-matching Euler; `shift` 1.15 (`supported_models.Fibo2.sampling_settings`).
 - Edit-turbo workflow: `Fibo2Scheduler` steps = 4, Euler sampler, default size 1024×704.
-- Dev step count and CFG are not in the public workflows. The diffusers v1 pipeline example uses 50 steps and guidance 5;
-  that is a v1 source, not confirmed for 2.0. Treat dev defaults as **open** until checked.
+- Dev step count and CFG are not in the public workflows. See open items.
 
 ## Quantization
 
 - `int8_tensorwise` + ConvRot 256 is already supported (`docs/Research/QUANTIZATION_COMFY_FORMATS.md`). Every Fibo linear
   input dimension is a multiple of 256 (3584, 7680, 9728), so the rotation applies to all of them.
 
+## Open items
+
+- **Injection layers 6 and 38.** The checkpoint header confirms 14, 22 and 30 only. 6 and 38 come from ComfyUI's
+  `injection_layers` default. Confirm against the real weights: a wrong layer shifts which text bundle each block reads.
+- **Dev step count and CFG.** The public workflows give only the edit-turbo values. The diffusers v1 pipeline example uses
+  50 steps and guidance 5; that is a v1 source, not confirmed for 2.0. Close it from the Bria model card or a dev template.
+- **Glyph text images.** ComfyUI renders each `text_render` entry to an image through the Qwen3-VL vision tower
+  (`VISION_MARKER`). It is on by default and switched off above sigma 0.9 (`TEXT_IMAGES_START`). It is a separate component
+  and is not in the first engine PR. Captions with `text_render` entries will not match ComfyUI until it lands.
+- **Reference-image editing** (`context_latents`) and the edit-turbo conditioning node.
+- **Real-weight verification.** Pending. The bf16 DiT is 16.45 GB, so it needs a GPU host with enough VRAM and host RAM for
+  the checkpoint.
+
 ## Validation plan
 
 1. Tiny-config CPU parity of the denoiser against a standalone Python reference of the ComfyUI forward (random weights,
-   saved inputs). Covers RoPE, fused splits, AdaLN, gates, Perceiver, injection, gist masking.
+   saved inputs). Covers RoPE, fused splits, AdaLN, gates, Perceiver, injection, gist count.
 2. Vulkan parity for the same tiny config.
-3. Real-weight run (bf16 dev and int8) on the 4090 box, not this one: the bf16 DiT is 16.45 GB against an 8 GB card and
-   about 12 GB of usable host RAM.
+3. Real-weight run (bf16 dev and int8) on a GPU host with enough memory for the checkpoint. Pending.
+
+## References
+
+- ComfyUI `87ed5a066d9c` (2026-10-21): `comfy/ldm/fibo2/model.py`, `comfy/text_encoders/fibo2.py`,
+  `comfy/supported_models.py` (`Fibo2`), `comfy_extras/nodes_fibo2.py`. This is the authoritative implementation for the
+  checkpoint.
+- diffusers `de988b7ee77c` (2026-10-20): `src/diffusers/models/transformers/transformer_bria_fibo2.py`. Same structure,
+  but with unfused names and a different FFN width formula; treat it as a structural reference only.
+- Checkpoint headers: `Comfy-Org/Fibo-2.0`, read 2026-10-21.
+- The diffusers pipeline for 2.0 does not exist. `pipeline_bria_fibo.py` is the v1 model.
