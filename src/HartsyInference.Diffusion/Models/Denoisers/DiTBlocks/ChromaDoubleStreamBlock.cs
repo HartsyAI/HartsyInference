@@ -157,7 +157,11 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
 
         // Built after the damp, which replaces the output biases. QK RMS-norm bounds the scores, so the call may narrow to F16.
         _attention = new JointAttention(
-            new JointAttentionConfig { Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [1, 0], AllowF16 = true },
+            new JointAttentionConfig
+            {
+                Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [1, 0], AllowF16 = true,
+                TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
+            },
             [Stream(_imgQkvWeight, _imgQkvBias, _toQWeight, _toQBias, _toKWeight, _toKBias, _toVWeight, _toVBias, _toOutWeight,
                  _toOutBias, _normQ, _normK),
              Stream(_txtQkvWeight, _txtQkvBias, _addQWeight, _addQBias, _addKWeight, _addKBias, _addVWeight, _addVBias,
@@ -179,7 +183,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
             QueryNormEps = normQ.Eps, KeyNormEps = qkv is null ? normK.Eps : normQ.Eps,
         });
 
-    /// <summary>The ChromaF16 trace points over the joint call: the joint normed Q and V and the head-major attention output.</summary>
+    /// <summary>The ChromaF16 trace points over the joint call: the joint normed Q and V and the attention output.</summary>
     private sealed class TraceProbe : IAttentionProbe
     {
         public static readonly TraceProbe Instance = new();

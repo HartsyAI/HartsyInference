@@ -127,7 +127,7 @@ public sealed partial class AttentionLayer
     }
 
     /// <summary><see cref="Attend"/> over flat operands: <paramref name="q"/> <c>[B, S, heads·D]</c>, <paramref name="k"/> and
-    /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout), head-major only; rank-2
+    /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout); rank-2
     /// <c>[S, heads·D]</c> operands are one batch item.</summary>
     public Tensor AttendFlat(IBackend backend, Tensor q, Tensor k, Tensor v, TensorShape flatShape, in AttentionCallContext context)
     {
@@ -135,8 +135,6 @@ public sealed partial class AttentionLayer
             throw new NotSupportedException($"Flat operands cannot take a {_config.QkNorm} QK norm.");
         if (_config.QkNorm != AttentionQkNorm.None && _norms is null)
             throw new InvalidOperationException("A QK norm needs the layer's norm weights.");
-        if (_config.TokenMajorRoute != AttentionRoute.Dense)
-            throw new NotSupportedException("Flat operands attend head-major.");
         if (context.QueryRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs)
             || context.KeyRotation.Kind is not (QkRotationKind.None or QkRotationKind.InterleavedPairs))
             throw new NotSupportedException("Flat operands take interleaved-pair tables or a rotation adapter; the other table kinds read [.., heads, D].");
@@ -204,6 +202,7 @@ public sealed partial class AttentionLayer
                 : AttentionCall.FromFlashAttention(attn, qMh, keyCache, valueCache, view.KvLength, view.Causal, view.QueryOffset,
                     _config.EffectiveScale, view.Softcap, view.Sinks, view.SlidingWindow, null);
             backend.Attention(in call);
+            context.Probe?.Observe("attention", attn);
         }
         catch
         {
@@ -214,7 +213,6 @@ public sealed partial class AttentionLayer
         {
             Consume(consume, qMh, keyCache, valueCache);
         }
-        context.Probe?.Observe("attention", attn);
         return attn;
     }
 
@@ -688,6 +686,7 @@ public sealed partial class AttentionLayer
             AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
                 _config.HeadDim, _config.EffectiveScale, _config.AllowF16) with { Route = _config.TokenMajorRoute };
             backend.Attention(in call);
+            context.Probe?.Observe("attention", flat);
         }
         catch
         {
@@ -756,6 +755,7 @@ public sealed partial class AttentionLayer
             AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
                 _config.AllowF16);
             backend.Attention(in call);
+            context.Probe?.Observe("attention", attn);
         }
         catch
         {
@@ -766,7 +766,6 @@ public sealed partial class AttentionLayer
         {
             Consume(consume, qMh, kMh, vMh);
         }
-        context.Probe?.Observe("attention", attn);
         return attn;
     }
 

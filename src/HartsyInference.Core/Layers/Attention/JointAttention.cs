@@ -38,6 +38,13 @@ public sealed record JointAttentionConfig
 
     /// <summary>The order of the projection and norm stages across streams.</summary>
     public JointStageOrder StageOrder { get; init; }
+
+    /// <summary>The joint call's <see cref="AttentionLayerConfig.TokenMajorRoute"/>; the stream layers never attend, so
+    /// they stay Dense.</summary>
+    public AttentionRoute TokenMajorRoute { get; init; } = AttentionRoute.Dense;
+
+    /// <summary>The joint call's <see cref="AttentionLayerConfig.HeadMajorForSage"/>.</summary>
+    public bool HeadMajorForSage { get; init; }
 }
 
 /// <summary>The per-call inputs of a joint attention. Every member is borrowed for the call.</summary>
@@ -285,6 +292,7 @@ public sealed class JointAttention
     private static AttentionLayer JointLayer(JointAttentionConfig config, bool allowF16) => new(new AttentionLayerConfig
     {
         Heads = config.Heads, KvHeads = config.Heads, HeadDim = config.HeadDim, AllowF16 = allowF16, Scale = config.Scale,
+        TokenMajorRoute = config.TokenMajorRoute, HeadMajorForSage = config.HeadMajorForSage,
     });
 
     /// <summary>One tensor per stream, held on the stack.</summary>

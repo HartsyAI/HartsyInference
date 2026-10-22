@@ -162,6 +162,60 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
         Assert.Equal(0, differing);
     }
 
+    /// <summary>The double-stream blocks' joint call through <see cref="AttentionLayer.AttendFlat"/>: Q, K, V and the output are the
+    /// concatenated [1, S, H·D] rows, which the token-major config attends in place through M.2 with the bits the head-major config's
+    /// permutes and row give: F32 cast whole on both, Chroma's padding mask, and a context-parallel rank's local queries over the
+    /// whole sequence's keys. At Flux's 1536² length the Sage guard keeps the head-major Sage row.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("flux1-1024", 24, 128, 4608, 4608, true, false, "S.3", "M.2")]
+    [InlineData("flux1-1024-f32", 24, 128, 4608, 4608, false, false, "S.5", "M.2")]
+    [InlineData("flux1-1536", 24, 128, 9728, 9728, true, false, "S.1", "S.1")]
+    [InlineData("chroma-1024-masked", 24, 128, 4107, 4107, true, true, "S.3", "M.2")]
+    [InlineData("flux2-1024", 48, 128, 4608, 4608, true, false, "S.3", "M.2")]
+    [InlineData("qwenimage-1024", 24, 128, 4115, 4115, false, false, "S.5", "M.2")]
+    [InlineData("qwenimage-1024-f16", 24, 128, 4115, 4115, true, false, "S.3", "M.2")]
+    [InlineData("qwenimage-cp-rank", 24, 128, 2067, 4115, false, false, "S.5", "M.2")]
+    [InlineData("hunyuanimage-f32", 28, 128, 1101, 1101, false, false, "S.5", "M.2")]
+    [InlineData("auraflow-f32", 12, 256, 4352, 4352, false, false, "S.5", "M.2")]
+    [InlineData("hidream-f32", 20, 128, 4352, 4352, false, false, "S.5", "M.2")]
+    public void JointAttendFlat_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int d, int sq, int skv, bool f16, bool masked,
+        string headMajorRoute, string tokenMajorRoute)
+    {
+        if (Skip()) return;
+        const int txt = 11, keptTxt = 4;
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        Random rng = new(sq * 31 + skv * 7 + h);
+        float[] q = Gauss(rng, (long)sq * h * d), k = Gauss(rng, (long)skv * h * d), v = Gauss(rng, (long)skv * h * d);
+        float[]? bias = masked ? PaddingMask(sq, txt, keptTxt) : null;
+        TensorShape rows = new(1, sq, h * d), kvRows = new(1, skv, h * d);
+        using CudaBackend backend = new(0, PtxDir());
+
+        float[] Run(AttentionRoute route)
+        {
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, AllowF16 = true, TokenMajorRoute = route, HeadMajorForSage = true,
+            });
+            using Tensor? mask = bias is null ? null : Make(bias, new TensorShape(1, 1, sq, skv), DType.F32);
+            using Tensor o = layer.AttendFlat(backend, Make(q, rows, dtype), Make(k, kvRows, dtype), Make(v, kvRows, dtype), rows,
+                new AttentionCallContext { Bias = mask });
+            backend.Sync();
+            Assert.Equal(rows, o.Shape);
+            return Read(o);
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        Assert.Equal(headMajorRoute, CudaBackend.LastAttentionRoute);
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        Assert.Equal(tokenMajorRoute, CudaBackend.LastAttentionRoute);
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        _output.WriteLine($"{name}: {headMajorRoute} vs {tokenMajorRoute}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal(0, differing);
+    }
+
     /// <summary>Chroma's additive mask over a [text; image] sequence: a pair is kept only when both tokens are, and the text past
     /// <paramref name="kept"/> is padding.</summary>
     private static float[] PaddingMask(int s, int txt, int kept)
