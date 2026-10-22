@@ -302,6 +302,53 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
         Assert.Equal(0, differing);
     }
 
+    /// <summary>SDXL's CFG batch of two through <see cref="AttentionLayer.Forward"/>, projections and output projection included: once
+    /// CUDA plans the batch on M.2, the token-major config attends both sequences in place with the bits the head-major config's
+    /// permutes and S.5 give, F32 cast whole on both, at the UNet's 1024² levels and sdxl-wide's 1280×720 first level.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("sdxl-64x64", 10, 4096)]
+    [InlineData("sdxl-32x32", 20, 1024)]
+    [InlineData("sdxl-wide-80x45", 10, 3600)]
+    public void BatchedSelfAttention_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int s)
+    {
+        if (Skip()) return;
+        const int batch = 2, d = 64;
+        int channels = h * d;
+        Random rng = new(s * 37 + h);
+        float[] x = Gauss(rng, (long)batch * s * channels);
+        float[][] w = [Gauss(rng, (long)channels * channels, 0.03f), Gauss(rng, (long)channels * channels, 0.03f),
+            Gauss(rng, (long)channels * channels, 0.03f), Gauss(rng, (long)channels * channels, 0.03f)];
+        float[] outBias = Gauss(rng, channels, 0.1f);
+        TensorShape rows = new(batch, s, channels), square = new(channels, channels);
+        using CudaBackend backend = new(0, PtxDir());
+
+        float[] Run(AttentionRoute route)
+        {
+            using Tensor wq = Make(w[0], square, DType.F32), wk = Make(w[1], square, DType.F32), wv = Make(w[2], square, DType.F32);
+            using Tensor wo = Make(w[3], square, DType.F32), bo = Make(outBias, new TensorShape(channels), DType.F32);
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, TokenMajorRoute = route, HeadMajorForSage = true, AllowF16 = true,
+            }, new AttentionLayerWeights { Query = wq, Key = wk, Value = wv, Output = wo, OutputBias = bo });
+            using Tensor input = Make(x, rows, DType.F32);
+            using Tensor o = layer.Forward(backend, input, input, default);
+            backend.Sync();
+            Assert.Equal(rows, o.Shape);
+            return Read(o);
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        Assert.Equal("S.5", CudaBackend.LastAttentionRoute);
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        Assert.Equal("M.2", CudaBackend.LastAttentionRoute);
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        _output.WriteLine($"{name}: S.5 vs M.2 over {batch} sequences of {s}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal(0, differing);
+    }
+
     /// <summary>A context-parallel exchange: the rank's K and V traded for the whole sequence's rows, as host tensors.</summary>
     private sealed class Exchanged(float[] k, float[] v, TensorShape shape) : IKvRewrite
     {
