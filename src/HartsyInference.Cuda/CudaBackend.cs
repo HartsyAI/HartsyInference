@@ -7633,7 +7633,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the
-    /// token-major SDPA entry point; the mask is checked when the rows are planned.</summary>
+    /// token-major SDPA entry point; the mask is checked when the rows are planned. The Sq·Skv score matrix is deliberately not
+    /// bounded here: the rows own that bound.</summary>
     internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
         int heads, int headDim, float scale)
     {
