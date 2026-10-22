@@ -46,9 +46,6 @@ stable release will require. Dates are UTC.
   and 1536²), Flux.2 and Chroma images on CUDA, Flux.1 images on Vulkan, and the attention call at the Flux.1, Flux.2,
   Chroma (padding mask included) and HunyuanImage single-block shapes on CUDA's cuDNN row and Vulkan's cooperative-matrix-2
   kernel.
-
-## alpha.385
-
 - **Fixed: ACE-Step v1 generated noise on CUDA: it misread bf16 checkpoint tensors on the host, plus two smaller
   ACE-Step v1 faults.** Several tensors are read on the host through `float*`: the DiT's lyric embedding table, the
   lyric encoder's norm biases, the DCAE's depthwise and grouped convs and norm biases, and the vocoder's norm biases.
