@@ -18,9 +18,10 @@ public sealed partial class CudaBackend
     /// <summary>Number of INT8 attention v2 executions this session.</summary>
     public long Int8AttentionV2ExecutionCount => Interlocked.Read(ref _int8V2ExecutionCount);
 
-    /// <summary>Query rows per INT8 v2 attention block on this card.</summary>
+    /// <summary>Query rows per INT8 v2 attention block on this card: 64 on CC 8.0–8.8 and 12.x (the 3060 and the 5090 measured
+    /// 64 ahead or level), 128 from 8.9 to 11.x.</summary>
     internal int Int8V2BlockRows => Int8V2BlockRowsOverride is 64 or 128 ? Int8V2BlockRowsOverride
-        : _context.Sm is >= CudaArch.Ampere and < 89 ? 64 : 128;
+        : _context.Sm is >= 89 and < 120 ? 128 : 64;
 
     /// <summary>Bytes the INT8 v2 workspace holds now (its high-water mark since it was last released).</summary>
     internal long Int8V2WorkspaceBytes => _int8V2WorkspaceBytes;
