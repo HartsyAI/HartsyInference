@@ -101,9 +101,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Test diagnostic incremented only after a detached cuDNN SDPA session releases all owned resources.</summary>
     internal long CudnnSdpaDisposedSessionCount => Interlocked.Read(ref _cudnnSdpaDisposedSessionCount);
 
-    /// <summary>True once the opt-in TF32 FlashAttention-v2 path has run at least once this session.</summary>
-    internal bool FlashAttentionV2Engaged { get; private set; }
-
     private long _sageAttentionExecutionCount;
 
     /// <summary>True once the SageAttention INT8 fast path has run at least once this session.</summary>
@@ -1146,17 +1143,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Native-F16 SageAttention policy; enabled by default and disabled with <c>numerics.sageAttn=false</c>.</summary>
     private static bool UseSageAttn => EngineKnobs.SageAttn.Value;
 
-    /// <summary>The explicit <c>=1</c> sense of the Sage switch, distinct from the default-ON <see cref="UseSageAttn"/>.</summary>
-    private static bool SageExplicitlyEnabled => EngineKnobs.SageAttnExplicit.Value;
-
     /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>numerics.ltx25Na3dTiled=false</c> falls back to the per-query one. Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
     private static bool UseLtx25Na3dTiled => EngineKnobs.Ltx25Na3dTiled.Value;
-
-    /// <summary>True only when the caller explicitly accepts Sage's F32-to-F16 V-storage narrowing.</summary>
-    /// <remarks>The current Sage prologue materializes V as F16, so an F32 value outside the finite F16 range
-    /// becomes infinity. Requiring a second, plainly unsafe opt-in quarantines that path until V is range-safe.</remarks>
-    internal static bool SageF32ValueNarrowingEnabled =>
-        SageExplicitlyEnabled && EngineKnobs.SageUnsafeF32VNarrow.Value;
 
     /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — PyTorch's default. Opt out: <c>numerics.noTf32=true</c>.</summary>
     /// <remarks>Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a fraction of
@@ -7921,70 +7909,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Checks the complete safety contract for the experimental TF32 FlashAttention-v2 kernel.</summary>
-    /// <remarks>The current kernel has no masked or GQA variant and its WMMA query load requires complete
-    /// 32-row tiles. Rejecting a partial query tile prevents the final block from reading beyond Q.</remarks>
-    internal static bool FlashAttentionV2ContractSatisfied(
-        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool tf32Available)
-    {
-        if (!tf32Available || mask is not null || !float.IsFinite(scale)) return false;
-        if (output.Shape.Rank != 4 || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
-            return false;
-        if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
-            return false;
-
-        long b = query.Shape[0];
-        long h = query.Shape[1];
-        long sq = query.Shape[2];
-        long d = query.Shape[3];
-        long skv = key.Shape[2];
-        if (b <= 0 || h <= 0 || sq <= 0 || skv <= 0 || d <= 0
-            || !FlashAttentionV2GridDimensionsSupported(b, h) || sq > int.MaxValue
-            || skv > int.MaxValue || d > int.MaxValue)
-            return false;
-        if ((d != 64 && d != 128) || sq % 32 != 0) return false;
-
-        return output.Shape == query.Shape && key.Shape == value.Shape && key.Shape[0] == b && key.Shape[1] == h
-            && key.Shape[3] == d;
-    }
-
-    /// <summary>Validates the CUDA grid Y/Z dimensions used directly for head and batch indices.</summary>
-    internal static bool FlashAttentionV2GridDimensionsSupported(long batch, long heads)
-        => batch is > 0 and <= 65_535 && heads is > 0 and <= 65_535;
-
-    /// <summary>Fused FlashAttention-2 (TF32 tensor cores, F32 accumulate) — no-mask MHA, D∈{64,128}; never materializes the score matrix.</summary>
-    private unsafe void FlashAttentionV2(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
-    {
-        if (!FlashAttentionV2ContractSatisfied(output, query, key, value, null, scale, _allowTf32))
-            throw new HartsyInferenceException("FlashAttention-v2 was invoked outside its F32 MHA, full-query-tile contract.");
-
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
-        long skv = key.Shape[2];
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pQ = GpuTransferHelper.CopyToDevice(query);
-            pK = GpuTransferHelper.CopyToDevice(key);
-            pV = GpuTransferHelper.CopyToDevice(value);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchFlashAttentionV2Tf32(pOut, pQ, pK, pV, (int)b, (int)h, (int)sq, (int)skv, (int)d, scale, _stream.Handle);
-            FlashAttentionV2Engaged = true;
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pQ);
-            GpuTransferHelper.FreeDevice(pK);
-            GpuTransferHelper.FreeDevice(pV);
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-        }
-    }
-
     /// <summary>numerics.ltx2SageTokenmajor=true — let a token-major SDPA call detour through the permute pair into the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
     private static bool SageTokenMajorDetour => EngineKnobs.Ltx2SageTokenmajor.Value;
 
@@ -8000,26 +7924,25 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // LTX-2.5's 151-query / 17480-key audio->video attention Sage measured 2.53 ms/call against cuDNN's 0.51.
         if (skv < SageF16MinSkv() || sq < SageF16MinSkv()) return false;
         EnsureKernels();
-        return _kernels!.HasSageAttentionKernels && _kernels.HasSageV1;
+        return _kernels!.HasSageAttentionKernels;
     }
 
     /// <summary>Min Skv (override: numerics.sageF16MinSkv) above which native-F16 SageAttention ingest is preferred over cuDNN.</summary>
     // Measured: 1.11x at 8192, 1.15x at 12288, parity at 4096 (3060).
     private static int SageF16MinSkv() => EngineKnobs.SageF16MinSkv.Value;
 
-    /// <summary>SageAttention-v1 INT8 flash attention (src/HartsyInference.Cuda/Kernels/attention/sage_attn_int8.cu).</summary>
-    /// <remarks>Four launches: K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) →
-    /// (K−mean) per-row INT8 quant (the softmax-invariant smoothing that absorbs the DiT outlier channels) →
-    /// fused INT8-QK^T flash loop with online softmax and TF32 PV. Workspace: Q8/K8 mirrors (¼ the F32 bytes),
-    /// per-row scales, and the [B,H,D] mean — all transient device allocations, freed before return. Correctness
-    /// oracle: SageAttentionReferenceTests (CPU int8 reference math) + SageAttnKernelTests (GPU vs CPU-SDPA parity).</remarks>
+    /// <summary>SageAttention INT8 flash attention over native-F16 operands (src/HartsyInference.Cuda/Kernels/attention/sage_attn_int8.cu).</summary>
+    /// <remarks>Five launches: K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) →
+    /// (K−mean) per-row INT8 quant (the softmax-invariant smoothing that absorbs the DiT outlier channels) → V transposed
+    /// to F16 [B,H,D,skvPad] → fused INT8-QKᵀ flash loop with online softmax and F16-accumulate PV. Workspace: Q8/K8,
+    /// per-row scales, the [B,H,D] mean and the transposed V — all transient device allocations, freed before return.
+    /// Correctness oracle: SageAttentionReferenceTests (CPU int8 reference math) + SageAttnKernelTests (GPU vs CPU-SDPA parity).</remarks>
     private unsafe void SageAttentionInt8(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
     {
         using OpScope _op = EnterOp();
         EnsureKernels();
         long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
         long skv = key.Shape[2];
-        bool f16 = query.DType == DType.F16;   // native-F16 contract: f16h prologues + f16io flash kernel
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
         ulong pQ8 = 0, pQs = 0, pK8 = 0, pKs = 0, pKmean = 0, pVt16 = 0;
         bool cachedOutput = false;
@@ -8041,31 +7964,27 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // alone moves ~14 GB/step on MiniMax-H3 — invisible while the whole call profiled as a single op.
             using (NvtxRange _rk = NvtxRange.PushFine("Sage.KMean"))
             {
-                _kernels!.LaunchSageKMean(pKmean, pK, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+                _kernels!.LaunchSageKMean(pKmean, pK, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
             // log2-domain softmax: fold log2(e) into the Q row scales so the flash kernels exponentiate via
             // native exp2 (one fewer multiply per score element; max/corr/l all commute with the constant).
             const float Log2E = 1.4426950408889634f;
             using (NvtxRange _rq = NvtxRange.PushFine("Sage.QuantQ"))
             {
-                _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)b, (int)h, (int)sq, (int)d, scale * Log2E, _stream.Handle, srcF16: f16);
+                _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)b, (int)h, (int)sq, (int)d, scale * Log2E, _stream.Handle);
             }
             using (NvtxRange _rkq = NvtxRange.PushFine("Sage.QuantK"))
             {
-                _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+                _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
-            if (_kernels!.UseSageV1)
+            using (NvtxRange _rv = NvtxRange.PushFine("Sage.VF16T"))
             {
-                using NvtxRange _rv = NvtxRange.PushFine("Sage.VF16T");
-                // v1 prologue: one-shot [B,H,Skv,D]→[B,H,D,skvPad] F16 transpose (cp.async-able staging).
-                long skvPad = (skv + 7L) & ~7L;
-                if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
-                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * skvPad * 2));
-                _kernels!.LaunchSageVF16T(pVt16, pV, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * CudaKernels.SageSkvPad(skv) * sizeof(ushort)));
+                _kernels!.LaunchSageVTranspose(pVt16, pV, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
             using (NvtxRange _ra = NvtxRange.PushFine("Sage.Flash"))
             {
-                _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pV, pVt16, (int)b, (int)h, (int)sq, (int)skv, (int)d, _stream.Handle, f16Io: f16);
+                _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pVt16, (int)b, (int)h, (int)sq, (int)skv, (int)d, _stream.Handle);
             }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);

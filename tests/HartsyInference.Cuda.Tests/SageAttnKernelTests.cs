@@ -7,12 +7,11 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Parity gate for the SageAttention INT8 kernel pipeline (sage_attn_int8.ptx, INFERENCE_ACCEL_GRIND
-/// §H4 gate 1): <see cref="CudaBackend.ScaledDotProductAttention"/> with HARTSY_SAGE_ATTN=1 against the CPU
-/// F32 reference, on inputs carrying the documented DiT pathology — channel-consistent K outliers (the case
-/// plain per-row INT8 collapses on and K-smoothing recovers; CPU-side math validated by
-/// SageAttentionReferenceTests). Budget: ≤1e-2 max error at unit activation scale (the threshold at which
-/// SageAttention reports metric-neutral e2e results), plus bit-exact run-to-run determinism.</summary>
+/// <summary>Parity gate for the SageAttention INT8 pipeline (sage_attn_int8.ptx): native-F16
+/// <see cref="CudaBackend.ScaledDotProductAttention"/> against the CPU F32 reference on the same F16-rounded values,
+/// on inputs carrying the documented DiT pathology — channel-consistent K outliers (the case plain per-row INT8 collapses
+/// on and K-smoothing recovers; CPU-side math validated by SageAttentionReferenceTests). Budget: ≤2e-2 max error at unit
+/// activation scale, plus bit-exact run-to-run determinism.</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class SageAttnKernelTests
 {
@@ -25,6 +24,13 @@ public sealed unsafe class SageAttnKernelTests
         if (!Directory.Exists(dir))
             dir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
         return dir;
+    }
+
+    private bool Skip()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return true; }
+        if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8.ptx"))) { _output.WriteLine("SKIPPED: sage_attn_int8.ptx not built"); return true; }
+        return false;
     }
 
     private static Tensor RandomF32(TensorShape shape, int seed)
@@ -49,6 +55,15 @@ public sealed unsafe class SageAttnKernelTests
                 p[r * d + c] += magnitude;
     }
 
+    private static Tensor ToF16(Tensor f32)
+    {
+        Tensor t = new Tensor(f32.Shape, DType.F16);
+        float* src = (float*)f32.DataPointer;
+        ushort* dst = (ushort*)t.DataPointer;
+        for (long i = 0; i < f32.ElementCount; i++) dst[i] = BitConverter.HalfToUInt16Bits((Half)src[i]);
+        return t;
+    }
+
     private static (double maxErr, double meanErr) Compare(Tensor a, Tensor b)
     {
         float* ap = (float*)a.DataPointer;
@@ -66,196 +81,101 @@ public sealed unsafe class SageAttnKernelTests
         return (maxErr, sum / n);
     }
 
+    /// <summary>Runs native-F16 Q/K/V through Sage twice on one backend (the gate lowered so test shapes engage it) and
+    /// returns both outputs widened to F32.</summary>
+    private static (Tensor First, Tensor Second) RunSage(Tensor q16, Tensor k16, Tensor v16, float scale)
+    {
+        using Tensor out1 = new Tensor(q16.Shape, DType.F16);
+        using Tensor out2 = new Tensor(q16.Shape, DType.F16);
+        KnobStore.Set(EngineKnobs.SageAttn, true);
+        KnobStore.Set(EngineKnobs.SageF16MinSkv, 1);
+        try
+        {
+            using CudaBackend cuda = new CudaBackend(0, PtxDir());
+            cuda.ScaledDotProductAttention(out1, q16, k16, v16, null, scale);
+            cuda.ScaledDotProductAttention(out2, q16, k16, v16, null, scale);
+            cuda.Sync();
+            Assert.Equal(2L, cuda.SageAttentionExecutionCount);   // a fallback path would leave the checks below vacuous
+            return (out1.CastTo(DType.F32), out2.CastTo(DType.F32));
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SageF16MinSkv);
+        }
+    }
+
+    /// <summary>Head dims 64 and 128 against the F32 reference on the same F16 values, with key tails inside a 32-key step
+    /// (1025, 250) and a query tail inside a 64-row tile (250), and bitwise equal across two runs.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(128, 256, 1024)]
-    [InlineData(128, 256, 1025)]   // Skv tail (curBC < BC on the last step)
-    public void SageAttention_MatchesCpuF32_WithKOutliers(int d, int sq, int skv)
-    {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-        if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8.ptx")))
-        {
-            _output.WriteLine("SKIPPED: sage_attn_int8.ptx not built");
-            return;
-        }
-
-        const int B = 1, H = 2;
-        float scale = 1.0f / MathF.Sqrt(d);
-        using Tensor q = RandomF32(new TensorShape(B, H, sq, d), 71);
-        using Tensor k = RandomF32(new TensorShape(B, H, skv, d), 72);
-        using Tensor v = RandomF32(new TensorShape(B, H, skv, d), 73);
-        InjectChannelOutliers(k, d, magnitude: 8.0f);
-
-        using Tensor cpuOut = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
-        using (CpuBackend cpu = new CpuBackend())
-            ((IBackend)cpu).ScaledDotProductAttention(cpuOut, q, k, v, null, scale);
-
-        using Tensor gpuOut = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
-        using Tensor gpuOut2 = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
-        KnobStore.Set(EngineKnobs.SageAttn, true);
-        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
-        KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
-        try
-        {
-            using CudaBackend cuda = new CudaBackend(0, PtxDir());
-            cuda.ScaledDotProductAttention(gpuOut, q, k, v, null, scale);
-            cuda.Sync();
-            _ = *(float*)gpuOut.DataPointer;
-
-            cuda.ScaledDotProductAttention(gpuOut2, q, k, v, null, scale);
-            cuda.Sync();
-            _ = *(float*)gpuOut2.DataPointer;
-            Assert.True(cuda.SageAttentionEngaged, "SageAttention did not engage; numerical checks would only cover a fallback path.");
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SageAttn);
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-        }
-
-        (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
-        _output.WriteLine($"D={d} Sq={sq} Skv={skv}: maxErr={maxErr:E3} meanErr={meanErr:E3} vs CPU F32");
-        Assert.True(maxErr < 2e-2, $"max error {maxErr:E3} exceeds the 2e-2 Sage budget");
-        Assert.True(meanErr < 2e-3, $"mean error {meanErr:E3} exceeds 2e-3");
-
-        (double detMax, _) = Compare(gpuOut, gpuOut2);
-        Assert.True(detMax == 0.0, $"kernel is not run-to-run deterministic (max diff {detMax:E3})");
-    }
-
-    /// <summary>E1 overflow-adversarial gate for the F16-accumulate PV variant (HARTSY_SAGE_PV=f16acc):
-    /// uniform attention (Q ≈ 0 ⇒ every softmax weight equal) with CONSTANT positive V drives the
-    /// unnormalized flash accumulator toward l·|v| — the F16 overflow regime the in-kernel 1/16 P
-    /// pre-scale must absorb. At Skv=24576, |v|=3: unscaled O would reach ~73728/16 = 4608 scaled —
-    /// inside F16 range with the pre-scale, catastrophically outside without it. Expected output is
-    /// exactly v (uniform average of constant V); NaN/Inf or drift means the headroom fix failed.
-    /// Runs the f16acc path explicitly regardless of ambient env.</summary>
-    [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void SageAttention_F16AccPv_UniformAttention_LargeSkv_NoOverflow()
-    {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-        if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8_v1.ptx")))
-        {
-            _output.WriteLine("SKIPPED: sage_attn_int8_v1.ptx not built");
-            return;
-        }
-
-        const int B = 1, H = 1, Sq = 64, Skv = 24576, D = 128;
-        const float VConst = 3.0f;
-        float scale = 1.0f / MathF.Sqrt(D);
-        using Tensor q = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);      // zeros → uniform attention
-        using Tensor k = RandomF32(new TensorShape(B, H, Skv, D), 91);
-        using Tensor v = new Tensor(new TensorShape(B, H, Skv, D), DType.F32);
-        float* vp = (float*)v.DataPointer;
-        for (long i = 0; i < v.ElementCount; i++) vp[i] = VConst;
-        _ = *(float*)q.DataPointer;   // host-materialize the zero buffers
-
-        using Tensor gpuOut = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);
-        KnobStore.Set(EngineKnobs.SageAttn, true);
-        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
-        KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
-        KnobStore.Set(EngineKnobs.SagePv, "f16acc");
-        try
-        {
-            using CudaBackend cuda = new CudaBackend(0, PtxDir());
-            cuda.ScaledDotProductAttention(gpuOut, q, k, v, null, scale);
-            cuda.Sync();
-            _ = *(float*)gpuOut.DataPointer;
-            Assert.True(cuda.SageAttentionEngaged, "SageAttention did not engage in the overflow-adversarial test.");
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SageAttn);
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-            KnobStore.Clear(EngineKnobs.SagePv);
-        }
-
-        // Uniform attention over constant V ⇒ output ≡ VConst everywhere.
-        float* op = (float*)gpuOut.DataPointer;
-        double maxErr = 0;
-        for (long i = 0; i < gpuOut.ElementCount; i++)
-        {
-            Assert.True(float.IsFinite(op[i]), $"non-finite output at {i}: {op[i]} — F16 accumulator overflowed");
-            maxErr = Math.Max(maxErr, Math.Abs(op[i] - VConst));
-        }
-        _output.WriteLine($"uniform-attention constant-V: maxErr={maxErr:E3} (Skv={Skv}, |v|={VConst})");
-        Assert.True(maxErr < 2e-2, $"maxErr {maxErr:E3} exceeds budget");
-    }
-
-    /// <summary>F16-ingest parity gate: native-F16 Q/K/V/out through the f16h prologues + f16io flash
-    /// kernel vs the CPU F32 reference on the SAME real values (F16 inputs constructed by rounding the F32
-    /// randoms — both paths see identical data up to the F16 encode). Budget stays 2e-2 (input rounding
-    /// adds ~1e-3-class error on top of the INT8 path's 4e-4). Covers the branch-1 dispatch contract.</summary>
-    [Trait("Category", "GpuIntegration")]
-    [Theory]
+    [InlineData(128, 256, 1025)]
     [InlineData(128, 256, 250)]
     [InlineData(64, 512, 512)]
-    public void SageAttention_F16Ingest_MatchesCpuF32(int d, int sq, int skv)
+    [InlineData(64, 250, 1025)]
+    public void SageAttention_MatchesCpuF32_WithKOutliers(int d, int sq, int skv)
     {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8_v1.ptx"))) { _output.WriteLine("SKIPPED: no v1 ptx"); return; }
-
+        if (Skip()) return;
         const int B = 1, H = 2;
         float scale = 1.0f / MathF.Sqrt(d);
-        using Tensor q32 = RandomF32(new TensorShape(B, H, sq, d), 61);
-        using Tensor k32 = RandomF32(new TensorShape(B, H, skv, d), 62);
-        using Tensor v32 = RandomF32(new TensorShape(B, H, skv, d), 63);
+        using Tensor q32 = RandomF32(new TensorShape(B, H, sq, d), 71);
+        using Tensor k32 = RandomF32(new TensorShape(B, H, skv, d), 72);
+        using Tensor v32 = RandomF32(new TensorShape(B, H, skv, d), 73);
         InjectChannelOutliers(k32, d, magnitude: 8.0f);
-
-        // Round to F16 then back to F32 so the CPU reference sees EXACTLY what the F16 kernel ingests.
-        Tensor ToF16(Tensor f32)
-        {
-            Tensor t = new Tensor(f32.Shape, DType.F16);
-            float* src = (float*)f32.DataPointer;
-            ushort* dst = (ushort*)t.DataPointer;
-            for (long i = 0; i < f32.ElementCount; i++) dst[i] = BitConverter.HalfToUInt16Bits((Half)src[i]);
-            return t;
-        }
-        using Tensor q16 = ToF16(q32);
-        using Tensor k16 = ToF16(k32);
-        using Tensor v16 = ToF16(v32);
-        using Tensor qRef = q16.CastTo(DType.F32);
-        using Tensor kRef = k16.CastTo(DType.F32);
-        using Tensor vRef = v16.CastTo(DType.F32);
+        using Tensor q16 = ToF16(q32), k16 = ToF16(k32), v16 = ToF16(v32);
+        using Tensor qRef = q16.CastTo(DType.F32), kRef = k16.CastTo(DType.F32), vRef = v16.CastTo(DType.F32);
 
         using Tensor cpuOut = new Tensor(new TensorShape(B, H, sq, d), DType.F32);
         using (CpuBackend cpu = new CpuBackend())
             ((IBackend)cpu).ScaledDotProductAttention(cpuOut, qRef, kRef, vRef, null, scale);
 
-        using Tensor gpuOut16 = new Tensor(new TensorShape(B, H, sq, d), DType.F16);
-        KnobStore.Set(EngineKnobs.SageAttn, true);
-        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
-        KnobStore.Set(EngineKnobs.SageF16MinSkv, 1);   // force dispatch at test sizes
-        try
+        (Tensor gpuOut, Tensor gpuOut2) = RunSage(q16, k16, v16, scale);
+        using (gpuOut)
+        using (gpuOut2)
         {
-            using CudaBackend cuda = new CudaBackend(0, PtxDir());
-            cuda.ScaledDotProductAttention(gpuOut16, q16, k16, v16, null, scale);
-            cuda.Sync();
-            _ = *(ushort*)gpuOut16.DataPointer;
-            Assert.True(cuda.SageAttentionEngaged, "Native-F16 SageAttention did not engage; the test only covered a fallback path.");
+            (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
+            _output.WriteLine($"D={d} Sq={sq} Skv={skv}: maxErr={maxErr:E3} meanErr={meanErr:E3} vs CPU F32");
+            Assert.True(maxErr < 2e-2, $"max error {maxErr:E3} exceeds the 2e-2 Sage budget");
+            Assert.True(meanErr < 2e-3, $"mean error {meanErr:E3} exceeds 2e-3");
+            (double detMax, _) = Compare(gpuOut, gpuOut2);
+            Assert.True(detMax == 0.0, $"kernel is not run-to-run deterministic (max diff {detMax:E3})");
         }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SageAttn);
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageF16MinSkv);
-        }
+    }
 
-        using Tensor gpuOut = gpuOut16.CastTo(DType.F32);
-        (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
-        _output.WriteLine($"F16-ingest D={d} Sq={sq} Skv={skv}: maxErr={maxErr:E3} meanErr={meanErr:E3}");
-        Assert.True(maxErr < 2e-2, $"max error {maxErr:E3} exceeds budget");
-        Assert.True(meanErr < 2e-3, $"mean error {meanErr:E3} exceeds budget");
+    /// <summary>Overflow gate for the F16-accumulate PV: uniform attention (Q = 0 ⇒ every softmax weight equal) over
+    /// constant positive V drives each key step's F16 tile sum toward its bound, which the 1/16 P pre-scale and the per-step
+    /// drain into F32 must absorb at any key count. The output must be exactly v; NaN/Inf or drift means the headroom failed.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void SageAttention_F16AccPv_UniformAttention_LargeSkv_NoOverflow()
+    {
+        if (Skip()) return;
+        const int B = 1, H = 1, Sq = 64, Skv = 24576, D = 128;
+        const float VConst = 3.0f;
+        float scale = 1.0f / MathF.Sqrt(D);
+        using Tensor q32 = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);      // zeros → uniform attention
+        using Tensor k32 = RandomF32(new TensorShape(B, H, Skv, D), 91);
+        using Tensor v32 = new Tensor(new TensorShape(B, H, Skv, D), DType.F32);
+        float* vp = (float*)v32.DataPointer;
+        for (long i = 0; i < v32.ElementCount; i++) vp[i] = VConst;
+        _ = *(float*)q32.DataPointer;   // host-materialize the zero buffer
+        using Tensor q16 = ToF16(q32), k16 = ToF16(k32), v16 = ToF16(v32);
+
+        (Tensor gpuOut, Tensor gpuOut2) = RunSage(q16, k16, v16, scale);
+        using (gpuOut)
+        using (gpuOut2)
+        {
+            float* op = (float*)gpuOut.DataPointer;
+            double maxErr = 0;
+            for (long i = 0; i < gpuOut.ElementCount; i++)
+            {
+                Assert.True(float.IsFinite(op[i]), $"non-finite output at {i}: {op[i]} — F16 accumulator overflowed");
+                maxErr = Math.Max(maxErr, Math.Abs(op[i] - VConst));
+            }
+            _output.WriteLine($"uniform-attention constant-V: maxErr={maxErr:E3} (Skv={Skv}, |v|={VConst})");
+            Assert.True(maxErr < 2e-2, $"maxErr {maxErr:E3} exceeds budget");
+        }
     }
 
     /// <summary>The refutation control for the smoothing claim at kernel level: WITHOUT outliers the budget
@@ -264,48 +184,26 @@ public sealed unsafe class SageAttnKernelTests
     [Fact]
     public void SageAttention_CleanInputs_WithinBudget()
     {
-        if (!CudaContext.IsAvailable())
-        {
-            _output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
-        }
-        if (!File.Exists(Path.Combine(PtxDir(), "sage_attn_int8.ptx")))
-        {
-            _output.WriteLine("SKIPPED: sage_attn_int8.ptx not built");
-            return;
-        }
-
+        if (Skip()) return;
         const int B = 1, H = 2, Sq = 256, Skv = 1024, D = 128;
         float scale = 1.0f / MathF.Sqrt(D);
-        using Tensor q = RandomF32(new TensorShape(B, H, Sq, D), 81);
-        using Tensor k = RandomF32(new TensorShape(B, H, Skv, D), 82);
-        using Tensor v = RandomF32(new TensorShape(B, H, Skv, D), 83);
+        using Tensor q32 = RandomF32(new TensorShape(B, H, Sq, D), 81);
+        using Tensor k32 = RandomF32(new TensorShape(B, H, Skv, D), 82);
+        using Tensor v32 = RandomF32(new TensorShape(B, H, Skv, D), 83);
+        using Tensor q16 = ToF16(q32), k16 = ToF16(k32), v16 = ToF16(v32);
+        using Tensor qRef = q16.CastTo(DType.F32), kRef = k16.CastTo(DType.F32), vRef = v16.CastTo(DType.F32);
 
         using Tensor cpuOut = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);
         using (CpuBackend cpu = new CpuBackend())
-            ((IBackend)cpu).ScaledDotProductAttention(cpuOut, q, k, v, null, scale);
+            ((IBackend)cpu).ScaledDotProductAttention(cpuOut, qRef, kRef, vRef, null, scale);
 
-        using Tensor gpuOut = new Tensor(new TensorShape(B, H, Sq, D), DType.F32);
-        KnobStore.Set(EngineKnobs.SageAttn, true);
-        KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
-        KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
-        try
+        (Tensor gpuOut, Tensor gpuOut2) = RunSage(q16, k16, v16, scale);
+        using (gpuOut)
+        using (gpuOut2)
         {
-            using CudaBackend cuda = new CudaBackend(0, PtxDir());
-            cuda.ScaledDotProductAttention(gpuOut, q, k, v, null, scale);
-            cuda.Sync();
-            _ = *(float*)gpuOut.DataPointer;
-            Assert.True(cuda.SageAttentionEngaged, "SageAttention did not engage for clean-input parity.");
+            (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
+            _output.WriteLine($"clean: maxErr={maxErr:E3} meanErr={meanErr:E3}");
+            Assert.True(maxErr < 2e-2, $"max error {maxErr:E3} exceeds the 2e-2 Sage budget");
         }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SageAttn);
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-        }
-
-        (double maxErr, double meanErr) = Compare(gpuOut, cpuOut);
-        _output.WriteLine($"clean: maxErr={maxErr:E3} meanErr={meanErr:E3}");
-        Assert.True(maxErr < 2e-2, $"max error {maxErr:E3} exceeds the 2e-2 Sage budget");
     }
 }

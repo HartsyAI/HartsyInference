@@ -116,16 +116,6 @@ public static partial class EngineKnobs
         Bool("diagnostics.ltxDiag", false, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Enables LTX-Video per-step diagnostics on the console.");
 
-    /// <summary>The explicit opt-in sense of <c>numerics.sageAttn</c>: true only when it is set to exactly <c>1</c>.</summary>
-    /// <remarks>Shares its legacy name with <see cref="SageAttn"/>, which carries the default-ON <c>!= "0"</c>
-    /// sense. Both readings are deliberate and were in the code before this migration: SageAttention is on unless
-    /// you set 0, but the unsafe F32-to-F16 V-narrowing path additionally requires a plain <c>=1</c>, so merely
-    /// leaving Sage at its default never unlocks it. Collapsing the pair into one knob would open that path by
-    /// default. Same shape as <see cref="DitGraph"/> / <see cref="DitGraphDefaultOn"/>.</remarks>
-    public static readonly Knob<bool> SageAttnExplicit =
-        Bool("numerics.sageAttnExplicit", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "The explicit opt-in sense of the Sage attention switch: true only when it is set to exactly 1.");
-
     // ── Constant defaults that live in a hand-written parsing expression ──
 
     /// <summary>Worker cap for CPU kernels that fan out across cores. 0 (the default) means every core.</summary>

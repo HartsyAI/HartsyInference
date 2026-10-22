@@ -14,7 +14,11 @@ public static class KnobDeprecations
     /// <param name="Note">What changed, shown with the warning.</param>
     public sealed record Entry(string OldId, string? NewId, Func<string, string>? MapValue, int AcceptedThrough, string Note);
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    /// <summary>Releases a retired id stays accepted after the release that retires it.</summary>
+    public const int Window = 100;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Entry> _entries =
+        new(Retired().Select(e => KeyValuePair.Create(e.OldId, e)), StringComparer.Ordinal);
 
     /// <summary>Every retired id still accepted (a snapshot).</summary>
     public static IReadOnlyCollection<Entry> All => [.. _entries.Values];
@@ -46,6 +50,24 @@ public static class KnobDeprecations
     public static string Warning(Entry entry) => entry.NewId is null
         ? $"Setting '{entry.OldId}' was removed and is ignored: {entry.Note}"
         : $"Setting '{entry.OldId}' is now '{entry.NewId}': {entry.Note}";
+
+    private static Entry[] Retired()
+    {
+        // The attention kernels and switches retired in alpha.386.
+        const int Attention386 = 386 + Window;
+        return
+        [
+            new("numerics.sdpaV2", null, null, Attention386,
+                "the TF32 FlashAttention-2 kernel it opted into is gone; F32 attention runs on cuDNN, the tiled core or the materialized path."),
+            new("numerics.sdpaForceFlash", null, null, Attention386, "attention no longer has a forced per-row flash route."),
+            new("numerics.sageV0", null, null, Attention386, "the v0 SageAttention kernel is gone; numerics.sageAttn governs the one that remains."),
+            new("numerics.sageAttnExplicit", null, null, Attention386,
+                "F32 operands no longer reach SageAttention; numerics.sageAttn governs the native-F16 path."),
+            new("numerics.sageUnsafeF32VNarrow", null, null, Attention386,
+                "F32 operands no longer reach SageAttention, so there is no V narrowing to accept."),
+            new("numerics.sagePv", null, null, Attention386, "the native-F16 SageAttention path always accumulates PV in F16 per key step."),
+        ];
+    }
 
     internal static void Add(Entry entry)
     {

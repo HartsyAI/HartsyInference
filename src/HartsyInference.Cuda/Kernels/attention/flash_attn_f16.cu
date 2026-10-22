@@ -1,5 +1,5 @@
 // FlashAttention-2-style fused attention for F16 Q/K/V/O with F32 accumulation, register-resident (raw mma.sync,
-// architecturally defined fragment layouts — the same discipline as sage_attn_int8_v1.cu, with an f16 QK^T in
+// architecturally defined fragment layouts — the same discipline as sage_attn_int8.cu, with an f16 QK^T in
 // place of the s8 one). Exists for head dims the cuDNN fused engine serves slowly or not at all: at D=256 on Ada
 // cuDNN offers one engine config at ~80 TFLOPS, where this layout reaches the FA2 regime.
 //
@@ -14,14 +14,12 @@
 // buffer, pipelined FA2-style: V(j) streams in while S(j) and its softmax compute, K(j+1) while P·V(j) computes.
 // Tails are zero-filled by cp.async. Shared tiles are XOR-swizzled at 16-byte granularity so each 8-row ldmatrix
 // phase touches all 32 banks. Shared memory = (BR + 2·BC)·D halves: 96 KB at D=256 (needs the max-dynamic-shared
-// opt-in), 48 KB at D=128. 256 threads × ≤ 255 registers fits the 64 K register file, so one block per SM.
+// opt-in). 256 threads × ≤ 255 registers fits the 64 K register file, so one block per SM.
 //
 // Per k-step per warp: S = Q·Kᵀ as (BC/8) n-tiles × (D/16) k-chunks of mma.m16n8k16 (f32 acc); online softmax in
 // the log2 domain (scale·log2e folded by the caller) on the C fragments; P repacked to f16 A fragments with no
 // shuffle; O += P·V as (D/8) n-tiles × (BC/16) k-chunks. Key columns ≥ Skv are −inf before the row max; query
 // rows ≥ Sq compute on zeros and are never stored.
-//
-// Build: nvcc -ptx -arch=sm_80 flash_attn_f16.cu (PTX must say .version 9.0 — pinned toolchain).
 #include <cuda_fp16.h>
 
 #define FA_WARPS 8
@@ -269,6 +267,5 @@ __device__ __forceinline__ void flash_attn_f16_core(
         flash_attn_f16_core<D>(O, Q, K, V, so, sq, sk, sv, Sq, Skv, scaleLog2);                                       \
     }
 
-FA_ENTRY(64)
-FA_ENTRY(128)
+// Only D=256 is instantiated: cuDNN serves 64 and 128.
 FA_ENTRY(256)
