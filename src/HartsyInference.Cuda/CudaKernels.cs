@@ -2747,18 +2747,24 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_sageQuantK, (rows + 3) / 4, 1, 1, 128, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>SageAttention prologue 4/4 — F16 V transposed once: [B,H,Skv,D] → [B,H,D,skvPad], pad keys zero.</summary>
+    /// <summary>Row stride, in halves, of the transposed V the Sage flash kernel reads: <paramref name="skv"/> rounded up to
+    /// 8 (16-byte cp.async rows), plus 8 more when that is a power of two of at least 2048, which would map every row of
+    /// the tile to the same L2 sets.</summary>
+    public static long SageSkvPad(long skv)
+    {
+        long pad = (skv + 7L) & ~7L;
+        return pad >= 2048 && (pad & (pad - 1)) == 0 ? pad + 8 : pad;
+    }
+
+    /// <summary>SageAttention prologue 4/4 — F16 V transposed once: [B,H,Skv,D] → [B,H,D,<see cref="SageSkvPad"/>], pad keys zero.</summary>
     public unsafe void LaunchSageVTranspose(ulong vt16, ulong v, int b, int h, int skv, int d, nint stream)
     {
         ThrowIfNoSageModule();
+        long skvPad = SageSkvPad(skv);
         ulong vtArg = vt16, vArg = v;
-        uint bArg = (uint)b, hArg = (uint)h, skvArg = (uint)skv, dArg = (uint)d;
-        void** args = stackalloc void*[6];
-        args[0] = &vtArg; args[1] = &vArg; args[2] = &bArg; args[3] = &hArg; args[4] = &skvArg; args[5] = &dArg;
-        // skvPad = Skv rounded up to 8 (16-byte cp.async source alignment), amortizing the flash kernel's
-        // otherwise-repeated per-query-tile re-transpose (Sq/64 times).
-        long skvPad = (skv + 7L) & ~7L;
-        if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
+        uint bArg = (uint)b, hArg = (uint)h, skvArg = (uint)skv, dArg = (uint)d, padArg = (uint)skvPad;
+        void** args = stackalloc void*[7];
+        args[0] = &vtArg; args[1] = &vArg; args[2] = &bArg; args[3] = &hArg; args[4] = &skvArg; args[5] = &dArg; args[6] = &padArg;
         long total = (long)b * h * d * skvPad;
         uint grid = (uint)Math.Min(4096, (total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_sageVTranspose, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
@@ -2772,10 +2778,10 @@ public sealed partial class CudaKernels : IDisposable
         ThrowIfNoSageModule();
         if (vt16 == 0) throw new ArgumentException("SageAttention needs the pre-transposed V workspace (LaunchSageVTranspose).");
         ulong outArg = outPtr, q8Arg = q8, qsArg = qscale, k8Arg = k8, ksArg = kscale, vtArg = vt16;
-        uint bArg = (uint)b, hArg = (uint)h, sqArg = (uint)sq, skvArg = (uint)skv;
-        void** args = stackalloc void*[10];
+        uint bArg = (uint)b, hArg = (uint)h, sqArg = (uint)sq, skvArg = (uint)skv, padArg = (uint)SageSkvPad(skv);
+        void** args = stackalloc void*[11];
         args[0] = &outArg; args[1] = &q8Arg; args[2] = &qsArg; args[3] = &k8Arg; args[4] = &ksArg; args[5] = &vtArg;
-        args[6] = &bArg; args[7] = &hArg; args[8] = &sqArg; args[9] = &skvArg;
+        args[6] = &bArg; args[7] = &hArg; args[8] = &sqArg; args[9] = &skvArg; args[10] = &padArg;
         // Two cp.async stages of (K8 s8 [BC·D] + Vt f16 [D·BC] + kscale f32 [BC]) at the kernel's BC = 32.
         const int bc = 32;
         uint smemBytes = (uint)(2 * (bc * d + d * bc * 2 + bc * sizeof(float)));

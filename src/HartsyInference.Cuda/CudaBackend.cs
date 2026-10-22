@@ -7979,10 +7979,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             using (NvtxRange _rv = NvtxRange.PushFine("Sage.VF16T"))
             {
-                // One-shot [B,H,Skv,D]→[B,H,D,skvPad] transpose (cp.async-able staging).
-                long skvPad = (skv + 7L) & ~7L;
-                if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
-                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * skvPad * 2));
+                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * CudaKernels.SageSkvPad(skv) * sizeof(ushort)));
                 _kernels!.LaunchSageVTranspose(pVt16, pV, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
             using (NvtxRange _ra = NvtxRange.PushFine("Sage.Flash"))

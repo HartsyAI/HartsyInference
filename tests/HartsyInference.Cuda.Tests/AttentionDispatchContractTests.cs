@@ -25,6 +25,19 @@ public sealed class AttentionDispatchContractTests
     [InlineData(264, false)]
     public void CudnnSdpa_HeadDims_AreTheProbedEnvelope(long d, bool expected) => Assert.Equal(expected, CudnnSdpa.ShapeSupported(d));
 
+    /// <summary>The Sage V stride: whole 16-byte rows, and never a power of two from 2048 up (those alias in L2).</summary>
+    [Theory]
+    [InlineData(1, 8)]
+    [InlineData(250, 256)]
+    [InlineData(1024, 1024)]
+    [InlineData(1025, 1032)]
+    [InlineData(2040, 2040)]
+    [InlineData(2048, 2056)]
+    [InlineData(2041, 2056)]
+    [InlineData(8192, 8200)]
+    [InlineData(17480, 17480)]
+    public void SageSkvPad_IsWholeRowsAndNeverALargePowerOfTwo(long skv, long expected) => Assert.Equal(expected, CudaKernels.SageSkvPad(skv));
+
     [Fact]
     public void SdpaContract_RejectsMismatchedBuffersAndMaskAxes()
     {

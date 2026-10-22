@@ -46,16 +46,6 @@ __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commi
 template<int N>
 __device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
 
-// skvPad: rows padded to 8 halves (16B cp.async alignment) — and bumped +8 when the result is an EXACT
-// power of two ≥ 2048: a pow2 pad makes the Vt row stride (2·skvPad bytes) a pure power of 2, aliasing
-// every d-row into the same L2 set group.
-__device__ __forceinline__ unsigned sage_skv_pad(unsigned skv)
-{
-    unsigned p = (skv + 7u) & ~7u;
-    if (p >= 2048u && (p & (p - 1u)) == 0u) p += 8u;
-    return p;
-}
-
 // ── SMEM XOR swizzles (DEEP_KERNEL_OPTIMIZATION §6: mandatory for mma-consumed tiles). Both tiles are
 // permuted at 4-element (u32 / 8-byte) granularity WITHIN a row, XORed with the row index, so the
 // fragment-read patterns (u32s whose lane addresses previously differed only in the row → same bank)
@@ -171,7 +161,8 @@ __device__ __forceinline__ void sage_attn_v1_core(
     const signed char* __restrict__ K8,   // [B, Hq, Skv, D]
     const float* __restrict__ kscale,     // [B, Hq, Skv]
     const __half* __restrict__ Vt16,      // [B, Hq, D, skvPad] (sage_v_f16t_h)
-    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
+    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv,
+    unsigned int skvPad)                  // Vt16 row stride in halves (CudaKernels.SageSkvPad)
 {
     const unsigned qtile = blockIdx.x;
     const unsigned h = blockIdx.y;
@@ -190,7 +181,6 @@ __device__ __forceinline__ void sage_attn_v1_core(
     const size_t headKV = (size_t)Skv * D;
     const signed char* Q8h = Q8 + ((size_t)b * Hq + h) * headQ;
     const signed char* K8h = K8 + ((size_t)b * Hq + h) * headKV;
-    const unsigned skvPad = sage_skv_pad(Skv);                   // Vt16 row stride (16B-aligned, anti-aliased)
     const __half* Vth = Vt16 + ((size_t)b * Hq + h) * ((size_t)D * skvPad);   // [D][skvPad] for this head
     const float* qsh = qscale + ((size_t)b * Hq + h) * Sq;
     const float* ksh = kscale + ((size_t)b * Hq + h) * Skv;
@@ -436,26 +426,25 @@ __device__ __forceinline__ void sage_attn_v1_core(
 extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d128_f16io(
     __half* __restrict__ out, const signed char* __restrict__ Q8, const float* __restrict__ qscale,
     const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
-    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
+    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv, unsigned int skvPad)
 {
-    sage_attn_v1_core<128>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+    sage_attn_v1_core<128>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv, skvPad);
 }
 
 extern "C" __global__ void __launch_bounds__(128, 3) sage_attn_int8_v1_d64_f16io(
     __half* __restrict__ out, const signed char* __restrict__ Q8, const float* __restrict__ qscale,
     const signed char* __restrict__ K8, const float* __restrict__ kscale, const __half* __restrict__ Vt16,
-    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv)
+    unsigned int B, unsigned int Hq, unsigned int Sq, unsigned int Skv, unsigned int skvPad)
 {
-    sage_attn_v1_core<64>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv);
+    sage_attn_v1_core<64>(out, Q8, qscale, K8, kscale, Vt16, B, Hq, Sq, Skv, skvPad);
 }
 
 // V pre-transpose, once per forward: [B,Hq,Skv,D] → [B,Hq,D,skvPad], pad keys zero. Grid-stride over the output, so
 // writes are coalesced and reads stride by D.
 extern "C" __global__ void sage_v_f16t_h(
     __half* __restrict__ vt, const __half* __restrict__ V,
-    unsigned int B, unsigned int Hq, unsigned int Skv, unsigned int D)
+    unsigned int B, unsigned int Hq, unsigned int Skv, unsigned int D, unsigned int skvPad)
 {
-    const unsigned skvPad = sage_skv_pad(Skv);
     const size_t total = (size_t)B * Hq * D * skvPad;
     const size_t stride = (size_t)gridDim.x * blockDim.x;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += stride)
