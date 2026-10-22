@@ -44,6 +44,24 @@ public sealed class AttentionTraceBackend : IBackend
     /// <summary>Records a Flash-route call as one <c>Attention</c> line with its stage parameters instead of re-entering the legacy entry.</summary>
     public bool FlashAsAttention { get; init; }
 
+    /// <summary>Skips the F32-only default bodies of the adaLN norm and modulation ops, so an F16 block reaches its attention.</summary>
+    public bool SkipAdaLayerNorm { get; init; }
+
+    public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
+    {
+        if (!SkipAdaLayerNorm) IBackend.LayerNormNoAffineReference(output, input, eps);
+    }
+
+    public void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
+    {
+        if (!SkipAdaLayerNorm) IBackend.LayerNormModulateReference(output, input, scale, shift, eps);
+    }
+
+    public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
+    {
+        if (!SkipAdaLayerNorm) IBackend.AffineBroadcastLastDimReference(output, input, scale, shift);
+    }
+
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         Track(output, input);

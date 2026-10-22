@@ -40,6 +40,7 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
             new AttentionLayerConfig
             {
                 Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+                TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
             },
             new AttentionNormWeights(_normQ.Weight, _normK.Weight, _normQ.Eps, _normK.Eps));
     }
