@@ -90,6 +90,7 @@ public static class RecipeRegistryValidator
 
     private static void CheckImage(string owner, ImageDefaults defaults, List<string> problems)
     {
+        CheckRevision(owner, defaults.Revision, problems);
         CheckSampling(owner, defaults.Steps, defaults.CfgScale, problems);
         CheckSize(owner, defaults.Width, defaults.Height, problems);
         if (defaults.SigmaShift is double shift && !double.IsFinite(shift))
@@ -102,6 +103,7 @@ public static class RecipeRegistryValidator
 
     private static void CheckVideo(string owner, VideoDefaults defaults, FrameGrid? grid, List<string> problems)
     {
+        CheckRevision(owner, defaults.Revision, problems);
         CheckSampling(owner, defaults.Steps, defaults.CfgScale, problems);
         CheckSize(owner, defaults.Width, defaults.Height, problems);
         if (defaults.Fps < 1)
@@ -122,6 +124,14 @@ public static class RecipeRegistryValidator
         }
         CheckOptionalName(owner, "sampler", defaults.Sampler, problems);
         CheckOptionalName(owner, "scheduler", defaults.Scheduler, problems);
+    }
+
+    private static void CheckRevision(string owner, int revision, List<string> problems)
+    {
+        if (revision < 1)
+        {
+            problems.Add($"{owner}: revision {revision} is below 1.");
+        }
     }
 
     private static void CheckSampling(string owner, int steps, float cfgScale, List<string> problems)

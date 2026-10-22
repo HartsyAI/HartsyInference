@@ -7,6 +7,10 @@ namespace HartsyInference.Engine.Recipes;
 /// <see cref="ImageDefaults"/>, resolving the <see cref="VideoRequest"/> tunables the caller left <c>null</c>.</summary>
 public sealed record VideoDefaults
 {
+    /// <summary>Revision of these values, recorded on every plan and result that used them. Bump it whenever a value
+    /// changes, so output generated before and after the change can be told apart.</summary>
+    public int Revision { get; init; } = 1;
+
     /// <summary>Denoising steps the architecture's authors sample with.</summary>
     public required int Steps { get; init; }
 

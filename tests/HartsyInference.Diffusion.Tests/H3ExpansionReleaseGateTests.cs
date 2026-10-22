@@ -138,6 +138,8 @@ public sealed class H3ExpansionReleaseGateTests
                 ReferenceSizing = VideoReferenceSizing.Native,
                 LockedFields = VideoLockedFields.None,
             },
+            Recipe = TestVideoRecipes.Identity("test"),
+            Provenance = TestVideoRecipes.NoProvenance,
             Issues = [],
             CacheIdentity = "test",
             ComponentFormats = component == "int8-vae"

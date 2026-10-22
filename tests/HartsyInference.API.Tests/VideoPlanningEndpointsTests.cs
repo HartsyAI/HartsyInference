@@ -51,6 +51,29 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         Assert.DoesNotContain("checkpointMetadata", json, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Plan_ReportsTheRecipeAndWhereEachSettingCameFrom()
+    {
+        string checkpoint = WriteH3Folder();
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.PostAsJsonAsync("/v1/native/video/plan", new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            request = new { prompt = "provenance", steps = 12 },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement recipe = body.GetProperty("recipe");
+        Assert.Equal("minimax-h3", recipe.GetProperty("familyId").GetString());
+        Assert.True(recipe.GetProperty("revision").GetInt32() >= 1);
+        JsonElement provenance = body.GetProperty("provenance");
+        Assert.Equal("UserOverride", provenance.GetProperty("Steps").GetProperty("source").GetString());
+        Assert.Equal("ProfileDefault", provenance.GetProperty("Frames").GetProperty("source").GetString());
+        Assert.Equal("Derived", provenance.GetProperty("Seed").GetProperty("source").GetString());
+    }
+
     [Theory]
     [InlineData("/v1/native/video/stream")]
     public async Task InvalidPlan_DoesNotExposePathsEmbeddedInIssueMessages(string route)
@@ -627,6 +650,8 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
                 Model = spec,
                 Profile = ProfileOverride ?? DefaultProfile,
                 EffectiveSettings = Effective,
+                Recipe = new RecipeIdentity { FamilyId = "test", Revision = 1 },
+                Provenance = new Dictionary<string, ResolvedParameter>(StringComparer.Ordinal),
                 Issues = PlanIssues,
                 CacheIdentity = "fake",
             };

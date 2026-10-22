@@ -30,6 +30,12 @@ public sealed record VideoPlan
     /// <summary>Resolved values passed to the recipe pipeline.</summary>
     public required VideoEffectiveSettings EffectiveSettings { get; init; }
 
+    /// <summary>The recipe, revision, variant and profile this plan resolved against.</summary>
+    public required RecipeIdentity Recipe { get; init; }
+
+    /// <summary>Where each effective setting came from: recipe or profile default, the caller, or a normalization.</summary>
+    public required IReadOnlyDictionary<string, ResolvedParameter> Provenance { get; init; }
+
     /// <summary>All preflight diagnostics, including non-blocking warnings.</summary>
     public required IReadOnlyList<VideoPlanIssue> Issues { get; init; }
 

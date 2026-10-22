@@ -18,6 +18,14 @@ public sealed record VideoGenerationResult
     /// geometry or schedule is still resolved inside the pipeline rather than by <c>VideoPlan</c>.</summary>
     public VideoExecutionSummary? Execution { get; init; }
 
+    /// <summary>The recipe, revision, variant and profile the generation was planned against; null from a pipeline
+    /// driven without the video service.</summary>
+    public RecipeIdentity? Recipe { get; init; }
+
+    /// <summary>Where each effective setting came from, including a frame rate the pipeline pinned.</summary>
+    public IReadOnlyDictionary<string, ResolvedParameter> Provenance { get; init; } =
+        new Dictionary<string, ResolvedParameter>(StringComparer.Ordinal);
+
     /// <summary>Wraps a frame-only generation.</summary>
     public static VideoGenerationResult FromFrames(IReadOnlyList<VideoFrame> frames) =>
         new VideoGenerationResult { Frames = frames };

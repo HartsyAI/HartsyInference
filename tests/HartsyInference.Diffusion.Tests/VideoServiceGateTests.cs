@@ -164,6 +164,8 @@ public sealed class VideoServiceGateTests
                 ReferenceSizing = VideoReferenceSizing.Native,
                 LockedFields = VideoLockedFields.None,
             },
+            Recipe = TestVideoRecipes.Identity("test"),
+            Provenance = TestVideoRecipes.NoProvenance,
             Issues = [],
             CacheIdentity = "fabricated",
             ComponentPaths = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -178,6 +180,7 @@ public sealed class VideoServiceGateTests
         ModelSpec spec = Spec(family);
         VideoDefaults defaults = ModelCapabilities.VideoDefaultsFor(spec);
         VideoFeatures features = ModelCapabilities.VideoFeaturesFor(spec);
-        return VideoProfileResolver.ResolveAsync(spec, request, family, defaults, features, CancellationToken.None);
+        return VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare(family, defaults, features), CancellationToken.None);
     }
 }
