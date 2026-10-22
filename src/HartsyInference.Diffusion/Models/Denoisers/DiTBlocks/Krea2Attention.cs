@@ -44,12 +44,14 @@ public sealed class Krea2Attention
         _toOut = w[$"{p}.to_out.0.weight"];
         _normQ = Krea2Norm.LoadZeroCentered(w[$"{p}.norm_q.weight"]);
         _normK = Krea2Norm.LoadZeroCentered(w[$"{p}.norm_k.weight"]);
-        // Per-head RMS-normed Q/K bound the scores (F16 allowed); the grouped token-major entry also serves equal heads.
+        // Per-head RMS-normed Q/K bound the scores (F16 allowed); the grouped entry yields Sage-eligible calls itself.
+        bool grouped = _numKvHeads < _numHeads;
         _layer = new AttentionLayer(
             new AttentionLayerConfig
             {
                 Heads = _numHeads, KvHeads = _numKvHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead,
-                Gate = AttentionGate.Sigmoid, TokenMajorRoute = AttentionRoute.TokenMajorGqa, AllowF16 = true,
+                Gate = AttentionGate.Sigmoid, TokenMajorRoute = grouped ? AttentionRoute.TokenMajorGqa : AttentionRoute.TokenMajor,
+                HeadMajorForSage = !grouped, AllowF16 = true,
             },
             new AttentionLayerWeights
             {

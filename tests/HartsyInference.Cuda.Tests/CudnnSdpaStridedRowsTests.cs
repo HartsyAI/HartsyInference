@@ -70,6 +70,50 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
     /// <summary>Q, K and V are <see cref="AttentionOperand.Packed"/> column views of one [b·s, 3·h·d] F16 tensor. Asserted: the reference tolerance and the
     /// cuDNN route (no permute, no staging). Reported, not asserted: whether the output equals bit for bit the same call over plain copies of the columns,
     /// whose plan has other strides and so may pick another engine.</summary>
+    /// <summary>The shape classes of the sites that moved onto the token-major entry: M.2 must give the bits the head-major row
+    /// they used gave (F32 calls cast whole tensors on both rows), at sequence lengths off the kernel's tile size too.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("zimage-1024", 30, 128, 4128, true, "S.3")]
+    [InlineData("sdxl-b1", 10, 64, 4096, true, "S.3")]
+    [InlineData("sd15-d40", 8, 40, 4096, false, "S.5")]
+    [InlineData("sd15-d80", 8, 80, 1024, false, "S.5")]
+    [InlineData("sd15-d160", 8, 160, 256, false, "S.5")]
+    [InlineData("krea2-fusion-12", 20, 128, 12, false, "S.5")]
+    [InlineData("krea2-fusion-117", 20, 128, 117, false, "S.5")]
+    [InlineData("krea2-fusion-333", 20, 128, 333, false, "S.5")]
+    public void TokenMajor_IsBitwiseEqualToTheHeadMajorRow_AtTheFlippedSitesShapes(string name, int h, int d, int s, bool f16,
+        string headMajorRoute)
+    {
+        if (Skip()) return;
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        float scale = 1f / MathF.Sqrt(d);
+        Random rng = new(s * 31 + h * 7 + d);
+        float[] q = Gauss(rng, (long)h * s * d), k = Gauss(rng, (long)h * s * d), v = Gauss(rng, (long)h * s * d);
+        TensorShape headMajor = new(1, h, s, d), tokenMajor = new(1, s, h, d);
+        using CudaBackend backend = new(0, PtxDir());
+        IBackend b = backend;
+
+        using Tensor qh = Make(q, headMajor, dtype), kh = Make(k, headMajor, dtype), vh = Make(v, headMajor, dtype);
+        using Tensor oh = new(headMajor, dtype);
+        b.ScaledDotProductAttention(oh, qh, kh, vh, null, scale, allowF16: true);
+        backend.Sync();
+        Assert.Equal(headMajorRoute, CudaBackend.LastAttentionRoute);
+
+        using Tensor qt = Make(Transpose(q, 1, h, s, d), tokenMajor, dtype), kt = Make(Transpose(k, 1, h, s, d), tokenMajor, dtype);
+        using Tensor vt = Make(Transpose(v, 1, h, s, d), tokenMajor, dtype), ot = new(new TensorShape(s, h * d), dtype);
+        b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, null, h, d, scale, allowF16: true);
+        backend.Sync();
+        Assert.Equal("M.2", CudaBackend.LastAttentionRoute);
+
+        float[] fromHeadMajor = Read(oh), fromTokenMajor = Transpose(Read(ot), 1, s, h, d);
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        _output.WriteLine($"{name}: {headMajorRoute} vs M.2, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal(0, differing);
+    }
+
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1)]

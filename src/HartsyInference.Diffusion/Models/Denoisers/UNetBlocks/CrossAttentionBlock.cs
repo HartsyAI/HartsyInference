@@ -208,7 +208,12 @@ internal sealed class TransformerSubBlock
         _numHeads = numHeads;
         _headDim = channels / numHeads;
         _contextDim = contextDim;
-        _attentionConfig = new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = _headDim, AllowF16 = true };
+        // Only self-attention's Forward reads the route; the cross branch attends head-major over its cached K/V.
+        _attentionConfig = new AttentionLayerConfig
+        {
+            Heads = numHeads, KvHeads = numHeads, HeadDim = _headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
+            AllowF16 = true,
+        };
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string attnPrefix, string normPrefix)

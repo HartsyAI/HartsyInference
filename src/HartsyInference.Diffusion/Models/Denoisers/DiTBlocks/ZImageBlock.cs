@@ -87,10 +87,12 @@ public sealed unsafe class ZImageBlock
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.k_norm.weight"]);
+        // Base's F32 call without allowF16 has no token-major cuDNN row, so it stays head-major.
         _attention = new AttentionLayer(
             new AttentionLayerConfig
             {
                 Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = _allowF16Attention,
+                TokenMajorRoute = _allowF16Attention ? AttentionRoute.TokenMajor : AttentionRoute.Dense, HeadMajorForSage = true,
             },
             new AttentionLayerWeights
             {
