@@ -139,7 +139,7 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         try
         {
             foreach (string key in Nf4Keys(w.SourceKey)) parts[key] = _set.GetTensor(key);
-            return Nf4CompanionFold.Apply(parts)[w.SourceKey];
+            return Nf4CompanionFold.DecodeWeight(parts, w.SourceKey);
         }
         finally
         {
@@ -157,6 +157,13 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     public Tensor Produce(string name, DType target, GgufQuantError? error = null)
     {
         HfQuantWeight w = Get(name);
+        long rowLength = w.Shape[w.Shape.Rank - 1];
+        if (target.IsQuantized && rowLength % target.BlockElementCount != 0)
+        {
+            // The quantizer blocks the flattened tensor, so a ragged row would silently share blocks with the next one.
+            throw new ArgumentException(
+                $"'{name}' has rows of {rowLength} values, not whole {target.Name} blocks of {target.BlockElementCount}.", nameof(target));
+        }
         if (w.Storage == HfWeightStorage.Plain && w.StoredDType == target)
         {
             return Borrow(name);
@@ -217,6 +224,12 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             }
             RequireCompanion(module + ".absmax", module);
             RequireCompanion(module + ".quant_map", module);
+            // A non-F32 absmax is double-quantized and decodes only through both nested companions.
+            if (_set.Inventory[module + ".absmax"].DType != DType.F32)
+            {
+                RequireCompanion(module + ".nested_absmax", module);
+                RequireCompanion(module + ".nested_quant_map", module);
+            }
             TensorShape shape;
             using (Tensor state = _set.GetTensor(key))
             {

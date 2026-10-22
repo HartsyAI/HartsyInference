@@ -258,6 +258,7 @@ public static unsafe class Nf4Codec
         json.CopyTo(headerBytes, 0);
         Array.Fill(headerBytes, (byte)' ', json.Length, headerBytes.Length - json.Length);
 
+        // Only a partial file this call opened is removed: one it could not open may be another run's, still being written.
         bool opened = false;
         try
         {
@@ -312,7 +313,6 @@ public static unsafe class Nf4Codec
         }
         catch
         {
-            // Only a partial file this call opened is removed: one it failed to open may be another run's, still being written.
             // A failed cleanup is logged rather than thrown, so the error that stopped the write is the one the caller sees.
             try
             {

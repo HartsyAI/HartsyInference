@@ -172,6 +172,66 @@ public sealed class HfQuantCheckpointTests : IDisposable
     }
 
     [Fact]
+    public void WriteFromFp8_RefusesEveryPathToItsSource()
+    {
+        string real = Directory.CreateDirectory(Path.Combine(_dir, "real")).FullName;
+        string source = WriteFp8Source(Path.Combine(real, "fp8.safetensors"));
+        List<string> outputs = [source, Path.Combine(real, "..", "real", "fp8.safetensors")];
+        // Windows runners do not consistently grant the symbolic-link privilege.
+        if (!OperatingSystem.IsWindows())
+        {
+            outputs.Add(File.CreateSymbolicLink(Path.Combine(_dir, "fp8-link.safetensors"), source).FullName);
+            outputs.Add(Path.Combine(Directory.CreateSymbolicLink(Path.Combine(_dir, "alias"), real).FullName, "fp8.safetensors"));
+        }
+        byte[] before = File.ReadAllBytes(source);
+        using (HfQuantCheckpoint src = HfQuantCheckpoint.OpenFiles([source]))
+        {
+            foreach (string output in outputs)
+                Assert.Throws<ArgumentException>(() => Nf4Codec.WriteFromFp8(src, output, new Dictionary<string, string>()));
+        }
+        Assert.Equal(before, File.ReadAllBytes(source));
+
+        // A source the output's .partial file would land on.
+        string partialNamed = WriteFp8Source(Path.Combine(_dir, "nf4.safetensors.partial"));
+        byte[] partialBefore = File.ReadAllBytes(partialNamed);
+        using (HfQuantCheckpoint src = HfQuantCheckpoint.OpenFiles([partialNamed]))
+        {
+            string output = Path.Combine(_dir, "nf4.safetensors");
+            Assert.Throws<ArgumentException>(() => Nf4Codec.WriteFromFp8(src, output, new Dictionary<string, string>()));
+        }
+        Assert.Equal(partialBefore, File.ReadAllBytes(partialNamed));
+    }
+
+    [Fact]
+    public void WriteFromFp8_Cancelled_KeepsThePreviousFileAndLeavesNoPartial()
+    {
+        string source = WriteFp8Source(Path.Combine(_dir, "fp8.safetensors"));
+        string output = Path.Combine(_dir, "nf4.safetensors");
+        File.WriteAllText(output, "previous checkpoint");
+        using CancellationTokenSource stop = new();
+        stop.Cancel();
+        using HfQuantCheckpoint src = HfQuantCheckpoint.OpenFiles([source]);
+        Assert.Throws<OperationCanceledException>(() =>
+            Nf4Codec.WriteFromFp8(src, output, new Dictionary<string, string>(), cancellationToken: stop.Token));
+        Assert.Equal("previous checkpoint", File.ReadAllText(output));
+        Assert.False(File.Exists(output + ".partial"));
+    }
+
+    [Fact]
+    public void WriteFromFp8_LeavesAPartialFileItCouldNotOpen()
+    {
+        string source = WriteFp8Source(Path.Combine(_dir, "fp8.safetensors"));
+        string output = Path.Combine(_dir, "nf4.safetensors");
+        using HfQuantCheckpoint src = HfQuantCheckpoint.OpenFiles([source]);
+        // A second run writing the same output still holds its partial file.
+        using FileStream held = new(output + ".partial", FileMode.Create, FileAccess.Write, FileShare.None);
+        held.Write("in progress"u8);
+        held.Flush();
+        Assert.ThrowsAny<IOException>(() => Nf4Codec.WriteFromFp8(src, output, new Dictionary<string, string>()));
+        Assert.Equal(held.Length, new FileInfo(output + ".partial").Length);
+    }
+
+    [Fact]
     public void WriteFromFp8_FailingMidStream_KeepsThePreviousFileAndLeavesNoPartial()
     {
         // 500 quantized weights: the progress callback fires after the 500th is written, with the output still open.
@@ -212,6 +272,55 @@ public sealed class HfQuantCheckpointTests : IDisposable
             HfWeightStorage.Nf4, DType.U8, "model.layers.0.mlp.experts.0.down_proj.weight");
         Assert.Equal(DType.Q4_0, FishAudioDrama3Weights.TargetDType(expert, FishAudioDrama3Precision.Native));
         Assert.Equal(DType.Q8_0, FishAudioDrama3Weights.TargetDType(expert, FishAudioDrama3Precision.Q8_0));
+        // A row that is not whole Q4_0 blocks loads as BF16 rather than reaching the quantizer.
+        HfQuantWeight ragged = expert with { Shape = new TensorShape(8, 40) };
+        Assert.Equal(DType.BF16, FishAudioDrama3Weights.TargetDType(ragged, FishAudioDrama3Precision.Native));
+    }
+
+    [Fact]
+    public void Produce_RefusesABlockQuantWhoseBlocksWouldSpanRows()
+    {
+        const string weightKey = "model.layers.0.mlp.experts.0.down_proj.weight";
+        string path = Path.Combine(_dir, "nf4.safetensors");
+        Dictionary<string, Tensor> tensors = Nf4Codec.QuantizeToCompanions(weightKey, new float[8 * 40], 8, 40, "float32")
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        try
+        {
+            SafeTensorsWriter.Save(path, tensors);
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+
+        using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([path]);
+        ArgumentException error = Assert.Throws<ArgumentException>(() => checkpoint.Produce(weightKey, DType.Q4_0));
+        Assert.Contains("rows of 40 values", error.Message);
+    }
+
+    [Fact]
+    public void Nf4_DoubleQuantWithoutItsNestedCodebook_FailsAtOpen()
+    {
+        const string weightKey = "model.layers.0.mlp.experts.0.down_proj.weight";
+        Dictionary<string, Tensor> tensors = Nf4Codec.QuantizeToCompanions(weightKey, new float[8 * 64], 8, 64, "float32")
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        // A U8 absmax is double quant: give it the nested absmax but not the nested codebook.
+        long blocks = tensors[weightKey + ".absmax"].Shape.ElementCount;
+        tensors[weightKey + ".absmax"].Dispose();
+        tensors[weightKey + ".absmax"] = new Tensor(new TensorShape(blocks), DType.U8);
+        tensors[weightKey + ".nested_absmax"] = new Tensor(new TensorShape(1), DType.F32);
+        string path = Path.Combine(_dir, "double_quant_nf4.safetensors");
+        try
+        {
+            SafeTensorsWriter.Save(path, tensors);
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => HfQuantCheckpoint.OpenFiles([path]));
+        Assert.Contains($"'{weightKey}.nested_quant_map'", error.Message);
     }
 
     [Fact]

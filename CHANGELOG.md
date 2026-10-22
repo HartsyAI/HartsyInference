@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Drama 3 reads NF4 (bitsandbytes) checkpoints.** An NF4 expert loads as Q4_0, a second quantization rather than
+  the GPTQ build's bit-exact repack. `CheckpointRepacker --quant nf4` streams a block-FP8 checkpoint into one NF4 file in
+  bitsandbytes' layout, refuses an output that resolves to its input, and on a failure, Ctrl-C or SIGTERM removes its
+  partial file and leaves any earlier output in place. No NF4 Drama 3 has been loaded on the real weights yet.
 - **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The

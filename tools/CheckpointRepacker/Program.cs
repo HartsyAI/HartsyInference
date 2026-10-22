@@ -835,10 +835,18 @@ static bool IsQuantTarget(string key, Tensor tensor, string quantName) =>
     && SafeTensorsMerger.IsCastable(tensor.DType)
     && (quantName == "nf4" || tensor.Shape[1] % 16 == 0);
 
+// From the header alone, so a file the NF4 writer does not take falls through to the merge path and its own errors.
 static bool HasFp8Weights(string path)
 {
-    using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([path]);
-    return checkpoint.Weights.Values.Any(w => w.Storage == HfWeightStorage.Fp8Block);
+    try
+    {
+        IReadOnlyDictionary<string, SafeTensorDescriptor> tensors = SafeTensorHeaderReader.Read(path).Tensors;
+        return tensors.Values.Any(t => t.DType == DType.F8E4M3 && tensors.ContainsKey(t.Name + "_scale_inv"));
+    }
+    catch (HartsyInference.Core.Exceptions.HartsyInferenceException)
+    {
+        return false;
+    }
 }
 
 static Dictionary<string, string> ReadSourceMetadata(string path)
@@ -849,15 +857,6 @@ static Dictionary<string, string> ReadSourceMetadata(string path)
 
 static int WriteNf4FromFp8(string input, string output, bool force)
 {
-    using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([input]);
-    if (source.IsSourceFile(output))
-        return Usage($"The output is the input checkpoint: {output}. Choose a different output path.");
-    if (File.Exists(output) && !force)
-    {
-        Console.Error.WriteLine($"Output already exists: {output}. Add --force to replace it.");
-        return 1;
-    }
-    Stopwatch clock = Stopwatch.StartNew();
     using CancellationTokenSource stop = new();
     // The first signal stops the write between weights, so its partial file is removed; a second ends the process.
     void Stop(PosixSignalContext context)
@@ -865,16 +864,43 @@ static int WriteNf4FromFp8(string input, string output, bool force)
         context.Cancel = !stop.IsCancellationRequested;
         stop.Cancel();
     }
-    string sha;
     try
     {
-        using PosixSignalRegistration interrupt = PosixSignalRegistration.Create(PosixSignal.SIGINT, Stop);
-        using PosixSignalRegistration terminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, Stop);
+        using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([input]);
+        if (source.IsSourceFile(output))
+            return Usage($"The output is the input checkpoint: {output}. Choose a different output path.");
+        if (File.Exists(output) && !force)
+        {
+            Console.Error.WriteLine($"Output already exists: {output}. Add --force to replace it.");
+            return 1;
+        }
         Dictionary<string, string> metadata = ReadSourceMetadata(input);
         metadata["hartsy.quant"] = "nf4";
         metadata["hartsy.converter"] = "CheckpointRepacker --quant nf4 (streaming)";
         metadata.Remove("modelspec.hash_sha256");
-        sha = Nf4Codec.WriteFromFp8(source, output, metadata, message => Console.WriteLine($"  {message}"), stop.Token);
+        Stopwatch clock = Stopwatch.StartNew();
+        string sha;
+        using (PosixSignalRegistration.Create(PosixSignal.SIGINT, Stop))
+        using (PosixSignalRegistration.Create(PosixSignal.SIGTERM, Stop))
+        {
+            sha = Nf4Codec.WriteFromFp8(source, output, metadata, message => Console.WriteLine($"  {message}"), stop.Token);
+        }
+        long bytes = new FileInfo(output).Length;
+        JsonObject manifest = new()
+        {
+            ["source"] = Path.GetFullPath(input),
+            ["source_bytes"] = new FileInfo(input).Length,
+            ["output"] = Path.GetFullPath(output),
+            ["output_bytes"] = bytes,
+            ["sha256"] = sha,
+            ["quant"] = "nf4",
+            ["block_size"] = Nf4Codec.DefaultBlockSize,
+            ["weights_quantized"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Fp8Block),
+            ["weights_plain"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Plain),
+        };
+        File.WriteAllText(output + ".manifest.json", manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine($"Wrote {output} ({bytes} bytes), sha256 {sha}, in {clock.Elapsed.TotalMinutes:F1} min.");
+        return 0;
     }
     catch (OperationCanceledException)
     {
@@ -887,22 +913,6 @@ static int WriteNf4FromFp8(string input, string output, bool force)
         Console.Error.WriteLine($"Could not convert {Path.GetFileName(input)}: {ex.Message}");
         return 1;
     }
-    long bytes = new FileInfo(output).Length;
-    JsonObject manifest = new()
-    {
-        ["source"] = Path.GetFullPath(input),
-        ["source_bytes"] = new FileInfo(input).Length,
-        ["output"] = Path.GetFullPath(output),
-        ["output_bytes"] = bytes,
-        ["sha256"] = sha,
-        ["quant"] = "nf4",
-        ["block_size"] = Nf4Codec.DefaultBlockSize,
-        ["weights_quantized"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Fp8Block),
-        ["weights_plain"] = source.Weights.Values.Count(w => w.Storage == HfWeightStorage.Plain),
-    };
-    File.WriteAllText(output + ".manifest.json", manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-    Console.WriteLine($"Wrote {output} ({bytes} bytes), sha256 {sha}, in {clock.Elapsed.TotalMinutes:F1} min.");
-    return 0;
 }
 
 static string ComputeDtypeName(DType dtype) =>
