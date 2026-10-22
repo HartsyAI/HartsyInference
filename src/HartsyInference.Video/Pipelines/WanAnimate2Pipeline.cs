@@ -197,8 +197,8 @@ public sealed unsafe class WanAnimate2Pipeline : DiffusionPipelineBase
         bool continuation = carriedRgbFrame is not null;
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         bool useCfg = UsesCfgBranch(guidance);
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? DefaultFlowShift;
         float poseStrength = (request as VideoGenerationRequest)?.AnimatePoseStrength ?? 1.0f;

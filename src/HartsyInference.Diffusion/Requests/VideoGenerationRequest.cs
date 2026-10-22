@@ -1,6 +1,6 @@
 namespace HartsyInference.Diffusion.Requests;
 
-/// <summary>Request parameters for text/image-to-video generation; extends <see cref="TextToImageRequest"/> with video-only knobs (frame count, frame rate, flow-match shift), which resolve against the model's <see cref="GenerationDefaults"/> the same way <see cref="TextToImageRequest.Steps"/>/<see cref="TextToImageRequest.CfgScale"/> do for images.</summary>
+/// <summary>Request parameters for text/image-to-video generation; extends <see cref="TextToImageRequest"/> with video-only knobs (frame count, frame rate, flow-match shift).</summary>
 public record VideoGenerationRequest : TextToImageRequest
 {
     /// <summary>Number of output frames; <c>null</c> = the pipeline's model default (e.g. Wan 81, LTX 161, LTX-2 121, HunyuanVideo 129, Kandinsky-5 121). Must satisfy the model's frame-count constraint (commonly <c>(n-1) % temporal_compression == 0</c>).</summary>

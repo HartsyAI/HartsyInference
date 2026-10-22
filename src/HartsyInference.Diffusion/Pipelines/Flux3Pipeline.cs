@@ -58,9 +58,6 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         _config = transformer.Config;
     }
 
-    /// <summary>The official defaults of the loaded build.</summary>
-    public GenerationDefaults Defaults => _config.FlowMap ? GenerationDefaults.Flux3Distilled : GenerationDefaults.Flux3;
-
     /// <summary>Keeps the DiT resident across generations unless the VRAM profile says otherwise.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
@@ -81,7 +78,10 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             throw new ArgumentException($"FLUX.3 takes at most {_config.MaxReferenceImages} reference images.", nameof(referenceImages));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, float cfg, int reqWidth, int reqHeight) = Defaults.Resolve(request);
+        int steps = request.Steps;
+        float cfg = request.CfgScale;
+        int reqWidth = request.Width;
+        int reqHeight = request.Height;
         int imgH = reqHeight / _config.VaeDownscaleFactor * _config.VaeDownscaleFactor;
         int imgW = reqWidth / _config.VaeDownscaleFactor * _config.VaeDownscaleFactor;
         int patH = imgH / _config.VaeDownscaleFactor;

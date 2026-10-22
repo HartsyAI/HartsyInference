@@ -30,7 +30,7 @@ public sealed class Sd15Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sd15", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>SD 1.5's official sampling settings: 50 steps at CFG 7.5 and a native 512x512 (diffusers <c>StableDiffusionPipeline.__call__</c>, mirrored by <c>GenerationDefaults.Sd15</c>).</summary>
+    /// <summary>SD 1.5's official sampling settings: 50 steps at CFG 7.5 and a native 512x512 (diffusers <c>StableDiffusionPipeline.__call__</c>).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 7.5f, Width = 512, Height = 512 };
 
     /// <inheritdoc/>

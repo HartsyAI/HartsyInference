@@ -52,7 +52,7 @@ public sealed unsafe class LanceVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"Lance T2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width ?? 848, request.Height ?? 480, seed);
+        return (frames, request.Width, request.Height, seed);
     }
 
     /// <summary>Streams decoded frames one at a time (pull-based → memory bounded to a single VAE frame-group; natural backpressure). Pair with an <c>IVideoEncoder</c> to write an MP4/frame-sequence without holding the whole clip.</summary>
@@ -87,7 +87,7 @@ public sealed unsafe class LanceVideoPipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? 848, height = request.Height ?? 480;
+        int width = request.Width, height = request.Height;
         int downscale = _config.VaeDownsampleSpatial * _config.LatentPatchSize.H;
         if (width % downscale != 0 || height % downscale != 0)
             throw new ArgumentException($"Width and height must be divisible by {downscale} for Lance video.");
@@ -97,8 +97,8 @@ public sealed unsafe class LanceVideoPipeline : DiffusionPipelineBase
         int gridT = (numFrames - 1) / _config.VaeDownsampleTemporal + 1;
         int gridH = height / downscale, gridW = width / downscale;
         int nVae = gridT * gridH * gridW;
-        int steps = request.Steps ?? _config.NumTimesteps;
-        float cfg = request.CfgScale ?? _config.CfgTextScale;
+        int steps = request.Steps;
+        float cfg = request.CfgScale;
         float shift = _config.VideoTimestepShift;
 
         Logs.Info($"Lance T2V denoise: {numFrames}f {width}x{height}, {steps} steps, cfg={cfg}, seed={seed} (grid {gridT}x{gridH}x{gridW}, {nVae} tokens)");

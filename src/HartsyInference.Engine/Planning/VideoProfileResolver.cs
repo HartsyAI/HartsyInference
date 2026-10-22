@@ -1422,10 +1422,17 @@ internal static class VideoProfileResolver
         {
             return planned;
         }
-        int below = Math.Max(grid.Offset, grid.Offset + (frames - grid.Offset) / grid.Step * grid.Step);
+        // Long arithmetic and the cap keep both suggestions counts the family can actually generate.
+        long below = Math.Max(grid.Offset, grid.Offset + (long)(frames - grid.Offset) / grid.Step * grid.Step);
+        long above = below + grid.Step;
+        if (grid.Max is int max)
+        {
+            below = Math.Min(below, max);
+            above = Math.Min(above, max);
+        }
+        string nearest = below == above ? $"the nearest is {below}" : $"the nearest are {below} and {above}";
         issues.Add(Error("video.frames.off_grid",
-            $"{frames} frames is not a count this model generates ({grid}); the nearest are {below} and {below + grid.Step}.",
-            nameof(VideoRequest.Frames)));
+            $"{frames} frames is not a count this model generates ({grid}); {nearest}.", nameof(VideoRequest.Frames)));
         return frames;
     }
 

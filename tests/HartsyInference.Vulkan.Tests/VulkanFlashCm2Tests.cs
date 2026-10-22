@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vulkan;
 using Xunit;
@@ -290,6 +291,75 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
             }
         }
         return o;
+    }
+
+    /// <summary>The single-stream blocks' attention through <see cref="AttentionLayer.Attend"/>: the token-major config (B.1) gives
+    /// the bits of the head-major config's permutes and A.1, the same cm2 kernel read through other strides, with Chroma's
+    /// [1, 1, S, S] padding mask too and F32 cast to F16 on both.</summary>
+    [Theory]
+    [InlineData("flux1-1024", 24, 4608, true, false)]
+    [InlineData("flux1-1024-f32", 24, 4608, false, false)]
+    [InlineData("chroma-1024", 24, 4107, true, false)]
+    [InlineData("chroma-1024-masked", 24, 4107, true, true)]
+    [InlineData("flux2-1024", 48, 4608, true, false)]
+    [InlineData("hunyuanimage-f32", 28, 4173, false, false)]
+    public void SingleStreamAttend_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int s, bool f16, bool masked)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        const int d = 128;
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        float[] q = Half(Random(s * h * d, 41)), k = Half(Random(s * h * d, 42)), v = Half(Random(s * h * d, 43));
+        float[]? bias = masked ? PaddingMask(s, txt: 11, kept: 4) : null;
+        TensorShape operand = new(1, s, h, d), flat = new(1, s, h * d);
+
+        float[] Run(AttentionRoute route)
+        {
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, AllowF16 = true, TokenMajorRoute = route, HeadMajorForSage = true,
+            });
+            using Tensor? mask = bias is null ? null : FromHost(new TensorShape(1, 1, s, s), bias);
+            using Tensor o = layer.Attend(backend, Operand(q, operand, dtype), Operand(k, operand, dtype), Operand(v, operand, dtype), flat,
+                new AttentionCallContext { Bias = mask });
+            Assert.Equal(flat, o.Shape);
+            if (o.DType == DType.F32) return o.AsReadOnlySpan<float>().ToArray();
+            using Tensor wide = o.CastTo(DType.F32);
+            return wide.AsReadOnlySpan<float>().ToArray();
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        string? headMajorRoute = VulkanBackend.LastAttentionRoute;
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        string? tokenMajorRoute = VulkanBackend.LastAttentionRoute;
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        output.WriteLine($"{name}: {headMajorRoute} vs {tokenMajorRoute}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal("A.1", headMajorRoute);
+        Assert.Equal("B.1", tokenMajorRoute);
+        Assert.Equal(0, differing);
+    }
+
+    /// <summary>Chroma's additive mask over a [text; image] sequence: a pair is kept only when both tokens are, and the text past
+    /// <paramref name="kept"/> is padding.</summary>
+    private static float[] PaddingMask(int s, int txt, int kept)
+    {
+        float[] mask = new float[(long)s * s];
+        for (int i = 0; i < s; i++)
+            for (int j = 0; j < s; j++)
+                mask[(long)i * s + j] = (i >= kept && i < txt) || (j >= kept && j < txt) ? -1e30f : 0f;
+        return mask;
+    }
+
+    /// <summary>A host tensor of <paramref name="dtype"/> holding <paramref name="values"/>, already F16-exact.</summary>
+    private static Tensor Operand(float[] values, TensorShape shape, DType dtype)
+    {
+        Tensor f32 = FromHost(shape, values);
+        if (dtype == DType.F32) return f32;
+        try { return f32.CastTo(dtype); }
+        finally { f32.Dispose(); }
     }
 
     private static float[] ToTokenMajor(float[] headMajor, int heads, int s, int d)

@@ -7,7 +7,6 @@ KERNELS=(
     "flash_attn_f16"
     "h3_vsa"
     "sage_attn_int8"
-    "sage_attn_int8_v1"
 )
 
 # shellcheck source=../build_common.sh

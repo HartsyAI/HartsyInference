@@ -82,11 +82,17 @@ and source:
 |---|---|
 | `RecipeDefault` / `ProfileDefault` | unset by the caller; the recipe, or an exact-checkpoint profile, supplied it |
 | `UserOverride` | set by the caller and run as set |
-| `Normalized` | set by the caller and changed by planning; the note names the requested value |
-| `Derived` | computed: a random seed, or a frame rate the pipeline pinned from an input clip |
+| `Normalized` | set by the caller and changed by planning or by a pipeline that pins it (a frame rate taken from an input clip); the note names the requested value |
+| `Derived` | computed: a random seed, or a frame rate the pipeline pinned from an input clip when the caller set none |
 
 The plan's identity and provenance travel onto `VideoGenerationResult` and `ImageResult` and are logged once per
 generation, so a wrong value in an output can be traced to the recipe, the host, the user or the pipeline.
+
+Two limits, by design for now:
+- **Image provenance compares the caller's request with the resolved request.** A size a pipeline later rounds
+  (to its latent multiple) still reports the resolved value; the result's own `Width`/`Height` are what ran.
+- **The streaming path (`GenerateFramesAsync`) yields frames only.** It logs `[VideoPlan]` but carries no result
+  object, so a host that streams reads provenance from `IVideoPlanningService.PlanAsync`.
 
 Frame counts are normalized in planning, not in pipelines. A count off a family's grid snaps as the grid declares;
 **a snap that would pass the grid's cap lands on the cap**, which is on the grid and the closest count the family can
@@ -137,19 +143,38 @@ been re-read; until then it is an audit finding, not a specification.
 | lance-video | 30 / 4.0 / 512×512 / 25 @ 25 | none in SwarmUI; pipeline fallback was 81, cap 121 | unverified |
 | minimax-h3 | 30 / 1.0 / 1344×768 / 124 @ 24 | 124 frames (17k+5, rounded up), 24 fps, cfg 1, `res_multistep` / `simple` | unverified |
 | ace-step 1.5 (audio) | loader table | 120 s (max 600), turbo cfg 1 / 8 steps / shift 3 | unverified |
-| minimax-music-3 (audio) | loader table | 120 s max, cfg 1.7, 30 steps | unverified |
-| yue2 (audio) | loader table | 300 s max, cfg 1, 20 steps | unverified |
+| minimax-music-3 (audio) | `MiniMaxMusic3MusicRecipe`: 10 s, 30 steps, cfg 1.7 | 120 s max, cfg 1.7, 30 steps; frame grid caps at 360 s | unverified |
+| yue2 (audio) | `Yue2MusicRecipe`: 10 s, 32 ODE steps; cfg owned by the planning mode | 300 s max, cfg 1, 20 steps; protocol caps at 900 s | unverified |
 
 Rows marked "today" with 25 fps or 704×480 that SwarmUI does not list are the old generic fallback, kept so the
 change that made defaults total moved no output.
 
+## Audio
+
+Music families follow the same contract through `IMusicRecipe` and `MusicRecipeRegistry`, which mirror the video
+types. `MusicDefaults` holds the values a request's unset fields take; `MusicConstraints` holds the longest clip a
+family renders. `MusicService` applies the recipe before loading or generation, so `MusicRequest` carries only
+values a caller set. Every field is nullable, and a `null` in a recipe means the loader or pipeline owns that choice.
+
+Two cases deviate from "the recipe owns it":
+
+- ACE-Step's 1.5 and v1 pipelines take different values for steps and guidance, and a placed checkpoint only shows
+  which one it is after its header is read. The service therefore applies only the family-level values to a placed
+  checkpoint, and the 1.5 loader applies the variant's steps, shift and guidance once it knows the checkpoint is 1.5.
+- The output sample rate is not a recipe value: the loaded model reports it (48 kHz on ACE-Step 1.5, 44.1 kHz on v1),
+  and the runner is the authority.
+
+Audio speech and transcription recipes are not yet typed; their defaults stay in their loaders.
+
 ## Open
 
+- ACE-Step steps, shift and guidance for a checkpoint placed on disk are still applied by the loader, which tells v1
+  from 1.5 only after reading it. A structural ACE-Step variant catalog moves them into the recipe, as for Flux.
 - Image sizes are still snapped inside the pipelines (multiples of 16, area clamps), after provenance is recorded;
   that moves into planning with the pipeline migration, so a snapped size reports as a normalization.
 - Variant resolution refuses an unresolved variant instead of taking the catalog default, and filename guesses for
   families whose variants differ in defaults. Variant defaults now come from the catalog alone, and `VariantDefaults`
   is gone. Flux.2's filename guess remains the last resort for prefixed checkpoints, whose names its structural rule
   does not read; LTX-Video's filename clauses in `SupportsFor` remain.
-- Pipelines take the resolved plan only; pipeline `??` fallbacks and `GenerationDefaults` go.
-- Audio recipes (music, speech, transcription identity and defaults).
+- Pipelines take the resolved plan only; the remaining pipeline `??` fallbacks go (`GenerationDefaults` is gone).
+- Audio speech and transcription recipes (music is typed; see Audio above).

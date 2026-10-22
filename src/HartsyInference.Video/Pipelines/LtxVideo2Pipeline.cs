@@ -131,7 +131,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
 
         ThrowIfDisposed();
-        int width = request.Width ?? 768, height = request.Height ?? 512;
+        int width = request.Width, height = request.Height;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
         if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for LTX-2.");
@@ -166,7 +166,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int audioFrames = Math.Max(1, (int)Math.Round(durationS * audioLatentsPerSecond));
         int audioChannels = _config.AudioInChannels;   // 8 latent ch × 16 mel-latent bins (patch-1 pack)
 
-        int steps = request.Steps ?? _config.NumInferenceSteps;
+        int steps = request.Steps;
         if (_config.FixedSigmas is { Length: > 1 } fixedSigmas)
         {
             int distilledSteps = fixedSigmas.Length - 1;
@@ -179,7 +179,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 steps = distilledSteps;
             }
         }
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        float guidance = request.CfgScale;
         // The reference carries a separate audio CFG scale; unset follows the video scale.
         float audioGuidance = _config.AudioGuidanceScale ?? guidance;
         // Both scales must be 1 to skip the unconditional branch: the single-branch path has no unconditional

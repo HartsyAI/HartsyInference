@@ -31,9 +31,6 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
     /// <summary>Explicit bring-up probe. Each scan deliberately materializes a prediction on the host, so it is disabled in production; use it to localize non-finite Base outputs before the CFG combine.</summary>
     private static bool PredictionStatsEnabled => EngineKnobs.ZimagePredStats.Value;
 
-    private GenerationDefaults VariantDefaults =>
-        _config.IsBase ? GenerationDefaults.ZImageBase : GenerationDefaults.ZImageTurbo;
-
     /// <summary>Creates a Z-Image pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public ZImagePipeline(IBackend backend, ZImageTransformer transformer, VaeDecoder vaeDecoder, ZImageConfig config)
         : this(backend, transformer, vaeDecoder, vaeEncoder: null, config)
@@ -127,10 +124,9 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 "negativeCaptionEmbeddings is required when cfgScale > 1.0 (Z-Image-Base path). For Z-Image-Turbo, leave cfgScale at 1.0.",
                 nameof(negativeCaptionEmbeddings));
 
-        GenerationDefaults defaults = VariantDefaults;
-        int width = request.Width ?? defaults.Width;
-        int height = request.Height ?? defaults.Height;
-        int steps = request.Steps ?? defaults.Steps;
+        int width = request.Width;
+        int height = request.Height;
+        int steps = request.Steps;
         _ = Img2ImgSetup.Prepare(request, height, width, steps);
     }
 
@@ -153,12 +149,11 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        GenerationDefaults defaults = VariantDefaults;
-        int width = request.Width ?? defaults.Width;
-        int height = request.Height ?? defaults.Height;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / _config.VaeDownscaleFactor;
         int latentW = width / _config.VaeDownscaleFactor;
-        int steps = request.Steps ?? defaults.Steps;
+        int steps = request.Steps;
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
         if (plan.PassThrough)

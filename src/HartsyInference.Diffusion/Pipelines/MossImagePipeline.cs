@@ -66,9 +66,6 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>The reference sampling defaults.</summary>
-    public GenerationDefaults Defaults => GenerationDefaults.MossImage;
-
     /// <summary>Keeps the DiT resident across generations unless the VRAM profile says otherwise.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
@@ -94,7 +91,10 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         bool encodes = references is not null || request is ImageToImageRequest;
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int requestedSteps, float cfg, int reqWidth, int reqHeight) = Defaults.Resolve(request);
+        int requestedSteps = request.Steps;
+        float cfg = request.CfgScale;
+        int reqWidth = request.Width;
+        int reqHeight = request.Height;
         int unit = _config.VaeDownscaleFactor;
         int imgH = Math.Max(unit, reqHeight / unit * unit);
         int imgW = Math.Max(unit, reqWidth / unit * unit);

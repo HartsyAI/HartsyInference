@@ -47,7 +47,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         // Klein has no guidance embedding; Dev uses guidance ~3.5 (BFL distillation target).
         float guidance = _config.GuidanceEmbed ? 3.5f : 0f;
 
-        // TODO(E-IMG-4/5): img2img, NegativePrompt/CfgScale mapping, and user component overrides are deferred.
+        // TODO(E-IMG-4/5): img2img, NegativePrompt mapping, and user component overrides are deferred.
         // <alternate:>/<fromto[N]:> now survive ImagesService, because this recipe declares
         // ImageFeatures.PromptScheduling. Everything OUTSIDE the schedule builder therefore needs them collapsed to
         // their step-0 value first, or the literal tag text is tokenized as prose — the same split SdxlRecipePipeline
@@ -74,6 +74,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
                 Width = width,
                 Height = height,
                 Steps = steps,
+                CfgScale = settings.CfgScale,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
                 // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.

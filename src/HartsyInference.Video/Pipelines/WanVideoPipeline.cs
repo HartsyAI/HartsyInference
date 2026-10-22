@@ -136,7 +136,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"Wan-Video T2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width ?? 832, request.Height ?? 480, seed);
+        return (frames, request.Width, request.Height, seed);
     }
 
     /// <summary>Streams decoded frames (pull-based → memory bounded; pair with an <c>IVideoEncoder</c>).
@@ -199,7 +199,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? 832, height = request.Height ?? 480;
+        int width = request.Width, height = request.Height;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
         if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-Video.");
@@ -219,8 +219,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         if (lastFrameLatent is not null && tLat < 2)
             throw new ArgumentException($"lastFrameLatent needs at least 2 latent frames (numFrames={numFrames} → T_lat={tLat}); a single-frame clip has no distinct end.", nameof(lastFrameLatent));
 
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         // NOT converted to the sampler seam, and it cannot be: Wan denoises through FlowUniPCMultistepScheduler, a
         // stateful predictor/corrector. Its step converts to x0 (x0 = x − σ·v), retro-corrects the PREVIOUS sample
@@ -430,6 +430,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int cfgSkippedSteps = 0;
         int cacheComputes = 0, cacheReuses = 0, uncondComputes = 0, uncondReuses = 0;
         WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
+        using IDisposable? textKv = OpenTextKvCache(stream, tLat, hLat, wLat, promptEmbeds, negativeEmbeds,
+            cfgParallelEnabled ? CfgParallelBackend : cpEnabled ? CpBackends![1] : null);
 
         for (int k = 0; k < steps; k++)
         {
@@ -547,6 +549,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             if (cfgParallelEnabled) CfgParallelBackend!.FreeActivations();
             if (cpEnabled) CpBackends![1].FreeActivations();
         }
+        textKv?.Dispose();   // before the decode-headroom check below measures free VRAM
         cpExchange?.Dispose();
 
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);
@@ -596,7 +599,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 + "Use a Wan I2V config preset (e.g. I2V_14B_480p / I2V_A14B), or the TI2V firstFrameLatent path.");
         if (_config.HasImageConditioning && imageEmbeds is null)
             throw new ArgumentException("This variant has CLIP image conditioning — imageEmbeds is required.", nameof(imageEmbeds));
-        int width = request.Width ?? 832, height = request.Height ?? 480;
+        int width = request.Width, height = request.Height;
         if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-Video.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
@@ -605,8 +608,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (numFrames - 1) / tp + 1;
         int hLat = height / sp, wLat = width / sp;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         // Same UniPC blocker as RunDenoise (see the comment there). Refused here BEFORE the conditioning VAE encode
@@ -752,8 +755,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         int startStep = Math.Clamp((int)Math.Round((1f - strength) * steps), 0, steps - 1);
 
@@ -929,6 +932,26 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Logs.Info($"[wan-phase] cond encode fits beside the resident DiT " +
                 $"(need ~{encodeNeedBytes >> 20} MB + 2048 MB margin, free {free >> 20} MB) — evict skipped.");
         }
+    }
+
+    /// <summary>Opens the single-expert transformer's text cross-attention K/V cache when the DiT is fully resident and every
+    /// backend the loop runs on still has the activation reserve free beside both contexts' K/V; null otherwise.</summary>
+    private IDisposable? OpenTextKvCache(BlockStreamingScope? stream, int tLat, int hLat, int wLat, Tensor promptEmbeds,
+        Tensor negativeEmbeds, IBackend? second)
+    {
+        if (_transformer2 is not null || stream?.Streaming == true)
+            return null;
+        int contextTokens = (int)Math.Max(promptEmbeds.Shape[0], negativeEmbeds.Shape[0]);
+        long need = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim, _config.PatchSize)
+            + _transformer.TextCrossAttentionKvBytes(contextTokens, contexts: 2);
+        long free = Backend.FreeMemoryBytes();
+        if (free < need || second?.FreeMemoryBytes() < need)
+        {
+            // A backend that reports no free VRAM (the CPU) skips the cache without a line.
+            if (free > 0) Logs.Info($"Wan text cross-attention K/V cache off: under {need >> 20} MB free beside the resident DiT.");
+            return null;
+        }
+        return _transformer.CacheTextCrossAttentionKv();
     }
 
     /// <summary>Bytes the denoise phase needs beside the weights, so the resident/streamed decision and the block window budget against the same number.</summary>

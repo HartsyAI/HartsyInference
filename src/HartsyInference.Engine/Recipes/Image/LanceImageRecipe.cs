@@ -26,7 +26,7 @@ public sealed class LanceImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lance-image", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Lance's official sampling settings: 30 steps at text-CFG 4.0, 1024x1024 (<c>LanceConfig.NumTimesteps</c>/<c>CfgTextScale</c>).</summary>
+    /// <summary>Lance's official sampling settings: 30 steps at text-CFG 4.0, 1024x1024.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

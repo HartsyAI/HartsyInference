@@ -45,39 +45,12 @@ public sealed record LensConfig
     /// <summary>RMSNorm epsilon for stream norms (img_norm1/2, txt_norm1/2, txt_norm[i]) and the AdaLN-Continuous final layer.</summary>
     public float StreamNormEps { get; init; } = 1e-6f;
 
-    /// <summary>Default number of inference steps for this variant.</summary>
-    public required int DefaultSteps { get; init; }
-
-    /// <summary>Default CFG scale. Lens-Turbo uses 1.0 (no CFG, distilled); Lens and Lens-Base both use 5.0.</summary>
-    public required float DefaultCfgScale { get; init; }
-
-    /// <summary><c>microsoft/Lens</c> (default RL-tuned production weights). 20 steps, CFG 5.0.</summary>
+    /// <summary>The Lens architecture, shared by <c>microsoft/Lens</c>, <c>Lens-Turbo</c> and <c>Lens-Base</c>: the variants
+    /// differ only in weights and sampling settings, which <c>LensRecipe</c> declares.</summary>
     public static LensConfig Default => new()
     {
         HiddenSize = 1536,
         NumLayers = 48,
         NumHeads = 24,
-        DefaultSteps = 20,
-        DefaultCfgScale = 5.0f,
-    };
-
-    /// <summary><c>microsoft/Lens-Turbo</c> (4-step distilled, no CFG). Architecturally identical to <see cref="Default"/>.</summary>
-    public static LensConfig Turbo => new()
-    {
-        HiddenSize = 1536,
-        NumLayers = 48,
-        NumHeads = 24,
-        DefaultSteps = 4,
-        DefaultCfgScale = 1.0f,
-    };
-
-    /// <summary><c>microsoft/Lens-Base</c> (SFT-only, no RL or distillation; for fair baseline comparison). 50 steps, CFG 5.0.</summary>
-    public static LensConfig Base => new()
-    {
-        HiddenSize = 1536,
-        NumLayers = 48,
-        NumHeads = 24,
-        DefaultSteps = 50,
-        DefaultCfgScale = 5.0f,
     };
 }

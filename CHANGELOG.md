@@ -8,6 +8,31 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: the executable specification of INT8 attention v2.** `Int8AttentionV2Reference` runs on the CPU the stats pass,
+  quantization and online recurrence the coming INT8 kernel must reproduce: u8 P against each key tile's own maximum, s8 V,
+  INT32 partials drained at every key tile, K channel-mean smoothing with its softcap, sink, LSE and per-segment corrections,
+  tile-classified masks, GQA and head dims up to 256, plus the FP8 and F16 P×V fallbacks. An adversarial suite holds it to
+  the contract oracle, which can now return the LSE.
+- **Changed: attention's NaN policy is written down.** A NaN that a row's output reads makes that output NaN (contract §3).
+  The host reference, which the CPU backend runs for calls no legacy entry carries, returned zeros for a row whose every
+  score was NaN, that saw no key and had a NaN sink, or that had a +∞ sink; it now returns NaN. Finite inputs are
+  unaffected.
+- **Added: Drama 3 reads NF4 (bitsandbytes) checkpoints.** An NF4 expert loads as Q4_0, a second quantization rather than
+  the GPTQ build's bit-exact repack. `CheckpointRepacker --quant nf4` streams a block-FP8 checkpoint into one NF4 file in
+  bitsandbytes' layout, refuses an output that resolves to its input, and on a failure, Ctrl-C or SIGTERM removes its
+  partial file and leaves any earlier output in place. No NF4 Drama 3 has been loaded on the real weights yet.
+- **Faster: Wan's denoise step.** Each block's text cross-attention keys and values are projected once per prompt per
+  generation and kept on the device, instead of re-projecting the 512 context rows on every step; the cache is pinned
+  per backend, released when the denoise loop ends, and off when the DiT streams or VRAM is short. Self-attention casts
+  its normed input to F16 once for its three projections instead of once each (F16 weights on CUDA), and the per-block
+  modulation is one add over the six-row table instead of eighteen ops. Output is bit-identical.
+- **Removed: dead attention kernels and switches.** The TF32 FlashAttention-2 kernel (`numerics.sdpaV2`), the SDPA
+  route forced onto the per-row flash kernel (`numerics.sdpaForceFlash`), SageAttention's first kernel
+  (`numerics.sageV0`), its F32-input rows (`numerics.sageAttnExplicit`, `numerics.sageUnsafeF32VNarrow`) with the
+  F32-output PV variants only they reached (`numerics.sagePv`), and the F16 flash kernel's never-routed head-dim 64 and
+  128 entries. Each was opt-in or unreachable, so output is bit-identical. SageAttention now ships as one module,
+  `sage_attn_int8.ptx`. A settings file, `--set`, request or API call naming one of the six ids warns and ignores it
+  through alpha.486.
 - **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The
@@ -29,9 +54,6 @@ stable release will require. Dates are UTC.
   text-token count from the leading dim of the `[1, T, 768]` UMT5 features the engine passes, so it conditioned on the first
   tag token alone and its projection wrote T rows into a one-row output (an exception on CPU, an out-of-bounds write on
   CUDA). It now counts rows as `Linear` does, which changes CUDA output.
-
-## alpha.385
-
 - **Fixed: ACE-Step v1 generated noise on CUDA: it misread bf16 checkpoint tensors on the host, plus two smaller
   ACE-Step v1 faults.** Several tensors are read on the host through `float*`: the DiT's lyric embedding table, the
   lyric encoder's norm biases, the DCAE's depthwise and grouped convs and norm biases, and the vocoder's norm biases.
@@ -46,6 +68,14 @@ stable release will require. Dates are UTC.
   stream in blocks of 3·d (columns h·3d, h·3d + d and h·3d + 2d). From the first EfficientViT stage on, the decode
   diverged from the reference: the right channel came out quieter and the two channels nearly uncorrelated. A reference
   latent now decodes to the reference's mel stage for stage, which changes every ACE-Step v1 generation.
+- **Faster: the single-stream blocks of Flux.1, Chroma, Flux.2, Flux.3 and HunyuanImage/HunyuanVideo attend token-major.**
+  `AttentionLayer.Attend` now writes the caller's `[1, S, heads·D]` output on the token-major entry instead of refusing
+  it (CUDA's equal-head entry takes that shape, as its grouped one already did), so each call drops three permutes in and
+  one out at one batch item. Calls SageAttention would take (F16, head dim 64 or 128, unmasked, both sequences at least
+  `numerics.sageF16MinSkv`, as Flux.1 at 1536²) and batched forwards stay head-major. Measured bit-identical: Flux.1 (1024²
+  and 1536²), Flux.2 and Chroma images on CUDA, Flux.1 images on Vulkan, and the attention call at the Flux.1, Flux.2,
+  Chroma (padding mask included) and HunyuanImage single-block shapes on CUDA's cuDNN row and Vulkan's cooperative-matrix-2
+  kernel.
 
 ## alpha.385
 

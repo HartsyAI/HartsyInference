@@ -75,22 +75,12 @@ public static partial class KnobProfiles
         .With(EngineKnobs.S2vTextCfg, false)
         // SageAttention quantizes Q and K to INT8 (K-smoothed per-row) for QK^T; off keeps the cuDNN/F32 attention routes.
         .With(EngineKnobs.SageAttn, false)
-        // The explicit =1 sense; it is the first of two opt-ins that unlock Sage's unsafe F32-to-F16 V narrowing.
-        .With(EngineKnobs.SageAttnExplicit, false)
-        // Anything other than the literal f16acc keeps SageAttention's F32-accumulate PV; f16acc accumulates PV in F16.
-        .With(EngineKnobs.SagePv, null)
-        // Accepts materializing F32 V as F16, so any V outside the finite F16 range becomes infinity.
-        .With(EngineKnobs.SageUnsafeF32VNarrow, false)
         // Falls back to the materialized F32 score-matrix paths instead of cuDNN's fused flash engine, which picks its own internal math.
         .With(EngineKnobs.SdpaCudnn, false)
         // Would force F16 SDPA on for callers the per-call allowF16 gate deliberately excludes (unbounded-score architectures).
         .With(EngineKnobs.SdpaF16, false)
-        // Forces the online-softmax FlashAttention kernel for every SDPA call instead of the materialized F32 route.
-        .With(EngineKnobs.SdpaForceFlash, false)
         // Kill-switch: true disables the F16 SDPA path everywhere, including callers that opt in via allowF16.
         .With(EngineKnobs.SdpaNoF16, true)
-        // The experimental fused FlashAttention-2 kernel runs its QK^T on TF32 tensor cores.
-        .With(EngineKnobs.SdpaV2, false)
         // Builds the SeedVR2 VAE with F32 activations instead of the default CUDA BF16.
         .With(EngineKnobs.Seedvr2VaeF32, true)
         // The speculative verify pass recomputes logits with multi-row GEMMs, so an accepted token's argmax can differ from m=1 decode.

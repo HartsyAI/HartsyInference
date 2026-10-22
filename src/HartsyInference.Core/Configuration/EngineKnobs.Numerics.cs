@@ -200,14 +200,6 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SageAttn =
         Bool("numerics.sageAttn", true, KnobScope.Runtime, KnobDomain.Numerics, "Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).");
 
-    /// <summary>Literal f16acc picks SageAttention v1's F16-accumulate PV variant; any other value silently means off.</summary>
-    public static readonly Knob<string?> SagePv =
-        Str("numerics.sagePv", null, KnobScope.Runtime, KnobDomain.Numerics, "Literal f16acc picks SageAttention v1's F16-accumulate PV variant; any other value silently means off.");
-
-    /// <summary>Forces the older v0 SageAttention flash kernel instead of the register-resident v1 path.</summary>
-    public static readonly Knob<bool> SageV0 =
-        Bool("numerics.sageV0", false, KnobScope.Runtime, KnobDomain.Numerics, "Forces the older v0 SageAttention flash kernel instead of the register-resident v1 path.");
-
     /// <summary>Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.</summary>
     public static readonly Knob<bool> SandwichFusion =
         Bool("numerics.sandwichFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.");
