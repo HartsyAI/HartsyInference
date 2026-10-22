@@ -1235,9 +1235,10 @@ public static unsafe class CheckpointConvertUtils
         long packedCols = packed.Shape[1];
         long cols = packedCols * 2;
         long scaleCols = blockScales.Shape[1];
-        if (blockScales.Shape[0] != rows || scaleCols * 16 != cols)
+        // The blocked layout may be padded to 128 rows and 4 block columns; the stored column count is the swizzle stride.
+        if (cols % 16 != 0 || blockScales.Shape[0] < rows || scaleCols * 16 < cols)
             throw new ArgumentException(
-                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not match packed weight [{rows}, {packedCols}] (expect [rows, cols/16]).");
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need at least [rows, cols/16] with cols a multiple of 16).");
 
         Tensor result = new Tensor(new TensorShape(rows, cols), DType.F16);
         unsafe
@@ -1284,9 +1285,9 @@ public static unsafe class CheckpointConvertUtils
         long packedCols = packed.Shape[1];
         long cols = packedCols * 2;
         long scaleCols = blockScales.Shape[1];
-        if (blockScales.Shape[0] != rows || scaleCols * 16 != cols)
+        if (cols % 16 != 0 || blockScales.Shape[0] < rows || scaleCols * 16 < cols)
             throw new ArgumentException(
-                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not match packed weight [{rows}, {packedCols}] (expect [rows, cols/16]).");
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need at least [rows, cols/16] with cols a multiple of 16).");
 
         // Build the dequantized values (e2m1 · block_scale / 8) as F32, then cast to fp8 via the engine's TESTED
         // F32→F8E4M3 path (Tensor.CastTo) rather than a hand-rolled quantizer. The F32 intermediate is per-tensor

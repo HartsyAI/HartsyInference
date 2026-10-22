@@ -8,6 +8,7 @@ using System.Text.Json.Nodes;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Nf4;
@@ -59,7 +60,8 @@ MERGE AND CAST (safetensors)
                         e.g. --keep-dtype '*norm*' keeps norms in F32 under a bf16 cast.
   --quant <nf4|nvfp4>   Quantize every 2D .weight (F32/BF16/F16) into the layout the engine loads: NF4 writes
                         .absmax, .quant_map and .quant_state.bitsandbytes__nf4; NVFP4 writes .weight_scale
-                        (E4M3) and .weight_scale_2 (F32). 2D weights that fail the shape rule are left full precision and listed.
+                        (E4M3, blocked) and .weight_scale_2 (F32) in ComfyUI's layout, listed in _quantization_metadata.
+                        2D weights that fail the shape rule are left full precision and listed.
                         An FP8 block-scaled single .safetensors with --quant nf4 is streamed one weight at a time to
                         a single output file, with <output>.manifest.json beside it.
 
@@ -604,6 +606,7 @@ try
                 }
             }
             HashSet<string> quantKeep = new(StringComparer.Ordinal);
+            List<string> nvfp4Layers = [];
             if (quantName is not null)
             {
                 List<KeyValuePair<string, Tensor>> quantized = [];
@@ -629,7 +632,8 @@ try
                         ReadOnlySpan<float> weights = f32.AsReadOnlySpan<float>();
                         companions = quantName == "nf4"
                             ? Nf4Codec.QuantizeToCompanions(key, weights, rows, cols, ComputeDtypeName(tensor.DType))
-                            : ModelOptNvfp4Codec.QuantizeToCompanions(key, weights, rows, cols);
+                            : Nvfp4Codec.QuantizeToComfyCompanions(key, weights, rows, cols);
+                        if (quantName == "nvfp4") nvfp4Layers.Add(key[..^".weight".Length]);
                     }
                     finally
                     {
@@ -657,6 +661,10 @@ try
             }
             output = named;
             metadata = BuildMetadata();
+            // Not identity, so written even under --no-metadata: it is what marks the groups as Comfy layout for this
+            // engine's loader and what makes ComfyUI read them as nvfp4 at all.
+            if (nvfp4Layers.Count > 0)
+                (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = Nvfp4Codec.QuantizationMetadata(nvfp4Layers);
             long inBytes = mergeSources.Sum(f => new FileInfo(f).Length);
             Console.WriteLine($"Writing {all.Count} tensors from {loaders.Count} file(s) ({Size(inBytes)})"
                 + (castTo is { } t ? $", cast to {t.Name}" : "") + $" to {Path.GetFileName(output)}...");
