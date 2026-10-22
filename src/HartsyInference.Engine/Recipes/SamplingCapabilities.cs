@@ -54,6 +54,8 @@ public static class SamplingCapabilities
         ["chroma-radiance"] = FullSeam,
         ["ernie-image"] = FullSeam,
         ["f-lite"] = FullSeam,
+        // Fibo 2.0 samples with its own flow-matching Euler and refuses any named sampler or schedule.
+        ["fibo2"] = SolverOwned,
         ["flux1"] = FullSeam,
         ["flux2"] = FullSeam,
         ["flux3"] = FullSeam,

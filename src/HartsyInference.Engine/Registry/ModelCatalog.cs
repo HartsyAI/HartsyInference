@@ -618,6 +618,22 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Bria Fibo 2.0 dev (text-to-image). Licence: CC-BY-NC-4.0, non-commercial; commercial use needs a Bria agreement.
+                // Not real-weight verified. The transformer, text encoder and VAE are single files in Comfy-Org/Fibo-2.0, and no
+                // hash is pinned yet, so downloads are not checked: Sha256 stays null until the files have been read.
+                Id = "fibo2-dev", Modality = img, DisplayName = "Fibo 2.0", Architecture = "Single-stream DiT (Qwen3-VL-4B), gist + injection",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/Fibo-2.0", RepoPath = "diffusion_models/fibo2_dev_bf16.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer", Sha256 = null },
+                    SideModels.Fibo2Qwen3VL4B,
+                    SideModels.Fibo2Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "moss-image", Modality = img, DisplayName = "MOSS-Image", Architecture = "single-stream DiT, flow-matching",
                 Status = vp,
                 // Not CliDrivable yet: OpenMOSS ships Base and SFT as diffusers folders (transformer/, text_encoder/,

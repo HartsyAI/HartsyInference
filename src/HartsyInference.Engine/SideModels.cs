@@ -358,6 +358,30 @@ public static class SideModels
         Sha256 = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
     };
 
+    /// <summary>Qwen3-VL-4B text encoder (bf16) for Fibo 2.0, from the Comfy-Org Fibo-2.0 repo. Sha256 is unknown, so the download is
+    /// not hash-checked; add it once the file has been read. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    public static readonly ModelAsset Fibo2Qwen3VL4B = new ModelAsset
+    {
+        Repo = "Comfy-Org/Fibo-2.0",
+        RepoPath = "text_encoders/qwen3vl_4b_bf16.safetensors",
+        TargetSubdir = "text_encoders",
+        TargetName = "fibo2/qwen3vl_4b_bf16.safetensors",
+        Role = "text encoder",
+        Sha256 = null
+    };
+
+    /// <summary>FLUX.2 VAE as shipped in the Comfy-Org Fibo-2.0 repo. Sha256 is unknown (not hash-checked), so this does not share
+    /// <see cref="Flux2Vae"/>'s pinned download. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    public static readonly ModelAsset Fibo2Vae = new ModelAsset
+    {
+        Repo = "Comfy-Org/Fibo-2.0",
+        RepoPath = "vae/flux2-vae.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "fibo2/flux2-vae.safetensors",
+        Role = "vae",
+        Sha256 = null
+    };
+
     /// <summary>FLUX.2 VAE with the small decoder (96-192-384-384) that OpenMOSS ships for MOSS-Image: its decoder tensors
     /// are byte-identical to the MOSS-Image folder's <c>vae/</c>. Path and hash match Comfy-Org's <c>MOSS-Image</c> repack.</summary>
     public static readonly ModelAsset Flux2VaeSmall = new ModelAsset

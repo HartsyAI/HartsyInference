@@ -148,7 +148,8 @@ public sealed class PromptWeightingModeLedgerTests
     /// <c>supported_models.py</c> class, no <c>CLIPType</c>, no tokenizer module).</para>
     /// <para><c>f-lite</c> — Freepik F-Lite is likewise absent; its T5-XXL stack makes ComfyBlend the likely answer but
     /// there is no ComfyUI tokenizer to read it off, so it stays out.</para></summary>
-    private static readonly string[] Unresolved = ["f-lite", "lance-image", "lance-video"];
+    // fibo2: ComfyUI's Fibo2 tokenizer is not read yet, so the recipe declares no weighting and emphasis parens stay as prose.
+    private static readonly string[] Unresolved = ["f-lite", "lance-image", "lance-video", "fibo2"];
 
     /// <summary><b>EMPTY as of alpha.135 — every registered family consumes its weights.</b> This listed the
     /// families whose recipe still declared <see cref="PromptWeightingMode.None"/> because their pipeline could not
