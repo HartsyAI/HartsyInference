@@ -14,6 +14,7 @@ namespace HartsyInference.Diffusion.Sampling;
 public sealed class DenoiserProbe
 {
     private const string TsvName = "probe.tsv";
+    private static readonly HashSet<string> s_started = new(StringComparer.Ordinal);
     private readonly string _dir;
     private readonly string? _outDir;
     private readonly HashSet<int> _steps;
@@ -53,7 +54,10 @@ public sealed class DenoiserProbe
         }
         string outDir = EngineKnobs.DenoiserProbeOut.Value is { Length: > 0 } o ? o : Path.Combine(dir, "replay");
         Directory.CreateDirectory(outDir);
-        File.WriteAllText(Path.Combine(outDir, TsvName), "step\tsigma\toutput\trelL2\tcos\tmaxAbs\trmsRecorded\n");
+        // A pipeline may build more than one sampler per generation; the first starts the table.
+        lock (s_started)
+            if (s_started.Add(Path.GetFullPath(outDir)))
+                File.WriteAllText(Path.Combine(outDir, TsvName), "step\tsigma\toutput\trelL2\tcos\tmaxAbs\trmsRecorded\n");
         Logs.Info($"[DenoiserProbe] replaying steps {string.Join(",", steps.Order())} of {stepCount} against {dir} into {outDir}");
         return new DenoiserProbe(dir, outDir, steps);
     }

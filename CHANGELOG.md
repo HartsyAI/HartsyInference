@@ -49,6 +49,13 @@ stable release will require. Dates are UTC.
   token-major rows read one sequence) stay head-major. Measured bit-identical on CUDA's cuDNN row through the whole
   layer at B=2: SDXL's 64×64 and 32×32 levels and sdxl-wide's 80×45. On an RTX 4090 against main, sdxl and sdxl-wide
   decode to the same pixels at 255 and 233 ms per step against 259 and 240 (one warm rep each).
+- **Added: a teacher-forced denoiser probe.** `diagnostics.denoiserProbe=record` writes the denoiser's conditioning and, at the
+  probed steps (`diagnostics.denoiserProbeSteps`, first, mid and last by default), its inputs and outputs to
+  `diagnostics.denoiserProbeDir`; `replay` loads that conditioning, runs one more forward at each probed step on the recorded
+  inputs and writes relL2, cosine and max |d| per output to `probe.tsv`, leaving its own trajectory alone. It judges a numerics
+  change on a model whose trajectory is too chaotic for image SSIM, such as MiniMax-H3 or SD3.5 Medium. Every sampler
+  `SamplerRegistry` builds carries it, as do the H3, Wan text-to-video and Lumina 2 loops; `tests/regression-ab.sh --probe` runs
+  it. Off by default; output is unchanged.
 
 ## alpha.387
 
