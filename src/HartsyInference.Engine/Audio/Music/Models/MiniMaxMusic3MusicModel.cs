@@ -9,6 +9,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -154,10 +155,9 @@ internal static class MiniMaxMusic3MusicModel
             (int[] conditional, int[] unconditional) = MiniMaxMusic3Prompt.Tokenize(tokenizer, caption, lyrics);
 
             int frames = (int)Math.Clamp(
-                Math.Round(request.Duration * MiniMaxMusic3ArPipeline.FrameRate), 1, MiniMaxMusic3ArPipeline.MaxAudioFrames);
-            int steps = request.InferSteps is > 0 ? request.InferSteps.Value : MiniMaxMusic3FlowPipeline.DefaultSteps;
-            float cfgScale = request.CfgScale is > 0 ? (float)request.CfgScale.Value
-                : MiniMaxMusic3FlowPipeline.DefaultCfgScale;
+                Math.Round(request.Duration.Filled() * MiniMaxMusic3ArPipeline.FrameRate), 1, MiniMaxMusic3ArPipeline.MaxAudioFrames);
+            int steps = request.InferSteps.Filled();
+            float cfgScale = (float)request.CfgScale.Filled();
 
             long autoregressiveStart = Environment.TickCount64;
             float[] frameHiddens;

@@ -91,11 +91,28 @@ been re-read; until then it is an audit finding, not a specification.
 | lance-video | 30 / 4.0 / 512×512 / 25 @ 25 | none in SwarmUI; pipeline fallback was 81, cap 121 | unverified |
 | minimax-h3 | 30 / 1.0 / 1344×768 / 124 @ 24 | 124 frames (17k+5, rounded up), 24 fps, cfg 1, `res_multistep` / `simple` | unverified |
 | ace-step 1.5 (audio) | loader table | 120 s (max 600), turbo cfg 1 / 8 steps / shift 3 | unverified |
-| minimax-music-3 (audio) | loader table | 120 s max, cfg 1.7, 30 steps | unverified |
-| yue2 (audio) | loader table | 300 s max, cfg 1, 20 steps | unverified |
+| minimax-music-3 (audio) | `MiniMaxMusic3MusicRecipe`: 10 s, 30 steps, cfg 1.7 | 120 s max, cfg 1.7, 30 steps; frame grid caps at 360 s | unverified |
+| yue2 (audio) | `Yue2MusicRecipe`: 10 s, 32 ODE steps; cfg owned by the planning mode | 300 s max, cfg 1, 20 steps; protocol caps at 900 s | unverified |
 
 Rows marked "today" with 25 fps or 704×480 that SwarmUI does not list are the old generic fallback, kept so the
 change that made defaults total moved no output.
+
+## Audio
+
+Music families follow the same contract through `IMusicRecipe` and `MusicRecipeRegistry`, which mirror the video
+types. `MusicDefaults` holds the values a request's unset fields take; `MusicConstraints` holds the longest clip a
+family renders. `MusicService` applies the recipe before loading or generation, so `MusicRequest` carries only
+values a caller set. Every field is nullable, and a `null` in a recipe means the loader or pipeline owns that choice.
+
+Two cases deviate from "the recipe owns it":
+
+- ACE-Step's 1.5 and v1 pipelines take different values for steps and guidance, and a placed checkpoint only shows
+  which one it is after its header is read. The service therefore applies only the family-level values to a placed
+  checkpoint, and the 1.5 loader applies the variant's steps, shift and guidance once it knows the checkpoint is 1.5.
+- The output sample rate is not a recipe value: the loaded model reports it (48 kHz on ACE-Step 1.5, 44.1 kHz on v1),
+  and the runner is the authority.
+
+Audio speech and transcription recipes are not yet typed; their defaults stay in their loaders.
 
 ## Open
 
@@ -106,5 +123,5 @@ change that made defaults total moved no output.
 - Variant resolution refuses an unresolved variant instead of taking the catalog default, and filename guesses for
   families whose variants differ in defaults; Flux.1, Flux.2, Z-Image and LTX variant defaults move out of pipelines.
 - Pipelines take the resolved plan only; pipeline `??` fallbacks, `GenerationDefaults` and `VariantDefaults` go.
-- Audio recipes (music, speech, transcription identity and defaults).
+- Audio speech and transcription recipes (music is typed; see Audio above).
 - A side-effect-free descriptor (`IInferenceEngine.Recipes`) and HTTP endpoints for hosts.

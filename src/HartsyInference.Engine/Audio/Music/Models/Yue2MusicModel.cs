@@ -6,6 +6,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -252,16 +253,16 @@ internal static class Yue2MusicModel
 
         return new Yue2Request
         {
-            Style = request.Genre,
+            Style = request.Genre ?? string.Empty,
             Lyrics = request.Prompt,
-            Cot = ParseCot(request.Yue2Cot),
-            Abc = request.Yue2Abc,
+            Cot = ParseCot(request.Yue2Cot ?? string.Empty),
+            Abc = request.Yue2Abc ?? string.Empty,
             Seed = request.Seed,
-            MaxDurationSeconds = request.Duration > 0 ? request.Duration : Yue2Protocol.DefaultDurationSeconds,
+            MaxDurationSeconds = request.Duration.Filled() > 0 ? request.Duration.Filled() : Yue2Protocol.DefaultDurationSeconds,
             AbcSampling = abc,
             SemanticSampling = semantic,
             CfgScale = request.CfgScale is { } cfg ? (float)cfg : null,
-            OdeSteps = request.InferSteps is { } steps and > 0 ? steps : Yue2Config.V1.OdeSteps,
+            OdeSteps = request.InferSteps.Filled(),
         };
     }
 
