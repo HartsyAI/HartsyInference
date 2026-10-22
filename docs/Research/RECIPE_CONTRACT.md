@@ -168,6 +168,22 @@ only an example value, so the upstream value stays.
 | mage-flow base | 30 / 5.0 | 20 / 5.0 | OMS Mage Flow: 20-ish steps |
 | z-image base | shift 6 | shift 3 | MS Z-Image: default sigma shift 3 |
 
+Samplers, schedulers and shifts SwarmUI sets per model were checked the same way (2026-10-22). Two are taken: `er_sde`
+for Anima Base and Flux 3 Image Base (core `WorkflowGenerator.cs`). The rest stay with the pipeline:
+
+- **Refused names.** `flux2`, `ideogram4` and `AlignYourSteps` are not in `SigmaSchedule.Names`. The solver-owned
+  families (Wan, LTX, LTX-2, MiniMax-H3, Ideogram 4, Lumina 2) refuse any sampler or scheduler. Declaring one of these
+  would fail every unset request.
+- **Schedules on image families.** Any declared schedule is refused with img2img or inpaint (`FlowMatchSampling.Resolve`),
+  and `simple` over a family's own grid returns the same sigmas. So Flux.1, Flux 3, Anima and Wan keep `null`, and so
+  do Chroma's and Radiance's `beta`.
+- **Shifts.** Where the engine computes a resolution-dependent shift (Chroma, Qwen-Image, Flux.2, Krea 2, Boogu), a
+  fixed SwarmUI shift would override it. SwarmUI core applies a fixed value only for Chroma (1) and Qwen-Image (3); the
+  docs' Flux.2, Krea 2, Boogu and HunyuanImage values apply only when the user sets a shift. Where the value already
+  equals the pipeline's (SD3 3, AuraFlow 1.73, HiDream 3, Lumina 2 6, MiniMax-H3 12), declaring it changes nothing.
+- **Mode-owned values.** YuE2's CFG depends on its planning mode (1.01 with planning off, 1.0 otherwise), so its
+  recipe leaves it to the pipeline. Boogu Turbo's own shifted linspace already equals `sgm_uniform`.
+
 Lance image stays at 1024² (upstream's official size). The SwarmUI bridge registers its class at 768² and Lance
 video at 832×480; those are host-declared sizes, which this contract replaces with `IInferenceEngine.Recipes`.
 
