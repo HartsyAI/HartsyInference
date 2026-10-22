@@ -18,7 +18,7 @@ internal sealed record Int8V2Readback
     /// <summary>K bytes <c>[B·H, kvPad, 128]</c>.</summary>
     public required sbyte[] K8 { get; init; }
 
-    /// <summary>K scales <c>[B·H, tiles, 4]</c>.</summary>
+    /// <summary>K scales, one per key <c>[B·H, kvPad]</c> (1 past the valid keys).</summary>
     public required float[] KScale { get; init; }
 
     /// <summary>V bytes <c>[B·H, 128, kvPad]</c>, keys permuted within 32-key chunks; empty for F16 PV.</summary>

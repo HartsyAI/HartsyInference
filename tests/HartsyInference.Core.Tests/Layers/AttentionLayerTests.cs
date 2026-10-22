@@ -344,6 +344,7 @@ public sealed class AttentionLayerTests
     /// those calls head-major, unless the token-major INT8 v2 row takes them first (head dim 128 only).</summary>
     [Theory]
     [InlineData("int8v2", AttentionRoute.TokenMajor)]
+    [InlineData("int8v2-declined", AttentionRoute.Dense)]
     [InlineData("int8v2-d64", AttentionRoute.Dense)]
     [InlineData("sage-length", AttentionRoute.Dense)]
     [InlineData("sage-length-d64", AttentionRoute.Dense)]
@@ -362,7 +363,7 @@ public sealed class AttentionLayerTests
         int sq = name == "short-query" ? 256 : skv;
         int headDim = name switch { "sage-length-d64" or "int8v2-d64" => 64, "d96" => 96, _ => 128 };
         DType act = name == "f32" ? DType.F32 : DType.F16;
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, Int8V2TokenMajor = name != "int8v2-declined" };
         AttentionLayer layer = new(new AttentionLayerConfig
         {
             Heads = 1, KvHeads = 1, HeadDim = headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = name != "unguarded",

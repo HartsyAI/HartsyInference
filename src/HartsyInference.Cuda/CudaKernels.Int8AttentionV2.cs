@@ -18,10 +18,10 @@ public sealed partial class CudaKernels
     /// <summary>Whether int8_attn_v2.ptx loaded with its F16 PV entries, which need the shared-memory opt-in.</summary>
     internal bool HasInt8AttentionV2F16Pv { get; private set; }
 
-    /// <summary>Dynamic shared memory of one INT8 v2 attention block: the K and V tiles, the K scales and per-tile V scales.</summary>
+    /// <summary>Dynamic shared memory of one INT8 v2 attention block: the K and V tiles, the tile's K scales and per-tile V scales.</summary>
     internal static int Int8V2SharedBytes(Int8AttentionV2Pv pv) =>
-        Int8AttentionV2Layout.BlockCols * Int8AttentionV2Layout.HeadDim * (pv == Int8AttentionV2Pv.F16 ? 3 : 2) + 16
-        + Int8AttentionV2Layout.HeadDim * sizeof(float);
+        Int8AttentionV2Layout.BlockCols * Int8AttentionV2Layout.HeadDim * (pv == Int8AttentionV2Pv.F16 ? 3 : 2)
+        + (Int8AttentionV2Layout.BlockCols + Int8AttentionV2Layout.HeadDim) * sizeof(float);
 
     private void LoadInt8AttentionV2Kernels()
     {

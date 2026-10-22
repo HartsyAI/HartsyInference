@@ -16,8 +16,8 @@ public sealed class Int8AttentionV2AccuracyTableTests(ITestOutputHelper output)
     /// <summary>The base variant and one change at a time.</summary>
     public static readonly (string Name, Int8AttentionV2Options Options)[] Variants =
     [
-        ("base: class K, BC128, smooth, u8", new Int8AttentionV2Options()),
-        ("per-key K", new Int8AttentionV2Options { KeyScales = Int8KeyScaleGrouping.PerKey }),
+        ("base: per-key K, BC128, smooth, u8", new Int8AttentionV2Options()),
+        ("lane-class K", new Int8AttentionV2Options { KeyScales = Int8KeyScaleGrouping.ThreadClass }),
         ("BC64", new Int8AttentionV2Options { BlockCols = 64 }),
         ("no smoothing", new Int8AttentionV2Options { SmoothKeys = false }),
         ("per-tile V", new Int8AttentionV2Options { ValueScalesPerTile = true }),

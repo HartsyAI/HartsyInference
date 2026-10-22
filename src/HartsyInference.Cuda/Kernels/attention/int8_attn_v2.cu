@@ -6,10 +6,10 @@
 //   1. int8v2_stats_*   per (b, h) chunk of 64 keys: the K channel sum in key order and, for per-sequence V scales, the
 //                       V channel absmax; the last chunk block of each (b, h) sums the chunk partials in chunk order,
 //                       divides by the key count (the emulator's SegmentMean) and folds the V maxima into scales.
-//   2. int8v2_quant_*   Q rows (absmax/127 per row), K tiles (smoothed by the mean, one scale per lane class
-//                       (key mod 8)/2 per tile) and V tiles (per-channel scales, transposed to [ch][key] with the keys of
-//                       every 32-key chunk permuted so a lane's QK accumulators are already its PV A fragment).
-//   3. int8v2_attn_*    QK^T on mma.m16n8k32.s8.s8.s32; per key tile the row max is taken in the integer domain and
+//   2. int8v2_quant_*   Q rows (absmax/127 per row), K rows (smoothed by the mean, absmax/127 per key) and V tiles
+//                       (per-channel scales, transposed to [ch][key] with the keys of every 32-key chunk permuted so a
+//                       lane's QK accumulators are already its PV A fragment).
+//   3. int8v2_attn_*    QK^T on mma.m16n8k32.s8.s8.s32; each score is dot * (q scale * k scale), and per key tile
 //                       P = exp2(score - (tileMax - 7.9943534)) is rounded to u8 (the tile max maps to 255); PV on
 //                       mma.m16n8k32.u8.s8.s32 into an INT32 partial drained per tile as O = O*oScale + partial*tileScale,
 //                       the denominator summed from the same bytes. F16-PV fallback entries run P and V in F16 against
@@ -26,7 +26,6 @@
 #define V2_U8_OFFSET 7.9943534f
 #define V2_MIN_NORMAL 1.17549435e-38f
 #define V2_FULL 0xffffffffu
-#define V2_INT_MIN (-2147483647 - 1)
 #define V2_NEG_INF __int_as_float(0xff800000)
 
 // Element strides of an operand whose head dim is contiguous; the base pointer already includes the view offset.
@@ -333,65 +332,37 @@ __device__ __forceinline__ void v2_quant(const T* __restrict__ Q, V2View vq, con
         v2_quant_v<T, PV_F16>(V, vv, b, h, bh, tileK - tiles, kvLen, tiles, vTile, vScaleSeq, vScaleTile, v8, smem);
         return;
     }
-    // K tile: warp w holds keys 16w..16w+15, a lane four channels; class of key j is (j & 7) / 2.
+    // K tile: warp w holds keys 16w..16w+15, a lane four channels; one scale per key.
     float mean[4];
     {
         const float4 mv = *(const float4*)(kMean + (size_t)bh * V2_D + 4 * lane);
         mean[0] = mv.x; mean[1] = mv.y; mean[2] = mv.z; mean[3] = mv.w;
     }
     const T* base = K + b * vk.batch + h * vk.head + 4 * lane;
-    float x[16][4];
-    float cls[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     #pragma unroll
     for (unsigned i = 0; i < 16; i++)
     {
         const unsigned j = tileK * V2_BC + warp * 16 + i;
-        float rowMax = 0.0f;
+        float x[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         if (j < kvLen)
         {
             float v[4];
             v2_ld4(base + j * vk.row, v);
             #pragma unroll
-            for (unsigned e = 0; e < 4; e++)
-            {
-                x[i][e] = __fsub_rn(v[e], mean[e]);
-                rowMax = v2_max_nan(rowMax, fabsf(x[i][e]));
-            }
+            for (unsigned e = 0; e < 4; e++) x[e] = __fsub_rn(v[e], mean[e]);
         }
-        else
-        {
-            x[i][0] = x[i][1] = x[i][2] = x[i][3] = 0.0f;
-        }
+        float rowMax = v2_max_nan(v2_max_nan(fabsf(x[0]), fabsf(x[1])), v2_max_nan(fabsf(x[2]), fabsf(x[3])));
         #pragma unroll
         for (unsigned off = 16; off > 0; off >>= 1) rowMax = v2_max_nan(rowMax, __shfl_xor_sync(V2_FULL, rowMax, off));
-        cls[(i & 7) >> 1] = v2_max_nan(cls[(i & 7) >> 1], rowMax);
-    }
-    float* sCls = (float*)smem;   // [8 warps][4]
-    if (lane < 4) sCls[warp * 4 + lane] = cls[lane];
-    __syncthreads();
-    float inv[4];
-    #pragma unroll
-    for (unsigned k = 0; k < 4; k++)
-    {
-        float m = 0.0f;
-        #pragma unroll
-        for (unsigned w = 0; w < 8; w++) m = v2_max_nan(m, sCls[w * 4 + k]);
-        const float scale = v2_scale(m, 127.0f);
-        inv[k] = __frcp_rn(scale);
-        if (threadIdx.x == k) kScale[((size_t)bh * tiles + tileK) * 4 + k] = scale;
-    }
-    #pragma unroll
-    for (unsigned i = 0; i < 16; i++)
-    {
-        const unsigned j = tileK * V2_BC + warp * 16 + i;
-        const float s = inv[(i & 7) >> 1];
-        *(unsigned*)(k8 + ((size_t)bh * kvPad + j) * V2_D + 4 * lane) = v2_pack4(v2_s8(__fmul_rn(x[i][0], s)),
-            v2_s8(__fmul_rn(x[i][1], s)), v2_s8(__fmul_rn(x[i][2], s)), v2_s8(__fmul_rn(x[i][3], s)));
+        const float scale = v2_scale(rowMax, 127.0f), inv = __frcp_rn(scale);
+        *(unsigned*)(k8 + ((size_t)bh * kvPad + j) * V2_D + 4 * lane) = v2_pack4(v2_s8(__fmul_rn(x[0], inv)),
+            v2_s8(__fmul_rn(x[1], inv)), v2_s8(__fmul_rn(x[2], inv)), v2_s8(__fmul_rn(x[3], inv)));
+        if (lane == 0) kScale[(size_t)bh * kvPad + j] = scale;
     }
 }
 
 #define V2_QUANT_ENTRY(NAME, T, PV_F16)                                                                                       \
-    extern "C" __global__ void __launch_bounds__(256) NAME(const T* __restrict__ Q, V2View vq, const T* __restrict__ K,   \
+    extern "C" __global__ void __launch_bounds__(256, 2) NAME(const T* __restrict__ Q, V2View vq, const T* __restrict__ K,   \
         V2View vk, const T* __restrict__ V, V2View vv, signed char* q8, float* qScale, signed char* k8, float* kScale,       \
         void* v8, float* vScaleTile, const float* kMean, const float* vScaleSeq, unsigned H, unsigned Sq, unsigned kvLen,    \
         unsigned tiles, unsigned qBlocks, unsigned vTile)                                                                    \
@@ -455,14 +426,13 @@ struct V2Smem
 {
     static constexpr unsigned KBytes = V2_BC * V2_D;
     static constexpr unsigned VBytes = V2_D * V2_BC * (PV_F16 ? 2 : 1);
-    static constexpr unsigned Total = KBytes + VBytes + 16 + V2_D * 4;
+    static constexpr unsigned Total = KBytes + VBytes + V2_BC * 4 + V2_D * 4;
 };
 
 // u8 P of one tile for a lane's two rows: exp2(score − tm) rounded half to even, packed as the PV A fragment, and each row's
-// byte sum. MASKED (the tail tile) drops keys whose product was replaced by V2_INT_MIN.
-template<bool MASKED>
-__device__ __forceinline__ void v2_u8_probabilities(const int (&s)[16][4], float f0, float f1, float tm0, float tm1,
-    unsigned (&pa)[4][4], unsigned& sum0, unsigned& sum1)
+// byte sum. A key past kvLen scores −∞, so its byte is 0.
+__device__ __forceinline__ void v2_u8_probabilities(const float (&sc)[16][4], float tm0, float tm1, unsigned (&pa)[4][4],
+    unsigned& sum0, unsigned& sum1)
 {
     #pragma unroll
     for (unsigned kc = 0; kc < 4; kc++)
@@ -472,12 +442,7 @@ __device__ __forceinline__ void v2_u8_probabilities(const int (&s)[16][4], float
         for (unsigned n = 0; n < 4; n++)
             #pragma unroll
             for (unsigned e = 0; e < 4; e++)
-            {
-                const int x = s[4 * kc + n][e];
-                const float score = __fmul_rn(__int2float_rn(x), e < 2 ? f0 : f1);
-                const int q = __float2int_rn(v2_ex2(__fsub_rn(score, e < 2 ? tm0 : tm1)));
-                u[n][e] = MASKED && x == V2_INT_MIN ? 0 : q;
-            }
+                u[n][e] = __float2int_rn(v2_ex2(__fsub_rn(sc[4 * kc + n][e], e < 2 ? tm0 : tm1)));
         pa[kc][0] = v2_pack_u8(u[0][0], u[0][1], u[1][0], u[1][1]);
         pa[kc][1] = v2_pack_u8(u[0][2], u[0][3], u[1][2], u[1][3]);
         pa[kc][2] = v2_pack_u8(u[2][0], u[2][1], u[3][0], u[3][1]);
@@ -490,21 +455,15 @@ __device__ __forceinline__ void v2_u8_probabilities(const int (&s)[16][4], float
 }
 
 // F16 P of one tile against the running maxima m0, m1, packed as eight m16n8k16 A fragments, and each row's sum.
-template<bool MASKED>
-__device__ __forceinline__ void v2_f16_probabilities(const int (&s)[16][4], float f0, float f1, float m0, float m1,
-    unsigned (&pa)[8][4], float& sum0, float& sum1)
+__device__ __forceinline__ void v2_f16_probabilities(const float (&sc)[16][4], float m0, float m1, unsigned (&pa)[8][4],
+    float& sum0, float& sum1)
 {
     #pragma unroll
     for (unsigned nt = 0; nt < 16; nt++)
     {
         __half p[4];
         #pragma unroll
-        for (unsigned e = 0; e < 4; e++)
-        {
-            const int x = s[nt][e];
-            const __half h = __float2half_rn(v2_ex2(__fsub_rn(__fmul_rn(__int2float_rn(x), e < 2 ? f0 : f1), e < 2 ? m0 : m1)));
-            p[e] = MASKED && x == V2_INT_MIN ? __float2half_rn(0.0f) : h;
-        }
+        for (unsigned e = 0; e < 4; e++) p[e] = __float2half_rn(v2_ex2(__fsub_rn(sc[nt][e], e < 2 ? m0 : m1)));
         sum0 += __half2float(p[0]) + __half2float(p[1]);
         sum1 += __half2float(p[2]) + __half2float(p[3]);
         const __half2 lo = __halves2half2(p[0], p[1]), hi = __halves2half2(p[2], p[3]);
@@ -534,7 +493,7 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
     unsigned char* sK = smem;
     unsigned char* sV = smem + V2Smem<PV_F16>::KBytes;
     float* sKs = (float*)(sV + V2Smem<PV_F16>::VBytes);
-    float* sVs = sKs + 4;
+    float* sVs = sKs + V2_BC;
 
     // Q fragments stay in registers: a0 (row g, k 4t4..+3), a1 (row g+8), a2 (row g, +16), a3 (row g+8, +16).
     unsigned qa[4][4];
@@ -553,18 +512,22 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
     const float qs0 = row0 < Sq ? __fmul_rn(qScale[(size_t)bh * Sq + row0], alphaLog2e) : 0.0f;
     const float qs1 = row1 < Sq ? __fmul_rn(qScale[(size_t)bh * Sq + row1], alphaLog2e) : 0.0f;
 
-    const signed char* kh = k8 + (size_t)bh * kvPad * V2_D;
+    // Tile loads from one per-thread base each: a K tile is 16 KB contiguous (thread i copies bytes 16i..), a u8 V tile
+    // row r of 128 keys sits at r·kvPad. Shared rows are swizzled by (row & 7), which the per-iteration row step keeps.
+    const unsigned r0 = threadIdx.x >> 3, c0 = threadIdx.x & 7;
+    const signed char* kSrc = k8 + (size_t)bh * kvPad * V2_D + threadIdx.x * 16;
+    const float* ksSrc = kScale + (size_t)bh * kvPad + (threadIdx.x & 31) * 4;
+    unsigned char* const kDst = sK + r0 * V2_D + ((c0 ^ (r0 & 7)) << 4);
     auto loadK = [&](unsigned t)
     {
-        const signed char* src = kh + (size_t)t * V2_BC * V2_D;
+        const signed char* src = kSrc + (size_t)t * V2_BC * V2_D;
         #pragma unroll
-        for (unsigned it = 0; it < V2_BC * 8 / THREADS; it++)
-        {
-            const unsigned i = threadIdx.x + it * THREADS, row = i >> 3, ch = i & 7;
-            v2_cp16(sK + row * V2_D + ((ch ^ (row & 7)) << 4), src + (size_t)row * V2_D + ch * 16);
-        }
-        if (threadIdx.x == 0) v2_cp16(sKs, kScale + ((size_t)bh * tiles + t) * 4);
+        for (unsigned it = 0; it < V2_BC * 8 / THREADS; it++) v2_cp16(kDst + it * THREADS * 16, src + it * THREADS * 16);
+        if (threadIdx.x < V2_BC / 4) v2_cp16(sKs + threadIdx.x * 4, ksSrc + (size_t)t * V2_BC);
     };
+    const size_t vRowStep = (size_t)(THREADS / 8) * kvPad;
+    const signed char* vSrc = (const signed char*)v8 + (size_t)bh * V2_D * kvPad + (size_t)r0 * kvPad + c0 * 16;
+    unsigned char* const vDst = sV + r0 * V2_BC + ((c0 ^ (r0 & 7)) << 4);
     auto loadV = [&](unsigned t)
     {
         if (PV_F16)
@@ -580,13 +543,10 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
         }
         else
         {
-            const signed char* src = (const signed char*)v8 + (size_t)bh * V2_D * kvPad + (size_t)t * V2_BC;
-            #pragma unroll
-            for (unsigned it = 0; it < V2_D * 8 / THREADS; it++)
-            {
-                const unsigned i = threadIdx.x + it * THREADS, row = i >> 3, ch = i & 7;
-                v2_cp16(sV + row * V2_BC + ((ch ^ (row & 7)) << 4), src + (size_t)row * kvPad + ch * 16);
-            }
+            const signed char* src = vSrc + (size_t)t * V2_BC;
+            #pragma unroll 1
+            for (unsigned it = 0; it < V2_D * 8 / THREADS; it++, src += vRowStep)
+                v2_cp16(vDst + it * (THREADS / 8) * V2_BC, src);
         }
         if (VTILE && threadIdx.x < 32) v2_cp16(sVs + threadIdx.x * 4, vScale + ((size_t)bh * tiles + t) * V2_D + threadIdx.x * 4);
     };
@@ -632,10 +592,7 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
                 v2_mma_s8(s[2 * np + 1], qa[kc], kb[2], kb[3]);
             }
         }
-        const float ks = sKs[t4];
-        const float f0 = __fmul_rn(qs0, ks), f1 = __fmul_rn(qs1, ks);
-
-        // Keys past kvLen in the last tile: out of the max and P = 0.
+        // Keys past kvLen in the last tile score −∞: out of the max, and P = 0.
         const unsigned valid = min(kvLen - t * V2_BC, (unsigned)V2_BC);
         const bool tail = valid < V2_BC;
         if (TRACE && traced)
@@ -648,20 +605,24 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
                 *(int2*)(trace.dots + (size_t)(rowLocal0 + 8) * kvPad + key) = make_int2(s[nt][2], s[nt][3]);
             }
         }
-        int mx0 = V2_INT_MIN, mx1 = V2_INT_MIN;
+        // score = dot · (q scale · k scale), the emulator's FMA(dot, qs·ks, 0).
+        float sc[16][4];
+        float tileMax0 = V2_NEG_INF, tileMax1 = V2_NEG_INF;
         #pragma unroll
         for (unsigned nt = 0; nt < 16; nt++)
         {
+            const float2 ks = *(const float2*)(sKs + nt * 8 + 2 * t4);
             #pragma unroll
             for (unsigned e = 0; e < 2; e++)
             {
-                if (tail && nt * 8 + 2 * t4 + e >= valid) { s[nt][e] = V2_INT_MIN; s[nt][2 + e] = V2_INT_MIN; }
-                mx0 = max(mx0, s[nt][e]);
-                mx1 = max(mx1, s[nt][2 + e]);
+                const float k = e == 0 ? ks.x : ks.y;
+                const bool out = tail && nt * 8 + 2 * t4 + e >= valid;
+                sc[nt][e] = out ? V2_NEG_INF : __fmul_rn(__int2float_rn(s[nt][e]), __fmul_rn(qs0, k));
+                sc[nt][2 + e] = out ? V2_NEG_INF : __fmul_rn(__int2float_rn(s[nt][2 + e]), __fmul_rn(qs1, k));
+                tileMax0 = v2_max_nan(tileMax0, sc[nt][e]);
+                tileMax1 = v2_max_nan(tileMax1, sc[nt][2 + e]);
             }
         }
-        float tileMax0 = mx0 == V2_INT_MIN ? V2_NEG_INF : __fmul_rn(__int2float_rn(mx0), f0);
-        float tileMax1 = mx1 == V2_INT_MIN ? V2_NEG_INF : __fmul_rn(__int2float_rn(mx1), f1);
         #pragma unroll
         for (unsigned off = 1; off <= 2; off <<= 1)
         {
@@ -677,8 +638,7 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
         {
             const float tm0 = __fsub_rn(tileMax0, V2_U8_OFFSET), tm1 = __fsub_rn(tileMax1, V2_U8_OFFSET);
             unsigned sum0 = 0, sum1 = 0;
-            if (tail) v2_u8_probabilities<true>(s, f0, f1, tm0, tm1, pa, sum0, sum1);
-            else v2_u8_probabilities<false>(s, f0, f1, tm0, tm1, pa, sum0, sum1);
+            v2_u8_probabilities(sc, tm0, tm1, pa, sum0, sum1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 2);
             sum1 += __shfl_xor_sync(V2_FULL, sum1, 1);
@@ -727,8 +687,7 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
             m0 = next0;
             m1 = next1;
             float sum0 = 0.0f, sum1 = 0.0f;
-            if (tail) v2_f16_probabilities<true>(s, f0, f1, m0, m1, pa, sum0, sum1);
-            else v2_f16_probabilities<false>(s, f0, f1, m0, m1, pa, sum0, sum1);
+            v2_f16_probabilities(sc, m0, m1, pa, sum0, sum1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 2);
             sum1 += __shfl_xor_sync(V2_FULL, sum1, 1);

@@ -15,12 +15,6 @@ public sealed partial class CudaBackend
     /// <summary>Number of INT8 attention v2 executions this session.</summary>
     public long Int8AttentionV2ExecutionCount => Interlocked.Read(ref _int8V2ExecutionCount);
 
-    /// <summary>Test and benchmark hook: query rows per INT8 v2 attention block, 64 or 128; 0 follows the card.</summary>
-    internal int Int8V2BlockRowsOverride { get; set; }
-
-    /// <summary>Test and benchmark hook: admits the F16-PV rows instead of the u8 ones.</summary>
-    internal bool Int8V2F16Pv { get; set; }
-
     /// <summary>Query rows per INT8 v2 attention block on this card.</summary>
     internal int Int8V2BlockRows => Int8V2BlockRowsOverride is 64 or 128 ? Int8V2BlockRowsOverride
         : _context.Sm is >= CudaArch.Ampere and < 89 ? 64 : 128;
@@ -28,32 +22,48 @@ public sealed partial class CudaBackend
     /// <summary>Bytes the INT8 v2 workspace holds now (its high-water mark since it was last released).</summary>
     internal long Int8V2WorkspaceBytes => _int8V2WorkspaceBytes;
 
-    /// <summary>What the INT8 v2 rows take beyond their declared capability: the knob, F16 or F32 throughout, a positive scale,
-    /// both sequences at the engage length, 16-byte aligned rows and the kernels.</summary>
-    private bool Int8V2Admits(in AttentionCall c, bool f16Pv)
+    /// <summary>The checks the INT8 v2 rows and the grouped row's yield share: the knob, no bias, host positions, F16 or F32
+    /// throughout, head dim 128, a finite positive scale, both sequences at the engage length, and a grid and counter slot per
+    /// (batch, head).</summary>
+    private static bool Int8V2Eligible(in AttentionCall c) =>
+        EngineKnobs.Int8AttnV2.Value && c.Mask.Bias is null && !c.Positions.OnDevice
+        && (c.Query.DType == DType.F16 || c.Query.DType == DType.F32) && c.Key.DType == c.Query.DType && c.Value.DType == c.Query.DType
+        && c.Output.DType == c.Query.DType && c.QkHeadDim == Int8AttentionV2Layout.HeadDim && c.ValueHeadDim == Int8AttentionV2Layout.HeadDim
+        && c.Scale > 0f && float.IsFinite(c.Scale) && Math.Min(c.QueryTokens, c.ValidKvLength) >= EngineKnobs.Int8AttnV2MinTokens.Value
+        && CudaKernels.GridYzFits(c.Heads, c.Batch) && (long)c.Batch * c.Heads <= Int8AttentionV2Layout.CounterSlots;
+
+    /// <summary>Whether the kernels of the PV format <c>numerics.int8AttnV2F16Pv</c> picks are loaded.</summary>
+    private bool Int8V2KernelsLoaded()
     {
-        if (!EngineKnobs.Int8AttnV2.Value || f16Pv != Int8V2F16Pv || c.Mask.Bias is not null || c.Positions.OnDevice) return false;
-        DType dt = c.Query.DType;
-        if (dt != DType.F16 && dt != DType.F32 || c.Key.DType != dt || c.Value.DType != dt || c.Output.DType != dt) return false;
-        if (c.ValueHeadDim != Int8AttentionV2Layout.HeadDim || !(c.Scale > 0f) || !float.IsFinite(c.Scale)) return false;
-        if (Math.Min(c.QueryTokens, c.ValidKvLength) < EngineKnobs.Int8AttnV2MinTokens.Value) return false;
-        if (!CudaKernels.GridYzFits(c.Heads, c.Batch) || (long)c.Batch * c.Heads > Int8AttentionV2Layout.CounterSlots) return false;
-        if (!Int8V2RowsAligned(c.Query) || !Int8V2RowsAligned(c.Key) || !Int8V2RowsAligned(c.Value) || !Int8V2RowsAligned(c.Output)
-            || !c.Output.CoversStorage) return false;
         EnsureKernels();
-        return f16Pv ? _kernels!.HasInt8AttentionV2F16Pv : _kernels!.HasInt8AttentionV2;
+        return EngineKnobs.Int8AttnV2F16Pv.Value ? _kernels!.HasInt8AttentionV2F16Pv : _kernels!.HasInt8AttentionV2;
     }
 
-    /// <summary>Whether a head-major call of this shape with no mask would take S.17; the grouped token-major row yields to it.</summary>
-    private bool Int8V2TakesWidened(in AttentionCall c)
+    /// <summary>What the INT8 v2 rows take beyond their declared capability: <see cref="Int8V2Eligible"/>, the row's PV format,
+    /// 16-byte aligned rows and the kernels.</summary>
+    private bool Int8V2Admits(in AttentionCall c, bool f16Pv) =>
+        f16Pv == EngineKnobs.Int8AttnV2F16Pv.Value && Int8V2Eligible(in c)
+        && Int8V2RowsAligned(c.Query) && Int8V2RowsAligned(c.Key) && Int8V2RowsAligned(c.Value) && Int8V2RowsAligned(c.Output)
+        && c.Output.CoversStorage && Int8V2KernelsLoaded();
+
+    /// <summary>Whether the head-major widening of this grouped call is one S.17 takes, so the grouped token-major row yields to it.
+    /// The widening is contiguous; a widened call S.17 still declines runs on the dense rows, where S.1 follows.</summary>
+    private bool Int8V2TakesWidened(in AttentionCall c) => Int8V2Eligible(in c) && Int8V2KernelsLoaded();
+
+    /// <inheritdoc/>
+    public bool Int8AttentionV2TakesTokenMajor(int heads, int queryTokens, int keys, int headDim, DType dtype)
     {
-        if (!EngineKnobs.Int8AttnV2.Value || c.Mask.Bias is not null || c.QkHeadDim != Int8AttentionV2Layout.HeadDim
-            || c.ValueHeadDim != Int8AttentionV2Layout.HeadDim || (c.Query.DType != DType.F16 && c.Query.DType != DType.F32) || !(c.Scale > 0f)
-            || Math.Min(c.QueryTokens, c.KeyTokens) < EngineKnobs.Int8AttnV2MinTokens.Value || !CudaKernels.GridYzFits(c.Heads, c.Batch))
-            return false;
-        EnsureKernels();
-        return Int8V2F16Pv ? _kernels!.HasInt8AttentionV2F16Pv : _kernels!.HasInt8AttentionV2;
+        if (!EngineKnobs.Int8AttnV2.Value || headDim != Int8AttentionV2Layout.HeadDim || (dtype != DType.F16 && dtype != DType.F32)
+            || Math.Min(queryTokens, keys) < EngineKnobs.Int8AttnV2MinTokens.Value || !CudaKernels.GridYzFits(heads, 1)
+            || !Int8V2KernelsLoaded()) return false;
+        // A capture cannot grow the workspace: a call it does not fit falls to the next row.
+        return !StreamIsCapturing() || new Int8AttentionV2Layout(1, heads, queryTokens, keys, CurrentInt8V2Pv()).Bytes <= _int8V2WorkspaceBytes;
     }
+
+    /// <summary>The PV format the knobs pick.</summary>
+    private static Int8AttentionV2Pv CurrentInt8V2Pv() =>
+        EngineKnobs.Int8AttnV2F16Pv.Value ? Int8AttentionV2Pv.F16
+        : EngineKnobs.Int8AttnV2VTile.Value ? Int8AttentionV2Pv.U8TileScales : Int8AttentionV2Pv.U8SequenceScales;
 
     /// <summary>Offset and strides in whole 8-element steps: every row the quant and epilogue touch starts 16-byte aligned.</summary>
     private static bool Int8V2RowsAligned(in AttentionOperand o) =>
@@ -64,9 +74,7 @@ public sealed partial class CudaBackend
     {
         using OpScope _op = EnterOp();
         EnsureKernels();
-        Int8AttentionV2Pv pv = f16Pv ? Int8AttentionV2Pv.F16
-            : EngineKnobs.Int8AttnV2VTile.Value ? Int8AttentionV2Pv.U8TileScales : Int8AttentionV2Pv.U8SequenceScales;
-        Int8AttentionV2Layout layout = new(c.Batch, c.Heads, c.QueryTokens, c.ValidKvLength, pv);
+        Int8AttentionV2Layout layout = new(c.Batch, c.Heads, c.QueryTokens, c.ValidKvLength, CurrentInt8V2Pv());
         ulong workspace = EnsureInt8V2Workspace(layout.Bytes);
         if (workspace == 0) return false;
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
@@ -103,6 +111,7 @@ public sealed partial class CudaBackend
         ulong q = pQ + (ulong)c.Query.Offset * elem, k = pK + (ulong)c.Key.Offset * elem, v = pV + (ulong)c.Value.Offset * elem;
         ulong o = pOut + (ulong)c.Output.Offset * (f32Out ? 4UL : 2UL);
         int keys = c.ValidKvLength;
+        ZeroInt8V2Counters(workspace, (long)c.Batch * c.Heads);
         using (NvtxRange _ = NvtxRange.PushFine("Int8V2.Stats"))
             _kernels!.LaunchInt8V2Stats(f32, k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch, c.Heads, keys,
                 _stream.Handle);
@@ -113,6 +122,11 @@ public sealed partial class CudaBackend
             _kernels!.LaunchInt8V2Attention(blockRows, f32Out, o, Strides(c.Output), workspace, in layout, c.Batch, c.Heads, c.QueryTokens,
                 keys, c.Scale * Int8AttentionV2Reference.Log2E, _stream.Handle, trace);
     }
+
+    /// <summary>Zeroes the stats launch's completion counters of <paramref name="slots"/> (batch, head) pairs, so a launch that
+    /// stopped part way cannot leave one counting for a later call.</summary>
+    private void ZeroInt8V2Counters(ulong workspace, long slots) =>
+        CudaDriverApi.cuMemsetD32Async(workspace, 0, (nuint)slots, _stream.Handle).ThrowOnError();
 
     private static CudaKernels.FlashStrides Strides(in AttentionOperand o) =>
         new((ulong)o.BatchStride, (ulong)o.HeadStride, (ulong)o.TokenStride);
@@ -126,7 +140,6 @@ public sealed partial class CudaBackend
         StepGraphInvalidateForActivationFree();
         ReleaseInt8V2Workspace();
         ulong buffer = GpuTransferHelper.AllocateDevice((nuint)bytes);
-        CudaDriverApi.cuMemsetD8Async(buffer, 0, (nuint)(Int8AttentionV2Layout.CounterSlots * sizeof(uint)), _stream.Handle).ThrowOnError();
         _int8V2Workspace = buffer;
         _int8V2WorkspaceBytes = bytes;
         return buffer;
@@ -139,158 +152,5 @@ public sealed partial class CudaBackend
         _int8V2Workspace = 0;
         _int8V2WorkspaceBytes = 0;
         if (buffer != 0) GpuTransferHelper.FreeDevice(buffer);
-    }
-
-    /// <summary>Test hook: runs one call on <paramref name="pv"/> at <paramref name="blockRows"/> and copies its workspace back, with
-    /// the trace of (batch, head, query tile) when <paramref name="traceTarget"/> is set (u8 PV, F32 output).</summary>
-    internal unsafe Int8V2Readback RunInt8AttentionV2ForTest(in AttentionCall c, Int8AttentionV2Pv pv, int blockRows,
-        (int Batch, int Head, int QueryTile)? traceTarget = null)
-    {
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        Int8AttentionV2Layout layout = new(c.Batch, c.Heads, c.QueryTokens, c.ValidKvLength, pv);
-        ulong workspace = EnsureInt8V2Workspace(layout.Bytes);
-        if (workspace == 0) throw new InvalidOperationException("The INT8 v2 workspace cannot grow while the stream captures.");
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, traceBuffer = 0;
-        long kvPad = layout.KvPad, rows = blockRows, tiles = layout.Tiles;
-        long dotsBytes = rows * kvPad * 4, pBytes = rows * kvPad, maxBytes = rows * tiles * 4, partialBytes = rows * tiles * 128 * 4;
-        try
-        {
-            pQ = GpuTransferHelper.CopyToDevice(c.Query.Storage);
-            pK = GpuTransferHelper.CopyToDevice(c.Key.Storage);
-            pV = GpuTransferHelper.CopyToDevice(c.Value.Storage);
-            nuint outBytes = GpuTransferHelper.ByteSize(c.Output.Storage);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            Int8V2TraceArgs? trace = null;
-            if (traceTarget is { } target)
-            {
-                traceBuffer = GpuTransferHelper.AllocateDevice((nuint)(dotsBytes + pBytes + 2 * maxBytes + partialBytes));
-                CudaDriverApi.cuMemsetD8Async(traceBuffer, 0, (nuint)(dotsBytes + pBytes + 2 * maxBytes + partialBytes), _stream.Handle).ThrowOnError();
-                trace = new Int8V2TraceArgs
-                {
-                    Dots = traceBuffer, Probabilities = traceBuffer + (ulong)dotsBytes, TileMax = traceBuffer + (ulong)(dotsBytes + pBytes),
-                    Sums = traceBuffer + (ulong)(dotsBytes + pBytes + maxBytes), Partials = traceBuffer + (ulong)(dotsBytes + pBytes + 2 * maxBytes),
-                    Batch = (uint)target.Batch, Head = (uint)target.Head, QueryTile = (uint)target.QueryTile,
-                };
-            }
-            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, blockRows, trace);
-            _stream.Synchronize();
-            T[] Read<T>(ulong at, long count) where T : unmanaged
-            {
-                T[] host = new T[count];
-                fixed (T* p = host)
-                    CudaDriverApi.cuMemcpyDtoH((nint)p, at, (nuint)(count * sizeof(T))).ThrowOnError();
-                return host;
-            }
-            long bh = (long)c.Batch * c.Heads;
-            byte[] output = Read<byte>(pOut, (long)outBytes);
-            Int8V2Readback result = new()
-            {
-                Layout = layout,
-                Output = output,
-                Q8 = Read<sbyte>(workspace + (ulong)layout.Q8, bh * c.QueryTokens * 128),
-                QScale = Read<float>(workspace + (ulong)layout.QScale, bh * c.QueryTokens),
-                K8 = Read<sbyte>(workspace + (ulong)layout.K8, bh * kvPad * 128),
-                KScale = Read<float>(workspace + (ulong)layout.KScale, bh * tiles * 4),
-                V8 = pv == Int8AttentionV2Pv.F16 ? [] : Read<sbyte>(workspace + (ulong)layout.V8, bh * 128 * kvPad),
-                VScale = pv == Int8AttentionV2Pv.F16 ? []
-                    : Read<float>(workspace + (ulong)layout.VScale, bh * (pv == Int8AttentionV2Pv.U8TileScales ? tiles : 1) * 128),
-                KMean = Read<float>(workspace + (ulong)layout.KMean, bh * 128),
-                Dots = trace is null ? [] : Read<int>(traceBuffer, rows * kvPad),
-                Probabilities = trace is null ? [] : Read<byte>(traceBuffer + (ulong)dotsBytes, rows * kvPad),
-                TileMax = trace is null ? [] : Read<float>(traceBuffer + (ulong)(dotsBytes + pBytes), rows * tiles),
-                Sums = trace is null ? [] : Read<int>(traceBuffer + (ulong)(dotsBytes + pBytes + maxBytes), rows * tiles),
-                Partials = trace is null ? [] : Read<int>(traceBuffer + (ulong)(dotsBytes + pBytes + 2 * maxBytes), rows * tiles * 128),
-            };
-            return result;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pQ);
-            GpuTransferHelper.FreeDevice(pK);
-            GpuTransferHelper.FreeDevice(pV);
-            GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(traceBuffer);
-        }
-    }
-
-    /// <summary>Benchmark hook: mean device milliseconds of the stats, quant and attention launches over
-    /// <paramref name="iterations"/> runs of one call on device-resident operands.</summary>
-    internal float[] Int8V2StageTimesForTest(in AttentionCall c, Int8AttentionV2Pv pv, int blockRows, int iterations)
-    {
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        Int8AttentionV2Layout layout = new(c.Batch, c.Heads, c.QueryTokens, c.ValidKvLength, pv);
-        ulong workspace = EnsureInt8V2Workspace(layout.Bytes);
-        if (workspace == 0) throw new InvalidOperationException("The INT8 v2 workspace cannot grow while the stream captures.");
-        nint[] events = new nint[4];
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
-        float[] totals = new float[3];
-        try
-        {
-            for (int i = 0; i < events.Length; i++) CudaDriverApi.cuEventCreate(out events[i], 0).ThrowOnError();
-            pQ = GpuTransferHelper.CopyToDevice(c.Query.Storage);
-            pK = GpuTransferHelper.CopyToDevice(c.Key.Storage);
-            pV = GpuTransferHelper.CopyToDevice(c.Value.Storage);
-            pOut = GpuTransferHelper.AllocateDevice(GpuTransferHelper.ByteSize(c.Output.Storage));
-            bool f32 = c.Query.DType == DType.F32, f32Out = c.Output.DType == DType.F32;
-            ulong elem = f32 ? 4UL : 2UL;
-            ulong q = pQ + (ulong)c.Query.Offset * elem, k = pK + (ulong)c.Key.Offset * elem, v = pV + (ulong)c.Value.Offset * elem;
-            ulong o = pOut + (ulong)c.Output.Offset * (f32Out ? 4UL : 2UL);
-            for (int it = -2; it < iterations; it++)
-            {
-                CudaDriverApi.cuEventRecord(events[0], _stream.Handle).ThrowOnError();
-                _kernels!.LaunchInt8V2Stats(f32, k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch, c.Heads,
-                    c.ValidKvLength, _stream.Handle);
-                CudaDriverApi.cuEventRecord(events[1], _stream.Handle).ThrowOnError();
-                _kernels.LaunchInt8V2Quant(f32, q, Strides(c.Query), k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch,
-                    c.Heads, c.QueryTokens, c.ValidKvLength, _stream.Handle);
-                CudaDriverApi.cuEventRecord(events[2], _stream.Handle).ThrowOnError();
-                _kernels.LaunchInt8V2Attention(blockRows, f32Out, o, Strides(c.Output), workspace, in layout, c.Batch, c.Heads,
-                    c.QueryTokens, c.ValidKvLength, c.Scale * Int8AttentionV2Reference.Log2E, _stream.Handle);
-                CudaDriverApi.cuEventRecord(events[3], _stream.Handle).ThrowOnError();
-                CudaDriverApi.cuEventSynchronize(events[3]).ThrowOnError();
-                if (it < 0) continue;
-                for (int s = 0; s < 3; s++)
-                {
-                    CudaDriverApi.cuEventElapsedTime(out float ms, events[s], events[s + 1]).ThrowOnError();
-                    totals[s] += ms / iterations;
-                }
-            }
-            return totals;
-        }
-        finally
-        {
-            foreach (nint e in events)
-                if (e != 0) CudaDriverApi.cuEventDestroy(e);
-            GpuTransferHelper.FreeDevice(pQ);
-            GpuTransferHelper.FreeDevice(pK);
-            GpuTransferHelper.FreeDevice(pV);
-            GpuTransferHelper.FreeDevice(pOut);
-        }
-    }
-
-    /// <summary>Test hook: the attention kernels' exp2 of each argument.</summary>
-    internal unsafe float[] Int8V2Exp2ForTest(float[] arguments)
-    {
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        if (arguments.Length == 0) return [];
-        nuint bytes = (nuint)(arguments.Length * sizeof(float));
-        ulong input = GpuTransferHelper.AllocateDevice(bytes), output = GpuTransferHelper.AllocateDevice(bytes);
-        try
-        {
-            fixed (float* p = arguments) CudaDriverApi.cuMemcpyHtoDAsync(input, (nint)p, bytes, _stream.Handle).ThrowOnError();
-            _kernels!.LaunchInt8V2Ex2Probe(output, input, arguments.Length, _stream.Handle);
-            _stream.Synchronize();
-            float[] result = new float[arguments.Length];
-            fixed (float* p = result) CudaDriverApi.cuMemcpyDtoH((nint)p, output, bytes).ThrowOnError();
-            return result;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(input);
-            GpuTransferHelper.FreeDevice(output);
-        }
     }
 }

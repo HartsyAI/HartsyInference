@@ -42,7 +42,7 @@ internal readonly record struct Int8AttentionV2Layout
         Q8 = Take(ref at, bh * queryTokens * HeadDim);
         QScale = Take(ref at, bh * queryTokens * sizeof(float));
         K8 = Take(ref at, bh * kvPad * HeadDim);
-        KScale = Take(ref at, bh * Tiles * 4 * sizeof(float));
+        KScale = Take(ref at, bh * kvPad * sizeof(float));
         V8 = Take(ref at, bh * HeadDim * kvPad * (pv == Int8AttentionV2Pv.F16 ? sizeof(ushort) : 1));
         VScale = Take(ref at, bh * (pv == Int8AttentionV2Pv.U8TileScales ? Tiles : 1) * HeadDim * sizeof(float));
         KMean = Take(ref at, bh * HeadDim * sizeof(float));
@@ -77,7 +77,7 @@ internal readonly record struct Int8AttentionV2Layout
     /// <summary>Smoothed K bytes <c>[B·H, kvPad, 128]</c>.</summary>
     public long K8 { get; }
 
-    /// <summary>K scales by lane class <c>[B·H, tiles, 4]</c>.</summary>
+    /// <summary>K scales, one per key <c>[B·H, kvPad]</c>.</summary>
     public long KScale { get; }
 
     /// <summary>V bytes <c>[B·H, 128, kvPad]</c>, keys permuted within 32-key chunks (F16 V in key order for the F16 PV).</summary>

@@ -114,19 +114,25 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
         Int8V2Readback gpu = cuda.RunInt8AttentionV2ForTest(call, pv, 64);
         Int8AttentionV2Options options = Options(pv);
         Int8AttentionV2Operands own = Int8AttentionV2Reference.Quantize(c.Call, options);
+        int heads = 2 * 3, keys = 333, kvPad = (int)gpu.Layout.KvPad;
+        float[] keyScales = new float[heads * keys];
+        for (int bh = 0; bh < heads; bh++)
+        {
+            gpu.KScale.AsSpan(bh * kvPad, keys).CopyTo(keyScales.AsSpan(bh * keys));
+            Assert.All(gpu.KScale.AsSpan(bh * kvPad + keys, kvPad - keys).ToArray(), s => Assert.Equal(1f, s));
+        }
         Assert.Equal(own.QueryScales, gpu.QScale);
-        Assert.Equal(own.KeyScales, gpu.KScale);
+        Assert.Equal(own.KeyScales, keyScales);
         Assert.Equal(own.KeyMeans, gpu.KMean);
         if (pv != Int8AttentionV2Pv.F16) Assert.Equal(own.ValueScales, gpu.VScale);
 
         Int8AttentionV2Operands supplied = Int8AttentionV2Reference.Quantize(c.Call, options);
         gpu.QScale.CopyTo(supplied.QueryScales, 0);
-        gpu.KScale.CopyTo(supplied.KeyScales, 0);
+        keyScales.CopyTo(supplied.KeyScales, 0);
         gpu.KMean.CopyTo(supplied.KeyMeans, 0);
         if (pv != Int8AttentionV2Pv.F16) gpu.VScale.CopyTo(supplied.ValueScales, 0);
         Int8AttentionV2Operands ops = Int8AttentionV2Reference.Quantize(c.Call, options, scales: supplied);
         Assert.Equal(ops.Queries, gpu.Q8);
-        int heads = 2 * 3, keys = 333, kvPad = (int)gpu.Layout.KvPad;
         for (int bh = 0; bh < heads; bh++)
         {
             Assert.Equal(ops.Keys.AsSpan(bh * keys * 128, keys * 128).ToArray(), gpu.K8.AsSpan(bh * kvPad * 128, keys * 128).ToArray());
@@ -508,6 +514,81 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
             Assert.Equal(expected, first);
             Assert.Equal(expected, second);
             cuda.StepGraphReset();
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.Int8AttnV2);
+            KnobStore.Clear(EngineKnobs.Int8AttnV2MinTokens);
+        }
+    }
+
+    /// <summary>The question an attention layer asks before keeping a call token-major for M.4: yes eagerly, no inside a capture the
+    /// workspace does not fit (M.4 declines there, and the call goes to Sage instead), yes once an eager call has grown it.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void TakesTokenMajor_IsNoInsideACaptureTheWorkspaceDoesNotFit()
+    {
+        if (!Open(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        const int Heads = 2, Tokens = 600;
+        TensorShape shape = new(1, Heads, Tokens, 128);
+        using Tensor q = new(shape, DType.F16), o = new(shape, DType.F16), small = new(new TensorShape(4), DType.F32);
+        cuda.Scale(q, q, 1f);
+        KnobStore.Set(EngineKnobs.Int8AttnV2, true);
+        KnobStore.Set(EngineKnobs.Int8AttnV2MinTokens, 512);
+        try
+        {
+            Assert.True(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.F16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 64, DType.F16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, 500, Tokens, 128, DType.F16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.BF16));
+            bool Captured()
+            {
+                cuda.StepGraphBegin();
+                cuda.Scale(small, small, 1f);
+                bool takes = cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.F16);
+                cuda.StepGraphEndAndLaunch();
+                cuda.StepGraphReset();
+                return takes;
+            }
+            Assert.Equal(0, cuda.Int8V2WorkspaceBytes);
+            Assert.False(Captured());
+            cuda.ScaledDotProductAttention(o, q, q, q, null, 0.088f);
+            Assert.Equal(1, cuda.Int8AttentionV2ExecutionCount);
+            Assert.True(Captured());
+            KnobStore.Set(EngineKnobs.Int8AttnV2, false);
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.F16));
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.Int8AttnV2);
+            KnobStore.Clear(EngineKnobs.Int8AttnV2MinTokens);
+        }
+    }
+
+    /// <summary>A capture whose workspace has not grown declines S.17, and the call runs on the next row; the grouped token-major
+    /// row's yield then lands on the dense rows, where S.1 follows S.17.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void DeclinedUnderCapture_RunsTheNextRow()
+    {
+        if (!Open(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        TensorShape shape = new(1, 2, 600, 128);
+        using Tensor q = new(shape, DType.F16), o = new(shape, DType.F16);
+        cuda.Scale(q, q, 1f);
+        KnobStore.Set(EngineKnobs.Int8AttnV2, true);
+        KnobStore.Set(EngineKnobs.Int8AttnV2MinTokens, 512);
+        try
+        {
+            cuda.StepGraphBegin();
+            cuda.ScaledDotProductAttention(o, q, q, q, null, 0.088f);
+            string? route = CudaBackend.LastAttentionRoute;
+            cuda.StepGraphEndAndLaunch();
+            cuda.StepGraphReset();
+            Assert.Equal(0, cuda.Int8AttentionV2ExecutionCount);
+            Assert.NotNull(route);
+            Assert.NotEqual("S.17", route);
         }
         finally
         {

@@ -209,6 +209,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Int8AttnV2VTile =
         Bool("numerics.int8AttnV2VTile", true, KnobScope.Runtime, KnobDomain.Numerics, "Gives INT8 attention v2 one V scale per channel per 128-key tile instead of one per channel over the sequence.");
 
+    /// <summary>Runs INT8 attention v2's PV product in F16 against the running maximum instead of u8 P times s8 V.</summary>
+    public static readonly Knob<bool> Int8AttnV2F16Pv =
+        Bool("numerics.int8AttnV2F16Pv", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs INT8 attention v2's PV product in F16 against the running maximum instead of u8 P times s8 V: slower, and it keeps the keys below u8 P's step.");
+
     /// <summary>Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).</summary>
     public static readonly Knob<bool> SageAttn =
         Bool("numerics.sageAttn", true, KnobScope.Runtime, KnobDomain.Numerics, "Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).");

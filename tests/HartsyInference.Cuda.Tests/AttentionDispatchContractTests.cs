@@ -49,6 +49,7 @@ public sealed class AttentionDispatchContractTests
         Assert.All(starts, x => Assert.Equal(0, x % 256));
         Assert.Equal(starts.Order(), starts);
         Assert.Equal(24L * 8192 * 128, seq.QScale - seq.Q8);
+        Assert.Equal(24L * 8192 * 4, seq.V8 - seq.KScale);
         Assert.Equal(24L * 8192 * 128, seq.VScale - seq.V8);
         Int8AttentionV2Layout tile = new(2, 3, 300, 333, Int8AttentionV2Pv.U8TileScales);
         Assert.Equal((3, 6, 384L), (tile.Tiles, tile.Chunks, tile.KvPad));

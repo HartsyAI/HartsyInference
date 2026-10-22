@@ -114,11 +114,11 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
         Assert.Equal(own.ValueScales[7], nudged.ValueScales[7]);
         Assert.True(Measure("one-ulp scales", c.Attend(nudged), reference).RelL2 < 1e-3);
 
-        // A supplied scale is the one the bytes are quantized with: doubling it halves every byte of its class (tile 1, class 1).
+        // A supplied scale is the one the bytes are quantized with: doubling it halves every byte of its key (key 5 of KV head 0).
         Int8AttentionV2Operands doubled = Int8AttentionV2Reference.Quantize(c.Call, options, c.Rows, scales: own);
         doubled.KeyScales[5] *= 2f;
         Int8AttentionV2Operands requantized = Int8AttentionV2Reference.Quantize(c.Call, options, c.Rows, scales: doubled);
-        int[] keys = Enumerable.Range(128, 128).Where(j => (j & 7) >> 1 == 1).ToArray();
+        int[] keys = [5];
         Assert.All(keys.SelectMany(j => Enumerable.Range(j * 64, 64)),
             i => Assert.True(Math.Abs(requantized.Keys[i] - nudged.Keys[i] / 2.0) <= 1.0, $"byte {i}: {nudged.Keys[i]} → {requantized.Keys[i]}"));
         Assert.Contains(keys.SelectMany(j => Enumerable.Range(j * 64, 64)), i => requantized.Keys[i] != nudged.Keys[i]);

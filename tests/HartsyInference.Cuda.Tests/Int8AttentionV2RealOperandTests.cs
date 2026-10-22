@@ -81,20 +81,22 @@ public sealed class Int8AttentionV2RealOperandTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>The emulator's variants on the same calls (64 sampled rows), host only: K scales per lane class or per key,
-    /// 128- or 64-key tiles, u8 or F16 PV.</summary>
+    /// <summary>The emulator's variants on the same calls (64 sampled rows), host only: per-key K scales against the per-lane-class
+    /// ones the kernel first shipped, 128- or 64-key tiles, u8 PV with per-tile or per-sequence V scales, F16 PV.</summary>
     [Trait("Category", "Integration")]
     [Fact]
     public void CapturedCalls_EmulatorVariants()
     {
         if (!RealWeightGate.Require(output.WriteLine, CaptureRoot)) return;
+        const Int8KeyScaleGrouping PerKey = Int8KeyScaleGrouping.PerKey;
         (string Name, Int8AttentionV2Options Options)[] variants =
         [
-            ("class-128-u8tile", new() { ValueScalesPerTile = true }),
-            ("perkey-128-u8tile", new() { KeyScales = Int8KeyScaleGrouping.PerKey, ValueScalesPerTile = true }),
-            ("class-64-u8tile", new() { BlockCols = 64, ValueScalesPerTile = true }),
-            ("class-128-f16pv", new() { Probabilities = Int8ProbabilityFormat.F16 }),
-            ("perkey-128-f16pv", new() { KeyScales = Int8KeyScaleGrouping.PerKey, Probabilities = Int8ProbabilityFormat.F16 }),
+            ("class-128-u8tile", new() { KeyScales = Int8KeyScaleGrouping.ThreadClass, ValueScalesPerTile = true }),
+            ("perkey-128-u8tile", new() { KeyScales = PerKey, ValueScalesPerTile = true }),
+            ("perkey-128-u8seq", new() { KeyScales = PerKey }),
+            ("perkey-64-u8tile", new() { KeyScales = PerKey, BlockCols = 64, ValueScalesPerTile = true }),
+            ("perkey-128-f16pv", new() { KeyScales = PerKey, Probabilities = Int8ProbabilityFormat.F16 }),
+            ("perkey-64-f16pv", new() { KeyScales = PerKey, BlockCols = 64, Probabilities = Int8ProbabilityFormat.F16 }),
         ];
         string[] metas = [.. Directory.GetFiles(CaptureRoot, "meta.json", SearchOption.AllDirectories).Order()];
         string[] lines = new string[metas.Length];
