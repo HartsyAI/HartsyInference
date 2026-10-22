@@ -175,7 +175,7 @@ public sealed partial class CudaBackend
                 {
                     UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32, Lowering = AttentionLowering.Cast,
                 }, "S.11",
-                static (in AttentionCall c) => c.Mask.Bias is null && ScoresPastMaterialized(in c),
+                static (in AttentionCall c) => c.Mask.Bias is null && ScoresPastMaterialized(in c) && OneRowTiles(in c),
                 (in AttentionCall c) => { SdpaTiledCast(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("materialized", E, AnyFloat, AnyFloat, HM) with
                 {
@@ -192,9 +192,9 @@ public sealed partial class CudaBackend
             new DelegateAttentionRow(Cap("refuse", E, AnyFloat, AnyFloat, HM) with { Masks = AnyBias }, null,
                 static (in AttentionCall c) => ScoresPastMaterialized(in c),
                 static (in AttentionCall c) => throw new AttentionUnsupportedException(
-                    $"No bounded CUDA row serves this {c.Query.DType} head-major attention: its score matrix is past the {MaterializedMaxScores} "
-                    + "elements the materialized row addresses, and past that only unmasked calls and F32 calls with a key-only mask run "
-                    + "query-tiled.")),
+                    $"No bounded CUDA row serves this {c.Query.DType} head-major attention: its {(long)c.Batch * c.Heads * c.QueryTokens * c.KeyTokens} "
+                    + $"score elements are past the 2^32 ({MaterializedMaxScores}) the materialized row addresses, and past that only unmasked "
+                    + "calls and F32 calls with a key-only mask run query-tiled.")),
         ];
     }
 
@@ -205,10 +205,14 @@ public sealed partial class CudaBackend
     internal static bool ScoresPastMaterialized(in AttentionCall c) =>
         c.KeyTokens > 0 && (long)c.Batch * c.Heads * c.QueryTokens > MaterializedMaxScores / c.KeyTokens;
 
-    /// <summary>The query-tiled gate: forced, an F32 score matrix larger than half of free VRAM, or one the materialized row does not
-    /// address.</summary>
+    /// <summary>A one-row tile, B·H·Skv scores, is within what the softmax addresses; every tiled row needs it.</summary>
+    internal static bool OneRowTiles(in AttentionCall c) => (long)c.Batch * c.Heads * c.KeyTokens <= MaterializedMaxScores;
+
+    /// <summary>The query-tiled gate: a one-row tile the softmax addresses, and forced, an F32 score matrix larger than half of free
+    /// VRAM, or one the materialized row does not address.</summary>
     private bool TilesScores(in AttentionCall c)
     {
+        if (!OneRowTiles(in c)) return false;
         if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
         ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
         (nuint free, _) = _context.GetMemoryInfo();

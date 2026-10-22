@@ -6,9 +6,9 @@ using static HartsyInference.Cuda.Tests.CudnnSdpaVariantTests;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>A head-major F16 call past the 2^32 score elements the materialized row addresses, with cuDNN and Sage off so no fused row
-/// takes it: it runs query-tiled on F32 widenings and every sampled row matches a float64 oracle, the rows whose 32-bit offsets
-/// would wrap included.</summary>
+/// <summary>A head-major F16 or BF16 call past the 2^32 score elements the materialized row addresses, with cuDNN and Sage off so no
+/// fused row takes it: it runs query-tiled on F32 widenings and every sampled row matches a float64 oracle, the rows whose 32-bit
+/// offsets would wrap included.</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class MaterializedScoreBoundTests
 {
@@ -16,16 +16,20 @@ public sealed unsafe class MaterializedScoreBoundTests
     public MaterializedScoreBoundTests(ITestOutputHelper output) => _output = output;
 
     [Trait("Category", "GpuIntegration")]
-    [Fact]
-    public void AnF16CallPastTheBound_RunsTiled_AndMatchesTheOracleOnTheRowsThatWouldWrap()
+    [Theory]
+    [InlineData("f16")]
+    [InlineData("bf16")]
+    public void AHalfPrecisionCallPastTheBound_RunsTiled_AndMatchesTheOracleOnTheRowsThatWouldWrap(string dtypeName)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         const int s = 66000, d = 64;
+        DType dtype = dtypeName == "bf16" ? DType.BF16 : DType.F16;
+        double tolerance = dtype == DType.BF16 ? Bf16Tolerance : F16Tolerance;
         long firstWrapped = CudaBackend.MaterializedMaxScores / s + 1;
         float scale = 1f / MathF.Sqrt(d);
         Random rng = new(66000);
-        float[] q = Quantize(Gauss(rng, (long)s * d, 1.7f), DType.F16), k = Quantize(Gauss(rng, (long)s * d, 1.7f), DType.F16);
-        float[] v = Quantize(Gauss(rng, (long)s * d), DType.F16);
+        float[] q = Quantize(Gauss(rng, (long)s * d, 1.7f), dtype), k = Quantize(Gauss(rng, (long)s * d, 1.7f), dtype);
+        float[] v = Quantize(Gauss(rng, (long)s * d), dtype);
         TensorShape shape = new(1, 1, s, d);
         float[] got;
         string? route;
@@ -34,8 +38,8 @@ public sealed unsafe class MaterializedScoreBoundTests
         try
         {
             using CudaBackend backend = new(0, PtxDir());
-            using Tensor qt = Make(q, shape, DType.F16), kt = Make(k, shape, DType.F16), vt = Make(v, shape, DType.F16);
-            using Tensor ot = new(shape, DType.F16);
+            using Tensor qt = Make(q, shape, dtype), kt = Make(k, shape, dtype), vt = Make(v, shape, dtype);
+            using Tensor ot = new(shape, dtype);
             backend.ScaledDotProductAttention(ot, qt, kt, vt, null, scale, allowF16: false);
             backend.Sync();
             route = CudaBackend.LastAttentionRoute;
@@ -55,9 +59,9 @@ public sealed unsafe class MaterializedScoreBoundTests
             worst = Math.Max(worst, double.IsNaN(err) ? double.PositiveInfinity : err);
             _output.WriteLine($"row {row}{(row >= firstWrapped ? " (past a 32-bit offset)" : "")}: relL2 {err:E2}");
         }
-        _output.WriteLine($"route {route}, worst relL2 {worst:E2}");
+        _output.WriteLine($"{dtypeName}: route {route}, worst relL2 {worst:E2}");
         Assert.Equal("S.11", route);
-        Assert.True(worst <= F16Tolerance, $"worst sampled row relL2 {worst:E2}");
+        Assert.True(worst <= tolerance, $"worst sampled row relL2 {worst:E2}");
     }
 
     /// <summary>Relative L2 error of one output row against float64 softmax(scale·qKᵀ)·V over every key; NaN when the row is not finite.</summary>

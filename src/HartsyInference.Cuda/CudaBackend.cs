@@ -8074,12 +8074,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             k32 = CudaMemory.Allocate((nuint)(key.ElementCount * 4));
             v32 = CudaMemory.Allocate((nuint)(value.ElementCount * 4));
             o32 = CudaMemory.Allocate((nuint)(output.ElementCount * 4));
-            Widen(q32, pQ, query.ElementCount);
-            Widen(k32, pK, key.ElementCount);
-            Widen(v32, pV, value.ElementCount);
+            Widen(q32, ref pQ, query.ElementCount);
+            Widen(k32, ref pK, key.ElementCount);
+            Widen(v32, ref pV, value.ElementCount);
             SdpaTiledF32Core(q32, k32, v32, o32, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
-            if (bf16) _kernels!.LaunchCastF32ToBf16(pOut, o32, (int)output.ElementCount, _stream.Handle);
-            else _kernels!.LaunchCastF32ToF16(pOut, o32, (int)output.ElementCount, _stream.Handle);
+            if (bf16) _kernels!.LaunchCastF32ToBf16(pOut, o32, checked((int)output.ElementCount), _stream.Handle);
+            else _kernels!.LaunchCastF32ToF16(pOut, o32, checked((int)output.ElementCount), _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -8093,11 +8093,31 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (p != 0) CudaMemory.FreeAsync(p, _stream.Handle);
         }
 
-        void Widen(ulong wide, ulong half, long count)
+        // FreeDevice is stream-ordered, so an uploaded half-precision copy goes as soon as its widen has read it.
+        void Widen(ulong wide, ref ulong half, long count)
         {
-            if (bf16) _kernels!.LaunchCastBf16ToF32(wide, half, (int)count, _stream.Handle);
-            else _kernels!.LaunchCastF16ToF32(wide, half, (int)count, _stream.Handle);
+            if (bf16) _kernels!.LaunchCastBf16ToF32(wide, half, checked((int)count), _stream.Handle);
+            else _kernels!.LaunchCastF16ToF32(wide, half, checked((int)count), _stream.Handle);
+            GpuTransferHelper.FreeDevice(half);
+            half = 0;
         }
+    }
+
+    /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
+    /// the weights), or the height <c>numerics.sdpaTile</c> forces, and never past the score elements the softmax addresses.</summary>
+    /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
+    internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced)
+    {
+        long perRow = totalHeads * skv * sizeof(float);
+        long rows = (long)(freeBytes / 4) / Math.Max(1, perRow);
+        if (rows < 1) rows = 1;
+        if (rows > sq) rows = sq;
+        if (forced is int f && f > 0) rows = Math.Min(f, sq);
+        long cap = MaterializedMaxScores / (totalHeads * skv);
+        if (cap < 1)
+            throw new AttentionUnsupportedException(
+                $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
+        return Math.Min(rows, cap);
     }
 
     /// <summary>The query-tiled loop of <see cref="SdpaTiledF32"/> over F32 device buffers, shared with the BF16 path
@@ -8108,17 +8128,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ulong scoresBuf = 0, pOnes = 0;
         try
         {
-            // Query-tile height: fit [totalHeads, Br, Skv] into ~a quarter of free VRAM (leaves room for Q/K/V/out
-            // and the model weights). Env override numerics.sdpaTile forces a fixed Br (benchmarking).
             (nuint freeBytes, _) = _context.GetMemoryInfo();
-            long perRow = totalHeads * skv * sizeof(float);            // bytes for one query row across all heads
-            long Br = (long)((ulong)freeBytes / 4) / Math.Max(1, perRow);
-            if (Br < 1) Br = 1;
-            if (Br > sq) Br = sq;
-            if (EngineKnobs.SdpaTile.Value is int envBr && envBr > 0)
-                Br = Math.Min(envBr, sq);
-            // The softmax forms each row's offset in 32 bits, so one tile stays within the score elements it addresses.
-            Br = Math.Max(1, Math.Min(Br, MaterializedMaxScores / (totalHeads * skv)));
+            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value);
 
             scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
             if (pBias != 0)

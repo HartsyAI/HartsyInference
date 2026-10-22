@@ -182,8 +182,9 @@ public sealed class CudnnSdpaBackendRowsTests
 
     /// <summary>The materialized row addresses 2^32 score elements: up to there it keeps every call it had (SD1.5's VAE mid-block at
     /// 2048² sits exactly on it), and past it an unmasked F16 or BF16 call runs query-tiled on F32 widenings, an F32 call on the tiled
-    /// F32 rows, and a call no tiled row takes is refused naming the budget. Head dim 512 is past every fused row; the masked calls keep
-    /// Sq·Skv within the mask contract's Int32 bound, so only heads take them past 2^32.</summary>
+    /// F32 rows, and a call no tiled row takes is refused naming the budget, as is one whose single query row across its heads is past
+    /// 2^32, which no tile height brings back. Head dim 512 is past every fused row; the masked calls keep Sq·Skv within the mask
+    /// contract's Int32 bound, so only heads take them past 2^32.</summary>
     [Theory]
     [InlineData("f16-at-bound", "f16", 1, 65536, 65536, "none", "materialized")]
     [InlineData("f16-under", "f16", 8, 4096, 4096, "none", "materialized")]
@@ -195,6 +196,7 @@ public sealed class CudnnSdpaBackendRowsTests
     [InlineData("f32-keymask-past", "f32", 4, 40000, 40000, "key", "tiled.f32.keybias")]
     [InlineData("f32-mask-past", "f32", 4, 40000, 40000, "full", "refuse")]
     [InlineData("f16-keymask-past", "f16", 4, 40000, 40000, "key", "refuse")]
+    [InlineData("f16-one-row-past", "f16", 70000, 1, 65537, "none", "refuse")]
     public void TheMaterializedRowAddresses2Pow32ScoreElements(string name, string dtype, int heads, int sq, int skv, string mask, string row)
     {
         const int d = 512;
@@ -215,7 +217,25 @@ public sealed class CudnnSdpaBackendRowsTests
         if (row != "refuse") return;
         AttentionUnsupportedException refused = Assert.Throws<AttentionUnsupportedException>(
             () => AttentionPlanner.Run(Rows(backend, "BuildDenseRows"), in call));
-        Assert.Contains(CudaBackend.MaterializedMaxScores.ToString(System.Globalization.CultureInfo.InvariantCulture), refused.Message);
+        Assert.Contains("2^32 (4294967296)", refused.Message);
+        Assert.Contains(((long)heads * sq * skv).ToString(System.Globalization.CultureInfo.InvariantCulture), refused.Message);
+    }
+
+    /// <summary>The query tile: a quarter of free VRAM in F32 scores or the height <c>numerics.sdpaTile</c> forces, never past the 2^32
+    /// score elements the softmax addresses (65075 rows over 66000 keys, however much memory is free or the knob asks), and a call whose
+    /// one query row is already past them is refused rather than tiled.</summary>
+    [Theory]
+    [InlineData(12L << 30, 24, 4480, 4480, 0, 4480)]
+    [InlineData(80L << 30, 1, 66000, 66000, 0, 65075)]
+    [InlineData(1L << 30, 1, 66000, 66000, 66000, 65075)]
+    [InlineData(1L << 30, 1, 66000, 66000, 100, 100)]
+    public void TheTileHeightNeverPassesTheBound(long freeBytes, int heads, int sq, int skv, int forced, long rows)
+    {
+        Assert.Equal(rows, CudaBackend.TileRows((ulong)freeBytes, heads, sq, skv, forced == 0 ? null : forced));
+        Assert.True(rows * heads * skv <= CudaBackend.MaterializedMaxScores);
+        AttentionUnsupportedException refused = Assert.Throws<AttentionUnsupportedException>(
+            () => CudaBackend.TileRows((ulong)freeBytes, 70000, 1, 65537, forced == 0 ? null : forced));
+        Assert.Contains("2^32 (4294967296)", refused.Message);
     }
 
     [Fact]
