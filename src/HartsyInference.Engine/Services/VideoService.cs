@@ -327,15 +327,19 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     }
 
     /// <summary>The plan's provenance with the frame rate the result actually carries: a rate the pipeline pinned from
-    /// an input clip replaces the default the plan chose, and is reported as derived.</summary>
+    /// an input clip replaces the plan's, reported as derived over a default and as normalized over a caller's value.</summary>
     private static IReadOnlyDictionary<string, ResolvedParameter> FpsProvenance(VideoPlan plan, int? requested, int? fps)
     {
-        if (requested is not null || fps is not int pinned || pinned == plan.EffectiveSettings.Fps)
+        if (fps is not int pinned || pinned == plan.EffectiveSettings.Fps)
         {
             return plan.Provenance;
         }
-        return ParameterProvenance.With(plan.Provenance, nameof(VideoRequest.Fps), new ResolvedParameter(
-            pinned.ToString(CultureInfo.InvariantCulture), ParameterSource.Derived, "pinned by the pipeline's input clip"));
+        string value = pinned.ToString(CultureInfo.InvariantCulture);
+        ResolvedParameter entry = requested is int asked
+            ? new ResolvedParameter(value, ParameterSource.Normalized,
+                $"requested {asked.ToString(CultureInfo.InvariantCulture)}, pinned by the pipeline's input clip")
+            : new ResolvedParameter(value, ParameterSource.Derived, "pinned by the pipeline's input clip");
+        return ParameterProvenance.With(plan.Provenance, nameof(VideoRequest.Fps), entry);
     }
 
     /// <inheritdoc/>

@@ -62,6 +62,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
             new AttentionLayerConfig
             {
                 Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+                TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
             },
             new AttentionNormWeights(_normQ.Weight, _normK.Weight, _normQ.Eps, _normK.Eps));
 
@@ -141,7 +142,7 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         backend.Gelu(mlpActivated, mlpProj);
         mlpProj.Dispose();
 
-        // ── 4-8. QK-norm, image-only RoPE on the leading image rows, attention (QK RMS-norm bounds the scores), permuted back ──
+        // ── 4-8. QK-norm, image-only RoPE on the leading image rows, attention (QK RMS-norm bounds the scores) ──
         HunyuanImageRotation imageRope = new(rope, imgPackedT, imgPackedH, imgPackedW);
         AttentionCallContext context = batch == 1
             ? new AttentionCallContext { Rotation = imageRope }

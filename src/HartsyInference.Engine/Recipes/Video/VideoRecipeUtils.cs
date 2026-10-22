@@ -48,7 +48,6 @@ internal static class VideoRecipeUtils
         return (width, height);
     }
 
-
     /// <summary>Image-to-video geometry: fits the init image's aspect into the model's standard pixel budget ("Image Aspect, Model Res" — the SwarmUI default), or takes the image's own size when the request asks for "Image". Everything snaps to <paramref name="multiple"/>.</summary>
     internal static (int Width, int Height) ResolveI2VResolution(VideoRequest request, VideoEffectiveSettings settings,
         int imageWidth, int imageHeight, int multiple)

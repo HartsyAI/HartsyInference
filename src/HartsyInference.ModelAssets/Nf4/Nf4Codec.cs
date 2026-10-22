@@ -1,5 +1,11 @@
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Checkpoints;
 
 namespace HartsyInference.ModelAssets.Nf4;
 
@@ -151,8 +157,8 @@ public static unsafe class Nf4Codec
     #region Companion tensors
 
     /// <summary>Quantizes a weight into the bitsandbytes companion tensors <see cref="Nf4CompanionFold"/> reads back: the
-    /// packed U8 weight, F32 <c>.absmax</c>, the 16-entry F32 <c>.quant_map</c>, and the U8 JSON
-    /// <c>.quant_state.bitsandbytes__nf4</c> blob that gives the shape, block size and compute dtype.</summary>
+    /// packed U8 weight shaped <c>[n/2, 1]</c> as bitsandbytes stores it, F32 <c>.absmax</c>, the 16-entry F32 <c>.quant_map</c>,
+    /// and the U8 JSON <c>.quant_state.bitsandbytes__nf4</c> blob that gives the shape, block size and compute dtype.</summary>
     /// <param name="weightKey">Key of the weight; the companions are named from it.</param>
     /// <param name="computeDtype">Torch dtype name the weight dequantizes back to: <c>float32</c>, <c>float16</c> or <c>bfloat16</c>.</param>
     /// <returns>Every tensor, weight first. The caller owns and disposes them.</returns>
@@ -161,14 +167,13 @@ public static unsafe class Nf4Codec
     {
         (byte[] packed, float[] absmax) = Quantize(values, blockSize);
 
-        Tensor weight = new(new TensorShape(packed.Length), DType.U8);
+        Tensor weight = new(new TensorShape(packed.Length, 1), DType.U8);
         packed.AsSpan().CopyTo(weight.AsSpan<byte>());
         Tensor scales = new(new TensorShape(absmax.Length), DType.F32);
         absmax.AsSpan().CopyTo(scales.AsSpan<float>());
         Tensor codebook = new(new TensorShape(Nf4Lut.Length), DType.F32);
         Nf4Lut.AsSpan().CopyTo(codebook.AsSpan<float>());
-        byte[] state = System.Text.Encoding.ASCII.GetBytes(
-            $"{{\"shape\":[{rows},{cols}],\"blocksize\":{blockSize},\"dtype\":\"{computeDtype}\"}}");
+        byte[] state = System.Text.Encoding.ASCII.GetBytes(StateText(rows, cols, blockSize, computeDtype));
         Tensor stateBlob = new(new TensorShape(state.Length), DType.U8);
         state.AsSpan().CopyTo(stateBlob.AsSpan<byte>());
 
@@ -180,6 +185,153 @@ public static unsafe class Nf4Codec
             new(weightKey + ".quant_state.bitsandbytes__nf4", stateBlob),
         ];
     }
+
+    #endregion
+
+    #region Streaming FP8 source to NF4 file
+
+    /// <summary>Writes a block-FP8 checkpoint as one NF4 safetensors file, one weight at a time: each FP8 weight is dequantized,
+    /// quantized and written before the next is read, so memory holds one weight rather than the checkpoint. Plain tensors of
+    /// any dtype are copied byte for byte. The F32 <c>weight_scale_inv</c> grids are consumed by the dequantization and not written.</summary>
+    /// <remarks>A failed or cancelled write removes its <c>.partial</c> file and leaves any file already at
+    /// <paramref name="outputPath"/> untouched. Cancellation is checked between tensors.</remarks>
+    /// <returns>Lowercase hex SHA-256 of the file.</returns>
+    /// <exception cref="ArgumentException"><paramref name="outputPath"/> or its <c>.partial</c> file is one of the source's files.</exception>
+    public static string WriteFromFp8(HfQuantCheckpoint source, string outputPath, IReadOnlyDictionary<string, string> metadata,
+        Action<string>? progress = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentException.ThrowIfNullOrEmpty(outputPath);
+        ArgumentNullException.ThrowIfNull(metadata);
+        // Stream into a sibling .partial file: the final path only ever holds a complete, length-checked checkpoint.
+        string partial = outputPath + ".partial";
+        if (source.IsSourceFile(outputPath) || source.IsSourceFile(partial))
+            throw new ArgumentException($"The NF4 output '{outputPath}' must not overwrite its source checkpoint.", nameof(outputPath));
+        List<HfQuantWeight> plain = [];
+        List<HfQuantWeight> quantized = [];
+        foreach (HfQuantWeight w in source.Weights.Values.OrderBy(static w => w.Name, StringComparer.Ordinal))
+        {
+            if (w.Storage == HfWeightStorage.Plain && w.StackedSource is null) plain.Add(w);
+            else if (w.Storage == HfWeightStorage.Fp8Block && w.Shape.Rank == 2) quantized.Add(w);
+            else throw new NotSupportedException($"'{w.Name}' is stored as {w.Storage} {w.Shape}; only FP8 2D weights and plain tensors are written.");
+        }
+
+        JsonObject header = new();
+        if (metadata.Count > 0)
+        {
+            JsonObject meta = new();
+            foreach (KeyValuePair<string, string> entry in metadata) meta[entry.Key] = entry.Value;
+            header["__metadata__"] = meta;
+        }
+        long offset = 0;
+        void Declare(string name, string dtype, long[] shape, long bytes)
+        {
+            JsonArray dims = new();
+            foreach (long d in shape) dims.Add(d);
+            JsonArray range = new() { offset, offset + bytes };
+            header[name] = new JsonObject
+            {
+                ["dtype"] = dtype,
+                ["shape"] = dims,
+                ["data_offsets"] = range,
+            };
+            offset += bytes;
+        }
+        foreach (HfQuantWeight w in plain)
+        {
+            Declare(w.Name, w.StoredDType.Name, DimsOf(w.Shape), Tensor.ComputeByteSize(w.Shape, w.StoredDType));
+        }
+        foreach (HfQuantWeight w in quantized)
+        {
+            long rows = w.Shape[0], cols = w.Shape[1], elements = rows * cols;
+            long blocks = (elements + DefaultBlockSize - 1) / DefaultBlockSize, packedBytes = (elements + 1) / 2;
+            // bitsandbytes' own [n/2, 1] layout, so its loaders read the file as well as ours.
+            Declare(w.Name, "U8", [packedBytes, 1], packedBytes);
+            Declare(w.Name + ".absmax", "F32", [blocks], blocks * sizeof(float));
+            Declare(w.Name + ".quant_map", "F32", [Nf4Lut.Length], Nf4Lut.Length * sizeof(float));
+            long stateBytes = Encoding.ASCII.GetByteCount(StateText(rows, cols, DefaultBlockSize, "float32"));
+            Declare(w.Name + Nf4CompanionFold.QuantStatePrefix + "nf4", "U8", [stateBytes], stateBytes);
+        }
+
+        byte[] json = Encoding.UTF8.GetBytes(header.ToJsonString());
+        byte[] headerBytes = new byte[json.Length + (8 - json.Length % 8) % 8];
+        json.CopyTo(headerBytes, 0);
+        Array.Fill(headerBytes, (byte)' ', json.Length, headerBytes.Length - json.Length);
+
+        // Removed only if this call opened it: after a failed open the file may be another run's, even if empty.
+        bool opened = false;
+        try
+        {
+            string sha;
+            using (FileStream file = new(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+            {
+                opened = true;
+                using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                void Emit(ReadOnlySpan<byte> bytes)
+                {
+                    file.Write(bytes);
+                    hash.AppendData(bytes);
+                }
+
+                Span<byte> length = stackalloc byte[sizeof(long)];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(length, headerBytes.Length);
+                Emit(length);
+                Emit(headerBytes);
+
+                foreach (HfQuantWeight w in plain)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using Tensor view = source.Borrow(w.Name);
+                    ReadOnlySpan<byte> raw = view.AsReadOnlySpan<byte>();
+                    if (raw.Length != Tensor.ComputeByteSize(w.Shape, w.StoredDType))
+                        throw new InvalidDataException($"'{w.Name}' holds {raw.Length} bytes; its shape {w.Shape} needs {Tensor.ComputeByteSize(w.Shape, w.StoredDType)}.");
+                    Emit(raw);
+                }
+
+                int done = 0;
+                foreach (HfQuantWeight w in quantized)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    long rows = w.Shape[0], cols = w.Shape[1];
+                    using Tensor f32 = source.DequantizeF32(w.Name);
+                    (byte[] packed, float[] absmax) = Quantize(f32.AsReadOnlySpan<float>());
+                    Emit(packed);
+                    Emit(MemoryMarshal.AsBytes(absmax.AsSpan()));
+                    Emit(MemoryMarshal.AsBytes(Nf4Lut.AsSpan()));
+                    Emit(Encoding.ASCII.GetBytes(StateText(rows, cols, DefaultBlockSize, "float32")));
+                    if (++done % 500 == 0) progress?.Invoke($"{done}/{quantized.Count} FP8 weights written");
+                }
+                file.Flush();
+                long expected = 8 + headerBytes.Length + offset;
+                if (file.Length != expected)
+                    throw new InvalidDataException($"Wrote {file.Length} bytes to '{partial}'; the header declares {expected}.");
+                sha = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            }
+
+            File.Move(partial, outputPath, overwrite: true);
+            return sha;
+        }
+        catch
+        {
+            // A failed cleanup is logged rather than thrown, so the error that stopped the write is the one the caller sees.
+            try
+            {
+                if (opened) File.Delete(partial);
+            }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+                Logs.Warning($"Could not remove '{partial}' after a failed write: {cleanup.Message}");
+            }
+            throw;
+        }
+    }
+
+    /// <summary>The quant-state JSON bitsandbytes writes beside an NF4 weight: its type, logical shape, block size and compute
+    /// dtype. bitsandbytes' own loader requires the type.</summary>
+    private static string StateText(long rows, long cols, int blockSize, string computeDtype) =>
+        $"{{\"quant_type\":\"nf4\",\"shape\":[{rows},{cols}],\"blocksize\":{blockSize},\"dtype\":\"{computeDtype}\"}}";
+
+    private static long[] DimsOf(TensorShape shape) => Enumerable.Range(0, shape.Rank).Select(i => shape[i]).ToArray();
 
     #endregion
 

@@ -82,11 +82,17 @@ and source:
 |---|---|
 | `RecipeDefault` / `ProfileDefault` | unset by the caller; the recipe, or an exact-checkpoint profile, supplied it |
 | `UserOverride` | set by the caller and run as set |
-| `Normalized` | set by the caller and changed by planning; the note names the requested value |
-| `Derived` | computed: a random seed, or a frame rate the pipeline pinned from an input clip |
+| `Normalized` | set by the caller and changed by planning or by a pipeline that pins it (a frame rate taken from an input clip); the note names the requested value |
+| `Derived` | computed: a random seed, or a frame rate the pipeline pinned from an input clip when the caller set none |
 
 The plan's identity and provenance travel onto `VideoGenerationResult` and `ImageResult` and are logged once per
 generation, so a wrong value in an output can be traced to the recipe, the host, the user or the pipeline.
+
+Two limits, by design for now:
+- **Image provenance compares the caller's request with the resolved request.** A size a pipeline later rounds
+  (to its latent multiple) still reports the resolved value; the result's own `Width`/`Height` are what ran.
+- **The streaming path (`GenerateFramesAsync`) yields frames only.** It logs `[VideoPlan]` but carries no result
+  object, so a host that streams reads provenance from `IVideoPlanningService.PlanAsync`.
 
 Frame counts are normalized in planning, not in pipelines. A count off a family's grid snaps as the grid declares;
 **a snap that would pass the grid's cap lands on the cap**, which is on the grid and the closest count the family can
