@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: the executable specification of INT8 attention v2.** `Int8AttentionV2Reference` runs on the CPU the stats pass,
+  quantization and online recurrence the coming INT8 kernel must reproduce: u8 P against each key tile's own maximum, s8 V,
+  INT32 partials drained at every key tile, K channel-mean smoothing with its softcap, sink, LSE and per-segment corrections,
+  tile-classified masks, GQA and head dims up to 256, plus the FP8 and F16 P×V fallbacks. An adversarial suite holds it to
+  the contract oracle, which can now return the LSE. No runtime path changes.
 - **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The

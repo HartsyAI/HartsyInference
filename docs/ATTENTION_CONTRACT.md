@@ -121,6 +121,12 @@ softmax, additive bias and exclusions are invariant to that shift; a softcap is 
 smoothed with different vectors need per-segment corrections. A kernel that smooths implements those corrections or
 refuses the call. A stale smoothing vector is invariant in real arithmetic and still changes quantized bytes.
 
+INT8 attention v2 is specified by its emulator, `Int8AttentionV2Reference` (beside the host reference): the stats pass,
+quantization and online recurrence its kernel rows reproduce, bit for bit on the Q/K/V bytes, scales, K means and INT32 QK
+products when the emulator is fed the kernel's own scales, and up to summation order and the hardware exp2 on the output.
+It applies the corrections above: a softcap gets each row's offset back before the tanh, sinks and the LSE take it, and
+each key segment carries its own.
+
 ## 6. Planning and fallback
 
 A backend declares one capability row per kernel. The planner picks, among the rows whose declared support and
