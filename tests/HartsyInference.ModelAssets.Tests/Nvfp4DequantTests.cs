@@ -155,28 +155,6 @@ public sealed unsafe class Nvfp4DequantTests
         }
         _output.WriteLine($"{pastE4M3Max} of {Rows * Cols} values past 448 before the ÷8; the unscaled fold breaks the bound on {rejected}.");
         Assert.True(rejected > 0, "the bounds accept the unscaled fold, so they cannot see clipping");
-    /// <summary>Padding to the 128-row, 4-column tile is accepted; a scale tensor larger than that is a mismatch.</summary>
-    [Theory]
-    [InlineData(128, 4, true)]
-    [InlineData(2, 1, true)]
-    [InlineData(256, 4, false)]
-    [InlineData(128, 8, false)]
-    public void DequantNvfp4_AcceptsPaddingOnly(int scaleRows, int scaleCols, bool accepted)
-    {
-        using Tensor packed = new(new TensorShape(2, 8), DType.U8);
-        using Tensor blockScales = new(new TensorShape(scaleRows, scaleCols), DType.F8E4M3);
-        if (accepted)
-        {
-            using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f);
-            using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f);
-        }
-        else
-        {
-            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f));
-            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
-        }
-    }
-
     /// <summary>The block-scale matrix ComfyUI stores is in NVIDIA's blocked layout, not row-major, so the
     /// dequant has to invert the permutation to find the scale for a logical <c>(row, blockColumn)</c>.
     ///
@@ -434,5 +412,27 @@ public sealed unsafe class Nvfp4DequantTests
         (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, rows, cols);
         float[] dec = Decode(packed, scales, global, rows, cols);
         AssertWithinBlockBound(src.ToArray(), dec, rows, cols, global, d.Name);
+    }
+
+    /// <summary>Padding to the 128-row, 4-column tile is accepted; a scale tensor larger than that is a mismatch.</summary>
+    [Theory]
+    [InlineData(128, 4, true)]
+    [InlineData(2, 1, true)]
+    [InlineData(256, 4, false)]
+    [InlineData(128, 8, false)]
+    public void DequantNvfp4_AcceptsPaddingOnly(int scaleRows, int scaleCols, bool accepted)
+    {
+        using Tensor packed = new(new TensorShape(2, 8), DType.U8);
+        using Tensor blockScales = new(new TensorShape(scaleRows, scaleCols), DType.F8E4M3);
+        if (accepted)
+        {
+            using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f);
+            using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f);
+        }
+        else
+        {
+            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f));
+            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
+        }
     }
 }
