@@ -31,6 +31,8 @@ internal static class Nvfp4LayoutNormalizer
                 continue;
             }
             if (weights.ContainsKey(stem + ".comfy_quant") || fileLayers?.Contains(stem) == true) continue;
+            // Shape cannot tell the layouts apart once rows are a multiple of 128 and K/16 of 4, so the missing config is
+            // the only evidence: a Comfy group without one would be scrambled here.
             if (scale.Shape[0] != packed.Shape[0] || scale.Shape[1] * Nvfp4Codec.GroupSize != packed.Shape[1] * 2) continue;
 
             (Tensor comfyPacked, Tensor comfyScale) = Nvfp4Codec.FromModelOptLayout(packed, scale);

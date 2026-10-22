@@ -1226,6 +1226,11 @@ public static unsafe class CheckpointConvertUtils
         return table;
     }
 
+    /// <summary>A block-scale tensor covers the weight exactly or up to the blocked layout's padding, and no further.</summary>
+    private static bool BlockScaleShapeFits(long rows, long cols, long scaleRows, long scaleCols)
+        => cols % 16 == 0 && scaleRows >= rows && scaleRows <= (rows + 127) / 128 * 128
+            && scaleCols >= cols / 16 && scaleCols <= (cols / 16 + 3) / 4 * 4;
+
     /// <summary>Dequantizes an NVFP4 weight to F16. <paramref name="packed"/> is U8 <c>[rows, cols/2]</c> with two e2m1 values per byte — element <c>2j</c> in the HIGH nibble, <c>2j+1</c> in the LOW nibble (comfy_kitchen <c>hi_first=True</c>, its default for both quantize and dequantize; verified against <c>float_utils.unpack_uint4</c>). <paramref name="blockScales"/> is F8-E4M3 <c>[rows, cols/16]</c> — one scale per 16 consecutive input-dim elements. The full value is <c>e2m1 · block_scale · globalScale</c>. Rows are dequantized in parallel (pure per-row writes).</summary>
     public static Tensor DequantNvfp4ToF16(Tensor packed, Tensor blockScales, float globalScale)
     {
@@ -1236,9 +1241,9 @@ public static unsafe class CheckpointConvertUtils
         long cols = packedCols * 2;
         long scaleCols = blockScales.Shape[1];
         // The blocked layout may be padded to 128 rows and 4 block columns; the stored column count is the swizzle stride.
-        if (cols % 16 != 0 || blockScales.Shape[0] < rows || scaleCols * 16 < cols)
+        if (!BlockScaleShapeFits(rows, cols, blockScales.Shape[0], scaleCols))
             throw new ArgumentException(
-                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need at least [rows, cols/16] with cols a multiple of 16).");
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need [rows, cols/16], up to the 128-row and 4-column padding, with cols a multiple of 16).");
 
         Tensor result = new Tensor(new TensorShape(rows, cols), DType.F16);
         unsafe
@@ -1285,9 +1290,9 @@ public static unsafe class CheckpointConvertUtils
         long packedCols = packed.Shape[1];
         long cols = packedCols * 2;
         long scaleCols = blockScales.Shape[1];
-        if (cols % 16 != 0 || blockScales.Shape[0] < rows || scaleCols * 16 < cols)
+        if (!BlockScaleShapeFits(rows, cols, blockScales.Shape[0], scaleCols))
             throw new ArgumentException(
-                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need at least [rows, cols/16] with cols a multiple of 16).");
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need [rows, cols/16], up to the 128-row and 4-column padding, with cols a multiple of 16).");
 
         // Build the dequantized values (e2m1 · block_scale / 8) as F32, then cast to fp8 via the engine's TESTED
         // F32→F8E4M3 path (Tensor.CastTo) rather than a hand-rolled quantizer. The F32 intermediate is per-tensor
