@@ -4,6 +4,7 @@ using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Requests;
 using Xunit;
+using HartsyInference.Engine.Catalog;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -47,7 +48,7 @@ public sealed class ImageInputLimitsTests
     public void QwenImage_LimitsFollowTheResolvedVariant(string swarmClass, int maxImages)
     {
         ModelSpec spec = new ModelSpec { Requested = "qwen-image", Modality = Modality.Image, Variant = swarmClass };
-        ImageInputLimits limits = ModelCapabilities.ImageInputLimitsFor(spec);
+        ImageInputLimits limits = ((ImageModelDescriptor)new RecipeCatalog().Describe(spec)).InputLimits;
         Assert.Equal(maxImages, limits.MaxImages);
         Assert.Equal(swarmClass == "qwen-image", limits.ReferencesRequireInitImage);
     }

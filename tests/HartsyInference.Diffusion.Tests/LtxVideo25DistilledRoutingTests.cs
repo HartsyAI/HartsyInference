@@ -3,6 +3,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using Xunit;
+using HartsyInference.Engine.Catalog;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -21,14 +22,14 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
     public void DistilledFilenameRoutesEveryDevFamilyId(string familyId)
     {
         string path = Touch("ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors");
-        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, ModelCapabilities.VideoFamilyIdFor(Spec(familyId, path)));
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, RecipeResolution.VideoFamilyIdFor(Spec(familyId, path)));
     }
 
     [Fact]
     public void NonDistilledFilenameDoesNotRoute()
     {
         string path = Touch("ltx-2.5-22b-dev-transformer-int8_lean_convrot.safetensors");
-        Assert.Equal("ltx-2.5", ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", path)));
+        Assert.Equal("ltx-2.5", RecipeResolution.VideoFamilyIdFor(Spec("ltx-2.5", path)));
     }
 
     /// <summary>A hint is the definitive signal the file name only guesses at: it routes a renamed distilled build.</summary>
@@ -36,9 +37,9 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
     public void AnExplicitVariantRoutesWithoutAFilenameToken()
     {
         string path = Touch("renamed.safetensors");
-        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5:distilled", path)));
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, RecipeResolution.VideoFamilyIdFor(Spec("ltx-2.5:distilled", path)));
         Assert.Equal(LtxVideo2Variants.DistilledFamilyId,
-            ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", path) with { Variant = "distilled" }));
+            RecipeResolution.VideoFamilyIdFor(Spec("ltx-2.5", path) with { Variant = "distilled" }));
     }
 
     [Fact]
@@ -48,7 +49,7 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
         // nothing, so the scan must look at the contained safetensors names.
         Touch("foo-distilled-transformer.safetensors");
         Touch("video-vae.safetensors");
-        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", _dir)));
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, RecipeResolution.VideoFamilyIdFor(Spec("ltx-2.5", _dir)));
     }
 
     [Fact]

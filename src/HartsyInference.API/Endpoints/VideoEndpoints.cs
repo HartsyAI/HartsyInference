@@ -214,7 +214,7 @@ public static class VideoEndpoints
         queue.EnqueueAsync(() => engine.VideoPlanning.PlanAsync(spec, request, cancel), cancel);
 
     /// <summary>True for request/model failures that occur before a typed <see cref="VideoPlan"/> exists.</summary>
-    private static bool IsPlanningInputFailure(Exception exception) => exception is
+    internal static bool IsPlanningInputFailure(Exception exception) => exception is
         FileNotFoundException or DirectoryNotFoundException or ArgumentException or InvalidDataException;
 
     /// <summary>Creates the same typed 422 envelope used by ordinary plan diagnostics without inventing a plan.</summary>

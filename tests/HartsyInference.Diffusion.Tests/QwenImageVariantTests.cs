@@ -5,6 +5,7 @@ using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Metadata;
 using Xunit;
+using HartsyInference.Engine.Catalog;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -71,10 +72,10 @@ public sealed class QwenImageVariantTests
     public void SelectorSuffix_ReachesTheCapabilityQuery()
     {
         Engine.Dispatch.ModelSpec spec = new Engine.Dispatch.ModelSpec { Requested = "qwen-image:edit", Modality = Modality.Image };
-        Assert.Equal("edit", ModelCapabilities.ResolveVariant(spec)?.Id);
-        Assert.NotEqual(ImageFeatures.None, ModelCapabilities.ImageFeaturesFor(spec) & ImageFeatures.RefEdit);
+        Assert.Equal("edit", new RecipeCatalog().Describe(spec).Recipe.VariantId);
+        Assert.NotEqual(ImageFeatures.None, ((ImageModelDescriptor)new RecipeCatalog().Describe(spec)).Features & ImageFeatures.RefEdit);
         Engine.Dispatch.ModelSpec swarm = new Engine.Dispatch.ModelSpec { Requested = "qwen-image", Modality = Modality.Image, Variant = "qwen-image" };
-        Assert.Equal(ImageFeatures.None, ModelCapabilities.ImageFeaturesFor(swarm) & ImageFeatures.RefEdit);
+        Assert.Equal(ImageFeatures.None, ((ImageModelDescriptor)new RecipeCatalog().Describe(swarm)).Features & ImageFeatures.RefEdit);
     }
 
     /// <summary>The repacker stamps the identity catalog's class; the resolver must read that stamp back as the same variant.</summary>

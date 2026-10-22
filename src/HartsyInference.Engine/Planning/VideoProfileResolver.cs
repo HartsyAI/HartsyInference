@@ -27,6 +27,10 @@ internal static class VideoProfileResolver
         "919a48acb525dc8fc70287fcd94ec1f5e5e289a77f1df14d01099c6ce204eb02";
     private const string H3FunPrunedFormat = "minimax_h3_fun_pruned_v1";
 
+    /// <summary>Whether exact-hash checkpoint profiles overlay the recipe defaults of <paramref name="familyId"/> at plan time.</summary>
+    internal static bool BindsProfiles(string familyId) =>
+        string.Equals(familyId, H3FamilyId, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Builds a plan for a request against its resolved recipe declaration.</summary>
     public static async Task<VideoPlan> ResolveAsync(ModelSpec spec, VideoRequest request,
         VideoRecipeDeclaration recipe, CancellationToken cancel)
@@ -35,7 +39,7 @@ internal static class VideoProfileResolver
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(recipe);
 
-        if (!string.Equals(recipe.FamilyId, H3FamilyId, StringComparison.OrdinalIgnoreCase))
+        if (!BindsProfiles(recipe.FamilyId))
         {
             return ResolveGeneric(spec, request, recipe);
         }

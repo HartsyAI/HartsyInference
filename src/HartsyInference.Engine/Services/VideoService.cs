@@ -8,6 +8,7 @@ using HartsyInference.Cuda;
 using HartsyInference.Vulkan;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
@@ -44,14 +45,14 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequestExecutionBinding binding = VideoRequestExecutionBinding.Create(spec, request);
         ModelSpec plannedSpec = binding.Model;
         VideoRequest plannedRequest = binding.Request;
-        string familyId = ModelCapabilities.VideoFamilyIdFor(plannedSpec);
-        (IVideoRecipe? recipe, ResolvedModelVariant? variant) = ModelCapabilities.ResolveVideo(plannedSpec);
+        string familyId = RecipeResolution.VideoFamilyIdFor(plannedSpec);
+        (IVideoRecipe? recipe, ResolvedModelVariant? variant) = RecipeResolution.ResolveVideo(plannedSpec);
         if (recipe is null)
         {
             throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
         }
         VideoRecipeDeclaration declaration = VideoRecipeDeclaration.For(recipe, familyId, variant,
-            ModelCapabilities.VideoFeaturesFor(plannedSpec));
+            RecipeResolution.VideoFeaturesFor(recipe, variant, plannedSpec.LocalPath));
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(plannedSpec, plannedRequest, declaration, cancel)
             .ConfigureAwait(false);
         plan = plan with

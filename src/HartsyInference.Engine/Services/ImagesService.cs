@@ -1,6 +1,7 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Prompting;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
@@ -104,7 +105,7 @@ public sealed class ImagesService : IImagesService
                 result = BackgroundRemovalStage.Apply(_engine, resolved, result);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted);
                 RecipeIdentity recipe = RecipeIdentity.For(InferenceEngine.FamilyIdFor(spec), defaults.Revision,
-                    ModelCapabilities.ResolveVariant(spec));
+                    RecipeResolution.ResolveVariant(spec));
                 IReadOnlyDictionary<string, ResolvedParameter> provenance =
                     ParameterProvenance.ForImage(request, resolved, result.Seed);
                 Logs.Info($"[ImagePlan] {ParameterProvenance.Describe(recipe, provenance)}");

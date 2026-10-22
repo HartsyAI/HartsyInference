@@ -102,6 +102,27 @@ valid counts.
 **Revisions.** Each defaults record carries a `Revision`. A change to any value bumps it, so output generated under
 the old and new values stays distinguishable in its metadata.
 
+## Descriptors and the query surface
+
+Hosts ask the engine what a model's recipe declares; they never keep their own tables. `IInferenceEngine.Recipes`
+(`IRecipeCatalog`) answers without loading weights or constructing a pipeline:
+
+| Query | Answer |
+|---|---|
+| `Describe(ModelSpec)` | The family and variant the spec resolves to, through the same routing a generation uses |
+| `DescribeFamily(modality, familyId, variantId?)` | A family's catalog default variant, or the named variant; an unknown variant throws and names the valid ids |
+| `All(modality?)` | One family-level descriptor per built-in recipe, in registry order |
+
+Every descriptor carries `Recipe` (family, defaults revision, variant), `Variants` (the catalog's ids) and `ProfileBound`
+(true for MiniMax-H3, whose exact-hash checkpoint profiles overlay the defaults at plan time; the plan and the descriptor
+read the same check). An `ImageModelDescriptor` adds `Defaults`, `Features`, `InputLimits` and `PromptWeighting`; a
+`VideoModelDescriptor` adds `Defaults`, `Constraints`, `Features` and `Sampling`. The descriptor is the wire type:
+`[JsonPolymorphic]` with a `$type` of `image` or `video`.
+
+Routes: `GET /v1/native/recipes?modality=`, `GET /v1/native/recipes/{modality}/{familyId}?variant=` and
+`POST /v1/native/recipes/describe`. The last takes the same `model` and `modelPath` as the video plan route and returns
+422 `recipe.family.unregistered` for a family with no recipe.
+
 ## Defaults ledger
 
 Values the recipes declare today against the reference they should match. A row is frozen only after its source has
@@ -157,4 +178,3 @@ Audio speech and transcription recipes are not yet typed; their defaults stay in
   does not read; LTX-Video's filename clauses in `SupportsFor` remain.
 - Pipelines take the resolved plan only; the remaining pipeline `??` fallbacks go (`GenerationDefaults` is gone).
 - Audio speech and transcription recipes (music is typed; see Audio above).
-- A side-effect-free descriptor (`IInferenceEngine.Recipes`) and HTTP endpoints for hosts.

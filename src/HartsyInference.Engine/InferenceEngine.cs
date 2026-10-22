@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning;
@@ -27,6 +28,9 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>How long a release waits, after the audio unload, for the jobs still on its devices: a free then skips
     /// the device release, and a teardown stops the job at its next op and waits as long again.</summary>
     internal TimeSpan DeviceReleaseWait { get; set; } = TimeSpan.FromSeconds(120);
+
+    /// <summary>What the registered recipes declare about each family, without loading weights.</summary>
+    public IRecipeCatalog Recipes { get; } = new RecipeCatalog();
 
     private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
@@ -277,7 +281,7 @@ public sealed class InferenceEngine : IInferenceEngine
         }
 
         IArchitectureRecipe recipe = ResolveRecipe(spec);
-        ResolvedModelVariant? variant = ModelCapabilities.ResolveVariant(recipe.Variants, spec);
+        ResolvedModelVariant? variant = RecipeResolution.ResolveVariant(recipe.Variants, spec);
         // LoRA, component overrides and the variant are baked into the loaded pipeline, so they are cache identity.
         string key = $"recipe:{spec.LocalPath}|{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
@@ -288,7 +292,7 @@ public sealed class InferenceEngine : IInferenceEngine
         {
             CheckpointPath = spec.LocalPath,
             Variant = variant,
-            VariantHints = ModelCapabilities.HintsFor(spec),
+            VariantHints = RecipeResolution.HintsFor(spec),
             Backend = backend,
             TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
             VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
@@ -410,14 +414,18 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>The composition features the recipe for <paramref name="spec"/> declares it can apply. Resolved through
     /// the same family-id + registry lookup <see cref="GetOrConstructRecipe"/> uses, so the answer can never disagree
     /// with the pipeline that will actually run.</summary>
-    internal ImageFeatures SupportedFeatures(ModelSpec spec) => ModelCapabilities.ImageFeaturesFor(ResolveRecipe(spec), spec);
+    internal ImageFeatures SupportedFeatures(ModelSpec spec)
+    {
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return RecipeResolution.ImageFeaturesFor(recipe, RecipeResolution.ResolveVariant(recipe.Variants, spec));
+    }
 
     /// <summary>The input-image limits of the recipe for <paramref name="spec"/>.</summary>
     /// <remarks>Resolved through the same lookup as <see cref="SupportedFeatures"/>.</remarks>
     internal ImageInputLimits ImageInputLimitsFor(ModelSpec spec)
     {
         IArchitectureRecipe recipe = ResolveRecipe(spec);
-        return recipe.InputLimitsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
+        return recipe.InputLimitsFor(RecipeResolution.ResolveVariant(recipe.Variants, spec));
     }
 
     /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
@@ -427,16 +435,16 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The video counterpart of <see cref="PromptWeightingFor"/>; an unregistered family weights nothing.</summary>
     internal static Diffusion.Prompting.PromptWeightingMode VideoPromptWeightingFor(ModelSpec spec) =>
-        VideoRecipeRegistry.Resolve(ModelCapabilities.VideoFamilyIdFor(spec))?.PromptWeighting
+        VideoRecipeRegistry.Resolve(RecipeResolution.VideoFamilyIdFor(spec))?.PromptWeighting
         ?? Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>The officially recommended defaults for <paramref name="spec"/>'s resolved variant. The variant catalog is
-    /// the only source, resolved through the same lookup <see cref="ModelCapabilities"/> answers hosts with, so the
+    /// the only source, resolved through the same lookup <see cref="Recipes"/> answers hosts with, so the
     /// numbers a host is told and the numbers the pipeline runs are the same.</summary>
     internal ImageDefaults DefaultsFor(ModelSpec spec)
     {
         IArchitectureRecipe recipe = ResolveRecipe(spec);
-        return recipe.DefaultsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
+        return recipe.DefaultsFor(RecipeResolution.ResolveVariant(recipe.Variants, spec));
     }
 
     /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>
@@ -462,8 +470,8 @@ public sealed class InferenceEngine : IInferenceEngine
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity —
         // the same rule the image path already follows. Without this a LoRA request reuses the un-merged pipeline.
-        string familyId = ModelCapabilities.VideoFamilyIdFor(spec);
-        (IVideoRecipe? resolvedRecipe, ResolvedModelVariant? variant) = ModelCapabilities.ResolveVideo(spec);
+        string familyId = RecipeResolution.VideoFamilyIdFor(spec);
+        (IVideoRecipe? resolvedRecipe, ResolvedModelVariant? variant) = RecipeResolution.ResolveVideo(spec);
         IVideoRecipe recipe = resolvedRecipe
             ?? throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
         string planKey = plan is null ? "" : plan.CacheIdentity;
@@ -485,7 +493,7 @@ public sealed class InferenceEngine : IInferenceEngine
             Components = request?.Components,
             Loras = request?.Loras,
             Variant = variant,
-            VariantHints = ModelCapabilities.HintsFor(spec),
+            VariantHints = RecipeResolution.HintsFor(spec),
             VideoPlan = plan,
             VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
             VideoSwapPercent = request?.VideoSwapPercent,

@@ -4,6 +4,7 @@ using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Vulkan;
 using Xunit;
+using HartsyInference.Engine.Catalog;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -193,7 +194,7 @@ public sealed class BackendSelectorTests
     public void A_Registered_Recipe_Name_Resolves_As_Its_Own_Family(string familyId)
     {
         ModelSpec spec = new() { Requested = familyId, Modality = Modality.Video, LocalPath = "/nonexistent.safetensors" };
-        Assert.Equal(familyId, ModelCapabilities.VideoFamilyIdFor(spec));
+        Assert.Equal(familyId, RecipeResolution.VideoFamilyIdFor(spec));
     }
 
     /// <summary>A name no registry knows still falls through to header detection rather than being invented. Resolution
@@ -203,7 +204,7 @@ public sealed class BackendSelectorTests
     public void An_Unregistered_Name_Falls_Through_To_Detection()
     {
         ModelSpec spec = new() { Requested = "not-a-real-family", Modality = Modality.Video, LocalPath = "/nonexistent.safetensors" };
-        FileNotFoundException ex = Assert.Throws<FileNotFoundException>(() => ModelCapabilities.VideoFamilyIdFor(spec));
+        FileNotFoundException ex = Assert.Throws<FileNotFoundException>(() => RecipeResolution.VideoFamilyIdFor(spec));
         Assert.Contains("/nonexistent.safetensors", ex.Message);
     }
 }

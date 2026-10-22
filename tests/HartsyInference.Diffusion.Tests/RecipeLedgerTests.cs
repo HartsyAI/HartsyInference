@@ -5,6 +5,7 @@ using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 using Xunit;
+using HartsyInference.Engine.Catalog;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -98,7 +99,7 @@ public sealed class RecipeLedgerTests
         // SDXL resolves to a real family that deliberately has no video recipe.
         ModelSpec spec = new ModelSpec { Requested = "sdxl", Modality = Modality.Video };
 
-        RecipeNotRegisteredException error = Assert.Throws<RecipeNotRegisteredException>(() => ModelCapabilities.VideoDefaultsFor(spec));
+        RecipeNotRegisteredException error = Assert.Throws<RecipeNotRegisteredException>(() => new RecipeCatalog().Describe(spec));
         Assert.Equal("sdxl", error.FamilyId);
         Assert.Contains("wan", error.Drivable);
     }

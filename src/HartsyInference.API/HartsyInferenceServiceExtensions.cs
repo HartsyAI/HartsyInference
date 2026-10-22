@@ -289,6 +289,7 @@ public static class HartsyInferenceServiceExtensions
         app.MapVisionEndpoints();
         app.MapMeshEndpoints();
         app.MapVideoEndpoints();
+        app.MapRecipeEndpoints();
         app.MapRestoreEndpoints();
         app.MapWorldEndpoints();
         app.MapCompatEndpoints();
