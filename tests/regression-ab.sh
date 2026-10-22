@@ -25,7 +25,7 @@
 # `--probe` adds the teacher-forced denoiser probe to image and video cases, for models whose trajectories are too chaotic
 # for SSIM: the base build records the denoiser's conditioning, inputs and outputs at the probed steps (seed 42), the head
 # build runs one more forward there on those inputs, and the report lists relL2 and cos per step and output. It is judged
-# only against --probe-floor (max relL2); --probe-only skips the seed series and runs the probe alone; each
+# only against --probe-floor (one relL2, or OUTPUT=relL2 pairs); --probe-only skips the seed series and runs the probe alone; each
 # --probe-arm NAME=k=v[,k=v] replays once more with those knobs on top of the head's, for a measurement (not judged).
 #
 # Arms alternate seed by seed (A s0, B s0, A s1, B s1, …) so thermal drift and page-cache state land on both equally.
@@ -350,8 +350,10 @@ probe_case() {
     local max at cos
     IFS=$'\t' read -r max at cos < <(probe_summary "$tsv")
     notes+="probe max relL2 ${max} (${at}), min cos ${cos}; "
-    if [ -n "$PROBE_FLOOR" ] && awk -v a="$max" -v f="$PROBE_FLOOR" 'BEGIN { exit !(a > f) }'; then
-        probe_fail="denoiser probe relL2 $max > $PROBE_FLOOR"
+    if [ -n "$PROBE_FLOOR" ]; then
+        local over
+        over="$(probe_over "$tsv" "$PROBE_FLOOR")"
+        [ -n "$over" ] && probe_fail="denoiser probe past --probe-floor $PROBE_FLOOR: $over"
     fi
     local arm name kv extra
     for arm in "${PROBE_ARMS[@]}"; do
@@ -367,6 +369,13 @@ probe_case() {
         IFS=$'\t' read -r max at cos < <(probe_summary "$tsv")
         notes+="probe arm $name max relL2 ${max} (${at}), min cos ${cos}; "
     done
+}
+# probe_over <probe.tsv> <floor> -> the rows past the floor, "step S OUTPUT relL2" joined by "; ". The floor is one relL2 for
+# every row or OUTPUT=relL2 pairs (cond=4e-3,cfg=5e-2) judging only the outputs they name.
+probe_over() {
+    awk -F'\t' -v spec="$2" 'BEGIN { n = split(spec, p, ","); for (i = 1; i <= n; i++) { if (split(p[i], kv, "=") == 2) f[kv[1]] = kv[2] + 0; else all = p[i] + 0 } }
+        NR > 1 { lim = ($3 in f) ? f[$3] : all; if (lim != "" && $4 + 0 > lim) { out = out sep "step " $1 " " $3 " " $4; sep = "; " } }
+        END { print out }' "$1"
 }
 # probe_summary <probe.tsv> -> "max relL2<TAB>where<TAB>min cos"
 probe_summary() {
