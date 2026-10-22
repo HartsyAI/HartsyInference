@@ -689,6 +689,32 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void TileTrace_ReportsEveryDrainedTile_WithItsBytesPartialAndSum()
+    {
+        // Two heads, three key tiles (the last partial): every (row, tile) is reported once, its sum is its bytes' total, its
+        // partial is Σ p·v over the V bytes in exact integers, and its maximum carries the tile's largest byte, 255.
+        using Int8V2Case c = Int8V2Case.Create(new Int8V2Spec { Id = "trace", Heads = 2, KvHeads = 2, Sq = 20, Skv = 300, HeadDim = 64, SampledRows = 0 });
+        Int8AttentionV2Operands ops = Int8AttentionV2Reference.Quantize(c.Call, Base);
+        List<(int Bh, int Row, int Tile, float Max, byte[] P, float[] Partial, int Sum)> seen = [];
+        float[] traced = c.Emulate(Base with { TileTrace = (bh, row, tile, max, p, partial, sum) => seen.Add((bh, row, tile, max, p.ToArray(), partial.ToArray(), sum)) });
+        Assert.Equal(c.Emulate(Base), traced);
+        Assert.Equal(2 * 20 * 3, seen.Count);
+        foreach ((int bh, _, int tile, float max, byte[] p, float[] partial, int sum) in seen)
+        {
+            Assert.True(float.IsFinite(max));
+            Assert.Equal(tile < 2 ? 128 : 44, p.Length);
+            Assert.Equal(sum, p.Sum(x => x));
+            Assert.Equal(255, p.Max());
+            for (int ch = 0; ch < 64; ch++)
+            {
+                long exact = 0;
+                for (int j = 0; j < p.Length; j++) exact += p[j] * (long)ops.Values[(bh * 300 + tile * 128 + j) * 64 + ch];
+                Assert.Equal(exact, (long)partial[ch]);
+            }
+        }
+    }
+
+    [Fact]
     public void WhatV2DoesNotRun_IsRefused()
     {
         using Int8V2Case c = Int8V2Case.Create(new Int8V2Spec { Id = "refusals", Sq = 4, Skv = 8, HeadDim = 64, SampledRows = 0 });
