@@ -101,6 +101,7 @@ public sealed unsafe class Nvfp4DequantTests
             double magnitude = e2m1[nibble & 7] * E4M3(ScaleByte(row, col / 16)) * G;
             return (nibble & 8) != 0 ? -magnitude : magnitude;
         }
+        // The 1e-6 slack is for the F32 multiply by Fp8ScaleFactor in CastTo; exact half-ulp ties sit on the bound.
         static double Bound(double expected) => Math.Max(Math.Pow(2, -4) * Math.Abs(expected), Math.Pow(2, -7) * G) * (1 + 1e-6);
 
         using Tensor packed = new(new TensorShape(Rows, PackedCols), DType.U8);
