@@ -67,8 +67,9 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   configs; capability limits go in `Constraints`, not defaults.
 - A default that differs from SwarmUI's documented one, or comes from upstream where SwarmUI has none, carries a
   one-line comment saying why. Design and the per-family ledger: [RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md).
-- Changing any value in a defaults record bumps its `Revision`. The revision travels into the plan's `RecipeIdentity`,
-  so output made under old and new values stays distinguishable.
+- Changing any value in a defaults record bumps its `Revision`. For image and video the revision travels into the
+  plan's `RecipeIdentity`, so output made under old and new values stays distinguishable; music results do not carry
+  it yet.
 - Declare a `Sampler` or `Scheduler` only when the family's pipeline accepts it for every unset request. Solver-owned
   families refuse any name, any declared schedule is refused with img2img and inpaint, and a fixed `SigmaShift`
   overrides a shift the pipeline computes from the resolution. Leave the field null in those cases.

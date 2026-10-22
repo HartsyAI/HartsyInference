@@ -227,6 +227,7 @@ live SwarmUI checks that close this are in
   the snap into planning makes it a `Normalized` entry.
 - **ACE-Step placed checkpoints.** Steps, shift and guidance for a checkpoint placed on disk are applied by the loader,
   which tells v1 from 1.5 only after reading it. A structural ACE-Step variant catalog moves them into the recipe.
-- **Music descriptors.** `IInferenceEngine.Recipes` describes image and video families only. Music recipes are typed
-  and planned, but a host cannot query them yet.
+- **Music descriptors and identity.** `IInferenceEngine.Recipes` describes image and video families only. Music
+  recipes are typed and applied, but a host cannot query them, and a music result carries no `RecipeIdentity`, so
+  its defaults `Revision` is not recorded on the output.
 - **Speech and transcription.** Their defaults still live in their loaders (see Audio above).
