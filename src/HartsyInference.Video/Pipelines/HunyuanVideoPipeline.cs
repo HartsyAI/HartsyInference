@@ -76,7 +76,7 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? 512, height = request.Height ?? 320;
+        int width = request.Width, height = request.Height;
         if (width % VaeSpatial != 0 || height % VaeSpatial != 0)
             throw new ArgumentException($"Width/height must be divisible by {VaeSpatial} for HunyuanVideo.");
         if (numFrames < 1 || (numFrames - 1) % VaeTemporal != 0)
@@ -84,7 +84,7 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
 
         int tLat = (numFrames - 1) / VaeTemporal + 1;
         int hLat = height / VaeSpatial, wLat = width / VaeSpatial;
-        int steps = request.Steps ?? _config.InferSteps;
+        int steps = request.Steps;
         float shift = _config.FlowShift;
         float guidance = _config.GuidanceEmbed ? _config.EmbeddedGuidanceScale * 1000f : 0f;
 

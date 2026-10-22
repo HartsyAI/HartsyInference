@@ -73,7 +73,9 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
                 nameof(negativeTextEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int width, int height) = GenerationDefaults.Generic.Resolve(request);
+        int steps = request.Steps;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
 

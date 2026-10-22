@@ -140,6 +140,7 @@ public sealed class FluxSsimTests
                 Width = meta.Width,
                 Height = meta.Height,
                 Steps = numSteps,
+                CfgScale = 3.5f,
                 Seed = meta.Seed,
                 InitialNoise = injectedNoise,
             };

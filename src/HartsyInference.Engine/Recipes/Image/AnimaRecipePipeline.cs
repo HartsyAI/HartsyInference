@@ -100,6 +100,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
                 Width = settings.Width,
                 Height = settings.Height,
                 Steps = steps,
+                CfgScale = settings.CfgScale,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
                 // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.

@@ -42,7 +42,7 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ernie-image", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>ERNIE-Image's official sampling settings: 50 steps at CFG 4.0, 1024x1024 (<c>GenerationDefaults.ErnieImage</c>).</summary>
+    /// <summary>ERNIE-Image's official sampling settings: 50 steps at CFG 4.0, 1024x1024.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

@@ -90,7 +90,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
                 "GenerateFromTokens requires a LensGptOssEncoder; the pipeline was constructed without one. " +
                 "Use the constructor that accepts a text encoder, or call GenerateFromEmbeddings with pre-computed captures.");
 
-        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
+        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f;
         if (useCfg && negativeTokenIds is null)
             throw new ArgumentException("cfgScale > 1.0 requires negativeTokenIds.", nameof(negativeTokenIds));
@@ -162,8 +162,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         ValidateEmbeddings(positiveLayers, negativeLayers);
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int steps = request.Steps ?? _config.DefaultSteps;
-        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f;
         if (useCfg && negativeLayers is null)
             throw new ArgumentException("CfgScale > 1.0 requires negativeLayers.", nameof(negativeLayers));
@@ -171,8 +171,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         // Lens uses vae_scale_factor = 16 (Flux.2 VAE 8× + pipeline-side 2×2 patchify).
         // Round image dims to a multiple of 16 so latent grids tile cleanly.
         const int vaeScaleFactor = 16;
-        int reqHeight = request.Height ?? GenerationDefaults.Generic.Height;
-        int reqWidth = request.Width ?? GenerationDefaults.Generic.Width;
+        int reqHeight = request.Height;
+        int reqWidth = request.Width;
         int imgH = (reqHeight / vaeScaleFactor) * vaeScaleFactor;
         int imgW = (reqWidth / vaeScaleFactor) * vaeScaleFactor;
         int patH = imgH / vaeScaleFactor;

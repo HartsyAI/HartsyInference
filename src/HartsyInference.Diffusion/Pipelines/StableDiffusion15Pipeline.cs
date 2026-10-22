@@ -63,7 +63,10 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sd15.Resolve(request);
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
         TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);

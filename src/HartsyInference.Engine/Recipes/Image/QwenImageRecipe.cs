@@ -68,7 +68,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     public bool Matches(string familyId) => string.Equals(familyId, "qwen-image", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Qwen-Image's official sampling settings: 50 steps at true-CFG 4.0 (diffusers <c>QwenImagePipeline.__call__</c>)
-    /// at the model card's 1328x1328 (its 1:1 aspect entry), mirrored by <c>GenerationDefaults.QwenImage</c>.</summary>
+    /// at the model card's 1328x1328 (its 1:1 aspect entry).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1328, Height = 1328 };
 
     /// <inheritdoc/>

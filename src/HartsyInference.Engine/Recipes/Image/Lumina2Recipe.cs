@@ -48,7 +48,7 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lumina2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Lumina-Image-2.0's official sampling settings: 30 steps at guidance 4.0, 1024x1024 (diffusers <c>Lumina2Pipeline.__call__</c>, mirrored by <c>GenerationDefaults.Lumina2</c>).</summary>
+    /// <summary>Lumina-Image-2.0's official sampling settings: 30 steps at guidance 4.0, 1024x1024 (diffusers <c>Lumina2Pipeline.__call__</c>).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

@@ -41,7 +41,7 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
 
         // TODO(E-IMG-4/5): Flux guidance came from the FluxGuidanceScale T2IParam (default 3.5 for Dev, ignored by
         // Schnell) — defaulted here. True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so
-        // NegativePrompt / CfgScale are not mapped for the base path.
+        // NegativePrompt is not mapped for the base path; CfgScale is set but unread by FluxPipeline.
         float guidance = _isDev ? 3.5f : 0f;
 
         // Prompt images on Flux mean Redux (redux.stylemodel); a real IP-Adapter checkpoint is SD15/SDXL-only, and
@@ -121,6 +121,7 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                     Width = settings.Width,
                     Height = settings.Height,
                     Steps = steps,
+                    CfgScale = settings.CfgScale,
                     Seed = RecipeRequestMapper.MapSeed(request.Seed),
                     // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
                     // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.
