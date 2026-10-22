@@ -13,7 +13,8 @@ Commits:
 | `cc4d184` | Before the contract work (#504). Base for the refactor identity gate. |
 | `2dcb81a` | #516: refactors done, no default changed yet. Base for every pass below. |
 | `0ca5fb0` | #520: `alpha.386`, published on NuGet. |
-| `1f62fa5` | `main` today: adds #521 (`er_sde`) and #522 (Wan 2.2 I2V-14B), which are not on NuGet yet. |
+| `1f62fa5` | #522: the last default change, after #521 (`er_sde`). Head for the passes below. |
+| `8a28226` | #533: `alpha.387`, published on NuGet with #521, #522 and the CLI music-duration fix (#532). |
 
 `--head` takes a checkout path, not a ref, so make a worktree for any head that is not your working tree.
 
@@ -33,13 +34,15 @@ anything else.
 
 ## 2. Pinned cases across the default changes
 
-Base `2dcb81a`, head `main`. The existing rows pin most values, so most must stay identical. The rows below leave a
+Base `2dcb81a`, head `1f62fa5`. Later `main` commits bring unrelated
+attention work that changes timings. The existing rows pin most values, so most must stay identical. The rows below leave a
 changed value unset, so their output moves on purpose.
 
 ```bash
-tests/regression-ab.sh --base 2dcb81a --tag "" --expect identical \
+git worktree add ../hi-1f62fa5 1f62fa5
+tests/regression-ab.sh --base 2dcb81a --head ../hi-1f62fa5 --tag "" --expect identical \
   --filter sd15,krea2,zimage,qwenimage-q4k,flux1-dev,hunyuanimage-q4,lumina2,sd35m,auraflow,hidream,ideogram4,boogu-turbo,lens-mxfp8,wan5b,wan21-14b,h3-fl2va-fp8,hunyuanvideo,stableaudio,acestep-v1
-tests/regression-ab.sh --base 2dcb81a --tag "" --expect bounded:0 --speed-tolerance 150 \
+tests/regression-ab.sh --base 2dcb81a --head ../hi-1f62fa5 --tag "" --expect bounded:0 --speed-tolerance 150 \
   --filter chroma-hd,flux2-dev-q4ks,omnigen2,anima,ltx25-dev,ltx25-distilled
 ```
 
@@ -110,8 +113,8 @@ row with the evidence, and say which run showed it. Do not change a value that m
 
 ## 4. Live SwarmUI session
 
-Use Backend `main` (`cb1260b`) with the engine from NuGet `2.0.0-alpha.386`. The csproj floats to the newest
-prerelease. That package does not have #521 or #522, so leave those two out of this pass.
+Use Backend `main` with the engine from NuGet `2.0.0-alpha.387` or later; the csproj floats to the newest
+prerelease, and 387 carries every default change above.
 
 1. **Defaults route.** Pick a video model (Wan 2.2 5B, LTX-2.5). `POST /API/HartsyInferenceGetModelDefaults` with
    `model_name` returns `success: true` and a descriptor with `$type: "video"`. The Video Frames and Video FPS fields

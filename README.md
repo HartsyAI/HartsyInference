@@ -50,6 +50,11 @@ The HTTP application wraps Engine with native routes and OpenAI-compatible route
 and [deployment](https://github.com/HartsyAI/HartsyInference/blob/main/deploy/README.md).
 The HTTP text path does not currently expose the LLM package's continuous-batching scheduler.
 
+Each model family's defaults come from its recipe: a request field left unset takes the recipe's value, and an
+image or video result records where every setting came from. GET /v1/native/recipes lists the image and video recipes, and
+POST /v1/native/recipes/describe answers for one model without loading weights; see the
+[recipe contract](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Research/RECIPE_CONTRACT.md).
+
 Video supports preflight at POST /v1/native/video/plan and SSE generation at POST /v1/native/video/stream.
 Plans govern compatibility, artifacts, defaults, and release gates before loading weights. H3 expansion
 features remain subject to their individual

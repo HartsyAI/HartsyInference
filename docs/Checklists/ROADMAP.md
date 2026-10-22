@@ -136,9 +136,11 @@ Model-specific SDXL refiner/segment gaps belong in [image status](MODEL_STATUS_I
 
 ## 8. SwarmUI extensions
 
-- [ ] Recipe contract follow-ups ([RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md#open)): planner with parameter
-  provenance, strict variant resolution, pipelines on resolved plans only, audio recipes, host descriptor API, then
-  SwarmUI-aligned defaults per the ledger.
+- [ ] Recipe defaults on real weights: the GPU passes and live SwarmUI checks in
+  [RECIPE_DEFAULTS_GPU_HANDOFF.md](../Research/RECIPE_DEFAULTS_GPU_HANDOFF.md).
+- [ ] Recipe contract follow-ups ([RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md#open)): refuse unresolved
+  variants, snap image sizes in planning, a structural ACE-Step variant catalog, music descriptors on
+  `IInferenceEngine.Recipes`, speech and transcription recipes.
 
 - [ ] 3D and world-model UI extensions, thin over Engine.
 - [ ] Validate package/extension compatibility for newly exposed features; H3 gates live in video status.
