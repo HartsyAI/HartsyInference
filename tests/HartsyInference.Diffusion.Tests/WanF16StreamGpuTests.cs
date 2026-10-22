@@ -11,7 +11,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Wan's F16 attention and FFN branches over the F32 residual stream (the opt-in <c>numerics.wanF16</c>) on CUDA. One block at
+/// <summary>Wan's F16 attention and FFN branches over the F32 residual stream (<c>numerics.wanF16</c>) on CUDA. One block at
 /// TI2V-5B geometry, fed a stream with the outlier channels the real residual carries, tracks its F32 twin, and its
 /// self-attention stays on cuDNN past the SageAttention knee, which an unrefused call at the same geometry reaches. With the
 /// switch off, or with <c>numerics.ditF16</c> off, the transformer is the F32 path assembled from its parts, bit for bit; the

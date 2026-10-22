@@ -79,10 +79,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Flux3F16 =
         Bool("numerics.flux3F16", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs the FLUX.3 block loop in F16 on backends with F16 activation kernels. Off by default until real-weight numerics and a Swarm A/B pass; 1 turns it on.");
 
-    /// <summary>Opt-in F16 attention and FFN branches over Wan's F32 residual stream, for TI2V-5B and Wan 2.1 T2V-14B on backends
-    /// with F16 activation kernels. It also needs <see cref="DitF16"/>. Off by default until a Swarm A/B clears the Wan floors.</summary>
+    /// <summary>F16 attention and FFN branches over Wan's F32 residual stream, for TI2V-5B and Wan 2.1 T2V-14B on backends with F16
+    /// activation kernels. It also needs <see cref="DitF16"/>; false keeps the F32 path.</summary>
     public static readonly Knob<bool> WanF16 =
-        Bool("numerics.wanF16", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs Wan's attention and FFN branches in F16 over the F32 residual stream (TI2V-5B and Wan 2.1 T2V-14B) on backends with F16 activation kernels. Off by default until a Swarm A/B passes; 1 turns it on.");
+        Bool("numerics.wanF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs Wan's attention and FFN branches in F16 over the F32 residual stream (TI2V-5B and Wan 2.1 T2V-14B) on backends with F16 activation kernels; 0 keeps the F32 path.");
 
     /// <summary>CUDA-graph capture of a DiT denoise step: 0 kills both tiers, 1 forces both, unset keeps per-arch defaults.</summary>
     public static readonly Knob<bool> DitGraph =

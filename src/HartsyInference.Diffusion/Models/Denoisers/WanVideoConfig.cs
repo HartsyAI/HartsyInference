@@ -127,7 +127,7 @@ public sealed record WanVideoConfig
     /// <summary>True when this variant is a two-expert MoE (Wan2.2 A14B).</summary>
     public bool IsMixtureOfExperts => BoundaryRatio > 0f;
 
-    /// <summary>The blocks may run attention and the FFN in F16 over the F32 residual stream (opt-in, <c>numerics.wanF16</c>): set
+    /// <summary>The blocks may run attention and the FFN in F16 over the F32 residual stream (<c>numerics.wanF16</c>): set
     /// for the checkpoints whose branch activations were measured inside the F16 range, TI2V-5B and Wan 2.1 T2V-14B. An A14B expert
     /// pair stays F32 whatever this says; a lone A14B T2V expert is a T2V-14B by structure.</summary>
     public bool F16Branches { get; init; }

@@ -28,16 +28,16 @@ stable release will require. Dates are UTC.
   a Qwen-Image context-parallel rank's local queries included) on CUDA's cuDNN row and on Vulkan; no Vulkan generation was
   compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention output on the
   token-major entry again.
-- **Added (opt-in): Wan can run its attention and FFN in F16 on CUDA** (`numerics.wanF16=true`). On TI2V-5B and Wan 2.1
-  T2V-14B, for a forward with one timestep group and no image context, each norm writes its branch input in F16 straight from
-  the F32 residual stream, the attention, cross-attention and FFN run in F16 with F32 accumulation, and each branch output is
-  added back to the F32 stream; the modulation, norm weights and RoPE tables stay F32. Two kernels join the stream to the
-  branches: a LayerNorm from F32 into F16 and a gated residual adding an F16 value to an F32 residual. The F16 attention runs
-  on cuDNN at every length: it refuses SageAttention's INT8 through a new per-layer refusal
+- **Faster: Wan's attention and FFN run in F16 on CUDA, on by default** (`numerics.wanF16=false` restores the F32 path). On
+  TI2V-5B and Wan 2.1 T2V-14B, for a forward with one timestep group and no image context, each norm writes its branch input
+  in F16 straight from the F32 residual stream, the attention, cross-attention and FFN run in F16 with F32 accumulation, and
+  each branch output is added back to the F32 stream; the modulation, norm weights and RoPE tables stay F32. Two kernels join
+  the stream to the branches: a LayerNorm from F32 into F16 and a gated residual adding an F16 value to an F32 residual. The
+  F16 attention runs on cuDNN at every length: it refuses SageAttention's INT8 through a new per-layer refusal
   (`AttentionLayerConfig.RefusedFormats`), which excludes every attention row that multiplies in a refused format. The text
-  cross-attention K/V cache holds F16 for those forwards. It is off by default until a Swarm A/B clears the Wan floors. A Wan
-  2.2 A14B expert pair, image-to-video, per-frame timesteps, context parallelism, the step cache, the 1.3B and the S2V, VACE,
-  Animate and Matrix-Game models keep F32, as do `numerics.ditF16=false` and the `reference` profile.
+  cross-attention K/V cache holds F16 for those forwards. A Wan 2.2 A14B expert pair, image-to-video, per-frame timesteps,
+  context parallelism, the step cache, the 1.3B and the S2V, VACE, Animate and Matrix-Game models keep F32, as do
+  `numerics.ditF16=false` and the `reference` profile.
 
 ## alpha.386
 

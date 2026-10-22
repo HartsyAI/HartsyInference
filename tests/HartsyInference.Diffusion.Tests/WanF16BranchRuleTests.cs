@@ -8,11 +8,23 @@ using Xunit;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Which Wan forwards take F16 branches: TI2V-5B and a single-expert 14B T2V, one timestep group, under
-/// <c>numerics.wanF16</c> and <c>numerics.ditF16</c>, on a backend with F16 activations. An A14B expert pair, image-to-video and
-/// the 1.3B stay F32, the weight detector grants the same geometries as the presets, and with the switch on a forward with
-/// per-frame timesteps, an image context, context parallelism or the step cache stays F32.</summary>
+/// <c>numerics.wanF16</c> (on by default, off in the <c>reference</c> profile) and <c>numerics.ditF16</c>, on a backend with F16
+/// activations. An A14B expert pair, image-to-video and the 1.3B stay F32, the weight detector grants the same geometries as
+/// the presets, and with the switch on a forward with per-frame timesteps, an image context, context parallelism or the step
+/// cache stays F32.</summary>
 public sealed class WanF16BranchRuleTests
 {
+    [Fact]
+    public void TheSwitchIsOnByDefaultAndTheReferenceProfileKeepsF32()
+    {
+        using WanVideoTransformer transformer = new(WanVideoConfig.Ti2V5B);
+        AttentionTraceBackend backend = new() { SupportsF16Activations = true };
+
+        Assert.True(EngineKnobs.WanF16.Default);
+        using (KnobProfiles.Reference.Push())
+            Assert.Equal(DType.F32, transformer.BranchActivation(backend, singleGroup: true));
+    }
+
     [Theory]
     [InlineData("plain", true)]
     [InlineData("per-frame timesteps", false)]
