@@ -122,13 +122,16 @@ public sealed class TokenMajorFlipTraceTests
     }
 
     /// <summary>The single-stream blocks attend through <c>Attend</c>: one batch item takes the token-major entry and writes the
-    /// caller's <c>[1, S, hidden]</c>. A batch, and an F16 call the Sage row would take (the knob lowered to this sequence),
-    /// keep the head-major call and its four permutes; a bias rules Sage out, so Chroma's masked call still flips.</summary>
+    /// caller's <c>[1, S, hidden]</c>. A batch, and an F16 call the Sage row would take (the knob lowered to this sequence, or
+    /// Flux.1's 9728 tokens at 1536² against the default), keep the head-major call and its four permutes; a bias rules Sage out,
+    /// so Chroma's masked call still flips.</summary>
     [Theory]
     [InlineData("flux", 1, false, false, AttentionRoute.TokenMajor)]
     [InlineData("flux", 1, true, false, AttentionRoute.TokenMajor)]
     [InlineData("flux", 1, true, true, AttentionRoute.Dense)]
     [InlineData("flux", 2, false, false, AttentionRoute.Dense)]
+    [InlineData("flux-1024", 1, true, false, AttentionRoute.TokenMajor)]
+    [InlineData("flux-1536", 1, true, false, AttentionRoute.Dense)]
     [InlineData("chroma", 1, false, false, AttentionRoute.TokenMajor)]
     [InlineData("chroma", 1, true, false, AttentionRoute.TokenMajor)]
     [InlineData("chroma", 1, true, true, AttentionRoute.Dense)]
@@ -147,12 +150,14 @@ public sealed class TokenMajorFlipTraceTests
     [InlineData("hunyuanimage", 1, true, false, AttentionRoute.TokenMajor)]
     [InlineData("hunyuanimage", 1, true, true, AttentionRoute.Dense)]
     [InlineData("hunyuanimage", 2, false, false, AttentionRoute.Dense)]
-    public void SingleStreamBlocks_AttendTokenMajorAtOneBatchItem(string site, int batch, bool f16, bool sageLength, AttentionRoute route)
+    public void SingleStreamBlocks_AttendTokenMajorAtOneBatchItem(string site, int batch, bool f16, bool lowerSageKnob, AttentionRoute route)
     {
         AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true };
+        (int txt, int gridH, int gridW) = Geometry(site);
+        int seq = txt + gridH * gridW;
         try
         {
-            if (sageLength) KnobStore.Set(EngineKnobs.SageF16MinSkv, Seq);
+            if (lowerSageKnob) KnobStore.Set(EngineKnobs.SageF16MinSkv, seq);
             RunSingleStream(backend, site, batch, f16 ? DType.F16 : DType.F32);
         }
         catch (NotSupportedException) when (backend.Calls.Count == 1)
@@ -169,8 +174,16 @@ public sealed class TokenMajorFlipTraceTests
         Assert.True(call.Numerics.LegacyAssertedBounded);
         Assert.Equal(site == "chroma-masked", call.Mask.Bias is not null);
         Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, Permutes(backend));
-        if (route == AttentionRoute.TokenMajor) Assert.Equal(new TensorShape(1, Seq, Hidden), call.Output.Storage.Shape);
+        if (route == AttentionRoute.TokenMajor) Assert.Equal(new TensorShape(1, seq, Hidden), call.Output.Storage.Shape);
     }
+
+    /// <summary>Text rows and image grid: Flux.1's own at 1024² and 1536² (512 text rows), the small default otherwise.</summary>
+    private static (int Txt, int GridH, int GridW) Geometry(string site) => site switch
+    {
+        "flux-1024" => (512, 64, 64),
+        "flux-1536" => (512, 96, 96),
+        _ => (Txt, GridH, GridW),
+    };
 
     private static void RunSingleStream(AttentionTraceBackend backend, string site, int batch, DType act)
     {
@@ -179,8 +192,9 @@ public sealed class TokenMajorFlipTraceTests
         Weights w = new(45);
         switch (site)
         {
-            case "flux":
+            case "flux" or "flux-1024" or "flux-1536":
             {
+                (int txt, int gridH, int gridW) = Geometry(site);
                 FluxSingleStreamBlock block = new(Hidden, Heads, Mlp);
                 w.Linear("b.norm.linear", 3 * Hidden, Hidden, true);
                 AddPerHeadNorms(w, "b.attn.norm_q", "b.attn.norm_k");
@@ -188,8 +202,8 @@ public sealed class TokenMajorFlipTraceTests
                 w.Linear("b.proj_mlp", Mlp, Hidden, true);
                 w.Linear("b.proj_out", Hidden, Hidden + Mlp, true);
                 block.LoadWeights(w, "b");
-                using FluxRope rope = Rope(FluxRope.BuildPositionIds(Txt, GridH, GridW), [16, 24, 24]);
-                block.Forward(backend, Rows(Seq), Mod(), rope);
+                using FluxRope rope = Rope(FluxRope.BuildPositionIds(txt, gridH, gridW), [16, 24, 24]);
+                block.Forward(backend, Rows(txt + gridH * gridW), Mod(), rope);
                 break;
             }
             case "chroma" or "chroma-fused" or "chroma-masked":

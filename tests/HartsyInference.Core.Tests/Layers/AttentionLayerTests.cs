@@ -229,6 +229,24 @@ public sealed class AttentionLayerTests
         Assert.Equal(new TensorShape(1, 6, 8), permuted.Shape);
     }
 
+    /// <summary>Flat operands attend head-major: a token-major config refuses them before any op, and a Dense one returns the
+    /// caller's <c>[1, S, heads·D]</c> on a backend that serves the token-major entry.</summary>
+    [Fact]
+    public void AttendFlat_RefusesATokenMajorConfig_AndKeepsTheCallersShapeOnADenseOne()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        static Tensor Rows() => new(new TensorShape(1, 6, 8), DType.F32);
+        AttentionLayer dense = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4 });
+        AttentionLayer tokenMajor = new(dense.Config with { TokenMajorRoute = AttentionRoute.TokenMajor });
+
+        Assert.Throws<NotSupportedException>(() => tokenMajor.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default));
+        Assert.Empty(backend.Ops);
+        Tensor attended = dense.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default);
+
+        Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
+        Assert.Equal(new TensorShape(1, 6, 8), attended.Shape);
+    }
+
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
     /// minimum; the token-major entry has no Sage kernel, so a guarded layer keeps exactly those calls head-major.</summary>
     [Theory]
