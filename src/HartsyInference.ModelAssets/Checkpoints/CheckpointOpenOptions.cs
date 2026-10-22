@@ -38,15 +38,6 @@ public sealed record CheckpointOpenOptions
     public static CheckpointOpenOptions ForNvfp4Consumer(IBackend backend)
         => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new() { Nvfp4ToFp8 = true };
 
-    /// <summary>The options for a checkpoint whose nvfp4 groups <paramref name="backend"/> will consume ONLY where it
-    /// multiplies them natively; everywhere else the defaults stand, so a fleet without the native GEMM produces the
-    /// same bytes it did before.</summary>
-    /// <remarks>The narrow half of <see cref="ForNvfp4Consumer"/>, for a model whose F16 expansion already fits: that
-    /// one also folds to fp8 off Blackwell, which is a numerics change on every card in the fleet, and a model that
-    /// does not need the footprint should not pay it to make the native path reachable on one that does.</remarks>
-    public static CheckpointOpenOptions ForNativeNvfp4Gemm(IBackend backend)
-        => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new();
-
     /// <summary>The options for a diffusion transformer whose nvfp4 groups stay packed wherever every backend that runs
     /// it can hold them: the native GEMM takes them on Blackwell, and elsewhere each unpacks per GEMM to exactly the F16
     /// it would have been unpacked to at open. A backend set that cannot hold them gets the defaults.</summary>

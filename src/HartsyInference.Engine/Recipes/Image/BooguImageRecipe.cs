@@ -101,7 +101,8 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
         try
         {
             (Dictionary<string, Tensor> transformerW, CheckpointSource transformerSource) =
-                ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
+                ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix,
+                    CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends));
             loaders.Add(transformerSource);
             // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
             // the first GEMM, minutes into a generation.
