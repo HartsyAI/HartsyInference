@@ -42,9 +42,11 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
     /// <inheritdoc/>
     /// <exception cref="NotSupportedException">The request asks for something Fibo 2.0 does not implement: a negative prompt, reference
     /// images, or a sampler or schedule other than the built-in flow-matching Euler.</exception>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(settings);
         cancel.ThrowIfCancellationRequested();
         if (!string.IsNullOrWhiteSpace(request.NegativePrompt))
             throw new NotSupportedException("Fibo 2.0 does not map negative prompts yet: its unconditional branch is the fixed null caption.");
@@ -57,11 +59,11 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
         int[] unconditional = Fibo2PromptTemplate.Tokenize(_tokenizer, Fibo2PromptTemplate.NullCaption);
 
         // Rounded down to the 16-pixel grid (VAE 8× and the denoiser's 2×2 patch), as the Flux.2 recipe does.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int width = reqWidth / 16 * 16;
         int height = reqHeight / 16 * 16;
-        int steps = request.Steps ?? _defaults.Steps;
-        float guidance = request.CfgScale ?? _defaults.CfgScale;
+        int steps = settings.Steps;
+        float guidance = settings.CfgScale;
         float shift = (float)(request.SigmaShift ?? _defaults.SigmaShift ?? Math.Exp(1.15));
         int? seed = RecipeRequestMapper.MapSeed(request.Seed);
 

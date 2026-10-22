@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -60,7 +61,7 @@ public sealed class Fibo2PipelineTests
             new ResolvedModelVariant("fibo2", Fibo2Variants.Dev, ModelVariantSource.CallerHint, "test"), []);
 
         NotSupportedException error = Assert.Throws<NotSupportedException>(() =>
-            recipe.Generate(new ImageRequest { Prompt = "a cat", NegativePrompt = "blurry" }, null, CancellationToken.None));
+            recipe.Generate(new ImageRequest { Prompt = "a cat", NegativePrompt = "blurry" }, Settings(), null, CancellationToken.None));
 
         Assert.Contains("negative prompts", error.Message, StringComparison.Ordinal);
         recipe.Dispose();
@@ -115,8 +116,11 @@ public sealed class Fibo2PipelineTests
             new ResolvedModelVariant("fibo2", Fibo2Variants.Dev, ModelVariantSource.CallerHint, "test"), []);
 
         Assert.Throws<NotSupportedException>(() =>
-            recipe.Generate(new ImageRequest { Prompt = "a cat", Sampler = "euler_ancestral" }, null, CancellationToken.None));
+            recipe.Generate(new ImageRequest { Prompt = "a cat", Sampler = "euler_ancestral" }, Settings(), null, CancellationToken.None));
         recipe.Dispose();
         pipeline.Dispose();
     }
+
+    private static ImageEffectiveSettings Settings() =>
+        new() { Width = 1024, Height = 1024, Steps = 4, CfgScale = 5f };
 }
