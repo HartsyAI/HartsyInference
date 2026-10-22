@@ -601,7 +601,8 @@ public sealed partial class AttentionLayer
         bool ownsKv = context.KvCapture is null;
         context.KvCapture?.Capture(k, v);
         bool tokenMajor = TokenMajorServed(backend, sq, skv, act, in context)
-            && (batch == 1 || !flat && PlansBatch(backend, q, k, v, act, tokenMajorShape, batch, in context));
+            && (batch == 1 || _config.TokenMajorBatches && !flat
+                && PlansBatch(backend, q, k, v, act, tokenMajorShape, batch, in context));
         try
         {
             return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, tokenMajorShape, batch, ownsKv, in context)
@@ -636,7 +637,7 @@ public sealed partial class AttentionLayer
 
     /// <summary>The token-major entry runs when the config names one, its switch is on, no host rotation needs the head-major
     /// layout, <see cref="AttentionLayerConfig.HeadMajorForSage"/> does not keep the call head-major, and the backend serves it;
-    /// a batch also needs <see cref="PlansBatch"/>.</summary>
+    /// a batch also needs <see cref="AttentionLayerConfig.TokenMajorBatches"/> and <see cref="PlansBatch"/>.</summary>
     private bool TokenMajorServed(IBackend backend, int sq, int skv, DType act, in AttentionCallContext context) =>
         _config.TokenMajorRoute != AttentionRoute.Dense && context.HeadMajorRotation is null
         && (_config.TokenMajorKnob?.Value ?? true)

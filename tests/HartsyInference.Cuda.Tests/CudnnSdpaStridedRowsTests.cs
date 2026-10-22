@@ -329,7 +329,8 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
             using Tensor wo = Make(w[3], square, DType.F32), bo = Make(outBias, new TensorShape(channels), DType.F32);
             AttentionLayer layer = new(new AttentionLayerConfig
             {
-                Heads = h, KvHeads = h, HeadDim = d, TokenMajorRoute = route, HeadMajorForSage = true, AllowF16 = true,
+                Heads = h, KvHeads = h, HeadDim = d, TokenMajorRoute = route, HeadMajorForSage = true, TokenMajorBatches = true,
+                AllowF16 = true,
             }, new AttentionLayerWeights { Query = wq, Key = wk, Value = wv, Output = wo, OutputBias = bo });
             using Tensor input = Make(x, rows, DType.F32);
             using Tensor o = layer.Forward(backend, input, input, default);

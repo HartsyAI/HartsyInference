@@ -26,11 +26,12 @@ stable release will require. Dates are UTC.
   value past F16's 65504 stays finite instead of clipping. The row declines when the copies do not fit half of free VRAM.
   cuDNN failure state is keyed by the dtype the graph runs in, so a refused BF16 plan cannot disable the F16 path. Nothing
   grants BF16 yet, so output is unchanged.
-- **Faster: SDXL's self-attention runs token-major over its CFG batch.** `AttentionLayer` takes the token-major entry for a
-  batch of per-head `[B, S, heads, D]` operands where the backend plans a row for the whole call (on CUDA the cuDNN row; no
-  permuting row takes a batch), and the call reads B sequences through a batch-aware `AttentionCall.FromTokenMajor`. The
-  UNet's self-attention at B=2 drops three permutes in and one out; flat operands, host-rotated batches (the batched DiT
-  forwards) and backends that plan no batched row (Vulkan's token-major rows read one sequence) stay head-major.
+- **Faster: SDXL's self-attention runs token-major over its CFG batch.** A layer whose config sets `TokenMajorBatches` takes
+  the token-major entry for a batch of per-head `[B, S, heads, D]` operands where the backend plans a row for the whole call
+  (on CUDA the cuDNN row; no permuting row takes a batch), and the call reads B sequences through a batch-aware
+  `AttentionCall.FromTokenMajor`. The UNet's self-attention opts in and at B=2 drops three permutes in and one out; other
+  batched calls (Krea 2's layer-axis text fusion, the host-rotated DiT batches), flat operands and backends that plan no
+  batched row (Vulkan's token-major rows read one sequence) stay head-major.
 - **Faster: Wan's self-attention and HiDream's single-stream blocks run token-major.** A full-width RMS QK norm no longer
   forces the head-major entry, so the self-attention of the Wan-family blocks (Wan 2.1 and 2.2, VACE, S2V, Animate,
   Matrix-Game) and of HiDream's single-stream blocks reads the normed, rotated `[S, heads·D]` rows where the projections

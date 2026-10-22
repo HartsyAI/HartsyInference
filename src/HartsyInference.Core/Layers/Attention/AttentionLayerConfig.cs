@@ -97,6 +97,10 @@ public sealed record AttentionLayerConfig
     /// <summary>A switch read on every call that can turn the token-major entry off.</summary>
     public Knob<bool>? TokenMajorKnob { get; init; }
 
+    /// <summary>A batch of per-head operands takes the token-major entry too, where the backend plans a row for the whole call;
+    /// otherwise only one batch item does.</summary>
+    public bool TokenMajorBatches { get; init; }
+
     /// <summary>A call the CUDA head-major entry serves with SageAttention (F16, head dim 64 or 128, no bias, both sequences at
     /// least <c>numerics.sageF16MinSkv</c>) attends head-major instead of taking the token-major entry, which has no Sage kernel.</summary>
     public bool HeadMajorForSage { get; init; }

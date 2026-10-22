@@ -86,11 +86,15 @@ public sealed class TokenMajorFlipTraceTests
         }
         w.Add("f.projector.weight", 1, layers);
         fusion.LoadWeights(w, "f");
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SupportsTokenMajorGqaAttention = true };
+        AttentionTraceBackend backend = new()
+        {
+            SupportsTokenMajorAttention = true, SupportsTokenMajorGqaAttention = true, PlansBatchedTokenMajor = true,
+        };
 
         fusion.Forward(backend, new Tensor(new TensorShape(1, seq, layers, dim), DType.F32), 1, seq);
 
-        // The layer-axis block attends one sequence per token, so it keeps the head-major entry and its four permutes.
+        // The layer-axis block attends one sequence per token, a batch it does not opt in, so it keeps the head-major entry and its
+        // four permutes even where the backend would plan the batch.
         Assert.Equal([AttentionRoute.Dense, AttentionRoute.TokenMajor], backend.Calls.Select(c => c.Route));
         Assert.Equal(4, Permutes(backend));
     }

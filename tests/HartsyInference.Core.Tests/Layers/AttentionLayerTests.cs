@@ -292,12 +292,13 @@ public sealed class AttentionLayerTests
         Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
     }
 
-    /// <summary>A batch takes the token-major entry over per-head <c>[B, S, heads, D]</c> operands only where the backend plans a row
-    /// for the call (no permuting fallback takes a batch): it reads B sequences and writes the <c>[B, S, heads·D]</c> rows the output
-    /// projection reads. Without a planned row, over flat operands (a <c>[B, S, heads·D]</c> tensor reads as one sequence) or with a
-    /// host rotation it stays head-major.</summary>
+    /// <summary>A layer that opts its batches in takes the token-major entry over per-head <c>[B, S, heads, D]</c> operands only where
+    /// the backend plans a row for the call (no permuting fallback takes a batch): it reads B sequences and writes the
+    /// <c>[B, S, heads·D]</c> rows the output projection reads. Without the opt-in, without a planned row, over flat operands (a
+    /// <c>[B, S, heads·D]</c> tensor reads as one sequence) or with a host rotation a batch stays head-major.</summary>
     [Theory]
     [InlineData("planned", AttentionRoute.TokenMajor)]
+    [InlineData("not-opted-in", AttentionRoute.Dense)]
     [InlineData("unplanned", AttentionRoute.Dense)]
     [InlineData("flat", AttentionRoute.Dense)]
     [InlineData("host-rotation", AttentionRoute.Dense)]
@@ -305,7 +306,11 @@ public sealed class AttentionLayerTests
     {
         const int batch = 2, seq = 6;
         AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, PlansBatchedTokenMajor = name != "unplanned" };
-        AttentionLayerConfig config = new() { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor, AllowF16 = true };
+        AttentionLayerConfig config = new()
+        {
+            Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor, TokenMajorBatches = name != "not-opted-in",
+            AllowF16 = true,
+        };
         Tensor attended;
         if (name == "flat")
         {
