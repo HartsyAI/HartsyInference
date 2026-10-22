@@ -89,6 +89,31 @@ public sealed unsafe class AttentionHostReferenceTests
     }
 
     [Fact]
+    public void NaN_Propagates_EvenWhenEveryScoreOfARowIsNaN()
+    {
+        using Tensor q = Rand(new TensorShape(1, 1, 3, 4), 1), k = Rand(new TensorShape(1, 1, 5, 4), 2), v = Rand(new TensorShape(1, 1, 5, 4), 3);
+        ((float*)q.DataPointer)[4] = float.NaN;   // query row 1: every score is NaN
+        using Tensor o = new(new TensorShape(1, 1, 3, 4), DType.F32);
+        float[] lse = new float[3];
+        AttentionHostReference.Run(AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.5f, false), lse);
+        float* op = (float*)o.DataPointer;
+        for (int c = 0; c < 4; c++)
+        {
+            Assert.True(float.IsFinite(op[c]) && float.IsFinite(op[8 + c]));
+            Assert.True(float.IsNaN(op[4 + c]));
+        }
+        Assert.True(float.IsNaN(lse[1]) && float.IsFinite(lse[0]));
+
+        // A NaN sink on rows that see no key: NaN, not the zero an excluded row writes.
+        using Tensor sink = new(new TensorShape(1), DType.F32);
+        ((float*)sink.DataPointer)[0] = float.NaN;
+        AttentionHostReference.Run(AttentionCall.FromFlashAttention(o, q, k, v, kvLen: 0, causal: false, qOffset: 0, scale: 0.5f,
+            softcap: 0f, sink: sink, slidingWindow: 0, alibiSlopes: null), lse);
+        for (int i = 0; i < 12; i++) Assert.True(float.IsNaN(op[i]));
+        Assert.All(lse, x => Assert.True(float.IsNaN(x)));
+    }
+
+    [Fact]
     public void AnEmptyCache_AttendsNothing()
     {
         using Tensor q = Rand(new TensorShape(1, 2, 1, 4), 1), k = Rand(new TensorShape(1, 2, 8, 4), 2), v = Rand(new TensorShape(1, 2, 8, 4), 3);

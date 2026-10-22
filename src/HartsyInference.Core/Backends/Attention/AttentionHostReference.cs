@@ -66,7 +66,7 @@ public static class AttentionHostReference
                         s += bias.At(b, h, r, j);
                         if (slopes != null) s += slopes[h] * (mask.Causal ? j - qpos : -Math.Abs(j - qpos));
                         scores[j] = s;
-                        if (s > max) max = s;
+                        if (s > max || double.IsNaN(s)) max = s;
                     }
                     double sink = sinks == null ? double.NegativeInfinity : sinks[h];
                     double m = Math.Max(max, sink);
@@ -80,8 +80,8 @@ public static class AttentionHostReference
                             sum += p;
                             for (int c = 0; c < dv; c++) acc[c] += p * Read(in v, b, hk, j, c);
                         }
-                    // A fully excluded row with no sink writes zeros (contract §3).
-                    double inv = sum > 0 ? 1.0 / sum : 0.0;
+                    // A fully excluded row with no sink writes zeros; a NaN anywhere in the row stays NaN (contract §3).
+                    double inv = sum > 0 ? 1.0 / sum : double.IsNaN(sum) ? double.NaN : 0.0;
                     for (int c = 0; c < dv; c++) Write(in o, b, h, r, c, (float)(acc[c] * inv));
                     if (!lse.IsEmpty)
                         lse[(b * call.Heads + h) * call.QueryTokens + r] =

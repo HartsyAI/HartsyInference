@@ -12,7 +12,10 @@ stable release will require. Dates are UTC.
   quantization and online recurrence the coming INT8 kernel must reproduce: u8 P against each key tile's own maximum, s8 V,
   INT32 partials drained at every key tile, K channel-mean smoothing with its softcap, sink, LSE and per-segment corrections,
   tile-classified masks, GQA and head dims up to 256, plus the FP8 and F16 P×V fallbacks. An adversarial suite holds it to
-  the contract oracle, which can now return the LSE. No runtime path changes.
+  the contract oracle, which can now return the LSE.
+- **Changed: attention's NaN policy is written down.** A NaN that a row's output reads makes that output NaN (contract §3).
+  The host reference, which the CPU backend runs for calls no legacy entry carries, returned zeros for a row whose every
+  score was NaN, or that saw no key and had a NaN sink; it now returns NaN. Finite inputs are unaffected.
 - **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The

@@ -543,7 +543,15 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
                 for (int i = 0; i < 16 * 64; i++) Assert.Equal(i % 64 == 9, float.IsNaN(o[i]));
             }
 
-        // An infinity cannot be quantized: it reaches a scale and comes out as NaN, never as a finite value.
+        // An infinity cannot be quantized: it reaches a scale (0·∞ in the dequant) and comes out as NaN, never as a finite value.
+        float[] qInf = (float[])clean.Q.Clone();
+        qInf[3 * 64 + 11] = float.PositiveInfinity;
+        using (Int8V2Case c = Int8V2Case.FromArrays(spec, qInf, clean.K, clean.V))
+        {
+            float[] o = c.Emulate(Base, lse);
+            for (int r = 0; r < 16; r++) Assert.Equal(r == 3, float.IsNaN(o[r * 64]));
+            Assert.True(float.IsNaN(lse[3]) && float.IsFinite(lse[2]));
+        }
         float[] kInf = (float[])clean.K.Clone();
         kInf[150 * 64 + 2] = float.PositiveInfinity;
         float[] vInf = (float[])clean.V.Clone();
@@ -579,6 +587,51 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
             Assert.Equal(lse1, lse2);
         }
         Assert.NotEqual(c.Emulate(Stochastic), c.Emulate(Stochastic with { RoundingSeed = 4 }));
+    }
+
+    [Fact]
+    public void ABiasThatDoesNotFit_IsRefusedBeforeAnyRead()
+    {
+        using Int8V2Case c = Int8V2Case.Create(new Int8V2Spec
+        {
+            Id = "bias-shapes", Sq = 4, Skv = 200, HeadDim = 64, Fill = Int8V2Fill.Uniform, SampledRows = 0,
+        });
+        using Tensor rank1 = new(new TensorShape(200), DType.F32), shortKeys = new(new TensorShape(1, 1, 1, 199), DType.F32);
+        Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.Run(c.Call with { Mask = AttentionMask.Additive(rank1) }, Base));
+        Assert.Throws<ArgumentException>(() =>
+            Int8AttentionV2Reference.Run(c.Call with { Mask = AttentionMask.Additive(shortKeys) }, Base));
+
+        // A bias broadcast over the keys is one element for every key; a constant leaves the softmax where it was.
+        using Tensor broadcast = new(new TensorShape(1, 1, 1, 1), DType.F32);
+        broadcast.AsSpan<float>()[0] = -3f;
+        Int8AttentionV2Reference.Run(c.Call with { Mask = AttentionMask.Additive(broadcast) }, Base);
+        MeetsBar("key-broadcast bias", c.Call.Output.Storage.AsReadOnlySpan<float>().ToArray(), c.Oracle());
+    }
+
+    [Fact]
+    public void Exp2_IsInjectable_SoAKernelsOwnExp2ReplaysBitForBit()
+    {
+        // A stand-in for ex2.approx one ulp high. Its values for the arguments the emulator asks for (which never depend on an
+        // earlier exp2) replay into the same bytes as running it directly: the two-pass recipe for comparing P with a GPU.
+        static float Hardware(float x) => MathF.BitIncrement((float)Math.Pow(2.0, x));
+        using Int8V2Case c = Int8V2Case.Create(MaskSpec("everything") with { Sinks = [0.5f, 1f, -1f, 0f] });
+        foreach (Int8AttentionV2Options options in (Int8AttentionV2Options[])[Base, F16Pv])
+        {
+            float[] reference = c.Emulate(options);
+            Dictionary<float, float> table = [];
+            float[] recorded = c.Emulate(options with
+            {
+                Exp2 = x =>
+                {
+                    table[x] = Hardware(x);
+                    return (float)Math.Pow(2.0, x);
+                },
+            });
+            Assert.Equal(reference, recorded);
+            float[] direct = c.Emulate(options with { Exp2 = Hardware });
+            Assert.NotEqual(reference, direct);
+            Assert.Equal(direct, c.Emulate(options with { Exp2 = x => table[x] }));
+        }
     }
 
     [Fact]

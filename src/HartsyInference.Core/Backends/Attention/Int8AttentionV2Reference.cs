@@ -2,18 +2,18 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-/// <summary>The executable specification of INT8 attention v2 (docs/ATTENTION_CONTRACT.md §5): the kernel's stats pass, quant
-/// launch and online recurrence on the CPU. A kernel reproduces its bytes, scales, means and INT32 QK products bit for bit,
-/// and its F32 output up to summation order and the hardware exp2.</summary>
+/// <summary>The executable specification of INT8 attention v2 (docs/ATTENTION_CONTRACT.md §5): the kernel's stats pass,
+/// quant launch and online recurrence on the CPU. A kernel reproduces its bytes, scales, means and INT32 QK products bit for
+/// bit, and its F32 output up to summation order and the hardware exp2.</summary>
 public static class Int8AttentionV2Reference
 {
     /// <summary>log2(255) rounded down, so a key tile's maximum maps to u8 255 (Comfy Kitchen's S_U8_OFFSET).</summary>
     public const float U8Offset = 7.9943534f;
 
-    /// <summary>log2(448): the running maximum maps to E4M3's largest finite value (SageAttention's S_FP8_OFFSET).</summary>
+    /// <summary>log2(448): the running maximum maps to E4M3's largest value (SageAttention's S_FP8_OFFSET).</summary>
     public const float Fp8Offset = 8.807f;
 
-    /// <summary>Where V's per-channel E4M3 scale puts each channel's absmax (SageAttention2++'s value on sm_89).</summary>
+    /// <summary>Where V's per-channel E4M3 scale puts each channel's absmax (SageAttention2++ on sm_89).</summary>
     public const float Fp8ValueRange = 2.25f;
 
     /// <summary>Keys per partial sum of the K channel mean.</summary>
@@ -25,7 +25,7 @@ public static class Int8AttentionV2Reference
     private const float Ln2 = 0.693147182f;
     private const float MinNormal = 1.17549435e-38f;
 
-    /// <summary>The head dim a kernel template runs for <paramref name="headDim"/>: 64, 128 or 256, padded with zeros.</summary>
+    /// <summary>The head dim a kernel template runs for <paramref name="headDim"/>: 64, 128 or 256, zero-padded.</summary>
     /// <exception cref="AttentionUnsupportedException">The head dim is above 256.</exception>
     public static int PaddedHeadDim(int headDim) => headDim switch
     {
@@ -36,28 +36,28 @@ public static class Int8AttentionV2Reference
         _ => throw new AttentionUnsupportedException($"INT8 attention v2 runs head dims up to 256; got {headDim}."),
     };
 
-    /// <summary>The largest |INT32 PV partial| of one key tile, <c>BC · 255 · 127</c>; below 2²⁴, so its F32 conversion is exact.</summary>
+    /// <summary>The largest |INT32 PV partial| of one key tile, <c>BC · 255 · 127</c>: below 2²⁴, exact in F32.</summary>
     public static int PvPartialBound(int blockCols) => blockCols * 255 * 127;
 
-    /// <summary>The largest |INT32 QK product|, <c>127² · Dp</c>; below 2²⁴, so its F32 conversion is exact.</summary>
+    /// <summary>The largest |INT32 QK product|, <c>127² · Dp</c>: below 2²⁴, exact in F32.</summary>
     public static int QkDotBound(int paddedHeadDim) => 127 * 127 * paddedHeadDim;
 
-    /// <summary>Quantizes and attends <paramref name="rows"/> (every row when empty) of every (batch, head) of
-    /// <paramref name="call"/>; writes those output rows and, when given, their natural-log LSE into <c>[B, Hq, Sq]</c>.</summary>
-    /// <exception cref="AttentionUnsupportedException">The call carries something INT8 attention v2 does not run.</exception>
-    public static void Run(in AttentionCall call, Int8AttentionV2Options options, ReadOnlySpan<int> rows = default, Span<float> lse = default)
-        => Attend(in call, Quantize(in call, options, rows), lse);
+    /// <summary>Quantizes and attends <paramref name="rows"/> (all when empty) of every (batch, head) of
+    /// <paramref name="call"/>, writing those output rows and, when given, their natural-log LSE <c>[B, Hq, Sq]</c>.</summary>
+    /// <exception cref="AttentionUnsupportedException">The call carries something INT8 v2 does not run.</exception>
+    public static void Run(in AttentionCall call, Int8AttentionV2Options options, ReadOnlySpan<int> rows = default,
+        Span<float> lse = default) => Attend(in call, Quantize(in call, options, rows), lse);
 
-    /// <summary>The stats pass and quant launch for <paramref name="rows"/> (every row when empty) of <paramref name="call"/>.
-    /// With <paramref name="scales"/>, its means and Q/K/V scales are used instead of computed (a GPU's, to compare bytes).</summary>
-    /// <exception cref="AttentionUnsupportedException">The call carries something INT8 attention v2 does not run.</exception>
-    public static Int8AttentionV2Operands Quantize(in AttentionCall call, Int8AttentionV2Options options, ReadOnlySpan<int> rows = default,
-        Int8AttentionV2Operands? scales = null)
+    /// <summary>The stats pass and quant launch for <paramref name="rows"/> (all when empty) of <paramref name="call"/>;
+    /// with <paramref name="scales"/>, its means and Q/K/V scales replace the computed ones (a GPU's, to compare bytes).</summary>
+    /// <exception cref="AttentionUnsupportedException">The call carries something INT8 v2 does not run.</exception>
+    public static Int8AttentionV2Operands Quantize(in AttentionCall call, Int8AttentionV2Options options,
+        ReadOnlySpan<int> rows = default, Int8AttentionV2Operands? scales = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         Check(in call, options);
-        Int8AttentionV2Operands ops = new(options, call.Batch, call.Heads, call.KvHeads, call.ValidKvLength, call.QkHeadDim,
-            RowList(rows, call.QueryTokens));
+        Int8AttentionV2Operands ops = new(options, call.Batch, call.Heads, call.KvHeads, call.ValidKvLength,
+            call.QkHeadDim, RowList(rows, call.QueryTokens));
         if (scales is not null) CopyScales(scales, ops);
         int dp = ops.PaddedHeadDim, kvLen = ops.ValidKeys, segments = ops.Segments;
         int[] bounds = SegmentBounds(options, kvLen);
@@ -73,7 +73,8 @@ public static class Int8AttentionV2Reference
                 }
                 Span<float> means = ops.KeyMeans.AsSpan(kvh * segments * dp, segments * dp);
                 if (scales is null && options.SmoothKeys)
-                    for (int s = 0; s < segments; s++) SegmentMean(k, dp, bounds[s], bounds[s + 1], means.Slice(s * dp, dp));
+                    for (int s = 0; s < segments; s++)
+                        SegmentMean(k, dp, bounds[s], bounds[s + 1], means.Slice(s * dp, dp));
                 if (options.SmoothKeys)
                     for (int s = 0; s < segments; s++)
                         for (int j = bounds[s]; j < bounds[s + 1]; j++)
@@ -86,7 +87,8 @@ public static class Int8AttentionV2Reference
         for (int b = 0; b < call.Batch; b++)
             for (int h = 0; h < call.Heads; h++)
             {
-                ReadOnlySpan<float> means = ops.KeyMeans.AsSpan((b * call.KvHeads + h / group) * segments * dp, segments * dp);
+                int kvh = b * call.KvHeads + h / group;
+                ReadOnlySpan<float> means = ops.KeyMeans.AsSpan(kvh * segments * dp, segments * dp);
                 for (int ri = 0; ri < nRows; ri++)
                 {
                     int at = (b * call.Heads + h) * nRows + ri;
@@ -94,6 +96,7 @@ public static class Int8AttentionV2Reference
                     if (scales is null) ops.QueryScales[at] = Scale(AbsMax(q), 127f);
                     float inv = 1f / ops.QueryScales[at];
                     for (int c = 0; c < dp; c++) ops.Queries[at * dp + c] = ToS8(q[c] * inv);
+                    if (!options.SmoothKeys) continue;
                     for (int s = 0; s < segments; s++)
                     {
                         float dot = 0f;
@@ -105,8 +108,8 @@ public static class Int8AttentionV2Reference
         return ops;
     }
 
-    /// <summary>The online recurrence over <paramref name="operands"/>: writes their rows of <paramref name="call"/>'s output
-    /// and, when given, the natural-log LSE into <paramref name="lse"/> <c>[B, Hq, Sq]</c>.</summary>
+    /// <summary>The online recurrence over <paramref name="operands"/>: writes their rows of <paramref name="call"/>'s
+    /// output and, when given, the natural-log LSE into <paramref name="lse"/> <c>[B, Hq, Sq]</c>.</summary>
     /// <exception cref="ArgumentException">The operands were quantized for a different call.</exception>
     public static void Attend(in AttentionCall call, Int8AttentionV2Operands operands, Span<float> lse = default)
     {
@@ -116,28 +119,30 @@ public static class Int8AttentionV2Reference
             || operands.ValidKeys != call.ValidKvLength || operands.HeadDim != call.QkHeadDim
             || operands.Rows.Length > 0 && operands.Rows[^1] >= call.QueryTokens)
             throw new ArgumentException("The operands were quantized for a different call.", nameof(operands));
-        if (!lse.IsEmpty && lse.Length != (long)call.Batch * call.Heads * call.QueryTokens)
-            throw new ArgumentException($"LSE holds {lse.Length} values; [B, Hq, Sq] needs {(long)call.Batch * call.Heads * call.QueryTokens}.",
-                nameof(lse));
+        long rowsTotal = (long)call.Batch * call.Heads * call.QueryTokens;
+        if (!lse.IsEmpty && lse.Length != rowsTotal)
+            throw new ArgumentException($"LSE holds {lse.Length} values; [B, Hq, Sq] needs {rowsTotal}.", nameof(lse));
         new Recurrence(in call, operands).Run(in call, lse);
     }
 
-    /// <summary>The INT32 QK product of query row <paramref name="rowIndex"/> (an index into <see cref="Int8AttentionV2Operands.Rows"/>)
-    /// of (<paramref name="batch"/>, <paramref name="head"/>) with key <paramref name="key"/>.</summary>
+    /// <summary>The INT32 QK product of key <paramref name="key"/> and query row <paramref name="rowIndex"/> (an index into
+    /// <see cref="Int8AttentionV2Operands.Rows"/>) of (<paramref name="batch"/>, <paramref name="head"/>).</summary>
     public static int QkDot(Int8AttentionV2Operands operands, int batch, int head, int rowIndex, int key)
     {
         ArgumentNullException.ThrowIfNull(operands);
         int dp = operands.PaddedHeadDim, kh = head / (operands.Heads / operands.KvHeads);
-        ReadOnlySpan<sbyte> q = operands.Queries.AsSpan(((batch * operands.Heads + head) * operands.Rows.Length + rowIndex) * dp, dp);
-        ReadOnlySpan<sbyte> k = operands.Keys.AsSpan(((batch * operands.KvHeads + kh) * operands.ValidKeys + key) * dp, dp);
+        int qRow = (batch * operands.Heads + head) * operands.Rows.Length + rowIndex;
+        int kRow = (batch * operands.KvHeads + kh) * operands.ValidKeys + key;
+        ReadOnlySpan<sbyte> q = operands.Queries.AsSpan(qRow * dp, dp), k = operands.Keys.AsSpan(kRow * dp, dp);
         int dot = 0;
         for (int c = 0; c < dp; c++) dot += q[c] * k[c];
         return dot;
     }
 
-    /// <summary>What query rows <c>[queryRow0, queryRow0 + queryRows)</c> of (<paramref name="batch"/>, <paramref name="head"/>)
-    /// see of key slots <c>[key0, key0 + keys)</c>: causal and window bounds, the valid key length and the bias's exclusions.</summary>
-    public static AttentionTileClass ClassifyTile(in AttentionCall call, int batch, int head, int queryRow0, int queryRows, int key0, int keys)
+    /// <summary>What query rows <c>[queryRow0, +queryRows)</c> of (<paramref name="batch"/>, <paramref name="head"/>) see of
+    /// key slots <c>[key0, +keys)</c> under the causal and window bounds, the valid key length and the bias's exclusions.</summary>
+    public static AttentionTileClass ClassifyTile(in AttentionCall call, int batch, int head, int queryRow0,
+        int queryRows, int key0, int keys)
     {
         int end = Math.Min(key0 + keys, call.ValidKvLength);
         Span<bool> excluded = new bool[Math.Max(0, end - key0)];
@@ -148,11 +153,12 @@ public static class Int8AttentionV2Reference
             StageBias(in call, batch, head, staged, all);
             if (end > key0) all.AsSpan(key0, end - key0).CopyTo(excluded);
         }
-        return Classify(call.Mask, call.Positions.QueryOffset, call.ValidKvLength, queryRow0, Math.Min(queryRow0 + queryRows, call.QueryTokens),
-            key0, keys, excluded);
+        int rowEnd = Math.Min(queryRow0 + queryRows, call.QueryTokens);
+        return Classify(call.Mask, call.Positions.QueryOffset, call.ValidKvLength, queryRow0, rowEnd, key0, keys,
+            excluded);
     }
 
-    /// <summary>E4M3 with round-to-nearest-even and saturation to ±448 (<c>cvt.rn.satfinite.e4m3x2.f32</c>); NaN stays NaN.</summary>
+    /// <summary>E4M3 rounded to nearest even and saturated to ±448, as <c>cvt.rn.satfinite</c>; NaN stays NaN.</summary>
     public static float RoundToE4M3(float x)
     {
         if (float.IsNaN(x)) return float.NaN;
@@ -188,14 +194,18 @@ public static class Int8AttentionV2Reference
         PaddedHeadDim(call.QkHeadDim);
         if (call.Logits.AlibiSlopes is not null)
             throw new AttentionUnsupportedException("INT8 attention v2 carries no ALiBi slopes.");
+        // Validate admits only ranks 2-4 whose key extent is 1 or Skv, so StageBias reads inside the tensor.
         if (call.Mask.Bias is { } bias)
         {
-            if (bias.DType != DType.F32) throw new AttentionUnsupportedException($"INT8 attention v2 reads an F32 bias, not {bias.DType}.");
+            if (bias.DType != DType.F32)
+                throw new AttentionUnsupportedException($"INT8 attention v2 reads an F32 bias, not {bias.DType}.");
             if (bias.Shape[bias.Shape.Rank - 2] != 1 && call.QueryTokens > 1)
-                throw new AttentionUnsupportedException("INT8 attention v2 stages a per-key bias; a bias that varies over query rows is not one.");
+                throw new AttentionUnsupportedException(
+                    "INT8 attention v2 stages a per-key bias; a bias that varies over query rows is not one.");
         }
         if (options.BlockRows is not (64 or 128) || options.BlockCols is not (64 or 128))
-            throw new ArgumentException($"Tiles are 64 or 128 rows and keys; got {options.BlockRows}x{options.BlockCols}.", nameof(options));
+            throw new ArgumentException(
+                $"Tiles are 64 or 128 rows and keys; got {options.BlockRows}x{options.BlockCols}.", nameof(options));
         for (int i = 0; i < options.KeySegmentStarts.Count; i++)
             if (options.KeySegmentStarts[i] <= (i == 0 ? 0 : options.KeySegmentStarts[i - 1]))
                 throw new ArgumentException("Key segment starts must be positive and ascending.", nameof(options));
@@ -206,7 +216,8 @@ public static class Int8AttentionV2Reference
         if (rows.IsEmpty) return Enumerable.Range(0, queryTokens).ToArray();
         for (int i = 0; i < rows.Length; i++)
             if (rows[i] < 0 || rows[i] >= queryTokens || i > 0 && rows[i] <= rows[i - 1])
-                throw new ArgumentException($"Query rows must ascend inside [0, {queryTokens}); row {i} is {rows[i]}.", nameof(rows));
+                throw new ArgumentException($"Query rows must ascend inside [0, {queryTokens}); row {i} is {rows[i]}.",
+                    nameof(rows));
         return rows.ToArray();
     }
 
@@ -224,7 +235,7 @@ public static class Int8AttentionV2Reference
         if (from.QueryScales.Length != to.QueryScales.Length || from.KeyMeans.Length != to.KeyMeans.Length
             || from.KeyScales.Length != to.KeyScales.Length || from.ValueScales.Length != to.ValueScales.Length
             || !from.Rows.AsSpan().SequenceEqual(to.Rows))
-            throw new ArgumentException("The supplied scales were made for a different call, rows or variant.", nameof(from));
+            throw new ArgumentException("The supplied scales belong to another call, rows or variant.", nameof(from));
         from.QueryScales.CopyTo(to.QueryScales, 0);
         if (to.Options.SmoothKeys) from.KeyMeans.CopyTo(to.KeyMeans, 0);
         from.KeyScales.CopyTo(to.KeyScales, 0);
@@ -250,7 +261,8 @@ public static class Int8AttentionV2Reference
     {
         int dp = ops.PaddedHeadDim, kvLen = ops.ValidKeys, bc = ops.Options.BlockCols;
         bool perKey = ops.Options.KeyScales == Int8KeyScaleGrouping.PerKey;
-        Span<float> scales = perKey ? ops.KeyScales.AsSpan(kvh * kvLen, kvLen) : ops.KeyScales.AsSpan(kvh * ops.KeyTiles * 4, ops.KeyTiles * 4);
+        int perHead = perKey ? kvLen : ops.KeyTiles * 4;
+        Span<float> scales = ops.KeyScales.AsSpan(kvh * perHead, perHead);
         if (computeScales)
         {
             if (perKey)
@@ -303,14 +315,15 @@ public static class Int8AttentionV2Reference
                 {
                     int at = (kvh * kvLen + j) * dp + c;
                     float x = v[j * dp + c];
-                    if (format is Int8ProbabilityFormat.U8 or Int8ProbabilityFormat.U8Stochastic) ops.Values[at] = ToS8(x * inv);
-                    else ops.NarrowValues[at] = format == Int8ProbabilityFormat.Fp8 ? RoundToE4M3(x * inv) : (float)(Half)x;
+                    if (format == Int8ProbabilityFormat.Fp8) ops.NarrowValues[at] = RoundToE4M3(x * inv);
+                    else if (format == Int8ProbabilityFormat.F16) ops.NarrowValues[at] = (float)(Half)x;
+                    else ops.Values[at] = ToS8(x * inv);
                 }
             }
         }
     }
 
-    /// <summary><c>absmax / range</c>, NaN when the absmax is, and 1 when it falls below the smallest normal float.</summary>
+    /// <summary><c>absmax / range</c>; NaN for a NaN absmax, 1 below the smallest normal float.</summary>
     private static float Scale(float absMax, float range)
     {
         if (float.IsNaN(absMax)) return float.NaN;
@@ -354,7 +367,7 @@ public static class Int8AttentionV2Reference
         dst[d..].Clear();
     }
 
-    /// <summary>The bias of (<paramref name="b"/>, <paramref name="h"/>) over the valid keys, times log2(e); −∞ marks an exclusion.</summary>
+    /// <summary>One head's bias over the valid keys times log2(e); −∞ marks an exclusion.</summary>
     private static unsafe void StageBias(in AttentionCall call, int b, int h, Span<float> staged, Span<bool> excluded)
     {
         staged.Clear();
@@ -373,7 +386,7 @@ public static class Int8AttentionV2Reference
         }
     }
 
-    /// <summary>The keys query position <paramref name="qpos"/> may see under the causal, window and block rules, inclusive.</summary>
+    /// <summary>The keys a query position may see under the causal, window and block rules, inclusive.</summary>
     private static (long Lo, long Hi) KeyRange(in AttentionMask mask, long qpos)
     {
         long n = Math.Max(1, mask.BlockSize), qi = qpos / n;
@@ -384,8 +397,8 @@ public static class Int8AttentionV2Reference
         return (lo, hi);
     }
 
-    private static AttentionTileClass Classify(in AttentionMask mask, int queryOffset, int kvLen, int row0, int rowEnd, int key0, int keys,
-        ReadOnlySpan<bool> excluded)
+    private static AttentionTileClass Classify(in AttentionMask mask, int queryOffset, int kvLen, int row0, int rowEnd,
+        int key0, int keys, ReadOnlySpan<bool> excluded)
     {
         int end = Math.Min(key0 + keys, kvLen);
         if (end <= key0 || rowEnd <= row0) return AttentionTileClass.Skip;
@@ -419,14 +432,14 @@ public static class Int8AttentionV2Reference
         for (; i < x.Length; i++) y[i] += p * x[i];
     }
 
-    /// <summary>One call's recurrence: per (batch, kv head) the dequant-ready K/V rows, per (batch, head) the staged bias, per
-    /// query tile the key tile classes, per row the running state.</summary>
+    /// <summary>One call's recurrence: K/V per kv head, the bias per head, tile classes per query tile.</summary>
     private sealed class Recurrence
     {
         private readonly Int8AttentionV2Operands _ops;
         private readonly int _dp, _bc, _kvLen, _tiles, _segments;
         private readonly float _alpha, _alphaLog2e, _softcap;
         private readonly bool _u8, _stochastic, _fp8;
+        private readonly Func<float, float> _exp2;
         private readonly float[] _sinks;
         private readonly int[] _segmentOf;
         private readonly float[] _keys, _values, _bias, _q, _t, _o, _partial, _shift;
@@ -447,6 +460,7 @@ public static class Int8AttentionV2Reference
             _u8 = ops.Options.Probabilities is Int8ProbabilityFormat.U8 or Int8ProbabilityFormat.U8Stochastic;
             _stochastic = ops.Options.Probabilities == Int8ProbabilityFormat.U8Stochastic;
             _fp8 = ops.Options.Probabilities == Int8ProbabilityFormat.Fp8;
+            _exp2 = ops.Options.Exp2 ?? Exp2;
             _sinks = call.Logits.Sinks is { } sinks ? sinks.AsReadOnlySpan<float>()[..call.Heads].ToArray() : [];
             int[] bounds = SegmentBounds(ops.Options, _kvLen);
             _segmentOf = new int[_kvLen];
@@ -478,12 +492,13 @@ public static class Int8AttentionV2Reference
                         for (int ri = 0; ri < rows.Length;)
                         {
                             int tile0 = rows[ri] / br * br, tileEnd = Math.Min(tile0 + br, call.QueryTokens);
+                            int qOffset = call.Positions.QueryOffset;
                             for (int t = 0; t < _tiles; t++)
-                                _classes[t] = Classify(call.Mask, call.Positions.QueryOffset, _kvLen, tile0, tileEnd, t * _bc, _bc,
+                                _classes[t] = Classify(call.Mask, qOffset, _kvLen, tile0, tileEnd, t * _bc, _bc,
                                     _excluded.AsSpan(t * _bc, Math.Min(_bc, _kvLen - t * _bc)));
                             for (; ri < rows.Length && rows[ri] < tileEnd; ri++)
                             {
-                                float rowLse = Row(call.Mask, call.Positions.QueryOffset, b, h, ri, rows[ri], call.Heads);
+                                float rowLse = Row(call.Mask, qOffset, b, h, ri, rows[ri], call.Heads);
                                 for (int c = 0; c < call.ValueHeadDim; c++)
                                     AttentionHostReference.Write(call.Output, b, h, rows[ri], c, _o[c]);
                                 if (!lse.IsEmpty) lse[(b * call.Heads + h) * call.QueryTokens + rows[ri]] = rowLse;
@@ -506,19 +521,23 @@ public static class Int8AttentionV2Reference
             else _ops.NarrowValues.AsSpan(kvh * n, n).CopyTo(_values);
         }
 
-        /// <summary>Attends one query row into <see cref="_o"/> (already divided and V-scaled) and returns its natural-log LSE.</summary>
+        /// <summary>Attends one query row into <c>_o</c>, divided and V-scaled; returns its natural-log LSE.</summary>
         private float Row(in AttentionMask mask, int queryOffset, int b, int h, int ri, int row, int heads)
         {
-            int dp = _dp, kvh = b * _ops.KvHeads + h / (heads / _ops.KvHeads), at = (b * heads + h) * _ops.Rows.Length + ri;
+            int dp = _dp, kvh = b * _ops.KvHeads + h / (heads / _ops.KvHeads);
+            int at = (b * heads + h) * _ops.Rows.Length + ri;
             ReadOnlySpan<sbyte> q8 = _ops.Queries.AsSpan(at * dp, dp);
             for (int c = 0; c < dp; c++) _q[c] = q8[c];
             float qScale = _ops.QueryScales[at];
             bool capped = _softcap > 0f;
             float qs = qScale * (capped ? _alpha : _alphaLog2e);
-            // The frame the scores live in: the first segment's smoothing offset is left out unless a softcap needs it back.
+            // Scores leave out the first segment's smoothing offset unless a softcap needs it back.
             float frame = capped ? 0f : _ops.QueryMeanDots[at * _segments] * _alphaLog2e;
             for (int s = 0; s < _segments; s++)
-                _shift[s] = capped ? _ops.QueryMeanDots[at * _segments + s] * _alpha : _ops.QueryMeanDots[at * _segments + s] * _alphaLog2e - frame;
+            {
+                float meanDot = _ops.QueryMeanDots[at * _segments + s];
+                _shift[s] = capped ? meanDot * _alpha : meanDot * _alphaLog2e - frame;
+            }
             (long lo, long hi) = KeyRange(in mask, (long)queryOffset + row);
             bool valid = false, poisoned = false;
             float m = 0f, d = 0f;
@@ -536,9 +555,11 @@ public static class Int8AttentionV2Reference
                     if (!seen) continue;
                     visible++;
                     float dot = Dot(_q, _keys.AsSpan(j * dp, dp));
-                    if (MathF.Abs(dot) > dotBound) throw new InvalidOperationException($"QK product {dot} exceeds the INT32 bound {dotBound}.");
+                    if (MathF.Abs(dot) > dotBound)
+                        throw new InvalidOperationException($"QK product {dot} exceeds the INT32 bound {dotBound}.");
                     float ks = _ops.Options.KeyScales == Int8KeyScaleGrouping.PerKey
-                        ? _ops.KeyScales[kvh * _kvLen + j] : _ops.KeyScales[(kvh * _tiles + t) * 4 + ((j & 7) >> 1)];
+                        ? _ops.KeyScales[kvh * _kvLen + j]
+                        : _ops.KeyScales[(kvh * _tiles + t) * 4 + ((j & 7) >> 1)];
                     float score;
                     if (capped)
                     {
@@ -550,7 +571,8 @@ public static class Int8AttentionV2Reference
                     tileMax = MathF.Max(tileMax, score);
                 }
                 if (visible == 0) continue;
-                ReadOnlySpan<float> tileVScales = _ops.Options.ValueScalesPerTile ? _ops.ValueScales.AsSpan((kvh * _tiles + t) * dp, dp) : [];
+                ReadOnlySpan<float> tileVScales =
+                    _ops.Options.ValueScalesPerTile ? _ops.ValueScales.AsSpan((kvh * _tiles + t) * dp, dp) : [];
                 if (!float.IsFinite(tileMax)) poisoned = true;
                 else if (_u8) U8Tile(b * heads + h, row, j0, j1, tileMax, tileVScales, ref valid, ref m, ref d);
                 else RunningTile(j0, j1, tileMax, tileVScales, ref valid, ref m, ref d);
@@ -561,9 +583,10 @@ public static class Int8AttentionV2Reference
                 if (float.IsNaN(sink)) poisoned = true;
                 else
                 {
-                    float sinkMax = sink - (_u8 ? U8Offset : _fp8 ? Fp8Offset : 0f), next = valid ? MathF.Max(m, sinkMax) : sinkMax;
-                    float oScale = valid ? Exp2(m - next) : 1f;
-                    d = d * oScale + Exp2(sink - next);
+                    float sinkMax = sink - (_u8 ? U8Offset : _fp8 ? Fp8Offset : 0f);
+                    float next = valid ? MathF.Max(m, sinkMax) : sinkMax;
+                    float oScale = valid ? _exp2(m - next) : 1f;
+                    d = d * oScale + _exp2(sink - next);
                     for (int c = 0; c < dp; c++) _o[c] *= oScale;
                     (m, valid) = (next, true);
                 }
@@ -585,15 +608,15 @@ public static class Int8AttentionV2Reference
             return (m + MathF.Log2(d) + frame) * Ln2;
         }
 
-        /// <summary>u8 P against the tile's own maximum; numerator and denominator drain the same bytes at the tile boundary.</summary>
-        private void U8Tile(int batchHead, int row, int j0, int j1, float tileMax, ReadOnlySpan<float> vScales, ref bool valid, ref float m,
-            ref float d)
+        /// <summary>u8 P against the tile's own maximum; numerator and denominator drain the same bytes.</summary>
+        private void U8Tile(int batchHead, int row, int j0, int j1, float tileMax, ReadOnlySpan<float> vScales,
+            ref bool valid, ref float m, ref float d)
         {
             float tileM = tileMax - U8Offset, oScale = 1f, tileScale = 1f;
             if (!valid) (m, valid) = (tileM, true);
             else
             {
-                float smaller = Exp2(-MathF.Abs(m - tileM));
+                float smaller = _exp2(-MathF.Abs(m - tileM));
                 oScale = m < tileM ? smaller : 1f;
                 tileScale = tileM < m ? smaller : 1f;
                 m = MathF.Max(m, tileM);
@@ -603,8 +626,10 @@ public static class Int8AttentionV2Reference
             for (int j = j0; j < j1; j++)
             {
                 if (!_visible[j - j0]) continue;
-                float x = Exp2(_t[j - j0] - tileM);
-                int p = _stochastic ? ToU8Stochastic(x, RoundingBits(_ops.Options.RoundingSeed, batchHead, row, j)) : ToU8(x);
+                float x = _exp2(_t[j - j0] - tileM);
+                int p = _stochastic
+                    ? ToU8Stochastic(x, RoundingBits(_ops.Options.RoundingSeed, batchHead, row, j))
+                    : ToU8(x);
                 if (p == 0) continue;
                 sum += p;
                 AddScaled(p, _values.AsSpan(j * _dp, _dp), _partial);
@@ -612,21 +637,24 @@ public static class Int8AttentionV2Reference
             int bound = PvPartialBound(_bc);
             for (int c = 0; c < _dp; c++)
             {
-                if (MathF.Abs(_partial[c]) > bound) throw new InvalidOperationException($"PV partial {_partial[c]} exceeds the INT32 bound {bound}.");
-                _o[c] = MathF.FusedMultiplyAdd(_partial[c], vScales.IsEmpty ? tileScale : tileScale * vScales[c], _o[c] * oScale);
+                if (MathF.Abs(_partial[c]) > bound)
+                    throw new InvalidOperationException($"PV partial {_partial[c]} exceeds the INT32 bound {bound}.");
+                float scale = vScales.IsEmpty ? tileScale : tileScale * vScales[c];
+                _o[c] = MathF.FusedMultiplyAdd(_partial[c], scale, _o[c] * oScale);
             }
             d = MathF.FusedMultiplyAdd(sum, tileScale, d * oScale);
         }
 
-        /// <summary>E4M3 or F16 P against the running maximum; the tile's partial sums in key order and drains at its boundary.</summary>
-        private void RunningTile(int j0, int j1, float tileMax, ReadOnlySpan<float> vScales, ref bool valid, ref float m, ref float d)
+        /// <summary>E4M3 or F16 P against the running maximum; the partial sums in key order and drains per tile.</summary>
+        private void RunningTile(int j0, int j1, float tileMax, ReadOnlySpan<float> vScales, ref bool valid,
+            ref float m, ref float d)
         {
             float tileM = tileMax - (_fp8 ? Fp8Offset : 0f), oScale = 1f;
             if (!valid) (m, valid) = (tileM, true);
             else
             {
                 float next = MathF.Max(m, tileM);
-                oScale = Exp2(m - next);
+                oScale = _exp2(m - next);
                 m = next;
             }
             Array.Clear(_partial);
@@ -634,13 +662,15 @@ public static class Int8AttentionV2Reference
             for (int j = j0; j < j1; j++)
             {
                 if (!_visible[j - j0]) continue;
-                float x = Exp2(_t[j - j0] - m);
+                float x = _exp2(_t[j - j0] - m);
                 float p = _fp8 ? RoundToE4M3(x) : (float)(Half)x;
                 sum += p;
                 AddScaled(p, _values.AsSpan(j * _dp, _dp), _partial);
             }
             for (int c = 0; c < _dp; c++)
-                _o[c] = vScales.IsEmpty ? _o[c] * oScale + _partial[c] : MathF.FusedMultiplyAdd(_partial[c], vScales[c], _o[c] * oScale);
+                _o[c] = vScales.IsEmpty
+                    ? _o[c] * oScale + _partial[c]
+                    : MathF.FusedMultiplyAdd(_partial[c], vScales[c], _o[c] * oScale);
             d = d * oScale + sum;
         }
     }
