@@ -141,9 +141,16 @@ public static class Int8AttentionV2Reference
 
     /// <summary>What query rows <c>[queryRow0, +queryRows)</c> of (<paramref name="batch"/>, <paramref name="head"/>) see of
     /// key slots <c>[key0, +keys)</c> under the causal and window bounds, the valid key length and the bias's exclusions.</summary>
+    /// <exception cref="ArgumentException">A malformed operand or bias, or (batch, head) outside the call.</exception>
+    /// <exception cref="AttentionUnsupportedException">The call carries something INT8 v2 does not run.</exception>
     public static AttentionTileClass ClassifyTile(in AttentionCall call, int batch, int head, int queryRow0,
         int queryRows, int key0, int keys)
     {
+        Check(in call);
+        if ((uint)batch >= (uint)call.Batch)
+            throw new ArgumentOutOfRangeException(nameof(batch), batch, $"The call has {call.Batch} batches.");
+        if ((uint)head >= (uint)call.Heads)
+            throw new ArgumentOutOfRangeException(nameof(head), head, $"The call has {call.Heads} heads.");
         int end = Math.Min(key0 + keys, call.ValidKvLength);
         Span<bool> excluded = new bool[Math.Max(0, end - key0)];
         if (call.Mask.Bias is not null)
@@ -185,6 +192,17 @@ public static class Int8AttentionV2Reference
 
     private static void Check(in AttentionCall call, Int8AttentionV2Options options)
     {
+        Check(in call);
+        if (options.BlockRows is not (64 or 128) || options.BlockCols is not (64 or 128))
+            throw new ArgumentException(
+                $"Tiles are 64 or 128 rows and keys; got {options.BlockRows}x{options.BlockCols}.", nameof(options));
+        for (int i = 0; i < options.KeySegmentStarts.Count; i++)
+            if (options.KeySegmentStarts[i] <= (i == 0 ? 0 : options.KeySegmentStarts[i - 1]))
+                throw new ArgumentException("Key segment starts must be positive and ascending.", nameof(options));
+    }
+
+    private static void Check(in AttentionCall call)
+    {
         AttentionHostReference.Validate(in call);
         if (call.Positions.OnDevice)
             throw new AttentionUnsupportedException("The INT8 attention v2 emulator reads host positions only.");
@@ -194,6 +212,8 @@ public static class Int8AttentionV2Reference
         PaddedHeadDim(call.QkHeadDim);
         if (call.Logits.AlibiSlopes is not null)
             throw new AttentionUnsupportedException("INT8 attention v2 carries no ALiBi slopes.");
+        if (call.Logits.Sinks is { } sinks && sinks.DType != DType.F32)
+            throw new AttentionUnsupportedException($"INT8 attention v2 reads F32 sinks, not {sinks.DType}.");
         // Validate admits only ranks 2-4 whose key extent is 1 or Skv, so StageBias reads inside the tensor.
         if (call.Mask.Bias is { } bias)
         {
@@ -203,12 +223,6 @@ public static class Int8AttentionV2Reference
                 throw new AttentionUnsupportedException(
                     "INT8 attention v2 stages a per-key bias; a bias that varies over query rows is not one.");
         }
-        if (options.BlockRows is not (64 or 128) || options.BlockCols is not (64 or 128))
-            throw new ArgumentException(
-                $"Tiles are 64 or 128 rows and keys; got {options.BlockRows}x{options.BlockCols}.", nameof(options));
-        for (int i = 0; i < options.KeySegmentStarts.Count; i++)
-            if (options.KeySegmentStarts[i] <= (i == 0 ? 0 : options.KeySegmentStarts[i - 1]))
-                throw new ArgumentException("Key segment starts must be positive and ascending.", nameof(options));
     }
 
     private static int[] RowList(ReadOnlySpan<int> rows, int queryTokens)
@@ -247,6 +261,7 @@ public static class Int8AttentionV2Reference
         for (int c = 0; c < dp; c++)
         {
             float total = 0f;
+            // Chunks start at the segment start, not at absolute multiples of 64: the stats pass chunks per segment.
             for (int chunk = start; chunk < end; chunk += MeanChunk)
             {
                 float partial = 0f;
@@ -577,11 +592,11 @@ public static class Int8AttentionV2Reference
                 else if (_u8) U8Tile(b * heads + h, row, j0, j1, tileMax, tileVScales, ref valid, ref m, ref d);
                 else RunningTile(j0, j1, tileMax, tileVScales, ref valid, ref m, ref d);
             }
-            // A −∞ sink logit carries no mass (contract §3); it must not become exp2(−∞ + ∞).
+            // A −∞ sink carries no mass; a NaN or +∞ one poisons the row (contract §3).
             if (_sinks.Length > 0 && !poisoned && !float.IsNegativeInfinity(_sinks[h]))
             {
                 float sink = _sinks[h] * Log2E - frame;
-                if (float.IsNaN(sink)) poisoned = true;
+                if (!float.IsFinite(sink)) poisoned = true;
                 else
                 {
                     float sinkMax = sink - (_u8 ? U8Offset : _fp8 ? Fp8Offset : 0f);

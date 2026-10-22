@@ -62,6 +62,7 @@ For a visible pair the score is computed in this order; the order is part of the
 is `m + ln Σ exp(s − m)` in natural-log units, sinks included.
 
 A **fully excluded row** (no visible key and no sink) produces `o = 0` and `LSE = −∞`, on every backend.
+A `−∞` sink is no sink; a `+∞` sink makes the row's output and LSE NaN.
 
 **NaN propagates.** An output element or LSE whose computation reads a NaN — in Q, K, V, a bias, a sink or a scale — is
 NaN. No kernel drops a NaN from a maximum or rounds one into a finite value; a quantized kernel may spread it further

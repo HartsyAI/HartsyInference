@@ -579,6 +579,22 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
             float[] o = c.Emulate(Base);
             for (int r = 0; r < 16; r++) Assert.Equal(70 + r >= 77, float.IsNaN(o[r * 64]));
         }
+
+        // A +∞ sink makes its row NaN (contract §3), whether the row sees keys or not, in the emulator and the oracle.
+        float[] excluded = Enumerable.Repeat(float.NegativeInfinity, 200).ToArray();
+        foreach (float[]? keyBias in (float[]?[])[null, excluded])
+        {
+            Int8V2Spec infSink = spec with { KeyBias = keyBias, Sinks = [float.PositiveInfinity, -2f] };
+            using Int8V2Case c = Int8V2Case.FromArrays(infSink, clean.Q, clean.K, clean.V);
+            float[] emulatedLse = new float[32], oracleLse = new float[32];
+            float[] o = c.Emulate(Base, emulatedLse), expected = c.Oracle(oracleLse);
+            bool[] head0 = [.. Enumerable.Range(0, o.Length).Select(i => i < 16 * 64)];
+            bool[] head0Lse = [.. Enumerable.Range(0, 32).Select(i => i < 16)];
+            Assert.Equal(head0, o.Select(float.IsNaN));
+            Assert.Equal(head0, expected.Select(float.IsNaN));
+            Assert.Equal(head0Lse, emulatedLse.Select(float.IsNaN));
+            Assert.Equal(head0Lse, oracleLse.Select(float.IsNaN));
+        }
     }
 
     [Fact]
@@ -606,9 +622,18 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
             Id = "bias-shapes", Sq = 4, Skv = 200, HeadDim = 64, Fill = Int8V2Fill.Uniform, SampledRows = 0,
         });
         using Tensor rank1 = new(new TensorShape(200), DType.F32), shortKeys = new(new TensorShape(1, 1, 1, 199), DType.F32);
-        Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.Run(c.Call with { Mask = AttentionMask.Additive(rank1) }, Base));
-        Assert.Throws<ArgumentException>(() =>
-            Int8AttentionV2Reference.Run(c.Call with { Mask = AttentionMask.Additive(shortKeys) }, Base));
+        using Tensor half = new(new TensorShape(1, 1, 1, 200), DType.F16);
+        foreach (Tensor misfit in (Tensor[])[rank1, shortKeys])
+        {
+            AttentionCall call = c.Call with { Mask = AttentionMask.Additive(misfit) };
+            Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.Run(call, Base));
+            Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.ClassifyTile(call, 0, 0, 0, 4, 0, 128));
+        }
+        AttentionCall halfBias = c.Call with { Mask = AttentionMask.Additive(half) };
+        Assert.Throws<AttentionUnsupportedException>(() =>
+            Int8AttentionV2Reference.ClassifyTile(halfBias, 0, 0, 0, 4, 0, 128));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Int8AttentionV2Reference.ClassifyTile(c.Call, 0, 1, 0, 4, 0, 128));
 
         // A bias broadcast over the keys is one element for every key; a constant leaves the softmax where it was.
         using Tensor broadcast = new(new TensorShape(1, 1, 1, 1), DType.F32);
@@ -648,9 +673,11 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
     {
         using Int8V2Case c = Int8V2Case.Create(new Int8V2Spec { Id = "refusals", Sq = 4, Skv = 8, HeadDim = 64, SampledRows = 0 });
         AttentionCall call = c.Call;
-        using Tensor slopes = new(new TensorShape(1), DType.F32);
+        using Tensor slopes = new(new TensorShape(1), DType.F32), halfSinks = new(new TensorShape(1), DType.F16);
         using Tensor perQuery = new(new TensorShape(1, 1, 4, 8), DType.F32);
         Assert.Throws<AttentionUnsupportedException>(() => Int8AttentionV2Reference.Run(call with { Logits = new(0f, null, slopes) }, Base));
+        Assert.Throws<AttentionUnsupportedException>(() =>
+            Int8AttentionV2Reference.Run(call with { Logits = new(0f, halfSinks, null) }, Base));
         Assert.Throws<AttentionUnsupportedException>(() => Int8AttentionV2Reference.Run(call with { Mask = AttentionMask.Additive(perQuery) }, Base));
         Assert.Throws<AttentionUnsupportedException>(() =>
             Int8AttentionV2Reference.Run(call with { Positions = AttentionPositions.Device(1, 8, 0) }, Base));

@@ -111,6 +111,18 @@ public sealed unsafe class AttentionHostReferenceTests
             softcap: 0f, sink: sink, slidingWindow: 0, alibiSlopes: null), lse);
         for (int i = 0; i < 12; i++) Assert.True(float.IsNaN(op[i]));
         Assert.All(lse, x => Assert.True(float.IsNaN(x)));
+
+        // A +∞ sink makes the row NaN whether or not it sees a key (contract §3).
+        ((float*)sink.DataPointer)[0] = float.PositiveInfinity;
+        foreach (int kvLen in (int[])[5, 0])
+        {
+            new Span<float>(op, 12).Clear();
+            Array.Clear(lse);
+            AttentionHostReference.Run(AttentionCall.FromFlashAttention(o, q, k, v, kvLen, causal: false, qOffset: 0,
+                scale: 0.5f, softcap: 0f, sink: sink, slidingWindow: 0, alibiSlopes: null), lse);
+            for (int i = 0; i < 12; i++) Assert.True(float.IsNaN(op[i]), $"kvLen {kvLen}, element {i}");
+            Assert.All(lse, x => Assert.True(float.IsNaN(x)));
+        }
     }
 
     [Fact]

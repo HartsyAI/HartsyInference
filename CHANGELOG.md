@@ -15,7 +15,8 @@ stable release will require. Dates are UTC.
   the contract oracle, which can now return the LSE.
 - **Changed: attention's NaN policy is written down.** A NaN that a row's output reads makes that output NaN (contract §3).
   The host reference, which the CPU backend runs for calls no legacy entry carries, returned zeros for a row whose every
-  score was NaN, or that saw no key and had a NaN sink; it now returns NaN. Finite inputs are unaffected.
+  score was NaN, that saw no key and had a NaN sink, or that had a +∞ sink; it now returns NaN. Finite inputs are
+  unaffected.
 - **Faster: Wan's denoise step.** Each block's text cross-attention keys and values are projected once per prompt per
   generation and kept on the device, instead of re-projecting the 512 context rows on every step; the cache is pinned
   per backend, released when the denoise loop ends, and off when the DiT streams or VRAM is short. Self-attention casts

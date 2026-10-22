@@ -68,7 +68,7 @@ public sealed record Int8AttentionV2Options
     /// <summary>Seed of the stochastic rounding hash.</summary>
     public uint RoundingSeed { get; init; }
 
-    /// <summary>The recurrence's exp2, null for a correctly rounded one; a kernel test replays the hardware's.</summary>
+    /// <summary>The recurrence's exp2, null for double exp2 narrowed to F32; a kernel test replays the GPU's.</summary>
     public Func<float, float>? Exp2 { get; init; }
 
     /// <summary>Key segments: one, or one plus <see cref="KeySegmentStarts"/> when keys are smoothed.</summary>
