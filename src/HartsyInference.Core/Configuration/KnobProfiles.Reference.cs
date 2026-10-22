@@ -81,6 +81,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.SdpaF16, false)
         // Kill-switch: true disables the F16 SDPA path everywhere, including callers that opt in via allowF16.
         .With(EngineKnobs.SdpaNoF16, true)
+        // Kill-switch: the F32 SDPA GEMMs run TF32 whatever noTf32 says; true runs them in plain FP32.
+        .With(EngineKnobs.SdpaNoTf32, true)
         // Builds the SeedVR2 VAE with F32 activations instead of the default CUDA BF16.
         .With(EngineKnobs.Seedvr2VaeF32, true)
         // The speculative verify pass recomputes logits with multi-row GEMMs, so an accepted token's argmax can differ from m=1 decode.

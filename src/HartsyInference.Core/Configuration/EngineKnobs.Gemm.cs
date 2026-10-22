@@ -57,6 +57,12 @@ public static partial class EngineKnobs
         Bool("numerics.noTf32", false, KnobScope.Runtime, KnobDomain.Numerics,
             "Opts out of TF32 tensor-core math for F32 GEMMs on Ampere+, where it is on by default.");
 
+    /// <summary>Runs CUDA's F32 attention GEMMs (the materialized and query-tiled SDPA paths) in plain FP32 instead of TF32;
+    /// <c>numerics.noTf32</c> does not reach them.</summary>
+    public static readonly Knob<bool> SdpaNoTf32 =
+        Bool("numerics.sdpaNoTf32", false, KnobScope.Construction, KnobDomain.Numerics,
+            "Runs CUDA's F32 attention GEMMs in plain FP32 instead of TF32: the exact attention arm.");
+
     /// <summary>Enables the fast F16 GEMM path on Ampere+.</summary>
     public static readonly Knob<bool> GemmF16 =
         Bool("numerics.gemmF16", false, KnobScope.Runtime, KnobDomain.Numerics,

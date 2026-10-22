@@ -1160,6 +1160,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private readonly bool _sdpaF16ForceOn;
     /// <summary>numerics.sdpaNoF16=true: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
     private readonly bool _sdpaF16Disabled;
+    /// <summary>numerics.sdpaNoTf32=true: the F32 SDPA GEMMs (materialized and query-tiled) run plain FP32, not TF32.</summary>
+    private readonly bool _sdpaNoTf32;
     /// <summary>Routes MHA (D∈{64,128,256}, no mask or broadcastable F32 mask) through cuDNN's fused attention, not materialized cuBLAS.</summary>
     /// <remarks>~34× on the Krea2 self-attention shape. Standard-profile default ON; numerics.sdpaCudnn=false disables.
     /// Missing cuDNN or engine rejections fall back to the materialized paths automatically.</remarks>
@@ -1188,6 +1190,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (_gemmFast16) return CublasApi.CUBLAS_COMPUTE_32F_FAST_16F;
         return _allowTf32 ? CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32 : CublasApi.CUBLAS_COMPUTE_32F;
     }
+
+    /// <summary>Compute type of the F32 SDPA GEMMs: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
+    private int SdpaF32Compute => _sdpaNoTf32 ? CublasApi.CUBLAS_COMPUTE_32F : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
 
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
@@ -1261,6 +1266,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
         _sdpaF16ForceOn = EngineKnobs.SdpaF16.Value;
         _sdpaF16Disabled = EngineKnobs.SdpaNoF16.Value;
+        _sdpaNoTf32 = EngineKnobs.SdpaNoTf32.Value;
         // cuDNN fused flash attention: default ON — resolution failures self-disable per session (and engine
         // rejections per head-dim), falling back to the materialized paths, so machines without cuDNN lose
         // speed, never correctness.
@@ -1286,7 +1292,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             + $"NativeFp4Gemm={EnableNativeFp4Gemm} MempoolKeep={mempoolKeep} " +
             $"EpilogueFusion={EnableEpilogueFusion} Dp4aGemv={EnableDp4aGemv} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
-            $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
+            $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32} Tf32Sdpa={!_sdpaNoTf32}.");
 
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();
         CublasApi.cublasSetStream(_cublasHandle, _stream.Handle).ThrowOnCublasError();
@@ -7423,8 +7429,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else
             {
-                // F32 QK^T via TF32 tensor cores (~8x over FP32 CUDA cores). TF32 keeps the F32
-                // exponent range, so raw pre-softmax scores can't overflow the way F16 would.
+                // F32 QK^T in SdpaF32Compute. TF32 keeps the F32 exponent range, so raw pre-softmax scores can't
+                // overflow the way F16 would.
                 CublasApi.cublasGemmStridedBatchedEx(
                     _cublasHandle,
                     CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
@@ -7435,7 +7441,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     &beta,
                     scoresBuf, CublasApi.CUDA_R_32F, (int)skv, strideScores,
                     (int)totalHeads,
-                    CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
             if (mask is not null)
@@ -7490,7 +7496,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else
             {
-                // attn_weights @ V via TF32 tensor cores (~8x over FP32 CUDA cores).
                 CublasApi.cublasGemmStridedBatchedEx(
                     _cublasHandle,
                     CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
@@ -7501,7 +7506,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     &zero,
                     opOut, CublasApi.CUDA_R_32F, (int)d, strideOut,
                     (int)totalHeads,
-                    CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
             // If we did the BF16 internal-cast detour, the output is F32 in pOutCast — cast
@@ -8021,7 +8026,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Query-tiled SDPA for plain F32/no-mask/MHA; materializes a <c>[totalHeads, Br, Skv]</c> tile at a time (Wan self-attn).</summary>
     /// <remarks>Never materializes the full <c>[totalHeads, Sq, Skv]</c> matrix (24×14040²×4B ≈ 19 GB). Each tile
-    /// reuses the same TF32 tensor-core QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, so
+    /// reuses the same QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, so
     /// results are numerically identical to the plain path. <c>Br</c> is sized to a quarter of free VRAM
     /// (override: <c>numerics.sdpaTile</c>).</remarks>
     private unsafe void SdpaTiledF32(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
@@ -8158,7 +8163,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 long curBr = Math.Min(Br, sq - q0);
                 long tileStride = curBr * skv;   // per-head stride within the (packed) tile score buffer
 
-                // QK^T per head: scores[curBr, Skv] = scale · Q[q0:q0+curBr] · Kᵀ  (TF32 tensor cores)
+                // QK^T per head: scores[curBr, Skv] = scale · Q[q0:q0+curBr] · Kᵀ
                 for (long bh = 0; bh < totalHeads; bh++)
                 {
                     ulong qPtr = pQ + (ulong)((bh * strideQ + q0 * d) * sizeof(float));
@@ -8173,7 +8178,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         qPtr, CublasApi.CUDA_R_32F, (int)d,
                         &beta,
                         sPtr, CublasApi.CUDA_R_32F, (int)skv,
-                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
 
                 // A key-only additive bias needs no [Sq,Skv] duplicate — one rank-1 accumulate covers a whole
@@ -8193,7 +8198,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
                 _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * curBr), _stream.Handle);
 
-                // scores·V per head → out[q0:q0+curBr]  (TF32 tensor cores)
+                // scores·V per head → out[q0:q0+curBr]
                 for (long bh = 0; bh < totalHeads; bh++)
                 {
                     ulong sPtr = scoresBuf + (ulong)(bh * tileStride * sizeof(float));
@@ -8208,7 +8213,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         sPtr, CublasApi.CUDA_R_32F, (int)skv,
                         &zero,
                         oPtr, CublasApi.CUDA_R_32F, (int)d,
-                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
             }
             Interlocked.Increment(ref _sdpaTiledExecutionCount);
