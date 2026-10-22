@@ -47,6 +47,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// host-RAM-starvation failure can't be reproduced on demand in a fast unit test. Null in production.</remarks>
     internal Func<CudnnSdpaSignature, Exception?>? TestCudnnSdpaFaultInjector { get; set; }
 
+    /// <summary>Test-only stand-in for the free VRAM the attention rows budget against (the tiled gate, the BF16 cast scratch);
+    /// null in production.</summary>
+    internal Func<nuint>? TestFreeVramOverride { get; set; }
+
     /// <summary>Per-dim diagnostic snapshot for <see cref="TryCudnnSdpa"/>'s classify/retry/backoff state.</summary>
     /// <remarks>Programmatically queryable observability surface (deliberately not wired into <c>/ready</c>: a
     /// degraded-but-correct fallback to the materialized attention path is not a "can't serve traffic" condition,
@@ -7739,10 +7743,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     internal static bool MaskIsKeyOnly(Tensor? mask, long sq)
         => mask is not null && mask.DType == DType.F32 && sq > 1 && MaskQueryRows(mask) == 1;
 
-    /// <summary>cuDNN fused attention over the call's operand views: fp16/bf16 run in place, F32 (whole tensors only) through a saturating F16 cast. False means the caller falls through.</summary>
-    private unsafe bool TryCudnnSdpa(in AttentionCall c)
+    /// <summary>cuDNN fused attention over the call's operand views: fp16/bf16 run in place, F32 (whole tensors only) behind a cast to
+    /// <paramref name="castTarget"/>, saturating F16 or BF16. False means the caller falls through.</summary>
+    private unsafe bool TryCudnnSdpa(in AttentionCall c, CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16)
         => TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, c.QkHeadDim,
-            CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c));
+            CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c),
+            castTarget);
 
     /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit in half of free VRAM (cuMemGetInfo counts pool reservations as used).</summary>
     private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
@@ -7779,7 +7785,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>The view form: the operands' dims and strides come from the caller, so a rank-2 token-major tensor or a column of a wider one reads the same as a whole head-major one.</summary>
     private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, long d,
-        in CudnnSdpa.View q, in CudnnSdpa.View k, in CudnnSdpa.View v, in CudnnSdpa.View o, in CudnnSdpa.Offsets offsets)
+        in CudnnSdpa.View q, in CudnnSdpa.View k, in CudnnSdpa.View v, in CudnnSdpa.View o, in CudnnSdpa.Offsets offsets,
+        CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16)
     {
         lock (_cudnnSdpaLock)
         {
@@ -7788,11 +7795,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // Callers perform this check before entering, but another request can publish a failure while this
             // request waits for the shared cuDNN handle. Recheck under the same lock that serializes attempts so
             // a queued request cannot bypass a newly established backoff window.
-            // An F32 Q/K/V needs the saturating cast; without it (kv_scatter_f16.ptx missing) the materialized path keeps the call.
-            if (_cudnnSdpaDead || (query.DType != DType.F16 && query.DType != DType.BF16 && _kernels is not { HasCastF32ToF16Sat: true })
+            // An F32 Q/K/V cast to F16 needs the saturating cast; without it (kv_scatter_f16.ptx missing) the materialized path keeps the call.
+            if (_cudnnSdpaDead
+                || (query.DType == DType.F32 && castTarget != CudnnSdpa.SdpaDtype.BF16 && _kernels is not { HasCastF32ToF16Sat: true })
                 || !CudnnBias.TryFrom(mask, q.B, q.H, q.S, k.S, out CudnnBias bias))
                 return false;
-            CudnnSdpaSignature signature = CudnnSdpaSignature.For(query.DType, q.H, k.H, d, bias, CudnnSdpa.IsStrided(d, q, k, v, o, offsets));
+            CudnnSdpaSignature signature = CudnnSdpaSignature.For(CudnnSdpaRows.Compute(query.DType, castTarget), q.H, k.H, d, bias,
+                CudnnSdpa.IsStrided(d, q, k, v, o, offsets));
             if (!_cudnnSdpaHealth.Eligible(signature, Environment.TickCount64)) return false;
 
             return TryCudnnSdpaLocked(output, query, key, value, mask, scale, CudnnSdpa.PlanKey.Of(signature.Dtype, d, q, k, v, o, bias), offsets, signature);
@@ -7803,7 +7812,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
         in CudnnSdpa.PlanKey plan, in CudnnSdpa.Offsets offsets, CudnnSdpaSignature signature)
     {
-        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qCast = 0, kCast = 0, vCast = 0, oCast = 0;
         bool cachedOutput = false;
         CudnnSdpaShape shape = new(signature, query.DType, plan);
         if (_cudnnSdpaHealth.Refused(shape)) return false;
@@ -7838,18 +7847,27 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else
             {
-                qF16 = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
-                kF16 = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
-                vF16 = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
-                oF16 = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
-                // Saturating cast: a Q/K/V value past F16's 65504 becomes the limit, not infinity, before the fused softmax sees it.
-                _kernels!.LaunchCastF32ToF16Sat(qF16, pQ, (int)query.ElementCount, _stream.Handle);
-                _kernels!.LaunchCastF32ToF16Sat(kF16, pK, (int)key.ElementCount, _stream.Handle);
-                _kernels!.LaunchCastF32ToF16Sat(vF16, pV, (int)value.ElementCount, _stream.Handle);
-
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, plan, scale, pMask, offsets);
-
-                _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
+                qCast = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
+                kCast = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
+                vCast = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
+                oCast = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
+                if (plan.Dtype == CudnnSdpa.SdpaDtype.BF16)
+                {
+                    _kernels!.LaunchCastF32ToBf16(qCast, pQ, (int)query.ElementCount, _stream.Handle);
+                    _kernels!.LaunchCastF32ToBf16(kCast, pK, (int)key.ElementCount, _stream.Handle);
+                    _kernels!.LaunchCastF32ToBf16(vCast, pV, (int)value.ElementCount, _stream.Handle);
+                    _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
+                    _kernels!.LaunchCastBf16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
+                }
+                else
+                {
+                    // Saturating cast: a Q/K/V value past F16's 65504 becomes the limit, not infinity, before the fused softmax sees it.
+                    _kernels!.LaunchCastF32ToF16Sat(qCast, pQ, (int)query.ElementCount, _stream.Handle);
+                    _kernels!.LaunchCastF32ToF16Sat(kCast, pK, (int)key.ElementCount, _stream.Handle);
+                    _kernels!.LaunchCastF32ToF16Sat(vCast, pV, (int)value.ElementCount, _stream.Handle);
+                    _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
+                    _kernels!.LaunchCastF16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
+                }
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -7920,10 +7938,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GpuTransferHelper.FreeDevice(pV);
             if (pMask != 0) GpuTransferHelper.FreeDevice(pMask);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            if (qF16 != 0) CudaMemory.FreeAsync(qF16, _stream.Handle);
-            if (kF16 != 0) CudaMemory.FreeAsync(kF16, _stream.Handle);
-            if (vF16 != 0) CudaMemory.FreeAsync(vF16, _stream.Handle);
-            if (oF16 != 0) CudaMemory.FreeAsync(oF16, _stream.Handle);
+            if (qCast != 0) CudaMemory.FreeAsync(qCast, _stream.Handle);
+            if (kCast != 0) CudaMemory.FreeAsync(kCast, _stream.Handle);
+            if (vCast != 0) CudaMemory.FreeAsync(vCast, _stream.Handle);
+            if (oCast != 0) CudaMemory.FreeAsync(oCast, _stream.Handle);
         }
     }
 
