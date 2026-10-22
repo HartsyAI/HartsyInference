@@ -51,11 +51,17 @@ internal static class RecipeRequestMapper
         return mu;
     }
 
-    /// <summary>The concrete pixel size for a pipeline that has to snap or clamp it; <c>ImagesService</c> fills width/height from the family's <see cref="ImageDefaults"/> before <c>Generate</c>, so the coalesce here only covers a directly-driven pipeline.</summary>
+    /// <summary>The concrete pixel size for a pipeline that has to snap or clamp it.</summary>
+    /// <exception cref="ArgumentException">The request was not resolved against its family's <see cref="ImageDefaults"/> first.</exception>
     public static (int Width, int Height) Size(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return (request.Width ?? ImageDefaults.Standard.Width!.Value, request.Height ?? ImageDefaults.Standard.Height!.Value);
+        if (request.Width is not int width || request.Height is not int height)
+        {
+            throw new ArgumentException("The image request has no size: resolve it against the family's ImageDefaults "
+                + "(ImagesService does) before handing it to a pipeline.", nameof(request));
+        }
+        return (width, height);
     }
 
     /// <summary>Builds the text-to-image core (prompt, size, seed, steps and guidance) from an already defaults-resolved request; families that also carry a scheduler, CLIP-skip, init noise or img2img fields layer them on with a record <c>with</c> expression.</summary>

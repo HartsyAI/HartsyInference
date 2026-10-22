@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Nf4;
 using HartsyInference.ModelAssets.Quant;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -114,6 +115,12 @@ public sealed partial class HfQuantCheckpoint : IDisposable
                     return GptqInt4Codec.Dequantize(qweight, scales, qzeros, gIdx, GptqGroupSize);
                 }
             }
+            case HfWeightStorage.Nf4:
+            {
+                Tensor decoded = DecodeNf4(w);
+                if (decoded.DType == DType.F32) return decoded;
+                using (decoded) return decoded.CastTo(DType.F32);
+            }
             default:
             {
                 using Tensor view = Borrow(name);
@@ -121,6 +128,24 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             }
         }
     }
+
+    private Tensor DecodeNf4(HfQuantWeight w)
+    {
+        Dictionary<string, Tensor> parts = new(StringComparer.Ordinal);
+        try
+        {
+            foreach (string key in Nf4Keys(w.SourceKey)) parts[key] = _set.GetTensor(key);
+            return Nf4CompanionFold.Apply(parts)[w.SourceKey];
+        }
+        finally
+        {
+            foreach (Tensor part in parts.Values) part.Dispose();
+        }
+    }
+
+    private IEnumerable<string> Nf4Keys(string module) =>
+        new[] { module, module + ".absmax", module + ".quant_map", module + ".nested_absmax", module + ".nested_quant_map",
+            module + Nf4CompanionFold.QuantStatePrefix + "nf4" }.Where(_set.Inventory.ContainsKey);
 
     /// <summary>The weight in <paramref name="target"/> dtype, a tensor the caller owns: a fresh view for a plain weight already in it,
     /// a bit-exact repack for a GPTQ weight to Q4_0, else a cast or quantization of the dequantized values. When
@@ -169,11 +194,48 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         return (_set.GetTensor($"{module}.qweight"), _set.GetTensor($"{module}.scales"), qzeros, gIdx);
     }
 
+    private HashSet<string> IndexNf4()
+    {
+        HashSet<string> consumed = new(StringComparer.Ordinal);
+        foreach (string key in _set.Inventory.Keys)
+        {
+            int marker = key.IndexOf(Nf4CompanionFold.QuantStatePrefix, StringComparison.Ordinal);
+            if (marker < 0) continue;
+            string module = key[..marker];
+            string quantType = key[(marker + Nf4CompanionFold.QuantStatePrefix.Length)..];
+            if (!string.Equals(quantType, "nf4", StringComparison.Ordinal))
+            {
+                throw new NotSupportedException($"'{module}' is bitsandbytes '{quantType}', not nf4. Only NF4 4-bit checkpoints are read.");
+            }
+            if (!_set.Inventory.ContainsKey(module))
+            {
+                throw new InvalidDataException($"'{key}' has a quant state but no weight tensor '{module}'.");
+            }
+            RequireCompanion(module + ".absmax", module);
+            RequireCompanion(module + ".quant_map", module);
+            TensorShape shape;
+            using (Tensor state = _set.GetTensor(key))
+            {
+                shape = Nf4CompanionFold.ReadShape(state, key);
+            }
+            long packedBytes = _set.Inventory[module].Shape.ElementCount;
+            long expectedBytes = (shape.ElementCount + 1) / 2;
+            if (packedBytes != expectedBytes)
+            {
+                throw new InvalidDataException($"'{module}' holds {packedBytes} NF4 bytes; its quant state's shape {shape} needs {expectedBytes}.");
+            }
+            Add(new HfQuantWeight(module, shape, HfWeightStorage.Nf4, DType.U8, module));
+            foreach (string part in Nf4Keys(module)) consumed.Add(part);
+        }
+        return consumed;
+    }
+
     private void Index()
     {
+        HashSet<string> nf4Parts = IndexNf4();
         foreach ((string key, TensorLocation location) in _set.Inventory)
         {
-            if (key.EndsWith("_scale_inv", StringComparison.Ordinal) || key.EndsWith(".scales", StringComparison.Ordinal)
+            if (nf4Parts.Contains(key) || key.EndsWith("_scale_inv", StringComparison.Ordinal) || key.EndsWith(".scales", StringComparison.Ordinal)
                 || key.EndsWith(".qzeros", StringComparison.Ordinal) || key.EndsWith(".g_idx", StringComparison.Ordinal))
             {
                 continue;

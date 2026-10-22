@@ -41,9 +41,8 @@ public interface IArchitectureRecipe
     Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
-    /// left null. The generic 20-step / CFG-7.5 fallback keeps a recipe that has not declared its own numbers working;
-    /// variant-dependent families refine it further via <see cref="IRecipePipeline.VariantDefaults"/>.</summary>
-    ImageDefaults Defaults => ImageDefaults.Standard;
+    /// left null. Every recipe declares its own; there is no generic fallback.</summary>
+    ImageDefaults Defaults { get; }
 
     /// <summary>The variants this family ships whose weights alone may not tell them apart; null when it has one.</summary>
     ModelVariantCatalog? Variants => null;

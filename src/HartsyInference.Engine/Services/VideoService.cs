@@ -34,6 +34,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     };
 
     /// <inheritdoc/>
+    /// <exception cref="RecipeNotRegisteredException">The model's family has no video recipe, so there is nothing to plan with.</exception>
     public async Task<VideoPlan> PlanAsync(ModelSpec spec, VideoRequest request, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(spec);
@@ -52,11 +53,6 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             SourceRequest = request,
             RequestBinding = binding,
         };
-        plan = ApplyRegisteredVideoFamilyCheck(plan, familyId);
-        if (plan.Issues.Any(issue => issue.Code == "video.family.unregistered"))
-        {
-            return VideoRequestExecutionBinding.BindPlan(plan);
-        }
         plan = ApplyH3VsaReleaseGate(plan);
         plan = ApplyH3ExpansionReleaseGate(plan, plannedRequest);
         if (!plan.IsValid)
@@ -110,32 +106,6 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             plan = plan with { Issues = issues };
         }
         return VideoRequestExecutionBinding.BindPlan(plan);
-    }
-
-    /// <summary>Rejects families that can be identified but have no video execution recipe. This uses the exact
-    /// checkpoint-aware family id selected by <see cref="ModelCapabilities.VideoFamilyIdFor"/> and only inspects
-    /// the recipe registry; it never constructs a pipeline, backend, or model weights.</summary>
-    internal static VideoPlan ApplyRegisteredVideoFamilyCheck(VideoPlan plan, string familyId)
-    {
-        ArgumentNullException.ThrowIfNull(plan);
-        ArgumentException.ThrowIfNullOrWhiteSpace(familyId);
-        if (VideoRecipeRegistry.Resolve(familyId) is not null)
-        {
-            return plan;
-        }
-
-        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues)
-        {
-            new VideoPlanIssue
-            {
-                Code = "video.family.unregistered",
-                Severity = VideoPlanIssueSeverity.Error,
-                Message = $"Video model family '{familyId}' has no registered video recipe. "
-                    + $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.",
-                Field = nameof(ModelSpec.Requested),
-            },
-        };
-        return plan with { Issues = issues };
     }
 
     /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.

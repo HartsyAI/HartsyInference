@@ -113,8 +113,15 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 
+    // Fps is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
     /// <summary>Wan's official sampling settings: 50 steps at guidance 5.0, 832x480 ("480p"), 33 frames — the resolution/frame-count every <c>WanVariant_Gpu_E2E</c> 480p test verifies coherent at (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f, Width = 832, Height = 480, Frames = 33 };
+    public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 50, CfgScale = 5.0f, Width = 832, Height = 480, Frames = 33, Fps = 25,
+    };
+
+    /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new WanVideoConfig().VaeTemporalCompression, FrameNormalization.SnapNearest) };
 
     /// <inheritdoc/>
     /// <inheritdoc/>

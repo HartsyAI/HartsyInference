@@ -144,10 +144,12 @@ internal sealed class CheckpointMemoryProfile
         int defaultFrames = 1;
         if (video)
         {
-            IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(familyId);
-            capabilities = recipe?.MemorySupports ?? MemoryCapabilities.None;
-            model = recipe?.DescribeMemory(representative);
-            defaultFrames = ModelCapabilities.VideoDefaultsFor(spec).Frames ?? VideoDefaults.Standard.Frames ?? 1;
+            // An unregistered family has no frame count to size activations for; estimating one would route on fiction.
+            IVideoRecipe recipe = VideoRecipeRegistry.Resolve(familyId)
+                ?? throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
+            capabilities = recipe.MemorySupports;
+            model = recipe.DescribeMemory(representative);
+            defaultFrames = ModelCapabilities.VideoDefaultsFor(spec).Frames;
         }
         else
         {

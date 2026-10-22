@@ -19,7 +19,10 @@ namespace HartsyInference.ModelAssets.Nf4;
 public static class Nf4CompanionFold
 {
     /// <summary>Suffix bitsandbytes gives the serialized non-tensor quant state, one per quantized weight.</summary>
-    private const string QuantStatePrefix = ".quant_state.bitsandbytes__";
+    public const string QuantStatePrefix = ".quant_state.bitsandbytes__";
+
+    /// <summary>The logical shape a bitsandbytes quant state blob declares for its weight.</summary>
+    public static TensorShape ReadShape(Tensor stateBlob, string stateKey) => Nf4QuantState.Parse(stateBlob, stateKey).Shape;
 
     /// <summary>Returns a dictionary with every NF4 weight dequantized and its companions removed; the input is returned unchanged when the checkpoint holds none.</summary>
     /// <param name="allocated">Receives each decoded weight as it is created, so a caller can free what was built

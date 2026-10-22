@@ -449,9 +449,7 @@ public sealed class InferenceEngine : IInferenceEngine
     {
         string familyId = ResolveFamilyId(spec);
         return RecipeRegistry.Resolve(familyId)
-            ?? throw new NotSupportedException(
-                $"Model family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
-                $"Currently drivable: {string.Join(", ", RecipeRegistry.RegisteredNames)}.");
+            ?? throw new RecipeNotRegisteredException(Modality.Image, familyId, RecipeRegistry.RegisteredNames);
     }
 
     /// <summary>Resolves the video recipe for <paramref name="spec"/> and constructs (or returns a cached) pipeline.
@@ -469,9 +467,7 @@ public sealed class InferenceEngine : IInferenceEngine
         string familyId = ModelCapabilities.VideoFamilyIdFor(spec);
         (IVideoRecipe? resolvedRecipe, ResolvedModelVariant? variant) = ModelCapabilities.ResolveVideo(spec);
         IVideoRecipe recipe = resolvedRecipe
-            ?? throw new NotSupportedException(
-                $"Video family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
-                $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.");
+            ?? throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
         string planKey = plan is null ? "" : plan.CacheIdentity;
         string key = $"video-recipe:{spec.LocalPath}|{planKey}{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))

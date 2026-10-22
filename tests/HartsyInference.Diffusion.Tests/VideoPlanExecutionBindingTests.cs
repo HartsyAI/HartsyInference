@@ -158,6 +158,16 @@ public sealed class VideoPlanExecutionBindingTests
     {
         public string Name { get; } = name;
 
+        public VideoDefaults Defaults { get; } = new VideoDefaults
+        {
+            Steps = 30, CfgScale = 6.0f, Width = 704, Height = 480, Frames = 25, Fps = 25,
+        };
+
+        public VideoConstraints Constraints { get; } = new VideoConstraints
+        {
+            Frames = FrameGrid.StepPlusOne(4, FrameNormalization.SnapNearest),
+        };
+
         public int ConstructCalls { get; private set; }
 
         public TrackingPipeline Pipeline { get; } = new TrackingPipeline();

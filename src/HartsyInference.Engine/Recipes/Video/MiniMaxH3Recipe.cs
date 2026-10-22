@@ -73,6 +73,13 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         new VideoDefaults { Steps = 30, CfgScale = 1.0f, Width = 1344, Height = 768, Frames = 124, Fps = 24 };
 
     /// <inheritdoc/>
+    /// <remarks>Frames sit on the VAE's 17k+5 grid and a generation's length snaps up (<see cref="MiniMaxH3Geometry.AlignFrameCount"/>).</remarks>
+    public VideoConstraints Constraints { get; } = new VideoConstraints
+    {
+        Frames = new FrameGrid(17, 5, FrameNormalization.SnapUp),
+    };
+
+    /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.DitSharding | MemoryCapabilities.CfgParallel
         | MemoryCapabilities.ContextParallel | MemoryCapabilities.ComponentPlacement
         | MemoryCapabilities.PhaseUnload | MemoryCapabilities.Chunking;
