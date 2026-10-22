@@ -413,6 +413,62 @@ struct V2Smem
     static constexpr unsigned Total = KBytes + VBytes + 16 + V2_D * 4;
 };
 
+// u8 P of one tile for a lane's two rows: exp2(score − tm) rounded half to even, packed as the PV A fragment, and each row's
+// byte sum. MASKED (the tail tile) drops keys whose product was replaced by V2_INT_MIN.
+template<bool MASKED>
+__device__ __forceinline__ void v2_u8_probabilities(const int (&s)[16][4], float f0, float f1, float tm0, float tm1,
+    unsigned (&pa)[4][4], unsigned& sum0, unsigned& sum1)
+{
+    #pragma unroll
+    for (unsigned kc = 0; kc < 4; kc++)
+    {
+        unsigned u[4][4];
+        #pragma unroll
+        for (unsigned n = 0; n < 4; n++)
+            #pragma unroll
+            for (unsigned e = 0; e < 4; e++)
+            {
+                const int x = s[4 * kc + n][e];
+                const float score = __fmul_rn(v2_i2f(x), e < 2 ? f0 : f1);
+                const unsigned bits = v2_u8_bits(v2_ex2(__fsub_rn(score, e < 2 ? tm0 : tm1)));
+                u[n][e] = MASKED && x == V2_INT_MIN ? 0u : bits;
+            }
+        pa[kc][0] = v2_pack_low_bytes(u[0][0], u[0][1], u[1][0], u[1][1]);
+        pa[kc][1] = v2_pack_low_bytes(u[0][2], u[0][3], u[1][2], u[1][3]);
+        pa[kc][2] = v2_pack_low_bytes(u[2][0], u[2][1], u[3][0], u[3][1]);
+        pa[kc][3] = v2_pack_low_bytes(u[2][2], u[2][3], u[3][2], u[3][3]);
+        sum0 = __dp4a(pa[kc][0], 0x01010101u, sum0);
+        sum0 = __dp4a(pa[kc][2], 0x01010101u, sum0);
+        sum1 = __dp4a(pa[kc][1], 0x01010101u, sum1);
+        sum1 = __dp4a(pa[kc][3], 0x01010101u, sum1);
+    }
+}
+
+// F16 P of one tile against the running maxima m0, m1, packed as eight m16n8k16 A fragments, and each row's sum.
+template<bool MASKED>
+__device__ __forceinline__ void v2_f16_probabilities(const int (&s)[16][4], float f0, float f1, float m0, float m1,
+    unsigned (&pa)[8][4], float& sum0, float& sum1)
+{
+    #pragma unroll
+    for (unsigned nt = 0; nt < 16; nt++)
+    {
+        __half p[4];
+        #pragma unroll
+        for (unsigned e = 0; e < 4; e++)
+        {
+            const int x = s[nt][e];
+            const __half h = __float2half_rn(v2_ex2(__fsub_rn(__fmul_rn(v2_i2f(x), e < 2 ? f0 : f1), e < 2 ? m0 : m1)));
+            p[e] = MASKED && x == V2_INT_MIN ? __float2half_rn(0.0f) : h;
+        }
+        sum0 += __half2float(p[0]) + __half2float(p[1]);
+        sum1 += __half2float(p[2]) + __half2float(p[3]);
+        const __half2 lo = __halves2half2(p[0], p[1]), hi = __halves2half2(p[2], p[3]);
+        // k16 chunk nt/2: a0/a1 hold n-tile 2kc, a2/a3 n-tile 2kc+1.
+        pa[nt >> 1][(nt & 1) * 2 + 0] = *(const unsigned*)&lo;
+        pa[nt >> 1][(nt & 1) * 2 + 1] = *(const unsigned*)&hi;
+    }
+}
+
 // One CTA attends BR query rows of one (b, h) over every key tile; warp w owns rows 16w..16w+15 and a lane rows g, g+8.
 // Pipeline per tile t, one K slot and one V slot: wait K(t) + barrier, issue V(t); QK; softmax; wait V(t) + barrier,
 // issue K(t+1); PV. V(t) streams in under QK and the softmax, K(t+1) under PV.
@@ -457,9 +513,9 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
     {
         const signed char* src = kh + (size_t)t * V2_BC * V2_D;
         #pragma unroll
-        for (unsigned i = threadIdx.x; i < V2_BC * 8; i += THREADS)
+        for (unsigned it = 0; it < V2_BC * 8 / THREADS; it++)
         {
-            const unsigned row = i >> 3, ch = i & 7;
+            const unsigned i = threadIdx.x + it * THREADS, row = i >> 3, ch = i & 7;
             v2_cp16(sK + row * V2_D + ((ch ^ (row & 7)) << 4), src + (size_t)row * V2_D + ch * 16);
         }
         if (threadIdx.x == 0) v2_cp16(sKs, kScale + ((size_t)bh * tiles + t) * 4);
@@ -471,9 +527,9 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
             // [128 ch][128 keys] halves: 16 chunks of 16 B per row, swizzled within each group of 8 chunks.
             const __half* src = (const __half*)v8 + (size_t)bh * V2_D * kvPad + (size_t)t * V2_BC;
             #pragma unroll
-            for (unsigned i = threadIdx.x; i < V2_D * 16; i += THREADS)
+            for (unsigned it = 0; it < V2_D * 16 / THREADS; it++)
             {
-                const unsigned row = i >> 4, ch = i & 15;
+                const unsigned i = threadIdx.x + it * THREADS, row = i >> 4, ch = i & 15;
                 v2_cp16(sV + row * 256 + (((ch & 8) | ((ch & 7) ^ (row & 7))) << 4), src + (size_t)row * kvPad + ch * 8);
             }
         }
@@ -481,9 +537,9 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
         {
             const signed char* src = (const signed char*)v8 + (size_t)bh * V2_D * kvPad + (size_t)t * V2_BC;
             #pragma unroll
-            for (unsigned i = threadIdx.x; i < V2_D * 8; i += THREADS)
+            for (unsigned it = 0; it < V2_D * 8 / THREADS; it++)
             {
-                const unsigned row = i >> 3, ch = i & 7;
+                const unsigned i = threadIdx.x + it * THREADS, row = i >> 3, ch = i & 7;
                 v2_cp16(sV + row * V2_BC + ((ch ^ (row & 7)) << 4), src + (size_t)row * kvPad + ch * 16);
             }
         }
@@ -572,35 +628,12 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
 
         unsigned pa[PV_F16 ? 8 : 4][4];
         float oScale0, oScale1, tileScale0, tileScale1;
-        if (!PV_F16)
+        if constexpr (!PV_F16)
         {
             const float tm0 = __fsub_rn(tileMax0, V2_U8_OFFSET), tm1 = __fsub_rn(tileMax1, V2_U8_OFFSET);
             unsigned sum0 = 0, sum1 = 0;
-            #pragma unroll
-            for (unsigned kc = 0; kc < 4; kc++)
-            {
-                unsigned u[4][4];
-                #pragma unroll
-                for (unsigned n = 0; n < 4; n++)
-                {
-                    const unsigned nt = 4 * kc + n;
-                    #pragma unroll
-                    for (unsigned e = 0; e < 4; e++)
-                    {
-                        const float sc = __fmul_rn(v2_i2f(s[nt][e]), e < 2 ? f0 : f1);
-                        const unsigned bits = v2_u8_bits(v2_ex2(__fsub_rn(sc, e < 2 ? tm0 : tm1)));
-                        u[n][e] = s[nt][e] == V2_INT_MIN ? 0u : bits;
-                    }
-                }
-                pa[kc][0] = v2_pack_low_bytes(u[0][0], u[0][1], u[1][0], u[1][1]);
-                pa[kc][1] = v2_pack_low_bytes(u[0][2], u[0][3], u[1][2], u[1][3]);
-                pa[kc][2] = v2_pack_low_bytes(u[2][0], u[2][1], u[3][0], u[3][1]);
-                pa[kc][3] = v2_pack_low_bytes(u[2][2], u[2][3], u[3][2], u[3][3]);
-                sum0 = __dp4a(pa[kc][0], 0x01010101u, sum0);
-                sum0 = __dp4a(pa[kc][2], 0x01010101u, sum0);
-                sum1 = __dp4a(pa[kc][1], 0x01010101u, sum1);
-                sum1 = __dp4a(pa[kc][3], 0x01010101u, sum1);
-            }
+            if (tail) v2_u8_probabilities<true>(s, f0, f1, tm0, tm1, pa, sum0, sum1);
+            else v2_u8_probabilities<false>(s, f0, f1, tm0, tm1, pa, sum0, sum1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 2);
             sum1 += __shfl_xor_sync(V2_FULL, sum1, 1);
@@ -649,23 +682,8 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
             m0 = next0;
             m1 = next1;
             float sum0 = 0.0f, sum1 = 0.0f;
-            #pragma unroll
-            for (unsigned nt = 0; nt < 16; nt++)
-            {
-                __half p[4];
-                #pragma unroll
-                for (unsigned e = 0; e < 4; e++)
-                {
-                    const float sc = __fmul_rn(v2_i2f(s[nt][e]), e < 2 ? f0 : f1);
-                    p[e] = s[nt][e] == V2_INT_MIN ? __float2half_rn(0.0f) : __float2half_rn(v2_ex2(__fsub_rn(sc, e < 2 ? m0 : m1)));
-                }
-                sum0 += __half2float(p[0]) + __half2float(p[1]);
-                sum1 += __half2float(p[2]) + __half2float(p[3]);
-                const __half2 lo = __halves2half2(p[0], p[1]), hi = __halves2half2(p[2], p[3]);
-                // k16 chunk nt/2: a0/a1 hold n-tile 2kc, a2/a3 n-tile 2kc+1.
-                pa[nt >> 1][(nt & 1) * 2 + 0] = *(const unsigned*)&lo;
-                pa[nt >> 1][(nt & 1) * 2 + 1] = *(const unsigned*)&hi;
-            }
+            if (tail) v2_f16_probabilities<true>(s, f0, f1, m0, m1, pa, sum0, sum1);
+            else v2_f16_probabilities<false>(s, f0, f1, m0, m1, pa, sum0, sum1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 1);
             sum0 += __shfl_xor_sync(V2_FULL, sum0, 2);
             sum1 += __shfl_xor_sync(V2_FULL, sum1, 1);
@@ -673,6 +691,11 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
             d0 = __fadd_rn(__fmul_rn(d0, oScale0), sum0);
             d1 = __fadd_rn(__fmul_rn(d1, oScale1), sum1);
             tileScale0 = tileScale1 = 1.0f;
+        }
+        // O·oScale before the drain is the emulator's FMA(partial, scale, O·oScale) bit for bit; most tiles leave every max
+        // in the warp unchanged, so the multiply is skipped warp-uniformly when no row moved.
+        if (__any_sync(V2_FULL, oScale0 != 1.0f || oScale1 != 1.0f))
+        {
             #pragma unroll
             for (unsigned dt = 0; dt < 16; dt++)
             {
@@ -690,7 +713,7 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
         for (unsigned dt = 0; dt < 16; dt++)
         {
             const unsigned c0 = dt * 8 + 2 * t4;
-            if (!PV_F16)
+            if constexpr (!PV_F16)
             {
                 int acc[4] = { 0, 0, 0, 0 };
                 #pragma unroll
@@ -715,10 +738,10 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
                     sc2 = __fmul_rn(tileScale1, vs.x);
                     sc3 = __fmul_rn(tileScale1, vs.y);
                 }
-                o[dt][0] = __fmaf_rn(v2_i2f(acc[0]), sc0, __fmul_rn(o[dt][0], oScale0));
-                o[dt][1] = __fmaf_rn(v2_i2f(acc[1]), sc1, __fmul_rn(o[dt][1], oScale0));
-                o[dt][2] = __fmaf_rn(v2_i2f(acc[2]), sc2, __fmul_rn(o[dt][2], oScale1));
-                o[dt][3] = __fmaf_rn(v2_i2f(acc[3]), sc3, __fmul_rn(o[dt][3], oScale1));
+                o[dt][0] = __fmaf_rn(v2_i2f(acc[0]), sc0, o[dt][0]);
+                o[dt][1] = __fmaf_rn(v2_i2f(acc[1]), sc1, o[dt][1]);
+                o[dt][2] = __fmaf_rn(v2_i2f(acc[2]), sc2, o[dt][2]);
+                o[dt][3] = __fmaf_rn(v2_i2f(acc[3]), sc3, o[dt][3]);
             }
             else
             {

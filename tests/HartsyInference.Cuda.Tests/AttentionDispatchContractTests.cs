@@ -38,6 +38,47 @@ public sealed class AttentionDispatchContractTests
     [InlineData(17480, 17480)]
     public void SageSkvPad_IsWholeRowsAndNeverALargePowerOfTwo(long skv, long expected) => Assert.Equal(expected, CudaKernels.SageSkvPad(skv));
 
+    /// <summary>INT8 v2's workspace: counters at the head for every shape, regions 256-byte aligned in order, V sized by format.</summary>
+    [Fact]
+    public void Int8V2Layout_KeepsTheCountersFirstAndSizesEveryRegion()
+    {
+        Int8AttentionV2Layout seq = new(1, 24, 8192, 8192, Int8AttentionV2Pv.U8SequenceScales);
+        Assert.Equal((64, 128, 8192L), (seq.Tiles, seq.Chunks, seq.KvPad));
+        Assert.Equal(Int8AttentionV2Layout.CounterSlots * 4L, seq.Q8);
+        long[] starts = [seq.Q8, seq.QScale, seq.K8, seq.KScale, seq.V8, seq.VScale, seq.KMean, seq.KPartial, seq.VPartial, seq.Bytes];
+        Assert.All(starts, x => Assert.Equal(0, x % 256));
+        Assert.Equal(starts.Order(), starts);
+        Assert.Equal(24L * 8192 * 128, seq.QScale - seq.Q8);
+        Assert.Equal(24L * 8192 * 128, seq.VScale - seq.V8);
+        Int8AttentionV2Layout tile = new(2, 3, 300, 333, Int8AttentionV2Pv.U8TileScales);
+        Assert.Equal((3, 6, 384L), (tile.Tiles, tile.Chunks, tile.KvPad));
+        Assert.Equal(tile.Bytes, tile.VPartial);
+        Assert.Equal(6L * 3 * 128 * 4, tile.KMean - tile.VScale);
+        Int8AttentionV2Layout f16 = new(1, 2, 100, 100, Int8AttentionV2Pv.F16);
+        Assert.Equal(2L * 128 * 128 * 2, f16.VScale - f16.V8);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new Int8AttentionV2Layout(1, Int8AttentionV2Layout.CounterSlots + 1, 8, 8,
+            Int8AttentionV2Pv.F16));
+    }
+
+    /// <summary>The V key permutation is a bijection on every 32-key chunk that puts a lane's two keys of four n-tiles (2t, 2t+1 of
+    /// n-tiles 0..3) at physical bytes 4t..4t+3 and 16+4t..16+4t+3, the m16n8k32 A-fragment the lane already holds.</summary>
+    [Fact]
+    public void Int8V2KeyPermutation_TurnsALanesAccumulatorsIntoItsAFragment()
+    {
+        for (int chunk = 0; chunk < 4; chunk++)
+        {
+            int[] physical = [.. Enumerable.Range(32 * chunk, 32).Select(Int8AttentionV2Layout.PhysicalKey)];
+            Assert.Equal(Enumerable.Range(32 * chunk, 32), physical.Order());
+        }
+        for (int t = 0; t < 4; t++)
+            for (int n = 0; n < 4; n++)
+                for (int e = 0; e < 2; e++)
+                {
+                    int key = 8 * n + 2 * t + e;
+                    Assert.Equal(16 * (n >> 1) + 4 * t + 2 * (n & 1) + e, Int8AttentionV2Layout.PhysicalKey(key));
+                }
+    }
+
     [Fact]
     public void SdpaContract_RejectsMismatchedBuffersAndMaskAxes()
     {

@@ -204,6 +204,10 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
   dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
   permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
+- CUDA's INT8 attention v2 rows (S.16 and M.4; the F16-PV fallback S.17 and M.5) run only with `numerics.int8AttnV2`:
+  unmasked, equal heads, head dim 128, F16 or F32 views with 16-byte aligned rows and an output covering its tensor,
+  both sequences at `numerics.int8AttnV2MinTokens`. They take F32 whatever `allowF16` says, the grouped token-major row
+  yields to them through its widening, and a call they take token-major is not kept head-major for Sage.
 - CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
   `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
   without a permission.

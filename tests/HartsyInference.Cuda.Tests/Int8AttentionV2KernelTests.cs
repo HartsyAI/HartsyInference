@@ -489,6 +489,33 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>Device time of the three launches at the CK parity shapes, for the record: stats, quant, attention.</summary>
+    [Trait("Category", "GpuBenchmark")]
+    [Theory]
+    [InlineData(4096, "seq", 64)]
+    [InlineData(8192, "seq", 64)]
+    [InlineData(8192, "tile", 64)]
+    [InlineData(8192, "seq", 128)]
+    [InlineData(12288, "tile", 64)]
+    public void StageTimes_AtCkParity(int tokens, string pvName, int blockRows)
+    {
+        if (!Open(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        TensorShape shape = new(1, 24, tokens, 128);
+        using Tensor q = new(shape, DType.F16), k = new(shape, DType.F16), v = new(shape, DType.F16), o = new(shape, DType.F16);
+        Random rng = new(5);
+        foreach (Tensor t in new[] { q, k, v })
+        {
+            Span<Half> span = t.AsSpan<Half>();
+            for (int i = 0; i < span.Length; i++) span[i] = (Half)(rng.NextDouble() * 2 - 1);
+        }
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.088f, false);
+        float[] ms = cuda.Int8V2StageTimesForTest(call, Pv(pvName), blockRows, 10);
+        double flops = 4.0 * 24 * tokens * (double)tokens * 128;
+        output.WriteLine($"{tokens} {pvName} BR{blockRows}: stats {ms[0]:F3} ms, quant {ms[1]:F3} ms, attention {ms[2]:F3} ms "
+            + $"({flops / (ms[2] * 1e-3) / 1e12:F1} TOPS kernel, {flops / (ms.Sum() * 1e-3) / 1e12:F1} TOPS total)");
+    }
+
     private static Tensor Host(TensorShape shape, float[] values)
     {
         Tensor t = new(shape, DType.F32);

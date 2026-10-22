@@ -646,10 +646,17 @@ public sealed partial class AttentionLayer
             ? backend.SupportsTokenMajorGqaAttention : backend.SupportsTokenMajorAttention);
 
     /// <summary>The CUDA head-major Sage row's admission (S.1, <c>CudaBackend.SageF16Preferred</c>), less the kernel check only the backend
-    /// can make; a change to either side must change the other.</summary>
+    /// can make; a change to either side must change the other. A call the token-major INT8 v2 row takes ahead of it stays token-major.</summary>
     private bool SageServesHeadMajor(int sq, int skv, DType act, Tensor? bias) =>
         act == DType.F16 && bias is null && _config.HeadDim is 64 or 128 && EngineKnobs.SageAttn.Value
-        && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value && (_config.RefusedFormats & AttentionFormats.Int8) == 0;
+        && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value && (_config.RefusedFormats & AttentionFormats.Int8) == 0
+        && !Int8V2ServesTokenMajor(sq, skv, bias);
+
+    /// <summary>The CUDA token-major INT8 v2 row's admission (M.4, <c>CudaBackend.Int8V2Admits</c>) for an F16 call, less what only the
+    /// backend can check; it reads token-major operands in place.</summary>
+    private bool Int8V2ServesTokenMajor(int sq, int skv, Tensor? bias) =>
+        EngineKnobs.Int8AttnV2.Value && bias is null && _config.HeadDim == 128 && _config.KvHeads == _config.Heads
+        && Math.Min(sq, skv) >= EngineKnobs.Int8AttnV2MinTokens.Value;
 
     private static Tensor Have(Tensor? norm) =>
         norm ?? throw new InvalidOperationException("This attention layer's weights have no norm for that projection.");

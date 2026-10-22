@@ -10,8 +10,9 @@ namespace HartsyInference.GpuBenchmarks.Attention;
 /// <param name="Expect">Kernel the arm exists to measure; a call that lands elsewhere is reported as not applicable
 /// rather than timed under the wrong name. Null means "whatever production dispatch picks".</param>
 /// <param name="Grant">Permissions the call carries through <see cref="IBackend.Attention"/>; null calls the legacy entry.</param>
+/// <param name="Configure">Run on the constructed backend, for settings that are not knobs (INT8 v2's tile height and PV format).</param>
 public sealed record AttentionArm(string Name, string Entry, DType Dtype, DType KvDtype, bool AllowF16, string? Expect,
-    Action Apply, string Description, AttentionNumerics? Grant = null);
+    Action Apply, string Description, AttentionNumerics? Grant = null, Action<IBackend>? Configure = null);
 
 /// <summary>The arm catalog the table runner times.</summary>
 /// <remarks>Arms set knobs before the backend is constructed: <c>sdpaCudnn</c>, <c>flashF16</c>, <c>sdpaF16</c> and
@@ -27,6 +28,8 @@ public static class AttentionArms
         () => KnobStore.Clear(EngineKnobs.Fa2Prefill), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
         () => KnobStore.Clear(EngineKnobs.FlashSplitOff), () => KnobStore.Clear(EngineKnobs.FlashSplitForce),
         () => KnobStore.Clear(EngineKnobs.Profile), () => KnobStore.Clear(EngineKnobs.ProfileShapes),
+        () => KnobStore.Clear(EngineKnobs.Int8AttnV2), () => KnobStore.Clear(EngineKnobs.Int8AttnV2VTile),
+        () => KnobStore.Clear(EngineKnobs.Int8AttnV2MinTokens),
     ];
 
     /// <summary>Knob ids whose provenance is printed with every row, so a settings-file override cannot pass as a default.</summary>
@@ -35,7 +38,10 @@ public static class AttentionArms
         EngineKnobs.SageAttn.Id, EngineKnobs.SdpaCudnn.Id, EngineKnobs.FlashF16.Id, EngineKnobs.SageF16MinSkv.Id,
         EngineKnobs.SdpaForceTiled.Id, EngineKnobs.SdpaF16.Id, EngineKnobs.SdpaNoF16.Id, EngineKnobs.NoTf32.Id,
         EngineKnobs.Fa2Prefill.Id, EngineKnobs.FlashDecodeGqa.Id, EngineKnobs.FlashSplitOff.Id, EngineKnobs.FlashSplitForce.Id,
+        EngineKnobs.Int8AttnV2.Id, EngineKnobs.Int8AttnV2VTile.Id, EngineKnobs.Int8AttnV2MinTokens.Id,
     ];
+
+
 
     /// <summary>Every arm the runner knows.</summary>
     public static readonly AttentionArm[] All =
@@ -48,6 +54,24 @@ public static class AttentionArms
         new("sage-f16", "sdpa", DType.F16, DType.F16, true, "sage-int8",
             () => KnobStore.Set(EngineKnobs.SageF16MinSkv, 1),
             "native F16 through SageAttention v1 INT8 at any length"),
+        new("int8v2-tile", "sdpa", DType.F16, DType.F16, true, "int8-v2", Int8V2(true),
+            "native F16 through INT8 attention v2, per-tile V scales, the card's tile height"),
+        new("int8v2-seq", "sdpa", DType.F16, DType.F16, true, "int8-v2", Int8V2(false),
+            "native F16 through INT8 attention v2, per-sequence V scales, the card's tile height"),
+        new("int8v2-tile-br64", "sdpa", DType.F16, DType.F16, true, "int8-v2", Int8V2(true), "INT8 v2, tile V scales, 64-row tiles",
+            Configure: Int8V2Tile(64)),
+        new("int8v2-tile-br128", "sdpa", DType.F16, DType.F16, true, "int8-v2", Int8V2(true), "INT8 v2, tile V scales, 128-row tiles",
+            Configure: Int8V2Tile(128)),
+        new("int8v2-seq-br64", "sdpa", DType.F16, DType.F16, true, "int8-v2", Int8V2(false), "INT8 v2, sequence V scales, 64-row tiles",
+            Configure: Int8V2Tile(64)),
+        new("int8v2-seq-br128", "sdpa", DType.F16, DType.F16, true, "int8-v2", Int8V2(false), "INT8 v2, sequence V scales, 128-row tiles",
+            Configure: Int8V2Tile(128)),
+        new("int8v2-f16pv", "sdpa", DType.F16, DType.F16, true, "int8-v2", Int8V2(false), "INT8 v2 with the F16-PV fallback",
+            Configure: Int8V2Tile(0, f16Pv: true)),
+        new("int8v2-tile-f32", "sdpa", DType.F32, DType.F32, false, "int8-v2", Int8V2(true),
+            "F32 I/O through INT8 attention v2, per-tile V scales"),
+        new("int8v2-seq-f32", "sdpa", DType.F32, DType.F32, false, "int8-v2", Int8V2(false),
+            "F32 I/O through INT8 attention v2, per-sequence V scales"),
         new("flash-f16", "sdpa", DType.F16, DType.F16, true, "flash-f16",
             () => KnobStore.Set(EngineKnobs.SageAttn, false),
             "native F16 through the engine's F16 flash kernel (D=256)"),
@@ -101,11 +125,12 @@ public static class AttentionArms
         string.Join(",", ReportedKnobIds.Select(id => $"{id}={KnobStore.SourceOf(id)}"));
 
     /// <summary>Execution counters of the kernels that keep one.</summary>
-    public readonly record struct Counters(long Sage, long Cudnn, long FlashF16, long Tiled)
+    public readonly record struct Counters(long Sage, long Cudnn, long FlashF16, long Tiled, long Int8V2)
     {
         /// <summary>Reads the counters; all zero on a backend that keeps none.</summary>
         public static Counters Read(IBackend backend) => backend is CudaBackend c
-            ? new(c.SageAttentionExecutionCount, c.CudnnSdpaExecutionCount, c.FlashF16ExecutionCount, c.SdpaTiledExecutionCount)
+            ? new(c.SageAttentionExecutionCount, c.CudnnSdpaExecutionCount, c.FlashF16ExecutionCount, c.SdpaTiledExecutionCount,
+                c.Int8AttentionV2ExecutionCount)
             : default;
     }
 
@@ -141,6 +166,7 @@ public static class AttentionArms
             NvtxRange.ResetProfile();
         }
         Counters after = Counters.Read(backend);
+        if (after.Int8V2 > before.Int8V2) return "int8-v2";
         if (after.Sage > before.Sage) return "sage-int8";
         if (after.FlashF16 > before.FlashF16) return "flash-f16";
         if (after.Cudnn > before.Cudnn) return entry == "flash" ? "cudnn-causal" : "cudnn";
@@ -148,4 +174,20 @@ public static class AttentionArms
         if (entry == "flash") return labels.Contains("FlashAttention.Fa2") ? "fa2-causal" : "flash-decode";
         return "materialized";
     }
+
+    /// <summary>INT8 v2 at any length with per-tile or per-sequence V scales.</summary>
+    private static Action Int8V2(bool tileScales) => () =>
+    {
+        KnobStore.Set(EngineKnobs.Int8AttnV2, true);
+        KnobStore.Set(EngineKnobs.Int8AttnV2VTile, tileScales);
+        KnobStore.Set(EngineKnobs.Int8AttnV2MinTokens, 1);
+    };
+
+    /// <summary>Forces INT8 v2's tile height (0 follows the card) and its PV format.</summary>
+    private static Action<IBackend> Int8V2Tile(int blockRows, bool f16Pv = false) => backend =>
+    {
+        if (backend is not CudaBackend cuda) return;
+        cuda.Int8V2BlockRowsOverride = blockRows;
+        cuda.Int8V2F16Pv = f16Pv;
+    };
 }

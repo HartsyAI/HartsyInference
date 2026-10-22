@@ -214,6 +214,62 @@ public sealed partial class CudaBackend
         }
     }
 
+    /// <summary>Benchmark hook: mean device milliseconds of the stats, quant and attention launches over
+    /// <paramref name="iterations"/> runs of one call on device-resident operands.</summary>
+    internal float[] Int8V2StageTimesForTest(in AttentionCall c, Int8AttentionV2Pv pv, int blockRows, int iterations)
+    {
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        Int8AttentionV2Layout layout = new(c.Batch, c.Heads, c.QueryTokens, c.ValidKvLength, pv);
+        ulong workspace = EnsureInt8V2Workspace(layout.Bytes);
+        if (workspace == 0) throw new InvalidOperationException("The INT8 v2 workspace cannot grow while the stream captures.");
+        nint[] events = new nint[4];
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        float[] totals = new float[3];
+        try
+        {
+            for (int i = 0; i < events.Length; i++) CudaDriverApi.cuEventCreate(out events[i], 0).ThrowOnError();
+            pQ = GpuTransferHelper.CopyToDevice(c.Query.Storage);
+            pK = GpuTransferHelper.CopyToDevice(c.Key.Storage);
+            pV = GpuTransferHelper.CopyToDevice(c.Value.Storage);
+            pOut = GpuTransferHelper.AllocateDevice(GpuTransferHelper.ByteSize(c.Output.Storage));
+            bool f32 = c.Query.DType == DType.F32, f32Out = c.Output.DType == DType.F32;
+            ulong elem = f32 ? 4UL : 2UL;
+            ulong q = pQ + (ulong)c.Query.Offset * elem, k = pK + (ulong)c.Key.Offset * elem, v = pV + (ulong)c.Value.Offset * elem;
+            ulong o = pOut + (ulong)c.Output.Offset * (f32Out ? 4UL : 2UL);
+            for (int it = -2; it < iterations; it++)
+            {
+                CudaDriverApi.cuEventRecord(events[0], _stream.Handle).ThrowOnError();
+                _kernels!.LaunchInt8V2Stats(f32, k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch, c.Heads,
+                    c.ValidKvLength, _stream.Handle);
+                CudaDriverApi.cuEventRecord(events[1], _stream.Handle).ThrowOnError();
+                _kernels.LaunchInt8V2Quant(f32, q, Strides(c.Query), k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch,
+                    c.Heads, c.QueryTokens, c.ValidKvLength, _stream.Handle);
+                CudaDriverApi.cuEventRecord(events[2], _stream.Handle).ThrowOnError();
+                _kernels.LaunchInt8V2Attention(blockRows, f32Out, o, Strides(c.Output), workspace, in layout, c.Batch, c.Heads,
+                    c.QueryTokens, c.ValidKvLength, c.Scale * Int8AttentionV2Reference.Log2E, _stream.Handle);
+                CudaDriverApi.cuEventRecord(events[3], _stream.Handle).ThrowOnError();
+                CudaDriverApi.cuEventSynchronize(events[3]).ThrowOnError();
+                if (it < 0) continue;
+                for (int s = 0; s < 3; s++)
+                {
+                    CudaDriverApi.cuEventElapsedTime(out float ms, events[s], events[s + 1]).ThrowOnError();
+                    totals[s] += ms / iterations;
+                }
+            }
+            return totals;
+        }
+        finally
+        {
+            foreach (nint e in events)
+                if (e != 0) CudaDriverApi.cuEventDestroy(e);
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            GpuTransferHelper.FreeDevice(pOut);
+        }
+    }
+
     /// <summary>Test hook: the attention kernels' exp2 of each argument.</summary>
     internal unsafe float[] Int8V2Exp2ForTest(float[] arguments)
     {

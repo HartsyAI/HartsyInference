@@ -113,7 +113,26 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("dev-short", "dev", DType.F32, 8, 2, 1, 16, 128, "none", false, "V.5",
             Knobs: () => KnobStore.Set(EngineKnobs.FlashDecodeGqa, false)),
         new("dev-pos0", "dev0", DType.F32, 8, 2, 1, 256, 128, "none", false, "V.0/F.4"),
+        new("int8v2-f16-d128", "sdpa", DType.F16, 4, 4, 256, 256, 128, "none", true, "S.16", Knobs: Int8V2On),
+        new("int8v2-f32-d128", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", false, "S.16", Knobs: Int8V2On),
+        new("int8v2-f16-8k-default-length", "sdpa", DType.F16, 2, 2, 8192, 8192, 128, "none", true, "S.16",
+            Knobs: () => KnobStore.Set(EngineKnobs.Int8AttnV2, true)),
+        new("int8v2-f16-below-length", "sdpa", DType.F16, 4, 4, 256, 256, 128, "none", true, "S.3",
+            Knobs: () => KnobStore.Set(EngineKnobs.Int8AttnV2, true)),
+        new("int8v2-f16-d64", "sdpa", DType.F16, 4, 4, 256, 256, 64, "none", true, "S.3", Knobs: Int8V2On),
+        new("int8v2-f16-bias", "sdpa", DType.F16, 4, 4, 256, 256, 128, "bias", true, "S.3", Knobs: Int8V2On),
+        new("int8v2-bf16", "sdpa", DType.BF16, 4, 4, 256, 256, 128, "none", true, "S.12", Knobs: Int8V2On),
+        new("int8v2-tm-f16", "tm", DType.F16, 4, 4, 256, 256, 128, "none", true, "M.4", Knobs: Int8V2On),
+        new("int8v2-tm-f32", "tm", DType.F32, 4, 4, 256, 256, 128, "none", false, "M.4", Knobs: Int8V2On),
+        new("int8v2-tm-gqa-f16", "tmg", DType.F16, 48, 12, 256, 256, 128, "none", true, "MG/S.16", Knobs: Int8V2On),
+        new("int8v2-krea2", "krea2", DType.F16, 48, 12, 256, 256, 128, "none", true, "MG/S.16", Knobs: Int8V2On),
     ];
+
+    private static void Int8V2On()
+    {
+        KnobStore.Set(EngineKnobs.Int8AttnV2, true);
+        KnobStore.Set(EngineKnobs.Int8AttnV2MinTokens, 1);
+    }
 
     public static IEnumerable<object[]> Names => Table.Select(c => new object[] { c.Name });
 
@@ -122,6 +141,7 @@ public sealed unsafe class AttentionRouteGoldenTests
         () => KnobStore.Clear(EngineKnobs.SdpaCudnn), () => KnobStore.Clear(EngineKnobs.SdpaForceTiled),
         () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
         () => KnobStore.Clear(EngineKnobs.FlashSplitOff), () => KnobStore.Clear(EngineKnobs.Fa2Prefill),
+        () => KnobStore.Clear(EngineKnobs.Int8AttnV2), () => KnobStore.Clear(EngineKnobs.Int8AttnV2MinTokens),
     ];
 
     private static string PtxDir()

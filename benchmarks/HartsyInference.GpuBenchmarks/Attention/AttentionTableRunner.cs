@@ -48,6 +48,7 @@ public static unsafe class AttentionTableRunner
         {
             using BenchmarkFixture fx = new();
             IBackend be = fx.Backend;
+            arm.Configure?.Invoke(be);
             device = string.IsNullOrEmpty(be.Capabilities.DeviceName) ? be.Capabilities.Name : be.Capabilities.DeviceName;
             Inputs inp = Inputs.Create(s, arm, seed, outlier);
             float scale = 1f / MathF.Sqrt(s.D);
