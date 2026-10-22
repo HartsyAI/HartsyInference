@@ -11,11 +11,13 @@ public sealed class Fibo2ConfigTests
     [InlineData(0, 256)]
     [InlineData(100, 256)]
     [InlineData(256, 256)]
+    [InlineData(257, 320)]
     [InlineData(300, 320)]
     [InlineData(1000, 384)]
     [InlineData(1152, 384)]
     [InlineData(2000, 512)]
     [InlineData(2048, 512)]
+    [InlineData(2049, 512)]
     [InlineData(9999, 512)]
     public void GistCount_Checkpoint_MatchesComfySchedule(int textLength, int expected) =>
         Assert.Equal(expected, Fibo2Config.Checkpoint.GistCount(textLength));
