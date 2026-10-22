@@ -79,6 +79,8 @@ public sealed class VideoCommandContractTests
                 ReferenceSizing = VideoReferenceSizing.Native,
                 LockedFields = VideoLockedFields.None,
             },
+            Recipe = new RecipeIdentity { FamilyId = "test", Revision = 1 },
+            Provenance = new Dictionary<string, ResolvedParameter>(StringComparer.Ordinal),
             Issues =
             [
                 Issue("video.profile.reference_required"),

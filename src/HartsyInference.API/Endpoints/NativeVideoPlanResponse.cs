@@ -16,6 +16,12 @@ public sealed class NativeVideoPlanResponse
     /// <summary>Resolved values generation will execute.</summary>
     public required VideoEffectiveSettings EffectiveSettings { get; init; }
 
+    /// <summary>The recipe, revision, variant and profile the plan resolved against.</summary>
+    public required RecipeIdentity Recipe { get; init; }
+
+    /// <summary>Where each effective setting came from: recipe or profile default, the caller, or a normalization.</summary>
+    public required IReadOnlyDictionary<string, ResolvedParameter> Provenance { get; init; }
+
     /// <summary>Blocking errors and non-blocking warnings.</summary>
     public required IReadOnlyList<VideoPlanIssue> Issues { get; init; }
 
@@ -33,6 +39,8 @@ public sealed class NativeVideoPlanResponse
         {
             Profile = NativeVideoModelProfile.Create(plan.Profile),
             EffectiveSettings = plan.EffectiveSettings,
+            Recipe = plan.Recipe,
+            Provenance = plan.Provenance,
             Issues = SanitizeIssues(plan.Issues),
             ComponentFormats = plan.ComponentFormats,
             IsValid = plan.IsValid,

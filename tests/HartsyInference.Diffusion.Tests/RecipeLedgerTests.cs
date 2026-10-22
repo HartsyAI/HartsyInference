@@ -83,8 +83,8 @@ public sealed class RecipeLedgerTests
             return;
         }
         ModelSpec spec = new ModelSpec { Requested = family, Modality = Modality.Video };
-        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, new VideoRequest { Prompt = "p" }, family,
-            recipe.Defaults, recipe.Supports, CancellationToken.None);
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, new VideoRequest { Prompt = "p" },
+            VideoRecipeDeclaration.For(recipe, family, null, recipe.Supports), CancellationToken.None);
 
         VideoEffectiveSettings effective = plan.EffectiveSettings;
         VideoDefaults defaults = recipe.Defaults;

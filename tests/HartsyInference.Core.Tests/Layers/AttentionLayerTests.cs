@@ -203,20 +203,48 @@ public sealed class AttentionLayerTests
             new Tensor(new TensorShape(6, 2, 4), DType.F32), new Tensor(new TensorShape(6, 2, 4), DType.F32), new TensorShape(6, 16), default));
     }
 
+    /// <summary>Forward hands its output projection the <c>[S, heads·D]</c> rows it has always read; Attend writes the caller's
+    /// <c>[1, S, heads·D]</c> on the token-major route, the shape the head-major route returns.</summary>
     [Fact]
-    public void EqualHeadTokenMajor_HoldsABatchedOutputAsTheRowsTheProjectionReads()
+    public void EqualHeadTokenMajor_ForwardHoldsProjectionRows_AttendKeepsTheCallersShape()
     {
         AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
         AttentionLayer layer = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor },
             Weights(gate: false));
         Tensor x = new(new TensorShape(1, 6, 8), DType.F32);
+        static Tensor Operand() => new(new TensorShape(1, 6, 2, 4), DType.F32);
 
         Tensor y = layer.Forward(backend, x, x, default);
+        Tensor attended = layer.Attend(backend, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+        AttentionTraceBackend headMajor = new();
+        Tensor permuted = layer.Attend(headMajor, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
 
         Assert.Equal(new TensorShape(6, 8), backend.Calls[0].Output.Storage.Shape);
         Assert.Equal(new TensorShape(1, 6, 8), y.Shape);
-        Assert.Throws<ArgumentException>(() => layer.Attend(backend, new Tensor(new TensorShape(1, 6, 2, 4), DType.F32),
-            new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new TensorShape(1, 6, 8), default));
+        Assert.Equal(AttentionRoute.TokenMajor, backend.Calls[1].Route);
+        Assert.Same(attended, backend.Calls[1].Output.Storage);
+        Assert.Equal(new TensorShape(1, 6, 8), attended.Shape);
+        Assert.Equal(0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
+        Assert.Equal(AttentionRoute.Dense, Assert.Single(headMajor.Calls).Route);
+        Assert.Equal(new TensorShape(1, 6, 8), permuted.Shape);
+    }
+
+    /// <summary>Flat operands attend head-major: a token-major config refuses them before any op, and a Dense one returns the
+    /// caller's <c>[1, S, heads·D]</c> on a backend that serves the token-major entry.</summary>
+    [Fact]
+    public void AttendFlat_RefusesATokenMajorConfig_AndKeepsTheCallersShapeOnADenseOne()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        static Tensor Rows() => new(new TensorShape(1, 6, 8), DType.F32);
+        AttentionLayer dense = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4 });
+        AttentionLayer tokenMajor = new(dense.Config with { TokenMajorRoute = AttentionRoute.TokenMajor });
+
+        Assert.Throws<NotSupportedException>(() => tokenMajor.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default));
+        Assert.Empty(backend.Ops);
+        Tensor attended = dense.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default);
+
+        Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
+        Assert.Equal(new TensorShape(1, 6, 8), attended.Shape);
     }
 
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's

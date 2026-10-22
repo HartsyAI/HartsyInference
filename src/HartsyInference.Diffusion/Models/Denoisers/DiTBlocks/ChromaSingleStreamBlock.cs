@@ -52,7 +52,11 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
 
         _normQ = new QkNorm(_headDim, qkNormEps);
         _normK = new QkNorm(_headDim, qkNormEps);
-        _attention = new AttentionLayer(new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = headDim, AllowF16 = true });
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = numHeads, KvHeads = numHeads, HeadDim = headDim, AllowF16 = true, TokenMajorRoute = AttentionRoute.TokenMajor,
+            HeadMajorForSage = true,
+        });
     }
 
     /// <summary>Loads weights from named tensors using diffusers naming
@@ -192,7 +196,7 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
             k.Dispose();
         }
 
-        // ── 5-8. RoPE, attention over the normed Q/K (the shared [B,1,S,S] mask is borrowed), permuted back ──
+        // ── 5-8. RoPE, attention over the normed Q/K (the shared [B,1,S,S] mask is borrowed) ──
         AttentionCallContext context = batch == 1
             ? new AttentionCallContext { Rotation = rope, Bias = sdpaMask }
             : new AttentionCallContext { HeadMajorRotation = rope, Bias = sdpaMask };
