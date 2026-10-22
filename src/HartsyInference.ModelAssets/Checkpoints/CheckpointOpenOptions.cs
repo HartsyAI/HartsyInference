@@ -39,20 +39,25 @@ public sealed record CheckpointOpenOptions
         => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new() { Nvfp4ToFp8 = true };
 
     /// <summary>The options for a diffusion transformer whose nvfp4 groups stay packed wherever every backend that runs
-    /// it can hold them: the native GEMM takes them on Blackwell, and elsewhere each unpacks per GEMM to exactly the F16
-    /// it would have been unpacked to at open. A backend set that cannot hold them gets the defaults.</summary>
+    /// it can hold them: the native GEMM takes them on Blackwell, and elsewhere each unpacks per GEMM to exactly the
+    /// dense weight the eager path would have made. A backend set that cannot hold them gets the defaults.</summary>
     /// <remarks>Every backend, not the primary alone: the weights are one set of bytes shared by every device that
     /// executes a block, so one shard without the packed path widens all of them.</remarks>
-    public static CheckpointOpenOptions ForResidentNvfp4(IEnumerable<IBackend> backends)
+    /// <param name="denseDType">What the recipe holds its dense DiT weights in after the eager F16 unpack: F16, or F32
+    /// for a recipe that widens them.</param>
+    public static CheckpointOpenOptions ForResidentNvfp4(IEnumerable<IBackend> backends, DType? denseDType = null)
     {
         ArgumentNullException.ThrowIfNull(backends);
+        DType dense = denseDType ?? DType.F16;
+        if (dense != DType.F16 && dense != DType.F32)
+            throw new ArgumentException($"A resident nvfp4 weight stands in for an F16 or F32 weight, not {dense}.", nameof(denseDType));
         bool any = false;
         foreach (IBackend backend in backends)
         {
             if (!backend.SupportsResidentQuant(DType.F4E2M1)) return new();
             any = true;
         }
-        return any ? new() { ResidentNvfp4 = true, ResidentNvfp4DenseDType = DType.F16 } : new();
+        return any ? new() { ResidentNvfp4 = true, ResidentNvfp4DenseDType = dense } : new();
     }
 
     /// <summary>Relabel rank-2 GGUF tensors from ggml's <c>[in, out]</c> order to the <c>[out, in]</c> order the engine assumes for a matrix weight.</summary>

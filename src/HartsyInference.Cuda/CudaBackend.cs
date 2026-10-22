@@ -1031,6 +1031,23 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 outBf16: gemmDtype == DType.BF16);
             return;
         }
+        if (gemmDtype == DType.F32)
+        {
+            // The kernel writes 16 bits; an F32 dense twin is that F16 widened, which is exact.
+            ulong half = CudaMemory.Allocate((nuint)(weight.ElementCount * DType.F16.SizeInBytes));
+            try
+            {
+                _kernels!.LaunchNvfp4Dequant(half, source, scales.BlockScaleDevice,
+                    (int)weight.Shape[0], (int)(weight.Shape[1] / 2), scales.PaddedCols,
+                    scales.ScaleFactor, scales.GlobalScale, _stream.Handle, outBf16: false);
+                CastOnGpu(destination, half, DType.F16, DType.F32, (int)weight.ElementCount);
+            }
+            finally
+            {
+                CudaMemory.FreeAsync(half, _stream.Handle);
+            }
+            return;
+        }
         _kernels!.LaunchNvfp4Dequant(destination, source, scales.BlockScaleDevice,
             (int)weight.Shape[0], (int)(weight.Shape[1] / 2), scales.PaddedCols,
             scales.ScaleFactor, scales.GlobalScale, _stream.Handle, outBf16: gemmDtype == DType.BF16);

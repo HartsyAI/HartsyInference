@@ -49,6 +49,30 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
     }
 
+    /// <summary>A recipe that widens its dense DiT weights to F32 (HiDream) gets an F32 twin: the F16 unpack, widened.</summary>
+    [Theory]
+    [InlineData(64, 256, 512, "none")]
+    [InlineData(2, 384, 256, "F32")]
+    public void Linear_MatchesTheEagerF32Weight_BitForBit(int m, int n, int k, string bias)
+    {
+        using CudaBackend? backend = TryOpenBackend();
+        if (backend is null) return;   // tier-lint: guarded
+        using Operands ops = Operands.Create(m, n, k, DType.F32, DType.F32, bias, seed: m * 131 + n + k);
+        using Tensor eagerF16 = CheckpointConvertUtils.DequantNvfp4ToF16(ops.Packed, ops.BlockScale, ((float*)ops.GlobalScale.DataPointer)[0]);
+        using Tensor eager = eagerF16.CastTo(DType.F32);
+        using Tensor resident = ops.AttachResident(DType.F32);
+        try
+        {
+            uint[] expected = RunLinear(backend, ops, eager);
+            uint[] got = RunLinear(backend, ops, resident);
+            AssertBitIdentical(expected, got, $"F32 twin m={m} n={n} k={k} bias={bias}");
+        }
+        finally
+        {
+            backend.FreeWeights([eager, resident]);
+        }
+    }
+
     /// <summary>The negative control: without a dense dtype an F32 activation meets a BF16 unpack, so the comparison above can fail.</summary>
     [Fact]
     public void WithoutADenseDType_AnF32ActivationDoesNotMatchTheEagerWeight()
