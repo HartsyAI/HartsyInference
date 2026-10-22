@@ -50,7 +50,7 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
             throw new NotSupportedException("Fibo 2.0 does not map negative prompts yet: its unconditional branch is the fixed null caption.");
         if (request.ReferenceImages is { Count: > 0 })
             throw new NotSupportedException("Fibo 2.0 reference-image conditioning (editing) is not implemented yet.");
-        if (request.Sampler is not null || request.Scheduler is not null)
+        if (!IsDefaultSampler(request.Sampler) || !IsDefaultSchedule(request.Scheduler))
             throw new NotSupportedException("Fibo 2.0 samples only with its built-in flow-matching Euler; drop the sampler and schedule selection.");
 
         int[] conditional = Fibo2PromptTemplate.Tokenize(_tokenizer, Fibo2PromptTemplate.CaptionFor(request.Prompt));
@@ -84,6 +84,14 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
             },
         };
     }
+
+    /// <summary>Euler is the built-in sampler; hosts send it as their default, so it is accepted rather than refused.</summary>
+    private static bool IsDefaultSampler(string? sampler) =>
+        string.IsNullOrWhiteSpace(sampler) || string.Equals(sampler.Trim(), "euler", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The identity schedule names are accepted; any other sigma schedule is refused.</summary>
+    private static bool IsDefaultSchedule(string? schedule) =>
+        string.IsNullOrWhiteSpace(schedule) || schedule.Trim().ToLowerInvariant() is "normal" or "default";
 
     /// <inheritdoc/>
     public void Dispose()
