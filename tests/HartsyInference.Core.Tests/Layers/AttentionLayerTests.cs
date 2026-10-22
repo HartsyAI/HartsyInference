@@ -294,10 +294,12 @@ public sealed class AttentionLayerTests
 
     /// <summary>A layer that opts its batches in takes the token-major entry over per-head <c>[B, S, heads, D]</c> operands only where
     /// the backend plans a row for the call (no permuting fallback takes a batch): it reads B sequences and writes the
-    /// <c>[B, S, heads·D]</c> rows the output projection reads. Without the opt-in, without a planned row, over flat operands (a
-    /// <c>[B, S, heads·D]</c> tensor reads as one sequence) or with a host rotation a batch stays head-major.</summary>
+    /// <c>[B, S, heads·D]</c> rows the output projection reads, carrying the layer's refused formats. Without the opt-in, without a
+    /// planned row, over flat operands (a <c>[B, S, heads·D]</c> tensor reads as one sequence) or with a host rotation a batch stays
+    /// head-major.</summary>
     [Theory]
     [InlineData("planned", AttentionRoute.TokenMajor)]
+    [InlineData("int8-refused", AttentionRoute.TokenMajor)]
     [InlineData("not-opted-in", AttentionRoute.Dense)]
     [InlineData("unplanned", AttentionRoute.Dense)]
     [InlineData("flat", AttentionRoute.Dense)]
@@ -309,7 +311,7 @@ public sealed class AttentionLayerTests
         AttentionLayerConfig config = new()
         {
             Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor, TokenMajorBatches = name != "not-opted-in",
-            AllowF16 = true,
+            AllowF16 = true, RefusedFormats = name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
         };
         Tensor attended;
         if (name == "flat")
@@ -334,6 +336,7 @@ public sealed class AttentionLayerTests
         Assert.Equal((batch, seq), (call.Output.Batch, call.Output.Tokens));
         Assert.Equal(new TensorShape(batch, seq, 8), call.Output.Storage.Shape);
         Assert.Null(call.TermsGap());
+        Assert.Equal(name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
     }
 
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
