@@ -138,8 +138,9 @@ Model-specific SDXL refiner/segment gaps belong in [image status](MODEL_STATUS_I
 
 - [ ] Recipe defaults on real weights: the GPU passes and live SwarmUI checks in
   [RECIPE_DEFAULTS_GPU_HANDOFF.md](../Research/RECIPE_DEFAULTS_GPU_HANDOFF.md).
-- [ ] Recipe contract follow-ups ([RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md#open)): refuse unresolved
-  variants, snap image sizes in planning, a structural ACE-Step variant catalog, music descriptors on
+- [ ] Recipe contract follow-ups ([RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md#open)): make variant
+  resolution refuse an unresolved variant and a filename guess where variants differ in defaults (today both fall
+  back), snap image sizes in planning, a structural ACE-Step variant catalog, music descriptors on
   `IInferenceEngine.Recipes`, speech and transcription recipes.
 
 - [ ] 3D and world-model UI extensions, thin over Engine.
