@@ -9,6 +9,17 @@ public sealed partial class CudaBackend
     /// <summary>Test and benchmark hook: query rows per INT8 v2 attention block, 64 or 128; 0 follows the card.</summary>
     internal int Int8V2BlockRowsOverride { get; set; }
 
+    /// <summary>Test hook: the smallest workspace size that ran out of VRAM since activations were last freed.</summary>
+    internal long Int8V2GrowthFailedAtForTest { get => _int8V2GrowthFailedAt; set => _int8V2GrowthFailedAt = value; }
+
+    /// <summary>Test hook: each loaded INT8 v2 entry's registers and local bytes as the driver compiled it for this card.</summary>
+    internal (string Name, int Registers, int LocalBytes)[] Int8V2EntryResourcesForTest()
+    {
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        return [.. _kernels!.Int8V2EntryResources()];
+    }
+
     /// <summary>Test hook: runs one call on <paramref name="pv"/> at <paramref name="blockRows"/> and copies its workspace back, with
     /// the trace of (batch, head, query tile) when <paramref name="traceTarget"/> is set (u8 PV, F32 output).</summary>
     internal unsafe Int8V2Readback RunInt8AttentionV2ForTest(in AttentionCall c, Int8AttentionV2Pv pv, int blockRows,

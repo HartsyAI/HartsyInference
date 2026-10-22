@@ -63,6 +63,28 @@ public sealed partial class CudaKernels
         }
     }
 
+    /// <summary>Every loaded INT8 v2 entry with the registers and local (spill) bytes the driver's JIT gave it on this card.</summary>
+    internal IEnumerable<(string Name, int Registers, int LocalBytes)> Int8V2EntryResources()
+    {
+        if (_int8V2Module is null) yield break;
+        string[] pvNames = ["vseq", "vtile", "pvf16"];
+        List<(string, nint)> entries = [("int8v2_stats_f16", _int8V2StatsF16), ("int8v2_stats_f32", _int8V2StatsF32),
+            ("int8v2_quant_f16", _int8V2Quant[0]), ("int8v2_quant_f16_pvf16", _int8V2Quant[1]), ("int8v2_quant_f32", _int8V2Quant[2]),
+            ("int8v2_quant_f32_pvf16", _int8V2Quant[3])];
+        for (int br = 0; br < 2; br++)
+            for (int pv = 0; pv < 3; pv++)
+                for (int f32 = 0; f32 < 2; f32++)
+                    entries.Add(($"int8v2_attn_br{(br == 0 ? 64 : 128)}_{pvNames[pv]}_{(f32 == 0 ? "f16o" : "f32o")}", _int8V2Attention[br * 6 + pv * 2 + f32]));
+        foreach ((string name, nint fn) in entries)
+        {
+            if (fn == 0) continue;
+            // CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES = 3, CU_FUNC_ATTRIBUTE_NUM_REGS = 4.
+            CudaDriverApi.cuFuncGetAttribute(out int local, 3, fn).ThrowOnError();
+            CudaDriverApi.cuFuncGetAttribute(out int regs, 4, fn).ThrowOnError();
+            yield return (name, regs, local);
+        }
+    }
+
     /// <summary>The K channel sums and per-sequence V absmax per 64-key chunk; each (b, h)'s last block folds them into the K
     /// mean and V scales. Grid (chunks, H, B).</summary>
     internal unsafe void LaunchInt8V2Stats(bool f32, ulong k, FlashStrides kStrides, ulong v, FlashStrides vStrides, ulong workspace,

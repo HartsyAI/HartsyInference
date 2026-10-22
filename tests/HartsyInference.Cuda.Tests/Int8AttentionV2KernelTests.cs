@@ -478,6 +478,50 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>A workspace size that ran out of VRAM stays refused while a smaller call grows the workspace, and is asked again
+    /// once activations are freed.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void FailedGrowth_StaysRefusedUntilActivationsAreFreed()
+    {
+        if (!Open(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        TensorShape shape = new(1, 2, 600, 128);
+        using Tensor q = new(shape, DType.F16), o = new(shape, DType.F16);
+        cuda.Scale(q, q, 1f);
+        KnobStore.Set(EngineKnobs.Int8AttnV2, true);
+        KnobStore.Set(EngineKnobs.Int8AttnV2MinTokens, 512);
+        try
+        {
+            cuda.Int8V2GrowthFailedAtForTest = new Int8AttentionV2Layout(1, 8, 4096, 4096, Int8AttentionV2Pv.U8TileScales).Bytes;
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(1, 8, 4096, 4096, 128, DType.F16));
+            cuda.ScaledDotProductAttention(o, q, q, q, null, 0.088f);
+            Assert.Equal(1, cuda.Int8AttentionV2ExecutionCount);
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(1, 8, 4096, 4096, 128, DType.F16));
+            cuda.FreeActivations();
+            Assert.True(cuda.Int8AttentionV2TakesTokenMajor(1, 8, 4096, 4096, 128, DType.F16));
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.Int8AttnV2);
+            KnobStore.Clear(EngineKnobs.Int8AttnV2MinTokens);
+        }
+    }
+
+    /// <summary>Every entry of int8_attn_v2.ptx loads on this card, and the driver's JIT gives none of them local memory (a spill):
+    /// the offline ptxas check covers sm_80/86/89/120, this covers the driver that actually runs it.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void Entries_LoadWithoutLocalMemory()
+    {
+        if (!Open(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        (string Name, int Registers, int LocalBytes)[] entries = cuda.Int8V2EntryResourcesForTest();
+        foreach ((string name, int regs, int local) in entries) output.WriteLine($"{name}: {regs} registers, {local} local bytes");
+        Assert.Equal(18, entries.Length);
+        Assert.All(entries, e => Assert.Equal(0, e.LocalBytes));
+    }
+
     /// <summary>A step graph holding the call, replayed twice, gives the eager call's bits; the workspace sized by the eager call is not
     /// regrown under capture.</summary>
     [Trait("Category", "GpuIntegration")]

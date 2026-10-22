@@ -25,15 +25,20 @@ public sealed partial class CudaBackend
     /// <summary>Bytes the INT8 v2 workspace holds now (its high-water mark since it was last released).</summary>
     internal long Int8V2WorkspaceBytes => _int8V2WorkspaceBytes;
 
-    /// <summary>The checks the INT8 v2 rows and the grouped row's yield share: the knob, no bias, host positions, F16 or F32
-    /// throughout, head dim 128, a finite positive scale, both sequences at the engage length, and a grid and counter slot per
-    /// (batch, head).</summary>
+    /// <summary>The shape checks every INT8 v2 decision shares: the knob, F16 or F32, head dim 128, both sequences at the engage
+    /// length, and a grid and counter slot per (batch, head).</summary>
+    private static bool Int8V2ShapeEligible(int batch, int heads, int queryTokens, int keys, int qkDim, int vDim, DType dtype) =>
+        EngineKnobs.Int8AttnV2.Value && (dtype == DType.F16 || dtype == DType.F32)
+        && qkDim == Int8AttentionV2Layout.HeadDim && vDim == Int8AttentionV2Layout.HeadDim
+        && Math.Min(queryTokens, keys) >= EngineKnobs.Int8AttnV2MinTokens.Value
+        && CudaKernels.GridYzFits(heads, batch) && (long)batch * heads <= Int8AttentionV2Layout.CounterSlots;
+
+    /// <summary>The checks the INT8 v2 rows and the grouped row's yield share: <see cref="Int8V2ShapeEligible"/>, no bias, host
+    /// positions, one dtype throughout and a finite positive scale.</summary>
     private static bool Int8V2Eligible(in AttentionCall c) =>
-        EngineKnobs.Int8AttnV2.Value && c.Mask.Bias is null && !c.Positions.OnDevice
-        && (c.Query.DType == DType.F16 || c.Query.DType == DType.F32) && c.Key.DType == c.Query.DType && c.Value.DType == c.Query.DType
-        && c.Output.DType == c.Query.DType && c.QkHeadDim == Int8AttentionV2Layout.HeadDim && c.ValueHeadDim == Int8AttentionV2Layout.HeadDim
-        && c.Scale > 0f && float.IsFinite(c.Scale) && Math.Min(c.QueryTokens, c.ValidKvLength) >= EngineKnobs.Int8AttnV2MinTokens.Value
-        && CudaKernels.GridYzFits(c.Heads, c.Batch) && (long)c.Batch * c.Heads <= Int8AttentionV2Layout.CounterSlots;
+        Int8V2ShapeEligible(c.Batch, c.Heads, c.QueryTokens, c.ValidKvLength, c.QkHeadDim, c.ValueHeadDim, c.Query.DType)
+        && c.Mask.Bias is null && !c.Positions.OnDevice && c.Key.DType == c.Query.DType && c.Value.DType == c.Query.DType
+        && c.Output.DType == c.Query.DType && c.Scale > 0f && float.IsFinite(c.Scale);
 
     /// <summary>Whether the kernels of the PV format <c>numerics.int8AttnV2F16Pv</c> picks are loaded.</summary>
     private bool Int8V2KernelsLoaded()
@@ -50,15 +55,14 @@ public sealed partial class CudaBackend
         && c.Output.CoversStorage && Int8V2KernelsLoaded();
 
     /// <summary>Whether the head-major widening of this grouped call is one S.17 takes, so the grouped token-major row yields to it.
-    /// The widening is contiguous; a widened call S.17 still declines runs on the dense rows, where S.1 follows.</summary>
+    /// Alignment is not asked here: S.17 checks the widened call again at admission, and one it declines runs on the dense rows,
+    /// where S.1 follows, as it did before v2.</summary>
     private bool Int8V2TakesWidened(in AttentionCall c) => Int8V2Eligible(in c) && Int8V2KernelsLoaded();
 
     /// <inheritdoc/>
     public bool Int8AttentionV2TakesTokenMajor(int batch, int heads, int queryTokens, int keys, int headDim, DType dtype)
     {
-        if (!EngineKnobs.Int8AttnV2.Value || headDim != Int8AttentionV2Layout.HeadDim || (dtype != DType.F16 && dtype != DType.F32)
-            || Math.Min(queryTokens, keys) < EngineKnobs.Int8AttnV2MinTokens.Value || !CudaKernels.GridYzFits(heads, batch)
-            || (long)batch * heads > Int8AttentionV2Layout.CounterSlots || !Int8V2KernelsLoaded()) return false;
+        if (!Int8V2ShapeEligible(batch, heads, queryTokens, keys, headDim, headDim, dtype) || !Int8V2KernelsLoaded()) return false;
         long bytes = new Int8AttentionV2Layout(batch, heads, queryTokens, keys, CurrentInt8V2Pv()).Bytes;
         // A capture cannot grow the workspace, and a size that failed to allocate is not retried: such a call takes the next row.
         return bytes <= _int8V2WorkspaceBytes || (!StreamIsCapturing() && bytes < _int8V2GrowthFailedAt);
@@ -143,7 +147,8 @@ public sealed partial class CudaBackend
         if (bytes <= _int8V2WorkspaceBytes) return _int8V2Workspace;
         if (StreamIsCapturing() || bytes >= _int8V2GrowthFailedAt) return 0;
         StepGraphInvalidateForActivationFree();
-        ReleaseInt8V2Workspace();
+        // Free first: old and new together would need both at peak, which is what fails near the VRAM limit.
+        FreeInt8V2Workspace();
         try
         {
             _int8V2Workspace = GpuTransferHelper.AllocateDevice((nuint)bytes);
@@ -158,11 +163,16 @@ public sealed partial class CudaBackend
         return _int8V2Workspace;
     }
 
-    /// <summary>Returns the workspace to the stream-ordered pool and lets a size that did not fit try again; the next call grows
-    /// it again.</summary>
+    /// <summary>Returns the workspace to the stream-ordered pool when activations are freed, and lets a size that did not fit try
+    /// again; the next call grows it again.</summary>
     private void ReleaseInt8V2Workspace()
     {
         _int8V2GrowthFailedAt = long.MaxValue;
+        FreeInt8V2Workspace();
+    }
+
+    private void FreeInt8V2Workspace()
+    {
         ulong buffer = _int8V2Workspace;
         _int8V2Workspace = 0;
         _int8V2WorkspaceBytes = 0;
