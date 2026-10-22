@@ -141,8 +141,6 @@ public sealed record AttentionLayerConfig
             throw new ArgumentException("The full-width QK norm runs with equal query and key/value heads.");
         if (Gate == AttentionGate.PerHeadDoubledSigmoid && Projection != AttentionProjection.GroupedByInput)
             throw new ArgumentException("The per-head gate is projected with the query, grouped by input.");
-        if (QkNorm == AttentionQkNorm.FullWidthRms && TokenMajorRoute != AttentionRoute.Dense)
-            throw new ArgumentException("The full-width RMS norm attends head-major.");
         if (Projection is AttentionProjection.FusedSlice or AttentionProjection.FusedSplitNorm
             && (KvHeads != Heads || Gate != AttentionGate.None))
             throw new ArgumentException("A fused [q|k|v] projection has equal head counts and no gate.");

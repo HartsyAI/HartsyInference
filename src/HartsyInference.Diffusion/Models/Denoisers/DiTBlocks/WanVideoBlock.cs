@@ -79,9 +79,11 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
             Query = _q[i], QueryBias = _qB[i], Key = _k[i], KeyBias = _kB[i], Value = _v[i], ValueBias = _vB[i], Output = _o[i],
             OutputBias = _oB[i], QueryNorm = _nq[i], KeyNorm = _nk[i], QueryNormEps = _eps, KeyNormEps = _eps,
         };
-        _selfAttention = new AttentionLayer(config, Weights(0));
+        static AttentionLayerConfig TokenMajor(AttentionLayerConfig c) =>
+            c with { TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true };
+        _selfAttention = new AttentionLayer(TokenMajor(config), Weights(0));
         _crossAttention = new AttentionLayer(config, Weights(1));
-        _selfAttention16 = new AttentionLayer(config16, Weights(0));
+        _selfAttention16 = new AttentionLayer(TokenMajor(config16), Weights(0));
         _crossAttention16 = new AttentionLayer(config16, Weights(1));
         _imageAttention = _addK is null ? null : new AttentionLayer(config, new AttentionLayerWeights
         {

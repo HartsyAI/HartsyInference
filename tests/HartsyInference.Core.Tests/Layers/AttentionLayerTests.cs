@@ -270,6 +270,28 @@ public sealed class AttentionLayerTests
         if (route == AttentionRoute.TokenMajor) Assert.Same(attended, call.Output.Storage);
     }
 
+    /// <summary>Flat operands take the token-major entry without a QK norm only: a full-width RMS config that names it attends through
+    /// <see cref="AttentionLayer.Forward"/>, and the flat entry refuses it before issuing anything.</summary>
+    [Fact]
+    public void AttendFlat_RefusesATokenMajorFullWidthRmsConfig()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        static Tensor Rows() => new(new TensorShape(1, 6, 8), DType.F32);
+        AttentionLayerConfig config = new()
+        {
+            Heads = 2, KvHeads = 2, HeadDim = 4, QkNorm = AttentionQkNorm.FullWidthRms, TokenMajorRoute = AttentionRoute.TokenMajor,
+        };
+        AttentionLayer layer = new(config, new AttentionNormWeights(W(106), W(107), 1e-6f, 1e-6f));
+
+        Assert.Throws<NotSupportedException>(() => layer.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default));
+        Assert.Empty(backend.Ops);
+
+        AttentionLayer dense = new(config with { TokenMajorRoute = AttentionRoute.Dense },
+            new AttentionNormWeights(W(106), W(107), 1e-6f, 1e-6f));
+        dense.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default);
+        Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
+    }
+
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
     /// minimum, from a call that does not refuse INT8; the token-major entry has no Sage kernel, so a guarded layer keeps exactly
     /// those calls head-major.</summary>

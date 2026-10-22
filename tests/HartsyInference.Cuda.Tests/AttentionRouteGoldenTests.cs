@@ -18,7 +18,8 @@ public sealed unsafe class AttentionRouteGoldenTests
 
     /// <param name="Entry">sdpa (head-major), tm (token-major), tmg (the grouped token-major overload), krea2 (that overload with
     /// Krea2's own shapes: [1,S,H,D] operands, a [1,S,H·D] output), single (tm with that output), joint (tm with [1,S,H·D] operands
-    /// and output, a joint call's concatenated rows), flash (host positions) or dev (device positions).</param>
+    /// and output, a joint call's concatenated rows), rows (tm with [S,H·D] operands and output, Wan's self-attention rows), flash
+    /// (host positions) or dev (device positions).</param>
     /// <param name="Mask">none, bias (<c>[1,1,Sq,Skv]</c>), perhead (<c>[1,H,Sq,Skv]</c>) or key (<c>[1,1,1,Skv]</c>).</param>
     /// <param name="GrantBf16">The call carries <see cref="AttentionNumerics.Bf16Storage"/> (with the legacy flag when
     /// <paramref name="AllowF16"/> is set), issued through <see cref="IBackend.Attention"/>.</param>
@@ -76,6 +77,9 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("joint-f32-allowf16", "joint", DType.F32, 24, 24, 256, 256, 128, "none", true, "M.2"),
         new("joint-f32-d256-allowf16", "joint", DType.F32, 12, 12, 256, 256, 256, "none", true, "M.2"),
         new("joint-f32-cp-allowf16", "joint", DType.F32, 24, 24, 133, 261, 128, "none", true, "M.2"),
+        new("rows-f32-allowf16", "rows", DType.F32, 24, 24, 256, 256, 128, "none", true, "M.2"),
+        new("rows-f32-bias-allowf16", "rows", DType.F32, 12, 12, 256, 256, 128, "bias", true, "M.2"),
+        new("rows-f32-cp-allowf16", "rows", DType.F32, 24, 24, 133, 261, 128, "none", true, "M.2"),
         new("tm-gqa-f16-d128", "tmg", DType.F16, 48, 12, 256, 256, 128, "none", true, "G.1"),
         new("tm-gqa-f16-16-8", "tmg", DType.F16, 16, 8, 256, 256, 128, "none", true, "G.1"),
         new("tm-gqa-f16-sage-8k", "tmg", DType.F16, 4, 2, 8192, 8192, 128, "none", true, "MG/S.1"),
@@ -191,9 +195,19 @@ public sealed unsafe class AttentionRouteGoldenTests
             }
             return;
         }
-        bool tm = c.Entry is "tm" or "tmg" or "krea2" or "single" or "joint";
-        TensorShape qs = c.Entry == "joint" ? new(1, c.Sq, c.Hq * c.D) : tm ? new(1, c.Sq, c.Hq, c.D) : new(1, c.Hq, c.Sq, c.D);
-        TensorShape ks = c.Entry == "joint" ? new(1, c.Skv, c.Hkv * c.D) : tm ? new(1, c.Skv, c.Hkv, c.D) : new(1, c.Hkv, c.Skv, c.D);
+        bool tm = c.Entry is "tm" or "tmg" or "krea2" or "single" or "joint" or "rows";
+        TensorShape qs = c.Entry switch
+        {
+            "rows" => new(c.Sq, c.Hq * c.D),
+            "joint" => new(1, c.Sq, c.Hq * c.D),
+            _ => tm ? new(1, c.Sq, c.Hq, c.D) : new(1, c.Hq, c.Sq, c.D),
+        };
+        TensorShape ks = c.Entry switch
+        {
+            "rows" => new(c.Skv, c.Hkv * c.D),
+            "joint" => new(1, c.Skv, c.Hkv * c.D),
+            _ => tm ? new(1, c.Skv, c.Hkv, c.D) : new(1, c.Hkv, c.Skv, c.D),
+        };
         using Tensor qt = Random(qs, c.Dtype, 1);
         using Tensor kt = Random(ks, c.Dtype, 2);
         using Tensor vt = Random(ks, c.Dtype, 3);

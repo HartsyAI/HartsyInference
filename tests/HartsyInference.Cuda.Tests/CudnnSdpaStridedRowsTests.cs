@@ -219,6 +219,112 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
         Assert.Equal(0, differing);
     }
 
+    /// <summary>The full-width RMS self-attention of Wan and HiDream's single-stream blocks through <see cref="AttentionLayer.Forward"/>,
+    /// projections, norm, rotation and output projection included: the token-major config attends the rows in place through M.2 with
+    /// the bits the head-major config's permutes and S.5 give, F32 cast whole on both. Wan 2.2 5B at 49 and 121 frames (F32 never takes
+    /// Sage, at any length), Wan 2.1 14B, Matrix-Game 2's block mask, a context-parallel rank's local queries over the exchanged keys,
+    /// and HiDream's [1, S, hidden] rows.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("wan5b-49f", 24, 5070, 0, false, false)]
+    [InlineData("wan5b-121f", 24, 12090, 0, false, false)]
+    [InlineData("wan21-14b", 40, 4480, 0, false, false)]
+    [InlineData("matrixgame2-masked", 12, 2640, 0, true, false)]
+    [InlineData("wan5b-cp-rank", 24, 2730, 5070, false, false)]
+    [InlineData("hidream-single", 20, 4352, 0, false, true)]
+    public void FullWidthRmsForward_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int s, int exchanged, bool masked, bool rank3) =>
+        AssertFullWidthRmsRoutesBitwise(name, h, s, exchanged, masked, rank3, DType.F32);
+
+    /// <summary>Wan's F16 branches (TI2V-5B and Wan 2.1 14B: one timestep group, no mask, no exchange): F16 rows and weights through the
+    /// F16 twin, which refuses INT8, take S.3 head-major and M.2 token-major with the same bits, at 121 frames past Sage's minimum
+    /// length too.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("wan5b-49f", 24, 5070)]
+    [InlineData("wan5b-121f", 24, 12090)]
+    [InlineData("wan21-14b", 40, 4480)]
+    public void F16FullWidthRmsForward_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int s) =>
+        AssertFullWidthRmsRoutesBitwise(name, h, s, 0, false, false, DType.F16);
+
+    private void AssertFullWidthRmsRoutesBitwise(string name, int h, int s, int exchanged, bool masked, bool rank3, DType dtype)
+    {
+        if (Skip()) return;
+        const int d = 128, framesOfMask = 3;
+        int inner = h * d, skv = exchanged > 0 ? exchanged : s;
+        Random rng = new(s * 31 + h);
+        float[] x = Gauss(rng, (long)s * inner), angles = Gauss(rng, (long)s * d, 3f);
+        float[][] w = [Gauss(rng, (long)inner * inner, 0.02f), Gauss(rng, (long)inner * inner, 0.02f), Gauss(rng, (long)inner * inner, 0.02f),
+            Gauss(rng, (long)inner * inner, 0.02f)];
+        float[] qNorm = Gauss(rng, inner, 0.1f), kNorm = Gauss(rng, inner, 0.1f);
+        float[]? kFull = exchanged > 0 ? Gauss(rng, (long)skv * inner) : null, vFull = exchanged > 0 ? Gauss(rng, (long)skv * inner) : null;
+        float[]? bias = masked ? BlockCausalMask(s, framesOfMask) : null;
+        TensorShape rows = rank3 ? new(1, s, inner) : new(s, inner);
+        using CudaBackend backend = new(0, PtxDir());
+
+        float[] Run(AttentionRoute route)
+        {
+            using Tensor wq = Make(w[0], new TensorShape(inner, inner), dtype), wk = Make(w[1], new TensorShape(inner, inner), dtype);
+            using Tensor wv = Make(w[2], new TensorShape(inner, inner), dtype), wo = Make(w[3], new TensorShape(inner, inner), dtype);
+            using Tensor nq = Make(qNorm, new TensorShape(inner), DType.F32), nk = Make(kNorm, new TensorShape(inner), DType.F32);
+            using Tensor cos = Make([.. angles.Select(MathF.Cos)], new TensorShape(s, d), DType.F32);
+            using Tensor sin = Make([.. angles.Select(MathF.Sin)], new TensorShape(s, d), DType.F32);
+            using Tensor? mask = bias is null ? null : Make(bias, new TensorShape(1, 1, s, s), DType.F32);
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, QkNorm = AttentionQkNorm.FullWidthRms, ComputeDType = dtype, AllowF16 = true,
+                TokenMajorRoute = route, HeadMajorForSage = route != AttentionRoute.Dense,
+                RefusedFormats = dtype == DType.F16 ? AttentionFormats.Int8 : AttentionFormats.None,
+            }, new AttentionLayerWeights
+            {
+                Query = wq, Key = wk, Value = wv, Output = wo, QueryNorm = nq, KeyNorm = nk, QueryNormEps = 1e-6f, KeyNormEps = 1e-6f,
+            });
+            QkRotation rotation = new(QkRotationKind.InterleavedPairs, cos, sin, s);
+            using Tensor input = Make(x, rows, dtype);
+            using Tensor o = layer.Forward(backend, input, input, new AttentionCallContext
+            {
+                QueryRotation = rotation, KeyRotation = rotation, Bias = mask,
+                KvRewrite = kFull is null ? null : new Exchanged(kFull, vFull!, new TensorShape(skv, inner)),
+            });
+            backend.Sync();
+            Assert.Equal(rows, o.Shape);
+            return Read(o);
+        }
+
+        string headMajorRoute = dtype == DType.F16 ? "S.3" : "S.5";
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        Assert.Equal(headMajorRoute, CudaBackend.LastAttentionRoute);
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        Assert.Equal("M.2", CudaBackend.LastAttentionRoute);
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        _output.WriteLine($"{name} {dtype}: {headMajorRoute} vs M.2 over {s} query and {skv} key rows, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal(0, differing);
+    }
+
+    /// <summary>A context-parallel exchange: the rank's K and V traded for the whole sequence's rows, as host tensors.</summary>
+    private sealed class Exchanged(float[] k, float[] v, TensorShape shape) : IKvRewrite
+    {
+        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor key, Tensor value)
+        {
+            key.Dispose();
+            value.Dispose();
+            return (Make(k, shape, DType.F32), Make(v, shape, DType.F32));
+        }
+    }
+
+    /// <summary>Matrix-Game 2's additive block-causal mask over <paramref name="frames"/> equal frames: a query sees its own frame and the
+    /// earlier ones.</summary>
+    private static float[] BlockCausalMask(int s, int frames)
+    {
+        int perFrame = s / frames;
+        float[] mask = new float[(long)s * s];
+        for (int i = 0; i < s; i++)
+            for (int j = 0; j < s; j++)
+                mask[(long)i * s + j] = j / perFrame <= i / perFrame ? 0f : -1e9f;
+        return mask;
+    }
+
     /// <summary>Chroma's additive mask over a [text; image] sequence: a pair is kept only when both tokens are, and the text past
     /// <paramref name="kept"/> is padding.</summary>
     private static float[] PaddingMask(int s, int txt, int kept)

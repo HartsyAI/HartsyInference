@@ -21,6 +21,20 @@ stable release will require. Dates are UTC.
   value past F16's 65504 stays finite instead of clipping. The row declines when the copies do not fit half of free VRAM.
   cuDNN failure state is keyed by the dtype the graph runs in, so a refused BF16 plan cannot disable the F16 path. Nothing
   grants BF16 yet, so output is unchanged.
+- **Faster: Wan's self-attention and HiDream's single-stream blocks run token-major.** A full-width RMS QK norm no longer
+  forces the head-major entry, so the self-attention of the Wan-family blocks (Wan 2.1 and 2.2, VACE, S2V, Animate,
+  Matrix-Game) and of HiDream's single-stream blocks reads the normed, rotated `[S, heads·D]` rows where the projections
+  wrote them and drops three permutes in and one out per call at one batch item. F32 calls take the token-major cuDNN row's
+  cast branch, as the head-major row cast them; Wan's F16 branches (TI2V-5B and Wan 2.1 14B) attend through an F16 twin of
+  the same config, which still refuses SageAttention's INT8, on that row's F16 branch where they ran on the head-major cuDNN
+  row. The cross-attention and Wan's image branch, the Animate-2 splice and HiDream's batched forward stay head-major, and
+  `AttendFlat` takes the token-major entry for norm-free configs only. Measured bit-identical on CUDA's cuDNN row: the
+  self-attention through the whole layer, in F32 at Wan 2.2 5B's 49- and 121-frame lengths, Wan 2.1 14B's, Matrix-Game 2's
+  masked call, a context-parallel rank's local queries over the exchanged keys and HiDream's single-stream rows, and in F16
+  with INT8 refused at Wan 2.2 5B's two lengths and Wan 2.1 14B's. On an RTX 4090 against main, wan5b, wan5b-720p, wan21-14b
+  and hidream decode to the same pixels, at 912, 1181, 1257 and 914 ms per step against 939, 1220, 1353 and 928 (one warm rep
+  each). On Vulkan, whose Wan forwards stay F32, the evidence is the attention call alone at Wan's shapes (cm2,
+  bit-identical) and no Vulkan generation was gated.
 
 ## alpha.387
 
