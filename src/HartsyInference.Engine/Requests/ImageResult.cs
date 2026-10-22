@@ -26,6 +26,14 @@ public sealed record ImageResult
     /// <summary>The seed actually used (resolved from a random seed when the request asked for -1).</summary>
     public long Seed { get; init; }
 
+    /// <summary>The recipe, revision and variant the generation resolved against; null from a pipeline driven without
+    /// the image service.</summary>
+    public Planning.RecipeIdentity? Recipe { get; init; }
+
+    /// <summary>Where each effective setting came from: the recipe's default, the caller, or a normalization.</summary>
+    public IReadOnlyDictionary<string, Planning.ResolvedParameter> Provenance { get; init; } =
+        new Dictionary<string, Planning.ResolvedParameter>(StringComparer.Ordinal);
+
     /// <summary>Free-form metadata surfaced to the caller (steps, sampler, timing, arch).</summary>
     public IReadOnlyDictionary<string, string> Meta { get; init; } = new Dictionary<string, string>();
 }

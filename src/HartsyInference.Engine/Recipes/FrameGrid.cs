@@ -39,6 +39,25 @@ public sealed record FrameGrid
     public bool Contains(int frames) =>
         frames >= Offset && (frames - Offset) % Step == 0 && (Max is null || frames <= Max);
 
+    /// <summary>The count planning runs for a requested <paramref name="frames"/>: the request itself when it is on the
+    /// grid, otherwise per <see cref="Normalization"/>, clamped to <see cref="Max"/>; null when the grid rejects it.</summary>
+    public int? Normalize(int frames)
+    {
+        if (Contains(frames))
+        {
+            return frames;
+        }
+        if (Normalization == FrameNormalization.Reject)
+        {
+            return null;
+        }
+        double steps = (frames - (double)Offset) / Step;
+        double n = Normalization == FrameNormalization.SnapUp ? Math.Ceiling(steps) : Math.Round(steps);
+        long snapped = Offset + (long)Math.Max(0, n) * Step;
+        // Snapping past the cap lands on the cap: it is on the grid and the closest count the family can generate.
+        return (int)Math.Min(snapped, Max ?? int.MaxValue);
+    }
+
     /// <inheritdoc/>
     public override string ToString() => Max is int cap ? $"{Step}n+{Offset} (max {cap})" : $"{Step}n+{Offset}";
 }
