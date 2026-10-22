@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Variants;
 using Xunit;
 
@@ -55,7 +56,8 @@ public sealed class RecipeCatalogTests
         {
             IVideoRecipe recipe = VideoRecipeRegistry.Resolve(name)!;
             Assert.Equal(recipe.DefaultsFor(CatalogDefault(recipe.Variants)), ((VideoModelDescriptor)_catalog.DescribeFamily(Modality.Video, name)).Defaults);
-            IReadOnlyList<ModelVariant> variants = recipe.Variants?.Variants ?? [];
+            // A variant another family serves is covered by ARoutedVideoVariant_IsDescribedByTheFamilyThatServesIt.
+            IReadOnlyList<ModelVariant> variants = [.. (recipe.Variants?.Variants ?? []).Where(variant => variant.RoutesToFamily is null)];
             foreach (ModelVariant variant in variants)
             {
                 ResolvedModelVariant resolved = new(recipe.Variants!.FamilyId, variant, ModelVariantSource.CallerHint, "test");
@@ -114,6 +116,17 @@ public sealed class RecipeCatalogTests
         Assert.Equal(videoOriginal.Constraints.Frames, videoBack.Constraints.Frames);
         Assert.Equal(videoOriginal.Features, videoBack.Features);
         Assert.Equal(videoOriginal.Sampling.Samplers, videoBack.Sampling.Samplers);
+    }
+
+    [Fact]
+    public void ARoutedVideoVariant_IsDescribedByTheFamilyThatServesIt()
+    {
+        VideoModelDescriptor routed = (VideoModelDescriptor)_catalog.DescribeFamily(Modality.Video, "ltx-video-2",
+            LtxVideo2Variants.Distilled.Id);
+        VideoModelDescriptor served = (VideoModelDescriptor)_catalog.DescribeFamily(Modality.Video, LtxVideo2Variants.DistilledFamilyId);
+
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, routed.Recipe.FamilyId);
+        Assert.Equal(served, routed);
     }
 
     /// <summary>What a family with no variant evidence runs: its catalog's default variant, or no variant at all.</summary>

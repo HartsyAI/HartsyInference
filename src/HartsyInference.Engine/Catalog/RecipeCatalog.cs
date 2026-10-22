@@ -84,7 +84,11 @@ public sealed class RecipeCatalog : IRecipeCatalog
     {
         IVideoRecipe recipe = VideoRecipeRegistry.Resolve(familyId)
             ?? throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
-        return VideoDescriptor(familyId, recipe, FamilyVariant(familyId, recipe.Variants, variantId), null);
+        ResolvedModelVariant? variant = FamilyVariant(familyId, recipe.Variants, variantId);
+        // A variant served by another family (LTX-2 distilled) is described by that family, as generation routes it.
+        return variant?.Variant.RoutesToFamily is string routed
+            ? DescribeVideoFamily(routed, null)
+            : VideoDescriptor(familyId, recipe, variant, null);
     }
 
     private static ImageModelDescriptor ImageDescriptor(string familyId, IArchitectureRecipe recipe, ResolvedModelVariant? variant)
