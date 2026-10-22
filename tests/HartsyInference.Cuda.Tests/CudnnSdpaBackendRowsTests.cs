@@ -182,7 +182,8 @@ public sealed class CudnnSdpaBackendRowsTests
 
     /// <summary>The materialized row addresses 2^32 score elements: up to there it keeps every call it had (SD1.5's VAE mid-block at
     /// 2048² sits exactly on it), and past it an unmasked F16 or BF16 call runs query-tiled on F32 widenings, an F32 call on the tiled
-    /// F32 rows, and a call no tiled row takes is refused naming the budget. Head dim 512 is past every fused row.</summary>
+    /// F32 rows, and a call no tiled row takes is refused naming the budget. Head dim 512 is past every fused row; the masked calls keep
+    /// Sq·Skv within the mask contract's Int32 bound, so only heads take them past 2^32.</summary>
     [Theory]
     [InlineData("f16-at-bound", "f16", 1, 65536, 65536, "none", "materialized")]
     [InlineData("f16-under", "f16", 8, 4096, 4096, "none", "materialized")]
@@ -191,9 +192,9 @@ public sealed class CudnnSdpaBackendRowsTests
     [InlineData("f16-past", "f16", 1, 65537, 65536, "none", "tiled.cast")]
     [InlineData("bf16-past", "bf16", 2, 46341, 46341, "none", "tiled.cast")]
     [InlineData("f32-past", "f32", 1, 65537, 65536, "none", "tiled.f32")]
-    [InlineData("f32-keymask-past", "f32", 2, 46341, 46341, "key", "tiled.f32.keybias")]
-    [InlineData("f32-mask-past", "f32", 2, 46341, 46341, "full", "refuse")]
-    [InlineData("f16-keymask-past", "f16", 2, 46341, 46341, "key", "refuse")]
+    [InlineData("f32-keymask-past", "f32", 4, 40000, 40000, "key", "tiled.f32.keybias")]
+    [InlineData("f32-mask-past", "f32", 4, 40000, 40000, "full", "refuse")]
+    [InlineData("f16-keymask-past", "f16", 4, 40000, 40000, "key", "refuse")]
     public void TheMaterializedRowAddresses2Pow32ScoreElements(string name, string dtype, int heads, int sq, int skv, string mask, string row)
     {
         const int d = 512;
