@@ -143,9 +143,9 @@ been re-read; until then it is an audit finding, not a specification.
 | kandinsky5-video | 50 / 1.0 / 640×640 / 73 @ 24 | core Kandinsky 5 branch: cfg 1 (docs: 5 regular, 1 distilled), class 640², 73 frames | verified 2026-10-22 |
 | lance-video | 30 / 4.0 / 512×512 / 25 @ 25 | none in SwarmUI core; the bridge registers 832×480 as a host-declared size; pipeline cap 121 | unverified |
 | minimax-h3 | 30 / 1.0 / 1344×768 / 124 @ 24 | 124 frames (17k+5, rounded up), 24 fps, cfg 1, `res_multistep` / `simple`; size kept native (core class 960²) | verified 2026-10-22 |
-| ace-step 1.5 (audio) | loader table | 120 s (max 600), turbo cfg 1 / 8 steps / shift 3 | unverified |
-| minimax-music-3 (audio) | `MiniMaxMusic3MusicRecipe`: 10 s, 30 steps, cfg 1.7 | 120 s max, cfg 1.7, 30 steps; frame grid caps at 360 s | unverified |
-| yue2 (audio) | `Yue2MusicRecipe`: 10 s, 32 ODE steps; cfg owned by the planning mode | 300 s max, cfg 1, 20 steps; protocol caps at 900 s | unverified |
+| ace-step 1.5 (audio) | 120 s; turbo 8 / cfg 1 / shift 3, sft 50 and base 32 at cfg 7 / shift 1 | 120 s (max 600), turbo cfg 1 / 8 steps / shift 3 | verified 2026-10-22 |
+| minimax-music-3 (audio) | 120 s, 30 steps, flow cfg 1.7 | core: 120 s; docs: flow cfg 1.7 official, 30 steps. Core's `cfg_scale` 1.5 on `MiniMaxMusic3TextEncode` is the code LM's guidance, which `MiniMaxMusic3ArPipeline` already runs at 1.5; frame grid caps at 360 s | verified 2026-10-22 |
+| yue2 (audio) | 300 s, 32 ODE steps; cfg owned by the planning mode | 300 s, cfg 1, steps "eg 20" (an example, so 32 stays); protocol caps at 900 s | verified 2026-10-22 |
 
 Rows marked "today" with 25 fps or 704×480 that SwarmUI does not list are the old generic fallback, kept so the
 change that made defaults total moved no output.
