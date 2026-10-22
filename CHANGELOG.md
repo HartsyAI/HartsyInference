@@ -52,6 +52,16 @@ stable release will require. Dates are UTC.
 
 ## alpha.387
 
+- **Changed: Anima Base and Flux 3 Image Base default to the `er_sde` sampler**, SwarmUI core's choice for both (#521).
+  Anima Turbo and the Flux 3 distilled build keep their pipeline's sampler. A request that names a sampler is
+  unchanged. `docs/Research/RECIPE_CONTRACT.md` records why the rest of SwarmUI's per-model samplers, schedulers and
+  shifts stay with the pipelines.
+- **Changed: Wan 2.2 I2V-14B is recognised by its weights and defaults to CFG 3.5**, SwarmUI core's value (#522). It
+  shares the `wan-21-14b` class and ran Wan 2.1's CFG 6. The new `i2v-22-14b` variant matches the 14B backbone with a
+  36-channel patch embedding and no CLIP image branch; Wan 2.1 I2V, FLF2V and Animate-2 resolve as before.
+- **Changed: `hartsy music` without `--duration` renders the model's recipe duration** (120 s for ACE-Step 1.5 and
+  MiniMax Music 3, 300 s for YuE2) instead of 10 s; the REPL's music duration starts unset too (#532). An explicit
+  `--duration` is unchanged.
 - **Fixed: CUDA head-major attention past 2^32 score elements returns the right rows.** The materialized row's softmax forms
   each row's offset in 32 bits, so a call whose B·H·Sq·Skv score matrix passed 2^32 elements and reached that row (no cuDNN,
   SageAttention or flash row taking it; for F32 only on a card with more than about 34 GB free) normalized the wrong memory
