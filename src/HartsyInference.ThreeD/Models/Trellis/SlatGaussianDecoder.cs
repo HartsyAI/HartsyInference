@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
@@ -87,8 +88,8 @@ public sealed unsafe class SlatGaussianDecoder
 internal sealed unsafe class GsBlock
 {
     private const int W = 768, H = 12, Hd = 64, Mlp = 3072;
-    private static readonly float Scale = 1f / MathF.Sqrt(Hd);
     private Tensor _qkvW = null!, _qkvB = null!, _oW = null!, _oB = null!, _m0W = null!, _m0B = null!, _m2W = null!, _m2B = null!;
+    private AttentionLayer _attn = null!;
 
     public static GsBlock Load(IReadOnlyDictionary<string, Tensor> w, string p)
     {
@@ -99,6 +100,9 @@ internal sealed unsafe class GsBlock
         b._oW = Fw("attn.to_out.weight"); b._oB = F("attn.to_out.bias");
         b._m0W = Fw("mlp.mlp.0.weight"); b._m0B = F("mlp.mlp.0.bias");
         b._m2W = Fw("mlp.mlp.2.weight"); b._m2B = F("mlp.mlp.2.bias");
+        b._attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = H, KvHeads = H, HeadDim = Hd, Projection = AttentionProjection.FusedSlice, ComputeDType = DType.F32, AllowF16 = true },
+            new AttentionLayerWeights { Qkv = b._qkvW, QkvBias = b._qkvB, Output = b._oW, OutputBias = b._oB });
         return b;
     }
 
@@ -106,19 +110,9 @@ internal sealed unsafe class GsBlock
 
     public Tensor Forward(IBackend backend, Tensor x, Tensor mask, int n)
     {
-        TensorShape flat = new(1, n, W), heads = new(1, n, H, Hd), mh = new(1, H, n, Hd);
+        TensorShape flat = new(1, n, W);
         Tensor h = new(flat, DType.F32); backend.LayerNormNoAffine(h, x, 1e-6f);
-        Tensor qkv = new(new TensorShape(1, n, 3 * W), DType.F32); backend.Linear(qkv, h, _qkvW, _qkvB); h.Dispose();
-        Tensor q = new(heads, DType.F32); backend.SliceLastDim(q, qkv, 0);
-        Tensor k = new(heads, DType.F32); backend.SliceLastDim(k, qkv, W);
-        Tensor v = new(heads, DType.F32); backend.SliceLastDim(v, qkv, 2 * W); qkv.Dispose();
-        Tensor qP = new(mh, DType.F32); backend.Permute0213(qP, q, n, H, Hd); q.Dispose();
-        Tensor kP = new(mh, DType.F32); backend.Permute0213(kP, k, n, H, Hd); k.Dispose();
-        Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, n, H, Hd); v.Dispose();
-        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, mask, Scale, allowF16: true);
-        qP.Dispose(); kP.Dispose(); vP.Dispose();
-        Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, H, n, Hd); attn.Dispose();
-        Tensor o = new(flat, DType.F32); backend.Linear(o, attnFlat, _oW, _oB); attnFlat.Dispose();
+        Tensor o = _attn.Forward(backend, h, h, new AttentionCallContext { Bias = mask, ReleaseInputs = true });
         Tensor x1 = new(flat, DType.F32); backend.Add(x1, x, o); o.Dispose();
 
         Tensor h2 = new(flat, DType.F32); backend.LayerNormNoAffine(h2, x1, 1e-6f);

@@ -13,7 +13,7 @@ public sealed unsafe class ResBlock2d
     {
         _conv1W = w[$"{p}.conv1.weight"]; w.TryGetValue($"{p}.conv1.bias", out _conv1B);
         _conv2W = w[$"{p}.conv2.weight"];
-        _normW = TensorCasts.LoadF32(w, $"{p}.norm.weight"); w.TryGetValue($"{p}.norm.bias", out _normB);
+        _normW = TensorCasts.LoadF32(w, $"{p}.norm.weight"); _normB = TensorCasts.LoadF32Opt(w, $"{p}.norm.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

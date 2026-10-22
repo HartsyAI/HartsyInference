@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -27,6 +28,7 @@ public sealed unsafe class OasisVitVae
     private readonly int _decDepth;
     private readonly int _mlpHidden;
     private readonly AxialRope2D _rope;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _patchW2d, _patchB;            // Conv2d(3→dim, 20, stride 20) as linear [dim, 3·p²]
     private VitBlock[] _encoder = [];
@@ -50,6 +52,7 @@ public sealed unsafe class OasisVitVae
         _mlpHidden = (int)(dim * mlpRatio);
         // rotary dim = head_dim // 4 per axis, max_freq = 18·32 = 576 (the trained grid).
         _rope = new AxialRope2D(_headDim / 4, maxFreq: 576);
+        _attention = new AttentionLayer(new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32 });
     }
 
     /// <summary>Latent channels (16).</summary>
@@ -286,9 +289,7 @@ public sealed unsafe class OasisVitVae
             Tensor qMh = ToBhsd(q, s, heads, hd); q.Dispose();
             Tensor kMh = ToBhsd(k, s, heads, hd); k.Dispose();
             Tensor vMh = ToBhsd(v, s, heads, hd); v.Dispose();
-            Tensor attn = new Tensor(new TensorShape([1L, heads, s, hd]), DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1.0f / MathF.Sqrt(hd));
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+            Tensor attn = _vae._attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default);
 
             Tensor flat = FromBhsd(attn, s, heads, hd);
             attn.Dispose();

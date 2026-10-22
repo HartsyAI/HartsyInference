@@ -56,20 +56,25 @@ public sealed partial class CudaBackend
     public void Attention(in AttentionCall call)
     {
         if (call.LegacyGap() is { } gap)
-            throw new AttentionUnsupportedException($"CUDA attention serves a call its legacy entry point can carry; this one has {gap}.");
+        {
+            // Only the cuDNN rows read views, so the route's other rows exclude themselves and the planner refuses what none takes.
+            if (call.Route is not (AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa) || call.TermsGap() is not null)
+                throw new AttentionUnsupportedException($"CUDA attention serves a call its legacy entry point can carry; this one has {gap}.");
+            RunViewCall(in call);
+            return;
+        }
         Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
         switch (call.Route)
         {
             case AttentionRoute.Dense:
-                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics.LegacyAssertedBounded);
+                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics);
                 break;
             case AttentionRoute.TokenMajor:
-                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale,
-                    call.Numerics.LegacyAssertedBounded);
+                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale, call.Numerics);
                 break;
             case AttentionRoute.TokenMajorGqa:
                 ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.KvHeads, call.QkHeadDim, call.Scale,
-                    call.Numerics.LegacyAssertedBounded);
+                    call.Numerics);
                 break;
             case AttentionRoute.Flash:
                 FlashAttention(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
@@ -80,6 +85,18 @@ public sealed partial class CudaBackend
                     call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
                 break;
         }
+    }
+
+    /// <summary>A call the legacy entries cannot carry, planned over its route's rows with its own geometry checked first.</summary>
+    private void RunViewCall(in AttentionCall call)
+    {
+        AttentionHostReference.Validate(in call);
+        if (!float.IsFinite(call.Scale))
+            throw new ArgumentOutOfRangeException(nameof(call), "SDPA scale must be finite.");
+        Tensor output = call.Output.Storage;
+        if (ReferenceEquals(output, call.Query.Storage) || ReferenceEquals(output, call.Key.Storage) || ReferenceEquals(output, call.Value.Storage))
+            throw new ArgumentException("Attention output must not alias an input.", nameof(call));
+        RunAttentionRows(RowsFor(call.Route), in call);
     }
 
     /// <inheritdoc/>
@@ -127,15 +144,9 @@ public sealed partial class CudaBackend
                         c.KeyTokens, c.QkHeadDim, HeadMajorStrides(h, sq, d), HeadMajorStrides(h, sq, d), HeadMajorStrides(h, skv, d),
                         HeadMajorStrides(h, skv, d));
                 }),
-            new DelegateAttentionRow(Cap("cudnn.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, HM) with
-                {
-                    MinHeadDim = CudnnSdpa.MinHeadDim, MaxHeadDim = CudnnSdpa.MaxHeadDim, Masks = AttentionMaskSupport.HeadSharedBias,
-                    UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16,
-                }, "S.3",
-                (in AttentionCall c) => CudnnMaskCompatible(c.Mask.Bias, c.Batch, c.QueryTokens, c.KeyTokens)
-                    && c.Query.DType == DType.F16 && c.Key.DType == DType.F16 && c.Value.DType == DType.F16 && c.Output.DType == DType.F16
-                    && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(c.QkHeadDim) && CudnnSdpa.ShapeSupported(c.QkHeadDim),
-                (in AttentionCall c) => TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale)),
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f16", E, AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView), "S.3",
+                (in AttentionCall c) => CudnnSdpaRows.Covers(in c) && CudnnReady(in c),
+                (in AttentionCall c) => TryCudnnSdpa(in c)),
             // The F32 Sage rows narrow V to F16 with no range check (|V| > 65504 becomes Inf), hence the two opt-in flags.
             new DelegateAttentionRow(Cap("sage.int8.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
@@ -144,16 +155,13 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => c.Query.DType == DType.F32 && SageF32ValueNarrowingEnabled && c.Mask.Bias is null
                     && (c.QkHeadDim == 64 || c.QkHeadDim == 128) && c.KeyTokens >= 2048 && SageF32KernelsReady(c.QueryTokens),
                 (in AttentionCall c) => { SageAttentionInt8(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("cudnn.f32.sat", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.sat", E, AttentionDTypes.F32, HM, strided: false) with
                 {
-                    MinHeadDim = CudnnSdpa.MinHeadDim, MaxHeadDim = CudnnSdpa.MaxHeadDim, Masks = AttentionMaskSupport.HeadSharedBias,
-                    UsesQueryKey = AttentionFormats.F16,
-                    UsesProbValue = AttentionFormats.F16, Saturates = true, Lowering = AttentionLowering.Cast,
+                    Saturates = true, Lowering = AttentionLowering.Cast,
                 }, "S.5",
-                (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnMaskCompatible(c.Mask.Bias, c.Batch, c.QueryTokens, c.KeyTokens)
-                    && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(c.QkHeadDim) && CudnnSdpa.ShapeSupported(c.QkHeadDim)
+                (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c) && CudnnReady(in c)
                     && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled,
-                (in AttentionCall c) => TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale)),
+                (in AttentionCall c) => TryCudnnSdpa(in c)),
             new DelegateAttentionRow(Cap("sage.int8.f32.short", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
@@ -233,7 +241,7 @@ public sealed partial class CudaBackend
         [
             new DelegateAttentionRow(Cap("flash.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, TM) with
                 {
-                    MinHeadDim = 256, MaxHeadDim = 256, UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
+                    MaxBatch = 1, MinHeadDim = 256, MaxHeadDim = 256, UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
                 }, "M.1",
                 (in AttentionCall c) => FlashF16Eligible(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QkHeadDim),
                 (in AttentionCall c) =>
@@ -242,44 +250,75 @@ public sealed partial class CudaBackend
                     return TryFlashF16(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale, 1, c.Heads, c.QueryTokens,
                         c.KeyTokens, c.QkHeadDim, tokenMajor, tokenMajor, tokenMajor, tokenMajor);
                 }),
-            new DelegateAttentionRow(Cap("cudnn.tokenmajor", E, AttentionDTypes.F16 | AttentionDTypes.F32,
-                    AttentionDTypes.F16 | AttentionDTypes.F32, TM) with
-                {
-                    MinHeadDim = CudnnSdpa.MinHeadDim, MaxHeadDim = CudnnSdpa.MaxHeadDim, Masks = AttentionMaskSupport.HeadSharedBias,
-                    UsesQueryKey = AttentionFormats.F16,
-                    UsesProbValue = AttentionFormats.F16, Saturates = true,
-                }, "M.2",
-                (in AttentionCall c) => !(SageTokenMajorDetour && SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage,
-                        c.Mask.Bias, c.QueryTokens, c.KeyTokens, c.QkHeadDim))
-                    && CudnnMaskCompatible(c.Mask.Bias, 1, c.QueryTokens, c.KeyTokens)
-                    && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(c.QkHeadDim) && CudnnSdpa.ShapeSupported(c.QkHeadDim)
-                    && (c.Query.DType == DType.F16
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.tokenmajor", E,
+                    AttentionDTypes.F16 | AttentionDTypes.BF16 | AttentionDTypes.F32, CudnnSdpaRows.AnyView) with { Saturates = true }, "M.2",
+                // The Sage detour is the permute row's; a view or batch that row cannot take stays on cuDNN.
+                (in AttentionCall c) => !(SageTokenMajorDetour && WholeSequence(in c) && SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage,
+                        c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens, c.QkHeadDim))
+                    && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c) && CudnnReady(in c)
+                    && (CudnnSdpaRows.HalfOperands(in c)
                         || (c.Query.DType == DType.F32 && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled)),
-                (in AttentionCall c) =>
-                {
-                    using OpScope _op = EnterOp(nameof(ScaledDotProductAttentionTokenMajor));
-                    EnsureKernels();
-                    return TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
-                        CudnnSdpa.SdpaLayout.TokenMajor, 1, c.Heads, c.QueryTokens, c.KeyTokens, c.QkHeadDim);
-                }),
+                (in AttentionCall c) => RunCudnnTokenMajor(in c)),
             new DelegateAttentionRow(Cap("permute.dense", E, AnyFloat, AnyFloat, TM) with
                 {
-                    Masks = AnyBias, Lowering = AttentionLowering.Permute,
+                    MaxBatch = 1, Masks = AnyBias, Lowering = AttentionLowering.Permute,
                 }, null,
-                static (in AttentionCall c) => true,
+                static (in AttentionCall c) => c.Mask.Bias is not { } mask || TokenMajorMaskFits(mask, c.Heads, c.QueryTokens, c.KeyTokens),
                 (in AttentionCall c) => { TokenMajorViaHeadMajor(in c); return true; }),
         ];
     }
 
     private AttentionKernelRow[] BuildTokenMajorGqaRows() =>
     [
+        // Grouped fp16/bf16 only; yields to Sage and the F16 flash kernel, which took these calls after widening.
+        new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.tokenmajor.gqa", AttentionRoute.TokenMajorGqa,
+                AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView, gqa: true), "G.1",
+            (in AttentionCall c) => c.KvHeads < c.Heads && CudnnSdpaRows.Covers(in c)
+                && (!WholeSequence(in c)
+                    || (!SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens,
+                            c.QkHeadDim)
+                        && !FlashF16Eligible(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QkHeadDim)))
+                && CudnnReady(in c),
+            (in AttentionCall c) => RunCudnnTokenMajor(in c)),
         new DelegateAttentionRow(Cap("permute.widen.dense", AttentionRoute.TokenMajorGqa, AnyFloat, AnyFloat, AttentionLayouts.TokenMajor) with
             {
-                Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute | AttentionLowering.WidenKv,
+                MaxBatch = 1, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute | AttentionLowering.WidenKv,
             }, null,
-            static (in AttentionCall c) => true,
+            // It runs the head-major entry, which takes the masks that entry takes.
+            static (in AttentionCall c) => c.Mask.Bias is not { } mask || HeadMajorMaskFits(mask, c.Batch, c.Heads, c.QueryTokens, c.KeyTokens),
             (in AttentionCall c) => { GroupedTokenMajorViaHeadMajor(in c); return true; }),
     ];
+
+    /// <summary>The knob, the session, the head dim and this call's signature health.</summary>
+    private bool CudnnReady(in AttentionCall c) =>
+        _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(c.QkHeadDim)
+        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c), Environment.TickCount64);
+
+    /// <summary>One sequence of whole tensors: all the permuting and widening rows take.</summary>
+    private static bool WholeSequence(in AttentionCall c) =>
+        c.Batch == 1 && c.Query.IsPlain && c.Key.IsPlain && c.Value.IsPlain && c.Output.IsPlain;
+
+    /// <summary>The token-major launch shared by the equal-head and grouped rows.</summary>
+    private bool RunCudnnTokenMajor(in AttentionCall c)
+    {
+        using OpScope _op = EnterOp(nameof(ScaledDotProductAttentionTokenMajor));
+        EnsureKernels();
+        return TryCudnnSdpa(in c);
+    }
+
+    /// <summary>The masks the permuting token-major row has always taken: F32, one block per head or shared, one row per query.</summary>
+    private static bool TokenMajorMaskFits(Tensor mask, long heads, long sq, long skv) => mask.DType == DType.F32 && mask.Shape.Rank switch
+    {
+        2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
+        3 => (mask.Shape[0] == 1 || mask.Shape[0] == heads) && mask.Shape[1] == sq && mask.Shape[2] == skv,
+        4 => mask.Shape[0] == 1 && (mask.Shape[1] == 1 || mask.Shape[1] == heads) && mask.Shape[2] == sq && mask.Shape[3] == skv,
+        _ => false,
+    };
+
+    /// <summary>What <see cref="AttentionMaskLayout.Of"/> accepts, without throwing.</summary>
+    private static bool HeadMajorMaskFits(Tensor mask, long batch, long heads, long sq, long skv) =>
+        mask.DType == DType.F32 && mask.ElementCount <= int.MaxValue && sq * skv <= int.MaxValue
+        && AttentionMaskLayout.Broadcasts(mask.Shape, batch, heads, sq, skv);
 
     /// <summary>The sequence Krea2 issued before CUDA served this overload, in its order: permute Q, K and V, repeat K/V
     /// heads when grouped (dropping the head-major copies), head-major SDPA, permute out.</summary>
@@ -307,7 +346,7 @@ public sealed partial class CudaBackend
                 vMh.Dispose();
             }
             oMh = new Tensor(qMhShape, output.DType);
-            ScaledDotProductAttention(oMh, qMh, kRep ?? kMh, vRep ?? vMh, c.Mask.Bias, c.Scale, c.Numerics.LegacyAssertedBounded);
+            ScaledDotProductAttention(oMh, qMh, kRep ?? kMh, vRep ?? vMh, c.Mask.Bias, c.Scale, c.Numerics);
             qMh.Dispose();
             (kRep ?? kMh).Dispose();
             (vRep ?? vMh).Dispose();
@@ -335,7 +374,7 @@ public sealed partial class CudaBackend
             Permute0213(qMh, query, sq, heads, headDim);
             Permute0213(kMh, key, skv, heads, headDim);
             Permute0213(vMh, value, skv, heads, headDim);
-            ScaledDotProductAttention(oMh, qMh, kMh, vMh, c.Mask.Bias, c.Scale, c.Numerics.LegacyAssertedBounded);
+            ScaledDotProductAttention(oMh, qMh, kMh, vMh, c.Mask.Bias, c.Scale, c.Numerics);
             Permute0213(output, oMh, heads, sq, headDim);
             t_attentionRoute = AttentionRouteText.Nested("M.3/", t_attentionRoute);
         }
@@ -371,7 +410,7 @@ public sealed partial class CudaBackend
                 {
                     MinHeadDim = 64, MaxHeadDim = 256, Gqa = true, Masks = CW, MinQueryTokens = 2, UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Saturates = true,
-                    Lowering = AttentionLowering.Cast | AttentionLowering.MaterializeMask | AttentionLowering.WidenKv,
+                    Lowering = AttentionLowering.Cast | AttentionLowering.MaterializeMask,
                 }, "F.2",
                 (in AttentionCall c) =>
                 {
@@ -382,8 +421,10 @@ public sealed partial class CudaBackend
                         && c.Logits.Softcap == 0f && c.Logits.Sinks is null && c.Logits.AlibiSlopes is null
                         && c.Query.DType == DType.F32 && c.Output.DType == DType.F32 && !f16Kv && value.DType == DType.F32
                         && _kernels is not null && _kernels.HasCausalMaskKernel
-                        && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
-                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, d, t_flashKvGroup);
+                        && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(d)
+                        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.For(DType.F32, c.Heads, c.KvHeads, d, new CudnnBias(1, 1, c.QueryTokens)),
+                            Environment.TickCount64)
+                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d);
                 },
                 (in AttentionCall c) => TryCausalPrefillSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Heads, c.KvHeads,
                     c.QueryTokens, c.Positions.KvLength, c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.QkHeadDim, c.Scale)),

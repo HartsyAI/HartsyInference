@@ -1684,8 +1684,8 @@ __global__ void row_gather_f32(
     out[idx] = in[(long)indices[j] * c + ch];
 }
 
-// Row scatter-add: out[indices[j]] += in[j] (indices unique within a call → no atomics needed). Accumulates a
-// kernel-offset's GEMM contribution into the sparse-conv output.
+// Row scatter-add: out[indices[j]] += in[j] without atomics, so indices must be unique within a call (a repeated row
+// races and loses updates). Accumulates a sparse-conv kernel offset's GEMM output and SeedVR2's window video rows.
 __global__ void row_scatter_add_f32(
     float* __restrict__ out, const float* __restrict__ in, const int* __restrict__ indices, int m, int c)
 {

@@ -5,6 +5,7 @@ using HartsyInference.Cli.Infra;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 using Spectre.Console;
@@ -72,11 +73,19 @@ public sealed class InspectCommand : Command<InspectCommand.Settings>
             spec = spec with { ProfileId = settings.ModelProfile };
         }
         using InferenceEngine engine = new InferenceEngine(settings.Backend);
-        VideoPlan plan = engine.VideoPlanning.PlanAsync(spec, new VideoRequest
+        VideoPlan plan;
+        try
         {
-            Prompt = "",
-            Loras = BuildLoraStack(settings),
-        }).GetAwaiter().GetResult();
+            plan = engine.VideoPlanning.PlanAsync(spec, new VideoRequest
+            {
+                Prompt = "",
+                Loras = BuildLoraStack(settings),
+            }).GetAwaiter().GetResult();
+        }
+        catch (RecipeNotRegisteredException ex)
+        {
+            return CliErrors.Report(ex, Modality.Video);
+        }
         plan = AsInspectionResult(plan);
         if (settings.Json)
         {

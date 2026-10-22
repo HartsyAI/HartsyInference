@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -114,6 +115,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     // ISsmModel has no "expected max length" input, so this is a practical fixed cap, not a general solution.
     private const int MaxAttnSeqLen = 8192;
     private readonly FixedKvCache _kvCache;
+    private readonly AttentionLayer? _attn;   // the attention operator and KV stage of every full-attention layer; null when there are none
     private int _pos;
     private int _disposed;
 
@@ -182,6 +184,13 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
             _deltaState[i] = new float[NumVHeads * HeadVDim * HeadVDim];
         }
         _kvCache = new FixedKvCache(layers, 1, numKvHeads, attnHeadDim, maxAttnSeqLen);
+        if (Array.Exists(_isLinear, linear => !linear))
+        {
+            _attn = new AttentionLayer(new AttentionLayerConfig
+            {
+                Heads = numHeads, KvHeads = numKvHeads, HeadDim = attnHeadDim, ComputeDType = DType.F32, Scale = 1f / MathF.Sqrt(attnHeadDim),
+            });
+        }
     }
 
     /// <summary>Zeroes every layer's carried state (Gated DeltaNet matrices + conv history) and the KV cache — call before the first <see cref="ForwardLastLogits"/> of a new generation.</summary>
@@ -462,7 +471,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer D2H/H2D round-trip) with a SliceTimeRange over the [1,hq,2,hd]-shaped fused projection, and the per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled copies (ApplyRopeSingle's contract); the tiny relabel copies stay on-device.</summary>
     private Tensor BlockAttnDeviceStep(IBackend backend, Tensor hIn, int i, Tensor stepCos, Tensor stepSin)
     {
-        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
+        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim;
         string p = $"blk.{i}";
         TensorShape flat = new(1, 1, d);
 
@@ -506,12 +515,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.CopyTo(kMh, kRope);
         kRope.Dispose();
 
-        _kvCache.AppendStep(backend, i, kMh, vMh);
-        kMh.Dispose(); vMh.Dispose();
-        int kvLen = _pos + 1;
-        Tensor attn = new(new TensorShape(1, hq, 1, hd), DType.F32);
-        backend.FlashAttention(attn, qMh, _kvCache.KeyPrefix(i), _kvCache.ValuePrefix(i), kvLen, group, causal: true, qOffset: _pos, 1f / MathF.Sqrt(hd));
-        qMh.Dispose();
+        Tensor attn = _attn!.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, _kvCache, i, i, new KvAttentionCall { KvLength = _pos + 1, QueryOffset = _pos });
 
         // [1,hq,1,hd] ≡ [1,1,hq*hd] bytes at seq=1 — gate, then the output projection, no permutes.
         Tensor gateSig = new(new TensorShape(1, hq, 1, hd), DType.F32);
@@ -542,7 +546,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     {
         if (seq == 1 && stepCos is not null && backend.GraphDecodeSupported && EngineKnobs.SsmDeviceStep.Value)
             return BlockAttnDeviceStep(backend, hIn, i, stepCos, stepSin!);
-        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
+        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim;
         string p = $"blk.{i}";
         TensorShape flat = new(1, seq, d);
 
@@ -596,12 +600,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Permute0213(vMh, v, seq, hkv, hd);
         qN.Dispose(); kN.Dispose(); v.Dispose();
 
-        _kvCache.AppendStep(backend, i, kMh, vMh);
-        kMh.Dispose(); vMh.Dispose();
-        int kvLen = _pos + seq;
-        Tensor attn = new(new TensorShape(1, hq, seq, hd), DType.F32);
-        backend.FlashAttention(attn, qMh, _kvCache.KeyPrefix(i), _kvCache.ValuePrefix(i), kvLen, group, causal: true, qOffset: _pos, 1f / MathF.Sqrt(hd));
-        qMh.Dispose();
+        Tensor attn = _attn!.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, _kvCache, i, i, new KvAttentionCall { KvLength = _pos + seq, QueryOffset = _pos });
 
         Tensor attnFlat = new(new TensorShape(1, seq, hq * hd), DType.F32);
         backend.Permute0213(attnFlat, attn, hq, seq, hd);
@@ -721,7 +720,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// <summary>Attention layer for the captured step: identical to <see cref="BlockAttnDeviceStep"/> except rope/append/attention read the position from the device buffer (the decode rope kernel is head-major, so the relabel copies disappear too).</summary>
     private Tensor BlockAttnGraphStep(IBackend backend, Tensor hIn, int i, Tensor cosTable, Tensor sinTable, ulong devicePos)
     {
-        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim, group = hq / hkv;
+        int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim;
         string p = $"blk.{i}";
         TensorShape flat = new(1, 1, d);
 
@@ -759,9 +758,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.KvCacheAppendDev(vFull, vMh, 0, devicePos);
         kMh.Dispose(); vMh.Dispose();
 
-        Tensor attn = new(new TensorShape(1, hq, 1, hd), DType.F32);
-        backend.FlashAttentionDev(attn, qMh, kFull, vFull, 0, group, causal: true, 0, 1f / MathF.Sqrt(hd), devicePos, 0f, 0);
-        qMh.Dispose();
+        Tensor attn = _attn!.AttendDevice(backend, qMh, kFull, vFull, devicePos, default);
 
         Tensor gateSig = new(new TensorShape(1, hq, 1, hd), DType.F32);
         backend.Sigmoid(gateSig, gateHm);

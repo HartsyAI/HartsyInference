@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 
@@ -371,11 +372,16 @@ public sealed unsafe class Qwen25VlVisionEncoder : IDisposable
     private sealed unsafe class Block : IDisposable
     {
         private readonly Qwen25VlVisionConfig _c;
+        private readonly AttentionLayer _attention;
         private Tensor? _norm1W, _norm2W;
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _projW, _projB;
         private Tensor? _gateW, _gateB, _upW, _upB, _downW, _downB;
 
-        public Block(Qwen25VlVisionConfig c) => _c = c;
+        public Block(Qwen25VlVisionConfig c)
+        {
+            _c = c;
+            _attention = new(new AttentionLayerConfig { Heads = c.NumHeads, KvHeads = c.NumHeads, HeadDim = c.HeadDim });
+        }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
@@ -437,9 +443,7 @@ public sealed unsafe class Qwen25VlVisionEncoder : IDisposable
             backend.Permute0213(vM, v, np, heads, hd);
             q.Dispose(); k.Dispose(); v.Dispose();
 
-            Tensor attn = new Tensor(new TensorShape(1, heads, np, hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, qM, kM, vM, mask, 1f / MathF.Sqrt(hd));
-            qM.Dispose(); kM.Dispose(); vM.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qM, kM, vM, new AttentionCallContext { Bias = mask });
 
             Tensor attnFlat = new Tensor(flat3, DType.F32);
             backend.Permute0213(attnFlat, attn, heads, np, hd);

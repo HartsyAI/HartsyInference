@@ -13,4 +13,8 @@
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.ThreeD.Tests" />
+  </ItemGroup>
+
 </Project>

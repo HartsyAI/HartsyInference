@@ -1,0 +1,31 @@
+r0 ck-off  krea2     T(8)=5.94s T(16)=11.38s -> 680.6 ms/step
+r0 ck-off  flux1dev  T(20)=11.70s T(40)=22.90s -> 560.3 ms/step
+r0 ck-off  wan5b     T(20)=22.90s T(40)=38.97s -> 803.6 ms/step
+r0 ck-off  ltx25     T(8)=17.25s T(16)=20.99s -> 466.8 ms/step
+r0 ck-on   krea2     T(8)=5.57s T(16)=10.73s -> 644.5 ms/step
+r0 ck-on   flux1dev  T(20)=10.76s T(40)=20.97s -> 510.9 ms/step
+r0 ck-on   wan5b     T(20)=21.26s T(40)=36.01s -> 737.2 ms/step
+r0 ck-on   ltx25     T(8)=17.27s T(16)=21.85s -> 572.8 ms/step
+r0 engine  krea2     T(8)=11.41s T(16)=15.73s -> 540.3 ms/step
+r0 engine  flux1dev  T(20)=23.78s T(40)=32.77s -> 449.3 ms/step
+r0 engine  wan5b     T(20)=50.59s T(40)=73.27s -> 1133.9 ms/step
+r0 engine  ltx25     T(8)=161.25s T(16)=79.61s -> -10205.3 ms/step
+r1 ck-off  krea2     T(8)=5.89s T(16)=11.39s -> 687.0 ms/step
+r1 ck-off  flux1dev  T(20)=11.71s T(40)=23.06s -> 567.3 ms/step
+r1 ck-off  wan5b     T(20)=23.29s T(40)=38.40s -> 755.8 ms/step
+r1 ck-off  ltx25     T(8)=21.27s T(16)=25.98s -> 590.0 ms/step
+r1 ck-on   krea2     T(8)=5.57s T(16)=10.77s -> 650.4 ms/step
+r1 ck-on   flux1dev  T(20)=10.72s T(40)=20.93s -> 510.2 ms/step
+r1 ck-on   wan5b     T(20)=20.86s T(40)=35.81s -> 747.5 ms/step
+r1 ck-on   ltx25     T(8)=18.45s T(16)=21.88s -> 428.7 ms/step
+r1 engine  krea2     T(8)=11.59s T(16)=15.77s -> 522.0 ms/step
+r1 engine  flux1dev  T(20)=23.49s T(40)=32.68s -> 459.7 ms/step
+r1 engine  wan5b     T(20)=50.44s T(40)=73.40s -> 1148.0 ms/step
+r1 engine  ltx25     T(8)=121.16s T(16)=128.92s -> 970.4 ms/step
+
+| model | ComfyUI default ms/step | ComfyUI --use-ck-attention ms/step | engine ms/step | engine ÷ ck |
+|---|---|---|---|---|
+| krea2 | 683.8 | 647.4 | 531.1 | 0.82× |
+| flux1dev | 563.8 | 510.6 | 454.5 | 0.89× |
+| wan5b | 779.7 | 742.3 | 1140.9 | 1.54× |
+| ltx25 | 528.4 | 500.8 | -4617.4 | -9.22× |

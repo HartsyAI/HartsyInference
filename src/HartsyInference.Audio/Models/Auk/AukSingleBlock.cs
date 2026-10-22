@@ -29,7 +29,6 @@ public sealed class AukSingleBlock(AukConfig config)
         (Tensor q, Tensor k, Tensor v) = _attn.Project(backend, modded, n, cos, sin);
         modded.Dispose();
         Tensor merged = AukOps.Attend(backend, q, k, v, n, config.Heads, config.HeadDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
         Tensor attnOut = _attn.Output(backend, merged, n);
         merged.Dispose();
         Tensor afterAttn = AukOps.GatedResidual(backend, x, attnOut, mod.GateMsa);

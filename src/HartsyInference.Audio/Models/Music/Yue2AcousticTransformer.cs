@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
@@ -20,6 +21,7 @@ public sealed class Yue2AcousticTransformer : IDisposable
 {
     private readonly Yue2Config _config;
     private readonly Layer[] _layers;
+    private readonly AttentionLayer _attention;
     private Tensor? _vae2llmWeight, _vae2llmBias, _llm2vaeWeight, _llm2vaeBias;
     private Tensor? _timeMlp0Weight, _timeMlp0Bias, _timeMlp2Weight, _timeMlp2Bias;
     private Tensor? _positionEmbedding, _finalNorm;
@@ -37,6 +39,11 @@ public sealed class Yue2AcousticTransformer : IDisposable
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
         _layers = new Layer[config.Nar.NumHiddenLayers];
+        // The prefix buffers hold K/V already widened to every head, so the operator stage attends them as MHA.
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = config.Nar.NumAttentionHeads, KvHeads = config.Nar.NumAttentionHeads, HeadDim = config.Nar.HeadDim, AllowF16 = true,
+        });
         for (int i = 0; i < _layers.Length; i++) _layers[i] = new Layer();
     }
 
@@ -154,7 +161,6 @@ public sealed class Yue2AcousticTransformer : IDisposable
 
         Tensor cos = prefix.Cos, sin = prefix.Sin;
 
-        float scale = 1f / MathF.Sqrt(dim);
         float eps = _config.Nar.RmsNormEps;
         DType kv = prefix.Dtype;
         for (int i = 0; i < _layers.Length; i++)
@@ -229,8 +235,8 @@ public sealed class Yue2AcousticTransformer : IDisposable
 
             // Q, the keys, the values and the output all at the buffers' dtype: at F16 that is cuDNN's native
             // entry, which casts nothing, where the F32 route re-narrows the whole key and value every call.
-            using Tensor attention = new(new TensorShape(1, heads, tokens, dim), kv);
-            backend.ScaledDotProductAttention(attention, qHeadMajor, prefix.Keys(i), prefix.Values(i), null, scale, allowF16: true);
+            using Tensor attention = _attention.AttendHeadMajorOperands(backend, qHeadMajor, prefix.Keys(i), prefix.Values(i), default,
+                OperandOwnership.None);
 
             using Tensor tokenMajor = new(new TensorShape(1, tokens, heads * dim), kv);
             backend.Permute0213(tokenMajor, attention, heads, tokens, dim);

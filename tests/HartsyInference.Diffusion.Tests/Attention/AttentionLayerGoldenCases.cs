@@ -1,5 +1,7 @@
-using System.Security.Cryptography;
 using HartsyInference.Core.Backends;
+using HartsyInference.Tests.Common.Attention;
+using static HartsyInference.Tests.Common.Attention.AttentionGolden;
+using Weights = HartsyInference.Tests.Common.Attention.GoldenWeights;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -483,26 +485,6 @@ internal static unsafe class AttentionLayerGoldenCases
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Digests the outputs, then releases every tensor the case allocated.</summary>
-    private static string Finish(List<Tensor> owned, params (string Label, Tensor Tensor)[] outputs)
-    {
-        foreach ((string label, Tensor t) in outputs)
-            for (long i = 0; i < t.ElementCount; i++)
-                if (!float.IsFinite(((float*)t.DataPointer)[i]))
-                    throw new InvalidOperationException($"Non-finite value in '{label}' at {i}.");
-        string digests = string.Join(' ', outputs.Select(entry => Hex(entry.Label, Bytes(entry.Tensor))));
-        foreach (Tensor t in owned) t.Dispose();
-        return digests;
-    }
-
-    private static ReadOnlySpan<byte> Bytes(Tensor t)
-    {
-        int size = t.DType == DType.F16 ? sizeof(ushort) : sizeof(float);
-        return new ReadOnlySpan<byte>(t.DataPointer, checked((int)(t.ElementCount * size)));
-    }
-
-    private static string Hex(string label, ReadOnlySpan<byte> bytes) => $"{label}={Convert.ToHexStringLower(SHA256.HashData(bytes))}";
-
     /// <summary>Additive F32 mask <c>[1, 1, rows, cols]</c>: 0 where <paramref name="allowed"/>, a large negative elsewhere.</summary>
     private static Tensor AdditiveMask(int rows, int cols, Func<int, int, bool> allowed)
     {
@@ -512,47 +494,5 @@ internal static unsafe class AttentionLayerGoldenCases
             for (int j = 0; j < cols; j++)
                 p[i * cols + j] = allowed(i, j) ? 0f : NegInf;
         return mask;
-    }
-
-    private static Tensor Seeded(TensorShape shape, uint seed, float scale = 1f)
-    {
-        Tensor tensor = new(shape, DType.F32);
-        float* data = (float*)tensor.DataPointer;
-        uint state = seed * 2654435761u + 0x9E3779B9u;
-        for (long i = 0; i < tensor.ElementCount; i++)
-        {
-            state = state * 1664525u + 1013904223u;
-            data[i] = (((state >> 8) & 0xFFFF) / 32768f - 1f) * scale;
-        }
-        return tensor;
-    }
-
-    /// <summary>A checkpoint stand-in: each tensor is seeded from its own name (FNV-1a) plus a per-case salt.</summary>
-    private sealed class Weights(uint salt) : Dictionary<string, Tensor>
-    {
-        public void Add(string name, long rows, long cols) => base.Add(name, Seeded(new TensorShape(rows, cols), Seed(name), 0.3f));
-
-        public void Replace(string name, long rows, long cols) => this[name] = Seeded(new TensorShape(rows, cols), Seed(name), 0.3f);
-
-        public void AddBias(string name, long n) => base.Add(name, Seeded(new TensorShape(n), Seed(name), 0.1f));
-
-        /// <summary>Norm scale near 1 (near 0 when stored zero-centered, as Krea2's are).</summary>
-        public void AddNorm(string name, long n, bool zeroCentered = false)
-        {
-            Tensor t = Seeded(new TensorShape(n), Seed(name), 0.25f);
-            if (!zeroCentered)
-            {
-                float* p = (float*)t.DataPointer;
-                for (long i = 0; i < n; i++) p[i] += 1f;
-            }
-            base.Add(name, t);
-        }
-
-        private uint Seed(string name)
-        {
-            uint h = 2166136261u ^ salt;
-            foreach (char c in name) h = (h ^ c) * 16777619u;
-            return h;
-        }
     }
 }

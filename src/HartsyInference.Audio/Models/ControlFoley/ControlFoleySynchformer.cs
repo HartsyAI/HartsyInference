@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ControlFoley;
@@ -12,6 +13,7 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
 
     private readonly ControlFoleySynchformerConfig _config;
     private readonly List<Tensor> _owned = [];
+    private readonly AttentionLayer _attention;
     private Block[]? _blocks;
     private Tensor? _patchW, _patchB, _cls, _pos, _temp, _normW, _normB;
     private Agg? _agg;
@@ -34,6 +36,7 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
         }
 
         _config = config;
+        _attention = AttentionLayer.Shared(config.Heads, config.EmbedDim / config.Heads);
     }
 
     /// <summary>Geometry this instance was built for.</summary>
@@ -220,7 +223,6 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
         ControlFoleySynchformerConfig c = _config;
         int heads = c.Heads, d = c.EmbedDim, hd = d / heads, n = c.SpatialTokens, frames = c.TemporalTokens, total = 1 + frames * n;
         int groups = time ? n : frames, len = time ? frames : n;
-        float scale = 1f / MathF.Sqrt(hd);
 
         using Tensor qkv = ControlFoleyOps.Linear(backend, x, w.QkvW, w.QkvB);
         (Tensor qAll, Tensor kAll, Tensor vAll) = ControlFoleyVitOps.SplitQkv(qkv, heads);
@@ -234,7 +236,7 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
             new ReadOnlySpan<float>(qa0 + (long)h * total * hd, hd).CopyTo(new Span<float>((float*)clsQ.DataPointer + h * hd, hd));
         }
 
-        backend.ScaledDotProductAttention(clsCtx, clsQ, ka, va, null, scale);
+        _attention.AttendHeadMajorOperands(backend, clsQ, ka, va, default, OperandOwnership.None, clsCtx);
 
         using Tensor q = new(new TensorShape(groups, heads, len, hd), DType.F32);
         using Tensor k = new(new TensorShape(groups, heads, len + 1, hd), DType.F32);
@@ -259,8 +261,7 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
             }
         }
 
-        using Tensor ctx = new(q.Shape, DType.F32);
-        backend.ScaledDotProductAttention(ctx, q, k, v, null, scale);
+        using Tensor ctx = _attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
 
         using Tensor merged = new(new TensorShape(1, total, d), DType.F32);
         float* mp = (float*)merged.DataPointer, cp = (float*)ctx.DataPointer;
@@ -340,8 +341,7 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
             }
         }
 
-        using Tensor ctx = new(qShape, DType.F32);
-        backend.ScaledDotProductAttention(ctx, q, k, v, null, 1f / MathF.Sqrt(hd));
+        using Tensor ctx = _attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
         using Tensor merged = ControlFoleyVitOps.MergeHeads(ctx);
         using Tensor attn = ControlFoleyOps.Linear(backend, merged, a.OutW, a.OutB);
         using Tensor y = new(new TensorShape(t, 1, d), DType.F32);

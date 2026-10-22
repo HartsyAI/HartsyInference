@@ -61,7 +61,7 @@ public sealed unsafe class AdaMosHiFiGanV1
                     ConvW = w[$"{p}.0.weight"],
                     ConvB = Get(w, $"{p}.0.bias"),
                     StemNormW = GetF32(w, $"{p}.1.weight"),
-                    StemNormB = Get(w, $"{p}.1.bias"),
+                    StemNormB = GetF32(w, $"{p}.1.bias"),
                 };
             }
             else
@@ -69,7 +69,7 @@ public sealed unsafe class AdaMosHiFiGanV1
                 _channelLayers[i] = new ChannelLayer
                 {
                     NormW = GetF32(w, $"{p}.0.weight"),
-                    NormB = Get(w, $"{p}.0.bias"),
+                    NormB = GetF32(w, $"{p}.0.bias"),
                     ConvW = w[$"{p}.1.weight"],
                     ConvB = Get(w, $"{p}.1.bias"),
                 };
@@ -86,7 +86,7 @@ public sealed unsafe class AdaMosHiFiGanV1
             }
         }
         _backboneNormW = GetF32(w, "backbone.norm.weight");
-        _backboneNormB = Get(w, "backbone.norm.bias");
+        _backboneNormB = GetF32(w, "backbone.norm.bias");
 
         _convPreW = w["head.conv_pre.weight"]; _convPreB = Get(w, "head.conv_pre.bias");
         _ups = new (Tensor, Tensor?)[_upsampleRates.Length];
@@ -250,7 +250,7 @@ public sealed unsafe class AdaMosHiFiGanV1
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
             _dwW = w[$"{p}.dwconv.weight"]; _dwB = Get(w, $"{p}.dwconv.bias");
-            _normW = GetF32(w, $"{p}.norm.weight"); _normB = Get(w, $"{p}.norm.bias");
+            _normW = GetF32(w, $"{p}.norm.weight"); _normB = GetF32(w, $"{p}.norm.bias");
             _pw1W = w[$"{p}.pwconv1.weight"]; _pw1B = Get(w, $"{p}.pwconv1.bias");
             _pw2W = w[$"{p}.pwconv2.weight"]; _pw2B = Get(w, $"{p}.pwconv2.bias");
             _gamma = GetF32(w, $"{p}.gamma");

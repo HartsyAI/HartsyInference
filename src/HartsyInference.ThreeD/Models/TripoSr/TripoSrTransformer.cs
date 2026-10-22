@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models.Hunyuan3D;
@@ -120,6 +121,7 @@ internal sealed unsafe class TripoSrBlock
     private Tensor? _n1W, _n1B, _qW, _kW, _vW, _oW, _oB;             // self-attn (attn1)
     private Tensor? _n2W, _n2B, _cqW, _ckW, _cvW, _coW, _coB;        // cross-attn (attn2)
     private Tensor? _n3W, _n3B, _ffProjW, _ffProjB, _ffOutW, _ffOutB; // GEGLU ff
+    private AttentionLayer? _selfAttn, _crossAttn;
 
     public TripoSrBlock(TripoSrConfig cfg) => _cfg = cfg;
 
@@ -138,6 +140,12 @@ internal sealed unsafe class TripoSrBlock
         _n3W = Hunyuan3DDit.F32(w[$"{p}.norm3.weight"]); _n3B = Hunyuan3DDit.F32(w[$"{p}.norm3.bias"]);
         _ffProjW = Hunyuan3DDit.F32(w[$"{p}.ff.net.0.proj.weight"]); _ffProjB = Hunyuan3DDit.F32(w[$"{p}.ff.net.0.proj.bias"]);
         _ffOutW = Hunyuan3DDit.F32(w[$"{p}.ff.net.2.weight"]); _ffOutB = Hunyuan3DDit.F32(w[$"{p}.ff.net.2.bias"]);
+        AttentionLayerConfig attn = new()
+        {
+            Heads = _cfg.NumHeads, KvHeads = _cfg.NumHeads, HeadDim = _cfg.Width / _cfg.NumHeads, ComputeDType = DType.F32, AllowF16 = true,
+        };
+        _selfAttn = new AttentionLayer(attn, new AttentionLayerWeights { Query = _qW, Key = _kW, Value = _vW, Output = _oW, OutputBias = _oB });
+        _crossAttn = new AttentionLayer(attn, new AttentionLayerWeights { Query = _cqW, Key = _ckW, Value = _cvW, Output = _coW, OutputBias = _coB });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -164,27 +172,9 @@ internal sealed unsafe class TripoSrBlock
         return x3;
     }
 
-    private Tensor SelfAttn(IBackend backend, Tensor src, int n)
-    {
-        int width = _cfg.Width;
-        Tensor q = new(new TensorShape(1, n, width), DType.F32); backend.Linear(q, src, _qW!, null);
-        Tensor k = new(new TensorShape(1, n, width), DType.F32); backend.Linear(k, src, _kW!, null);
-        Tensor v = new(new TensorShape(1, n, width), DType.F32); backend.Linear(v, src, _vW!, null);
-        Tensor a = Hunyuan3DAttention.Attend(backend, q, k, v, _cfg.NumHeads); q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor o = new(new TensorShape(1, n, width), DType.F32); backend.Linear(o, a, _oW!, _oB!); a.Dispose();
-        return o;
-    }
+    private Tensor SelfAttn(IBackend backend, Tensor src, int n) => _selfAttn!.Forward(backend, src, src, default);
 
-    private Tensor CrossAttn(IBackend backend, Tensor src, Tensor img, int n, int s)
-    {
-        int width = _cfg.Width;
-        Tensor q = new(new TensorShape(1, n, width), DType.F32); backend.Linear(q, src, _cqW!, null);
-        Tensor k = new(new TensorShape(1, s, width), DType.F32); backend.Linear(k, img, _ckW!, null);
-        Tensor v = new(new TensorShape(1, s, width), DType.F32); backend.Linear(v, img, _cvW!, null);
-        Tensor a = Hunyuan3DAttention.Attend(backend, q, k, v, _cfg.NumHeads); q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor o = new(new TensorShape(1, n, width), DType.F32); backend.Linear(o, a, _coW!, _coB!); a.Dispose();
-        return o;
-    }
+    private Tensor CrossAttn(IBackend backend, Tensor src, Tensor img, int n, int s) => _crossAttn!.Forward(backend, src, img, default);
 
     private Tensor GegluFeedForward(IBackend backend, Tensor src, int n)
     {

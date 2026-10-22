@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
@@ -19,6 +20,7 @@ public sealed unsafe class MusicGenBlock : IDisposable
     private Tensor? _crossQW, _crossKW, _crossVW, _crossOW;
     private Tensor? _finalLnW, _finalLnB;
     private Tensor? _fc1W, _fc1B, _fc2W, _fc2B;
+    private AttentionLayer? _selfAttn, _crossAttn;
 
     public MusicGenBlock(MusicGenConfig cfg) => _cfg = cfg;
 
@@ -41,6 +43,9 @@ public sealed unsafe class MusicGenBlock : IDisposable
         _crossKW = w[$"{prefix}.encoder_attn.k_proj.weight"];
         _crossVW = w[$"{prefix}.encoder_attn.v_proj.weight"];
         _crossOW = w[$"{prefix}.encoder_attn.out_proj.weight"];
+        AttentionLayerConfig attention = new() { Heads = _cfg.NumHeads, KvHeads = _cfg.NumHeads, HeadDim = _cfg.HeadDim, ComputeDType = DType.F32 };
+        _selfAttn = new AttentionLayer(attention, new AttentionLayerWeights { Query = _selfQW, Key = _selfKW, Value = _selfVW, Output = _selfOW });
+        _crossAttn = new AttentionLayer(attention, new AttentionLayerWeights { Query = _crossQW, Key = _crossKW, Value = _crossVW, Output = _crossOW });
         _finalLnW = WhisperOps.EnsureF32(w[$"{prefix}.final_layer_norm.weight"]);
         _finalLnB = WhisperOps.EnsureF32(w[$"{prefix}.final_layer_norm.bias"]);
         // MusicGen FFN linears are bias-free (the HF checkpoint has no fc1.bias/fc2.bias); load if present.
@@ -82,17 +87,13 @@ public sealed unsafe class MusicGenBlock : IDisposable
         int d = _cfg.Hidden;
         int nh = _cfg.NumHeads;
         int hd = _cfg.HeadDim;
-        float scale = 1f / MathF.Sqrt(hd);
         TensorShape one = new(b, 1, d);
         TensorShape mh1 = new(b, nh, 1, hd);
 
         // --- Self-attention (incremental, device-resident KV) ---
         Tensor normed = new(one, DType.F32);
         backend.LayerNorm(normed, x, _selfLnW!, _selfLnB!, 1e-5f);
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _selfQW!, null, b, 1, d, d);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _selfKW!, null, b, 1, d, d);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, null, b, 1, d, d);
-        normed.Dispose();
+        (Tensor q, Tensor k, Tensor v) = _selfAttn!.ProjectSelf(backend, normed, releaseInput: true);
         Tensor qh = new(mh1, DType.F32), kh = new(mh1, DType.F32), vh = new(mh1, DType.F32);
         backend.Permute0213(qh, q, 1, nh, hd);   // [b,1,d] → head-major [b,nh,1,hd]
         backend.Permute0213(kh, k, 1, nh, hd);
@@ -101,14 +102,21 @@ public sealed unsafe class MusicGenBlock : IDisposable
         backend.KvCacheAppendDev(cache.K, kh, pos, devicePos);   // in-place device append at row `pos` (device or host)
         backend.KvCacheAppendDev(cache.V, vh, pos, devicePos);
         kh.Dispose(); vh.Dispose();
-        Tensor attn = new(mh1, DType.F32);
-        backend.FlashAttentionDev(attn, qh, cache.K, cache.V, kvLen: pos + 1, kvGroup: 1, causal: true, qOffset: pos, scale, devicePos);
-        qh.Dispose();
-        Tensor attnFlat = new(one, DType.F32);
-        backend.Permute0213(attnFlat, attn, nh, 1, hd);   // [b,nh,1,hd] → [b,1,d]
-        attn.Dispose();
-        Tensor selfProj = WhisperOps.ProjectLinear(backend, attnFlat, _selfOW!, null, b, 1, d, d);
-        attnFlat.Dispose();
+        Tensor attn;
+        if (devicePos != 0)
+        {
+            attn = _selfAttn.AttendCachedHeadMajor(backend, qh, cache.K, cache.V,
+                new AttentionCacheView(pos + 1, pos, Causal: true, DevicePositions: devicePos));
+        }
+        else
+        {
+            // The stage plans a zero handle as host-position FlashAttention; the Dev entry keeps its own rows on Vulkan.
+            attn = new(mh1, DType.F32);
+            backend.FlashAttentionDev(attn, qh, cache.K, cache.V, kvLen: pos + 1, kvGroup: 1, causal: true, qOffset: pos, 1f / MathF.Sqrt(hd), devicePos);
+            qh.Dispose();
+        }
+        Tensor attnFlat = _selfAttn.MergeHeads(backend, attn, one);   // [b,nh,1,hd] → [b,1,d]
+        Tensor selfProj = _selfAttn.ProjectOutput(backend, attnFlat);
         Tensor res1 = new(one, DType.F32);
         backend.Add(res1, x, selfProj);
         selfProj.Dispose();
@@ -116,19 +124,11 @@ public sealed unsafe class MusicGenBlock : IDisposable
         // --- Cross-attention (device-resident pre-projected text K/V; each batch elem attends its own K/V) ---
         Tensor normed2 = new(one, DType.F32);
         backend.LayerNorm(normed2, res1, _crossLnW!, _crossLnB!, 1e-5f);
-        Tensor cq = WhisperOps.ProjectLinear(backend, normed2, _crossQW!, null, b, 1, d, d);
-        normed2.Dispose();
-        Tensor cqh = new(mh1, DType.F32);
-        backend.Permute0213(cqh, cq, 1, nh, hd);
-        cq.Dispose();
-        Tensor cattn = new(mh1, DType.F32);
-        backend.FlashAttention(cattn, cqh, cache.CrossK!, cache.CrossV!, kvLen: crossLen, kvGroup: 1, causal: false, qOffset: 0, scale);
-        cqh.Dispose();
-        Tensor cattnFlat = new(one, DType.F32);
-        backend.Permute0213(cattnFlat, cattn, nh, 1, hd);
-        cattn.Dispose();
-        Tensor cproj = WhisperOps.ProjectLinear(backend, cattnFlat, _crossOW!, null, b, 1, d, d);
-        cattnFlat.Dispose();
+        Tensor cqh = _crossAttn!.ProjectQueryHeadMajor(backend, normed2, releaseInput: true, default);
+        Tensor cattn = _crossAttn.AttendCachedHeadMajor(backend, cqh, cache.CrossK!, cache.CrossV!,
+            new AttentionCacheView(crossLen, 0, Causal: false));
+        Tensor cattnFlat = _crossAttn.MergeHeads(backend, cattn, one);
+        Tensor cproj = _crossAttn.ProjectOutput(backend, cattnFlat);
         Tensor res2 = new(one, DType.F32);
         backend.Add(res2, res1, cproj);
         res1.Dispose(); cproj.Dispose();

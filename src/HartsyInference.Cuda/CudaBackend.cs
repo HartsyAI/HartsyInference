@@ -36,78 +36,27 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private CudnnSdpa? _cudnnSdpa;
     private volatile bool _cudnnSdpaDead;   // set if cuDNN INIT throws once — never retry, fall back for the session
 
-    /// <summary>Per-head-dim failure/backoff state — replaces a plain permanent-dead set.</summary>
-    /// <remarks>A structural failure (e.g. a head dim the installed cuDNN refuses — <see
-    /// cref="CudnnStatusException.IsPermanent"/>) disables that dim forever, same as before; a transient failure
-    /// (e.g. the host-RAM allocation error that motivated this — see the plan notes referenced from <see
-    /// cref="TryCudnnSdpa"/>) gets bounded backoff instead, since the resource pressure that caused it is typically
-    /// external to this process and does clear up. <see cref="ConcurrentDictionary{TKey,TValue}"/> (not a plain
-    /// <c>HashSet</c>) because this backend is a process-wide DI singleton and nothing enforces
-    /// <c>InferenceQueue.MaxConcurrency</c> stays at its default of 1 — a plain <c>HashSet</c> was never actually
-    /// safe under a higher setting.</remarks>
-    /// <param name="NextRetryAtTicks">Environment.TickCount64; 0 = eligible immediately.</param>
-    private sealed record DimFailureState(int ConsecutiveFailures, long NextRetryAtTicks, bool Permanent);
-    private readonly ConcurrentDictionary<long, DimFailureState> _cudnnSdpaDimState = new();
-
-    /// <summary>One cuDNN SDPA plan's shape: what a structural refusal (no engine config, an unsupported layout) is about.</summary>
-    private readonly record struct CudnnSdpaShape(long B, long H, long Sq, long Skv, long D, CudnnSdpa.SdpaLayout Layout,
-        bool F16Input, long BiasB, long BiasH, long BiasSq)
-    {
-        public override string ToString() =>
-            $"b{B} h{H} sq{Sq} skv{Skv} d{D} {Layout} {(F16Input ? "f16" : "f32")}{(BiasSq > 0 ? $" bias[{BiasB},{BiasH},{BiasSq},{Skv}]" : "")}";
-    }
-
-    /// <summary>Shapes cuDNN refused structurally. A refusal holds for its own shape only: one shape with no deterministic
-    /// engine must not take cuDNN away from every model at that head dim.</summary>
-    private readonly ConcurrentDictionary<CudnnSdpaShape, byte> _cudnnSdpaRefusedShapes = new();
-
-    /// <summary>Head dims cuDNN has run at least once; a head dim with a success is never disabled by its refusals.</summary>
-    private readonly ConcurrentDictionary<long, byte> _cudnnSdpaWorkingDims = new();
-
-    /// <summary>Distinct shapes refused at a head dim before the head dim itself is given up, when none ever ran.</summary>
-    private const int CudnnSdpaRefusalsToDisableDim = 3;
-
-    /// <summary>Refusals warned about per process; later ones are recorded without a warning.</summary>
-    private const int CudnnSdpaRefusalWarnings = 64;
+    /// <summary>cuDNN SDPA failure state, kept per capability signature so one variant cannot disable another at the same head dim.</summary>
+    private readonly CudnnSdpaHealth _cudnnSdpaHealth = new();
 
     /// <summary>The shapes cuDNN refused structurally in this process (diagnostics).</summary>
-    public IReadOnlyCollection<string> CudnnSdpaRefusedShapes => [.. _cudnnSdpaRefusedShapes.Keys.Select(k => k.ToString())];
+    public IReadOnlyCollection<string> CudnnSdpaRefusedShapes => _cudnnSdpaHealth.RefusedShapes;
 
     /// <summary>Test-only fault hook for <see cref="TryCudnnSdpa"/>: a non-null return from this is thrown instead of the real call.</summary>
     /// <remarks>Exists so the classify/retry/backoff behavior can be tested deterministically — a real
     /// host-RAM-starvation failure can't be reproduced on demand in a fast unit test. Null in production.</remarks>
-    internal Func<long, Exception?>? TestCudnnSdpaFaultInjector { get; set; }
+    internal Func<CudnnSdpaSignature, Exception?>? TestCudnnSdpaFaultInjector { get; set; }
 
     /// <summary>Per-dim diagnostic snapshot for <see cref="TryCudnnSdpa"/>'s classify/retry/backoff state.</summary>
     /// <remarks>Programmatically queryable observability surface (deliberately not wired into <c>/ready</c>: a
     /// degraded-but-correct fallback to the materialized attention path is not a "can't serve traffic" condition,
-    /// matching this engine's existing health-check philosophy).</remarks>
+    /// matching this engine's existing health-check philosophy). Folds every signature at a head dim into one entry.</remarks>
     public IReadOnlyDictionary<long, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> CudnnSdpaDimDiagnostics =>
-        _cudnnSdpaDimState.ToDictionary(
-            kv => kv.Key,
-            kv => (kv.Value.ConsecutiveFailures, kv.Value.Permanent,
-                   kv.Value.Permanent ? (DateTimeOffset?)null : DateTimeOffset.UtcNow.AddMilliseconds(kv.Value.NextRetryAtTicks - Environment.TickCount64)));
+        _cudnnSdpaHealth.DimDiagnostics;
 
-    /// <summary>True if head dim <paramref name="d"/> is currently eligible for a cuDNN SDPA attempt.</summary>
-    /// <remarks>No failure on record (the overwhelmingly common case: a single dictionary miss, same O(1) cost as
-    /// the plain <c>HashSet.Contains</c> this replaces), not permanently disabled, and any backoff window from a
-    /// prior transient failure has elapsed.</remarks>
-    private bool CudnnSdpaDimEligible(long d)
-    {
-        if (!_cudnnSdpaDimState.TryGetValue(d, out DimFailureState? s)) return true;
-        if (s.Permanent) return false;
-        return Environment.TickCount64 >= s.NextRetryAtTicks;
-    }
-
-    // Backoff schedule for a transient cuDNN SDPA failure: short at first (the common case — a brief host-RAM
-    // blip clears within seconds), capped so a persistently-constrained box doesn't retry so often it's
-    // effectively hammering itself, but never gives up permanently on a failure class that isn't structural.
-    private static long CudnnSdpaBackoffMs(int consecutiveFailures)
-    {
-        const long baseMs = 2000, capMs = 5 * 60 * 1000;
-        int shift = Math.Min(consecutiveFailures - 1, 8);
-        return Math.Min(baseMs * (1L << shift), capMs);
-    }
+    /// <summary>The same snapshot per signature.</summary>
+    internal IReadOnlyDictionary<CudnnSdpaSignature, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> CudnnSdpaDiagnostics =>
+        _cudnnSdpaHealth.Diagnostics;
 
     private CudnnConv? _cudnnConv;
     private bool _cudnnConvDead;   // any cuDNN conv failure → session fallback to the im2col path
@@ -7296,13 +7245,19 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Scaled dot-product attention via cuBLAS batched GEMM: softmax(Q @ K^T * scale) @ V.</summary>
     public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
+        => ScaledDotProductAttention(output, query, key, value, mask, scale, AttentionNumerics.FromLegacy(allowF16));
+
+    // Carries the call's own numerics to the rows; the public overload grants only the legacy flag.
+    private unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
+        AttentionNumerics numerics)
     {
         using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
-            ? $"SDPA {query.DType} q{query.Shape} k{key.Shape}{(mask is null ? "" : $" m{mask.Shape}")}{(allowF16 ? " f16ok" : "")}" : "SDPA");
+            ? $"SDPA {query.DType} q{query.Shape} k{key.Shape}{(mask is null ? "" : $" m{mask.Shape}")}{(numerics.LegacyAssertedBounded ? " f16ok" : "")}" : "SDPA");
         ValidateScaledDotProductAttentionContract(output, query, key, value, mask, scale);
         using OpScope _op = EnterOp();
         EnsureKernels();
-        RunAttentionRows(DenseAttentionRows, AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
+        RunAttentionRows(DenseAttentionRows,
+            AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, false) with { Numerics = numerics });
     }
 
     /// <summary>The materialized cuBLAS path (S.11-S.15): the score matrix in memory, or for BF16 the query-tiled core when
@@ -7589,13 +7544,17 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Token-major SDPA — see <see cref="IBackend.ScaledDotProductAttentionTokenMajor"/>. cuDNN reads the <c>[S, heads*headDim]</c> buffers through BSHD strides at no throughput cost, which is what lets the LTX-2 caller drop the permute pair around attention. Anything cuDNN declines (wrong head dim, mask shape, a dead session) is permuted into the head-major dispatch so correctness never depends on the fast path.</summary>
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int headDim, float scale, bool allowF16 = false)
+        => ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, headDim, scale, AttentionNumerics.FromLegacy(allowF16));
+
+    private unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
+        Tensor? mask, int heads, int headDim, float scale, AttentionNumerics numerics)
     {
-        ValidateTokenMajorAttentionContract(output, query, key, value, mask, heads, headDim, scale);
+        ValidateTokenMajorAttentionContract(output, query, key, value, heads, headDim, scale);
         long sq = TokenMajorRows(query), skv = TokenMajorRows(key), d = headDim;
         using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
             ? $"SDPA-TM {sq}x{skv}x{heads}x{headDim}" : "SDPA-TM");
         RunAttentionRows(TokenMajorAttentionRows,
-            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16));
+            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, false) with { Numerics = numerics });
     }
 
     /// <inheritdoc/>
@@ -7605,13 +7564,17 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// head-major sequence its callers used to issue themselves: permute in, repeat K/V heads, SDPA, permute out.</summary>
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
+        => ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, AttentionNumerics.FromLegacy(allowF16));
+
+    private unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
+        Tensor? mask, int heads, int kvHeads, int headDim, float scale, AttentionNumerics numerics)
     {
         // Equal heads too: Krea2's text-fusion blocks issued the head-major sequence, not the token-major cuDNN call.
-        // The mask is validated by the head-major entry, as it was when callers issued that sequence themselves.
+        // The mask is checked when the rows are planned: the cuDNN row takes any bias the head-major entry takes, the widening row what that entry takes.
         ValidateTokenMajorGqaAttentionContract(output, query, key, value, heads, kvHeads, headDim, scale);
         RunAttentionRows(TokenMajorGqaAttentionRows,
-            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16)
-                with { Route = AttentionRoute.TokenMajorGqa });
+            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, false)
+                with { Route = AttentionRoute.TokenMajorGqa, Numerics = numerics });
     }
 
     /// <summary>F32 → F16 for an attention operand: saturating at ±65504 as cuDNN's input cast does, so a value past the F16
@@ -7681,9 +7644,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the token-major SDPA entry point.</summary>
+    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the token-major SDPA entry point; the mask is checked when the rows are planned.</summary>
     internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
-        Tensor? mask, int heads, int headDim, float scale)
+        int heads, int headDim, float scale)
     {
         if (heads <= 0 || headDim <= 0)
             throw new ArgumentException($"Token-major SDPA needs positive heads/headDim; got heads={heads}, headDim={headDim}.");
@@ -7716,20 +7679,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
         if (sq * skv > int.MaxValue || query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
-        if (mask is null) return;
-        if (mask.DType != DType.F32)
-            throw new NotSupportedException($"SDPA additive masks must be F32; got {mask.DType}.");
-        bool validMask = mask.Shape.Rank switch
-        {
-            2 => mask.Shape[0] == sq && mask.Shape[1] == skv,
-            3 => (mask.Shape[0] == 1 || mask.Shape[0] == heads) && mask.Shape[1] == sq && mask.Shape[2] == skv,
-            4 => mask.Shape[0] == 1 && (mask.Shape[1] == 1 || mask.Shape[1] == heads)
-                && mask.Shape[2] == sq && mask.Shape[3] == skv,
-            _ => false,
-        };
-        if (!validMask)
-            throw new ArgumentException(
-                $"SDPA mask {mask.Shape} is not broadcastable to [1,{heads},{sq},{skv}].");
     }
 
     /// <summary>Validates the canonical rank-4 MHA contract shared by every SDPA dispatch branch.</summary>
@@ -7781,38 +7730,18 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     internal static bool MaskIsKeyOnly(Tensor? mask, long sq)
         => mask is not null && mask.DType == DType.F32 && sq > 1 && MaskQueryRows(mask) == 1;
 
-    /// <summary>Whether a mask can ride the cuDNN fused engine as an additive fp32 bias (no mask, or F32 broadcastable over heads).</summary>
-    /// <remarks>Per-head ([B,H,Sq,Skv]) or non-F32 masks fall back to the materialized path.</remarks>
-    private static bool CudnnMaskCompatible(Tensor? mask, long b, long sq, long skv)
-    {
-        if (mask is null) return true;
-        if (mask.DType != DType.F32) return false;
-        if (mask.Shape.Rank == 2)
-            return (mask.Shape[0] == sq || mask.Shape[0] == 1) && mask.Shape[1] == skv;
-        return mask.Shape.Rank == 4 && (mask.Shape[0] == 1 || mask.Shape[0] == b) && mask.Shape[1] == 1
-            && (mask.Shape[2] == sq || mask.Shape[2] == 1) && mask.Shape[3] == skv;
-    }
+    /// <summary>cuDNN fused attention over the call's operand views: fp16/bf16 run in place, F32 (whole tensors only) through a saturating F16 cast. False means the caller falls through.</summary>
+    private unsafe bool TryCudnnSdpa(in AttentionCall c)
+        => TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, c.QkHeadDim,
+            CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c));
 
-    /// <summary>cuDNN fused flash-attention fast path for the plain F32/no-mask/MHA case (F16 execute, F32 output).</summary>
-    /// <remarks>Casts Q/K/V to F16, runs cuDNN's fused attention, casts the F16 result back to F32. Returns false (and
-    /// permanently disables cuDNN for the session) on any failure so the caller falls through to the materialized/tiled
-    /// paths. Q/out [B,H,Sq,D], K/V [B,H,Skv,D].</remarks>
-    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
-        => TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
-            query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2], query.Shape[3]);
-
-    /// <summary>Whether the causal bias (and the widened K/V the MHA-only fused engine needs) fit in free VRAM.
-    /// The bias is <c>tq*kvLen</c> F32, which is 286 MB at 8,664 tokens and grows quadratically, so this is a real
-    /// gate rather than a formality. Mirrors the headroom convention the SDPA score-matrix gate already uses —
-    /// cuMemGetInfo counts pool reservations as used, so it under-reports what is reusable.</summary>
-    private bool CausalMaskFits(int tq, int kvLen, int hq, int d, int kvGroup)
+    /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit in half of free VRAM (cuMemGetInfo counts pool reservations as used).</summary>
+    private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
-        ulong widenBytes = kvGroup > 1 ? 2UL * (ulong)hq * (ulong)kvLen * (ulong)d * sizeof(float) : 0UL;
-        // The F16 copies of Q, O and the (widened) K and V that the cuDNN call casts the F32 operands into.
-        ulong castBytes = 2UL * sizeof(ushort) * (ulong)hq * (ulong)d * ((ulong)tq + (ulong)kvLen);
+        ulong castBytes = 2UL * sizeof(ushort) * (ulong)d * ((ulong)hq * (ulong)tq + (ulong)hkv * (ulong)kvLen);
         (nuint freeBytes, _) = _context.GetMemoryInfo();
-        return maskBytes + widenBytes + castBytes < (ulong)freeBytes / 2;
+        return maskBytes + castBytes < (ulong)freeBytes / 2;
     }
 
     /// <summary>Causal prefill through cuDNN's fused engine, with the causal rule carried as an additive bias.
@@ -7823,8 +7752,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool TryCausalPrefillSdpa(Tensor output, Tensor query, Tensor key, Tensor value,
         int hq, int hkv, int tq, int kvLen, int qOffset, int window, int d, float scale)
     {
-        // A shape cuDNN already refused must not build the mask and widen K/V on every layer before declining.
-        if (_cudnnSdpaRefusedShapes.ContainsKey(new CudnnSdpaShape(1, hq, tq, kvLen, d, CudnnSdpa.SdpaLayout.HeadMajor, false, 1, 1, tq)))
+        // A refused shape must not build the mask before declining.
+        CudnnSdpaSignature signature = CudnnSdpaSignature.For(DType.F32, hq, hkv, d, new CudnnBias(1, 1, tq));
+        CudnnSdpa.View q = CudnnSdpa.View.HeadMajor(1, hq, tq, d), k = CudnnSdpa.View.HeadMajor(1, hkv, kvLen, d);
+        CudnnSdpa.View v = k, o = q;
+        if (_cudnnSdpaHealth.Refused(new CudnnSdpaShape(signature, DType.F32, CudnnSdpa.PlanKey.Of(signature.Dtype, d, q, k, v, o, new CudnnBias(1, 1, tq)))))
             return false;
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -7833,24 +7765,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ulong pMask = GpuTransferHelper.AllocateDevice(maskBytes);
         _kernels!.LaunchCausalBiasMask(pMask, tq, kvLen, qOffset, window, _stream.Handle);
         GpuTransferHelper.CacheActivation(mask, pMask, maskBytes);
-
-        if (hq == hkv)
-        {
-            return TryCudnnSdpa(output, query, key, value, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
-                1, hq, tq, kvLen, d);
-        }
-        // The fused engine takes one head count, so grouped K/V are widened first.
-        using Tensor keyWide = new(new TensorShape(1, hq, kvLen, d), key.DType);
-        using Tensor valueWide = new(new TensorShape(1, hq, kvLen, d), value.DType);
-        RepeatKvHeads(keyWide, key, hkv, hq / hkv);
-        RepeatKvHeads(valueWide, value, hkv, hq / hkv);
-        return TryCudnnSdpa(output, query, keyWide, valueWide, mask, scale, CudnnSdpa.SdpaLayout.HeadMajor,
-            1, hq, tq, kvLen, d);
+        return TryCudnnSdpa(output, query, key, value, mask, scale, d, q, k, v, o, default);
     }
 
-    /// <summary>Layout-explicit form: the token-major caller's tensors are rank-2, so the dims cannot be read off the shapes.</summary>
-    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        CudnnSdpa.SdpaLayout layout, long b, long h, long sq, long skv, long d)
+    /// <summary>The view form: the operands' dims and strides come from the caller, so a rank-2 token-major tensor or a column of a wider one reads the same as a whole head-major one.</summary>
+    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, long d,
+        in CudnnSdpa.View q, in CudnnSdpa.View k, in CudnnSdpa.View v, in CudnnSdpa.View o, in CudnnSdpa.Offsets offsets)
     {
         lock (_cudnnSdpaLock)
         {
@@ -7860,24 +7780,24 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // request waits for the shared cuDNN handle. Recheck under the same lock that serializes attempts so
             // a queued request cannot bypass a newly established backoff window.
             // An F32 Q/K/V needs the saturating cast; without it (kv_scatter_f16.ptx missing) the materialized path keeps the call.
-            if (_cudnnSdpaDead || !CudnnSdpaDimEligible(d) || (query.DType != DType.F16 && _kernels is not { HasCastF32ToF16Sat: true }))
+            if (_cudnnSdpaDead || (query.DType != DType.F16 && query.DType != DType.BF16 && _kernels is not { HasCastF32ToF16Sat: true })
+                || !CudnnBias.TryFrom(mask, q.B, q.H, q.S, k.S, out CudnnBias bias))
                 return false;
+            CudnnSdpaSignature signature = CudnnSdpaSignature.For(query.DType, q.H, k.H, d, bias, CudnnSdpa.IsStrided(d, q, k, v, o, offsets));
+            if (!_cudnnSdpaHealth.Eligible(signature, Environment.TickCount64)) return false;
 
-            return TryCudnnSdpaLocked(output, query, key, value, mask, scale, layout, b, h, sq, skv, d);
+            return TryCudnnSdpaLocked(output, query, key, value, mask, scale, CudnnSdpa.PlanKey.Of(signature.Dtype, d, q, k, v, o, bias), offsets, signature);
         }
     }
 
     private unsafe bool TryCudnnSdpaLocked(
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        CudnnSdpa.SdpaLayout layout, long b, long h, long sq, long skv, long d)
+        in CudnnSdpa.PlanKey plan, in CudnnSdpa.Offsets offsets, CudnnSdpaSignature signature)
     {
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
         bool cachedOutput = false;
-        CudnnSdpaShape shape = new(b, h, sq, skv, d, layout, query.DType == DType.F16,
-            mask is null ? 0 : mask.Shape.Rank == 4 ? mask.Shape[0] : 1,
-            mask is null ? 0 : mask.Shape.Rank >= 3 ? mask.Shape[mask.Shape.Rank - 3] : 1,
-            mask is null ? 0 : MaskQueryRows(mask));
-        if (_cudnnSdpaRefusedShapes.ContainsKey(shape)) return false;
+        CudnnSdpaShape shape = new(signature, query.DType, plan);
+        if (_cudnnSdpaHealth.Refused(shape)) return false;
         try
         {
             if (_cudnnSdpa is null)
@@ -7890,29 +7810,22 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // classified the same way a real post-init failure (e.g. a BuildPlan/Execute failure) would be
             // — the catch below branches on whether _cudnnSdpa is null, i.e. whether construction itself
             // ever succeeded, and a fault injected before that point would be indistinguishable from a
-            // genuine init failure (permanent, session-wide), defeating the point of testing per-dim
+            // genuine init failure (permanent, session-wide), defeating the point of testing per-signature
             // retry/backoff/classification.
-            Exception? injected = TestCudnnSdpaFaultInjector?.Invoke(d);
+            Exception? injected = TestCudnnSdpaFaultInjector?.Invoke(signature);
             if (injected is not null) throw injected;
 
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
-            long biasB = 1, biasSq = sq;
-            if (mask is not null)
-            {
-                pMask = GpuTransferHelper.CopyToDevice(mask);
-                // From the SHAPE, not the element count: a key-only [1,Skv] bias divides to 0 that way.
-                biasSq = MaskQueryRows(mask);
-                biasB = mask.Shape.Rank == 4 ? mask.Shape[0] : 1;
-            }
+            if (mask is not null) pMask = GpuTransferHelper.CopyToDevice(mask);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            if (query.DType == DType.F16)
+            if (query.DType == DType.F16 || query.DType == DType.BF16)
             {
-                // Native F16 Q/K/V/output — the engine's fp16 I/O dtype already; execute directly, zero casts.
-                _cudnnSdpa.Execute(pQ, pK, pV, pOut, b, h, sq, skv, d, scale, layout, pMask, biasB, biasSq);
+                // Native F16/BF16 Q/K/V/output — the engine's I/O dtype already; execute directly, zero casts.
+                _cudnnSdpa.Execute(pQ, pK, pV, pOut, plan, scale, pMask, offsets);
             }
             else
             {
@@ -7925,22 +7838,22 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 _kernels!.LaunchCastF32ToF16Sat(kF16, pK, (int)key.ElementCount, _stream.Handle);
                 _kernels!.LaunchCastF32ToF16Sat(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, b, h, sq, skv, d, scale, layout, pMask, biasB, biasSq);
+                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, plan, scale, pMask, offsets);
 
                 _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
             long executionCount = Interlocked.Increment(ref _cudnnSdpaExecutionCount);
-            _cudnnSdpaWorkingDims.TryAdd(d, 0);
-            if (_cudnnSdpaDimState.TryRemove(d, out DimFailureState? recovered))
+            int recovered = _cudnnSdpaHealth.RecordSuccess(signature);
+            if (recovered > 0)
             {
                 HartsyInference.Core.Logging.Logs.Info(
-                    $"[cuDNN SDPA] D={d} recovered after {recovered.ConsecutiveFailures} prior failure(s) — fused path re-engaged.");
+                    $"[cuDNN SDPA] {signature} recovered after {recovered} prior failure(s) — fused path re-engaged.");
             }
             if (executionCount == 1)
             {
-                HartsyInference.Core.Logging.Logs.Info($"[cuDNN SDPA] fused flash-attention engaged (D={d}, cuDNN {CudnnApi.cudnnGetVersion()})");
+                HartsyInference.Core.Logging.Logs.Info($"[cuDNN SDPA] fused flash-attention engaged ({signature}, cuDNN {CudnnApi.cudnnGetVersion()})");
             }
             return true;
         }
@@ -7957,7 +7870,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // A failure AFTER a working init: classify by cuDNN's own status category
             // (CudnnStatusException.IsPermanent) when we can — structural failures (e.g. a head dim the
             // installed cuDNN refuses) are genuinely never going to succeed and stay permanently
-            // disabled for this dim, same as before. Everything else, including the exact class of failure
+            // refused for this shape, same as before. Everything else, including the exact class of failure
             // that motivated this (a transient host-RAM allocation error), gets bounded backoff instead of
             // a permanent kill: the resource pressure that causes it is typically external to this process
             // (other processes on the box) and does clear up. An exception we can't positively classify
@@ -7971,35 +7884,23 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 CudnnStatusException cse => cse.IsPermanent,
                 _ => true,
             };
+            CudnnSdpaHealth.FailureOutcome outcome = _cudnnSdpaHealth.RecordFailure(shape, permanent, Environment.TickCount64);
             if (permanent)
             {
-                // Structural for this shape; the head dim goes only once several shapes failed and none ever ran.
-                if (_cudnnSdpaRefusedShapes.TryAdd(shape, 0) && _cudnnSdpaRefusedShapes.Count <= CudnnSdpaRefusalWarnings)
+                // Structural for this shape; the signature goes only once several shapes failed and none ever ran.
+                if (outcome.Warn)
                     HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] refused {shape} for the rest of the process: {ex.Message}");
-                int refusedAtDim = _cudnnSdpaRefusedShapes.Keys.Count(k => k.D == d);
-                if (!_cudnnSdpaWorkingDims.ContainsKey(d) && refusedAtDim >= CudnnSdpaRefusalsToDisableDim)
-                {
-                    _cudnnSdpaDimState[d] = new DimFailureState(0, 0, Permanent: true);
+                if (outcome.SignatureDisabled)
                     HartsyInference.Core.Logging.Logs.Warning(
-                        $"[cuDNN SDPA] D={d} permanently disabled after {refusedAtDim} refused shapes and no success.");
-                }
+                        $"[cuDNN SDPA] {signature} permanently disabled after {outcome.RefusedUnderSignature} refused shapes and no success.");
             }
             else
             {
-                int failures = _cudnnSdpaDimState.TryGetValue(d, out DimFailureState? previous)
-                    ? previous.ConsecutiveFailures == int.MaxValue ? int.MaxValue : previous.ConsecutiveFailures + 1
-                    : 1;
-                long backoffMs = CudnnSdpaBackoffMs(failures);
-                DimFailureState state = new(
-                    failures,
-                    Environment.TickCount64 + backoffMs,
-                    Permanent: false);
-                _cudnnSdpaDimState[d] = state;
                 long? ramMb = HostMemoryInfo.AvailableBytes() is { } bytes ? bytes / (1024 * 1024) : null;
                 HartsyInference.Core.Logging.Logs.Warning(
-                    $"[cuDNN SDPA] D={d} transient failure #{state.ConsecutiveFailures} " +
+                    $"[cuDNN SDPA] {signature} transient failure #{outcome.ConsecutiveFailures} " +
                     $"(host RAM available={(ramMb is { } mb ? $"{mb}MB" : "unknown")}) — " +
-                    $"retrying after {backoffMs / 1000.0:F1}s: {ex.Message}");
+                    $"retrying after {outcome.BackoffMs / 1000.0:F1}s: {ex.Message}");
             }
             return false;
         }

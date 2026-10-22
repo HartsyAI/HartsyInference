@@ -8,6 +8,51 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
+  never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
+  buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The
+  logit width now comes from the head; embedding lookups still read every table row.
+- **Changed: LLM attention runs on the shared layer.** `GenericTransformer` (eager prefill and decode, batched and dual
+  decode, the graph-decode step, MLA), the tensor-parallel ranks, Looped, Qwen3.5, Mllama cross-attention and Cosmos AR
+  append to and read their KV caches through `AttentionLayer`'s KV stage; `IKvCache` is an `IAttentionKvSource`. Output is
+  bit-identical.
+- **Faster: Z-Image Turbo, the SD1.5/SDXL UNet's self-attention and Krea 2's text-fusion refiner attend token-major.**
+  Attention reads Q, K and V where their projections wrote them, so each call drops three permutes in and one out, on
+  backends that serve the token-major entry. A call the head-major entry would run through SageAttention (F16, head dim
+  64 or 128, unmasked, both sequences at least `numerics.sageF16MinSkv`, as Z-Image at 2048²) stays head-major, since
+  the token-major entry has no Sage kernel. Z-Image Base, SDXL's batched CFG forward and the UNet's cross-attention keep
+  the head-major layout. Output is bit-identical: at these models' shapes the token-major cuDNN row returns the bits of
+  the head-major row it replaces.
+- **Fixed: ACE-Step v1 on the CPU backend.** The Comfy all-in-one checkpoint is bf16 and the CPU kernels are F32-only, so
+  generation stopped at the DiT's first bf16 bias. On the CPU backend the engine now loads the checkpoint as F32 (about
+  15 GB of weights, 22 GB peak RSS for a 2 s clip); other backends keep reading the bf16 weights. The DiT also took its
+  text-token count from the leading dim of the `[1, T, 768]` UMT5 features the engine passes, so it conditioned on the first
+  tag token alone and its projection wrote T rows into a one-row output (an exception on CPU, an out-of-bounds write on
+  CUDA). It now counts rows as `Linear` does, which changes CUDA output.
+
+## alpha.385
+
+- **Fixed: ACE-Step v1 generated noise on CUDA: it misread bf16 checkpoint tensors on the host, plus two smaller
+  ACE-Step v1 faults.** Several tensors are read on the host through `float*`: the DiT's lyric embedding table, the
+  lyric encoder's norm biases, the DCAE's depthwise and grouped convs and norm biases, and the vocoder's norm biases.
+  The Comfy all-in-one checkpoint ships them as bf16, which GPU backends keep, so all of them were misread (the lyric
+  table also read past its end for ids above 3346). They are now widened to F32 at load like the models' other
+  host-read tensors, which changes CUDA output from noise to music. The vocoder's weight-norm fusion let the GC free
+  its F32 casts while still reading them, an intermittent access violation at load. Double-condition CFG's text-only
+  context now zeroes exactly the lyric rows, which the DiT appends last, instead of counting text rows from the leading
+  dim of the `[1, T, 768]` features.
+- **Fixed: ACE-Step v1's music DCAE decoded a distorted mel.** Its EfficientViT attention took head h's query, key and
+  value from column h·d of each projection, while the reference cuts heads from the channel-concatenated `[q|k|v]`
+  stream in blocks of 3·d (columns h·3d, h·3d + d and h·3d + 2d). From the first EfficientViT stage on, the decode
+  diverged from the reference: the right channel came out quieter and the two channels nearly uncorrelated. A reference
+  latent now decodes to the reference's mel stage for stage, which changes every ACE-Step v1 generation.
+
+## alpha.385
+
+- **Fixed: SeedVR2 output differed run to run on CUDA.** Every window of a shape group sent the same text rows back
+  through one `RowScatterAdd`, whose CUDA kernel adds without atomics, so the text tokens lost updates and two identical
+  restores on an RTX 3060 differed (SSIM 0.9991). The video rows now scatter alone, each once, and the text rows are
+  summed over the windows in a fixed order (`MoeCombine`) before the mean.
 - **Fixed: ACE-Step v1 generated silence on CUDA.** Its bf16 GEMMs against F32 activations turned the latent to NaN
   over the guidance loop, and the written audio was all zeros. The pipeline now runs with high-precision GEMM (bf16 weights
   upcast for the multiply, still bf16-resident), which its notes required of every caller and the engine's loader never set.
@@ -19,6 +64,31 @@ stable release will require. Dates are UTC.
 - **Faster: cuDNN fused attention takes every head dim that is a multiple of 8 from 32 to 256** (was 64 to 128 and 256)
   on its dense and token-major rows. SD1.5's 40- and 160-wide heads leave the materialized path; the cuDNN 9.24 probes ran
   each of these head dims correct on SM 86 and SM 89. LLM causal prefill keeps its 64 floor.
+- **Changed: video, UNet, VAE and adapter attention runs on the shared layer.** The Wan block (self, cross and I2V image
+  cross-attention, Animate-2's driving capture and frame-local splice, context parallel as a K/V rewrite), the S2V audio
+  injector, the Matrix-Game 3 action module, the SD1.5/SDXL UNet cross-attention (its constant text K/V cache is an
+  `ICachedKv`), ControlNet-Union fusion, VAE attention, the Wan 2.2 and Oasis ViT VAEs, the IP-Adapter resampler, SeedVR2's
+  windowed attention, MiniMax-H3's dense path and Oasis attend through `AttentionLayer`. Output is bit-identical.
+- **Changed: cuDNN fused attention reads grouped-query K/V in place, takes bf16 and per-head or per-batch bias, and binds the
+  scale by value.** K/V carry their own head count in the graph, so Krea2's grouped token-major call and the causal LLM prefill no
+  longer repeat K/V heads first (new route `G.1`; the Sage and F16-flash routes still take their calls before it). A bf16 call
+  reaches cuDNN only when its numerics grant bf16 multiplies, which no caller does yet, and `Attention` now hands a call's own
+  numerics to the rows instead of only the legacy `allowF16`. Bias `[1|B, 1|H, 1|Sq, Skv]` rides the fused engine, so per-head
+  masks on calls that permit F16 leave the materialized path. The scale is no longer part of a plan: one plan serves every scale and the
+  per-plan device scalar is gone. cuDNN failures are remembered per capability signature (dtype, grouped, mask kind, bias axes,
+  head dim), so a refused bf16 or grouped plan cannot switch off the fp16 path at the same head dim.
+- **LTX-2 rotary runs on the GPU under Vulkan.** `Ltx2SplitRope` had no Vulkan kernel, so every LTX-2 attention
+  call copied Q and K to the host, rotated them there and uploaded them again. The new kernel keeps each product unfused,
+  so its output is bit-identical to the host loop.
+- **Changed: cuDNN fused attention reads strided operand views.** Q, K, V and the output can be any view with a contiguous
+  head dim: any batch, column slices of one fused QKV projection, and mixed head-major and token-major layouts. Offsets stay
+  out of the plan key. The token-major cuDNN rows take the same masks as head-major (per-batch, per-head, key-only). Today's
+  calls build the graphs they built before; this is what lets later changes drop the permutes around attention.
+- **Changed: audio, encoder, vision and 3-D attention runs on the shared layer.** The TTS, ASR, music and codec models
+  (F5, IndexTTS2, Kokoro, CosyVoice, Whisper, Moonshine, MusicGen, Moshi and Mimi, Dia, YuE2, MiniMax-Music-3, HeartMuLa,
+  Stable Audio, ACE-Step 1.5 and others), the T5, CLIP, BERT and Qwen-VL encoders, DINO, SAM2, Swin, RT-DETR and the
+  Hunyuan3D, TRELLIS and TripoSR blocks attend through `AttentionLayer`. Output is bit-identical; SAM2 and Hiera no longer
+  leak their attention operands, and BERT's head reshapes run on the device instead of the host.
 
 ## alpha.384
 

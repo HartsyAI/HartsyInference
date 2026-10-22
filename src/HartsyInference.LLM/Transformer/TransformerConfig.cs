@@ -158,7 +158,7 @@ public sealed record TransformerConfig
     /// <summary>SwiGLU feed-forward inner dimension.</summary>
     public required int IntermediateSize { get; init; }
 
-    /// <summary>Vocabulary size (embedding rows and logit width).</summary>
+    /// <summary>Logit width: the rows the LM head scores. The embedding table can hold more rows than this (mllama's image tokens).</summary>
     public required int VocabSize { get; init; }
 
     /// <summary>Maximum position the RoPE table addresses; a hard cap on prompt + generation length.</summary>

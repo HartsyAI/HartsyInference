@@ -43,6 +43,9 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 6.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
 
     /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(4, FrameNormalization.SnapNearest) };
+
+    /// <inheritdoc/>
     /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). Image-to-video remains unwired and is tracked separately: HunyuanVideo-I2V is a distinct upstream checkpoint with a different input-channel count, not a flag on this T2V one.</remarks>
     public VideoFeatures Supports => VideoFeatures.Lora;
 

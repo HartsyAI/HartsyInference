@@ -4,7 +4,7 @@ namespace HartsyInference.Engine.Recipes;
 /// One place to register every video family as it lands.</summary>
 public static class VideoRecipeRegistry
 {
-    private static readonly List<IVideoRecipe> _recipes = BuildDefaults();
+    private static readonly List<IVideoRecipe> _recipes = Validated(BuildDefaults());
 
     /// <summary>The families this build ships, captured before <see cref="Register"/> can add to them —
     /// a catalogue-wide invariant must not be widened by a recipe a test or an out-of-tree package registered
@@ -23,10 +23,26 @@ public static class VideoRecipeRegistry
     }
 
     /// <summary>Registers an additional recipe (last-registered wins on ties).</summary>
-    public static void Register(IVideoRecipe recipe) => _recipes.Insert(0, recipe);
+    public static void Register(IVideoRecipe recipe)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        IReadOnlyList<string> problems = RecipeRegistryValidator.Problems(recipe);
+        if (problems.Count > 0)
+        {
+            throw new ArgumentException($"Recipe '{recipe.Name}' is invalid: {string.Join(" ", problems)}", nameof(recipe));
+        }
+        _recipes.Insert(0, recipe);
+    }
 
     /// <summary>The video families a lifted recipe currently covers.</summary>
     public static IReadOnlyCollection<string> RegisteredNames => _recipes.Select(r => r.Name).ToList();
+
+    /// <summary>Refuses to serve a built-in registry whose declarations break their own contract.</summary>
+    private static List<IVideoRecipe> Validated(List<IVideoRecipe> recipes)
+    {
+        RecipeRegistryValidator.ThrowIfInvalid(recipes);
+        return recipes;
+    }
 
     private static List<IVideoRecipe> BuildDefaults() => new List<IVideoRecipe>
     {

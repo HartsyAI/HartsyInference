@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -27,6 +28,9 @@ public sealed unsafe class MatrixGame3ActionModule
     private readonly bool _enableKeyboard;
     private readonly WanRope _rope;
     private readonly float _eps;
+    private readonly AttentionLayer _attention;
+
+    internal AttentionLayer AttentionStage => _attention;
 
     private Tensor? _mouseMlp1W, _mouseMlp1B, _mouseMlp2W, _mouseMlp2B, _mouseLnW, _mouseLnB;
     private Tensor? _tQkvW, _tQkvB, _projMouseW, _projMouseB;
@@ -55,6 +59,11 @@ public sealed unsafe class MatrixGame3ActionModule
         if (ropeTDim + ropeHDim + ropeWDim != _headDim)
             throw new ArgumentException($"rope dims ({ropeTDim}+{ropeHDim}+{ropeWDim}) must sum to head dim {_headDim}.");
         _rope = new WanRope(ropeTDim, ropeHDim, ropeWDim, ropeTheta);
+        // allowF16: q and k are RMS-normed, so the scores are bounded.
+        _attention = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32, AllowF16 = true,
+        });
     }
 
     /// <summary>Raw actions gathered per latent frame.</summary>
@@ -181,11 +190,7 @@ public sealed unsafe class MatrixGame3ActionModule
         ApplyRopeBatched(backend, k, cos, sin, tt, gh, gw);
         cos.Dispose(); sin.Dispose();
 
-        Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        // cuDNN fused flash: mask-null, D=64, batched over sp spatial positions × tiny frame-seq — the same
-        // shape that made Oasis's materialized SDPA catastrophic. allowF16 (bounded/RMS-normed q/k).
-        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
 
         Tensor flat = MergeTemporal(backend, attn, tt, sp);
         attn.Dispose();
@@ -242,9 +247,7 @@ public sealed unsafe class MatrixGame3ActionModule
         ApplyRopeBatched(backend, k, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
         cosT.Dispose(); sinT.Dispose();
 
-        Tensor attn = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        backend.ScaledDotProductAttention(attn, q, k, v, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
 
         Tensor flat = MergeTemporal(backend, attn, tt, sp);
         attn.Dispose();

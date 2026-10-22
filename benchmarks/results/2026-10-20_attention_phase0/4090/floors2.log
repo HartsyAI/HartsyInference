@@ -1,0 +1,45 @@
+[ab] reusing build e845dcd9
+[ab] reusing build e845dcd9
+[ab] stopping swarmui.service for the run (restored on exit)
+[ab] ── sd15 on cuda
+[ab] ── krea2 on cuda
+[ab] ── zimage on cuda
+[ab] ── qwenimage-q4k on cuda
+[ab] ── llama32-1b on cuda
+[ab] ── sdxl on cuda
+[ab] ── flux1-dev on cuda
+[ab] ── wan5b on cuda
+[ab] ── ideogram4 on cuda
+[ab] ── chroma-hd on cuda
+[ab] ── lumina2 on cuda
+[ab] ── ltx25-dev on cuda
+[ab] ── h3-fl2va-fp8 on cuda
+[ab] ── qwen3-4b on cuda
+[ab] ── gemma2-2b on cuda
+# Regression gate — e845dcd9 vs e845dcd9+set-e0122c
+
+- when: 2026-10-21T11:54:31Z UTC · GPU: NVIDIA GeForce RTX 4090, 595.99.02 · expectation: bounded:0 · warm reps: 2 · speed tolerance: ±5%
+- head knobs: --set numerics.sdpaNoF16=true --set numerics.sageAttn=false --set numerics.fa2Prefill=false --set numerics.flashF16=false
+- runs: /home/hartsy/Desktop/regression-ab/runs · pairs: /home/hartsy/Desktop/regression-ab/reports/20261021-112150-e845dcd9-vs-e845dcd9+set-e0122c/pairs
+
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| sd15 | cuda | FAIL | 5.27 → 5.20 | -1.3 | 69 → 82 | +18.8 | 3887 → 4223 | +8.6 | 0.998215 | DIFFER | slower by +18.8% (base spread 2.9%);  |
+| krea2 | cuda | PASS | 10.81 → 10.71 | -0.9 | 523 → 520 | -0.6 | 17689 → 17517 | -1.0 | 0.966578 | DIFFER |  |
+| zimage | cuda | PASS | 10.12 → 9.79 | -3.3 | 291 → 290 | -0.3 | 10197 → 8293 | -18.7 | 0.936570 | DIFFER |  |
+| qwenimage-q4k | cuda | FAIL | 40.45 → 54.57 | +34.9 | 1621 → 2348 | +44.8 | 17347 → 18435 | +6.3 | 0.988030 | DIFFER | slower by +44.8% (base spread 0.5%);  |
+| llama32-1b | cuda | FAIL | 4.21 → 4.15 | -1.4 | 4.67 → 5.27 | +12.8 | 5385 → 5209 | -3.3 | - | DIFFER | teacher-forced probe skipped (a build lacks --scores-out); output CHANGED (no SSIM for this artifact); slower by +12.8% (base spread 11.3%);  |
+| sdxl | cuda | FAIL | 24.48 → 26.21 | +7.1 | 259 → 364 | +40.5 | 16546 → 16377 | -1.0 | 0.998141 | DIFFER | slower by +40.5% (base spread 0.4%);  |
+| flux1-dev | cuda | PASS | 22.74 → 22.68 | -0.3 | 0 → 0 | - | 16093 → 14191 | -11.8 | 1.000000 | equal |  |
+| wan5b | cuda | FAIL | 49.25 → 63.44 | +28.8 | 1124 → 1863 | +65.7 | 19439 → 19265 | -0.9 | 0.994821 | DIFFER | slower by +65.7% (base spread 0.1%);  |
+| ideogram4 | cuda | FAIL | 25.42 → 28.53 | +12.2 | 821 → 946 | +15.2 | 22063 → 23653 | +7.2 | 0.894457 | DIFFER | slower by +15.2% (base spread 0.5%);  |
+| chroma-hd | cuda | PASS | 38.59 → 40.01 | +3.7 | 0 → 0 | - | 13559 → 13390 | -1.2 | 1.000000 | equal |  |
+| lumina2 | cuda | FAIL | 22.02 → 29.38 | +33.4 | 688 → 1059 | +53.9 | 17957 → 18907 | +5.3 | 0.999098 | DIFFER | slower by +53.9% (base spread 0.0%);  |
+| ltx25-dev | cuda | PASS | 36.51 → 36.01 | -1.4 | 742 → 764 | +3.0 | 22828 → 23358 | +2.3 | 0.964689 | DIFFER |  |
+| h3-fl2va-fp8 | cuda | PASS | 60.70 → 45.37 | -25.3 | 1091 → 1084 | -0.6 | 22998 → 22950 | -0.2 | 0.390199 | DIFFER |  |
+| qwen3-4b | cuda | FAIL | 6.44 → 6.25 | -3.0 | 8.40 → 8.27 | -1.5 | 12685 → 12136 | -4.3 | - | DIFFER | teacher-forced probe skipped (a build lacks --scores-out); output CHANGED (no SSIM for this artifact);  |
+| gemma2-2b | cuda | PASS | 6.91 → 6.20 | -10.3 | 9.01 → 8.91 | -1.1 | 8307 → 7712 | -7.2 | - | equal | teacher-forced probe skipped (a build lacks --scores-out);  |
+
+Step ms is the median over warm seeds of the CLI's per-step interval (per token for text, as the CLI streams it — not the engine decode rate). SSIM is the minimum over seed pairs; digests compare decoded pixels.
+[ab] report: /home/hartsy/Desktop/regression-ab/reports/20261021-112150-e845dcd9-vs-e845dcd9+set-e0122c/report.md
+[ab] 8 case(s) failed the gate

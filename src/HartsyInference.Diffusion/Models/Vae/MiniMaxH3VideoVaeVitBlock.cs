@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -10,11 +11,16 @@ namespace HartsyInference.Diffusion.Models.Vae;
 internal sealed class MiniMaxH3VideoVaeVitBlock
 {
     private readonly MiniMaxH3VideoVaeConfig _config;
+    private readonly AttentionLayer _attention;
     private Tensor? _norm1W, _norm2W, _scale1, _scale2;
     private Tensor? _qkvW, _qkvB, _outW, _outB;
     private Tensor? _w1W, _w1B, _w2W, _w2B;
 
-    public MiniMaxH3VideoVaeVitBlock(MiniMaxH3VideoVaeConfig config) => _config = config;
+    public MiniMaxH3VideoVaeVitBlock(MiniMaxH3VideoVaeConfig config)
+    {
+        _config = config;
+        _attention = new(new AttentionLayerConfig { Heads = config.Heads, KvHeads = config.Heads, HeadDim = config.DimHead });
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, List<Tensor> owned)
     {
@@ -89,7 +95,7 @@ internal sealed class MiniMaxH3VideoVaeVitBlock
         backend.Permute0213(qh, qn, seq, heads, hd);
         backend.Permute0213(kh, kn, seq, heads, hd);
         backend.Permute0213(vh, v, seq, heads, hd);
-        backend.ScaledDotProductAttention(attn, qh, kh, vh, null, 1f / MathF.Sqrt(hd));
+        _attention.AttendHeadMajorOperands(backend, qh, kh, vh, default, OperandOwnership.None, output: attn);
 
         using Tensor merged = new Tensor(new TensorShape(seq, dim), DType.F32);
         backend.Permute0213(merged, attn, heads, seq, hd);

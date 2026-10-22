@@ -1,5 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
+using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
@@ -248,6 +250,9 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
 
     private sealed class Layer
     {
+        // The batch is folded into the heads (the cache's layout), so each row count is its own geometry.
+        private static readonly ConcurrentDictionary<int, AttentionLayer> Attention = new();
+
         private Tensor? _inputNorm;
         private Tensor? _postAttentionNorm;
         private Tensor? _toQ;
@@ -309,9 +314,10 @@ public sealed unsafe class MiniMaxMusic3DepthDecoder : IDisposable
                 }
                 Tensor mask = cache.Mask(steps);
                 cache.Append(backend, index, key, value);
-                using Tensor attention = new Tensor(headMajor, DType.F32);
-                backend.ScaledDotProductAttention(attention, query, cache.Keys(index), cache.Values(index), mask,
-                    1f / MathF.Sqrt(HeadDim));
+                AttentionLayer layer = Attention.GetOrAdd(batch, static rows => new AttentionLayer(
+                    new AttentionLayerConfig { Heads = rows * NumHeads, KvHeads = rows * NumHeads, HeadDim = HeadDim, ComputeDType = DType.F32 }));
+                using Tensor attention = layer.AttendHeadMajorOperands(backend, query, cache.Keys(index), cache.Values(index),
+                    new AttentionCallContext { Bias = mask }, OperandOwnership.None);
                 if (steps == 1)
                 {
                     backend.Linear(result, attention, _toOut!, null);

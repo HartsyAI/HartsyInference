@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.Moonshine;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -22,9 +23,10 @@ public sealed unsafe class DiaAttention
     // Cross-attention precomputed K/V (constant across decode steps).
     private Tensor? _crossK, _crossV;
     private int _crossLen;
+    private AttentionLayer? _attn;
 
-    /// <param name="attnScale">Softmax logit scale. Dia pre-scales Q and passes 1.0; models that rely on SDPA's
-    /// default scaling (e.g. Zonos) pass <c>1/√head_dim</c>.</param>
+    /// <param name="attnScale">Softmax logit scale. Dia passes 1.0 (nothing in this class scales Q); models that rely on
+    /// SDPA's default scaling (e.g. Zonos) pass <c>1/√head_dim</c>.</param>
     public DiaAttention(int qHeads, int kvHeads, int headDim, int qInDim, int kvInDim, int outDim, bool useRope,
         bool interleavedRope = false, float attnScale = 1f)
     {
@@ -39,6 +41,12 @@ public sealed unsafe class DiaAttention
         _kW = WhisperOps.EnsureF32(w[$"{prefix}.k_proj.weight"]);
         _vW = WhisperOps.EnsureF32(w[$"{prefix}.v_proj.weight"]);
         _oW = WhisperOps.EnsureF32(w[$"{prefix}.o_proj.weight"]);
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig
+            {
+                Heads = _qHeads, KvHeads = _kvHeads, HeadDim = _headDim, OutDim = _outDim, ComputeDType = DType.F32, Scale = _attnScale,
+            },
+            new AttentionLayerWeights { Query = _qW, Key = _kW, Value = _vW, Output = _oW });
     }
 
     /// <summary>Self-attention. <paramref name="cache"/> + <paramref name="layerIndex"/> enable incremental
@@ -108,19 +116,13 @@ public sealed unsafe class DiaAttention
     {
         // Project directly into head-shaped [1, t, H, headDim] (identical memory to [1, t, H*headDim]); avoids the
         // host FlatToHeads copy and keeps the activation GPU-resident.
-        Tensor q = new(new TensorShape(1, t, _qHeads, _headDim), DType.F32);
-        Tensor k = new(new TensorShape(1, t, _kvHeads, _headDim), DType.F32);
-        Tensor v = new(new TensorShape(1, t, _kvHeads, _headDim), DType.F32);
-        backend.Linear(q, x, _qW!, null);
-        backend.Linear(k, x, _kW!, null);
-        backend.Linear(v, x, _vW!, null);
+        (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, x, releaseInput: false);
 
         if (_useRope)
         {
             if (_interleavedRope)
             {
-                backend.ApplyRopeInterleaved(q, cosGpu, sinGpu);
-                backend.ApplyRopeInterleaved(k, cosGpu, sinGpu);
+                _attn.RotateQk(backend, q, k, new AttentionCallContext { Rotation = new InterleavedRope(cosGpu, sinGpu) });
             }
             else
             {
@@ -131,8 +133,8 @@ public sealed unsafe class DiaAttention
                 // caught producing "[Music]" instead of speech while matching baseline's digest-per-rep
                 // determinism). ApplyRopeSingle derives numHeads/totalVecs from whichever tensor it's given, so
                 // q and k each get their own correct shape.
-                backend.ApplyRopeSingle(q, cosGpu, sinGpu);
-                backend.ApplyRopeSingle(k, cosGpu, sinGpu);
+                QkRotation rope = new(QkRotationKind.RotateHalf, cosGpu, sinGpu);
+                _attn.RotateQk(backend, q, k, new AttentionCallContext { QueryRotation = rope, KeyRotation = rope });
             }
         }
 
@@ -147,17 +149,9 @@ public sealed unsafe class DiaAttention
         cache.AppendStep(backend, layerIndex, kMh, vMh); kMh.Dispose(); vMh.Dispose();
         Tensor kFull = cache.KeyPrefix(layerIndex);   // [1, Hkv, maxSeq, D], valid = posStart + t
         Tensor vFull = cache.ValuePrefix(layerIndex);
-        int kvLen = posStart + t, group = _qHeads / _kvHeads;
-
-        Tensor attn = new(new TensorShape(1, _qHeads, t, _headDim), DType.F32);
-        backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, _attnScale);
-        qMh.Dispose();
-
-        Tensor flat = new(new TensorShape(1, t, _qHeads * _headDim), DType.F32);
-        backend.Permute0213(flat, attn, _qHeads, t, _headDim); attn.Dispose();   // [1, H, t, D] → [1, t, H*D]
-        Tensor outT = new(new TensorShape(1, t, _outDim), DType.F32);
-        backend.Linear(outT, flat, _oW!, null); flat.Dispose();
-        return outT;
+        Tensor attn = _attn.AttendCachedHeadMajor(backend, qMh, kFull, vFull, new AttentionCacheView(posStart + t, posStart, Causal: true));
+        Tensor flat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, _qHeads * _headDim));   // [1, H, t, D] → [1, t, H*D]
+        return _attn.ProjectOutput(backend, flat);
     }
 
     /// <summary>Projects and caches the encoder K/V once for cross-attention.</summary>
@@ -197,7 +191,7 @@ public sealed unsafe class DiaAttention
             DiaHeads.RepeatKv(kRep, kMh, _kvHeads, group, kvLen, _headDim);
             DiaHeads.RepeatKv(vRep, vMh, _kvHeads, group, kvLen, _headDim);
         }
-        // Dia pre-scales Q so its scale is 1.0; Zonos relies on SDPA's default 1/sqrt(head_dim) (see ctor).
+        // _attnScale is 1.0 for Dia and 1/sqrt(head_dim) for Zonos (see ctor).
         Tensor attn = new(new TensorShape(1, _qHeads, t, _headDim), DType.F32);
         backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, _attnScale);
         if (group != 1) { kRep.Dispose(); vRep.Dispose(); }
@@ -212,5 +206,15 @@ public sealed unsafe class DiaAttention
     {
         Tensor?[] all = [_qW, _kW, _vW, _oW];
         foreach (Tensor? x in all) if (x is not null) yield return x;
+    }
+
+    /// <summary>GPT-J interleaved rotation of token-major Q and K by the Zonos tables (the rotate-half form runs as a table kind).</summary>
+    private sealed class InterleavedRope(Tensor cos, Tensor sin) : IQkRotation
+    {
+        public void RotateTokenMajor(IBackend backend, Tensor q, Tensor k, int heads, int kvHeads)
+        {
+            backend.ApplyRopeInterleaved(q, cos, sin);
+            backend.ApplyRopeInterleaved(k, cos, sin);
+        }
     }
 }

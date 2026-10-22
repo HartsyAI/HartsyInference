@@ -1,8 +1,8 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Tests.Common;
 using HartsyInference.Tests.Common.Attention;
-using Xunit;
+using HartsyInference.Tests.Common;
 using Xunit.Abstractions;
+using Xunit;
 
 namespace HartsyInference.Gpu.Tests.Parity;
 

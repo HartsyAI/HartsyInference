@@ -177,14 +177,6 @@ public sealed unsafe class QwenImageBlock : IStreamingBlock
             rope.ApplyJoint(q, k, batch, heads, packedH, packedW, txtSeqLen, txtPositionStart, refGrids);
     }
 
-    /// <summary>The context-parallel K/V rendezvous: this rank's local <c>[txt ∥ img_rank]</c> K/V for <c>[txt ∥ img_full]</c>,
-    /// the text prefix from its own replica. Allocates and synchronizes, so a CP step is never captured.</summary>
-    private sealed class CpExchangeRewrite(CpKvExchange exchange, int rank, int prefixRows) : IKvRewrite
-    {
-        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v) =>
-            exchange.Exchange(rank, k, v, replicatedPrefixRows: prefixRows);
-    }
-
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {

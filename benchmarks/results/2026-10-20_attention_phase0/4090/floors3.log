@@ -1,0 +1,10 @@
+# floors3: MiniMax-H3 with the SDPA route pinned on both arms, and the teacher-forced LLM rows (default vs strict)
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| h3-fl2va-fp8 | cuda | PASS | 105.44 → 138.66 | +31.5 | 1656 → 1363 | -17.7 | 23905 → 23292 | -2.6 | 1.000000 | equal | faster by 17.7%;  |
+
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| llama32-1b | cuda | FAIL | 5.31 → 5.47 | +3.0 | 7.62 → 6.70 | -12.1 | 5230 → 5230 | +0.0 | - | DIFFER | logp Δ mean 0.0145873 max 0.114196, top-token flips 2/256; output CHANGED (no SSIM for this artifact); faster by 12.1%;  |
+| qwen3-4b | cuda | FAIL | 9.45 → 9.49 | +0.4 | 13.61 → 13.18 | -3.2 | 12157 → 12156 | -0.0 | - | DIFFER | logp Δ mean 0.0145455 max 0.238139, top-token flips 1/256; output CHANGED (no SSIM for this artifact);  |
+| gemma2-2b | cuda | PASS | 11.26 → 11.87 | +5.4 | 13.97 → 14.56 | +4.2 | 7727 → 7739 | +0.2 | - | equal | logp Δ mean 0 max 0, top-token flips 0/256;  |

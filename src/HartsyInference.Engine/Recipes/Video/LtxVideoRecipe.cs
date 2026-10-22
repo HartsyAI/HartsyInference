@@ -28,8 +28,15 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         string.Equals(familyId, "ltx-video", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "lightricks-ltx-video", StringComparison.OrdinalIgnoreCase);
 
+    // Fps is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
     /// <summary>LTX-Video's official sampling settings: 50 steps at guidance 3.0, 704x480, 97 frames (<c>LtxVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>; frame count matches the pipeline's own <c>modelDefault</c> in <see cref="LtxVideoRecipePipeline.Generate"/>).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 97 };
+    public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 50, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 97, Fps = 25,
+    };
+
+    /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new LtxVideoConfig().VaeTemporalCompression, FrameNormalization.SnapNearest) };
 
     /// <summary>Family-level default. <see cref="VideoFeatures.Lora"/> (added 2026-08-20) is checkpoint-independent — it merges into the DiT, which every variant has — so unlike <see cref="VideoFeatures.InitImage"/> it is NOT narrowed by <see cref="SupportsFor"/>. InitImage stays variant-gated there: only the base 0.9 (non-timestep-VAE, non-13B) checkpoint has a VAE encoder built for its config.</summary>
     public VideoFeatures Supports => VideoFeatures.Lora;

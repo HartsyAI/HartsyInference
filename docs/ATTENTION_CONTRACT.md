@@ -180,7 +180,15 @@ The planner reproduces these until the row that owns each is rewritten.
 
 - A fully excluded row gives the mean of V on CUDA's cuDNN and materialized F32 paths, and zero on the flash kernels.
 - A sliding window without `Causal` keeps every later key on CUDA and excludes them on Vulkan.
-- CUDA's token-major entry refuses key-only masks and masks with `B ≠ 1`; its head-major entry accepts both.
+- CUDA's token-major permute fallback refuses key-only masks, masks with `B ≠ 1` and `B ≠ 1` operands; its cuDNN rows and its
+  head-major entry accept them.
+- CUDA's cuDNN rows read Q, K, V and the output as strided views (head dim contiguous, offset and strides multiples of 8
+  elements, F16 or BF16; the output must cover its whole tensor) and are the only rows that take a strided or batched
+  token-major call; no row stages a copy, so a view none of them takes is refused at planning. F32 operands are cast whole
+  and so must be whole tensors.
+- CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
+  dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
+  permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
 - CUDA runs F32 attention GEMMs in TF32 whatever the precision settings say, and `FlashAttention`'s F32 prefill
   narrows to F16 without a permission.
 - CUDA's materialized F32→F16 cast does not saturate; cuDNN's does.

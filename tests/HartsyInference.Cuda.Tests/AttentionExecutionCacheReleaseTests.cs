@@ -50,6 +50,7 @@ public sealed unsafe class AttentionExecutionCacheReleaseTests
             using Tensor q = RandomTensor(new TensorShape(1, Heads, Sequence, HeadDim), 23);
             using Tensor k = RandomTensor(new TensorShape(1, Heads, Sequence, HeadDim), 29);
             using Tensor v = RandomTensor(new TensorShape(1, Heads, Sequence, HeadDim), 31);
+            using Tensor bias = RandomTensor(new TensorShape(1, 1, Sequence, Sequence), 37);
             using Tensor first = new(q.Shape, DType.F32);
             using Tensor alternateScale = new(q.Shape, DType.F32);
             using Tensor second = new(q.Shape, DType.F32);
@@ -58,9 +59,9 @@ public sealed unsafe class AttentionExecutionCacheReleaseTests
             Assert.True(GpuTransferHelper.IsWeightCached(sentinelWeight));
 
             backend.ScaledDotProductAttention(first, q, k, v, null, scale, allowF16: true);
-            // A distinct exact scale is a distinct PlanKey. Releasing this session must walk both cached plans,
-            // not stop after the first independently owned descriptor/scalar/workspace.
-            backend.ScaledDotProductAttention(alternateScale, q, k, v, null, scale * 0.75f, allowF16: true);
+            // A bias is a distinct PlanKey (the scale is not). Releasing this session must walk both cached plans,
+            // not stop after the first independently owned descriptor/workspace.
+            backend.ScaledDotProductAttention(alternateScale, q, k, v, bias, scale, allowF16: true);
             backend.Sync();
             Assert.Equal(2, backend.CudnnSdpaExecutionCount);
             Assert.Equal(1, backend.CudnnSdpaSessionGeneration);

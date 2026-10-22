@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -792,8 +793,11 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         if (StagesGraphDecodeEmbedRows(backend)) return 0;
         if (_embedGatherQuant is { } quant && QuantEmbedGatherFits(backend, quant))
             return ReferenceEquals(quant, _lmHeadQuant) ? 0 : Tensor.ComputeByteSize(quant.Shape, quant.DType);
-        return (long)_cfg.VocabSize * _cfg.HiddenSize * sizeof(float);
+        return (long)EmbedRows * _cfg.HiddenSize * sizeof(float);
     }
+
+    /// <summary>Rows of the token-embedding table, which can exceed the logit width (<see cref="TransformerConfig.VocabSize"/>).</summary>
+    private int EmbedRows => (int)(_embed!.ElementCount / _cfg.HiddenSize);
 
     /// <summary>Uploads the QUANTIZED per-layer token embedding table for graph decode's device-side PLE gather (Q5_K: 1.6 GB for E2B vs 9.4 GB F32 — the F32 host copy stays host-only for the eager path).</summary>
     public void EnsurePleResidentForGraphDecode(IBackend backend)
@@ -1073,8 +1077,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     public unsafe nint GraphDecodeEmbedRow(int tokenId)
     {
         ThrowIfDisposed();
-        if ((uint)tokenId >= (uint)_cfg.VocabSize)
-            throw new ArgumentException($"token id {tokenId} out of range [0, {_cfg.VocabSize}).", nameof(tokenId));
+        if ((uint)tokenId >= (uint)EmbedRows)
+            throw new ArgumentException($"token id {tokenId} out of range [0, {EmbedRows}).", nameof(tokenId));
         int h = _cfg.HiddenSize;
         float* row = (float*)_embed!.DataPointer + (long)tokenId * h;
         if (_cfg.EmbeddingScale == 1f) return (nint)row;
@@ -1092,11 +1096,12 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         int h = _cfg.HiddenSize;
         float* op = (float*)output.DataPointer;
         float* ep = (float*)_embed!.DataPointer;
+        int rows = EmbedRows;
         for (int s = 0; s < tokenIds.Length; s++)
         {
             int id = tokenIds[s];
-            if ((uint)id >= (uint)_cfg.VocabSize)
-                throw new ArgumentException($"token id {id} out of range [0, {_cfg.VocabSize}).");
+            if ((uint)id >= (uint)rows)
+                throw new ArgumentException($"token id {id} out of range [0, {rows}).");
             Buffer.MemoryCopy(ep + (long)id * h, op + (long)s * h, h * 4, h * 4);
         }
         // Gemma scales token embeddings by sqrt(hidden) (the embedding normalizer); 1.0 for Qwen/Llama.
@@ -1209,6 +1214,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         private Tensor? _gateUpW, _gateUpB;
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
         private Multimodal.MllamaCrossAttentionLayer? _crossAttn;   // non-null on mllama gated cross-attention layers
+        private AttentionLayer? _attn;   // the attention operator and KV stage; null on cross-attention layers
         // Gemma-4 per-layer embeddings (PLE): this layer's own gate/proj/post-norm (the top-level token
         // table/projection/norm shared across all layers lives on GenericTransformer).
         private Tensor? _pleInpGate, _pleProj, _plePostNorm;
@@ -1241,6 +1247,18 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 _crossAttn.LoadWeights(w, prefix);
                 return;
             }
+            // MLA scale: DeepSeek YaRN folds mscale²/√qkHead into AttnScale; 0 is the plain 1/√qkHead.
+            _attn = new AttentionLayer(_cfg.Mla is { } mlaCfg
+                ? new AttentionLayerConfig
+                {
+                    Heads = _cfg.NumHeads, KvHeads = _cfg.NumHeads, HeadDim = mlaCfg.QkHeadDim, ComputeDType = DType.F32,
+                    Scale = mlaCfg.AttnScale > 0f ? mlaCfg.AttnScale : 1f / MathF.Sqrt(mlaCfg.QkHeadDim),
+                }
+                : new AttentionLayerConfig
+                {
+                    Heads = _cfg.NumHeads, KvHeads = _cfg.NumKvHeads, HeadDim = _cfg.HeadDimFor(layerIndex), ComputeDType = DType.F32,
+                    Scale = _cfg.AttnScale,
+                });
             if (_cfg.NormPlacement == NormPlacement.PostNorm)
             {
                 // OLMo-2: no input / pre-FFN norm. The attention and FFN outputs are each RMSNorm'd before being
@@ -1691,7 +1709,6 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             int hq = _cfg.NumHeads;
             int hkv = _cfg.NumKvHeads;
             int d = _cfg.HeadDimFor(layerIndex);   // Gemma-4: local/SWA layers use a narrower head dim than global
-            int group = _cfg.KvGroup;
             TensorShape flat = new(1, t, h);
 
             Tensor pre = new(flat, DType.F32);
@@ -1764,53 +1781,22 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 }
             }
 
-            Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.Permute0213(qMh, q, t, hq, d);
-            q.Dispose();
-
-            Tensor kFull, vFull;
-            if (hasOwnKv)
-            {
-                Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32);
-                Tensor vMh = new(new TensorShape(1, hkv, t, d), DType.F32);
-                backend.Permute0213(kMh, k!, t, hkv, d);
-                backend.Permute0213(vMh, v!, t, hkv, d);
-                k!.Dispose(); v!.Dispose();
-                cache.AppendStep(backend, layerIndex, kMh, vMh);
-                kMh.Dispose(); vMh.Dispose();
-                kFull = cache.KeyPrefix(layerIndex);   // [1, Hkv, kvLen, D] (cache-owned)
-                vFull = cache.ValuePrefix(layerIndex);
-            }
-            else
-            {
-                // Gemma-4 KV-sharing: the donor layer ran earlier THIS SAME forward call (donor index < layerIndex
-                // always), so its cache slot for this position is already populated — just read it.
-                int donor = _cfg.KvDonorLayer(layerIndex);
-                kFull = cache.KeyPrefix(donor);
-                vFull = cache.ValuePrefix(donor);
-            }
-
-            // FlashAttention: GQA-aware (no K/V replication) online-softmax, causal via the absolute query
-            // offset (decode t=1 naturally attends the whole prefix; prefill t>1 is per-row causal). No score
-            // matrix, no causal-mask tensor.
-            // kFull/vFull may be a fixed-capacity buffer whose seq stride exceeds the valid length, so pass the
-            // valid key count (posStart + t) explicitly; the kernel reads the stride from the tensor shape.
-            int kvLen = posStart + t;
-            float scale = _cfg.AttnScale;
             // Local (sliding-window) layers attend only the most recent SlidingWindow keys; global layers attend
             // the full causal prefix (window 0). No-op for non-SWA models.
             int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
-            Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink, window, _alibiSlopes);
-            qMh.Dispose();
+            // k == null is a Gemma-4 KV-sharing layer: it reads its donor's slot, written earlier this forward.
+            Tensor attn = _attn!.AttendOverKv(backend, q, k, v, cache, layerIndex, hasOwnKv ? layerIndex : _cfg.KvDonorLayer(layerIndex),
+                new KvAttentionCall
+                {
+                    KvLength = posStart + t, QueryOffset = posStart, SlidingWindow = window, Softcap = _cfg.AttnLogitSoftcap,
+                    Sinks = _sink, AlibiSlopes = _alibiSlopes,
+                });
             attn = NormHeads(backend, attn);
 
             // hq*d (not _cfg.QDim, which is the GLOBAL head dim) — Gemma-4 local/SWA layers project to a
             // narrower width than global layers, and _oW's own shape (loaded from the checkpoint) already
             // matches whichever width this specific layer actually uses.
-            Tensor attnFlat = new(new TensorShape(1, t, hq * d), DType.F32);
-            backend.Permute0213(attnFlat, attn, hq, t, d);
-            attn.Dispose();
+            Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hq * d));
             attnFlat = GateAttention(backend, attnFlat, gate);
             Tensor attnOut = new(flat, DType.F32);
             Project(backend, attnOut, attnFlat, _oW!, _oB, _cfg.LowVramQuant);
@@ -1894,7 +1880,6 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             int hkv = _cfg.NumKvHeads;
             int d = _cfg.HeadDimFor(layerIndex);        // Gemma-4: local/SWA layers are narrower than global
             int rotaryDim = _cfg.RotaryDimFor(layerIndex);
-            int group = _cfg.KvGroup;
             TensorShape flat = new(1, t, h);
 
             Tensor pre = new(flat, DType.F32);
@@ -2092,14 +2077,11 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 q = qRoped;
             }
 
-            float scale = _cfg.AttnScale;
             // Local (sliding-window) layers attend only the most recent SlidingWindow keys — same per-layer
             // selection as the eager path; the window and soft-cap are constants baked into the captured graph.
             int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
-            Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttentionDev(attn, q, kFull, vFull, 0, group, causal: true, 0, scale, devicePos,
-                _cfg.AttnLogitSoftcap, window);
-            q.Dispose();
+            Tensor attn = _attn!.AttendDevice(backend, q, kFull, vFull, devicePos,
+                new KvAttentionCall { SlidingWindow = window, Softcap = _cfg.AttnLogitSoftcap });
 
             Tensor attnOut = new(flat, DType.F32);
             Project(backend, attnOut, attn, _oW!, _oB, _cfg.LowVramQuant);
@@ -2178,7 +2160,6 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             int hkv = _cfg.NumKvHeads;
             int d = _cfg.HeadDim;
             int rotaryDim = _cfg.RotaryDim;
-            int group = _cfg.KvGroup;
             bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
             TensorShape flat = new(1, b, h);
 
@@ -2254,17 +2235,11 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             // every CUDA dual-graph step, invisible on CpuBackend, which does not validate). At Tq=1 the two
             // layouts are byte-identical, so the segments still concatenate — along dim 0 now — into the
             // token-major o_proj input.
-            float scale = _cfg.AttnScale;
             int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
+            KvAttentionCall attention = new() { SlidingWindow = window, Softcap = _cfg.AttnLogitSoftcap };
             Tensor[] segs = new Tensor[b];
             for (int s = 0; s < b; s++)
-            {
-                Tensor attnSeg = new(new TensorShape(1, hq, 1, d), DType.F32);
-                backend.FlashAttentionDev(attnSeg, qRows[s], caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
-                    0, group, causal: true, 0, scale, devicePos, _cfg.AttnLogitSoftcap, window);
-                qRows[s].Dispose();
-                segs[s] = attnSeg;
-            }
+                segs[s] = _attn!.AttendDevice(backend, qRows[s], caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex), devicePos, in attention);
             Tensor attnConcat = new(new TensorShape(b, hq, 1, d), DType.F32);
             backend.Concat(attnConcat, segs, dim: 0);
             foreach (Tensor seg in segs) seg.Dispose();
@@ -2399,16 +2374,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor vFull = new(new TensorShape(1, hq, t, qkHead), DType.F32); backend.Concat(vFull, [vMh, vPad], dim: 3);
             qNopeMh.Dispose(); qRopeMh.Dispose(); kNopeMh.Dispose(); kRopeB.Dispose(); vMh.Dispose(); vPad.Dispose();
 
-            cache.AppendStep(backend, layerIndex, kFull, vFull);
-            kFull.Dispose(); vFull.Dispose();
-            int kvLen = posStart + t;
-            // MLA softmax scale: DeepSeek YaRN folds mscale²/√qkHead into the score scale (cos/sin left neutral);
-            // 0 → the plain 1/√qkHead (V2-Lite / no long-context scaling).
-            float scale = mla.AttnScale > 0f ? mla.AttnScale : 1f / MathF.Sqrt(qkHead);
-            Tensor attn = new(new TensorShape(1, hq, t, qkHead), DType.F32);
-            backend.FlashAttention(attn, qFull, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
-                kvLen, 1, causal: true, qOffset: posStart, scale);
-            qFull.Dispose();
+            Tensor attn = _attn!.AttendOverKvHeadMajor(backend, qFull, kFull, vFull, cache, layerIndex, layerIndex,
+                new KvAttentionCall { KvLength = posStart + t, QueryOffset = posStart });
 
             // Keep only the real v_head_dim of each head's output (the zero-padded tail contributes 0).
             Tensor attnV = new(new TensorShape(1, hq, t, vDim), DType.F32); backend.SliceLastDim(attnV, attn, 0);
@@ -2513,7 +2480,6 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             int hq = _cfg.NumHeads;
             int hkv = _cfg.NumKvHeads;
             int d = _cfg.HeadDim;
-            int group = _cfg.KvGroup;
             TensorShape flat = new(1, b, h);
 
             Tensor pre = new(flat, DType.F32);
@@ -2560,7 +2526,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 }
             }
 
-            float scale = _cfg.AttnScale;
+            int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
             Tensor[] segs = new Tensor[b];
             for (int s = 0; s < b; s++)
             {
@@ -2573,20 +2539,18 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 backend.SliceRows(kMh, k, s * hkv);
                 backend.SliceRows(vMh, v, s * hkv);
 
-                IKvCache cache = caches[s];
-                cache.AppendStep(backend, layerIndex, kMh, vMh);
-                kMh.Dispose(); vMh.Dispose();
-                int kvLen = cache.CurrentLength + 1;   // append did not advance; +1 for the just-written token
-                int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
                 // Head-major like qMh: FlashAttention requires output.Shape to EQUAL Q's, and CudaBackend
                 // enforces it (a token-major [1,1,hq,d] segment threw on every CUDA batched decode, invisible on
                 // CpuBackend, which does not validate). At Tq=1 the two layouts are byte-identical, so the
                 // segments still concatenate — along dim 0 now — into the token-major o_proj input.
-                Tensor attnSeg = new(new TensorShape(1, hq, 1, d), DType.F32);
-                backend.FlashAttention(attnSeg, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
-                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap, _sink, window, _alibiSlopes);
-                qMh.Dispose();
-                segs[s] = attnSeg;
+                IKvCache cache = caches[s];
+                // The append does not advance CurrentLength: +1 for the just-written token.
+                segs[s] = _attn!.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, cache, layerIndex, layerIndex,
+                    new KvAttentionCall
+                    {
+                        KvLength = cache.CurrentLength + 1, QueryOffset = cache.CurrentLength, SlidingWindow = window,
+                        Softcap = _cfg.AttnLogitSoftcap, Sinks = _sink, AlibiSlopes = _alibiSlopes,
+                    });
             }
 
             // The per-row slices above are copies, not views, so the batched projections die here. Omitting this

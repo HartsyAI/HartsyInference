@@ -97,6 +97,10 @@ public sealed record AttentionLayerConfig
     /// <summary>A switch read on every call that can turn the token-major entry off.</summary>
     public Knob<bool>? TokenMajorKnob { get; init; }
 
+    /// <summary>A call the CUDA head-major entry serves with SageAttention (F16, head dim 64 or 128, no bias, both sequences at
+    /// least <c>numerics.sageF16MinSkv</c>) attends head-major instead of taking the token-major entry, which has no Sage kernel.</summary>
+    public bool HeadMajorForSage { get; init; }
+
     /// <summary>The legacy <c>allowF16</c> assertion the attention call carries.</summary>
     public bool AllowF16 { get; init; }
 
@@ -137,7 +141,7 @@ public sealed record AttentionLayerConfig
 /// <summary>The weights of one attention layer, borrowed from the model, which loads, slices and folds them.</summary>
 public sealed record AttentionLayerWeights
 {
-    /// <summary>Query projection; null with a fused projection.</summary>
+    /// <summary>Query projection; null with a fused projection, or in a key/value-only weight set.</summary>
     public Tensor? Query { get; init; }
 
     /// <summary>Key projection; null with a fused projection.</summary>
@@ -187,5 +191,5 @@ public sealed record AttentionLayerWeights
     public float KeyNormEps { get; init; }
 }
 
-/// <summary>The Q and K norm weights of a layer whose projections the model runs itself.</summary>
-public readonly record struct AttentionNormWeights(Tensor Query, Tensor Key, float QueryEps, float KeyEps);
+/// <summary>The Q and K norm weights of a layer whose projections the model runs itself; a key/value-only layer has no Q norm.</summary>
+public readonly record struct AttentionNormWeights(Tensor? Query, Tensor? Key, float QueryEps, float KeyEps);

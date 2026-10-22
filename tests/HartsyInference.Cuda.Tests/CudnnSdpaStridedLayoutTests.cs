@@ -15,6 +15,12 @@ public sealed unsafe class CudnnSdpaStridedLayoutTests
     private readonly ITestOutputHelper _output;
     public CudnnSdpaStridedLayoutTests(ITestOutputHelper output) => _output = output;
 
+    private static CudnnSdpa.PlanKey Key(Func<long, long, long, long, CudnnSdpa.View> view, int heads, int s, int d)
+    {
+        CudnnSdpa.View v = view(1, heads, s, d);
+        return new(CudnnSdpa.SdpaDtype.F16, d, v, v, v, v);
+    }
+
     private static uint _rng = 0x9E3779B9u;
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return (_rng & 0xFFFF) / 65535f - 0.5f; }
 
@@ -86,13 +92,13 @@ public sealed unsafe class CudnnSdpaStridedLayoutTests
         {
             dq = Upload(qh); dk = Upload(kh); dv = Upload(vh);
             doHm = CudaMemory.Allocate((nuint)(n * sizeof(ushort)));
-            sdpa.Execute(dq, dk, dv, doHm, 1, heads, s, s, d, scale, CudnnSdpa.SdpaLayout.HeadMajor);
+            sdpa.Execute(dq, dk, dv, doHm, Key(CudnnSdpa.View.HeadMajor, heads, s, d), scale);
             backend.Sync();
             Half[] outHm = Download(doHm, n);
 
             dqT = Upload(qt); dkT = Upload(kt); dvT = Upload(vt);
             doTm = CudaMemory.Allocate((nuint)(n * sizeof(ushort)));
-            sdpa.Execute(dqT, dkT, dvT, doTm, 1, heads, s, s, d, scale, CudnnSdpa.SdpaLayout.TokenMajor);
+            sdpa.Execute(dqT, dkT, dvT, doTm, Key(CudnnSdpa.View.TokenMajor, heads, s, d), scale);
             backend.Sync();
             Half[] outTm = Download(doTm, n);
 

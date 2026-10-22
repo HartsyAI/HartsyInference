@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Whisper;
@@ -298,6 +299,7 @@ internal sealed unsafe class WhisperDecoderLayer
     private Tensor? _fc1W; private Tensor? _fc1B;
     private Tensor? _fc2W; private Tensor? _fc2B;
     private Tensor? _finalLnW; private Tensor? _finalLnB;
+    private AttentionLayer? _selfAttn, _crossAttn;
 
     public WhisperDecoderLayer(WhisperConfig cfg) { _cfg = cfg; }
 
@@ -329,6 +331,16 @@ internal sealed unsafe class WhisperDecoderLayer
         _fc2B = WhisperOps.EnsureF32(weights[$"{prefix}.fc2.bias"]);
         _finalLnW = WhisperOps.EnsureF32(weights[$"{prefix}.final_layer_norm.weight"]);
         _finalLnB = WhisperOps.EnsureF32(weights[$"{prefix}.final_layer_norm.bias"]);
+
+        AttentionLayerConfig attention = new() { Heads = _cfg.NumHeads, KvHeads = _cfg.NumHeads, HeadDim = _cfg.HeadDim, ComputeDType = DType.F32 };
+        _selfAttn = new AttentionLayer(attention, new AttentionLayerWeights
+        {
+            Query = _selfQW, QueryBias = _selfQB, Key = _selfKW, Value = _selfVW, ValueBias = _selfVB, Output = _selfOutW, OutputBias = _selfOutB,
+        });
+        _crossAttn = new AttentionLayer(attention, new AttentionLayerWeights
+        {
+            Query = _crossQW, QueryBias = _crossQB, Key = _crossKW, Value = _crossVW, ValueBias = _crossVB, Output = _crossOutW, OutputBias = _crossOutB,
+        });
     }
 
     /// <summary>Precomputes cross-attention K and V from the encoder hidden state, run once per audio chunk at decode start; the result is held in <see cref="WhisperDecoder.DecodeState"/>.</summary>
@@ -357,10 +369,7 @@ internal sealed unsafe class WhisperDecoderLayer
         // --- Self-attention sub-block (causal, with KV cache append) ---
         Tensor normed = new(inShape, DType.F32);
         backend.LayerNorm(normed, hidden, _selfLnW!, _selfLnB!, _cfg.LayerNormEps);
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _selfQW!, _selfQB, 1, newCount, d, d);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _selfKW!, bias: null, 1, newCount, d, d);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, _selfVB, 1, newCount, d, d);
-        normed.Dispose();
+        (Tensor q, Tensor k, Tensor v) = _selfAttn!.ProjectSelf(backend, normed, releaseInput: true);
 
         TensorShape mhNew = new(1, heads, newCount, headDim);
         Tensor qMh = new(mhNew, DType.F32);
@@ -384,16 +393,10 @@ internal sealed unsafe class WhisperDecoderLayer
         backend.SliceTimeRange(kCached, selfK, 0, totalPos);
         backend.SliceTimeRange(vCached, selfV, 0, totalPos);
 
-        float scale = 1f / MathF.Sqrt(headDim);
-        Tensor attnOut = new(mhNew, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kCached, vCached, causalMask, scale);
-        qMh.Dispose(); kCached.Dispose(); vCached.Dispose();
-
-        Tensor merged = new(inShape, DType.F32);
-        backend.Permute0213(merged, attnOut, heads, newCount, headDim);
-        attnOut.Dispose();
-        Tensor selfProj = WhisperOps.ProjectLinear(backend, merged, _selfOutW!, _selfOutB, 1, newCount, d, d);
-        merged.Dispose();
+        // The mask is a tensor even at newCount == 1, where it is all zeros: it is never null.
+        Tensor attnOut = _selfAttn.AttendHeadMajorOperands(backend, qMh, kCached, vCached, new AttentionCallContext { Bias = causalMask });
+        Tensor merged = _selfAttn.MergeHeads(backend, attnOut, inShape);
+        Tensor selfProj = _selfAttn.ProjectOutput(backend, merged);
         Tensor res1 = new(inShape, DType.F32);
         backend.Add(res1, hidden, selfProj);
         selfProj.Dispose();
@@ -401,20 +404,10 @@ internal sealed unsafe class WhisperDecoderLayer
         // --- Cross-attention sub-block ---
         Tensor normed2 = new(inShape, DType.F32);
         backend.LayerNorm(normed2, res1, _crossLnW!, _crossLnB!, _cfg.LayerNormEps);
-        Tensor crossQ = WhisperOps.ProjectLinear(backend, normed2, _crossQW!, _crossQB, 1, newCount, d, d);
-        normed2.Dispose();
-        Tensor crossQMh = new(mhNew, DType.F32);
-        backend.Permute0213(crossQMh, crossQ, newCount, heads, headDim);
-        crossQ.Dispose();
-
-        Tensor crossAttn = new(mhNew, DType.F32);
-        backend.ScaledDotProductAttention(crossAttn, crossQMh, crossK, crossV, mask: null, scale);
-        crossQMh.Dispose();
-        Tensor crossMerged = new(inShape, DType.F32);
-        backend.Permute0213(crossMerged, crossAttn, heads, newCount, headDim);
-        crossAttn.Dispose();
-        Tensor crossProj = WhisperOps.ProjectLinear(backend, crossMerged, _crossOutW!, _crossOutB, 1, newCount, d, d);
-        crossMerged.Dispose();
+        Tensor crossQMh = _crossAttn!.ProjectQueryHeadMajor(backend, normed2, releaseInput: true, default);
+        Tensor crossAttn = _crossAttn.AttendHeadMajorOperands(backend, crossQMh, crossK, crossV, default, OperandOwnership.Query);
+        Tensor crossMerged = _crossAttn.MergeHeads(backend, crossAttn, inShape);
+        Tensor crossProj = _crossAttn.ProjectOutput(backend, crossMerged);
         Tensor res2 = new(inShape, DType.F32);
         backend.Add(res2, res1, crossProj);
         res1.Dispose(); crossProj.Dispose();

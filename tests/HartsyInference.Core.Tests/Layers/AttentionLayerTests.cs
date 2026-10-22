@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Tests.Common.Attention;
 using Xunit;
 
 namespace HartsyInference.Core.Tests.Layers;
@@ -216,6 +217,49 @@ public sealed class AttentionLayerTests
         Assert.Equal(new TensorShape(1, 6, 8), y.Shape);
         Assert.Throws<ArgumentException>(() => layer.Attend(backend, new Tensor(new TensorShape(1, 6, 2, 4), DType.F32),
             new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new TensorShape(1, 6, 8), default));
+    }
+
+    /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
+    /// minimum; the token-major entry has no Sage kernel, so a guarded layer keeps exactly those calls head-major.</summary>
+    [Theory]
+    [InlineData("sage-length", AttentionRoute.Dense)]
+    [InlineData("sage-length-d64", AttentionRoute.Dense)]
+    [InlineData("knob-minimum", AttentionRoute.Dense)]
+    [InlineData("below-minimum", AttentionRoute.TokenMajor)]
+    [InlineData("short-query", AttentionRoute.TokenMajor)]
+    [InlineData("d96", AttentionRoute.TokenMajor)]
+    [InlineData("f32", AttentionRoute.TokenMajor)]
+    [InlineData("bias", AttentionRoute.TokenMajor)]
+    [InlineData("sage-off", AttentionRoute.TokenMajor)]
+    [InlineData("unguarded", AttentionRoute.TokenMajor)]
+    public void HeadMajorForSage_KeepsTheCallsTheSageRowTakesHeadMajor(string name, AttentionRoute route)
+    {
+        int skv = name is "below-minimum" or "knob-minimum" ? 4096 : 8192;
+        int sq = name == "short-query" ? 256 : skv;
+        int headDim = name switch { "sage-length-d64" => 64, "d96" => 96, _ => 128 };
+        DType act = name == "f32" ? DType.F32 : DType.F16;
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        AttentionLayer layer = new(new AttentionLayerConfig
+        {
+            Heads = 1, KvHeads = 1, HeadDim = headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = name != "unguarded",
+            AllowF16 = true,
+        }, Weights(gate: false));
+        Tensor kv = new(new TensorShape(1, skv, 8), act), q = sq == skv ? kv : new(new TensorShape(1, sq, 8), act);
+        Tensor? bias = name == "bias" ? new Tensor(new TensorShape(1, 1, 1, skv), DType.F32) : null;
+        try
+        {
+            if (name == "sage-off") KnobStore.Set(EngineKnobs.SageAttn, false);
+            if (name == "knob-minimum") KnobStore.Set(EngineKnobs.SageF16MinSkv, 4096);
+            layer.Forward(backend, q, kv, new AttentionCallContext { Bias = bias });
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SageF16MinSkv);
+        }
+
+        Assert.Equal(route, Assert.Single(backend.Calls).Route);
+        Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
     }
 
     [Fact]

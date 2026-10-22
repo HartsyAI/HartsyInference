@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
@@ -9,6 +10,7 @@ internal sealed unsafe class Hunyuan3DVaeResBlock
     private readonly int _width, _heads, _headDim, _mlpDim;
     private Tensor? _ln1W, _ln1B, _qW, _kW, _vW, _projW, _projB, _qnW, _qnB, _knW, _knB;
     private Tensor? _ln2W, _ln2B, _fcW, _fcB, _fcpW, _fcpB;
+    private AttentionLayer? _attn;
 
     public Hunyuan3DVaeResBlock(int width, int heads)
     {
@@ -25,6 +27,9 @@ internal sealed unsafe class Hunyuan3DVaeResBlock
         _ln2W = F(w, $"{p}.ln_2.weight"); _ln2B = F(w, $"{p}.ln_2.bias");
         _fcW = F(w, $"{p}.mlp.c_fc.weight"); _fcB = F(w, $"{p}.mlp.c_fc.bias");
         _fcpW = F(w, $"{p}.mlp.c_proj.weight"); _fcpB = F(w, $"{p}.mlp.c_proj.bias");
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32, AllowF16 = true },
+            new AttentionLayerWeights { Query = _qW, Key = _kW, Value = _vW, Output = _projW, OutputBias = _projB });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -36,21 +41,14 @@ internal sealed unsafe class Hunyuan3DVaeResBlock
     public Tensor Forward(IBackend backend, Tensor x)
     {
         int n = (int)x.Shape[1];
-        float scale = 1f / MathF.Sqrt(_headDim);
-        TensorShape flat = new(1, n, _width), heads = new(1, n, _heads, _headDim), mh = new(1, _heads, n, _headDim);
+        TensorShape flat = new(1, n, _width), heads = new(1, n, _heads, _headDim);
 
         Tensor n1 = new(flat, DType.F32); backend.LayerNorm(n1, x, _ln1W!, _ln1B!, 1e-6f);
-        Tensor q = new(heads, DType.F32); backend.Linear(q, n1, _qW!, null);
-        Tensor k = new(heads, DType.F32); backend.Linear(k, n1, _kW!, null);
-        Tensor v = new(heads, DType.F32); backend.Linear(v, n1, _vW!, null); n1.Dispose();
+        (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, n1, releaseInput: true);
         Tensor qn = new(heads, DType.F32); backend.LayerNorm(qn, q, _qnW!, _qnB!, 1e-6f); q.Dispose();
         Tensor kn = new(heads, DType.F32); backend.LayerNorm(kn, k, _knW!, _knB!, 1e-6f); k.Dispose();
-        Tensor qP = new(mh, DType.F32); backend.Permute0213(qP, qn, n, _heads, _headDim); qn.Dispose();
-        Tensor kP = new(mh, DType.F32); backend.Permute0213(kP, kn, n, _heads, _headDim); kn.Dispose();
-        Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, n, _heads, _headDim); v.Dispose();
-        Tensor attn = new(mh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kP, vP, null, scale, allowF16: true); qP.Dispose(); kP.Dispose(); vP.Dispose();
-        Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, _heads, n, _headDim); attn.Dispose();
-        Tensor proj = new(flat, DType.F32); backend.Linear(proj, attnFlat, _projW!, _projB!); attnFlat.Dispose();
+        Tensor attnFlat = _attn.Attend(backend, qn, kn, v, flat, default);
+        Tensor proj = _attn.ProjectOutput(backend, attnFlat);
         Tensor x1 = new(flat, DType.F32); backend.Add(x1, x, proj); proj.Dispose();
 
         Tensor n2 = new(flat, DType.F32); backend.LayerNorm(n2, x1, _ln2W!, _ln2B!, 1e-6f);
@@ -73,6 +71,7 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
     private Tensor? _cqW, _ckW, _cvW, _cprojW, _cprojB, _qnW, _qnB, _knW, _knB;
     private Tensor? _fcW, _fcB, _fcpW, _fcpB;
     private Tensor? _lnPostW, _lnPostB, _outW, _outB;
+    private AttentionLayer? _attn;
 
     public Hunyuan3DGeoDecoder(int width, int heads, int bands, int fourierDim)
     {
@@ -95,6 +94,7 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         _fcpW = F(w, $"{c}.mlp.c_proj.weight"); _fcpB = F(w, $"{c}.mlp.c_proj.bias");
         _lnPostW = F(w, $"{p}.ln_post.weight"); _lnPostB = F(w, $"{p}.ln_post.bias");
         _outW = F(w, $"{p}.output_proj.weight"); _outB = F(w, $"{p}.output_proj.bias");
+        _attn = new AttentionLayer(new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32, AllowF16 = true });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -122,7 +122,6 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
     public Tensor Query(IBackend backend, (Tensor kP, Tensor vP) kv, Tensor coords, int count)
     {
         int nl = (int)kv.kP.Shape[2];
-        float scale = 1f / MathF.Sqrt(_headDim);
         TensorShape flat = new(1, count, _width), heads = new(1, count, _heads, _headDim), qmh = new(1, _heads, count, _headDim);
 
         // Fourier embed on-device (coords [count,3] → feat stays GPU-resident) → query_proj → query_embeddings.
@@ -135,8 +134,8 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         Tensor q = new(heads, DType.F32); backend.Linear(q, n1, _cqW!, null); n1.Dispose();
         Tensor qn = new(heads, DType.F32); backend.LayerNorm(qn, q, _qnW!, _qnB!, 1e-6f); q.Dispose();
         Tensor qP = new(qmh, DType.F32); backend.Permute0213(qP, qn, count, _heads, _headDim); qn.Dispose();
-        Tensor attn = new(qmh, DType.F32); backend.ScaledDotProductAttention(attn, qP, kv.kP, kv.vP, null, scale, allowF16: true); qP.Dispose();
-        Tensor attnFlat = new(flat, DType.F32); backend.Permute0213(attnFlat, attn, _heads, count, _headDim); attn.Dispose();
+        Tensor attn = _attn!.AttendHeadMajorOperands(backend, qP, kv.kP, kv.vP, default, OperandOwnership.Query);
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, flat);
         Tensor proj = new(flat, DType.F32); backend.Linear(proj, attnFlat, _cprojW!, _cprojB!); attnFlat.Dispose();
         Tensor x1 = new(flat, DType.F32); backend.Add(x1, qEmb, proj); qEmb.Dispose(); proj.Dispose();
 

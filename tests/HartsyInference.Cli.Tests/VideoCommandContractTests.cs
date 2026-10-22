@@ -61,7 +61,10 @@ public sealed class VideoCommandContractTests
                 Task = VideoTaskFamily.Ref2Va,
                 Acceleration = VideoAccelerationKind.None,
                 Attention = VideoAttentionKind.Dense,
-                Defaults = VideoDefaults.Standard,
+                Defaults = new VideoDefaults
+                {
+                    Steps = 30, CfgScale = 6.0f, Width = 704, Height = 480, Frames = 25, Fps = 25,
+                },
                 Features = VideoFeatures.ReferenceImages,
             },
             EffectiveSettings = new VideoEffectiveSettings

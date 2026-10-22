@@ -29,8 +29,11 @@ public interface IVideoRecipe
     Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
-    /// left null; the generic fallback keeps a recipe that has not declared its own numbers working.</summary>
-    VideoDefaults Defaults => VideoDefaults.Standard;
+    /// left null. Every recipe declares its own; there is no generic fallback.</summary>
+    VideoDefaults Defaults { get; }
+
+    /// <summary>What this family can generate: limits planning validates a request against, which its own defaults satisfy.</summary>
+    VideoConstraints Constraints { get; }
 
     /// <summary>The variants this family ships whose weights alone may not tell them apart; null when it has one.</summary>
     ModelVariantCatalog? Variants => null;

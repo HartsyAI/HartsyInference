@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -243,11 +244,16 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
     private sealed unsafe class VisionBlock
     {
         private readonly Qwen3VlVisionConfig _c;
+        private readonly AttentionLayer _attention;
         private Tensor? _norm1W, _norm1B, _norm2W, _norm2B;
         private Tensor? _qkvW, _qkvB, _projW, _projB;
         private Tensor? _fc1W, _fc1B, _fc2W, _fc2B;
 
-        public VisionBlock(Qwen3VlVisionConfig c) => _c = c;
+        public VisionBlock(Qwen3VlVisionConfig c)
+        {
+            _c = c;
+            _attention = new(new AttentionLayerConfig { Heads = c.NumHeads, KvHeads = c.NumHeads, HeadDim = c.HeadDim });
+        }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
@@ -288,10 +294,7 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
             ApplyRopeSplitHalf(qMh, ropeCos, ropeSin, heads, seq, hd);
             ApplyRopeSplitHalf(kMh, ropeCos, ropeSin, heads, seq, hd);
 
-            float scale = 1.0f / MathF.Sqrt(hd);
-            Tensor attn = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, scale);
-            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default);
 
             Tensor attnFlat = DiTUtils.ReshapeFromMultiHead(attn, 1, seq, heads, hd);
             attn.Dispose();

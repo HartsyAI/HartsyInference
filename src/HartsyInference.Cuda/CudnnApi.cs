@@ -129,6 +129,7 @@ internal static partial class CudnnApi
     internal const int CUDNN_ATTR_TENSOR_STRIDES = 903;
     internal const int CUDNN_ATTR_TENSOR_UNIQUE_ID = 906;
     internal const int CUDNN_ATTR_TENSOR_IS_VIRTUAL = 907;
+    internal const int CUDNN_ATTR_TENSOR_IS_BY_VALUE = 908;
     internal const int CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS = 1000;
     internal const int CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS = 1001;
     internal const int CUDNN_ATTR_VARIANT_PACK_WORKSPACE = 1003;

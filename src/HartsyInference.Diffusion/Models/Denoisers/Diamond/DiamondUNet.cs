@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.Diamond;
@@ -58,9 +59,8 @@ internal static unsafe class DiamondOps
         Tensor k = SplitHeads(qkv, 1 * c, c, nHead, hd, hw);
         Tensor v = SplitHeads(qkv, 2 * c, c, nHead, hd, hw);
         qkv.Dispose();
-        Tensor att = new(new TensorShape(1, nHead, hw, hd), DType.F32);
-        backend.ScaledDotProductAttention(att, q, k, v, null, 1f / MathF.Sqrt(hd));
-        q.Dispose(); k.Dispose(); v.Dispose();
+        Tensor att = AttentionLayer.Shared(nHead, hd)
+            .AttendHeadMajorOperands(backend, q, k, v, default);
         Tensor y = MergeHeads(att, c, nHead, hd, h, w); att.Dispose();     // [1,C,H,W]
         Tensor proj = Conv(backend, y, outW, outB, 1, 0, c); y.Dispose();  // out_proj (1x1)
         Tensor o = new(x.Shape, DType.F32); backend.Add(o, xn, proj);

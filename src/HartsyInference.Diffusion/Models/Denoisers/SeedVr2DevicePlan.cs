@@ -11,9 +11,11 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// chunk of a clip shares the geometry, so the build amortizes across the whole restore.</summary>
 public sealed class SeedVr2DevicePlan : IDisposable
 {
-    /// <summary>One same-shape window group: gather/scatter row indices into <c>[vid ; txt]</c> (length
-    /// WindowCount·(WindowTokens+TxtLen)), window token count excluding text.</summary>
-    public sealed record ShapeGroup(Tensor Indices, int WindowCount, int WindowTokens);
+    /// <summary>One same-shape window group: gather rows of each window's <c>[vid ; txt]</c> (length
+    /// WindowCount·(WindowTokens+TxtLen)), window token count excluding text, the video rows alone for the scatter
+    /// back (each row once), and the <c>MoeCombine</c> slots/weights that sum each text row over the windows.</summary>
+    public sealed record ShapeGroup(Tensor Indices, int WindowCount, int WindowTokens, Tensor VidIndices, Tensor TxtSlots,
+        Tensor TxtWeights);
 
     /// <summary>One partition parity (regular or shifted): its shape groups, total window count, and the
     /// global-token-order rope tables <c>[Lv, headDim]</c>.</summary>
@@ -65,19 +67,31 @@ public sealed class SeedVr2DevicePlan : IDisposable
                 int winTokens = group.Key.F * group.Key.R * group.Key.C;
                 int s = winTokens + txtLen;
                 Tensor idx = new Tensor(new TensorShape((long)grp.Length * s), DType.I32);
+                Tensor vidIdx = new Tensor(new TensorShape((long)grp.Length * winTokens), DType.I32);
                 int* ip = (int*)idx.DataPointer;
-                int pos = 0;
+                int* vp = (int*)vidIdx.DataPointer;
+                int pos = 0, vidPos = 0;
                 foreach (SeedVr2WindowSlice slice in grp)
                 {
                     for (int t = slice.T0; t < slice.T1; t++)
                     for (int h = slice.H0; h < slice.H1; h++)
                     for (int w = slice.W0; w < slice.W1; w++)
-                        ip[pos++] = (t * gridH + h) * gridW + w;
+                        ip[pos++] = vp[vidPos++] = (t * gridH + h) * gridW + w;
                     for (int p = 0; p < txtLen; p++)
                         ip[pos++] = lv + p;
                 }
-                groups.Add(new ShapeGroup(idx, grp.Length, winTokens));
-                _owned.Add(idx);
+
+                // Text row p of window j is row j·txtLen + p of the group's [WindowCount, txtLen, C] text block.
+                Tensor txtSlots = new Tensor(new TensorShape((long)txtLen * grp.Length), DType.I32);
+                Tensor txtWeights = new Tensor(new TensorShape((long)txtLen * grp.Length), DType.F32);
+                int* sp = (int*)txtSlots.DataPointer;
+                for (int p = 0; p < txtLen; p++)
+                for (int j = 0; j < grp.Length; j++)
+                    sp[p * grp.Length + j] = j * txtLen + p;
+                txtWeights.AsSpan<float>().Fill(1f);
+
+                groups.Add(new ShapeGroup(idx, grp.Length, winTokens, vidIdx, txtSlots, txtWeights));
+                _owned.AddRange([idx, vidIdx, txtSlots, txtWeights]);
             }
             Partitions[parity] = new Partition([.. groups], windows.Length, vidCos, vidSin);
             _owned.Add(vidCos);

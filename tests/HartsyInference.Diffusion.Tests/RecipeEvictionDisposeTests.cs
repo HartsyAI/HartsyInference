@@ -84,6 +84,8 @@ public sealed class RecipeEvictionDisposeTests
     {
         public string Name => familyId;
 
+        public ImageDefaults Defaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 7.5f, Width = 1024, Height = 1024 };
+
         public List<FakeRecipePipeline> Built { get; } = new List<FakeRecipePipeline>();
 
         public bool Matches(string candidate) => string.Equals(candidate, familyId, StringComparison.OrdinalIgnoreCase);

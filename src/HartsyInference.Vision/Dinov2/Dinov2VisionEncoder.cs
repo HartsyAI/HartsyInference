@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.Dinov2;
@@ -261,6 +262,7 @@ internal sealed unsafe class Dinov2Layer
     private Tensor? _n1W, _n1B, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _ls1;
     private Tensor? _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2;
     private Tensor? _swiInW, _swiInB, _swiOutW, _swiOutB;  // SwiGLU FFN (giant variant)
+    private AttentionLayer? _attn;
 
     public Dinov2Layer(int hidden, int numHeads, int inter, float eps)
     {
@@ -290,6 +292,12 @@ internal sealed unsafe class Dinov2Layer
             _fc2W = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.weight"]); _fc2B = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.bias"]);
         }
         _ls2 = w.TryGetValue($"{prefix}.layer_scale2.lambda1", out Tensor? ls2) ? Dinov2VisionEncoder.F32(ls2) : null;
+        _attn = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _oW, OutputBias = _oB,
+            });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -304,7 +312,7 @@ internal sealed unsafe class Dinov2Layer
         TensorShape shape = new(batch, seq, _hidden);
 
         Tensor n1 = new(shape, DType.F32); backend.LayerNorm(n1, x, _n1W!, _n1B!, _eps);
-        Tensor attn = LayerScale(backend, Attention(backend, n1, batch, seq), _ls1, batch, seq); n1.Dispose();
+        Tensor attn = LayerScale(backend, _attn!.Forward(backend, n1, n1, default), _ls1, batch, seq); n1.Dispose();
         Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attn); attn.Dispose();
 
         Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
@@ -331,25 +339,6 @@ internal sealed unsafe class Dinov2Layer
         for (long i = 0; i < (long)batch * seq; i++)
             for (int c = 0; c < _hidden; c++) tp[i * _hidden + c] *= g[c];
         return t;
-    }
-
-    private Tensor Attention(IBackend backend, Tensor input, int batch, int seq)
-    {
-        Tensor q = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        Tensor k = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        Tensor v = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        backend.Linear(q, input, _qW!, _qB!); backend.Linear(k, input, _kW!, _kB!); backend.Linear(v, input, _vW!, _vB!);
-        Tensor qh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(qh, q, seq, _numHeads, _headDim);
-        Tensor kh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(kh, k, seq, _numHeads, _headDim);
-        Tensor vh = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32); backend.Permute0213(vh, v, seq, _numHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
-        Tensor ao = new(new TensorShape(batch, _numHeads, seq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(ao, qh, kh, vh, null, 1f / MathF.Sqrt(_headDim));
-        qh.Dispose(); kh.Dispose(); vh.Dispose();
-        Tensor merged = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Permute0213(merged, ao, _numHeads, seq, _headDim); ao.Dispose();
-        Tensor proj = new(new TensorShape(batch, seq, _hidden), DType.F32);
-        backend.Linear(proj, merged, _oW!, _oB!); merged.Dispose();
-        return proj;
     }
 
     private Tensor Mlp(IBackend backend, Tensor input, int batch, int seq)

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -48,6 +49,12 @@ public sealed unsafe class ClipSegPipeline : IVisionPipeline, ITextSegmenter
         public required Tensor QW, QB, KW, KB, VW, VB, OW, OB;
         public required Tensor Ln1W, Ln1B, Ln2W, Ln2B;
         public required Tensor Fc1W, Fc1B, Fc2W, Fc2B;
+
+        private AttentionLayer? _attn;
+
+        public AttentionLayer Attn => _attn ??= new AttentionLayer(
+            new AttentionLayerConfig { Heads = DecoderHeads, KvHeads = DecoderHeads, HeadDim = ReduceDim / DecoderHeads, ComputeDType = DType.F32 },
+            new AttentionLayerWeights { Query = QW, QueryBias = QB, Key = KW, KeyBias = KB, Value = VW, ValueBias = VB, Output = OW, OutputBias = OB });
     }
 
     /// <summary>Loads a CLIPSeg model from its HuggingFace directory (containing <c>model.safetensors</c>).</summary>
@@ -254,27 +261,8 @@ public sealed unsafe class ClipSegPipeline : IVisionPipeline, ITextSegmenter
     private Tensor DecoderLayer(IBackend backend, Tensor x, DecoderLayerWeights w, int seq)
     {
         TensorShape shape = new TensorShape(1, seq, ReduceDim);
-        int headDim = ReduceDim / DecoderHeads; // 16
 
-        Tensor q = new Tensor(shape, DType.F32); backend.Linear(q, x, w.QW, w.QB);
-        Tensor k = new Tensor(shape, DType.F32); backend.Linear(k, x, w.KW, w.KB);
-        Tensor v = new Tensor(shape, DType.F32); backend.Linear(v, x, w.VW, w.VB);
-
-        TensorShape mh = new TensorShape(1, DecoderHeads, seq, headDim);
-        Tensor qMh = new Tensor(mh, DType.F32); backend.Permute0213(qMh, q, seq, DecoderHeads, headDim); q.Dispose();
-        Tensor kMh = new Tensor(mh, DType.F32); backend.Permute0213(kMh, k, seq, DecoderHeads, headDim); k.Dispose();
-        Tensor vMh = new Tensor(mh, DType.F32); backend.Permute0213(vMh, v, seq, DecoderHeads, headDim); v.Dispose();
-
-        Tensor attn = new Tensor(mh, DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, 1.0f / MathF.Sqrt(headDim));
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
-
-        Tensor attnFlat = new Tensor(shape, DType.F32);
-        backend.Permute0213(attnFlat, attn, DecoderHeads, seq, headDim);
-        attn.Dispose();
-        Tensor attnOut = new Tensor(shape, DType.F32);
-        backend.Linear(attnOut, attnFlat, w.OW, w.OB);
-        attnFlat.Dispose();
+        Tensor attnOut = w.Attn.Forward(backend, x, x, default);
 
         Tensor afterAttn = new Tensor(shape, DType.F32);
         backend.Add(afterAttn, x, attnOut);

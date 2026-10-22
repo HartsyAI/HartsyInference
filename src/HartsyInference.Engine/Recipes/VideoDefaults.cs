@@ -13,17 +13,17 @@ public sealed record VideoDefaults
     /// <summary>Guidance scale the architecture's authors sample with.</summary>
     public required float CfgScale { get; init; }
 
-    /// <summary>Native training width in pixels; null falls back to <see cref="Standard"/>'s 704.</summary>
-    public int? Width { get; init; }
+    /// <summary>Native training width in pixels.</summary>
+    public required int Width { get; init; }
 
-    /// <summary>Native training height in pixels; null falls back to <see cref="Standard"/>'s 480.</summary>
-    public int? Height { get; init; }
+    /// <summary>Native training height in pixels.</summary>
+    public required int Height { get; init; }
 
-    /// <summary>Native/recommended frame count; null falls back to <see cref="Standard"/>'s 25.</summary>
-    public int? Frames { get; init; }
+    /// <summary>Native/recommended frame count; must lie on the family's <see cref="VideoConstraints.Frames"/> grid.</summary>
+    public required int Frames { get; init; }
 
-    /// <summary>Native/recommended frame rate; null falls back to <see cref="Standard"/>'s 25.</summary>
-    public int? Fps { get; init; }
+    /// <summary>Native/recommended generation frame rate.</summary>
+    public required int Fps { get; init; }
 
     /// <summary>Recommended video-stream flow shift; null leaves the request unset so the legacy family pipeline
     /// can apply its own checkpoint-specific behavior.</summary>
@@ -44,19 +44,6 @@ public sealed record VideoDefaults
     /// <summary>Reference-media canvas policy used when the request leaves it unset.</summary>
     public VideoReferenceSizing ReferenceSizing { get; init; } = VideoReferenceSizing.Native;
 
-    /// <summary>The generic fallback (30 steps, CFG 6.0, 704x480, 25 frames @ 25 fps) a recipe that has not declared
-    /// its own numbers inherits.</summary>
-    public static VideoDefaults Standard { get; } =
-        new VideoDefaults
-        {
-            Steps = 30,
-            CfgScale = 6.0f,
-            Width = 704,
-            Height = 480,
-            Frames = 25,
-            Fps = 25,
-        };
-
     /// <summary>Returns <paramref name="request"/> with every unset tunable filled in from these defaults; values the caller supplied are left untouched.</summary>
     public VideoRequest Apply(VideoRequest request)
     {
@@ -65,10 +52,10 @@ public sealed record VideoDefaults
         {
             Steps = request.Steps ?? Steps,
             CfgScale = request.CfgScale ?? CfgScale,
-            Width = request.Width ?? Width ?? Standard.Width,
-            Height = request.Height ?? Height ?? Standard.Height,
-            Frames = request.Frames ?? Frames ?? Standard.Frames,
-            Fps = request.Fps ?? Fps ?? Standard.Fps,
+            Width = request.Width ?? Width,
+            Height = request.Height ?? Height,
+            Frames = request.Frames ?? Frames,
+            Fps = request.Fps ?? Fps,
             // These fields already existed on VideoRequest before profile planning. Historically an omitted value
             // reached the family pipeline as null, and several families deliberately distinguish null from a named
             // sampler/scheduler or a generic shift. Only materialize a value when this exact family/profile declares

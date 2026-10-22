@@ -333,6 +333,91 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>LTX-2's split rotary in place. Vulkan's kernel keeps every product unfused, so it matches the host loop it
+    /// replaced bit for bit; CUDA's kernel is compared within rounding.</summary>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void Ltx2SplitRope_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int seqLen = 7, heads = 3, headDim = 16;
+        using Tensor actual = Random(new TensorShape(seqLen, heads * headDim), seed: 31);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        actual.AsReadOnlySpan<float>().CopyTo(expected.AsSpan<float>());
+        using Tensor cos = Random(new TensorShape(seqLen, heads * headDim / 2), seed: 32);
+        using Tensor sin = Random(new TensorShape(seqLen, heads * headDim / 2), seed: 33);
+
+        backend.Ltx2SplitRope(actual, cos, sin, seqLen, heads, headDim);
+        ((IBackend)cpu).Ltx2SplitRope(expected, cos, sin, seqLen, heads, headDim);
+
+        if (kind == "vulkan") TensorAssert.Identical(actual, expected, because: "Ltx2SplitRope on vulkan");
+        else TensorAssert.Close(actual, expected, because: $"on {kind}");
+    }
+
+    /// <summary>The F16 activation variant against the host loop run on the same F16-rounded values, rounded back to F16: Vulkan
+    /// computes in F32 with unfused products and rounds once, so it matches bit for bit.</summary>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void Ltx2SplitRope_F16_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int seqLen = 7, heads = 3, headDim = 16;
+        using Tensor actual = InDtype(Random(new TensorShape(seqLen, heads * headDim), seed: 51), DType.F16, cpu);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        ((IBackend)cpu).CastToF32(expected, actual);
+        using Tensor cos = Random(new TensorShape(seqLen, heads * headDim / 2), seed: 52);
+        using Tensor sin = Random(new TensorShape(seqLen, heads * headDim / 2), seed: 53);
+
+        backend.Ltx2SplitRope(actual, cos, sin, seqLen, heads, headDim);
+        ((IBackend)cpu).Ltx2SplitRope(expected, cos, sin, seqLen, heads, headDim);
+
+        using Tensor expectedF16 = new(actual.Shape, DType.F16);
+        ((IBackend)cpu).CastToF16(expectedF16, expected);
+        using Tensor got = new(actual.Shape, DType.F32), want = new(actual.Shape, DType.F32);
+        ((IBackend)cpu).CastToF32(got, actual);
+        ((IBackend)cpu).CastToF32(want, expectedF16);
+        if (kind == "vulkan") TensorAssert.Identical(got, want, because: "F16 Ltx2SplitRope on vulkan");
+        else TensorAssert.Close(got, want, rtol: 1e-3f, atol: 1e-3f, because: $"F16 on {kind}");
+    }
+
+    /// <summary>The fused LTX-2 QK path (norm, split rotary, head-major emit) as each backend serves it.</summary>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void Ltx2QkNormRopeHeadMajor_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int seqLen = 7, heads = 3, headDim = 16;
+        using Tensor input = Random(new TensorShape(seqLen, heads * headDim), seed: 41);
+        using Tensor norm = Random(new TensorShape(heads * headDim), seed: 42);
+        using Tensor cos = Random(new TensorShape(seqLen, heads * headDim / 2), seed: 43);
+        using Tensor sin = Random(new TensorShape(seqLen, heads * headDim / 2), seed: 44);
+        using Tensor actual = new(new TensorShape(1, heads, seqLen, headDim), DType.F32);
+        using Tensor expected = new(new TensorShape(1, heads, seqLen, headDim), DType.F32);
+
+        backend.Ltx2QkNormRopeHeadMajor(actual, input, norm, cos, sin, seqLen, heads, headDim, 1e-6f);
+        ((IBackend)cpu).Ltx2QkNormRopeHeadMajor(expected, input, norm, cos, sin, seqLen, heads, headDim, 1e-6f);
+
+        TensorAssert.Close(actual, expected, because: $"on {kind}");
+    }
+
     /// <summary>The last step of an image generation: F32 CHW in [-1,1] to u8 HWC.</summary>
     /// <remarks>Odd dimensions on purpose. The output is three bytes per pixel, so only every fourth pixel starts
     /// on a word boundary, and a kernel that composes whole words has a tail to get wrong — 5x7 leaves the final

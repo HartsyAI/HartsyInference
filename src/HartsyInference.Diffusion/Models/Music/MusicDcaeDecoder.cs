@@ -97,7 +97,8 @@ public sealed unsafe class MusicDcaeDecoder
             _stages[i] = stage;
         }
 
-        _normOutW = TensorCasts.LoadF32(w, "decoder.norm_out.weight"); w.TryGetValue("decoder.norm_out.bias", out _normOutB);
+        _normOutW = TensorCasts.LoadF32(w, "decoder.norm_out.weight");
+        _normOutB = TensorCasts.LoadF32Opt(w, "decoder.norm_out.bias");
         _convOutW = w["decoder.conv_out.weight"]; w.TryGetValue("decoder.conv_out.bias", out _convOutB);
     }
 

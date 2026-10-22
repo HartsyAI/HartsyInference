@@ -18,7 +18,7 @@ public sealed class LanceVideoRecipePipeline : IVideoRecipePipeline
     private const int SizeMultiple = 16;
 
     /// <summary>Lance tops out at 121 frames (~5s @ 24fps) on a 4x temporal VAE compression.</summary>
-    private const int MaxFrames = 121;
+    internal const int MaxFrames = 121;
 
     private readonly LanceVideoPipeline _pipeline;
     private readonly LanceConfig _config;

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -39,7 +40,7 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         _blocks = new Block[_config.NumLayers];
         for (int i = 0; i < _blocks.Length; i++)
         {
-            _blocks[i] = new Block();
+            _blocks[i] = new Block(_config);
         }
     }
 
@@ -453,6 +454,7 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
     /// is the SECOND half of <c>ff_in</c> — <c>first · silu(second)</c>, the reverse of the usual convention.</summary>
     private sealed class Block
     {
+        private readonly AttentionLayer _attention;
         private Tensor? _norm1Weight;
         private Tensor? _norm1Bias;
         private Tensor? _norm2Weight;
@@ -465,6 +467,9 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         private Tensor? _ffInBias;
         private Tensor? _ffOutWeight;
         private Tensor? _ffOutBias;
+
+        public Block(MiniMaxMusic3DitConfig config) =>
+            _attention = new(new AttentionLayerConfig { Heads = config.NumAttentionHeads, KvHeads = config.NumAttentionHeads, HeadDim = config.AttentionHeadDim });
 
         public void Load(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
@@ -527,13 +532,13 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
         /// <summary>Head-major attention over the shared rank-4 scratch. The token-major entry point is not used:
         /// it wants rank-2, and reaching that from the rotary op's rank-4 layout needs a reshape, which silently
         /// drops GPU residency.</summary>
-        private static void Attend(IBackend backend, BlockScratch scratch, int rows, int heads, int headDim)
+        private void Attend(IBackend backend, BlockScratch scratch, int rows, int heads, int headDim)
         {
             backend.Permute0213(scratch.HeadQuery, scratch.Query, rows, heads, headDim);
             backend.Permute0213(scratch.HeadKey, scratch.Key, rows, heads, headDim);
             backend.Permute0213(scratch.HeadValue, scratch.Value, rows, heads, headDim);
-            backend.ScaledDotProductAttention(scratch.HeadAttention, scratch.HeadQuery, scratch.HeadKey,
-                scratch.HeadValue, null, 1f / MathF.Sqrt(headDim));
+            _attention.AttendHeadMajorOperands(backend, scratch.HeadQuery, scratch.HeadKey, scratch.HeadValue, default,
+                OperandOwnership.None, output: scratch.HeadAttention);
             backend.Permute0213(scratch.Attention, scratch.HeadAttention, heads, rows, headDim);
         }
     }

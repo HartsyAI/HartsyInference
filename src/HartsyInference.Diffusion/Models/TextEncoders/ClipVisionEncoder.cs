@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
@@ -313,6 +314,7 @@ internal sealed unsafe class ClipVisionTransformerLayer
     private readonly int _intermediateSize;
     private readonly float _layerNormEps;
     private readonly bool _useQuickGelu;
+    private readonly AttentionLayer _attention;
 
     private Tensor? _layerNorm1Weight, _layerNorm1Bias;
     private Tensor? _qProjWeight, _qProjBias;
@@ -331,6 +333,7 @@ internal sealed unsafe class ClipVisionTransformerLayer
         _intermediateSize = intermediateSize;
         _layerNormEps = layerNormEps;
         _useQuickGelu = useQuickGelu;
+        _attention = new(new AttentionLayerConfig { Heads = numHeads, KvHeads = numHeads, HeadDim = _headDim });
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -401,10 +404,7 @@ internal sealed unsafe class ClipVisionTransformerLayer
         query.Dispose(); key.Dispose(); value.Dispose();
 
         // No mask — vision attention is bidirectional.
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale);
-        queryMh.Dispose(); keyMh.Dispose(); valueMh.Dispose();
+        Tensor attnOut = _attention.AttendHeadMajorOperands(backend, queryMh, keyMh, valueMh, default);
 
         Tensor merged = new Tensor(seqShape, DType.F32);
         ReshapeFromMultiHead4D(merged, attnOut, batch, seqLen, _numHeads, _headDim);

@@ -85,6 +85,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 20, CfgScale = 4.0f, Width = 1280, Height = 736, Frames = 121, Fps = 24 };
 
     /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new LtxVideo2Config().VaeTemporalCompression, FrameNormalization.SnapNearest) };
+
+    /// <inheritdoc/>
     /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). NOTE: when the backend reports <c>SupportsQuantized</c> this recipe keeps the DiT resident as PACKED nvfp4, and <c>LoraStack</c> dequant-merges fp8 only — a non-fp8 quantized weight refuses by name with the "use a safetensors build" message, the same boundary HunyuanImage's Q4_K GGUF hits. A LoRA on a resident-nvfp4 LTX-2 build therefore refuses rather than merging; that is intended, not a regression. Image-to-video is still absent and tracked separately: only <c>LtxVideo2VaeDecoder</c> is ported, so there is no encoder to turn an init image into latents.</remarks>
     public VideoFeatures Supports => VideoFeatures.Lora;
 
