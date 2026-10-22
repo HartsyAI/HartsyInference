@@ -51,7 +51,8 @@ and [deployment](https://github.com/HartsyAI/HartsyInference/blob/main/deploy/RE
 The HTTP text path does not currently expose the LLM package's continuous-batching scheduler.
 
 Each model family's defaults come from its recipe: a request field left unset takes the recipe's value, and an
-image or video result records where every setting came from. GET /v1/native/recipes lists the image and video recipes, and
+image or video result records where its core settings came from (steps, guidance, size, and the sampler or frames and
+fps); other request fields are not tracked. GET /v1/native/recipes lists the image and video recipes, and
 POST /v1/native/recipes/describe answers for one model without loading weights; see the
 [recipe contract](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Research/RECIPE_CONTRACT.md).
 
