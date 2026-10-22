@@ -170,10 +170,10 @@ public sealed class MusicRecipeLedgerTests
     public void MusicRecipe_MiniMaxMusic3DeclaresItsFlowDefaults()
     {
         IMusicRecipe recipe = MusicRecipeRegistry.Resolve("minimaxmusic3")!;
-        // MiniMaxMusic3FlowPipeline.cs:37 (30 steps), applied by MiniMaxMusic3MusicModel.cs:158-160; the frame grid caps
-        // the clip at MaxAudioFrames / FrameRate = 9000 / 25 s (MiniMaxMusic3MusicModel.cs:156-157). Duration 120 s and
-        // CFG 1.5 are SwarmUI core's (WorkflowGenerator.cs), revision 2; the pipeline's own default is 1.7.
-        Assert.Equal(new MusicDefaults { Revision = 2, Duration = 120, Steps = 30, CfgScale = 1.5 }, recipe.Defaults);
+        // MiniMaxMusic3FlowPipeline.cs:37 (30 steps) and :34 (1.7 CFG), applied by MiniMaxMusic3MusicModel.cs:158-160;
+        // the frame grid caps the clip at MaxAudioFrames / FrameRate = 9000 / 25 s (MiniMaxMusic3MusicModel.cs:156-157).
+        // Duration 120 s is SwarmUI core's (WorkflowGenerator.cs), revision 2.
+        Assert.Equal(new MusicDefaults { Revision = 2, Duration = 120, Steps = 30, CfgScale = 1.7 }, recipe.Defaults);
         Assert.Equal(new MusicConstraints { MaxDurationSeconds = 360 }, recipe.Constraints);
     }
 
