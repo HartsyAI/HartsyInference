@@ -169,22 +169,6 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && SageF32ValueNarrowingEnabled
                     && (c.QkHeadDim == 64 || c.QkHeadDim == 128) && c.KeyTokens >= 1024 && SageF32KernelsReady(c.QueryTokens),
                 (in AttentionCall c) => { SageAttentionInt8(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("fa2.tf32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32, CaptureSafe = true,
-                }, "S.7",
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && EngineKnobs.SdpaV2.Value
-                    && FlashAttentionV2ContractSatisfied(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, _allowTf32),
-                (in AttentionCall c) => { FlashAttentionV2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("flash.forced", E, AttentionDTypes.F32, AttentionDTypes.F32, HM), null,
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && EngineKnobs.SdpaForceFlash.Value,
-                (in AttentionCall c) =>
-                {
-                    FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.KeyTokens, kvGroup: 1, causal: false, qOffset: 0,
-                        c.Scale);
-                    t_attentionRoute = AttentionRouteText.Nested("S.8/", t_attentionRoute);
-                    return true;
-                }),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,

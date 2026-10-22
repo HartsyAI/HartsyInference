@@ -85,12 +85,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.SdpaCudnn, false)
         // Would force F16 SDPA on for callers the per-call allowF16 gate deliberately excludes (unbounded-score architectures).
         .With(EngineKnobs.SdpaF16, false)
-        // Forces the online-softmax FlashAttention kernel for every SDPA call instead of the materialized F32 route.
-        .With(EngineKnobs.SdpaForceFlash, false)
         // Kill-switch: true disables the F16 SDPA path everywhere, including callers that opt in via allowF16.
         .With(EngineKnobs.SdpaNoF16, true)
-        // The experimental fused FlashAttention-2 kernel runs its QK^T on TF32 tensor cores.
-        .With(EngineKnobs.SdpaV2, false)
         // Builds the SeedVR2 VAE with F32 activations instead of the default CUDA BF16.
         .With(EngineKnobs.Seedvr2VaeF32, true)
         // The speculative verify pass recomputes logits with multi-row GEMMs, so an accepted token's argmax can differ from m=1 decode.

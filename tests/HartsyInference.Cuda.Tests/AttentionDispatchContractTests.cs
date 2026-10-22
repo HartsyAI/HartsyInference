@@ -49,49 +49,6 @@ public sealed class AttentionDispatchContractTests
         }
     }
 
-    /// <summary>FlashAttention-v2 accepts only exact F32 MHA shapes with complete query tiles on TF32 hardware.</summary>
-    [Fact]
-    public void FlashV2Contract_RejectsMixedDtypesAndPartialTiles()
-    {
-        const float Scale = 0.125f;
-        using Tensor query = new Tensor(new TensorShape(1, 2, 32, 64), DType.F32);
-        using Tensor key = new Tensor(new TensorShape(1, 2, 17, 64), DType.F32);
-        using Tensor value = new Tensor(new TensorShape(1, 2, 17, 64), DType.F32);
-        using Tensor output = new Tensor(query.Shape, DType.F32);
-        Assert.True(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, Scale, tf32Available: true));
-
-        using Tensor tailQuery = new Tensor(new TensorShape(1, 2, 33, 64), DType.F32);
-        using Tensor tailOutput = new Tensor(tailQuery.Shape, DType.F32);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            tailOutput, tailQuery, key, value, null, Scale, tf32Available: true));
-
-        using Tensor f16Key = new Tensor(key.Shape, DType.F16);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, f16Key, value, null, Scale, tf32Available: true));
-
-        using Tensor wrongHeads = new Tensor(new TensorShape(1, 1, 17, 64), DType.F32);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, wrongHeads, wrongHeads, null, Scale, tf32Available: true));
-
-        using Tensor f16Output = new Tensor(query.Shape, DType.F16);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            f16Output, query, key, value, null, Scale, tf32Available: true));
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, float.NaN, tf32Available: true));
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, Scale, tf32Available: false));
-    }
-
-    [Theory]
-    [InlineData(65_535, 1, true)]
-    [InlineData(0, 1, false)]
-    [InlineData(65_536, 1, false)]
-    public void FlashV2GridContract_EnforcesCudaYzLimits(long batch, long heads, bool expected)
-    {
-        Assert.Equal(expected, CudaBackend.FlashAttentionV2GridDimensionsSupported(batch, heads));
-    }
-
     [Fact]
     public void SdpaContract_RejectsMismatchedBuffersAndMaskAxes()
     {

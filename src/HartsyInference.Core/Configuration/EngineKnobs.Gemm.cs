@@ -12,16 +12,6 @@ namespace HartsyInference.Core.Configuration;
 /// names the code already used.</para></remarks>
 public static partial class EngineKnobs
 {
-    /// <summary>Opts into the experimental fused FlashAttention-2 kernel (TF32 tensor cores, F32 accumulate, MHA only).</summary>
-    public static readonly Knob<bool> SdpaV2 =
-        Bool("numerics.sdpaV2", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Opts into the experimental fused FlashAttention-2 kernel (TF32 tensor cores, F32 accumulate, MHA only).");
-
-    /// <summary>Forces the FlashAttention path for every SDPA call rather than letting the backend choose.</summary>
-    public static readonly Knob<bool> SdpaForceFlash =
-        Bool("numerics.sdpaForceFlash", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Forces the FlashAttention path for every SDPA call rather than letting the backend choose.");
-
     /// <summary>Forces F16 SDPA on for all callers; normally it is gated per call because unbounded-score architectures must not use it.</summary>
     public static readonly Knob<bool> SdpaF16 =
         Bool("numerics.sdpaF16", false, KnobScope.Runtime, KnobDomain.Numerics,

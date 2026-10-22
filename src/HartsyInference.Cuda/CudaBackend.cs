@@ -101,9 +101,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Test diagnostic incremented only after a detached cuDNN SDPA session releases all owned resources.</summary>
     internal long CudnnSdpaDisposedSessionCount => Interlocked.Read(ref _cudnnSdpaDisposedSessionCount);
 
-    /// <summary>True once the opt-in TF32 FlashAttention-v2 path has run at least once this session.</summary>
-    internal bool FlashAttentionV2Engaged { get; private set; }
-
     private long _sageAttentionExecutionCount;
 
     /// <summary>True once the SageAttention INT8 fast path has run at least once this session.</summary>
@@ -7918,70 +7915,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (kF16 != 0) CudaMemory.FreeAsync(kF16, _stream.Handle);
             if (vF16 != 0) CudaMemory.FreeAsync(vF16, _stream.Handle);
             if (oF16 != 0) CudaMemory.FreeAsync(oF16, _stream.Handle);
-        }
-    }
-
-    /// <summary>Checks the complete safety contract for the experimental TF32 FlashAttention-v2 kernel.</summary>
-    /// <remarks>The current kernel has no masked or GQA variant and its WMMA query load requires complete
-    /// 32-row tiles. Rejecting a partial query tile prevents the final block from reading beyond Q.</remarks>
-    internal static bool FlashAttentionV2ContractSatisfied(
-        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool tf32Available)
-    {
-        if (!tf32Available || mask is not null || !float.IsFinite(scale)) return false;
-        if (output.Shape.Rank != 4 || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
-            return false;
-        if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
-            return false;
-
-        long b = query.Shape[0];
-        long h = query.Shape[1];
-        long sq = query.Shape[2];
-        long d = query.Shape[3];
-        long skv = key.Shape[2];
-        if (b <= 0 || h <= 0 || sq <= 0 || skv <= 0 || d <= 0
-            || !FlashAttentionV2GridDimensionsSupported(b, h) || sq > int.MaxValue
-            || skv > int.MaxValue || d > int.MaxValue)
-            return false;
-        if ((d != 64 && d != 128) || sq % 32 != 0) return false;
-
-        return output.Shape == query.Shape && key.Shape == value.Shape && key.Shape[0] == b && key.Shape[1] == h
-            && key.Shape[3] == d;
-    }
-
-    /// <summary>Validates the CUDA grid Y/Z dimensions used directly for head and batch indices.</summary>
-    internal static bool FlashAttentionV2GridDimensionsSupported(long batch, long heads)
-        => batch is > 0 and <= 65_535 && heads is > 0 and <= 65_535;
-
-    /// <summary>Fused FlashAttention-2 (TF32 tensor cores, F32 accumulate) — no-mask MHA, D∈{64,128}; never materializes the score matrix.</summary>
-    private unsafe void FlashAttentionV2(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
-    {
-        if (!FlashAttentionV2ContractSatisfied(output, query, key, value, null, scale, _allowTf32))
-            throw new HartsyInferenceException("FlashAttention-v2 was invoked outside its F32 MHA, full-query-tile contract.");
-
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
-        long skv = key.Shape[2];
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pQ = GpuTransferHelper.CopyToDevice(query);
-            pK = GpuTransferHelper.CopyToDevice(key);
-            pV = GpuTransferHelper.CopyToDevice(value);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchFlashAttentionV2Tf32(pOut, pQ, pK, pV, (int)b, (int)h, (int)sq, (int)skv, (int)d, scale, _stream.Handle);
-            FlashAttentionV2Engaged = true;
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pQ);
-            GpuTransferHelper.FreeDevice(pK);
-            GpuTransferHelper.FreeDevice(pV);
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
     }
 

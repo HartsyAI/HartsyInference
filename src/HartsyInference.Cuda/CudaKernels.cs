@@ -199,8 +199,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _flashAttnF32SplitModule;
     private readonly nint _flashAttnF32Split;
     private readonly nint _flashAttnF32SplitF16Kv;
-    private readonly CudaModule _flashV2Module;
-    private readonly nint _flashV2Tf32;
     // Optional: tiled batched transpose (channels_last.ptx), the layout step around cuDNN's channels-last conv engines.
     private readonly CudaModule? _channelsLastModule;
     private readonly nint _transposeTiledB16;
@@ -1201,11 +1199,6 @@ public sealed partial class CudaKernels : IDisposable
         _flashAttnF32Split = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_split");
         _flashAttnF32SplitF16Kv = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f16kv_f32_split");
         _flashAttnF32Combine = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_combine");
-        _flashV2Module = LoadOwnedModule(Ptx("flash_attn_v2_tf32"));
-        _flashV2Tf32 = _flashV2Module.GetFunction("lm_flash_attn_v2_tf32");
-        // Opt the fused flash kernel into >48 KB dynamic shared memory (K/V/S/O tiles ≈ 72 KB for D=128).
-        // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. Ignore failure (kernel launch will surface it).
-        CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
         string channelsLastPath = Ptx("channels_last");
         if (CanLoad(channelsLastPath))
         {
@@ -3073,38 +3066,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             _flashAttnF16Kv, gridDim, 1, 1, blockThreads, 1, 1,
             sharedBytes, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Fused FlashAttention-2, TF32 tensor cores, F32 accumulate — no-mask MHA, D∈{64,128}, Hkv==Hq. Q/out [B,Hq,Sq,D], K/V [B,Hq,Skv,D]. Sq must contain complete 32-row tiles. Grid (Sq/32,Hq,B); block 64 (2 warps); BR=32/BC=16 tiles.</summary>
-    public unsafe void LaunchFlashAttentionV2Tf32(ulong outPtr, ulong q, ulong k, ulong v,
-        int b, int hq, int sq, int skv, int d, float scale, nint stream)
-    {
-        const int BR = 32, BC = 16;   // must match flash_attn_v2_tf32.cu #defines
-        if (outPtr == 0 || q == 0 || k == 0 || v == 0)
-            throw new ArgumentException("FlashAttention-v2 requires non-null device pointers.");
-        if (b <= 0 || hq <= 0 || skv <= 0)
-            throw new ArgumentOutOfRangeException(nameof(b), "FlashAttention-v2 dimensions must be positive.");
-        if (b > 65_535)
-            throw new ArgumentOutOfRangeException(nameof(b), "FlashAttention-v2 batch count must fit CUDA grid Z (maximum 65535).");
-        if (hq > 65_535)
-            throw new ArgumentOutOfRangeException(nameof(hq), "FlashAttention-v2 head count must fit CUDA grid Y (maximum 65535).");
-        if (sq <= 0 || sq % BR != 0)
-            throw new ArgumentOutOfRangeException(nameof(sq), "FlashAttention-v2 requires complete 32-row query tiles.");
-        if (d != 64 && d != 128)
-            throw new ArgumentOutOfRangeException(nameof(d), "FlashAttention-v2 supports head dimensions 64 and 128 only.");
-        if (!float.IsFinite(scale))
-            throw new ArgumentOutOfRangeException(nameof(scale), "FlashAttention-v2 scale must be finite.");
-
-        ulong oArg = outPtr, qArg = q, kArg = k, vArg = v;
-        uint bA = (uint)b, hA = (uint)hq, sqA = (uint)sq, skvA = (uint)skv, dA = (uint)d;
-        float scA = scale;
-        void** args = stackalloc void*[10];
-        args[0] = &oArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
-        args[4] = &bA; args[5] = &hA; args[6] = &sqA; args[7] = &skvA; args[8] = &dA; args[9] = &scA;
-        uint grid = (uint)(sq / BR);
-        uint smem = (uint)((BC * d + BC * d + BR * BC + BR * d) * sizeof(float));
-        CudaDriverApi.cuLaunchKernel(_flashV2Tf32, grid, (uint)hq, (uint)b, 64, 1, 1,
-            smem, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether flash_attn_f16.ptx is loaded.</summary>
