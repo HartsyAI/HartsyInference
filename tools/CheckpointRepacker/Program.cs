@@ -843,18 +843,8 @@ static bool HasFp8Weights(string path)
 
 static Dictionary<string, string> ReadSourceMetadata(string path)
 {
-    using FileStream stream = File.OpenRead(path);
-    Span<byte> length = stackalloc byte[sizeof(long)];
-    stream.ReadExactly(length);
-    byte[] header = new byte[System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(length)];
-    stream.ReadExactly(header);
-    Dictionary<string, string> metadata = new(StringComparer.Ordinal);
-    using JsonDocument document = JsonDocument.Parse(header);
-    if (document.RootElement.TryGetProperty("__metadata__", out JsonElement entries))
-    {
-        foreach (JsonProperty entry in entries.EnumerateObject()) metadata[entry.Name] = entry.Value.GetString() ?? "";
-    }
-    return metadata;
+    IReadOnlyDictionary<string, string>? metadata = SafeTensorHeaderReader.Read(path).Metadata;
+    return new Dictionary<string, string>(metadata ?? new Dictionary<string, string>(), StringComparer.Ordinal);
 }
 
 static int WriteNf4FromFp8(string input, string output, bool force)
@@ -884,9 +874,9 @@ static int WriteNf4FromFp8(string input, string output, bool force)
     long bytes = new FileInfo(output).Length;
     JsonObject manifest = new()
     {
-        ["source"] = input,
+        ["source"] = Path.GetFullPath(input),
         ["source_bytes"] = new FileInfo(input).Length,
-        ["output"] = output,
+        ["output"] = Path.GetFullPath(output),
         ["output_bytes"] = bytes,
         ["sha256"] = sha,
         ["quant"] = "nf4",

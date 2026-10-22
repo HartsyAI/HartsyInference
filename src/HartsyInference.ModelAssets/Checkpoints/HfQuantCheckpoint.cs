@@ -207,6 +207,10 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             {
                 throw new NotSupportedException($"'{module}' is bitsandbytes '{quantType}', not nf4. Only NF4 4-bit checkpoints are read.");
             }
+            if (!_set.Inventory.ContainsKey(module))
+            {
+                throw new InvalidDataException($"'{key}' has a quant state but no weight tensor '{module}'.");
+            }
             RequireCompanion(module + ".absmax", module);
             RequireCompanion(module + ".quant_map", module);
             TensorShape shape;

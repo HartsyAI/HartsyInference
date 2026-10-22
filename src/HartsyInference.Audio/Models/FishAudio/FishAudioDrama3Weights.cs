@@ -62,7 +62,7 @@ public static class FishAudioDrama3Weights
             {
                 HfWeightStorage.Fp8Block => DType.Q8_0,
                 HfWeightStorage.GptqInt4 => DType.Q4_0,
-                HfWeightStorage.Nf4 => DType.Q4_0,
+                HfWeightStorage.Nf4 => DType.Q4_0, // Dequantized then re-quantized: a second quantization, not a bit-exact repack.
                 _ => weight.StoredDType,
             },
             FishAudioDrama3Precision.Bf16 => DType.BF16,

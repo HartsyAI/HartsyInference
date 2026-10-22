@@ -146,6 +146,41 @@ public sealed class HfQuantCheckpointTests : IDisposable
             for (int i = b; i < end; i++)
                 Assert.True(MathF.Abs(g[i] - w[i]) <= blockMax * Nf4Codec.MaxBlockError + 1e-6f, $"element {i}: nf4 {g[i]} vs fp8 {w[i]}");
         }
+        Assert.False(File.Exists(output + ".partial"));
+    }
+
+    [Fact]
+    public void WriteFromFp8_FailingMidStream_KeepsThePreviousFileAndLeavesNoPartial()
+    {
+        // 500 quantized weights: the progress callback fires after the 500th is written, with the output still open.
+        string source = Path.Combine(_dir, "fp8_many.safetensors");
+        Dictionary<string, Tensor> tensors = new(StringComparer.Ordinal);
+        for (int i = 0; i < 500; i++)
+        {
+            string name = $"model.layers.{i}.mlp.experts.0.down_proj.weight";
+            tensors[name] = Fp8(8, 8, seed: i);
+            Tensor scale = new(new TensorShape(1, 1), DType.F32);
+            scale.AsSpan<float>()[0] = 1f;
+            tensors[name + "_scale_inv"] = scale;
+        }
+        try
+        {
+            SafeTensorsWriter.Save(source, tensors);
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+
+        string output = Path.Combine(_dir, "nf4_previous.safetensors");
+        File.WriteAllText(output, "previous checkpoint");
+        using HfQuantCheckpoint src = HfQuantCheckpoint.OpenFiles([source]);
+        InvalidOperationException injected = Assert.Throws<InvalidOperationException>(() =>
+            Nf4Codec.WriteFromFp8(src, output, new Dictionary<string, string>(), _ => throw new InvalidOperationException("injected")));
+
+        Assert.Equal("injected", injected.Message);
+        Assert.Equal("previous checkpoint", File.ReadAllText(output));
+        Assert.False(File.Exists(output + ".partial"));
     }
 
     [Fact]

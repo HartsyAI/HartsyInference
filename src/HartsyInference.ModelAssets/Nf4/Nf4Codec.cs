@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -172,8 +173,7 @@ public static unsafe class Nf4Codec
         absmax.AsSpan().CopyTo(scales.AsSpan<float>());
         Tensor codebook = new(new TensorShape(Nf4Lut.Length), DType.F32);
         Nf4Lut.AsSpan().CopyTo(codebook.AsSpan<float>());
-        byte[] state = System.Text.Encoding.ASCII.GetBytes(
-            $"{{\"shape\":[{rows},{cols}],\"blocksize\":{blockSize},\"dtype\":\"{computeDtype}\"}}");
+        byte[] state = System.Text.Encoding.ASCII.GetBytes(StateText(rows, cols, blockSize, computeDtype));
         Tensor stateBlob = new(new TensorShape(state.Length), DType.U8);
         state.AsSpan().CopyTo(stateBlob.AsSpan<byte>());
 
@@ -240,7 +240,7 @@ public static unsafe class Nf4Codec
             Declare(w.Name, "U8", [(elements + 1) / 2], (elements + 1) / 2);
             Declare(w.Name + ".absmax", "F32", [blocks], blocks * sizeof(float));
             Declare(w.Name + ".quant_map", "F32", [Nf4Lut.Length], Nf4Lut.Length * sizeof(float));
-            long stateBytes = Encoding.ASCII.GetByteCount(StateText(rows, cols));
+            long stateBytes = Encoding.ASCII.GetByteCount(StateText(rows, cols, DefaultBlockSize, "float32"));
             Declare(w.Name + Nf4CompanionFold.QuantStatePrefix + "nf4", "U8", [stateBytes], stateBytes);
         }
 
@@ -286,7 +286,7 @@ public static unsafe class Nf4Codec
                     Emit(packed);
                     Emit(MemoryMarshal.AsBytes(absmax.AsSpan()));
                     Emit(MemoryMarshal.AsBytes(Nf4Lut.AsSpan()));
-                    Emit(Encoding.ASCII.GetBytes(StateText(rows, cols)));
+                    Emit(Encoding.ASCII.GetBytes(StateText(rows, cols, DefaultBlockSize, "float32")));
                     if (++done % 500 == 0) progress?.Invoke($"{done}/{quantized.Count} FP8 weights written");
                 }
                 file.Flush();
@@ -302,13 +302,22 @@ public static unsafe class Nf4Codec
         catch
         {
             // The stream is already closed here; remove the incomplete file so nothing mistakes it for a checkpoint.
-            File.Delete(partial);
+            // A failed cleanup is logged rather than thrown, so the error that stopped the write is the one the caller sees.
+            try
+            {
+                if (File.Exists(partial)) File.Delete(partial);
+            }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+                Logs.Warning($"Could not remove '{partial}' after a failed write: {cleanup.Message}");
+            }
             throw;
         }
     }
 
-    private static string StateText(long rows, long cols) =>
-        $"{{\"shape\":[{rows},{cols}],\"blocksize\":{DefaultBlockSize},\"dtype\":\"float32\"}}";
+    /// <summary>The quant-state JSON bitsandbytes writes beside an NF4 weight: its logical shape, block size and compute dtype.</summary>
+    private static string StateText(long rows, long cols, int blockSize, string computeDtype) =>
+        $"{{\"shape\":[{rows},{cols}],\"blocksize\":{blockSize},\"dtype\":\"{computeDtype}\"}}";
 
     private static long[] DimsOf(TensorShape shape) => Enumerable.Range(0, shape.Rank).Select(i => shape[i]).ToArray();
 
