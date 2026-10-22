@@ -345,6 +345,7 @@ public sealed class AttentionLayerTests
     [Theory]
     [InlineData("int8v2", AttentionRoute.TokenMajor)]
     [InlineData("int8v2-declined", AttentionRoute.Dense)]
+    [InlineData("int8v2-refused", AttentionRoute.TokenMajor)]
     [InlineData("int8v2-d64", AttentionRoute.Dense)]
     [InlineData("sage-length", AttentionRoute.Dense)]
     [InlineData("sage-length-d64", AttentionRoute.Dense)]
@@ -367,7 +368,7 @@ public sealed class AttentionLayerTests
         AttentionLayer layer = new(new AttentionLayerConfig
         {
             Heads = 1, KvHeads = 1, HeadDim = headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = name != "unguarded",
-            AllowF16 = true, RefusedFormats = name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
+            AllowF16 = true, RefusedFormats = name is "int8-refused" or "int8v2-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
         }, Weights(gate: false));
         Tensor kv = new(new TensorShape(1, skv, 8), act), q = sq == skv ? kv : new(new TensorShape(1, sq, 8), act);
         Tensor? bias = name == "bias" ? new Tensor(new TensorShape(1, 1, 1, skv), DType.F32) : null;
@@ -387,7 +388,7 @@ public sealed class AttentionLayerTests
 
         AttentionCall call = Assert.Single(backend.Calls);
         Assert.Equal(route, call.Route);
-        Assert.Equal(name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
+        Assert.Equal(name is "int8-refused" or "int8v2-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
         Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
     }
 

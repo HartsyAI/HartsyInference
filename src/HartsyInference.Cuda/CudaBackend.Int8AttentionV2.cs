@@ -33,11 +33,11 @@ public sealed partial class CudaBackend
         && Math.Min(queryTokens, keys) >= EngineKnobs.Int8AttnV2MinTokens.Value
         && CudaKernels.GridYzFits(heads, batch) && (long)batch * heads <= Int8AttentionV2Layout.CounterSlots;
 
-    /// <summary>The checks the INT8 v2 rows and the grouped row's yield share: <see cref="Int8V2ShapeEligible"/>, no bias, host
-    /// positions, one dtype throughout and a finite positive scale.</summary>
+    /// <summary>The checks the INT8 v2 rows and the grouped row's yield share: <see cref="Int8V2ShapeEligible"/>, a call that
+    /// does not refuse INT8 (Wan's F16 layers do), no bias, host positions, one dtype throughout and a finite positive scale.</summary>
     private static bool Int8V2Eligible(in AttentionCall c) =>
         Int8V2ShapeEligible(c.Batch, c.Heads, c.QueryTokens, c.ValidKvLength, c.QkHeadDim, c.ValueHeadDim, c.Query.DType)
-        && c.Mask.Bias is null && !c.Positions.OnDevice && c.Key.DType == c.Query.DType && c.Value.DType == c.Query.DType
+        && (c.Numerics.Refused & AttentionFormats.Int8) == 0 && c.Mask.Bias is null && !c.Positions.OnDevice && c.Key.DType == c.Query.DType && c.Value.DType == c.Query.DType
         && c.Output.DType == c.Query.DType && c.Scale > 0f && float.IsFinite(c.Scale);
 
     /// <summary>Whether the kernels of the PV format <c>numerics.int8AttnV2F16Pv</c> picks are loaded.</summary>

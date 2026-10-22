@@ -655,7 +655,7 @@ public sealed partial class AttentionLayer
     /// <summary>Whether the backend's token-major INT8 v2 row takes this call as it stands (M.4 reads the projections in place); the
     /// backend answers, so a refusal only it sees (its kernels, a capture its workspace does not fit) leaves the call to Sage.</summary>
     private bool Int8V2ServesTokenMajor(IBackend backend, int batch, int sq, int skv, DType act, Tensor? bias) =>
-        bias is null && _config.KvHeads == _config.Heads
+        bias is null && _config.KvHeads == _config.Heads && (_config.RefusedFormats & AttentionFormats.Int8) == 0
         && backend.Int8AttentionV2TakesTokenMajor(batch, _config.Heads, sq, skv, _config.HeadDim, act);
 
     private static Tensor Have(Tensor? norm) =>

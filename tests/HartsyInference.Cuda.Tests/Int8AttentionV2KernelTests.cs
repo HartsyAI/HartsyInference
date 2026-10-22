@@ -478,6 +478,51 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>A call that refuses INT8 formats (what Wan's F16 layers pass) never takes an INT8 v2 row, head-major, token-major or
+    /// through the grouped row's widening; the same call without the refusal does.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("hm", "S.17")]
+    [InlineData("tm", "M.4")]
+    [InlineData("tmg", "MG/S.17")]
+    public void ARefusedInt8Call_NeverTakesV2(string entry, string allowedRoute)
+    {
+        if (!Open(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        int hq = entry == "tmg" ? 8 : 4, hkv = entry == "tmg" ? 2 : 4;
+        const int Tokens = 600;
+        TensorShape qs = entry == "hm" ? new(1, hq, Tokens, 128) : new(1, Tokens, hq, 128);
+        TensorShape ks = entry == "hm" ? new(1, hkv, Tokens, 128) : new(1, Tokens, hkv, 128);
+        using Tensor q = new(qs, DType.F16), k = new(ks, DType.F16), v = new(ks, DType.F16), o = new(qs, DType.F16);
+        cuda.Scale(q, q, 1f);
+        cuda.Scale(k, k, 1f);
+        cuda.Scale(v, v, 1f);
+        KnobStore.Set(EngineKnobs.Int8AttnV2, true);
+        KnobStore.Set(EngineKnobs.Int8AttnV2MinTokens, 512);
+        try
+        {
+            AttentionCall call = entry == "hm"
+                ? AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.088f, true)
+                : AttentionCall.FromTokenMajor(o, q, k, v, null, hq, hkv, 128, 0.088f, true)
+                    with { Route = entry == "tm" ? AttentionRoute.TokenMajor : AttentionRoute.TokenMajorGqa };
+            IBackend backend = cuda;
+            backend.Attention(call with { Numerics = call.Numerics with { Refused = AttentionFormats.Int8 } });
+            string? refused = CudaBackend.LastAttentionRoute;
+            Assert.Equal(0, cuda.Int8AttentionV2ExecutionCount);
+            backend.Attention(call);
+            Assert.Equal(1, cuda.Int8AttentionV2ExecutionCount);
+            Assert.Equal(allowedRoute, CudaBackend.LastAttentionRoute);
+            Assert.NotNull(refused);
+            Assert.DoesNotContain("S.17", refused);
+            Assert.DoesNotContain("M.4", refused);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.Int8AttnV2);
+            KnobStore.Clear(EngineKnobs.Int8AttnV2MinTokens);
+        }
+    }
+
     /// <summary>A workspace size that ran out of VRAM stays refused while a smaller call grows the workspace, and is asked again
     /// once activations are freed.</summary>
     [Trait("Category", "GpuIntegration")]
