@@ -278,12 +278,15 @@ public sealed class HfQuantCheckpointTests : IDisposable
     }
 
     [Fact]
-    public void Produce_RefusesABlockQuantWhoseBlocksWouldSpanRows()
+    public void Produce_RefusesRaggedBlockQuantRows_AndStillReadsAScalar()
     {
         const string weightKey = "model.layers.0.mlp.experts.0.down_proj.weight";
         string path = Path.Combine(_dir, "nf4.safetensors");
         Dictionary<string, Tensor> tensors = Nf4Codec.QuantizeToCompanions(weightKey, new float[8 * 40], 8, 40, "float32")
             .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        Tensor scale = new(new TensorShape([]), DType.F32);
+        scale.AsSpan<float>()[0] = 2.5f;
+        tensors["model.logit_scale"] = scale;
         try
         {
             SafeTensorsWriter.Save(path, tensors);
@@ -296,6 +299,8 @@ public sealed class HfQuantCheckpointTests : IDisposable
         using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([path]);
         ArgumentException error = Assert.Throws<ArgumentException>(() => checkpoint.Produce(weightKey, DType.Q4_0));
         Assert.Contains("rows of 40 values", error.Message);
+        using Tensor scalar = checkpoint.Produce("model.logit_scale", DType.F32);
+        Assert.Equal(2.5f, scalar.AsReadOnlySpan<float>()[0]);
     }
 
     [Fact]

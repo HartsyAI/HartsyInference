@@ -157,7 +157,7 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     public Tensor Produce(string name, DType target, GgufQuantError? error = null)
     {
         HfQuantWeight w = Get(name);
-        long rowLength = w.Shape[w.Shape.Rank - 1];
+        long rowLength = w.Shape.Rank == 0 ? 1 : w.Shape[w.Shape.Rank - 1];
         if (target.IsQuantized && rowLength % target.BlockElementCount != 0)
         {
             // The quantizer blocks the flattened tensor, so a ragged row would silently share blocks with the next one.
