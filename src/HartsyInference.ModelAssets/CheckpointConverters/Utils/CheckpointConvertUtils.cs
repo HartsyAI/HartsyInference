@@ -533,6 +533,20 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
+    /// <summary>The dense weight a resident nvfp4 weight stands in for (<see cref="QuantWeightInfo.DenseDType"/>), unpacked
+    /// exactly as the eager open would have; the caller owns it.</summary>
+    public static Tensor UnpackResidentNvfp4(Tensor resident, DType denseDType)
+    {
+        QuantWeightInfo info = resident.QuantInfo
+            ?? throw new ArgumentException("The weight carries no nvfp4 companions.", nameof(resident));
+        if (resident.DType != DType.F4E2M1 || resident.Shape.Rank != 2 || info.BlockScale is null || info.GlobalScale is null)
+            throw new ArgumentException($"Expected a resident nvfp4 weight, got {resident.DType} {resident.Shape}.", nameof(resident));
+        using Tensor packed = resident.ReinterpretAs(DType.U8, new TensorShape(resident.Shape[0], resident.Shape[1] / 2));
+        Tensor f16 = DequantNvfp4ToF16(packed, info.BlockScale, ((float*)info.GlobalScale.DataPointer)[0]);
+        if (denseDType == DType.F16) return f16;
+        using (f16) return f16.CastTo(denseDType);
+    }
+
     /// <summary>Swaps the two halves of a tensor along dim 0 — the BFL/Tencent <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c> modulation reorder. Works for 2D weights and 1D biases; quant-aware via <see cref="SliceByteCount"/>. The swap is a row permutation, so the source's per-tensor fp8 scale is carried.</summary>
     /// <param name="castToF32">Returns the swapped tensor as F32 (HunyuanVideo's final Modulate reads F32). The cast folds any fp8 scale into the values, so the result carries no scale factor.</param>
     public static Tensor SwapScaleShiftHalves(Tensor input, bool castToF32 = false)
@@ -540,6 +554,14 @@ public static unsafe class CheckpointConvertUtils
         long firstDim = input.Shape[0];
         if (firstDim % 2 != 0)
             throw new InvalidOperationException($"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
+
+        // A resident nvfp4 weight swaps as the dense twin the eager open would have made.
+        if (input.QuantInfo is { Format: "nvfp4", DenseDType: { } dense, BlockScale: not null, GlobalScale: not null })
+        {
+            using Tensor twin = UnpackResidentNvfp4(input, dense);
+            twin.Fp8ScaleFactor = input.Fp8ScaleFactor;
+            return SwapScaleShiftHalves(twin, castToF32);
+        }
 
         // The swap permutes rows, so a per-row scale would have to be permuted with them. Modulation tables are never
         // shipped int8_tensorwise, and silently keeping the unpermuted scale is worse than a refusal. Checked before
