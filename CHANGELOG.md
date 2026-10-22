@@ -109,8 +109,10 @@ stable release will require. Dates are UTC.
   joint call, and `AttentionLayer.AttendFlat` takes the config's token-major entry instead of refusing it, so the call reads
   the concatenated `[1, S, heads·D]` Q, K and V where the concatenation wrote them and drops three permutes in and one out at
   one batch item. Calls SageAttention would take (as Flux.1 at 1536²), batched forwards and SD3's joint block stay
-  head-major. Measured bit-identical: the joint call at these models' shapes, Chroma's padding mask and a Qwen-Image
-  context-parallel rank's local queries included, on CUDA's cuDNN row and on Vulkan.
+  head-major. Measured bit-identical: the joint attention call alone at these models' shapes, Chroma's padding mask and a
+  Qwen-Image context-parallel rank's local queries included, on CUDA's cuDNN row and on Vulkan (RTX 3060); no Vulkan
+  generation was compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention
+  output on the token-major entry again.
 
 ## alpha.385
 

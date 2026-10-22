@@ -701,6 +701,7 @@ public sealed partial class AttentionLayer
                 v.Dispose();
             }
         }
+        context.Probe?.Observe("attention", flat);
         return flat;
     }
 

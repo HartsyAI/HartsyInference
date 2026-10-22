@@ -340,16 +340,19 @@ public sealed class AttentionLayerTests
         Assert.Equal(new TensorShape(6, 16), flat.Shape);
     }
 
-    [Fact]
-    public void Probe_SeesEachIntermediateInOrder()
+    [Theory]
+    [InlineData(AttentionRoute.Dense)]
+    [InlineData(AttentionRoute.TokenMajor)]
+    public void Probe_SeesEachIntermediateInOrder(AttentionRoute route)
     {
-        AttentionTraceBackend backend = new();
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
         List<string> points = new();
-        AttentionLayer layer = new(Krea2(4, 4) with { Gate = AttentionGate.None, TokenMajorRoute = AttentionRoute.Dense }, Weights(gate: false));
+        AttentionLayer layer = new(Krea2(4, 4) with { Gate = AttentionGate.None, TokenMajorRoute = route }, Weights(gate: false));
         Tensor x = new(new TensorShape(1, 6, 16), DType.F32);
 
         layer.Forward(backend, x, x, new AttentionCallContext { Probe = new TraceProbe(points) });
 
+        Assert.Equal(route, Assert.Single(backend.Calls).Route);
         Assert.Equal(["q", "k", "v", "qNormed", "kNormed", "attention"], points);
     }
 

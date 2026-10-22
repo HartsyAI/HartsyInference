@@ -183,7 +183,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
             QueryNormEps = normQ.Eps, KeyNormEps = qkv is null ? normK.Eps : normQ.Eps,
         });
 
-    /// <summary>The ChromaF16 trace points over the joint call: the joint normed Q and V and the head-major attention output.</summary>
+    /// <summary>The ChromaF16 trace points over the joint call: the joint normed Q and V and the attention output.</summary>
     private sealed class TraceProbe : IAttentionProbe
     {
         public static readonly TraceProbe Instance = new();
