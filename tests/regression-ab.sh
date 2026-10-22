@@ -371,10 +371,11 @@ probe_case() {
     done
 }
 # probe_over <probe.tsv> <floor> -> the rows past the floor, "step S OUTPUT relL2" joined by "; ". The floor is one relL2 for
-# every row or OUTPUT=relL2 pairs (cond=4e-3,cfg=5e-2) judging only the outputs they name.
+# every row, or KEY=relL2 pairs judging only the rows they name, where KEY is OUTPUT (cond=4e-3) or STEP:OUTPUT (19:cfg=5e-2).
 probe_over() {
     awk -F'\t' -v spec="$2" 'BEGIN { n = split(spec, p, ","); for (i = 1; i <= n; i++) { if (split(p[i], kv, "=") == 2) f[kv[1]] = kv[2] + 0; else all = p[i] + 0 } }
-        NR > 1 { lim = ($3 in f) ? f[$3] : all; if (lim != "" && $4 + 0 > lim) { out = out sep "step " $1 " " $3 " " $4; sep = "; " } }
+        NR > 1 { k = $1 ":" $3; lim = (k in f) ? f[k] : ($3 in f) ? f[$3] : all
+            if (lim != "" && $4 + 0 > lim) { out = out sep "step " $1 " " $3 " " $4; sep = "; " } }
         END { print out }' "$1"
 }
 # probe_summary <probe.tsv> -> "max relL2<TAB>where<TAB>min cos"
