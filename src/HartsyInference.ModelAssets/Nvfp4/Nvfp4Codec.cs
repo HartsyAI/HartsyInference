@@ -50,9 +50,9 @@ public static unsafe class Nvfp4Codec
         long outFeatures = packed.Shape[0];
         long inFeatures = packed.Shape[1] * 2;
         if (inFeatures % GroupSize != 0) return false;
-        // Rows pad up to 128 and block columns up to 4 in the blocked layout, so the stored scale tensor is never
-        // smaller than the logical one; smaller means these companions do not describe this weight.
-        if (blockScale.Shape[0] < outFeatures || blockScale.Shape[1] < inFeatures / GroupSize
+        // The blocked layout pads rows to 128 and block columns to 4, and every device kernel (and cuBLASLt) indexes
+        // the padded tensor; a smaller one is not this weight's, or not in that layout, and takes the eager path.
+        if (blockScale.Shape[0] < (outFeatures + 127) / 128 * 128 || blockScale.Shape[1] < inFeatures / GroupSize
             || blockScale.Shape[1] % 4 != 0)
         {
             return false;

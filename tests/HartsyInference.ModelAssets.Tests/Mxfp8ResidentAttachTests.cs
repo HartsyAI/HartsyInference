@@ -36,17 +36,20 @@ public sealed unsafe class Mxfp8ResidentAttachTests
     [InlineData("dtype")]
     [InlineData("group")]
     [InlineData("rows")]
+    [InlineData("unpadded")]
     public void WrongShapesAreRefusedUntouched(string kind)
     {
         using Tensor weight = kind switch
         {
             "dtype" => Weight(OutFeatures, InFeatures, DType.F16),
             "group" => Weight(OutFeatures, InFeatures + 8, DType.F8E4M3),
+            "unpadded" => Weight(OutFeatures - 28, InFeatures, DType.F8E4M3),
             _ => Weight(OutFeatures, InFeatures, DType.F8E4M3),
         };
         using Tensor scale = kind switch
         {
             "rows" => Scale(OutFeatures - 1, InFeatures / 32),
+            "unpadded" => Scale(OutFeatures - 28, InFeatures / 32),   // the weight's own rows, not the 128-row tile
             _ => Scale(OutFeatures, InFeatures / 32),
         };
         Assert.False(Mxfp8Codec.TryAttachResident(weight, scale));
