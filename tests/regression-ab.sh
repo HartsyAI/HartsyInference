@@ -25,7 +25,8 @@
 # `--probe` adds the teacher-forced denoiser probe to image and video cases, for models whose trajectories are too chaotic
 # for SSIM: the base build records the denoiser's conditioning, inputs and outputs at the probed steps (seed 42), the head
 # build runs one more forward there on those inputs, and the report lists relL2 and cos per step and output. It is judged
-# only against --probe-floor (max relL2); --probe-only skips the seed series and runs the probe alone.
+# only against --probe-floor (max relL2); --probe-only skips the seed series and runs the probe alone; each
+# --probe-arm NAME=k=v[,k=v] replays once more with those knobs on top of the head's, for a measurement (not judged).
 #
 # Arms alternate seed by seed (A s0, B s0, A s1, B s1, …) so thermal drift and page-cache state land on both equally.
 set -uo pipefail
@@ -58,6 +59,7 @@ PROBE=0
 PROBE_ONLY=0
 PROBE_FLOOR=""
 PROBE_STEPS=""
+PROBE_ARMS=()
 # Bumped whenever what a digest covers changes, so a cached run is regenerated instead of compared across formats.
 # 2: every frame of a video (and its audio), not just the first file found.
 DIGEST_FORMAT=2
@@ -84,6 +86,7 @@ while [ $# -gt 0 ]; do
         --probe-only) PROBE=1; PROBE_ONLY=1; shift ;;
         --probe-floor) PROBE_FLOOR="$2"; shift 2 ;;
         --probe-steps) PROBE_STEPS="$2"; shift 2 ;;
+        --probe-arm) PROBE_ARMS+=("$2"); shift 2 ;;
         --out)      OUT="$2"; shift 2 ;;
         -h|--help)  sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -345,12 +348,30 @@ probe_case() {
     mkdir -p "$REPORT_DIR/probe"
     cp "$tsv" "$REPORT_DIR/probe/${id}_${backend}.tsv"
     local max at cos
-    IFS=$'\t' read -r max at cos < <(awk -F'\t' 'NR > 1 { if (n++ == 0 || $4 + 0 > m) { m = $4 + 0; w = "step " $1 " " $3 }
-        if (n == 1 || $5 + 0 < c) c = $5 + 0 } END { printf "%.6g\t%s\t%.9f\n", m, w, c }' "$tsv")
+    IFS=$'\t' read -r max at cos < <(probe_summary "$tsv")
     notes+="probe max relL2 ${max} (${at}), min cos ${cos}; "
     if [ -n "$PROBE_FLOOR" ] && awk -v a="$max" -v f="$PROBE_FLOOR" 'BEGIN { exit !(a > f) }'; then
         probe_fail="denoiser probe relL2 $max > $PROBE_FLOOR"
     fi
+    local arm name kv extra
+    for arm in "${PROBE_ARMS[@]}"; do
+        name="${arm%%=*}"
+        extra=()
+        IFS=',' read -ra kv <<<"${arm#*=}"
+        for k in "${kv[@]}"; do extra+=(--set "$k"); done
+        rep="$OUT/runs/$HEAD_LABEL/$backend/$id/probe-$name-on-$BASE_LABEL$steps"
+        run_probe "$HEAD_BUILD" "$HEAD_LABEL" "$ckpt" "$cmd" "$positional" "$args" "$backend" "$rep" replay "$rec" "${HEAD_SET[@]}" "${extra[@]}"
+        tsv="$rep/replay/probe.tsv"
+        if [ ! -f "$rep/done" ] || [ ! -s "$tsv" ] || [ "$(wc -l <"$tsv")" -le 1 ]; then notes+="probe arm $name failed (see $rep/run.log); "; continue; fi
+        cp "$tsv" "$REPORT_DIR/probe/${id}_${backend}_${name}.tsv"
+        IFS=$'\t' read -r max at cos < <(probe_summary "$tsv")
+        notes+="probe arm $name max relL2 ${max} (${at}), min cos ${cos}; "
+    done
+}
+# probe_summary <probe.tsv> -> "max relL2<TAB>where<TAB>min cos"
+probe_summary() {
+    awk -F'\t' 'NR > 1 { if (n++ == 0 || $4 + 0 > m) { m = $4 + 0; w = "step " $1 " " $3 }
+        if (n == 1 || $5 + 0 < c) c = $5 + 0 } END { printf "%.6g\t%s\t%.9f\n", m, w, c }' "$1"
 }
 
 # ── the run ──────────────────────────────────────────────────────────────────────────────────────────────────
