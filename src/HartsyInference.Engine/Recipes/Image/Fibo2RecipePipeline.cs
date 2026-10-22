@@ -46,7 +46,7 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
     {
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
-        if (!string.IsNullOrEmpty(request.NegativePrompt))
+        if (!string.IsNullOrWhiteSpace(request.NegativePrompt))
             throw new NotSupportedException("Fibo 2.0 does not map negative prompts yet: its unconditional branch is the fixed null caption.");
         if (request.ReferenceImages is { Count: > 0 })
             throw new NotSupportedException("Fibo 2.0 reference-image conditioning (editing) is not implemented yet.");
@@ -62,7 +62,7 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
         int height = reqHeight / 16 * 16;
         int steps = request.Steps ?? _defaults.Steps;
         float guidance = request.CfgScale ?? _defaults.CfgScale;
-        float shift = (float)(request.SigmaShift ?? _defaults.SigmaShift ?? 1.15);
+        float shift = (float)(request.SigmaShift ?? _defaults.SigmaShift ?? Math.Exp(1.15));
         int? seed = RecipeRequestMapper.MapSeed(request.Seed);
 
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);

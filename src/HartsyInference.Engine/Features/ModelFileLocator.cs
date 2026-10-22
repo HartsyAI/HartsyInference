@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 
@@ -49,7 +50,7 @@ public static class ModelFileLocator
         {
             return Require(requested, role, subfolders);
         }
-        return ModelDownloader.EnsureSideModelAsync(fallback, downloadIfMissing: true, onProgress: null, cancel)
+        return ModelDownloader.EnsureSideModelAsync(fallback, EngineKnobs.SideModelAutofetch.Value, onProgress: null, cancel)
             .GetAwaiter().GetResult();
     }
 

@@ -86,10 +86,10 @@ converter's source files were not available.
 
 ## Open items
 
-- **Sigma schedule; confirm in the engine sampler.** The timestep input matches ComfyUI: `Fibo2Pipeline` passes
-  `SigmaAt(i)` and the model multiplies by 1000. The shift does not: the pipeline hands 1.15 to
-  `FlowMatchEulerDiscreteScheduler`, which uses it as `s` in `s·t / (1 + (s − 1)·t)`, while ComfyUI's schedule is that form
-  with `s = e^1.15`.
+- **Sigma schedule; compare against ComfyUI on the GPU.** The timestep input matches ComfyUI: `Fibo2Pipeline` passes
+  `SigmaAt(i)` and the model multiplies by 1000. The recipe defaults now hand `s = e^1.15` to
+  `FlowMatchEulerDiscreteScheduler` (it was 1.15 before the review fix). Still to confirm: the saved ComfyUI sigma list
+  against ours.
 - **Dev step count and CFG.** The public workflows give only the edit-turbo values. The diffusers v1 pipeline example uses
   50 steps and guidance 5; that is a v1 source, not confirmed for 2.0. Close it from the Bria model card or a dev template.
 - **JSON captions.** ComfyUI re-serialises a JSON caption before templating (`parse_prompt`: compact separators, empty

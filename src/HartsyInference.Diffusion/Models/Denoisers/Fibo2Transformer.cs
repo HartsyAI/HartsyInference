@@ -122,7 +122,8 @@ public sealed unsafe class Fibo2Transformer : IDisposable
             image = RunRefiners(backend, image, noisyEmbedding, gridH, gridW);
             Tensor gist = PerceiverForward(backend, bundles[0], gistCount);
 
-            _streamRope.Precompute(Fibo2PositionIds.Combined(_config, gistCount, gridH, gridW));
+            using (Tensor streamIds = Fibo2PositionIds.Combined(_config, gistCount, gridH, gridW))
+                _streamRope.Precompute(streamIds);
             Tensor stream = DiTUtils.ConcatAlongSeqDim(gist, image);
             gist.Dispose();
             image.Dispose();
@@ -175,7 +176,8 @@ public sealed unsafe class Fibo2Transformer : IDisposable
 
     private Tensor RunRefiners(IBackend backend, Tensor image, Tensor noisyEmbedding, int gridH, int gridW)
     {
-        _imageRope.Precompute(Fibo2PositionIds.Image(_config, gridH, gridW));
+        using (Tensor imageIds = Fibo2PositionIds.Image(_config, gridH, gridW))
+            _imageRope.Precompute(imageIds);
         ReadOnlySpan<int> lengths = [gridH * gridW];
         ReadOnlySpan<int> groups = [0];
         using TokenSegmentLayout layout = new(lengths, groups);

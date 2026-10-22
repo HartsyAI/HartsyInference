@@ -25,6 +25,9 @@ public static unsafe class Fibo2TextBundles
         [13, 24, 35],
     ];
 
+    /// <summary>Injection layers the production bundle layout feeds: every bundle after the Perceiver's.</summary>
+    public static int InjectionLayerCount => BundleTaps.Count - 1;
+
     /// <summary>Each bundle's taps as slots in the packed input (the position of its layer in <see cref="TapLayers"/>).</summary>
     private static readonly int[][] BundleSlots = BuildBundleSlots();
 

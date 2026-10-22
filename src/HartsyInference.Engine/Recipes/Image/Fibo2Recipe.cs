@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
@@ -16,18 +17,22 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// models. Text-to-image only: glyph text images, reference-image editing, LoRA and refiners are not implemented.</summary>
 public sealed class Fibo2Recipe : IArchitectureRecipe
 {
+    /// <summary>ComfyUI's Fibo 2.0 shift 1.15 is a Flux-type exponent: <c>sigma(t) = e^1.15 / (e^1.15 + 1/t - 1)</c>, which is
+    /// the scheduler's <c>s·t / (1 + (s - 1)·t)</c> with <c>s = e^1.15</c>, not <c>s = 1.15</c>.</summary>
+    private static readonly double FluxTimeShift = Math.Exp(1.15);
+
     /// <summary>Fibo 2.0 dev's sampling settings. Steps and CFG come from the diffusers v1 pipeline example (50 steps, guidance 5);
     /// the 2.0 dev defaults are not documented yet, so revisit them against the Bria model card. The 1.15 shift is ComfyUI's.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults
     {
-        Steps = 50, CfgScale = 5.0f, Width = 1024, Height = 1024, SigmaShift = 1.15,
+        Steps = 50, CfgScale = 5.0f, Width = 1024, Height = 1024, SigmaShift = FluxTimeShift,
     };
 
     /// <summary>Edit-turbo's sampling settings from ComfyUI's edit-turbo workflow: 4 steps, 1024×704. The workflow sets no CFG, so
     /// guidance is off (1.0), which is an assumption for the distilled build.</summary>
     public static ImageDefaults EditTurboDefaults { get; } = new ImageDefaults
     {
-        Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 704, SigmaShift = 1.15,
+        Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 704, SigmaShift = FluxTimeShift,
     };
 
     /// <inheritdoc/>
@@ -65,6 +70,11 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             owned.Add(source);
             Dictionary<string, Tensor> dit = HalfPrecisionWeights(source.Weights, owned);
             Fibo2Config config = Fibo2Config.FromWeights(dit, Fibo2Config.Checkpoint);
+            if (config.InjectionLayers.Length != Fibo2TextBundles.InjectionLayerCount)
+            {
+                throw new InvalidDataException($"Fibo 2.0 checkpoint has {config.InjectionLayers.Length} injection layers "
+                    + $"({string.Join(",", config.InjectionLayers)}) but the text bundles feed {Fibo2TextBundles.InjectionLayerCount}.");
+            }
             Logs.Info($"[Fibo2Recipe] {variant.Variant.DisplayName} ({variant.Source}): dim={config.Dim}, {config.NumLayers} layers, "
                 + $"injection={string.Join(",", config.InjectionLayers)}.");
 

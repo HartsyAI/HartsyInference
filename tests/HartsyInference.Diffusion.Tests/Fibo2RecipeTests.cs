@@ -51,7 +51,7 @@ public sealed class Fibo2RecipeTests
         Assert.Equal(5.0f, defaults.CfgScale);
         Assert.Equal(1024, defaults.Width);
         Assert.Equal(1024, defaults.Height);
-        Assert.Equal(1.15, defaults.SigmaShift);
+        Assert.Equal(Math.Exp(1.15), defaults.SigmaShift);
         Assert.Null(defaults.Sampler);
         Assert.Null(defaults.Scheduler);
     }
@@ -65,7 +65,7 @@ public sealed class Fibo2RecipeTests
         Assert.Equal(1.0f, defaults.CfgScale);
         Assert.Equal(1024, defaults.Width);
         Assert.Equal(704, defaults.Height);
-        Assert.Equal(1.15, defaults.SigmaShift);
+        Assert.Equal(Math.Exp(1.15), defaults.SigmaShift);
     }
 
     [Fact]
