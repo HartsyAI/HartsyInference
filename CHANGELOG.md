@@ -34,6 +34,14 @@ stable release will require. Dates are UTC.
   text-token count from the leading dim of the `[1, T, 768]` UMT5 features the engine passes, so it conditioned on the first
   tag token alone and its projection wrote T rows into a one-row output (an exception on CPU, an out-of-bounds write on
   CUDA). It now counts rows as `Linear` does, which changes CUDA output.
+- **Faster: the single-stream blocks of Flux.1, Chroma, Flux.2, Flux.3 and HunyuanImage/HunyuanVideo attend token-major.**
+  `AttentionLayer.Attend` now writes the caller's `[1, S, heads·D]` output on the token-major entry instead of refusing
+  it (CUDA's equal-head entry takes that shape, as its grouped one already did), so each call drops three permutes in and
+  one out at one batch item. Calls SageAttention would take (F16, head dim 64 or 128, unmasked, both sequences at least
+  `numerics.sageF16MinSkv`, as Flux.1 at 1536²) and batched forwards stay head-major. Measured bit-identical: Flux.1 (1024²
+  and 1536²), Flux.2 and Chroma images on CUDA, Flux.1 images on Vulkan, and the attention call at the Flux.1, Flux.2,
+  Chroma (padding mask included) and HunyuanImage single-block shapes on CUDA's cuDNN row and Vulkan's cooperative-matrix-2
+  kernel.
 
 ## alpha.385
 

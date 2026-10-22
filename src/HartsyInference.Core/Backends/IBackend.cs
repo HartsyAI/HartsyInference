@@ -2554,9 +2554,10 @@ public partial interface IBackend : IDisposable
     /// build head-major <c>[B,H,S,D]</c> tensors and use <see cref="ScaledDotProductAttention"/> instead.</summary>
     bool SupportsTokenMajorAttention => false;
 
-    /// <summary>SDPA whose Q/K/V/output are TOKEN-MAJOR rank-2 <c>[S, heads*headDim]</c> — the layout a Linear
-    /// already emits and <c>to_out</c> already wants, so the caller pays no permute on either side. Semantics are
-    /// otherwise identical to <see cref="ScaledDotProductAttention"/>.</summary>
+    /// <summary>SDPA whose Q/K/V/output are TOKEN-MAJOR <c>[S, heads*headDim]</c> (or that one sequence as
+    /// <c>[1, S, heads*headDim]</c> or <c>[1, S, heads, headDim]</c>) — the layout a Linear already emits and <c>to_out</c>
+    /// already wants, so the caller pays no permute on either side. Semantics are otherwise identical to
+    /// <see cref="ScaledDotProductAttention"/>.</summary>
     void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int headDim, float scale, bool allowF16 = false)
         => throw new NotSupportedException($"{GetType().Name} does not serve token-major attention; check SupportsTokenMajorAttention first.");
