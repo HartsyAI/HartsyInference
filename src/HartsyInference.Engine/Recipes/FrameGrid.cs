@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace HartsyInference.Engine.Recipes;
 
 /// <summary>The frame counts a video family can generate: <c>Step·n + Offset</c> from <see cref="Offset"/> up to
@@ -5,6 +7,7 @@ namespace HartsyInference.Engine.Recipes;
 public sealed record FrameGrid
 {
     /// <summary>Creates a grid; the step and offset must be positive and a declared maximum must itself be on the grid.</summary>
+    [JsonConstructor]
     public FrameGrid(int step, int offset, FrameNormalization normalization, int? max = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(step, 1);

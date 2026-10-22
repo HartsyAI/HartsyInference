@@ -431,6 +431,7 @@ and no VSA or int8-VAE performance target has been measured.
   profiles and combinations return `NativeVideoPlanProblem` with machine-readable `issues` and an optional
   resolved `plan` at HTTP 422 before SSE headers. A valid stream emits `progress`, `frame`, optional `audio`,
   and successful terminal `complete` events; a post-start generation failure emits terminal `error`.
+- `GET /v1/native/recipes/video/minimax-h3` returns its `VideoModelDescriptor` with `profileBound: true`; the other recipe routes are in [RECIPE_CONTRACT.md](RECIPE_CONTRACT.md#descriptors-and-the-query-surface).
   `complete.execution` is the actual profile, aligned geometry, seed,
   sampling recipe, execution path, and component formats. Configure large base64 guide/control bodies with
   `HartsyInference:MaxVideoRequestBodyBytes`; the default is 256 MiB.
