@@ -8,6 +8,17 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Faster: the joint attention of the double-stream blocks of Flux.1, Chroma, Flux.2, Qwen-Image, HunyuanImage/HunyuanVideo,
+  AuraFlow and HiDream runs token-major.** `JointAttentionConfig` takes a `TokenMajorRoute` and `HeadMajorForSage` for the
+  joint call, and `AttentionLayer.AttendFlat` takes the config's token-major entry instead of refusing it, so the call reads
+  the concatenated `[1, S, heads·D]` Q, K and V where the concatenation wrote them and drops three permutes in and one out at
+  one batch item. Calls SageAttention would take (as Flux.1 at 1536²), batched forwards and SD3's joint block stay
+  head-major. Measured bit-identical: Flux.1 (1024², 1536² and with a LoRA), Chroma, Flux.2, Qwen-Image, HunyuanImage,
+  AuraFlow and HiDream images on CUDA, and the joint attention call alone at these models' shapes (Chroma's padding mask and
+  a Qwen-Image context-parallel rank's local queries included) on CUDA's cuDNN row and on Vulkan; no Vulkan generation was
+  compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention output on the
+  token-major entry again.
+
 ## alpha.386
 
 - **Added: hosts ask the engine for a model's defaults.** `IInferenceEngine.Recipes` (`IRecipeCatalog`) describes a
@@ -104,15 +115,6 @@ stable release will require. Dates are UTC.
   and 1536²), Flux.2 and Chroma images on CUDA, Flux.1 images on Vulkan, and the attention call at the Flux.1, Flux.2,
   Chroma (padding mask included) and HunyuanImage single-block shapes on CUDA's cuDNN row and Vulkan's cooperative-matrix-2
   kernel.
-- **Faster: the joint attention of the double-stream blocks of Flux.1, Chroma, Flux.2, Qwen-Image, HunyuanImage/HunyuanVideo,
-  AuraFlow and HiDream runs token-major.** `JointAttentionConfig` takes a `TokenMajorRoute` and `HeadMajorForSage` for the
-  joint call, and `AttentionLayer.AttendFlat` takes the config's token-major entry instead of refusing it, so the call reads
-  the concatenated `[1, S, heads·D]` Q, K and V where the concatenation wrote them and drops three permutes in and one out at
-  one batch item. Calls SageAttention would take (as Flux.1 at 1536²), batched forwards and SD3's joint block stay
-  head-major. Measured bit-identical: the joint attention call alone at these models' shapes, Chroma's padding mask and a
-  Qwen-Image context-parallel rank's local queries included, on CUDA's cuDNN row and on Vulkan (RTX 3060); no Vulkan
-  generation was compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention
-  output on the token-major entry again.
 
 ## alpha.385
 
