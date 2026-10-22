@@ -120,9 +120,14 @@ compile_one() {
     # down at module load — how a 16-bit e2m1 cvt destination made every CC 12.0 card unusable. Assemble when we can.
     if [[ -n "$PTXAS" ]]; then
         if ! ptxas_log="$("$PTXAS" -arch="sm_${arch}" "$ptx" -o /dev/null 2>&1)"; then
-            echo "ERROR: ${kernel}${suffix}.ptx does not assemble for sm_${arch}:" >&2
-            printf '%s\n' "$ptxas_log" | head -5 >&2
-            exit 1
+            # An older ptxas that cannot name the target or read the ISA says nothing about the source.
+            if grep -qE "is not defined for option|Unsupported \.version" <<<"$ptxas_log"; then
+                echo "UNASSEMBLED: ${kernel}${suffix}.ptx — $PTXAS cannot assemble sm_${arch} or this PTX ISA; point HARTSY_NVCC at a full CUDA 13.0 toolkit"
+            else
+                echo "ERROR: ${kernel}${suffix}.ptx does not assemble for sm_${arch}:" >&2
+                printf '%s\n' "$ptxas_log" | head -5 >&2
+                exit 1
+            fi
         fi
     fi
     if $INSTALL; then
