@@ -17,6 +17,7 @@ public sealed class WanI2V22VariantTests
     [InlineData(5120, 36, new[] { "img_emb.emb_pos" }, "base")]
     [InlineData(5120, 16, new string[0], "base")]
     [InlineData(1536, 36, new string[0], "base")]
+    [InlineData(5120, 36, new[] { "vace_blocks.0.after_proj.bias" }, "vace")]
     public void Classify_NeedsThe14BHiddenSizeA36ChannelPatchEmbeddingAndNoImageBranch(long hidden, long inChannels, string[] extraKeys, string expected)
     {
         Dictionary<string, TensorShape> shapes = new Dictionary<string, TensorShape>(StringComparer.Ordinal)
@@ -27,6 +28,21 @@ public sealed class WanI2V22VariantTests
         CheckpointProbe probe = CheckpointProbe.Empty with { Keys = keys, Shapes = shapes };
 
         Assert.Equal(expected, ModelVariantResolver.Classify(WanVideoVariants.Catalog, probe, []).Id);
+    }
+
+    /// <summary>The resolver runs structure rules before metadata ones, so Animate-2's metadata must keep a repack without
+    /// the image branch away from the I2V-14B rule.</summary>
+    [Fact]
+    public void Classify_Animate2MetadataOnTheSameShape_IsNotTakenForI2V22()
+    {
+        CheckpointProbe probe = CheckpointProbe.Empty with
+        {
+            Keys = new HashSet<string>(["patch_embedding.weight"], StringComparer.Ordinal),
+            Shapes = new Dictionary<string, TensorShape>(StringComparer.Ordinal) { ["patch_embedding.weight"] = new TensorShape([5120L, 36L, 1L, 2L, 2L]) },
+            Metadata = new Dictionary<string, string>(StringComparer.Ordinal) { ["config"] = "{\"transformer\":{\"model_type\":\"animate2\"}}" },
+        };
+
+        Assert.Equal("animate2", ModelVariantResolver.Classify(WanVideoVariants.Catalog, probe, []).Id);
     }
 
     [Fact]
