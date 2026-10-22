@@ -157,13 +157,13 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
-                    UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,
+                    UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
                 }, "S.9",
                 (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && TilesScores(in c),
                 (in AttentionCall c) => { SdpaTiledF32(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("tiled.f32.keybias", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
-                    Masks = AnyBias, UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,
+                    Masks = AnyBias, UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
                 }, "S.10",
                 (in AttentionCall c) => c.Query.DType == DType.F32 && MaskIsKeyOnly(c.Mask.Bias, c.QueryTokens) && TilesScores(in c),
                 (in AttentionCall c) =>
@@ -173,13 +173,13 @@ public sealed partial class CudaBackend
                 }),
             new DelegateAttentionRow(Cap("tiled.cast", E, Half, Half, HM) with
                 {
-                    UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32, Lowering = AttentionLowering.Cast,
+                    UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats, Lowering = AttentionLowering.Cast,
                 }, "S.11",
                 static (in AttentionCall c) => c.Mask.Bias is null && ScoresPastMaterialized(in c) && OneRowTiles(in c),
                 (in AttentionCall c) => { SdpaTiledCast(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("materialized", E, AnyFloat, AnyFloat, HM) with
                 {
-                    Masks = AnyBias, UsesQueryKey = AttentionFormats.Tf32 | AttentionFormats.F16, UsesProbValue = AttentionFormats.Tf32 | AttentionFormats.F16,
+                    Masks = AnyBias, UsesQueryKey = SdpaF32Formats | AttentionFormats.F16, UsesProbValue = SdpaF32Formats | AttentionFormats.F16,
                     Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast | AttentionLowering.ExpandMask,
                 }, null,
                 static (in AttentionCall c) => !ScoresPastMaterialized(in c),
@@ -198,6 +198,9 @@ public sealed partial class CudaBackend
                     + $"{(long)c.Batch * c.Heads * c.KeyTokens} score elements, fits too.")),
         ];
     }
+
+    /// <summary>The format the F32 SDPA GEMMs multiply in beyond F32: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
+    private AttentionFormats SdpaF32Formats => _sdpaNoTf32 ? AttentionFormats.None : AttentionFormats.Tf32;
 
     /// <summary>Score elements the materialized row addresses: its softmax forms each row's offset in 32 bits.</summary>
     internal const long MaterializedMaxScores = 1L << 32;

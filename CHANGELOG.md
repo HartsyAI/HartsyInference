@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: an exact F32 attention arm on CUDA.** `numerics.sdpaNoTf32` runs the materialized and query-tiled F32 SDPA
+  GEMMs in plain FP32; they ran TF32 whatever `numerics.noTf32` said. The `reference` profile sets it. Default output is
+  unchanged.
+- **Added: a BF16 attention grant.** `AttentionNumerics.Bf16Storage` permits BF16 storage and multiply of Q, K, P and V
+  with F32 scores, softmax and accumulation; `AttentionLayerConfig.AllowBf16` and `JointAttentionConfig.AllowBf16` carry
+  it, and a config that also sets `AllowF16` is refused. The planner now excludes a row that narrows F32 operands to a
+  format the call does not permit (`AttentionKernelCapability.NarrowsF32To`, exclusion `Numerics`). No row narrows and no
+  model grants yet, so output is unchanged.
+
 ## alpha.387
 
 - **Fixed: CUDA head-major attention past 2^32 score elements returns the right rows.** The materialized row's softmax forms

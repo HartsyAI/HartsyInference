@@ -169,6 +169,25 @@ public sealed class JointAttentionTests
     }
 
     [Fact]
+    public void ABf16Grant_ReachesTheJointCall_AndExcludesEitherF16Assertion()
+    {
+        AttentionTraceBackend backend = new();
+        JointAttentionConfig granted = Config(0, 1) with { AllowF16 = false, AllowBf16 = true };
+        JointAttention joint = new(granted, [Stream(1), Stream(2)]);
+        (Tensor img, Tensor txt) = Inputs();
+        Span<Tensor?> attended = [null, null];
+
+        joint.Attend(backend, [img, txt], attended, new JointCallContext());
+
+        Assert.Equal(AttentionNumerics.Bf16Storage, Assert.Single(backend.Calls).Numerics);
+        // The joint config refuses the pair itself, before any joint layer is built.
+        Assert.Equal("config", Assert.Throws<ArgumentException>(() => new JointAttention(granted with { AllowF16 = true },
+            [Stream(1), Stream(2)])).ParamName);
+        Assert.Equal("config", Assert.Throws<ArgumentException>(() => new JointAttention(granted with { AllowF16Batched = true },
+            [Stream(1), Stream(2)])).ParamName);
+    }
+
+    [Fact]
     public void AStreamWithoutAnOutputProjection_IsUsedUnprojected()
     {
         AttentionTraceBackend backend = new();

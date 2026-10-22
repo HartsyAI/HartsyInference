@@ -44,6 +44,27 @@ public sealed class AttentionLayerTests
         Assert.Throws<ArgumentException>(() => new AttentionLayer(Krea2(), Weights(gate: false)));
     }
 
+    /// <summary>The BF16 grant replaces the legacy flag on either entry's call, and the two cannot be combined.</summary>
+    [Fact]
+    public void ABf16Grant_ReachesTheCallOnEitherEntry_AndExcludesAllowF16()
+    {
+        AttentionLayerConfig config = new() { Heads = 2, KvHeads = 2, HeadDim = 4, AllowBf16 = true };
+        Assert.Throws<ArgumentException>(() => new AttentionLayer(config with { AllowF16 = true }));
+        static Tensor Operand() => new(new TensorShape(1, 6, 2, 4), DType.F32);
+        AttentionTraceBackend headMajor = new(), tokenMajor = new() { SupportsTokenMajorAttention = true }, legacy = new();
+
+        new AttentionLayer(config).Attend(headMajor, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+        new AttentionLayer(config with { TokenMajorRoute = AttentionRoute.TokenMajor })
+            .Attend(tokenMajor, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+        new AttentionLayer(config with { AllowBf16 = false, AllowF16 = true })
+            .Attend(legacy, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+
+        Assert.Equal(AttentionNumerics.Bf16Storage, Assert.Single(headMajor.Calls).Numerics);
+        Assert.Equal(AttentionRoute.TokenMajor, Assert.Single(tokenMajor.Calls).Route);
+        Assert.Equal(AttentionNumerics.Bf16Storage, tokenMajor.Calls[0].Numerics);
+        Assert.Equal(AttentionNumerics.FromLegacy(true), Assert.Single(legacy.Calls).Numerics);
+    }
+
     [Fact]
     public void Ltx_TokenMajorSelfAttention_RunsTheFusedNormAndTheGatedProjection()
     {

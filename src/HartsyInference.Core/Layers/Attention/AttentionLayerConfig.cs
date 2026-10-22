@@ -107,11 +107,19 @@ public sealed record AttentionLayerConfig
     /// <summary>Multiply formats the attention call refuses (<see cref="AttentionNumerics.Refused"/>).</summary>
     public AttentionFormats RefusedFormats { get; init; }
 
+    /// <summary>The attention call may store Q, K, P and V in BF16 (<see cref="AttentionNumerics.Bf16Storage"/>); exclusive
+    /// with <see cref="AllowF16"/>.</summary>
+    public bool AllowBf16 { get; init; }
+
     /// <summary>The softmax scale; 0 means <c>1/√headDim</c>.</summary>
     public float Scale { get; init; }
 
     /// <summary>The scale the attention call uses.</summary>
     public float EffectiveScale => Scale != 0f ? Scale : 1.0f / MathF.Sqrt(HeadDim);
+
+    /// <summary>The permissions and refusals the attention call carries.</summary>
+    public AttentionNumerics Numerics =>
+        (AllowBf16 ? AttentionNumerics.Bf16Storage : AttentionNumerics.FromLegacy(AllowF16)) with { Refused = RefusedFormats };
 
     /// <summary>Width of the attention output before the output projection.</summary>
     public int InnerDim => Heads * HeadDim;
@@ -123,6 +131,8 @@ public sealed record AttentionLayerConfig
             throw new ArgumentException($"Attention needs positive heads, kv heads and head dim; got {Heads}, {KvHeads}, {HeadDim}.");
         if (Heads % KvHeads != 0)
             throw new ArgumentException($"Attention heads ({Heads}) must be a multiple of key/value heads ({KvHeads}).");
+        if (AllowF16 && AllowBf16)
+            throw new ArgumentException("AllowF16 and AllowBf16 are exclusive: with both, the saturating F16 path takes the call.");
         if (TokenMajorRoute is not (AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa))
             throw new ArgumentException($"The token-major entry must be Dense, TokenMajor or TokenMajorGqa, not {TokenMajorRoute}.");
         if (TokenMajorRoute == AttentionRoute.TokenMajor && KvHeads != Heads)

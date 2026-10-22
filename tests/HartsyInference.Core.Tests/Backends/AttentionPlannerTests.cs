@@ -61,6 +61,26 @@ public sealed class AttentionPlannerTests
     }
 
     [Fact]
+    public void ARowThatNarrowsF32_TakesOnlyACallThatPermitsTheFormat()
+    {
+        List<string> log = [];
+        AttentionKernelCapability bf16 = Cap("bf16") with { NarrowsF32To = AttentionFormats.Bf16 };
+        AttentionCall f32 = Call(DType.F32), granted = f32 with { Numerics = AttentionNumerics.Bf16Storage };
+        Assert.Equal(AttentionExclusion.Numerics, bf16.Excludes(f32));
+        Assert.Equal(AttentionExclusion.Numerics, bf16.Excludes(f32 with { Numerics = AttentionNumerics.FromLegacy(true) }));
+        Assert.Equal(AttentionExclusion.None, bf16.Excludes(granted));
+        // Half operands are the caller's own storage, and a row that narrows nothing never reads a grant.
+        Assert.Equal(AttentionExclusion.None, bf16.Excludes(Call(DType.F16)));
+        Assert.Equal(AttentionExclusion.None, Cap("plain").Excludes(f32));
+
+        AttentionKernelRow[] rows = [Row("bf16", true, true, log, bf16), Row("f32", true, true, log)];
+        Assert.Equal("f32", AttentionPlanner.Run(rows, f32).Capability.Id);
+        Assert.Equal("bf16 (Numerics)", AttentionPlanner.Plan(rows, f32).Declined);
+        Assert.Equal("bf16", AttentionPlanner.Run(rows, granted).Capability.Id);
+        Assert.Equal(["f32", "bf16"], log);
+    }
+
+    [Fact]
     public void Exclusions_NameTheLimitAndAllocateNothing()
     {
         AttentionKernelCapability c = Cap("x") with { MinHeadDim = 64, MaxHeadDim = 128 };

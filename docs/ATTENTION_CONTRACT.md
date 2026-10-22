@@ -203,8 +203,9 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
   dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
   permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
-- CUDA runs F32 attention GEMMs in TF32 whatever the precision settings say, and `FlashAttention`'s F32 prefill
-  narrows to F16 without a permission.
+- CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
+  `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
+  without a permission.
 - CUDA's materialized F32→F16 cast does not saturate; cuDNN's does.
 - CUDA chooses between the materialized and tiled paths, the tile height, and cuDNN or FA2 prefill from free VRAM.
 - CUDA's materialized row addresses at most 2^32 score elements (B·H·Sq·Skv; its softmax forms row offsets in 32 bits), and

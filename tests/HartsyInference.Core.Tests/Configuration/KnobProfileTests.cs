@@ -98,7 +98,7 @@ public sealed class KnobProfileTests
             $"reference pins only {KnobProfiles.Reference.Count} knobs; it is supposed to disable every approximation.");
 
     /// <summary>Spot-checks the entries whose faithful direction reads BACKWARDS from the name, since those are what a well-meaning edit would invert.</summary>
-    /// <remarks><c>noTf32</c> and <c>sdpaNoF16</c> are kill-switches, so faithful is true. <c>bf16Gemv</c> is pinned ON
+    /// <remarks><c>noTf32</c>, <c>sdpaNoTf32</c> and <c>sdpaNoF16</c> are kill-switches, so faithful is true. <c>bf16Gemv</c> is pinned ON
     /// because the fused GEMV keeps activations F32 while the cuBLAS fallback casts them to BF16. Both coopmat knobs
     /// are required: coopmat2 dispatches first under its own flag and <c>vkDisableCoopmat</c> does not gate it.</remarks>
     [Fact]
@@ -107,6 +107,7 @@ public sealed class KnobProfileTests
         using (KnobProfiles.Reference.Push())
         {
             Assert.True(EngineKnobs.NoTf32.Value);
+            Assert.True(EngineKnobs.SdpaNoTf32.Value);
             Assert.True(EngineKnobs.SdpaNoF16.Value);
             Assert.True(EngineKnobs.Bf16Gemv.Value);
             Assert.True(EngineKnobs.VkDisableCoopmat.Value);
