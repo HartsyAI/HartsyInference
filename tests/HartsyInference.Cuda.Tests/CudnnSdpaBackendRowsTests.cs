@@ -180,6 +180,43 @@ public sealed class CudnnSdpaBackendRowsTests
         Assert.Equal("cudnn.tokenmajor", Plan(backend, "BuildTokenMajorRows", in tokenMajor));
     }
 
+    /// <summary>The materialized row addresses 2^32 score elements: up to there it keeps every call it had (SD1.5's VAE mid-block at
+    /// 2048² sits exactly on it), and past it an unmasked F16 or BF16 call runs query-tiled on F32 widenings, an F32 call on the tiled
+    /// F32 rows, and a call no tiled row takes is refused naming the budget. Head dim 512 is past every fused row.</summary>
+    [Theory]
+    [InlineData("f16-at-bound", "f16", 1, 65536, 65536, "none", "materialized")]
+    [InlineData("f16-under", "f16", 8, 4096, 4096, "none", "materialized")]
+    [InlineData("f16-masked-under", "f16", 2, 4096, 4096, "full", "materialized")]
+    [InlineData("bf16-at-bound", "bf16", 4, 32768, 32768, "none", "materialized")]
+    [InlineData("f16-past", "f16", 1, 65537, 65536, "none", "tiled.cast")]
+    [InlineData("bf16-past", "bf16", 2, 46341, 46341, "none", "tiled.cast")]
+    [InlineData("f32-past", "f32", 1, 65537, 65536, "none", "tiled.f32")]
+    [InlineData("f32-keymask-past", "f32", 2, 46341, 46341, "key", "tiled.f32.keybias")]
+    [InlineData("f32-mask-past", "f32", 2, 46341, 46341, "full", "refuse")]
+    [InlineData("f16-keymask-past", "f16", 2, 46341, 46341, "key", "refuse")]
+    public void TheMaterializedRowAddresses2Pow32ScoreElements(string name, string dtype, int heads, int sq, int skv, string mask, string row)
+    {
+        const int d = 512;
+        DType dt = dtype switch { "f16" => DType.F16, "bf16" => DType.BF16, _ => DType.F32 };
+        Tensor q = new(new TensorShape(1, heads, sq, d), dt), k = new(new TensorShape(1, heads, skv, d), dt);
+        Tensor v = new(k.Shape, dt), o = new(q.Shape, dt);
+        Tensor? bias = mask switch
+        {
+            "key" => new Tensor(new TensorShape(1, 1, 1, skv), DType.F32),
+            "full" => new Tensor(new TensorShape(1, 1, sq, skv), DType.F32),
+            _ => null,
+        };
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(o, q, k, v, bias, 0.125f, false);
+        CudaBackend backend = Backend();
+
+        Assert.Equal(row, Plan(backend, "BuildDenseRows", in call));
+        Assert.Equal(name.Contains("past", StringComparison.Ordinal), CudaBackend.ScoresPastMaterialized(in call));
+        if (row != "refuse") return;
+        AttentionUnsupportedException refused = Assert.Throws<AttentionUnsupportedException>(
+            () => AttentionPlanner.Run(Rows(backend, "BuildDenseRows"), in call));
+        Assert.Contains(CudaBackend.MaterializedMaxScores.ToString(System.Globalization.CultureInfo.InvariantCulture), refused.Message);
+    }
+
     [Fact]
     public void AGroupedHeadMajorCall_PlansNoDenseRow()
     {

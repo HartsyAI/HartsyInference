@@ -8052,6 +8052,54 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>S.11 for an F16 or BF16 call past the score elements the materialized row addresses: Q, K and V widened to F32
+    /// exactly, the query-tiled core, and the output narrowed back to the call's dtype.</summary>
+    private unsafe void SdpaTiledCast(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    {
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        long sq = query.Shape[2], d = query.Shape[3], skv = key.Shape[2];
+        long totalHeads = query.Shape[0] * query.Shape[1];
+        bool bf16 = query.DType == DType.BF16;
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, q32 = 0, k32 = 0, v32 = 0, o32 = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            q32 = CudaMemory.Allocate((nuint)(query.ElementCount * 4));
+            k32 = CudaMemory.Allocate((nuint)(key.ElementCount * 4));
+            v32 = CudaMemory.Allocate((nuint)(value.ElementCount * 4));
+            o32 = CudaMemory.Allocate((nuint)(output.ElementCount * 4));
+            Widen(q32, pQ, query.ElementCount);
+            Widen(k32, pK, key.ElementCount);
+            Widen(v32, pV, value.ElementCount);
+            SdpaTiledF32Core(q32, k32, v32, o32, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
+            if (bf16) _kernels!.LaunchCastF32ToBf16(pOut, o32, (int)output.ElementCount, _stream.Handle);
+            else _kernels!.LaunchCastF32ToF16(pOut, o32, (int)output.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            foreach (ulong p in (ReadOnlySpan<ulong>)[q32, k32, v32, o32])
+                if (p != 0) CudaMemory.FreeAsync(p, _stream.Handle);
+        }
+
+        void Widen(ulong wide, ulong half, long count)
+        {
+            if (bf16) _kernels!.LaunchCastBf16ToF32(wide, half, (int)count, _stream.Handle);
+            else _kernels!.LaunchCastF16ToF32(wide, half, (int)count, _stream.Handle);
+        }
+    }
+
     /// <summary>The query-tiled loop of <see cref="SdpaTiledF32"/> over F32 device buffers, shared with the BF16 path
     /// of <see cref="ScaledDotProductAttention"/>, which runs it on its F32 casts.</summary>
     private unsafe void SdpaTiledF32Core(ulong pQ, ulong pK, ulong pV, ulong pOut, long totalHeads, long sq, long skv,
@@ -8069,6 +8117,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (Br > sq) Br = sq;
             if (EngineKnobs.SdpaTile.Value is int envBr && envBr > 0)
                 Br = Math.Min(envBr, sq);
+            // The softmax forms each row's offset in 32 bits, so one tile stays within the score elements it addresses.
+            Br = Math.Max(1, Math.Min(Br, MaterializedMaxScores / (totalHeads * skv)));
 
             scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
             if (pBias != 0)
