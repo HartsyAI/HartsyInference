@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: NVFP4 weights folded to fp8 no longer clip.** Off Blackwell, FLUX.3, MOSS, Ideogram 4 and the Flux.2 text
+  encoder unpack NVFP4 to fp8 at open, and `e2m1 · block_scale` reaches 6 · 448 = 2688 where e4m3 stops at 448: every
+  value past it was clipped, 11 % of the values in FLUX.3 Klein's `content_mode_blocks.image.1.attn_out`. The fold now
+  stores `e2m1 · block_scale / 8` and carries the 8 on `Fp8ScaleFactor`, a power of two, so no normal-range value moves
+  and the layer's fold error drops from 6.6 % of its energy to 0.04 %. Output changes for those models on Ada and Ampere.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch
