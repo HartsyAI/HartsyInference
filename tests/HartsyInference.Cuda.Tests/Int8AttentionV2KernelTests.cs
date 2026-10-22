@@ -264,6 +264,33 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
         Assert.True(rel <= bound, $"relL2 {rel:E2} against {bound:E0}");
     }
 
+    /// <summary>Edge geometries, bit for bit on the replayed exp2: one query row, fewer keys than a tile, exactly one tile, a
+    /// key count one past a tile, and a batch of three with a query tail; both V scale modes, both tile heights.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData(1, 1, 77)]
+    [InlineData(1, 5, 128)]
+    [InlineData(1, 70, 129)]
+    [InlineData(3, 130, 260)]
+    public void EdgeGeometries_AreTheEmulatorsOnItsExp2(int batch, int sq, int skv)
+    {
+        if (!Open(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        using Int8V2Case c = Int8V2Case.Create(new Int8V2Spec
+        {
+            Id = $"edge-{batch}-{sq}-{skv}", Batch = batch, Heads = 2, KvHeads = 2, Sq = sq, Skv = skv, HeadDim = 128, DType = DType.F32,
+            SampledRows = 0,
+        });
+        foreach (Int8AttentionV2Pv pv in U8Modes)
+            foreach (int br in new[] { 64, 128 })
+            {
+                (AttentionCall call, Tensor o) = GpuCall(c, DType.F32);
+                using Tensor __ = o;
+                float[] actual = Rows(c, cuda.RunInt8AttentionV2ForTest(call, pv, br).Output, DType.F32);
+                Assert.Equal(c.Emulate(Replayed(cuda, c, Options(pv))), actual);
+            }
+    }
+
     /// <summary>Comfy Kitchen's published bar, relL2 ≤ 6e-3 and cos ≥ 0.99998 against the double-precision oracle, on uniform inputs at
     /// ck-parity-4k (three heads, 64 rows each), for every PV format.</summary>
     [Trait("Category", "GpuIntegration")]
