@@ -43,14 +43,15 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? OmniGen2Recipe.FamilyDefaults.Steps;
+        int steps = settings.Steps;
         // OmniGen 2's own default is guidance-free; the SwarmUI loader mapped a non-positive CFG to 1.0.
-        float cfg = request.CfgScale ?? OmniGen2Recipe.FamilyDefaults.CfgScale;
+        float cfg = settings.CfgScale;
         bool needNegative = cfg > 1.0f;
 
         // TODO(E-IMG-4/5): Prompt Images as additional references, align_res output sizing, LoRA, ControlNet and
@@ -59,7 +60,7 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
 
         // Reference editing, not img2img: the init image becomes in-context reference latents that condition every
         // step, so there is no denoise-strength start step and Creativity does not apply.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? refEdit = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
 
         TextToImageRequest inner = new TextToImageRequest
@@ -70,8 +71,8 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
             Prompt = prompt,
             NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
+            Width = settings.Width,
+            Height = settings.Height,
             Steps = steps,
             CfgScale = cfg,
             Seed = RecipeRequestMapper.MapSeed(request.Seed),

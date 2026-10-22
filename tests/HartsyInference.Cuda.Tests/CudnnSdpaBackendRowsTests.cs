@@ -16,13 +16,14 @@ public sealed class CudnnSdpaBackendRowsTests
     internal static void Set(CudaBackend backend, string field, object value) =>
         (typeof(CudaBackend).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic) ?? throw new MissingFieldException(field)).SetValue(backend, value);
 
-    internal static CudaBackend Backend(bool cudnn = true, bool dead = false, CudnnSdpaHealth? health = null)
+    internal static CudaBackend Backend(bool cudnn = true, bool dead = false, CudnnSdpaHealth? health = null, ulong freeVram = 64UL << 30)
     {
         CudaBackend backend = (CudaBackend)RuntimeHelpers.GetUninitializedObject(typeof(CudaBackend));
         GC.SuppressFinalize(backend);   // the finalizer would tear down state the constructor never built
         Set(backend, "_sdpaCudnn", cudnn);
         Set(backend, "_cudnnSdpaDead", dead);
         Set(backend, "_cudnnSdpaHealth", health ?? new CudnnSdpaHealth());
+        backend.TestFreeVramOverride = () => (nuint)freeVram;
         return backend;
     }
 
@@ -57,7 +58,7 @@ public sealed class CudnnSdpaBackendRowsTests
         CudaBackend backend = Backend();
         IEnumerable<AttentionKernelRow> cudnn = new[] { "BuildDenseRows", "BuildTokenMajorRows", "BuildTokenMajorGqaRows", "BuildFlashRows" }
             .SelectMany(b => Rows(backend, b)).Where(r => r.Capability.Id.StartsWith("cudnn.", StringComparison.Ordinal)).ToArray();
-        Assert.Equal(["cudnn.causal", "cudnn.f16", "cudnn.f32.sat", "cudnn.tokenmajor", "cudnn.tokenmajor.gqa"],
+        Assert.Equal(["cudnn.causal", "cudnn.f16", "cudnn.f32.bf16", "cudnn.f32.sat", "cudnn.tokenmajor", "cudnn.tokenmajor.gqa"],
             cudnn.Select(r => r.Capability.Id).Order().ToArray());
         foreach (AttentionKernelRow row in cudnn)
             Assert.Equal(row.Capability.Id is "cudnn.causal" or "cudnn.tokenmajor.gqa", row.Capability.Gqa);
@@ -78,8 +79,8 @@ public sealed class CudnnSdpaBackendRowsTests
             Assert.Equal(AttentionFormats.F16 | AttentionFormats.Bf16, c.UsesQueryKey);
         }
         Assert.Equal(0, (int)(Of(dense, "cudnn.f32.sat").QueryTypes & AttentionDTypes.BF16));
-        foreach (AttentionKernelCapability c in new[] { Of(dense, "cudnn.f16"), Of(dense, "cudnn.f32.sat"), Of(tokenMajor, "cudnn.tokenmajor"),
-            Of(grouped, "cudnn.tokenmajor.gqa"), Of(flash, "cudnn.causal") })
+        foreach (AttentionKernelCapability c in new[] { Of(dense, "cudnn.f16"), Of(dense, "cudnn.f32.sat"), Of(dense, "cudnn.f32.bf16"),
+            Of(tokenMajor, "cudnn.tokenmajor"), Of(grouped, "cudnn.tokenmajor.gqa"), Of(flash, "cudnn.causal") })
             Assert.Equal(AttentionLowering.None, c.Lowering & AttentionLowering.WidenKv);
         Assert.Equal(AttentionLowering.WidenKv, Of(grouped, "permute.widen.dense").Lowering & AttentionLowering.WidenKv);
     }
@@ -91,6 +92,81 @@ public sealed class CudnnSdpaBackendRowsTests
         Assert.Equal(["cudnn.tokenmajor.gqa", "permute.widen.dense"], Rows(backend, "BuildTokenMajorGqaRows").Select(r => r.Capability.Id).ToArray());
         Assert.DoesNotContain(Rows(backend, "BuildTokenMajorRows"), r => r.Capability.Id == "cudnn.tokenmajor.gqa");
         Assert.Equal("G.1", ((DelegateAttentionRow)Rows(backend, "BuildTokenMajorGqaRows")[0]).Branch);
+    }
+
+    /// <summary>The BF16 cast row: F32 only, narrowing to BF16 without saturating, between the saturating F16 row and the tiled row.</summary>
+    [Fact]
+    public void TheBf16CastRow_NarrowsF32ToBf16_BetweenTheSaturatingRowAndTheTiledRow()
+    {
+        AttentionKernelRow[] dense = Rows(Backend(), "BuildDenseRows");
+        string[] ids = dense.Select(r => r.Capability.Id).ToArray();
+        Assert.Equal(Array.IndexOf(ids, "cudnn.f32.sat") + 1, Array.IndexOf(ids, "cudnn.f32.bf16"));
+        Assert.Equal(Array.IndexOf(ids, "cudnn.f32.bf16") + 1, Array.IndexOf(ids, "tiled.f32"));
+        AttentionKernelRow row = dense.Single(r => r.Capability.Id == "cudnn.f32.bf16");
+        AttentionKernelCapability c = row.Capability;
+        Assert.Equal("S.16", ((DelegateAttentionRow)row).Branch);
+        Assert.Equal(AttentionDTypes.F32, c.QueryTypes);
+        Assert.Equal(AttentionFormats.Bf16, c.NarrowsF32To);
+        Assert.Equal(AttentionFormats.Bf16, c.UsesQueryKey);
+        Assert.Equal(AttentionFormats.Bf16, c.UsesProbValue);
+        Assert.False(c.Saturates);
+        Assert.False(c.StridedViews);
+        Assert.Equal(AttentionLowering.Cast, c.Lowering);
+        Assert.All(dense.Where(r => r != row), r => Assert.Equal(AttentionFormats.None, r.Capability.NarrowsF32To));
+    }
+
+    /// <summary>An F32 call reaches the BF16 row only with the grant; with the legacy flag as well the saturating row keeps it,
+    /// and with too little free VRAM for the BF16 copies the call falls to the memory-bounded tiled row.</summary>
+    [Fact]
+    public void AnF32Call_PlansTheBf16RowWithTheGrantOnly()
+    {
+        CudaBackend backend = Backend();
+        AttentionCall granted = HeadMajor(DType.F32, 8, 8, numerics: AttentionNumerics.Bf16Storage);
+        Assert.Equal("cudnn.f32.bf16", Plan(backend, "BuildDenseRows", in granted));
+        AttentionCall plain = HeadMajor(DType.F32, 8, 8, numerics: AttentionNumerics.Exact);
+        Assert.Equal("materialized", Plan(backend, "BuildDenseRows", in plain));
+        Assert.Contains("cudnn.f32.bf16 (Numerics)", AttentionPlanner.Plan(Rows(backend, "BuildDenseRows"), in plain).Declined);
+        AttentionCall legacy = HeadMajor(DType.F32, 8, 8);
+        Assert.Equal("cudnn.f32.sat", Plan(backend, "BuildDenseRows", in legacy));
+        AttentionCall both = HeadMajor(DType.F32, 8, 8, numerics: AttentionNumerics.Bf16Storage with { LegacyAssertedBounded = true });
+        Assert.Equal("cudnn.f32.sat", Plan(backend, "BuildDenseRows", in both));
+        using Tensor perHead = new(new TensorShape(1, 8, S, S), DType.F32);
+        AttentionCall masked = granted with { Mask = AttentionMask.Additive(perHead) };
+        Assert.Equal("cudnn.f32.bf16", Plan(backend, "BuildDenseRows", in masked));
+
+        Assert.Equal("tiled.f32", Plan(Backend(freeVram: 4096), "BuildDenseRows", in granted));
+        Assert.Equal("materialized", Plan(Backend(cudnn: false), "BuildDenseRows", in granted));
+    }
+
+    /// <summary>Failure state is per signature: a BF16 cast signature given up leaves the F16 D=128 path and the saturating row
+    /// eligible, and an F16 signature given up leaves the BF16 cast row eligible.</summary>
+    [Fact]
+    public void ARefusedBf16CastSignature_LeavesTheF16Path_AndTheReverse()
+    {
+        static CudnnSdpaHealth Refusing(DType compute)
+        {
+            CudnnSdpaHealth health = new();
+            CudnnSdpaSignature signature = CudnnSdpaSignature.For(compute, 8, 8, D, CudnnBias.None);
+            CudnnSdpa.SdpaDtype dtype = compute == DType.BF16 ? CudnnSdpa.SdpaDtype.BF16 : CudnnSdpa.SdpaDtype.F16;
+            for (int i = 0; i < CudnnSdpaHealth.RefusalsToDisable; i++)
+            {
+                CudnnSdpa.View view = CudnnSdpa.View.HeadMajor(1, 8, S + 8 * (i + 1), D);
+                health.RecordFailure(new CudnnSdpaShape(signature, DType.F32, new(dtype, D, view, view, view, view)), permanent: true, 0);
+            }
+            Assert.False(health.Eligible(signature, 0));
+            return health;
+        }
+
+        AttentionCall granted = HeadMajor(DType.F32, 8, 8, numerics: AttentionNumerics.Bf16Storage);
+        AttentionCall fp16 = HeadMajor(DType.F16, 8, 8), legacy = HeadMajor(DType.F32, 8, 8);
+        CudaBackend bf16Refused = Backend(health: Refusing(DType.BF16));
+        Assert.Equal("materialized", Plan(bf16Refused, "BuildDenseRows", in granted));
+        Assert.Equal("cudnn.f16", Plan(bf16Refused, "BuildDenseRows", in fp16));
+        Assert.Equal("cudnn.f32.sat", Plan(bf16Refused, "BuildDenseRows", in legacy));
+
+        CudaBackend f16Refused = Backend(health: Refusing(DType.F16));
+        Assert.Equal("cudnn.f32.bf16", Plan(f16Refused, "BuildDenseRows", in granted));
+        Assert.Equal("materialized", Plan(f16Refused, "BuildDenseRows", in legacy));
     }
 
     // ── grouped token-major ───────────────────────────────────────────────────────────────────────────────────
@@ -178,6 +254,65 @@ public sealed class CudnnSdpaBackendRowsTests
         Assert.Equal("cudnn.f16", Plan(backend, "BuildDenseRows", in granted));
         AttentionCall tokenMajor = TokenMajor(DType.BF16, 8, 8, numerics: GrantsBf16);
         Assert.Equal("cudnn.tokenmajor", Plan(backend, "BuildTokenMajorRows", in tokenMajor));
+    }
+
+    /// <summary>The materialized row addresses 2^32 score elements: up to there it keeps every call it had (SD1.5's VAE mid-block at
+    /// 2048² sits exactly on it), and past it an unmasked F16 or BF16 call runs query-tiled on F32 widenings, an F32 call on the tiled
+    /// F32 rows, and a call no tiled row takes is refused naming the budget, as is one whose single query row across its heads is past
+    /// 2^32, which no tile height brings back. Head dim 512 is past every fused row; the masked calls keep Sq·Skv within the mask
+    /// contract's Int32 bound, so only heads take them past 2^32.</summary>
+    [Theory]
+    [InlineData("f16-at-bound", "f16", 1, 65536, 65536, "none", "materialized")]
+    [InlineData("f16-under", "f16", 8, 4096, 4096, "none", "materialized")]
+    [InlineData("f16-masked-under", "f16", 2, 4096, 4096, "full", "materialized")]
+    [InlineData("bf16-at-bound", "bf16", 4, 32768, 32768, "none", "materialized")]
+    [InlineData("f16-past", "f16", 1, 65537, 65536, "none", "tiled.cast")]
+    [InlineData("bf16-past", "bf16", 2, 46341, 46341, "none", "tiled.cast")]
+    [InlineData("f32-past", "f32", 1, 65537, 65536, "none", "tiled.f32")]
+    [InlineData("f32-keymask-past", "f32", 4, 40000, 40000, "key", "tiled.f32.keybias")]
+    [InlineData("f32-mask-past", "f32", 4, 40000, 40000, "full", "refuse")]
+    [InlineData("f16-keymask-past", "f16", 4, 40000, 40000, "key", "refuse")]
+    [InlineData("f16-one-row-past", "f16", 70000, 1, 65537, "none", "refuse")]
+    public void TheMaterializedRowAddresses2Pow32ScoreElements(string name, string dtype, int heads, int sq, int skv, string mask, string row)
+    {
+        const int d = 512;
+        DType dt = dtype switch { "f16" => DType.F16, "bf16" => DType.BF16, _ => DType.F32 };
+        Tensor q = new(new TensorShape(1, heads, sq, d), dt), k = new(new TensorShape(1, heads, skv, d), dt);
+        Tensor v = new(k.Shape, dt), o = new(q.Shape, dt);
+        Tensor? bias = mask switch
+        {
+            "key" => new Tensor(new TensorShape(1, 1, 1, skv), DType.F32),
+            "full" => new Tensor(new TensorShape(1, 1, sq, skv), DType.F32),
+            _ => null,
+        };
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(o, q, k, v, bias, 0.125f, false);
+        CudaBackend backend = Backend();
+
+        Assert.Equal(row, Plan(backend, "BuildDenseRows", in call));
+        Assert.Equal(name.Contains("past", StringComparison.Ordinal), CudaBackend.ScoresPastMaterialized(in call));
+        if (row != "refuse") return;
+        AttentionUnsupportedException refused = Assert.Throws<AttentionUnsupportedException>(
+            () => AttentionPlanner.Run(Rows(backend, "BuildDenseRows"), in call));
+        Assert.Contains("2^32 (4294967296)", refused.Message);
+        Assert.Contains(((long)heads * sq * skv).ToString(System.Globalization.CultureInfo.InvariantCulture), refused.Message);
+    }
+
+    /// <summary>The query tile: a quarter of free VRAM in F32 scores or the height <c>numerics.sdpaTile</c> forces, never past the 2^32
+    /// score elements the softmax addresses (65075 rows over 66000 keys, however much memory is free or the knob asks), no division by an
+    /// empty key set, and a call whose one query row is already past them is refused rather than tiled.</summary>
+    [Theory]
+    [InlineData(12L << 30, 24, 4480, 4480, 0, 4480)]
+    [InlineData(80L << 30, 1, 66000, 66000, 0, 65075)]
+    [InlineData(1L << 30, 1, 66000, 66000, 66000, 65075)]
+    [InlineData(1L << 30, 1, 66000, 66000, 100, 100)]
+    [InlineData(1L << 30, 1, 64, 0, 0, 64)]
+    public void TheTileHeightNeverPassesTheBound(long freeBytes, int heads, int sq, int skv, int forced, long rows)
+    {
+        Assert.Equal(rows, CudaBackend.TileRows((ulong)freeBytes, heads, sq, skv, forced == 0 ? null : forced));
+        Assert.True(rows * heads * skv <= CudaBackend.MaterializedMaxScores);
+        AttentionUnsupportedException refused = Assert.Throws<AttentionUnsupportedException>(
+            () => CudaBackend.TileRows((ulong)freeBytes, 70000, 1, 65537, forced == 0 ? null : forced));
+        Assert.Contains("2^32 (4294967296)", refused.Message);
     }
 
     [Fact]

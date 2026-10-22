@@ -44,8 +44,8 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "boogu", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Boogu's sampling settings: 25 steps at text-guidance 3.5, 1024x1024. The step count is the lifted loader's, and 3.5 sits in the 2-5 band the base model is documented to work in.</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 25, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+    /// <summary>Boogu's sampling settings: 20 steps at text-guidance 4.0, 1024x1024 (SwarmUI <c>Model Support.md</c>, Boogu: 20 steps as normal, CFG around 4). The lifted loader used 25 steps at 3.5.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 20, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <summary>Boogu Turbo's sampling settings: 4 distilled steps, guidance-free (CFG 1.0), LCM. Boogu's own shifted
     /// linspace is already ComfyUI's <c>sgm_uniform</c> for this model, so no schedule is named.</summary>
@@ -141,8 +141,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 4096);
             BooguImagePipeline pipeline = new BooguImagePipeline(context.Backend, transformer, vaeDecoder, vaeEncoder, config);
             Logs.Info("[BooguImageRecipe] Boogu-Image ready (text-to-image).");
-            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack,
-                DefaultsFor(context.ResolveVariant(BooguImageVariants.Catalog)));
+            return new BooguImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, context.Backend, loaders, loraStack);
         }
         catch (Exception ex)
         {

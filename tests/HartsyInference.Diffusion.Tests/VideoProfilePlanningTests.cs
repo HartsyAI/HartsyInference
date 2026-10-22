@@ -250,9 +250,9 @@ public sealed class VideoProfilePlanningTests : IDisposable
             Scheduler = "normal",
         };
 
-        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, request, "test-video", defaults,
-            VideoFeatures.Guides | VideoFeatures.AudioDenoiseMask | VideoFeatures.VideoControlNet
-                | VideoFeatures.VideoInpaint, CancellationToken.None);
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("test-video", defaults, VideoFeatures.Guides | VideoFeatures.AudioDenoiseMask | VideoFeatures.VideoControlNet
+                | VideoFeatures.VideoInpaint), CancellationToken.None);
 
         Assert.Equal(2.5f, plan.EffectiveSettings.AudioFlowShift);
         Assert.Contains(plan.Issues, issue => issue.Code == "video.guide.visual_xor");
@@ -291,8 +291,9 @@ public sealed class VideoProfilePlanningTests : IDisposable
             Scheduler = "normal",
         };
 
-        VideoPlan withoutSidecar = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", defaults,
-            VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora, CancellationToken.None);
+        VideoPlan withoutSidecar = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", defaults,
+                VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora), CancellationToken.None);
         Assert.Contains(withoutSidecar.Issues, issue => issue.Code == "video.profile.sidecar_required");
         Assert.Equal(VideoAccelerationKind.None, withoutSidecar.Profile.Acceleration);
 
@@ -314,8 +315,9 @@ public sealed class VideoProfilePlanningTests : IDisposable
         });
         await File.WriteAllTextAsync(sidecar, json);
 
-        VideoPlan withSidecar = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", defaults,
-            VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora, CancellationToken.None);
+        VideoPlan withSidecar = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", defaults,
+                VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora), CancellationToken.None);
         Assert.Equal("community-fl-turbo8", withSidecar.Profile.Id);
         Assert.Equal(VideoAccelerationKind.Turbo, withSidecar.Profile.Acceleration);
         Assert.Equal(8, withSidecar.EffectiveSettings.Steps);
@@ -330,8 +332,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
         ModelSpec spec = new ModelSpec { Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video };
         VideoRequest request = new VideoRequest { Prompt = "test" };
 
-        VideoPlan unbound = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", H3Defaults(),
-            VideoFeatures.Lora, CancellationToken.None);
+        VideoPlan unbound = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
         Assert.Contains(unbound.Issues, issue => issue.Code == "video.vsa.profile_required");
 
         string json = JsonSerializer.Serialize(new Dictionary<string, object>
@@ -349,8 +351,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
             ["scheduler"] = "normal",
         });
         await File.WriteAllTextAsync(checkpoint + ".hartsy-video-profile.json", json);
-        VideoPlan bound = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", H3Defaults(),
-            VideoFeatures.Lora, CancellationToken.None);
+        VideoPlan bound = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
         Assert.Equal(VideoAttentionKind.FastVideoVsa64V1, bound.Profile.Attention);
         Assert.DoesNotContain(bound.Issues, issue => issue.Code is "video.vsa.profile_required" or "video.vsa.gates_required");
 
@@ -388,8 +390,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
             Loras = new LoraStack { Entries = [new LoraEntry { Model = adapter }] },
         };
 
-        VideoPlan accepted = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", H3Defaults(),
-            VideoFeatures.Lora, CancellationToken.None);
+        VideoPlan accepted = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
         Assert.Equal(VideoAccelerationKind.Pdd, accepted.Profile.Acceleration);
         Assert.Equal(8, accepted.EffectiveSettings.Steps);
         Assert.True(accepted.ArtifactMetadata.ContainsKey("lora:0"));
@@ -400,7 +402,7 @@ public sealed class VideoProfilePlanningTests : IDisposable
         VideoPlan rejected = await VideoProfileResolver.ResolveAsync(spec, request with
         {
             Loras = new LoraStack { Entries = [new LoraEntry { Model = mismatch }] },
-        }, "minimax-h3", H3Defaults(), VideoFeatures.Lora, CancellationToken.None);
+        }, TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
         Assert.Contains(rejected.Issues, issue => issue.Code == "video.pdd.target_hash_mismatch");
         Assert.False(rejected.IsValid);
     }
@@ -435,7 +437,7 @@ public sealed class VideoProfilePlanningTests : IDisposable
         {
             Prompt = "test",
             Loras = new LoraStack { Entries = [new LoraEntry { Model = lora }] },
-        }, "minimax-h3", H3Defaults(), VideoFeatures.Lora, CancellationToken.None);
+        }, TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
     }
 
     [Fact]
@@ -495,8 +497,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
         VideoPlan plan;
         try
         {
-            plan = await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", H3Defaults(),
-                VideoFeatures.VideoControlNet | VideoFeatures.VideoInpaint | VideoFeatures.Lora,
+            plan = await VideoProfileResolver.ResolveAsync(spec, request,
+                TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.VideoControlNet | VideoFeatures.VideoInpaint | VideoFeatures.Lora),
                 CancellationToken.None);
         }
         finally
@@ -560,8 +562,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
                     new VideoControl { Model = controlPath, Video = new VideoClip { Data = [1] } },
                 ],
             };
-            return await VideoProfileResolver.ResolveAsync(spec, request, "minimax-h3", H3Defaults(),
-                VideoFeatures.VideoControlNet | VideoFeatures.VideoInpaint | VideoFeatures.Lora,
+            return await VideoProfileResolver.ResolveAsync(spec, request,
+                TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.VideoControlNet | VideoFeatures.VideoInpaint | VideoFeatures.Lora),
                 CancellationToken.None);
         }
     }
@@ -582,7 +584,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
             Requested = checkpoint,
             LocalPath = checkpoint,
             Modality = Modality.Video,
-        }, new VideoRequest { Prompt = "test" }, "minimax-h3", H3Defaults(), VideoFeatures.Lora,
+        }, new VideoRequest { Prompt = "test" },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora),
             CancellationToken.None);
 
         Assert.Contains(plan.Issues, issue => issue.Code == "video.checkpoint.tensor_missing"
@@ -614,7 +617,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
             Requested = path,
             LocalPath = path,
             Modality = Modality.Video,
-        }, new VideoRequest { Prompt = "test" }, "minimax-h3", H3Defaults(), VideoFeatures.Lora,
+        }, new VideoRequest { Prompt = "test" },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora),
             CancellationToken.None);
 
         static Task WriteSidecar(string path, string hash, string acceleration, string attention, string task,
@@ -664,7 +668,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
             Requested = checkpoint,
             LocalPath = checkpoint,
             Modality = Modality.Video,
-        }, new VideoRequest { Prompt = "test" }, "minimax-h3", H3Defaults(), VideoFeatures.Lora,
+        }, new VideoRequest { Prompt = "test" },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora),
             CancellationToken.None);
 
         Assert.Contains(plan.Issues, issue => issue.Code == "video.profile.sidecar_url_invalid");
@@ -693,7 +698,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
             Requested = checkpoint,
             LocalPath = checkpoint,
             Modality = Modality.Video,
-        }, new VideoRequest { Prompt = "test" }, "minimax-h3", H3Defaults(), VideoFeatures.Lora,
+        }, new VideoRequest { Prompt = "test" },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora),
             CancellationToken.None);
 
         Task Write(string task, string acceleration, int steps, double flowShift) => File.WriteAllTextAsync(
@@ -740,7 +746,7 @@ public sealed class VideoProfilePlanningTests : IDisposable
         {
             Requested = "missing",
             Modality = Modality.Video,
-        }, request, "minimax-h3", H3Defaults(), VideoFeatures.Lora, CancellationToken.None);
+        }, request, TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
 
         Assert.Contains(plan.Issues, issue => issue.Code == "video.request.value_invalid");
         Assert.Contains(plan.Issues, issue => issue.Code == "video.sampler.unsupported");
@@ -788,7 +794,8 @@ public sealed class VideoProfilePlanningTests : IDisposable
             {
                 MaskVideo = new VideoClip { Data = data, Format = "png" },
             },
-        }, "minimax-h3", H3Defaults(), VideoFeatures.VideoDenoiseMask, CancellationToken.None);
+        },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.VideoDenoiseMask), CancellationToken.None);
     }
 
     private ImageData Image(int width, int height) =>

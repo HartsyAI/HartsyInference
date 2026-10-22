@@ -10,6 +10,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -54,7 +55,8 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         AudioClip speech = request.VideoAudioReference ?? request.VideoAudioInput
@@ -66,10 +68,10 @@ public sealed class WanS2VRecipePipeline : IVideoRecipePipeline
 
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 81, step: _config.VaeTemporalCompression);
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
+        int steps = settings.Steps;
+        int numFrames = settings.Frames;
+        float cfgScale = settings.CfgScale;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, _config.VaeSpatialCompression);
 
         (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWeightedWanPrompts(
             _backend, _umt5, _tokenizer, _config.TextDim, prompt, negative);

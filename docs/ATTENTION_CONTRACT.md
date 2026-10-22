@@ -62,6 +62,11 @@ For a visible pair the score is computed in this order; the order is part of the
 is `m + ln Σ exp(s − m)` in natural-log units, sinks included.
 
 A **fully excluded row** (no visible key and no sink) produces `o = 0` and `LSE = −∞`, on every backend.
+A `−∞` sink is no sink; a `+∞` sink makes the row's output and LSE NaN.
+
+**NaN propagates.** An output element or LSE whose computation reads a NaN — in Q, K, V, a bias, a sink or a scale — is
+NaN. No kernel drops a NaN from a maximum or rounds one into a finite value; a quantized kernel may spread it further
+(through a shared scale or mean), never less.
 
 ## 4. Masks
 
@@ -115,11 +120,20 @@ allow, never add them:
 | `f16` | F16 operand storage and multiply where the element bounds fit, saturation permitted, F32 accumulation |
 | `int8` | `f16`, plus INT8 Q/K with per-row or finer scales and K smoothing, plus the P/V format the model's gate selected |
 
+A call may also refuse a multiply format (`AttentionNumerics.Refused`, per layer `AttentionLayerConfig.RefusedFormats`): every
+row that declares that format is excluded, whatever the call grants or asserts.
+
 K smoothing (subtracting one vector `μ` from every key) shifts each query row's scores by `cᵢ = α qᵢ · μ`. Plain
 softmax, additive bias and exclusions are invariant to that shift; a softcap is not (`tanh(x − c)` is not a shift of
 `tanh(x)`), a sink logit must be shifted by the same `cᵢ`, the returned LSE must add `cᵢ` back, and two segments
 smoothed with different vectors need per-segment corrections. A kernel that smooths implements those corrections or
 refuses the call. A stale smoothing vector is invariant in real arithmetic and still changes quantized bytes.
+
+INT8 attention v2 is specified by its emulator, `Int8AttentionV2Reference` (beside the host reference): the stats pass,
+quantization and online recurrence its kernel rows reproduce, bit for bit on the Q/K/V bytes, scales, K means and INT32 QK
+products when the emulator is fed the kernel's own scales, and up to summation order and the hardware exp2 on the output.
+It applies the corrections above: a softcap gets each row's offset back before the tanh, sinks and the LSE take it, and
+each key segment carries its own.
 
 ## 6. Planning and fallback
 
@@ -185,14 +199,19 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's cuDNN rows read Q, K, V and the output as strided views (head dim contiguous, offset and strides multiples of 8
   elements, F16 or BF16; the output must cover its whole tensor) and are the only rows that take a strided or batched
   token-major call; no row stages a copy, so a view none of them takes is refused at planning. F32 operands are cast whole
-  and so must be whole tensors.
+  and so must be whole tensors. A layer takes the token-major entry for a batch of per-head operands only where its config
+  sets `TokenMajorBatches` and the backend plans a row for the call; Vulkan's token-major rows read one sequence and plan none.
 - CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
   dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
   permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
-- CUDA runs F32 attention GEMMs in TF32 whatever the precision settings say, and `FlashAttention`'s F32 prefill
-  narrows to F16 without a permission.
+- CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
+  `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
+  without a permission.
 - CUDA's materialized F32→F16 cast does not saturate; cuDNN's does.
 - CUDA chooses between the materialized and tiled paths, the tile height, and cuDNN or FA2 prefill from free VRAM.
+- CUDA's materialized row addresses at most 2^32 score elements (B·H·Sq·Skv; its softmax forms row offsets in 32 bits), and
+  so does each query tile. Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
+  unmasked or key-masked F32 call the tiled F32 rows, and any other call is refused at planning, naming the budget.
 - Vulkan's scalar kernel reads a per-head or per-batch mask as one `[Sq,Skv]` block, and its naive kernel mis-addresses
   a per-batch one.
 - `AttentionReference.FlashAttention` adds ALiBi before the softcap; the orders differ only when a call sets both.

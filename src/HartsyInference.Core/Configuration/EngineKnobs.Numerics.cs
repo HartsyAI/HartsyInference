@@ -79,6 +79,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Flux3F16 =
         Bool("numerics.flux3F16", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs the FLUX.3 block loop in F16 on backends with F16 activation kernels. Off by default until real-weight numerics and a Swarm A/B pass; 1 turns it on.");
 
+    /// <summary>F16 attention and FFN branches over Wan's F32 residual stream, for TI2V-5B and Wan 2.1 T2V-14B on backends with F16
+    /// activation kernels. It also needs <see cref="DitF16"/>; false keeps the F32 path.</summary>
+    public static readonly Knob<bool> WanF16 =
+        Bool("numerics.wanF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs Wan's attention and FFN branches in F16 over the F32 residual stream (TI2V-5B and Wan 2.1 T2V-14B) on backends with F16 activation kernels; 0 keeps the F32 path.");
+
     /// <summary>CUDA-graph capture of a DiT denoise step: 0 kills both tiers, 1 forces both, unset keeps per-arch defaults.</summary>
     public static readonly Knob<bool> DitGraph =
         Bool("numerics.ditGraph", false, KnobScope.Runtime, KnobDomain.Numerics, "CUDA-graph capture of a DiT denoise step: 0 kills both tiers, 1 forces both, unset keeps per-arch defaults.");
@@ -199,14 +204,6 @@ public static partial class EngineKnobs
     /// <summary>Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).</summary>
     public static readonly Knob<bool> SageAttn =
         Bool("numerics.sageAttn", true, KnobScope.Runtime, KnobDomain.Numerics, "Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).");
-
-    /// <summary>Literal f16acc picks SageAttention v1's F16-accumulate PV variant; any other value silently means off.</summary>
-    public static readonly Knob<string?> SagePv =
-        Str("numerics.sagePv", null, KnobScope.Runtime, KnobDomain.Numerics, "Literal f16acc picks SageAttention v1's F16-accumulate PV variant; any other value silently means off.");
-
-    /// <summary>Forces the older v0 SageAttention flash kernel instead of the register-resident v1 path.</summary>
-    public static readonly Knob<bool> SageV0 =
-        Bool("numerics.sageV0", false, KnobScope.Runtime, KnobDomain.Numerics, "Forces the older v0 SageAttention flash kernel instead of the register-resident v1 path.");
 
     /// <summary>Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.</summary>
     public static readonly Knob<bool> SandwichFusion =

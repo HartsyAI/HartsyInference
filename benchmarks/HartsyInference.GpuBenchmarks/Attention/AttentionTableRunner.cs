@@ -96,7 +96,7 @@ public static unsafe class AttentionTableRunner
         using (Tensor vh = inp.Build(Operand.V, false, widen: true, arm.Dtype))
         using (Tensor oh = new(new TensorShape(s.B, s.Hq, s.Sq, s.D), arm.Dtype))
         {
-            Func<Tensor> kernel = () => { be.ScaledDotProductAttention(oh, qh, kh, vh, mask, scale, arm.AllowF16); return oh; };
+            Func<Tensor> kernel = () => { HeadMajor(be, oh, qh, kh, vh, mask, scale, arm); return oh; };
             yield return Time(be, s, arm, "kernel", kernel, warmup, trials, oracle, oracleRows, tokenMajorOut: false, ownsOutput: false);
         }
         if (s.Layout != "tm" && !s.Gqa) yield break;
@@ -117,6 +117,14 @@ public static unsafe class AttentionTableRunner
         int g = s.Hq / s.Hkv;
         TensorShape qMh = new(s.B, s.Hq, s.Sq, s.D), kvMh = new(s.B, s.Hkv, s.Skv, s.D), kvRep = new(s.B, s.Hq, s.Skv, s.D);
         TensorShape tmOut = new(s.B, s.Sq, s.Hq, s.D);
+        if (s.Layout == "tm" && arm.Grant is { } grant
+            && (s.Gqa ? be.SupportsTokenMajorGqaAttention : be.SupportsTokenMajorAttention))
+            return () =>
+            {
+                Tensor o = new(tmOut, arm.Dtype);
+                be.Attention(AttentionCall.FromTokenMajor(o, q, k, v, mask, s.Hq, s.Hkv, s.D, scale, arm.AllowF16) with { Numerics = grant });
+                return o;
+            };
         if (s.Layout == "tm" && s.Gqa && be.SupportsTokenMajorGqaAttention)
             return () => { Tensor o = new(tmOut, arm.Dtype); be.ScaledDotProductAttentionTokenMajor(o, q, k, v, mask, s.Hq, s.Hkv, s.D, scale, arm.AllowF16); return o; };
         if (s.Layout == "tm" && !s.Gqa && be.SupportsTokenMajorAttention)
@@ -136,7 +144,7 @@ public static unsafe class AttentionTableRunner
                     vr = new(kvRep, arm.Dtype); be.RepeatKvHeads(vr, vh, s.Hkv, g); vh.Dispose();
                 }
                 Tensor oh = new(qMh, arm.Dtype);
-                be.ScaledDotProductAttention(oh, qh, kr, vr, mask, scale, arm.AllowF16);
+                HeadMajor(be, oh, qh, kr, vr, mask, scale, arm);
                 qh.Dispose(); kr.Dispose(); vr.Dispose();
                 Tensor o = new(tmOut, arm.Dtype);
                 be.Permute0213(o, oh, s.Hq, s.Sq, s.D);
@@ -150,10 +158,19 @@ public static unsafe class AttentionTableRunner
             Tensor kr = new(kvRep, arm.Dtype); be.RepeatKvHeads(kr, k, s.Hkv, g);
             Tensor vr = new(kvRep, arm.Dtype); be.RepeatKvHeads(vr, v, s.Hkv, g);
             Tensor o = new(qMh, arm.Dtype);
-            be.ScaledDotProductAttention(o, q, kr, vr, mask, scale, arm.AllowF16);
+            HeadMajor(be, o, q, kr, vr, mask, scale, arm);
             kr.Dispose(); vr.Dispose();
             return o;
         };
+    }
+
+    /// <summary>The head-major call: the legacy entry, or the descriptor when the arm carries a grant the legacy flag cannot.</summary>
+    private static void HeadMajor(IBackend be, Tensor o, Tensor q, Tensor k, Tensor v, Tensor? mask, float scale, AttentionArm arm)
+    {
+        if (arm.Grant is { } grant)
+            be.Attention(AttentionCall.FromScaledDotProductAttention(o, q, k, v, mask, scale, arm.AllowF16) with { Numerics = grant });
+        else
+            be.ScaledDotProductAttention(o, q, k, v, mask, scale, arm.AllowF16);
     }
 
     private static Result Time(IBackend be, AttentionBenchShape s, AttentionArm arm, string callName, Func<Tensor> call,

@@ -6,6 +6,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Audio;
@@ -138,7 +139,7 @@ internal static class HeartMulaMusicModel
             // section lowercased and BOS/EOS-wrapped.
             int[] tags = AudioTextFrontend.HeartMulaTags(request.Genre ?? string.Empty);
             int[] lyrics = AudioTextFrontend.HeartMulaLyrics(request.Prompt ?? string.Empty);
-            int maxFrames = (int)(Math.Clamp(request.Duration, 1d, 300d) * 12.5);   // HeartCodec frame rate = 12.5 Hz
+            int maxFrames = (int)(Math.Clamp(request.Duration.Filled(), 1d, 300d) * 12.5);   // HeartCodec frame rate = 12.5 Hz
             // Per-frame progress: the AR decode is the long pole, and silence in the log reads as "stuck".
             void OnFrame(int done, int total)
             {
@@ -149,7 +150,7 @@ internal static class HeartMulaMusicModel
             }
             float[] samples = pipeline.Generate(backend, lyrics, maxFrames, seed: request.Seed,
                 temperature: request.Temperature.HasValue ? (float)request.Temperature.Value : null, topK: request.TopK,
-                cfgScale: request.CfgScale.HasValue ? (float)request.CfgScale.Value : null, cancel: ct,
+                cfgScale: request.CfgScale.HasValue ? (float)request.CfgScale.Filled() : null, cancel: ct,
                 onFrame: OnFrame, tagsTokens: tags);
             return MusicAudio.Mono(samples);
         }

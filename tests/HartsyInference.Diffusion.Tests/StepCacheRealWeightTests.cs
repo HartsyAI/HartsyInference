@@ -102,7 +102,9 @@ public sealed class StepCacheRealWeightTests
             return;
         }
         RecipeContext context = new RecipeContext { CheckpointPath = c.CheckpointPath, Backend = backend };
-        using IRecipePipeline pipeline = c.RecipeFactory().Construct(context);
+        IArchitectureRecipe recipe = c.RecipeFactory();
+        using IRecipePipeline pipeline = recipe.Construct(context);
+        request = recipe.Defaults.Apply(request);
 
         Directory.CreateDirectory(TestPaths.OutputDir);
         byte[] uncached = Generate(pipeline, request, threshold: null, lateWindow: null, out string uncachedLog);
@@ -165,7 +167,7 @@ public sealed class StepCacheRealWeightTests
         });
         try
         {
-            ImageResult result = pipeline.Generate(request, progress: null, cancel: default);
+            ImageResult result = pipeline.Generate(request, ImageEffectiveSettings.Of(request), progress: null, cancel: default);
             return result.Rgb;
         }
         finally

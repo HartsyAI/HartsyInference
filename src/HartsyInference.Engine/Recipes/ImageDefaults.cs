@@ -6,6 +6,10 @@ namespace HartsyInference.Engine.Recipes;
 /// left <c>null</c> resolves to; any value the caller does set wins.</summary>
 public sealed record ImageDefaults
 {
+    /// <summary>Revision of these values, recorded on every plan and result that used them. Bump it whenever a value
+    /// changes, so output generated before and after the change can be told apart.</summary>
+    public int Revision { get; init; } = 1;
+
     /// <summary>Denoising steps the architecture's authors sample with.</summary>
     public required int Steps { get; init; }
 

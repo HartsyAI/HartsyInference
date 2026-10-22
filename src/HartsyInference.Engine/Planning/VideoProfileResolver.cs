@@ -27,28 +27,34 @@ internal static class VideoProfileResolver
         "919a48acb525dc8fc70287fcd94ec1f5e5e289a77f1df14d01099c6ce204eb02";
     private const string H3FunPrunedFormat = "minimax_h3_fun_pruned_v1";
 
-    /// <summary>Builds a plan for a resolved recipe family and request.</summary>
-    public static async Task<VideoPlan> ResolveAsync(ModelSpec spec, VideoRequest request, string familyId,
-        VideoDefaults familyDefaults, VideoFeatures familyFeatures, CancellationToken cancel)
+    /// <summary>Whether exact-hash checkpoint profiles overlay the recipe defaults of <paramref name="familyId"/> at plan time.</summary>
+    internal static bool BindsProfiles(string familyId) =>
+        string.Equals(familyId, H3FamilyId, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Builds a plan for a request against its resolved recipe declaration.</summary>
+    public static async Task<VideoPlan> ResolveAsync(ModelSpec spec, VideoRequest request,
+        VideoRecipeDeclaration recipe, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(familyId);
-        ArgumentNullException.ThrowIfNull(familyDefaults);
+        ArgumentNullException.ThrowIfNull(recipe);
 
-        if (!string.Equals(familyId, H3FamilyId, StringComparison.OrdinalIgnoreCase))
+        if (!BindsProfiles(recipe.FamilyId))
         {
-            return ResolveGeneric(spec, request, familyId, familyDefaults, familyFeatures);
+            return ResolveGeneric(spec, request, recipe);
         }
-        return await ResolveH3Async(spec, request, familyDefaults, familyFeatures, cancel).ConfigureAwait(false);
+        return await ResolveH3Async(spec, request, recipe, cancel).ConfigureAwait(false);
     }
 
-    private static VideoPlan ResolveGeneric(ModelSpec spec, VideoRequest request, string familyId,
-        VideoDefaults defaults, VideoFeatures features)
+    private static VideoPlan ResolveGeneric(ModelSpec spec, VideoRequest request, VideoRecipeDeclaration recipe)
     {
+        string familyId = recipe.FamilyId;
+        VideoDefaults defaults = recipe.Defaults;
+        VideoFeatures features = recipe.Features;
         List<VideoPlanIssue> issues = [];
         ValidateCommonRequest(request, issues);
         VideoRequest resolved = defaults.Apply(request);
+        resolved = resolved with { Frames = PlanFrames(resolved.Frames!.Value, recipe.Constraints.Frames, issues) };
         VideoFeatures requested = VideoService.RequestedFeatures(request);
         VideoFeatures missing = requested & ~features;
         if (missing != VideoFeatures.None)
@@ -86,6 +92,8 @@ internal static class VideoProfileResolver
             Model = spec,
             Profile = profile,
             EffectiveSettings = settings,
+            Recipe = recipe.Identity,
+            Provenance = ParameterProvenance.ForVideo(request, settings, ParameterSource.RecipeDefault),
             Issues = issues,
             CacheIdentity = $"profile:{profile.Id};",
             ComponentPaths = spec.LocalPath is null
@@ -94,9 +102,11 @@ internal static class VideoProfileResolver
         };
     }
 
-    private static async Task<VideoPlan> ResolveH3Async(ModelSpec spec, VideoRequest request, VideoDefaults familyDefaults,
-        VideoFeatures familyFeatures, CancellationToken cancel)
+    private static async Task<VideoPlan> ResolveH3Async(ModelSpec spec, VideoRequest request,
+        VideoRecipeDeclaration recipe, CancellationToken cancel)
     {
+        VideoDefaults familyDefaults = recipe.Defaults;
+        VideoFeatures familyFeatures = recipe.Features;
         List<VideoPlanIssue> issues = [];
         ValidateCommonRequest(request, issues, deferSourceFreeMaskVideo: true);
         ValidateH3Request(request, issues);
@@ -111,7 +121,7 @@ internal static class VideoProfileResolver
         {
             issues.Add(Error("video.model.missing", "MiniMax-H3 planning requires a resolved local checkpoint path.",
                 nameof(ModelSpec.LocalPath)));
-            return InvalidH3Plan(spec, request, familyDefaults, familyFeatures, issues);
+            return InvalidH3Plan(spec, request, recipe, issues);
         }
 
         string checkpointPath = spec.LocalPath;
@@ -126,7 +136,7 @@ internal static class VideoProfileResolver
             issues.Add(Error("video.component.missing", ex.Message, nameof(ModelSpec.LocalPath)));
             if (!File.Exists(checkpointPath))
             {
-                return InvalidH3Plan(spec, request, familyDefaults, familyFeatures, issues);
+                return InvalidH3Plan(spec, request, recipe, issues);
             }
         }
 
@@ -140,7 +150,7 @@ internal static class VideoProfileResolver
         {
             issues.Add(Error("video.checkpoint.header_invalid",
                 $"Could not inspect MiniMax-H3 checkpoint header: {ex.Message}", nameof(ModelSpec.LocalPath)));
-            return InvalidH3Plan(spec, request, familyDefaults, familyFeatures, issues);
+            return InvalidH3Plan(spec, request, recipe, issues);
         }
 
         ValidateH3Structure(header.Descriptors, issues);
@@ -161,7 +171,7 @@ internal static class VideoProfileResolver
         {
             issues.Add(Error("video.checkpoint.hash_failed",
                 $"Could not hash MiniMax-H3 checkpoint: {ex.Message}", nameof(ModelSpec.LocalPath)));
-            return InvalidH3Plan(spec, request, familyDefaults, familyFeatures, issues);
+            return InvalidH3Plan(spec, request, recipe, issues);
         }
 
         VideoModelProfile profile;
@@ -232,7 +242,7 @@ internal static class VideoProfileResolver
         ValidateProfileHint(spec.ProfileId, profile, mainHash, issues);
         ValidateRequestedFeatures(request, profile, issues);
         ValidateChain(request, issues);
-        VideoEffectiveSettings settings = ResolveEffectiveSettings(request, profile, issues);
+        VideoEffectiveSettings settings = ResolveEffectiveSettings(request, profile, recipe.Constraints.Frames, issues);
         issues.Add(Warning("minimax.h3.license",
             "MiniMax-H3 use is subject to its community license, including territory restrictions and notice, disclosure, and display obligations."));
 
@@ -243,6 +253,8 @@ internal static class VideoProfileResolver
             Model = spec,
             Profile = profile,
             EffectiveSettings = settings,
+            Recipe = H3Identity(recipe, profile),
+            Provenance = ParameterProvenance.ForVideo(request, settings, ParameterSource.ProfileDefault),
             Issues = issues,
             CacheIdentity = cacheIdentity,
             ComponentPaths = componentPaths,
@@ -252,17 +264,20 @@ internal static class VideoProfileResolver
         };
     }
 
-    private static VideoPlan InvalidH3Plan(ModelSpec spec, VideoRequest request, VideoDefaults defaults,
-        VideoFeatures features, List<VideoPlanIssue> issues)
+    private static VideoPlan InvalidH3Plan(ModelSpec spec, VideoRequest request, VideoRecipeDeclaration recipe,
+        List<VideoPlanIssue> issues)
     {
         VideoModelProfile profile = UnknownBaseProfile(new Dictionary<string, string>(StringComparer.Ordinal),
-            "unknown", null, defaults, features);
+            "unknown", null, recipe.Defaults, recipe.Features);
+        VideoEffectiveSettings settings = ResolveEffectiveSettings(request, profile, recipe.Constraints.Frames, issues);
         return new VideoPlan
         {
             SourceRequest = request,
             Model = spec,
             Profile = profile,
-            EffectiveSettings = ResolveEffectiveSettings(request, profile, issues),
+            EffectiveSettings = settings,
+            Recipe = H3Identity(recipe, profile),
+            Provenance = ParameterProvenance.ForVideo(request, settings, ParameterSource.ProfileDefault),
             Issues = issues,
             CacheIdentity = $"profile:{profile.Id};",
         };
@@ -1394,8 +1409,35 @@ internal static class VideoProfileResolver
         return null;
     }
 
+    /// <summary>The recipe identity of an H3 plan, naming the profile whose defaults it ran: every H3 plan, the
+    /// unrecognized base included, resolves against a profile.</summary>
+    private static RecipeIdentity H3Identity(VideoRecipeDeclaration recipe, VideoModelProfile profile) =>
+        recipe.Identity with { ProfileId = profile.Id };
+
+    /// <summary>The frame count a request runs at on <paramref name="grid"/>; an off-grid count the family refuses is
+    /// reported and left as requested so the plan still describes the request.</summary>
+    private static int PlanFrames(int frames, FrameGrid grid, List<VideoPlanIssue> issues)
+    {
+        if (grid.Normalize(frames) is int planned)
+        {
+            return planned;
+        }
+        // Long arithmetic and the cap keep both suggestions counts the family can actually generate.
+        long below = Math.Max(grid.Offset, grid.Offset + (long)(frames - grid.Offset) / grid.Step * grid.Step);
+        long above = below + grid.Step;
+        if (grid.Max is int max)
+        {
+            below = Math.Min(below, max);
+            above = Math.Min(above, max);
+        }
+        string nearest = below == above ? $"the nearest is {below}" : $"the nearest are {below} and {above}";
+        issues.Add(Error("video.frames.off_grid",
+            $"{frames} frames is not a count this model generates ({grid}); {nearest}.", nameof(VideoRequest.Frames)));
+        return frames;
+    }
+
     private static VideoEffectiveSettings ResolveEffectiveSettings(VideoRequest request, VideoModelProfile profile,
-        List<VideoPlanIssue> issues)
+        FrameGrid grid, List<VideoPlanIssue> issues)
     {
         VideoDefaults defaults = profile.Defaults;
         ValidateLocked(request.Steps, defaults.Steps, VideoLockedFields.Steps, defaults.LockedFields,
@@ -1430,7 +1472,7 @@ internal static class VideoProfileResolver
                 $"Profile '{profile.Id}' requires {defaults.Width}x{defaults.Height}.", "geometry"));
         }
         (width, height) = MiniMaxH3Geometry.ClampToMaxArea(width, height);
-        frames = MiniMaxH3Geometry.AlignFrameCount(frames);
+        frames = PlanFrames(frames, grid, issues);
         ValidateResolvedGuideFrames(request, frames, issues);
         long seed = ResolveExecutionSeed(request.Seed);
         return new VideoEffectiveSettings

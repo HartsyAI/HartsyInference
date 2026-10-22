@@ -47,6 +47,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// host-RAM-starvation failure can't be reproduced on demand in a fast unit test. Null in production.</remarks>
     internal Func<CudnnSdpaSignature, Exception?>? TestCudnnSdpaFaultInjector { get; set; }
 
+    /// <summary>Test-only stand-in for the free VRAM the attention rows budget against (the tiled gate, the BF16 cast scratch);
+    /// null in production.</summary>
+    internal Func<nuint>? TestFreeVramOverride { get; set; }
+
     /// <summary>Per-dim diagnostic snapshot for <see cref="TryCudnnSdpa"/>'s classify/retry/backoff state.</summary>
     /// <remarks>Programmatically queryable observability surface (deliberately not wired into <c>/ready</c>: a
     /// degraded-but-correct fallback to the materialized attention path is not a "can't serve traffic" condition,
@@ -100,9 +104,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Test diagnostic incremented only after a detached cuDNN SDPA session releases all owned resources.</summary>
     internal long CudnnSdpaDisposedSessionCount => Interlocked.Read(ref _cudnnSdpaDisposedSessionCount);
-
-    /// <summary>True once the opt-in TF32 FlashAttention-v2 path has run at least once this session.</summary>
-    internal bool FlashAttentionV2Engaged { get; private set; }
 
     private long _sageAttentionExecutionCount;
 
@@ -1146,17 +1147,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Native-F16 SageAttention policy; enabled by default and disabled with <c>numerics.sageAttn=false</c>.</summary>
     private static bool UseSageAttn => EngineKnobs.SageAttn.Value;
 
-    /// <summary>The explicit <c>=1</c> sense of the Sage switch, distinct from the default-ON <see cref="UseSageAttn"/>.</summary>
-    private static bool SageExplicitlyEnabled => EngineKnobs.SageAttnExplicit.Value;
-
     /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>numerics.ltx25Na3dTiled=false</c> falls back to the per-query one. Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
     private static bool UseLtx25Na3dTiled => EngineKnobs.Ltx25Na3dTiled.Value;
-
-    /// <summary>True only when the caller explicitly accepts Sage's F32-to-F16 V-storage narrowing.</summary>
-    /// <remarks>The current Sage prologue materializes V as F16, so an F32 value outside the finite F16 range
-    /// becomes infinity. Requiring a second, plainly unsafe opt-in quarantines that path until V is range-safe.</remarks>
-    internal static bool SageF32ValueNarrowingEnabled =>
-        SageExplicitlyEnabled && EngineKnobs.SageUnsafeF32VNarrow.Value;
 
     /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — PyTorch's default. Opt out: <c>numerics.noTf32=true</c>.</summary>
     /// <remarks>Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a fraction of
@@ -1172,6 +1164,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private readonly bool _sdpaF16ForceOn;
     /// <summary>numerics.sdpaNoF16=true: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
     private readonly bool _sdpaF16Disabled;
+    /// <summary>numerics.sdpaNoTf32=true: the F32 SDPA GEMMs (materialized and query-tiled) run plain FP32, not TF32.</summary>
+    private readonly bool _sdpaNoTf32;
     /// <summary>Routes MHA (D∈{64,128,256}, no mask or broadcastable F32 mask) through cuDNN's fused attention, not materialized cuBLAS.</summary>
     /// <remarks>~34× on the Krea2 self-attention shape. Standard-profile default ON; numerics.sdpaCudnn=false disables.
     /// Missing cuDNN or engine rejections fall back to the materialized paths automatically.</remarks>
@@ -1200,6 +1194,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (_gemmFast16) return CublasApi.CUBLAS_COMPUTE_32F_FAST_16F;
         return _allowTf32 ? CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32 : CublasApi.CUBLAS_COMPUTE_32F;
     }
+
+    /// <summary>Compute type of the F32 SDPA GEMMs: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
+    private int SdpaF32Compute => _sdpaNoTf32 ? CublasApi.CUBLAS_COMPUTE_32F : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
 
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
@@ -1273,6 +1270,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
         _sdpaF16ForceOn = EngineKnobs.SdpaF16.Value;
         _sdpaF16Disabled = EngineKnobs.SdpaNoF16.Value;
+        _sdpaNoTf32 = EngineKnobs.SdpaNoTf32.Value;
         // cuDNN fused flash attention: default ON — resolution failures self-disable per session (and engine
         // rejections per head-dim), falling back to the materialized paths, so machines without cuDNN lose
         // speed, never correctness.
@@ -1298,7 +1296,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             + $"NativeFp4Gemm={EnableNativeFp4Gemm} MempoolKeep={mempoolKeep} " +
             $"EpilogueFusion={EnableEpilogueFusion} Dp4aGemv={EnableDp4aGemv} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
-            $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
+            $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32} Tf32Sdpa={!_sdpaNoTf32}.");
 
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();
         CublasApi.cublasSetStream(_cublasHandle, _stream.Handle).ThrowOnCublasError();
@@ -3377,10 +3375,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     else _kernels!.LaunchCastBf16ToF32(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
                     bPtr = pBCast;
                 }
-                _kernels!.LaunchLayerNorm(
-                    pOut, pIn, wPtr, bPtr,
-                    normDim, totalRows, eps,
-                    _stream.Handle);
+                // An F16 output is an F32 residual stream feeding an F16 branch: normalized in F32, rounded once.
+                if (output.DType == DType.F16)
+                    _kernels!.LaunchLayerNormModulateF32ToF16(pOut, pIn, wPtr, 0, bPtr, normDim, totalRows, totalRows, eps, _stream.Handle);
+                else if (output.DType == DType.F32)
+                    _kernels!.LaunchLayerNorm(pOut, pIn, wPtr, bPtr, normDim, totalRows, eps, _stream.Handle);
+                else
+                    throw new NotSupportedException($"CUDA LayerNorm writes an F32 input as F32 or F16, not {output.DType}.");
             }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -3708,11 +3709,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GatedResidual");
-        // F32, or F16/BF16 activations (residual/value/output) with an F32 gate — the DiT 16-bit recipe.
+        // F32, or F16/BF16 activations (residual/value/output) with an F32 gate — the DiT 16-bit recipe — or an F16 branch
+        // value added to an F32 residual stream.
         bool f16 = residual.DType == DType.F16 && value.DType == DType.F16 && output.DType == DType.F16;
         bool bf16 = residual.DType == DType.BF16 && value.DType == DType.BF16 && output.DType == DType.BF16;
-        if ((!f16 && !bf16 && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32)) || gate.DType != DType.F32)
-            throw new NotSupportedException($"CUDA GatedResidualLastDim supports F32, or F16/BF16 activations with an F32 gate — got output={output.DType}, residual={residual.DType}, value={value.DType}, gate={gate.DType}.");
+        bool mixed = residual.DType == DType.F32 && value.DType == DType.F16 && output.DType == DType.F32;
+        if ((!f16 && !bf16 && !mixed && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32))
+            || gate.DType != DType.F32)
+            throw new NotSupportedException($"CUDA GatedResidualLastDim supports F32, F16/BF16 activations, or an F16 value on an F32 residual, with an F32 gate — got output={output.DType}, residual={residual.DType}, value={value.DType}, gate={gate.DType}.");
         using OpScope _op = EnterOp();
         EnsureKernels();
         int rank = value.Shape.Rank;
@@ -3728,7 +3732,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pGate = GpuTransferHelper.CopyToDevice(gate);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (f16)
+            if (mixed)
+                _kernels!.LaunchGatedResidualLastDimF32F16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
+            else if (f16)
                 _kernels!.LaunchGatedResidualLastDimF16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
             else if (bf16)
                 _kernels!.LaunchGatedResidualLastDimBf16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
@@ -6372,8 +6378,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("LayerNormModulate");
         bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
-        if (!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
-            throw new NotSupportedException("CUDA LayerNormModulate supports F32 or F16 activations.");
+        bool mixed = input.DType == DType.F32 && output.DType == DType.F16;
+        if (!f16 && !mixed && (output.DType != DType.F32 || input.DType != DType.F32))
+            throw new NotSupportedException("CUDA LayerNormModulate supports F32 or F16 activations, or an F32 input into F16.");
         if (scale.DType != DType.F32 || shift.DType != DType.F32)
             throw new NotSupportedException("CUDA LayerNormModulate requires F32 scale/shift.");
         using OpScope _op = EnterOp();
@@ -6389,7 +6396,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pSh = GpuTransferHelper.CopyToDevice(shift);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchLayerNormModulate(f16, pOut, pIn, pSc, pSh, dim, seqLen, (int)rows, eps, _stream.Handle);
+            if (mixed)
+                _kernels!.LaunchLayerNormModulateF32ToF16(pOut, pIn, 0, pSc, pSh, dim, (int)rows, seqLen, eps, _stream.Handle);
+            else
+                _kernels!.LaunchLayerNormModulate(f16, pOut, pIn, pSc, pSh, dim, seqLen, (int)rows, eps, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cached = true;
         }
@@ -7423,8 +7433,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else
             {
-                // F32 QK^T via TF32 tensor cores (~8x over FP32 CUDA cores). TF32 keeps the F32
-                // exponent range, so raw pre-softmax scores can't overflow the way F16 would.
+                // F32 QK^T in SdpaF32Compute. TF32 keeps the F32 exponent range, so raw pre-softmax scores can't
+                // overflow the way F16 would.
                 CublasApi.cublasGemmStridedBatchedEx(
                     _cublasHandle,
                     CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
@@ -7435,7 +7445,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     &beta,
                     scoresBuf, CublasApi.CUDA_R_32F, (int)skv, strideScores,
                     (int)totalHeads,
-                    CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
             if (mask is not null)
@@ -7490,7 +7500,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else
             {
-                // attn_weights @ V via TF32 tensor cores (~8x over FP32 CUDA cores).
                 CublasApi.cublasGemmStridedBatchedEx(
                     _cublasHandle,
                     CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
@@ -7501,7 +7510,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     &zero,
                     opOut, CublasApi.CUDA_R_32F, (int)d, strideOut,
                     (int)totalHeads,
-                    CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
             // If we did the BF16 internal-cast detour, the output is F32 in pOutCast — cast
@@ -7644,7 +7653,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the token-major SDPA entry point; the mask is checked when the rows are planned.</summary>
+    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the
+    /// token-major SDPA entry point; the mask is checked when the rows are planned. The Sq·Skv score matrix is deliberately not
+    /// bounded here: the rows own that bound.</summary>
     internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
         int heads, int headDim, float scale)
     {
@@ -7656,12 +7667,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             bool tokenMajor = t.Shape.Rank switch
             {
                 2 => t.Shape[1] == inner,
+                3 => t.Shape[0] == 1 && t.Shape[2] == inner,
                 4 => t.Shape[0] == 1 && t.Shape[2] == heads && t.Shape[3] == headDim,
                 _ => false,
             };
             if (!tokenMajor)
                 throw new ArgumentException(
-                    $"Token-major SDPA requires [S, heads*headDim] or [1, S, heads, headDim] tensors with heads={heads}, headDim={headDim}; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
+                    $"Token-major SDPA requires [S, heads*headDim], [1, S, heads*headDim] or [1, S, heads, headDim] tensors with heads={heads}, "
+                    + $"headDim={headDim}; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
         }
         if (TokenMajorRows(output) != TokenMajorRows(query))
             throw new ArgumentException($"Token-major SDPA output must have Q's row count; got output={output.Shape}, Q={query.Shape}.");
@@ -7677,7 +7690,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (output.DType != query.DType || key.DType != query.DType || value.DType != query.DType)
             throw new ArgumentException(
                 $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
-        if (sq * skv > int.MaxValue || query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
+        if (query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
     }
 
@@ -7730,10 +7743,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     internal static bool MaskIsKeyOnly(Tensor? mask, long sq)
         => mask is not null && mask.DType == DType.F32 && sq > 1 && MaskQueryRows(mask) == 1;
 
-    /// <summary>cuDNN fused attention over the call's operand views: fp16/bf16 run in place, F32 (whole tensors only) through a saturating F16 cast. False means the caller falls through.</summary>
-    private unsafe bool TryCudnnSdpa(in AttentionCall c)
+    /// <summary>cuDNN fused attention over the call's operand views: fp16/bf16 run in place, F32 (whole tensors only) behind a cast to
+    /// <paramref name="castTarget"/>, saturating F16 or BF16. False means the caller falls through.</summary>
+    private unsafe bool TryCudnnSdpa(in AttentionCall c, CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16)
         => TryCudnnSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, c.QkHeadDim,
-            CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c));
+            CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c),
+            castTarget);
 
     /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit in half of free VRAM (cuMemGetInfo counts pool reservations as used).</summary>
     private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
@@ -7770,7 +7785,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>The view form: the operands' dims and strides come from the caller, so a rank-2 token-major tensor or a column of a wider one reads the same as a whole head-major one.</summary>
     private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, long d,
-        in CudnnSdpa.View q, in CudnnSdpa.View k, in CudnnSdpa.View v, in CudnnSdpa.View o, in CudnnSdpa.Offsets offsets)
+        in CudnnSdpa.View q, in CudnnSdpa.View k, in CudnnSdpa.View v, in CudnnSdpa.View o, in CudnnSdpa.Offsets offsets,
+        CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16)
     {
         lock (_cudnnSdpaLock)
         {
@@ -7779,11 +7795,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // Callers perform this check before entering, but another request can publish a failure while this
             // request waits for the shared cuDNN handle. Recheck under the same lock that serializes attempts so
             // a queued request cannot bypass a newly established backoff window.
-            // An F32 Q/K/V needs the saturating cast; without it (kv_scatter_f16.ptx missing) the materialized path keeps the call.
-            if (_cudnnSdpaDead || (query.DType != DType.F16 && query.DType != DType.BF16 && _kernels is not { HasCastF32ToF16Sat: true })
+            // An F32 Q/K/V cast to F16 needs the saturating cast; without it (kv_scatter_f16.ptx missing) the materialized path keeps the call.
+            if (_cudnnSdpaDead
+                || (query.DType == DType.F32 && castTarget != CudnnSdpa.SdpaDtype.BF16 && _kernels is not { HasCastF32ToF16Sat: true })
                 || !CudnnBias.TryFrom(mask, q.B, q.H, q.S, k.S, out CudnnBias bias))
                 return false;
-            CudnnSdpaSignature signature = CudnnSdpaSignature.For(query.DType, q.H, k.H, d, bias, CudnnSdpa.IsStrided(d, q, k, v, o, offsets));
+            CudnnSdpaSignature signature = CudnnSdpaSignature.For(CudnnSdpaRows.Compute(query.DType, castTarget), q.H, k.H, d, bias,
+                CudnnSdpa.IsStrided(d, q, k, v, o, offsets));
             if (!_cudnnSdpaHealth.Eligible(signature, Environment.TickCount64)) return false;
 
             return TryCudnnSdpaLocked(output, query, key, value, mask, scale, CudnnSdpa.PlanKey.Of(signature.Dtype, d, q, k, v, o, bias), offsets, signature);
@@ -7794,7 +7812,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
         in CudnnSdpa.PlanKey plan, in CudnnSdpa.Offsets offsets, CudnnSdpaSignature signature)
     {
-        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qCast = 0, kCast = 0, vCast = 0, oCast = 0;
         bool cachedOutput = false;
         CudnnSdpaShape shape = new(signature, query.DType, plan);
         if (_cudnnSdpaHealth.Refused(shape)) return false;
@@ -7829,18 +7847,24 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else
             {
-                qF16 = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
-                kF16 = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
-                vF16 = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
-                oF16 = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
-                // Saturating cast: a Q/K/V value past F16's 65504 becomes the limit, not infinity, before the fused softmax sees it.
-                _kernels!.LaunchCastF32ToF16Sat(qF16, pQ, (int)query.ElementCount, _stream.Handle);
-                _kernels!.LaunchCastF32ToF16Sat(kF16, pK, (int)key.ElementCount, _stream.Handle);
-                _kernels!.LaunchCastF32ToF16Sat(vF16, pV, (int)value.ElementCount, _stream.Handle);
+                bool bf16 = plan.Dtype == CudnnSdpa.SdpaDtype.BF16;
+                qCast = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
+                kCast = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
+                vCast = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
+                oCast = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
+                CastIn(qCast, pQ, query.ElementCount);
+                CastIn(kCast, pK, key.ElementCount);
+                CastIn(vCast, pV, value.ElementCount);
+                _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
+                if (bf16) _kernels!.LaunchCastBf16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
+                else _kernels!.LaunchCastF16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
 
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, plan, scale, pMask, offsets);
-
-                _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
+                // F16 saturates, so a value past 65504 reaches the fused softmax as the limit, not infinity; BF16 keeps F32's range.
+                void CastIn(ulong cast, ulong source, long count)
+                {
+                    if (bf16) _kernels!.LaunchCastF32ToBf16(cast, source, (int)count, _stream.Handle);
+                    else _kernels!.LaunchCastF32ToF16Sat(cast, source, (int)count, _stream.Handle);
+                }
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -7911,74 +7935,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GpuTransferHelper.FreeDevice(pV);
             if (pMask != 0) GpuTransferHelper.FreeDevice(pMask);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            if (qF16 != 0) CudaMemory.FreeAsync(qF16, _stream.Handle);
-            if (kF16 != 0) CudaMemory.FreeAsync(kF16, _stream.Handle);
-            if (vF16 != 0) CudaMemory.FreeAsync(vF16, _stream.Handle);
-            if (oF16 != 0) CudaMemory.FreeAsync(oF16, _stream.Handle);
-        }
-    }
-
-    /// <summary>Checks the complete safety contract for the experimental TF32 FlashAttention-v2 kernel.</summary>
-    /// <remarks>The current kernel has no masked or GQA variant and its WMMA query load requires complete
-    /// 32-row tiles. Rejecting a partial query tile prevents the final block from reading beyond Q.</remarks>
-    internal static bool FlashAttentionV2ContractSatisfied(
-        Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool tf32Available)
-    {
-        if (!tf32Available || mask is not null || !float.IsFinite(scale)) return false;
-        if (output.Shape.Rank != 4 || query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
-            return false;
-        if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
-            return false;
-
-        long b = query.Shape[0];
-        long h = query.Shape[1];
-        long sq = query.Shape[2];
-        long d = query.Shape[3];
-        long skv = key.Shape[2];
-        if (b <= 0 || h <= 0 || sq <= 0 || skv <= 0 || d <= 0
-            || !FlashAttentionV2GridDimensionsSupported(b, h) || sq > int.MaxValue
-            || skv > int.MaxValue || d > int.MaxValue)
-            return false;
-        if ((d != 64 && d != 128) || sq % 32 != 0) return false;
-
-        return output.Shape == query.Shape && key.Shape == value.Shape && key.Shape[0] == b && key.Shape[1] == h
-            && key.Shape[3] == d;
-    }
-
-    /// <summary>Validates the CUDA grid Y/Z dimensions used directly for head and batch indices.</summary>
-    internal static bool FlashAttentionV2GridDimensionsSupported(long batch, long heads)
-        => batch is > 0 and <= 65_535 && heads is > 0 and <= 65_535;
-
-    /// <summary>Fused FlashAttention-2 (TF32 tensor cores, F32 accumulate) — no-mask MHA, D∈{64,128}; never materializes the score matrix.</summary>
-    private unsafe void FlashAttentionV2(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
-    {
-        if (!FlashAttentionV2ContractSatisfied(output, query, key, value, null, scale, _allowTf32))
-            throw new HartsyInferenceException("FlashAttention-v2 was invoked outside its F32 MHA, full-query-tile contract.");
-
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
-        long skv = key.Shape[2];
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pQ = GpuTransferHelper.CopyToDevice(query);
-            pK = GpuTransferHelper.CopyToDevice(key);
-            pV = GpuTransferHelper.CopyToDevice(value);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchFlashAttentionV2Tf32(pOut, pQ, pK, pV, (int)b, (int)h, (int)sq, (int)skv, (int)d, scale, _stream.Handle);
-            FlashAttentionV2Engaged = true;
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pQ);
-            GpuTransferHelper.FreeDevice(pK);
-            GpuTransferHelper.FreeDevice(pV);
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (qCast != 0) CudaMemory.FreeAsync(qCast, _stream.Handle);
+            if (kCast != 0) CudaMemory.FreeAsync(kCast, _stream.Handle);
+            if (vCast != 0) CudaMemory.FreeAsync(vCast, _stream.Handle);
+            if (oCast != 0) CudaMemory.FreeAsync(oCast, _stream.Handle);
         }
     }
 
@@ -7997,26 +7957,25 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // LTX-2.5's 151-query / 17480-key audio->video attention Sage measured 2.53 ms/call against cuDNN's 0.51.
         if (skv < SageF16MinSkv() || sq < SageF16MinSkv()) return false;
         EnsureKernels();
-        return _kernels!.HasSageAttentionKernels && _kernels.HasSageV1;
+        return _kernels!.HasSageAttentionKernels;
     }
 
     /// <summary>Min Skv (override: numerics.sageF16MinSkv) above which native-F16 SageAttention ingest is preferred over cuDNN.</summary>
     // Measured: 1.11x at 8192, 1.15x at 12288, parity at 4096 (3060).
     private static int SageF16MinSkv() => EngineKnobs.SageF16MinSkv.Value;
 
-    /// <summary>SageAttention-v1 INT8 flash attention (src/HartsyInference.Cuda/Kernels/attention/sage_attn_int8.cu).</summary>
-    /// <remarks>Four launches: K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) →
-    /// (K−mean) per-row INT8 quant (the softmax-invariant smoothing that absorbs the DiT outlier channels) →
-    /// fused INT8-QK^T flash loop with online softmax and TF32 PV. Workspace: Q8/K8 mirrors (¼ the F32 bytes),
-    /// per-row scales, and the [B,H,D] mean — all transient device allocations, freed before return. Correctness
-    /// oracle: SageAttentionReferenceTests (CPU int8 reference math) + SageAttnKernelTests (GPU vs CPU-SDPA parity).</remarks>
+    /// <summary>SageAttention INT8 flash attention over native-F16 operands (src/HartsyInference.Cuda/Kernels/attention/sage_attn_int8.cu).</summary>
+    /// <remarks>Five launches: K channel-mean → Q per-row INT8 quant (attn scale folded into the row scales) →
+    /// (K−mean) per-row INT8 quant (the softmax-invariant smoothing that absorbs the DiT outlier channels) → V transposed
+    /// to F16 [B,H,D,skvPad] → fused INT8-QKᵀ flash loop with online softmax and F16-accumulate PV. Workspace: Q8/K8,
+    /// per-row scales, the [B,H,D] mean and the transposed V — all transient device allocations, freed before return.
+    /// Correctness oracle: SageAttentionReferenceTests (CPU int8 reference math) + SageAttnKernelTests (GPU vs CPU-SDPA parity).</remarks>
     private unsafe void SageAttentionInt8(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
     {
         using OpScope _op = EnterOp();
         EnsureKernels();
         long b = query.Shape[0], h = query.Shape[1], sq = query.Shape[2], d = query.Shape[3];
         long skv = key.Shape[2];
-        bool f16 = query.DType == DType.F16;   // native-F16 contract: f16h prologues + f16io flash kernel
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
         ulong pQ8 = 0, pQs = 0, pK8 = 0, pKs = 0, pKmean = 0, pVt16 = 0;
         bool cachedOutput = false;
@@ -8038,31 +7997,27 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // alone moves ~14 GB/step on MiniMax-H3 — invisible while the whole call profiled as a single op.
             using (NvtxRange _rk = NvtxRange.PushFine("Sage.KMean"))
             {
-                _kernels!.LaunchSageKMean(pKmean, pK, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+                _kernels!.LaunchSageKMean(pKmean, pK, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
             // log2-domain softmax: fold log2(e) into the Q row scales so the flash kernels exponentiate via
             // native exp2 (one fewer multiply per score element; max/corr/l all commute with the constant).
             const float Log2E = 1.4426950408889634f;
             using (NvtxRange _rq = NvtxRange.PushFine("Sage.QuantQ"))
             {
-                _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)b, (int)h, (int)sq, (int)d, scale * Log2E, _stream.Handle, srcF16: f16);
+                _kernels!.LaunchSageQuantQ(pQ8, pQs, pQ, (int)b, (int)h, (int)sq, (int)d, scale * Log2E, _stream.Handle);
             }
             using (NvtxRange _rkq = NvtxRange.PushFine("Sage.QuantK"))
             {
-                _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+                _kernels!.LaunchSageQuantK(pK8, pKs, pK, pKmean, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
-            if (_kernels!.UseSageV1)
+            using (NvtxRange _rv = NvtxRange.PushFine("Sage.VF16T"))
             {
-                using NvtxRange _rv = NvtxRange.PushFine("Sage.VF16T");
-                // v1 prologue: one-shot [B,H,Skv,D]→[B,H,D,skvPad] F16 transpose (cp.async-able staging).
-                long skvPad = (skv + 7L) & ~7L;
-                if (skvPad >= 2048 && (skvPad & (skvPad - 1)) == 0) skvPad += 8;   // anti-aliasing pad (see sage_skv_pad)
-                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * skvPad * 2));
-                _kernels!.LaunchSageVF16T(pVt16, pV, (int)b, (int)h, (int)skv, (int)d, _stream.Handle, srcF16: f16);
+                pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * CudaKernels.SageSkvPad(skv) * sizeof(ushort)));
+                _kernels!.LaunchSageVTranspose(pVt16, pV, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
             using (NvtxRange _ra = NvtxRange.PushFine("Sage.Flash"))
             {
-                _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pV, pVt16, (int)b, (int)h, (int)sq, (int)skv, (int)d, _stream.Handle, f16Io: f16);
+                _kernels!.LaunchSageAttnInt8(pOut, pQ8, pQs, pK8, pKs, pVt16, (int)b, (int)h, (int)sq, (int)skv, (int)d, _stream.Handle);
             }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -8086,9 +8041,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Query-tiled SDPA for plain F32/no-mask/MHA; materializes a <c>[totalHeads, Br, Skv]</c> tile at a time (Wan self-attn).</summary>
     /// <remarks>Never materializes the full <c>[totalHeads, Sq, Skv]</c> matrix (24×14040²×4B ≈ 19 GB). Each tile
-    /// reuses the same TF32 tensor-core QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, so
-    /// results are numerically identical to the plain path. <c>Br</c> is sized to a quarter of free VRAM
-    /// (override: <c>numerics.sdpaTile</c>).</remarks>
+    /// runs the same QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, in the same compute type
+    /// (<see cref="SdpaF32Compute"/>); the per-tile GEMM shapes can change the summation order, so the two paths agree to
+    /// rounding, not bit for bit. <c>Br</c> is sized to a quarter of free VRAM (override: <c>numerics.sdpaTile</c>).</remarks>
     private unsafe void SdpaTiledF32(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         Tensor? keyBias = null)
     {
@@ -8129,6 +8084,74 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>S.11 for an F16 or BF16 call past the score elements the materialized row addresses: Q, K and V widened to F32
+    /// exactly, the query-tiled core, and the output narrowed back to the call's dtype.</summary>
+    private unsafe void SdpaTiledCast(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    {
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        long sq = query.Shape[2], d = query.Shape[3], skv = key.Shape[2];
+        long totalHeads = query.Shape[0] * query.Shape[1];
+        bool bf16 = query.DType == DType.BF16;
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, q32 = 0, k32 = 0, v32 = 0, o32 = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            q32 = CudaMemory.Allocate((nuint)(query.ElementCount * 4));
+            k32 = CudaMemory.Allocate((nuint)(key.ElementCount * 4));
+            v32 = CudaMemory.Allocate((nuint)(value.ElementCount * 4));
+            o32 = CudaMemory.Allocate((nuint)(output.ElementCount * 4));
+            Widen(q32, ref pQ, query.ElementCount);
+            Widen(k32, ref pK, key.ElementCount);
+            Widen(v32, ref pV, value.ElementCount);
+            SdpaTiledF32Core(q32, k32, v32, o32, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
+            if (bf16) _kernels!.LaunchCastF32ToBf16(pOut, o32, checked((int)output.ElementCount), _stream.Handle);
+            else _kernels!.LaunchCastF32ToF16(pOut, o32, checked((int)output.ElementCount), _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            foreach (ulong p in (ReadOnlySpan<ulong>)[q32, k32, v32, o32])
+                if (p != 0) CudaMemory.FreeAsync(p, _stream.Handle);
+        }
+
+        // FreeDevice is stream-ordered, so an uploaded half-precision copy goes as soon as its widen has read it.
+        void Widen(ulong wide, ref ulong half, long count)
+        {
+            if (bf16) _kernels!.LaunchCastBf16ToF32(wide, half, checked((int)count), _stream.Handle);
+            else _kernels!.LaunchCastF16ToF32(wide, half, checked((int)count), _stream.Handle);
+            GpuTransferHelper.FreeDevice(half);
+            half = 0;
+        }
+    }
+
+    /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
+    /// the weights), or the height <c>numerics.sdpaTile</c> forces, and never past the score elements the softmax addresses.</summary>
+    /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
+    internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced)
+    {
+        long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
+        if (cap < 1)
+            throw new AttentionUnsupportedException(
+                $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
+        long perRow = totalHeads * skv * sizeof(float);
+        long rows = (long)(freeBytes / 4) / Math.Max(1, perRow);
+        if (rows < 1) rows = 1;
+        if (rows > sq) rows = sq;
+        if (forced is int f && f > 0) rows = Math.Min(f, sq);
+        return Math.Min(rows, cap);
+    }
+
     /// <summary>The query-tiled loop of <see cref="SdpaTiledF32"/> over F32 device buffers, shared with the BF16 path
     /// of <see cref="ScaledDotProductAttention"/>, which runs it on its F32 casts.</summary>
     private unsafe void SdpaTiledF32Core(ulong pQ, ulong pK, ulong pV, ulong pOut, long totalHeads, long sq, long skv,
@@ -8137,15 +8160,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ulong scoresBuf = 0, pOnes = 0;
         try
         {
-            // Query-tile height: fit [totalHeads, Br, Skv] into ~a quarter of free VRAM (leaves room for Q/K/V/out
-            // and the model weights). Env override numerics.sdpaTile forces a fixed Br (benchmarking).
             (nuint freeBytes, _) = _context.GetMemoryInfo();
-            long perRow = totalHeads * skv * sizeof(float);            // bytes for one query row across all heads
-            long Br = (long)((ulong)freeBytes / 4) / Math.Max(1, perRow);
-            if (Br < 1) Br = 1;
-            if (Br > sq) Br = sq;
-            if (EngineKnobs.SdpaTile.Value is int envBr && envBr > 0)
-                Br = Math.Min(envBr, sq);
+            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value);
 
             scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
             if (pBias != 0)
@@ -8162,7 +8178,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 long curBr = Math.Min(Br, sq - q0);
                 long tileStride = curBr * skv;   // per-head stride within the (packed) tile score buffer
 
-                // QK^T per head: scores[curBr, Skv] = scale · Q[q0:q0+curBr] · Kᵀ  (TF32 tensor cores)
+                // QK^T per head: scores[curBr, Skv] = scale · Q[q0:q0+curBr] · Kᵀ
                 for (long bh = 0; bh < totalHeads; bh++)
                 {
                     ulong qPtr = pQ + (ulong)((bh * strideQ + q0 * d) * sizeof(float));
@@ -8177,7 +8193,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         qPtr, CublasApi.CUDA_R_32F, (int)d,
                         &beta,
                         sPtr, CublasApi.CUDA_R_32F, (int)skv,
-                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
 
                 // A key-only additive bias needs no [Sq,Skv] duplicate — one rank-1 accumulate covers a whole
@@ -8197,7 +8213,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
                 _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * curBr), _stream.Handle);
 
-                // scores·V per head → out[q0:q0+curBr]  (TF32 tensor cores)
+                // scores·V per head → out[q0:q0+curBr]
                 for (long bh = 0; bh < totalHeads; bh++)
                 {
                     ulong sPtr = scoresBuf + (ulong)(bh * tileStride * sizeof(float));
@@ -8212,7 +8228,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         sPtr, CublasApi.CUDA_R_32F, (int)skv,
                         &zero,
                         oPtr, CublasApi.CUDA_R_32F, (int)d,
-                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        SdpaF32Compute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
             }
             Interlocked.Increment(ref _sdpaTiledExecutionCount);

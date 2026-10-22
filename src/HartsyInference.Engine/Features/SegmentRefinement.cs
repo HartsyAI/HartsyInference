@@ -177,7 +177,7 @@ public static class SegmentRefinement
                 continue;
             }
             ImageRequest cropped = InpaintOnlyMasked.Apply(segRequest, cropPlan);
-            ImageResult segGenerated = pipeline.Generate(cropped, progress, cancel);
+            ImageResult segGenerated = pipeline.Generate(cropped, ImageEffectiveSettings.Of(cropped), progress, cancel);
             current = InpaintOnlyMasked.Composite(segGenerated, cropPlan);
             refined++;
         }

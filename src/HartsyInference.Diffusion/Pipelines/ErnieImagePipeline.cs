@@ -114,7 +114,10 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with one (vaeEncoder parameter).");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, float cfgScale, int width, int height) = GenerationDefaults.ErnieImage.Resolve(request);
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
+        int width = request.Width;
+        int height = request.Height;
         // ERNIE-Image: VAE is 8× spatial, then a 2×2 patchify in pipeline → effective 16× downscale.
         int effectiveDownscale = 16;
         if (width % effectiveDownscale != 0 || height % effectiveDownscale != 0)

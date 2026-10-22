@@ -9,8 +9,9 @@ namespace HartsyInference.GpuBenchmarks.Attention;
 /// <summary>One way of calling attention: input dtype, the knobs that steer dispatch, and the kernel it must reach.</summary>
 /// <param name="Expect">Kernel the arm exists to measure; a call that lands elsewhere is reported as not applicable
 /// rather than timed under the wrong name. Null means "whatever production dispatch picks".</param>
+/// <param name="Grant">Permissions the call carries through <see cref="IBackend.Attention"/>; null calls the legacy entry.</param>
 public sealed record AttentionArm(string Name, string Entry, DType Dtype, DType KvDtype, bool AllowF16, string? Expect,
-    Action Apply, string Description);
+    Action Apply, string Description, AttentionNumerics? Grant = null);
 
 /// <summary>The arm catalog the table runner times.</summary>
 /// <remarks>Arms set knobs before the backend is constructed: <c>sdpaCudnn</c>, <c>flashF16</c>, <c>sdpaF16</c> and
@@ -25,8 +26,6 @@ public static class AttentionArms
         () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.NoTf32),
         () => KnobStore.Clear(EngineKnobs.Fa2Prefill), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
         () => KnobStore.Clear(EngineKnobs.FlashSplitOff), () => KnobStore.Clear(EngineKnobs.FlashSplitForce),
-        () => KnobStore.Clear(EngineKnobs.SdpaV2), () => KnobStore.Clear(EngineKnobs.SdpaForceFlash),
-        () => KnobStore.Clear(EngineKnobs.SageAttnExplicit), () => KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow),
         () => KnobStore.Clear(EngineKnobs.Profile), () => KnobStore.Clear(EngineKnobs.ProfileShapes),
     ];
 
@@ -62,6 +61,8 @@ public static class AttentionArms
             "F32 I/O through the query-tiled core"),
         new("cast-f16", "sdpa", DType.F32, DType.F32, true, null, () => { },
             "F32 I/O, allowF16=true: the bounded-score caller (casts to F16 inside)"),
+        new("bf16-cast", "sdpa", DType.F32, DType.F32, false, "cudnn", () => { },
+            "F32 I/O with the BF16 grant: cuDNN on BF16 copies (S.16)", AttentionNumerics.Bf16Storage),
         new("bf16", "sdpa", DType.BF16, DType.BF16, true, null, () => { },
             "BF16 I/O, production knobs"),
         new("fa-def", "flash", DType.F32, DType.F32, false, null, () => { },

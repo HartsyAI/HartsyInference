@@ -78,7 +78,7 @@ public sealed class RecipeImg2ImgBinderTests
         using Img2ImgResolver.Img2ImgSpec spec = RecipeImg2ImgBinder.Resolve(request, 48, 32)!;
 
         ImageToImageRequest result = Assert.IsType<ImageToImageRequest>(
-            RecipeImg2ImgBinder.Apply(new TextToImageRequest { Prompt = "a fox", Width = 48, Height = 32 }, spec));
+            RecipeImg2ImgBinder.Apply(new TextToImageRequest { Prompt = "a fox", Width = 48, Height = 32, Steps = 20, CfgScale = 7.5f }, spec));
 
         Assert.NotNull(result.Mask);
         Assert.False(result.RecompositeAtEnd);
@@ -222,7 +222,8 @@ public sealed class RecipeImg2ImgBinderTests
     {
         public ImageRequest? Received { get; private set; }
 
-        public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+        public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings,
+            IProgress<StepPreview>? progress, CancellationToken cancel)
         {
             Received = request;
             return new ImageResult

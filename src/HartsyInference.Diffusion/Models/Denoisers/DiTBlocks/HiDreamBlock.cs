@@ -145,7 +145,7 @@ public sealed unsafe class HiDreamBlock
 
         // Q/K are RMS-normed over the full width, so one batch item may narrow to F16; a batch keeps F32 attention.
         AttentionLayer image = Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!, _toOutBias,
-            _qRmsNormWeight!, _kRmsNormWeight!, allowF16: true);
+            _qRmsNormWeight!, _kRmsNormWeight!, allowF16: true, tokenMajor: _isSingle);
         if (_isSingle)
         {
             _selfAttention = image;
@@ -158,7 +158,8 @@ public sealed unsafe class HiDreamBlock
                 new JointAttentionConfig
                 {
                     Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = true, AllowF16Batched = false,
-                    StageOrder = JointStageOrder.ProjectNormPerStream,
+                    StageOrder = JointStageOrder.ProjectNormPerStream, TokenMajorRoute = AttentionRoute.TokenMajor,
+                    HeadMajorForSage = true,
                 },
                 [image, Stream(_toQTWeight!, _toQTBias, _toKTWeight!, _toKTBias, _toVTWeight!, _toVTBias, _toOutTWeight!, _toOutTBias,
                     _qRmsNormTWeight!, _kRmsNormTWeight!, allowF16: true)]);
@@ -166,11 +167,12 @@ public sealed unsafe class HiDreamBlock
     }
 
     private AttentionLayer Stream(Tensor q, Tensor? qBias, Tensor k, Tensor? kBias, Tensor v, Tensor? vBias, Tensor output,
-        Tensor? outputBias, Tensor qNorm, Tensor kNorm, bool allowF16) => new(
+        Tensor? outputBias, Tensor qNorm, Tensor kNorm, bool allowF16, bool tokenMajor = false) => new(
         new AttentionLayerConfig
         {
             Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.FullWidthRms,
             ComputeDType = DType.F32, AllowF16 = allowF16,
+            TokenMajorRoute = tokenMajor ? AttentionRoute.TokenMajor : AttentionRoute.Dense, HeadMajorForSage = tokenMajor,
         },
         new AttentionLayerWeights
         {

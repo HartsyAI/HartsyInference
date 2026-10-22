@@ -31,7 +31,8 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
 - [ ] General/packed variable-length attention; audit existing attention paths before designing another kernel.
 - [ ] `flash_attn_f16` at head dim 256 runs 122 TFLOPS on a 4090 (2.93 ms at Ideogram 4's 18×4400² shape) against
   FlashAttention-2's 143: every warp stalls through its softmax phase at once. Next rung is a warp ping-pong (FA3-style)
-  or FA2's own hdim-256 forward compiled to PTX. Measure d=128 against cuDNN before routing it there.
+  or FA2's own hdim-256 forward compiled to PTX. Its template builds D=64/128 as well; measure one against cuDNN before
+  instantiating and routing it.
 - [ ] QKV/gate-up/norm/activation fusion where full-model profiling shows launch or bandwidth cost.
 - [ ] Extend memory reuse and graph capture only on measured eligible paths; both mechanisms already exist.
 - [ ] F16/BF16 coverage and Hopper FA3/WGMMA experiments with numerical gates.
@@ -117,9 +118,8 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] LoRA extraction/checkpoint-diff utility.
 - [ ] PAG/SAG attention hooks and per-pipeline regional-tag handling.
 - [ ] Declare variant catalogs (`ENGINE_PATTERNS.md#model-variants`) for the families still ignoring theirs: SD3.5
-  Large-Turbo and Flux.2 Klein base get their own defaults. Flux.1
-  Kontext/Fill/Depth/Canny and HiDream-Edit get an explicit refusal until those paths exist. LTX-Video 0.9.5/13B
-  still mixes its key probe with a filename check.
+  Large-Turbo gets its own defaults. Flux.1 Kontext/Fill/Depth/Canny and HiDream-Edit get an explicit refusal until
+  those paths exist. LTX-Video 0.9.5/13B still mixes its key probe with a filename check.
 - [ ] Real-weight check of Qwen-Image-Edit v1 through its own template, and of the Auto-mode edit path.
 - [ ] Wan 2.2 TI2V-5B to ComfyUI parity (warm 6.6 s vs 4.5 s at 512×320, 25 f, 20 steps on a 4090). The gap is the
   denoise: GEMMs already run near the card's F16 rate, and ~1.5 s per generation is per-op glue across ~330 ops per

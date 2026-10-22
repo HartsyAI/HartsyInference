@@ -32,7 +32,6 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     private readonly Tensor[] _ownedVaeWeights;
     private readonly IBackend _backend;
     private readonly IBackend _textBackend;
-    private readonly ImageDefaults _variantDefaults;
     private readonly IDisposable _checkpoint;
     private readonly SafeTensorsLoader _qwenLoader;
     private readonly SafeTensorsLoader _vaeLoader;
@@ -52,7 +51,7 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
     public ZImageRecipePipeline(ZImagePipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer,
         ZImageTransformer transformer, VaeDecoder vae, VaeEncoder vaeEncoder, Tensor[] transformerWeightTensors,
         Tensor[] qwenWeightTensors, Tensor[] ownedVaeWeights, IBackend backend, IBackend textBackend,
-        ImageDefaults variantDefaults, IDisposable checkpoint, SafeTensorsLoader qwenLoader,
+        IDisposable checkpoint, SafeTensorsLoader qwenLoader,
         SafeTensorsLoader vaeLoader, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
@@ -67,29 +66,26 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         _ownedVaeWeights = ownedVaeWeights;
         _backend = backend;
         _textBackend = textBackend;
-        _variantDefaults = variantDefaults;
         _checkpoint = checkpoint;
         _qwenLoader = qwenLoader;
         _vaeLoader = vaeLoader;
     }
 
     /// <inheritdoc/>
-    public ImageDefaults? VariantDefaults => _variantDefaults;
-
-    /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _variantDefaults.Steps;
+        int steps = settings.Steps;
         // Z-Image CFG: <=0 (or 1) means Turbo (no CFG, single forward). >1 is Base and requires a negative encode.
-        float cfg = request.CfgScale ?? _variantDefaults.CfgScale;
+        float cfg = settings.CfgScale;
         bool needNegative = cfg > 1.0f;
         int penultimateIdx = _qwen.NumLayers - 1;
 
         // Validate/map every request-level input before a cache miss can evict the resident DiT and run Qwen.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
@@ -100,9 +96,10 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                 Prompt = prompt,
                 NegativePrompt = negative,
-                Width = request.Width,
-                Height = request.Height,
+                Width = settings.Width,
+                Height = settings.Height,
                 Steps = steps,
+                CfgScale = settings.CfgScale,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
                 // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.

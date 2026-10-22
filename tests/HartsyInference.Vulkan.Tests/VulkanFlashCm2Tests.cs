@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vulkan;
 using Xunit;
@@ -290,6 +291,202 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
             }
         }
         return o;
+    }
+
+    /// <summary>The single-stream blocks' attention through <see cref="AttentionLayer.Attend"/>: the token-major config (B.1) gives
+    /// the bits of the head-major config's permutes and A.1, the same cm2 kernel read through other strides, with Chroma's
+    /// [1, 1, S, S] padding mask too and F32 cast to F16 on both.</summary>
+    [Theory]
+    [InlineData("flux1-1024", 24, 4608, true, false)]
+    [InlineData("flux1-1024-f32", 24, 4608, false, false)]
+    [InlineData("chroma-1024", 24, 4107, true, false)]
+    [InlineData("chroma-1024-masked", 24, 4107, true, true)]
+    [InlineData("flux2-1024", 48, 4608, true, false)]
+    [InlineData("hunyuanimage-f32", 28, 4173, false, false)]
+    public void SingleStreamAttend_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int s, bool f16, bool masked)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        const int d = 128;
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        float[] q = Half(Random(s * h * d, 41)), k = Half(Random(s * h * d, 42)), v = Half(Random(s * h * d, 43));
+        float[]? bias = masked ? PaddingMask(s, txt: 11, kept: 4) : null;
+        TensorShape operand = new(1, s, h, d), flat = new(1, s, h * d);
+
+        float[] Run(AttentionRoute route)
+        {
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, AllowF16 = true, TokenMajorRoute = route, HeadMajorForSage = true,
+            });
+            using Tensor? mask = bias is null ? null : FromHost(new TensorShape(1, 1, s, s), bias);
+            using Tensor o = layer.Attend(backend, Operand(q, operand, dtype), Operand(k, operand, dtype), Operand(v, operand, dtype), flat,
+                new AttentionCallContext { Bias = mask });
+            Assert.Equal(flat, o.Shape);
+            if (o.DType == DType.F32) return o.AsReadOnlySpan<float>().ToArray();
+            using Tensor wide = o.CastTo(DType.F32);
+            return wide.AsReadOnlySpan<float>().ToArray();
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        string? headMajorRoute = VulkanBackend.LastAttentionRoute;
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        string? tokenMajorRoute = VulkanBackend.LastAttentionRoute;
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        output.WriteLine($"{name}: {headMajorRoute} vs {tokenMajorRoute}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal("A.1", headMajorRoute);
+        Assert.Equal("B.1", tokenMajorRoute);
+        Assert.Equal(0, differing);
+    }
+
+    /// <summary>The double-stream blocks' joint call through <see cref="AttentionLayer.AttendFlat"/>: the token-major config reads the
+    /// concatenated [1, S, H·D] rows through B.1 with the bits of the head-major config's permutes and A.1, with Chroma's padding
+    /// mask too and F32 cast to F16 on both. AuraFlow's head dim 256, which no cm2 row takes, permutes into the same head-major row.</summary>
+    [Theory]
+    [InlineData("flux1-1024", 24, 128, 4608, true, false, "A.1", "B.1")]
+    [InlineData("flux1-1024-f32", 24, 128, 4608, false, false, "A.1", "B.1")]
+    [InlineData("chroma-1024-masked", 24, 128, 4107, true, true, "A.1", "B.1")]
+    [InlineData("flux2-1024", 48, 128, 4608, true, false, "A.1", "B.1")]
+    [InlineData("qwenimage-1024", 24, 128, 4115, false, false, "A.1", "B.1")]
+    [InlineData("hunyuanimage-f32", 28, 128, 1101, false, false, "A.1", "B.1")]
+    [InlineData("hidream-f32", 20, 128, 4352, false, false, "A.1", "B.1")]
+    [InlineData("auraflow-f32", 12, 256, 4352, false, false, "A.3", "B.2/A.3")]
+    public void JointAttendFlat_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int d, int s, bool f16, bool masked,
+        string headMajorRoute, string tokenMajorRoute)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        float[] q = Half(Random(s * h * d, 51)), k = Half(Random(s * h * d, 52)), v = Half(Random(s * h * d, 53));
+        float[]? bias = masked ? PaddingMask(s, txt: 11, kept: 4) : null;
+        TensorShape rows = new(1, s, h * d);
+
+        float[] Run(AttentionRoute route)
+        {
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, AllowF16 = true, TokenMajorRoute = route, HeadMajorForSage = true,
+            });
+            using Tensor? mask = bias is null ? null : FromHost(new TensorShape(1, 1, s, s), bias);
+            using Tensor o = layer.AttendFlat(backend, Operand(q, rows, dtype), Operand(k, rows, dtype), Operand(v, rows, dtype), rows,
+                new AttentionCallContext { Bias = mask });
+            Assert.Equal(rows, o.Shape);
+            if (o.DType == DType.F32) return o.AsReadOnlySpan<float>().ToArray();
+            using Tensor wide = o.CastTo(DType.F32);
+            return wide.AsReadOnlySpan<float>().ToArray();
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        string? headMajor = VulkanBackend.LastAttentionRoute;
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        string? tokenMajor = VulkanBackend.LastAttentionRoute;
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        output.WriteLine($"{name}: {headMajor} vs {tokenMajor}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal(headMajorRoute, headMajor);
+        Assert.Equal(tokenMajorRoute, tokenMajor);
+        Assert.Equal(0, differing);
+    }
+
+    /// <summary>Wan's self-attention rows, the attention call alone: the token-major config reads F32 [S, H·D] Q, K and V through B.1 with
+    /// the bits of the head-major config's permutes and A.1, at Wan 2.2 5B's and Wan 2.1 14B's lengths, with Matrix-Game 2's block
+    /// mask, and for a context-parallel rank's local queries over the whole sequence's keys.</summary>
+    [Theory]
+    [InlineData("wan5b-49f", 24, 5070, 5070, false)]
+    [InlineData("wan21-14b", 40, 4480, 4480, false)]
+    [InlineData("matrixgame2-masked", 12, 2640, 2640, true)]
+    [InlineData("wan5b-cp-rank", 24, 2730, 5070, false)]
+    public void WanRows_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int sq, int skv, bool masked)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        const int d = 128;
+        float[] q = Half(Random(sq * h * d, 61)), k = Half(Random(skv * h * d, 62)), v = Half(Random(skv * h * d, 63));
+        float[]? bias = masked ? BlockCausalMask(sq, frames: 3) : null;
+        TensorShape qRows = new(sq, h * d), kvRows = new(skv, h * d);
+
+        float[] Run(AttentionRoute route)
+        {
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, AllowF16 = true, TokenMajorRoute = route, HeadMajorForSage = true,
+            });
+            using Tensor? mask = bias is null ? null : FromHost(new TensorShape(1, 1, sq, skv), bias);
+            using Tensor o = layer.AttendFlat(backend, Operand(q, qRows, DType.F32), Operand(k, kvRows, DType.F32), Operand(v, kvRows, DType.F32),
+                qRows, new AttentionCallContext { Bias = mask });
+            Assert.Equal(qRows, o.Shape);
+            return o.AsReadOnlySpan<float>().ToArray();
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        string? headMajor = VulkanBackend.LastAttentionRoute;
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        string? tokenMajor = VulkanBackend.LastAttentionRoute;
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        output.WriteLine($"{name}: {headMajor} vs {tokenMajor}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal("A.1", headMajor);
+        Assert.Equal("B.1", tokenMajor);
+        Assert.Equal(0, differing);
+    }
+
+    /// <summary>The token-major rows read one sequence, so a batched token-major call plans no row there and the layer keeps a batch
+    /// head-major on Vulkan; one sequence still plans the cm2 row.</summary>
+    [Fact]
+    public void ABatchedTokenMajorCall_PlansNoRow()
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        const int h = 10, d = 64, s = 256;
+        AttentionCall Call(int batch)
+        {
+            TensorShape rows = new(batch, s, h, d);
+            return AttentionCall.FromTokenMajor(new Tensor(new TensorShape(batch, s, h * d), DType.F32), new Tensor(rows, DType.F32),
+                new Tensor(rows, DType.F32), new Tensor(rows, DType.F32), null, h, h, d, 0.125f, allowF16: true, batch);
+        }
+
+        AttentionCall batched = Call(2), single = Call(1);
+        Assert.Null(backend.PlanAttention(in batched).Row);
+        Assert.Equal("cm2.flash", backend.PlanAttention(in single).RowId);
+    }
+
+    /// <summary>Matrix-Game 2's additive block-causal mask over equal frames: a query sees its own frame and the earlier ones.</summary>
+    private static float[] BlockCausalMask(int s, int frames)
+    {
+        int perFrame = s / frames;
+        float[] mask = new float[(long)s * s];
+        for (int i = 0; i < s; i++)
+            for (int j = 0; j < s; j++)
+                mask[(long)i * s + j] = j / perFrame <= i / perFrame ? 0f : -1e9f;
+        return mask;
+    }
+
+    /// <summary>Chroma's additive mask over a [text; image] sequence: a pair is kept only when both tokens are, and the text past
+    /// <paramref name="kept"/> is padding.</summary>
+    private static float[] PaddingMask(int s, int txt, int kept)
+    {
+        float[] mask = new float[(long)s * s];
+        for (int i = 0; i < s; i++)
+            for (int j = 0; j < s; j++)
+                mask[(long)i * s + j] = (i >= kept && i < txt) || (j >= kept && j < txt) ? -1e30f : 0f;
+        return mask;
+    }
+
+    /// <summary>A host tensor of <paramref name="dtype"/> holding <paramref name="values"/>, already F16-exact.</summary>
+    private static Tensor Operand(float[] values, TensorShape shape, DType dtype)
+    {
+        Tensor f32 = FromHost(shape, values);
+        if (dtype == DType.F32) return f32;
+        try { return f32.CastTo(dtype); }
+        finally { f32.Dispose(); }
     }
 
     private static float[] ToTokenMajor(float[] headMajor, int heads, int s, int d)

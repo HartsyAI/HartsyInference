@@ -122,6 +122,8 @@ internal static class H3PlanFixture
             ReferenceSizing = VideoReferenceSizing.Native,
             LockedFields = VideoLockedFields.None,
         },
+        Recipe = TestVideoRecipes.Identity("test"),
+        Provenance = TestVideoRecipes.NoProvenance,
         Issues = [],
         CacheIdentity = "test",
         ComponentFormats = new Dictionary<string, string>(StringComparer.Ordinal),

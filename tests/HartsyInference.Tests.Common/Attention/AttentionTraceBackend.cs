@@ -35,6 +35,8 @@ public sealed class AttentionTraceBackend : IBackend
 
     public bool SupportsTokenMajorGqaAttention { get; init; }
 
+    public bool SupportsF16Activations { get; init; }
+
     /// <summary>Makes every attention call throw after it is recorded.</summary>
     public bool FailAttention { get; init; }
 
@@ -43,6 +45,38 @@ public sealed class AttentionTraceBackend : IBackend
 
     /// <summary>Records a Flash-route call as one <c>Attention</c> line with its stage parameters instead of re-entering the legacy entry.</summary>
     public bool FlashAsAttention { get; init; }
+
+    /// <summary>Skips the F32-only default bodies of the adaLN norm and modulation ops, so an F16 block reaches its attention.</summary>
+    public bool SkipAdaLayerNorm { get; init; }
+
+    /// <summary>Plans a row for a batched token-major call, as CUDA's cuDNN row does; otherwise no call plans a row.</summary>
+    public bool PlansBatchedTokenMajor { get; init; }
+
+    private static readonly AttentionKernelRow BatchedRow = new DelegateAttentionRow(new AttentionKernelCapability
+    {
+        Id = "trace.batched", Entry = AttentionRoute.TokenMajor, QueryTypes = AttentionDTypes.Any, KvTypes = AttentionDTypes.Any,
+        Layouts = AttentionLayouts.TokenMajor,
+    }, null, static (in AttentionCall c) => true, static (in AttentionCall c) => true);
+
+    public AttentionPlan PlanAttention(in AttentionCall call) =>
+        PlansBatchedTokenMajor && call.Batch > 1 && call.Route is AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa
+            ? new(BatchedRow, null, "trace", null)
+            : new(null, null, "trace: no row", null);
+
+    public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
+    {
+        if (!SkipAdaLayerNorm) IBackend.LayerNormNoAffineReference(output, input, eps);
+    }
+
+    public void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
+    {
+        if (!SkipAdaLayerNorm) IBackend.LayerNormModulateReference(output, input, scale, shift, eps);
+    }
+
+    public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
+    {
+        if (!SkipAdaLayerNorm) IBackend.AffineBroadcastLastDimReference(output, input, scale, shift);
+    }
 
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {

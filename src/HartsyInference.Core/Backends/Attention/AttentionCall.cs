@@ -142,16 +142,36 @@ public readonly record struct AttentionCall
     public static AttentionCall FromTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, int heads,
         int kvHeads, int headDim, float scale, bool allowF16)
     {
+        ValidateHeads(heads, kvHeads, headDim);
+        return Token(AttentionOperand.TokenMajor(output, heads, headDim), AttentionOperand.TokenMajor(query, heads, headDim),
+            AttentionOperand.TokenMajor(key, kvHeads, headDim), AttentionOperand.TokenMajor(value, kvHeads, headDim), mask, heads, kvHeads,
+            scale, allowF16);
+    }
+
+    /// <summary>A token-major call over <paramref name="batch"/> sequences whatever each tensor's rank: <c>[B, S, heads·D]</c> rows
+    /// read as B sequences rather than one of B·S tokens.</summary>
+    public static AttentionCall FromTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, int heads,
+        int kvHeads, int headDim, float scale, bool allowF16, int batch)
+    {
+        ValidateHeads(heads, kvHeads, headDim);
+        return Token(AttentionOperand.TokenMajor(output, heads, headDim, batch), AttentionOperand.TokenMajor(query, heads, headDim, batch),
+            AttentionOperand.TokenMajor(key, kvHeads, headDim, batch), AttentionOperand.TokenMajor(value, kvHeads, headDim, batch), mask,
+            heads, kvHeads, scale, allowF16);
+    }
+
+    private static void ValidateHeads(int heads, int kvHeads, int headDim)
+    {
         if (heads <= 0 || kvHeads <= 0 || headDim <= 0)
             throw new ArgumentException($"Token-major attention needs positive heads, kvHeads and headDim; got {heads}, {kvHeads}, {headDim}.");
-        return new()
+    }
+
+    private static AttentionCall Token(AttentionOperand output, AttentionOperand query, AttentionOperand key, AttentionOperand value,
+        Tensor? mask, int heads, int kvHeads, float scale, bool allowF16) => new()
         {
-            Query = AttentionOperand.TokenMajor(query, heads, headDim), Key = AttentionOperand.TokenMajor(key, kvHeads, headDim),
-            Value = AttentionOperand.TokenMajor(value, kvHeads, headDim), Output = AttentionOperand.TokenMajor(output, heads, headDim),
+            Query = query, Key = key, Value = value, Output = output,
             Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = AttentionNumerics.FromLegacy(allowF16),
             Route = kvHeads == heads ? AttentionRoute.TokenMajor : AttentionRoute.TokenMajorGqa,
         };
-    }
 
     /// <summary>A <c>FlashAttention</c> call: head-major Q/O, a head-major K/V cache whose first <paramref name="kvLen"/>
     /// rows are valid, query row 0 at <paramref name="qOffset"/>.</summary>

@@ -162,6 +162,10 @@ public sealed record AttentionKernelCapability
     /// <summary>Clips out-of-range values when narrowing.</summary>
     public bool Saturates { get; init; }
 
+    /// <summary>The format F32 operands are narrowed to, which the call must permit for both multiplies; None for a row that
+    /// narrows nothing or still admits on a legacy flag.</summary>
+    public AttentionFormats NarrowsF32To { get; init; }
+
     /// <summary>Work added around the kernel.</summary>
     public AttentionLowering Lowering { get; init; }
 
@@ -172,6 +176,9 @@ public sealed record AttentionKernelCapability
         if (call.Route != AttentionRoute.Auto && call.Route != Entry) return AttentionExclusion.Entry;
         if (!Has(QueryTypes, call.Query.DType) || !Has(QueryTypes, call.Output.DType)) return AttentionExclusion.QueryType;
         if (!Has(KvTypes, call.Key.DType) || !Has(KvTypes, call.Value.DType)) return AttentionExclusion.KvType;
+        if (NarrowsF32To != AttentionFormats.None && !call.Numerics.Permits(NarrowsF32To, NarrowsF32To)
+            && (call.Query.DType == DType.F32 || call.Key.DType == DType.F32 || call.Value.DType == DType.F32))
+            return AttentionExclusion.Numerics;
         if ((Layouts & Of(call.Query.Layout)) == 0 || (Layouts & Of(call.Key.Layout)) == 0
             || (Layouts & Of(call.Value.Layout)) == 0 || (Layouts & Of(call.Output.Layout)) == 0) return AttentionExclusion.Layout;
         if (!StridedViews && !(call.Query.IsPlain && call.Key.IsPlain && call.Value.IsPlain && call.Output.IsPlain)) return AttentionExclusion.Strides;
@@ -181,6 +188,7 @@ public sealed record AttentionKernelCapability
         if (call.QueryTokens < MinQueryTokens || call.QueryTokens > MaxQueryTokens) return AttentionExclusion.QueryRows;
         if (call.Logits.Any && !LogitTerms) return AttentionExclusion.LogitTerms;
         if (call.Positions.OnDevice && !DevicePositions) return AttentionExclusion.DevicePositions;
+        if (((UsesQueryKey | UsesProbValue) & call.Numerics.Refused) != 0) return AttentionExclusion.RefusedFormat;
         AttentionMask m = call.Mask;
         if (m.Causal && (Masks & AttentionMaskSupport.Causal) == 0) return AttentionExclusion.Causal;
         if ((m.WindowLeft is not null || m.WindowRight is not null) && (Masks & AttentionMaskSupport.Window) == 0) return AttentionExclusion.Window;
@@ -261,6 +269,12 @@ public enum AttentionExclusion
 
     /// <summary>A per-head bias.</summary>
     PerHeadBias,
+
+    /// <summary>A multiply format the call refuses.</summary>
+    RefusedFormat,
+
+    /// <summary>A narrowing the call does not permit.</summary>
+    Numerics,
 }
 
 /// <summary>One kernel a backend can run for attention: its declared capability, the runtime conditions that admit a call

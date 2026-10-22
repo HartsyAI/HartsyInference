@@ -33,11 +33,21 @@ public sealed record JointAttentionConfig
     /// <summary>The assertion above one batch item when it differs; null follows <see cref="AllowF16"/>.</summary>
     public bool? AllowF16Batched { get; init; }
 
+    /// <summary>The joint call's <see cref="AttentionLayerConfig.AllowBf16"/> grant; exclusive with either F16 assertion.</summary>
+    public bool AllowBf16 { get; init; }
+
     /// <summary>The softmax scale; 0 means <c>1/√headDim</c>.</summary>
     public float Scale { get; init; }
 
     /// <summary>The order of the projection and norm stages across streams.</summary>
     public JointStageOrder StageOrder { get; init; }
+
+    /// <summary>The joint call's <see cref="AttentionLayerConfig.TokenMajorRoute"/>; the stream layers never attend, so
+    /// they stay Dense.</summary>
+    public AttentionRoute TokenMajorRoute { get; init; } = AttentionRoute.Dense;
+
+    /// <summary>The joint call's <see cref="AttentionLayerConfig.HeadMajorForSage"/>.</summary>
+    public bool HeadMajorForSage { get; init; }
 }
 
 /// <summary>The per-call inputs of a joint attention. Every member is borrowed for the call.</summary>
@@ -80,6 +90,9 @@ public sealed class JointAttention
         if (config.ConcatOrder is null || config.ConcatOrder.Length != count
             || config.ConcatOrder.Distinct().Count() != count || config.ConcatOrder.Any(i => i < 0 || i >= count))
             throw new ArgumentException("ConcatOrder must name every stream exactly once.", nameof(config));
+        if (config.AllowBf16 && (config.AllowF16 || config.AllowF16Batched == true))
+            throw new ArgumentException("AllowBf16 excludes AllowF16 and AllowF16Batched: with both, the saturating F16 path takes the call.",
+                nameof(config));
         foreach (AttentionLayer stream in streams)
         {
             AttentionLayerConfig c = stream.Config;
@@ -284,7 +297,8 @@ public sealed class JointAttention
 
     private static AttentionLayer JointLayer(JointAttentionConfig config, bool allowF16) => new(new AttentionLayerConfig
     {
-        Heads = config.Heads, KvHeads = config.Heads, HeadDim = config.HeadDim, AllowF16 = allowF16, Scale = config.Scale,
+        Heads = config.Heads, KvHeads = config.Heads, HeadDim = config.HeadDim, AllowF16 = allowF16, AllowBf16 = config.AllowBf16,
+        Scale = config.Scale, TokenMajorRoute = config.TokenMajorRoute, HeadMajorForSage = config.HeadMajorForSage,
     });
 
     /// <summary>One tensor per stream, held on the stack.</summary>

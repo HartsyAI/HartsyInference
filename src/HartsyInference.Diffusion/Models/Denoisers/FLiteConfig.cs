@@ -51,12 +51,6 @@ public sealed record FLiteConfig
     /// <summary>T5 hidden state layer index to use for cross-attention conditioning. F-Lite uses index 17 of 24 (Python <c>hidden_states[-8]</c> with <c>final_layer_norm</c> + <c>dropout</c> reapplied).</summary>
     public int T5LayerIndex { get; init; } = 17;
 
-    /// <summary>Default CFG scale.</summary>
-    public float DefaultCfgScale { get; init; } = 6.0f;
-
-    /// <summary>Default denoise step count.</summary>
-    public int DefaultSteps { get; init; } = 30;
-
     /// <summary>F-Lite (10B) full-precision preset. Verified against `Freepik/F-Lite/dit_model/config.json` (v0.32.2). 40 blocks × 3072 hidden × 12 heads. Pairs with T5-XXL + Flux Schnell VAE.</summary>
     public static FLiteConfig V1 => new()
     {

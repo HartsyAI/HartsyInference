@@ -73,7 +73,9 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
                 nameof(negativeTextEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int width, int height) = GenerationDefaults.Generic.Resolve(request);
+        int steps = request.Steps;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
 
@@ -217,8 +219,8 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         if (DiagnosticStats) LogStats("initial latent", latent);
 
         // Sampler selection (2026-08-20). Anima is flow-matching, so it had no user-selectable sampler at all before
-        // this — the schedule doc comment above still notes that Comfy's `er_sde + simple` parity needs a dedicated
-        // SDE scheduler, which the sampler registry is the place to add. The sampler owns the integrator and the
+        // this. Comfy's `er_sde + simple` is now the recipe default for Anima Base: `ErSdeSampler` runs over this
+        // family's own grid, which is what `simple` resamples to on it, so no named schedule is needed. The sampler owns the integrator and the
         // sigma spacing; the two-forward CFG stays in the predictor closure below. There is no step graph, no step
         // cache and no host/reference loop here (masked inpaint blends against the same in-place device step), so
         // there is nothing to narrow for a non-default sampler.

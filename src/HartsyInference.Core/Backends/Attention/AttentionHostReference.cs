@@ -10,11 +10,19 @@ public static class AttentionHostReference
 {
     /// <summary>Runs <paramref name="call"/>. Device positions need a backend to read them and are refused.</summary>
     /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
-    public static unsafe void Run(in AttentionCall call)
+    public static void Run(in AttentionCall call) => Run(in call, default);
+
+    /// <summary>Runs <paramref name="call"/> and, when <paramref name="lse"/> is not empty, writes each row's natural-log LSE
+    /// (§3; −∞ for a fully excluded row) into it as <c>[B, Hq, Sq]</c>.</summary>
+    /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
+    public static unsafe void Run(in AttentionCall call, Span<float> lse)
     {
         if (call.Positions.OnDevice)
             throw new AttentionUnsupportedException("The host reference cannot read device positions.");
         Validate(in call);
+        if (!lse.IsEmpty && lse.Length != (long)call.Batch * call.Heads * call.QueryTokens)
+            throw new ArgumentException($"LSE holds {lse.Length} values; [B, Hq, Sq] needs {(long)call.Batch * call.Heads * call.QueryTokens}.",
+                nameof(lse));
         AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
         int dqk = call.QkHeadDim, dv = call.ValueHeadDim, group = call.KvGroup;
         int kvLen = call.ValidKvLength;
@@ -27,7 +35,7 @@ public static class AttentionHostReference
         double[] acc = ArrayPool<double>.Shared.Rent(dv);
         try
         {
-            Compute(in call, q, k, v, o, dqk, dv, group, kvLen, in mask, bias, sinks, slopes, softcap, scores, acc);
+            Compute(in call, q, k, v, o, dqk, dv, group, kvLen, in mask, bias, sinks, slopes, softcap, scores, acc, lse);
         }
         finally
         {
@@ -38,7 +46,7 @@ public static class AttentionHostReference
 
     private static unsafe void Compute(in AttentionCall call, AttentionOperand q, AttentionOperand k, AttentionOperand v,
         AttentionOperand o, int dqk, int dv, int group, int kvLen, in AttentionMask mask, BiasView bias, float* sinks, float* slopes,
-        float softcap, double[] scores, double[] acc)
+        float softcap, double[] scores, double[] acc, Span<float> lse)
     {
         for (int b = 0; b < call.Batch; b++)
             for (int h = 0; h < call.Heads; h++)
@@ -58,7 +66,7 @@ public static class AttentionHostReference
                         s += bias.At(b, h, r, j);
                         if (slopes != null) s += slopes[h] * (mask.Causal ? j - qpos : -Math.Abs(j - qpos));
                         scores[j] = s;
-                        if (s > max) max = s;
+                        if (s > max || double.IsNaN(s)) max = s;
                     }
                     double sink = sinks == null ? double.NegativeInfinity : sinks[h];
                     double m = Math.Max(max, sink);
@@ -72,9 +80,12 @@ public static class AttentionHostReference
                             sum += p;
                             for (int c = 0; c < dv; c++) acc[c] += p * Read(in v, b, hk, j, c);
                         }
-                    // A fully excluded row with no sink writes zeros (contract §3).
-                    double inv = sum > 0 ? 1.0 / sum : 0.0;
+                    // A fully excluded row with no sink writes zeros; a NaN anywhere in the row stays NaN (contract §3).
+                    double inv = sum > 0 ? 1.0 / sum : double.IsNaN(sum) ? double.NaN : 0.0;
                     for (int c = 0; c < dv; c++) Write(in o, b, h, r, c, (float)(acc[c] * inv));
+                    if (!lse.IsEmpty)
+                        lse[(b * call.Heads + h) * call.QueryTokens + r] =
+                            sum > 0 ? (float)(m + Math.Log(sum)) : double.IsNaN(sum) ? float.NaN : float.NegativeInfinity;
                 }
             }
     }
@@ -136,7 +147,7 @@ public static class AttentionHostReference
         throw new AttentionUnsupportedException($"The host reference reads F32, F16 and BF16 operands, not {dt}.");
     }
 
-    private static unsafe void Write(in AttentionOperand x, int b, int h, int t, int c, float value)
+    internal static unsafe void Write(in AttentionOperand x, int b, int h, int t, int c, float value)
     {
         long i = x.Offset + b * x.BatchStride + h * x.HeadStride + t * x.TokenStride + c;
         void* p = x.Storage.DataPointer;

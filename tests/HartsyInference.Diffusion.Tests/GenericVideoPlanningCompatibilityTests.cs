@@ -16,7 +16,8 @@ public sealed class GenericVideoPlanningCompatibilityTests
     {
         VideoRequest request = new VideoRequest { Prompt = "test", Seed = (1L << 31) + 17 };
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(
-            Spec(), request, "legacy-test", LegacyDefaults(), VideoFeatures.None, CancellationToken.None);
+            Spec(), request,
+                TestVideoRecipes.Declare("legacy-test", LegacyDefaults(), VideoFeatures.None), CancellationToken.None);
 
         Assert.Null(plan.EffectiveSettings.FlowShift);
         Assert.Null(plan.EffectiveSettings.AudioFlowShift);
@@ -46,7 +47,8 @@ public sealed class GenericVideoPlanningCompatibilityTests
             Seed = 123,
         };
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(
-            Spec(), request, "legacy-test", LegacyDefaults(), VideoFeatures.None, CancellationToken.None);
+            Spec(), request,
+                TestVideoRecipes.Declare("legacy-test", LegacyDefaults(), VideoFeatures.None), CancellationToken.None);
 
         Assert.Equal(5f, plan.EffectiveSettings.FlowShift);
         Assert.Equal(2f, plan.EffectiveSettings.AudioFlowShift);
@@ -64,7 +66,8 @@ public sealed class GenericVideoPlanningCompatibilityTests
         VideoRequest request = new VideoRequest { Prompt = "test", SparseAttentionPolicy = policy };
 
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(
-            Spec(), request, "legacy-test", LegacyDefaults(), VideoFeatures.None, CancellationToken.None);
+            Spec(), request,
+                TestVideoRecipes.Declare("legacy-test", LegacyDefaults(), VideoFeatures.None), CancellationToken.None);
 
         Assert.True(plan.IsValid);
         Assert.DoesNotContain(plan.Issues,
@@ -81,7 +84,8 @@ public sealed class GenericVideoPlanningCompatibilityTests
         };
 
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(
-            Spec(), request, "legacy-test", LegacyDefaults(), VideoFeatures.None, CancellationToken.None);
+            Spec(), request,
+                TestVideoRecipes.Declare("legacy-test", LegacyDefaults(), VideoFeatures.None), CancellationToken.None);
 
         VideoPlanIssue issue = Assert.Single(plan.Issues,
             issue => issue.Code == "video.vsa.profile_required");
@@ -102,7 +106,8 @@ public sealed class GenericVideoPlanningCompatibilityTests
         VideoRequest request = new VideoRequest { Prompt = "test", VideoAudioReference = Track() };
 
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(
-            Spec(), request, "wan-s2v", recipe.Defaults, recipe.Supports, CancellationToken.None);
+            Spec(), request,
+                TestVideoRecipes.Declare("wan-s2v", recipe.Defaults, recipe.Supports), CancellationToken.None);
 
         Assert.DoesNotContain(plan.Issues, issue => issue.Code == "video.feature.unsupported");
         Assert.True(plan.IsValid);
@@ -116,7 +121,8 @@ public sealed class GenericVideoPlanningCompatibilityTests
         VideoRequest request = new VideoRequest { Prompt = "test", VideoAudioReference = Track() };
 
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(
-            Spec(), request, "legacy-test", LegacyDefaults(), VideoFeatures.None, CancellationToken.None);
+            Spec(), request,
+                TestVideoRecipes.Declare("legacy-test", LegacyDefaults(), VideoFeatures.None), CancellationToken.None);
 
         VideoPlanIssue issue = Assert.Single(plan.Issues, issue => issue.Code == "video.feature.unsupported");
         Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);

@@ -1,12 +1,14 @@
 using System.Security.Cryptography;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Plain fp16 MHA output digests before and after the by-value scale and the strided plan key (head-major and token-major B=1); public API only, so this file also compiles on the base tree.
+/// <summary>Plain fp16 MHA output digests before and after the by-value scale and the strided plan key (head-major and token-major B=1),
+/// and plain F32 SDPA digests on the default arm; public API only, so this file also compiles on the base tree.
 /// <c>HARTSY_SDPA_BASELINE_MODE=record</c> on base writes them to <c>HARTSY_SDPA_BASELINE_DIR</c>; on head they are compared (unset dir skips).</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class CudnnSdpaDigestTests
@@ -64,8 +66,64 @@ public sealed unsafe class CudnnSdpaDigestTests
         else ((IBackend)backend).ScaledDotProductAttention(o, q, k, v, mask, scale, allowF16: true);
         backend.Sync();
         Assert.True(backend.CudnnSdpaEngaged, $"{name} did not run on cuDNN, so it says nothing about the plan");
-        string digest = Convert.ToHexString(SHA256.HashData(new ReadOnlySpan<byte>(o.DataPointer, checked((int)(o.ElementCount * sizeof(ushort))))));
+        Settle(dir, record, name, Convert.ToHexString(SHA256.HashData(new ReadOnlySpan<byte>(o.DataPointer,
+            checked((int)(o.ElementCount * sizeof(ushort)))))));
+    }
 
+    /// <summary>F32 SDPA on the materialized, query-tiled and saturating cuDNN rows with no knob set, so changes to their compute
+    /// type and cast plumbing are shown to leave the default arm's bits alone.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("f32-h8-s512-d128", 128, "none", false, false, "S.14")]
+    [InlineData("f32-h8-s512-d64-perhead", 64, "perhead", false, false, "S.14")]
+    [InlineData("f32-h8-s512-d128-tiled", 128, "none", true, false, "S.9")]
+    [InlineData("f32-h8-s512-d64-key-tiled", 64, "key", true, false, "S.10")]
+    [InlineData("f32-h8-s512-d128-allowf16", 128, "none", false, true, "S.5")]
+    [InlineData("f32-h8-s512-d64-key-allowf16", 64, "key", false, true, "S.5")]
+    public void F32Sdpa_DefaultOutputDigest_IsUnchanged(string name, int d, string mask, bool tiled, bool allowF16, string route)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string? dir = Environment.GetEnvironmentVariable("HARTSY_SDPA_BASELINE_DIR");
+        if (string.IsNullOrWhiteSpace(dir)) { _output.WriteLine("SKIPPED: HARTSY_SDPA_BASELINE_DIR is unset"); return; }
+        bool record = string.Equals(Environment.GetEnvironmentVariable("HARTSY_SDPA_BASELINE_MODE"), "record", StringComparison.OrdinalIgnoreCase);
+
+        const int h = 8, s = 512;
+        Random rng = new(name.Aggregate(17, (a, c) => a * 31 + c));
+        TensorShape shape = new(1, h, s, d);
+        using Tensor q = Make(Gauss(rng, shape.ElementCount), shape, DType.F32);
+        using Tensor k = Make(Gauss(rng, shape.ElementCount), shape, DType.F32);
+        using Tensor v = Make(Gauss(rng, shape.ElementCount), shape, DType.F32);
+        using Tensor? bias = mask switch
+        {
+            "perhead" => Make(Gauss(rng, (long)h * s * s), new TensorShape(1, h, s, s), DType.F32),
+            "key" => Make(Gauss(rng, s), new TensorShape(1, 1, 1, s), DType.F32),
+            _ => null,
+        };
+        using Tensor o = new(shape, DType.F32);
+
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        string digest;
+        if (tiled) KnobStore.Set(EngineKnobs.SdpaForceTiled, true);
+        try
+        {
+            using CudaBackend backend = new(0, ptxDir);
+            ((IBackend)backend).ScaledDotProductAttention(o, q, k, v, bias, 1f / MathF.Sqrt(d), allowF16);
+            backend.Sync();
+            Assert.Equal(route, CudaBackend.LastAttentionRoute);
+            digest = Convert.ToHexString(SHA256.HashData(new ReadOnlySpan<byte>(o.DataPointer, checked((int)(o.ElementCount * sizeof(float))))));
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.SdpaForceTiled);
+        }
+        Settle(dir, record, name, digest);
+    }
+
+    /// <summary>Records <paramref name="digest"/> on the base tree, or compares it with the recorded one.</summary>
+    private void Settle(string dir, bool record, string name, string digest)
+    {
         Directory.CreateDirectory(dir);
         string path = Path.Combine(dir, name + ".sha256");
         if (record)

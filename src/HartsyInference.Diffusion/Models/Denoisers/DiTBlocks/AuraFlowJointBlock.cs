@@ -102,7 +102,11 @@ public sealed unsafe class AuraFlowJointBlock
 
         // QK-RMS-normed, so the joint call may narrow to F16 (the cuDNN fused config at D=256).
         _attention = new JointAttention(
-            new JointAttentionConfig { Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [1, 0], AllowF16 = true },
+            new JointAttentionConfig
+            {
+                Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [1, 0], AllowF16 = true,
+                TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
+            },
             [Stream(_toQWeight!, _toKWeight!, _toVWeight!, _toOutWeight!, _normQ, _normK),
              Stream(_addQWeight!, _addKWeight!, _addVWeight!, _toAddOutWeight!, _normAddedQ, _normAddedK)]);
     }

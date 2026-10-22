@@ -133,8 +133,10 @@ public sealed class RegionalPromptingRealWeightTests
     {
         using CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
         RecipeContext context = new RecipeContext { CheckpointPath = c.CheckpointPath, Backend = backend };
-        using IRecipePipeline pipeline = c.RecipeFactory().Construct(context);
-        ImageResult result = pipeline.Generate(request, progress: null, cancel: default);
+        IArchitectureRecipe recipe = c.RecipeFactory();
+        using IRecipePipeline pipeline = recipe.Construct(context);
+        (ImageRequest resolved, ImageEffectiveSettings settings) = TestImageRecipes.Resolve(recipe.Defaults, request);
+        ImageResult result = pipeline.Generate(resolved, settings, progress: null, cancel: default);
         return result.Rgb;
     }
 }

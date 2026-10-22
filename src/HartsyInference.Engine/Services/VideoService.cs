@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using HartsyInference.Core.Configuration;
@@ -7,10 +8,12 @@ using HartsyInference.Cuda;
 using HartsyInference.Vulkan;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Services;
 
@@ -42,11 +45,15 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequestExecutionBinding binding = VideoRequestExecutionBinding.Create(spec, request);
         ModelSpec plannedSpec = binding.Model;
         VideoRequest plannedRequest = binding.Request;
-        string familyId = ModelCapabilities.VideoFamilyIdFor(plannedSpec);
-        VideoDefaults defaults = ModelCapabilities.VideoDefaultsFor(plannedSpec);
-        VideoFeatures features = ModelCapabilities.VideoFeaturesFor(plannedSpec);
-        VideoPlan plan = await VideoProfileResolver.ResolveAsync(
-                plannedSpec, plannedRequest, familyId, defaults, features, cancel)
+        string familyId = RecipeResolution.VideoFamilyIdFor(plannedSpec);
+        (IVideoRecipe? recipe, ResolvedModelVariant? variant) = RecipeResolution.ResolveVideo(plannedSpec);
+        if (recipe is null)
+        {
+            throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
+        }
+        VideoRecipeDeclaration declaration = VideoRecipeDeclaration.For(recipe, familyId, variant,
+            RecipeResolution.VideoFeaturesFor(recipe, variant, plannedSpec.LocalPath));
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(plannedSpec, plannedRequest, declaration, cancel)
             .ConfigureAwait(false);
         plan = plan with
         {
@@ -284,7 +291,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         ArgumentNullException.ThrowIfNull(request);
         VideoPlan executionPlan = VideoRequestExecutionBinding.RequirePlannedState(plan);
         VideoRequest executionRequest = VideoRequestExecutionBinding.RequireUnchanged(executionPlan, request);
-        LogPlanWarnings(executionPlan);
+        LogPlan(executionPlan);
         executionPlan.ThrowIfInvalid();
         VideoRequest effectiveRequest = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
@@ -300,7 +307,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 VideoArtifactFileBinding.RequireUnchanged(executionPlan);
                 IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
                     executionPlan.Model, effectiveRequest, executionPlan);
-                VideoGenerationResult result = pipeline.Generate(effectiveRequest, progress, cancel);
+                VideoGenerationResult result = pipeline.Generate(effectiveRequest, executionPlan.EffectiveSettings, progress, cancel);
                 // An explicit request fps always wins; else a pipeline-pinned rate (e.g. a decoded driving clip's,
                 // so motion speed matches the driving video); else the family default the resolver applied.
                 int? fps = executionRequest.Fps ?? result.Fps ?? effectiveRequest.Fps;
@@ -310,9 +317,30 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 }
                 double seconds = VideoAudioResolver.VideoSeconds(result.Frames.Count, fps);
                 VideoGenerationResult withAudio = VideoAudioResolver.Resolve(result, effectiveRequest, seconds);
-                return withAudio with { Execution = BuildExecutionSummary(executionPlan) };
+                return withAudio with
+                {
+                    Execution = BuildExecutionSummary(executionPlan),
+                    Recipe = executionPlan.Recipe,
+                    Provenance = FpsProvenance(executionPlan, executionRequest.Fps, fps),
+                };
             },
             cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>The plan's provenance with the frame rate the result actually carries: a rate the pipeline pinned from
+    /// an input clip replaces the plan's, reported as derived over a default and as normalized over a caller's value.</summary>
+    private static IReadOnlyDictionary<string, ResolvedParameter> FpsProvenance(VideoPlan plan, int? requested, int? fps)
+    {
+        if (fps is not int pinned || pinned == plan.EffectiveSettings.Fps)
+        {
+            return plan.Provenance;
+        }
+        string value = pinned.ToString(CultureInfo.InvariantCulture);
+        ResolvedParameter entry = requested is int asked
+            ? new ResolvedParameter(value, ParameterSource.Normalized,
+                $"requested {asked.ToString(CultureInfo.InvariantCulture)}, pinned by the pipeline's input clip")
+            : new ResolvedParameter(value, ParameterSource.Derived, "pinned by the pipeline's input clip");
+        return ParameterProvenance.With(plan.Provenance, nameof(VideoRequest.Fps), entry);
     }
 
     /// <inheritdoc/>
@@ -322,7 +350,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoPlan plan = await PlanAsync(spec, request, cancel).ConfigureAwait(false);
         VideoPlan executionPlan = VideoRequestExecutionBinding.RequirePlannedState(plan);
         VideoRequest executionRequest = VideoRequestExecutionBinding.RequireUnchanged(executionPlan, request);
-        LogPlanWarnings(executionPlan);
+        LogPlan(executionPlan);
         executionPlan.ThrowIfInvalid();
         VideoRequest resolved = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
@@ -345,7 +373,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             try
             {
-                await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, progress, cancel).WithCancellation(cancel).ConfigureAwait(false))
+                await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, executionPlan.EffectiveSettings, progress, cancel).WithCancellation(cancel).ConfigureAwait(false))
                 {
                     await channel.Writer.WriteAsync(frame, cancel).ConfigureAwait(false);
                 }
@@ -402,8 +430,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         };
     }
 
-    private static void LogPlanWarnings(VideoPlan plan)
+    /// <summary>One line naming where every effective setting came from, then each planning warning.</summary>
+    private static void LogPlan(VideoPlan plan)
     {
+        Logs.Info($"[VideoPlan] {ParameterProvenance.Describe(plan.Recipe, plan.Provenance)}");
         foreach (VideoPlanIssue issue in plan.Issues)
         {
             if (issue.Severity == VideoPlanIssueSeverity.Warning)

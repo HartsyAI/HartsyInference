@@ -180,7 +180,7 @@ public static class RefinerStage
         Logs.Info($"[Features][Refiner] Generic refine: base '{baseFamily}' {baseResult.Width}x{baseResult.Height} → "
             + $"'{refinerFamily}' at {width}x{height}, strength={spec.Strength:F2}, steps={spec.Steps}, cfg={spec.CfgScale}.");
         IRecipePipeline refinerPipeline = engine.GetOrConstructRecipe(refinerSpec, refineRequest, alsoKeepPath: baseSpec.LocalPath, cancel: cancel);
-        ImageRequest resolvedRefine = engine.DefaultsFor(refinerSpec, refinerPipeline).Apply(refineRequest) with
+        ImageRequest resolvedRefine = engine.DefaultsFor(refinerSpec).Apply(refineRequest) with
         {
             // Apply() may re-fill from family defaults; the refine geometry and budget are already decided above.
             Width = width,
@@ -188,7 +188,7 @@ public static class RefinerStage
             Steps = spec.Steps,
             CfgScale = spec.CfgScale,
         };
-        ImageResult refined = engine.GenerateWithVramCleanup(() => refinerPipeline.Generate(resolvedRefine, progress, cancel));
+        ImageResult refined = engine.GenerateWithVramCleanup(() => refinerPipeline.Generate(resolvedRefine, ImageEffectiveSettings.Of(resolvedRefine), progress, cancel));
         Dictionary<string, string> meta = new Dictionary<string, string>(refined.Meta, StringComparer.OrdinalIgnoreCase)
         {
             ["refiner_model"] = Path.GetFileName(spec.Model),

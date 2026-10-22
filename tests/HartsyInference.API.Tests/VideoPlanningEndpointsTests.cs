@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
+using HartsyInference.Engine.Catalog;
 
 namespace HartsyInference.API.Tests;
 
@@ -49,6 +50,29 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         Assert.DoesNotContain("artifactHashes", json, StringComparison.Ordinal);
         Assert.DoesNotContain("artifactMetadata", json, StringComparison.Ordinal);
         Assert.DoesNotContain("checkpointMetadata", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Plan_ReportsTheRecipeAndWhereEachSettingCameFrom()
+    {
+        string checkpoint = WriteH3Folder();
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage response = await client.PostAsJsonAsync("/v1/native/video/plan", new
+        {
+            model = "minimax-h3",
+            modelPath = checkpoint,
+            request = new { prompt = "provenance", steps = 12 },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement recipe = body.GetProperty("recipe");
+        Assert.Equal("minimax-h3", recipe.GetProperty("familyId").GetString());
+        Assert.True(recipe.GetProperty("revision").GetInt32() >= 1);
+        JsonElement provenance = body.GetProperty("provenance");
+        Assert.Equal("UserOverride", provenance.GetProperty("Steps").GetProperty("source").GetString());
+        Assert.Equal("ProfileDefault", provenance.GetProperty("Frames").GetProperty("source").GetString());
+        Assert.Equal("Derived", provenance.GetProperty("Seed").GetProperty("source").GetString());
     }
 
     [Theory]
@@ -564,6 +588,8 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         public IEmbeddingService Embeddings => throw new NotSupportedException();
         public IDecisionService Decisions => throw new NotSupportedException();
 
+        public IRecipeCatalog Recipes => throw new NotSupportedException();
+
         public bool IsSupported(Modality modality) => modality == Modality.Video;
         public void SetBackend(string selector) => throw new NotSupportedException();
         public void FreeMemory() { }
@@ -627,6 +653,8 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
                 Model = spec,
                 Profile = ProfileOverride ?? DefaultProfile,
                 EffectiveSettings = Effective,
+                Recipe = new RecipeIdentity { FamilyId = "test", Revision = 1 },
+                Provenance = new Dictionary<string, ResolvedParameter>(StringComparer.Ordinal),
                 Issues = PlanIssues,
                 CacheIdentity = "fake",
             };

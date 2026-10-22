@@ -7,6 +7,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -165,7 +166,7 @@ internal static class YueMusicModel
                 dual ? "vocal " : "");
             int[] instrumental = dual ? EncodeReferenceCb0(backend, request.ReferenceInstrumental!, "instrumental ") : [];
             int[] promptCodec = YueTokenizer.BuildAudioPromptCodec(vocal, instrumental,
-                request.ReferenceStartSeconds, request.ReferenceEndSeconds);
+                request.ReferenceStartSeconds.Filled(), request.ReferenceEndSeconds.Filled());
             if (promptCodec.Length == 0)
             {
                 Logs.Warning($"[Audio][YuE] Reference audio window [{request.ReferenceStartSeconds}s, "
@@ -203,7 +204,7 @@ internal static class YueMusicModel
             {
                 segmentPrompts.Add(tokenizer.EncodeSegmentPrompt(request.Prompt ?? string.Empty, isFirst: true));
             }
-            int maxFrames = (int)(Math.Clamp(request.Duration, 5d, 300d) * config.FrameRateHz);
+            int maxFrames = (int)(Math.Clamp(request.Duration.Filled(), 5d, 300d) * config.FrameRateHz);
             int perSegment = Math.Max(config.FrameRateHz, maxFrames / segmentPrompts.Count);
             return MusicAudio.Mono(pipeline.Synthesize(backend, headIds, segmentPrompts, maxFramesPerSegment: perSegment,
                 seed: request.Seed,

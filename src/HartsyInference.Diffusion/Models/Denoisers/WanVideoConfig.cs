@@ -127,10 +127,15 @@ public sealed record WanVideoConfig
     /// <summary>True when this variant is a two-expert MoE (Wan2.2 A14B).</summary>
     public bool IsMixtureOfExperts => BoundaryRatio > 0f;
 
+    /// <summary>The blocks may run attention and the FFN in F16 over the F32 residual stream (<c>numerics.wanF16</c>): set
+    /// for the checkpoints whose branch activations were measured inside the F16 range, TI2V-5B and Wan 2.1 T2V-14B. An A14B expert
+    /// pair stays F32 whatever this says; a lone A14B T2V expert is a T2V-14B by structure.</summary>
+    public bool F16Branches { get; init; }
+
     // ── Presets ──
 
     /// <summary>Wan2.2 TI2V-5B (z=48 VAE, text+first-frame-latent I2V via expand_timesteps).</summary>
-    public static WanVideoConfig Ti2V5B => new();
+    public static WanVideoConfig Ti2V5B => new() { F16Branches = true };
 
     /// <summary>Wan2.1 T2V-1.3B (480p): inner 1536, 30 layers, ffn 8960, z=16 VAE (8×/4×).</summary>
     public static WanVideoConfig T2V_1_3B => new()
@@ -143,7 +148,7 @@ public sealed record WanVideoConfig
     public static WanVideoConfig T2V_14B => new()
     {
         NumHeads = 40, HeadDim = 128, InChannels = 16, OutChannels = 16, VaeLatentChannels = 16,
-        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f,
+        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f, F16Branches = true,
     };
 
     /// <summary>Wan2.1 I2V-14B (480p): T2V-14B + 36-ch concat conditioning (z 16 + cond-latent 16 + mask 4) and

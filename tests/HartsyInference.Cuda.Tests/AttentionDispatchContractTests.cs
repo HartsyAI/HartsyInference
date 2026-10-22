@@ -1,4 +1,3 @@
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -26,71 +25,18 @@ public sealed class AttentionDispatchContractTests
     [InlineData(264, false)]
     public void CudnnSdpa_HeadDims_AreTheProbedEnvelope(long d, bool expected) => Assert.Equal(expected, CudnnSdpa.ShapeSupported(d));
 
-    /// <summary>F32 Sage dispatch requires both the feature opt-in and the explicit unsafe V-narrowing opt-in.</summary>
-    [Fact]
-    public void SageF32Dispatch_RequiresTwoExplicitOptIns()
-    {
-        try
-        {
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-            Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
-
-            KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
-            Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
-
-            KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
-            Assert.True(CudaBackend.SageF32ValueNarrowingEnabled);
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-        }
-    }
-
-    /// <summary>FlashAttention-v2 accepts only exact F32 MHA shapes with complete query tiles on TF32 hardware.</summary>
-    [Fact]
-    public void FlashV2Contract_RejectsMixedDtypesAndPartialTiles()
-    {
-        const float Scale = 0.125f;
-        using Tensor query = new Tensor(new TensorShape(1, 2, 32, 64), DType.F32);
-        using Tensor key = new Tensor(new TensorShape(1, 2, 17, 64), DType.F32);
-        using Tensor value = new Tensor(new TensorShape(1, 2, 17, 64), DType.F32);
-        using Tensor output = new Tensor(query.Shape, DType.F32);
-        Assert.True(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, Scale, tf32Available: true));
-
-        using Tensor tailQuery = new Tensor(new TensorShape(1, 2, 33, 64), DType.F32);
-        using Tensor tailOutput = new Tensor(tailQuery.Shape, DType.F32);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            tailOutput, tailQuery, key, value, null, Scale, tf32Available: true));
-
-        using Tensor f16Key = new Tensor(key.Shape, DType.F16);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, f16Key, value, null, Scale, tf32Available: true));
-
-        using Tensor wrongHeads = new Tensor(new TensorShape(1, 1, 17, 64), DType.F32);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, wrongHeads, wrongHeads, null, Scale, tf32Available: true));
-
-        using Tensor f16Output = new Tensor(query.Shape, DType.F16);
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            f16Output, query, key, value, null, Scale, tf32Available: true));
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, float.NaN, tf32Available: true));
-        Assert.False(CudaBackend.FlashAttentionV2ContractSatisfied(
-            output, query, key, value, null, Scale, tf32Available: false));
-    }
-
+    /// <summary>The Sage V stride: whole 16-byte rows, and never a power of two from 2048 up (those alias in L2).</summary>
     [Theory]
-    [InlineData(65_535, 1, true)]
-    [InlineData(0, 1, false)]
-    [InlineData(65_536, 1, false)]
-    public void FlashV2GridContract_EnforcesCudaYzLimits(long batch, long heads, bool expected)
-    {
-        Assert.Equal(expected, CudaBackend.FlashAttentionV2GridDimensionsSupported(batch, heads));
-    }
+    [InlineData(1, 8)]
+    [InlineData(250, 256)]
+    [InlineData(1024, 1024)]
+    [InlineData(1025, 1032)]
+    [InlineData(2040, 2040)]
+    [InlineData(2048, 2056)]
+    [InlineData(2041, 2056)]
+    [InlineData(8192, 8200)]
+    [InlineData(17480, 17480)]
+    public void SageSkvPad_IsWholeRowsAndNeverALargePowerOfTwo(long skv, long expected) => Assert.Equal(expected, CudaKernels.SageSkvPad(skv));
 
     [Fact]
     public void SdpaContract_RejectsMismatchedBuffersAndMaskAxes()
@@ -114,6 +60,44 @@ public sealed class AttentionDispatchContractTests
         using Tensor invalidMask = new(new TensorShape(2, 2, 4, 6), DType.F32);
         Assert.Throws<ArgumentException>(() =>
             CudaBackend.ValidateScaledDotProductAttentionContract(output, query, key, value, invalidMask, 0.125f));
+    }
+
+    /// <summary>The equal-head token-major entry takes one sequence as <c>[S, H·D]</c>, <c>[1, S, H·D]</c> or <c>[1, S, H, D]</c>, the
+    /// shapes the grouped entry takes, and refuses a batch or a width that is not H·D.</summary>
+    [Fact]
+    public void TokenMajorContract_TakesOneSequenceInEachLayout_AndRefusesABatch()
+    {
+        const int Heads = 2, HeadDim = 8, S = 5, Inner = Heads * HeadDim;
+        TensorShape[] layouts = [new(S, Inner), new(1, S, Inner), new(1, S, Heads, HeadDim)];
+        foreach (TensorShape operands in layouts)
+        {
+            foreach (TensorShape output in layouts)
+            {
+                using Tensor q = new(operands, DType.F16), k = new(operands, DType.F16), v = new(operands, DType.F16), o = new(output, DType.F16);
+                CudaBackend.ValidateTokenMajorAttentionContract(o, q, k, v, Heads, HeadDim, 0.25f);
+                CudaBackend.ValidateTokenMajorGqaAttentionContract(o, q, k, v, Heads, Heads, HeadDim, 0.25f);
+            }
+        }
+
+        using Tensor query = new(new TensorShape(1, S, Heads, HeadDim), DType.F16), key = new(query.Shape, DType.F16);
+        using Tensor value = new(query.Shape, DType.F16);
+        using Tensor batched = new(new TensorShape(2, S, Inner), DType.F16), wide = new(new TensorShape(1, S, Inner + HeadDim), DType.F16);
+        using Tensor short3 = new(new TensorShape(1, S - 1, Inner), DType.F16);
+        foreach (Tensor output in (Tensor[])[batched, wide, short3])
+            Assert.Throws<ArgumentException>(() => CudaBackend.ValidateTokenMajorAttentionContract(output, query, key, value, Heads, HeadDim, 0.25f));
+    }
+
+    /// <summary>The token-major entry bounds each tensor at Int32.MaxValue elements, as the head-major entry does, and leaves the score
+    /// matrix to its rows: 46341 query and key rows (SD1.5's self-attention at 1728² and up) are taken.</summary>
+    [Fact]
+    public void TokenMajorContract_TakesAScoreMatrixPastInt32()
+    {
+        const int Heads = 1, HeadDim = 8, S = 46341;
+        Assert.True((long)S * S > int.MaxValue);
+        using Tensor q = new(new TensorShape(S, Heads * HeadDim), DType.F16), k = new(q.Shape, DType.F16), v = new(q.Shape, DType.F16);
+        using Tensor o = new(q.Shape, DType.F16);
+
+        CudaBackend.ValidateTokenMajorAttentionContract(o, q, k, v, Heads, HeadDim, 0.25f);
     }
 
     [Fact]

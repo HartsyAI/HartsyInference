@@ -92,7 +92,10 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
+        int width = request.Width;
+        int height = request.Height;
         float cfgRescale = Math.Clamp(request.CfgRescale ?? 0f, 0f, 1f);
         bool tcfg = request.Tcfg ?? false;
         int latentH = height / 8;

@@ -25,6 +25,7 @@ public sealed partial class CudaBackend
     /// <summary>Runs the first row of <paramref name="rows"/> that covers, admits and completes the call, and records its route.</summary>
     private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call, int flashKvGroup = 0)
     {
+        if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
         int saved = t_flashKvGroup;
         t_flashKvGroup = flashKvGroup;
         try
@@ -117,12 +118,13 @@ public sealed partial class CudaBackend
     private const AttentionDTypes AnyFloat = AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16;
     private const AttentionMaskSupport AnyBias = AttentionMaskSupport.HeadSharedBias | AttentionMaskSupport.PerHeadBias;
 
-    // ── head-major ScaledDotProductAttention: S.1-S.15 ─────────────────────────────────────────────────────────────
+    // ── head-major ScaledDotProductAttention: S.1-S.16 (S.4, S.6-S.8 retired) ───────────────────────────────────────
 
     private AttentionKernelRow[] BuildDenseRows()
     {
         const AttentionRoute E = AttentionRoute.Dense;
         const AttentionLayouts HM = AttentionLayouts.HeadMajor;
+        const AttentionDTypes Half = AttentionDTypes.F16 | AttentionDTypes.BF16;
         return
         [
             new DelegateAttentionRow(Cap("sage.int8.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, HM) with
@@ -147,14 +149,6 @@ public sealed partial class CudaBackend
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f16", E, AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView), "S.3",
                 (in AttentionCall c) => CudnnSdpaRows.Covers(in c) && CudnnReady(in c),
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
-            // The F32 Sage rows narrow V to F16 with no range check (|V| > 65504 becomes Inf), hence the two opt-in flags.
-            new DelegateAttentionRow(Cap("sage.int8.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
-                }, "S.4",
-                (in AttentionCall c) => c.Query.DType == DType.F32 && SageF32ValueNarrowingEnabled && c.Mask.Bias is null
-                    && (c.QkHeadDim == 64 || c.QkHeadDim == 128) && c.KeyTokens >= 2048 && SageF32KernelsReady(c.QueryTokens),
-                (in AttentionCall c) => { SageAttentionInt8(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.sat", E, AttentionDTypes.F32, HM, strided: false) with
                 {
                     Saturates = true, Lowering = AttentionLowering.Cast,
@@ -162,74 +156,91 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c) && CudnnReady(in c)
                     && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled,
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
-            new DelegateAttentionRow(Cap("sage.int8.f32.short", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.bf16", E, AttentionDTypes.F32, HM, strided: false) with
                 {
-                    MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
-                }, "S.6",
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && SageF32ValueNarrowingEnabled
-                    && (c.QkHeadDim == 64 || c.QkHeadDim == 128) && c.KeyTokens >= 1024 && SageF32KernelsReady(c.QueryTokens),
-                (in AttentionCall c) => { SageAttentionInt8(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("fa2.tf32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32, CaptureSafe = true,
-                }, "S.7",
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && EngineKnobs.SdpaV2.Value
-                    && FlashAttentionV2ContractSatisfied(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, _allowTf32),
-                (in AttentionCall c) => { FlashAttentionV2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("flash.forced", E, AttentionDTypes.F32, AttentionDTypes.F32, HM), null,
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && EngineKnobs.SdpaForceFlash.Value,
-                (in AttentionCall c) =>
-                {
-                    FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.KeyTokens, kvGroup: 1, causal: false, qOffset: 0,
-                        c.Scale);
-                    t_attentionRoute = AttentionRouteText.Nested("S.8/", t_attentionRoute);
-                    return true;
-                }),
+                    UsesQueryKey = AttentionFormats.Bf16, UsesProbValue = AttentionFormats.Bf16, NarrowsF32To = AttentionFormats.Bf16,
+                    Lowering = AttentionLowering.Cast,
+                }, "S.16",
+                (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
+                    && CudnnReady(in c, CudnnSdpa.SdpaDtype.BF16) && Bf16CastFits(in c),
+                (in AttentionCall c) => TryCudnnSdpa(in c, CudnnSdpa.SdpaDtype.BF16)),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
-                    UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,
+                    UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
                 }, "S.9",
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && ScoresExceedHalfFree(in c),
+                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && TilesScores(in c),
                 (in AttentionCall c) => { SdpaTiledF32(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("tiled.f32.keybias", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
-                    Masks = AnyBias, UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,
+                    Masks = AnyBias, UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
                 }, "S.10",
-                (in AttentionCall c) => c.Query.DType == DType.F32 && MaskIsKeyOnly(c.Mask.Bias, c.QueryTokens) && ScoresExceedHalfFree(in c),
+                (in AttentionCall c) => c.Query.DType == DType.F32 && MaskIsKeyOnly(c.Mask.Bias, c.QueryTokens) && TilesScores(in c),
                 (in AttentionCall c) =>
                 {
                     SdpaTiledF32(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale, c.Mask.Bias);
                     return true;
                 }),
+            new DelegateAttentionRow(Cap("tiled.cast", E, Half, Half, HM) with
+                {
+                    UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats, Lowering = AttentionLowering.Cast,
+                }, "S.11",
+                static (in AttentionCall c) => c.Mask.Bias is null && ScoresPastMaterialized(in c) && OneRowTiles(in c),
+                (in AttentionCall c) => { SdpaTiledCast(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("materialized", E, AnyFloat, AnyFloat, HM) with
                 {
-                    Masks = AnyBias, UsesQueryKey = AttentionFormats.Tf32 | AttentionFormats.F16, UsesProbValue = AttentionFormats.Tf32 | AttentionFormats.F16,
+                    Masks = AnyBias, UsesQueryKey = SdpaF32Formats | AttentionFormats.F16, UsesProbValue = SdpaF32Formats | AttentionFormats.F16,
                     Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast | AttentionLowering.ExpandMask,
                 }, null,
-                static (in AttentionCall c) => true,
+                static (in AttentionCall c) => !ScoresPastMaterialized(in c),
                 (in AttentionCall c) =>
                 {
                     SdpaMaterialized(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         c.Numerics.LegacyAssertedBounded);
                     return true;
                 }),
+            new DelegateAttentionRow(Cap("refuse", E, AnyFloat, AnyFloat, HM) with { Masks = AnyBias }, null,
+                static (in AttentionCall c) => ScoresPastMaterialized(in c),
+                static (in AttentionCall c) => throw new AttentionUnsupportedException(
+                    $"No bounded CUDA row serves this {c.Query.DType} head-major attention: its {(long)c.Batch * c.Heads * c.QueryTokens * c.KeyTokens} "
+                    + $"score elements are past the 2^32 ({MaterializedMaxScores}) the materialized row addresses, and past that a call runs "
+                    + "query-tiled only when it is unmasked or F32 with a key-only mask and one query row across its heads, "
+                    + $"{(long)c.Batch * c.Heads * c.KeyTokens} score elements, fits too.")),
         ];
     }
 
-    /// <summary>The F32 Sage branches' kernel check: the module loaded, and the v0 kernel's full-tile rule when v1 is absent.</summary>
-    private bool SageF32KernelsReady(int sq)
+    /// <summary>The format the F32 SDPA GEMMs multiply in beyond F32: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
+    private AttentionFormats SdpaF32Formats => _sdpaNoTf32 ? AttentionFormats.None : AttentionFormats.Tf32;
+
+    /// <summary>Score elements the materialized row addresses: its softmax forms each row's offset in 32 bits.</summary>
+    internal const long MaterializedMaxScores = 1L << 32;
+
+    /// <summary>The B·H·Sq·Skv score matrix is larger than the materialized row addresses.</summary>
+    internal static bool ScoresPastMaterialized(in AttentionCall c) =>
+        c.KeyTokens > 0 && (long)c.Batch * c.Heads * c.QueryTokens > MaterializedMaxScores / c.KeyTokens;
+
+    /// <summary>A one-row tile, B·H·Skv scores, is within what the softmax addresses; every tiled row needs it.</summary>
+    internal static bool OneRowTiles(in AttentionCall c) => (long)c.Batch * c.Heads * c.KeyTokens <= MaterializedMaxScores;
+
+    /// <summary>The query-tiled gate: a one-row tile the softmax addresses, and forced, an F32 score matrix larger than half of free
+    /// VRAM, or one the materialized row does not address.</summary>
+    private bool TilesScores(in AttentionCall c)
     {
-        EnsureKernels();
-        return _kernels!.HasSageAttentionKernels && (_kernels.HasSageV1 || sq % 32 == 0);
+        if (!OneRowTiles(in c)) return false;
+        if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
+        ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
+        return scoreBytes > (ulong)FreeVram() / 2;
     }
 
-    /// <summary>The query-tiled gate: forced, or an F32 score matrix larger than half of free VRAM.</summary>
-    private bool ScoresExceedHalfFree(in AttentionCall c)
+    /// <summary>The BF16 copies of Q, K, V and the output fit in half of free VRAM.</summary>
+    private bool Bf16CastFits(in AttentionCall c)
     {
-        ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
-        (nuint free, _) = _context.GetMemoryInfo();
-        return EngineKnobs.SdpaForceTiled.Value || scoreBytes > (ulong)free / 2;
+        ulong castBytes = sizeof(ushort) * ((ulong)c.Query.Storage.ElementCount + (ulong)c.Key.Storage.ElementCount
+            + (ulong)c.Value.Storage.ElementCount + (ulong)c.Output.Storage.ElementCount);
+        return castBytes <= (ulong)FreeVram() / 2;
     }
+
+    /// <summary>Free device memory the attention rows budget against.</summary>
+    private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
 
     // ── token-major ScaledDotProductAttentionTokenMajor: M.1-M.3, and the grouped-query lowering ────────────────────
 
@@ -289,10 +300,11 @@ public sealed partial class CudaBackend
             (in AttentionCall c) => { GroupedTokenMajorViaHeadMajor(in c); return true; }),
     ];
 
-    /// <summary>The knob, the session, the head dim and this call's signature health.</summary>
-    private bool CudnnReady(in AttentionCall c) =>
+    /// <summary>The knob, the session, the head dim and the health of the signature the call runs under, F32 operands cast to
+    /// <paramref name="castTarget"/>.</summary>
+    private bool CudnnReady(in AttentionCall c, CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16) =>
         _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(c.QkHeadDim)
-        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c), Environment.TickCount64);
+        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c, castTarget), Environment.TickCount64);
 
     /// <summary>One sequence of whole tensors: all the permuting and widening rows take.</summary>
     private static bool WholeSequence(in AttentionCall c) =>

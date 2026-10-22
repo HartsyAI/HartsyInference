@@ -39,8 +39,8 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>OmniGen2's official sampling settings: 28 steps at text-guidance 4.0, 1024x1024 (<c>GenerationDefaults.OmniGen2</c>).</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+    /// <summary>OmniGen2's sampling settings: 20 steps at text-guidance 5.0, 1024x1024 (SwarmUI <c>Obscure Model Support.md</c>, OmniGen2: steps ~20, CFG 5 to 7). Upstream's script uses 28 steps at 4.0.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 20, CfgScale = 5.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;

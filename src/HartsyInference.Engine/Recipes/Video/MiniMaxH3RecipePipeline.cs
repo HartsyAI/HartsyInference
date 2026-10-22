@@ -201,7 +201,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     private sealed record PreparedVideo(IReadOnlyList<byte[]> Frames, int Width, int Height, AudioClip? Soundtrack);
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         // H3's canonical joint solver is Euler over its native "normal" schedule. One DiT forward returns BOTH
@@ -232,18 +233,18 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 + $"{requestedFps} fps (slow/fast motion), not resampled.");
         }
         if (request.ChainTotalFrames is int chainTotal
-            && chainTotal > MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124))
+            && chainTotal > settings.Frames)
         {
-            return GenerateChain(request, chainTotal, progress, cancel);
+            return GenerateChain(request, settings, chainTotal, progress, cancel);
         }
-        return GenerateOnce(ApplyDrivingAudio(request), progress, cancel);
+        return GenerateOnce(ApplyDrivingAudio(request, settings.Frames), settings, progress, cancel);
     }
 
     /// <summary>Locks the audio stream to a supplied track so the video denoises against it instead of inventing its
     /// own soundtrack — H3 has no audio-driven mode, and its reference audio is a soft exhibit that the generated
     /// audio can drift away from. Built here rather than on the request for the same reason chaining builds its
     /// masks internally: the request-level mask surface carries its own release gate.</summary>
-    private static VideoRequest ApplyDrivingAudio(VideoRequest request)
+    private static VideoRequest ApplyDrivingAudio(VideoRequest request, int frames)
     {
         if (request.VideoAudioReference is null)
         {
@@ -255,7 +256,6 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 "MiniMax-H3 driving audio builds its own audio mask; supplying both is ambiguous.", nameof(request));
         }
         RejectTimingEditsThatBreakLipSync(request);
-        int frames = MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124);
         // All-zero: every audio row is preserved from the track, so the source is the output and video follows it.
         float[] locked = new float[MiniMaxH3Geometry.AudioLatentFrames(frames)];
         Logs.Info($"[MiniMaxH3RecipePipeline] Driving audio: locking {locked.Length} audio latent rows to the "
@@ -307,16 +307,16 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     }
 
     /// <summary>One segment: the whole single-generation path, from geometry snapping through VAE decode.</summary>
-    private VideoGenerationResult GenerateOnce(VideoRequest request, IProgress<StepPreview>? progress,
-        CancellationToken cancel, int stepOffset = 0, int? totalSteps = null)
+    private VideoGenerationResult GenerateOnce(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel, int stepOffset = 0, int? totalSteps = null)
     {
-        int requestedFrames = request.Frames ?? 124;
+        int requestedFrames = settings.Frames;
         // H3's grids are coarse and non-obvious: frames snap to 17k+5, latent frames are NOT frames/4, and each pixel
         // axis rounds to 32 (a multiple of 16 alone leaves an odd latent axis and the 2x2 patchifier drops its last
         // row/column). Audio length follows the ALIGNED frame count so the two streams end together.
         int frames = MiniMaxH3Geometry.AlignFrameCount(requestedFrames);
-        int requestedWidth = request.Width ?? 1344;
-        int requestedHeight = request.Height ?? 768;
+        int requestedWidth = settings.Width;
+        int requestedHeight = settings.Height;
         (int width, int height) = MiniMaxH3Geometry.ClampToMaxArea(requestedWidth, requestedHeight);
         if (frames != requestedFrames || width != requestedWidth || height != requestedHeight)
         {
@@ -372,12 +372,12 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     Height = height,
                     LatentFrames = MiniMaxH3Geometry.VideoLatentFrames(frames),
                     AudioLatentFrames = MiniMaxH3Geometry.AudioLatentFrames(frames),
-                    Steps = request.Steps ?? 30,
+                    Steps = settings.Steps,
                     Seed = (int)(RecipeRequestMapper.MapSeed(request.Seed) ?? 0),
                     SigmaShiftVideo = request.FlowShift ?? _config.SigmaShiftVideo,
                     SigmaShiftAudio = request.AudioFlowShift ?? _config.SigmaShiftAudio,
                     Sampler = request.Sampler ?? "euler",
-                    CfgScale = request.CfgScale ?? 1f,
+                    CfgScale = settings.CfgScale,
                     HybridProfile = _supportsHybridConditioning,
                     Keyframes = keyframes.Count == 0 ? null
                         : keyframes.Select(k => new MiniMaxH3Keyframe
@@ -953,13 +953,13 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     /// segment's tail as a fully-preserved head, which carries its motion and soundtrack phase into the new frames'
     /// attention context; the head is context rather than output and is dropped at assembly, so there is no seam to
     /// blend. Trim and boomerang apply once, to the whole video.</summary>
-    private VideoGenerationResult GenerateChain(VideoRequest request, int totalFrames,
+    private VideoGenerationResult GenerateChain(VideoRequest request, VideoEffectiveSettings settings, int totalFrames,
         IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        int perSegment = MiniMaxH3Geometry.AlignFrameCount(request.Frames ?? 124);
+        int perSegment = settings.Frames;
         IReadOnlyList<MiniMaxH3ChainPlanner.Segment> plan =
             MiniMaxH3ChainPlanner.Plan(totalFrames, request.ChainContextFrames, perSegment);
-        int steps = request.Steps ?? 30;
+        int steps = settings.Steps;
         Logs.Info($"[MiniMaxH3RecipePipeline] Long-form chain: {MiniMaxH3ChainPlanner.TotalFrames(plan)} frames as "
             + $"{plan.Count} segment(s) of up to {perSegment}f with a {request.ChainContextFrames}-frame carry.");
 
@@ -977,7 +977,8 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
             }
             VideoRequest segmentRequest = BuildSegmentRequest(request, segment, baseSeed,
                 assembled, width, height, sampleRate, assembledAudio);
-            VideoGenerationResult result = GenerateOnce(segmentRequest, progress, cancel,
+            VideoGenerationResult result = GenerateOnce(segmentRequest, settings with { Frames = segment.FrameCount },
+                progress, cancel,
                 stepOffset: segment.Index * steps, totalSteps: plan.Count * steps);
             if (result.Frames.Count == 0)
             {

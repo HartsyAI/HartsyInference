@@ -84,7 +84,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         FlowMatchSampling.ThrowIfSamplerSelected(request.Scheduler, "Wan S2V");
 
         ThrowIfDisposed();
-        int width = request.Width ?? 832, height = request.Height ?? 480;
+        int width = request.Width, height = request.Height;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
         if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-S2V.");
@@ -96,8 +96,8 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (numFrames - 1) / tp + 1, hLat = height / sp, wLat = width / sp, latentCh = _config.VaeLatentChannels;
         int tVideo = tLat * 4;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         bool hasRef = referenceLatent is not null || !referenceRgb24.IsEmpty;
 

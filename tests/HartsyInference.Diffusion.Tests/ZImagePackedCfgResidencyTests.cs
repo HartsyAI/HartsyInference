@@ -211,17 +211,11 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         Assert.Equal(expectedShift, config.SchedulerShift);
         Assert.Equal(isBase, config.IsBase);
 
-        GenerationDefaults diffusionDefaults = config.IsBase
-            ? GenerationDefaults.ZImageBase
-            : GenerationDefaults.ZImageTurbo;
-        Assert.Equal(config.IsBase ? 50 : 8, diffusionDefaults.Steps);
-        Assert.Equal(config.IsBase ? 5.0f : 1.0f, diffusionDefaults.CfgScale);
-
         if (config.IsBase)
         {
             Assert.Equal(50, ZImageRecipe.BaseDefaults.Steps);
             Assert.Equal(5.0f, ZImageRecipe.BaseDefaults.CfgScale);
-            Assert.Equal(6.0, ZImageRecipe.BaseDefaults.SigmaShift);
+            Assert.Equal(3.0, ZImageRecipe.BaseDefaults.SigmaShift);
         }
     }
 

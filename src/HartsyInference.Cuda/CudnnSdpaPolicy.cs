@@ -42,18 +42,20 @@ internal readonly record struct CudnnBias(long B, long H, long Sq)
 internal readonly record struct CudnnSdpaSignature(CudnnSdpa.SdpaDtype Dtype, bool Gqa, CudnnSdpaMask Mask, CudnnBiasAxes BiasAxes, int HeadDim,
     bool Strided = false)
 {
-    /// <summary>F32 operands run the graph in fp16 behind a cast, so they share the F16 signature. <paramref name="strided"/> keeps a refused
-    /// view from disabling the whole-tensor plans of its dtype and head dim.</summary>
-    public static CudnnSdpaSignature For(DType io, long h, long hKv, long d, CudnnBias bias, bool strided = false) => new(
-        io == DType.BF16 ? CudnnSdpa.SdpaDtype.BF16 : CudnnSdpa.SdpaDtype.F16, hKv != h,
+    /// <summary>The signature of a graph run in <paramref name="compute"/>: BF16, else F16, so an F32 call cast to F16 shares the F16
+    /// signature. <paramref name="strided"/> keeps a refused view from disabling the whole-tensor plans of its dtype and head dim.</summary>
+    public static CudnnSdpaSignature For(DType compute, long h, long hKv, long d, CudnnBias bias, bool strided = false) => new(
+        compute == DType.BF16 ? CudnnSdpa.SdpaDtype.BF16 : CudnnSdpa.SdpaDtype.F16, hKv != h,
         bias.HasBias ? CudnnSdpaMask.Bias : CudnnSdpaMask.None, bias.Axes, (int)d, strided);
 
-    /// <summary>A mask the graph cannot carry reads as none; the row's mask check rejects that call first.</summary>
-    public static CudnnSdpaSignature Of(in AttentionCall c)
+    /// <summary>The signature <paramref name="c"/> runs under when F32 operands are cast to <paramref name="castTarget"/>. A mask the
+    /// graph cannot carry reads as none; the row's mask check rejects that call first.</summary>
+    public static CudnnSdpaSignature Of(in AttentionCall c, CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16)
     {
         CudnnBias.TryFrom(c.Mask.Bias, c.Batch, c.Heads, c.QueryTokens, c.KeyTokens, out CudnnBias bias);
-        return For(c.Query.DType, c.Heads, c.KvHeads, c.QkHeadDim, bias, CudnnSdpa.IsStrided(c.QkHeadDim, CudnnSdpa.View.Of(c.Query),
-            CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c)));
+        bool strided = CudnnSdpa.IsStrided(c.QkHeadDim, CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value),
+            CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c));
+        return For(CudnnSdpaRows.Compute(c.Query.DType, castTarget), c.Heads, c.KvHeads, c.QkHeadDim, bias, strided);
     }
 
     public override string ToString() =>
@@ -176,6 +178,11 @@ internal static class CudnnSdpaRows
         UsesQueryKey = AttentionFormats.F16 | ((types & AttentionDTypes.BF16) != 0 ? AttentionFormats.Bf16 : 0),
         UsesProbValue = AttentionFormats.F16 | ((types & AttentionDTypes.BF16) != 0 ? AttentionFormats.Bf16 : 0),
     };
+
+    /// <summary>The dtype the graph runs <paramref name="io"/> operands in: fp16 and bf16 as they are, F32 behind a cast to
+    /// <paramref name="castTarget"/> (saturating F16, or BF16).</summary>
+    internal static DType Compute(DType io, CudnnSdpa.SdpaDtype castTarget) =>
+        io != DType.F32 ? io : castTarget == CudnnSdpa.SdpaDtype.BF16 ? DType.BF16 : DType.F16;
 
     /// <summary>All fp16, or all bf16 with the call's grant (legacy entry points grant none): the graph runs them uncast.</summary>
     internal static bool HalfOperands(in AttentionCall c)

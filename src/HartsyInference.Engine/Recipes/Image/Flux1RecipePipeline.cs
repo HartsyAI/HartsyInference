@@ -14,7 +14,7 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Flux.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FluxPipeline"/> owns the CLIP-L + T5-XXL encoders, so this tokenizes the prompt with both (CLIP-L for the pooled EOS vector, T5-XXL per-token plus its attention mask) and calls <see cref="FluxPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FluxLoader.Generate</c> vanilla text-to-image drive path. Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable.</summary>
-/// <param name="isDev">Selects the step fallback and whether the embedded distilled guidance is applied.</param>
+/// <param name="isDev">Whether the embedded distilled guidance is applied (Dev) or the guidance is dropped (Schnell).</param>
 /// <param name="loaders">Whatever keeps the weights alive: the open checkpoint — either container, plus any copies the backend needed widened — and one loader per component resolved as a separate file.</param>
 public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev,
     List<IDisposable> loaders, MergedLoraStack? loraStack, IBackend backend) : IRecipePipeline
@@ -27,20 +27,18 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
     private readonly MergedLoraStack? _loraStack = loraStack;
     private readonly IBackend _backend = backend;
 
-    /// <summary>A Schnell checkpoint (no guidance embedding) is a 4-step distilled model, so it resolves against <see cref="Flux1Recipe.SchnellDefaults"/> rather than Dev's 28 steps.</summary>
-    public ImageDefaults? VariantDefaults => _isDev ? Flux1Recipe.FamilyDefaults : Flux1Recipe.SchnellDefaults;
-
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
-        int steps = request.Steps ?? (_isDev ? Flux1Recipe.FamilyDefaults.Steps : Flux1Recipe.SchnellDefaults.Steps);
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        int steps = settings.Steps;
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
 
         // TODO(E-IMG-4/5): Flux guidance came from the FluxGuidanceScale T2IParam (default 3.5 for Dev, ignored by
         // Schnell) — defaulted here. True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so
-        // NegativePrompt / CfgScale are not mapped for the base path.
+        // NegativePrompt is not mapped for the base path; CfgScale is set but unread by FluxPipeline.
         float guidance = _isDev ? 3.5f : 0f;
 
         // Prompt images on Flux mean Redux (redux.stylemodel); a real IP-Adapter checkpoint is SD15/SDXL-only, and
@@ -117,9 +115,10 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                     VariationSeed = request.VariationSeed?.Seed ?? -1,
                     VariationSeedStrength = request.VariationSeed?.Strength ?? 0,
                     Prompt = prompt,
-                    Width = request.Width,
-                    Height = request.Height,
+                    Width = settings.Width,
+                    Height = settings.Height,
                     Steps = steps,
+                    CfgScale = settings.CfgScale,
                     Seed = RecipeRequestMapper.MapSeed(request.Seed),
                     // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
                     // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.

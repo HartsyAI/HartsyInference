@@ -97,6 +97,10 @@ public sealed record AttentionLayerConfig
     /// <summary>A switch read on every call that can turn the token-major entry off.</summary>
     public Knob<bool>? TokenMajorKnob { get; init; }
 
+    /// <summary>A batch of per-head operands takes the token-major entry too, where the backend plans a row for the whole call;
+    /// otherwise only one batch item does.</summary>
+    public bool TokenMajorBatches { get; init; }
+
     /// <summary>A call the CUDA head-major entry serves with SageAttention (F16, head dim 64 or 128, no bias, both sequences at
     /// least <c>numerics.sageF16MinSkv</c>) attends head-major instead of taking the token-major entry, which has no Sage kernel.</summary>
     public bool HeadMajorForSage { get; init; }
@@ -104,11 +108,22 @@ public sealed record AttentionLayerConfig
     /// <summary>The legacy <c>allowF16</c> assertion the attention call carries.</summary>
     public bool AllowF16 { get; init; }
 
+    /// <summary>Multiply formats the attention call refuses (<see cref="AttentionNumerics.Refused"/>).</summary>
+    public AttentionFormats RefusedFormats { get; init; }
+
+    /// <summary>The attention call may store Q, K, P and V in BF16 (<see cref="AttentionNumerics.Bf16Storage"/>); exclusive
+    /// with <see cref="AllowF16"/>.</summary>
+    public bool AllowBf16 { get; init; }
+
     /// <summary>The softmax scale; 0 means <c>1/√headDim</c>.</summary>
     public float Scale { get; init; }
 
     /// <summary>The scale the attention call uses.</summary>
     public float EffectiveScale => Scale != 0f ? Scale : 1.0f / MathF.Sqrt(HeadDim);
+
+    /// <summary>The permissions and refusals the attention call carries.</summary>
+    public AttentionNumerics Numerics =>
+        (AllowBf16 ? AttentionNumerics.Bf16Storage : AttentionNumerics.FromLegacy(AllowF16)) with { Refused = RefusedFormats };
 
     /// <summary>Width of the attention output before the output projection.</summary>
     public int InnerDim => Heads * HeadDim;
@@ -120,6 +135,8 @@ public sealed record AttentionLayerConfig
             throw new ArgumentException($"Attention needs positive heads, kv heads and head dim; got {Heads}, {KvHeads}, {HeadDim}.");
         if (Heads % KvHeads != 0)
             throw new ArgumentException($"Attention heads ({Heads}) must be a multiple of key/value heads ({KvHeads}).");
+        if (AllowF16 && AllowBf16)
+            throw new ArgumentException("AllowF16 and AllowBf16 are exclusive: with both, the saturating F16 path takes the call.");
         if (TokenMajorRoute is not (AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa))
             throw new ArgumentException($"The token-major entry must be Dense, TokenMajor or TokenMajorGqa, not {TokenMajorRoute}.");
         if (TokenMajorRoute == AttentionRoute.TokenMajor && KvHeads != Heads)
@@ -128,8 +145,6 @@ public sealed record AttentionLayerConfig
             throw new ArgumentException("The full-width QK norm runs with equal query and key/value heads.");
         if (Gate == AttentionGate.PerHeadDoubledSigmoid && Projection != AttentionProjection.GroupedByInput)
             throw new ArgumentException("The per-head gate is projected with the query, grouped by input.");
-        if (QkNorm == AttentionQkNorm.FullWidthRms && TokenMajorRoute != AttentionRoute.Dense)
-            throw new ArgumentException("The full-width RMS norm attends head-major.");
         if (Projection is AttentionProjection.FusedSlice or AttentionProjection.FusedSplitNorm
             && (KvHeads != Heads || Gate != AttentionGate.None))
             throw new ArgumentException("A fused [q|k|v] projection has equal head counts and no gate.");

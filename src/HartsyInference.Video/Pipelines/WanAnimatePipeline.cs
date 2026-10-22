@@ -86,7 +86,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             throw new InvalidOperationException(
                 $"Wan-Animate expects InChannels == 2·z + tp ({2 * latentCh + tp}); got {_config.InChannels}.");
 
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        float guidance = request.CfgScale;
         bool useCfg = UsesCfgBranch(guidance);
 
         // Geometry: from the cached pose latent on a conditioning-cache hit, else from the pose pixel clip.
@@ -141,7 +141,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tTotal = tLat + trimLatent;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
+        int steps = request.Steps;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         Logs.Info($"Wan-Animate: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}{(useCfg ? "" : " single forward")}, seed={seed} " +

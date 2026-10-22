@@ -20,9 +20,6 @@ public sealed record AceStep15GenerateOptions
     public int? InferSteps { get; init; }
     /// <summary>CFG strength; ≤1 (or a turbo config) disables the uncond pass.</summary>
     public float GuidanceScale { get; init; } = 1f;
-    /// <summary>ADG instead of the default APG blend. Deprecated: honored only when <see cref="GuidanceType"/> is empty.</summary>
-    public bool UseAdg { get; init; }
-
     /// <summary>Guidance blend: "apg" (default), "cfg" (plain classifier-free), or "adg".</summary>
     public string GuidanceType { get; init; } = "";
     /// <summary>Guidance applies only when <c>cfgIntervalStart ≤ t ≤ cfgIntervalEnd</c> (momentum skips too).</summary>
@@ -148,9 +145,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
             Logs.Warning("ACE-Step 1.5: guidance requested but null_condition_emb not loaded — running uncond-free.");
         }
         bool sde = string.Equals(opts.InferMethod, "sde", StringComparison.OrdinalIgnoreCase);
-        // "apg" | "cfg" | "adg"; empty honors the deprecated UseAdg bool.
-        string guidanceType = string.IsNullOrEmpty(opts.GuidanceType) ? (opts.UseAdg ? "adg" : "apg")
-            : opts.GuidanceType.ToLowerInvariant();
+        string guidanceType = string.IsNullOrEmpty(opts.GuidanceType) ? "apg" : opts.GuidanceType.ToLowerInvariant();
         if (guidanceType is not ("apg" or "cfg" or "adg"))
             throw new ArgumentException($"Unknown ACE-Step guidance type '{opts.GuidanceType}' — expected apg, cfg, or adg.");
         AceStep15Guidance.DcwCorrector dcw = new(opts.DcwEnabled ?? _config.IsTurbo, opts.DcwMode, opts.DcwScaler, opts.DcwHighScaler);

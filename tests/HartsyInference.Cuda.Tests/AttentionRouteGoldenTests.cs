@@ -17,10 +17,14 @@ public sealed unsafe class AttentionRouteGoldenTests
     public AttentionRouteGoldenTests(ITestOutputHelper output) => _output = output;
 
     /// <param name="Entry">sdpa (head-major), tm (token-major), tmg (the grouped token-major overload), krea2 (that overload with
-    /// Krea2's own shapes: [1,S,H,D] operands, a [1,S,H·D] output), flash (host positions) or dev (device positions).</param>
+    /// Krea2's own shapes: [1,S,H,D] operands, a [1,S,H·D] output), single (tm with that output), joint (tm with [1,S,H·D] operands
+    /// and output, a joint call's concatenated rows), rows (tm with [S,H·D] operands and output, Wan's self-attention rows), flash
+    /// (host positions) or dev (device positions).</param>
     /// <param name="Mask">none, bias (<c>[1,1,Sq,Skv]</c>), perhead (<c>[1,H,Sq,Skv]</c>) or key (<c>[1,1,1,Skv]</c>).</param>
+    /// <param name="GrantBf16">The call carries <see cref="AttentionNumerics.Bf16Storage"/> (with the legacy flag when
+    /// <paramref name="AllowF16"/> is set), issued through <see cref="IBackend.Attention"/>.</param>
     private sealed record Case(string Name, string Entry, DType Dtype, int Hq, int Hkv, int Sq, int Skv, int D, string Mask,
-        bool AllowF16, string Expected, DType? KvDtype = null, bool Sink = false, Action? Knobs = null);
+        bool AllowF16, string Expected, DType? KvDtype = null, bool Sink = false, Action? Knobs = null, bool GrantBf16 = false);
 
     private static readonly Case[] Table =
     [
@@ -47,14 +51,11 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("f32-d40-allowf16", "sdpa", DType.F32, 4, 4, 256, 256, 40, "none", true, "S.5"),
         new("f32-allowf16-nof16", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", true, "S.14",
             Knobs: () => KnobStore.Set(EngineKnobs.SdpaNoF16, true)),
-        new("f32-sage-2k", "sdpa", DType.F32, 2, 2, 2048, 2048, 128, "none", false, "S.4",
-            Knobs: () => { KnobStore.Set(EngineKnobs.SageAttnExplicit, true); KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true); }),
-        new("f32-sage-1k", "sdpa", DType.F32, 2, 2, 1024, 1024, 128, "none", false, "S.6",
-            Knobs: () => { KnobStore.Set(EngineKnobs.SageAttnExplicit, true); KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true); }),
-        new("f32-sdpav2", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", false, "S.7",
-            Knobs: () => KnobStore.Set(EngineKnobs.SdpaV2, true)),
-        new("f32-forceflash", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", false, "S.8/F.7",
-            Knobs: () => KnobStore.Set(EngineKnobs.SdpaForceFlash, true)),
+        new("f32-bf16grant", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", false, "S.16", GrantBf16: true),
+        new("f32-bf16grant-allowf16", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", true, "S.5", GrantBf16: true),
+        new("f32-bf16grant-perhead", "sdpa", DType.F32, 4, 4, 256, 256, 64, "perhead", false, "S.16", GrantBf16: true),
+        new("f32-bf16grant-cudnn-off", "sdpa", DType.F32, 4, 4, 256, 256, 128, "none", false, "S.14", GrantBf16: true,
+            Knobs: () => KnobStore.Set(EngineKnobs.SdpaCudnn, false)),
         new("bf16", "sdpa", DType.BF16, 4, 4, 256, 256, 128, "none", true, "S.12"),
         new("bf16-forcetiled", "sdpa", DType.BF16, 4, 4, 256, 256, 128, "none", true, "S.11",
             Knobs: () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true)),
@@ -66,7 +67,19 @@ public sealed unsafe class AttentionRouteGoldenTests
         new("tm-f32-d40-allowf16", "tm", DType.F32, 4, 4, 256, 256, 40, "none", true, "M.2"),
         new("tm-f32-d160-allowf16", "tm", DType.F32, 4, 4, 256, 256, 160, "none", true, "M.2"),
         new("tm-f32", "tm", DType.F32, 4, 4, 256, 256, 128, "none", false, "M.3/S.14"),
+        new("tm-f32-bf16grant", "tm", DType.F32, 4, 4, 256, 256, 128, "none", false, "M.3/S.16", GrantBf16: true),
         new("tm-f16-d128-perhead", "tm", DType.F16, 4, 4, 256, 256, 128, "perhead", true, "M.2"),
+        new("single-f16-d128", "single", DType.F16, 24, 24, 256, 256, 128, "none", true, "M.2"),
+        new("single-f16-d128-bias", "single", DType.F16, 24, 24, 256, 256, 128, "bias", true, "M.2"),
+        new("single-f32-allowf16", "single", DType.F32, 24, 24, 256, 256, 128, "none", true, "M.2"),
+        new("joint-f16-d128", "joint", DType.F16, 24, 24, 256, 256, 128, "none", true, "M.2"),
+        new("joint-f16-d128-bias", "joint", DType.F16, 24, 24, 256, 256, 128, "bias", true, "M.2"),
+        new("joint-f32-allowf16", "joint", DType.F32, 24, 24, 256, 256, 128, "none", true, "M.2"),
+        new("joint-f32-d256-allowf16", "joint", DType.F32, 12, 12, 256, 256, 256, "none", true, "M.2"),
+        new("joint-f32-cp-allowf16", "joint", DType.F32, 24, 24, 133, 261, 128, "none", true, "M.2"),
+        new("rows-f32-allowf16", "rows", DType.F32, 24, 24, 256, 256, 128, "none", true, "M.2"),
+        new("rows-f32-bias-allowf16", "rows", DType.F32, 12, 12, 256, 256, 128, "bias", true, "M.2"),
+        new("rows-f32-cp-allowf16", "rows", DType.F32, 24, 24, 133, 261, 128, "none", true, "M.2"),
         new("tm-gqa-f16-d128", "tmg", DType.F16, 48, 12, 256, 256, 128, "none", true, "G.1"),
         new("tm-gqa-f16-16-8", "tmg", DType.F16, 16, 8, 256, 256, 128, "none", true, "G.1"),
         new("tm-gqa-f16-sage-8k", "tmg", DType.F16, 4, 2, 8192, 8192, 128, "none", true, "MG/S.1"),
@@ -107,9 +120,7 @@ public sealed unsafe class AttentionRouteGoldenTests
     private static readonly Action[] ClearKnobs =
     [
         () => KnobStore.Clear(EngineKnobs.SdpaCudnn), () => KnobStore.Clear(EngineKnobs.SdpaForceTiled),
-        () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.SageAttnExplicit),
-        () => KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow), () => KnobStore.Clear(EngineKnobs.SdpaV2),
-        () => KnobStore.Clear(EngineKnobs.SdpaForceFlash), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
+        () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
         () => KnobStore.Clear(EngineKnobs.FlashSplitOff), () => KnobStore.Clear(EngineKnobs.Fa2Prefill),
     ];
 
@@ -184,13 +195,24 @@ public sealed unsafe class AttentionRouteGoldenTests
             }
             return;
         }
-        bool tm = c.Entry is "tm" or "tmg" or "krea2";
-        TensorShape qs = tm ? new(1, c.Sq, c.Hq, c.D) : new(1, c.Hq, c.Sq, c.D);
-        TensorShape ks = tm ? new(1, c.Skv, c.Hkv, c.D) : new(1, c.Hkv, c.Skv, c.D);
+        bool tm = c.Entry is "tm" or "tmg" or "krea2" or "single" or "joint" or "rows";
+        TensorShape qs = c.Entry switch
+        {
+            "rows" => new(c.Sq, c.Hq * c.D),
+            "joint" => new(1, c.Sq, c.Hq * c.D),
+            _ => tm ? new(1, c.Sq, c.Hq, c.D) : new(1, c.Hq, c.Sq, c.D),
+        };
+        TensorShape ks = c.Entry switch
+        {
+            "rows" => new(c.Skv, c.Hkv * c.D),
+            "joint" => new(1, c.Skv, c.Hkv * c.D),
+            _ => tm ? new(1, c.Skv, c.Hkv, c.D) : new(1, c.Hkv, c.Skv, c.D),
+        };
         using Tensor qt = Random(qs, c.Dtype, 1);
         using Tensor kt = Random(ks, c.Dtype, 2);
         using Tensor vt = Random(ks, c.Dtype, 3);
-        using Tensor ot = new(c.Entry == "krea2" ? new TensorShape(1, c.Sq, c.Hq * c.D) : qs, c.Dtype);
+        // Krea 2 and the single-stream blocks hand the entry a [1, S, H·D] output.
+        using Tensor ot = new(c.Entry is "krea2" or "single" ? new TensorShape(1, c.Sq, c.Hq * c.D) : qs, c.Dtype);
         using Tensor? mask = c.Mask switch
         {
             "bias" => Random(new TensorShape(1, 1, c.Sq, c.Skv), DType.F32, 5, -2f, 2f),
@@ -198,7 +220,13 @@ public sealed unsafe class AttentionRouteGoldenTests
             "key" => Random(new TensorShape(1, 1, 1, c.Skv), DType.F32, 5, -2f, 2f),
             _ => null,
         };
-        if (c.Entry is "tmg" or "krea2") b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.Hkv, c.D, scale, c.AllowF16);
+        if (c.GrantBf16)
+        {
+            AttentionCall call = tm ? AttentionCall.FromTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.Hkv, c.D, scale, c.AllowF16)
+                : AttentionCall.FromScaledDotProductAttention(ot, qt, kt, vt, mask, scale, c.AllowF16);
+            b.Attention(call with { Numerics = AttentionNumerics.Bf16Storage with { LegacyAssertedBounded = c.AllowF16 } });
+        }
+        else if (c.Entry is "tmg" or "krea2") b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.Hkv, c.D, scale, c.AllowF16);
         else if (tm) b.ScaledDotProductAttentionTokenMajor(ot, qt, kt, vt, mask, c.Hq, c.D, scale, c.AllowF16);
         else b.ScaledDotProductAttention(ot, qt, kt, vt, mask, scale, c.AllowF16);
     }

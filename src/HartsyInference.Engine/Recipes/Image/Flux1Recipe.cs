@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -43,16 +44,22 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024 (<c>GenerationDefaults.FluxDev</c>); a Schnell checkpoint narrows this to 4 steps via <see cref="Flux1RecipePipeline.VariantDefaults"/>.</summary>
+    /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024; a Schnell checkpoint narrows this to 4 steps via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
-    /// <summary>Flux.1 Schnell's official sampling settings: 4 steps, guidance-free by distillation (<c>GenerationDefaults.FluxSchnell</c>).</summary>
-    public static ImageDefaults SchnellDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+    /// <summary>Flux.1 Schnell's official sampling settings: 4 steps, guidance-free by distillation, so CFG 1 (SwarmUI <c>Model Support.md</c>, Flux; Flux Guidance does not apply to Schnell).</summary>
+    public static ImageDefaults SchnellDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => Flux1Variants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(Flux1Variants.Schnell) ? SchnellDefaults : FamilyDefaults;
+
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.DitSharding | MemoryCapabilities.CfgParallel | MemoryCapabilities.ComponentPlacement;
 

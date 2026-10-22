@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -133,7 +134,7 @@ internal sealed class CheckpointMemoryProfile
     private static CheckpointMemoryProfile Build(ModelSpec spec)
     {
         bool video = spec.Modality == Modality.Video;
-        string familyId = video ? ModelCapabilities.VideoFamilyIdFor(spec) : InferenceEngine.ResolveFamilyId(spec);
+        string familyId = video ? RecipeResolution.VideoFamilyIdFor(spec) : InferenceEngine.ResolveFamilyId(spec);
         ModelLayout layout = ModelLayoutResolver.Resolve(spec.LocalPath!);
         CheckpointHeader representative = CheckpointHeader.Read(layout.RepresentativeFile);
         CheckpointWeightInventory checkpoint = CheckpointWeightInventory.FromFiles(layout.SafeTensorsFiles.Select(file =>
@@ -149,7 +150,7 @@ internal sealed class CheckpointMemoryProfile
                 ?? throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
             capabilities = recipe.MemorySupports;
             model = recipe.DescribeMemory(representative);
-            defaultFrames = ModelCapabilities.VideoDefaultsFor(spec).Frames;
+            defaultFrames = recipe.DefaultsFor(RecipeResolution.ResolveVariant(recipe.Variants, spec)).Frames;
         }
         else
         {

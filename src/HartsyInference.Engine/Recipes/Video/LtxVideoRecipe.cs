@@ -28,11 +28,12 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         string.Equals(familyId, "ltx-video", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "lightricks-ltx-video", StringComparison.OrdinalIgnoreCase);
 
-    // Fps is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
-    /// <summary>LTX-Video's official sampling settings: 50 steps at guidance 3.0, 704x480, 97 frames (<c>LtxVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>; frame count matches the pipeline's own <c>modelDefault</c> in <see cref="LtxVideoRecipePipeline.Generate"/>).</summary>
+    /// <summary>LTX-Video's sampling settings: 50 steps at guidance 3.0 (<c>LtxVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>),
+    /// 768x512, 97 frames @ 24 fps. Size, frames and fps are SwarmUI's (<c>Video Model Support.md</c>, LTXV: 768x512, 97 frames,
+    /// trained at 24 fps; core class <c>lightricks-ltx-video</c> is 768x512).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
-        Steps = 50, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 97, Fps = 25,
+        Revision = 2, Steps = 50, CfgScale = 3.0f, Width = 768, Height = 512, Frames = 97, Fps = 24,
     };
 
     /// <inheritdoc/>

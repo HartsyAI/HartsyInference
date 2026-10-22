@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
+using HartsyInference.Engine.Catalog;
 
 namespace HartsyInference.API.Tests;
 
@@ -267,6 +268,8 @@ public sealed class DeploymentEndpointsTests : IClassFixture<WebApplicationFacto
         public IWorldService World => throw new NotSupportedException();
         public IEmbeddingService Embeddings => throw new NotSupportedException();
         public IDecisionService Decisions => throw new NotSupportedException();
+
+        public IRecipeCatalog Recipes => throw new NotSupportedException();
 
         public bool IsSupported(Modality modality) => modality == Modality.Text;
         public void SetBackend(string selector) => throw new NotSupportedException();

@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Catalog;
+
 namespace HartsyInference.Engine.Services;
 
 /// <summary>The single in-process entry point for running inference: owns the compute backend and the loaded-model cache, and exposes one typed service per capability. A consumer (CLI, HTTP API, SwarmUI extension, direct library use) constructs one, calls the service it needs, and disposes it.</summary>
@@ -30,6 +32,9 @@ public interface IInferenceEngine : IDisposable
     /// <summary>Checkpoint-aware video preflight; defaults to the video service when an external engine implementation has not exposed a separate planner.</summary>
     IVideoPlanningService VideoPlanning => Video as IVideoPlanningService
         ?? throw new NotSupportedException("This inference-engine implementation does not expose video planning.");
+
+    /// <summary>Side-effect-free recipe queries: what each family defaults to and can do, for hosts that must not re-declare it.</summary>
+    IRecipeCatalog Recipes { get; }
 
     /// <summary>Header-only VRAM estimation and per-device fit, for hosts that route requests across GPUs.</summary>
     IMemoryEstimationService MemoryEstimation =>

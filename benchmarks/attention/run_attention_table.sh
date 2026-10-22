@@ -51,7 +51,7 @@ PAIRS=$(python3 - "$SHAPES" "$ONLY" "$ARMS" "$BACKEND" <<'PY'
 import json, sys
 shapes = json.load(open(sys.argv[1]))["shapes"]
 only = set(filter(None, sys.argv[2].split(",")))
-arms = {"sdpa": ["def-f16","cudnn-f16","sage-f16","flash-f16","mat-f16","def-f32","tiled-f32","cast-f16","bf16"],
+arms = {"sdpa": ["def-f16","cudnn-f16","sage-f16","flash-f16","mat-f16","def-f32","tiled-f32","cast-f16","bf16-cast","bf16"],
         "flash": ["fa-def","fa-f16kv","fa-nocudnn","fa-nofa2","fa-nogqa","fa-splitoff","fa-splitforce"]}
 if sys.argv[4] == "vulkan":   # the knob arms steer CUDA dispatch only
     arms = {"sdpa": ["def-f16","def-f32","cast-f16","bf16"], "flash": ["fa-def","fa-f16kv"]}

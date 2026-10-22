@@ -10,6 +10,8 @@ using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Music;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.PyTorch;
@@ -139,9 +141,9 @@ internal static class AceStepMusicModel
         {
             pipeline.SetNullConditionEmb(CopyToF32(nullEmb));
         }
-        (int defaultSteps, float defaultShift) = VariantDefaults(variant);
+        MusicDefaults variantDefaults = new AceStepMusicRecipe().DefaultsFor(variant);
         Logs.Info($"[Audio][ACE-Step] Loaded 1.5 '{variant}' ({(config.IsTurbo ? "turbo" : "CFG")}, 48 kHz stereo, "
-            + $"default {defaultSteps} steps, shift {defaultShift}).");
+            + $"default {variantDefaults.Steps} steps, shift {variantDefaults.Shift}).");
 
         // <|endoftext|> is a special token: tokenize the surrounding text separately and splice the id in. The
         // Qwen3-Embedding post-processor then appends one more <|endoftext|>, which is replicated here.
@@ -178,6 +180,8 @@ internal static class AceStepMusicModel
         MusicAudio Synth(IBackend device, MusicRequest request, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            // A placed checkpoint reaches here without the variant's steps, shift and guidance: they are the 1.5 values.
+            request = variantDefaults.Apply(request);
             if (request.UseErgTag is not null || request.UseErgLyric is not null || request.UseErgDiffusion is not null)
             {
                 throw new NotSupportedException(
@@ -186,7 +190,7 @@ internal static class AceStepMusicModel
             EditInputs? edit = ResolveEdit(request, config);
             // Continuation re-generates the source AND the appended tail in one pass, so the DiT duration is the sum;
             // repaint/cover run at the source's own length and ignore the requested duration.
-            double duration = edit is null ? Math.Clamp(request.Duration, 1d, 600d) : edit.TotalSeconds;
+            double duration = edit is null ? Math.Clamp(request.Duration.Filled(), 1d, 600d) : edit.TotalSeconds;
             // Upstream SFT_GEN_PROMPT layout: the DiT is trained on THIS format — a bare style string is
             // out-of-distribution.
             string caption = string.IsNullOrWhiteSpace(request.Genre) ? "pop" : request.Genre;
@@ -226,14 +230,14 @@ internal static class AceStepMusicModel
                 if (lmKind is not ("" or "none" or "disabled"))
                 {
                     AceStepLmPlanner planner = plannerHolder.GetOrLoad(lmKind);
-                    lmThink = request.Thinking;
+                    lmThink = request.Thinking.Filled();
                     (int[] codes, string _) = planner.Plan(device, caption, lyrics, duration, new AceStepPlannerOptions
                     {
-                        Thinking = request.Thinking,
-                        Temperature = (float)request.LmTemperature,
-                        CfgScale = (float)request.LmCfgScale,
-                        TopK = request.LmTopK,
-                        TopP = (float)request.LmTopP,
+                        Thinking = request.Thinking.Filled(),
+                        Temperature = (float)request.LmTemperature.Filled(),
+                        CfgScale = (float)request.LmCfgScale.Filled(),
+                        TopK = request.LmTopK.Filled(),
+                        TopP = (float)request.LmTopP.Filled(),
                         NegativePrompt = request.LmNegativePrompt ?? string.Empty,
                         Seed = request.Seed,
                     }, ct);
@@ -244,16 +248,15 @@ internal static class AceStepMusicModel
                 }
                 AceStep15GenerateOptions options = new AceStep15GenerateOptions
                 {
-                    Shift = request.Shift.HasValue ? (float)request.Shift.Value : defaultShift,
+                    Shift = (float)request.Shift.Filled(),
                     Seed = request.Seed,
-                    InferSteps = request.InferSteps ?? defaultSteps,
+                    InferSteps = request.InferSteps.Filled(),
                     // The pipeline clamps guidance to 1.0 on turbo configs itself (upstream behavior).
-                    GuidanceScale = request.CfgScale.HasValue ? (float)request.CfgScale.Value : 7f,
-                    UseAdg = request.UseAdg,
-                    GuidanceType = request.GuidanceType,
-                    CfgIntervalStart = (float)request.CfgIntervalStart,
-                    CfgIntervalEnd = (float)request.CfgIntervalEnd,
-                    InferMethod = string.IsNullOrWhiteSpace(request.InferMethod) ? "ode" : request.InferMethod,
+                    GuidanceScale = (float)request.CfgScale.Filled(),
+                    GuidanceType = request.GuidanceType ?? string.Empty,
+                    CfgIntervalStart = (float)request.CfgIntervalStart.Filled(),
+                    CfgIntervalEnd = (float)request.CfgIntervalEnd.Filled(),
+                    InferMethod = request.InferMethod ?? string.Empty,
                     // Upstream DCW scalers flip with the LM-think state (dcw_defaults.py).
                     DcwScaler = lmHints is not null && lmThink ? 0.02f : 0.05f,
                     DcwHighScaler = lmHints is not null && lmThink ? 0.06f : 0.02f,
@@ -330,14 +333,14 @@ internal static class AceStepMusicModel
             throw new ArgumentException($"The ACE-Step '{mode}' source clip decoded to no audio.", nameof(request));
         }
         double sourceSeconds = Math.Min(left.Length, right.Length) / (double)config.SampleRate;
-        double total = mode == "continuation" ? sourceSeconds + Math.Max(request.Duration, 0d) : sourceSeconds;
+        double total = mode == "continuation" ? sourceSeconds + Math.Max(request.Duration.Filled(), 0d) : sourceSeconds;
         if (total < 1d || total > 600d)
         {
             throw new ArgumentException(
                 $"ACE-Step '{mode}' resolves to a {total:0.0}s generation; the pipeline accepts 1..600 s "
                 + $"(source is {sourceSeconds:0.0}s).", nameof(request));
         }
-        if (mode == "continuation" && request.Duration < 1d / config.LatentRate)
+        if (mode == "continuation" && request.Duration.Filled() < 1d / config.LatentRate)
         {
             throw new ArgumentException(
                 $"ACE-Step 'continuation' needs a Duration of at least one latent frame ({1d / config.LatentRate:0.00}s) to append.", nameof(request));
@@ -356,7 +359,7 @@ internal static class AceStepMusicModel
             }
         }
         // Cover strength is the schedule entry point; 0 would emit the source unchanged, so the floor keeps one step.
-        float startSigma = mode == "cover" ? (float)Math.Clamp(request.CoverStrength, 0.05d, 1d) : 1f;
+        float startSigma = mode == "cover" ? (float)Math.Clamp(request.CoverStrength.Filled(), 0.05d, 1d) : 1f;
         return new EditInputs
         {
             Mode = mode,
@@ -542,8 +545,7 @@ internal static class AceStepMusicModel
             {
                 throw new NotSupportedException("The 5 Hz LM planner is ACE-Step 1.5 only — set ACE-Step LM Planner to none for v1 checkpoints.");
             }
-            string guidanceType = string.IsNullOrEmpty(request.GuidanceType) ? (request.UseAdg ? "adg" : "apg")
-                : request.GuidanceType.ToLowerInvariant();
+            string guidanceType = string.IsNullOrEmpty(request.GuidanceType) ? "apg" : request.GuidanceType.ToLowerInvariant();
             AceStepPipeline.GuidanceMode guidanceMode = guidanceType switch
             {
                 "apg" => AceStepPipeline.GuidanceMode.Apg,
@@ -600,9 +602,9 @@ internal static class AceStepMusicModel
                     : lyricTokenizer.TokenizeLyrics(request.Prompt,
                         string.IsNullOrWhiteSpace(request.VocalLanguage) ? null : request.VocalLanguage);
                 (float[] left, float[] right, int _, int _) = pipeline.Generate(
-                    textEmbeds, lyricIds, Math.Clamp(request.Duration, 1d, 240d),
+                    textEmbeds, lyricIds, Math.Clamp(request.Duration.Filled(), 1d, 240d),
                     steps: request.InferSteps is > 0 ? request.InferSteps : null,
-                    guidance: request.CfgScale is > 0 ? (float)request.CfgScale.Value : null,
+                    guidance: request.CfgScale is > 0 ? (float)request.CfgScale.Filled() : null,
                     guidanceMode: guidanceMode,
                     sampler: sampler,
                     seed: request.Seed,
@@ -621,25 +623,6 @@ internal static class AceStepMusicModel
         // MusicDcaeDecoder / AdaMosHiFiGanV1 are not IDisposable: their tensors are loader views (F32 copies on CPU).
         return new MusicRunner(44100, Synth,
             pipeline as IDisposable, dit as IDisposable, textEncoder as IDisposable, loader);
-    }
-
-    /// <summary>Per-variant inference defaults, mirroring upstream <c>get_ui_control_config</c>: the turbo family is 8 steps (shift 3 except the shift-1 checkpoint); sft is 50 and base 32 steps at shift 1.</summary>
-    private static (int Steps, float Shift) VariantDefaults(string variant)
-    {
-        string value = (variant ?? string.Empty).Trim().ToLowerInvariant();
-        if (value.Contains("shift1", StringComparison.Ordinal))
-        {
-            return (8, 1f);
-        }
-        if (value == "sft" || value.EndsWith("-sft", StringComparison.Ordinal))
-        {
-            return (50, 1f);
-        }
-        if (value == "base" || value.EndsWith("-base", StringComparison.Ordinal))
-        {
-            return (32, 1f);
-        }
-        return (8, 3f);   // turbo / turbo-shift3 / turbo-continuous / xl-turbo
     }
 
     /// <summary>Loads the shipped silence latent (fp32 [1, 64, 15000]) into the pipeline's src-latent slot, transposed to per-frame rows. An absent file keeps the VAE-recompute fallback.</summary>

@@ -75,6 +75,7 @@ public sealed unsafe class Flux2SingleBlock
             new AttentionLayerConfig
             {
                 Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, AllowF16 = true,
+                TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
             },
             new AttentionNormWeights(_normQ.Weight, _normK.Weight, _normQ.Eps, _normK.Eps));
 
@@ -132,7 +133,7 @@ public sealed unsafe class Flux2SingleBlock
         backend.Linear(up, modulated, _upWeight!, _upBias);
         modulated.Dispose();
 
-        // ── 3-7. QK-norm, RoPE, attention (QK RMS-norm bounds the scores), permuted back to [B, S, hidden] ──
+        // ── 3-7. QK-norm, RoPE, attention (QK RMS-norm bounds the scores) into [B, S, hidden] ──
         AttentionCallContext context = batch == 1
             ? new AttentionCallContext { Rotation = rope, Bias = attnBias }
             : new AttentionCallContext { HeadMajorRotation = rope, Bias = attnBias };

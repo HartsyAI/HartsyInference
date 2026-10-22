@@ -55,8 +55,16 @@ public readonly record struct AttentionNumerics
     /// <summary>A legacy entry point's <c>allowF16</c>: an assertion, not a derived bound. Only route-pinned calls honour it.</summary>
     public bool LegacyAssertedBounded { get; init; }
 
+    /// <summary>Multiply formats the call refuses outright: a row that would use one is excluded, whatever the call grants or
+    /// asserts.</summary>
+    public AttentionFormats Refused { get; init; }
+
     /// <summary>F32 everywhere: no TF32, no narrowing, no saturation, no quantization.</summary>
     public static AttentionNumerics Exact => default;
+
+    /// <summary>Q, K, P and V may be stored and multiplied in BF16; scores, softmax and accumulation stay F32. BF16 keeps F32's
+    /// range, so this is a precision permission, not a range one.</summary>
+    public static AttentionNumerics Bf16Storage => new() { QueryKey = AttentionFormats.Bf16, ProbValue = AttentionFormats.Bf16 };
 
     /// <summary>The permissions a legacy entry point's <c>allowF16</c> carried.</summary>
     public static AttentionNumerics FromLegacy(bool allowF16) => new() { LegacyAssertedBounded = allowF16 };

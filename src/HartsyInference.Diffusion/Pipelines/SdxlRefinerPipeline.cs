@@ -83,7 +83,10 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
         float strength = Math.Clamp(request.Strength, 0f, 1f);

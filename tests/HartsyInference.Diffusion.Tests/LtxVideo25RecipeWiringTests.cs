@@ -30,16 +30,16 @@ public sealed class LtxVideo25RecipeWiringTests
         IVideoRecipe distilled = VideoRecipeRegistry.Resolve("ltx-2.5-distilled")!;
 
         Assert.Equal(LtxVideo2Config.V25Distilled.NumInferenceSteps, distilled.Defaults.Steps);
-        Assert.Equal(LtxVideo2Config.V25Distilled.GuidanceScale, distilled.Defaults.CfgScale);
+        Assert.Equal(3.0f, distilled.Defaults.CfgScale);
         Assert.Equal(20, dev.Defaults.Steps);
-        Assert.Equal(4.0f, dev.Defaults.CfgScale);
+        Assert.Equal(3.0f, dev.Defaults.CfgScale);
 
-        // Both families ship the template geometry; only the sampling contract differs.
+        // Both families ship the template geometry and SwarmUI core's LTX-2 guidance; only the step count differs.
         foreach (IVideoRecipe recipe in new[] { dev, distilled })
         {
             Assert.Equal(1280, recipe.Defaults.Width);
             Assert.Equal(736, recipe.Defaults.Height);
-            Assert.Equal(121, recipe.Defaults.Frames);
+            Assert.Equal(97, recipe.Defaults.Frames);
             Assert.Equal(24, recipe.Defaults.Fps);
         }
     }

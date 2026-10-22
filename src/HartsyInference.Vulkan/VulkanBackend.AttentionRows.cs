@@ -191,7 +191,7 @@ public sealed partial class VulkanBackend
         [
             new DelegateAttentionRow(Cap("cm2.flash", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
-                    MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
+                    MaxBatch = 1, MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "B.1",
                 (in AttentionCall c) => TokenMajorCm2Admits(in c),
@@ -206,7 +206,7 @@ public sealed partial class VulkanBackend
                 }),
             new DelegateAttentionRow(Cap("permute.dense", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
-                    Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute,
+                    MaxBatch = 1, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute,
                 }, null,
                 static (in AttentionCall c) => true,
                 (in AttentionCall c) =>

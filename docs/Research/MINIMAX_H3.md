@@ -431,6 +431,7 @@ and no VSA or int8-VAE performance target has been measured.
   profiles and combinations return `NativeVideoPlanProblem` with machine-readable `issues` and an optional
   resolved `plan` at HTTP 422 before SSE headers. A valid stream emits `progress`, `frame`, optional `audio`,
   and successful terminal `complete` events; a post-start generation failure emits terminal `error`.
+- `GET /v1/native/recipes/video/minimax-h3` returns its `VideoModelDescriptor` with `profileBound: true`; the other recipe routes are in [RECIPE_CONTRACT.md](RECIPE_CONTRACT.md#descriptors-and-the-query-surface).
   `complete.execution` is the actual profile, aligned geometry, seed,
   sampling recipe, execution path, and component formats. Configure large base64 guide/control bodies with
   `HartsyInference:MaxVideoRequestBodyBytes`; the default is 256 MiB.
@@ -465,11 +466,10 @@ optional `AudioBuffer`), `VideoAudioResolver` picks and trims the track, and the
 ffmpeg mux is reconnected. An H3 pipeline that produces a stereo waveform just attaches it to its
 result and the mux happens for free.
 
-**SageAttention F16-V overflow — MEASURED CLEAR, 2026-08-08.** H3's SDPA calls take the default INT8
-SageAttention path (F32 in, no mask, `d=128`, `Skv >= 2048` — every real geometry qualifies). That path
-quantizes Q/K but materializes V as an F16 transpose, so any `|V| > 65504` becomes INF and the softmax
-smears it across every query row with no error raised — the failure that bit Lens at its block 45. H3's
-documented ~2.7e6 residual made this worth checking directly.
+**V range against F16 — MEASURED CLEAR, 2026-08-08.** H3 attends in F32, so its V never passes through F16
+today. An F16 attention path for H3 (SageAttention transposes V to F16) would turn any `|V| > 65504` into INF,
+which the softmax smears across every query row with no error raised — the failure that bit Lens at its block 45.
+H3's documented ~2.7e6 residual made this worth checking directly.
 
 It is not a problem, and the reason is structural: `norm1` precedes the qkv projection, so **V is a
 projection of a normalized tensor, never of the raw residual stream**. Measured with `diagnostics.h3Vprobe`

@@ -156,16 +156,16 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         }
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? GenerationDefaults.QwenImage.Width;
-        int height = request.Height ?? GenerationDefaults.QwenImage.Height;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
         int hPacked = latentH / _config.PatchSize;
         int wPacked = latentW / _config.PatchSize;
         int imgSeqLen = hPacked * wPacked;
         int patchDim = _config.PatchSize * _config.PatchSize * _config.InChannels;
-        int steps = request.Steps ?? GenerationDefaults.QwenImage.Steps;
-        float cfgScale = request.CfgScale ?? GenerationDefaults.QwenImage.CfgScale;
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f;
 
         // Default-off perf knobs (reference wiring for the fleet — see docs/Checklists/INFERENCE_ACCEL_GRIND.md).

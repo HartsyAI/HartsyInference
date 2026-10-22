@@ -24,7 +24,7 @@ public sealed class LanceVideoRecipe : IVideoRecipe
     public bool Matches(string familyId) => string.Equals(familyId, "lance-video", StringComparison.OrdinalIgnoreCase);
 
     // Fps is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
-    /// <summary>Lance Video's official sampling settings: 30 steps at text-CFG 4.0, 512x512, 25 frames (<c>LanceConfig.NumTimesteps</c>/<c>CfgTextScale</c>; <c>LanceVideoGenerationTests</c> verified 512x512 coherent, using a shorter 9-frame clip only to keep the smoke test fast).</summary>
+    /// <summary>Lance Video's official sampling settings: 30 steps at text-CFG 4.0, 512x512, 25 frames (<c>LanceVideoGenerationTests</c> verified 512x512 coherent, using a shorter 9-frame clip only to keep the smoke test fast).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
         Steps = 30, CfgScale = 4.0f, Width = 512, Height = 512, Frames = 25, Fps = 25,

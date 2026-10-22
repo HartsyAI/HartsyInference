@@ -39,8 +39,8 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
         string.Equals(familyId, "hunyuan-video", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "hunyuanvideo", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>HunyuanVideo's official sampling settings: 20 steps at embedded-guidance 6.0 (no CFG here — no negative branch amplifies fp8 noise), 512x320, 25 frames @ 24fps — the geometry <c>HunyuanVideoGenerationTests</c> verified coherent (real 720p is the trained resolution but far too slow for a CLI turnaround; per MODEL_STATUS_VIDEO.md the 512x320/2.15s-per-step config is the proven production path).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 6.0f, Width = 512, Height = 320, Frames = 25, Fps = 24 };
+    /// <summary>HunyuanVideo's sampling settings: 20 steps at embedded-guidance 6.0 (no CFG here — no negative branch amplifies fp8 noise), 720x720, 73 frames @ 24fps. Size and frames are SwarmUI's (class <c>hunyuan-video</c>: 720x720, the trained 720p; <c>WorkflowGeneratorModelSupport.cs</c>: 73 frames). <c>HunyuanVideoGenerationTests</c> verifies the faster 512x320 / 25-frame geometry.</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Revision = 2, Steps = 20, CfgScale = 6.0f, Width = 720, Height = 720, Frames = 73, Fps = 24 };
 
     /// <inheritdoc/>
     public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(4, FrameNormalization.SnapNearest) };

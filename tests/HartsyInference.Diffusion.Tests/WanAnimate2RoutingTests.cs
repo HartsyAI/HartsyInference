@@ -138,8 +138,10 @@ public sealed class WanAnimate2RoutingTests
         {
             header.Append($"\"__metadata__\":{{\"config\":{JsonEscape(configJson)}}},");
         }
-        // A couple of real I2V-14B key names, so the key-based rules of WanVideoVariants have something to reject.
+        // A few real Wan 2.1 I2V-14B key names (its CLIP image branch included), so the key-based rules of WanVideoVariants
+        // have something to reject.
         header.Append("\"patch_embedding.weight\":{\"dtype\":\"F32\",\"shape\":[5120,36,1,2,2],\"data_offsets\":[0,0]},");
+        header.Append("\"img_emb.proj.0.bias\":{\"dtype\":\"F32\",\"shape\":[1280],\"data_offsets\":[0,0]},");
         header.Append("\"blocks.0.self_attn.q.weight\":{\"dtype\":\"F32\",\"shape\":[5120,5120],\"data_offsets\":[0,0]}}");
         byte[] json = Encoding.UTF8.GetBytes(header.ToString());
         string path = Path.Combine(Path.GetTempPath(), $"hartsy-animate2-{Guid.NewGuid():N}.safetensors");
@@ -161,6 +163,7 @@ public sealed class WanAnimate2RoutingTests
         StringBuilder header = new StringBuilder("{");
         header.Append($"\"{variantKeyName}\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,0]}},");
         header.Append("\"patch_embedding.weight\":{\"dtype\":\"F32\",\"shape\":[5120,36,1,2,2],\"data_offsets\":[0,0]},");
+        header.Append("\"img_emb.proj.0.bias\":{\"dtype\":\"F32\",\"shape\":[1280],\"data_offsets\":[0,0]},");
         header.Append("\"blocks.0.self_attn.q.weight\":{\"dtype\":\"F32\",\"shape\":[5120,5120],\"data_offsets\":[0,0]}}");
         byte[] json = Encoding.UTF8.GetBytes(header.ToString());
         string path = Path.Combine(Path.GetTempPath(), $"hartsy-animate-variant-{Guid.NewGuid():N}.safetensors");

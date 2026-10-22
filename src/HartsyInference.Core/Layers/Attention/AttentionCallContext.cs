@@ -108,7 +108,7 @@ public interface IQkvTap
 public interface IAttentionProbe
 {
     /// <summary>Called with each intermediate as it is produced: <c>q</c>, <c>k</c>, <c>v</c>, <c>qNormed</c>, <c>kNormed</c>
-    /// and <c>attention</c> (the head-major output).</summary>
+    /// and <c>attention</c> (the output, head-major or in the token-major entry's rows).</summary>
     void Observe(string point, Tensor value);
 }
 

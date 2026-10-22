@@ -97,8 +97,15 @@ public sealed class WanVideoRecipe : IVideoRecipe
         "animate" => new WanAnimateRecipe().Defaults,
         "animate2" => new WanAnimate2Recipe().Defaults,
         "s2v" => new WanS2VRecipe().Defaults,
+        "ti2v-5b" => Wan22_5BDefaults,
+        "i2v-22-14b" => Wan22I2V14BDefaults,
         _ => Defaults,
     };
+
+    /// <summary>Whether <paramref name="variant"/> is a plain T2V / I2V backbone this recipe builds itself, rather than a
+    /// conditioning variant it delegates to that variant's recipe.</summary>
+    public static bool IsPlainBackbone(ResolvedModelVariant variant) =>
+        variant.Is(WanVideoVariants.Base) || variant.Is(WanVideoVariants.Ti2V5B) || variant.Is(WanVideoVariants.I2V22_14B);
 
     /// <inheritdoc/>
     /// <remarks>Animate and Animate-2 share <c>wan-21-14b</c> with the solver-owned plain backbone but accept
@@ -113,12 +120,36 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 
-    // Fps is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
-    /// <summary>Wan's official sampling settings: 50 steps at guidance 5.0, 832x480 ("480p"), 33 frames — the resolution/frame-count every <c>WanVariant_Gpu_E2E</c> 480p test verifies coherent at (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults
+    /// <summary>The defaults for this recipe's compat class: Wan 2.1 and Wan 2.2 5B take core's per-class values, the
+    /// generic <c>"wan"</c> slug the values core gives every Wan.</summary>
+    public VideoDefaults Defaults => _familyId switch
     {
-        Steps = 50, CfgScale = 5.0f, Width = 832, Height = 480, Frames = 33, Fps = 25,
+        Wan21_14BCompatClassId or Wan21_1_3BCompatClassId => Wan21Defaults,
+        Wan22_5BCompatClassId => Wan22_5BDefaults,
+        _ => FamilyDefaults,
     };
+
+    /// <summary>Wan's sampling settings for an unclassified checkpoint: 50 steps at guidance 5.0, 832x480 ("480p"),
+    /// 81 frames @ 24 fps. Steps, guidance and size are upstream's (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>,
+    /// the 480p geometry <c>WanVariant_Gpu_E2E</c> verifies); 81 frames and 24 fps are what SwarmUI core runs for every
+    /// Wan (<c>WorkflowGeneratorModelSupport.cs</c> Wan latent, <c>WorkflowGenerator.cs</c> <c>Text2VideoFPS</c>).</summary>
+    public static VideoDefaults FamilyDefaults { get; } = new VideoDefaults
+    {
+        Revision = 2, Steps = 50, CfgScale = 5.0f, Width = 832, Height = 480, Frames = 81, Fps = 24,
+    };
+
+    /// <summary>Wan 2.1 (14B and 1.3B): CFG 6, 81 frames @ 24 fps, SwarmUI core's <c>wan-21-14b</c> / <c>wan-21-1_3b</c>
+    /// branch (<c>WorkflowGenerator.cs</c>; <c>Video Model Support.md</c>: official CFG 6).</summary>
+    public static VideoDefaults Wan21Defaults { get; } = FamilyDefaults with { CfgScale = 6.0f };
+
+    /// <summary>Wan 2.2 TI2V 5B: CFG 5, 81 frames @ 22 fps, SwarmUI core's <c>wan-22-5b</c> branch (<c>WorkflowGenerator.cs</c>;
+    /// its image-to-video path starts at 49 frames, its text-to-video latent at 81).</summary>
+    public static VideoDefaults Wan22_5BDefaults { get; } = FamilyDefaults with { Fps = 22 };
+
+    /// <summary>Wan 2.2 I2V-14B (<see cref="WanVideoVariants.I2V22_14B"/>): CFG 3.5 at 24 fps, SwarmUI core's
+    /// <c>wan-2_2-image2video-14b</c> branch (<c>WorkflowGenerator.cs</c>; <c>Video Model Support.md</c>: CFG 3.5), and 81
+    /// frames (core's image-to-video branch starts at 49). Revision 3: these checkpoints ran Wan 2.1's CFG 6 at revision 2.</summary>
+    public static VideoDefaults Wan22I2V14BDefaults { get; } = FamilyDefaults with { Revision = 3, CfgScale = 3.5f };
 
     /// <inheritdoc/>
     public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new WanVideoConfig().VaeTemporalCompression, FrameNormalization.SnapNearest) };
@@ -162,8 +193,9 @@ public sealed class WanVideoRecipe : IVideoRecipe
             DenoiserActivationBytes = request =>
             {
                 int frames = Math.Max(1, request.Frames ?? 1);
+                // F32: the estimate knows neither the backend nor whether the request runs the F16 path.
                 return WanVideoPipeline.WanActivationReserveBytes((frames - 1) / temporal + 1,
-                    Math.Max(1, request.Height / spatial), Math.Max(1, request.Width / spatial), innerDim, patchSize);
+                    Math.Max(1, request.Height / spatial), Math.Max(1, request.Width / spatial), innerDim, patchSize, sizeof(float));
             },
             VaeActivationBytes = request =>
                 WanVideoPipeline.WanDecodeReserveBytes(Math.Max(1, request.Frames ?? 1), request.Width, request.Height),
@@ -192,7 +224,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
     {
         // TODO(E-IMG-4/5): VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
         ResolvedModelVariant variant = context.ResolveVariant(WanVideoVariants.Catalog);
-        if (!variant.Is(WanVideoVariants.Base) && !variant.Is(WanVideoVariants.Ti2V5B))
+        if (!IsPlainBackbone(variant))
         {
             if (context.VideoSwapModelPath is not null)
             {
@@ -271,7 +303,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
                 string swapPath = File.Exists(context.VideoSwapModelPath) ? context.VideoSwapModelPath
                     : ModelFileLocator.Require(context.VideoSwapModelPath, "Video swap model", "Stable-Diffusion", "diffusion_models", "unet");
                 ResolvedModelVariant swapVariant = ModelVariantResolver.Resolve(WanVideoVariants.Catalog, new ModelVariantEvidence(swapPath, []));
-                if (!swapVariant.Is(WanVideoVariants.Base))
+                if (!swapVariant.Is(WanVideoVariants.Base) && !swapVariant.Is(WanVideoVariants.I2V22_14B))
                 {
                     throw new NotSupportedException(
                         $"Wan low-noise expert '{swapPath}' is a {swapVariant.Variant.DisplayName} variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");

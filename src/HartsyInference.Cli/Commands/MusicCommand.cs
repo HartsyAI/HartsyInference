@@ -37,10 +37,10 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         [Description("Genre/style tags (ACE-Step style prompt; YuE/YuE2 genre tags, e.g. \"uplifting pop female vocal electronic\"). For YuE, YuE2 and MiniMax the PROMPT is the lyrics (use [[verse]]/[[chorus]] markers) and this carries the style.")]
         public string Genre { get; init; } = "";
 
-        /// <summary>Duration in seconds.</summary>
+        /// <summary>Duration in seconds; unset uses the model's recipe duration.</summary>
         [CommandOption("-d|--duration")]
-        [Description("Duration in seconds.")]
-        public int Duration { get; init; } = 10;
+        [Description("Duration in seconds (default: the model's recipe duration, e.g. 120 for ACE-Step 1.5).")]
+        public int? Duration { get; init; }
 
         /// <summary>RNG seed; &lt; 0 uses 0.</summary>
         [CommandOption("--seed")]
@@ -134,7 +134,7 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
         // required — every catalog music model (musicgen, audiogen, acestep, yue, stableaudio, heartmula)
         // self-downloads through the engine's audio cache, same as the speech/transcribe commands.
         ParamState parameters = new ParamState(Modality.Music) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
-        parameters.Put("duration", settings.Duration.ToString(CultureInfo.InvariantCulture));
+        PutIfSet(parameters, "duration", settings.Duration);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         parameters.Put("genre", settings.Genre);
         PutIfSet(parameters, "steps", settings.Steps);

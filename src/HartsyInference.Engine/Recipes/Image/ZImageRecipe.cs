@@ -38,17 +38,19 @@ public sealed class ZImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zimage", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Z-Image Turbo's official sampling settings: 8 steps, guidance-free (CFG 1.0), 1024x1024 (<c>GenerationDefaults.ZImageTurbo</c>).</summary>
+    /// <summary>Z-Image Turbo's official sampling settings: 8 steps, guidance-free (CFG 1.0), 1024x1024.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 8, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
-    /// <summary>Z-Image Base's official undistilled sampling settings: 50 steps, CFG 5.0, 1024x1024, shift 6.</summary>
+    /// <summary>Z-Image Base's sampling settings: 50 steps, CFG 5.0, 1024x1024, shift 3. SwarmUI's default shift is 3
+    /// (<c>Model Support.md</c>, Z-Image); upstream's undistilled config uses 6, which SwarmUI lists as the stronger-coherence option.</summary>
     public static ImageDefaults BaseDefaults { get; } = new ImageDefaults
     {
+        Revision = 2,
         Steps = 50,
         CfgScale = 5.0f,
         Width = 1024,
         Height = 1024,
-        SigmaShift = 6.0,
+        SigmaShift = 3.0,
     };
 
     /// <inheritdoc/>
@@ -185,7 +187,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             Logs.Info("[ZImageRecipe] Z-Image ready.");
             return new ZImageRecipePipeline(pipeline, qwen, tokenizer, transformer, vae, vaeEncoder,
                 transformerWeightTensors, qwenWeightTensors, ownedVaeWeights, context.Backend,
-                context.TextEncoderBackendOrDefault, isBase ? BaseDefaults : FamilyDefaults, checkpoint, qwenLoader,
+                context.TextEncoderBackendOrDefault, checkpoint, qwenLoader,
                 vaeLoader, loraStack);
         }
         catch

@@ -33,23 +33,21 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
 
     private readonly MergedLoraStack? _loraStack = loraStack;
 
-    /// <summary>A Klein checkpoint (no guidance embedding) is CFG-distilled and few-step, so it resolves against <see cref="Flux2Recipe.KleinDefaults"/> rather than Dev's 50 steps.</summary>
-    public ImageDefaults? VariantDefaults => _config.GuidanceEmbed ? Flux2Recipe.FamilyDefaults : Flux2Recipe.KleinDefaults;
-
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
-        int steps = request.Steps ?? (_config.GuidanceEmbed ? Flux2Recipe.FamilyDefaults.Steps : Flux2Recipe.KleinDefaults.Steps);
+        int steps = settings.Steps;
         // Flux.2 rounds image dims down to a multiple of 16 (VAE 8× × 2×2 patch).
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int width = (reqWidth / 16) * 16;
         int height = (reqHeight / 16) * 16;
         // Klein has no guidance embedding; Dev uses guidance ~3.5 (BFL distillation target).
         float guidance = _config.GuidanceEmbed ? 3.5f : 0f;
 
-        // TODO(E-IMG-4/5): img2img, NegativePrompt/CfgScale mapping, and user component overrides are deferred.
+        // TODO(E-IMG-4/5): img2img, NegativePrompt mapping, and user component overrides are deferred.
         // <alternate:>/<fromto[N]:> now survive ImagesService, because this recipe declares
         // ImageFeatures.PromptScheduling. Everything OUTSIDE the schedule builder therefore needs them collapsed to
         // their step-0 value first, or the literal tag text is tokenized as prose — the same split SdxlRecipePipeline
@@ -76,6 +74,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
                 Width = width,
                 Height = height,
                 Steps = steps,
+                CfgScale = settings.CfgScale,
                 Seed = RecipeRequestMapper.MapSeed(request.Seed),
                 // Routed through the resolver rather than read raw, so an unavailable sampler is refused by name here —
                 // before the checkpoint loads — instead of deep inside the pipeline, or silently dropped.

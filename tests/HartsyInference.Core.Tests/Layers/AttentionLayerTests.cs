@@ -44,6 +44,27 @@ public sealed class AttentionLayerTests
         Assert.Throws<ArgumentException>(() => new AttentionLayer(Krea2(), Weights(gate: false)));
     }
 
+    /// <summary>The BF16 grant replaces the legacy flag on either entry's call, and the two cannot be combined.</summary>
+    [Fact]
+    public void ABf16Grant_ReachesTheCallOnEitherEntry_AndExcludesAllowF16()
+    {
+        AttentionLayerConfig config = new() { Heads = 2, KvHeads = 2, HeadDim = 4, AllowBf16 = true };
+        Assert.Throws<ArgumentException>(() => new AttentionLayer(config with { AllowF16 = true }));
+        static Tensor Operand() => new(new TensorShape(1, 6, 2, 4), DType.F32);
+        AttentionTraceBackend headMajor = new(), tokenMajor = new() { SupportsTokenMajorAttention = true }, legacy = new();
+
+        new AttentionLayer(config).Attend(headMajor, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+        new AttentionLayer(config with { TokenMajorRoute = AttentionRoute.TokenMajor })
+            .Attend(tokenMajor, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+        new AttentionLayer(config with { AllowBf16 = false, AllowF16 = true })
+            .Attend(legacy, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+
+        Assert.Equal(AttentionNumerics.Bf16Storage, Assert.Single(headMajor.Calls).Numerics);
+        Assert.Equal(AttentionRoute.TokenMajor, Assert.Single(tokenMajor.Calls).Route);
+        Assert.Equal(AttentionNumerics.Bf16Storage, tokenMajor.Calls[0].Numerics);
+        Assert.Equal(AttentionNumerics.FromLegacy(true), Assert.Single(legacy.Calls).Numerics);
+    }
+
     [Fact]
     public void Ltx_TokenMajorSelfAttention_RunsTheFusedNormAndTheGatedProjection()
     {
@@ -203,24 +224,124 @@ public sealed class AttentionLayerTests
             new Tensor(new TensorShape(6, 2, 4), DType.F32), new Tensor(new TensorShape(6, 2, 4), DType.F32), new TensorShape(6, 16), default));
     }
 
+    /// <summary>Forward hands its output projection the <c>[S, heads·D]</c> rows it has always read; Attend writes the caller's
+    /// <c>[1, S, heads·D]</c> on the token-major route, the shape the head-major route returns.</summary>
     [Fact]
-    public void EqualHeadTokenMajor_HoldsABatchedOutputAsTheRowsTheProjectionReads()
+    public void EqualHeadTokenMajor_ForwardHoldsProjectionRows_AttendKeepsTheCallersShape()
     {
         AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
         AttentionLayer layer = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor },
             Weights(gate: false));
         Tensor x = new(new TensorShape(1, 6, 8), DType.F32);
+        static Tensor Operand() => new(new TensorShape(1, 6, 2, 4), DType.F32);
 
         Tensor y = layer.Forward(backend, x, x, default);
+        Tensor attended = layer.Attend(backend, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
+        AttentionTraceBackend headMajor = new();
+        Tensor permuted = layer.Attend(headMajor, Operand(), Operand(), Operand(), new TensorShape(1, 6, 8), default);
 
         Assert.Equal(new TensorShape(6, 8), backend.Calls[0].Output.Storage.Shape);
         Assert.Equal(new TensorShape(1, 6, 8), y.Shape);
-        Assert.Throws<ArgumentException>(() => layer.Attend(backend, new Tensor(new TensorShape(1, 6, 2, 4), DType.F32),
-            new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new Tensor(new TensorShape(1, 6, 2, 4), DType.F32), new TensorShape(1, 6, 8), default));
+        Assert.Equal(AttentionRoute.TokenMajor, backend.Calls[1].Route);
+        Assert.Same(attended, backend.Calls[1].Output.Storage);
+        Assert.Equal(new TensorShape(1, 6, 8), attended.Shape);
+        Assert.Equal(0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
+        Assert.Equal(AttentionRoute.Dense, Assert.Single(headMajor.Calls).Route);
+        Assert.Equal(new TensorShape(1, 6, 8), permuted.Shape);
+    }
+
+    /// <summary>Flat operands take a token-major config's entry at one batch item and the head-major entry on a Dense config; either
+    /// way the caller gets its <c>[1, S, heads·D]</c> back, and only the head-major entry permutes.</summary>
+    [Theory]
+    [InlineData(AttentionRoute.TokenMajor, 0)]
+    [InlineData(AttentionRoute.Dense, 4)]
+    public void AttendFlat_TakesTheConfigsEntry_AndKeepsTheCallersShape(AttentionRoute route, int permutes)
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        static Tensor Rows() => new(new TensorShape(1, 6, 8), DType.F32);
+        AttentionLayer layer = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = route });
+
+        Tensor attended = layer.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default);
+
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
+        Assert.Equal(new TensorShape(1, 6, 8), attended.Shape);
+        Assert.Equal(permutes, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
+        if (route == AttentionRoute.TokenMajor) Assert.Same(attended, call.Output.Storage);
+    }
+
+    /// <summary>Flat operands take the token-major entry without a QK norm only: a full-width RMS config that names it attends through
+    /// <see cref="AttentionLayer.Forward"/>, and the flat entry refuses it before issuing anything.</summary>
+    [Fact]
+    public void AttendFlat_RefusesATokenMajorFullWidthRmsConfig()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        static Tensor Rows() => new(new TensorShape(1, 6, 8), DType.F32);
+        AttentionLayerConfig config = new()
+        {
+            Heads = 2, KvHeads = 2, HeadDim = 4, QkNorm = AttentionQkNorm.FullWidthRms, TokenMajorRoute = AttentionRoute.TokenMajor,
+        };
+        AttentionLayer layer = new(config, new AttentionNormWeights(W(106), W(107), 1e-6f, 1e-6f));
+
+        Assert.Throws<NotSupportedException>(() => layer.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default));
+        Assert.Empty(backend.Ops);
+
+        AttentionLayer dense = new(config with { TokenMajorRoute = AttentionRoute.Dense },
+            new AttentionNormWeights(W(106), W(107), 1e-6f, 1e-6f));
+        dense.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default);
+        Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
+    }
+
+    /// <summary>A layer that opts its batches in takes the token-major entry over per-head <c>[B, S, heads, D]</c> operands only where
+    /// the backend plans a row for the call (no permuting fallback takes a batch): it reads B sequences and writes the
+    /// <c>[B, S, heads·D]</c> rows the output projection reads, carrying the layer's refused formats. Without the opt-in, without a
+    /// planned row, over flat operands (a <c>[B, S, heads·D]</c> tensor reads as one sequence) or with a host rotation a batch stays
+    /// head-major.</summary>
+    [Theory]
+    [InlineData("planned", AttentionRoute.TokenMajor)]
+    [InlineData("int8-refused", AttentionRoute.TokenMajor)]
+    [InlineData("not-opted-in", AttentionRoute.Dense)]
+    [InlineData("unplanned", AttentionRoute.Dense)]
+    [InlineData("flat", AttentionRoute.Dense)]
+    [InlineData("host-rotation", AttentionRoute.Dense)]
+    public void ABatch_TakesTheTokenMajorEntryOnlyWhereTheBackendPlansIt(string name, AttentionRoute route)
+    {
+        const int batch = 2, seq = 6;
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, PlansBatchedTokenMajor = name != "unplanned" };
+        AttentionLayerConfig config = new()
+        {
+            Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor, TokenMajorBatches = name != "not-opted-in",
+            AllowF16 = true, RefusedFormats = name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
+        };
+        Tensor attended;
+        if (name == "flat")
+        {
+            static Tensor Rows() => new(new TensorShape(batch, seq, 8), DType.F32);
+            attended = new AttentionLayer(config).AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(batch, seq, 8), default);
+        }
+        else
+        {
+            Tensor x = new(new TensorShape(batch, seq, 8), DType.F32);
+            AttentionCallContext context = name == "host-rotation" ? new() { HeadMajorRotation = new TraceRotation([]) } : default;
+            attended = new AttentionLayer(config, Weights(gate: false)).Forward(backend, x, x, in context);
+        }
+
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
+        Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
+        Assert.Equal(new TensorShape(batch, seq, 8), attended.Shape);
+        if (route == AttentionRoute.Dense) return;
+        Assert.Equal(batch, call.Batch);
+        Assert.Equal(seq, call.Query.Tokens);
+        Assert.Equal((batch, seq), (call.Output.Batch, call.Output.Tokens));
+        Assert.Equal(new TensorShape(batch, seq, 8), call.Output.Storage.Shape);
+        Assert.Null(call.TermsGap());
+        Assert.Equal(name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
     }
 
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
-    /// minimum; the token-major entry has no Sage kernel, so a guarded layer keeps exactly those calls head-major.</summary>
+    /// minimum, from a call that does not refuse INT8; the token-major entry has no Sage kernel, so a guarded layer keeps exactly
+    /// those calls head-major.</summary>
     [Theory]
     [InlineData("sage-length", AttentionRoute.Dense)]
     [InlineData("sage-length-d64", AttentionRoute.Dense)]
@@ -232,6 +353,7 @@ public sealed class AttentionLayerTests
     [InlineData("bias", AttentionRoute.TokenMajor)]
     [InlineData("sage-off", AttentionRoute.TokenMajor)]
     [InlineData("unguarded", AttentionRoute.TokenMajor)]
+    [InlineData("int8-refused", AttentionRoute.TokenMajor)]
     public void HeadMajorForSage_KeepsTheCallsTheSageRowTakesHeadMajor(string name, AttentionRoute route)
     {
         int skv = name is "below-minimum" or "knob-minimum" ? 4096 : 8192;
@@ -242,7 +364,7 @@ public sealed class AttentionLayerTests
         AttentionLayer layer = new(new AttentionLayerConfig
         {
             Heads = 1, KvHeads = 1, HeadDim = headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = name != "unguarded",
-            AllowF16 = true,
+            AllowF16 = true, RefusedFormats = name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
         }, Weights(gate: false));
         Tensor kv = new(new TensorShape(1, skv, 8), act), q = sq == skv ? kv : new(new TensorShape(1, sq, 8), act);
         Tensor? bias = name == "bias" ? new Tensor(new TensorShape(1, 1, 1, skv), DType.F32) : null;
@@ -258,7 +380,9 @@ public sealed class AttentionLayerTests
             KnobStore.Clear(EngineKnobs.SageF16MinSkv);
         }
 
-        Assert.Equal(route, Assert.Single(backend.Calls).Route);
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
+        Assert.Equal(name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
         Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
     }
 
@@ -310,16 +434,19 @@ public sealed class AttentionLayerTests
         Assert.Equal(new TensorShape(6, 16), flat.Shape);
     }
 
-    [Fact]
-    public void Probe_SeesEachIntermediateInOrder()
+    [Theory]
+    [InlineData(AttentionRoute.Dense)]
+    [InlineData(AttentionRoute.TokenMajor)]
+    public void Probe_SeesEachIntermediateInOrder(AttentionRoute route)
     {
-        AttentionTraceBackend backend = new();
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
         List<string> points = new();
-        AttentionLayer layer = new(Krea2(4, 4) with { Gate = AttentionGate.None, TokenMajorRoute = AttentionRoute.Dense }, Weights(gate: false));
+        AttentionLayer layer = new(Krea2(4, 4) with { Gate = AttentionGate.None, TokenMajorRoute = route }, Weights(gate: false));
         Tensor x = new(new TensorShape(1, 6, 16), DType.F32);
 
         layer.Forward(backend, x, x, new AttentionCallContext { Probe = new TraceProbe(points) });
 
+        Assert.Equal(route, Assert.Single(backend.Calls).Route);
         Assert.Equal(["q", "k", "v", "qNormed", "kNormed", "attention"], points);
     }
 
@@ -331,8 +458,37 @@ public sealed class AttentionLayerTests
             ops.Add($"RotateHeadMajor b={batch} {heads}/{kvHeads} s={tokens}");
     }
 
+    /// <summary>A probe that throws on the output it is shown leaves no output behind, on either entry.</summary>
+    [Theory]
+    [InlineData(AttentionRoute.Dense)]
+    [InlineData(AttentionRoute.TokenMajor)]
+    public unsafe void AThrowingProbe_FreesTheOutputItWasShown(AttentionRoute route)
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        ThrowingProbe probe = new();
+        AttentionLayer layer = new(Krea2(4, 4) with { Gate = AttentionGate.None, TokenMajorRoute = route }, Weights(gate: false));
+        Tensor x = new(new TensorShape(1, 6, 16), DType.F32);
+
+        Assert.Throws<InvalidOperationException>(() => layer.Forward(backend, x, x, new AttentionCallContext { Probe = probe }));
+
+        Assert.Equal(route, Assert.Single(backend.Calls).Route);
+        Assert.Throws<ObjectDisposedException>(() => (nint)probe.Output!.DataPointer);
+    }
+
     private sealed class TraceProbe(List<string> points) : IAttentionProbe
     {
         public void Observe(string point, Tensor value) => points.Add(point);
+    }
+
+    private sealed class ThrowingProbe : IAttentionProbe
+    {
+        public Tensor? Output;
+
+        public void Observe(string point, Tensor value)
+        {
+            if (point != "attention") return;
+            Output = value;
+            throw new InvalidOperationException("probe failed");
+        }
     }
 }

@@ -31,13 +31,14 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
 
         // Width/height must be multiples of 16 (2x2 patchify x 8x VAE), range 256-2048.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int snappedW = Math.Clamp(reqWidth / 16 * 16, 256, 2048);
         int snappedH = Math.Clamp(reqHeight / 16 * 16, 256, 2048);
         if (snappedW != reqWidth || snappedH != reqHeight)
@@ -47,7 +48,7 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
 
         // Steps pick the nearest official preset; the preset owns the guidance schedule (gw~7 main + gw~3 polish)
         // and the logit-normal mu/std, so CfgScale and the negative prompt are intentionally not consumed.
-        int steps = request.Steps ?? Ideogram4Recipe.FamilyDefaults.Steps;
+        int steps = settings.Steps;
         Ideogram4SamplerPreset preset = steps <= 14 ? Ideogram4SamplerPreset.Turbo12
             : steps >= 40 ? Ideogram4SamplerPreset.Quality48
             : Ideogram4SamplerPreset.Default20;

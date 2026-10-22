@@ -8,6 +8,160 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
+  call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
+  `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch
+  0's Q (four heads, 512 rows), K and V (every key) in the call's dtype with a `meta.json`. Nothing is read back while
+  the stream captures a graph (a warning says so once), and a write that fails is logged without failing the call.
+- **Added: an exact F32 attention arm on CUDA.** `numerics.sdpaNoTf32` runs the materialized and query-tiled F32 SDPA
+  GEMMs in plain FP32; they ran TF32 whatever `numerics.noTf32` said. The `reference` profile sets it. Default output is
+  unchanged.
+- **Added: a BF16 attention grant.** `AttentionNumerics.Bf16Storage` permits BF16 storage and multiply of Q, K, P and V
+  with F32 scores, softmax and accumulation; `AttentionLayerConfig.AllowBf16` and `JointAttentionConfig.AllowBf16` carry
+  it, and a config that also sets `AllowF16` is refused. The planner now excludes a row that narrows F32 operands to a
+  format the call does not permit (`AttentionKernelCapability.NarrowsF32To`, exclusion `Numerics`). No model grants yet,
+  so output is unchanged.
+- **Added: a BF16 attention row on CUDA.** A head-major F32 call that carries the BF16 grant runs cuDNN's fused attention
+  on BF16 copies of Q, K and V (row S.16, `cudnn.f32.bf16`, after the saturating F16 row). BF16 keeps F32's range, so a
+  value past F16's 65504 stays finite instead of clipping. The row declines when the copies do not fit half of free VRAM.
+  cuDNN failure state is keyed by the dtype the graph runs in, so a refused BF16 plan cannot disable the F16 path. Nothing
+  grants BF16 yet, so output is unchanged.
+- **Faster: Wan's self-attention and HiDream's single-stream blocks run token-major.** A full-width RMS QK norm no longer
+  forces the head-major entry, so the self-attention of the Wan-family blocks (Wan 2.1 and 2.2, VACE, S2V, Animate,
+  Matrix-Game) and of HiDream's single-stream blocks reads the normed, rotated `[S, heads·D]` rows where the projections
+  wrote them and drops three permutes in and one out per call at one batch item. F32 calls take the token-major cuDNN row's
+  cast branch, as the head-major row cast them; Wan's F16 branches (TI2V-5B and Wan 2.1 14B) attend through an F16 twin of
+  the same config, which still refuses SageAttention's INT8, on that row's F16 branch where they ran on the head-major cuDNN
+  row. The cross-attention and Wan's image branch, the Animate-2 splice and HiDream's batched forward stay head-major, and
+  `AttendFlat` takes the token-major entry for norm-free configs only. Measured bit-identical on CUDA's cuDNN row: the
+  self-attention through the whole layer, in F32 at Wan 2.2 5B's 49- and 121-frame lengths, Wan 2.1 14B's, Matrix-Game 2's
+  masked call, a context-parallel rank's local queries over the exchanged keys and HiDream's single-stream rows, and in F16
+  with INT8 refused at Wan 2.2 5B's two lengths and Wan 2.1 14B's. On an RTX 4090 against main, wan5b, wan5b-720p, wan21-14b
+  and hidream decode to the same pixels, at 912, 1181, 1257 and 914 ms per step against 939, 1220, 1353 and 928 (one warm rep
+  each). On Vulkan, whose Wan forwards stay F32, the evidence is the attention call alone at Wan's shapes (cm2,
+  bit-identical) and no Vulkan generation was gated.
+- **Faster: SDXL's self-attention runs token-major over its CFG batch.** A layer whose config sets `TokenMajorBatches`
+  takes the token-major entry for a batch of per-head `[B, S, heads, D]` operands where the backend plans a row for the
+  whole call (on CUDA the cuDNN row; no permuting row takes a batch), and the call reads B sequences through a
+  batch-aware `AttentionCall.FromTokenMajor`. The UNet's self-attention opts in and at B=2 drops three permutes in and
+  one out, in SDXL and in SDXL ControlNet's blocks, which share it at the same shapes; other batched calls (Krea 2's
+  layer-axis text fusion, the host-rotated DiT batches), flat operands and backends that plan no batched row (Vulkan's
+  token-major rows read one sequence) stay head-major. Measured bit-identical on CUDA's cuDNN row through the whole
+  layer at B=2: SDXL's 64×64 and 32×32 levels and sdxl-wide's 80×45. On an RTX 4090 against main, sdxl and sdxl-wide
+  decode to the same pixels at 255 and 233 ms per step against 259 and 240 (one warm rep each).
+
+## alpha.388
+
+- **Added: Fibo 2.0 (Bria AI) text-to-image, `fibo2-dev`.** A 44-layer DiT with a 512-query Perceiver over Qwen3-VL-4B
+  text bundles, five injection blocks, and the FLUX.2 VAE, loaded from the Comfy-Org checkpoint layout. Verified by a tiny-config
+  parity test against a Python transcription of ComfyUI's forward. Real-weight and GPU results are recorded in the model status row.
+  Not in this change: glyph text images, reference-image editing, the edit-turbo variant, LoRA, and the int8 builds.
+  Licence CC-BY-NC-4.0.
+- **Fixed: `paths.sideModelAutofetch=false` was ignored by `ModelFileLocator.RequireOrEnsure`**, so Fibo 2.0, Flux.3 and MOSS-Image
+  still downloaded a missing text encoder or VAE. A missing one is now an error when the knob is off.
+
+## alpha.387
+
+- **Fixed: CUDA head-major attention past 2^32 score elements returns the right rows.** The materialized row's softmax forms
+  each row's offset in 32 bits, so a call whose B·H·Sq·Skv score matrix passed 2^32 elements and reached that row (no cuDNN,
+  SageAttention or flash row taking it; for F32 only on a card with more than about 34 GB free) normalized the wrong memory
+  for the rows past the wrap. F16 past the bound now runs query-tiled instead, on exact F32 widenings with the output written
+  back in F16, as BF16 already did (S.11); F32 takes the tiled F32 rows, a tile never passes the bound, and a masked call no
+  tiled row serves is refused naming the budget. Every call up to 2^32 keeps its row, SD1.5's VAE mid-block at 2048², which
+  sits exactly on it, included. Measured on the RTX 3060 with a 66,000² F16 call (cuDNN and SageAttention off): before, the
+  first rows were off by a relative L2 of 0.2 to 1.0 and the rows past the wrap by about 1e4; now every sampled row is within
+  3.7e-4 of a float64 reference.
+
+- **Fixed: CUDA token-major attention past 46,340 tokens.** Since #497 (in alpha.386), SD1.5 from about 1728² failed with
+  "SDPA tensors currently support at most Int32.MaxValue elements each": its UNet self-attention moved to the token-major
+  entry, whose contract refused a score matrix of more than Int32.MaxValue entries, a bound the head-major entry never had.
+  Every token-major call that long was refused the same way; for the DiTs that is from about 3400² (the F32 calls of Flux.1,
+  Qwen-Image, AuraFlow and HiDream, and Chroma's masked calls). The entry now bounds each tensor's elements only; the
+  remaining limit past 2^32 score elements, the materialized row's, is #528's.
+  Measured: SD1.5 at 2048² is bit-identical to the build before #497 (RTX 4090), and the token-major cuDNN row is
+  bit-identical to the head-major one at SD1.5's 65,536 rows (8 heads of 40) and at 75,600 rows (8 heads of 128, Wan 14B's
+  720p length) on the RTX 3060.
+
+- **Faster: the joint attention of the double-stream blocks of Flux.1, Chroma, Flux.2, Qwen-Image, HunyuanImage/HunyuanVideo,
+  AuraFlow and HiDream runs token-major.** `JointAttentionConfig` takes a `TokenMajorRoute` and `HeadMajorForSage` for the
+  joint call, and `AttentionLayer.AttendFlat` takes the config's token-major entry instead of refusing it, so the call reads
+  the concatenated `[1, S, heads·D]` Q, K and V where the concatenation wrote them and drops three permutes in and one out at
+  one batch item. Calls SageAttention would take (as Flux.1 at 1536²), batched forwards and SD3's joint block stay
+  head-major. Measured bit-identical: Flux.1 (1024², 1536² and with a LoRA), Chroma, Flux.2, Qwen-Image, HunyuanImage,
+  AuraFlow and HiDream images on CUDA, and the joint attention call alone at these models' shapes (Chroma's padding mask and
+  a Qwen-Image context-parallel rank's local queries included) on CUDA's cuDNN row and on Vulkan; no Vulkan generation was
+  compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention output on the
+  token-major entry again.
+- **Faster: Wan's attention and FFN run in F16 on CUDA, on by default** (`numerics.wanF16=false` restores the F32 path). On
+  TI2V-5B and Wan 2.1 T2V-14B, for a forward with one timestep group and no image context, each norm writes its branch input
+  in F16 straight from the F32 residual stream, the attention, cross-attention and FFN run in F16 with F32 accumulation, and
+  each branch output is added back to the F32 stream; the modulation, norm weights and RoPE tables stay F32. Two kernels join
+  the stream to the branches: a LayerNorm from F32 into F16 and a gated residual adding an F16 value to an F32 residual. The
+  F16 attention runs on cuDNN at every length: it refuses SageAttention's INT8 through a new per-layer refusal
+  (`AttentionLayerConfig.RefusedFormats`), which excludes every attention row that multiplies in a refused format. The text
+  cross-attention K/V cache holds F16 for those forwards. A Wan 2.2 A14B expert pair, image-to-video, per-frame timesteps,
+  context parallelism, the step cache, the 1.3B and the S2V, VACE, Animate and Matrix-Game models keep F32, as do
+  `numerics.ditF16=false` and the `reference` profile. Measured on an RTX 4090 against main at seeds 42-44, per step and
+  first-frame SSIM per seed: wan5b (832×480×49) 1090 → 885 ms (−18.8%), 0.979 / 0.994 / 0.997; wan5b-720p (1280×704×25)
+  1390 → 1133 ms (−18.5%), 0.958 / 0.982 / 0.965; wan21-14b (fp8, 512×320×25) 1704 → 1290 ms (−24.3%), 0.680 / 0.723 / 0.666,
+  where main's F16 attention alone already moves this 15-step clip to 0.63 against F32 attention; wan5b-long (832×480×121)
+  3010 → 2515 ms (−16.4%), 0.998 / 0.997 / 0.994. wan5b at seed 42 drifts below its 0.985 floor, to 0.979 on the first frame
+  and 0.952 on the last: the same scene and subject, the subject's position and pose shifted, no artifacts. With
+  `numerics.wanF16=false`, wan5b and wan21-14b match main bit for bit.
+
+## alpha.386
+
+- **Added: hosts ask the engine for a model's defaults.** `IInferenceEngine.Recipes` (`IRecipeCatalog`) describes a
+  model's resolved family and variant without loading weights: defaults, features, input limits, frame grid and the
+  variant that was chosen. The HTTP API serves it at `GET /v1/native/recipes`, `GET /v1/native/recipes/{modality}/{familyId}`
+  and `POST /v1/native/recipes/describe`. `ModelCapabilities` is removed; its callers use the catalog.
+- **Added: every plan records where each setting came from.** Video and image plans and results carry the recipe
+  identity (family, defaults revision, variant and how it was chosen) and, per setting, whether it is the recipe's
+  default, a checkpoint profile's, the user's, or a normalized value with the one requested. Each generation logs
+  it in one line.
+- **Changed: recipes are the only source of defaults.** Pipelines run the planned settings and no longer fill an unset
+  value themselves; Diffusion's `GenerationDefaults` table, the per-pipeline fallbacks and
+  `IRecipePipeline.VariantDefaults` are removed. Flux.1 and Flux.2 gain variant catalogs, so Dev, Schnell and the
+  Klein builds are told apart from the weights before loading. Video frame counts are normalized on the family's
+  grid during planning, and a count past the grid's cap lands on the cap.
+- **Added: music recipes.** Each music family declares typed, validated defaults and its longest clip, and
+  `MusicRequest` carries only the values a caller set. `MusicRequest.UseAdg` is removed: set `GuidanceType = "adg"`.
+- **Changed: defaults follow SwarmUI's per-model values.** Output for a request that leaves these unset changes;
+  `docs/Research/RECIPE_CONTRACT.md` lists every value with its source.
+  - Image: Chroma 26 steps at CFG 3.5, Flux.1 Schnell CFG 1, Flux.2 Dev guidance 3.5, Flux.2 Klein 8 steps,
+    Flux 3 Image distilled 16 steps, HunyuanImage 2.1 20 steps, OmniGen2 20 steps at CFG 5, Lens 1440×1440,
+    Boogu base 20 steps at CFG 4, Mage-Flow base 20 steps, Z-Image Base sigma shift 3.
+  - Video: every Wan 81 frames; Wan 2.1 and VACE CFG 6 at 24 fps; Wan 2.2 5B 22 fps; LTX-Video 768×512 at 24 fps;
+    LTX-2 and LTX-2.5 distilled CFG 3 and 97 frames; Kandinsky 5 Video CFG 1, 640×640, 73 frames; HunyuanVideo
+    720×720, 73 frames. Wan, LTX-2 and MiniMax-H3 keep their native sizes.
+  - Music: ACE-Step 1.5 120 s (turbo declares CFG 1), MiniMax Music 3 120 s, YuE2 300 s. An unset duration now
+    renders 12× to 30× the audio it used to.
+
+- **Added: the executable specification of INT8 attention v2.** `Int8AttentionV2Reference` runs on the CPU the stats pass,
+  quantization and online recurrence the coming INT8 kernel must reproduce: u8 P against each key tile's own maximum, s8 V,
+  INT32 partials drained at every key tile, K channel-mean smoothing with its softcap, sink, LSE and per-segment corrections,
+  tile-classified masks, GQA and head dims up to 256, plus the FP8 and F16 P×V fallbacks. An adversarial suite holds it to
+  the contract oracle, which can now return the LSE.
+- **Changed: attention's NaN policy is written down.** A NaN that a row's output reads makes that output NaN (contract §3).
+  The host reference, which the CPU backend runs for calls no legacy entry carries, returned zeros for a row whose every
+  score was NaN, that saw no key and had a NaN sink, or that had a +∞ sink; it now returns NaN. Finite inputs are
+  unaffected.
+- **Added: Drama 3 reads NF4 (bitsandbytes) checkpoints.** An NF4 expert loads as Q4_0, a second quantization rather than
+  the GPTQ build's bit-exact repack. `CheckpointRepacker --quant nf4` streams a block-FP8 checkpoint into one NF4 file in
+  bitsandbytes' layout, refuses an output that resolves to its input, and on a failure, Ctrl-C or SIGTERM removes its
+  partial file and leaves any earlier output in place. No NF4 Drama 3 has been loaded on the real weights yet.
+- **Faster: Wan's denoise step.** Each block's text cross-attention keys and values are projected once per prompt per
+  generation and kept on the device, instead of re-projecting the 512 context rows on every step; the cache is pinned
+  per backend, released when the denoise loop ends, and off when the DiT streams or VRAM is short. Self-attention casts
+  its normed input to F16 once for its three projections instead of once each (F16 weights on CUDA), and the per-block
+  modulation is one add over the six-row table instead of eighteen ops. Output is bit-identical.
+- **Removed: dead attention kernels and switches.** The TF32 FlashAttention-2 kernel (`numerics.sdpaV2`), the SDPA
+  route forced onto the per-row flash kernel (`numerics.sdpaForceFlash`), SageAttention's first kernel
+  (`numerics.sageV0`), its F32-input rows (`numerics.sageAttnExplicit`, `numerics.sageUnsafeF32VNarrow`) with the
+  F32-output PV variants only they reached (`numerics.sagePv`), and the F16 flash kernel's never-routed head-dim 64 and
+  128 entries. Each was opt-in or unreachable, so output is bit-identical. SageAttention now ships as one module,
+  `sage_attn_int8.ptx`. A settings file, `--set`, request or API call naming one of the six ids warns and ignores it
+  through alpha.486.
 - **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The
@@ -29,17 +183,6 @@ stable release will require. Dates are UTC.
   text-token count from the leading dim of the `[1, T, 768]` UMT5 features the engine passes, so it conditioned on the first
   tag token alone and its projection wrote T rows into a one-row output (an exception on CPU, an out-of-bounds write on
   CUDA). It now counts rows as `Linear` does, which changes CUDA output.
-
-## alpha.386
-
-- **Added: Fibo 2.0 (Bria AI) text-to-image, `fibo2-dev`.** A 44-layer DiT with a 512-query Perceiver over Qwen3-VL-4B
-  text bundles, six injection blocks, and the FLUX.2 VAE, loaded from the Comfy-Org checkpoint layout. Verified by a tiny-config
-  parity test against a Python transcription of ComfyUI's forward. Not verified on the real 16 GB checkpoint or on a GPU.
-  Not in this change: glyph text images, reference-image editing, the edit-turbo variant, LoRA, and the int8 builds.
-  Licence CC-BY-NC-4.0.
-
-## alpha.385
-
 - **Fixed: ACE-Step v1 generated noise on CUDA: it misread bf16 checkpoint tensors on the host, plus two smaller
   ACE-Step v1 faults.** Several tensors are read on the host through `float*`: the DiT's lyric embedding table, the
   lyric encoder's norm biases, the DCAE's depthwise and grouped convs and norm biases, and the vocoder's norm biases.
@@ -54,6 +197,14 @@ stable release will require. Dates are UTC.
   stream in blocks of 3·d (columns h·3d, h·3d + d and h·3d + 2d). From the first EfficientViT stage on, the decode
   diverged from the reference: the right channel came out quieter and the two channels nearly uncorrelated. A reference
   latent now decodes to the reference's mel stage for stage, which changes every ACE-Step v1 generation.
+- **Faster: the single-stream blocks of Flux.1, Chroma, Flux.2, Flux.3 and HunyuanImage/HunyuanVideo attend token-major.**
+  `AttentionLayer.Attend` now writes the caller's `[1, S, heads·D]` output on the token-major entry instead of refusing
+  it (CUDA's equal-head entry takes that shape, as its grouped one already did), so each call drops three permutes in and
+  one out at one batch item. Calls SageAttention would take (F16, head dim 64 or 128, unmasked, both sequences at least
+  `numerics.sageF16MinSkv`, as Flux.1 at 1536²) and batched forwards stay head-major. Measured bit-identical: Flux.1 (1024²
+  and 1536²), Flux.2 and Chroma images on CUDA, Flux.1 images on Vulkan, and the attention call at the Flux.1, Flux.2,
+  Chroma (padding mask included) and HunyuanImage single-block shapes on CUDA's cuDNN row and Vulkan's cooperative-matrix-2
+  kernel.
 
 ## alpha.385
 

@@ -62,10 +62,14 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   with `required` non-nullable members, so a missing value fails to compile; `RecipeRegistryValidator` rejects the
   values a type cannot (zero frame rate, off-grid frames, sizes off the multiple of 8, a shadowed name) when the
   registry loads. There is no generic fallback: an unregistered family throws `RecipeNotRegisteredException`.
+- Hosts query `IInferenceEngine.Recipes`, never re-declare defaults.
 - No pipeline and no host decides an omitted user-configurable parameter. Architecture constants stay in model
   configs; capability limits go in `Constraints`, not defaults.
 - A default that differs from SwarmUI's documented one, or comes from upstream where SwarmUI has none, carries a
   one-line comment saying why. Design and the per-family ledger: [RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md).
+- Music recipes (`IMusicRecipe`) follow the same rules: `MusicRequest` fields are nullable and `MusicService` fills them
+  from the recipe before any loader runs. A loader reads a filled field with `Filled()`, which fails by name if the
+  recipe was skipped. A placed checkpoint's variant is not trusted for defaults; the loader applies them once it reads the header.
 
 ## GPU Weight Management
 - Preload with `backend.PreloadWeights(model.EnumerateWeights())`; dispose CPU weight tensors afterwards only if
@@ -106,7 +110,7 @@ filename or metadata in a recipe. `ModelVariantResolver` weighs the evidence in 
 5. **Default**.
 
 The engine resolves once per construction and passes the result as `RecipeContext.Variant`. The result is part of the
-pipeline cache key and feeds `SupportsFor` / `DefaultsFor`. Hosts query the same answer through `ModelCapabilities`.
+pipeline cache key and feeds `SupportsFor` / `DefaultsFor`. Hosts query the same answer through `IInferenceEngine.Recipes`.
 A recipe reached by delegation calls `context.ResolveVariant(itsCatalog)`. A variant with its own registered contract
 sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a file-name guess must not impose.
 

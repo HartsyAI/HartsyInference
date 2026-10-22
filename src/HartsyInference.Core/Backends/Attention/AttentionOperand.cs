@@ -28,11 +28,15 @@ public readonly record struct AttentionOperand(Tensor Storage, AttentionLayout L
     }
 
     /// <summary>A contiguous token-major tensor, <c>[S, heads·headDim]</c> or <c>[B, S, heads, headDim]</c>.</summary>
-    public static AttentionOperand TokenMajor(Tensor t, int heads, int headDim)
+    public static AttentionOperand TokenMajor(Tensor t, int heads, int headDim) =>
+        TokenMajor(t, heads, headDim, t.Shape.Rank == 4 ? (int)t.Shape[0] : 1);
+
+    /// <summary>A contiguous token-major tensor of <paramref name="batch"/> sequences, whatever its rank: <c>[B, S, heads·headDim]</c>
+    /// or <c>[B, S, heads, headDim]</c>.</summary>
+    public static AttentionOperand TokenMajor(Tensor t, int heads, int headDim, int batch)
     {
-        int batch = t.Shape.Rank == 4 ? (int)t.Shape[0] : 1;
         long perToken = (long)batch * heads * headDim;
-        if (perToken <= 0 || t.ElementCount % perToken != 0)
+        if (batch <= 0 || perToken <= 0 || t.ElementCount % perToken != 0)
             throw new ArgumentException($"A token-major {t.Shape} tensor does not hold whole rows of {heads}x{headDim} per batch item.");
         int tokens = (int)(t.ElementCount / perToken);
         long row = (long)heads * headDim;

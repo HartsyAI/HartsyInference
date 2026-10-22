@@ -37,9 +37,8 @@ public enum KnobDomain
 /// value genuinely is baked in when something is built, declare the knob <see cref="KnobScope.Construction"/> and say
 /// why — that scope exists precisely to make the freeze legible instead of accidental.</para>
 /// <para>Some behaviours are deliberately split across a PAIR of knobs with opposite defaults — an opt-in and a
-/// default-on flag, where the opt-in alone unlocks an unsafe path. <c>numerics.ditGraph*</c> and
-/// <c>numerics.sageAttention*</c> are the two such pairs; changing one of a pair without the other changes only half
-/// the behaviour. <c>KnobRegistryTests</c> pins both pairs.</para></remarks>
+/// default-on flag. <c>numerics.ditGraph</c> / <c>numerics.ditGraphDefaultOn</c> is such a pair; changing one without the
+/// other changes only half the behaviour. <c>KnobRegistryTests</c> pins it.</para></remarks>
 public sealed class Knob<T>
 {
     internal Knob(string id, T defaultValue, KnobScope scope, KnobDomain domain, string summary,

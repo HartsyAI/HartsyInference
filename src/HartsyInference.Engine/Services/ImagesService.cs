@@ -1,7 +1,10 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Prompting;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Core.MemoryManagement;
@@ -40,7 +43,8 @@ public sealed class ImagesService : IImagesService
                 string? keepRefiner = request.Refiner?.Model;
                 IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner, cancel: cancel);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
-                ImageRequest resolved = _engine.DefaultsFor(spec, pipeline).Apply(request);
+                ImageDefaults defaults = _engine.DefaultsFor(spec);
+                ImageRequest resolved = defaults.Apply(request);
 
                 // Upstream of every pipeline AND of the segment/region parsing below, so no pipeline sees a raw
                 // tag; what survives is whatever the resolved recipe declares it can act on.
@@ -71,13 +75,12 @@ public sealed class ImagesService : IImagesService
                 InpaintOnlyMasked.Plan? cropPlan = InpaintOnlyMasked.Prepare(basePass);
                 // A declined crop runs as a plain full-canvas inpaint; the mask resolver refuses a lingering crop request.
                 ImageRequest fullCanvas = InpaintOnlyMasked.WithoutCrop(basePass);
+                ImageRequest cropped = cropPlan is null ? fullCanvas : InpaintOnlyMasked.Apply(basePass, cropPlan);
+                ImageResult generated = _engine.GenerateWithVramCleanup(
+                    () => pipeline.Generate(cropped, ImageEffectiveSettings.Of(cropped), progress, cancel));
                 ImageResult result = cropPlan is null
-                    ? MaskRecomposite.Apply(
-                        fullCanvas,
-                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(fullCanvas, progress, cancel)))
-                    : InpaintOnlyMasked.Composite(
-                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(InpaintOnlyMasked.Apply(basePass, cropPlan), progress, cancel)),
-                        cropPlan);
+                    ? MaskRecomposite.Apply(fullCanvas, generated)
+                    : InpaintOnlyMasked.Composite(generated, cropPlan);
 
                 // Generic refiner (any model over any base, PostApply semantics): pixels from the base pass become
                 // the refiner family's img2img init. Runs BEFORE segment refinement, matching Comfy's stage order.
@@ -101,7 +104,12 @@ public sealed class ImagesService : IImagesService
                 // Last, over the final pixels, so the matte matches what the caller actually receives.
                 result = BackgroundRemovalStage.Apply(_engine, resolved, result);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted);
-                return result;
+                RecipeIdentity recipe = RecipeIdentity.For(InferenceEngine.FamilyIdFor(spec), defaults.Revision,
+                    RecipeResolution.ResolveVariant(spec));
+                IReadOnlyDictionary<string, ResolvedParameter> provenance =
+                    ParameterProvenance.ForImage(request, resolved, result.Seed);
+                Logs.Info($"[ImagePlan] {ParameterProvenance.Describe(recipe, provenance)}");
+                return result with { Recipe = recipe, Provenance = provenance };
             },
             cancel);
     }
