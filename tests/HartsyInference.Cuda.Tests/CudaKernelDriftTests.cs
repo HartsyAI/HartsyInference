@@ -80,6 +80,7 @@ public sealed class CudaKernelDriftTests
                         "see Kernels/README.md). Inconclusive, not a pass.");
                     _out.WriteLine("stdout:\n" + stdout);
                     _out.WriteLine("stderr:\n" + stderr);
+                    AssertNoneRefused(refused);
                     return;
                 }
                 unverified.AddRange(stdout.Split('\n')
@@ -99,6 +100,7 @@ public sealed class CudaKernelDriftTests
                     refused.Add($"{Path.GetFileName(committed)}: no Kernels/<domain>/{kernel}.cu builds it");
                     continue;
                 }
+                // The kernel filter also rebuilds the baseline <kernel>.ptx; cleanup covers it.
                 (int exit, string stdout, string stderr) = RunBuild(owner, "--arch", $"sm_{sm}a", kernel);
                 if (exit != 0 && AssemblerRefusal(stderr) is { } refusal)
                 {
@@ -111,6 +113,7 @@ public sealed class CudaKernelDriftTests
                     _out.WriteLine($"SKIPPED: {Path.GetFileName(owner)}/build.sh --arch sm_{sm}a exited {exit} — this toolchain " +
                         "cannot build that arch. Inconclusive, not a pass.");
                     _out.WriteLine("stderr:\n" + stderr);
+                    AssertNoneRefused(refused);
                     return;
                 }
                 unverified.AddRange(stdout.Split('\n')
@@ -164,7 +167,7 @@ public sealed class CudaKernelDriftTests
                 _out.WriteLine("REFUSED by the assembler or unbuildable from source: " + string.Join("; ", refused));
 
             _out.WriteLine($"Compared {compared} rebuilt kernels ({variants.Count} arch variants) across {domains.Length} domains against {ptxDir}.");
-            Assert.True(refused.Count == 0, "A committed kernel cannot be rebuilt from its source: " + string.Join("; ", refused));
+            AssertNoneRefused(refused);
             if (compared == 0 && missing.Count == 0)
             {
                 _out.WriteLine("SKIPPED: no rebuilt kernel could be compared — every one was UNVERIFIED or built by another " +
@@ -240,6 +243,10 @@ public sealed class CudaKernelDriftTests
         proc.WaitForExit();
         return (proc.ExitCode, stdout, stderr);
     }
+
+    /// <summary>A refusal already seen stays a failure even when a later build makes the run inconclusive.</summary>
+    private static void AssertNoneRefused(List<string> refused)
+        => Assert.True(refused.Count == 0, "A committed kernel cannot be rebuilt from its source: " + string.Join("; ", refused));
 
     /// <summary>Walks up from the test binary looking for the repo root (marked by <c>HartsyInference.sln</c>),
     /// then returns <c>src/HartsyInference.Cuda/Kernels</c> under it.</summary>

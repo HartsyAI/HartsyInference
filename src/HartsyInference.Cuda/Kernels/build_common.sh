@@ -119,13 +119,11 @@ compile_one() {
     # nvrtc and nvcc -ptx stop before the assembler, so an operand the target refuses ships and takes the whole backend
     # down at module load — how a 16-bit e2m1 cvt destination made every CC 12.0 card unusable. Assemble when we can.
     if [[ -n "$PTXAS" ]]; then
-        if ! "$PTXAS" -arch="sm_${arch}" "$ptx" -o /dev/null 2>"${ptx}.ptxas.log"; then
+        if ! ptxas_log="$("$PTXAS" -arch="sm_${arch}" "$ptx" -o /dev/null 2>&1)"; then
             echo "ERROR: ${kernel}${suffix}.ptx does not assemble for sm_${arch}:" >&2
-            head -5 "${ptx}.ptxas.log" >&2
-            rm -f "${ptx}.ptxas.log"
+            printf '%s\n' "$ptxas_log" | head -5 >&2
             exit 1
         fi
-        rm -f "${ptx}.ptxas.log"
     fi
     if $INSTALL; then
         cp "$ptx" "${PTX_OUT}/${kernel}${suffix}.ptx"
