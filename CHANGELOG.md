@@ -30,6 +30,14 @@ stable release will require. Dates are UTC.
   tag token alone and its projection wrote T rows into a one-row output (an exception on CPU, an out-of-bounds write on
   CUDA). It now counts rows as `Linear` does, which changes CUDA output.
 
+## alpha.386
+
+- **Added: Fibo 2.0 (Bria AI) text-to-image, `fibo2-dev`.** A 44-layer DiT with a 512-query Perceiver over Qwen3-VL-4B
+  text bundles, six injection blocks, and the FLUX.2 VAE, loaded from the Comfy-Org checkpoint layout. Verified by a tiny-config
+  parity test against a Python transcription of ComfyUI's forward. Not verified on the real 16 GB checkpoint or on a GPU.
+  Not in this change: glyph text images, reference-image editing, the edit-turbo variant, LoRA, and the int8 builds.
+  Licence CC-BY-NC-4.0.
+
 ## alpha.385
 
 - **Fixed: ACE-Step v1 generated noise on CUDA: it misread bf16 checkpoint tensors on the host, plus two smaller
