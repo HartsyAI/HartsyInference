@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -72,7 +73,7 @@ internal static class StableAudioMusicModel
             try
             {
                 (float[] left, float[] right, int _, int _) = pipeline.Generate(
-                    textEmbeds, request.Duration, steps: request.InferSteps, seed: request.Seed);
+                    textEmbeds, request.Duration.Filled(), steps: request.InferSteps, seed: request.Seed);
                 return MusicAudio.Stereo(left, right);
             }
             finally
