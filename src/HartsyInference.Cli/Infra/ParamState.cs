@@ -130,7 +130,8 @@ public sealed class ParamState
                 _values["duration"] = "";
                 break;
             case Modality.Music:
-                _values["duration"] = "10";
+                // Empty = the model's recipe duration, like every other music knob below.
+                _values["duration"] = "";
                 _values["seed"] = "-1";
                 // Empty = "the model decides". TrySet refuses a key that is not already present, so every knob the
                 // REPL should be able to set has to be seeded here even when it has no CLI default.

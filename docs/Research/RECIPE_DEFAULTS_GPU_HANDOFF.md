@@ -100,10 +100,9 @@ Families with no row yet. Find a checkpoint under the models root, add a row, an
 | MiniMax Music 3 | 120 s, flow CFG unchanged |
 | YuE2 | 300 s |
 
-**Music caveat:** `hartsy music --duration` defaults to 10 in the CLI (`MusicCommand.cs`, `int Duration = 10`), so the
-CLI still masks the new recipe durations. Until that is nullable, pass `--duration 120` or `--duration 300` yourself to
-see them, and pass the same explicit duration on both arms. A bounded run fails on any audio change, so judge music by
-ear.
+**Music:** leave `--duration` off to get the recipe duration; the CLI no longer sends its own 10 s. Compare at an
+explicit `--duration` too, the same on both arms, because the base build's CLI still defaults to 10 s. A bounded run
+fails on any audio change, so judge music by ear.
 
 **Decide from what you see.** If a value is clearly worse (most likely LTX-2.5 distilled at CFG 3 or Kandinsky 5
 regular at CFG 1), open a PR that reverts that one value. Bump its `Revision`, update the `RECIPE_CONTRACT.md` ledger
