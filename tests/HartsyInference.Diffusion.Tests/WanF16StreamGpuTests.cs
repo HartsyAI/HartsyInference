@@ -13,11 +13,13 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>Wan's F16 block stream (<c>numerics.ditF16</c>) on CUDA. One block at TI2V-5B geometry, fed a stream with the
 /// outlier channels the real residual carries, tracks its F32 twin within F16 rounding, on the cuDNN route and on the
 /// SageAttention route a long sequence takes. With the switch off the transformer is the F32 path assembled from its parts,
-/// bit for bit; the forwards that stay F32 ignore the switch; and a text K/V scope serves only forwards of its own dtype.</summary>
+/// bit for bit; the forwards that stay F32 ignore the switch; a text K/V scope serves only forwards of its own dtype; and the
+/// debug dump records the F16 stream as F32 without moving the output.</summary>
 public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 {
     private const int GridH = 15, GridW = 26;   // 832×480 after the VAE and the patch
     private const int TextTokens = 512;
+    private const int SageKnee = 8192;
 
     private readonly ITestOutputHelper _output = output;
 
@@ -31,7 +33,8 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
     public void AnF16BlockTracksTheF32BlockAtTi2v5bGeometry(int frames)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        using IDisposable knobs = KnobProfile.Create("wan-f16-block").With(EngineKnobs.SageAttn, true).Push();
+        using IDisposable knobs = KnobProfile.Create("wan-f16-block").With(EngineKnobs.SageAttn, true)
+            .With(EngineKnobs.SageF16MinSkv, SageKnee).Push();
         WanVideoConfig cfg = WanVideoConfig.Ti2V5B;
         int dim = cfg.InnerDim, s = frames * GridH * GridW;
         int seed = 17;
@@ -50,10 +53,13 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         {
             using (Tensor out32 = block.Forward(backend, hidden, context, temb, rope, cos, sin, s))
                 f32 = Read(out32);
+            Assert.Equal(0, backend.SageAttentionExecutionCount);
             using Tensor hidden16 = new(hidden.Shape, DType.F16);
             backend.CastToF16(hidden16, hidden);
             using Tensor out16 = block.Forward(backend, hidden16, context, temb, rope, cos, sin, s);
             Assert.Equal(DType.F16, out16.DType);
+            // Self-attention alone is long on both sides; the 512 text keys keep cross-attention on cuDNN.
+            Assert.Equal(s >= SageKnee ? 1 : 0, backend.SageAttentionExecutionCount);
             using Tensor wide = DtypeCastHelper.EnsureF32(backend, out16, disposeSourceOnCast: false);
             f16 = Read(wide);
         }
@@ -167,6 +173,44 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
             cached = Steps();
 
         Assert.Equal(expected, cached);
+    }
+
+    /// <summary>The dump keeps the raw scale rows, so the F16 forward takes its unfused (1 + scale) add, which writes the same values.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void TheDebugDumpRecordsTheF16StreamAsF32WithoutMovingTheOutput()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        WanVideoConfig cfg = Tiny(image: false);
+        WanVideoTransformer transformer = new(cfg);
+        transformer.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+        int seed = 13;
+        using Tensor latent = Uniform(ref seed, 1f, 1, cfg.InChannels, 3, 8, 8);
+        using Tensor encoder = Uniform(ref seed, 1f, 5, cfg.TextDim);
+        using CudaBackend backend = new(0, PtxDir());
+        string dir = Path.Combine(Path.GetTempPath(), $"wan-f16-dump-{Guid.NewGuid():N}");
+        try
+        {
+            float[] plain = Forward(true, () => transformer.Forward(backend, latent, encoder, 500f));
+            float[] dumped;
+            using (KnobProfile.Create("wan-f16-dump").With(EngineKnobs.DitF16, true).With(EngineKnobs.WanDebugDir, dir)
+                .With(EngineKnobs.WanDebugTag, "").Push())
+            using (Tensor velocity = transformer.Forward(backend, latent, encoder, 500f))
+                dumped = Read(velocity);
+
+            Assert.Equal(plain, dumped);
+            const int Tokens = 3 * 4 * 4;
+            foreach (string name in new[] { "b0_n1", "blocks_0", "blocks_1" })
+            {
+                float[] stream = ReadDump(Path.Combine(dir, "layers", name + ".bin"));
+                Assert.Equal(Tokens * cfg.InnerDim, stream.Length);
+                Assert.All(stream, v => Assert.True(float.IsFinite(v) && (float)(Half)v == v, $"{name} holds {v}, not an F16 value."));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
     }
 
     /// <summary>Patch embed, F32 blocks, final layer and unpatchify, each called directly with the transformer's weights.</summary>
@@ -305,6 +349,8 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
     }
 
     private static float[] Read(Tensor t) => new ReadOnlySpan<float>(t.DataPointer, checked((int)t.ElementCount)).ToArray();
+
+    private static float[] ReadDump(string path) => System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(path)).ToArray();
 
     private static string PtxDir()
     {

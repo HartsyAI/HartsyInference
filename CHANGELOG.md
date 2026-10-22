@@ -34,7 +34,9 @@ stable release will require. Dates are UTC.
   norm weights and RoPE tables stay F32 and the final layer runs on an F32 cast. The text cross-attention K/V cache holds
   F16 for those forwards. Per-frame timesteps, the CLIP image branch, context parallelism, the step cache and the S2V,
   VACE, Animate and Matrix-Game models keep F32, as does `numerics.ditF16=false` (bit for bit) and the `reference`
-  profile. Self-attention over 8192 or more tokens now takes the default F16 SageAttention row, as the other F16 DiTs do.
+  profile. With F16 activations, Wan self-attention at `numerics.sageF16MinSkv` (8192) tokens or more now runs on the
+  INT8 SageAttention row (on by default; `numerics.sageAttn=0` keeps cuDNN F16): 832×480 from 85 frames, 1280×704 from
+  37, the 14B models at 832×480 from 21. The F32 path never reaches it.
 
 ## alpha.386
 

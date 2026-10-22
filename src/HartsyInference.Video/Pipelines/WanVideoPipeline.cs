@@ -960,6 +960,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     private DType DenoiseActivation(bool singleGroup)
     {
         bool eligible = singleGroup && StepCacheEnv.ReadThreshold() <= 0f && CpBackends is not { Count: >= 2 };
+        // numerics.ditF16 holds for a whole generation, the CFG worker included, so every forward agrees with this.
         DType act = WanVideoTransformer.BlockActivation(Backend, eligible);
         return CfgParallelBackend is { } second && WanVideoTransformer.BlockActivation(second, eligible) != act ? DType.F32 : act;
     }
