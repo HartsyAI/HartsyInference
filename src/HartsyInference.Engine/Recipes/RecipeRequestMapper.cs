@@ -51,7 +51,8 @@ internal static class RecipeRequestMapper
         return mu;
     }
 
-    /// <summary>The concrete pixel size for a pipeline that has to snap or clamp it.</summary>
+    /// <summary>The pixel size of a request already resolved against its family's defaults, for the pre-pipeline
+    /// stages (masked-inpaint cropping, composition planning) that need only the size.</summary>
     /// <exception cref="ArgumentException">The request was not resolved against its family's <see cref="ImageDefaults"/> first.</exception>
     public static (int Width, int Height) Size(ImageRequest request)
     {
@@ -64,18 +65,21 @@ internal static class RecipeRequestMapper
         return (width, height);
     }
 
-    /// <summary>Builds the text-to-image core (prompt, size, seed, steps and guidance) from an already defaults-resolved request; families that also carry a scheduler, CLIP-skip, init noise or img2img fields layer them on with a record <c>with</c> expression.</summary>
-    public static TextToImageRequest ToTextToImage(ImageRequest request, string negative)
+    /// <summary>Builds the text-to-image core (prompt, size, seed, steps and guidance) from a request and its resolved
+    /// <paramref name="settings"/>; families that also carry a scheduler, CLIP-skip, init noise or img2img fields layer
+    /// them on with a record <c>with</c> expression.</summary>
+    public static TextToImageRequest ToTextToImage(ImageRequest request, ImageEffectiveSettings settings, string negative)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(settings);
         return new TextToImageRequest
         {
             Prompt = request.Prompt,
             NegativePrompt = negative,
-            Width = request.Width,
-            Height = request.Height,
-            Steps = request.Steps,
-            CfgScale = request.CfgScale,
+            Width = settings.Width,
+            Height = settings.Height,
+            Steps = settings.Steps,
+            CfgScale = settings.CfgScale,
             CfgRescale = request.CfgRescale,
             Tcfg = request.Tcfg,
             SeamlessTiling = request.SeamlessTiling,

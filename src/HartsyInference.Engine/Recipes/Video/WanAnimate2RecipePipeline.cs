@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -66,7 +67,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
@@ -79,7 +81,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
         // The CLI width/height are an area budget; the OUTPUT aspect follows the reference image, and the driving
         // video is force-resized into that same geometry (ComfyUI's simplification of upstream's per-input
         // resize_by_area, which the spec endorses as the case to port first).
-        (int requestedWidth, int requestedHeight) = VideoRecipeUtils.ResolveResolution(request, SizeDivisor);
+        (int requestedWidth, int requestedHeight) = VideoRecipeUtils.ResolveResolution(settings, SizeDivisor);
         (int width, int height) = ShapeToAreaBudget((long)requestedWidth * requestedHeight, reference.Width, reference.Height);
         if (width != requestedWidth || height != requestedHeight)
         {
@@ -88,11 +90,10 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                 + $"aspect shapes the output to {width}x{height}.");
         }
 
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
-        int targetFps = request.Fps is > 0 ? request.Fps.Value : 24;
-        int chunkLen = VideoRecipeUtils.ResolveFrames(request, modelDefault: WanAnimate2Pipeline.ClipLength,
-            step: _config.VaeTemporalCompression);
+        int steps = settings.Steps;
+        float cfgScale = settings.CfgScale;
+        int targetFps = settings.Fps;
+        int chunkLen = settings.Frames;
         if (chunkLen < 5)
         {
             throw new InvalidOperationException($"Wan-Animate-2 needs at least 5 frames per chunk; got {chunkLen}.");

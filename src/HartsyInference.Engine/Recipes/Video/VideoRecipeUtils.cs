@@ -7,6 +7,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
@@ -34,10 +35,10 @@ internal static class VideoRecipeUtils
         vaeSpatialCompression * Math.Max(patchSize.H, patchSize.W);
 
     /// <summary>Snaps the request's width/height to <paramref name="multiple"/>, logging when the geometry moved.</summary>
-    internal static (int Width, int Height) ResolveResolution(VideoRequest request, int multiple)
+    internal static (int Width, int Height) ResolveResolution(VideoEffectiveSettings settings, int multiple)
     {
-        int requestedWidth = request.Width ?? 704;
-        int requestedHeight = request.Height ?? 480;
+        int requestedWidth = settings.Width;
+        int requestedHeight = settings.Height;
         int width = SnapToMultiple(requestedWidth, multiple);
         int height = SnapToMultiple(requestedHeight, multiple);
         if (width != requestedWidth || height != requestedHeight)
@@ -47,24 +48,14 @@ internal static class VideoRecipeUtils
         return (width, height);
     }
 
-    /// <summary>Rounds the requested frame count onto the model's <c>step·n + 1</c> grid (the VAE temporal compression constraint).</summary>
-    internal static int ResolveFrames(VideoRequest request, int modelDefault, int step)
-    {
-        int requested = request.Frames ?? modelDefault;
-        int snapped = Math.Max(1, 1 + (int)Math.Round((requested - 1) / (double)step) * step);
-        if (snapped != requested)
-        {
-            Logs.Info($"[VideoRecipe] Video frame count {requested} rounded to {snapped} (model requires {step}n+1 frames).");
-        }
-        return snapped;
-    }
 
     /// <summary>Image-to-video geometry: fits the init image's aspect into the model's standard pixel budget ("Image Aspect, Model Res" — the SwarmUI default), or takes the image's own size when the request asks for "Image". Everything snaps to <paramref name="multiple"/>.</summary>
-    internal static (int Width, int Height) ResolveI2VResolution(VideoRequest request, int imageWidth, int imageHeight, int multiple)
+    internal static (int Width, int Height) ResolveI2VResolution(VideoRequest request, VideoEffectiveSettings settings,
+        int imageWidth, int imageHeight, int multiple)
     {
         string mode = request.VideoResolution ?? "Image Aspect, Model Res";
-        int requestedWidth = request.Width ?? 704;
-        int requestedHeight = request.Height ?? 480;
+        int requestedWidth = settings.Width;
+        int requestedHeight = settings.Height;
         if (string.Equals(mode, "Image", StringComparison.OrdinalIgnoreCase))
         {
             return (SnapToMultiple(imageWidth, multiple), SnapToMultiple(imageHeight, multiple));

@@ -47,14 +47,15 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
     public ImageDefaults? VariantDefaults => _defaults;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _defaults.Steps;
+        int steps = settings.Steps;
         // Text guidance from CFG scale (Boogu Base works well ~2–5; Turbo = 1). The negative prompt drives the uncond pass.
-        float textGuidance = request.CfgScale ?? _defaults.CfgScale;
+        float textGuidance = settings.CfgScale;
 
         // Reference editing runs at TEXT-ONLY guidance (imageGuidanceScale = 1), which BooguImagePipeline explicitly
         // supports by skipping the drop-all pass. Full image guidance additionally needs the Qwen3-VL vision tower to
@@ -62,7 +63,7 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
         // stream, but its strength is not separately steerable yet.
 
         // Output size must be a multiple of 16 (2×2 patchify × 8× VAE).
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int snappedW = Math.Clamp(reqWidth / 16 * 16, 256, 2048);
         int snappedH = Math.Clamp(reqHeight / 16 * 16, 256, 2048);
         if (snappedW != reqWidth || snappedH != reqHeight)

@@ -9,6 +9,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -53,16 +54,17 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <inheritdoc/>
-    public VideoGenerationResult Generate(VideoRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
-        int numFrames = VideoRecipeUtils.ResolveFrames(request, modelDefault: 97, step: _config.VaeTemporalCompression);
-        int frameRate = request.Fps ?? 24;
-        float cfgScale = request.CfgScale ?? _config.GuidanceScale;
+        int steps = settings.Steps;
+        (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, _config.VaeSpatialCompression);
+        int numFrames = settings.Frames;
+        int frameRate = settings.Fps;
+        float cfgScale = settings.CfgScale;
 
         // Declaring ComfyBlend is what stops VideoService collapsing `(word:N)`, so the recipe owns the grammar
         // now. T5 pads to a fixed 128 here, so the empty baseline the blend subtracts shares the prompt's shape

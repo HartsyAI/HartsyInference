@@ -45,7 +45,8 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
     }
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
@@ -53,7 +54,7 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
         int layersFromEnd = RecipeRequestMapper.MapClipSkip(request.ClipSkip) ?? 1;
         // Real <alternate:>/<fromto[N]:> scheduling needs the actual step count to resolve which variant is
         // live at each step — see WeightedConditioning.BuildSingleClipScheduled.
-        int totalSteps = request.Steps ?? Sd15Recipe.FamilyDefaults.Steps;
+        int totalSteps = settings.Steps;
 
         // ImagesService leaves <alternate:>/<fromto[N]:> raw for this recipe so BuildSingleClipScheduled can build
         // a real per-step schedule; this plain encode has no per-step slot, so it takes the step-0 value instead of
@@ -71,7 +72,7 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
             _ipAdapterCache.Cache,
             cancel);
 
-        TextToImageRequest inner = BuildInner(request, negative, plan);
+        TextToImageRequest inner = BuildInner(request, settings, negative, plan);
 
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
@@ -92,15 +93,16 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
                 ["arch"] = "sd15",
                 ["size"] = $"{width}x{height}",
                 ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
-                ["steps"] = (request.Steps ?? Sd15Recipe.FamilyDefaults.Steps).ToString(CultureInfo.InvariantCulture),
+                ["steps"] = (settings.Steps).ToString(CultureInfo.InvariantCulture),
             },
         };
     }
 
     /// <summary>Builds the inner diffusion request — an <see cref="ImageToImageRequest"/> when the plan resolved an init image, else plain text-to-image with any variation-seed noise injected.</summary>
-    private static TextToImageRequest BuildInner(ImageRequest request, string negative, UnetCompositionPlan plan)
+    private static TextToImageRequest BuildInner(ImageRequest request, ImageEffectiveSettings settings, string negative,
+        UnetCompositionPlan plan)
     {
-        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, settings, negative) with
         {
             // Same fix as SdxlRecipePipeline: request.Sampler (euler/ddim/dpm++2m/lcm/tcd) is what the
             // "HartsyInference Sampler" param actually populates; request.Scheduler is always null from the

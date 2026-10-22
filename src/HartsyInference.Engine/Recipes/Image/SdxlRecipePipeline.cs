@@ -51,7 +51,8 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     }
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(request);
         cancel.ThrowIfCancellationRequested();
@@ -60,7 +61,7 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         // lazy conditioningFactory below can pass it to WeightedConditioning.BuildDualClipScheduled — real
         // <alternate:>/<fromto[N]:> scheduling needs the actual step count to resolve which variant is live
         // at each step, not just "some default".
-        int totalSteps = request.Steps ?? SdxlRecipe.FamilyDefaults.Steps;
+        int totalSteps = settings.Steps;
 
         // Textual-inversion embed markers (\0swarmembed:NAME\0end — SwarmUI core's own rewrite of <embed:name>,
         // arriving on request.Prompt/NegativePrompt before this recipe ever sees them) resolve to a token plan with
@@ -121,11 +122,11 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
         // to load that checkpoint as an SDXL refiner UNet. RefinerStage.IsSdxlInternalPair is the shared decision.
         RefinerResolver.RefinerSpec? refinerSpec = RefinerStage.IsSdxlInternalPair(request, "sdxl")
             ? RefinerResolver.Resolve(
-                request.Refiner, request.Steps ?? SdxlRecipe.FamilyDefaults.Steps, request.CfgScale ?? SdxlRecipe.FamilyDefaults.CfgScale)
+                request.Refiner, settings.Steps, settings.CfgScale)
             : null;
         bool postApply = refinerSpec is not null && !string.Equals(refinerSpec.Method, "StepSwap", StringComparison.OrdinalIgnoreCase);
         RefinerSwapConfig? stepSwapRefiner = postApply ? null : BuildStepSwapConfig(refinerSpec);
-        TextToImageRequest inner = BuildInner(request, negative, plan);
+        TextToImageRequest inner = BuildInner(request, settings, negative, plan);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
             tokensL, negL, tokensG, negG, eosG, negEosG, inner,
@@ -161,9 +162,10 @@ public sealed class SdxlRecipePipeline : IRecipePipeline
     }
 
     /// <summary>Builds the inner diffusion request — an <see cref="ImageToImageRequest"/> when the plan resolved an init image, else plain text-to-image with any variation-seed noise injected.</summary>
-    private static TextToImageRequest BuildInner(ImageRequest request, string negative, UnetCompositionPlan plan)
+    private static TextToImageRequest BuildInner(ImageRequest request, ImageEffectiveSettings settings, string negative,
+        UnetCompositionPlan plan)
     {
-        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, negative) with
+        TextToImageRequest inner = RecipeRequestMapper.ToTextToImage(request, settings, negative) with
         {
             // request.Sampler is what the "HartsyInference Sampler" param actually populates (euler/ddim/
             // dpm++2m/lcm/tcd — SchedulerFactory's own domain despite the field name); request.Scheduler is

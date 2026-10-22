@@ -34,15 +34,16 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? HunyuanImageRecipe.FamilyDefaults.Steps;
-        float cfg = request.CfgScale ?? HunyuanImageRecipe.FamilyDefaults.CfgScale;
+        int steps = settings.Steps;
+        float cfg = settings.CfgScale;
         // 32× VAE + unit patches → the image dims must be a multiple of 32.
-        (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
+        (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
         int width = (reqWidth / 32) * 32;
         int height = (reqHeight / 32) * 32;
 

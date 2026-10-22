@@ -74,13 +74,12 @@ public sealed class ImagesService : IImagesService
                 InpaintOnlyMasked.Plan? cropPlan = InpaintOnlyMasked.Prepare(basePass);
                 // A declined crop runs as a plain full-canvas inpaint; the mask resolver refuses a lingering crop request.
                 ImageRequest fullCanvas = InpaintOnlyMasked.WithoutCrop(basePass);
+                ImageRequest cropped = cropPlan is null ? fullCanvas : InpaintOnlyMasked.Apply(basePass, cropPlan);
+                ImageResult generated = _engine.GenerateWithVramCleanup(
+                    () => pipeline.Generate(cropped, ImageEffectiveSettings.Of(cropped), progress, cancel));
                 ImageResult result = cropPlan is null
-                    ? MaskRecomposite.Apply(
-                        fullCanvas,
-                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(fullCanvas, progress, cancel)))
-                    : InpaintOnlyMasked.Composite(
-                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(InpaintOnlyMasked.Apply(basePass, cropPlan), progress, cancel)),
-                        cropPlan);
+                    ? MaskRecomposite.Apply(fullCanvas, generated)
+                    : InpaintOnlyMasked.Composite(generated, cropPlan);
 
                 // Generic refiner (any model over any base, PostApply semantics): pixels from the base pass become
                 // the refiner family's img2img init. Runs BEFORE segment refinement, matching Comfy's stage order.

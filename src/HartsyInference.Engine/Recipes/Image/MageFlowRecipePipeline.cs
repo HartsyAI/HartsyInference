@@ -50,16 +50,17 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
     }
 
 
-    public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
-        int steps = request.Steps ?? (_isTurbo ? MageFlowRecipe.TurboDefaults.Steps : MageFlowRecipe.FamilyDefaults.Steps);
-        float cfg = _isTurbo ? MageFlowRecipe.TurboDefaults.CfgScale : (request.CfgScale ?? MageFlowRecipe.FamilyDefaults.CfgScale);
+        int steps = settings.Steps;
+        float cfg = _isTurbo ? MageFlowRecipe.TurboDefaults.CfgScale : (settings.CfgScale);
         bool useCfg = cfg > 1.0f;
 
-        (int reqW, int reqH) = RecipeRequestMapper.Size(request);
+        (int reqW, int reqH) = (settings.Width, settings.Height);
         int width = Math.Clamp(reqW / 16 * 16, 128, 4096);   // MageVAE /16, patch 1 → multiple of 16
         int height = Math.Clamp(reqH / 16 * 16, 128, 4096);
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? Random.Shared.Next(int.MaxValue);
