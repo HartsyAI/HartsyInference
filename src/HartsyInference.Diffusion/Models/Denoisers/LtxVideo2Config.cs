@@ -169,6 +169,8 @@ public sealed record LtxVideo2Config
     {
         FixedSigmas = Ltx25DistilledSigmas,
         NumInferenceSteps = 8,
+        // The distillation's own guidance. The engine recipe's default (CFG 3) follows SwarmUI core, which applies
+        // one CFG to every LTX-2 model, and is what a request without a CFG runs.
         GuidanceScale = 1.0f,
         TwoStage = true,
     };

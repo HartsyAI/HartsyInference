@@ -69,7 +69,7 @@ public sealed class PlanProvenanceTests
         {
             Assert.Equal(ParameterSource.RecipeDefault, plan.Provenance[name].Source);
         }
-        Assert.Equal("33", plan.Provenance["Frames"].Value);
+        Assert.Equal("81", plan.Provenance["Frames"].Value);
         Assert.Equal(ParameterSource.Derived, plan.Provenance["Seed"].Source);
         Assert.Null(plan.Provenance["Sampler"].Value);
     }
