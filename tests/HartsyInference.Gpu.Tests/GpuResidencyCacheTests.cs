@@ -88,6 +88,24 @@ public sealed class GpuResidencyCacheTests
             }
             MakeCurrentCalls++;
             _bound = true;
+            if (Binding is not null) Binding.Current = ContextId;
+        }
+
+        /// <summary>The calling thread's current context, shared by the caches of one test; null leaves it unmodelled.</summary>
+        internal sealed class ThreadBinding
+        {
+            public nint Current { get; set; }
+        }
+
+        public ThreadBinding? Binding { get; init; }
+
+        public nint ContextId { get; init; } = 1;
+
+        protected override nint CaptureCurrent() => Binding?.Current ?? 0;
+
+        protected override void RestoreCurrent(nint previous)
+        {
+            if (Binding is not null && previous != 0) Binding.Current = previous;
         }
 
         protected override bool HostReadForbidden => RefuseHostReads;
@@ -384,6 +402,33 @@ public sealed class GpuResidencyCacheTests
         Assert.True(promoted.Freed);
         Assert.True(cast.Freed);
         Assert.Empty(cache.FreedWhileForeign);
+    }
+
+    /// <summary>Two devices hold one host tensor, and the second device's op reads it on the host: the first cache's hooks
+    /// bind its own context to demote or sync, then must put the caller's back, or the op's next call lands in the first
+    /// device's context. Context-parallel Wan ranks failed with CUDA_ERROR_INVALID_VALUE this way.</summary>
+    [Fact]
+    public void A_Hook_Fired_By_Another_Devices_Host_Read_Puts_That_Devices_Binding_Back()
+    {
+        FakeCache.ThreadBinding thread = new();
+        using FakeCache first = new() { Binding = thread, ContextId = 1 };
+        using Tensor weight = NewTensor();
+        first.ForcePromote(weight, Size(weight));
+        using Tensor activation = NewTensor();
+        first.CacheActivation(activation, first.AllocateForTest(Size(activation)), Size(activation));
+
+        thread.Current = 2;
+        unsafe
+        {
+            _ = weight.DataPointer;
+            Assert.Equal(2, thread.Current);
+            _ = activation.DataPointer;
+        }
+
+        Assert.Equal(2, thread.Current);
+        Assert.False(first.TryGetCached(weight, out _));
+        Assert.False(first.TryGetCached(activation, out _));
+        Assert.Equal(1, first.Downloads);
     }
 
     /// <summary>The control: the sync callback of an activation read back to host has always made the context
