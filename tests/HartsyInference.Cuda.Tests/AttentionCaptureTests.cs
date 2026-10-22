@@ -72,6 +72,13 @@ public sealed class AttentionCaptureTests(ITestOutputHelper output)
                     for (int c = 0; c < D; c++)
                         Assert.Equal(values[((long)heads[i] * Tokens + t) * D + c], BitConverter.ToSingle(k, (int)((((long)i * Tokens) + t) * D + c) * 4));
             Assert.Equal(4L * 512 * D * 4, new FileInfo(Path.Combine(only, "q.bin")).Length);
+            // A directory that cannot be made is logged; the call itself runs.
+            string blocker = Path.Combine(dir, "not-a-directory");
+            File.WriteAllText(blocker, "");
+            KnobStore.Set(EngineKnobs.AttentionCaptureDir, blocker);
+            using Tensor o4 = new(shape, DType.F32);
+            cuda.ScaledDotProductAttention(o4, q, q, q, null, 0.125f);
+            Assert.Equal(o1.AsReadOnlySpan<float>().ToArray(), o4.AsReadOnlySpan<float>().ToArray());
         }
         finally
         {

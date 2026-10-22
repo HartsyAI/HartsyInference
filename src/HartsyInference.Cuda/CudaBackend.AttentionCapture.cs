@@ -13,7 +13,7 @@ public sealed partial class CudaBackend
     private const int CaptureMinTokens = 1024, CaptureHeads = 4, CaptureQueryRows = 512;
     private readonly Dictionary<string, int> _captureOrdinals = new(StringComparer.Ordinal);
     private readonly object _captureGate = new();
-    private bool _captureSkipNoted;
+    private int _captureSkipNoted;
 
     /// <summary>Counts the call against its shape in <c>calls.tsv</c> and, when its ordinal is listed, writes batch 0's Q (four
     /// evenly spaced heads, up to 512 evenly spaced rows), K and V (those heads' key/value heads, every valid key) in the call's
@@ -24,9 +24,8 @@ public sealed partial class CudaBackend
         if (Math.Min(call.QueryTokens, call.ValidKvLength) < CaptureMinTokens) return;
         if (StreamIsCapturing())
         {
-            if (!_captureSkipNoted)
+            if (Interlocked.Exchange(ref _captureSkipNoted, 1) == 0)
                 Logs.Warning("[attention capture] calls inside a captured graph are neither listed nor written; set numerics.ditGraph=false.");
-            _captureSkipNoted = true;
             return;
         }
         string shape = string.Create(CultureInfo.InvariantCulture,
@@ -36,9 +35,17 @@ public sealed partial class CudaBackend
         {
             ordinal = _captureOrdinals.TryGetValue(shape, out int seen) ? seen : 0;
             _captureOrdinals[shape] = ordinal + 1;
-            Directory.CreateDirectory(dir);
-            File.AppendAllText(Path.Combine(dir, "calls.tsv"), string.Create(CultureInfo.InvariantCulture,
-                $"{shape}\t{ordinal}\t{call.Route}\t{(call.Mask.Bias is null ? "none" : "bias")}\t{call.Scale:R}\n"));
+            try
+            {
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "calls.tsv"), string.Create(CultureInfo.InvariantCulture,
+                    $"{shape}\t{ordinal}\t{call.Route}\t{(call.Mask.Bias is null ? "none" : "bias")}\t{call.Scale:R}\n"));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Logs.Warning($"[attention capture] {shape} call {ordinal} not listed: {ex.Message}");
+                return;
+            }
         }
         if (!CaptureWanted(EngineKnobs.AttentionCaptureCalls.Value, shape, ordinal)) return;
         try
@@ -106,7 +113,8 @@ public sealed partial class CudaBackend
     private unsafe void WriteRows(in AttentionOperand operand, int[] heads, int[] rows, string path)
     {
         Tensor storage = operand.Storage;
-        int elem = storage.DType == DType.F32 ? 4 : 2;
+        int elem = storage.DType == DType.F32 ? 4 : storage.DType == DType.F16 || storage.DType == DType.BF16 ? 2
+            : throw new NotSupportedException($"Attention capture writes F32, F16 or BF16 operands; got {storage.DType}.");
         long storageBytes = (long)GpuTransferHelper.ByteSize(storage);
         if (storageBytes > Array.MaxLength)
             throw new NotSupportedException($"Attention capture reads whole operands into one array; {storageBytes} bytes is too many.");
