@@ -59,7 +59,9 @@ public sealed unsafe class BlockScaledGemmExecutor : CublasLtExecutorBase
 
     /// <summary><see cref="Run"/> for a caller with a fallback: a request cuBLASLt declines (invalid value, arch mismatch,
     /// not supported) returns that status and leaves <paramref name="outPtr"/> unwritten; 0 means the GEMM ran. An
-    /// execution or allocation failure still throws — those leave nothing a fallback could recover from.</summary>
+    /// execution or allocation failure still throws — those leave nothing a fallback could recover from. Every call in
+    /// <see cref="Run"/> is cuBLASLt (no algorithm query: <c>algo</c> is null, and an empty heuristic surfaces as
+    /// NOT_SUPPORTED), so the matched codes are cuBLAS statuses, never driver errors.</summary>
     public int TryRun(ulong weight, ulong weightBlockScale, ulong input, ulong inputBlockScale, ulong outPtr,
         int m, int n, int k, ulong alphaBetaDev, nint stream, BlockScaleFormat format, bool outF32 = false)
     {

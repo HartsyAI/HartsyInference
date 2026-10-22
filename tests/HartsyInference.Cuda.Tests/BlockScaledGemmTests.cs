@@ -151,7 +151,8 @@ public sealed class BlockScaledGemmTests
 
     /// <summary>A shape cuBLASLt declines must not take the generation down: the call is served by the unpack path, and
     /// the weight stays there instead of being retried every step. The decline is forced through the test hook because
-    /// cuBLASLt 13.8 accepts every shape the gate lets through.</summary>
+    /// cuBLASLt 13.8 accepts every shape the gate lets through; the hook overrides the status after the GEMM ran, so this
+    /// covers the fallback and its bookkeeping, not a real refusal.</summary>
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void DeclinedNativeGemm_FallsBackToTheUnpackPath()

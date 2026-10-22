@@ -859,7 +859,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         if (native) Interlocked.Increment(ref _blockScaledNativeCalls);
         else Interlocked.Increment(ref _blockScaledUnpackCalls);
-        MarkBlockScaledRoute(weight, native ? NativeRoute : UnpackRoute, declinedStatus: 0);
+        int route = native ? NativeRoute : UnpackRoute;
+        // The snapshot only lags the cache toward fewer routes, so a route it already holds needs no lock.
+        if ((scales.Routes & route) != route) MarkBlockScaledRoute(weight, route, declinedStatus: 0);
         if (!native && Volatile.Read(ref _blockScaledFirstRefusal) is null)
         {
             Interlocked.CompareExchange(ref _blockScaledFirstRefusal,
