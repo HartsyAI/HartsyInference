@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using Xunit;
 using Xunit.Abstractions;
@@ -67,9 +68,6 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
         Check($"token-major b{b} h{h} s{s} d{d} bias={biasKind}", HeadMajor(o, b, h, s, d, true), Reference(q, k, v, biasValues, b, h, h, s, s, d, scale, bB, bH, bS));
     }
 
-    /// <summary>Q, K and V are <see cref="AttentionOperand.Packed"/> column views of one [b·s, 3·h·d] F16 tensor. Asserted: the reference tolerance and the
-    /// cuDNN route (no permute, no staging). Reported, not asserted: whether the output equals bit for bit the same call over plain copies of the columns,
-    /// whose plan has other strides and so may pick another engine.</summary>
     /// <summary>The shape classes of the sites that moved onto the token-major entry: M.2 must give the bits the head-major row
     /// they used gave (F32 calls cast whole tensors on both rows), at sequence lengths off the kernel's tile size too.</summary>
     [Trait("Category", "GpuIntegration")]
@@ -114,6 +112,70 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
         Assert.Equal(0, differing);
     }
 
+    /// <summary>The single-stream blocks' attention through <see cref="AttentionLayer.Attend"/>: the token-major config writes the
+    /// caller's [1, S, H·D] through M.2 with the bits the head-major config's permutes and row give, with Chroma's [1, 1, S, S] padding
+    /// mask too and F32 cast whole on both; at Flux's 1536² length the Sage guard keeps the head-major Sage row.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData("flux1-1024", 24, 4608, true, false, "S.3", "M.2")]
+    [InlineData("flux1-1024-f32", 24, 4608, false, false, "S.5", "M.2")]
+    [InlineData("flux1-1536", 24, 9728, true, false, "S.1", "S.1")]
+    [InlineData("chroma-1024", 24, 4107, true, false, "S.3", "M.2")]
+    [InlineData("chroma-1024-masked", 24, 4107, true, true, "S.3", "M.2")]
+    [InlineData("chroma-1024-masked-f32", 24, 4107, false, true, "S.5", "M.2")]
+    [InlineData("flux2-1024", 48, 4608, true, false, "S.3", "M.2")]
+    [InlineData("hunyuanimage-f32", 28, 4173, false, false, "S.5", "M.2")]
+    public void SingleStreamAttend_TokenMajorIsBitwiseTheHeadMajorRoute(string name, int h, int s, bool f16, bool masked,
+        string headMajorRoute, string tokenMajorRoute)
+    {
+        if (Skip()) return;
+        const int d = 128, txt = 11, keptTxt = 4;
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        Random rng = new(s * 31 + h);
+        float[] q = Gauss(rng, (long)s * h * d), k = Gauss(rng, (long)s * h * d), v = Gauss(rng, (long)s * h * d);
+        float[]? bias = masked ? PaddingMask(s, txt, keptTxt) : null;
+        TensorShape operand = new(1, s, h, d), flat = new(1, s, h * d);
+        using CudaBackend backend = new(0, PtxDir());
+
+        float[] Run(AttentionRoute route)
+        {
+            AttentionLayer layer = new(new AttentionLayerConfig
+            {
+                Heads = h, KvHeads = h, HeadDim = d, AllowF16 = true, TokenMajorRoute = route, HeadMajorForSage = true,
+            });
+            using Tensor? mask = bias is null ? null : Make(bias, new TensorShape(1, 1, s, s), DType.F32);
+            using Tensor o = layer.Attend(backend, Make(q, operand, dtype), Make(k, operand, dtype), Make(v, operand, dtype), flat,
+                new AttentionCallContext { Bias = mask });
+            backend.Sync();
+            Assert.Equal(flat, o.Shape);
+            return Read(o);
+        }
+
+        float[] fromHeadMajor = Run(AttentionRoute.Dense);
+        Assert.Equal(headMajorRoute, CudaBackend.LastAttentionRoute);
+        float[] fromTokenMajor = Run(AttentionRoute.TokenMajor);
+        Assert.Equal(tokenMajorRoute, CudaBackend.LastAttentionRoute);
+        int differing = 0;
+        for (int i = 0; i < fromHeadMajor.Length; i++)
+            if (BitConverter.SingleToInt32Bits(fromHeadMajor[i]) != BitConverter.SingleToInt32Bits(fromTokenMajor[i])) differing++;
+        _output.WriteLine($"{name}: {headMajorRoute} vs {tokenMajorRoute}, {differing} of {fromHeadMajor.Length} elements differ");
+        Assert.Equal(0, differing);
+    }
+
+    /// <summary>Chroma's additive mask over a [text; image] sequence: a pair is kept only when both tokens are, and the text past
+    /// <paramref name="kept"/> is padding.</summary>
+    private static float[] PaddingMask(int s, int txt, int kept)
+    {
+        float[] mask = new float[(long)s * s];
+        for (int i = 0; i < s; i++)
+            for (int j = 0; j < s; j++)
+                mask[(long)i * s + j] = (i >= kept && i < txt) || (j >= kept && j < txt) ? -1e30f : 0f;
+        return mask;
+    }
+
+    /// <summary>Q, K and V are <see cref="AttentionOperand.Packed"/> column views of one [b·s, 3·h·d] F16 tensor. Asserted: the reference tolerance and the
+    /// cuDNN route (no permute, no staging). Reported, not asserted: whether the output equals bit for bit the same call over plain copies of the columns,
+    /// whose plan has other strides and so may pick another engine.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1)]

@@ -101,7 +101,7 @@ public sealed partial class AttentionLayer
         Tensor flat;
         try
         {
-            flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, FlatOperands, in context);
+            flat = Transform(backend, q, k, v, batch, sq, skv, act, flatShape, AttentionShape(flatShape), FlatOperands, in context);
         }
         catch
         {
@@ -113,17 +113,17 @@ public sealed partial class AttentionLayer
 
     /// <summary>The transform and attention stages for a model that projects and outputs through its own code: token-major
     /// <paramref name="q"/> <c>[B, S, heads, D]</c>, <paramref name="k"/> and <paramref name="v"/> <c>[B, Skv, kvHeads, D]</c>,
-    /// all three taken over and disposed. Returns the attention output in <paramref name="flatShape"/>; the caller owns it.</summary>
+    /// all three taken over and disposed. Returns the attention output in <paramref name="flatShape"/> on either route; the caller
+    /// owns it.</summary>
     public Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, TensorShape flatShape, in AttentionCallContext context)
     {
         if (_config.QkNorm != AttentionQkNorm.None && _norms is null)
             throw new InvalidOperationException("A QK norm needs the layer's norm weights.");
         if (q.Shape.Rank != 4 || k.Shape.Rank != 4 || v.Shape.Rank != 4)
             throw new ArgumentException($"Attend takes [B, S, heads, D] operands; got {q.Shape}, {k.Shape}, {v.Shape}.");
-        if (!AttentionShape(flatShape).Equals(flatShape))
-            throw new ArgumentException($"On the token-major route Attend writes [S, heads·D] or [1, S, heads, D]; got {flatShape}.");
         ValidateContext(in context, (int)q.Shape[0]);
-        return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, flat: false, in context);
+        return Transform(backend, q, k, v, (int)q.Shape[0], (int)q.Shape[1], (int)k.Shape[1], q.DType, flatShape, flatShape, flat: false,
+            in context);
     }
 
     /// <summary><see cref="Attend"/> over flat operands: <paramref name="q"/> <c>[B, S, heads·D]</c>, <paramref name="k"/> and
@@ -146,7 +146,8 @@ public sealed partial class AttentionLayer
             throw new ArgumentException($"AttendFlat takes [B, S, heads·D] or [S, heads·D] operands of this layer's widths; got {q.Shape}, {k.Shape}, {v.Shape}.");
         int batch = rank == 3 ? (int)q.Shape[0] : 1;
         ValidateContext(in context, batch);
-        return Transform(backend, q, k, v, batch, (int)q.Shape[rank - 2], (int)k.Shape[rank - 2], q.DType, flatShape, flat: true, in context);
+        return Transform(backend, q, k, v, batch, (int)q.Shape[rank - 2], (int)k.Shape[rank - 2], q.DType, flatShape, flatShape, flat: true,
+            in context);
     }
 
     /// <summary>The attention call alone over operands the caller laid out head-major: <paramref name="qMh"/> <c>[B, heads, Sq, D]</c>,
@@ -556,8 +557,10 @@ public sealed partial class AttentionLayer
     /// <summary>Whether Q, K and V are declared flat <c>[.., S, heads·D]</c> rather than <c>[.., S, heads, D]</c>.</summary>
     private bool FlatOperands => _config.QkNorm is AttentionQkNorm.FullWidth or AttentionQkNorm.FullWidthRms;
 
+    /// <summary>The norm, rotation and attention stages: a head-major output is permuted into <paramref name="flatShape"/>, a
+    /// token-major one written in <paramref name="tokenMajorShape"/>, which holds the same bytes.</summary>
     private Tensor Transform(IBackend backend, Tensor q, Tensor k, Tensor v, int batch, int sq, int skv, DType act,
-        TensorShape flatShape, bool flat, in AttentionCallContext context)
+        TensorShape flatShape, TensorShape tokenMajorShape, bool flat, in AttentionCallContext context)
     {
         if (context.Probe is { } probe)
         {
@@ -566,8 +569,8 @@ public sealed partial class AttentionLayer
             probe.Observe("v", v);
         }
         if (_config.QkNorm == AttentionQkNorm.FullWidth)
-            return AttendFullWidth(backend, q, k, v, sq, skv, act, flatShape, TokenMajorServed(backend, batch, sq, skv, act, in context),
-                in context);
+            return AttendFullWidth(backend, q, k, v, sq, skv, act, flatShape, tokenMajorShape,
+                TokenMajorServed(backend, batch, sq, skv, act, in context), in context);
 
         if (_config.QkNorm != AttentionQkNorm.None)
         {
@@ -598,7 +601,7 @@ public sealed partial class AttentionLayer
         bool tokenMajor = TokenMajorServed(backend, batch, sq, skv, act, in context);
         try
         {
-            return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, flatShape, ownsKv, in context)
+            return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, tokenMajorShape, ownsKv, in context)
                 : AttendHeadMajor(backend, q, k, v, batch, sq, skv, act, flatShape, ownsKv, in context);
         }
         catch when (!ownsKv)
@@ -675,10 +678,10 @@ public sealed partial class AttentionLayer
         }
     }
 
-    private Tensor AttendTokenMajor(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape flatShape, bool ownsKv,
+    private Tensor AttendTokenMajor(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape outShape, bool ownsKv,
         in AttentionCallContext context)
     {
-        Tensor flat = new(AttentionShape(flatShape), act);
+        Tensor flat = new(outShape, act);
         try
         {
             AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
@@ -786,7 +789,7 @@ public sealed partial class AttentionLayer
     /// <summary>The full-width norm and rotation as one op that emits the attention layout directly (LTX-2), with K and V
     /// widened onto the query's dtype first.</summary>
     private Tensor AttendFullWidth(IBackend backend, Tensor q, Tensor k, Tensor v, int sq, int skv, DType act, TensorShape flatShape,
-        bool tokenMajor, in AttentionCallContext context)
+        TensorShape tokenMajorShape, bool tokenMajor, in AttentionCallContext context)
     {
         AttentionNormWeights norms = _norms!.Value;
         Tensor qNorm = Have(norms.Query), kNorm = Have(norms.Key);
@@ -796,7 +799,7 @@ public sealed partial class AttentionLayer
             Tensor kTm = NormRotateTokenMajor(backend, k, kNorm, context.KeyRotation, skv, act);
             Tensor vTm = v.DType == act ? v : Widen(backend, v, act);
             if (!ReferenceEquals(vTm, v)) v.Dispose();
-            return AttendTokenMajor(backend, qTm, kTm, vTm, act, flatShape, ownsKv: true, in context);
+            return AttendTokenMajor(backend, qTm, kTm, vTm, act, tokenMajorShape, ownsKv: true, in context);
         }
         Tensor qMh = NormRotateHeadMajor(backend, q, qNorm, context.QueryRotation, sq, act);
         Tensor kMh = NormRotateHeadMajor(backend, k, kNorm, context.KeyRotation, skv, act);
@@ -913,9 +916,8 @@ public sealed partial class AttentionLayer
         }
     }
 
-    /// <summary>The shape the attention output is held in: the equal-head token-major entry takes <c>[S, heads·D]</c> or
-    /// <c>[1, S, heads, D]</c>, so a <c>[1, S, heads·D]</c> output is held as the <c>[S, heads·D]</c> rows the output
-    /// projection reads (backends pick Linear fast paths by the input's shape).</summary>
+    /// <summary>The shape <see cref="Forward"/> holds an equal-head token-major output in: <c>[1, S, heads·D]</c> becomes the
+    /// <c>[S, heads·D]</c> rows its output projection has always read (backends pick Linear fast paths by the input's shape).</summary>
     private TensorShape AttentionShape(TensorShape flatShape) =>
         _config.TokenMajorRoute == AttentionRoute.TokenMajor && flatShape.Rank == 3 && flatShape[0] == 1
             ? new TensorShape(flatShape[1], flatShape[2])
