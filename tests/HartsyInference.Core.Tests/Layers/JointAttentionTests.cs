@@ -180,8 +180,11 @@ public sealed class JointAttentionTests
         joint.Attend(backend, [img, txt], attended, new JointCallContext());
 
         Assert.Equal(AttentionNumerics.Bf16Storage, Assert.Single(backend.Calls).Numerics);
-        Assert.Throws<ArgumentException>(() => new JointAttention(granted with { AllowF16 = true }, [Stream(1), Stream(2)]));
-        Assert.Throws<ArgumentException>(() => new JointAttention(granted with { AllowF16Batched = true }, [Stream(1), Stream(2)]));
+        // The joint config refuses the pair itself, before any joint layer is built.
+        Assert.Equal("config", Assert.Throws<ArgumentException>(() => new JointAttention(granted with { AllowF16 = true },
+            [Stream(1), Stream(2)])).ParamName);
+        Assert.Equal("config", Assert.Throws<ArgumentException>(() => new JointAttention(granted with { AllowF16Batched = true },
+            [Stream(1), Stream(2)])).ParamName);
     }
 
     [Fact]

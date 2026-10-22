@@ -8026,9 +8026,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Query-tiled SDPA for plain F32/no-mask/MHA; materializes a <c>[totalHeads, Br, Skv]</c> tile at a time (Wan self-attn).</summary>
     /// <remarks>Never materializes the full <c>[totalHeads, Sq, Skv]</c> matrix (24×14040²×4B ≈ 19 GB). Each tile
-    /// reuses the same QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, so
-    /// results are numerically identical to the plain path. <c>Br</c> is sized to a quarter of free VRAM
-    /// (override: <c>numerics.sdpaTile</c>).</remarks>
+    /// runs the same QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, in the same compute type
+    /// (<see cref="SdpaF32Compute"/>); the per-tile GEMM shapes can change the summation order, so the two paths agree to
+    /// rounding, not bit for bit. <c>Br</c> is sized to a quarter of free VRAM (override: <c>numerics.sdpaTile</c>).</remarks>
     private unsafe void SdpaTiledF32(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         Tensor? keyBias = null)
     {

@@ -90,6 +90,9 @@ public sealed class JointAttention
         if (config.ConcatOrder is null || config.ConcatOrder.Length != count
             || config.ConcatOrder.Distinct().Count() != count || config.ConcatOrder.Any(i => i < 0 || i >= count))
             throw new ArgumentException("ConcatOrder must name every stream exactly once.", nameof(config));
+        if (config.AllowBf16 && (config.AllowF16 || config.AllowF16Batched == true))
+            throw new ArgumentException("AllowBf16 excludes AllowF16 and AllowF16Batched: with both, the saturating F16 path takes the call.",
+                nameof(config));
         foreach (AttentionLayer stream in streams)
         {
             AttentionLayerConfig c = stream.Config;
