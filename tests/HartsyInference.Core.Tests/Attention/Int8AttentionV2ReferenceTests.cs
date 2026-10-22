@@ -543,6 +543,18 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
                 for (int i = 0; i < 16 * 64; i++) Assert.Equal(i % 64 == 9, float.IsNaN(o[i]));
             }
 
+        // An infinity cannot be quantized: it reaches a scale and comes out as NaN, never as a finite value.
+        float[] kInf = (float[])clean.K.Clone();
+        kInf[150 * 64 + 2] = float.PositiveInfinity;
+        float[] vInf = (float[])clean.V.Clone();
+        vInf[30 * 64 + 9] = float.NegativeInfinity;
+        using (Int8V2Case c = Int8V2Case.FromArrays(spec with { Causal = true, QueryOffset = 140 }, clean.Q, kInf, vInf))
+        {
+            float[] o = c.Emulate(Base with { SmoothKeys = false, KeyScales = Int8KeyScaleGrouping.PerKey });
+            for (int r = 0; r < 16; r++)
+                for (int ch = 0; ch < 64; ch++) Assert.Equal(140 + r >= 150 || ch == 9, float.IsNaN(o[r * 64 + ch]));
+        }
+
         float[] bias = new float[200];
         bias[77] = float.NaN;
         using (Int8V2Case c = Int8V2Case.FromArrays(spec with { KeyBias = bias, Causal = true, QueryOffset = 70 }, clean.Q, clean.K, clean.V))

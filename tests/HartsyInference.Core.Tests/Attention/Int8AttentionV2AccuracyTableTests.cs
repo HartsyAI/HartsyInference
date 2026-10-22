@@ -8,7 +8,8 @@ using Xunit.Abstractions;
 namespace HartsyInference.Core.Tests.Attention;
 
 /// <summary>The INT8 attention v2 accuracy table: each variant against the contract oracle on the Phase-0 shapes (sampled heads
-/// and rows) and on the adversarial cases. Prints markdown; asserts only that every variant ran.</summary>
+/// and rows) and on the adversarial cases. Prints markdown; asserts the base variant meets CK's bar on CK's own uniform method
+/// and that no variant but F16 V overflows.</summary>
 [Trait("Category", "Slow")]
 public sealed class Int8AttentionV2AccuracyTableTests(ITestOutputHelper output)
 {
@@ -28,14 +29,29 @@ public sealed class Int8AttentionV2AccuracyTableTests(ITestOutputHelper output)
     [Fact]
     public void PrintsTheTable()
     {
-        List<(string Case, Int8V2Spec[] Specs)> groups = [];
+        List<(string Case, Int8V2Spec[] Specs)> realistic = [], adversarial = [];
         foreach ((string Id, int Heads, int Sq, int Skv, int HeadDim, bool Causal) shape in Int8V2Shapes.Phase0)
-            groups.Add(($"{shape.Id} gauss", Int8V2Shapes.HeadsOf(shape, Int8V2Fill.Gaussian).ToArray()));
-        groups.Add(("ck-parity-4k uniform", Int8V2Shapes.HeadsOf(Int8V2Shapes.Phase0[^2], Int8V2Fill.Uniform).ToArray()));
-        foreach (Int8V2Spec spec in Int8V2Adversarial.All()) groups.Add((spec.Id, [spec]));
+            realistic.Add(($"{shape.Id} N(0,1)", Int8V2Shapes.HeadsOf(shape, Int8V2Fill.Gaussian).ToArray()));
+        realistic.Add(("ck-parity-4k U[-1,1)", Int8V2Shapes.HeadsOf(Int8V2Shapes.Phase0.Single(s => s.Id == "ck-parity-4k"), Int8V2Fill.Uniform)
+            .ToArray()));
+        foreach (Int8V2Spec spec in Int8V2Adversarial.All()) adversarial.Add((spec.Id, [spec]));
+        Dictionary<(string Case, int Variant), (double RelL2, double Cos, double MaxAbs)> measured = [];
+        output.WriteLine(Table(realistic, measured));
+        output.WriteLine(Table(adversarial, measured));
 
+        // The uniform control is CK's own method: the base variant meets its bar there, and only F16 V overflows anywhere.
+        (double rel, double cos, _) = measured[("ck-parity-4k U[-1,1)", 0)];
+        Assert.True(rel <= Int8V2Measure.BarRelL2 && cos >= Int8V2Measure.BarCos, $"base on the uniform control: {rel:E2} / {cos:F6}");
+        int f16 = Array.FindIndex(Variants, v => v.Options.Probabilities == Int8ProbabilityFormat.F16);
+        foreach (((string name, int variant), (double r, _, _)) in measured)
+            Assert.True(double.IsFinite(r) == !(name == "v-above-f16-max" && variant == f16), $"{name} / {Variants[variant].Name}: relL2 {r}");
+    }
+
+    private static string Table(List<(string Case, Int8V2Spec[] Specs)> groups,
+        Dictionary<(string Case, int Variant), (double RelL2, double Cos, double MaxAbs)> measured)
+    {
         StringBuilder md = new();
-        md.Append("| case |");
+        md.Append("| case (relL2 / cos / max abs) |");
         foreach ((string name, _) in Variants) md.Append(CultureInfo.InvariantCulture, $" {name} |");
         md.AppendLine().Append("|---|").Append(string.Concat(Enumerable.Repeat("---|", Variants.Length))).AppendLine();
         foreach ((string name, Int8V2Spec[] specs) in groups)
@@ -51,14 +67,12 @@ public sealed class Int8AttentionV2AccuracyTableTests(ITestOutputHelper output)
             md.Append(CultureInfo.InvariantCulture, $"| {name} |");
             for (int v = 0; v < Variants.Length; v++)
             {
-                (double rel, double cos, double max) = Int8V2Measure.Of(actual[v].ToArray(), expected.ToArray());
-                md.Append(CultureInfo.InvariantCulture, $" {rel:E1} / {cos:F6} / {max:E1} |");
+                (double rel, double cos, double max) m = Int8V2Measure.Of(actual[v].ToArray(), expected.ToArray());
+                measured[(name, v)] = m;
+                md.Append(CultureInfo.InvariantCulture, $" {m.rel:0.0e0} / {m.cos:F6} / {m.max:0.0e0} |");
             }
             md.AppendLine();
-            output.WriteLine(md.ToString().Split('\n')[^2]);
         }
-        output.WriteLine("");
-        output.WriteLine(md.ToString());
-        Assert.True(groups.Count > 0);
+        return md.ToString();
     }
 }
