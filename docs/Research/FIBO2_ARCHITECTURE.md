@@ -97,8 +97,9 @@ converter's source files were not available.
   caption is already in that form.
 - **Glyph text images.** ComfyUI renders each `text_render` entry to an image through the Qwen3-VL vision tower
   (`VISION_MARKER`), on by default. It encodes the caption twice: with the images while sigma ≤ 0.9, and with empty markers
-  and no images above that (`TEXT_IMAGES_START` is the `start_percent` that maps to sigma 0.9 at shift 1.15). It is a
-  separate component and is not in the first engine PR; the engine refuses captions with `text_render` entries.
+  and no images above that. `TEXT_IMAGES_START` is a `start_percent` that maps to sigma 0.9 under ComfyUI's shift, so a
+  port should gate on sigma. It is a separate component and is not in the first engine PR; the engine refuses captions
+  with `text_render` entries.
 - **Reference-image editing** (`context_latents`) and the edit-turbo conditioning node.
 - **Real-weight verification.** Pending. The bf16 DiT is 16.45 GB, so it needs a GPU host with enough VRAM and host RAM for
   the checkpoint.

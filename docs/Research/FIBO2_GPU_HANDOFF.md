@@ -51,7 +51,9 @@ code runs. It is not evidence of correctness or speed, and it was removed.
 6. Quality: a fixed prompt set, reviewed against ComfyUI's output. Include a prompt with a JSON caption (the template
    requires it).
 7. Speed and memory: time per denoise step, total time at 1024x1024 and peak VRAM, measured against ComfyUI on the same
-   GPU. Quote absolute numbers with the external baseline (per AGENTS.md), not against our own earlier runs.
+   GPU. Quote absolute numbers with the external baseline (per AGENTS.md), not against our own earlier runs. With CFG the
+   engine runs two denoiser forwards per step; ComfyUI does too unless the caption and the null caption have the same token
+   count, when it can batch them (`model_base.Fibo2.extra_conds`).
 8. CLI and API, real model: `hartsy image "<prompt>" -m fibo2-dev --steps 50 --cfg 5 --width 1024 --height 1024 --seed 42
    --output <dir>` and `POST /v1/images/generations` with the same settings. Check the two produce identical bytes.
 9. Record the results in `docs/Checklists/MODEL_STATUS_IMAGE.md` (the Fibo row) and the parity doc, with the exact
@@ -66,7 +68,8 @@ code runs. It is not evidence of correctness or speed, and it was removed.
 - Patchify order `(c, dy, dx)`: sourced from the diffusers reference and the FLUX.2 latent ops. Confirm against ComfyUI's
   wrapper, which is not in the local checkout.
 - Sigma schedule: the timestep input matches ComfyUI, the shift does not. ComfyUI's 1.15 is Flux's exponential shift
-  (`s = e^1.15` in `s·t / (1 + (s − 1)·t)`); `Fibo2Pipeline` passes `s = 1.15`. Fix it before step 5c.
+  (`s = e^1.15` in `s·t / (1 + (s − 1)·t)`); `Fibo2Pipeline` passes `s = 1.15`. Fix it before step 5c, with a test that pins
+  a few sigmas from ComfyUI's `ModelSamplingFlux` at a fixed step count.
 - Text-encoder tap convention: `hidden_states[k]` is the input to block k. Confirm the taps against ComfyUI's text encoder
   output.
 - Sha256 for the text encoder and VAE. The new VAE entry duplicates the pinned `Flux2Vae` file; decide whether to reuse it.

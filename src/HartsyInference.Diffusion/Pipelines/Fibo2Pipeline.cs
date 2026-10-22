@@ -62,7 +62,8 @@ public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
     /// <param name="height">Output height in pixels; a multiple of 16.</param>
     /// <param name="steps">Euler steps.</param>
     /// <param name="guidanceScale">Classifier-free guidance scale; at or below 1 the unconditional branch is skipped.</param>
-    /// <param name="sigmaShift">Static flow-matching shift; Fibo 2.0 uses 1.15.</param>
+    /// <param name="sigmaShift">The scheduler's <c>s</c> in <c>s·t/(1 + (s − 1)·t)</c>; ComfyUI's Fibo 2.0 shift 1.15 is
+    /// <c>s = e^1.15</c>.</param>
     /// <param name="seed">Noise seed; null draws one.</param>
     /// <param name="onProgress">Optional per-step callback.</param>
     /// <returns>Interleaved RGB bytes and the actual size and seed.</returns>
@@ -170,6 +171,7 @@ public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
             throw new ArgumentOutOfRangeException(nameof(sigmaShift), sigmaShift, "Sigma shift must be finite and above 0.");
     }
 
+    /// <summary>Scales <paramref name="tensor"/> through its host pointer, so it must be host-resident F32.</summary>
     private static void ScaleInPlace(Tensor tensor, float factor)
     {
         float* values = (float*)tensor.DataPointer;
