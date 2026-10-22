@@ -51,8 +51,8 @@ and [deployment](https://github.com/HartsyAI/HartsyInference/blob/main/deploy/RE
 The HTTP text path does not currently expose the LLM package's continuous-batching scheduler.
 
 Image, video and music families take their defaults from a recipe: a request field left unset takes the recipe's
-value. Image and video results carry provenance (`ParameterProvenance`) for the settings planning resolves, saying
-whether each came from the recipe, the caller or a normalization. GET /v1/native/recipes lists the image and video
+value. Image and video results carry provenance (`ParameterProvenance`) for the settings planning resolves: each
+names its source, such as the recipe, the caller, or a normalization of the caller's value. GET /v1/native/recipes lists the image and video
 recipes, and POST /v1/native/recipes/describe answers for one model without loading weights; text, speech and
 transcription defaults still live in their loaders. See the
 [recipe contract](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Research/RECIPE_CONTRACT.md).
