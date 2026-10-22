@@ -4,8 +4,8 @@ State: the recipe-contract work and the SwarmUI-aligned defaults are all merged 
 SwarmUI-HartsyInference-Backend #38). Everything was verified on the CPU lane only: release build clean, unit tests green
 apart from `EngineReleaseDeviceGateTests.FreeMemory_WaitsForAnAudioJob…`, which also fails on `main` without a GPU.
 **The passes below have not run. Later GPU runs of the regression cases cover only the values those cases leave unset:
-the Wan rows set no fps, so `wan5b` and `wan5b-720p` ran the new 22 fps and `wan21-14b` the new 24. Do not claim parity
-or quality for the rest.** The contract and the
+every Wan row sets no fps, so each Wan case a later run lists (the `alpha.387` changelog names them) ran its family's new
+frame rate. Do not claim parity or quality for the rest.** The contract and the
 per-family ledger, with every value's SwarmUI source, are in [RECIPE_CONTRACT.md](RECIPE_CONTRACT.md).
 
 Commits:
