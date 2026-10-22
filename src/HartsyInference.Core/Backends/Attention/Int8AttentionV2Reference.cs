@@ -465,6 +465,7 @@ public static class Int8AttentionV2Reference
         private readonly float[] _sinks;
         private readonly int[] _segmentOf;
         private readonly float[] _keys, _values, _bias, _q, _t, _o, _partial, _shift;
+        private readonly byte[] _bytes;
         private readonly bool[] _excluded, _visible;
         private readonly AttentionTileClass[] _classes;
 
@@ -496,6 +497,7 @@ public static class Int8AttentionV2Reference
             _visible = new bool[_bc];
             _o = new float[_dp];
             _partial = new float[_dp];
+            _bytes = ops.Options.TileTrace is null ? [] : new byte[_bc];
             _shift = new float[_segments];
             _classes = new AttentionTileClass[_tiles];
         }
@@ -645,6 +647,7 @@ public static class Int8AttentionV2Reference
                 m = MathF.Max(m, tileM);
             }
             Array.Clear(_partial);
+            Array.Clear(_bytes);
             int sum = 0;
             for (int j = j0; j < j1; j++)
             {
@@ -654,9 +657,12 @@ public static class Int8AttentionV2Reference
                     ? ToU8Stochastic(x, RoundingBits(_ops.Options.RoundingSeed, batchHead, row, j))
                     : ToU8(x);
                 if (p == 0) continue;
+                if (_bytes.Length > 0) _bytes[j - j0] = (byte)p;
                 sum += p;
                 AddScaled(p, _values.AsSpan(j * _dp, _dp), _partial);
             }
+            _ops.Options.TileTrace?.Invoke(batchHead, row, j0 / _bc, tileMax, _bytes.AsSpan(0, Math.Min(_bytes.Length, j1 - j0)),
+                _partial, sum);
             int bound = PvPartialBound(_bc);
             for (int c = 0; c < _dp; c++)
             {

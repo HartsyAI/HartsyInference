@@ -11243,7 +11243,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// freeing activations under it leaves the graph pointing at freed memory and the next replay is a
     /// context-poisoning CUDA 700. Resetting the slot here lets cross-generation graphs (Chroma) survive only as
     /// long as their buffers do; owners detect the external reset and re-warm.</remarks>
-    protected override void OnActivationsFreeing() => StepGraphInvalidateForActivationFree();
+    protected override void OnActivationsFreeing()
+    {
+        StepGraphInvalidateForActivationFree();
+        ReleaseInt8V2Workspace();
+    }
 
     private void StepGraphInvalidateForActivationFree()
     {
@@ -11489,9 +11493,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             ulong ssmScratch = _ssmDeltaScratch;
             _ssmDeltaScratch = 0;
             _ssmDeltaScratchBytes = 0;
+            ulong int8V2Workspace = _int8V2Workspace;
+            _int8V2Workspace = 0;
+            _int8V2WorkspaceBytes = 0;
             if (state is not null)
             {
                 if (dp4aScratch != 0) Attempt("dp4a scratch", () => GpuTransferHelper.FreeDevice(state, dp4aScratch));
+                if (int8V2Workspace != 0) Attempt("INT8 attention v2 workspace", () => GpuTransferHelper.FreeDevice(state, int8V2Workspace));
                 if (argmaxScratch != 0) Attempt("argmax scratch", () => GpuTransferHelper.FreeDevice(state, argmaxScratch));
                 if (ssmScratch != 0) Attempt("SSM delta scratch", () => GpuTransferHelper.FreeDevice(state, ssmScratch));
                 Attempt("W8A8 caches", () => FreeW8A8Cache(state));

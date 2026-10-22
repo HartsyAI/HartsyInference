@@ -120,6 +120,24 @@ public sealed partial class CudaBackend
 
     // ── head-major ScaledDotProductAttention: S.1-S.16 (S.4, S.6-S.8 retired) ───────────────────────────────────────
 
+    /// <summary>INT8 attention v2 on one route: the u8 PV row, then its F16-PV fallback.</summary>
+    private AttentionKernelRow[] Int8V2Rows(AttentionRoute entry, AttentionLayouts layouts, string u8Branch, string f16Branch)
+    {
+        AttentionKernelCapability cap = Cap("int8.v2", entry, AttentionDTypes.F16 | AttentionDTypes.F32, AttentionDTypes.F16 | AttentionDTypes.F32,
+            layouts) with
+        {
+            StridedViews = true, MinHeadDim = 128, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.Int8,
+            CaptureSafe = true,
+        };
+        return
+        [
+            new DelegateAttentionRow(cap, u8Branch, (in AttentionCall c) => Int8V2Admits(in c, f16Pv: false),
+                (in AttentionCall c) => RunInt8AttentionV2(in c, f16Pv: false)),
+            new DelegateAttentionRow(cap with { Id = "int8.v2.f16pv", UsesProbValue = AttentionFormats.F16 }, f16Branch,
+                (in AttentionCall c) => Int8V2Admits(in c, f16Pv: true), (in AttentionCall c) => RunInt8AttentionV2(in c, f16Pv: true)),
+        ];
+    }
+
     private AttentionKernelRow[] BuildDenseRows()
     {
         const AttentionRoute E = AttentionRoute.Dense;
@@ -127,6 +145,7 @@ public sealed partial class CudaBackend
         const AttentionDTypes Half = AttentionDTypes.F16 | AttentionDTypes.BF16;
         return
         [
+            .. Int8V2Rows(E, HM, "S.16", "S.17"),
             new DelegateAttentionRow(Cap("sage.int8.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
@@ -250,6 +269,7 @@ public sealed partial class CudaBackend
         const AttentionLayouts TM = AttentionLayouts.TokenMajor;
         return
         [
+            .. Int8V2Rows(E, TM, "M.4", "M.5"),
             new DelegateAttentionRow(Cap("flash.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, TM) with
                 {
                     MaxBatch = 1, MinHeadDim = 256, MaxHeadDim = 256, UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16, CaptureSafe = true,
@@ -281,13 +301,14 @@ public sealed partial class CudaBackend
 
     private AttentionKernelRow[] BuildTokenMajorGqaRows() =>
     [
-        // Grouped fp16/bf16 only; yields to Sage and the F16 flash kernel, which took these calls after widening.
+        // Grouped fp16/bf16 only; yields to INT8 v2, Sage and the F16 flash kernel, which take these calls after widening.
         new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.tokenmajor.gqa", AttentionRoute.TokenMajorGqa,
                 AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView, gqa: true), "G.1",
             (in AttentionCall c) => c.KvHeads < c.Heads && CudnnSdpaRows.Covers(in c)
                 && (!WholeSequence(in c)
-                    || (!SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens,
-                            c.QkHeadDim)
+                    || (!Int8V2TakesWidened(in c)
+                        && !SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QueryTokens,
+                            c.KeyTokens, c.QkHeadDim)
                         && !FlashF16Eligible(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QkHeadDim)))
                 && CudnnReady(in c),
             (in AttentionCall c) => RunCudnnTokenMajor(in c)),

@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: INT8 attention v2 (CUDA, opt-in).** `numerics.int8AttnV2` runs unmasked equal-head attention at head dim 128
+  with F16 or F32 operands (head-major, token-major or fused-QKV views) on INT8 QK, u8 P and s8 V with an INT32 PV
+  accumulator drained per 128-key tile; `numerics.int8AttnV2VTile` picks per-tile or per-sequence V scales and
+  `numerics.int8AttnV2MinTokens` the engage length. Its bytes, scales and INT32 products are the emulator's bit for
+  bit, and its output is the emulator's bit for bit given the kernel's exp2. An F16-PV fallback row is registered. The
+  `reference` profile pins it off; SageAttention v1 stays the default.
+- **Changed: attention kernels build with a register check.** `attention/build.sh` builds `int8_attn_v2` with nvcc and
+  `--arch sm_89` adds its `.sm89.ptx`; `build_common.sh` accepts a plain `--arch` and fails a `PTXAS_SPILL_CHECK` kernel
+  that spills.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch

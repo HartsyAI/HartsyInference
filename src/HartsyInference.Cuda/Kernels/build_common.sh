@@ -5,6 +5,7 @@
 #   ./build.sh                    # compile + install every kernel in the domain's lists into ../../Ptx
 #   ./build.sh --no-install       # compile only (artifacts stay beside the .cu)
 #   ./build.sh --arch sm_120a     # also build the domain's ARCH_VARIANTS for that arch, as <kernel>.sm120.ptx
+#   ./build.sh --arch sm_89       # a plain arch too: <kernel>.sm89.ptx loads only on compute capability 8.9
 #
 # Lists a domain script may set before build_all:
 #   KERNELS        compiled for sm_80, the fleet baseline; PTX is JIT-forward-compatible from there
@@ -13,6 +14,8 @@
 #   ARCH_VARIANTS  kernels with arch-conditional device code; --arch builds each as a suffixed variant that
 #                  CudaKernels.PtxPath loads only on that exact compute capability
 #   NVCC_BUILT     kernels whose shipped PTX is CUDA 13.0.88 nvcc output rather than nvrtc output
+#   PTXAS_SPILL_CHECK  kernels whose every entry must assemble without a spill (ptxas -v, register counts logged): the
+#                  baseline for sm_80, sm_86 and sm_89, a variant for its own arch
 #
 # Each kernel has one compiler. nvcc and nvrtc of the same release stamp the same PTX header but still emit different
 # PTX (instruction selection, register numbering), so taking whichever is on PATH would rewrite benchmarked kernels.
@@ -57,18 +60,41 @@ KERNELS_SM75=("${KERNELS_SM75[@]:-}")
 KERNELS_SM80=("${KERNELS_SM80[@]:-}")
 ARCH_VARIANTS=("${ARCH_VARIANTS[@]:-}")
 NVCC_BUILT=("${NVCC_BUILT[@]:-}")
+PTXAS_SPILL_CHECK=("${PTXAS_SPILL_CHECK[@]:-}")
+PTXAS="${HARTSY_PTXAS:-}"
+if [[ -z "$PTXAS" && -n "$NVCC" && -x "$(dirname "$NVCC")/ptxas" ]]; then PTXAS="$(dirname "$NVCC")/ptxas"; fi
 
 # PTX ISA version a file declares in its header, and whether it is at or below the fleet driver's JIT ceiling (9.0).
 ptx_version() { head -20 "$1" | sed -n 's/^\.version \([0-9.]*\)$/\1/p' | head -1; }
 ptx_isa_ok() { local v; v="$(ptx_version "$1")"; [[ -n "$v" && "$(printf '%s\n' "$v" 9.0 | sort -V | tail -1)" == "9.0" ]]; }
 
-# compile_one <kernel> <arch>   arch is the bare number nvcc's sm_ and nvrtc's compute_ take (80, 75, 120a);
-# a family-specific arch (trailing letter) lands as <kernel>.sm<digits>.ptx, the baseline as <kernel>.ptx.
+# ptxas_check <ptx> <arch>...: logs each entry's register count and fails on any spill store or load.
+ptxas_check() {
+    local ptx="$1" arch out
+    shift
+    if [[ -z "$PTXAS" ]]; then
+        echo "ERROR: ${ptx##*/} is in PTXAS_SPILL_CHECK and no ptxas was found; set HARTSY_PTXAS" >&2
+        exit 1
+    fi
+    for arch in "$@"; do
+        out="$("$PTXAS" -arch="sm_${arch}" -v "$ptx" -o /dev/null 2>&1)" || { echo "$out" >&2; exit 1; }
+        echo "$out" | awk -v a="sm_${arch}" -v q="'" '/Compiling entry function/ { fn = $5; gsub(q, "", fn) }
+            /Used [0-9]+ registers/ { for (i = 1; i <= NF; i++) if ($i == "Used") printf "  ptxas %s %s: %s registers\n", a, fn, $(i + 1) }'
+        if echo "$out" | grep -qE '[1-9][0-9]* bytes spill (stores|loads)'; then
+            echo "ERROR: ${ptx##*/} spills on sm_${arch}:" >&2
+            echo "$out" | grep -E "Compiling entry|[1-9][0-9]* bytes spill" >&2
+            exit 1
+        fi
+    done
+}
+
+# compile_one <kernel> <arch> [variant]   arch is the bare number nvcc's sm_ and nvrtc's compute_ take (80, 75, 120a,
+# 89); an ARCH_VARIANTS build lands as <kernel>.sm<digits>.ptx, the baseline as <kernel>.ptx.
 compile_one() {
-    local kernel="$1" arch="$2"
+    local kernel="$1" arch="$2" variant="${3:-}"
     local src="${THIS_DIR}/${kernel}.cu"
     local suffix=""
-    if [[ "$arch" =~ [a-z]$ ]]; then suffix=".sm${arch%[a-z]}"; fi
+    if [[ -n "$variant" ]]; then suffix=".sm${arch%[a-z]}"; fi
     local ptx="${THIS_DIR}/${kernel}${suffix}.ptx"
     if [[ ! -f "$src" ]]; then
         echo "missing source: $src" >&2
@@ -95,6 +121,9 @@ compile_one() {
         fi
         cat "$tmp" > "$ptx"
         rm -f "$tmp"
+        if listed "$kernel" "${PTXAS_SPILL_CHECK[@]}"; then
+            if [[ -n "$variant" ]]; then ptxas_check "$ptx" "${arch%[a-z]}"; else ptxas_check "$ptx" 80 86 89; fi
+        fi
     else
         if [[ ! -x "$NVRTC" ]]; then
             if command -v cc >/dev/null 2>&1; then
@@ -149,11 +178,11 @@ build_all() {
     for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 75; done
     for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
     if [[ -n "$extra_arch" ]]; then
-        if [[ ! "$extra_arch" =~ [a-z]$ ]]; then
-            echo "ERROR: --arch takes a family-specific arch (sm_120a, sm_100a): plain sm_${extra_arch} PTX would replace nothing and load nowhere the baseline does not." >&2
+        if [[ ! "$extra_arch" =~ ^[0-9]+[a-z]?$ || "$extra_arch" == 80 ]]; then
+            echo "ERROR: --arch takes an arch above the sm_80 baseline (sm_89, sm_120a); got sm_${extra_arch}." >&2
             exit 2
         fi
-        for kernel in "${ARCH_VARIANTS[@]}"; do [[ -n "$kernel" ]] && compile_one "$kernel" "$extra_arch"; done
+        for kernel in "${ARCH_VARIANTS[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" "$extra_arch" variant; done
     fi
     "${THIS_DIR}/../check_ptx_isa.sh" >/dev/null || { echo "ERROR: a shipped PTX file is not ISA 9.0; run check_ptx_isa.sh" >&2; exit 1; }
     echo "done."

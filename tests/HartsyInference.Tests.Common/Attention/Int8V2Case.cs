@@ -310,6 +310,34 @@ public static class Int8V2Measure
         double cos = na > 0 && ne > 0 ? dot / Math.Sqrt(na * ne) : na == ne ? 1 : 0;
         return (rel, cos, max);
     }
+
+    /// <summary>F16 outputs against an F32 reference rounded to F16: the largest gap in F16 ulps of the rounded value, each ulp
+    /// floored at the ulp of 1e-3·max|ref| so near-zero outputs cannot fail on rounding alone, and the fraction of elements
+    /// that differ at all. A NaN must meet a NaN.</summary>
+    public static (double MaxUlps, double MismatchFraction) OfF16(ReadOnlySpan<Half> actual, ReadOnlySpan<float> expected)
+    {
+        if (actual.Length != expected.Length) throw new ArgumentException($"{actual.Length} values against {expected.Length}.");
+        double refMax = 0;
+        foreach (float e in expected) refMax = float.IsFinite(e) ? Math.Max(refMax, Math.Abs((double)e)) : refMax;
+        Half floor = (Half)(1e-3 * refMax);
+        double floorUlp = (double)Half.BitIncrement(floor) - (double)floor;
+        double maxUlps = 0;
+        int mismatches = 0;
+        for (int i = 0; i < actual.Length; i++)
+        {
+            Half e = (Half)expected[i], a = actual[i];
+            if (Half.IsNaN(e) || Half.IsNaN(a))
+            {
+                if (Half.IsNaN(e) != Half.IsNaN(a)) return (double.PositiveInfinity, 1);
+                continue;
+            }
+            if (a == e) continue;
+            mismatches++;
+            double ulp = Math.Max((double)Half.BitIncrement(Half.Abs(e)) - (double)Half.Abs(e), floorUlp);
+            maxUlps = Math.Max(maxUlps, Math.Abs((double)a - (double)e) / ulp);
+        }
+        return (maxUlps, actual.Length == 0 ? 0 : (double)mismatches / actual.Length);
+    }
 }
 
 /// <summary>Phase-0 attention shapes (benchmarks/python-baseline/attention_shapes.json) the accuracy table samples.</summary>
@@ -359,21 +387,27 @@ public static class Int8V2Adversarial
         yield return Outliers("k-token-outliers", (_, k, _, s) => ScaleRows(k, s.HeadDim, [100, 777, 1500, 2001], 20f));
         yield return Outliers("v-channel-outliers", (_, _, v, s) => ScaleChannels(v, s.KvHeads * s.Skv, s.HeadDim, [3, 64], 50f));
         yield return Outliers("v-token-outliers", (_, _, v, s) => ScaleRows(v, s.HeadDim, [50, 900], 50f));
-        yield return new Int8V2Spec
-        {
-            Id = "v-above-f16-max", Sq = 256, Skv = 1024, HeadDim = 64, DType = DType.F32, Seed = 11,
-            Mutate = (_, _, v) => { for (int i = 0; i < v.Length; i++) v[i] *= 1e5f; },
-        };
-        yield return new Int8V2Spec
-        {
-            Id = "uniform-attention-16k", Sq = 64, Skv = 16384, HeadDim = 64, Seed = 12, Mutate = (q, _, _) => Array.Clear(q),
-        };
+        yield return ValuesAboveF16Max();
+        yield return UniformAttention();
         yield return SingleDominantKey();
         yield return SubThresholdSpread(dominantAt: 0);
         yield return SubThresholdSpread(dominantAt: 8192);
         yield return SubThresholdOneTile(keys: 128);
         yield return FiveThousandNear1e4();
     }
+
+    /// <summary>F32 V scaled by 1e5, past F16's range.</summary>
+    public static Int8V2Spec ValuesAboveF16Max(int headDim = 64) => new()
+    {
+        Id = "v-above-f16-max", Sq = 256, Skv = 1024, HeadDim = headDim, DType = DType.F32, Seed = 11,
+        Mutate = (_, _, v) => { for (int i = 0; i < v.Length; i++) v[i] *= 1e5f; },
+    };
+
+    /// <summary>Q = 0: every row attends 16,384 keys uniformly.</summary>
+    public static Int8V2Spec UniformAttention(int headDim = 64) => new()
+    {
+        Id = "uniform-attention-16k", Sq = 64, Skv = 16384, HeadDim = headDim, Seed = 12, Mutate = (q, _, _) => Array.Clear(q),
+    };
 
     /// <summary>Gaussian 1×1×256×2048×128 with <paramref name="mutate"/> applied.</summary>
     public static Int8V2Spec Outliers(string id, Action<float[], float[], float[], Int8V2Spec> mutate)
@@ -400,12 +434,13 @@ public static class Int8V2Adversarial
 
     /// <summary>One dominant key at <paramref name="dominantAt"/> and 8,192 tail keys −ln 600 below it: Q is one-hot, the
     /// dominant key's V is 0 and every tail key's V is 1, so the exact output is the tail's share of the mass, 0.932.</summary>
-    public static Int8V2Spec SubThresholdSpread(int dominantAt, int rows = 1) => OneHot($"sub-threshold-8192@{dominantAt}", 8193,
-        dominantAt, rows);
+    public static Int8V2Spec SubThresholdSpread(int dominantAt, int rows = 1, int headDim = 64) =>
+        OneHot($"sub-threshold-8192@{dominantAt}", 8193, dominantAt, rows, headDim);
 
     /// <summary>The dominant key and its <paramref name="keys"/> − 1 tail keys in one key tile (Skv ≤ BC): every tail key sits
     /// below 1/510 of the tile's maximum, so u8 P rounds the whole tail to zero.</summary>
-    public static Int8V2Spec SubThresholdOneTile(int keys, int rows = 256) => OneHot($"sub-threshold-one-tile-{keys}", keys, 0, rows);
+    public static Int8V2Spec SubThresholdOneTile(int keys, int rows = 256, int headDim = 64) =>
+        OneHot($"sub-threshold-one-tile-{keys}", keys, 0, rows, headDim);
 
     /// <summary>SageAttention2's argument for a floating P: 5,040 keys near probability 1e-4 hold half the mass, and every key
     /// tile also holds one head key carrying ~120× more (scores set by a key bias over Q = K = 0).</summary>
@@ -422,12 +457,11 @@ public static class Int8V2Adversarial
         };
     }
 
-    private static Int8V2Spec OneHot(string id, int skv, int dominantAt, int rows) => new()
+    private static Int8V2Spec OneHot(string id, int skv, int dominantAt, int rows, int d) => new()
     {
-        Id = id, Sq = rows, Skv = skv, HeadDim = 64, DType = DType.F32, Scale = TailGap, SampledRows = 0, Seed = 15,
+        Id = id, Sq = rows, Skv = skv, HeadDim = d, DType = DType.F32, Scale = TailGap, SampledRows = 0, Seed = 15,
         Mutate = (q, k, v) =>
         {
-            const int d = 64;
             Array.Clear(q);
             Array.Clear(k);
             for (int r = 0; r < rows; r++) q[r * d] = 1f;

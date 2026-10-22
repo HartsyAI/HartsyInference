@@ -201,6 +201,14 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> S2vTextCfg =
         Bool("numerics.s2vTextCfg", false, KnobScope.Runtime, KnobDomain.Numerics, "Feeds the conditional audio to Wan-S2V's uncond branch so CFG steers text adherence only; changes output.");
 
+    /// <summary>Runs eligible attention calls (unmasked, equal heads, head dim 128, F16 or F32) on INT8 attention v2.</summary>
+    public static readonly Knob<bool> Int8AttnV2 =
+        Bool("numerics.int8AttnV2", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs eligible attention calls (unmasked, equal heads, head dim 128, F16 or F32) on INT8 attention v2: INT8 QK, u8 P times s8 V.");
+
+    /// <summary>Gives INT8 attention v2 one V scale per channel per 128-key tile instead of one per channel over the sequence.</summary>
+    public static readonly Knob<bool> Int8AttnV2VTile =
+        Bool("numerics.int8AttnV2VTile", true, KnobScope.Runtime, KnobDomain.Numerics, "Gives INT8 attention v2 one V scale per channel per 128-key tile instead of one per channel over the sequence.");
+
     /// <summary>Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).</summary>
     public static readonly Knob<bool> SageAttn =
         Bool("numerics.sageAttn", true, KnobScope.Runtime, KnobDomain.Numerics, "Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).");

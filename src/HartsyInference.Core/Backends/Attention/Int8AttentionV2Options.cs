@@ -71,6 +71,9 @@ public sealed record Int8AttentionV2Options
     /// <summary>The recurrence's exp2, null for double exp2 narrowed to F32; a kernel test replays the GPU's.</summary>
     public Func<float, float>? Exp2 { get; init; }
 
+    /// <summary>Observes every u8 key tile a row drains, for a kernel's trace test; null in normal use.</summary>
+    public Int8AttentionV2TileTrace? TileTrace { get; init; }
+
     /// <summary>Key segments: one, or one plus <see cref="KeySegmentStarts"/> when keys are smoothed.</summary>
     public int Segments => SmoothKeys ? 1 + KeySegmentStarts.Count : 1;
 }

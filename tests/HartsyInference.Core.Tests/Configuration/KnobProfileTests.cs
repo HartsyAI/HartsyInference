@@ -113,6 +113,7 @@ public sealed class KnobProfileTests
             Assert.True(EngineKnobs.VkDisableCoopmat.Value);
             Assert.False(EngineKnobs.VkCoopmat2.Value);
             Assert.False(EngineKnobs.SageAttn.Value);
+            Assert.False(EngineKnobs.Int8AttnV2.Value);
             Assert.False(EngineKnobs.W8a8.Value);
         }
     }

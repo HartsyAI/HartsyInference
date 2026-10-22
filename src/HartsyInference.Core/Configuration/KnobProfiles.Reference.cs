@@ -75,6 +75,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.S2vTextCfg, false)
         // SageAttention quantizes Q and K to INT8 (K-smoothed per-row) for QK^T; off keeps the cuDNN/F32 attention routes.
         .With(EngineKnobs.SageAttn, false)
+        // INT8 attention v2 quantizes Q, K, P and V; off keeps the cuDNN/F32 attention routes.
+        .With(EngineKnobs.Int8AttnV2, false)
         // Falls back to the materialized F32 score-matrix paths instead of cuDNN's fused flash engine, which picks its own internal math.
         .With(EngineKnobs.SdpaCudnn, false)
         // Would force F16 SDPA on for callers the per-call allowF16 gate deliberately excludes (unbounded-score architectures).

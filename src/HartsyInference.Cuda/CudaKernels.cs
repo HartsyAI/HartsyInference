@@ -1282,6 +1282,7 @@ public sealed partial class CudaKernels : IDisposable
         LoadSamplingKernels();
         LoadRecipeDequantKernels();
         LoadAttentionKernels();
+        LoadInt8AttentionV2Kernels();
         if (_skippedModules.Count > 0)
             ReportSkippedModules();
         }

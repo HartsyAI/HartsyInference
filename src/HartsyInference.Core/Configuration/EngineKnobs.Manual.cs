@@ -181,6 +181,12 @@ public static partial class EngineKnobs
             "Minimum K/V sequence length before the F16 SageAttention path is preferred; measured knee is 8192.",
             v => v > 0 ? v : 8192);
 
+    /// <summary>Fewest query rows and keys a call needs before INT8 attention v2 takes it.</summary>
+    public static readonly Knob<int> Int8AttnV2MinTokens =
+        Int("numerics.int8AttnV2MinTokens", 8192, KnobScope.Runtime, KnobDomain.Numerics,
+            "Fewest query rows and keys a call needs before INT8 attention v2 takes it; non-positive keeps 8192.",
+            v => v > 0 ? v : 8192);
+
     /// <summary>How many host-to-device transfers the H2D trace prints before going quiet.</summary>
     public static readonly Knob<int> H2dTraceLimit =
         Int("diagnostics.h2dTraceLimit", 24, KnobScope.Runtime, KnobDomain.Diagnostics,
