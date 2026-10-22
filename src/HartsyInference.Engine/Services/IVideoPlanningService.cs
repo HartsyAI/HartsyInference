@@ -8,5 +8,7 @@ namespace HartsyInference.Engine.Services;
 public interface IVideoPlanningService
 {
     /// <summary>Resolves checkpoint identity, effective settings, capabilities, and blocking issues without constructing model weights.</summary>
+    /// <exception cref="Recipes.RecipeNotRegisteredException">The model's family has no video recipe: there are no
+    /// defaults to plan with, so no plan is returned rather than one built on invented values.</exception>
     Task<VideoPlan> PlanAsync(ModelSpec spec, VideoRequest request, CancellationToken cancel = default);
 }

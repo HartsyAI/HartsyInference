@@ -42,8 +42,8 @@ public sealed class WanVaceRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Wan VACE's official sampling settings: 50 steps at guidance 5.0 (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
     // Size, frames and fps are what the removed generic fallback ran; SwarmUI-aligned values: RECIPE_CONTRACT.md ledger.
+    /// <summary>Wan VACE's official sampling settings: 50 steps at guidance 5.0 (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
         Steps = 50, CfgScale = 5.0f, Width = 704, Height = 480, Frames = 25, Fps = 25,

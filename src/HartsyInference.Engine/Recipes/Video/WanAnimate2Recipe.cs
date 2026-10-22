@@ -40,8 +40,8 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate-2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an 81-frame clip at 24 fps.</summary>
     // Size is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
+    /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an 81-frame clip at 24 fps.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
         Steps = 40, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 81, Fps = 24,

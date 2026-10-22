@@ -54,8 +54,11 @@ generation parameter.**
   choice internally.
 - **Valid by registration.** `RecipeRegistryValidator` runs when a registry loads and on `Register`: every
   family-level and variant defaults set has positive steps, finite positive guidance, sizes that are positive
-  multiples of 8, a positive frame rate and a frame count on the family's grid; every recipe resolves by its own name
-  and no earlier recipe shadows it. A broken built-in registry throws at load instead of serving invented values.
+  multiples of 8, a positive frame rate and a frame count on the family's grid, and every recipe resolves by its own
+  name. A broken built-in registry throws at load (a `TypeInitializationException` whose inner exception lists every
+  problem) instead of serving invented values. The shadowing check covers the built-in list only: `Register` puts a
+  recipe in front on purpose, to override one. The multiple of 8 is a floor every VAE shares, not a family's real
+  alignment; that belongs in its constraints.
 - **No family, no defaults.** An unregistered family raises `RecipeNotRegisteredException`; nothing plans or
   estimates memory against a stand-in.
 - **Frame grids.** A video family declares `FrameGrid(step, offset, normalization, max)`. Normalization is part of
@@ -96,6 +99,8 @@ change that made defaults total moved no output.
 
 ## Open
 
+- What `SnapNearest` and `SnapUp` do when the snapped count would pass a grid's `Max` (refuse, or clamp down onto
+  the grid), decided where the planner first applies the grid.
 - Planner with per-parameter provenance (recipe default, user override, normalization, lock) on every plan and
   result; image and audio plans of the same shape.
 - Variant resolution refuses an unresolved variant instead of taking the catalog default, and filename guesses for

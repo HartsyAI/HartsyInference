@@ -34,6 +34,7 @@ public static class VideoEndpoints
             {
                 return GenerationErrors.Map(ex);
             }
+            // Ahead of the input-failure filter: it keeps its own issue code even if its base type changes.
             catch (RecipeNotRegisteredException ex)
             {
                 return Results.Json(UnregisteredFamily(ex),
@@ -73,6 +74,7 @@ public static class VideoEndpoints
             {
                 return GenerationErrors.Map(ex);
             }
+            // Ahead of the input-failure filter: it keeps its own issue code even if its base type changes.
             catch (RecipeNotRegisteredException ex)
             {
                 return Results.Json(UnregisteredFamily(ex),
