@@ -111,7 +111,11 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
 
         // QK RMS-norm bounds the scores, so the joint call may narrow to F16.
         _attention = new JointAttention(
-            new JointAttentionConfig { Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = true },
+            new JointAttentionConfig
+            {
+                Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = true,
+                TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
+            },
             [Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!, _toOutBias, _normQ, _normK),
              Stream(_addQWeight!, _addQBias, _addKWeight!, _addKBias, _addVWeight!, _addVBias, _toAddOutWeight!, _toAddOutBias,
                  _normAddedQ, _normAddedK)]);

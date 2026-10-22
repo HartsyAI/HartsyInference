@@ -158,7 +158,8 @@ public sealed unsafe class HiDreamBlock
                 new JointAttentionConfig
                 {
                     Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = true, AllowF16Batched = false,
-                    StageOrder = JointStageOrder.ProjectNormPerStream,
+                    StageOrder = JointStageOrder.ProjectNormPerStream, TokenMajorRoute = AttentionRoute.TokenMajor,
+                    HeadMajorForSage = true,
                 },
                 [image, Stream(_toQTWeight!, _toQTBias, _toKTWeight!, _toKTBias, _toVTWeight!, _toVTBias, _toOutTWeight!, _toOutTBias,
                     _qRmsNormTWeight!, _kRmsNormTWeight!, allowF16: true)]);

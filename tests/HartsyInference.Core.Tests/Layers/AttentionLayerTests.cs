@@ -229,22 +229,24 @@ public sealed class AttentionLayerTests
         Assert.Equal(new TensorShape(1, 6, 8), permuted.Shape);
     }
 
-    /// <summary>Flat operands attend head-major: a token-major config refuses them before any op, and a Dense one returns the
-    /// caller's <c>[1, S, heads·D]</c> on a backend that serves the token-major entry.</summary>
-    [Fact]
-    public void AttendFlat_RefusesATokenMajorConfig_AndKeepsTheCallersShapeOnADenseOne()
+    /// <summary>Flat operands take a token-major config's entry at one batch item and the head-major entry on a Dense config; either
+    /// way the caller gets its <c>[1, S, heads·D]</c> back, and only the head-major entry permutes.</summary>
+    [Theory]
+    [InlineData(AttentionRoute.TokenMajor, 0)]
+    [InlineData(AttentionRoute.Dense, 4)]
+    public void AttendFlat_TakesTheConfigsEntry_AndKeepsTheCallersShape(AttentionRoute route, int permutes)
     {
         AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
         static Tensor Rows() => new(new TensorShape(1, 6, 8), DType.F32);
-        AttentionLayer dense = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4 });
-        AttentionLayer tokenMajor = new(dense.Config with { TokenMajorRoute = AttentionRoute.TokenMajor });
+        AttentionLayer layer = new(new AttentionLayerConfig { Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = route });
 
-        Assert.Throws<NotSupportedException>(() => tokenMajor.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default));
-        Assert.Empty(backend.Ops);
-        Tensor attended = dense.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default);
+        Tensor attended = layer.AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(1, 6, 8), default);
 
-        Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
         Assert.Equal(new TensorShape(1, 6, 8), attended.Shape);
+        Assert.Equal(permutes, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
+        if (route == AttentionRoute.TokenMajor) Assert.Same(attended, call.Output.Storage);
     }
 
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's

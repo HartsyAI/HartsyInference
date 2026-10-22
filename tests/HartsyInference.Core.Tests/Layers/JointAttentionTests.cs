@@ -29,6 +29,12 @@ public sealed class JointAttentionTests
     private static (Tensor Img, Tensor Txt) Inputs(int batch = 1) =>
         (new Tensor(new TensorShape(batch, ImgRows, Inner), DType.F32), new Tensor(new TensorShape(batch, TxtRows, Inner), DType.F32));
 
+    private static JointAttention TokenMajorJoint() =>
+        new(Config(1, 0) with { TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true }, [Stream(1), Stream(2)]);
+
+    private static int Permutes(AttentionTraceBackend backend) =>
+        backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal));
+
     [Fact]
     public void ProjectAllThenNorm_TextFirst_ConcatsAttendsAndSplitsInRowOrder()
     {
@@ -109,6 +115,57 @@ public sealed class JointAttentionTests
         joint.Attend(backend, [img, txt], attended, new JointCallContext());
 
         Assert.Equal([true, false], backend.Calls.Select(c => c.Numerics.LegacyAssertedBounded));
+    }
+
+    /// <summary>A token-major joint config hands the concatenated <c>[1, S, heads·D]</c> rows to the token-major entry and splits
+    /// its output, held in that shape, with no permute; a batch keeps the head-major call and its permutes.</summary>
+    [Fact]
+    public void ATokenMajorJointCall_AttendsTheConcatenatedRowsInPlace_ABatchStaysHeadMajor()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        JointAttention joint = TokenMajorJoint();
+        (Tensor img, Tensor txt) = Inputs();
+        Span<Tensor?> attended = [null, null];
+
+        joint.Attend(backend, [img, txt], attended, new JointCallContext { ReleaseInputs = true });
+
+        Assert.Equal(
+        [
+            "Concat rows 3+6", "Concat rows 3+6", "Concat rows 3+6", "Attention TokenMajor heads=4/4 bounded=True",
+            "SliceRows 3@0", "SliceRows 6@3",
+        ], backend.Ops.Skip(backend.Ops.IndexOf("Concat rows 3+6")));
+        AttentionCall call = Assert.Single(backend.Calls);
+        TensorShape joined = new(1, ImgRows + TxtRows, Inner);
+        Assert.Equal(joined, call.Query.Storage.Shape);
+        Assert.Equal(joined, call.Output.Storage.Shape);
+        Assert.Equal(new TensorShape(1, ImgRows, Inner), attended[0]!.Shape);
+        Assert.Equal(new TensorShape(1, TxtRows, Inner), attended[1]!.Shape);
+
+        AttentionTraceBackend batched = new() { SupportsTokenMajorAttention = true };
+        (img, txt) = Inputs(batch: 2);
+        joint.Attend(batched, [img, txt], attended, new JointCallContext());
+        Assert.Equal(AttentionRoute.Dense, Assert.Single(batched.Calls).Route);
+        Assert.Equal(4, Permutes(batched));
+    }
+
+    /// <summary>Under a K/V rewrite (a context-parallel rank's rendezvous) the token-major joint call attends the keys the rewrite
+    /// returns: the local query rows over the longer key rows.</summary>
+    [Fact]
+    public void ATokenMajorJointCall_AttendsTheKeysAKvRewriteReturns()
+    {
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        (Tensor img, Tensor txt) = Inputs();
+        Span<Tensor?> attended = [null, null];
+
+        TokenMajorJoint().Attend(backend, [img, txt], attended,
+            new JointCallContext { Joint = new AttentionCallContext { KvRewrite = new Prepend(4, backend.Ops) } });
+
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(AttentionRoute.TokenMajor, call.Route);
+        Assert.Equal(ImgRows + TxtRows, call.QueryTokens);
+        Assert.Equal(ImgRows + TxtRows + 4, call.KeyTokens);
+        Assert.Equal(0, Permutes(backend));
+        Assert.Equal(new TensorShape(1, ImgRows + TxtRows, Inner), call.Output.Storage.Shape);
     }
 
     [Fact]
@@ -305,7 +362,10 @@ public sealed class JointAttentionTests
         public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
         {
             ops.Add("Rewrite");
-            TensorShape shape = new(k.Shape[0], k.Shape[1] + rows, k.Shape[2], k.Shape[3]);
+            long[] dims = new long[k.Shape.Rank];
+            for (int i = 0; i < dims.Length; i++) dims[i] = k.Shape[i];
+            dims[1] += rows;
+            TensorShape shape = new(dims);
             return (new Tensor(shape, k.DType), new Tensor(shape, v.DType));
         }
     }
