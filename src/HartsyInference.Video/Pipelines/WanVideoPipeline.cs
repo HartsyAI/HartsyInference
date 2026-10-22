@@ -947,6 +947,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         long free = Backend.FreeMemoryBytes();
         if (free < need || second?.FreeMemoryBytes() < need)
         {
+            // A backend that reports no free VRAM (the CPU) skips the cache without a line.
             if (free > 0) Logs.Info($"Wan text cross-attention K/V cache off: under {need >> 20} MB free beside the resident DiT.");
             return null;
         }

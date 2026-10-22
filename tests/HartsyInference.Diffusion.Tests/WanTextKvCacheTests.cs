@@ -53,6 +53,29 @@ public sealed unsafe class WanTextKvCacheTests
         Assert.Equal(4, kv.Hits);
     }
 
+    [Fact]
+    public void AContextRebuiltInsideTheScopeIsProjectedAgainNotServedTheOldKv()
+    {
+        WanVideoConfig cfg = TinyConfig;
+        WanVideoBlock block = new(cfg, crossAttnNorm: true);
+        block.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg), "blocks.0");
+        using CpuBackend backend = new();
+        WanRope rope = new(cfg.HeadDim, cfg.RopeTheta, cfg.RopeMaxSeqLen);
+        (Tensor cos, Tensor sin) = rope.BuildCosSin(2, 2, 2);
+        const int s = 8;
+        Tensor hidden = Rand([s, cfg.InnerDim], 10), temb = Rand([1, 6, cfg.InnerDim], 20);
+        CountingKv kv = new(new ConstantKvCache(contextsPerBackend: 2, pinned: true));
+        block.Forward(backend, hidden, Rand([ContextTokens, cfg.InnerDim], 1), temb, rope, cos, sin, s, textKv: kv);
+
+        Tensor rebuilt = Rand([ContextTokens, cfg.InnerDim], 3);
+        float[] expected = Read(block.Forward(backend, hidden, rebuilt, temb, rope, cos, sin, s));
+        float[] actual = Read(block.Forward(backend, hidden, rebuilt, temb, rope, cos, sin, s, textKv: kv));
+
+        Assert.Equal(expected, actual);
+        Assert.Equal(2, kv.Stores);
+        Assert.Equal(0, kv.Hits);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
