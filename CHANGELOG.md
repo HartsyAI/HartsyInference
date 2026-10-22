@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: the executable specification of INT8 attention v2.** `Int8AttentionV2Reference` runs on the CPU the stats pass,
+  quantization and online recurrence the coming INT8 kernel must reproduce: u8 P against each key tile's own maximum, s8 V,
+  INT32 partials drained at every key tile, K channel-mean smoothing with its softcap, sink, LSE and per-segment corrections,
+  tile-classified masks, GQA and head dims up to 256, plus the FP8 and F16 P×V fallbacks. An adversarial suite holds it to
+  the contract oracle, which can now return the LSE.
+- **Changed: attention's NaN policy is written down.** A NaN that a row's output reads makes that output NaN (contract §3).
+  The host reference, which the CPU backend runs for calls no legacy entry carries, returned zeros for a row whose every
+  score was NaN, that saw no key and had a NaN sink, or that had a +∞ sink; it now returns NaN. Finite inputs are
+  unaffected.
 - **Added: Drama 3 reads NF4 (bitsandbytes) checkpoints.** An NF4 expert loads as Q4_0, a second quantization rather than
   the GPTQ build's bit-exact repack. `CheckpointRepacker --quant nf4` streams a block-FP8 checkpoint into one NF4 file in
   bitsandbytes' layout, refuses an output that resolves to its input, and on a failure, Ctrl-C or SIGTERM removes its
