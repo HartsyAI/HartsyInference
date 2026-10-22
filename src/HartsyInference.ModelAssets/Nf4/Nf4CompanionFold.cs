@@ -74,6 +74,15 @@ public static class Nf4CompanionFold
         return result;
     }
 
+    /// <summary>Decodes the one NF4 weight <paramref name="weightKey"/> from <paramref name="parts"/>, which hold it, its companions
+    /// and its quant state. Unlike <see cref="Apply"/> it logs nothing, for a caller that decodes a checkpoint weight by weight.</summary>
+    internal static Tensor DecodeWeight(Dictionary<string, Tensor> parts, string weightKey)
+    {
+        string stateKey = weightKey + QuantStatePrefix + "nf4";
+        Nf4QuantState state = Nf4QuantState.Parse(parts[stateKey], stateKey);
+        return Dequantize(parts[weightKey], state, weightKey, parts, new HashSet<string>(StringComparer.Ordinal));
+    }
+
     private static Tensor Dequantize(Tensor packed, Nf4QuantState state, string weightKey,
         Dictionary<string, Tensor> source, HashSet<string> consumed)
     {

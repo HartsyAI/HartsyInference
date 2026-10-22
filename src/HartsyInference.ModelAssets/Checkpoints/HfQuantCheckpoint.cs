@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Gguf;
@@ -80,6 +81,9 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         }
     }
 
+    /// <summary>Whether <paramref name="path"/> names one of this checkpoint's files, through a symbolic link in any component.</summary>
+    public bool IsSourceFile(string path) => _set.Shards.Any(shard => FileSystemPathIdentity.SamePath(shard.Path, path));
+
     /// <summary>A plain weight as stored, as a fresh borrowed view of the mapped checkpoint (an expert of a fused stack is a row view).</summary>
     public Tensor Borrow(string name)
     {
@@ -135,7 +139,7 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         try
         {
             foreach (string key in Nf4Keys(w.SourceKey)) parts[key] = _set.GetTensor(key);
-            return Nf4CompanionFold.Apply(parts)[w.SourceKey];
+            return Nf4CompanionFold.DecodeWeight(parts, w.SourceKey);
         }
         finally
         {
@@ -153,6 +157,13 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     public Tensor Produce(string name, DType target, GgufQuantError? error = null)
     {
         HfQuantWeight w = Get(name);
+        long rowLength = w.Shape.Rank == 0 ? 1 : w.Shape[w.Shape.Rank - 1];
+        if (target.IsQuantized && rowLength % target.BlockElementCount != 0)
+        {
+            // The quantizer blocks the flattened tensor, so a ragged row would silently share blocks with the next one.
+            throw new ArgumentException(
+                $"'{name}' has rows of {rowLength} values, not whole {target.Name} blocks of {target.BlockElementCount}.", nameof(target));
+        }
         if (w.Storage == HfWeightStorage.Plain && w.StoredDType == target)
         {
             return Borrow(name);
@@ -213,6 +224,12 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             }
             RequireCompanion(module + ".absmax", module);
             RequireCompanion(module + ".quant_map", module);
+            // A non-F32 absmax is double-quantized and decodes only through both nested companions.
+            if (_set.Inventory[module + ".absmax"].DType != DType.F32)
+            {
+                RequireCompanion(module + ".nested_absmax", module);
+                RequireCompanion(module + ".nested_quant_map", module);
+            }
             TensorShape shape;
             using (Tensor state = _set.GetTensor(key))
             {

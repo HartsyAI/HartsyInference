@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Drama 3 reads NF4 (bitsandbytes) checkpoints.** An NF4 expert loads as Q4_0, a second quantization rather than
+  the GPTQ build's bit-exact repack. `CheckpointRepacker --quant nf4` streams a block-FP8 checkpoint into one NF4 file in
+  bitsandbytes' layout, refuses an output that resolves to its input, and on a failure, Ctrl-C or SIGTERM removes its
+  partial file and leaves any earlier output in place. No NF4 Drama 3 has been loaded on the real weights yet.
 - **Faster: Wan's denoise step.** Each block's text cross-attention keys and values are projected once per prompt per
   generation and kept on the device, instead of re-projecting the 512 context rows on every step; the cache is pinned
   per backend, released when the denoise loop ends, and off when the DiT streams or VRAM is short. Self-attention casts
