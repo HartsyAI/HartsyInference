@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.387
+
 - **Fixed: CUDA head-major attention past 2^32 score elements returns the right rows.** The materialized row's softmax forms
   each row's offset in 32 bits, so a call whose B·H·Sq·Skv score matrix passed 2^32 elements and reached that row (no cuDNN,
   SageAttention or flash row taking it; for F32 only on a card with more than about 34 GB free) normalized the wrong memory
