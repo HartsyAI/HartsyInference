@@ -8,6 +8,16 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: CUDA token-major attention past 46,340 tokens.** Since #497 (in alpha.386), SD1.5 from about 1728² failed with
+  "SDPA tensors currently support at most Int32.MaxValue elements each": its UNet self-attention moved to the token-major
+  entry, whose contract refused a score matrix of more than Int32.MaxValue entries, a bound the head-major entry never had.
+  Every token-major call that long was refused the same way; for the DiTs that is from about 3400² (the F32 calls of Flux.1,
+  Qwen-Image, AuraFlow and HiDream, and Chroma's masked calls). The entry now bounds each tensor's elements only; the
+  remaining limit past 2^32 score elements, the materialized row's, is #528's.
+  Measured: SD1.5 at 2048² is bit-identical to the build before #497 (RTX 4090), and the token-major cuDNN row is
+  bit-identical to the head-major one at SD1.5's 65,536 rows (8 heads of 40) and at 75,600 rows (8 heads of 128, Wan 14B's
+  720p length) on the RTX 3060.
+
 - **Faster: the joint attention of the double-stream blocks of Flux.1, Chroma, Flux.2, Qwen-Image, HunyuanImage/HunyuanVideo,
   AuraFlow and HiDream runs token-major.** `JointAttentionConfig` takes a `TokenMajorRoute` and `HeadMajorForSage` for the
   joint call, and `AttentionLayer.AttendFlat` takes the config's token-major entry instead of refusing it, so the call reads

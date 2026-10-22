@@ -7633,7 +7633,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the
-    /// token-major SDPA entry point; the mask is checked when the rows are planned.</summary>
+    /// token-major SDPA entry point; the mask is checked when the rows are planned. The Sq·Skv score matrix is deliberately not
+    /// bounded here: the rows own that bound.</summary>
     internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
         int heads, int headDim, float scale)
     {
@@ -7668,7 +7669,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (output.DType != query.DType || key.DType != query.DType || value.DType != query.DType)
             throw new ArgumentException(
                 $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
-        if (sq * skv > int.MaxValue || query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
+        if (query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
     }
 

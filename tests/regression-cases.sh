@@ -26,6 +26,7 @@ regression_cases() {
         [ "$keep" = 1 ] && printf '%s\t%s\t%s\n' "$id" "$ckpt" "$spec"
     done <<'MATRIX'
 sd15	baseline,core,vulkan,attention	bench-cache/e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916/v1-5-pruned-emaonly-fp16.safetensors	image|a red apple on a table|--steps 8 --width 512 --height 512
+sd15-2048	attention	bench-cache/e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916/v1-5-pruned-emaonly-fp16.safetensors	image|a red apple on a table|--steps 8 --width 2048 --height 2048
 krea2	baseline,core,vulkan,vulkanbar,rope,attention	Stable-Diffusion/Krea2/Turbo/krea2_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m krea2 --steps 8 --width 1024 --height 1024
 zimage	core,vulkanbar,rope,attention,vulkan	Stable-Diffusion/z-image-turbo.safetensors	image|a lighthouse on a rocky coast at dusk, photograph|-m zimage --steps 8 --width 1024 --height 1024
 qwenimage-q4k	core,vulkanbar,rope,attention	Stable-Diffusion/QwenImage/Qwen_Image-Q4_K_M.gguf	image|a bowl of ramen on a wooden counter, photograph|-m qwen-image --steps 20 --width 1024 --height 1024
