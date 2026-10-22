@@ -1,8 +1,8 @@
 namespace HartsyInference.Cuda;
 
 /// <summary>Where INT8 attention v2's buffers sit in its workspace for one call shape (Kernels/attention/int8_attn_v2.cu).</summary>
-/// <remarks>The stats launch's completion counters sit at offset 0 for every shape: they are zeroed once when the workspace is
-/// allocated and every launch leaves the slots it used at zero.</remarks>
+/// <remarks>The stats launch's completion counters sit at offset 0 for every shape; each call zeroes the slots it uses before
+/// its stats launch.</remarks>
 internal readonly record struct Int8AttentionV2Layout
 {
     /// <summary>The head dim the kernels run.</summary>

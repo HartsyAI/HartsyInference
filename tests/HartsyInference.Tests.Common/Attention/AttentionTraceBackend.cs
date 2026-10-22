@@ -38,7 +38,7 @@ public sealed class AttentionTraceBackend : IBackend
     public bool Int8V2TokenMajor { get; init; } = true;
 
     /// <summary>CUDA's M.4 answer from the knobs: v2 on, head dim 128, F16 or F32, both sequences at the engage length.</summary>
-    public bool Int8AttentionV2TakesTokenMajor(int heads, int queryTokens, int keys, int headDim, DType dtype) =>
+    public bool Int8AttentionV2TakesTokenMajor(int batch, int heads, int queryTokens, int keys, int headDim, DType dtype) =>
         Int8V2TokenMajor && EngineKnobs.Int8AttnV2.Value && headDim == 128 && (dtype == DType.F16 || dtype == DType.F32)
         && Math.Min(queryTokens, keys) >= EngineKnobs.Int8AttnV2MinTokens.Value;
 

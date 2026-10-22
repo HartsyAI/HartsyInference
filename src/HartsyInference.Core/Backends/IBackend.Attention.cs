@@ -19,7 +19,7 @@ public partial interface IBackend
 
     /// <summary>Whether the backend's token-major INT8 attention v2 row would take an unmasked, equal-head, aligned call of this
     /// shape now (CUDA's M.4); an attention layer keeps such a call token-major instead of permuting it for SageAttention.</summary>
-    bool Int8AttentionV2TakesTokenMajor(int heads, int queryTokens, int keys, int headDim, DType dtype) => false;
+    bool Int8AttentionV2TakesTokenMajor(int batch, int heads, int queryTokens, int keys, int headDim, DType dtype) => false;
 
     /// <summary>Attention where one latent row is both key and value: per token and head, softmax over the scaled
     /// dot products of the indexed rows plus the head's fp32 sink, then the weighted sum of those rows.

@@ -641,22 +641,22 @@ public sealed partial class AttentionLayer
     private bool TokenMajorServed(IBackend backend, int sq, int skv, DType act, in AttentionCallContext context) =>
         _config.TokenMajorRoute != AttentionRoute.Dense && context.HeadMajorRotation is null
         && (_config.TokenMajorKnob?.Value ?? true)
-        && !(_config.HeadMajorForSage && SageServesHeadMajor(backend, sq, skv, act, context.Bias))
+        && !(_config.HeadMajorForSage && SageServesHeadMajor(backend, batch, sq, skv, act, context.Bias))
         && (_config.TokenMajorRoute == AttentionRoute.TokenMajorGqa
             ? backend.SupportsTokenMajorGqaAttention : backend.SupportsTokenMajorAttention);
 
     /// <summary>The CUDA head-major Sage row's admission (S.1, <c>CudaBackend.SageF16Preferred</c>), less the kernel check only the backend
     /// can make; a change to either side must change the other. A call the token-major INT8 v2 row takes ahead of it stays token-major.</summary>
-    private bool SageServesHeadMajor(IBackend backend, int sq, int skv, DType act, Tensor? bias) =>
+    private bool SageServesHeadMajor(IBackend backend, int batch, int sq, int skv, DType act, Tensor? bias) =>
         act == DType.F16 && bias is null && _config.HeadDim is 64 or 128 && EngineKnobs.SageAttn.Value
         && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value && (_config.RefusedFormats & AttentionFormats.Int8) == 0
-        && !Int8V2ServesTokenMajor(backend, sq, skv, act, bias);
+        && !Int8V2ServesTokenMajor(backend, batch, sq, skv, act, bias);
 
     /// <summary>Whether the backend's token-major INT8 v2 row takes this call as it stands (M.4 reads the projections in place); the
     /// backend answers, so a refusal only it sees (its kernels, a capture its workspace does not fit) leaves the call to Sage.</summary>
-    private bool Int8V2ServesTokenMajor(IBackend backend, int sq, int skv, DType act, Tensor? bias) =>
+    private bool Int8V2ServesTokenMajor(IBackend backend, int batch, int sq, int skv, DType act, Tensor? bias) =>
         bias is null && _config.KvHeads == _config.Heads
-        && backend.Int8AttentionV2TakesTokenMajor(_config.Heads, sq, skv, _config.HeadDim, act);
+        && backend.Int8AttentionV2TakesTokenMajor(batch, _config.Heads, sq, skv, _config.HeadDim, act);
 
     private static Tensor Have(Tensor? norm) =>
         norm ?? throw new InvalidOperationException("This attention layer's weights have no norm for that projection.");

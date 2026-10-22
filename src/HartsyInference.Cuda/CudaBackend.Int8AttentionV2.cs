@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
 
@@ -10,6 +12,7 @@ public sealed partial class CudaBackend
 {
     private ulong _int8V2Workspace;
     private long _int8V2WorkspaceBytes;
+    private long _int8V2GrowthFailedAt = long.MaxValue;
     private long _int8V2ExecutionCount;
 
     /// <summary>Number of INT8 attention v2 executions this session.</summary>
@@ -51,13 +54,14 @@ public sealed partial class CudaBackend
     private bool Int8V2TakesWidened(in AttentionCall c) => Int8V2Eligible(in c) && Int8V2KernelsLoaded();
 
     /// <inheritdoc/>
-    public bool Int8AttentionV2TakesTokenMajor(int heads, int queryTokens, int keys, int headDim, DType dtype)
+    public bool Int8AttentionV2TakesTokenMajor(int batch, int heads, int queryTokens, int keys, int headDim, DType dtype)
     {
         if (!EngineKnobs.Int8AttnV2.Value || headDim != Int8AttentionV2Layout.HeadDim || (dtype != DType.F16 && dtype != DType.F32)
-            || Math.Min(queryTokens, keys) < EngineKnobs.Int8AttnV2MinTokens.Value || !CudaKernels.GridYzFits(heads, 1)
-            || !Int8V2KernelsLoaded()) return false;
-        // A capture cannot grow the workspace: a call it does not fit falls to the next row.
-        return !StreamIsCapturing() || new Int8AttentionV2Layout(1, heads, queryTokens, keys, CurrentInt8V2Pv()).Bytes <= _int8V2WorkspaceBytes;
+            || Math.Min(queryTokens, keys) < EngineKnobs.Int8AttnV2MinTokens.Value || !CudaKernels.GridYzFits(heads, batch)
+            || (long)batch * heads > Int8AttentionV2Layout.CounterSlots || !Int8V2KernelsLoaded()) return false;
+        long bytes = new Int8AttentionV2Layout(batch, heads, queryTokens, keys, CurrentInt8V2Pv()).Bytes;
+        // A capture cannot grow the workspace, and a size that failed to allocate is not retried: such a call takes the next row.
+        return bytes <= _int8V2WorkspaceBytes || (!StreamIsCapturing() && bytes < _int8V2GrowthFailedAt);
     }
 
     /// <summary>The PV format the knobs pick.</summary>
@@ -131,23 +135,34 @@ public sealed partial class CudaBackend
     private static CudaKernels.FlashStrides Strides(in AttentionOperand o) =>
         new((ulong)o.BatchStride, (ulong)o.HeadStride, (ulong)o.TokenStride);
 
-    /// <summary>The workspace grown to at least <paramref name="bytes"/>, or 0 while the stream captures and it is smaller: a
-    /// capture never allocates it, and a captured graph must never hold a pointer a later growth frees.</summary>
+    /// <summary>The workspace grown to at least <paramref name="bytes"/>, or 0 (the call takes the next row) while the stream
+    /// captures and it is smaller, or when that size did not fit in VRAM since activations were last freed. A capture never
+    /// allocates it, and a captured graph must never hold a pointer a later growth frees. Ops are serialized (EnterOp).</summary>
     private ulong EnsureInt8V2Workspace(long bytes)
     {
         if (bytes <= _int8V2WorkspaceBytes) return _int8V2Workspace;
-        if (StreamIsCapturing()) return 0;
+        if (StreamIsCapturing() || bytes >= _int8V2GrowthFailedAt) return 0;
         StepGraphInvalidateForActivationFree();
         ReleaseInt8V2Workspace();
-        ulong buffer = GpuTransferHelper.AllocateDevice((nuint)bytes);
-        _int8V2Workspace = buffer;
+        try
+        {
+            _int8V2Workspace = GpuTransferHelper.AllocateDevice((nuint)bytes);
+        }
+        catch (OutOfVramException ex)
+        {
+            _int8V2GrowthFailedAt = bytes;
+            Logs.Warning($"[INT8 attention v2] its {bytes >> 20} MB workspace does not fit ({ex.Message}); such calls take the next row.");
+            return 0;
+        }
         _int8V2WorkspaceBytes = bytes;
-        return buffer;
+        return _int8V2Workspace;
     }
 
-    /// <summary>Returns the workspace to the stream-ordered pool; the next call grows it again.</summary>
+    /// <summary>Returns the workspace to the stream-ordered pool and lets a size that did not fit try again; the next call grows
+    /// it again.</summary>
     private void ReleaseInt8V2Workspace()
     {
+        _int8V2GrowthFailedAt = long.MaxValue;
         ulong buffer = _int8V2Workspace;
         _int8V2Workspace = 0;
         _int8V2WorkspaceBytes = 0;

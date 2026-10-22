@@ -523,7 +523,8 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
     }
 
     /// <summary>The question an attention layer asks before keeping a call token-major for M.4: yes eagerly, no inside a capture the
-    /// workspace does not fit (M.4 declines there, and the call goes to Sage instead), yes once an eager call has grown it.</summary>
+    /// workspace does not fit (M.4 declines there, and the call goes to Sage instead), yes once an eager call has grown it, and
+    /// no again for a batch it does not fit.</summary>
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TakesTokenMajor_IsNoInsideACaptureTheWorkspaceDoesNotFit()
@@ -538,26 +539,28 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
         KnobStore.Set(EngineKnobs.Int8AttnV2MinTokens, 512);
         try
         {
-            Assert.True(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.F16));
-            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 64, DType.F16));
-            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, 500, Tokens, 128, DType.F16));
-            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.BF16));
-            bool Captured()
+            Assert.True(cuda.Int8AttentionV2TakesTokenMajor(1, Heads, Tokens, Tokens, 128, DType.F16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(1, Heads, Tokens, Tokens, 64, DType.F16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(1, Heads, 500, Tokens, 128, DType.F16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(1, Heads, Tokens, Tokens, 128, DType.BF16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Int8AttentionV2Layout.CounterSlots, 2, Tokens, Tokens, 128, DType.F16));
+            bool Captured(int batch)
             {
                 cuda.StepGraphBegin();
                 cuda.Scale(small, small, 1f);
-                bool takes = cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.F16);
+                bool takes = cuda.Int8AttentionV2TakesTokenMajor(batch, Heads, Tokens, Tokens, 128, DType.F16);
                 cuda.StepGraphEndAndLaunch();
                 cuda.StepGraphReset();
                 return takes;
             }
             Assert.Equal(0, cuda.Int8V2WorkspaceBytes);
-            Assert.False(Captured());
+            Assert.False(Captured(1));
             cuda.ScaledDotProductAttention(o, q, q, q, null, 0.088f);
             Assert.Equal(1, cuda.Int8AttentionV2ExecutionCount);
-            Assert.True(Captured());
+            Assert.True(Captured(1));
+            Assert.False(Captured(2));
             KnobStore.Set(EngineKnobs.Int8AttnV2, false);
-            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(Heads, Tokens, Tokens, 128, DType.F16));
+            Assert.False(cuda.Int8AttentionV2TakesTokenMajor(1, Heads, Tokens, Tokens, 128, DType.F16));
         }
         finally
         {
