@@ -105,7 +105,7 @@ public sealed class GpuResidencyCacheTests
 
         protected override void RestoreCurrent(nint previous)
         {
-            if (Binding is not null && previous != 0) Binding.Current = previous;
+            if (Binding is not null) Binding.Current = previous;
         }
 
         protected override bool HostReadForbidden => RefuseHostReads;

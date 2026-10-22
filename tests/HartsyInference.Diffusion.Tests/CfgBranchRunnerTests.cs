@@ -1,5 +1,7 @@
 using Xunit;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine;
 using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -65,6 +67,19 @@ public sealed class CfgBranchRunnerTests
         Assert.Collection(thrown.InnerExceptions,
             e => Assert.Equal("peer aborted", Assert.IsType<InvalidOperationException>(e).Message),
             e => Assert.Equal("uncond failed", Assert.IsType<NotSupportedException>(e).Message));
+    }
+
+    /// <summary>The engine's out-of-VRAM cleanup still fires when the OOM is one of the two branch failures.</summary>
+    [Fact]
+    public void BothThrow_WithOneOutOfVram_IsStillTheEnginesOutOfVramCase()
+    {
+        AggregateException thrown = Assert.Throws<AggregateException>(() =>
+            CfgBranchRunner.Run(
+                () => throw new InvalidOperationException("peer aborted"),
+                () => throw new OutOfVramException(1L << 30, 0)));
+
+        Assert.True(InferenceEngine.IsOutOfVram(thrown));
+        Assert.False(InferenceEngine.IsOutOfVram(new AggregateException(new InvalidOperationException("a"), new NotSupportedException("b"))));
     }
 
     [Fact]

@@ -358,7 +358,7 @@ internal static unsafe class GpuTransferHelper
 
         protected override void RestoreCurrent(nint previous)
         {
-            if (previous == 0 || CudaDriverApi.cuCtxGetCurrent(out nint current) != 0 || current == previous)
+            if (CudaDriverApi.cuCtxGetCurrent(out nint current) != 0 || current == previous)
             {
                 return;
             }

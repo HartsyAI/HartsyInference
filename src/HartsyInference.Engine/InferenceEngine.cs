@@ -337,7 +337,7 @@ public sealed class InferenceEngine : IInferenceEngine
         {
             return generate();
         }
-        catch (OutOfVramException ex)
+        catch (Exception ex) when (IsOutOfVram(ex))
         {
             Logs.Error("[Engine] Generation ran out of VRAM — releasing device memory held by the partially-loaded pipeline.", ex);
             try
@@ -355,6 +355,16 @@ public sealed class InferenceEngine : IInferenceEngine
             }
             throw;
         }
+    }
+
+    /// <summary>An out-of-VRAM failure, alone or as one branch of two concurrent ones (<c>CfgBranchRunner</c>).</summary>
+    internal static bool IsOutOfVram(Exception error)
+    {
+        if (error is OutOfVramException) return true;
+        if (error is not AggregateException aggregate) return false;
+        foreach (Exception inner in aggregate.InnerExceptions)
+            if (inner is OutOfVramException) return true;
+        return false;
     }
 
     /// <summary>Escalating a VRAM policy and retrying CANNOT live here, despite this being the engine's OOM boundary.</summary>
