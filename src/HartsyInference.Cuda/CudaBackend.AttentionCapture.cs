@@ -13,13 +13,22 @@ public sealed partial class CudaBackend
     private const int CaptureMinTokens = 1024, CaptureHeads = 4, CaptureQueryRows = 512;
     private readonly Dictionary<string, int> _captureOrdinals = new(StringComparer.Ordinal);
     private readonly object _captureGate = new();
+    private bool _captureSkipNoted;
 
     /// <summary>Counts the call against its shape in <c>calls.tsv</c> and, when its ordinal is listed, writes batch 0's Q (four
     /// evenly spaced heads, up to 512 evenly spaced rows), K and V (those heads' key/value heads, every valid key) in the call's
-    /// dtype with a JSON description. Skipped while the stream captures: a graph cannot read back.</summary>
+    /// dtype with a JSON description. Skipped while the stream captures: a graph cannot read back. A failed write is logged and
+    /// the call runs on.</summary>
     private void CaptureAttentionCall(in AttentionCall call, string dir)
     {
-        if (Math.Min(call.QueryTokens, call.ValidKvLength) < CaptureMinTokens || StreamIsCapturing()) return;
+        if (Math.Min(call.QueryTokens, call.ValidKvLength) < CaptureMinTokens) return;
+        if (StreamIsCapturing())
+        {
+            if (!_captureSkipNoted)
+                Logs.Warning("[attention capture] calls inside a captured graph are neither listed nor written; set numerics.ditGraph=false.");
+            _captureSkipNoted = true;
+            return;
+        }
         string shape = string.Create(CultureInfo.InvariantCulture,
             $"{call.Query.DType}-b{call.Batch}-h{call.Heads}x{call.KvHeads}-q{call.QueryTokens}-k{call.ValidKvLength}-d{call.QkHeadDim}-{call.Query.Layout}");
         int ordinal;
@@ -31,7 +40,19 @@ public sealed partial class CudaBackend
             File.AppendAllText(Path.Combine(dir, "calls.tsv"), string.Create(CultureInfo.InvariantCulture,
                 $"{shape}\t{ordinal}\t{call.Route}\t{(call.Mask.Bias is null ? "none" : "bias")}\t{call.Scale:R}\n"));
         }
-        if (!CaptureWanted(shape, ordinal)) return;
+        if (!CaptureWanted(EngineKnobs.AttentionCaptureCalls.Value, shape, ordinal)) return;
+        try
+        {
+            WriteCapture(in call, dir, shape, ordinal);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            Logs.Warning($"[attention capture] {shape} call {ordinal} not written: {ex.Message}");
+        }
+    }
+
+    private void WriteCapture(in AttentionCall call, string dir, string shape, int ordinal)
+    {
         using OpScope _op = EnterOp();
         _stream.Synchronize();
         int group = call.KvGroup;
@@ -58,11 +79,11 @@ public sealed partial class CudaBackend
         Logs.Info($"[attention capture] {shape} call {ordinal} -> {target}");
     }
 
-    /// <summary>Whether the knob lists <paramref name="ordinal"/> for <paramref name="shape"/>: an entry is an ordinal for every
-    /// shape, or <c>text@ordinal</c> for the shapes containing <c>text</c>.</summary>
-    private static bool CaptureWanted(string shape, int ordinal)
+    /// <summary>Whether <paramref name="list"/> names <paramref name="ordinal"/> for <paramref name="shape"/>: an entry is an ordinal
+    /// for every shape, or <c>text@ordinal</c> for the shapes containing <c>text</c>; an entry that is not one is ignored.</summary>
+    internal static bool CaptureWanted(string? list, string shape, int ordinal)
     {
-        if (EngineKnobs.AttentionCaptureCalls.Value is not { Length: > 0 } list) return false;
+        if (list is not { Length: > 0 }) return false;
         foreach (string item in list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             int at = item.LastIndexOf('@');
@@ -74,7 +95,7 @@ public sealed partial class CudaBackend
     }
 
     /// <summary><paramref name="count"/> indices evenly spaced over <c>[0, extent)</c>, first and last included.</summary>
-    private static int[] Spread(int extent, int count)
+    internal static int[] Spread(int extent, int count)
     {
         int n = Math.Min(extent, count);
         if (n <= 1) return [0];

@@ -22,7 +22,9 @@ public static partial class EngineKnobs
         Str("diagnostics.attentionCaptureDir", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Directory where CUDA attention calls of at least 1024 query rows and keys are listed per shape (calls.tsv), and the calls diagnostics.attentionCaptureCalls names have four heads of Q, K and V written; unset captures nothing.");
 
     /// <summary>Ordinals, per call shape, of the attention calls <see cref="AttentionCaptureDir"/> writes, comma-separated; an entry
-    /// <c>text@n</c> applies only to the shapes whose calls.tsv name contains <c>text</c>.</summary>
+    /// <c>text@n</c> applies only to the shapes whose calls.tsv name contains <c>text</c>. Ordinals count eager calls in one process,
+    /// and a call a row re-issues through another entry (the token-major permute row) is counted under both shapes. A bias is
+    /// recorded in meta.json, not written.</summary>
     public static readonly Knob<string?> AttentionCaptureCalls =
         Str("diagnostics.attentionCaptureCalls", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Ordinals, per call shape, of the attention calls diagnostics.attentionCaptureDir writes, comma-separated; text@n limits an entry to the shapes containing text; unset only lists them.");
 

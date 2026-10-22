@@ -12,6 +12,27 @@ namespace HartsyInference.Cuda.Tests;
 [Collection("CudaSerial")]
 public sealed class AttentionCaptureTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData("3", "F16-b1-h24x24-q4096-k4096-d128-HeadMajor", 3, true)]
+    [InlineData("3", "F16-b1-h24x24-q4096-k4096-d128-HeadMajor", 2, false)]
+    [InlineData("q4096@2", "F16-b1-h24x24-q4096-k4096-d128-HeadMajor", 2, true)]
+    [InlineData("q4096@2", "F16-b1-h24x24-q8192-k8192-d128-HeadMajor", 2, false)]
+    [InlineData(" 7 , q4096@2 ", "F16-b1-h24x24-q4096-k4096-d128-HeadMajor", 7, true)]
+    [InlineData("x,@,q4096@,q4096@two,,", "F16-b1-h24x24-q4096-k4096-d128-HeadMajor", 0, false)]
+    [InlineData("@5", "F16-b1-h24x24-q4096-k4096-d128-HeadMajor", 5, true)]
+    [InlineData(null, "F16-b1-h24x24-q4096-k4096-d128-HeadMajor", 0, false)]
+    public void CaptureWanted_ReadsOrdinalsAndShapeScopedOrdinals(string? list, string shape, int ordinal, bool wanted) =>
+        Assert.Equal(wanted, CudaBackend.CaptureWanted(list, shape, ordinal));
+
+    [Theory]
+    [InlineData(1, 4, new[] { 0 })]
+    [InlineData(3, 4, new[] { 0, 1, 2 })]
+    [InlineData(24, 4, new[] { 0, 7, 15, 23 })]
+    [InlineData(6, 4, new[] { 0, 1, 3, 5 })]
+    [InlineData(1100, 2, new[] { 0, 1099 })]
+    public void Spread_KeepsTheEndsAndSpacesTheRest(int extent, int count, int[] expected) =>
+        Assert.Equal(expected, CudaBackend.Spread(extent, count));
+
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ListedCalls_WriteTheOperandsRowsAndNothingUnderCapture()
