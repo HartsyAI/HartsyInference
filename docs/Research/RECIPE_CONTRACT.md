@@ -209,8 +209,10 @@ Audio speech and transcription recipes are not yet typed; their defaults stay in
 
 ## Verification
 
-Every value above was checked against the code and SwarmUI's source, and the CPU lane is green. No generation has
-run on real weights since the defaults moved. The GPU passes and the live SwarmUI checks that close this are in
+Every value above was checked against the code and SwarmUI's source, and the CPU lane is green. Later real-weight
+runs (the attention work in `alpha.387`, for example) used the regression cases, which pin their settings, so none
+has generated with a recipe default left unset, and no live SwarmUI session has checked them. The GPU passes and the
+live SwarmUI checks that close this are in
 [RECIPE_DEFAULTS_GPU_HANDOFF.md](RECIPE_DEFAULTS_GPU_HANDOFF.md).
 
 ## Open

@@ -3,7 +3,8 @@
 State: the recipe-contract work and the SwarmUI-aligned defaults are all merged on `main` (HartsyInference #508–#522,
 SwarmUI-HartsyInference-Backend #38). Everything was verified on the CPU lane only: release build clean, unit tests green
 apart from `EngineReleaseDeviceGateTests.FreeMemory_WaitsForAnAudioJob…`, which also fails on `main` without a GPU.
-**No generation has run on real weights since these changes. Do not claim parity or quality.** The contract and the
+**The defaults passes below have not run: later GPU runs used the pinned regression cases, so none generated with a
+changed default left unset. Do not claim parity or quality for them.** The contract and the
 per-family ledger, with every value's SwarmUI source, are in [RECIPE_CONTRACT.md](RECIPE_CONTRACT.md).
 
 Commits:
