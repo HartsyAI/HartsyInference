@@ -80,21 +80,13 @@ __device__ __forceinline__ unsigned v2_pack4(int a, int b, int c, int d)
     return (unsigned)(a & 0xff) | ((unsigned)(b & 0xff) << 8) | ((unsigned)(c & 0xff) << 16) | ((unsigned)(d & 0xff) << 24);
 }
 
-// An exact int -> float for |x| < 2^22 on the FP32 pipe: the conversion units run at a quarter rate below sm_89.
-__device__ __forceinline__ float v2_i2f(int x)
+// Four integers saturated to [0, 255] and packed with a in the low byte (the emulator's ToU8 after a round half to even).
+__device__ __forceinline__ unsigned v2_pack_u8(int a, int b, int c, int d)
 {
-    return __fsub_rn(__int_as_float(x + 0x4B400000), 12582912.0f);
-}
-
-// The u8 byte of x >= 0 rounded half to even, in the low byte (x + 2^23 lands the integer in the low mantissa bits).
-__device__ __forceinline__ unsigned v2_u8_bits(float x)
-{
-    return __float_as_uint(__fadd_rn(fminf(x, 255.0f), 8388608.0f));
-}
-
-__device__ __forceinline__ unsigned v2_pack_low_bytes(unsigned a, unsigned b, unsigned c, unsigned d)
-{
-    return __byte_perm(__byte_perm(a, b, 0x0040), __byte_perm(c, d, 0x0040), 0x5410);
+    unsigned hi, r;
+    asm("cvt.pack.sat.u8.s32.b32 %0, %1, %2, 0;" : "=r"(hi) : "r"(d), "r"(c));
+    asm("cvt.pack.sat.u8.s32.b32 %0, %1, %2, %3;" : "=r"(r) : "r"(b), "r"(a), "r"(hi));
+    return r;
 }
 
 __device__ __forceinline__ bool v2_finite(float x)
@@ -475,21 +467,21 @@ __device__ __forceinline__ void v2_u8_probabilities(const int (&s)[16][4], float
     #pragma unroll
     for (unsigned kc = 0; kc < 4; kc++)
     {
-        unsigned u[4][4];
+        int u[4][4];
         #pragma unroll
         for (unsigned n = 0; n < 4; n++)
             #pragma unroll
             for (unsigned e = 0; e < 4; e++)
             {
                 const int x = s[4 * kc + n][e];
-                const float score = __fmul_rn(v2_i2f(x), e < 2 ? f0 : f1);
-                const unsigned bits = v2_u8_bits(v2_ex2(__fsub_rn(score, e < 2 ? tm0 : tm1)));
-                u[n][e] = MASKED && x == V2_INT_MIN ? 0u : bits;
+                const float score = __fmul_rn(__int2float_rn(x), e < 2 ? f0 : f1);
+                const int q = __float2int_rn(v2_ex2(__fsub_rn(score, e < 2 ? tm0 : tm1)));
+                u[n][e] = MASKED && x == V2_INT_MIN ? 0 : q;
             }
-        pa[kc][0] = v2_pack_low_bytes(u[0][0], u[0][1], u[1][0], u[1][1]);
-        pa[kc][1] = v2_pack_low_bytes(u[0][2], u[0][3], u[1][2], u[1][3]);
-        pa[kc][2] = v2_pack_low_bytes(u[2][0], u[2][1], u[3][0], u[3][1]);
-        pa[kc][3] = v2_pack_low_bytes(u[2][2], u[2][3], u[3][2], u[3][3]);
+        pa[kc][0] = v2_pack_u8(u[0][0], u[0][1], u[1][0], u[1][1]);
+        pa[kc][1] = v2_pack_u8(u[0][2], u[0][3], u[1][2], u[1][3]);
+        pa[kc][2] = v2_pack_u8(u[2][0], u[2][1], u[3][0], u[3][1]);
+        pa[kc][3] = v2_pack_u8(u[2][2], u[2][3], u[3][2], u[3][3]);
         sum0 = __dp4a(pa[kc][0], 0x01010101u, sum0);
         sum0 = __dp4a(pa[kc][2], 0x01010101u, sum0);
         sum1 = __dp4a(pa[kc][1], 0x01010101u, sum1);
@@ -510,7 +502,7 @@ __device__ __forceinline__ void v2_f16_probabilities(const int (&s)[16][4], floa
         for (unsigned e = 0; e < 4; e++)
         {
             const int x = s[nt][e];
-            const __half h = __float2half_rn(v2_ex2(__fsub_rn(__fmul_rn(v2_i2f(x), e < 2 ? f0 : f1), e < 2 ? m0 : m1)));
+            const __half h = __float2half_rn(v2_ex2(__fsub_rn(__fmul_rn(__int2float_rn(x), e < 2 ? f0 : f1), e < 2 ? m0 : m1)));
             p[e] = MASKED && x == V2_INT_MIN ? __float2half_rn(0.0f) : h;
         }
         sum0 += __half2float(p[0]) + __half2float(p[1]);
@@ -668,8 +660,8 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
                 mx1 = max(mx1, s[nt][2 + e]);
             }
         }
-        float tileMax0 = mx0 == V2_INT_MIN ? V2_NEG_INF : __fmul_rn(v2_i2f(mx0), f0);
-        float tileMax1 = mx1 == V2_INT_MIN ? V2_NEG_INF : __fmul_rn(v2_i2f(mx1), f1);
+        float tileMax0 = mx0 == V2_INT_MIN ? V2_NEG_INF : __fmul_rn(__int2float_rn(mx0), f0);
+        float tileMax1 = mx1 == V2_INT_MIN ? V2_NEG_INF : __fmul_rn(__int2float_rn(mx1), f1);
         #pragma unroll
         for (unsigned off = 1; off <= 2; off <<= 1)
         {
@@ -699,8 +691,8 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
             tileScale1 = tm1 < m1 ? small1 : 1.0f;
             m0 = fmaxf(m0, tm0);
             m1 = fmaxf(m1, tm1);
-            d0 = __fmaf_rn(v2_i2f((int)sum0), tileScale0, __fmul_rn(d0, oScale0));
-            d1 = __fmaf_rn(v2_i2f((int)sum1), tileScale1, __fmul_rn(d1, oScale1));
+            d0 = __fmaf_rn(__int2float_rn((int)sum0), tileScale0, __fmul_rn(d0, oScale0));
+            d1 = __fmaf_rn(__int2float_rn((int)sum1), tileScale1, __fmul_rn(d1, oScale1));
             if (TRACE && traced)
             {
                 #pragma unroll
@@ -791,10 +783,10 @@ __device__ __forceinline__ void v2_attn(OutT* __restrict__ out, V2View vo, const
                     sc2 = __fmul_rn(tileScale1, vs.x);
                     sc3 = __fmul_rn(tileScale1, vs.y);
                 }
-                o[dt][0] = __fmaf_rn(v2_i2f(acc[0]), sc0, o[dt][0]);
-                o[dt][1] = __fmaf_rn(v2_i2f(acc[1]), sc1, o[dt][1]);
-                o[dt][2] = __fmaf_rn(v2_i2f(acc[2]), sc2, o[dt][2]);
-                o[dt][3] = __fmaf_rn(v2_i2f(acc[3]), sc3, o[dt][3]);
+                o[dt][0] = __fmaf_rn(__int2float_rn(acc[0]), sc0, o[dt][0]);
+                o[dt][1] = __fmaf_rn(__int2float_rn(acc[1]), sc1, o[dt][1]);
+                o[dt][2] = __fmaf_rn(__int2float_rn(acc[2]), sc2, o[dt][2]);
+                o[dt][3] = __fmaf_rn(__int2float_rn(acc[3]), sc3, o[dt][3]);
             }
             else
             {
