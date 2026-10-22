@@ -47,11 +47,12 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
 
     public WanVideoConfig Config => _config;
 
-    /// <summary>The dtype a forward's attention and FFN branches compute in: <c>numerics.ditF16</c>'s for one timestep group of a
-    /// checkpoint whose branches fit F16 (<see cref="WanVideoConfig.F16Branches"/>) on a backend with F16 activations, else F32.
-    /// The residual stream is F32 either way.</summary>
+    /// <summary>The dtype a forward's attention and FFN branches compute in: under the opt-in <c>numerics.wanF16</c>,
+    /// <c>numerics.ditF16</c>'s for one timestep group of a single-expert checkpoint whose branches fit F16
+    /// (<see cref="WanVideoConfig.F16Branches"/>) on a backend with F16 activations, else F32. The residual stream is F32 either way.</summary>
     public DType BranchActivation(IBackend backend, bool singleGroup) =>
-        singleGroup && _config.F16Branches && backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
+        singleGroup && EngineKnobs.WanF16.Value && _config.F16Branches && !_config.IsMixtureOfExperts && backend.SupportsF16Activations
+            ? DitDtype.Act : DType.F32;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {

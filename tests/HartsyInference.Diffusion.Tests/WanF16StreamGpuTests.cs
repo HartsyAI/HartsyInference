@@ -11,12 +11,12 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Wan's F16 attention and FFN branches over the F32 residual stream (<c>numerics.ditF16</c>) on CUDA. One block at
+/// <summary>Wan's F16 attention and FFN branches over the F32 residual stream (the opt-in <c>numerics.wanF16</c>) on CUDA. One block at
 /// TI2V-5B geometry, fed a stream with the outlier channels the real residual carries, tracks its F32 twin, and its
 /// self-attention stays on cuDNN past the SageAttention knee, which an unrefused call at the same geometry reaches. With the
-/// switch off the transformer is the F32 path assembled from its parts, bit for bit; the forwards that stay F32 ignore the
-/// switch; a text K/V scope serves only forwards of its own dtype; and the debug dump records the F16 branches as F32 without
-/// moving the output.</summary>
+/// switch off, or with <c>numerics.ditF16</c> off, the transformer is the F32 path assembled from its parts, bit for bit; the
+/// forwards that stay F32 ignore the switch; a text K/V scope serves only forwards of its own dtype; and the debug dump records
+/// the F16 branches as F32 without moving the output.</summary>
 public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 {
     private const int GridH = 15, GridW = 26;   // 832×480 after the VAE and the patch
@@ -121,9 +121,11 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 
         float[] expected = F32Path(backend, cfg, w, latent, encoder, 500f);
         float[] off = Forward(false, () => transformer.Forward(backend, latent, encoder, 500f));
+        float[] ditOff = Forward(true, () => transformer.Forward(backend, latent, encoder, 500f), ditF16: false);
         float[] on = Forward(true, () => transformer.Forward(backend, latent, encoder, 500f));
 
         Assert.Equal(expected, off);
+        Assert.Equal(expected, ditOff);
         double rel = RelL2(on, expected);
         _output.WriteLine($"switch on vs the F32 path: relL2 {rel:E3}");
         Assert.True(rel > 0 && rel < 1e-2, $"With the switch on the forward is {rel:E3} from the F32 path; expected F16 rounding.");
@@ -208,8 +210,8 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         {
             float[] plain = Forward(true, () => transformer.Forward(backend, latent, encoder, 500f));
             float[] dumped;
-            using (KnobProfile.Create("wan-f16-dump").With(EngineKnobs.DitF16, true).With(EngineKnobs.WanDebugDir, dir)
-                .With(EngineKnobs.WanDebugTag, "").Push())
+            using (KnobProfile.Create("wan-f16-dump").With(EngineKnobs.DitF16, true).With(EngineKnobs.WanF16, true)
+                .With(EngineKnobs.WanDebugDir, dir).With(EngineKnobs.WanDebugTag, "").Push())
             using (Tensor velocity = transformer.Forward(backend, latent, encoder, 500f))
                 dumped = Read(velocity);
 
@@ -263,9 +265,11 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         return Read(velocity);
     }
 
-    private static float[] Forward(bool f16, Func<Tensor> run)
+    /// <summary>One forward with <c>numerics.wanF16</c> set to <paramref name="f16"/> and <c>numerics.ditF16</c> at its default, on.</summary>
+    private static float[] Forward(bool f16, Func<Tensor> run, bool ditF16 = true)
     {
-        using IDisposable knobs = KnobProfile.Create(f16 ? "wan-f16-on" : "wan-f16-off").With(EngineKnobs.DitF16, f16).Push();
+        using IDisposable knobs = KnobProfile.Create(f16 ? "wan-f16-on" : "wan-f16-off").With(EngineKnobs.DitF16, ditF16)
+            .With(EngineKnobs.WanF16, f16).Push();
         using Tensor velocity = run();
         return Read(velocity);
     }

@@ -112,9 +112,9 @@ public static class WanConfigDetector
         float guidance = audioInjectLayers.Length > 0 ? 2.0f : 5.0f;
         if (audioInjectLayers.Length > 0) cfgRescale = 1.0f;
 
-        // The geometries whose branch activations were measured inside F16: TI2V-5B, and the 14B T2V and concat I2V builds.
+        // The geometries whose branch activations were measured inside F16: TI2V-5B and the 14B T2V build.
         bool f16Branches = !i2vClip && !isAnimate && !isAnimate2 && vaceInChannels == 0 && audioInjectLayers.Length == 0
-            && (inner == 3072 && inChannels == 48 || inner == 5120);
+            && (inner == 3072 && inChannels == 48 || inner == 5120 && inChannels == 16);
 
         return new WanVideoConfig
         {
