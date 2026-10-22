@@ -1,6 +1,7 @@
 using Xunit;
 using Xunit.Abstractions;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -19,7 +20,8 @@ namespace HartsyInference.Video.Tests;
 /// per-block <see cref="CpKvExchange"/> K/V rendezvous, the G&gt;1 per-frame-timestep range slicing, and the
 /// pipeline's fork/gather/unpatchify path. The CP math is the identical kernels over identical values (the
 /// exchange is pure copies), so the transformer-level bar is a tiny max|diff| (GEMM row-tiling can differ at
-/// M=Sr vs M=S) and the pipeline-level bar is the CFG-parallel test's frame comparison.</summary>
+/// M=Sr vs M=S) and the pipeline-level bar is the CFG-parallel test's frame comparison. CP keeps the F32 block stream, so
+/// its single-backend baseline runs with <c>numerics.ditF16</c> off, and its own output must not move with the switch.</summary>
 public unsafe class ContextParallelWanTests
 {
     private readonly ITestOutputHelper _output;
@@ -76,30 +78,42 @@ public unsafe class ContextParallelWanTests
         backend1.PreloadWeights(transformer.EnumerateWeights());
         backend2.PreloadWeights(transformer.EnumerateWeights());
 
-        Tensor baseline = transformer.Forward(backend1, latent, prompt, timesteps);
+        Tensor baseline;
+        using (F32Stream())
+            baseline = transformer.Forward(backend1, latent, prompt, timesteps);
         _ = baseline.DataPointer;
 
         CpSequencePlan plan = CpSequencePlan.Create(gt, gh * gw, [1.0, 1.0]);
         _output.WriteLine($"plan: frames {plan.Ranks[0].FrameCount}+{plan.Ranks[1].FrameCount}, " +
             $"tokens {plan.Ranks[0].TokenCount}+{plan.Ranks[1].TokenCount}");
-        using CpKvExchange exchange = new(plan);
         transformer.PrewarmSequenceCaches(backend1, gt, gh, gw, prompt);
-        Tensor rank1Latent = CloneTensor(latent);
-        (Tensor local0, Tensor local1) = CfgBranchRunner.Run(
-            () => RankForward(transformer, backend1, latent, prompt, timesteps, 0, plan, exchange),
-            () => RankForward(transformer, backend2, rank1Latent, prompt, timesteps, 1, plan, exchange));
-        rank1Latent.Dispose();
-        Tensor full = WanDitOps.ConcatRows(local0, local1, cfg.OutChannels * pt * ph * pw);
-        local0.Dispose();
-        local1.Dispose();
-        Tensor cpOut = WanDitOps.Unpatchify(full, cfg.OutChannels, gt, gh, gw, cfg.PatchSize);
-        full.Dispose();
+        Tensor CpForward()
+        {
+            using CpKvExchange exchange = new(plan);
+            Tensor rank1Latent = CloneTensor(latent);
+            (Tensor local0, Tensor local1) = CfgBranchRunner.Run(
+                () => RankForward(transformer, backend1, latent, prompt, timesteps, 0, plan, exchange),
+                () => RankForward(transformer, backend2, rank1Latent, prompt, timesteps, 1, plan, exchange));
+            rank1Latent.Dispose();
+            Tensor full = WanDitOps.ConcatRows(local0, local1, cfg.OutChannels * pt * ph * pw);
+            local0.Dispose();
+            local1.Dispose();
+            Tensor velocity = WanDitOps.Unpatchify(full, cfg.OutChannels, gt, gh, gw, cfg.PatchSize);
+            full.Dispose();
+            return velocity;
+        }
+        Tensor cpOut = CpForward();
+        Tensor cpOutF32;
+        using (F32Stream())
+            cpOutF32 = CpForward();
 
+        Assert.Equal(0f, MaxAbsDiff(cpOutF32, cpOut));
         float maxDiff = MaxAbsDiff(baseline, cpOut);
         _output.WriteLine($"max |cp - baseline| = {maxDiff:E3}");
         Assert.True(maxDiff < 1e-4f, $"CP-split forward diverged from single-backend forward (max |diff| = {maxDiff:E3}).");
         baseline.Dispose();
         cpOut.Dispose();
+        cpOutF32.Dispose();
         latent.Dispose();
         prompt.Dispose();
     }
@@ -145,7 +159,10 @@ public unsafe class ContextParallelWanTests
         TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 3, CfgScale = 5, Seed = 42 };
 
         WanVideoPipeline sequential = new(backend1, transformer, vae, cfg);
-        (byte[][] baseline, int wBase, int hBase, _) = sequential.GenerateFromEmbeddings(promptEmbeds, negEmbeds, req, numFrames);
+        byte[][] baseline;
+        int wBase, hBase;
+        using (F32Stream())
+            (baseline, wBase, hBase, _) = sequential.GenerateFromEmbeddings(promptEmbeds, negEmbeds, req, numFrames);
         _output.WriteLine($"sequential: {baseline.Length} frames, {wBase}x{hBase}");
 
         WanVideoPipeline parallel = new(backend1, transformer, vae, cfg) { CpBackends = [backend1, backend2] };
@@ -168,6 +185,8 @@ public unsafe class ContextParallelWanTests
             Assert.True(maxByteDiff <= 1, $"frame {f} differs from sequential output by {maxByteDiff} grey levels.");
         }
     }
+
+    private static IDisposable F32Stream() => KnobProfile.Create("wan-cp-f32").With(EngineKnobs.DitF16, false).Push();
 
     private static Tensor RandTensor(long[] shape, int seed)
     {

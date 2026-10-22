@@ -91,7 +91,7 @@ public sealed unsafe class WanTextKvCacheTests
 
         List<float[]> expected = Steps(transformer, backend, latent, cond, uncond, timesteps);
         List<float[]> cached;
-        using (transformer.CacheTextCrossAttentionKv())
+        using (transformer.CacheTextCrossAttentionKv(DType.F32))
             cached = Steps(transformer, backend, latent, cond, uncond, timesteps);
 
         Assert.Equal(expected, cached);
@@ -103,11 +103,11 @@ public sealed unsafe class WanTextKvCacheTests
         WanVideoTransformer transformer = new(TinyConfig);
         transformer.LoadWeights(WanSyntheticWeights.BuildTransformer(TinyConfig));
 
-        IDisposable scope = transformer.CacheTextCrossAttentionKv();
-        Assert.Throws<InvalidOperationException>(() => transformer.CacheTextCrossAttentionKv());
+        IDisposable scope = transformer.CacheTextCrossAttentionKv(DType.F32);
+        Assert.Throws<InvalidOperationException>(() => transformer.CacheTextCrossAttentionKv(DType.F32));
         scope.Dispose();
         scope.Dispose();
-        transformer.CacheTextCrossAttentionKv().Dispose();
+        transformer.CacheTextCrossAttentionKv(DType.F32).Dispose();
     }
 
     private static List<float[]> Steps(WanVideoTransformer transformer, IBackend backend, Tensor latent, Tensor cond, Tensor uncond,

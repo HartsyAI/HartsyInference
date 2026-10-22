@@ -33,7 +33,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     private (int T, int H, int W) _ropeKey = (-1, -1, -1);
     private Tensor? _cosC, _sinC;
     private readonly Dictionary<Tensor, (Tensor Ctx, int ImageContextLen, Tensor? ImgKey)> _ctxCache = new(ReferenceEqualityComparer.Instance);
-    private ConstantKvCache[]? _textKv;
+    private TextKvScope? _textKv;
 
     public WanVideoTransformer(WanVideoConfig config)
     {
@@ -46,6 +46,11 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     }
 
     public WanVideoConfig Config => _config;
+
+    /// <summary>The dtype a forward's blocks carry: <c>numerics.ditF16</c>'s for one timestep group on a backend with F16
+    /// activations, else F32.</summary>
+    public static DType BlockActivation(IBackend backend, bool singleGroup) =>
+        singleGroup && backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
@@ -133,10 +138,13 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
 
         BuildRopeCache(gt, gh, gw);
         (Tensor cos, Tensor sin) = (_cosC!, _sinC!);
+        // The image branch, context parallelism's K/V exchange and the step cache's residuals stay F32.
+        DType act = imageEmbeds is null && cp is null && stepCache is null ? BlockActivation(backend, g == 1) : DType.F32;
 
         WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]
         WanVideoDebugDump.Dump("patch_embed", hidden);
+        hidden = DtypeCastHelper.EnsureDtype(backend, hidden, act);
         WanVideoDebugDump.Dump("in_encoder", encoder);
         if (WanVideoDebugDump.Enabled)
         {
@@ -175,7 +183,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         (Tensor encoderProj, int imageContextLen) = GetOrBuildContext(backend, encoder, imageEmbeds, dim);
 
         Tensor cur = hidden;
-        ConstantKvCache[]? textKv = _textKv;
+        ConstantKvCache[]? textKv = _textKv is { } scope && scope.Activation == act ? scope.Caches : null;
         _fwdCounter++;
         string? vramLog = EngineKnobs.WanVram.Value;
         IKvRewrite? kvRewrite = cp is null ? null : new CpExchangeRewrite(cp.Exchange, cp.Rank, 0);
@@ -229,6 +237,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         }
         timestepProj.Dispose();   // cos/sin/encoderProj live in the per-generation caches — not per-forward temporaries
 
+        cur = DtypeCastHelper.EnsureF32(backend, cur);
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, sEff, dim, _config.Eps, tokensPerGroup);
         cur.Dispose();
         temb.Dispose();
@@ -245,28 +254,35 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     }
 
     /// <summary>Keeps every block's text cross-attention K/V, per backend and context, pinned across the per-step activation
-    /// sweep until the returned scope is disposed. The contexts must not be rewritten in place while it is open.</summary>
-    public IDisposable CacheTextCrossAttentionKv()
+    /// sweep until the returned scope is disposed, for the forwards whose blocks carry <paramref name="activation"/>. The contexts
+    /// must not be rewritten in place while it is open.</summary>
+    public IDisposable CacheTextCrossAttentionKv(DType activation)
     {
         ConstantKvCache[] caches = new ConstantKvCache[_blocks.Length];
         for (int i = 0; i < caches.Length; i++) caches[i] = new ConstantKvCache(contextsPerBackend: 2, pinned: true);
-        if (Interlocked.CompareExchange(ref _textKv, caches, null) is not null)
+        TextKvScope scope = new(this, caches, activation);
+        if (Interlocked.CompareExchange(ref _textKv, scope, null) is not null)
             throw new InvalidOperationException("The text cross-attention K/V cache is already open.");
-        return new TextKvScope(this, caches);
+        return scope;
     }
 
-    /// <summary>Device bytes the cache holds for <paramref name="contexts"/> contexts of <paramref name="contextTokens"/> rows on one backend.</summary>
-    public long TextCrossAttentionKvBytes(int contextTokens, int contexts) =>
-        (long)_blocks.Length * contexts * 2L * contextTokens * _config.InnerDim * sizeof(float);
+    /// <summary>Device bytes the cache holds for <paramref name="contexts"/> contexts of <paramref name="contextTokens"/> rows on one
+    /// backend, in the <paramref name="activation"/> dtype.</summary>
+    public long TextCrossAttentionKvBytes(int contextTokens, int contexts, DType activation) =>
+        (long)_blocks.Length * contexts * 2L * contextTokens * _config.InnerDim * activation.SizeInBytes;
 
-    private sealed class TextKvScope(WanVideoTransformer owner, ConstantKvCache[] caches) : IDisposable
+    private sealed class TextKvScope(WanVideoTransformer owner, ConstantKvCache[] caches, DType activation) : IDisposable
     {
         private int _disposed;
+
+        public ConstantKvCache[] Caches => caches;
+
+        public DType Activation => activation;
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            Interlocked.CompareExchange(ref owner._textKv, null, caches);
+            Interlocked.CompareExchange(ref owner._textKv, null, this);
             foreach (ConstantKvCache cache in caches) cache.Clear();
         }
     }

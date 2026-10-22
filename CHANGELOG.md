@@ -28,6 +28,13 @@ stable release will require. Dates are UTC.
   a Qwen-Image context-parallel rank's local queries included) on CUDA's cuDNN row and on Vulkan; no Vulkan generation was
   compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention output on the
   token-major entry again.
+- **Faster: Wan's DiT blocks carry F16 activations on CUDA.** A forward with one timestep group and no image context
+  (text-to-video, and the concat image-to-video of the A14B models) casts the patch-embedded stream to F16 once; norms,
+  RoPE, attention, the FFN and the gated residuals then read and write F16 with F32 accumulation, while the modulation,
+  norm weights and RoPE tables stay F32 and the final layer runs on an F32 cast. The text cross-attention K/V cache holds
+  F16 for those forwards. Per-frame timesteps, the CLIP image branch, context parallelism, the step cache and the S2V,
+  VACE, Animate and Matrix-Game models keep F32, as does `numerics.ditF16=false` (bit for bit) and the `reference`
+  profile. Self-attention over 8192 or more tokens now takes the default F16 SageAttention row, as the other F16 DiTs do.
 
 ## alpha.386
 

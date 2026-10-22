@@ -8,7 +8,8 @@ using Xunit;
 namespace HartsyInference.Diffusion.Tests.Attention;
 
 /// <summary>The attention configs the Wan block, the S2V audio injector and the Matrix-Game 3 action module build, which the CPU
-/// goldens cannot see: <c>allowF16</c>, the F32 compute dtype, the dense route and the QK norm.</summary>
+/// goldens cannot see: <c>allowF16</c>, the compute dtype, the dense route and the QK norm. The block's F16 stream attends through
+/// F16 twins of its self and cross stages; the image branch has none, since an image context keeps the stream F32.</summary>
 public sealed class WanAttentionConfigPinTests
 {
     private const int Heads = 2, HeadDim = 16, Dim = Heads * HeadDim;
@@ -37,7 +38,7 @@ public sealed class WanAttentionConfigPinTests
         return block;
     }
 
-    private static void AssertWanConfig(AttentionLayerConfig? config)
+    private static void AssertWanConfig(AttentionLayerConfig? config, DType compute)
     {
         Assert.NotNull(config);
         Assert.Equal(Heads, config.Heads);
@@ -46,7 +47,7 @@ public sealed class WanAttentionConfigPinTests
         Assert.Equal(AttentionQkNorm.FullWidthRms, config.QkNorm);
         Assert.Equal(AttentionProjection.PerWeight, config.Projection);
         Assert.Equal(AttentionRoute.Dense, config.TokenMajorRoute);
-        Assert.Equal(DType.F32, config.ComputeDType);
+        Assert.Equal(compute, config.ComputeDType);
         Assert.True(config.AllowF16);
         Assert.Equal(0f, config.Scale);
     }
@@ -54,14 +55,16 @@ public sealed class WanAttentionConfigPinTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void TheWanBlockAttendsDenseF32WithAllowF16OnSelfAndCross(bool image)
+    public void TheWanBlockAttendsDenseWithAllowF16InF32AndThroughF16Twins(bool image)
     {
         WanVideoBlock block = Block(image);
 
-        AssertWanConfig(block.SelfAttentionStage?.Config);
-        AssertWanConfig(block.CrossAttentionStage?.Config);
+        AssertWanConfig(block.SelfAttentionStage?.Config, DType.F32);
+        AssertWanConfig(block.CrossAttentionStage?.Config, DType.F32);
+        AssertWanConfig(block.SelfAttentionF16Stage?.Config, DType.F16);
+        AssertWanConfig(block.CrossAttentionF16Stage?.Config, DType.F16);
         Assert.Equal(image, block.ImageAttentionStage is not null);
-        if (image) AssertWanConfig(block.ImageAttentionStage?.Config);
+        if (image) AssertWanConfig(block.ImageAttentionStage?.Config, DType.F32);
     }
 
     [Fact]

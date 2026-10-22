@@ -23,11 +23,13 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     private Tensor? _ffProjW, _ffProjB, _ffOutW, _ffOutB;
     // I2V image cross-attention KV (cross-attn to CLIP image context); present only when the checkpoint ships them.
     private Tensor? _addK, _addKB, _addV, _addVB, _normAddedK;
-    private AttentionLayer? _selfAttention, _crossAttention, _imageAttention;
+    private AttentionLayer? _selfAttention, _crossAttention, _imageAttention, _selfAttention16, _crossAttention16;
 
     internal AttentionLayer? SelfAttentionStage => _selfAttention;
     internal AttentionLayer? CrossAttentionStage => _crossAttention;
     internal AttentionLayer? ImageAttentionStage => _imageAttention;
+    internal AttentionLayer? SelfAttentionF16Stage => _selfAttention16;
+    internal AttentionLayer? CrossAttentionF16Stage => _crossAttention16;
 
     public WanVideoBlock(WanVideoConfig c, bool crossAttnNorm)
     {
@@ -69,6 +71,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
             Heads = _heads, KvHeads = _heads, HeadDim = _headDim, QkNorm = AttentionQkNorm.FullWidthRms, ComputeDType = DType.F32,
             AllowF16 = true,
         };
+        // F16 is named rather than followed from the input: the text context the cross-attention K/V project stays F32.
+        AttentionLayerConfig config16 = config with { ComputeDType = DType.F16 };
         AttentionLayerWeights Weights(int i) => new()
         {
             Query = _q[i], QueryBias = _qB[i], Key = _k[i], KeyBias = _kB[i], Value = _v[i], ValueBias = _vB[i], Output = _o[i],
@@ -76,6 +80,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         };
         _selfAttention = new AttentionLayer(config, Weights(0));
         _crossAttention = new AttentionLayer(config, Weights(1));
+        _selfAttention16 = new AttentionLayer(config16, Weights(0));
+        _crossAttention16 = new AttentionLayer(config16, Weights(1));
         _imageAttention = _addK is null ? null : new AttentionLayer(config, new AttentionLayerWeights
         {
             Key = _addK, KeyBias = _addKB, Value = _addV, ValueBias = _addVB, KeyNorm = _normAddedK, KeyNormEps = _eps,
@@ -120,13 +126,20 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// driving stream's re-projected K/V; <paramref name="selfAttnKvCapture"/> hands the caller this block's
     /// self-attention input (the Animate-2 driving prepass, which is otherwise an ordinary block forward).
     /// <paramref name="selfAttnKvRewrite"/> trades the local K/V for the full sequence's (context parallel).
-    /// <paramref name="textKv"/> keeps the text cross-attention K/V across forwards; it is used only without an image context.</summary>
+    /// <paramref name="textKv"/> keeps the text cross-attention K/V across forwards; it is used only without an image context.
+    /// <para><paramref name="hidden"/> is F32, or F16 for the plain single-group forward; every activation follows it, while the
+    /// modulation, the norm weights and the RoPE tables stay F32.</para></summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
         Action<Tensor>? postSelfAttnHook = null, IKvRewrite? selfAttnKvRewrite = null,
         WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? selfAttnKvCapture = null, ICachedKv? textKv = null)
     {
         int s = (int)hidden.Shape[0];
+        if (hidden.DType != DType.F32 && (hidden.DType != DType.F16 || tokensPerGroup != s || temb.Shape[0] != 1 || imageContextLen != 0
+            || postCrossAttnHook is not null || selfAttnMask is not null || postSelfAttnHook is not null || selfAttnKvRewrite is not null
+            || animate2 is not null || selfAttnKvCapture is not null || CrossAttnResidualNormed))
+            throw new NotSupportedException(
+                $"A {hidden.DType} Wan stream runs one timestep group with no image context, mask, hook, K/V rewrite or Animate-2 splice.");
         // The dump wants the raw scale rows.
         bool scalePlusOne = tokensPerGroup == s && temb.Shape[0] == 1 && !WanVideoDebugDump.Enabled;
         (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb, scalePlusOne);
@@ -184,6 +197,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         };
         if (animate2 is null)
         {
+            if (input.DType == DType.F16)
+                return _selfAttention16!.Forward(backend, input, input, in context);
             if (tap is not null || !LinearsCastInputToF16(backend, _q[0]!, _k[0]!, _v[0]!))
                 return _selfAttention!.Forward(backend, input, input, in context);
             // One cast for the three projections, each of which would cast its F32 input with the same kernel.
@@ -343,7 +358,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         int l = (int)encoder.Shape[0];
         int textLen = l - imageContextLen;
         TensorShape flatShape = new(sq, _dim);
-        AttentionLayer main = _crossAttention!;
+        AttentionLayer main = qInput.DType == DType.F16 ? _crossAttention16! : _crossAttention!;
 
         Tensor qMh = main.ProjectQueryHeadMajor(backend, qInput, releaseInput: false, default);
 
@@ -379,10 +394,10 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         return o;
     }
 
-    /// <summary>Activation dtype for the FFN's big [s, ffn_dim] intermediate — <c>DType.F16</c> halves its
+    /// <summary>Activation dtype for an F32 stream's FFN [s, ffn_dim] intermediate — <c>DType.F16</c> halves its
     /// bandwidth (the dominant per-block activation), F32-accumulated in the GEMMs, tiny cast boundaries. Default
     /// F32 keeps every existing caller (the whole video fleet) byte-identical; opt-in models (Matrix-Game 2.0) set
-    /// it to <see cref="DiTBlocks.DitDtype.Act"/>. QK/cross-attn already run F16 via <c>allowF16</c> SDPA.</summary>
+    /// it to <see cref="DiTBlocks.DitDtype.Act"/>. An F16 stream's FFN is F16 regardless.</summary>
     internal DType FfnDtype = DType.F32;
 
     /// <summary>When true, the cross-attention residual is built on the NORMED hidden state (Matrix-Game 3.0's
@@ -393,7 +408,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     private Tensor Ffn(IBackend backend, Tensor x, int s)
     {
         int inner = (int)_ffProjW!.Shape[0];
-        if (FfnDtype == DType.F16 && backend.SupportsF16Activations)
+        if (x.DType == DType.F32 && FfnDtype == DType.F16 && backend.SupportsF16Activations)
         {
             Tensor xF16 = new Tensor(x.Shape, DType.F16); backend.CastToF16(xF16, x);
             Tensor projH = new Tensor(new TensorShape(s, inner), DType.F16); backend.Linear(projH, xF16, _ffProjW!, _ffProjB);
@@ -405,9 +420,9 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
             outH.Dispose();
             return outF;
         }
-        Tensor proj = new Tensor(new TensorShape(s, inner), DType.F32); backend.Linear(proj, x, _ffProjW!, _ffProjB);
-        Tensor act = new Tensor(proj.Shape, DType.F32); backend.Gelu(act, proj); proj.Dispose();
-        Tensor outT = new Tensor(new TensorShape(s, _dim), DType.F32); backend.Linear(outT, act, _ffOutW!, _ffOutB);
+        Tensor proj = new Tensor(new TensorShape(s, inner), x.DType); backend.Linear(proj, x, _ffProjW!, _ffProjB);
+        Tensor act = new Tensor(proj.Shape, x.DType); backend.Gelu(act, proj); proj.Dispose();
+        Tensor outT = new Tensor(new TensorShape(s, _dim), x.DType); backend.Linear(outT, act, _ffOutW!, _ffOutB);
         act.Dispose();
         return outT;
     }
@@ -485,7 +500,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// the rare affine-without-bias case keeps the CPU reference.</summary>
     private Tensor LayerNorm(IBackend backend, Tensor x, Tensor? weight, Tensor? bias, int s)
     {
-        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+        Tensor o = new Tensor(new TensorShape(s, _dim), x.DType);
         // No-affine (n1/n3): direct GPU op. Affine (n2): normalize on GPU then apply weight/bias as a broadcast
         // affine on GPU (backend.LayerNorm has no CUDA kernel, but LayerNormNoAffine + AffineBroadcastLastDim do,
         // so we stay GPU-resident). weight/bias are [dim] = [1, dim] broadcast over the sequence. The affine step
@@ -496,7 +511,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
             backend.LayerNormNoAffine(o, x, _eps);
             return o;
         }
-        using Tensor normed = new Tensor(new TensorShape(s, _dim), DType.F32);
+        using Tensor normed = new Tensor(new TensorShape(s, _dim), x.DType);
         backend.LayerNormNoAffine(normed, x, _eps);
         backend.AffineBroadcastLastDim(o, normed, weight, bias);
         return o;
@@ -513,7 +528,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         {
             using Tensor? scaleP1 = scalePlusOne ? null : new Tensor(scale.Shape, DType.F32);
             if (scaleP1 is not null) backend.AddScalar(scaleP1, scale, 1.0f);           // (1 + scale)
-            Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+            Tensor o = new Tensor(new TensorShape(s, _dim), x.DType);
             backend.AffineBroadcastLastDim(o, x, scaleP1 ?? scale, shift);   // o = x·(1+scale) + shift  (non-in-place)
             x.Dispose();
             return o;
@@ -546,7 +561,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// G=1 is GPU-resident via <see cref="IBackend.GatedResidualLastDim"/>; multi-group TI2V keeps the CPU reference.</summary>
     private Tensor GatedAdd(IBackend backend, Tensor residual, Tensor value, Tensor gate, int s, int tokensPerGroup)
     {
-        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+        Tensor o = new Tensor(new TensorShape(s, _dim), residual.DType);
         if (tokensPerGroup == s)   // G == 1: gate is [1, dim]
         {
             backend.GatedResidualLastDim(o, residual, value, gate);
@@ -589,7 +604,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
 
     private Tensor AddRows(IBackend backend, Tensor a, Tensor b, int s)
     {
-        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+        Tensor o = new Tensor(new TensorShape(s, _dim), a.DType);
         backend.GatedResidualLastDim(o, a, b, Ones());   // a + 1·b  (GPU)
         return o;
     }
