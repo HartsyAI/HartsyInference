@@ -22,6 +22,10 @@
 # stream (seed 42) and the head build scores those same tokens, so a logit shift that has not yet flipped a token still
 # shows. `identical` needs every log-probability bit-equal; `bounded` needs mean and max |Δ log p| within --logp-floor
 # (top-token flips are reported there, not enforced).
+# `--probe` adds the teacher-forced denoiser probe to image and video cases, for models whose trajectories are too chaotic
+# for SSIM: the base build records the denoiser's conditioning, inputs and outputs at the probed steps (seed 42), the head
+# build runs one more forward there on those inputs, and the report lists relL2 and cos per step and output. It is judged
+# only against --probe-floor (max relL2); --probe-only skips the seed series and runs the probe alone.
 #
 # Arms alternate seed by seed (A s0, B s0, A s1, B s1, …) so thermal drift and page-cache state land on both equally.
 set -uo pipefail
@@ -50,6 +54,10 @@ FRESH=0
 SPEED_TOL=5
 TIMEOUT=1800
 LOGP_FLOOR="0.02,0.2"   # bounded text: mean and max |Δ log p| in nats over the forced tokens
+PROBE=0
+PROBE_ONLY=0
+PROBE_FLOOR=""
+PROBE_STEPS=""
 # Bumped whenever what a digest covers changes, so a cached run is regenerated instead of compared across formats.
 # 2: every frame of a video (and its audio), not just the first file found.
 DIGEST_FORMAT=2
@@ -72,6 +80,10 @@ while [ $# -gt 0 ]; do
         --speed-tolerance) SPEED_TOL="$2"; shift 2 ;;
         --timeout)  TIMEOUT="$2"; shift 2 ;;
         --logp-floor) LOGP_FLOOR="$2"; shift 2 ;;
+        --probe)    PROBE=1; shift ;;
+        --probe-only) PROBE=1; PROBE_ONLY=1; shift ;;
+        --probe-floor) PROBE_FLOOR="$2"; shift 2 ;;
+        --probe-steps) PROBE_STEPS="$2"; shift 2 ;;
         --out)      OUT="$2"; shift 2 ;;
         -h|--help)  sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -295,6 +307,51 @@ print(f"{sum(d) / n:.6g} {max(d):.6g} {flips} {n}")
 PY
 }
 
+# ── teacher-forced denoiser probe ──────────────────────────────────────────────────────────────────────────────
+has_probe() { grep -qa 'diagnostics.denoiserProbe' "$1/HartsyInference.Core.dll"; }
+# run_probe <build> <label> <ckpt> <cmd> <positional> <args> <backend> <dir> <record|replay> <record dir> [--set ...]
+# The record of a clean commit is reused; a replay always runs.
+run_probe() {
+    local build="$1" label="$2" ckpt="$3" cmd="$4" positional="$5" args="$6" backend="$7" dir="$8" mode="$9" record="${10}"
+    shift 10
+    if [ "$mode" = record ] && [ "$FRESH" = 0 ] && [[ "$label" != *+dirty* ]] && [ -f "$dir/done" ]; then return 0; fi
+    rm -rf "$dir"
+    mkdir -p "$dir/out"
+    local sel="$backend"
+    [ "$backend" = cuda ] && sel="cuda:$GPU_INDEX"
+    local knobs=(--set "diagnostics.denoiserProbe=$mode" --set "diagnostics.denoiserProbeDir=$record")
+    [ "$mode" = replay ] && knobs+=(--set "diagnostics.denoiserProbeOut=$dir/replay")
+    [ -n "$PROBE_STEPS" ] && knobs+=(--set "diagnostics.denoiserProbeSteps=$PROBE_STEPS")
+    # shellcheck disable=SC2086
+    timeout "$TIMEOUT" dotnet "$build/HartsyInference.Cli.dll" "$cmd" "$positional" --model-path "$(ckpt_path "$ckpt")" \
+        -b "$sel" -o "$dir/out" --seed "$SEED0" $args "${knobs[@]}" "$@" >"$dir/run.log" 2>&1 </dev/null && touch "$dir/done"
+}
+# probe_case: records with the base build, replays with the head build, appends to notes and sets probe_fail.
+probe_case() {
+    probe_fail=""
+    if [ -z "${PROBE_OK+x}" ]; then PROBE_OK=0; has_probe "$BASE_BUILD" && has_probe "$HEAD_BUILD" && PROBE_OK=1; fi
+    if [ "$PROBE_OK" != 1 ]; then notes+="denoiser probe skipped (a build lacks it); "; return; fi
+    local steps=""
+    [ -n "$PROBE_STEPS" ] && steps="-$(knob_label "$PROBE_STEPS")"
+    local rec="$OUT/runs/$BASE_LABEL/$backend/$id/probe-record$steps" rep="$OUT/runs/$HEAD_LABEL/$backend/$id/probe-on-$BASE_LABEL$steps"
+    run_probe "$BASE_BUILD" "$BASE_LABEL" "$ckpt" "$cmd" "$positional" "$args" "$backend" "$rec" record "$rec" "${BASE_SET[@]}"
+    if [ ! -f "$rec/done" ]; then notes+="denoiser probe record failed (see $rec/run.log); "; probe_fail="denoiser probe did not run"; return; fi
+    run_probe "$HEAD_BUILD" "$HEAD_LABEL" "$ckpt" "$cmd" "$positional" "$args" "$backend" "$rep" replay "$rec" "${HEAD_SET[@]}"
+    local tsv="$rep/replay/probe.tsv"
+    if [ ! -f "$rep/done" ] || [ ! -s "$tsv" ] || [ "$(wc -l <"$tsv")" -le 1 ]; then
+        notes+="denoiser probe replay failed (see $rep/run.log); "; probe_fail="denoiser probe did not run"; return
+    fi
+    mkdir -p "$REPORT_DIR/probe"
+    cp "$tsv" "$REPORT_DIR/probe/${id}_${backend}.tsv"
+    local max at cos
+    IFS=$'\t' read -r max at cos < <(awk -F'\t' 'NR > 1 { if (n++ == 0 || $4 + 0 > m) { m = $4 + 0; w = "step " $1 " " $3 }
+        if (n == 1 || $5 + 0 < c) c = $5 + 0 } END { printf "%.6g\t%s\t%.9f\n", m, w, c }' "$tsv")
+    notes+="probe max relL2 ${max} (${at}), min cos ${cos}; "
+    if [ -n "$PROBE_FLOOR" ] && awk -v a="$max" -v f="$PROBE_FLOOR" 'BEGIN { exit !(a > f) }'; then
+        probe_fail="denoiser probe relL2 $max > $PROBE_FLOOR"
+    fi
+}
+
 # ── the run ──────────────────────────────────────────────────────────────────────────────────────────────────
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 REPORT_DIR="$OUT/reports/$STAMP-${BASE_LABEL//\//_}-vs-${HEAD_LABEL//\//_}"
@@ -325,6 +382,15 @@ for backend in ${BACKENDS//,/ }; do
         fi
         CASES_RUN=$((CASES_RUN + 1))
         log "── $id on $backend"
+        if [ "$PROBE_ONLY" = 1 ]; then
+            notes=""
+            [ "$NO_BASE" = 1 ] && die "--probe-only compares two arms; drop --no-base"
+            if [[ "$cmd" == image || "$cmd" == video ]]; then probe_case; else notes="no denoiser to probe; "; probe_fail=""; fi
+            verdict="PROBE"
+            [ -n "$probe_fail" ] && { verdict="FAIL"; notes+="$probe_fail; "; FAILURES=$((FAILURES + 1)); }
+            printf '%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t%s\n' "$id" "$backend" "$verdict" "$notes" >>"$ROWS"
+            continue
+        fi
         for i in $(seq 0 "$REPS"); do
             seed=$((SEED0 + i))
             if [ "$NO_BASE" = 0 ]; then
@@ -394,6 +460,10 @@ for backend in ${BACKENDS//,/ }; do
                 notes+="teacher-forced probe skipped (a build lacks --scores-out); "
             fi
         fi
+        probe_fail=""
+        if [ "$PROBE" = 1 ] && [ "$NO_BASE" = 0 ] && [[ "$cmd" == image || "$cmd" == video ]] && [ "$h_crashes" -eq 0 ] && [ "$b_crashes" -eq 0 ]; then
+            probe_case
+        fi
         h_wall_m="$(printf '%s' "$hw" | median)"; h_step_m="$(printf '%s' "$hs" | median)"; h_peak_m="$(printf '%s' "$hv" | median)"
         if [ "$NO_BASE" = 1 ]; then
             [ "$h_crashes" -gt 0 ] && verdict="FAIL crash"
@@ -437,6 +507,7 @@ for backend in ${BACKENDS//,/ }; do
             fi
         fi
         [ -n "$logp_fail" ] && [ "$verdict" = PASS ] && { verdict="FAIL"; notes+="$logp_fail; "; }
+        [ -n "$probe_fail" ] && [ "$verdict" = PASS ] && { verdict="FAIL"; notes+="$probe_fail; "; }
         [ "$verdict" != PASS ] && [ "$verdict" != CRASH-both ] && FAILURES=$((FAILURES + 1))
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$id" "$backend" "$verdict" "$b_wall_m" "$h_wall_m" "$d_wall" "$b_step_m" "$h_step_m" "$d_step" \
@@ -461,6 +532,12 @@ done
         printf '| %s | %s | %s | %s → %s | %s | %s → %s | %s | %s → %s | %s | %s | %s | %s |\n' \
             "$id" "$backend" "$verdict" "$bw" "$hw" "$dw" "$bs" "$hs" "$ds" "$bv" "$hv" "$dv" "$ssim" "$digests" "$notes"
     done <"$ROWS"
+    if [ -d "$REPORT_DIR/probe" ]; then
+        printf '\n## Denoiser probe (head forward on the base'"'"'s recorded inputs, seed %s)\n\n| case | step | sigma | output | relL2 | cos | max abs | rms recorded |\n|---|---|---|---|---|---|---|---|\n' "$SEED0"
+        for f in "$REPORT_DIR"/probe/*.tsv; do
+            awk -F'\t' -v c="$(basename "$f" .tsv)" 'NR > 1 { printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n", c, $1, $2, $3, $4, $5, $6, $7 }' "$f"
+        done
+    fi
     printf '\nStep ms is the median over warm seeds of the CLI'"'"'s per-step interval (per token for text, as the CLI streams it — not the engine decode rate). SSIM is the minimum over seed pairs; digests compare decoded pixels.\n'
 } >"$REPORT_DIR/report.md"
 
