@@ -218,6 +218,12 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             {
                 shape = Nf4CompanionFold.ReadShape(state, key);
             }
+            long packedBytes = _set.Inventory[module].Shape.ElementCount;
+            long expectedBytes = (shape.ElementCount + 1) / 2;
+            if (packedBytes != expectedBytes)
+            {
+                throw new InvalidDataException($"'{module}' holds {packedBytes} NF4 bytes; its quant state's shape {shape} needs {expectedBytes}.");
+            }
             Add(new HfQuantWeight(module, shape, HfWeightStorage.Nf4, DType.U8, module));
             foreach (string part in Nf4Keys(module)) consumed.Add(part);
         }

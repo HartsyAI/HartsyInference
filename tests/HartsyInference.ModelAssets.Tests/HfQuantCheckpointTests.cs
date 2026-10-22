@@ -97,6 +97,31 @@ public sealed class HfQuantCheckpointTests : IDisposable
     }
 
     [Fact]
+    public void Nf4_BlobShorterThanItsQuantState_FailsAtOpen()
+    {
+        const int rows = 8, cols = 40;
+        const string weightKey = "model.layers.0.mlp.experts.0.down_proj.weight";
+        float[] values = new float[rows * cols];
+        for (int i = 0; i < values.Length; i++) values[i] = (i % 5) - 2f;
+        Dictionary<string, Tensor> tensors = Nf4Codec.QuantizeToCompanions(weightKey, values, rows, cols, "float32")
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        tensors[weightKey].Dispose();
+        tensors[weightKey] = new Tensor(new TensorShape(10), DType.U8);
+        string path = Path.Combine(_dir, "truncated_nf4.safetensors");
+        try
+        {
+            SafeTensorsWriter.Save(path, tensors);
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => HfQuantCheckpoint.OpenFiles([path]));
+        Assert.Contains("holds 10 NF4 bytes", error.Message);
+    }
+
+    [Fact]
     public void WriteFromFp8_StreamsEachExpertToNf4_WithinTheBlockBound()
     {
         const string expertName = "model.layers.0.mlp.experts.0.down_proj.weight";
