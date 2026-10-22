@@ -28,7 +28,7 @@ public sealed class AttentionCaptureTests(ITestOutputHelper output)
         values.CopyTo(qh.AsSpan<float>());
         cuda.Scale(q, qh, 1f);
         KnobStore.Set(EngineKnobs.AttentionCaptureDir, dir);
-        KnobStore.Set(EngineKnobs.AttentionCaptureCalls, "1");
+        KnobStore.Set(EngineKnobs.AttentionCaptureCalls, "q999@0,q1100@1");
         try
         {
             cuda.ScaledDotProductAttention(o1, q, q, q, null, 0.125f);

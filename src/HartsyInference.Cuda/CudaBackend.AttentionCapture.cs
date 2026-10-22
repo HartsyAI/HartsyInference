@@ -31,7 +31,7 @@ public sealed partial class CudaBackend
             File.AppendAllText(Path.Combine(dir, "calls.tsv"), string.Create(CultureInfo.InvariantCulture,
                 $"{shape}\t{ordinal}\t{call.Route}\t{(call.Mask.Bias is null ? "none" : "bias")}\t{call.Scale:R}\n"));
         }
-        if (!CaptureWanted(ordinal)) return;
+        if (!CaptureWanted(shape, ordinal)) return;
         using OpScope _op = EnterOp();
         _stream.Synchronize();
         int group = call.KvGroup;
@@ -58,11 +58,18 @@ public sealed partial class CudaBackend
         Logs.Info($"[attention capture] {shape} call {ordinal} -> {target}");
     }
 
-    private static bool CaptureWanted(int ordinal)
+    /// <summary>Whether the knob lists <paramref name="ordinal"/> for <paramref name="shape"/>: an entry is an ordinal for every
+    /// shape, or <c>text@ordinal</c> for the shapes containing <c>text</c>.</summary>
+    private static bool CaptureWanted(string shape, int ordinal)
     {
         if (EngineKnobs.AttentionCaptureCalls.Value is not { Length: > 0 } list) return false;
         foreach (string item in list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            if (int.TryParse(item, NumberStyles.Integer, CultureInfo.InvariantCulture, out int wanted) && wanted == ordinal) return true;
+        {
+            int at = item.LastIndexOf('@');
+            if (at >= 0 && !shape.Contains(item[..at], StringComparison.Ordinal)) continue;
+            if (int.TryParse(item[(at + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out int wanted) && wanted == ordinal)
+                return true;
+        }
         return false;
     }
 

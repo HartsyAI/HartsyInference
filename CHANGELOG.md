@@ -10,8 +10,9 @@ stable release will require. Dates are UTC.
 
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
-  `diagnostics.attentionCaptureCalls` also write batch 0's Q (four heads, 512 rows), K and V (every key) in the call's
-  dtype with a `meta.json`. Nothing is read back while the stream captures a graph.
+  `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch
+  0's Q (four heads, 512 rows), K and V (every key) in the call's dtype with a `meta.json`. Nothing is read back while
+  the stream captures a graph.
 - **Added: an exact F32 attention arm on CUDA.** `numerics.sdpaNoTf32` runs the materialized and query-tiled F32 SDPA
   GEMMs in plain FP32; they ran TF32 whatever `numerics.noTf32` said. The `reference` profile sets it. Default output is
   unchanged.
