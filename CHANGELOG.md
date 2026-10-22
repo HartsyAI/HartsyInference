@@ -8,6 +8,34 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.386
+
+- **Added: hosts ask the engine for a model's defaults.** `IInferenceEngine.Recipes` (`IRecipeCatalog`) describes a
+  model's resolved family and variant without loading weights: defaults, features, input limits, frame grid and the
+  variant that was chosen. The HTTP API serves it at `GET /v1/native/recipes`, `GET /v1/native/recipes/{modality}/{familyId}`
+  and `POST /v1/native/recipes/describe`. `ModelCapabilities` is removed; its callers use the catalog.
+- **Added: every plan records where each setting came from.** Video and image plans and results carry the recipe
+  identity (family, defaults revision, variant and how it was chosen) and, per setting, whether it is the recipe's
+  default, a checkpoint profile's, the user's, or a normalized value with the one requested. Each generation logs
+  it in one line.
+- **Changed: recipes are the only source of defaults.** Pipelines run the planned settings and no longer fill an unset
+  value themselves; Diffusion's `GenerationDefaults` table, the per-pipeline fallbacks and
+  `IRecipePipeline.VariantDefaults` are removed. Flux.1 and Flux.2 gain variant catalogs, so Dev, Schnell and the
+  Klein builds are told apart from the weights before loading. Video frame counts are normalized on the family's
+  grid during planning, and a count past the grid's cap lands on the cap.
+- **Added: music recipes.** Each music family declares typed, validated defaults and its longest clip, and
+  `MusicRequest` carries only the values a caller set. `MusicRequest.UseAdg` is removed: set `GuidanceType = "adg"`.
+- **Changed: defaults follow SwarmUI's per-model values.** Output for a request that leaves these unset changes;
+  `docs/Research/RECIPE_CONTRACT.md` lists every value with its source.
+  - Image: Chroma 26 steps at CFG 3.5, Flux.1 Schnell CFG 1, Flux.2 Dev guidance 3.5, Flux.2 Klein 8 steps,
+    Flux 3 Image distilled 16 steps, HunyuanImage 2.1 20 steps, OmniGen2 20 steps at CFG 5, Lens 1440×1440,
+    Boogu base 20 steps at CFG 4, Mage-Flow base 20 steps, Z-Image Base sigma shift 3.
+  - Video: every Wan 81 frames; Wan 2.1 and VACE CFG 6 at 24 fps; Wan 2.2 5B 22 fps; LTX-Video 768×512 at 24 fps;
+    LTX-2 and LTX-2.5 distilled CFG 3 and 97 frames; Kandinsky 5 Video CFG 1, 640×640, 73 frames; HunyuanVideo
+    720×720, 73 frames. Wan, LTX-2 and MiniMax-H3 keep their native sizes.
+  - Music: ACE-Step 1.5 120 s (turbo declares CFG 1), MiniMax Music 3 120 s, YuE2 300 s. An unset duration now
+    renders 12× to 30× the audio it used to.
+
 - **Added: the executable specification of INT8 attention v2.** `Int8AttentionV2Reference` runs on the CPU the stats pass,
   quantization and online recurrence the coming INT8 kernel must reproduce: u8 P against each key tile's own maximum, s8 V,
   INT32 partials drained at every key tile, K channel-mean smoothing with its softcap, sink, LSE and per-segment corrections,
