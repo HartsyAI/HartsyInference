@@ -358,8 +358,7 @@ public static class SideModels
         Sha256 = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
     };
 
-    /// <summary>Qwen3-VL-4B text encoder (bf16) for Fibo 2.0, from the Comfy-Org Fibo-2.0 repo. Sha256 is unknown, so the download is
-    /// not hash-checked; add it once the file has been read. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    /// <summary>Qwen3-VL-4B text encoder (bf16) for Fibo 2.0, from the Comfy-Org Fibo-2.0 repo. Sha256 is the Hugging Face LFS object id of the repo file. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
     public static readonly ModelAsset Fibo2Qwen3VL4B = new ModelAsset
     {
         Repo = "Comfy-Org/Fibo-2.0",
@@ -367,11 +366,11 @@ public static class SideModels
         TargetSubdir = "text_encoders",
         TargetName = "fibo2/qwen3vl_4b_bf16.safetensors",
         Role = "text encoder",
-        Sha256 = null
+        Sha256 = "36f3ff447ef59201722e8f9ce6020c9819fdcfba6aa2608c4e09b1c0ce114e34"
     };
 
-    /// <summary>FLUX.2 VAE as shipped in the Comfy-Org Fibo-2.0 repo. Sha256 is unknown (not hash-checked), so this does not share
-    /// <see cref="Flux2Vae"/>'s pinned download. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    /// <summary>FLUX.2 VAE as shipped in the Comfy-Org Fibo-2.0 repo. Sha256 is the Hugging Face LFS object id; these bytes differ from the
+    /// pinned <see cref="Flux2Vae"/> file, so the two do not share a download. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
     public static readonly ModelAsset Fibo2Vae = new ModelAsset
     {
         Repo = "Comfy-Org/Fibo-2.0",
@@ -379,7 +378,7 @@ public static class SideModels
         TargetSubdir = "VAE",
         TargetName = "fibo2/flux2-vae.safetensors",
         Role = "vae",
-        Sha256 = null
+        Sha256 = "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
     };
 
     /// <summary>FLUX.2 VAE with the small decoder (96-192-384-384) that OpenMOSS ships for MOSS-Image: its decoder tensors
