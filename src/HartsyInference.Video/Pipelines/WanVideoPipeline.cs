@@ -136,7 +136,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"Wan-Video T2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width ?? 832, request.Height ?? 480, seed);
+        return (frames, request.Width, request.Height, seed);
     }
 
     /// <summary>Streams decoded frames (pull-based → memory bounded; pair with an <c>IVideoEncoder</c>).
@@ -199,7 +199,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? 832, height = request.Height ?? 480;
+        int width = request.Width, height = request.Height;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
         if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-Video.");
@@ -219,8 +219,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         if (lastFrameLatent is not null && tLat < 2)
             throw new ArgumentException($"lastFrameLatent needs at least 2 latent frames (numFrames={numFrames} → T_lat={tLat}); a single-frame clip has no distinct end.", nameof(lastFrameLatent));
 
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         // NOT converted to the sampler seam, and it cannot be: Wan denoises through FlowUniPCMultistepScheduler, a
         // stateful predictor/corrector. Its step converts to x0 (x0 = x − σ·v), retro-corrects the PREVIOUS sample
@@ -599,7 +599,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 + "Use a Wan I2V config preset (e.g. I2V_14B_480p / I2V_A14B), or the TI2V firstFrameLatent path.");
         if (_config.HasImageConditioning && imageEmbeds is null)
             throw new ArgumentException("This variant has CLIP image conditioning — imageEmbeds is required.", nameof(imageEmbeds));
-        int width = request.Width ?? 832, height = request.Height ?? 480;
+        int width = request.Width, height = request.Height;
         if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-Video.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
@@ -608,8 +608,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (numFrames - 1) / tp + 1;
         int hLat = height / sp, wLat = width / sp;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         // Same UniPC blocker as RunDenoise (see the comment there). Refused here BEFORE the conditioning VAE encode
@@ -755,8 +755,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         int startStep = Math.Clamp((int)Math.Round((1f - strength) * steps), 0, steps - 1);
 

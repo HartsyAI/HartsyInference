@@ -132,12 +132,12 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? GenerationDefaults.Chroma.Width;
-        int height = request.Height ?? GenerationDefaults.Chroma.Height;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps ?? _config.DefaultSteps;
-        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f;
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);

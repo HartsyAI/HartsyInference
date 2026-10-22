@@ -114,7 +114,7 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
         rgb.Dispose();
 
         Logs.Info($"Kandinsky5-Video complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width ?? 768, request.Height ?? 512, seed);
+        return (frames, request.Width, request.Height, seed);
     }
 
     /// <summary>Runs the flow-match denoise loop and returns the model-space latent <c>[1, 16, T_lat, H_lat, W_lat]</c>.</summary>
@@ -125,7 +125,7 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
 
-        int width = request.Width ?? 768, height = request.Height ?? 512;
+        int width = request.Width, height = request.Height;
         int sp = _vae.Config.SpatialCompression;                       // 8
         int tp = _vae.Config.TemporalCompression;                      // 4
         (int _, int pH, int pW) = _config.PatchSize;
@@ -144,8 +144,8 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
                 $"firstFrameLatent must be [1,{latCh},1,{hLat},{wLat}]; got {firstFrameLatent.Shape}.",
                 nameof(firstFrameLatent));
 
-        int steps = request.Steps ?? 50;
-        float cfgScale = request.CfgScale ?? 5.0f;
+        int steps = request.Steps;
+        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f;
         if (useCfg && (negQwenEmbeds is null || negClipPooled is null))
             throw new ArgumentException(

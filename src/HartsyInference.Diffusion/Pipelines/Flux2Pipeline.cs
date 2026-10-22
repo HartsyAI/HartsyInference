@@ -157,7 +157,9 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int reqWidth, int reqHeight) = GenerationDefaults.Flux2.Resolve(request);
+        int steps = request.Steps;
+        int reqWidth = request.Width;
+        int reqHeight = request.Height;
 
         // Round image dims down to multiple of 16 (VAE 8× × 2 patch). Latent dims are then
         // image_h/8 (latent space, 32 channels) and image_h/16 (after 2×2 patchify, 128 channels).

@@ -73,12 +73,6 @@ public sealed record LanceConfig
     /// <summary>Logit-normal timestep shift (video inference).</summary>
     public float VideoTimestepShift { get; init; } = 4.0f;
 
-    /// <summary>Default Euler step count.</summary>
-    public int NumTimesteps { get; init; } = 30;
-
-    /// <summary>Default text CFG scale.</summary>
-    public float CfgTextScale { get; init; } = 4.0f;
-
     /// <summary>CFG applies only when the (shifted) flow time is in <c>(CfgIntervalMin, 1]</c> — upstream <c>cfg_interval=[0.4, 1.0]</c>; late low-noise steps run cond-only.</summary>
     public float CfgIntervalMin { get; init; } = 0.4f;
 

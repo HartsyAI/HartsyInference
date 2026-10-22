@@ -43,13 +43,13 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024 (<c>GenerationDefaults.FluxDev</c>); a Schnell checkpoint narrows this to 4 steps via <see cref="Flux1RecipePipeline.VariantDefaults"/>.</summary>
+    /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024; a Schnell checkpoint narrows this to 4 steps via <see cref="Flux1RecipePipeline.VariantDefaults"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
-    /// <summary>Flux.1 Schnell's official sampling settings: 4 steps, guidance-free by distillation (<c>GenerationDefaults.FluxSchnell</c>).</summary>
+    /// <summary>Flux.1 Schnell's official sampling settings: 4 steps, guidance-free by distillation.</summary>
     public static ImageDefaults SchnellDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

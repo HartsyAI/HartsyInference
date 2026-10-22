@@ -47,9 +47,9 @@ public sealed class ZetaChromaPipeline(IBackend backend, ZetaChromaTransformer t
                 "negativeCaptionEmbeddings is required when cfgScale > 1.0.", nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? GenerationDefaults.Chroma.Width;
-        int height = request.Height ?? GenerationDefaults.Chroma.Height;
-        int steps = request.Steps ?? _config.DefaultSteps;
+        int width = request.Width;
+        int height = request.Height;
+        int steps = request.Steps;
         int patch = _transformer.PatchSize;
         bool useCfg = cfgScale > 1.0f;
 

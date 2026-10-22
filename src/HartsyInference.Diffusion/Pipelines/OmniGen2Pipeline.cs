@@ -88,7 +88,9 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
                 nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int width, int height) = GenerationDefaults.OmniGen2.Resolve(request);
+        int steps = request.Steps;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
 
@@ -248,7 +250,9 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
 
         (float rangeStart, float rangeEnd) = cfgRange ?? (0f, 1f);
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int width, int height) = GenerationDefaults.OmniGen2.Resolve(request);
+        int steps = request.Steps;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
 

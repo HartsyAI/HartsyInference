@@ -11,7 +11,7 @@ using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Lens recipe (Microsoft Lens, 3.8B dual-stream MMDiT): the checkpoint is the DiT (<c>lens_bf16</c>/<c>lens_mxfp8</c>/<c>lens_turbo_*</c>; MXFP8 quants are dequanted by the engine converter), while the GPT-OSS-20B text encoder (<see cref="SideModels.LensGptOss20b"/>) and the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>) resolve as side models. A "turbo" in the checkpoint filename selects <see cref="LensConfig.Turbo"/> (4 steps, no CFG); everything else uses <see cref="LensConfig.Default"/> (20 steps, CFG 5). Lifted from the SwarmUI backend's <c>LensLoader</c> — construction goes through <see cref="LensPipelineFactory"/> — and driven through <see cref="LensRecipePipeline"/>.</summary>
+/// <summary>Lens recipe (Microsoft Lens, 3.8B dual-stream MMDiT): the checkpoint is the DiT (<c>lens_bf16</c>/<c>lens_mxfp8</c>/<c>lens_turbo_*</c>; MXFP8 quants are dequanted by the engine converter), while the GPT-OSS-20B text encoder (<see cref="SideModels.LensGptOss20b"/>) and the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>) resolve as side models. Every variant shares <see cref="LensConfig.Default"/>; a Lens-Turbo checkpoint differs only in its sampling defaults (<see cref="DefaultsFor"/>). Lifted from the SwarmUI backend's <c>LensLoader</c> — construction goes through <see cref="LensPipelineFactory"/> — and driven through <see cref="LensRecipePipeline"/>.</summary>
 public sealed class LensRecipe : IArchitectureRecipe
 {
     /// <summary>The microsoft/Lens repo is gated; the GPT-OSS o200k-harmony tokenizer Lens' encoder uses ships byte-identical with the ungated openai/gpt-oss-20b repo.</summary>
@@ -37,13 +37,13 @@ public sealed class LensRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lens", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Lens's official sampling settings: 20 steps at CFG 5.0, 1024x1024 (<c>LensConfig.Default</c>); a Lens-Turbo checkpoint narrows this to 4 guidance-free steps via <see cref="DefaultsFor"/>.</summary>
+    /// <summary>Lens's official sampling settings: 20 steps at CFG 5.0, 1024x1024 (<c>microsoft/Lens</c> model card); a Lens-Turbo checkpoint narrows this to 4 guidance-free steps via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 5.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
-    /// <summary>Lens-Turbo's official sampling settings: 4 distilled steps, guidance-free (<c>LensConfig.Turbo</c>).</summary>
+    /// <summary>Lens-Turbo's official sampling settings: 4 distilled steps, guidance-free (<c>microsoft/Lens-Turbo</c> model card).</summary>
     public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
@@ -62,8 +62,9 @@ public sealed class LensRecipe : IArchitectureRecipe
         string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
         (string vocabPath, string mergesPath) = EnsureGptOssVocabMerges();
 
-        LensConfig config = context.ResolveVariant(LensVariants.Catalog).Is(LensVariants.Turbo) ? LensConfig.Turbo : LensConfig.Default;
-        Logs.Info($"[LensRecipe] Loading Lens ({(config.DefaultCfgScale > 1 ? "standard" : "turbo")}): {Path.GetFileName(context.CheckpointPath)}.");
+        LensConfig config = LensConfig.Default;
+        bool turbo = context.ResolveVariant(LensVariants.Catalog).Is(LensVariants.Turbo);
+        Logs.Info($"[LensRecipe] Loading Lens ({(turbo ? "turbo" : "standard")}): {Path.GetFileName(context.CheckpointPath)}.");
 
         // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging after
         // would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule). Lens is the one family

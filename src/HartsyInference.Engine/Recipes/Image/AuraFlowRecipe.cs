@@ -34,7 +34,7 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "auraflow", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>AuraFlow's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (diffusers <c>AuraFlowPipeline.__call__</c>, mirrored by <c>GenerationDefaults.AuraFlow</c>).</summary>
+    /// <summary>AuraFlow's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (diffusers <c>AuraFlowPipeline.__call__</c>).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

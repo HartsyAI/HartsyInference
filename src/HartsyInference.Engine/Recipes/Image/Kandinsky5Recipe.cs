@@ -38,7 +38,7 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Kandinsky-5's official image sampling settings: 50 steps at guidance 3.5, 1024x1024 (<c>GenerationDefaults.Kandinsky5Image</c>).</summary>
+    /// <summary>Kandinsky-5's official image sampling settings: 50 steps at guidance 3.5, 1024x1024.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

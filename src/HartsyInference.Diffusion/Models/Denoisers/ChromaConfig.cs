@@ -46,12 +46,6 @@ public sealed record ChromaConfig
     /// <c>3 * num_single_blocks + 12 * num_double_blocks + 2</c>. For 19 doubles + 38 singles → 344 rows.</summary>
     public int ModIndexLength => 3 * DepthSingleBlocks + 12 * Depth + 2;
 
-    /// <summary>Default CFG scale. Chroma is "true CFG" (not distilled-to-1 like Flux Dev). Default 5.0.</summary>
-    public float DefaultCfgScale { get; init; } = 5.0f;
-
-    /// <summary>Default inference steps. 35 per the diffusers pipeline default.</summary>
-    public int DefaultSteps { get; init; } = 35;
-
     /// <summary>Chroma v1 preset (`lodestones/Chroma`, ~8.9B params).</summary>
     public static ChromaConfig V1 => new()
     {

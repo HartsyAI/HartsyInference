@@ -49,7 +49,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"LTX-Video {(firstFrameLatent is null ? "T2V" : "I2V")} complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width ?? 768, request.Height ?? 512, seed);
+        return (frames, request.Width, request.Height, seed);
     }
 
     /// <summary>Streams decoded frames (pull-based → memory bounded; pair with an <c>IVideoEncoder</c>).</summary>
@@ -126,7 +126,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
 
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? 768, height = request.Height ?? 512;
+        int width = request.Width, height = request.Height;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
         if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for LTX-Video.");
@@ -136,8 +136,8 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         int tLat = (numFrames - 1) / tp + 1;
         int hLat = height / sp, wLat = width / sp;
         int s = tLat * hLat * wLat;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
 
         if (firstFrameLatent is not null &&
             (firstFrameLatent.Shape.Rank != 5 || firstFrameLatent.Shape[0] != 1 || firstFrameLatent.Shape[1] != _latentChannels

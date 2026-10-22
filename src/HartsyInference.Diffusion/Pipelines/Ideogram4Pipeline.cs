@@ -144,8 +144,8 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             throw new ArgumentException($"Prompt has {promptTokenIds.Length} tokens, exceeds MaxTextTokens={_config.MaxTextTokens}.", nameof(promptTokenIds));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? GenerationDefaults.Generic.Width;
-        int height = request.Height ?? GenerationDefaults.Generic.Height;
+        int width = request.Width;
+        int height = request.Height;
         int patch = _config.PatchSize * _config.VaeScaleFactor; // 2 × 8 = 16
         if (width % patch != 0 || height % patch != 0)
             throw new ArgumentException($"Width and height must be divisible by {patch} for Ideogram 4.");
