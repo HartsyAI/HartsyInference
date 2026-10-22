@@ -147,8 +147,10 @@ RTX 4090, 2026-10-21, engine at the Phase 0 baseline (e845dcd9), ComfyUI from th
 | Wan 2.2 5B (20) | 779.7 | 742.3 | 1140.9 | 1.54× |
 | LTX-2.5 distilled (8) | not comparable | | | |
 
-- LTX-2.5's slope moves ±25% between rounds on both engines (the two-stage recipe's refine stage does not scale with S)
-  and the engine's first round went negative, so no ratio is quoted.
+- Two rounds per arm. The per-round slopes agree within 3.5% on the engine rows and within 6% on ComfyUI's.
+- LTX-2.5 is not comparable. Its slope moves ±25% between rounds on both engines, and the engine's two rounds gave
+  −10.2 s and +970 ms per step even after the warm-up. So a cost other than the page cache varies per process there; it
+  has not been investigated.
 - The engines compute at different precisions (ComfyUI bf16, the engine F16/F32 by layer), so these rows are speed only.
 
 ## Reading the numbers
