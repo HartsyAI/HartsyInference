@@ -38,8 +38,9 @@ code runs. It is not evidence of correctness or speed, and it was removed.
    for the Fibo text encoder and VAE: `Fibo2Recipe.cs` (about lines 75-76 and 86-87) calls `ModelFileLocator.RequireOrEnsure`,
    which calls `ModelDownloader.EnsureSideModelAsync(..., downloadIfMissing: true)`. Repro: set the knob to false, omit the
    text-encoder and VAE overrides, and delete the encoder file. It downloads. Fix this as a separate change with a test.
-3. Download the three files (after approval). Read the real transformer header through `Fibo2Config.FromWeights` and record:
-   the injection layers (6 and 38 are unconfirmed), the FFN width (9728 expected), the Perceiver query count (512).
+3. Download the three files (after approval). Read the real transformer header through `Fibo2Config.FromWeights` and check it
+   reports injection layers 6, 14, 22, 30, 38, FFN width 9728 and 512 Perceiver queries, as the header at revision
+   `b2bffaf57d48` does.
 4. Build a reference from ComfyUI at commit `87ed5a066d9c` on the same GPU, with the same checkpoint, prompt, seed,
    1024x1024, 50 steps, CFG 5, Euler, shift 1.15. Save the final image, the sigma schedule and the first denoise step's
    velocity. Also save the text bundles for the prompt (6 tensors of 7680-d per token).
@@ -58,15 +59,14 @@ code runs. It is not evidence of correctness or speed, and it was removed.
 
 ## Open items to resolve on the GPU
 
-- Injection layers 6 and 38 (the header confirms 14, 22, 30 only).
 - Dev steps and CFG. The 50 and 5 come from the diffusers v1 pipeline example, not from 2.0 docs. Confirm from the Bria
   model card or a ComfyUI dev template, then update the recipe `Defaults` and its comment.
-- Gist count basis: the engine uses the template-wrapped token length. Confirm ComfyUI uses the same length, not the raw
-  caption length.
+- JSON captions: ComfyUI re-serialises them before templating (`parse_prompt`) and the engine does not, so the tokens and
+  the gist count can differ. Both take the gist count from the template-wrapped length.
 - Patchify order `(c, dy, dx)`: sourced from the diffusers reference and the FLUX.2 latent ops. Confirm against ComfyUI's
   wrapper, which is not in the local checkout.
-- Timestep convention: the sampler passes sigma (1 = noise) and the model multiplies by 1000. Confirm against ComfyUI's
-  sampler.
+- Sigma schedule: the timestep input matches ComfyUI, the shift does not. ComfyUI's 1.15 is Flux's exponential shift
+  (`s = e^1.15` in `s·t / (1 + (s − 1)·t)`); `Fibo2Pipeline` passes `s = 1.15`. Fix it before step 5c.
 - Text-encoder tap convention: `hidden_states[k]` is the input to block k. Confirm the taps against ComfyUI's text encoder
   output.
 - Sha256 for the text encoder and VAE. The new VAE entry duplicates the pinned `Flux2Vae` file; decide whether to reuse it.
