@@ -1036,6 +1036,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             scales.ScaleFactor, scales.GlobalScale, _stream.Handle, outBf16: gemmDtype == DType.BF16);
     }
 
+    /// <summary>The dtype a Linear computes <paramref name="weight"/> as off the native block-scaled GEMM: a resident weight standing in for a dense one (<see cref="QuantWeightInfo.DenseDType"/>) is that dense weight.</summary>
+    private static DType UnpackedWeightDType(Tensor weight) => weight.QuantInfo?.DenseDType ?? weight.DType;
+
     /// <summary>Transient-buffer form of <see cref="MaterializeWeight"/>; <paramref name="castOut"/> is the caller's to free.</summary>
     private unsafe ulong MaterializeWeightIfNeeded(ulong source, Tensor weight, DType gemmDtype, out ulong castOut,
         in ResidentBlockScales scales)
@@ -2333,7 +2336,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // GemmEx is inefficient at m=1; the fused GEMV reads each weight row once with an F32 accumulate
                 // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
                 // numerics.bf16Gemv=false to fall back to cuBLAS.
-                if (EnableBf16Gemv && _kernels!.HasFloatGemv && (weight.DType == DType.BF16 || weight.DType == DType.F16))
+                DType gemvDtype = blockScaled is null ? UnpackedWeightDType(weight) : weight.DType;
+                if (EnableBf16Gemv && _kernels!.HasFloatGemv && (gemvDtype == DType.BF16 || gemvDtype == DType.F16))
                 {
                     // The fused GEMV kernels take an F32 bias pointer. Checkpoints that keep their small
                     // linears in 16-bit float ship the bias in the SAME dtype (Krea2 fp8_scaled: BF16
@@ -2342,10 +2346,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     // F32 cast; F32 biases (the common LLM case) pass straight through.
                     ulong gemvBias = bias is null ? 0
                         : CastIfNeeded(pBias, bias.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
-                    if (weight.DType == DType.BF16)
-                        _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, pWeight, gemvBias, n, k, m, _stream.Handle);
+                    ulong gemvWeight = gemvDtype == weight.DType ? pWeight
+                        : MaterializeWeightIfNeeded(pWeight, weight, gemvDtype, out pWeightCast, blockScales);
+                    if (gemvDtype == DType.BF16)
+                        _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, gemvWeight, gemvBias, n, k, m, _stream.Handle);
                     else
-                        _kernels!.LaunchMulMatVecF16F32(pOutput, pInput, pWeight, gemvBias, n, k, m, _stream.Handle);
+                        _kernels!.LaunchMulMatVecF16F32(pOutput, pInput, gemvWeight, gemvBias, n, k, m, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                     cachedOutput = true;
                     return;
@@ -2547,7 +2553,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // F32 activation down too. Old behaviour resolved per-operand and ended up at F32,
             // forcing an oversized weight cast (151 MB for proj_mlp) plus a 75 MB intermediate
             // inside CastOnGpu's F8→F32 path.
-            DType gemmDtype = ResolveGemmDtype(input.DType, weight.DType);
+            DType gemmDtype = ResolveGemmDtype(input.DType, UnpackedWeightDType(weight));
             ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
 
             // Weight cast (fp8/quant → BF16/F16): identical every forward, so for a preloaded weight we

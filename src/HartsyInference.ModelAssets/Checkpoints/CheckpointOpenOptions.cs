@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.Checkpoints;
 
@@ -21,6 +22,9 @@ public sealed record CheckpointOpenOptions
     /// <summary>Keep NVFP4 weights packed with their scales on <see cref="Core.Tensors.Tensor.QuantInfo"/> instead of unpacking them, for a caller that knows a CUDA backend will consume them.</summary>
     public bool ResidentNvfp4 { get; init; }
 
+    /// <summary>With <see cref="ResidentNvfp4"/>, the dense dtype each resident weight stands in for (<see cref="Core.Tensors.QuantWeightInfo.DenseDType"/>).</summary>
+    public DType? ResidentNvfp4DenseDType { get; init; }
+
     /// <summary>Keep NVFP4 weights packed with their scales as COMPANION KEYS, for a caller whose own layer reads that
     /// form — the opposite trade to <see cref="ResidentNvfp4"/>, which moves the scales onto the tensor.</summary>
     /// <remarks>Set this only for a dictionary that reaches such a consumer directly, never one an architecture
@@ -42,6 +46,23 @@ public sealed record CheckpointOpenOptions
     /// does not need the footprint should not pay it to make the native path reachable on one that does.</remarks>
     public static CheckpointOpenOptions ForNativeNvfp4Gemm(IBackend backend)
         => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new();
+
+    /// <summary>The options for a diffusion transformer whose nvfp4 groups stay packed wherever every backend that runs
+    /// it can hold them: the native GEMM takes them on Blackwell, and elsewhere each unpacks per GEMM to exactly the F16
+    /// it would have been unpacked to at open. A backend set that cannot hold them gets the defaults.</summary>
+    /// <remarks>Every backend, not the primary alone: the weights are one set of bytes shared by every device that
+    /// executes a block, so one shard without the packed path widens all of them.</remarks>
+    public static CheckpointOpenOptions ForResidentNvfp4(IEnumerable<IBackend> backends)
+    {
+        ArgumentNullException.ThrowIfNull(backends);
+        bool any = false;
+        foreach (IBackend backend in backends)
+        {
+            if (!backend.SupportsResidentQuant(DType.F4E2M1)) return new();
+            any = true;
+        }
+        return any ? new() { ResidentNvfp4 = true, ResidentNvfp4DenseDType = DType.F16 } : new();
+    }
 
     /// <summary>Relabel rank-2 GGUF tensors from ggml's <c>[in, out]</c> order to the <c>[out, in]</c> order the engine assumes for a matrix weight.</summary>
     /// <remarks>Only a caller that wants GGUF's own layout — a re-quantizer rewriting a GGUF — sets this false. With it

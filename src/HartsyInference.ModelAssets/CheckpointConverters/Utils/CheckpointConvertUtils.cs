@@ -781,9 +781,10 @@ public static unsafe class CheckpointConvertUtils
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
     /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
     /// <param name="keepNvfp4Companions">Leave nvfp4 weights packed AND leave their <c>.weight_scale</c>/<c>.weight_scale_2</c> companions in the dictionary, for a consumer that dequantizes the format itself rather than reading <see cref="Tensor.QuantInfo"/>. Unlike <paramref name="residentNvfp4"/> this also covers AWQ layers, which is the point: <see cref="Tensor.QuantInfo"/> cannot express <c>pre_quant_scale</c>, so those layers have no resident representation and would otherwise be widened. Everything else — fp8, int8, NF4 — folds exactly as it does with this off.</param>
+    /// <param name="nvfp4DenseDType">With <paramref name="residentNvfp4"/>, the <see cref="QuantWeightInfo.DenseDType"/> each resident weight carries — the dtype it stands in for.</param>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
         bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false,
-        Action<Tensor, Tensor>? onNvfp4Unpacked = null)
+        Action<Tensor, Tensor>? onNvfp4Unpacked = null, DType? nvfp4DenseDType = null)
     {
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
         // weight before anything here can strip them.
@@ -931,7 +932,7 @@ public static unsafe class CheckpointConvertUtils
                     // Resident: relabel to F4E2M1 [N, K] and hang the scales off QuantInfo rather than unpacking.
                     // Refuses AWQ pre_quant_scale layers, which fall through to the eager dequant below.
                     if (residentNvfp4 && Nvfp4Codec.TryAttachResident(kvp.Value, blockScales, scale2T,
-                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight))
+                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight, nvfp4DenseDType))
                     {
                         result[key] = residentWeight;
                         nvfp4Resident++;

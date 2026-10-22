@@ -35,6 +35,12 @@ public sealed record QuantWeightInfo
     /// <summary>The descriptor's <c>full_precision_matrix_mult</c>: this layer must dequantize and run a normal GEMM.</summary>
     public bool FullPrecisionMatMul { get; init; }
 
+    /// <summary>The dense dtype the eager load would have unpacked this weight to, when it stays packed in that copy's place.</summary>
+    /// <remarks>A backend that unpacks the weight for a GEMM computes as that dense weight would — same unpacked values,
+    /// same GEMM dtype, same small-m route — so keeping it packed changes the footprint and nothing else. Null leaves the
+    /// unpack's precision to the backend.</remarks>
+    public DType? DenseDType { get; init; }
+
     /// <summary>Returns these companions narrowed to a contiguous run of weight rows, for a caller splitting a fused weight (QKV) or consuming one in windows.</summary>
     /// <remarks><para><see cref="RowScale"/> is indexed by output row, so a row slice of the weight needs the matching
     /// slice of the scale; a per-tensor scale (one element) covers every row and is shared as-is. <see cref="ConvRotGroupSize"/>
