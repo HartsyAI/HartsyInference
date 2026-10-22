@@ -36,7 +36,14 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Upstream's Wan-Animate-14B sampling settings (<c>wan/configs/wan_animate_14B.py</c>): 20 steps at guidance 1.0 over a 77-frame (4n+1) clip at 30 fps.</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 20, CfgScale = 1.0f, Frames = 77, Fps = 30 };
+    // Size is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
+    public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 20, CfgScale = 1.0f, Width = 704, Height = 480, Frames = 77, Fps = 30,
+    };
+
+    /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new WanVideoConfig().VaeTemporalCompression, FrameNormalization.SnapNearest) };
 
     /// <inheritdoc/>
     /// <inheritdoc/>

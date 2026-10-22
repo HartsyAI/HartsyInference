@@ -3,6 +3,7 @@ using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -32,6 +33,11 @@ public static class VideoEndpoints
             catch (QueueFullException ex)
             {
                 return GenerationErrors.Map(ex);
+            }
+            catch (RecipeNotRegisteredException ex)
+            {
+                return Results.Json(UnregisteredFamily(ex),
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
             }
             catch (Exception ex) when (IsPlanningInputFailure(ex))
             {
@@ -66,6 +72,11 @@ public static class VideoEndpoints
             catch (QueueFullException ex)
             {
                 return GenerationErrors.Map(ex);
+            }
+            catch (RecipeNotRegisteredException ex)
+            {
+                return Results.Json(UnregisteredFamily(ex),
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
             }
             catch (Exception ex) when (IsPlanningInputFailure(ex))
             {
@@ -216,6 +227,21 @@ public static class VideoEndpoints
         });
         return new NativeVideoPlanProblem { Issues = [issue] };
     }
+
+    /// <summary>The typed 422 for a family that resolves but has no video recipe to plan with.</summary>
+    private static NativeVideoPlanProblem UnregisteredFamily(RecipeNotRegisteredException exception) => new NativeVideoPlanProblem
+    {
+        Issues =
+        [
+            NativeVideoPlanResponse.SanitizeIssue(new VideoPlanIssue
+            {
+                Code = "video.family.unregistered",
+                Severity = VideoPlanIssueSeverity.Error,
+                Message = exception.Message,
+                Field = nameof(ModelSpec.Requested),
+            }),
+        ],
+    };
 
     /// <summary>Resolves the model location and carries the additive checkpoint-profile hint into planning.</summary>
     private static ModelSpec ResolveSpec(NativeVideoRequest request)

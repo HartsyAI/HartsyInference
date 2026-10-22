@@ -43,7 +43,14 @@ public sealed class WanS2VRecipe : IVideoRecipe
     public bool Matches(string familyId) => string.Equals(familyId, "wan-s2v", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Wan S2V's official sampling settings: 50 steps at guidance 5.0 (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f };
+    // Size, frames and fps are what the removed generic fallback ran; SwarmUI-aligned values: RECIPE_CONTRACT.md ledger.
+    public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 50, CfgScale = 5.0f, Width = 704, Height = 480, Frames = 25, Fps = 25,
+    };
+
+    /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new WanVideoConfig().VaeTemporalCompression, FrameNormalization.SnapNearest) };
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)

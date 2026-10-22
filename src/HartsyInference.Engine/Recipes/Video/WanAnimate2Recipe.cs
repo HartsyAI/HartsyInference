@@ -41,10 +41,20 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
     public bool Matches(string familyId) => string.Equals(familyId, "wan-animate-2", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The base build's operative settings (README / demo / gradio): 40 steps at guidance 3.0 over an 81-frame clip at 24 fps.</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 40, CfgScale = 3.0f, Frames = 81, Fps = 24 };
+    // Size is what the removed generic fallback ran; the SwarmUI-aligned value: RECIPE_CONTRACT.md ledger.
+    public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 40, CfgScale = 3.0f, Width = 704, Height = 480, Frames = 81, Fps = 24,
+    };
+
+    /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new WanVideoConfig().VaeTemporalCompression, FrameNormalization.SnapNearest) };
 
     /// <summary>The distillation build's settings: 10 steps at guidance 1.0 (<c>infer/wan_animate_2_distillation.yaml</c>).</summary>
-    public static VideoDefaults DistillationDefaults { get; } = new VideoDefaults { Steps = 10, CfgScale = 1.0f, Frames = 81, Fps = 24 };
+    public static VideoDefaults DistillationDefaults { get; } = new VideoDefaults
+    {
+        Steps = 10, CfgScale = 1.0f, Width = 704, Height = 480, Frames = 81, Fps = 24,
+    };
 
     /// <inheritdoc/>
     public ModelVariantCatalog? Variants => WanAnimate2Variants.Catalog;

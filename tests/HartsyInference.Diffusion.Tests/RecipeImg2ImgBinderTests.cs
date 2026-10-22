@@ -208,6 +208,8 @@ public sealed class RecipeImg2ImgBinderTests
 
         public ImageFeatures Supports => supports;
 
+        public ImageDefaults Defaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 7.5f, Width = 1024, Height = 1024 };
+
         public FakeRecipePipeline Pipeline { get; } = new FakeRecipePipeline();
 
         public bool Matches(string candidate) => string.Equals(candidate, familyId, StringComparison.OrdinalIgnoreCase);

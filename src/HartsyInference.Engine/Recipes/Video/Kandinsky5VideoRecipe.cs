@@ -43,6 +43,9 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f, Width = 512, Height = 512, Frames = 25, Fps = 24 };
 
     /// <inheritdoc/>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(4, FrameNormalization.SnapNearest) };
+
+    /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): a VideoRequest.Components Qwen2.5-VL / CLIP-L / VAE override is still deferred.
