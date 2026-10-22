@@ -250,9 +250,10 @@ public sealed unsafe class LensTransformerBlock
         if (batch != 1)
             rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart);
 
-        // ── 7. Joint SDPA (no mask). V is not normalized and passes F16's range late in the schedule: never F16. ──
+        // ── 7. Joint SDPA (no mask). V is not normalized and passes F16's range late in the schedule: BF16, never F16. ──
         Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
+        backend.Attention(AttentionCall.FromScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: false)
+            with { Numerics = AttentionNumerics.Bf16Storage });
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();
