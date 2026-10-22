@@ -87,6 +87,19 @@ public sealed class AttentionDispatchContractTests
             Assert.Throws<ArgumentException>(() => CudaBackend.ValidateTokenMajorAttentionContract(output, query, key, value, Heads, HeadDim, 0.25f));
     }
 
+    /// <summary>The token-major entry bounds each tensor at Int32.MaxValue elements, as the head-major entry does, and leaves the score
+    /// matrix to its rows: 46341 query and key rows (SD1.5's self-attention at 1728² and up) are taken.</summary>
+    [Fact]
+    public void TokenMajorContract_TakesAScoreMatrixPastInt32()
+    {
+        const int Heads = 1, HeadDim = 8, S = 46341;
+        Assert.True((long)S * S > int.MaxValue);
+        using Tensor q = new(new TensorShape(S, Heads * HeadDim), DType.F16), k = new(q.Shape, DType.F16), v = new(q.Shape, DType.F16);
+        using Tensor o = new(q.Shape, DType.F16);
+
+        CudaBackend.ValidateTokenMajorAttentionContract(o, q, k, v, Heads, HeadDim, 0.25f);
+    }
+
     [Fact]
     public void FlashContract_RejectsInvalidCapacityGqaAndAuxiliaryLengths()
     {

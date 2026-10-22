@@ -69,7 +69,8 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
     }
 
     /// <summary>The shape classes of the sites that moved onto the token-major entry: M.2 must give the bits the head-major row
-    /// they used gave (F32 calls cast whole tensors on both rows), at sequence lengths off the kernel's tile size too.</summary>
+    /// they used gave (F32 calls cast whole tensors on both rows), at sequence lengths off the kernel's tile size too, and past
+    /// Int32.MaxValue scores: SD1.5 at 2048² and Wan 14B's 720p length.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("zimage-1024", 30, 128, 4128, true, "S.3")]
@@ -80,6 +81,8 @@ public sealed unsafe class CudnnSdpaStridedRowsTests
     [InlineData("krea2-fusion-12", 20, 128, 12, false, "S.5")]
     [InlineData("krea2-fusion-117", 20, 128, 117, false, "S.5")]
     [InlineData("krea2-fusion-333", 20, 128, 333, false, "S.5")]
+    [InlineData("sd15-2048", 8, 40, 65536, false, "S.5")]
+    [InlineData("rows-75600", 8, 128, 75600, false, "S.5")]
     public void TokenMajor_IsBitwiseEqualToTheHeadMajorRow_AtTheFlippedSitesShapes(string name, int h, int d, int s, bool f16,
         string headMajorRoute)
     {

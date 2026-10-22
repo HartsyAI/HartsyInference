@@ -7668,7 +7668,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (output.DType != query.DType || key.DType != query.DType || value.DType != query.DType)
             throw new ArgumentException(
                 $"SDPA requires matching output/Q/K/V dtypes; got output={output.DType}, Q={query.DType}, K={key.DType}, V={value.DType}.");
-        if (sq * skv > int.MaxValue || query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
+        if (query.ElementCount > int.MaxValue || key.ElementCount > int.MaxValue)
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
     }
 
