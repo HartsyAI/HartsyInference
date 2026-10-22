@@ -11,4 +11,8 @@ public enum HfWeightStorage
 
     /// <summary>Symmetric 4-bit GPTQ: <c>qweight</c>, <c>scales</c>, <c>qzeros</c> and an optional <c>g_idx</c>.</summary>
     GptqInt4,
+
+    /// <summary>bitsandbytes 4-bit NF4: a U8 nibble blob named by the weight, with <c>.absmax</c>, <c>.quant_map</c> and a
+    /// <c>.quant_state.bitsandbytes__nf4</c> JSON blob beside it.</summary>
+    Nf4,
 }
