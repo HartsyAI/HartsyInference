@@ -42,8 +42,9 @@ public sealed class AnimaRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "anima", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Anima base's sampling settings from the model card: 30 steps (card: 30-50) at CFG 4.0 (card: 4-5), 1024x1024.</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+    /// <summary>Anima base's sampling settings from the model card: 30 steps (card: 30-50) at CFG 4.0 (card: 4-5), 1024x1024. The
+    /// <c>er_sde</c> sampler is SwarmUI core's for Anima (<c>WorkflowGenerator.cs</c>; <c>Model Support.md</c>, Anima).</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 30, CfgScale = 4.0f, Sampler = "er_sde", Width = 1024, Height = 1024 };
 
     /// <summary>Anima Turbo's sampling settings from the model card: 10 steps (card: 8-12), guidance-free (CFG 1.0).</summary>
     public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 10, CfgScale = 1.0f, Width = 1024, Height = 1024 };
