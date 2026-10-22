@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Tests.Common.Attention;
 using Xunit;
@@ -225,6 +226,53 @@ public sealed unsafe class CudnnSdpaBf16CastTests
             Assert.True(backend.CudnnSdpaEngaged);
             Assert.Contains(backend.CudnnSdpaDiagnostics, kv => kv.Key.Dtype == CudnnSdpa.SdpaDtype.BF16 && kv.Value.Permanent);
             Assert.DoesNotContain(backend.CudnnSdpaDiagnostics, kv => kv.Key.Dtype == CudnnSdpa.SdpaDtype.F16);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
+        }
+    }
+
+    /// <summary>An out-of-memory on the cast scratch is a recoverable decline: the call falls through, and only the BF16 signature
+    /// backs off, transiently, so the F16 path keeps cuDNN.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void AnOutOfMemoryOnTheCastScratch_FallsThroughAndBacksOffOnlyTheBf16Signature()
+    {
+        if (!CudnnAvailable(_output)) return;
+        const int heads = 4, s = 256, d = 128;
+        float scale = 1f / MathF.Sqrt(d);
+        KnobStore.Set(EngineKnobs.SdpaCudnn, true);
+        try
+        {
+            using CudaBackend backend = new(0, PtxDir());
+            IBackend b = backend;
+            int injected = 0;
+            backend.TestCudnnSdpaFaultInjector = signature =>
+            {
+                if (signature.Dtype != CudnnSdpa.SdpaDtype.BF16) return null;
+                injected++;
+                return new OutOfVramException("injected scratch shortfall");
+            };
+            using Tensor q = Uniform(1, 1, heads, s, d), k = Uniform(2, 1, heads, s, d), v = Uniform(3, 1, heads, s, d);
+            using Tensor o = new(new TensorShape(1, heads, s, d), DType.F32);
+            for (int call = 0; call < 2; call++)
+            {
+                b.Attention(Granted(o, q, k, v, scale));
+                backend.Sync();
+                Assert.Equal("S.14", CudaBackend.LastAttentionRoute);
+            }
+            Assert.Equal(1, injected);   // the second call fell in the backoff window and never reached the row
+            Assert.Contains(backend.CudnnSdpaDiagnostics,
+                kv => kv.Key.Dtype == CudnnSdpa.SdpaDtype.BF16 && !kv.Value.Permanent && kv.Value.ConsecutiveFailures == 1);
+            Assert.Empty(backend.CudnnSdpaRefusedShapes);
+
+            using Tensor q16 = q.CastTo(DType.F16), k16 = k.CastTo(DType.F16), v16 = v.CastTo(DType.F16);
+            using Tensor o16 = new(new TensorShape(1, heads, s, d), DType.F16);
+            b.ScaledDotProductAttention(o16, q16, k16, v16, null, scale, allowF16: true);
+            backend.Sync();
+            Assert.Equal("S.3", CudaBackend.LastAttentionRoute);
+            Assert.True(backend.CudnnSdpaEngaged);
         }
         finally
         {

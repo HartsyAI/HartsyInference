@@ -70,15 +70,17 @@ public sealed unsafe class CudnnSdpaDigestTests
             checked((int)(o.ElementCount * sizeof(ushort)))))));
     }
 
-    /// <summary>F32 SDPA on the materialized and query-tiled rows with no knob set, so moving their TF32 choice behind
-    /// <c>numerics.sdpaNoTf32</c> is shown to leave the default arm's bits alone.</summary>
+    /// <summary>F32 SDPA on the materialized, query-tiled and saturating cuDNN rows with no knob set, so changes to their compute
+    /// type and cast plumbing are shown to leave the default arm's bits alone.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
-    [InlineData("f32-h8-s512-d128", 128, "none", false, "S.14")]
-    [InlineData("f32-h8-s512-d64-perhead", 64, "perhead", false, "S.14")]
-    [InlineData("f32-h8-s512-d128-tiled", 128, "none", true, "S.9")]
-    [InlineData("f32-h8-s512-d64-key-tiled", 64, "key", true, "S.10")]
-    public void F32Sdpa_DefaultOutputDigest_IsUnchanged(string name, int d, string mask, bool tiled, string route)
+    [InlineData("f32-h8-s512-d128", 128, "none", false, false, "S.14")]
+    [InlineData("f32-h8-s512-d64-perhead", 64, "perhead", false, false, "S.14")]
+    [InlineData("f32-h8-s512-d128-tiled", 128, "none", true, false, "S.9")]
+    [InlineData("f32-h8-s512-d64-key-tiled", 64, "key", true, false, "S.10")]
+    [InlineData("f32-h8-s512-d128-allowf16", 128, "none", false, true, "S.5")]
+    [InlineData("f32-h8-s512-d64-key-allowf16", 64, "key", false, true, "S.5")]
+    public void F32Sdpa_DefaultOutputDigest_IsUnchanged(string name, int d, string mask, bool tiled, bool allowF16, string route)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         string? dir = Environment.GetEnvironmentVariable("HARTSY_SDPA_BASELINE_DIR");
@@ -107,7 +109,7 @@ public sealed unsafe class CudnnSdpaDigestTests
         try
         {
             using CudaBackend backend = new(0, ptxDir);
-            ((IBackend)backend).ScaledDotProductAttention(o, q, k, v, bias, 1f / MathF.Sqrt(d), allowF16: false);
+            ((IBackend)backend).ScaledDotProductAttention(o, q, k, v, bias, 1f / MathF.Sqrt(d), allowF16);
             backend.Sync();
             Assert.Equal(route, CudaBackend.LastAttentionRoute);
             digest = Convert.ToHexString(SHA256.HashData(new ReadOnlySpan<byte>(o.DataPointer, checked((int)(o.ElementCount * sizeof(float))))));

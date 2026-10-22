@@ -7847,26 +7847,23 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             else
             {
+                bool bf16 = plan.Dtype == CudnnSdpa.SdpaDtype.BF16;
                 qCast = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
                 kCast = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
                 vCast = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
                 oCast = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
-                if (plan.Dtype == CudnnSdpa.SdpaDtype.BF16)
+                CastIn(qCast, pQ, query.ElementCount);
+                CastIn(kCast, pK, key.ElementCount);
+                CastIn(vCast, pV, value.ElementCount);
+                _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
+                if (bf16) _kernels!.LaunchCastBf16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
+                else _kernels!.LaunchCastF16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
+
+                // F16 saturates, so a value past 65504 reaches the fused softmax as the limit, not infinity; BF16 keeps F32's range.
+                void CastIn(ulong cast, ulong source, long count)
                 {
-                    _kernels!.LaunchCastF32ToBf16(qCast, pQ, (int)query.ElementCount, _stream.Handle);
-                    _kernels!.LaunchCastF32ToBf16(kCast, pK, (int)key.ElementCount, _stream.Handle);
-                    _kernels!.LaunchCastF32ToBf16(vCast, pV, (int)value.ElementCount, _stream.Handle);
-                    _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
-                    _kernels!.LaunchCastBf16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
-                }
-                else
-                {
-                    // Saturating cast: a Q/K/V value past F16's 65504 becomes the limit, not infinity, before the fused softmax sees it.
-                    _kernels!.LaunchCastF32ToF16Sat(qCast, pQ, (int)query.ElementCount, _stream.Handle);
-                    _kernels!.LaunchCastF32ToF16Sat(kCast, pK, (int)key.ElementCount, _stream.Handle);
-                    _kernels!.LaunchCastF32ToF16Sat(vCast, pV, (int)value.ElementCount, _stream.Handle);
-                    _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
-                    _kernels!.LaunchCastF16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
+                    if (bf16) _kernels!.LaunchCastF32ToBf16(cast, source, (int)count, _stream.Handle);
+                    else _kernels!.LaunchCastF32ToF16Sat(cast, source, (int)count, _stream.Handle);
                 }
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
