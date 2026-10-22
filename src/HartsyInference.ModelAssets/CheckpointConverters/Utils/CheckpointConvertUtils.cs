@@ -533,6 +533,27 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
+    /// <summary>Narrows, in place, every weight whose row count exceeds what <paramref name="rowsFor"/> says the model uses,
+    /// to its leading rows. ComfyUI's nvfp4 quantizer pads a weight's rows to a multiple of 16 (Boogu's 840-row K/V
+    /// projections ship as 848) and records the true size nowhere in the file, so only the model knows it.</summary>
+    /// <remarks>The narrowed weight is a view over the same bytes; a resident one keeps its block scales.</remarks>
+    public static void TrimPaddedRows(IDictionary<string, Tensor> weights, Func<string, long?> rowsFor)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(rowsFor);
+        foreach (string key in weights.Keys.ToList())
+        {
+            Tensor weight = weights[key];
+            if (rowsFor(key) is not long rows || weight.Shape.Rank != 2 || weight.Shape[0] == rows) continue;
+            if (weight.Shape[0] < rows || weight.Shape[0] - rows >= 16)
+                throw new InvalidOperationException(
+                    $"'{key}' has {weight.Shape[0]} rows where the model expects {rows}; that is not quantizer padding.");
+            Tensor narrowed = weight.SliceRows(0, rows);
+            narrowed.QuantInfo = weight.QuantInfo?.SliceRows(0, rows, key);
+            weights[key] = narrowed;
+        }
+    }
+
     /// <summary>The dense weight a resident nvfp4 weight stands in for (<see cref="QuantWeightInfo.DenseDType"/>), unpacked
     /// exactly as the eager open would have; the caller owns it.</summary>
     public static Tensor UnpackResidentNvfp4(Tensor resident, DType denseDType)

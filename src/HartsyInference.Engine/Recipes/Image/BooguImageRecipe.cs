@@ -104,6 +104,10 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
                 ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix,
                     CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends));
             loaders.Add(transformerSource);
+            long kvRows = (long)BooguImageConfig.V01.NumKvHeads * BooguImageConfig.V01.HeadDim;
+            CheckpointConvertUtils.TrimPaddedRows(transformerW,
+                key => key.EndsWith("to_k.weight", StringComparison.Ordinal) || key.EndsWith("to_v.weight", StringComparison.Ordinal)
+                    ? kvRows : null);
             // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
             // the first GEMM, minutes into a generation.
             loaders.Add(QuantizedWeightPolicy.PrepareForBackends(transformerW, context.TransformerBackends));
