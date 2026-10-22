@@ -78,6 +78,14 @@ stable release will require. Dates are UTC.
   change on a model whose trajectory is too chaotic for image SSIM, such as MiniMax-H3 or SD3.5 Medium. Every sampler
   `SamplerRegistry` builds carries it, as do the H3, Wan text-to-video and Lumina 2 loops; `tests/regression-ab.sh --probe` runs
   it. Off by default; output is unchanged.
+- **Fixed: CUDA work across two devices that share a host tensor.** A residency hook (the sync, release or demotion that a
+  host read or a disposal fires) bound its own device's context and left it current, so an op on one device that read a
+  tensor the other device held sent its next call to the other device's context. Wan's context parallelism failed on its
+  first forward this way: rank 1's upload of the text context that rank 0 had promoted returned
+  `CUDA_ERROR_INVALID_VALUE`. Hooks now put the caller's context back, and an upload re-binds its own after reading the
+  host bytes, as the promote path already did. `CfgBranchRunner` reports both branches' exceptions when both fail, so a
+  context-parallel rank's own error is no longer replaced by its peer's abort, and the engine's out-of-VRAM cleanup still
+  fires when one of the two is an out-of-VRAM.
 
 ## alpha.387
 
