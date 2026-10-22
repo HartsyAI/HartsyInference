@@ -19,7 +19,10 @@ namespace HartsyInference.ModelAssets.Nf4;
 public static class Nf4CompanionFold
 {
     /// <summary>Suffix bitsandbytes gives the serialized non-tensor quant state, one per quantized weight.</summary>
-    private const string QuantStatePrefix = ".quant_state.bitsandbytes__";
+    public const string QuantStatePrefix = ".quant_state.bitsandbytes__";
+
+    /// <summary>The logical shape a bitsandbytes quant state blob declares for its weight.</summary>
+    public static TensorShape ReadShape(Tensor stateBlob, string stateKey) => Nf4QuantState.Parse(stateBlob, stateKey).Shape;
 
     /// <summary>Returns a dictionary with every NF4 weight dequantized and its companions removed; the input is returned unchanged when the checkpoint holds none.</summary>
     /// <param name="allocated">Receives each decoded weight as it is created, so a caller can free what was built
@@ -69,6 +72,15 @@ public static class Nf4CompanionFold
         }
         Logs.Info($"NF4: dequantized {stateKeys.Count} bitsandbytes 4-bit weights at load.");
         return result;
+    }
+
+    /// <summary>Decodes the one NF4 weight <paramref name="weightKey"/> from <paramref name="parts"/>, which hold it, its companions
+    /// and its quant state. Unlike <see cref="Apply"/> it logs nothing, for a caller that decodes a checkpoint weight by weight.</summary>
+    internal static Tensor DecodeWeight(Dictionary<string, Tensor> parts, string weightKey)
+    {
+        string stateKey = weightKey + QuantStatePrefix + "nf4";
+        Nf4QuantState state = Nf4QuantState.Parse(parts[stateKey], stateKey);
+        return Dequantize(parts[weightKey], state, weightKey, parts, new HashSet<string>(StringComparer.Ordinal));
     }
 
     private static Tensor Dequantize(Tensor packed, Nf4QuantState state, string weightKey,

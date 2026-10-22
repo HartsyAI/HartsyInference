@@ -62,6 +62,11 @@ For a visible pair the score is computed in this order; the order is part of the
 is `m + ln Σ exp(s − m)` in natural-log units, sinks included.
 
 A **fully excluded row** (no visible key and no sink) produces `o = 0` and `LSE = −∞`, on every backend.
+A `−∞` sink is no sink; a `+∞` sink makes the row's output and LSE NaN.
+
+**NaN propagates.** An output element or LSE whose computation reads a NaN — in Q, K, V, a bias, a sink or a scale — is
+NaN. No kernel drops a NaN from a maximum or rounds one into a finite value; a quantized kernel may spread it further
+(through a shared scale or mean), never less.
 
 ## 4. Masks
 
@@ -120,6 +125,12 @@ softmax, additive bias and exclusions are invariant to that shift; a softcap is 
 `tanh(x)`), a sink logit must be shifted by the same `cᵢ`, the returned LSE must add `cᵢ` back, and two segments
 smoothed with different vectors need per-segment corrections. A kernel that smooths implements those corrections or
 refuses the call. A stale smoothing vector is invariant in real arithmetic and still changes quantized bytes.
+
+INT8 attention v2 is specified by its emulator, `Int8AttentionV2Reference` (beside the host reference): the stats pass,
+quantization and online recurrence its kernel rows reproduce, bit for bit on the Q/K/V bytes, scales, K means and INT32 QK
+products when the emulator is fed the kernel's own scales, and up to summation order and the hardware exp2 on the output.
+It applies the corrections above: a softcap gets each row's offset back before the tanh, sinks and the LSE take it, and
+each key segment carries its own.
 
 ## 6. Planning and fallback
 
