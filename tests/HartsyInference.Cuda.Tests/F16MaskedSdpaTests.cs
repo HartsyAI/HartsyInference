@@ -140,7 +140,6 @@ public sealed unsafe class F16MaskedSdpaTests
         try
         {
             KnobStore.Set(EngineKnobs.SdpaCudnn, false);
-            KnobStore.Set(EngineKnobs.SageAttnExplicit, false);
             KnobStore.Set(EngineKnobs.SageAttn, false);
             using CudaBackend backend = new(0, ptxDir);
             backend.ScaledDotProductAttention(actual, query, key, value, mask, scale);
@@ -150,7 +149,6 @@ public sealed unsafe class F16MaskedSdpaTests
         finally
         {
             KnobStore.Clear(EngineKnobs.SdpaCudnn);
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
             KnobStore.Clear(EngineKnobs.SageAttn);
         }
 

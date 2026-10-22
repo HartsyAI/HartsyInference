@@ -118,6 +118,35 @@ public sealed class KnobDeprecationsTests : IDisposable
         Assert.Contains("\"vram.keepModels\": false", text);
     }
 
+    /// <summary>Every id removed in production: a settings file naming it still loads the rest, saving it writes nothing and
+    /// drops it from the file, and a profile, <c>--set</c> or request naming it is accepted and changes nothing.</summary>
+    [Fact]
+    public void EveryRemovedId_IsAcceptedAndNeverWritten()
+    {
+        string[] removed = [.. KnobDeprecations.All.Where(e => e.NewId is null && e.OldId is not (Renamed or Removed or Retyped or Rejects))
+            .Select(e => e.OldId)];
+        Assert.NotEmpty(removed);
+        string named = string.Join(",", removed.Select(id => $"\"{id}\":true"));
+        File.WriteAllText(KnobFile.ExplicitPath!, "{\"settings\":{" + named + ",\"paths.modelsRoot\":\"/m\"}}");
+        KnobStore.ResetOverrides();
+        KnobFile.Reload();
+        Assert.Equal("/m", EngineKnobs.ModelsRoot.Value);
+
+        KnobProfile profile = KnobProfiles.ByName("default")!;
+        foreach (string id in removed)
+        {
+            Assert.Null(KnobFile.Save(id, "true"));
+            Assert.Equal(id, KnobDeprecations.Resolve(id));
+            Assert.True(profile.TrySet(id, "true", out KnobProfile same, out string? error), error);
+            Assert.Equal(profile.Count, same.Count);
+        }
+        Assert.Equal(0, new RequestSettings { Set = removed.ToDictionary(id => id, _ => "true") }.Resolve()!.Count);
+
+        KnobFile.Save("paths.modelsRoot", "/n");
+        string text = File.ReadAllText(KnobFile.ExplicitPath!);
+        Assert.All(removed, id => Assert.DoesNotContain(id, text));
+    }
+
     /// <summary>The ratchet: once a release passes an entry's window, this fails until the entry and its shim are deleted.</summary>
     [Fact]
     public void NoRetiredIdIsAcceptedPastItsWindow()

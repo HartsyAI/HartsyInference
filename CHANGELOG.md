@@ -26,6 +26,13 @@ stable release will require. Dates are UTC.
   per backend, released when the denoise loop ends, and off when the DiT streams or VRAM is short. Self-attention casts
   its normed input to F16 once for its three projections instead of once each (F16 weights on CUDA), and the per-block
   modulation is one add over the six-row table instead of eighteen ops. Output is bit-identical.
+- **Removed: dead attention kernels and switches.** The TF32 FlashAttention-2 kernel (`numerics.sdpaV2`), the SDPA
+  route forced onto the per-row flash kernel (`numerics.sdpaForceFlash`), SageAttention's first kernel
+  (`numerics.sageV0`), its F32-input rows (`numerics.sageAttnExplicit`, `numerics.sageUnsafeF32VNarrow`) with the
+  F32-output PV variants only they reached (`numerics.sagePv`), and the F16 flash kernel's never-routed head-dim 64 and
+  128 entries. Each was opt-in or unreachable, so output is bit-identical. SageAttention now ships as one module,
+  `sage_attn_int8.ptx`. A settings file, `--set`, request or API call naming one of the six ids warns and ignores it
+  through alpha.486.
 - **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The

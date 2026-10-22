@@ -696,13 +696,13 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     private static string FunControlPrefix(int index) => FunControlWeightPrefix + index;
 
-    /// <summary>Diagnostic only, off unless <c>diagnostics.h3Vprobe</c> is set: reports <c>max|V|</c> per block against F16's
-    /// 65504 ceiling. SDPA's default INT8 SageAttention path quantizes Q/K but materializes V as an F16 transpose, so
-    /// a V element past that range becomes INF and softmax·V smears it over every query row — one bad element per
-    /// token, no error raised (see the HAZARD note in <c>CudaBackend.ScaledDotProductAttention</c>; this is what bit
-    /// Lens at its block 45). It samples EVERY block rather than block 0 because the residual — and with it V — grows
-    /// with depth, so block 0 is the safest block in the stack and measuring only it would prove nothing. Host-side
-    /// and synchronizing, hence the gate: it is a measurement tool, not something the forward path pays for.</summary>
+    /// <summary>Diagnostic only, off unless <c>diagnostics.h3Vprobe</c> is set: reports <c>max|V|</c> per block against
+    /// F16's 65504 ceiling. H3 attends in F32 today; an F16 attention path (SageAttention transposes V to F16) would turn
+    /// a V element past that range into INF that softmax·V smears over every query row — one bad element per token, no
+    /// error raised (this is what bit Lens at its block 45). It samples EVERY block rather than block 0 because the
+    /// residual — and with it V — grows with depth, so block 0 is the safest block in the stack and measuring only it
+    /// would prove nothing. Host-side and synchronizing, hence the gate: it is a measurement tool, not something the
+    /// forward path pays for.</summary>
     private static bool VProbeEnabled => EngineKnobs.H3Vprobe.Value;
 
     /// <summary>F16's largest finite magnitude — the ceiling <see cref="VProbeEnabled"/> measures against.</summary>
