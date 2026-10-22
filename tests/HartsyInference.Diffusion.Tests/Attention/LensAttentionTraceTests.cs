@@ -48,6 +48,7 @@ public sealed class LensAttentionTraceTests
         AttentionCall call = Assert.Single(backend.Calls);
         Assert.Equal(AttentionRoute.Dense, call.Route);
         Assert.Equal(bf16 ? AttentionNumerics.Bf16Storage : default, call.Numerics);
+        // The legacy flag would admit the saturating F16 row, which clips Lens's V.
         Assert.False(call.Numerics.LegacyAssertedBounded);
         Assert.Equal(1f / MathF.Sqrt(HeadDim), call.Scale);
         Assert.Null(call.Mask.Bias);

@@ -176,7 +176,9 @@ stable release will require. Dates are UTC.
 - **Added: Lens can attend in BF16 (`numerics.lensBf16`, off by default).** It grants Lens's joint attention BF16 storage, so
   on CUDA it runs the cuDNN BF16 row (S.16) instead of the F32 materialized or tiled path: 536 → 240 ms per step at 1024² and
   7765 → 1299 at 2048² on an RTX 4090. Off until its quality is judged trajectory-free. Lens's 1/256 V damp, which held its
-  unnormalized V inside F16's range, is removed; it was a bit-exact no-op on every F32 row.
+  unnormalized V inside F16's range, is removed; it was a bit-exact no-op on every F32 row. Under `numerics.sdpaF16`, which
+  forces F16 for every caller, Lens's late-block V now clips at 65504 where the damp used to keep it in range.
+
 ## alpha.387
 
 - **Changed: Anima Base and Flux 3 Image Base default to the `er_sde` sampler**, SwarmUI core's choice for both (#521).

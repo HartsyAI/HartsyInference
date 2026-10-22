@@ -138,6 +138,24 @@ public sealed class CudnnSdpaBackendRowsTests
         Assert.Equal("materialized", Plan(Backend(cudnn: false), "BuildDenseRows", in granted));
     }
 
+    /// <summary>Lens's joint attention (F32, head dim 64, no mask, no F16 assertion) can only reach an F32 or BF16 row, whatever the
+    /// grant or free VRAM: no row that narrows to F16 (Sage, cuDNN F16, the saturating cast) admits it.</summary>
+    [Theory]
+    [InlineData(false, 64UL << 30)]
+    [InlineData(false, 4096UL)]
+    [InlineData(true, 64UL << 30)]
+    [InlineData(true, 4096UL)]
+    public void LensShapedF32Call_NeverReachesAnF16Row(bool bf16Grant, ulong freeVram)
+    {
+        const int heads = 24, d = 64;
+        Tensor q = new(new TensorShape(1, heads, S, d), DType.F32), k = new(new TensorShape(1, heads, S, d), DType.F32);
+        Tensor v = new(new TensorShape(1, heads, S, d), DType.F32), o = new(new TensorShape(1, heads, S, d), DType.F32);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.125f, allowF16: false);
+        if (bf16Grant) call = call with { Numerics = AttentionNumerics.Bf16Storage };
+        string row = Plan(Backend(freeVram: freeVram), "BuildDenseRows", in call);
+        Assert.Contains(row, (string[])["materialized", "tiled.f32", "cudnn.f32.bf16"]);
+    }
+
     /// <summary>Failure state is per signature: a BF16 cast signature given up leaves the F16 D=128 path and the saturating row
     /// eligible, and an F16 signature given up leaves the BF16 cast row eligible.</summary>
     [Fact]
