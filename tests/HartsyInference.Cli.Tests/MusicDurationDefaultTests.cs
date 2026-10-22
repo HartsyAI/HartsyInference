@@ -1,3 +1,4 @@
+using HartsyInference.Cli.Commands;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Engine;
 using Xunit;
@@ -8,6 +9,9 @@ namespace HartsyInference.Cli.Tests;
 /// ACE-Step 1.5 and MiniMax Music 3, 300 s for YuE2) instead of a CLI-side 10 s.</summary>
 public sealed class MusicDurationDefaultTests
 {
+    [Fact]
+    public void MusicCommand_HasNoDurationDefault() => Assert.Null(new MusicCommand.Settings().Duration);
+
     [Fact]
     public void MusicParams_LeaveDurationUnset_UntilTheUserSetsIt()
     {
