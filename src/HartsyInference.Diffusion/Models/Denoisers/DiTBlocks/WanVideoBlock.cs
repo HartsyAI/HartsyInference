@@ -72,7 +72,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
             AllowF16 = true,
         };
         // F16 is named rather than followed from the input: the text context the cross-attention K/V project stays F32.
-        AttentionLayerConfig config16 = config with { ComputeDType = DType.F16 };
+        // The F16 branches were measured on cuDNN's F16 attention, so they refuse SageAttention's INT8.
+        AttentionLayerConfig config16 = config with { ComputeDType = DType.F16, RefusedFormats = AttentionFormats.Int8 };
         AttentionLayerWeights Weights(int i) => new()
         {
             Query = _q[i], QueryBias = _qB[i], Key = _k[i], KeyBias = _kB[i], Value = _v[i], ValueBias = _vB[i], Output = _o[i],

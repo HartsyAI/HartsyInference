@@ -181,6 +181,7 @@ public sealed record AttentionKernelCapability
         if (call.QueryTokens < MinQueryTokens || call.QueryTokens > MaxQueryTokens) return AttentionExclusion.QueryRows;
         if (call.Logits.Any && !LogitTerms) return AttentionExclusion.LogitTerms;
         if (call.Positions.OnDevice && !DevicePositions) return AttentionExclusion.DevicePositions;
+        if (((UsesQueryKey | UsesProbValue) & call.Numerics.Refused) != 0) return AttentionExclusion.RefusedFormat;
         AttentionMask m = call.Mask;
         if (m.Causal && (Masks & AttentionMaskSupport.Causal) == 0) return AttentionExclusion.Causal;
         if ((m.WindowLeft is not null || m.WindowRight is not null) && (Masks & AttentionMaskSupport.Window) == 0) return AttentionExclusion.Window;
@@ -261,6 +262,9 @@ public enum AttentionExclusion
 
     /// <summary>A per-head bias.</summary>
     PerHeadBias,
+
+    /// <summary>A multiply format the call refuses.</summary>
+    RefusedFormat,
 }
 
 /// <summary>One kernel a backend can run for attention: its declared capability, the runtime conditions that admit a call

@@ -250,7 +250,8 @@ public sealed class AttentionLayerTests
     }
 
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
-    /// minimum; the token-major entry has no Sage kernel, so a guarded layer keeps exactly those calls head-major.</summary>
+    /// minimum, from a call that does not refuse INT8; the token-major entry has no Sage kernel, so a guarded layer keeps exactly
+    /// those calls head-major.</summary>
     [Theory]
     [InlineData("sage-length", AttentionRoute.Dense)]
     [InlineData("sage-length-d64", AttentionRoute.Dense)]
@@ -262,6 +263,7 @@ public sealed class AttentionLayerTests
     [InlineData("bias", AttentionRoute.TokenMajor)]
     [InlineData("sage-off", AttentionRoute.TokenMajor)]
     [InlineData("unguarded", AttentionRoute.TokenMajor)]
+    [InlineData("int8-refused", AttentionRoute.TokenMajor)]
     public void HeadMajorForSage_KeepsTheCallsTheSageRowTakesHeadMajor(string name, AttentionRoute route)
     {
         int skv = name is "below-minimum" or "knob-minimum" ? 4096 : 8192;
@@ -272,7 +274,7 @@ public sealed class AttentionLayerTests
         AttentionLayer layer = new(new AttentionLayerConfig
         {
             Heads = 1, KvHeads = 1, HeadDim = headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = name != "unguarded",
-            AllowF16 = true,
+            AllowF16 = true, RefusedFormats = name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
         }, Weights(gate: false));
         Tensor kv = new(new TensorShape(1, skv, 8), act), q = sq == skv ? kv : new(new TensorShape(1, sq, 8), act);
         Tensor? bias = name == "bias" ? new Tensor(new TensorShape(1, 1, 1, skv), DType.F32) : null;
@@ -288,7 +290,9 @@ public sealed class AttentionLayerTests
             KnobStore.Clear(EngineKnobs.SageF16MinSkv);
         }
 
-        Assert.Equal(route, Assert.Single(backend.Calls).Route);
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
+        Assert.Equal(name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
         Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
     }
 

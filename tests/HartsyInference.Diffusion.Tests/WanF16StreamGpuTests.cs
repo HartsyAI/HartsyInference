@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -11,10 +12,11 @@ using Xunit.Abstractions;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Wan's F16 attention and FFN branches over the F32 residual stream (<c>numerics.ditF16</c>) on CUDA. One block at
-/// TI2V-5B geometry, fed a stream with the outlier channels the real residual carries, tracks its F32 twin on the cuDNN route
-/// and on the SageAttention route a long sequence takes. With the switch off the transformer is the F32 path assembled from its
-/// parts, bit for bit; the forwards that stay F32 ignore the switch; a text K/V scope serves only forwards of its own dtype; and
-/// the debug dump records the F16 branches as F32 without moving the output.</summary>
+/// TI2V-5B geometry, fed a stream with the outlier channels the real residual carries, tracks its F32 twin, and its
+/// self-attention stays on cuDNN past the SageAttention knee, which an unrefused call at the same geometry reaches. With the
+/// switch off the transformer is the F32 path assembled from its parts, bit for bit; the forwards that stay F32 ignore the
+/// switch; a text K/V scope serves only forwards of its own dtype; and the debug dump records the F16 branches as F32 without
+/// moving the output.</summary>
 public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 {
     private const int GridH = 15, GridW = 26;   // 832×480 after the VAE and the patch
@@ -29,6 +31,7 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
     [Theory]
     [InlineData(4)]
     [InlineData(22)]
+    [InlineData(31)]
     public void F16BranchesTrackTheF32BlockAtTi2v5bGeometry(int frames)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -55,9 +58,9 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
             Assert.Equal(0, backend.SageAttentionExecutionCount);
             using Tensor out16 = block.Forward(backend, hidden, context, temb, rope, cos, sin, s, branchDType: DType.F16);
             Assert.Equal(DType.F32, out16.DType);
-            // Self-attention alone is long on both sides; the 512 text keys keep cross-attention on cuDNN.
-            Assert.Equal(s >= SageKnee ? 1 : 0, backend.SageAttentionExecutionCount);
+            Assert.Equal(0, backend.SageAttentionExecutionCount);
             f16 = Read(out16);
+            SelfAttentionRows(backend, cfg, s, ref seed);
         }
         foreach (Tensor t in weights.Values.Concat([cos, sin])) t.Dispose();
 
@@ -84,6 +87,22 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 
         Assert.True(diff > 0, "The F16 branches wrote the F32 block's bits; the F16 path did not run.");
         Assert.True(relUpdate <= 2e-3, $"The F16 branches miss the F32 block's update by {relUpdate:E3}.");
+    }
+
+    /// <summary>Self-attention's F16 operands at <paramref name="s"/> tokens: refusing INT8 as the F16 twins do, the call plans
+    /// to cuDNN's F16 row; unrefused, past the knee it plans to and runs on SageAttention.</summary>
+    private static void SelfAttentionRows(CudaBackend backend, WanVideoConfig cfg, int s, ref int seed)
+    {
+        long[] shape = [1, cfg.NumHeads, s, cfg.HeadDim];
+        using Tensor q = Half(Uniform(ref seed, 1f, shape)), k = Half(Uniform(ref seed, 1f, shape)), v = Half(Uniform(ref seed, 1f, shape));
+        using Tensor o = new(new TensorShape(shape), DType.F16);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 1f / MathF.Sqrt(cfg.HeadDim), allowF16: true);
+        AttentionCall refusing = call with { Numerics = call.Numerics with { Refused = AttentionFormats.Int8 } };
+
+        Assert.Equal("cudnn.f16", backend.PlanAttention(in refusing).RowId);
+        Assert.Equal(s >= SageKnee ? "sage.int8.f16" : "cudnn.f16", backend.PlanAttention(in call).RowId);
+        backend.Attention(in call);
+        Assert.Equal(s >= SageKnee ? 1 : 0, backend.SageAttentionExecutionCount);
     }
 
     [Trait("Category", "GpuIntegration")]
