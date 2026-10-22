@@ -1,4 +1,3 @@
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -25,29 +24,6 @@ public sealed class AttentionDispatchContractTests
     [InlineData(256, true)]
     [InlineData(264, false)]
     public void CudnnSdpa_HeadDims_AreTheProbedEnvelope(long d, bool expected) => Assert.Equal(expected, CudnnSdpa.ShapeSupported(d));
-
-    /// <summary>F32 Sage dispatch requires both the feature opt-in and the explicit unsafe V-narrowing opt-in.</summary>
-    [Fact]
-    public void SageF32Dispatch_RequiresTwoExplicitOptIns()
-    {
-        try
-        {
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-            Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
-
-            KnobStore.Set(EngineKnobs.SageAttnExplicit, true);
-            Assert.False(CudaBackend.SageF32ValueNarrowingEnabled);
-
-            KnobStore.Set(EngineKnobs.SageUnsafeF32VNarrow, true);
-            Assert.True(CudaBackend.SageF32ValueNarrowingEnabled);
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
-            KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow);
-        }
-    }
 
     [Fact]
     public void SdpaContract_RejectsMismatchedBuffersAndMaskAxes()

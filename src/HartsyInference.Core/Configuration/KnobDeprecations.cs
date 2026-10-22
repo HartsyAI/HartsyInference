@@ -60,6 +60,12 @@ public static class KnobDeprecations
             new("numerics.sdpaV2", null, null, Attention386,
                 "the TF32 FlashAttention-2 kernel it opted into is gone; F32 attention runs on cuDNN, the tiled core or the materialized path."),
             new("numerics.sdpaForceFlash", null, null, Attention386, "attention no longer has a forced per-row flash route."),
+            new("numerics.sageV0", null, null, Attention386, "the v0 SageAttention kernel is gone; numerics.sageAttn governs the one that remains."),
+            new("numerics.sageAttnExplicit", null, null, Attention386,
+                "F32 operands no longer reach SageAttention; numerics.sageAttn governs the native-F16 path."),
+            new("numerics.sageUnsafeF32VNarrow", null, null, Attention386,
+                "F32 operands no longer reach SageAttention, so there is no V narrowing to accept."),
+            new("numerics.sagePv", null, null, Attention386, "the native-F16 SageAttention path always accumulates PV in F16 per key step."),
         ];
     }
 

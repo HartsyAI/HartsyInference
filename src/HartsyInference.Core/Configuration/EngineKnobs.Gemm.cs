@@ -32,13 +32,6 @@ public static partial class EngineKnobs
         Bool("numerics.flashSplitOff", false, KnobScope.Runtime, KnobDomain.Numerics,
             "Kill-switch for split-K flash attention, which is otherwise a large LLM-decode win.");
 
-    /// <summary>Accepts Sage attention's F32-to-F16 V-storage narrowing; only takes effect alongside an explicit Sage opt-in.</summary>
-    /// <remarks>Quarantines a genuinely unsafe path: the Sage prologue materializes V as F16, so an F32 value
-    /// outside the finite F16 range becomes infinity. Requires a second opt-in on purpose.</remarks>
-    public static readonly Knob<bool> SageUnsafeF32VNarrow =
-        Bool("numerics.sageUnsafeF32VNarrow", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Accepts Sage attention's unsafe F32-to-F16 V narrowing; only effective alongside an explicit Sage opt-in.");
-
     /// <summary>Enables the tensor-core GEMM path.</summary>
     public static readonly Knob<bool> TensorcoreGemm =
         Bool("numerics.tensorcoreGemm", false, KnobScope.Runtime, KnobDomain.Numerics,

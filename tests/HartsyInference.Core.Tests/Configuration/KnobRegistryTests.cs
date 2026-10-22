@@ -98,10 +98,6 @@ public sealed class KnobRegistryTests
             // Graph capture: the opt-in tier and the default-ON tier. Changing one alone moves half the behaviour.
             ("numerics.ditGraph", false),
             ("numerics.ditGraphDefaultOn", true),
-            // SageAttention: the default-ON kernel, and the explicit opt-in that ALONE unlocks the unsafe
-            // F32 -> F16 V-narrowing. Collapsing these would open that path by default.
-            ("numerics.sageAttn", true),
-            ("numerics.sageAttnExplicit", false),
         ];
 
         List<string> problems = [];

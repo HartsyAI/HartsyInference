@@ -25,7 +25,6 @@ public static class AttentionArms
         () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.NoTf32),
         () => KnobStore.Clear(EngineKnobs.Fa2Prefill), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
         () => KnobStore.Clear(EngineKnobs.FlashSplitOff), () => KnobStore.Clear(EngineKnobs.FlashSplitForce),
-        () => KnobStore.Clear(EngineKnobs.SageAttnExplicit), () => KnobStore.Clear(EngineKnobs.SageUnsafeF32VNarrow),
         () => KnobStore.Clear(EngineKnobs.Profile), () => KnobStore.Clear(EngineKnobs.ProfileShapes),
     ];
 
