@@ -66,6 +66,9 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   configs; capability limits go in `Constraints`, not defaults.
 - A default that differs from SwarmUI's documented one, or comes from upstream where SwarmUI has none, carries a
   one-line comment saying why. Design and the per-family ledger: [RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md).
+- Music recipes (`IMusicRecipe`) follow the same rules: `MusicRequest` fields are nullable and `MusicService` fills them
+  from the recipe before any loader runs. A loader reads a filled field with `Filled()`, which fails by name if the
+  recipe was skipped. A placed checkpoint's variant is not trusted for defaults; the loader applies them once it reads the header.
 
 ## GPU Weight Management
 - Preload with `backend.PreloadWeights(model.EnumerateWeights())`; dispose CPU weight tensors afterwards only if

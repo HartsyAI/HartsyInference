@@ -4,6 +4,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Video.Encoding;
 
@@ -105,7 +106,7 @@ internal static class ControlFoleyMusicModel
 
             MusicAudio Synth(IBackend device, MusicRequest request, CancellationToken ct)
             {
-                ControlFoleyRawVideo? raw = request.Video is null ? null : DecodeVideo(request.Video, request.Duration, ct);
+                ControlFoleyRawVideo? raw = request.Video is null ? null : DecodeVideo(request.Video, request.Duration.Filled(), ct);
                 ControlFoleyPipeline.ReferenceAudio? clipReference = ReadReference(request);
                 if (raw is null && clipReference is null && string.IsNullOrWhiteSpace(request.Prompt))
                 {
@@ -115,11 +116,11 @@ internal static class ControlFoleyMusicModel
                 ControlFoleyPipeline.Request run = new()
                 {
                     Prompt = request.Prompt,
-                    NegativePrompt = request.NegativePrompt,
-                    DurationSeconds = request.Duration,
+                    NegativePrompt = request.NegativePrompt ?? string.Empty,
+                    DurationSeconds = request.Duration.Filled(),
                     Seed = request.Seed,
-                    Steps = request.InferSteps ?? 25,
-                    CfgStrength = (float)(request.CfgScale ?? 4.5),
+                    Steps = request.InferSteps.Filled(),
+                    CfgStrength = (float)request.CfgScale.Filled(),
                     Video = raw,
                     MaskAwayClip = request.MaskAwayClip,
                     Reference = clipReference,
@@ -277,8 +278,8 @@ internal static class ControlFoleyMusicModel
         }
 
         float[] mono = buffer.ToMono();
-        int start = Math.Clamp((int)(request.ReferenceStartSeconds * buffer.SampleRate), 0, mono.Length);
-        int end = Math.Clamp((int)(request.ReferenceEndSeconds * buffer.SampleRate), start, mono.Length);
+        int start = Math.Clamp((int)(request.ReferenceStartSeconds.Filled() * buffer.SampleRate), 0, mono.Length);
+        int end = Math.Clamp((int)(request.ReferenceEndSeconds.Filled() * buffer.SampleRate), start, mono.Length);
         return end > start ? new ControlFoleyPipeline.ReferenceAudio(mono[start..end], buffer.SampleRate) : null;
     }
 
