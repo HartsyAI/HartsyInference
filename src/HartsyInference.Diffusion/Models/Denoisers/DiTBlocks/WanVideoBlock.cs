@@ -127,26 +127,33 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// self-attention input (the Animate-2 driving prepass, which is otherwise an ordinary block forward).
     /// <paramref name="selfAttnKvRewrite"/> trades the local K/V for the full sequence's (context parallel).
     /// <paramref name="textKv"/> keeps the text cross-attention K/V across forwards; it is used only without an image context.
-    /// <para><paramref name="hidden"/> is F32, or F16 for the plain single-group forward; every activation follows it, while the
-    /// modulation, the norm weights and the RoPE tables stay F32.</para></summary>
+    /// <para>The residual stream <paramref name="hidden"/> is F32. <paramref name="branchDType"/> F16 runs the attention, the
+    /// cross-attention and the FFN in F16 for the plain single-group forward: each norm writes its branch input in F16 and each
+    /// branch output is added back to the F32 stream; the modulation, the norm weights and the RoPE tables stay F32.</para></summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
         Action<Tensor>? postSelfAttnHook = null, IKvRewrite? selfAttnKvRewrite = null,
-        WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? selfAttnKvCapture = null, ICachedKv? textKv = null)
+        WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? selfAttnKvCapture = null, ICachedKv? textKv = null,
+        DType? branchDType = null)
     {
         int s = (int)hidden.Shape[0];
-        if (hidden.DType != DType.F32 && (hidden.DType != DType.F16 || tokensPerGroup != s || temb.Shape[0] != 1 || imageContextLen != 0
+        DType branch = branchDType ?? DType.F32;
+        if (hidden.DType != DType.F32)
+            throw new NotSupportedException($"The Wan residual stream is F32, got {hidden.DType}.");
+        if (branch != DType.F32 && (branch != DType.F16 || tokensPerGroup != s || temb.Shape[0] != 1 || imageContextLen != 0
             || postCrossAttnHook is not null || selfAttnMask is not null || postSelfAttnHook is not null || selfAttnKvRewrite is not null
             || animate2 is not null || selfAttnKvCapture is not null || CrossAttnResidualNormed))
             throw new NotSupportedException(
-                $"A {hidden.DType} Wan stream runs one timestep group with no image context, mask, hook, K/V rewrite or Animate-2 splice.");
-        // The dump wants the raw scale rows.
-        bool scalePlusOne = tokensPerGroup == s && temb.Shape[0] == 1 && !WanVideoDebugDump.Enabled;
+                $"{branch} Wan branches run one timestep group with no image context, mask, hook, K/V rewrite or Animate-2 splice.");
+        bool f16Branches = branch == DType.F16;
+        // The dump wants the raw scale rows, and so does the fused F16 norm, which adds the 1 itself.
+        bool scalePlusOne = !f16Branches && tokensPerGroup == s && temb.Shape[0] == 1 && !WanVideoDebugDump.Enabled;
         (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb, scalePlusOne);
         if (dbg != null) { WanVideoDebugDump.Dump($"{dbg}_scaleMsa", scaleMsa); WanVideoDebugDump.Dump($"{dbg}_gateMsa", gateMsa); }
 
         // 1. self-attn
-        Tensor n1 = ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s), scaleMsa, shiftMsa, s, tokensPerGroup, scalePlusOne);
+        Tensor n1 = f16Branches ? NormModulateF16(backend, hidden, scaleMsa, shiftMsa, s)
+            : ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s, DType.F32), scaleMsa, shiftMsa, s, tokensPerGroup, scalePlusOne);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
         Tensor attn1 = SelfAttention(backend, n1, cos, sin, s, selfAttnMask, selfAttnKvRewrite, animate2, selfAttnKvCapture);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
@@ -159,7 +166,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         postSelfAttnHook?.Invoke(h1);
 
         // 2. cross-attn (to umT5 text, plus optional CLIP image context for I2V)
-        Tensor n2 = LayerNorm(backend, h1, _norm2W, _norm2B, s);
+        Tensor n2 = LayerNorm(backend, h1, _norm2W, _norm2B, s, branch);
         Tensor attn2 = CrossAttention(backend, n2, encoder, imageContextLen, imageContextLen == 0 ? textKv : null);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn2", attn2);
         // Matrix-Game 3.0's memory-mode block builds the cross-attn residual on the NORMED hidden state
@@ -173,7 +180,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         postCrossAttnHook?.Invoke(h2);
 
         // 3. ffn
-        Tensor n3 = ApplyShiftScale(backend, LayerNorm(backend, h2, null, null, s), cScale, cShift, s, tokensPerGroup, scalePlusOne);
+        Tensor n3 = f16Branches ? NormModulateF16(backend, h2, cScale, cShift, s)
+            : ApplyShiftScale(backend, LayerNorm(backend, h2, null, null, s, DType.F32), cScale, cShift, s, tokensPerGroup, scalePlusOne);
         Tensor ff = Ffn(backend, n3, s);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_ff", ff);
         n3.Dispose();
@@ -494,18 +502,20 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         return outT;
     }
 
-    /// <summary>FP32 LayerNorm over the last dim with optional affine. GPU-resident (backend ops) — the per-op
-    /// host-pointer loop it replaced dominated full-res runtime (14040×3072 per call, forcing D2H/H2D each block).
-    /// Affine-with-bias → <see cref="IBackend.LayerNorm"/>; no-affine → <see cref="IBackend.LayerNormNoAffine"/>;
-    /// the rare affine-without-bias case keeps the CPU reference.</summary>
-    private Tensor LayerNorm(IBackend backend, Tensor x, Tensor? weight, Tensor? bias, int s)
+    /// <summary>FP32 LayerNorm over the last dim with optional affine, written in <paramref name="output"/>. GPU-resident (backend
+    /// ops) — the per-op host-pointer loop it replaced dominated full-res runtime (14040×3072 per call, forcing D2H/H2D each block).
+    /// An F16 output with weight and bias is one <see cref="IBackend.LayerNorm"/> pass; otherwise no-affine →
+    /// <see cref="IBackend.LayerNormNoAffine"/>, affine → that plus <see cref="IBackend.AffineBroadcastLastDim"/>.</summary>
+    private Tensor LayerNorm(IBackend backend, Tensor x, Tensor? weight, Tensor? bias, int s, DType output)
     {
-        Tensor o = new Tensor(new TensorShape(s, _dim), x.DType);
-        // No-affine (n1/n3): direct GPU op. Affine (n2): normalize on GPU then apply weight/bias as a broadcast
-        // affine on GPU (backend.LayerNorm has no CUDA kernel, but LayerNormNoAffine + AffineBroadcastLastDim do,
-        // so we stay GPU-resident). weight/bias are [dim] = [1, dim] broadcast over the sequence. The affine step
-        // must NOT be in-place: re-caching the same tensor orphans its old device buffer (FreeDevice skips cached
-        // pointers), leaking it — so normalize into a scratch tensor, then affine into the output.
+        Tensor o = new Tensor(new TensorShape(s, _dim), output);
+        if (output != x.DType && weight is not null && bias is not null)
+        {
+            backend.LayerNorm(o, x, weight, bias, _eps);
+            return o;
+        }
+        // The affine step must NOT be in-place: re-caching the same tensor orphans its old device buffer (FreeDevice
+        // skips cached pointers), leaking it — so normalize into a scratch tensor, then affine into the output.
         if (weight is null)
         {
             backend.LayerNormNoAffine(o, x, _eps);
@@ -513,7 +523,22 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         }
         using Tensor normed = new Tensor(new TensorShape(s, _dim), x.DType);
         backend.LayerNormNoAffine(normed, x, _eps);
-        backend.AffineBroadcastLastDim(o, normed, weight, bias);
+        if (output == x.DType)
+        {
+            backend.AffineBroadcastLastDim(o, normed, weight, bias);
+            return o;
+        }
+        using Tensor affine = new Tensor(new TensorShape(s, _dim), x.DType);
+        backend.AffineBroadcastLastDim(affine, normed, weight, bias);
+        backend.CastToF16(o, affine);
+        return o;
+    }
+
+    /// <summary>adaLN of the F32 stream into an F16 branch, <c>LN(x)·(1 + scale) + shift</c>, in one pass that rounds once.</summary>
+    private Tensor NormModulateF16(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s)
+    {
+        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F16);
+        backend.LayerNormModulate(o, x, scale, shift, _eps);
         return o;
     }
 

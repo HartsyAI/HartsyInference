@@ -47,10 +47,11 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
 
     public WanVideoConfig Config => _config;
 
-    /// <summary>The dtype a forward's blocks carry: <c>numerics.ditF16</c>'s for one timestep group on a backend with F16
-    /// activations, else F32.</summary>
-    public static DType BlockActivation(IBackend backend, bool singleGroup) =>
-        singleGroup && backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
+    /// <summary>The dtype a forward's attention and FFN branches compute in: <c>numerics.ditF16</c>'s for one timestep group of a
+    /// checkpoint whose branches fit F16 (<see cref="WanVideoConfig.F16Branches"/>) on a backend with F16 activations, else F32.
+    /// The residual stream is F32 either way.</summary>
+    public DType BranchActivation(IBackend backend, bool singleGroup) =>
+        singleGroup && _config.F16Branches && backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
@@ -138,13 +139,12 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
 
         BuildRopeCache(gt, gh, gw);
         (Tensor cos, Tensor sin) = (_cosC!, _sinC!);
-        // The image branch, context parallelism's K/V exchange and the step cache's residuals stay F32.
-        DType act = imageEmbeds is null && cp is null && stepCache is null ? BlockActivation(backend, g == 1) : DType.F32;
+        // The image branch and context parallelism's K/V exchange are F32-only, and the step cache keeps today's path.
+        DType act = imageEmbeds is null && cp is null && stepCache is null ? BranchActivation(backend, g == 1) : DType.F32;
 
         WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]
         WanVideoDebugDump.Dump("patch_embed", hidden);
-        hidden = DtypeCastHelper.EnsureDtype(backend, hidden, act);
         WanVideoDebugDump.Dump("in_encoder", encoder);
         if (WanVideoDebugDump.Enabled)
         {
@@ -200,7 +200,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block 0: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen, dbg: "b0", textKv: textKv?[0]);
+                imageContextLen: imageContextLen, dbg: "b0", textKv: textKv?[0], branchDType: act);
             cur.Dispose();
             cur = block0;
             WanVideoDebugDump.Dump("blocks.0", cur);
@@ -224,7 +224,8 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
                 System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvRewrite: kvRewrite, textKv: textKv?[i]);
+                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvRewrite: kvRewrite, textKv: textKv?[i],
+                branchDType: act);
             if (!ReferenceEquals(cur, cacheAnchor)) cur.Dispose();
             cur = next;
             WanVideoDebugDump.Dump($"blocks.{i}", cur);
@@ -237,7 +238,6 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         }
         timestepProj.Dispose();   // cos/sin/encoderProj live in the per-generation caches — not per-forward temporaries
 
-        cur = DtypeCastHelper.EnsureF32(backend, cur);
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, sEff, dim, _config.Eps, tokensPerGroup);
         cur.Dispose();
         temb.Dispose();

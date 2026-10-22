@@ -955,27 +955,28 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         return _transformer.CacheTextCrossAttentionKv(blockAct);
     }
 
-    /// <summary>The dtype the T2V/TI2V loop's blocks carry: F16 only when no forward can take an F32 path (per-frame timesteps,
-    /// the step cache, context parallelism) on any backend the loop runs on, so a reserve sized from it never undercounts.</summary>
+    /// <summary>The dtype the T2V/TI2V loop's attention and FFN branches compute in: F16 only when no forward can take an F32
+    /// path (per-frame timesteps, the step cache, context parallelism) on any backend the loop runs on, so a reserve sized from
+    /// it never undercounts.</summary>
     private DType DenoiseActivation(bool singleGroup)
     {
         bool eligible = singleGroup && StepCacheEnv.ReadThreshold() <= 0f && CpBackends is not { Count: >= 2 };
         // numerics.ditF16 holds for a whole generation, the CFG worker included, so every forward agrees with this.
-        DType act = WanVideoTransformer.BlockActivation(Backend, eligible);
-        return CfgParallelBackend is { } second && WanVideoTransformer.BlockActivation(second, eligible) != act ? DType.F32 : act;
+        DType act = _transformer.BranchActivation(Backend, eligible);
+        return CfgParallelBackend is { } second && _transformer.BranchActivation(second, eligible) != act ? DType.F32 : act;
     }
 
     /// <summary>Bytes the denoise phase needs beside the weights, so the resident/streamed decision and the block window budget against the same number.</summary>
-    /// <remarks>The dominant terms are the per-block activations over the full token grid, <paramref name="activationBytes"/>
-    /// per element. The token count is the patchified grid, not the pixel grid. A generous constant rides on top for cuBLAS
-    /// workspace, RoPE tables and the encoder projections — under-reserving here does not fail cleanly, it
-    /// over-commits VRAM at exactly the geometries streaming exists to rescue.</remarks>
+    /// <remarks>The dominant terms are the per-block activations over the full token grid: the F32 residual stream, and the
+    /// branches at <paramref name="branchBytes"/> per element. The token count is the patchified grid, not the pixel grid. A
+    /// generous constant rides on top for cuBLAS workspace, RoPE tables and the encoder projections — under-reserving here does
+    /// not fail cleanly, it over-commits VRAM at exactly the geometries streaming exists to rescue.</remarks>
     internal static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim, (int T, int H, int W) patch,
-        int activationBytes)
+        int branchBytes)
     {
         long tokens = (long)Math.Max(1, tLat / patch.T) * Math.Max(1, hLat / patch.H) * Math.Max(1, wLat / patch.W);
-        // q/k/v + attention output + the FFN's two wide intermediates, plus the block's own residual.
-        long perForward = tokens * innerDim * activationBytes * 8L;
+        // The block's residual, plus q/k/v, the attention output and the FFN's two wide intermediates in the branch dtype.
+        long perForward = tokens * innerDim * (sizeof(float) + 7L * branchBytes);
         return perForward + (1536L * 1024 * 1024);
     }
 

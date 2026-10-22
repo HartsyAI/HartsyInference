@@ -10,11 +10,11 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Wan's F16 block stream (<c>numerics.ditF16</c>) on CUDA. One block at TI2V-5B geometry, fed a stream with the
-/// outlier channels the real residual carries, tracks its F32 twin within F16 rounding, on the cuDNN route and on the
-/// SageAttention route a long sequence takes. With the switch off the transformer is the F32 path assembled from its parts,
-/// bit for bit; the forwards that stay F32 ignore the switch; a text K/V scope serves only forwards of its own dtype; and the
-/// debug dump records the F16 stream as F32 without moving the output.</summary>
+/// <summary>Wan's F16 attention and FFN branches over the F32 residual stream (<c>numerics.ditF16</c>) on CUDA. One block at
+/// TI2V-5B geometry, fed a stream with the outlier channels the real residual carries, tracks its F32 twin on the cuDNN route
+/// and on the SageAttention route a long sequence takes. With the switch off the transformer is the F32 path assembled from its
+/// parts, bit for bit; the forwards that stay F32 ignore the switch; a text K/V scope serves only forwards of its own dtype; and
+/// the debug dump records the F16 branches as F32 without moving the output.</summary>
 public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 {
     private const int GridH = 15, GridW = 26;   // 832×480 after the VAE and the patch
@@ -23,14 +23,13 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 
     private readonly ITestOutputHelper _output = output;
 
-    /// <summary>The bar is relative to the block's update (output minus input), not its output, which the residual's outlier
-    /// channels dominate: the F16 block may miss the F32 update by at most twice what rounding the F32 block's own output to F16
-    /// already costs, so the arithmetic inside the block adds no more error than the F16 stream itself.</summary>
+    /// <summary>The bar is on the block's update (output minus input), which the residual's outlier channels would hide in the
+    /// output. For scale, the report also gives what storing the F32 block's own output in F16 would cost.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4)]
     [InlineData(22)]
-    public void AnF16BlockTracksTheF32BlockAtTi2v5bGeometry(int frames)
+    public void F16BranchesTrackTheF32BlockAtTi2v5bGeometry(int frames)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using IDisposable knobs = KnobProfile.Create("wan-f16-block").With(EngineKnobs.SageAttn, true)
@@ -41,7 +40,7 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         Dictionary<string, Tensor> weights = BlockWeights(cfg, ref seed);
         WanVideoBlock block = new(cfg, crossAttnNorm: true);
         block.LoadWeights(weights, "b");
-        using Tensor hidden = Representable(ResidualStream(ref seed, s, dim));
+        using Tensor hidden = ResidualStream(ref seed, s, dim);
         float[] x = Read(hidden);
         using Tensor context = Uniform(ref seed, MathF.Sqrt(3f), TextTokens, dim);
         using Tensor temb = Uniform(ref seed, 0.5f, 1, 6, dim);
@@ -54,14 +53,11 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
             using (Tensor out32 = block.Forward(backend, hidden, context, temb, rope, cos, sin, s))
                 f32 = Read(out32);
             Assert.Equal(0, backend.SageAttentionExecutionCount);
-            using Tensor hidden16 = new(hidden.Shape, DType.F16);
-            backend.CastToF16(hidden16, hidden);
-            using Tensor out16 = block.Forward(backend, hidden16, context, temb, rope, cos, sin, s);
-            Assert.Equal(DType.F16, out16.DType);
+            using Tensor out16 = block.Forward(backend, hidden, context, temb, rope, cos, sin, s, branchDType: DType.F16);
+            Assert.Equal(DType.F32, out16.DType);
             // Self-attention alone is long on both sides; the 512 text keys keep cross-attention on cuDNN.
             Assert.Equal(s >= SageKnee ? 1 : 0, backend.SageAttentionExecutionCount);
-            using Tensor wide = DtypeCastHelper.EnsureF32(backend, out16, disposeSourceOnCast: false);
-            f16 = Read(wide);
+            f16 = Read(out16);
         }
         foreach (Tensor t in weights.Values.Concat([cos, sin])) t.Dispose();
 
@@ -84,10 +80,10 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         double relOut = Math.Sqrt(diff / outNorm), relUpdate = Math.Sqrt(diff / update), floor = Math.Sqrt(rounding / update);
         double cosine = dot / Math.Sqrt(update * update16);
         _output.WriteLine($"S={s}: max|in|={maxIn:F1} max|out|={maxOut:F1} max|diff|={maxDiff:E3} relL2(out)={relOut:E3} " +
-            $"relL2(out-in)={relUpdate:E3} cos(out-in)={cosine:F6}; rounding the F32 output to F16 alone: relL2(out-in)={floor:E3}");
+            $"relL2(out-in)={relUpdate:E3} cos(out-in)={cosine:F6}; an F16 stream's output rounding alone: relL2(out-in)={floor:E3}");
 
-        Assert.True(diff > 0, "The F16 block wrote the F32 block's bits; the F16 path did not run.");
-        Assert.True(relUpdate <= 2 * floor, $"The F16 block's update is {relUpdate:E3} from F32, over twice the {floor:E3} F16 rounding of the output.");
+        Assert.True(diff > 0, "The F16 branches wrote the F32 block's bits; the F16 path did not run.");
+        Assert.True(relUpdate <= 2e-3, $"The F16 branches miss the F32 block's update by {relUpdate:E3}.");
     }
 
     [Trait("Category", "GpuIntegration")]
@@ -175,10 +171,10 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         Assert.Equal(expected, cached);
     }
 
-    /// <summary>The dump keeps the raw scale rows, so the F16 forward takes its unfused (1 + scale) add, which writes the same values.</summary>
+    /// <summary>The dump keeps the raw scale rows, which the F16 branches' fused norm takes anyway.</summary>
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void TheDebugDumpRecordsTheF16StreamAsF32WithoutMovingTheOutput()
+    public void TheDebugDumpRecordsTheF16BranchesAsF32WithoutMovingTheOutput()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         WanVideoConfig cfg = Tiny(image: false);
@@ -202,10 +198,13 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
             const int Tokens = 3 * 4 * 4;
             foreach (string name in new[] { "b0_n1", "blocks_0", "blocks_1" })
             {
-                float[] stream = ReadDump(Path.Combine(dir, "layers", name + ".bin"));
-                Assert.Equal(Tokens * cfg.InnerDim, stream.Length);
-                Assert.All(stream, v => Assert.True(float.IsFinite(v) && (float)(Half)v == v, $"{name} holds {v}, not an F16 value."));
+                float[] values = ReadDump(Path.Combine(dir, "layers", name + ".bin"));
+                Assert.Equal(Tokens * cfg.InnerDim, values.Length);
+                Assert.All(values, v => Assert.True(float.IsFinite(v), $"{name} holds {v}."));
             }
+            // The branch input is F16; the stream between blocks stays F32.
+            Assert.All(ReadDump(Path.Combine(dir, "layers", "b0_n1.bin")), v => Assert.True((float)(Half)v == v, $"b0_n1 holds {v}, not an F16 value."));
+            Assert.Contains(ReadDump(Path.Combine(dir, "layers", "blocks_1.bin")), v => (float)(Half)v != v);
         }
         finally
         {
@@ -252,11 +251,11 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         return Read(velocity);
     }
 
-    /// <summary>Two heads of 64 so the F16 stream takes the cuDNN row, two blocks, a 3×4×4 token grid.</summary>
+    /// <summary>Two heads of 64 so the F16 branches take the cuDNN row, two blocks, a 3×4×4 token grid.</summary>
     private static WanVideoConfig Tiny(bool image) => new()
     {
         NumHeads = 2, HeadDim = 64, InChannels = 48, OutChannels = 48, TextDim = 32, FreqDim = 32, FfnDim = 256, NumLayers = 2,
-        PatchSize = (1, 2, 2), ImageDim = image ? 32 : 0, AddedKvProjDim = image ? 32 : 0,
+        PatchSize = (1, 2, 2), ImageDim = image ? 32 : 0, AddedKvProjDim = image ? 32 : 0, F16Branches = true,
     };
 
     /// <summary>One block's weights in the checkpoint's layout: F16 projections at unit-gain scale, F32 norms and modulation table.</summary>
@@ -327,13 +326,6 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         Tensor h = f32.CastTo(DType.F16);
         f32.Dispose();
         return h;
-    }
-
-    /// <summary>The F16 rounding of <paramref name="f32"/>, held as F32, so both arms start from the same values.</summary>
-    private static Tensor Representable(Tensor f32)
-    {
-        using Tensor h = Half(f32);
-        return h.CastTo(DType.F32);
     }
 
     private static double RelL2(float[] a, float[] reference)

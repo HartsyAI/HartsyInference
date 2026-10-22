@@ -127,10 +127,14 @@ public sealed record WanVideoConfig
     /// <summary>True when this variant is a two-expert MoE (Wan2.2 A14B).</summary>
     public bool IsMixtureOfExperts => BoundaryRatio > 0f;
 
+    /// <summary>The blocks may run attention and the FFN in F16 over the F32 residual stream: set for the checkpoints whose
+    /// branch activations were measured inside the F16 range — TI2V-5B, and the 14B text-to-video and concat image-to-video builds.</summary>
+    public bool F16Branches { get; init; }
+
     // ── Presets ──
 
     /// <summary>Wan2.2 TI2V-5B (z=48 VAE, text+first-frame-latent I2V via expand_timesteps).</summary>
-    public static WanVideoConfig Ti2V5B => new();
+    public static WanVideoConfig Ti2V5B => new() { F16Branches = true };
 
     /// <summary>Wan2.1 T2V-1.3B (480p): inner 1536, 30 layers, ffn 8960, z=16 VAE (8×/4×).</summary>
     public static WanVideoConfig T2V_1_3B => new()
@@ -143,7 +147,7 @@ public sealed record WanVideoConfig
     public static WanVideoConfig T2V_14B => new()
     {
         NumHeads = 40, HeadDim = 128, InChannels = 16, OutChannels = 16, VaeLatentChannels = 16,
-        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f,
+        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f, F16Branches = true,
     };
 
     /// <summary>Wan2.1 I2V-14B (480p): T2V-14B + 36-ch concat conditioning (z 16 + cond-latent 16 + mask 4) and
@@ -162,7 +166,7 @@ public sealed record WanVideoConfig
     public static WanVideoConfig T2V_A14B => new()
     {
         NumHeads = 40, HeadDim = 128, InChannels = 16, OutChannels = 16, VaeLatentChannels = 16,
-        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f, BoundaryRatio = 0.875f,
+        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f, BoundaryRatio = 0.875f, F16Branches = true,
     };
 
     /// <summary>Wan2.2 I2V-A14B: MoE dual-expert (boundary 0.9) with 36-ch concat conditioning. No CLIP image
@@ -170,7 +174,7 @@ public sealed record WanVideoConfig
     public static WanVideoConfig I2V_A14B => new()
     {
         NumHeads = 40, HeadDim = 128, InChannels = 36, OutChannels = 16, VaeLatentChannels = 16,
-        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f, BoundaryRatio = 0.9f,
+        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f, BoundaryRatio = 0.9f, F16Branches = true,
     };
 
     /// <summary>Wan2.1 VACE-14B: T2V-14B + the VACE control branch (8 hint layers, 96-ch control patch embed).</summary>

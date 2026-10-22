@@ -28,15 +28,17 @@ stable release will require. Dates are UTC.
   a Qwen-Image context-parallel rank's local queries included) on CUDA's cuDNN row and on Vulkan; no Vulkan generation was
   compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention output on the
   token-major entry again.
-- **Faster: Wan's DiT blocks carry F16 activations on CUDA.** A forward with one timestep group and no image context
-  (text-to-video, and the concat image-to-video of the A14B models) casts the patch-embedded stream to F16 once; norms,
-  RoPE, attention, the FFN and the gated residuals then read and write F16 with F32 accumulation, while the modulation,
-  norm weights and RoPE tables stay F32 and the final layer runs on an F32 cast. The text cross-attention K/V cache holds
-  F16 for those forwards. Per-frame timesteps, the CLIP image branch, context parallelism, the step cache and the S2V,
-  VACE, Animate and Matrix-Game models keep F32, as does `numerics.ditF16=false` (bit for bit) and the `reference`
-  profile. With F16 activations, Wan self-attention at `numerics.sageF16MinSkv` (8192) tokens or more now runs on the
-  INT8 SageAttention row (on by default; `numerics.sageAttn=0` keeps cuDNN F16): 832×480 from 85 frames, 1280×704 from
-  37, the 14B models at 832×480 from 21. The F32 path never reaches it.
+- **Faster: Wan's attention and FFN run in F16 on CUDA.** For a forward with one timestep group and no image context, on
+  TI2V-5B and the 14B text-to-video and concat image-to-video checkpoints (the ones whose branch activations were measured
+  inside the F16 range), each norm writes its branch input in F16 straight from the F32 residual stream, the attention,
+  cross-attention and FFN run in F16 with F32 accumulation, and each branch output is added back to the F32 stream; the
+  modulation, norm weights and RoPE tables stay F32. Two kernels join the stream to the branches: a LayerNorm from F32 into
+  F16 and a gated residual adding an F16 value to an F32 residual. The text cross-attention K/V cache holds F16 for those
+  forwards. Per-frame timesteps, the CLIP image branch, context parallelism, the step cache, the 1.3B and the S2V, VACE,
+  Animate and Matrix-Game models keep F32, as does `numerics.ditF16=false` (bit for bit) and the `reference` profile. With
+  F16 branches, self-attention at `numerics.sageF16MinSkv` (8192) tokens or more runs on the INT8 SageAttention row (on by
+  default; `numerics.sageAttn=0` keeps cuDNN F16): 832×480 from 85 frames, 1280×704 from 37, the 14B models at 832×480 from
+  21. The F32 path never reaches it.
 
 ## alpha.386
 
