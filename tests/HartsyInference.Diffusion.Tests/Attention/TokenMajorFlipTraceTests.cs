@@ -291,6 +291,38 @@ public sealed class TokenMajorFlipTraceTests
         Assert.Equal(1 + 3 * crossCalls, Permutes(backend));
     }
 
+    /// <summary>Wan's F16 branches (TI2V-5B and Wan 2.1 14B, one timestep group) attend through the block's F16 twin: the
+    /// self-attention takes the token-major entry over the F16 rows with no permute and refuses INT8.</summary>
+    [Fact]
+    public void WanBlock_F16BranchSelfAttentionAttendsTokenMajorAndRefusesInt8()
+    {
+        const int frames = 2, gh = 2, gw = 3, seq = frames * gh * gw, text = 5;
+        WanVideoConfig cfg = new() { NumHeads = Heads, HeadDim = HeadDim, TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 1 };
+        WanVideoBlock block = new(cfg, crossAttnNorm: true);
+        block.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg), "blocks.0");
+        WanRope rope = new(cfg.HeadDim, cfg.RopeTheta, cfg.RopeMaxSeqLen);
+        (Tensor cos, Tensor sin) = rope.BuildCosSin(frames, gh, gw);
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SupportsF16Activations = true, SkipAdaLayerNorm = true };
+
+        try
+        {
+            block.Forward(backend, new Tensor(new TensorShape(seq, Hidden), DType.F32), new Tensor(new TensorShape(text, Hidden), DType.F32),
+                new Tensor(new TensorShape(1, 6, Hidden), DType.F32), rope, cos, sin, seq, branchDType: DType.F16);
+        }
+        catch (NotSupportedException) when (backend.Calls.Count == 1)
+        {
+            // The F16 branch's gated residual into the F32 stream has no stub body; the attention is recorded by then.
+        }
+
+        AttentionCall self = Assert.Single(backend.Calls);
+        Assert.Equal(AttentionRoute.TokenMajor, self.Route);
+        Assert.Equal(AttentionFormats.Int8, self.Numerics.Refused);
+        Assert.True(self.Numerics.LegacyAssertedBounded);
+        Assert.Equal(DType.F16, self.Query.Storage.DType);
+        Assert.Equal(new TensorShape(seq, Hidden), self.Query.Storage.Shape);
+        Assert.Equal(0, Permutes(backend));
+    }
+
     /// <summary>HiDream's single-stream blocks take the token-major entry over <c>[1, S, hidden]</c> at one batch item; a batch rotates
     /// on the host and keeps the head-major call and its four permutes.</summary>
     [Theory]
