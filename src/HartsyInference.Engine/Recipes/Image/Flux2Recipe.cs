@@ -49,15 +49,15 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 4.0, 1024x1024; the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+    /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (SwarmUI <c>Model Support.md</c>, Flux.2: Flux Guidance defaults to 3.5, 4 is the optional tweak); the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
-    /// <summary>Flux.2 Klein's sampling settings: 4 steps, guidance-free (CFG 1.0), the official settings for the distilled
-    /// Klein checkpoints, which carry no guidance embedding. <see cref="Flux2RecipePipeline"/> does not read CfgScale yet.</summary>
-    public static ImageDefaults KleinDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+    /// <summary>Flux.2 Klein's sampling settings: 8 steps, guidance-free (CFG 1.0), SwarmUI's settings for the distilled
+    /// Klein checkpoints (<c>Model Support.md</c>, Flux.2 Klein), which carry no guidance embedding. <see cref="Flux2RecipePipeline"/> does not read CfgScale yet.</summary>
+    public static ImageDefaults KleinDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 8, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
     public ModelVariantCatalog? Variants => Flux2Variants.Catalog;

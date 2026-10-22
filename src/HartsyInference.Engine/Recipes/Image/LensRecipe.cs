@@ -37,14 +37,14 @@ public sealed class LensRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lens", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Lens's official sampling settings: 20 steps at CFG 5.0, 1024x1024 (<c>microsoft/Lens</c> model card); a Lens-Turbo checkpoint narrows this to 4 guidance-free steps via <see cref="DefaultsFor"/>.</summary>
-    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 5.0f, Width = 1024, Height = 1024 };
+    /// <summary>Lens's official sampling settings: 20 steps at CFG 5.0, 1440x1440 (<c>microsoft/Lens</c> model card; SwarmUI <c>Obscure Model Support.md</c>: 1440 is the official default side); a Lens-Turbo checkpoint narrows this to 4 guidance-free steps via <see cref="DefaultsFor"/>.</summary>
+    public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 20, CfgScale = 5.0f, Width = 1440, Height = 1440 };
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <summary>Lens-Turbo's official sampling settings: 4 distilled steps, guidance-free (<c>microsoft/Lens-Turbo</c> model card).</summary>
-    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 4, CfgScale = 1.0f, Width = 1440, Height = 1440 };
 
     /// <inheritdoc/>
     public ModelVariantCatalog? Variants => LensVariants.Catalog;

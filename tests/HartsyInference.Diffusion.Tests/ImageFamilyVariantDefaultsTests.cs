@@ -64,8 +64,8 @@ public sealed class ImageFamilyVariantDefaultsTests
     [Theory]
     [InlineData("boogu_image_turbo_bf16.safetensors", 4, 1.0f)]
     [InlineData("boogu_image_edit_turbo_bf16.safetensors", 4, 1.0f)]
-    [InlineData("boogu_image_edit_fp8_scaled.safetensors", 25, 3.5f)]
-    [InlineData("boogu_image_base_bf16.safetensors", 25, 3.5f)]
+    [InlineData("boogu_image_edit_fp8_scaled.safetensors", 20, 4.0f)]
+    [InlineData("boogu_image_base_bf16.safetensors", 20, 4.0f)]
     public void Boogu_TurboBuildsRunFewGuidanceFreeSteps(string fileName, int steps, float cfg)
     {
         ImageDefaults defaults = new BooguImageRecipe().DefaultsFor(Classify(BooguImageVariants.Catalog, fileName));
