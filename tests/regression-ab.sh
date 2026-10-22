@@ -308,7 +308,8 @@ PY
 }
 
 # ── teacher-forced denoiser probe ──────────────────────────────────────────────────────────────────────────────
-has_probe() { grep -qa 'diagnostics.denoiserProbe' "$1/HartsyInference.Core.dll"; }
+# Metadata names are UTF-8; the knob id is a UTF-16 string literal an ASCII grep would miss.
+has_probe() { grep -qa 'DenoiserProbe' "$1/HartsyInference.Diffusion.dll"; }
 # run_probe <build> <label> <ckpt> <cmd> <positional> <args> <backend> <dir> <record|replay> <record dir> [--set ...]
 # The record of a clean commit is reused; a replay always runs.
 run_probe() {
