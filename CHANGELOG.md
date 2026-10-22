@@ -173,6 +173,10 @@ stable release will require. Dates are UTC.
   video's frame SSIM: a six-step trajectory turns a forward difference of that size into SSIM 0.897 (#552). Measured on two
   RTX 4090s in F32, the CP-to-control ratio is 0.89 to 1.07 at every step, the same in two runs.
 
+- **Added: Lens can attend in BF16 (`numerics.lensBf16`, off by default).** It grants Lens's joint attention BF16 storage, so
+  on CUDA it runs the cuDNN BF16 row (S.16) instead of the F32 materialized or tiled path: 536 → 240 ms per step at 1024² and
+  7765 → 1299 at 2048² on an RTX 4090. Off until its quality is judged trajectory-free. Lens's 1/256 V damp, which held its
+  unnormalized V inside F16's range, is removed; it was a bit-exact no-op on every F32 row.
 ## alpha.387
 
 - **Changed: Anima Base and Flux 3 Image Base default to the `er_sde` sampler**, SwarmUI core's choice for both (#521).
