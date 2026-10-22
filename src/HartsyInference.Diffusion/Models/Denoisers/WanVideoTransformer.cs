@@ -54,6 +54,11 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         singleGroup && EngineKnobs.WanF16.Value && _config.F16Branches && !_config.IsMixtureOfExperts && backend.SupportsF16Activations
             ? DitDtype.Act : DType.F32;
 
+    /// <summary>The dtype one forward's branches compute in: <see cref="BranchActivation"/>, or F32 for a forward with an image
+    /// context or context parallelism, whose paths are F32-only, or the step cache, which keeps today's path.</summary>
+    internal DType ForwardActivation(IBackend backend, int timestepGroups, bool imageContext, bool contextParallel, bool stepCache) =>
+        imageContext || contextParallel || stepCache ? DType.F32 : BranchActivation(backend, timestepGroups == 1);
+
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         // patch_embedding.weight [inner, in, pt, ph, pw] → [inner, patchVec] (contiguous).
@@ -140,8 +145,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
 
         BuildRopeCache(gt, gh, gw);
         (Tensor cos, Tensor sin) = (_cosC!, _sinC!);
-        // The image branch and context parallelism's K/V exchange are F32-only, and the step cache keeps today's path.
-        DType act = imageEmbeds is null && cp is null && stepCache is null ? BranchActivation(backend, g == 1) : DType.F32;
+        DType act = ForwardActivation(backend, g, imageEmbeds is not null, cp is not null, stepCache is not null);
 
         WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]

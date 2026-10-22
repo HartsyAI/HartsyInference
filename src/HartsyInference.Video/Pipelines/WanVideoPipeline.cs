@@ -958,12 +958,17 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     /// <summary>The dtype the T2V/TI2V loop's attention and FFN branches compute in: F16 only when no forward can take an F32
     /// path (per-frame timesteps, the step cache, context parallelism) on any backend the loop runs on, so a reserve sized from
     /// it never undercounts.</summary>
-    private DType DenoiseActivation(bool singleGroup)
+    private DType DenoiseActivation(bool singleGroup) => DenoiseActivation(_transformer, Backend, CfgParallelBackend,
+        CpBackends?.Count ?? 0, StepCacheEnv.ReadThreshold() > 0f, singleGroup);
+
+    /// <summary><see cref="DenoiseActivation(bool)"/> over explicit inputs.</summary>
+    internal static DType DenoiseActivation(WanVideoTransformer transformer, IBackend backend, IBackend? cfgParallel,
+        int contextParallelRanks, bool stepCache, bool singleGroup)
     {
-        bool eligible = singleGroup && StepCacheEnv.ReadThreshold() <= 0f && CpBackends is not { Count: >= 2 };
+        bool eligible = singleGroup && !stepCache && contextParallelRanks < 2;
         // numerics.wanF16 and numerics.ditF16 hold for a whole generation, the CFG worker included, so every forward agrees with this.
-        DType act = _transformer.BranchActivation(Backend, eligible);
-        return CfgParallelBackend is { } second && _transformer.BranchActivation(second, eligible) != act ? DType.F32 : act;
+        DType act = transformer.BranchActivation(backend, eligible);
+        return cfgParallel is { } second && transformer.BranchActivation(second, eligible) != act ? DType.F32 : act;
     }
 
     /// <summary>Bytes the denoise phase needs beside the weights, so the resident/streamed decision and the block window budget against the same number.</summary>
