@@ -684,7 +684,7 @@ public sealed partial class AttentionLayer
         try
         {
             AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
-                _config.HeadDim, _config.EffectiveScale, _config.AllowF16)
+                _config.HeadDim, _config.EffectiveScale, allowF16: false)
                 with { Route = _config.TokenMajorRoute, Numerics = _config.Numerics };
             backend.Attention(in call);
             context.Probe?.Observe("attention", flat);
@@ -754,7 +754,7 @@ public sealed partial class AttentionLayer
         try
         {
             AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
-                _config.AllowF16) with { Numerics = _config.Numerics };
+                allowF16: false) with { Numerics = _config.Numerics };
             backend.Attention(in call);
             context.Probe?.Observe("attention", attn);
         }
