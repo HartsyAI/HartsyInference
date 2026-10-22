@@ -212,7 +212,7 @@ internal sealed class TransformerSubBlock
         _attentionConfig = new AttentionLayerConfig
         {
             Heads = numHeads, KvHeads = numHeads, HeadDim = _headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
-            AllowF16 = true,
+            TokenMajorBatches = true, AllowF16 = true,
         };
     }
 

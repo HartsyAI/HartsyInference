@@ -292,6 +292,53 @@ public sealed class AttentionLayerTests
         Assert.Equal(AttentionRoute.Dense, Assert.Single(backend.Calls).Route);
     }
 
+    /// <summary>A layer that opts its batches in takes the token-major entry over per-head <c>[B, S, heads, D]</c> operands only where
+    /// the backend plans a row for the call (no permuting fallback takes a batch): it reads B sequences and writes the
+    /// <c>[B, S, heads·D]</c> rows the output projection reads, carrying the layer's refused formats. Without the opt-in, without a
+    /// planned row, over flat operands (a <c>[B, S, heads·D]</c> tensor reads as one sequence) or with a host rotation a batch stays
+    /// head-major.</summary>
+    [Theory]
+    [InlineData("planned", AttentionRoute.TokenMajor)]
+    [InlineData("int8-refused", AttentionRoute.TokenMajor)]
+    [InlineData("not-opted-in", AttentionRoute.Dense)]
+    [InlineData("unplanned", AttentionRoute.Dense)]
+    [InlineData("flat", AttentionRoute.Dense)]
+    [InlineData("host-rotation", AttentionRoute.Dense)]
+    public void ABatch_TakesTheTokenMajorEntryOnlyWhereTheBackendPlansIt(string name, AttentionRoute route)
+    {
+        const int batch = 2, seq = 6;
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, PlansBatchedTokenMajor = name != "unplanned" };
+        AttentionLayerConfig config = new()
+        {
+            Heads = 2, KvHeads = 2, HeadDim = 4, TokenMajorRoute = AttentionRoute.TokenMajor, TokenMajorBatches = name != "not-opted-in",
+            AllowF16 = true, RefusedFormats = name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
+        };
+        Tensor attended;
+        if (name == "flat")
+        {
+            static Tensor Rows() => new(new TensorShape(batch, seq, 8), DType.F32);
+            attended = new AttentionLayer(config).AttendFlat(backend, Rows(), Rows(), Rows(), new TensorShape(batch, seq, 8), default);
+        }
+        else
+        {
+            Tensor x = new(new TensorShape(batch, seq, 8), DType.F32);
+            AttentionCallContext context = name == "host-rotation" ? new() { HeadMajorRotation = new TraceRotation([]) } : default;
+            attended = new AttentionLayer(config, Weights(gate: false)).Forward(backend, x, x, in context);
+        }
+
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
+        Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
+        Assert.Equal(new TensorShape(batch, seq, 8), attended.Shape);
+        if (route == AttentionRoute.Dense) return;
+        Assert.Equal(batch, call.Batch);
+        Assert.Equal(seq, call.Query.Tokens);
+        Assert.Equal((batch, seq), (call.Output.Batch, call.Output.Tokens));
+        Assert.Equal(new TensorShape(batch, seq, 8), call.Output.Storage.Shape);
+        Assert.Null(call.TermsGap());
+        Assert.Equal(name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
+    }
+
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
     /// minimum, from a call that does not refuse INT8; the token-major entry has no Sage kernel, so a guarded layer keeps exactly
     /// those calls head-major.</summary>

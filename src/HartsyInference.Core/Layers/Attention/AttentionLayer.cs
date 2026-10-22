@@ -572,7 +572,7 @@ public sealed partial class AttentionLayer
         }
         if (_config.QkNorm == AttentionQkNorm.FullWidth)
             return AttendFullWidth(backend, q, k, v, sq, skv, act, flatShape, tokenMajorShape,
-                TokenMajorServed(backend, batch, sq, skv, act, in context), in context);
+                batch == 1 && TokenMajorServed(backend, sq, skv, act, in context), in context);
 
         if (_config.QkNorm != AttentionQkNorm.None)
         {
@@ -600,10 +600,12 @@ public sealed partial class AttentionLayer
         }
         bool ownsKv = context.KvCapture is null;
         context.KvCapture?.Capture(k, v);
-        bool tokenMajor = TokenMajorServed(backend, batch, sq, skv, act, in context);
+        bool tokenMajor = TokenMajorServed(backend, sq, skv, act, in context)
+            && (batch == 1 || _config.TokenMajorBatches && !flat
+                && PlansBatch(backend, q, k, v, act, tokenMajorShape, batch, in context));
         try
         {
-            return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, tokenMajorShape, ownsKv, in context)
+            return tokenMajor ? AttendTokenMajor(backend, q, k, v, act, tokenMajorShape, batch, ownsKv, in context)
                 : AttendHeadMajor(backend, q, k, v, batch, sq, skv, act, flatShape, ownsKv, in context);
         }
         catch when (!ownsKv)
@@ -633,11 +635,11 @@ public sealed partial class AttentionLayer
         }
     }
 
-    /// <summary>The token-major entry runs for one batch item when the config names one, its switch is on, no host rotation
-    /// needs the head-major layout, <see cref="AttentionLayerConfig.HeadMajorForSage"/> does not keep the call head-major, and the
-    /// backend serves it.</summary>
-    private bool TokenMajorServed(IBackend backend, int batch, int sq, int skv, DType act, in AttentionCallContext context) =>
-        _config.TokenMajorRoute != AttentionRoute.Dense && batch == 1 && context.HeadMajorRotation is null
+    /// <summary>The token-major entry runs when the config names one, its switch is on, no host rotation needs the head-major
+    /// layout, <see cref="AttentionLayerConfig.HeadMajorForSage"/> does not keep the call head-major, and the backend serves it;
+    /// a batch also needs <see cref="AttentionLayerConfig.TokenMajorBatches"/> and <see cref="PlansBatch"/>.</summary>
+    private bool TokenMajorServed(IBackend backend, int sq, int skv, DType act, in AttentionCallContext context) =>
+        _config.TokenMajorRoute != AttentionRoute.Dense && context.HeadMajorRotation is null
         && (_config.TokenMajorKnob?.Value ?? true)
         && !(_config.HeadMajorForSage && SageServesHeadMajor(sq, skv, act, context.Bias))
         && (_config.TokenMajorRoute == AttentionRoute.TokenMajorGqa
@@ -680,15 +682,28 @@ public sealed partial class AttentionLayer
         }
     }
 
-    private Tensor AttendTokenMajor(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape outShape, bool ownsKv,
+    /// <summary>A batch has no permuting fallback on the token-major entry, so it takes that entry only where the backend plans a
+    /// row for the call: per-head <c>[B, S, heads, D]</c> operands and the <paramref name="outShape"/> output it would write.</summary>
+    private bool PlansBatch(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape outShape, int batch,
         in AttentionCallContext context)
+    {
+        // Shape only: planning never touches the storage, which a new tensor allocates on first touch.
+        using Tensor output = new(outShape, act);
+        AttentionCall call = TokenMajorCall(output, q, k, v, batch, in context);
+        return backend.PlanAttention(in call).Row is not null;
+    }
+
+    private AttentionCall TokenMajorCall(Tensor output, Tensor q, Tensor k, Tensor v, int batch, in AttentionCallContext context) =>
+        AttentionCall.FromTokenMajor(output, q, k, v, context.Bias, _config.Heads, _config.KvHeads, _config.HeadDim,
+            _config.EffectiveScale, allowF16: false, batch) with { Route = _config.TokenMajorRoute, Numerics = _config.Numerics };
+
+    private Tensor AttendTokenMajor(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape outShape, int batch,
+        bool ownsKv, in AttentionCallContext context)
     {
         Tensor flat = new(outShape, act);
         try
         {
-            AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
-                _config.HeadDim, _config.EffectiveScale, allowF16: false)
-                with { Route = _config.TokenMajorRoute, Numerics = _config.Numerics };
+            AttentionCall call = TokenMajorCall(flat, q, k, v, batch, in context);
             backend.Attention(in call);
             context.Probe?.Observe("attention", flat);
         }
@@ -803,7 +818,7 @@ public sealed partial class AttentionLayer
             Tensor kTm = NormRotateTokenMajor(backend, k, kNorm, context.KeyRotation, skv, act);
             Tensor vTm = v.DType == act ? v : Widen(backend, v, act);
             if (!ReferenceEquals(vTm, v)) v.Dispose();
-            return AttendTokenMajor(backend, qTm, kTm, vTm, act, tokenMajorShape, ownsKv: true, in context);
+            return AttendTokenMajor(backend, qTm, kTm, vTm, act, tokenMajorShape, batch: 1, ownsKv: true, in context);
         }
         Tensor qMh = NormRotateHeadMajor(backend, q, qNorm, context.QueryRotation, sq, act);
         Tensor kMh = NormRotateHeadMajor(backend, k, kNorm, context.KeyRotation, skv, act);

@@ -86,29 +86,39 @@ public sealed class TokenMajorFlipTraceTests
         }
         w.Add("f.projector.weight", 1, layers);
         fusion.LoadWeights(w, "f");
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SupportsTokenMajorGqaAttention = true };
+        AttentionTraceBackend backend = new()
+        {
+            SupportsTokenMajorAttention = true, SupportsTokenMajorGqaAttention = true, PlansBatchedTokenMajor = true,
+        };
 
         fusion.Forward(backend, new Tensor(new TensorShape(1, seq, layers, dim), DType.F32), 1, seq);
 
-        // The layer-axis block attends one sequence per token, so it keeps the head-major entry and its four permutes.
+        // The layer-axis block attends one sequence per token, a batch it does not opt in, so it keeps the head-major entry and its
+        // four permutes even where the backend would plan the batch.
         Assert.Equal([AttentionRoute.Dense, AttentionRoute.TokenMajor], backend.Calls.Select(c => c.Route));
         Assert.Equal(4, Permutes(backend));
     }
 
+    /// <summary>The UNet self-attention takes the token-major entry at one batch item, and SDXL's CFG batch of two where the backend
+    /// plans a row for it; without one the batch keeps the head-major call.</summary>
     [Theory]
-    [InlineData(1, AttentionRoute.TokenMajor, 0)]
-    [InlineData(2, AttentionRoute.Dense, 4)]
-    public void UNetSelfAttention_TakesTheTokenMajorEntryAtOneBatchItem(int batch, AttentionRoute route, int permutes)
+    [InlineData(1, false, AttentionRoute.TokenMajor, 0)]
+    [InlineData(2, true, AttentionRoute.TokenMajor, 0)]
+    [InlineData(2, false, AttentionRoute.Dense, 4)]
+    public void UNetSelfAttention_TakesTheTokenMajorEntry_ABatchWhereTheBackendPlansIt(int batch, bool plansBatch, AttentionRoute route,
+        int permutes)
     {
         const int channels = 16, heads = 2, seq = 6;
         TransformerSubBlock self = SubBlock(channels, heads, channels);
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, PlansBatchedTokenMajor = plansBatch };
         Tensor hidden = new(new TensorShape(batch, seq, channels), DType.F32);
 
         self.Forward(backend, hidden, hidden);
 
-        Assert.Equal(route, Assert.Single(backend.Calls).Route);
+        AttentionCall call = Assert.Single(backend.Calls);
+        Assert.Equal(route, call.Route);
         Assert.Equal(permutes, Permutes(backend));
+        if (route == AttentionRoute.TokenMajor) Assert.Equal((batch, seq), (call.Batch, call.Output.Tokens));
     }
 
     [Fact]
@@ -155,7 +165,7 @@ public sealed class TokenMajorFlipTraceTests
     [InlineData("hunyuanimage", 2, false, false, AttentionRoute.Dense)]
     public void SingleStreamBlocks_AttendTokenMajorAtOneBatchItem(string site, int batch, bool f16, bool lowerSageKnob, AttentionRoute route)
     {
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true };
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true, PlansBatchedTokenMajor = true };
         (int txt, int gridH, int gridW) = Geometry(site);
         int seq = txt + gridH * gridW;
         try
@@ -225,7 +235,7 @@ public sealed class TokenMajorFlipTraceTests
     public void DoubleStreamBlocks_JointCallAttendsTokenMajorAtOneBatchItem(string site, int batch, bool f16, bool lowerSageKnob,
         AttentionRoute route)
     {
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true };
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true, PlansBatchedTokenMajor = true };
         (int txt, int gridH, int gridW) = Geometry(site);
         int seq = txt + gridH * gridW;
         try
@@ -344,7 +354,7 @@ public sealed class TokenMajorFlipTraceTests
         Tensor ids = HiDreamRope.BuildPositionIds(img, GridH, GridW, Txt);
         rope.Precompute(ids);
         ids.Dispose();
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true };
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, SkipAdaLayerNorm = true, PlansBatchedTokenMajor = true };
 
         try
         {

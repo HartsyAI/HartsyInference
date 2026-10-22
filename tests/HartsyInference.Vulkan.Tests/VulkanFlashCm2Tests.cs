@@ -437,6 +437,27 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
         Assert.Equal(0, differing);
     }
 
+    /// <summary>The token-major rows read one sequence, so a batched token-major call plans no row there and the layer keeps a batch
+    /// head-major on Vulkan; one sequence still plans the cm2 row.</summary>
+    [Fact]
+    public void ABatchedTokenMajorCall_PlansNoRow()
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.SupportsTokenMajorAttention) { output.WriteLine("SKIPPED: no cooperative-matrix-2 device"); return; }
+        const int h = 10, d = 64, s = 256;
+        AttentionCall Call(int batch)
+        {
+            TensorShape rows = new(batch, s, h, d);
+            return AttentionCall.FromTokenMajor(new Tensor(new TensorShape(batch, s, h * d), DType.F32), new Tensor(rows, DType.F32),
+                new Tensor(rows, DType.F32), new Tensor(rows, DType.F32), null, h, h, d, 0.125f, allowF16: true, batch);
+        }
+
+        AttentionCall batched = Call(2), single = Call(1);
+        Assert.Null(backend.PlanAttention(in batched).Row);
+        Assert.Equal("cm2.flash", backend.PlanAttention(in single).RowId);
+    }
+
     /// <summary>Matrix-Game 2's additive block-causal mask over equal frames: a query sees its own frame and the earlier ones.</summary>
     private static float[] BlockCausalMask(int s, int frames)
     {
