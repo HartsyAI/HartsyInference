@@ -122,6 +122,19 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
         Assert.All(keys.SelectMany(j => Enumerable.Range(j * 64, 64)),
             i => Assert.True(Math.Abs(requantized.Keys[i] - nudged.Keys[i] / 2.0) <= 1.0, $"byte {i}: {nudged.Keys[i]} → {requantized.Keys[i]}"));
         Assert.Contains(keys.SelectMany(j => Enumerable.Range(j * 64, 64)), i => requantized.Keys[i] != nudged.Keys[i]);
+
+        // The stats pass makes every scale NaN, +∞ or at least the smallest normal float; a supplied one must be too.
+        Int8AttentionV2Operands Supplied(Action<Int8AttentionV2Operands> edit)
+        {
+            Int8AttentionV2Operands scales = Int8AttentionV2Reference.Quantize(c.Call, options, c.Rows, scales: own);
+            edit(scales);
+            return Int8AttentionV2Reference.Quantize(c.Call, options, c.Rows, scales: scales);
+        }
+        Assert.Throws<ArgumentException>(() => Supplied(s => s.QueryScales[0] = 0f));
+        Assert.Throws<ArgumentException>(() => Supplied(s => s.KeyScales[5] = -1f));
+        Assert.Throws<ArgumentException>(() => Supplied(s => s.ValueScales[7] = float.Epsilon));
+        Assert.True(float.IsNaN(Supplied(s => s.KeyScales[5] = float.NaN).KeyScales[5]));
+        Assert.Equal(float.PositiveInfinity, Supplied(s => s.ValueScales[7] = float.PositiveInfinity).ValueScales[7]);
     }
 
     [Fact]
@@ -266,6 +279,12 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
         Assert.Equal(AttentionTileClass.Full, Int8AttentionV2Reference.ClassifyTile(call, 0, 0, 128, 64, 0, 128));
         Assert.Equal(AttentionTileClass.Skip, Int8AttentionV2Reference.ClassifyTile(call, 0, 0, 0, 64, 128, 128));
         Assert.Equal(AttentionTileClass.Partial, Int8AttentionV2Reference.ClassifyTile(call, 0, 0, 256, 64, 256, 128));
+        // Tile ends past int.MaxValue still classify; negative bounds are refused.
+        Assert.Equal(AttentionTileClass.Partial,
+            Int8AttentionV2Reference.ClassifyTile(call, 0, 0, 256, 64, 128, int.MaxValue));
+        Assert.Equal(AttentionTileClass.Full,
+            Int8AttentionV2Reference.ClassifyTile(call, 0, 0, 256, int.MaxValue, 0, 128));
+        Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.ClassifyTile(call, 0, 0, 0, 64, -64, 128));
         using Int8V2Case biased = Int8V2Case.Create(MaskSpec("bias-runs"));
         Assert.Equal(AttentionTileClass.Skip, Int8AttentionV2Reference.ClassifyTile(biased.Call, 0, 1, 0, 64, 256, 128));
         Assert.Equal(AttentionTileClass.Partial, Int8AttentionV2Reference.ClassifyTile(biased.Call, 0, 1, 0, 64, 64, 64));

@@ -139,9 +139,11 @@ public static class Int8AttentionV2Reference
         return dot;
     }
 
-    /// <summary>What query rows <c>[queryRow0, +queryRows)</c> of (<paramref name="batch"/>, <paramref name="head"/>) see of
-    /// key slots <c>[key0, +keys)</c> under the causal and window bounds, the valid key length and the bias's exclusions.</summary>
-    /// <exception cref="ArgumentException">A malformed operand or bias, or (batch, head) outside the call.</exception>
+    /// <summary>What query rows <c>[queryRow0, +queryRows)</c> of (<paramref name="batch"/>, <paramref name="head"/>)
+    /// see of key slots <c>[key0, +keys)</c> under the causal and window bounds, the valid key length and the bias's
+    /// exclusions. Rows past Sq are dropped, as in a partial query tile; keys past the valid ones are masked.</summary>
+    /// <exception cref="ArgumentException">A malformed operand or bias, a negative tile bound, or (batch, head) outside
+    /// the call.</exception>
     /// <exception cref="AttentionUnsupportedException">The call carries something INT8 v2 does not run.</exception>
     public static AttentionTileClass ClassifyTile(in AttentionCall call, int batch, int head, int queryRow0,
         int queryRows, int key0, int keys)
@@ -151,16 +153,13 @@ public static class Int8AttentionV2Reference
             throw new ArgumentOutOfRangeException(nameof(batch), batch, $"The call has {call.Batch} batches.");
         if ((uint)head >= (uint)call.Heads)
             throw new ArgumentOutOfRangeException(nameof(head), head, $"The call has {call.Heads} heads.");
-        int end = Math.Min(key0 + keys, call.ValidKvLength);
-        Span<bool> excluded = new bool[Math.Max(0, end - key0)];
-        if (call.Mask.Bias is not null)
-        {
-            float[] staged = new float[call.ValidKvLength];
-            bool[] all = new bool[call.ValidKvLength];
-            StageBias(in call, batch, head, staged, all);
-            if (end > key0) all.AsSpan(key0, end - key0).CopyTo(excluded);
-        }
-        int rowEnd = Math.Min(queryRow0 + queryRows, call.QueryTokens);
+        if (queryRow0 < 0 || queryRows < 0 || key0 < 0 || keys < 0)
+            throw new ArgumentException(
+                $"Tile bounds are non-negative; got rows {queryRow0}+{queryRows}, keys {key0}+{keys}.");
+        int end = (int)Math.Min((long)key0 + keys, call.ValidKvLength);
+        bool[] excluded = new bool[Math.Max(0, end - key0)];
+        StageBias(in call, batch, head, key0, new float[excluded.Length], excluded);
+        int rowEnd = (int)Math.Min((long)queryRow0 + queryRows, call.QueryTokens);
         return Classify(call.Mask, call.Positions.QueryOffset, call.ValidKvLength, queryRow0, rowEnd, key0, keys,
             excluded);
     }
@@ -250,6 +249,12 @@ public static class Int8AttentionV2Reference
             || from.KeyScales.Length != to.KeyScales.Length || from.ValueScales.Length != to.ValueScales.Length
             || !from.Rows.AsSpan().SequenceEqual(to.Rows))
             throw new ArgumentException("The supplied scales belong to another call, rows or variant.", nameof(from));
+        foreach (float[] scales in (float[][])[from.QueryScales, from.KeyScales, from.ValueScales])
+            foreach (float s in scales)
+                if (s < MinNormal)
+                    throw new ArgumentException(
+                        $"Supplied scale {s}: a stats pass scale is NaN, +∞ or at least the smallest normal float.",
+                        nameof(from));
         from.QueryScales.CopyTo(to.QueryScales, 0);
         if (to.Options.SmoothKeys) from.KeyMeans.CopyTo(to.KeyMeans, 0);
         from.KeyScales.CopyTo(to.KeyScales, 0);
@@ -382,8 +387,9 @@ public static class Int8AttentionV2Reference
         dst[d..].Clear();
     }
 
-    /// <summary>One head's bias over the valid keys times log2(e); −∞ marks an exclusion.</summary>
-    private static unsafe void StageBias(in AttentionCall call, int b, int h, Span<float> staged, Span<bool> excluded)
+    /// <summary>One head's bias over keys <c>[key0, +staged.Length)</c> times log2(e); −∞ marks an exclusion.</summary>
+    private static unsafe void StageBias(in AttentionCall call, int b, int h, int key0, Span<float> staged,
+        Span<bool> excluded)
     {
         staged.Clear();
         excluded.Clear();
@@ -395,7 +401,7 @@ public static class Int8AttentionV2Reference
         float* p = (float*)bias.DataPointer + at;
         for (int j = 0; j < staged.Length; j++)
         {
-            float x = p[dk == 1 ? 0 : j];
+            float x = p[dk == 1 ? 0 : key0 + j];
             excluded[j] = float.IsNegativeInfinity(x);
             staged[j] = excluded[j] ? 0f : x * Log2E;
         }
@@ -415,16 +421,17 @@ public static class Int8AttentionV2Reference
     private static AttentionTileClass Classify(in AttentionMask mask, int queryOffset, int kvLen, int row0, int rowEnd,
         int key0, int keys, ReadOnlySpan<bool> excluded)
     {
-        int end = Math.Min(key0 + keys, kvLen);
+        long keyEnd = (long)key0 + keys;
+        int end = (int)Math.Min(keyEnd, kvLen);
         if (end <= key0 || rowEnd <= row0) return AttentionTileClass.Skip;
         bool anyExcluded = excluded.Contains(true);
         if (!excluded.Contains(false)) return AttentionTileClass.Skip;
-        bool full = key0 + keys <= kvLen && !anyExcluded, none = true;
+        bool full = keyEnd <= kvLen && !anyExcluded, none = true;
         for (int r = row0; r < rowEnd; r++)
         {
             (long lo, long hi) = KeyRange(in mask, (long)queryOffset + r);
             if (Math.Max(lo, key0) <= Math.Min(hi, end - 1)) none = false;
-            if (lo > key0 || hi < key0 + keys - 1) full = false;
+            if (lo > key0 || hi < keyEnd - 1) full = false;
         }
         return none ? AttentionTileClass.Skip : full ? AttentionTileClass.Full : AttentionTileClass.Partial;
     }
@@ -503,7 +510,7 @@ public static class Int8AttentionV2Reference
                     LoadKv(b * call.KvHeads + kh);
                     for (int h = kh * group; h < (kh + 1) * group; h++)
                     {
-                        StageBias(in call, b, h, _bias, _excluded);
+                        StageBias(in call, b, h, 0, _bias, _excluded);
                         for (int ri = 0; ri < rows.Length;)
                         {
                             int tile0 = rows[ri] / br * br, tileEnd = Math.Min(tile0 + br, call.QueryTokens);
