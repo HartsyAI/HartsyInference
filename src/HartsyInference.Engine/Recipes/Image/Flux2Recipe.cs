@@ -63,8 +63,10 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     public ModelVariantCatalog? Variants => Flux2Variants.Catalog;
 
     /// <inheritdoc/>
+    /// <remarks>Keyed on the variant's guidance embedding, the property that makes Klein guidance-free, so a variant added
+    /// to <see cref="Flux2Variants"/> gets the right defaults without a second list here.</remarks>
     public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
-        variant is not null && (variant.Is(Flux2Variants.Klein4B) || variant.Is(Flux2Variants.Klein9B)) ? KleinDefaults : FamilyDefaults;
+        variant is null || Flux2Variants.ConfigFor(variant).GuidanceEmbed ? FamilyDefaults : KleinDefaults;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

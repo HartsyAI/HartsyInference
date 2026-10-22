@@ -61,7 +61,6 @@ public sealed class Flux1Recipe : IArchitectureRecipe
         variant is not null && variant.Is(Flux1Variants.Schnell) ? SchnellDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
-    /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.DitSharding | MemoryCapabilities.CfgParallel | MemoryCapabilities.ComponentPlacement;
 
     public IRecipePipeline Construct(RecipeContext context)
