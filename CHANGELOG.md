@@ -27,6 +27,10 @@ stable release will require. Dates are UTC.
   wrote them and drops three permutes in and one out per call at one batch item; their F32 calls take the token-major cuDNN
   row's cast branch, as the head-major row cast them. The cross-attention and Wan's image branch, the Animate-2 splice and
   HiDream's batched forward stay head-major, and `AttendFlat` takes the token-major entry for norm-free configs only.
+  Measured bit-identical on CUDA's cuDNN row: the self-attention through the whole layer at Wan 2.2 5B's 49- and 121-frame
+  lengths, Wan 2.1 14B's, Matrix-Game 2's masked call, a context-parallel rank's local queries over the exchanged keys and
+  HiDream's single-stream rows; on Vulkan the evidence is the attention call alone at Wan's shapes (cm2, bit-identical) and
+  no Vulkan generation was gated.
 
 ## alpha.387
 
