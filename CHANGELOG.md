@@ -11,7 +11,7 @@ stable release will require. Dates are UTC.
 - **Added: INT8 attention v2 (CUDA, opt-in).** `numerics.int8AttnV2` runs unmasked equal-head attention at head dim 128
   with F16 or F32 operands (head-major, token-major or fused-QKV views) on INT8 QK with one K scale per key, u8 P and s8
   V with an INT32 PV accumulator drained per 128-key tile; `numerics.int8AttnV2VTile` picks per-tile (default) or
-  per-sequence V scales, `numerics.int8AttnV2F16Pv` an F16 PV, and `numerics.int8AttnV2MinTokens` the engage length.
+  per-sequence V scales, `numerics.int8AttnV2F16Pv` an F16 PV, and `numerics.int8AttnV2MinTokens` the engage length (1024 query rows and keys; v2 was the fastest row from 512 on the RTX 3060, 4090 and 5090). It runs 64-row query tiles, ahead of 128-row ones on all three cards.
   Its bytes, scales and INT32 products are the emulator's bit for bit, and its output is the emulator's bit for bit
   given the kernel's exp2. The `reference` profile pins it off; SageAttention v1 stays the default.
 - **Changed: attention kernels build with a register check.** `attention/build.sh` builds `int8_attn_v2` with nvcc and

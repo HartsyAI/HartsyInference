@@ -183,9 +183,9 @@ public static partial class EngineKnobs
 
     /// <summary>Fewest query rows and keys a call needs before INT8 attention v2 takes it.</summary>
     public static readonly Knob<int> Int8AttnV2MinTokens =
-        Int("numerics.int8AttnV2MinTokens", 8192, KnobScope.Runtime, KnobDomain.Numerics,
-            "Fewest query rows and keys a call needs before INT8 attention v2 takes it; non-positive keeps 8192.",
-            v => v > 0 ? v : 8192);
+        Int("numerics.int8AttnV2MinTokens", 1024, KnobScope.Runtime, KnobDomain.Numerics,
+            "Fewest query rows and keys a call needs before INT8 attention v2 takes it; non-positive keeps 1024.",
+            v => v > 0 ? v : 1024);
 
     /// <summary>How many host-to-device transfers the H2D trace prints before going quiet.</summary>
     public static readonly Knob<int> H2dTraceLimit =
