@@ -199,10 +199,11 @@ public sealed class MusicService : IMusicService
             throw new ArgumentOutOfRangeException(nameof(MusicRequest.InferSteps), steps,
                 "Music steps must be at least 1; leave it unset to use the model's default.");
         }
-        if (request.CfgScale is double cfg && (!double.IsFinite(cfg) || cfg < 0))
+        // Zero is refused too: the loaders used to read 0 as "use the default", so it never ran as guidance 0.
+        if (request.CfgScale is double cfg && (!double.IsFinite(cfg) || cfg <= 0))
         {
             throw new ArgumentOutOfRangeException(nameof(MusicRequest.CfgScale), cfg,
-                "Music guidance must be finite and not negative; leave it unset to use the model's default.");
+                "Music guidance must be finite and above 0; leave it unset to use the model's default.");
         }
         if (request.Duration is double seconds && (!double.IsFinite(seconds) || seconds <= 0))
         {

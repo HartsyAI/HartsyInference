@@ -258,7 +258,7 @@ internal static class Yue2MusicModel
             Cot = ParseCot(request.Yue2Cot ?? string.Empty),
             Abc = request.Yue2Abc ?? string.Empty,
             Seed = request.Seed,
-            MaxDurationSeconds = request.Duration.Filled() > 0 ? request.Duration.Filled() : Yue2Protocol.DefaultDurationSeconds,
+            MaxDurationSeconds = request.Duration.Filled(),
             AbcSampling = abc,
             SemanticSampling = semantic,
             CfgScale = request.CfgScale is { } cfg ? (float)cfg : null,

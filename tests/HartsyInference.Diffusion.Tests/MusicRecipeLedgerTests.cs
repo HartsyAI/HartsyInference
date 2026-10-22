@@ -226,6 +226,7 @@ public sealed class MusicRecipeLedgerTests
     [InlineData(0, null, null)]
     [InlineData(-3, null, null)]
     [InlineData(null, -1.0, null)]
+    [InlineData(null, 0.0, null)]
     [InlineData(null, double.NaN, null)]
     [InlineData(null, null, 0.0)]
     public void ExplicitTunablesNoSamplerCanRun_AreRefusedByName(int? steps, double? cfg, double? duration)
@@ -239,5 +240,5 @@ public sealed class MusicRecipeLedgerTests
 
     [Fact]
     public void UnsetAndPositiveTunables_PassValidation() =>
-        MusicService.RejectInvalidTunables(new MusicRequest { Prompt = "p", InferSteps = 8, CfgScale = 0, Duration = 10 });
+        MusicService.RejectInvalidTunables(new MusicRequest { Prompt = "p", InferSteps = 8, CfgScale = 1, Duration = 10 });
 }
