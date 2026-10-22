@@ -29,10 +29,10 @@ public static class RecipeRegistryValidator
         ArgumentNullException.ThrowIfNull(recipe);
         List<string> problems = [];
         CheckName(recipe.Name, recipe.Matches, problems);
-        if (recipe.Constraints?.Frames is not FrameGrid grid)
+        FrameGrid? grid = recipe.Constraints?.Frames;
+        if (grid is null)
         {
             problems.Add($"{recipe.Name}: declares no frame grid.");
-            return problems;
         }
         foreach ((string label, ResolvedModelVariant? variant) in VariantsOf(recipe.Variants))
         {
@@ -100,7 +100,7 @@ public static class RecipeRegistryValidator
         CheckOptionalName(owner, "scheduler", defaults.Scheduler, problems);
     }
 
-    private static void CheckVideo(string owner, VideoDefaults defaults, FrameGrid grid, List<string> problems)
+    private static void CheckVideo(string owner, VideoDefaults defaults, FrameGrid? grid, List<string> problems)
     {
         CheckSampling(owner, defaults.Steps, defaults.CfgScale, problems);
         CheckSize(owner, defaults.Width, defaults.Height, problems);
@@ -108,7 +108,7 @@ public static class RecipeRegistryValidator
         {
             problems.Add($"{owner}: frame rate {defaults.Fps} is below 1.");
         }
-        if (!grid.Contains(defaults.Frames))
+        if (grid is not null && !grid.Contains(defaults.Frames))
         {
             problems.Add($"{owner}: default frame count {defaults.Frames} is not on the family's {grid} grid.");
         }

@@ -22,7 +22,7 @@ public sealed record FrameGrid
     /// <summary>Spacing between valid counts; the VAE's temporal compression for <c>step·n + 1</c> families.</summary>
     public int Step { get; }
 
-    /// <summary>The smallest valid count, and the remainder every valid count leaves modulo <see cref="Step"/>.</summary>
+    /// <summary>The smallest valid count; every valid count is <c>Offset + Step·n</c>.</summary>
     public int Offset { get; }
 
     /// <summary>What planning does with a requested count off the grid.</summary>

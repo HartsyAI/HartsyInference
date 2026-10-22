@@ -122,6 +122,20 @@ public sealed class RecipeLedgerTests
     }
 
     [Fact]
+    public void Validator_ReportsEveryProblemWhenTheGridIsMissing()
+    {
+        StubVideoRecipe recipe = new StubVideoRecipe("stub-no-grid", new VideoDefaults
+        {
+            Steps = 20, CfgScale = 5f, Width = 832, Height = 480, Frames = 33, Fps = 0,
+        }, hasGrid: false);
+
+        IReadOnlyList<string> problems = RecipeRegistryValidator.Problems(recipe);
+
+        Assert.Contains(problems, problem => problem.Contains("declares no frame grid", StringComparison.Ordinal));
+        Assert.Contains(problems, problem => problem.Contains("frame rate 0", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Validator_RejectsAShadowedName()
     {
         VideoDefaults valid = new VideoDefaults { Steps = 20, CfgScale = 5f, Width = 832, Height = 480, Frames = 33, Fps = 16 };
@@ -163,16 +177,17 @@ public sealed class RecipeLedgerTests
         }
     }
 
-    private sealed class StubVideoRecipe(string name, VideoDefaults defaults, bool matchesPrefix = false) : IVideoRecipe
+    private static readonly FrameGrid StubGrid = FrameGrid.StepPlusOne(4, FrameNormalization.Reject);
+
+    private sealed class StubVideoRecipe(string name, VideoDefaults defaults, bool matchesPrefix = false,
+        FrameGrid? grid = null, bool hasGrid = true) : IVideoRecipe
     {
         public string Name => name;
 
         public VideoDefaults Defaults => defaults;
 
-        public VideoConstraints Constraints { get; } = new VideoConstraints
-        {
-            Frames = FrameGrid.StepPlusOne(4, FrameNormalization.Reject),
-        };
+        // A missing grid can only reach the validator from a recipe that bypasses the required member.
+        public VideoConstraints Constraints { get; } = hasGrid ? new VideoConstraints { Frames = grid ?? StubGrid } : null!;
 
         public bool Matches(string familyId) => matchesPrefix
             ? familyId.StartsWith(name, StringComparison.Ordinal)
