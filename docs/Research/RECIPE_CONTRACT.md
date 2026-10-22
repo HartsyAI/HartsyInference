@@ -131,7 +131,8 @@ been re-read; until then it is an audit finding, not a specification.
 | Family | Today (steps / cfg / size / frames @ fps) | SwarmUI reference | Status |
 |---|---|---|---|
 | wan | 50 / 5.0 / 832×480 / 81 @ 24 | core: 81 frames, 24 fps for every Wan; size kept native (core class is 960² or 640²) | verified 2026-10-22 |
-| wan-21-1_3b, wan-21-14b | 50 / 6.0 / 832×480 / 81 @ 24 | core `wan-21-*` branch: cfg 6, 81 frames, 24 fps; docs: official cfg 6. Wan 2.2 I2V 14B shares the class (core cfg 3.5), no structural variant yet | verified 2026-10-22 |
+| wan-21-1_3b, wan-21-14b | 50 / 6.0 / 832×480 / 81 @ 24 | core `wan-21-*` branch: cfg 6, 81 frames, 24 fps; docs: official cfg 6. | verified 2026-10-22 |
+| wan-21-14b, variant `i2v-22-14b` | 50 / 3.5 / 832×480 / 81 @ 24 | core `wan-2_2-image2video-14b` branch: cfg 3.5, 24 fps (49 frames image-to-video); told apart by structure: hidden 5120, 36-channel patch embedding, no `k_img` / `img_emb` | verified 2026-10-22 |
 | wan-22-5b, ti2v-5b | 50 / 5.0 / 832×480 / 81 @ 22 | core `wan-22-5b` branch: cfg 5, 22 fps; 81 frames text-to-video (49 image-to-video). Docs say 24 fps native | verified 2026-10-22 |
 | wan-vace | 50 / 6.0 / 704×480 / 81 @ 24 | classed under `wan-21-*`, so core runs the Wan 2.1 branch; 704×480 is the old fallback (core class 960²) | verified 2026-10-22 |
 | wan-s2v | 50 / 5.0 / 704×480 / 25 @ 25 | none in SwarmUI; pipeline intends 81 | unverified |
