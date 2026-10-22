@@ -39,8 +39,8 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5-video", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Kandinsky-5 Video's official sampling settings: 50 steps at guidance 5.0, 512x512, 25 frames @ 24fps (<c>Kandinsky5VideoPipeline</c> doc comment; <c>Kandinsky5VideoGenerationTests</c> verified 512x512 coherent output at this cadence).</summary>
-    public VideoDefaults Defaults { get; } = new VideoDefaults { Steps = 50, CfgScale = 5.0f, Width = 512, Height = 512, Frames = 25, Fps = 24 };
+    /// <summary>Kandinsky-5 Video's sampling settings: 50 steps (<c>Kandinsky5VideoPipeline</c> doc comment) at CFG 1, 640x640, 73 frames @ 24fps. CFG, size and frames are SwarmUI core's (<c>WorkflowGenerator.cs</c> Kandinsky 5 branch: CFG 1; class <c>kandinsky5-video-lite</c>/<c>-pro</c>: 640x640; <c>WorkflowGeneratorModelSupport.cs</c>: 73 frames). The docs give CFG 5 for the regular models and 1 for the distilled ones.</summary>
+    public VideoDefaults Defaults { get; } = new VideoDefaults { Revision = 2, Steps = 50, CfgScale = 1.0f, Width = 640, Height = 640, Frames = 73, Fps = 24 };
 
     /// <inheritdoc/>
     public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(4, FrameNormalization.SnapNearest) };

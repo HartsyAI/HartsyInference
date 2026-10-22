@@ -130,18 +130,19 @@ been re-read; until then it is an audit finding, not a specification.
 
 | Family | Today (steps / cfg / size / frames @ fps) | SwarmUI reference | Status |
 |---|---|---|---|
-| wan, wan-21-1_3b, wan-21-14b | 50 / 5.0 / 832×480 / 33 @ 25 | 81 frames, 24 fps default (2.1 base trained at 16), 832×480, cfg 6 | unverified |
-| wan-22-5b | as wan | 24 fps native, cfg 5 | unverified |
-| wan-vace | 50 / 5.0 / 704×480 / 25 @ 25 | as Wan; pipeline intends 81 | unverified |
+| wan | 50 / 5.0 / 832×480 / 81 @ 24 | core: 81 frames, 24 fps for every Wan; size kept native (core class is 960² or 640²) | verified 2026-10-22 |
+| wan-21-1_3b, wan-21-14b | 50 / 6.0 / 832×480 / 81 @ 24 | core `wan-21-*` branch: cfg 6, 81 frames, 24 fps; docs: official cfg 6. Wan 2.2 I2V 14B shares the class (core cfg 3.5), no structural variant yet | verified 2026-10-22 |
+| wan-22-5b, ti2v-5b | 50 / 5.0 / 832×480 / 81 @ 22 | core `wan-22-5b` branch: cfg 5, 22 fps; 81 frames text-to-video (49 image-to-video). Docs say 24 fps native | verified 2026-10-22 |
+| wan-vace | 50 / 6.0 / 704×480 / 81 @ 24 | classed under `wan-21-*`, so core runs the Wan 2.1 branch; 704×480 is the old fallback (core class 960²) | verified 2026-10-22 |
 | wan-s2v | 50 / 5.0 / 704×480 / 25 @ 25 | none in SwarmUI; pipeline intends 81 | unverified |
 | wan-animate | 20 / 1.0 / 704×480 / 77 @ 30 | none in SwarmUI; upstream `wan_animate_14B.py` | unverified |
 | wan-animate-2 | 40 / 3.0 / 704×480 / 81 @ 24 (distilled 10 / 1.0) | none in SwarmUI | unverified |
-| ltx-video | 50 / 3.0 / 704×480 / 97 @ 25 | 97 frames, 24 fps, 768×512, cfg 3, 8n+1 rounded | unverified |
-| ltx-video-2, ltx-2.5-distilled | 20 / 4.0 / 1280×736 / 121 @ 24 (distilled 8 / 1) | core fallback 97 frames, 24 fps; euler / normal | unverified |
-| hunyuan-video | 20 / 6.0 (embedded guidance) / 512×320 / 25 @ 24 | 73 frames, 24 fps fixed, 960×544 | unverified |
-| kandinsky5-video | 50 / 5.0 / 512×512 / 25 @ 24 | none in SwarmUI; pipeline fallback was 121 | unverified |
-| lance-video | 30 / 4.0 / 512×512 / 25 @ 25 | none in SwarmUI; pipeline fallback was 81, cap 121 | unverified |
-| minimax-h3 | 30 / 1.0 / 1344×768 / 124 @ 24 | 124 frames (17k+5, rounded up), 24 fps, cfg 1, `res_multistep` / `simple` | unverified |
+| ltx-video | 50 / 3.0 / 768×512 / 97 @ 24 | 97 frames, 24 fps, 768×512, cfg 3, 8n+1 rounded | verified 2026-10-22 |
+| ltx-video-2, ltx-2.5-distilled | 20 / 3.0 / 1280×736 / 97 @ 24 (distilled 8 / 3.0) | core: cfg 3 and 97 frames for every LTX-2, distilled included (docs: ~4 dev, 1 distilled); size kept native (core class 960²) | verified 2026-10-22 |
+| hunyuan-video | 20 / 6.0 (embedded guidance) / 720×720 / 73 @ 24 | core class 720×720, 73 frames, 24 fps | verified 2026-10-22 |
+| kandinsky5-video | 50 / 1.0 / 640×640 / 73 @ 24 | core Kandinsky 5 branch: cfg 1 (docs: 5 regular, 1 distilled), class 640², 73 frames | verified 2026-10-22 |
+| lance-video | 30 / 4.0 / 512×512 / 25 @ 25 | none in SwarmUI core; the bridge registers 832×480 as a host-declared size; pipeline cap 121 | unverified |
+| minimax-h3 | 30 / 1.0 / 1344×768 / 124 @ 24 | 124 frames (17k+5, rounded up), 24 fps, cfg 1, `res_multistep` / `simple`; size kept native (core class 960²) | verified 2026-10-22 |
 | ace-step 1.5 (audio) | loader table | 120 s (max 600), turbo cfg 1 / 8 steps / shift 3 | unverified |
 | minimax-music-3 (audio) | `MiniMaxMusic3MusicRecipe`: 10 s, 30 steps, cfg 1.7 | 120 s max, cfg 1.7, 30 steps; frame grid caps at 360 s | unverified |
 | yue2 (audio) | `Yue2MusicRecipe`: 10 s, 32 ODE steps; cfg owned by the planning mode | 300 s max, cfg 1, 20 steps; protocol caps at 900 s | unverified |

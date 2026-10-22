@@ -54,15 +54,17 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         if (distilled)
         {
             // The shipped template geometry: 1280x736 nominal (the two-stage half-grid snap decodes it at
-            // 1280x704), 121 frames = 5 s at 24 fps. Same defaults as dev below — the families differ only in
-            // the sampling contract.
+            // 1280x704). Frames and guidance are SwarmUI core's for every LTX-2 model, distilled included: 97 frames
+            // (WorkflowGeneratorModelSupport.cs) at CFG 3 (WorkflowGenerator.cs). The docs and the distilled
+            // contract (LtxVideo2Config.V25Distilled) say CFG 1.
             Defaults = new VideoDefaults
             {
+                Revision = 2,
                 Steps = LtxVideo2Config.V25Distilled.NumInferenceSteps,
-                CfgScale = LtxVideo2Config.V25Distilled.GuidanceScale,
+                CfgScale = 3.0f,
                 Width = 1280,
                 Height = 736,
-                Frames = 121,
+                Frames = 97,
                 Fps = 24,
             };
         }
@@ -81,8 +83,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// variant, which routes to the distilled instance.</remarks>
     public ModelVariantCatalog? Variants => _distilled ? null : LtxVideo2Variants.Catalog;
 
-    /// <summary>Dev-family defaults: 20 steps at cfg 4.0, 1280x736, 121 frames @ 24 fps — the geometry Lightricks ships (their template's 0.9 MP ResolutionSelector output and 5 s clip), at the measured recommended profile from MODEL_STATUS_VIDEO.md's LTX-2.5 row (quality parity vs ComfyUI at 1280x736 / 20 steps / cfg 4.0). The distilled 2.5 variant carries the same geometry with its baked 8-step unguided contract (ctor above).</summary>
-    public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 20, CfgScale = 4.0f, Width = 1280, Height = 736, Frames = 121, Fps = 24 };
+    /// <summary>Dev-family defaults: 20 steps at cfg 3.0, 1280x736, 97 frames @ 24 fps. The size is the geometry Lightricks ships (their template's 0.9 MP ResolutionSelector output); cfg 3 and 97 frames are SwarmUI core's LTX-2 values (<c>WorkflowGenerator.cs</c>, <c>WorkflowGeneratorModelSupport.cs</c>). MODEL_STATUS_VIDEO.md's LTX-2.5 parity row was measured at cfg 4.0 and 121 frames. The distilled 2.5 variant carries the same geometry with its 8-step contract (ctor above).</summary>
+    public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Revision = 2, Steps = 20, CfgScale = 3.0f, Width = 1280, Height = 736, Frames = 97, Fps = 24 };
 
     /// <inheritdoc/>
     public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new LtxVideo2Config().VaeTemporalCompression, FrameNormalization.SnapNearest) };

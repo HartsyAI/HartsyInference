@@ -42,11 +42,13 @@ public sealed class WanVaceRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
 
-    // Size, frames and fps are what the removed generic fallback ran; SwarmUI-aligned values: RECIPE_CONTRACT.md ledger.
-    /// <summary>Wan VACE's official sampling settings: 50 steps at guidance 5.0 (<c>WanVideoConfig.NumInferenceSteps</c>/<c>GuidanceScale</c>).</summary>
+    // Size is what the removed generic fallback ran; SwarmUI gives VACE only its square class size.
+    /// <summary>Wan VACE's sampling settings: 50 steps (<c>WanVideoConfig.NumInferenceSteps</c>) at CFG 6, 81 frames @ 24 fps.
+    /// SwarmUI classes VACE under <c>wan-21-14b</c> / <c>wan-21-1_3b</c> (<c>T2IModelClassSorter.cs</c>), so core runs its Wan 2.1
+    /// branch (<c>WorkflowGenerator.cs</c>).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
-        Steps = 50, CfgScale = 5.0f, Width = 704, Height = 480, Frames = 25, Fps = 25,
+        Revision = 2, Steps = 50, CfgScale = 6.0f, Width = 704, Height = 480, Frames = 81, Fps = 24,
     };
 
     /// <inheritdoc/>
