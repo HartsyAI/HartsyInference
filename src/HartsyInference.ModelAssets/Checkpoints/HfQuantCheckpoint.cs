@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Gguf;
@@ -79,6 +80,9 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             throw;
         }
     }
+
+    /// <summary>Whether <paramref name="path"/> names one of this checkpoint's files, through a symbolic link in any component.</summary>
+    public bool IsSourceFile(string path) => _set.Shards.Any(shard => FileSystemPathIdentity.SamePath(shard.Path, path));
 
     /// <summary>A plain weight as stored, as a fresh borrowed view of the mapped checkpoint (an expert of a fused stack is a row view).</summary>
     public Tensor Borrow(string name)

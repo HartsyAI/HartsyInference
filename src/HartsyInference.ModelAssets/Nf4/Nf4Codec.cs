@@ -193,12 +193,20 @@ public static unsafe class Nf4Codec
     /// <summary>Writes a block-FP8 checkpoint as one NF4 safetensors file, one weight at a time: each FP8 weight is dequantized,
     /// quantized and written before the next is read, so memory holds one weight rather than the checkpoint. Plain tensors of
     /// any dtype are copied byte for byte. The F32 <c>weight_scale_inv</c> grids are consumed by the dequantization and not written.</summary>
+    /// <remarks>A failed or cancelled write removes its <c>.partial</c> file and leaves any file already at
+    /// <paramref name="outputPath"/> untouched.</remarks>
     /// <returns>Lowercase hex SHA-256 of the file.</returns>
+    /// <exception cref="ArgumentException"><paramref name="outputPath"/> or its <c>.partial</c> file is one of the source's files.</exception>
     public static string WriteFromFp8(HfQuantCheckpoint source, string outputPath, IReadOnlyDictionary<string, string> metadata,
-        Action<string>? progress = null)
+        Action<string>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        ArgumentException.ThrowIfNullOrEmpty(outputPath);
         ArgumentNullException.ThrowIfNull(metadata);
+        // Stream into a sibling .partial file: the final path only ever holds a complete, length-checked checkpoint.
+        string partial = outputPath + ".partial";
+        if (source.IsSourceFile(outputPath) || source.IsSourceFile(partial))
+            throw new ArgumentException($"The NF4 output '{outputPath}' must not overwrite its source checkpoint.", nameof(outputPath));
         List<HfQuantWeight> plain = [];
         List<HfQuantWeight> quantized = [];
         foreach (HfQuantWeight w in source.Weights.Values.OrderBy(static w => w.Name, StringComparer.Ordinal))
@@ -250,14 +258,14 @@ public static unsafe class Nf4Codec
         json.CopyTo(headerBytes, 0);
         Array.Fill(headerBytes, (byte)' ', json.Length, headerBytes.Length - json.Length);
 
-        // Stream into a sibling .partial file: the final path only ever holds a complete, length-checked checkpoint.
-        string partial = outputPath + ".partial";
+        bool opened = false;
         try
         {
             string sha;
             using (FileStream file = new(partial, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
-            using (IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
             {
+                opened = true;
+                using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 void Emit(ReadOnlySpan<byte> bytes)
                 {
                     file.Write(bytes);
@@ -271,6 +279,7 @@ public static unsafe class Nf4Codec
 
                 foreach (HfQuantWeight w in plain)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     using Tensor view = source.Borrow(w.Name);
                     ReadOnlySpan<byte> raw = view.AsReadOnlySpan<byte>();
                     if (raw.Length != Tensor.ComputeByteSize(w.Shape, w.StoredDType))
@@ -281,6 +290,7 @@ public static unsafe class Nf4Codec
                 int done = 0;
                 foreach (HfQuantWeight w in quantized)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     long rows = w.Shape[0], cols = w.Shape[1];
                     using Tensor f32 = source.DequantizeF32(w.Name);
                     (byte[] packed, float[] absmax) = Quantize(f32.AsReadOnlySpan<float>());
@@ -302,11 +312,11 @@ public static unsafe class Nf4Codec
         }
         catch
         {
-            // The stream is already closed here; remove the incomplete file so nothing mistakes it for a checkpoint.
+            // Only a partial file this call opened is removed: one it failed to open may be another run's, still being written.
             // A failed cleanup is logged rather than thrown, so the error that stopped the write is the one the caller sees.
             try
             {
-                if (File.Exists(partial)) File.Delete(partial);
+                if (opened) File.Delete(partial);
             }
             catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
             {

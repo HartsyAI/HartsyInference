@@ -849,28 +849,44 @@ static Dictionary<string, string> ReadSourceMetadata(string path)
 
 static int WriteNf4FromFp8(string input, string output, bool force)
 {
-    // Resolve symlinks on both sides: writing over the source would truncate it while it is still being read.
-    string inputFull = new FileInfo(input).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? Path.GetFullPath(input);
-    string outputFull = File.Exists(output)
-        ? new FileInfo(output).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? Path.GetFullPath(output)
-        : Path.GetFullPath(output);
-    if (string.Equals(inputFull, outputFull, StringComparison.Ordinal))
-    {
-        Console.Error.WriteLine($"Output is the input checkpoint: {output}. Choose a different output path.");
-        return 1;
-    }
+    using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([input]);
+    if (source.IsSourceFile(output))
+        return Usage($"The output is the input checkpoint: {output}. Choose a different output path.");
     if (File.Exists(output) && !force)
     {
         Console.Error.WriteLine($"Output already exists: {output}. Add --force to replace it.");
         return 1;
     }
-    Dictionary<string, string> metadata = ReadSourceMetadata(input);
-    metadata["hartsy.quant"] = "nf4";
-    metadata["hartsy.converter"] = "CheckpointRepacker --quant nf4 (streaming)";
-    metadata.Remove("modelspec.hash_sha256");
-    using HfQuantCheckpoint source = HfQuantCheckpoint.OpenFiles([input]);
     Stopwatch clock = Stopwatch.StartNew();
-    string sha = Nf4Codec.WriteFromFp8(source, output, metadata, message => Console.WriteLine($"  {message}"));
+    using CancellationTokenSource stop = new();
+    // The first signal stops the write between weights, so its partial file is removed; a second ends the process.
+    void Stop(PosixSignalContext context)
+    {
+        context.Cancel = !stop.IsCancellationRequested;
+        stop.Cancel();
+    }
+    string sha;
+    try
+    {
+        using PosixSignalRegistration interrupt = PosixSignalRegistration.Create(PosixSignal.SIGINT, Stop);
+        using PosixSignalRegistration terminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, Stop);
+        Dictionary<string, string> metadata = ReadSourceMetadata(input);
+        metadata["hartsy.quant"] = "nf4";
+        metadata["hartsy.converter"] = "CheckpointRepacker --quant nf4 (streaming)";
+        metadata.Remove("modelspec.hash_sha256");
+        sha = Nf4Codec.WriteFromFp8(source, output, metadata, message => Console.WriteLine($"  {message}"), stop.Token);
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine($"Stopped; {output} was not written.");
+        return 130;
+    }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException or InvalidDataException
+        or IOException or HartsyInference.Core.Exceptions.HartsyInferenceException)
+    {
+        Console.Error.WriteLine($"Could not convert {Path.GetFileName(input)}: {ex.Message}");
+        return 1;
+    }
     long bytes = new FileInfo(output).Length;
     JsonObject manifest = new()
     {
