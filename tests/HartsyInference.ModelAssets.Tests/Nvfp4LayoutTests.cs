@@ -36,7 +36,11 @@ public sealed class Nvfp4LayoutTests
         using TempFile file = Write(ModelOptNvfp4Codec.QuantizeToCompanions("layer.weight", source, Rows, Cols), metadata: null);
         using CheckpointSource raw = CheckpointSource.Open(file.Path, new CheckpointOpenOptions { FoldQuantCompanions = false });
         float global = raw.Weights["layer.weight_scale_2"].AsReadOnlySpan<float>()[0];
-        using Tensor misread = CheckpointConvertUtils.DequantNvfp4ToF16(raw.Weights["layer.weight"], raw.Weights["layer.weight_scale"], global);
+        // The old decode read the row-major bytes as the blocked tile; zero-pad them to the tile's rows so it stays in bounds.
+        Tensor rowMajor = raw.Weights["layer.weight_scale"];
+        using Tensor padded = new(new TensorShape((rowMajor.Shape[0] + 127) / 128 * 128, rowMajor.Shape[1]), DType.F8E4M3);
+        rowMajor.AsReadOnlySpan<byte>().CopyTo(padded.AsSpan<byte>());
+        using Tensor misread = CheckpointConvertUtils.DequantNvfp4ToF16(raw.Weights["layer.weight"], padded, global);
         Assert.True(Math.Abs(Pearson(source, misread)) < 0.2, $"the old decode should be noise: r = {Pearson(source, misread):F4}");
     }
 

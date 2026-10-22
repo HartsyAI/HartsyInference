@@ -414,10 +414,13 @@ public sealed unsafe class Nvfp4DequantTests
         AssertWithinBlockBound(src.ToArray(), dec, rows, cols, global, d.Name);
     }
 
-    /// <summary>Padding to the 128-row, 4-column tile is accepted; a scale tensor larger than that is a mismatch.</summary>
+    /// <summary>Padding to the 128-row, 4-column tile is accepted; a scale tensor larger than that is a mismatch, and so is
+    /// one padded in a single dimension, whose blocked indexing would read past its end (row 1 of [2, 4] is index 16).</summary>
     [Theory]
     [InlineData(128, 4, true)]
-    [InlineData(2, 1, true)]
+    [InlineData(128, 1, true)]
+    [InlineData(2, 1, false)]
+    [InlineData(2, 4, false)]
     [InlineData(256, 4, false)]
     [InlineData(128, 8, false)]
     public void DequantNvfp4_AcceptsPaddingOnly(int scaleRows, int scaleCols, bool accepted)

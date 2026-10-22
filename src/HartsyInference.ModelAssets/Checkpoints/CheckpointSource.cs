@@ -244,9 +244,21 @@ public sealed class CheckpointSource : IDisposable
             // ModelOpt-layout NVFP4 groups become Comfy layout here, before the pass below reads every group as Comfy.
             List<Tensor> relaid = Nvfp4LayoutNormalizer.ConvertModelOptGroups(folded, metadata);
             owned.AddRange(relaid);
+            // A re-laid group is freed as soon as it is widened, so peak memory is one group over the output, not all.
+            HashSet<Tensor> pending = new(relaid, ReferenceEqualityComparer.Instance as IEqualityComparer<Tensor>);
             Dictionary<string, Tensor> normalized =
                 CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4,
-                    options.KeepNvfp4Companions);
+                    options.KeepNvfp4Companions, (packed, blockScale) =>
+                    {
+                        if (!pending.Contains(packed) || !pending.Contains(blockScale)) return;
+                        pending.Remove(packed);
+                        pending.Remove(blockScale);
+                        owned.Remove(packed);
+                        owned.Remove(blockScale);
+                        packed.Dispose();
+                        blockScale.Dispose();
+                    });
+            relaid.RemoveAll(tensor => !pending.Contains(tensor));
             // Against `folded`, not `weights`: the NF4 decodes and the re-laid groups are already owned, and re-adding
             // them here would dispose each one twice.
             CollectAllocations(folded, normalized, owned);

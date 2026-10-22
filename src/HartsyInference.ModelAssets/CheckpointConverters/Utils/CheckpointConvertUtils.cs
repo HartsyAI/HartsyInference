@@ -782,7 +782,8 @@ public static unsafe class CheckpointConvertUtils
     /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
     /// <param name="keepNvfp4Companions">Leave nvfp4 weights packed AND leave their <c>.weight_scale</c>/<c>.weight_scale_2</c> companions in the dictionary, for a consumer that dequantizes the format itself rather than reading <see cref="Tensor.QuantInfo"/>. Unlike <paramref name="residentNvfp4"/> this also covers AWQ layers, which is the point: <see cref="Tensor.QuantInfo"/> cannot express <c>pre_quant_scale</c>, so those layers have no resident representation and would otherwise be widened. Everything else — fp8, int8, NF4 — folds exactly as it does with this off.</param>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
-        bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false)
+        bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false,
+        Action<Tensor, Tensor>? onNvfp4Unpacked = null)
     {
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
         // weight before anything here can strip them.
@@ -941,6 +942,7 @@ public static unsafe class CheckpointConvertUtils
                     result[key] = nvfp4ToFp8 ? DequantNvfp4ToFp8(kvp.Value, blockScales, globalScale)
                         : DequantNvfp4ToF16(kvp.Value, blockScales, globalScale);
                     if (nvfp4ToFp8) nvfp4Fp8++; else nvfp4F16++;
+                    onNvfp4Unpacked?.Invoke(kvp.Value, blockScales);
                     continue;
                 }
             }
@@ -1228,8 +1230,23 @@ public static unsafe class CheckpointConvertUtils
 
     /// <summary>A block-scale tensor covers the weight exactly or up to the blocked layout's padding, and no further.</summary>
     private static bool BlockScaleShapeFits(long rows, long cols, long scaleRows, long scaleCols)
-        => cols % 16 == 0 && scaleRows >= rows && scaleRows <= (rows + 127) / 128 * 128
-            && scaleCols >= cols / 16 && scaleCols <= (cols / 16 + 3) / 4 * 4;
+    {
+        long blockCols = cols / 16;
+        if (cols % 16 != 0 || rows == 0 || blockCols == 0 || scaleRows < rows || scaleRows > (rows + 127) / 128 * 128
+            || scaleCols < blockCols || scaleCols > (blockCols + 3) / 4 * 4)
+        {
+            return false;
+        }
+        // Each dimension can sit inside its padding while the pair is still too small for the blocked indexing, so
+        // the largest index has to fit. It falls in the last row tile and last column tile, where the index grows.
+        long last = 0;
+        for (long r = Math.Max(0, rows - 128); r < rows; r++)
+        {
+            for (long c = Math.Max(0, blockCols - 4); c < blockCols; c++)
+                last = Math.Max(last, BlockScaleSwizzle.SwizzledIndex(r, c, scaleCols));
+        }
+        return last < scaleRows * scaleCols;
+    }
 
     /// <summary>Dequantizes an NVFP4 weight to F16. <paramref name="packed"/> is U8 <c>[rows, cols/2]</c> with two e2m1 values per byte — element <c>2j</c> in the HIGH nibble, <c>2j+1</c> in the LOW nibble (comfy_kitchen <c>hi_first=True</c>, its default for both quantize and dequantize; verified against <c>float_utils.unpack_uint4</c>). <paramref name="blockScales"/> is F8-E4M3 <c>[rows, cols/16]</c> — one scale per 16 consecutive input-dim elements. The full value is <c>e2m1 · block_scale · globalScale</c>. Rows are dequantized in parallel (pure per-row writes).</summary>
     public static Tensor DequantNvfp4ToF16(Tensor packed, Tensor blockScales, float globalScale)
