@@ -66,16 +66,16 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
         // byte-exact source, so the coarseness only widens the transition band at the mask boundary.
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? GenerationDefaults.Generic.Width;
-        int height = request.Height ?? GenerationDefaults.Generic.Height;
+        int width = request.Width;
+        int height = request.Height;
         int downscale = _config.VaeDownsampleSpatial * _config.LatentPatchSize.H;
         if (width % downscale != 0 || height % downscale != 0)
             throw new ArgumentException($"Width and height must be divisible by {downscale} for Lance.");
 
         int gridT = 1, gridH = height / downscale, gridW = width / downscale;
         int nVae = gridT * gridH * gridW;
-        int steps = request.Steps ?? _config.NumTimesteps;
-        float cfg = request.CfgScale ?? _config.CfgTextScale;
+        int steps = request.Steps;
+        float cfg = request.CfgScale;
         float shift = _config.ImageTimestepShift;
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);

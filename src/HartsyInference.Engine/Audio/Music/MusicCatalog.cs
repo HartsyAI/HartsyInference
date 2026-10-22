@@ -6,6 +6,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -208,8 +209,8 @@ internal static class MusicCatalog
                 // MusicGen/AudioGen are trained on windows of at most 30 s. Sampling knobs ride the request
                 // (null = the model's own defaults: cfg_coef 3.0, temperature 1.0, top-k 250, top-p off).
                 float[] samples = pipeline.Synthesize(backend, textStates,
-                    seconds: (float)Math.Clamp(request.Duration, 1d, 30d), seed: request.Seed,
-                    guidance: request.CfgScale is > 0 ? (float)request.CfgScale.Value : null,
+                    seconds: (float)Math.Clamp(request.Duration.Filled(), 1d, 30d), seed: request.Seed,
+                    guidance: request.CfgScale is > 0 ? (float)request.CfgScale.Filled() : null,
                     temperature: request.Temperature is > 0 ? (float)request.Temperature.Value : null,
                     topK: request.TopK is > 0 ? request.TopK.Value : null,
                     topP: request.TopP is > 0 ? (float)request.TopP.Value : null);

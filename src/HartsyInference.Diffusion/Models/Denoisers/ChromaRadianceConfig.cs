@@ -27,12 +27,6 @@ public sealed record ChromaRadianceConfig
     /// <summary>GLU expansion ratio inside each NeRF block (4 → inner dim 256 = NerfHidden × 4).</summary>
     public int NerfMlpRatio { get; init; } = 4;
 
-    /// <summary>Default CFG scale (3.5 per the reference release).</summary>
-    public float DefaultCfgScale { get; init; } = 3.5f;
-
-    /// <summary>Default inference steps (50).</summary>
-    public int DefaultSteps { get; init; } = 50;
-
     /// <summary>Flow-match Euler static shift (mu = 1.0 — validation-gated, see research doc item 5).</summary>
     public float SchedulerShift { get; init; } = 1.0f;
 

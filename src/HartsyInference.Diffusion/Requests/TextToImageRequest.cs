@@ -11,17 +11,17 @@ public record TextToImageRequest
     /// <summary>Optional negative prompt for classifier-free guidance.</summary>
     public string NegativePrompt { get; init; } = "";
 
-    /// <summary>Number of denoising steps; <c>null</c> resolves via <c>Steps ?? modelDefault.Steps</c> (see <see cref="GenerationDefaults"/>).</summary>
-    public int? Steps { get; init; }
+    /// <summary>Number of denoising steps. Set by the engine recipe; no pipeline supplies a default.</summary>
+    public required int Steps { get; init; }
 
-    /// <summary>Classifier-free guidance scale (higher = more prompt adherence); <c>null</c> = model-specific default (<see cref="GenerationDefaults"/>).</summary>
-    public float? CfgScale { get; init; }
+    /// <summary>Classifier-free guidance scale (higher = more prompt adherence). Set by the engine recipe; no pipeline supplies a default.</summary>
+    public required float CfgScale { get; init; }
 
-    /// <summary>Output image width in pixels. Must be divisible by 8. <c>null</c> = model-specific default.</summary>
-    public int? Width { get; init; }
+    /// <summary>Output image width in pixels. Must be divisible by 8.</summary>
+    public required int Width { get; init; }
 
-    /// <summary>Output image height in pixels. Must be divisible by 8. <c>null</c> = model-specific default.</summary>
-    public int? Height { get; init; }
+    /// <summary>Output image height in pixels. Must be divisible by 8.</summary>
+    public required int Height { get; init; }
 
     /// <summary>Random seed for reproducibility. Null = random.</summary>
     public int? Seed { get; init; }

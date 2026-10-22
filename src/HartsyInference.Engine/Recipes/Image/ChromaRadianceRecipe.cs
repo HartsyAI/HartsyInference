@@ -32,7 +32,7 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma-radiance", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Chroma Radiance's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (<c>ChromaRadianceConfig.DefaultSteps</c>/<c>DefaultCfgScale</c>).</summary>
+    /// <summary>Chroma Radiance's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (the reference release).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

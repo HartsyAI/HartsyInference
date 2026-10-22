@@ -9,11 +9,11 @@ public sealed record MusicRequest
     /// <summary>The music description prompt.</summary>
     public required string Prompt { get; init; }
 
-    /// <summary>Genre/style tag (ACE-Step style prompt, YuE genre); empty for MusicGen/AudioGen.</summary>
-    public string Genre { get; init; } = "";
+    /// <summary>Genre/style tag (ACE-Step style prompt, YuE genre); null for MusicGen/AudioGen.</summary>
+    public string? Genre { get; init; }
 
-    /// <summary>Target duration in seconds.</summary>
-    public double Duration { get; init; } = 10;
+    /// <summary>Target duration in seconds; null takes the family's recipe default.</summary>
+    public double? Duration { get; init; }
 
     /// <summary>Sampling seed.</summary>
     public int Seed { get; init; }
@@ -42,23 +42,20 @@ public sealed record MusicRequest
     /// <summary>BPM meta (ACE-Step prompt template); null = "N/A".</summary>
     public int? Bpm { get; init; }
 
-    /// <summary>Key/scale meta (ACE-Step prompt template); empty = "N/A".</summary>
-    public string KeyScale { get; init; } = "";
+    /// <summary>Key/scale meta (ACE-Step prompt template); null = "N/A".</summary>
+    public string? KeyScale { get; init; }
 
-    /// <summary>Time-signature meta (ACE-Step prompt template); empty = "N/A".</summary>
-    public string TimeSignature { get; init; } = "";
+    /// <summary>Time-signature meta (ACE-Step prompt template); null = "N/A".</summary>
+    public string? TimeSignature { get; init; }
 
-    /// <summary>Lyric vocal language (ACE-Step lyric template); empty = "en".</summary>
-    public string VocalLanguage { get; init; } = "";
+    /// <summary>Lyric vocal language (ACE-Step lyric template); null = "en".</summary>
+    public string? VocalLanguage { get; init; }
 
-    /// <summary>ODE (default) or SDE diffusion solver (ACE-Step base/sft).</summary>
-    public string InferMethod { get; init; } = "";
+    /// <summary>ODE or SDE diffusion solver (ACE-Step); null takes the family's recipe default.</summary>
+    public string? InferMethod { get; init; }
 
-    /// <summary>Use ADG guidance instead of the default APG (ACE-Step base/sft CFG). Deprecated in favor of <see cref="GuidanceType"/>; honored only when that is empty.</summary>
-    public bool UseAdg { get; init; }
-
-    /// <summary>ACE-Step guidance blend: "apg" (default), "cfg" (plain classifier-free), or "adg". Empty falls back to <see cref="UseAdg"/> for callers that predate this field.</summary>
-    public string GuidanceType { get; init; } = "";
+    /// <summary>ACE-Step guidance blend: "apg", "cfg" or "adg" (ADG is the former <c>UseAdg</c> switch); null takes the family's recipe default.</summary>
+    public string? GuidanceType { get; init; }
 
     /// <summary>ACE-Step v1 ERG: weaken (rather than zero) the null TEXT embedding for the uncond branch. Null = the model default (upstream defaults true). ACE-Step 1.5 has no ERG and refuses explicit values.</summary>
     public bool? UseErgTag { get; init; }
@@ -69,41 +66,40 @@ public sealed record MusicRequest
     /// <summary>ACE-Step v1 ERG: run the uncond DiT forwards with weakened attention queries. Null = default (true).</summary>
     public bool? UseErgDiffusion { get; init; }
 
-    /// <summary>CFG active-interval start over t (ACE-Step base/sft).</summary>
-    public double CfgIntervalStart { get; init; }
+    /// <summary>CFG active-interval start over t (ACE-Step base/sft); null takes the family's recipe default.</summary>
+    public double? CfgIntervalStart { get; init; }
 
-    /// <summary>CFG active-interval end over t (ACE-Step base/sft).</summary>
-    public double CfgIntervalEnd { get; init; } = 1.0;
+    /// <summary>CFG active-interval end over t (ACE-Step base/sft); null takes the family's recipe default.</summary>
+    public double? CfgIntervalEnd { get; init; }
 
-    /// <summary>ACE-Step 5 Hz LM planner selection: "", "none", "0.6b", or "4b".</summary>
-    public string LmModel { get; init; } = "";
+    /// <summary>ACE-Step 5 Hz LM planner selection: null or "none" for no planner, or "0.6b" / "4b".</summary>
+    public string? LmModel { get; init; }
 
-    /// <summary>LM planner CoT thinking phase on/off.</summary>
-    public bool Thinking { get; init; } = true;
+    /// <summary>LM planner CoT thinking phase on/off; null takes the family's recipe default.</summary>
+    public bool? Thinking { get; init; }
 
-    /// <summary>LM planner sampling temperature.</summary>
-    public double LmTemperature { get; init; } = 0.85;
+    /// <summary>LM planner sampling temperature; null takes the family's recipe default.</summary>
+    public double? LmTemperature { get; init; }
 
-    /// <summary>LM planner CFG scale.</summary>
-    public double LmCfgScale { get; init; } = 2.0;
+    /// <summary>LM planner CFG scale; null takes the family's recipe default.</summary>
+    public double? LmCfgScale { get; init; }
 
-    /// <summary>LM planner top-K cutoff.</summary>
-    public int LmTopK { get; init; }
+    /// <summary>LM planner top-K cutoff; null takes the family's recipe default.</summary>
+    public int? LmTopK { get; init; }
 
-    /// <summary>LM planner top-P cutoff.</summary>
-    public double LmTopP { get; init; } = 0.9;
+    /// <summary>LM planner top-P cutoff; null takes the family's recipe default.</summary>
+    public double? LmTopP { get; init; }
 
-    /// <summary>LM planner negative prompt.</summary>
-    public string LmNegativePrompt { get; init; } = "";
+    /// <summary>LM planner negative prompt; null for none.</summary>
+    public string? LmNegativePrompt { get; init; }
 
-    /// <summary>LoRAs to merge into the model's weights before loading, the same stack the image and video requests take. Changing the set reloads the model, so it is part of the runner cache key. Only MiniMax Music 3 consumes these today.</summary>
     /// <summary>YuE2's symbolic-planning mode: <c>full</c> (melody and chords), <c>melody</c> (melody only,
-    /// recommended for covers), or <c>off</c> (straight to audio). Empty takes <c>full</c>.</summary>
-    public string Yue2Cot { get; init; } = "";
+    /// recommended for covers), or <c>off</c> (straight to audio). Null takes <c>full</c>.</summary>
+    public string? Yue2Cot { get; init; }
 
     /// <summary>YuE2: an externally supplied or edited ABC score. When set, the planning pass is skipped and this
     /// score is used verbatim. Ignored when <see cref="Yue2Cot"/> is <c>off</c>.</summary>
-    public string Yue2Abc { get; init; } = "";
+    public string? Yue2Abc { get; init; }
 
     /// <summary>YuE2: sampling temperature for the score planner, which runs far cooler than the semantic pass
     /// (0.7 against 1.0). The shared <see cref="Temperature"/> applies to the semantic pass only.</summary>
@@ -134,6 +130,7 @@ public sealed record MusicRequest
     /// stops a song ending a fraction of a second in.</summary>
     public int? Yue2MinTokens { get; init; }
 
+    /// <summary>LoRAs to merge into the model's weights before loading, the same stack the image and video requests take. Changing the set reloads the model, so it is part of the runner cache key. Only MiniMax Music 3 consumes these today.</summary>
     public LoraStack? Loras { get; init; }
 
     /// <summary>Continuation seed audio: extend this clip forward. Null for none.</summary>
@@ -151,8 +148,8 @@ public sealed record MusicRequest
     /// <summary>Cover source audio: re-render this clip under the new prompt/style. Null for none.</summary>
     public AudioClip? Cover { get; init; }
 
-    /// <summary>Cover conditioning strength (0 keeps the source, 1 fully re-renders).</summary>
-    public double CoverStrength { get; init; } = 0.5;
+    /// <summary>Cover conditioning strength (0 keeps the source, 1 fully re-renders); null takes the family's recipe default.</summary>
+    public double? CoverStrength { get; init; }
 
     /// <summary>Reference audio for in-context learning: the generation continues this clip's style/voice rather than starting cold (YuE's <c>--use_audio_prompt</c>). Encoded to codec tokens and spliced into the first segment's prompt. Ignored when <see cref="ReferenceVocal"/> and <see cref="ReferenceInstrumental"/> are both set — a dual-track reference wins, matching upstream's branch order. Null for none.</summary>
     public AudioClip? ReferenceAudio { get; init; }
@@ -163,14 +160,14 @@ public sealed record MusicRequest
     /// <summary>Isolated instrumental stem of a dual-track reference (YuE's <c>--instrumental_track_prompt_path</c>). Pairs with <see cref="ReferenceVocal"/>. Null for none.</summary>
     public AudioClip? ReferenceInstrumental { get; init; }
 
-    /// <summary>Start second of the span taken from the reference audio (YuE's <c>--prompt_start_time</c>).</summary>
-    public double ReferenceStartSeconds { get; init; }
+    /// <summary>Start second of the span taken from the reference audio (YuE's <c>--prompt_start_time</c>); null takes the family's recipe default.</summary>
+    public double? ReferenceStartSeconds { get; init; }
 
-    /// <summary>End second of the span taken from the reference audio (YuE's <c>--prompt_end_time</c>). The upstream default of 30 s is a real cap, not just a default: the excerpt occupies the model's context ahead of every generated segment.</summary>
-    public double ReferenceEndSeconds { get; init; } = 30;
+    /// <summary>End second of the span taken from the reference audio (YuE's <c>--prompt_end_time</c>); null takes the family's recipe default. The upstream default of 30 s is a real cap, not just a default: the excerpt occupies the model's context ahead of every generated segment.</summary>
+    public double? ReferenceEndSeconds { get; init; }
 
-    /// <summary>Negative prompt for classifier-free guidance (ControlFoley); empty for none.</summary>
-    public string NegativePrompt { get; init; } = "";
+    /// <summary>Negative prompt for classifier-free guidance (ControlFoley); null for none.</summary>
+    public string? NegativePrompt { get; init; }
 
     /// <summary>ControlFoley: source video to score; the output is cut to the clip if shorter than <see cref="Duration"/>. Needs ffmpeg.</summary>
     public VideoClip? Video { get; init; }

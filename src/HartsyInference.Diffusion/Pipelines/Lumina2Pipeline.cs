@@ -82,8 +82,8 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
                 nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width ?? GenerationDefaults.Lumina2.Width;
-        int height = request.Height ?? GenerationDefaults.Lumina2.Height;
+        int width = request.Width;
+        int height = request.Height;
         int spatialMultiple = checked(_config.VaeDownscaleFactor * _config.PatchSize);
         if (width <= 0 || height <= 0 || width % spatialMultiple != 0 || height % spatialMultiple != 0)
             throw new ArgumentException(
@@ -92,7 +92,7 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
                 nameof(request));
         int latentH = height / _config.VaeDownscaleFactor;
         int latentW = width / _config.VaeDownscaleFactor;
-        int steps = request.Steps ?? GenerationDefaults.Lumina2.Steps;
+        int steps = request.Steps;
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
         if (plan.PassThrough)

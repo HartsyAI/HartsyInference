@@ -31,7 +31,7 @@ public sealed class SdxlRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sdxl", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>SDXL's official sampling settings: 50 steps at CFG 5.0, 1024x1024 (diffusers <c>StableDiffusionXLPipeline.__call__</c>, mirrored by <c>GenerationDefaults.Sdxl</c>).</summary>
+    /// <summary>SDXL's official sampling settings: 50 steps at CFG 5.0, 1024x1024 (diffusers <c>StableDiffusionXLPipeline.__call__</c>).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 5.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

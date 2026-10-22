@@ -39,7 +39,7 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>OmniGen2's official sampling settings: 28 steps at text-guidance 4.0, 1024x1024 (<c>GenerationDefaults.OmniGen2</c>).</summary>
+    /// <summary>OmniGen2's official sampling settings: 28 steps at text-guidance 4.0, 1024x1024.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

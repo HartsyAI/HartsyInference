@@ -199,7 +199,9 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         }
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int width, int height) = GenerationDefaults.FluxDev.Resolve(request);
+        int steps = request.Steps;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
 

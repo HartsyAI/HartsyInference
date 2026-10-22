@@ -43,7 +43,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>HunyuanImage 2.1's official sampling settings: 50 steps at CFG 3.5 and a native 2048x2048 (<c>GenerationDefaults.HunyuanImage</c>).</summary>
+    /// <summary>HunyuanImage 2.1's official sampling settings: 50 steps at CFG 3.5 and a native 2048x2048.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 2048, Height = 2048 };
 
     /// <inheritdoc/>

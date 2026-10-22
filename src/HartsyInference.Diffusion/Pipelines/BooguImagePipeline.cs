@@ -66,7 +66,9 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
                 nameof(negativeInstructionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int width, int height) = GenerationDefaults.Generic.Resolve(request);
+        int steps = request.Steps;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
         int seqLen = (latentH / _config.PatchSize) * (latentW / _config.PatchSize);
@@ -217,7 +219,9 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             throw new ArgumentException("dropAllEmbeddings is required when imageGuidanceScale > 1.0.", nameof(dropAllEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        (int steps, _, int width, int height) = GenerationDefaults.Generic.Resolve(request);
+        int steps = request.Steps;
+        int width = request.Width;
+        int height = request.Height;
         int latentH = height / 8;
         int latentW = width / 8;
         int seqLen = (latentH / _config.PatchSize) * (latentW / _config.PatchSize);

@@ -49,7 +49,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 4.0, 1024x1024 (<c>GenerationDefaults.Flux2</c>); the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
+    /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 4.0, 1024x1024; the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

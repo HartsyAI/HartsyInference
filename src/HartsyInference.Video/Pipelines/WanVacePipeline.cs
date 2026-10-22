@@ -58,8 +58,8 @@ public sealed unsafe class WanVacePipeline : DiffusionPipelineBase
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
-        int steps = request.Steps ?? _config.NumInferenceSteps;
-        float guidance = request.CfgScale ?? _config.GuidanceScale;
+        int steps = request.Steps;
+        float guidance = request.CfgScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         // NOT converted to the sampler seam, and it cannot be: VACE denoises through FlowUniPCMultistepScheduler, a
         // stateful predictor/corrector. Its step converts to x0 (x0 = x − σ·v), retro-corrects the PREVIOUS sample

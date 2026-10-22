@@ -34,7 +34,7 @@ public sealed class ChromaRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Chroma's official sampling settings: 35 steps at guidance 5.0, 1024x1024 (<c>ChromaConfig.DefaultSteps</c>/<c>ChromaConfig.DefaultCfgScale</c>).</summary>
+    /// <summary>Chroma's official sampling settings: 35 steps at guidance 5.0, 1024x1024 (diffusers <c>ChromaPipeline.__call__</c> steps; true CFG, not distilled).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 35, CfgScale = 5.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
