@@ -54,7 +54,8 @@ public static unsafe class Fibo2TextBundles
         for (int b = 0; b < bundleSlots.Count; b++)
         {
             if (bundleSlots[b].Count != tapsPerBundle)
-                throw new ArgumentException($"Bundle {b} has {bundleSlots[b].Count} taps; every bundle must have {tapsPerBundle}.", nameof(bundleSlots));
+                throw new ArgumentException(
+                    $"Bundle {b} has {bundleSlots[b].Count} taps; every bundle must have {tapsPerBundle}.", nameof(bundleSlots));
             foreach (int slot in bundleSlots[b])
             {
                 if ((uint)slot >= (uint)tapCount)
