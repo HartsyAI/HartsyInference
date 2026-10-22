@@ -123,6 +123,7 @@ public sealed partial class CudaBackend
     {
         const AttentionRoute E = AttentionRoute.Dense;
         const AttentionLayouts HM = AttentionLayouts.HeadMajor;
+        const AttentionDTypes Half = AttentionDTypes.F16 | AttentionDTypes.BF16;
         return
         [
             new DelegateAttentionRow(Cap("sage.int8.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, HM) with
@@ -158,39 +159,65 @@ public sealed partial class CudaBackend
                 {
                     UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,
                 }, "S.9",
-                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && ScoresExceedHalfFree(in c),
+                (in AttentionCall c) => c.Mask.Bias is null && c.Query.DType == DType.F32 && TilesScores(in c),
                 (in AttentionCall c) => { SdpaTiledF32(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("tiled.f32.keybias", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     Masks = AnyBias, UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32,
                 }, "S.10",
-                (in AttentionCall c) => c.Query.DType == DType.F32 && MaskIsKeyOnly(c.Mask.Bias, c.QueryTokens) && ScoresExceedHalfFree(in c),
+                (in AttentionCall c) => c.Query.DType == DType.F32 && MaskIsKeyOnly(c.Mask.Bias, c.QueryTokens) && TilesScores(in c),
                 (in AttentionCall c) =>
                 {
                     SdpaTiledF32(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale, c.Mask.Bias);
                     return true;
                 }),
+            new DelegateAttentionRow(Cap("tiled.cast", E, Half, Half, HM) with
+                {
+                    UsesQueryKey = AttentionFormats.Tf32, UsesProbValue = AttentionFormats.Tf32, Lowering = AttentionLowering.Cast,
+                }, "S.11",
+                static (in AttentionCall c) => c.Mask.Bias is null && ScoresPastMaterialized(in c) && OneRowTiles(in c),
+                (in AttentionCall c) => { SdpaTiledCast(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
             new DelegateAttentionRow(Cap("materialized", E, AnyFloat, AnyFloat, HM) with
                 {
                     Masks = AnyBias, UsesQueryKey = AttentionFormats.Tf32 | AttentionFormats.F16, UsesProbValue = AttentionFormats.Tf32 | AttentionFormats.F16,
                     Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast | AttentionLowering.ExpandMask,
                 }, null,
-                static (in AttentionCall c) => true,
+                static (in AttentionCall c) => !ScoresPastMaterialized(in c),
                 (in AttentionCall c) =>
                 {
                     SdpaMaterialized(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         c.Numerics.LegacyAssertedBounded);
                     return true;
                 }),
+            new DelegateAttentionRow(Cap("refuse", E, AnyFloat, AnyFloat, HM) with { Masks = AnyBias }, null,
+                static (in AttentionCall c) => ScoresPastMaterialized(in c),
+                static (in AttentionCall c) => throw new AttentionUnsupportedException(
+                    $"No bounded CUDA row serves this {c.Query.DType} head-major attention: its {(long)c.Batch * c.Heads * c.QueryTokens * c.KeyTokens} "
+                    + $"score elements are past the 2^32 ({MaterializedMaxScores}) the materialized row addresses, and past that a call runs "
+                    + "query-tiled only when it is unmasked or F32 with a key-only mask and one query row across its heads, "
+                    + $"{(long)c.Batch * c.Heads * c.KeyTokens} score elements, fits too.")),
         ];
     }
 
-    /// <summary>The query-tiled gate: forced, or an F32 score matrix larger than half of free VRAM.</summary>
-    private bool ScoresExceedHalfFree(in AttentionCall c)
+    /// <summary>Score elements the materialized row addresses: its softmax forms each row's offset in 32 bits.</summary>
+    internal const long MaterializedMaxScores = 1L << 32;
+
+    /// <summary>The B·H·Sq·Skv score matrix is larger than the materialized row addresses.</summary>
+    internal static bool ScoresPastMaterialized(in AttentionCall c) =>
+        c.KeyTokens > 0 && (long)c.Batch * c.Heads * c.QueryTokens > MaterializedMaxScores / c.KeyTokens;
+
+    /// <summary>A one-row tile, B·H·Skv scores, is within what the softmax addresses; every tiled row needs it.</summary>
+    internal static bool OneRowTiles(in AttentionCall c) => (long)c.Batch * c.Heads * c.KeyTokens <= MaterializedMaxScores;
+
+    /// <summary>The query-tiled gate: a one-row tile the softmax addresses, and forced, an F32 score matrix larger than half of free
+    /// VRAM, or one the materialized row does not address.</summary>
+    private bool TilesScores(in AttentionCall c)
     {
+        if (!OneRowTiles(in c)) return false;
+        if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
         ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
         (nuint free, _) = _context.GetMemoryInfo();
-        return EngineKnobs.SdpaForceTiled.Value || scoreBytes > (ulong)free / 2;
+        return scoreBytes > (ulong)free / 2;
     }
 
     // ── token-major ScaledDotProductAttentionTokenMajor: M.1-M.3, and the grouped-query lowering ────────────────────

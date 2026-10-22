@@ -8,6 +8,16 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: CUDA head-major attention past 2^32 score elements returns the right rows.** The materialized row's softmax forms
+  each row's offset in 32 bits, so a call whose B·H·Sq·Skv score matrix passed 2^32 elements and reached that row (no cuDNN,
+  SageAttention or flash row taking it; for F32 only on a card with more than about 34 GB free) normalized the wrong memory
+  for the rows past the wrap. F16 past the bound now runs query-tiled instead, on exact F32 widenings with the output written
+  back in F16, as BF16 already did (S.11); F32 takes the tiled F32 rows, a tile never passes the bound, and a masked call no
+  tiled row serves is refused naming the budget. Every call up to 2^32 keeps its row, SD1.5's VAE mid-block at 2048², which
+  sits exactly on it, included. Measured on the RTX 3060 with a 66,000² F16 call (cuDNN and SageAttention off): before, the
+  first rows were off by a relative L2 of 0.2 to 1.0 and the rows past the wrap by about 1e4; now every sampled row is within
+  3.7e-4 of a float64 reference.
+
 - **Fixed: CUDA token-major attention past 46,340 tokens.** Since #497 (in alpha.386), SD1.5 from about 1728² failed with
   "SDPA tensors currently support at most Int32.MaxValue elements each": its UNet self-attention moved to the token-major
   entry, whose contract refused a score matrix of more than Int32.MaxValue entries, a bound the head-major entry never had.
