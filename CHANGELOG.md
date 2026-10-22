@@ -40,14 +40,15 @@ stable release will require. Dates are UTC.
   and hidream decode to the same pixels, at 912, 1181, 1257 and 914 ms per step against 939, 1220, 1353 and 928 (one warm rep
   each). On Vulkan, whose Wan forwards stay F32, the evidence is the attention call alone at Wan's shapes (cm2,
   bit-identical) and no Vulkan generation was gated.
-- **Faster: SDXL's self-attention runs token-major over its CFG batch.** A layer whose config sets `TokenMajorBatches` takes
-  the token-major entry for a batch of per-head `[B, S, heads, D]` operands where the backend plans a row for the whole call
-  (on CUDA the cuDNN row; no permuting row takes a batch), and the call reads B sequences through a batch-aware
-  `AttentionCall.FromTokenMajor`. The UNet's self-attention opts in and at B=2 drops three permutes in and one out; other
-  batched calls (Krea 2's layer-axis text fusion, the host-rotated DiT batches), flat operands and backends that plan no
-  batched row (Vulkan's token-major rows read one sequence) stay head-major. Measured bit-identical on CUDA's cuDNN row
-  through the whole layer at B=2: SDXL's 64×64 and 32×32 levels and sdxl-wide's 80×45. On an RTX 4090 against main, sdxl and
-  sdxl-wide decode to the same pixels at 255 and 233 ms per step against 259 and 240 (one warm rep each).
+- **Faster: SDXL's self-attention runs token-major over its CFG batch.** A layer whose config sets `TokenMajorBatches`
+  takes the token-major entry for a batch of per-head `[B, S, heads, D]` operands where the backend plans a row for the
+  whole call (on CUDA the cuDNN row; no permuting row takes a batch), and the call reads B sequences through a
+  batch-aware `AttentionCall.FromTokenMajor`. The UNet's self-attention opts in and at B=2 drops three permutes in and
+  one out, in SDXL and in SDXL ControlNet's blocks, which share it at the same shapes; other batched calls (Krea 2's
+  layer-axis text fusion, the host-rotated DiT batches), flat operands and backends that plan no batched row (Vulkan's
+  token-major rows read one sequence) stay head-major. Measured bit-identical on CUDA's cuDNN row through the whole
+  layer at B=2: SDXL's 64×64 and 32×32 levels and sdxl-wide's 80×45. On an RTX 4090 against main, sdxl and sdxl-wide
+  decode to the same pixels at 255 and 233 ms per step against 259 and 240 (one warm rep each).
 
 ## alpha.387
 

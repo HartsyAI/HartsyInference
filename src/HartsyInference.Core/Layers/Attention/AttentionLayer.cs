@@ -687,6 +687,7 @@ public sealed partial class AttentionLayer
     private bool PlansBatch(IBackend backend, Tensor q, Tensor k, Tensor v, DType act, TensorShape outShape, int batch,
         in AttentionCallContext context)
     {
+        // Shape only: planning never touches the storage, which a new tensor allocates on first touch.
         using Tensor output = new(outShape, act);
         AttentionCall call = TokenMajorCall(output, q, k, v, batch, in context);
         return backend.PlanAttention(in call).Row is not null;
