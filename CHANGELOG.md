@@ -12,6 +12,10 @@ stable release will require. Dates are UTC.
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The
   logit width now comes from the head; embedding lookups still read every table row.
+- **Changed: LLM attention runs on the shared layer.** `GenericTransformer` (eager prefill and decode, batched and dual
+  decode, the graph-decode step, MLA), the tensor-parallel ranks, Looped, Qwen3.5, Mllama cross-attention and Cosmos AR
+  append to and read their KV caches through `AttentionLayer`'s KV stage; `IKvCache` is an `IAttentionKvSource`. Output is
+  bit-identical.
 
 ## alpha.385
 
@@ -55,10 +59,6 @@ stable release will require. Dates are UTC.
   Stable Audio, ACE-Step 1.5 and others), the T5, CLIP, BERT and Qwen-VL encoders, DINO, SAM2, Swin, RT-DETR and the
   Hunyuan3D, TRELLIS and TripoSR blocks attend through `AttentionLayer`. Output is bit-identical; SAM2 and Hiera no longer
   leak their attention operands, and BERT's head reshapes run on the device instead of the host.
-- **Changed: LLM attention runs on the shared layer.** `GenericTransformer` (eager prefill and decode, batched and dual
-  decode, the graph-decode step, MLA), the tensor-parallel ranks, Looped, Qwen3.5, Mllama cross-attention and Cosmos AR
-  append to and read their KV caches through `AttentionLayer`'s KV stage; `IKvCache` is an `IAttentionKvSource`. Output is
-  bit-identical.
 
 ## alpha.384
 
