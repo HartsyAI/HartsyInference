@@ -435,12 +435,12 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int cfgSkippedSteps = 0;
         int cacheComputes = 0, cacheReuses = 0, uncondComputes = 0, uncondReuses = 0;
         WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
+        if (DenoiserProbe.Active && (cpEnabled || cfgParallelEnabled || condCache is not null || firstFrameLatent is not null
+            || lastFrameLatent is not null))
+            throw new NotSupportedException("The denoiser probe covers Wan's single-GPU text-to-video loop without the step cache.");
         using IDisposable? textKv = OpenTextKvCache(stream, tLat, hLat, wLat, promptEmbeds, negativeEmbeds,
             cfgParallelEnabled ? CfgParallelBackend : cpEnabled ? CpBackends![1] : null, blockAct);
         DenoiserProbe? probe = DenoiserProbe.Open(steps);
-        if (probe is not null && (cpEnabled || cfgParallelEnabled || condCache is not null || firstFrameLatent is not null
-            || lastFrameLatent is not null))
-            throw new NotSupportedException("The denoiser probe covers Wan's single-GPU text-to-video loop without the step cache.");
 
         for (int k = 0; k < steps; k++)
         {

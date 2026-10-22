@@ -225,84 +225,82 @@ public sealed class DenoiserProbe
         return copy;
     }
 
-    private void Compare(SafeTensorsLoader record, int step, float sigma, float guidance, string[] names, Tensor?[] outputs)
+    private unsafe void Compare(SafeTensorsLoader record, int step, float sigma, float guidance, string[] names, Tensor?[] outputs)
     {
         if (outputs.Length != names.Length)
             throw new HartsyInferenceException($"Step {step} was recorded with outputs {string.Join(",", names)}; the forward returned "
                 + $"{outputs.Length}.");
         Dictionary<string, Tensor> written = new(StringComparer.Ordinal);
+        List<Tensor> owned = [];
         List<string> rows = [];
-        double[]?[] candidate = new double[]?[outputs.Length], recorded = new double[]?[outputs.Length];
-        for (int i = 0; i < outputs.Length; i++)
-        {
-            string key = $"out.{names[i]}";
-            bool hasRecord = record.Descriptors.ContainsKey(key);
-            if ((outputs[i] is not null) != hasRecord)
-                throw new HartsyInferenceException($"Step {step} output '{names[i]}' is {(hasRecord ? "recorded but not produced" : "produced but not recorded")}.");
-            if (outputs[i] is not { } output)
-                continue;
-            using Tensor stored = record.GetTensor(key);
-            if (stored.Shape != output.Shape)
-                throw new HartsyInferenceException($"Step {step} output '{names[i]}' is {output.Shape}; it was recorded as {stored.Shape}.");
-            candidate[i] = Values(output);
-            recorded[i] = Values(stored);
-            written[key] = Copy(output);
-            rows.Add(Row(step, sigma, names[i], candidate[i]!, recorded[i]!));
-        }
-        if (guidance != 0f && outputs.Length >= 2 && candidate[0] is { } c0 && candidate[1] is { } c1)
-            rows.Add(Row(step, sigma, "cfg", Combine(c0, c1, guidance), Combine(recorded[0]!, recorded[1]!, guidance)));
+        float*[] candidate = new float*[outputs.Length], recorded = new float*[outputs.Length];
+        long[] counts = new long[outputs.Length];
         try
         {
+            for (int i = 0; i < outputs.Length; i++)
+            {
+                string key = $"out.{names[i]}";
+                bool hasRecord = record.Descriptors.ContainsKey(key);
+                if ((outputs[i] is not null) != hasRecord)
+                    throw new HartsyInferenceException($"Step {step} output '{names[i]}' is {(hasRecord ? "recorded but not produced" : "produced but not recorded")}.");
+                if (outputs[i] is not { } output)
+                    continue;
+                Tensor stored = record.GetTensor(key);
+                owned.Add(stored);
+                if (stored.Shape != output.Shape)
+                    throw new HartsyInferenceException($"Step {step} output '{names[i]}' is {output.Shape}; it was recorded as {stored.Shape}.");
+                candidate[i] = F32(output, owned);
+                recorded[i] = F32(stored, owned);
+                counts[i] = output.ElementCount;
+                written[key] = Copy(output);
+                rows.Add(Row(step, sigma, names[i], candidate[i], recorded[i], null, null, 0f, counts[i]));
+            }
+            if (guidance != 0f && outputs.Length >= 2 && candidate[0] != null && candidate[1] != null)
+                rows.Add(Row(step, sigma, "cfg", candidate[0], recorded[0], candidate[1], recorded[1], guidance, counts[0]));
             SafeTensorsWriter.Save(StepPath(_outDir!, step), written);
         }
         finally
         {
             foreach (Tensor t in written.Values) t.Dispose();
+            foreach (Tensor t in owned) t.Dispose();
         }
         File.AppendAllLines(Path.Combine(_outDir!, TsvName), rows);
     }
 
-    private static string Row(int step, float sigma, string name, double[] candidate, double[] recorded)
+    /// <summary>One pass over the outputs: relL2, cosine and max |d|; with a second pair, of the CFG combine <c>g·out0 + (1 − g)·out1</c>.</summary>
+    private static unsafe string Row(int step, float sigma, string name, float* cand0, float* rec0, float* cand1, float* rec1, float guidance,
+        long count)
     {
         double diff = 0, norm = 0, dot = 0, cand = 0, max = 0;
-        for (int i = 0; i < recorded.Length; i++)
+        for (long i = 0; i < count; i++)
         {
-            double d = candidate[i] - recorded[i];
+            double c = cand0[i], r = rec0[i];
+            if (cand1 != null)
+            {
+                c = guidance * c + (1.0 - guidance) * cand1[i];
+                r = guidance * r + (1.0 - guidance) * rec1[i];
+            }
+            double d = c - r;
             diff += d * d;
-            norm += recorded[i] * recorded[i];
-            cand += candidate[i] * candidate[i];
-            dot += candidate[i] * recorded[i];
+            norm += r * r;
+            cand += c * c;
+            dot += c * r;
             max = Math.Max(max, Math.Abs(d));
         }
         double rel = norm > 0 ? Math.Sqrt(diff / norm) : Math.Sqrt(diff);
         double cos = norm > 0 && cand > 0 ? dot / Math.Sqrt(norm * cand) : double.NaN;
         Logs.Info($"[DenoiserProbe] step {step} {name}: relL2 {rel:E3}, cos {cos:F9}, max|d| {max:E3}");
         return string.Create(CultureInfo.InvariantCulture,
-            $"{step}\t{sigma:R}\t{name}\t{rel:E6}\t{cos:F12}\t{max:E6}\t{Math.Sqrt(norm / recorded.Length):E6}");
+            $"{step}\t{sigma:R}\t{name}\t{rel:E6}\t{cos:F12}\t{max:E6}\t{Math.Sqrt(norm / count):E6}");
     }
 
-    private static double[] Combine(double[] cond, double[] uncond, float guidance)
+    /// <summary>The tensor's values as F32 on the host; a widened copy, when one is needed, joins <paramref name="owned"/>.</summary>
+    private static unsafe float* F32(Tensor t, List<Tensor> owned)
     {
-        double[] combined = new double[cond.Length];
-        for (int i = 0; i < cond.Length; i++)
-            combined[i] = guidance * cond[i] + (1.0 - guidance) * uncond[i];
-        return combined;
-    }
-
-    private static unsafe double[] Values(Tensor t)
-    {
-        Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-        try
-        {
-            float* p = (float*)f32.DataPointer;
-            double[] values = new double[f32.ElementCount];
-            for (long i = 0; i < values.Length; i++) values[i] = p[i];
-            return values;
-        }
-        finally
-        {
-            if (!ReferenceEquals(f32, t)) f32.Dispose();
-        }
+        if (t.DType == DType.F32) return (float*)t.DataPointer;
+        Tensor wide = t.CastTo(DType.F32);
+        owned.Add(wide);
+        return (float*)wide.DataPointer;
     }
 
     private static bool IsReplay()

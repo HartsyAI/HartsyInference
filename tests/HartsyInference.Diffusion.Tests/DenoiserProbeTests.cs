@@ -72,10 +72,10 @@ public sealed unsafe class DenoiserProbeTests : IDisposable
     }
 
     /// <summary>Runs the whole loop and returns the final latent's bits.</summary>
-    private static uint[] Run(IDenoisePredictor denoiser, float[] sigmas)
+    private static uint[] Run(IDenoisePredictor denoiser, float[] sigmas, string samplerName = "euler")
     {
         using IBackend backend = new CpuBackend();
-        ISampler sampler = SamplerRegistry.Create("euler", sigmas, seed: 3);
+        ISampler sampler = SamplerRegistry.Create(samplerName, sigmas, seed: 3);
         using Tensor z = Noise(9);
         sampler.Reset(Shape);
         for (int i = 0; i < sigmas.Length - 1; i++) sampler.Step(backend, z, denoiser, i);
@@ -169,6 +169,27 @@ public sealed unsafe class DenoiserProbeTests : IDisposable
         Assert.Equal([0, 0, 0, 4, 4, 4, 7, 7, 7], rows.Select(r => int.Parse(r[0], CultureInfo.InvariantCulture)));
         Assert.All(rows, r => Assert.Equal(0.0, double.Parse(r[3], CultureInfo.InvariantCulture)));
         Assert.All(rows, r => Assert.Equal(1.0, double.Parse(r[4], CultureInfo.InvariantCulture), 12));
+    }
+
+    [Fact]
+    public void ASecondOrderSampler_IsProbedOnItsFirstEvaluationOnly_AndKeepsItsTrajectory()
+    {
+        float[] sigmas = Sigmas(8);
+        PairDenoiser plainDenoiser = new();
+        uint[] plain = Run(plainDenoiser, sigmas, "heun");
+        using (Probe("record"))
+            Run(new PairDenoiser(), sigmas, "heun");
+        string outDir = Path.Combine(_dir, "heun");
+        PairDenoiser replaying = new();
+        uint[] replayed;
+        using (Probe("replay", outDir: outDir))
+            replayed = Run(replaying, sigmas, "heun");
+
+        Assert.Equal(plain, replayed);
+        Assert.Equal(plainDenoiser.Evaluations + 3, replaying.Evaluations);
+        List<string[]> rows = Rows(outDir);
+        Assert.Equal(9, rows.Count);
+        Assert.All(rows, r => Assert.Equal(0.0, double.Parse(r[3], CultureInfo.InvariantCulture)));
     }
 
     [Fact]
