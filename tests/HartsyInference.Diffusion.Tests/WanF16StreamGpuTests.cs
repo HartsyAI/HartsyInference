@@ -21,11 +21,14 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
 
     private readonly ITestOutputHelper _output = output;
 
+    /// <summary>The bar is relative to the block's update (output minus input), not its output, which the residual's outlier
+    /// channels dominate: the F16 block may miss the F32 update by at most twice what rounding the F32 block's own output to F16
+    /// already costs, so the arithmetic inside the block adds no more error than the F16 stream itself.</summary>
     [Trait("Category", "GpuIntegration")]
     [Theory]
-    [InlineData(4, 4e-3)]
-    [InlineData(22, 2e-2)]
-    public void AnF16BlockTracksTheF32BlockAtTi2v5bGeometry(int frames, double bound)
+    [InlineData(4)]
+    [InlineData(22)]
+    public void AnF16BlockTracksTheF32BlockAtTi2v5bGeometry(int frames)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using IDisposable knobs = KnobProfile.Create("wan-f16-block").With(EngineKnobs.SageAttn, true).Push();
@@ -56,13 +59,14 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
         }
         foreach (Tensor t in weights.Values.Concat([cos, sin])) t.Dispose();
 
-        double diff = 0, update = 0, outNorm = 0, dot = 0, update16 = 0;
+        double diff = 0, update = 0, outNorm = 0, dot = 0, update16 = 0, rounding = 0;
         float maxIn = 0, maxOut = 0, maxDiff = 0;
         for (int i = 0; i < f32.Length; i++)
         {
             Assert.True(float.IsFinite(f16[i]), $"F16 block output {i} is {f16[i]}.");
-            double d32 = f32[i] - x[i], d16 = f16[i] - x[i], e = f16[i] - f32[i];
+            double d32 = f32[i] - x[i], d16 = f16[i] - x[i], e = f16[i] - f32[i], r = (float)(Half)f32[i] - f32[i];
             diff += e * e;
+            rounding += r * r;
             update += d32 * d32;
             update16 += d16 * d16;
             dot += d32 * d16;
@@ -71,12 +75,13 @@ public sealed unsafe class WanF16StreamGpuTests(ITestOutputHelper output)
             maxOut = MathF.Max(maxOut, MathF.Abs(f32[i]));
             maxDiff = MathF.Max(maxDiff, MathF.Abs(f16[i] - f32[i]));
         }
-        double relOut = Math.Sqrt(diff / outNorm), relUpdate = Math.Sqrt(diff / update), cosine = dot / Math.Sqrt(update * update16);
+        double relOut = Math.Sqrt(diff / outNorm), relUpdate = Math.Sqrt(diff / update), floor = Math.Sqrt(rounding / update);
+        double cosine = dot / Math.Sqrt(update * update16);
         _output.WriteLine($"S={s}: max|in|={maxIn:F1} max|out|={maxOut:F1} max|diff|={maxDiff:E3} relL2(out)={relOut:E3} " +
-            $"relL2(out-in)={relUpdate:E3} cos(out-in)={cosine:F6}");
+            $"relL2(out-in)={relUpdate:E3} cos(out-in)={cosine:F6}; rounding the F32 output to F16 alone: relL2(out-in)={floor:E3}");
 
         Assert.True(diff > 0, "The F16 block wrote the F32 block's bits; the F16 path did not run.");
-        Assert.True(relUpdate <= bound, $"The F16 block's update drifted {relUpdate:E3} from F32 (bound {bound:E1}).");
+        Assert.True(relUpdate <= 2 * floor, $"The F16 block's update is {relUpdate:E3} from F32, over twice the {floor:E3} F16 rounding of the output.");
     }
 
     [Trait("Category", "GpuIntegration")]
