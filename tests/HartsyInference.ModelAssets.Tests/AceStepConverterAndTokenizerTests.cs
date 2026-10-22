@@ -35,6 +35,34 @@ public unsafe class AceStepConverterAndTokenizerTests
     }
 
     [Fact]
+    public void FuseWeightNorm_HalfPrecisionPair_FusesAndLeavesTheInputsUsable()
+    {
+        using Tensor gFull = Make([10f, 6f], 2, 1);
+        using Tensor vFull = Make([3f, 4f, 0f, 2f], 2, 2);
+        using Tensor gHalf = gFull.CastTo(DType.BF16);
+        using Tensor vHalf = vFull.CastTo(DType.BF16);
+        Dictionary<string, Tensor> raw = new()
+        {
+            ["half.weight_g"] = gHalf,
+            ["half.weight_v"] = vHalf,
+            ["full.weight_g"] = gFull,
+            ["full.weight_v"] = vFull,
+        };
+
+        Dictionary<string, Tensor> fused = AceStepCheckpointConverter.FuseWeightNorm(raw);
+
+        float[] expected = [6f, 8f, 0f, 6f];
+        Assert.Equal(expected, fused["half.weight"].AsSpan<float>().ToArray());
+        Assert.Equal(expected, fused["full.weight"].AsSpan<float>().ToArray());
+        // Only the fusion's own casts are released; the caller's tensors stay usable.
+        Assert.Equal(3f, vFull.AsSpan<float>()[0]);
+        Assert.Equal(10f, gFull.AsSpan<float>()[0]);
+        Assert.Equal(4, vHalf.AsSpan<ushort>().Length);
+        fused["half.weight"].Dispose();
+        fused["full.weight"].Dispose();
+    }
+
+    [Fact]
     public void LyricTokenizer_FollowsTheAceStepLineProtocol()
     {
         (string vocabPath, string mergesPath) = WriteTinyTokenizer();

@@ -23,6 +23,29 @@ stable release will require. Dates are UTC.
   the token-major entry has no Sage kernel. Z-Image Base, SDXL's batched CFG forward and the UNet's cross-attention keep
   the head-major layout. Output is bit-identical: at these models' shapes the token-major cuDNN row returns the bits of
   the head-major row it replaces.
+- **Fixed: ACE-Step v1 on the CPU backend.** The Comfy all-in-one checkpoint is bf16 and the CPU kernels are F32-only, so
+  generation stopped at the DiT's first bf16 bias. On the CPU backend the engine now loads the checkpoint as F32 (about
+  15 GB of weights, 22 GB peak RSS for a 2 s clip); other backends keep reading the bf16 weights. The DiT also took its
+  text-token count from the leading dim of the `[1, T, 768]` UMT5 features the engine passes, so it conditioned on the first
+  tag token alone and its projection wrote T rows into a one-row output (an exception on CPU, an out-of-bounds write on
+  CUDA). It now counts rows as `Linear` does, which changes CUDA output.
+
+## alpha.385
+
+- **Fixed: ACE-Step v1 generated noise on CUDA: it misread bf16 checkpoint tensors on the host, plus two smaller
+  ACE-Step v1 faults.** Several tensors are read on the host through `float*`: the DiT's lyric embedding table, the
+  lyric encoder's norm biases, the DCAE's depthwise and grouped convs and norm biases, and the vocoder's norm biases.
+  The Comfy all-in-one checkpoint ships them as bf16, which GPU backends keep, so all of them were misread (the lyric
+  table also read past its end for ids above 3346). They are now widened to F32 at load like the models' other
+  host-read tensors, which changes CUDA output from noise to music. The vocoder's weight-norm fusion let the GC free
+  its F32 casts while still reading them, an intermittent access violation at load. Double-condition CFG's text-only
+  context now zeroes exactly the lyric rows, which the DiT appends last, instead of counting text rows from the leading
+  dim of the `[1, T, 768]` features.
+- **Fixed: ACE-Step v1's music DCAE decoded a distorted mel.** Its EfficientViT attention took head h's query, key and
+  value from column h·d of each projection, while the reference cuts heads from the channel-concatenated `[q|k|v]`
+  stream in blocks of 3·d (columns h·3d, h·3d + d and h·3d + 2d). From the first EfficientViT stage on, the decode
+  diverged from the reference: the right channel came out quieter and the two channels nearly uncorrelated. A reference
+  latent now decodes to the reference's mel stage for stage, which changes every ACE-Step v1 generation.
 
 ## alpha.385
 
