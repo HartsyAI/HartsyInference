@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
@@ -118,18 +119,21 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// <paramref name="animate2"/> replaces self-attention with Wan-Animate-2's frame-local splice against the
     /// driving stream's re-projected K/V; <paramref name="selfAttnKvCapture"/> hands the caller this block's
     /// self-attention input (the Animate-2 driving prepass, which is otherwise an ordinary block forward).
-    /// <paramref name="selfAttnKvRewrite"/> trades the local K/V for the full sequence's (context parallel).</summary>
+    /// <paramref name="selfAttnKvRewrite"/> trades the local K/V for the full sequence's (context parallel).
+    /// <paramref name="textKv"/> keeps the text cross-attention K/V across forwards; it is used only without an image context.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null,
         Action<Tensor>? postSelfAttnHook = null, IKvRewrite? selfAttnKvRewrite = null,
-        WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? selfAttnKvCapture = null)
+        WanAnimate2SelfAttnContext? animate2 = null, WanAnimate2KvCapture? selfAttnKvCapture = null, ICachedKv? textKv = null)
     {
         int s = (int)hidden.Shape[0];
-        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb);
+        // The dump wants the raw scale rows.
+        bool scalePlusOne = tokensPerGroup == s && temb.Shape[0] == 1 && !WanVideoDebugDump.Enabled;
+        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb, scalePlusOne);
         if (dbg != null) { WanVideoDebugDump.Dump($"{dbg}_scaleMsa", scaleMsa); WanVideoDebugDump.Dump($"{dbg}_gateMsa", gateMsa); }
 
         // 1. self-attn
-        Tensor n1 = ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s), scaleMsa, shiftMsa, s, tokensPerGroup);
+        Tensor n1 = ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s), scaleMsa, shiftMsa, s, tokensPerGroup, scalePlusOne);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
         Tensor attn1 = SelfAttention(backend, n1, cos, sin, s, selfAttnMask, selfAttnKvRewrite, animate2, selfAttnKvCapture);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
@@ -143,7 +147,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
 
         // 2. cross-attn (to umT5 text, plus optional CLIP image context for I2V)
         Tensor n2 = LayerNorm(backend, h1, _norm2W, _norm2B, s);
-        Tensor attn2 = CrossAttention(backend, n2, encoder, imageContextLen);
+        Tensor attn2 = CrossAttention(backend, n2, encoder, imageContextLen, imageContextLen == 0 ? textKv : null);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn2", attn2);
         // Matrix-Game 3.0's memory-mode block builds the cross-attn residual on the NORMED hidden state
         // (`x = norm3(x); x = x + cross_attn(x)` in wan/modules/model.py cross_attn_ffn), so norm3 is destructive.
@@ -156,7 +160,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         postCrossAttnHook?.Invoke(h2);
 
         // 3. ffn
-        Tensor n3 = ApplyShiftScale(backend, LayerNorm(backend, h2, null, null, s), cScale, cShift, s, tokensPerGroup);
+        Tensor n3 = ApplyShiftScale(backend, LayerNorm(backend, h2, null, null, s), cScale, cShift, s, tokensPerGroup, scalePlusOne);
         Tensor ff = Ffn(backend, n3, s);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_ff", ff);
         n3.Dispose();
@@ -179,7 +183,14 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
             QueryRotation = rotation, KeyRotation = rotation, Bias = mask, Tap = tap, KvRewrite = kvRewrite,
         };
         if (animate2 is null)
-            return _selfAttention!.Forward(backend, input, input, in context);
+        {
+            if (tap is not null || !LinearsCastInputToF16(backend, _q[0]!, _k[0]!, _v[0]!))
+                return _selfAttention!.Forward(backend, input, input, in context);
+            // One cast for the three projections, each of which would cast its F32 input with the same kernel.
+            using Tensor input16 = new(input.Shape, DType.F16);
+            backend.CastToF16(input16, input);
+            return _selfAttention!.Forward(backend, input16, input16, in context);
+        }
 
         (Tensor qn, Tensor kn, Tensor v) = _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
         _selfAttention.NormalizeQk(backend, ref qn, ref kn);
@@ -188,6 +199,18 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         Tensor spliced = Animate2FrameLocalAttention(backend, qn, kn, v, s, 0, animate2);
         qn.Dispose(); kn.Dispose(); v.Dispose();
         return _selfAttention.ProjectOutput(backend, spliced);
+    }
+
+    /// <summary>True when an F16 input reaches the same GEMM as the F32 input these weights' Linears would cast to F16 themselves:
+    /// plain F16 weights on a backend whose F16 activations take the F16 GEMM, without the W8A8 path, which quantizes its own input.</summary>
+    private static bool LinearsCastInputToF16(IBackend backend, params ReadOnlySpan<Tensor> weights)
+    {
+        if (!backend.SupportsF16Activations || EngineKnobs.W8a8.Value)
+            return false;
+        foreach (Tensor w in weights)
+            if (w.DType != DType.F16 || w.LowRankAdjunct is not null)
+                return false;
+        return true;
     }
 
     /// <summary>Clones the Animate-2 prepass's block input and its post-norm, pre-RoPE K and V, so the generation stream re-projects and rotates on read.</summary>
@@ -314,7 +337,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     /// <paramref name="imageContextLen"/> encoder rows are the projected image context (attended via
     /// <c>add_k_proj</c>/<c>add_v_proj</c>), the rest are text. Both branches share the query; their per-head outputs
     /// are summed before the output projection (matching diffusers' WanAttnProcessor).</summary>
-    private Tensor CrossAttention(IBackend backend, Tensor qInput, Tensor encoder, int imageContextLen)
+    private Tensor CrossAttention(IBackend backend, Tensor qInput, Tensor encoder, int imageContextLen, ICachedKv? textKv)
     {
         int sq = (int)qInput.Shape[0];
         int l = (int)encoder.Shape[0];
@@ -325,7 +348,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         Tensor qMh = main.ProjectQueryHeadMajor(backend, qInput, releaseInput: false, default);
 
         Tensor textRows = imageContextLen > 0 ? SliceRows(backend, encoder, imageContextLen, textLen) : encoder;
-        Tensor flat = main.MergeHeads(backend, main.AttendBranchHeadMajor(backend, qMh, textRows, default), flatShape);
+        Tensor flat = main.MergeHeads(backend, main.AttendBranchHeadMajor(backend, qMh, textRows, new AttentionCallContext { CachedKv = textKv }), flatShape);
         if (imageContextLen > 0) textRows.Dispose();
 
         if (imageContextLen > 0 && _imageAttention is { } image)
@@ -390,33 +413,26 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     }
 
     /// <summary>Adds <c>scale_shift_table</c> to the timestep_proj <c>[G, 6, dim]</c>; returns 6 modulation tensors of <c>[G, dim]</c>.
-    /// <para>G=1 (scalar-timestep T2V/I2V, the hot path) builds the 6 tensors <b>on-device</b> via <see cref="IBackend.SliceRows"/>
-    /// + <see cref="IBackend.GatedResidualLastDim"/>, so the results are GPU-resident activations. This is a load-bearing perf
+    /// <para>G=1 (scalar-timestep T2V/I2V, the hot path) builds the 6 tensors <b>on-device</b> via one <see cref="IBackend.Add"/>
+    /// over the table + <see cref="IBackend.SliceRows"/>, so the results are GPU-resident activations. This is a load-bearing perf
     /// fix: the old host-pointer loop produced fresh CPU tensors whose first <c>CopyToDevice</c> (in every downstream AddScalar /
     /// AffineBroadcast / GatedResidual) is a cache MISS, and the miss path does a full stream <c>SyncStream</c> before its H2D —
     /// so each block drained the whole async attention/FFN pipeline 3× (measured: ~85 s of a ~90 s Wan-1.3B gen sat in that
     /// GatedResidual sync). Keeping modulation on-device makes every downstream upload a cache HIT → no per-block barriers.
     /// The multi-group TI2V path (per-frame timesteps) keeps the CPU reference.</para></summary>
-    private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation(IBackend backend, Tensor temb)
+    private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation(IBackend backend, Tensor temb, bool scalePlusOne)
     {
         int g = (int)temb.Shape[0];
         if (g == 1)
         {
-            // out[m] = scale_shift_table[m,:] + temb[0,m,:], each [1, dim], GPU-resident.
-            Tensor ones = Ones();   // [1, dim], device-promoted after first use — the "+1·x" add gate
-            Tensor[] outs = new Tensor[6];
-            for (int m = 0; m < 6; m++)
-            {
-                Tensor ssM = new Tensor(new TensorShape(1, _dim), DType.F32);
-                backend.SliceRows(ssM, _scaleShift!, m);            // scale_shift_table row m
-                Tensor tbM = new Tensor(new TensorShape(1, _dim), DType.F32);
-                backend.SliceRows(tbM, temb, m);                    // temb[0, m, :]
-                Tensor o = new Tensor(new TensorShape(1, _dim), DType.F32);
-                backend.GatedResidualLastDim(o, tbM, ssM, ones);    // o = tbM + 1·ssM
-                ssM.Dispose(); tbM.Dispose();
-                outs[m] = o;
-            }
-            return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
+            // out[m] = temb[0,m,:] + scale_shift_table[m,:], each [1, dim], GPU-resident; with scalePlusOne the two scale rows are (1 + scale).
+            using Tensor packed = new Tensor(new TensorShape(6, _dim), DType.F32);
+            backend.Add(packed, temb, _scaleShift!);
+            using Tensor? packedP1 = scalePlusOne ? new Tensor(packed.Shape, DType.F32) : null;
+            if (packedP1 is not null) backend.AddScalar(packedP1, packed, 1.0f);
+            Tensor scales = packedP1 ?? packed;
+            return (Row(backend, packed, 0), Row(backend, scales, 1), Row(backend, packed, 2),
+                Row(backend, packed, 3), Row(backend, scales, 4), Row(backend, packed, 5));
         }
         // Multi-group (per-frame timesteps: S2V/TI2V/Animate) — GPU-resident since 2026-07-09. The old
         // host loop here was the S2V 15x-vs-T2V wall: fresh CPU tensors -> downstream CopyToDevice cache
@@ -439,6 +455,13 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         }
         perm.Dispose();
         return (outsG[0], outsG[1], outsG[2], outsG[3], outsG[4], outsG[5]);
+    }
+
+    private Tensor Row(IBackend backend, Tensor table, int row)
+    {
+        Tensor o = new Tensor(new TensorShape(1, _dim), DType.F32);
+        backend.SliceRows(o, table, row);
+        return o;
     }
 
     /// <summary>Expands per-group rows <c>[G, dim]</c> to per-token rows <c>[G*tokensPerGroup, dim]</c> by row
@@ -481,17 +504,17 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
 
     /// <summary>AdaLN modulate: <c>out = x·(1+scale) + shift</c>, scale/shift broadcast per group over the last dim.
     /// Consumes <paramref name="x"/> (disposes it) and returns the result. G=1 (scalar timestep) is GPU-resident via
-    /// <see cref="IBackend.AffineBroadcastLastDim"/> (pre-adding 1 to scale on-GPU) into a FRESH tensor — never
-    /// in-place, which would orphan/leak x's cached device buffer. The multi-group TI2V path keeps the CPU reference
-    /// (mutates x in place and returns it).</summary>
-    private Tensor ApplyShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s, int tokensPerGroup)
+    /// <see cref="IBackend.AffineBroadcastLastDim"/> (pre-adding 1 to scale on-GPU unless <paramref name="scalePlusOne"/>
+    /// says the caller did) into a FRESH tensor — never in-place, which would orphan/leak x's cached device buffer. The
+    /// multi-group TI2V path keeps the CPU reference (mutates x in place and returns it).</summary>
+    private Tensor ApplyShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s, int tokensPerGroup, bool scalePlusOne)
     {
         if (tokensPerGroup == s)   // G == 1: scale/shift are [1, dim] broadcast over all S tokens
         {
-            using Tensor scaleP1 = new Tensor(scale.Shape, DType.F32);
-            backend.AddScalar(scaleP1, scale, 1.0f);           // (1 + scale)
+            using Tensor? scaleP1 = scalePlusOne ? null : new Tensor(scale.Shape, DType.F32);
+            if (scaleP1 is not null) backend.AddScalar(scaleP1, scale, 1.0f);           // (1 + scale)
             Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-            backend.AffineBroadcastLastDim(o, x, scaleP1, shift);   // o = x·(1+scale) + shift  (non-in-place)
+            backend.AffineBroadcastLastDim(o, x, scaleP1 ?? scale, shift);   // o = x·(1+scale) + shift  (non-in-place)
             x.Dispose();
             return o;
         }
@@ -548,8 +571,8 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         return o;
     }
 
-    // Cached [1, dim] ones row so plain elementwise add (backend.Add has no CUDA kernel) can run as a GPU
-    // GatedResidualLastDim: out = a + 1·b. Built once on first use; fill-before-publish + CAS because two
+    // Cached [1, dim] ones row, the gate that runs a plain add as GatedResidualLastDim: out = a + 1·b.
+    // Built once on first use; fill-before-publish + CAS because two
     // branch/rank threads (CFG-parallel, context-parallel) share the block and race the first touch.
     private Tensor? _ones;
     private Tensor Ones()
