@@ -149,6 +149,68 @@ public sealed class BlockScaledGemmTests
         Assert.True(unpackErr < 8e-2, $"the native and unpack paths disagree once the weight carries a factor ({unpackErr:E3})");
     }
 
+    /// <summary>A shape cuBLASLt declines must not take the generation down: the call is served by the unpack path, and
+    /// the weight stays there instead of being retried every step. The decline is forced through the test hook because
+    /// cuBLASLt 13.8 accepts every shape the gate lets through.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public unsafe void DeclinedNativeGemm_FallsBackToTheUnpackPath()
+    {
+        const int m = 64, n = 256, k = 128;
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        using CudaBackend backend = new CudaBackend(0, ptxDir);
+        if (!backend.BlockScaledExecutor.IsSupported)
+        {
+            _output.WriteLine($"SKIPPED: block-scaled GEMM needs Blackwell (this GPU is SM " +
+                $"{backend.Context.ComputeCapabilityMajor}.{backend.Context.ComputeCapabilityMinor}).");
+            return;
+        }
+
+        int paddedRows = (n + 127) / 128 * 128, paddedCols = (k / 16 + 3) / 4 * 4;
+        using Tensor packed = new Tensor(new TensorShape(n, k / 2), DType.U8);
+        using Tensor scales = new Tensor(new TensorShape(paddedRows, paddedCols), DType.F8E4M3);
+        using Tensor global = new Tensor(new TensorShape(1), DType.F32);
+        using Tensor input = new Tensor(new TensorShape(m, k), DType.F32);
+        using Tensor declinedOut = new Tensor(new TensorShape(m, n), DType.F32);
+        using Tensor retriedOut = new Tensor(new TensorShape(m, n), DType.F32);
+        using Tensor unpackOut = new Tensor(new TensorShape(m, n), DType.F32);
+        Random rng = new Random(43);
+        byte* wp = (byte*)packed.DataPointer;
+        for (long i = 0; i < (long)n * (k / 2); i++) wp[i] = (byte)rng.Next(256);
+        byte* sp = (byte*)scales.DataPointer;
+        for (long i = 0; i < (long)paddedRows * paddedCols; i++) sp[i] = (byte)(0x20 + rng.Next(0x21));
+        ((float*)global.DataPointer)[0] = 0.01f;
+        for (long i = 0; i < (long)m * k; i++) ((float*)input.DataPointer)[i] = (float)(rng.NextDouble() * 8.0 - 4.0);
+        Assert.True(Nvfp4Codec.TryAttachResident(packed, scales, global, hasPreQuantScale: false, out Tensor weight));
+
+        backend.EnableNativeFp4Gemm = true;
+        CudaBackend.ForceNativeBlockScaledDeclineForTest = 15;   // CUBLAS_STATUS_NOT_SUPPORTED
+        try
+        {
+            backend.Linear(declinedOut, input, weight, null);
+            backend.Sync();
+        }
+        finally
+        {
+            CudaBackend.ForceNativeBlockScaledDeclineForTest = null;
+        }
+        backend.Linear(retriedOut, input, weight, null);   // native allowed again, but this weight was declined
+        backend.Sync();
+        backend.EnableNativeFp4Gemm = false;
+        backend.Linear(unpackOut, input, weight, null);
+        backend.Sync();
+
+        float* d = (float*)declinedOut.DataPointer, r = (float*)retriedOut.DataPointer, u = (float*)unpackOut.DataPointer;
+        for (long i = 0; i < (long)m * n; i++)
+        {
+            Assert.Equal(u[i], d[i]);
+            Assert.Equal(u[i], r[i]);
+        }
+    }
+
     [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]

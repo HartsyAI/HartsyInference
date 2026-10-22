@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Block-scaled GEMM via cublasLtMatmul — NVFP4, MXFP4 and MXFP8 operands with their microscaling scale tensors — gated on Blackwell (SM 10.0 datacenter, SM 12.0 consumer). Below that <see cref="CublasLtExecutorBase.IsSupported"/> is false and callers dequantize to F16 instead. <para><b>Implemented against the headers, never executed.</b> No Blackwell card has run this code. The scale-mode attribute IDs and block-scale element types are taken from <c>cublasLt.h</c> / <c>library_types.h</c> (CUDA 13.6), and the block-scale layout question is settled: cuBLASLt wants its own blocked layout, which is what ComfyUI checkpoints store and what <c>block_quant.cu</c> writes for activations, so both scale tensors pass through unaltered. What remains unverified is whether a real Blackwell GEMM accepts this descriptor set and returns correct numbers — treat the first run on such a card as bring-up, not regression.</para> <para><b>alpha and beta are read from device memory</b> (pointer mode DEVICE). The activation's per-tensor scale is produced on the stream by the quantizer, so folding it into a host alpha would cost a sync per GEMM. Whether the block-scaled kernels accept a device alpha is one of the things that first run establishes; if they refuse, the fallback is a host readback of that one float.</para></summary>
+/// <summary>Block-scaled GEMM via cublasLtMatmul — NVFP4, MXFP4 and MXFP8 operands with their microscaling scale tensors — gated on Blackwell (SM 10.0 datacenter, SM 12.0 consumer). Below that <see cref="CublasLtExecutorBase.IsSupported"/> is false and callers dequantize to F16 instead. Both scale tensors pass through in cuBLASLt's blocked layout (what ComfyUI checkpoints store and what <c>block_quant.cu</c> writes), and alpha and beta are read from device memory, so the activation's per-tensor scale costs no host sync. Run on an RTX PRO 6000 and an RTX 5090 (CC 12.0); cuBLASLt 13.8 accepts m = 1.</summary>
 public sealed unsafe class BlockScaledGemmExecutor : CublasLtExecutorBase
 {
     /// <summary>Compute capability detected at construction.</summary>
@@ -56,4 +56,23 @@ public sealed unsafe class BlockScaledGemmExecutor : CublasLtExecutorBase
             DestroyDesc(desc);
         }
     }
+
+    /// <summary><see cref="Run"/> for a caller with a fallback: a request cuBLASLt declines (invalid value, arch mismatch,
+    /// not supported) returns that status and leaves <paramref name="outPtr"/> unwritten; 0 means the GEMM ran. An
+    /// execution or allocation failure still throws — those leave nothing a fallback could recover from.</summary>
+    public int TryRun(ulong weight, ulong weightBlockScale, ulong input, ulong inputBlockScale, ulong outPtr,
+        int m, int n, int k, ulong alphaBetaDev, nint stream, BlockScaleFormat format, bool outF32 = false)
+    {
+        try
+        {
+            Run(weight, weightBlockScale, input, inputBlockScale, outPtr, m, n, k, alphaBetaDev, stream, format, outF32);
+            return 0;
+        }
+        catch (CudaException error) when (error.ErrorCode is CublasInvalidValue or CublasArchMismatch or CublasNotSupported)
+        {
+            return error.ErrorCode;
+        }
+    }
+
+    private const int CublasInvalidValue = 7, CublasArchMismatch = 8, CublasNotSupported = 15;
 }

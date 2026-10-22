@@ -817,9 +817,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long k = weight.Shape[1];
         int group = format.GroupSize();
         if (k % group != 0) return false;
-        // Rows are padded up to 128 and block columns up to 4 by the blocked layout, so the stored scale tensor is
-        // never smaller than the logical one; smaller means the companion does not belong to this weight.
-        return blockScale.Shape[0] >= n && blockScale.Shape[1] >= k / group && blockScale.Shape[1] % 4 == 0;
+        // The blocked layout pads rows to 128 and block columns to 4, and every kernel indexes the padded tensor; a
+        // smaller one is not this weight's, or not in that layout.
+        return blockScale.Shape[0] >= (n + 127) / 128 * 128 && blockScale.Shape[1] >= k / group && blockScale.Shape[1] % 4 == 0;
     }
 
     /// <summary>Frees every resident-nvfp4 device block-scale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
@@ -844,20 +844,27 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     }
 
     // Native-vs-unpack accounting for the resident block-scaled weights, reported once per model rather than per
-    // layer: FreeBlockScaleCache flushes it, and the first dispatch names the condition that refused.
-    private int _blockScaledDispatchLogged, _blockScaledHostUnpackLogged;
+    // layer: FreeBlockScaleCache flushes it. Calls are counted here, weights on their cached scales entry, and the first
+    // refusal is kept whichever route the first dispatch took.
+    private int _blockScaledDispatchLogged, _blockScaledHostUnpackLogged, _blockScaledDeclineLogged;
     private long _blockScaledNativeCalls, _blockScaledUnpackCalls;
     private string? _blockScaledFirstRefusal;
 
     /// <summary>Records one block-scaled Linear's dispatch, and logs the first one so a run that never engages the
     /// native GEMM says which condition refused it.</summary>
-    /// <remarks>Only reached for a weight that already carries block scales, so an ordinary Linear pays nothing. The
-    /// reason string is built inside the one-shot, never per call.</remarks>
-    private void NoteBlockScaledDispatch(bool native, Tensor input, Tensor output, int n, int k, bool rowRange,
-        in ResidentBlockScales scales)
+    /// <remarks>Only reached for a weight that already carries block scales, so an ordinary Linear pays nothing. A
+    /// refusal reason is built until the first one is kept, never per call after that.</remarks>
+    private void NoteBlockScaledDispatch(bool native, Tensor weight, Tensor input, Tensor output, int n, int k,
+        bool rowRange, in ResidentBlockScales scales)
     {
         if (native) Interlocked.Increment(ref _blockScaledNativeCalls);
         else Interlocked.Increment(ref _blockScaledUnpackCalls);
+        MarkBlockScaledRoute(weight, native ? NativeRoute : UnpackRoute, declinedStatus: 0);
+        if (!native && Volatile.Read(ref _blockScaledFirstRefusal) is null)
+        {
+            Interlocked.CompareExchange(ref _blockScaledFirstRefusal,
+                $"{NativeBlockScaledRefusal(input, output, n, k, rowRange, scales)} (n={n} k={k})", null);
+        }
         if (Volatile.Read(ref _blockScaledDispatchLogged) != 0
             || Interlocked.Exchange(ref _blockScaledDispatchLogged, 1) != 0)
         {
@@ -870,11 +877,42 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 + "per call, so output will not match the unpack path bit for bit.");
             return;
         }
-        string reason = NativeBlockScaledRefusal(input, output, n, k, rowRange, scales);
-        _blockScaledFirstRefusal = reason;
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] native block-scaled GEMM not taken for a resident {scales.Format} weight (n={n} k={k}): {reason}. "
+            $"[Cuda] native block-scaled GEMM not taken for a resident {scales.Format} weight: {_blockScaledFirstRefusal}. "
             + "The weight unpacks per GEMM instead; further layers are counted, not logged.");
+    }
+
+    /// <summary>Folds a route (and, for a declined native call, cuBLASLt's status) into the weight's cached scales entry.</summary>
+    private void MarkBlockScaledRoute(Tensor weight, int route, int declinedStatus)
+    {
+        lock (_blockScaleLock)
+        {
+            if (!_blockScaleDevice.TryGetValue(weight, out ResidentBlockScales scales)) return;
+            if ((scales.Routes & route) == route && (declinedStatus == 0 || scales.DeclinedStatus != 0)) return;
+            _blockScaleDevice[weight] = scales with
+            {
+                Routes = scales.Routes | route,
+                DeclinedStatus = scales.DeclinedStatus != 0 ? scales.DeclinedStatus : declinedStatus,
+            };
+        }
+    }
+
+    /// <summary>A native call cuBLASLt declined: the weight stays on the unpack path from now on, and the first decline
+    /// is logged as a warning because it is a shape the dispatch gate thought valid.</summary>
+    private void NoteNativeBlockScaledDecline(Tensor weight, int status, Tensor input, Tensor output, int m, int n, int k,
+        in ResidentBlockScales scales)
+    {
+        MarkBlockScaledRoute(weight, UnpackRoute, status);
+        ResidentBlockScales declined = scales with { DeclinedStatus = status };
+        NoteBlockScaledDispatch(native: false, weight, input, output, n, k, rowRange: false, declined);
+        if (Volatile.Read(ref _blockScaledDeclineLogged) != 0
+            || Interlocked.Exchange(ref _blockScaledDeclineLogged, 1) != 0)
+        {
+            return;
+        }
+        HartsyInference.Core.Logging.Logs.Warning(
+            $"[Cuda] cuBLASLt declined the native {scales.Format} GEMM (status {status}) at m={m} n={n} k={k}; that weight "
+            + "unpacks per GEMM from now on. Further declines are counted, not logged.");
     }
 
     /// <summary>The first condition in the <c>LinearCore</c> dispatch gate that this call fails. Mirrors that gate's order.</summary>
@@ -883,6 +921,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         if (rowRange) return "a row range cannot address the packed layout";
         if (!EnableNativeFp4Gemm) return "numerics.fp4Native is off";
+        if (scales.DeclinedStatus != 0) return $"cuBLASLt declined this weight's GEMM (status {scales.DeclinedStatus})";
         int paddedCols = (k / scales.Format.GroupSize() + 3) / 4 * 4;
         if (scales.PaddedCols != paddedCols)
             return $"the scale tensor's stored block columns ({scales.PaddedCols}) are not the {paddedCols} cuBLASLt derives from k={k}";
@@ -921,14 +960,23 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         long native = Interlocked.Exchange(ref _blockScaledNativeCalls, 0);
         long unpacked = Interlocked.Exchange(ref _blockScaledUnpackCalls, 0);
-        string? refusal = _blockScaledFirstRefusal;
-        _blockScaledFirstRefusal = null;
+        string? refusal = Interlocked.Exchange(ref _blockScaledFirstRefusal, null);
         Volatile.Write(ref _blockScaledDispatchLogged, 0);
         Volatile.Write(ref _blockScaledHostUnpackLogged, 0);
+        Volatile.Write(ref _blockScaledDeclineLogged, 0);
+        int nativeWeights = 0, unpackWeights = 0;
+        lock (_blockScaleLock)
+        {
+            foreach (ResidentBlockScales scales in _blockScaleDevice.Values)
+            {
+                if ((scales.Routes & NativeRoute) != 0) nativeWeights++;
+                if ((scales.Routes & UnpackRoute) != 0) unpackWeights++;
+            }
+        }
         if (native == 0 && unpacked == 0) return;
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] block-scaled Linears this model: {native} native, {unpacked} unpacked"
-            + (refusal is null ? "." : $" (first refusal: {refusal})."));
+            $"[Cuda] block-scaled Linears this model: {nativeWeights} native, {unpackWeights} unpacked "
+            + $"({native} and {unpacked} calls)" + (refusal is null ? "." : $"; first refusal: {refusal}."));
     }
 
     /// <summary>Uploads (once) a block-scaled weight's swizzled scale tensor for the kernels that index it, and reads its host scalars (nvfp4 carries two; the MX formats none).</summary>
@@ -1008,6 +1056,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// read here, never its DataPointer; needed so a calibration harness can later correlate accumulated stats back
     /// to a specific weight via <see cref="SetW8A8SmoothingScale"/>).</remarks>
     public static Action<float[], int, int, float[], int, Tensor>? CaptureW8A8Operands;
+
+    /// <summary>Test-only: a nonzero status here makes every native block-scaled GEMM read as declined by cuBLASLt with it,
+    /// so the decline-to-unpack path can be checked on a card where cuBLASLt accepts every shape.</summary>
+    internal static int? ForceNativeBlockScaledDeclineForTest;
 
     /// <summary>Test-only: D2H-snapshots a tensor to a host F32 array via a cache-hit peek, backing <see cref="CaptureW8A8Operands"/> only.</summary>
     /// <remarks>Uses <see cref="GpuTransferHelper.CopyToDevice"/> (non-destructive on a hit) + blocking
@@ -2087,7 +2139,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // the checkpoint's scale layout must be the one cuBLASLt derives from [N, K] — block columns padded to 4 —
         // and a row range, which cannot address the packed layout, takes the unpack path like every other refusal.
         BlockScaleFormat? blockScaled = null;
-        if (!rowRange && EnableNativeFp4Gemm && blockScales.BlockScaleDevice != 0
+        if (!rowRange && EnableNativeFp4Gemm && blockScales.BlockScaleDevice != 0 && blockScales.DeclinedStatus == 0
             && blockScales.PaddedCols == (k / blockScales.Format.GroupSize() + 3) / 4 * 4
             && (input.DType == DType.F32 || input.DType == DType.F16)
             && (output.DType == DType.F16 || output.DType == DType.F32)
@@ -2096,8 +2148,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             blockScaled = blockScales.Format;
         }
-        if (blockScales.BlockScaleDevice != 0)
-            NoteBlockScaledDispatch(blockScaled is not null, input, output, n, k, rowRange, blockScales);
+        // The native route is noted once the GEMM ran: cuBLASLt can still decline it.
+        if (blockScales.BlockScaleDevice != 0 && blockScaled is null)
+            NoteBlockScaledDispatch(native: false, weight, input, output, n, k, rowRange, blockScales);
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
         ulong pInputFp8 = 0, pFp8Scratch = 0, pInputPacked = 0, pInputScale = 0, pBlockScratch = 0;
@@ -2393,14 +2446,21 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 _kernels!.LaunchBlockQuant(format, pInputPacked, pInputScale, pBlockScratch, pInput, input.DType, m, k,
                     paddedRows, paddedCols, weight.Fp8ScaleFactor * blockScales.ScaleFactor * blockScales.GlobalScale,
                     _stream.Handle);
-                BlockScaledExecutor.Run(weight: pWeight, weightBlockScale: blockScales.BlockScaleDevice,
+                int declined = BlockScaledExecutor.TryRun(weight: pWeight, weightBlockScale: blockScales.BlockScaleDevice,
                     input: pInputPacked, inputBlockScale: pInputScale, outPtr: pOutput, m: m, n: n, k: k,
                     alphaBetaDev: pBlockScratch + sizeof(float), stream: _stream.Handle, format: format,
                     outF32: output.DType == DType.F32);
-                if (bias is not null) pBiasCast = AddBiasEpilogue(output, bias, pOutput, pBias, m, n, rowRange, weightRowOffset);
-                GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
-                cachedOutput = true;
-                return;
+                if (ForceNativeBlockScaledDeclineForTest is { } forced) declined = forced;
+                if (declined == 0)
+                {
+                    NoteBlockScaledDispatch(native: true, weight, input, output, n, k, rowRange, blockScales);
+                    if (bias is not null) pBiasCast = AddBiasEpilogue(output, bias, pOutput, pBias, m, n, rowRange, weightRowOffset);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                // Declined: the unpack path below writes the output instead, as for any refused weight.
+                NoteNativeBlockScaledDecline(weight, declined, input, output, m, n, k, blockScales);
             }
 
             // W8A8 IMMA path (numerics.w8a8=true, INFERENCE_ACCEL_GRIND §H5): large-m Linear with a 16-bit-float
@@ -11611,5 +11671,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Everything the nvfp4 dequant kernel needs about one resident weight beyond its packed bytes.</summary>
     /// <param name="BlockScaleDevice">Device copy of the swizzled E4M3 scales; 0 means the weight is not nvfp4.</param>
     /// <param name="PaddedCols">Stored last-dim length of the scale tensor, which is the swizzle's stride.</param>
-    private readonly record struct ResidentBlockScales(ulong BlockScaleDevice, float ScaleFactor, float GlobalScale, int PaddedCols, BlockScaleFormat Format);
+    private readonly record struct ResidentBlockScales(ulong BlockScaleDevice, float ScaleFactor, float GlobalScale, int PaddedCols, BlockScaleFormat Format)
+    {
+        /// <summary>Routes this weight's GEMMs have taken since it loaded: <see cref="NativeRoute"/>, <see cref="UnpackRoute"/>.</summary>
+        public int Routes { get; init; }
+
+        /// <summary>cuBLASLt's status when it declined this weight's native GEMM; nonzero keeps the weight on the unpack path.</summary>
+        public int DeclinedStatus { get; init; }
+    }
+
+    private const int NativeRoute = 1, UnpackRoute = 2;
 }
