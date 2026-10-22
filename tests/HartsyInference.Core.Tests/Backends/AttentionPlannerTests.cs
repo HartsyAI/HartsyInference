@@ -87,6 +87,24 @@ public sealed class AttentionPlannerTests
     }
 
     [Fact]
+    public void ARefusedFormat_ExcludesTheRowsThatMultiplyInIt_WhateverTheCallAsserts()
+    {
+        List<string> log = [];
+        AttentionKernelCapability int8 = Cap("int8") with { UsesQueryKey = AttentionFormats.Int8, UsesProbValue = AttentionFormats.F16 };
+        AttentionKernelCapability f16 = Cap("f16") with { UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16 };
+        AttentionKernelRow[] rows = [Row("int8", true, true, log, int8), Row("f16", true, true, log, f16)];
+        AttentionCall call = Call(DType.F16) with { Numerics = AttentionNumerics.FromLegacy(true) };
+        AttentionCall refusing = call with { Numerics = call.Numerics with { Refused = AttentionFormats.Int8 } };
+
+        Assert.Equal("int8", AttentionPlanner.Run(rows, call).Capability.Id);
+        Assert.Equal("f16", AttentionPlanner.Run(rows, refusing).Capability.Id);
+        Assert.Equal(["int8", "f16"], log);
+        Assert.Equal(AttentionExclusion.RefusedFormat, int8.Excludes(refusing));
+        Assert.Equal(AttentionExclusion.None, f16.Excludes(refusing));
+        Assert.Equal("int8 (RefusedFormat)", AttentionPlanner.Plan(rows, refusing).Declined);
+    }
+
+    [Fact]
     public void Plan_NamesTheRowRunWouldTryFirst_AndTheRowsAheadOfIt()
     {
         List<string> log = [];

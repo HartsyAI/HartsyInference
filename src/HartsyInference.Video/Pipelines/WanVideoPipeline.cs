@@ -254,6 +254,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         {
             RecordCfgParallelDecision("fell-back(moe-two-expert)");
         }
+        // The reserve is sized from these two switches; every forward of the loop, the CFG worker's included, runs under them.
+        using IDisposable switches = PinBranchSwitches();
+        DType blockAct = DenoiseActivation(firstFrameLatent is null && lastFrameLatent is null);
         // Single-expert only: the MoE path already frees and reloads a whole expert per step (SwapToExpert), so
         // a sliding window underneath that would re-upload the same bytes twice. Streaming is decided by the
         // policy against measured free VRAM — on a card with headroom this resolves to the full-residency
@@ -266,7 +269,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 Backend = Backend,
                 Denoiser = _transformer,
                 ModelName = "Wan",
-                HeadroomBytes = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim, _config.PatchSize),
+                HeadroomBytes = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim, _config.PatchSize, blockAct.SizeInBytes),
                 Policy = BlockStreamingPolicy.AllOrNothing,
                 Pin = _ditPin,
             });
@@ -431,7 +434,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int cacheComputes = 0, cacheReuses = 0, uncondComputes = 0, uncondReuses = 0;
         WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
         using IDisposable? textKv = OpenTextKvCache(stream, tLat, hLat, wLat, promptEmbeds, negativeEmbeds,
-            cfgParallelEnabled ? CfgParallelBackend : cpEnabled ? CpBackends![1] : null);
+            cfgParallelEnabled ? CfgParallelBackend : cpEnabled ? CpBackends![1] : null, blockAct);
 
         for (int k = 0; k < steps; k++)
         {
@@ -937,13 +940,13 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     /// <summary>Opens the single-expert transformer's text cross-attention K/V cache when the DiT is fully resident and every
     /// backend the loop runs on still has the activation reserve free beside both contexts' K/V; null otherwise.</summary>
     private IDisposable? OpenTextKvCache(BlockStreamingScope? stream, int tLat, int hLat, int wLat, Tensor promptEmbeds,
-        Tensor negativeEmbeds, IBackend? second)
+        Tensor negativeEmbeds, IBackend? second, DType blockAct)
     {
         if (_transformer2 is not null || stream?.Streaming == true)
             return null;
         int contextTokens = (int)Math.Max(promptEmbeds.Shape[0], negativeEmbeds.Shape[0]);
-        long need = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim, _config.PatchSize)
-            + _transformer.TextCrossAttentionKvBytes(contextTokens, contexts: 2);
+        long need = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim, _config.PatchSize, blockAct.SizeInBytes)
+            + _transformer.TextCrossAttentionKvBytes(contextTokens, contexts: 2, blockAct);
         long free = Backend.FreeMemoryBytes();
         if (free < need || second?.FreeMemoryBytes() < need)
         {
@@ -951,19 +954,42 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             if (free > 0) Logs.Info($"Wan text cross-attention K/V cache off: under {need >> 20} MB free beside the resident DiT.");
             return null;
         }
-        return _transformer.CacheTextCrossAttentionKv();
+        return _transformer.CacheTextCrossAttentionKv(blockAct);
+    }
+
+    /// <summary>The dtype the T2V/TI2V loop's attention and FFN branches compute in: F16 only when no forward can take an F32
+    /// path (per-frame timesteps, the step cache, context parallelism) on any backend the loop runs on, so a reserve sized from
+    /// it never undercounts.</summary>
+    private DType DenoiseActivation(bool singleGroup) => DenoiseActivation(_transformer, Backend, CfgParallelBackend,
+        CpBackends?.Count ?? 0, StepCacheEnv.ReadThreshold() > 0f, singleGroup);
+
+    /// <summary>Pins <c>numerics.wanF16</c> and <c>numerics.ditF16</c> at their current values on this async flow, over the request's
+    /// own settings, so a settings change mid-generation cannot run a forward in a dtype the reserve was not sized for.</summary>
+    internal static IDisposable PinBranchSwitches() =>
+        (KnobProfileScope.Current ?? KnobProfile.Create("wan-denoise")).With(EngineKnobs.WanF16, EngineKnobs.WanF16.Value)
+            .With(EngineKnobs.DitF16, EngineKnobs.DitF16.Value).Push();
+
+    /// <summary><see cref="DenoiseActivation(bool)"/> over explicit inputs.</summary>
+    internal static DType DenoiseActivation(WanVideoTransformer transformer, IBackend backend, IBackend? cfgParallel,
+        int contextParallelRanks, bool stepCache, bool singleGroup)
+    {
+        bool eligible = singleGroup && !stepCache && contextParallelRanks < 2;
+        // numerics.wanF16 and numerics.ditF16 hold for a whole generation, the CFG worker included, so every forward agrees with this.
+        DType act = transformer.BranchActivation(backend, eligible);
+        return cfgParallel is { } second && transformer.BranchActivation(second, eligible) != act ? DType.F32 : act;
     }
 
     /// <summary>Bytes the denoise phase needs beside the weights, so the resident/streamed decision and the block window budget against the same number.</summary>
-    /// <remarks>The dominant terms are the per-block activations over the full token grid, and Wan's are F32. The
-    /// token count is the patchified grid, not the pixel grid. A generous constant rides on top for cuBLAS
-    /// workspace, RoPE tables and the encoder projections — under-reserving here does not fail cleanly, it
-    /// over-commits VRAM at exactly the geometries streaming exists to rescue.</remarks>
-    internal static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim, (int T, int H, int W) patch)
+    /// <remarks>The dominant terms are the per-block activations over the full token grid: the F32 residual stream, and the
+    /// branches at <paramref name="branchBytes"/> per element. The token count is the patchified grid, not the pixel grid. A
+    /// generous constant rides on top for cuBLAS workspace, RoPE tables and the encoder projections — under-reserving here does
+    /// not fail cleanly, it over-commits VRAM at exactly the geometries streaming exists to rescue.</remarks>
+    internal static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim, (int T, int H, int W) patch,
+        int branchBytes)
     {
         long tokens = (long)Math.Max(1, tLat / patch.T) * Math.Max(1, hLat / patch.H) * Math.Max(1, wLat / patch.W);
-        // q/k/v + attention output + the FFN's two wide intermediates, all F32, plus the block's own residual.
-        long perForward = tokens * innerDim * 4L * 8L;
+        // The block's residual, plus q/k/v, the attention output and the FFN's two wide intermediates in the branch dtype.
+        long perForward = tokens * innerDim * (sizeof(float) + 7L * branchBytes);
         return perForward + (1536L * 1024 * 1024);
     }
 

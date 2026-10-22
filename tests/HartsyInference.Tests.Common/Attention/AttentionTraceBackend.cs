@@ -35,6 +35,8 @@ public sealed class AttentionTraceBackend : IBackend
 
     public bool SupportsTokenMajorGqaAttention { get; init; }
 
+    public bool SupportsF16Activations { get; init; }
+
     /// <summary>Makes every attention call throw after it is recorded.</summary>
     public bool FailAttention { get; init; }
 

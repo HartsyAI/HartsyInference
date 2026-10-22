@@ -38,6 +38,22 @@ stable release will require. Dates are UTC.
   a Qwen-Image context-parallel rank's local queries included) on CUDA's cuDNN row and on Vulkan; no Vulkan generation was
   compared. The F16 traces (`diagnostics.chromaF16trace`, `diagnostics.zimageF16trace`) see the attention output on the
   token-major entry again.
+- **Faster: Wan's attention and FFN run in F16 on CUDA, on by default** (`numerics.wanF16=false` restores the F32 path). On
+  TI2V-5B and Wan 2.1 T2V-14B, for a forward with one timestep group and no image context, each norm writes its branch input
+  in F16 straight from the F32 residual stream, the attention, cross-attention and FFN run in F16 with F32 accumulation, and
+  each branch output is added back to the F32 stream; the modulation, norm weights and RoPE tables stay F32. Two kernels join
+  the stream to the branches: a LayerNorm from F32 into F16 and a gated residual adding an F16 value to an F32 residual. The
+  F16 attention runs on cuDNN at every length: it refuses SageAttention's INT8 through a new per-layer refusal
+  (`AttentionLayerConfig.RefusedFormats`), which excludes every attention row that multiplies in a refused format. The text
+  cross-attention K/V cache holds F16 for those forwards. A Wan 2.2 A14B expert pair, image-to-video, per-frame timesteps,
+  context parallelism, the step cache, the 1.3B and the S2V, VACE, Animate and Matrix-Game models keep F32, as do
+  `numerics.ditF16=false` and the `reference` profile. Measured on an RTX 4090 against main at seeds 42-44, per step and
+  first-frame SSIM per seed: wan5b (832×480×49) 1090 → 885 ms (−18.8%), 0.979 / 0.994 / 0.997; wan5b-720p (1280×704×25)
+  1390 → 1133 ms (−18.5%), 0.958 / 0.982 / 0.965; wan21-14b (fp8, 512×320×25) 1704 → 1290 ms (−24.3%), 0.680 / 0.723 / 0.666,
+  where main's F16 attention alone already moves this 15-step clip to 0.63 against F32 attention; wan5b-long (832×480×121)
+  3010 → 2515 ms (−16.4%), 0.998 / 0.997 / 0.994. wan5b at seed 42 drifts below its 0.985 floor, to 0.979 on the first frame
+  and 0.952 on the last: the same scene and subject, the subject's position and pose shifted, no artifacts. With
+  `numerics.wanF16=false`, wan5b and wan21-14b match main bit for bit.
 
 ## alpha.386
 

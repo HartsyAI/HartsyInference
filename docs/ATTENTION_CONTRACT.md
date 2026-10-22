@@ -120,6 +120,9 @@ allow, never add them:
 | `f16` | F16 operand storage and multiply where the element bounds fit, saturation permitted, F32 accumulation |
 | `int8` | `f16`, plus INT8 Q/K with per-row or finer scales and K smoothing, plus the P/V format the model's gate selected |
 
+A call may also refuse a multiply format (`AttentionNumerics.Refused`, per layer `AttentionLayerConfig.RefusedFormats`): every
+row that declares that format is excluded, whatever the call grants or asserts.
+
 K smoothing (subtracting one vector `μ` from every key) shifts each query row's scores by `cᵢ = α qᵢ · μ`. Plain
 softmax, additive bias and exclusions are invariant to that shift; a softcap is not (`tanh(x − c)` is not a shift of
 `tanh(x)`), a sink logit must be shifted by the same `cᵢ`, the returned LSE must add `cᵢ` back, and two segments

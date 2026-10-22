@@ -55,6 +55,10 @@ public readonly record struct AttentionNumerics
     /// <summary>A legacy entry point's <c>allowF16</c>: an assertion, not a derived bound. Only route-pinned calls honour it.</summary>
     public bool LegacyAssertedBounded { get; init; }
 
+    /// <summary>Multiply formats the call refuses outright: a row that would use one is excluded, whatever the call grants or
+    /// asserts.</summary>
+    public AttentionFormats Refused { get; init; }
+
     /// <summary>F32 everywhere: no TF32, no narrowing, no saturation, no quantization.</summary>
     public static AttentionNumerics Exact => default;
 

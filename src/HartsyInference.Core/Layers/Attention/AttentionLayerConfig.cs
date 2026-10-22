@@ -104,6 +104,9 @@ public sealed record AttentionLayerConfig
     /// <summary>The legacy <c>allowF16</c> assertion the attention call carries.</summary>
     public bool AllowF16 { get; init; }
 
+    /// <summary>Multiply formats the attention call refuses (<see cref="AttentionNumerics.Refused"/>).</summary>
+    public AttentionFormats RefusedFormats { get; init; }
+
     /// <summary>The softmax scale; 0 means <c>1/√headDim</c>.</summary>
     public float Scale { get; init; }
 

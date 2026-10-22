@@ -3365,10 +3365,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     else _kernels!.LaunchCastBf16ToF32(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
                     bPtr = pBCast;
                 }
-                _kernels!.LaunchLayerNorm(
-                    pOut, pIn, wPtr, bPtr,
-                    normDim, totalRows, eps,
-                    _stream.Handle);
+                // An F16 output is an F32 residual stream feeding an F16 branch: normalized in F32, rounded once.
+                if (output.DType == DType.F16)
+                    _kernels!.LaunchLayerNormModulateF32ToF16(pOut, pIn, wPtr, 0, bPtr, normDim, totalRows, totalRows, eps, _stream.Handle);
+                else if (output.DType == DType.F32)
+                    _kernels!.LaunchLayerNorm(pOut, pIn, wPtr, bPtr, normDim, totalRows, eps, _stream.Handle);
+                else
+                    throw new NotSupportedException($"CUDA LayerNorm writes an F32 input as F32 or F16, not {output.DType}.");
             }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -3696,11 +3699,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GatedResidual");
-        // F32, or F16/BF16 activations (residual/value/output) with an F32 gate — the DiT 16-bit recipe.
+        // F32, or F16/BF16 activations (residual/value/output) with an F32 gate — the DiT 16-bit recipe — or an F16 branch
+        // value added to an F32 residual stream.
         bool f16 = residual.DType == DType.F16 && value.DType == DType.F16 && output.DType == DType.F16;
         bool bf16 = residual.DType == DType.BF16 && value.DType == DType.BF16 && output.DType == DType.BF16;
-        if ((!f16 && !bf16 && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32)) || gate.DType != DType.F32)
-            throw new NotSupportedException($"CUDA GatedResidualLastDim supports F32, or F16/BF16 activations with an F32 gate — got output={output.DType}, residual={residual.DType}, value={value.DType}, gate={gate.DType}.");
+        bool mixed = residual.DType == DType.F32 && value.DType == DType.F16 && output.DType == DType.F32;
+        if ((!f16 && !bf16 && !mixed && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32))
+            || gate.DType != DType.F32)
+            throw new NotSupportedException($"CUDA GatedResidualLastDim supports F32, F16/BF16 activations, or an F16 value on an F32 residual, with an F32 gate — got output={output.DType}, residual={residual.DType}, value={value.DType}, gate={gate.DType}.");
         using OpScope _op = EnterOp();
         EnsureKernels();
         int rank = value.Shape.Rank;
@@ -3716,7 +3722,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pGate = GpuTransferHelper.CopyToDevice(gate);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (f16)
+            if (mixed)
+                _kernels!.LaunchGatedResidualLastDimF32F16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
+            else if (f16)
                 _kernels!.LaunchGatedResidualLastDimF16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
             else if (bf16)
                 _kernels!.LaunchGatedResidualLastDimBf16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
@@ -6360,8 +6368,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("LayerNormModulate");
         bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
-        if (!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
-            throw new NotSupportedException("CUDA LayerNormModulate supports F32 or F16 activations.");
+        bool mixed = input.DType == DType.F32 && output.DType == DType.F16;
+        if (!f16 && !mixed && (output.DType != DType.F32 || input.DType != DType.F32))
+            throw new NotSupportedException("CUDA LayerNormModulate supports F32 or F16 activations, or an F32 input into F16.");
         if (scale.DType != DType.F32 || shift.DType != DType.F32)
             throw new NotSupportedException("CUDA LayerNormModulate requires F32 scale/shift.");
         using OpScope _op = EnterOp();
@@ -6377,7 +6386,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pSh = GpuTransferHelper.CopyToDevice(shift);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchLayerNormModulate(f16, pOut, pIn, pSc, pSh, dim, seqLen, (int)rows, eps, _stream.Handle);
+            if (mixed)
+                _kernels!.LaunchLayerNormModulateF32ToF16(pOut, pIn, 0, pSc, pSh, dim, (int)rows, seqLen, eps, _stream.Handle);
+            else
+                _kernels!.LaunchLayerNormModulate(f16, pOut, pIn, pSc, pSh, dim, seqLen, (int)rows, eps, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cached = true;
         }

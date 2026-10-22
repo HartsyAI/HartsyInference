@@ -644,7 +644,7 @@ public sealed partial class AttentionLayer
     /// can make; a change to either side must change the other.</summary>
     private bool SageServesHeadMajor(int sq, int skv, DType act, Tensor? bias) =>
         act == DType.F16 && bias is null && _config.HeadDim is 64 or 128 && EngineKnobs.SageAttn.Value
-        && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value;
+        && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value && (_config.RefusedFormats & AttentionFormats.Int8) == 0;
 
     private static Tensor Have(Tensor? norm) =>
         norm ?? throw new InvalidOperationException("This attention layer's weights have no norm for that projection.");
@@ -685,6 +685,7 @@ public sealed partial class AttentionLayer
         {
             AttentionCall call = AttentionCall.FromTokenMajor(flat, q, k, v, context.Bias, _config.Heads, _config.KvHeads,
                 _config.HeadDim, _config.EffectiveScale, _config.AllowF16) with { Route = _config.TokenMajorRoute };
+            call = call with { Numerics = call.Numerics with { Refused = _config.RefusedFormats } };
             backend.Attention(in call);
             context.Probe?.Observe("attention", flat);
         }
@@ -754,6 +755,7 @@ public sealed partial class AttentionLayer
         {
             AttentionCall call = AttentionCall.FromScaledDotProductAttention(attn, qMh, kMh, vMh, context.Bias, _config.EffectiveScale,
                 _config.AllowF16);
+            call = call with { Numerics = call.Numerics with { Refused = _config.RefusedFormats } };
             backend.Attention(in call);
             context.Probe?.Observe("attention", attn);
         }

@@ -101,6 +101,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.VkF16Gemm, false)
         // Runs large-M float Linears as per-channel-int8 weight x per-row-int8 activation IMMA; the declaration itself calls it lossy.
         .With(EngineKnobs.W8a8, false)
+        // Wan's attention and FFN branches compute in F16 over its F32 residual stream; ditF16=false already forces F32.
+        .With(EngineKnobs.WanF16, false)
         // 2 is the FlowUniPC solver order Wan's own scheduler ships; the coercion already sends non-positive values back to 2.
         .With(EngineKnobs.WanSolverOrder, 2)
         // 0 restores the monolithic whole-latent HeartCodec scalar decode, removing every chunk boundary.

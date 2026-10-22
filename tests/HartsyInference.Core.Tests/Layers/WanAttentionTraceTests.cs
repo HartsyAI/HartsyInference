@@ -21,11 +21,12 @@ public sealed class WanAttentionTraceTests
         AllowF16 = allowF16,
     };
 
-    private static AttentionLayer Self() => new(Config(), new AttentionLayerWeights
-    {
-        Query = W(101), Key = W(102), Value = W(103), Output = W(104), QueryNorm = W(106), KeyNorm = W(107),
-        QueryNormEps = 1e-6f, KeyNormEps = 1e-6f,
-    });
+    private static AttentionLayer Self(AttentionFormats refused = AttentionFormats.None) => new(Config() with { RefusedFormats = refused },
+        new AttentionLayerWeights
+        {
+            Query = W(101), Key = W(102), Value = W(103), Output = W(104), QueryNorm = W(106), KeyNorm = W(107),
+            QueryNormEps = 1e-6f, KeyNormEps = 1e-6f,
+        });
 
     private static AttentionLayer ImageBranch() => new(Config(), new AttentionLayerWeights
     {
@@ -319,22 +320,25 @@ public sealed class WanAttentionTraceTests
     [Theory]
     [InlineData("self", true)]
     [InlineData("cross", true)]
+    [InlineData("self-int8-refused", true)]
+    [InlineData("cross-int8-refused", true)]
     [InlineData("s2v", false)]
     [InlineData("mg3", true)]
     public void EachWanConfigPinsTheLegacyAllowF16OnADenseRouteWithNoGap(string site, bool allowF16)
     {
         AttentionTraceBackend backend = new();
         Tensor Mh(int tokens) => new(new TensorShape(1, Heads, tokens, HeadDim), DType.F32);
+        AttentionFormats refused = site.EndsWith("-int8-refused", StringComparison.Ordinal) ? AttentionFormats.Int8 : AttentionFormats.None;
         switch (site)
         {
-            case "self":
+            case "self" or "self-int8-refused":
             {
                 Tensor x = Rows(Tokens);
-                Self().Forward(backend, x, x, default);
+                Self(refused).Forward(backend, x, x, default);
                 break;
             }
-            case "cross":
-                Self().AttendBranchHeadMajor(backend, Mh(Tokens), Rows(CtxTokens), default);
+            case "cross" or "cross-int8-refused":
+                Self(refused).AttendBranchHeadMajor(backend, Mh(Tokens), Rows(CtxTokens), default);
                 break;
             case "s2v":
                 new AttentionLayer(Config(allowF16: false) with { QkNorm = AttentionQkNorm.None })
@@ -349,6 +353,7 @@ public sealed class WanAttentionTraceTests
         AttentionCall call = Assert.Single(backend.Calls);
         Assert.Equal(AttentionRoute.Dense, call.Route);
         Assert.Equal(allowF16, call.Numerics.LegacyAssertedBounded);
+        Assert.Equal(refused, call.Numerics.Refused);
         Assert.Null(call.LegacyGap());
         Assert.Equal(1.0f / MathF.Sqrt(HeadDim), call.Scale);
         Assert.Equal(DType.F32, call.Output.Storage.DType);

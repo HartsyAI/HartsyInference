@@ -193,8 +193,9 @@ public sealed class WanVideoRecipe : IVideoRecipe
             DenoiserActivationBytes = request =>
             {
                 int frames = Math.Max(1, request.Frames ?? 1);
+                // F32: the estimate knows neither the backend nor whether the request runs the F16 path.
                 return WanVideoPipeline.WanActivationReserveBytes((frames - 1) / temporal + 1,
-                    Math.Max(1, request.Height / spatial), Math.Max(1, request.Width / spatial), innerDim, patchSize);
+                    Math.Max(1, request.Height / spatial), Math.Max(1, request.Width / spatial), innerDim, patchSize, sizeof(float));
             },
             VaeActivationBytes = request =>
                 WanVideoPipeline.WanDecodeReserveBytes(Math.Max(1, request.Frames ?? 1), request.Width, request.Height),
