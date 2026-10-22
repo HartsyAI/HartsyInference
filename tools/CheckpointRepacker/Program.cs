@@ -547,6 +547,7 @@ try
             List<Regex> drops = [.. (values.GetValueOrDefault("--drop") ?? []).Select(Glob)];
             List<Regex> keeps = [.. (values.GetValueOrDefault("--keep-dtype") ?? []).Select(Glob)];
             int dropped = 0;
+            HashSet<string> sourceNvfp4Layers = new(StringComparer.Ordinal);
             List<Tensor> owned = [];
             if (recipe is not null)
             {
@@ -560,11 +561,22 @@ try
             {
                 (List<KeyValuePair<string, Tensor>> tensors, List<SafeTensorsLoader> opened) = SafeTensorsMerger.Open(p);
                 loaders.AddRange(opened);
-                foreach ((string key, Tensor tensor) in tensors)
+                string MapKey(string key)
                 {
                     string mapped = stripPrefix is not null && key.StartsWith(stripPrefix, StringComparison.Ordinal) ? key[stripPrefix.Length..] : key;
                     foreach ((string from, string to) in renames)
                         mapped = mapped.Replace(from, to, StringComparison.Ordinal);
+                    return mapped;
+                }
+                // A source's Comfy-layout marker names its NVFP4 groups by their source keys; carry it under the output keys.
+                foreach (SafeTensorsLoader loader in opened)
+                {
+                    foreach (string layer in Nvfp4Codec.MarkedLayers(loader.Metadata) ?? [])
+                        sourceNvfp4Layers.Add(prefix + MapKey(layer + ".weight")[..^".weight".Length]);
+                }
+                foreach ((string key, Tensor tensor) in tensors)
+                {
+                    string mapped = MapKey(key);
                     if (drops.Any(d => d.IsMatch(mapped)))
                     {
                         dropped++;
@@ -662,9 +674,13 @@ try
             output = named;
             metadata = BuildMetadata();
             // Not identity, so written even under --no-metadata: it is what marks the groups as Comfy layout for this
-            // engine's loader and what makes ComfyUI read them as nvfp4 at all.
-            if (nvfp4Layers.Count > 0)
-                (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = Nvfp4Codec.QuantizationMetadata(nvfp4Layers);
+            // engine's loader and what makes ComfyUI read them as nvfp4 at all. Groups passed through from a marked source
+            // keep their mark, or a later open would read them as ModelOpt; an unmarked source group stays unmarked.
+            HashSet<string> outputKeys = new(all.Select(kv => kv.Key), StringComparer.Ordinal);
+            List<string> marked = [.. nvfp4Layers.Concat(sourceNvfp4Layers.Where(layer => outputKeys.Contains(layer + ".weight")
+                && !nvfp4Layers.Contains(layer))).Order(StringComparer.Ordinal)];
+            if (marked.Count > 0)
+                (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = Nvfp4Codec.QuantizationMetadata(marked);
             long inBytes = mergeSources.Sum(f => new FileInfo(f).Length);
             Console.WriteLine($"Writing {all.Count} tensors from {loaders.Count} file(s) ({Size(inBytes)})"
                 + (castTo is { } t ? $", cast to {t.Name}" : "") + $" to {Path.GetFileName(output)}...");
@@ -681,9 +697,11 @@ try
     }
     else if (isSafeTensors)
     {
+        string? quantMarker = null;
         using (SafeTensorsLoader header = new())
         {
             header.Load(input);
+            quantMarker = header.Metadata?.GetValueOrDefault("_quantization_metadata");
             if (ResolveOutput(header.Descriptors.Values.Select(d => (d.DType, d.Shape.ElementCount))) is not string named)
             {
                 return 1;
@@ -691,6 +709,9 @@ try
             output = named;
         }
         metadata = BuildMetadata();
+        // The NVFP4 layout marker is a format fact about the copied tensors, not identity, so a rewrite keeps it.
+        if (!string.IsNullOrEmpty(quantMarker))
+            (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = quantMarker;
         Console.WriteLine($"Rewriting metadata; {Size(new FileInfo(input).Length)} of tensors copied unchanged...");
         payloadSha = SafeTensorsWriter.RewriteMetadata(input, output, metadata ?? []);
         using SafeTensorsLoader check = new();

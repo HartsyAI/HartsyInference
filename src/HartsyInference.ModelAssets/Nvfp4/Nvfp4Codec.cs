@@ -81,6 +81,10 @@ public static unsafe class Nvfp4Codec
         }
     }
 
+    /// <summary>The layers a file's <c>_quantization_metadata</c> marks as Comfy-layout groups, or null when it has none.</summary>
+    public static HashSet<string>? MarkedLayers(IReadOnlyDictionary<string, string>? metadata)
+        => Nvfp4LayoutNormalizer.FileLevelLayers(metadata);
+
     /// <summary>The file-level <c>_quantization_metadata</c> value ComfyUI turns into per-layer configs, naming each layer
     /// (the weight key without <c>.weight</c>) as nvfp4. Its presence is what marks a group as Comfy layout on load.</summary>
     public static string QuantizationMetadata(IEnumerable<string> layers)

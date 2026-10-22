@@ -49,7 +49,7 @@ internal static class Nvfp4LayoutNormalizer
     }
 
     /// <summary>The layer names a file-level <c>_quantization_metadata</c> lists, or null when the file has none.</summary>
-    private static HashSet<string>? FileLevelLayers(IReadOnlyDictionary<string, string>? metadata)
+    internal static HashSet<string>? FileLevelLayers(IReadOnlyDictionary<string, string>? metadata)
     {
         if (metadata is null || !metadata.TryGetValue("_quantization_metadata", out string? json) || string.IsNullOrEmpty(json))
             return null;
