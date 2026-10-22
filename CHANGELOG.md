@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Faster: Wan's denoise step.** Each block's text cross-attention keys and values are projected once per prompt per
+  generation and kept on the device, instead of re-projecting the 512 context rows on every step; the cache is pinned
+  per backend, released when the denoise loop ends, and off when the DiT streams or VRAM is short. Self-attention casts
+  its normed input to F16 once for its three projections instead of once each (F16 weights on CUDA), and the per-block
+  modulation is one add over the six-row table instead of eighteen ops. Output is bit-identical.
 - **Fixed: Llama-3.2-Vision (mllama) answers lost words at random.** Its embedding table carries 8 image-token rows the LM head
   never scores, and the logit width came from the table, so the last 8 logits were never written and held whatever the device
   buffer last contained. Greedy decoding picked one whenever that stale value was the largest; those ids decode to nothing. The

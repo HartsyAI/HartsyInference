@@ -430,6 +430,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int cfgSkippedSteps = 0;
         int cacheComputes = 0, cacheReuses = 0, uncondComputes = 0, uncondReuses = 0;
         WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
+        using IDisposable? textKv = OpenTextKvCache(stream, tLat, hLat, wLat, promptEmbeds, negativeEmbeds,
+            cfgParallelEnabled ? CfgParallelBackend : cpEnabled ? CpBackends![1] : null);
 
         for (int k = 0; k < steps; k++)
         {
@@ -547,6 +549,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             if (cfgParallelEnabled) CfgParallelBackend!.FreeActivations();
             if (cpEnabled) CpBackends![1].FreeActivations();
         }
+        textKv?.Dispose();   // before the decode-headroom check below measures free VRAM
         cpExchange?.Dispose();
 
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);
@@ -929,6 +932,25 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Logs.Info($"[wan-phase] cond encode fits beside the resident DiT " +
                 $"(need ~{encodeNeedBytes >> 20} MB + 2048 MB margin, free {free >> 20} MB) — evict skipped.");
         }
+    }
+
+    /// <summary>Opens the single-expert transformer's text cross-attention K/V cache when the DiT is fully resident and every
+    /// backend the loop runs on still has the activation reserve free beside both contexts' K/V; null otherwise.</summary>
+    private IDisposable? OpenTextKvCache(BlockStreamingScope? stream, int tLat, int hLat, int wLat, Tensor promptEmbeds,
+        Tensor negativeEmbeds, IBackend? second)
+    {
+        if (_transformer2 is not null || stream?.Streaming == true)
+            return null;
+        int contextTokens = (int)Math.Max(promptEmbeds.Shape[0], negativeEmbeds.Shape[0]);
+        long need = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim, _config.PatchSize)
+            + _transformer.TextCrossAttentionKvBytes(contextTokens, contexts: 2);
+        long free = Backend.FreeMemoryBytes();
+        if (free < need || second?.FreeMemoryBytes() < need)
+        {
+            if (free > 0) Logs.Info($"Wan text cross-attention K/V cache off: under {need >> 20} MB free beside the resident DiT.");
+            return null;
+        }
+        return _transformer.CacheTextCrossAttentionKv();
     }
 
     /// <summary>Bytes the denoise phase needs beside the weights, so the resident/streamed decision and the block window budget against the same number.</summary>

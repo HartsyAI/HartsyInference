@@ -1,3 +1,4 @@
+using System.Reflection;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
@@ -6,8 +7,9 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>The UNet's two-slot (backend, context) constant K/V cache: which slot a backend owns, what a hit returns, what an
-/// eviction disposes, and that two threads on two backends sharing one sub-block never see each other's tensors.</summary>
+/// <summary>The (backend, context) constant K/V cache: which entries a backend owns, what a hit returns, what an eviction disposes,
+/// that two threads on two backends sharing one sub-block never see each other's tensors, and the pinned two-context form Wan's
+/// text cross-attention keeps per generation.</summary>
 public sealed unsafe class ConstantKvCacheTests
 {
     private const int Channels = 16, Heads = 2, CtxDim = 12, Tokens = 6, CtxTokens = 5;
@@ -205,6 +207,106 @@ public sealed unsafe class ConstantKvCacheTests
 
         Assert.Null(failures[0]);
         Assert.Null(failures[1]);
+    }
+
+    [Fact]
+    public void TwoContextsOnOneBackendBothStayCachedWhenTheBackendHoldsTwo()
+    {
+        using CpuBackend backend = new();
+        ConstantKvCache cache = new(contextsPerBackend: 2, pinned: false);
+        Tensor cond = Ctx(), uncond = Ctx(), condKey = Mh(), uncondKey = Mh();
+
+        for (int step = 0; step < 3; step++)
+        {
+            if (!cache.TryGet(backend, cond, out _, out _)) Assert.True(cache.TryStore(backend, cond, condKey, Mh()));
+            if (!cache.TryGet(backend, uncond, out _, out _)) Assert.True(cache.TryStore(backend, uncond, uncondKey, Mh()));
+        }
+
+        Assert.True(cache.TryGet(backend, cond, out Tensor hitCond, out _));
+        Assert.True(cache.TryGet(backend, uncond, out Tensor hitUncond, out _));
+        Assert.Same(condKey, hitCond);
+        Assert.Same(uncondKey, hitUncond);
+        Assert.False(IsDisposed(condKey));
+        Assert.False(IsDisposed(uncondKey));
+    }
+
+    [Fact]
+    public void AFullBackendReplacesItsOldestContextAndLeavesTheOtherBackendAlone()
+    {
+        using CpuBackend a = new();
+        using CpuBackend b = new();
+        ConstantKvCache cache = new(contextsPerBackend: 2, pinned: false);
+        Tensor first = Ctx(), second = Ctx(), third = Ctx(), other = Ctx();
+        Tensor firstKey = Mh(), firstValue = Mh(), secondKey = Mh(), otherKey = Mh();
+        cache.TryStore(a, first, firstKey, firstValue);
+        cache.TryStore(a, second, secondKey, Mh());
+        cache.TryStore(b, other, otherKey, Mh());
+
+        Assert.True(cache.TryStore(a, third, Mh(), Mh()));
+
+        Assert.True(IsDisposed(firstKey));
+        Assert.True(IsDisposed(firstValue));
+        Assert.False(cache.TryGet(a, first, out _, out _));
+        Assert.True(cache.TryGet(a, second, out Tensor hitSecond, out _));
+        Assert.True(cache.TryGet(a, third, out _, out _));
+        Assert.True(cache.TryGet(b, other, out Tensor hitOther, out _));
+        Assert.Same(secondKey, hitSecond);
+        Assert.Same(otherKey, hitOther);
+        Assert.False(IsDisposed(otherKey));
+    }
+
+    [Fact]
+    public void PinnedEntriesArePinnedOnTheirBackendUntilEvictedOrCleared()
+    {
+        IBackend a = PinLog.Create(out PinLog logA);
+        IBackend b = PinLog.Create(out PinLog logB);
+        ConstantKvCache cache = new(contextsPerBackend: 1, pinned: true);
+        Tensor ctxA = Ctx(), ctxB = Ctx(), keyA = Mh(), valueA = Mh(), keyB = Mh(), valueB = Mh(), keyA2 = Mh(), valueA2 = Mh();
+
+        cache.TryStore(a, ctxA, keyA, valueA);
+        cache.TryStore(b, ctxB, keyB, valueB);
+        Assert.Equal([keyA, valueA], logA.Pinned);
+        Assert.Equal([keyB, valueB], logB.Pinned);
+
+        cache.TryStore(a, Ctx(), keyA2, valueA2);
+        Assert.Equal([keyA2, valueA2], logA.Pinned);
+        Assert.True(IsDisposed(keyA));
+        Assert.True(IsDisposed(valueA));
+
+        cache.Clear();
+        Assert.Empty(logA.Pinned);
+        Assert.Empty(logB.Pinned);
+        Assert.All((Tensor[])[keyA2, valueA2, keyB, valueB], t => Assert.True(IsDisposed(t)));
+        Assert.False(cache.TryGet(b, ctxB, out _, out _));
+        Assert.True(cache.TryStore(b, ctxB, Mh(), Mh()));
+    }
+
+    /// <summary>A backend that only records what is pinned; any other member throws.</summary>
+    private class PinLog : DispatchProxy
+    {
+        public List<Tensor> Pinned { get; } = [];
+
+        public static IBackend Create(out PinLog log)
+        {
+            IBackend backend = DispatchProxy.Create<IBackend, PinLog>();
+            log = (PinLog)(object)backend;
+            return backend;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            switch (targetMethod!.Name)
+            {
+                case nameof(IBackend.PinActivation):
+                    Pinned.Add((Tensor)args![0]!);
+                    return null;
+                case nameof(IBackend.UnpinActivation):
+                    Assert.True(Pinned.Remove((Tensor)args![0]!), "unpinned a tensor that was not pinned");
+                    return null;
+                default:
+                    throw new NotSupportedException(targetMethod.Name);
+            }
+        }
     }
 
     private static float[] Read(Tensor t) => new ReadOnlySpan<float>(t.DataPointer, checked((int)t.ElementCount)).ToArray();
