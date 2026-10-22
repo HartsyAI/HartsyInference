@@ -28,7 +28,7 @@ public sealed class FLiteRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "f-lite", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>F-Lite's official sampling settings: 30 steps at CFG 6.0, 1024x1024 (<c>FLiteConfig.DefaultSteps</c>/<c>DefaultCfgScale</c>).</summary>
+    /// <summary>F-Lite's official sampling settings: 30 steps at CFG 6.0, 1024x1024.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 30, CfgScale = 6.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>

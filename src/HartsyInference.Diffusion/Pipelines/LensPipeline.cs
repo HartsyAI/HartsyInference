@@ -148,7 +148,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
     /// <summary>Generates an image from pre-computed GPT-OSS multi-layer text embeddings. Four positive captures + four negative captures (same length per layer; positives and negatives may differ in S_txt — cond and uncond run as separate forwards at their natural lengths). Each capture is <c>[B, S_txt, 2880]</c> matching <see cref="LensConfig.EncoderHiddenDim"/>.</summary>
     /// <param name="positiveLayers">Positive-prompt hidden states captured at <see cref="LensConfig.SelectedEncoderLayers"/>. Must have exactly 4 entries.</param>
     /// <param name="negativeLayers">Negative-prompt hidden states (same layer order as <paramref name="positiveLayers"/>). Required when <c>request.CfgScale &gt; 1.0</c>; ignored otherwise.</param>
-    /// <param name="request">Generation parameters. <c>request.CfgScale</c> falls back to <see cref="LensConfig.DefaultCfgScale"/> if unset. <c>request.Steps</c> falls back to <see cref="LensConfig.DefaultSteps"/>.</param>
+    /// <param name="request">Generation parameters, every tunable already resolved by the caller.</param>
     /// <param name="onProgress">Optional per-step progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromEmbeddings(
         IReadOnlyList<Tensor> positiveLayers,
