@@ -132,7 +132,8 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
         }
         Assert.Throws<ArgumentException>(() => Supplied(s => s.QueryScales[0] = 0f));
         Assert.Throws<ArgumentException>(() => Supplied(s => s.KeyScales[5] = -1f));
-        Assert.Throws<ArgumentException>(() => Supplied(s => s.ValueScales[7] = float.Epsilon));
+        Assert.Contains("V scale 7 ",
+            Assert.Throws<ArgumentException>(() => Supplied(s => s.ValueScales[7] = float.Epsilon)).Message);
         Assert.True(float.IsNaN(Supplied(s => s.KeyScales[5] = float.NaN).KeyScales[5]));
         Assert.Equal(float.PositiveInfinity, Supplied(s => s.ValueScales[7] = float.PositiveInfinity).ValueScales[7]);
     }

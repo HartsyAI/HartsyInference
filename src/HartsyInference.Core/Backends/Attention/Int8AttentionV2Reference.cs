@@ -249,12 +249,12 @@ public static class Int8AttentionV2Reference
             || from.KeyScales.Length != to.KeyScales.Length || from.ValueScales.Length != to.ValueScales.Length
             || !from.Rows.AsSpan().SequenceEqual(to.Rows))
             throw new ArgumentException("The supplied scales belong to another call, rows or variant.", nameof(from));
-        foreach (float[] scales in (float[][])[from.QueryScales, from.KeyScales, from.ValueScales])
-            foreach (float s in scales)
-                if (s < MinNormal)
-                    throw new ArgumentException(
-                        $"Supplied scale {s}: a stats pass scale is NaN, +∞ or at least the smallest normal float.",
-                        nameof(from));
+        (string, float[])[] supplied = [("Q", from.QueryScales), ("K", from.KeyScales), ("V", from.ValueScales)];
+        foreach ((string name, float[] values) in supplied)
+            for (int i = 0; i < values.Length; i++)
+                if (values[i] < MinNormal)
+                    throw new ArgumentException($"Supplied {name} scale {i} is {values[i]}; a stats pass scale is NaN, "
+                        + "+∞ or at least the smallest normal float.", nameof(from));
         from.QueryScales.CopyTo(to.QueryScales, 0);
         if (to.Options.SmoothKeys) from.KeyMeans.CopyTo(to.KeyMeans, 0);
         from.KeyScales.CopyTo(to.KeyScales, 0);
