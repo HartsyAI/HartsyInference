@@ -158,9 +158,9 @@ no bug, any more than one bad seed was proof there was one.
   `×2` feeding a skip concat; latents whose size is a multiple of 8 never exercise either.
 - **Un-normalized V + an F16 attention fast path = threshold NaN.** Microsoft Lens RMS-norms Q/K but not
   V; its residual stream is architecturally huge (`max|V|` 18940→71583 across forwards), crossing F16's
-  65504 → solid black. SageAttention's INT8 path casts V to F16 and is **default-on regardless of
-  `allowF16`** (only the cuDNN branch honors the flag). Fix: scale joint V by 1/256 before SDPA, scale
-  output back by 256 (attention is linear in V; power-of-2 = exponent-only).
+  65504 → solid black. Fix: never let such V reach an F16 row. Lens's attention asserts no F16 bound and takes the
+  BF16 grant (F32's range); `numerics.sdpaF16`, which forces F16 for every caller, still clips it. A power-of-two
+  damp on V (scaled back out of the output) is exact on F32 rows if an F16 path must be used.
 - **F16 damp in front of a norm without a matched eps = washed-out image, never a NaN.** A damp `c` on a
   projection that feeds an RMSNorm is exact only as `RMSNorm(c·x, c²·eps)`; with the plain eps the norm sees
   `c²·mean(x²) + eps`, so a sublayer with a small output is shrunk instead of normalized and the image goes hazy,
