@@ -67,6 +67,12 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   configs; capability limits go in `Constraints`, not defaults.
 - A default that differs from SwarmUI's documented one, or comes from upstream where SwarmUI has none, carries a
   one-line comment saying why. Design and the per-family ledger: [RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md).
+- Changing any value in a defaults record bumps its `Revision`. For image and video the revision travels into the
+  plan's `RecipeIdentity`, so output made under old and new values stays distinguishable; music results do not carry
+  it yet.
+- Declare a `Sampler` or `Scheduler` only when the family's pipeline accepts it for every unset request. Solver-owned
+  families refuse any name, any declared schedule is refused with img2img and inpaint, and a fixed `SigmaShift`
+  overrides a shift the pipeline computes from the resolution. Leave the field null in those cases.
 - Music recipes (`IMusicRecipe`) follow the same rules: `MusicRequest` fields are nullable and `MusicService` fills them
   from the recipe before any loader runs. A loader reads a filled field with `Filled()`, which fails by name if the
   recipe was skipped. A placed checkpoint's variant is not trusted for defaults; the loader applies them once it reads the header.
@@ -96,7 +102,7 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
 ## Model Variants
 
 A family whose builds share one architecture but need different contracts (Qwen-Image base/Edit/Edit-Plus, Z-Image
-Base/Turbo, LTX-2.5 dev/distilled, Wan VACE/Animate/S2V) declares them once as a `ModelVariantCatalog`
+Base/Turbo, LTX-2.5 dev/distilled, Wan VACE/Animate/S2V/2.2 I2V-14B) declares them once as a `ModelVariantCatalog`
 (`Engine/Variants`) and returns it from `IArchitectureRecipe.Variants` / `IVideoRecipe.Variants`. Never sniff a
 filename or metadata in a recipe. `ModelVariantResolver` weighs the evidence in a fixed order:
 
@@ -107,7 +113,11 @@ filename or metadata in a recipe. `ModelVariantResolver` weighs the evidence in 
 3. **Metadata**: `modelspec.architecture` against `MetadataClassIds`, `hartsy.model_id` against the id, then `MetadataMatch`.
 4. **Filename**: whole-token `FilenameTokenSets` (`!token` excludes), logged as a guess. It is a last resort for families
    that genuinely have nothing else.
-5. **Default**.
+5. **Default**: the catalog default, with the evidence "no variant signal found".
+
+Each step scans the whole catalog, so every structure rule runs before any metadata rule whatever the catalog order.
+A structure rule whose shape a metadata-identified variant also has must exclude that metadata itself: Wan 2.2
+I2V-14B's rule excludes Animate-2's config, because a repacked Animate-2 without its image branch has the same shape.
 
 The engine resolves once per construction and passes the result as `RecipeContext.Variant`. The result is part of the
 pipeline cache key and feeds `SupportsFor` / `DefaultsFor`. Hosts query the same answer through `IInferenceEngine.Recipes`.

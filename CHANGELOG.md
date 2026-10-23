@@ -8,25 +8,62 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Added: Fibo 2.0 img2img and mask inpaint.** An init image and strength start the flow-matching schedule at the matching
-  sigma of the shifted schedule, and a mask (white = regenerate) keeps the rest on the source's noise trajectory with a final
-  recomposite. Not yet run on real weights.
-- **Added: Fibo 2.0 LoRA support.** `fibo2` declares `ImageFeatures.Lora` and merges stacks into the F16 weights before the
-  transformer loads. `Fibo2LoraMapper` reads Comfy-Org's turbo LoRA layout (adapters on the fused `qkv`, `to_kv`, `w13`, plus
-  `.diff`/`.diff_b`) and diffusers/PEFT names (split projections resolve to fused row slices). bf16 bases only; verified by CPU
-  merge tests and header-level key checks, not on a GPU.
-- **Added: Fibo 2.0 int8 ConvRot builds (`fibo2-dev-int8`, `fibo2-edit-turbo-int8`).** `Fibo2Recipe` keeps Comfy-Org's
-  `int8_tensorwise` + ConvRot 256 linears packed on a backend with the int8 kernels and widens them on the host
-  elsewhere (`QuantizedWeightPolicy`), for both the transformer and the `qwen3vl_4b_int8_convrot` text encoder, which is
-  pinned as a side model with the int8 builds' sha256. The fused `qkv`, `to_kv` and `w13` split while packed, with each
-  piece's per-row scale sliced to its rows. Not run on real weights or a GPU.
-- **Added: Fibo 2.0 image editing (`fibo2-dev` and `fibo2-edit-turbo`).** An instruction edit of one image, a masked edit (white =
-  regenerate, the region greyed out before it is encoded, as Bria's pipeline does) and a multi-reference edit of up to four images
-  referred to as `<image_1>`..`<image_4>`. The source and references are VAE-encoded into clean tokens after the image tokens (RoPE
-  frames `MaxGist + 2 + k`, timestep-0 modulation, also through the noise refiners), and the edit prompt reaches the model through the
-  Qwen3-VL vision tower, so the language tower now exposes multi-layer taps with deepstack
-  (`LlamaStyleEncoder.EncodeMultiLayerEmbedsMrope`). `fibo2-edit-turbo` is edit-only (4 steps, guidance 1.0, no unconditional pass)
-  and refuses a request without a source image. Declared as `RefEdit` (with `Inpaint` and `Img2Img`). Not run on the real edit checkpoint or a GPU.
+- **Faster: NVFP4 diffusion transformers stay packed on CUDA.** Krea 2, Qwen-Image, Boogu, Z-Image, Flux.1, HiDream and
+  Wan open their NVFP4 groups resident (`CheckpointOpenOptions.ForResidentNvfp4`) instead of unpacking them to F16 at
+  load, so `numerics.fp4Native` reaches them on Blackwell. Below Blackwell each GEMM unpacks the weight to exactly the
+  dense weight the old open made (`QuantWeightInfo.DenseDType`: same GEMM dtype, same small-m GEMV), so output is
+  unchanged. A resident weight no longer keeps an unpacked copy in the weight-cast cache; `vram.residentCastCache=1`
+  restores it. RTX 4090, 1024², digest-identical to the previous build:
+
+  | model | step ms (before → after) | peak VRAM GB (before → after) | cache on: step ms, peak GB |
+  |---|---|---|---|
+  | Krea 2 Turbo | 3496 → 794 | 6.6 → 12.9 (before streamed its 24 GB F16 copy) | 793, 12.9 |
+  | Qwen-Image | 9940 → 1446 | 7.1 → 21.0 (before streamed) | 1445, 21.0 |
+  | Z-Image Turbo | 398 → 408 | 13.9 → 7.7 | 397, 18.3 |
+  | Boogu Turbo | did not load → 731 | — → 12.4 | 716, 21.2 |
+
+  CPU and Vulkan keep the eager unpack.
+- **Fixed: Comfy-Org's Boogu NVFP4 builds load and render.** The eager unpack refused their padded block scales, and
+  their 840-row K/V projections ship padded to 848 rows; the recipe trims them at load. RTX 4090 Boogu Turbo NVFP4, 4
+  steps: 720 ms/step, a clean image against the fp8 build (SSIM 0.73-0.80, seeds 42-44); the F16-at-open arm ran out of
+  VRAM at decode. CUDA's Linear now refuses an output narrower than the weight instead of writing past it. Boogu's VRAM preflight asks
+  13.5 GB of a packed NVFP4 build instead of 16.
+- **Fixed: Flux.1's single-block linear1 split keeps the weight's quantization companions** (`SplitRows`), including
+  the fp8 input scale the double-block QKV split already carried.
+- **Fixed: NVFP4 files without a ComfyUI layer config are read as ModelOpt layout.**
+  - Before, every NVFP4 group was decoded as Comfy layout (blocked scales, high nibble first). A ModelOpt-layout file
+    (row-major scales, low nibble first) decoded as noise: correlation about 0.00 against the source weights,
+    against 0.995 for the right decode. That includes the repacked MiniMax-H3 NVFP4 build, sampled against the fp8 H3
+    DiT.
+  - A group with neither a `.comfy_quant` blob nor a file-level `_quantization_metadata` entry is now converted to Comfy
+    layout at open, and the conversion is logged. ComfyUI will not load an NVFP4 weight without such a config, and
+    every Comfy-sourced NVFP4 file on this host carries one.
+  - The repacker's `--quant nvfp4` writes Comfy layout with `_quantization_metadata`, so its files also load in ComfyUI.
+  - The eager NVFP4 dequants accept a block-scale tensor padded to the 128-row tile, and refuse one their blocked
+    indexing would read past (main read past an unpadded one).
+  - The H3 build still needs about 66 GB of host RAM to open until its DiT stays packed.
+- **Fixed: the native NVFP4 GEMM (`numerics.fp4Native`, Blackwell) is safe to switch on.**
+  - It multiplies by the weight's own scale factor, the alpha the F16 damps of Z-Image, Flux.1, Chroma and Flux.2
+    scale, so Z-Image's NVFP4 build no longer decodes NaN (RTX 5090: 131 ms per step, against 278 for the F16 build).
+  - A shape cuBLASLt declines falls back to the per-GEMM unpack path, and that weight stays there, instead of failing
+    the generation.
+  - A block-scale tensor whose rows are not padded to the 128-row tile is refused at load instead of read past its end.
+  - The unload summary counts weights per route as well as calls, and keeps the first refusal even when the first
+    dispatch went native.
+- **Fixed: the sm_120a block-quant kernel builds from source again.** `block_scale.cuh` had gone back to a 16-bit
+  destination for `cvt.rn.satfinite.e2m1x2.f32` (reverted in `81ad529b1`), so rebuilding `block_quant.sm120.ptx` would
+  reproduce the module no CC 12.0 card can load; only the shipped PTX had been patched by hand. The source writes through
+  a `.b8` temporary again, the shipped variant is regenerated from it (identical to the hand-patched file except at the 16
+  cvt sites), the kernel build assembles everything it emits with `ptxas` when one is found, and `CudaKernelDriftTests`
+  rebuilds each `Ptx/<kernel>.sm<NNN>.ptx` with `--arch` and fails on a PTX the assembler refuses. Cards below CC 12.0 load
+  the unchanged baseline PTX.
+- **Fixed: NVFP4 weights folded to fp8 no longer clip.** Off Blackwell, FLUX.3, MOSS, Ideogram 4 and the Flux.2 text
+  encoder unpack NVFP4 to fp8 at open, and `e2m1 · block_scale` reaches 6 · 448 = 2688 where e4m3 stops at 448: every
+  value past it was clipped, 2.4 % of FLUX.3 Klein's weights (22 % of its worst layer) and 0.5 % of Ideogram 4's. The
+  fold now stores `e2m1 · block_scale / 8` and carries the 8 on `Fp8ScaleFactor`, a power of two, so no normal-range
+  value moves; FLUX.3's fold error falls from 1.5 % of its weight energy to 0.04 %. On an RTX 4090, FLUX.3 Klein NVFP4
+  against its own bf16 build reaches SSIM 0.935, 0.917 and 0.897 on seeds 42-44, from 0.708, 0.639 and 0.642, at the
+  same 295 ms per step. Output changes for those models on Ada and Ampere.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch
@@ -68,6 +105,21 @@ stable release will require. Dates are UTC.
   token-major rows read one sequence) stay head-major. Measured bit-identical on CUDA's cuDNN row through the whole
   layer at B=2: SDXL's 64×64 and 32×32 levels and sdxl-wide's 80×45. On an RTX 4090 against main, sdxl and sdxl-wide
   decode to the same pixels at 255 and 233 ms per step against 259 and 240 (one warm rep each).
+- **Added: a teacher-forced denoiser probe.** `diagnostics.denoiserProbe=record` writes the denoiser's conditioning and, at the
+  probed steps (`diagnostics.denoiserProbeSteps`, first, mid and last by default), its inputs and outputs to
+  `diagnostics.denoiserProbeDir`; `replay` loads that conditioning, runs one more forward at each probed step on the recorded
+  inputs and writes relL2, cosine and max |d| per output to `probe.tsv`, leaving its own trajectory alone. It judges a numerics
+  change on a model whose trajectory is too chaotic for image SSIM, such as MiniMax-H3 or SD3.5 Medium. Every sampler
+  `SamplerRegistry` builds carries it, as do the H3, Wan text-to-video and Lumina 2 loops; `tests/regression-ab.sh --probe` runs
+  it. Off by default; output is unchanged.
+- **Fixed: CUDA work across two devices that share a host tensor.** A residency hook (the sync, release or demotion that a
+  host read or a disposal fires) bound its own device's context and left it current, so an op on one device that read a
+  tensor the other device held sent its next call to the other device's context. Wan's context parallelism failed on its
+  first forward this way: rank 1's upload of the text context that rank 0 had promoted returned
+  `CUDA_ERROR_INVALID_VALUE`. Hooks now put the caller's context back, and an upload re-binds its own after reading the
+  host bytes, as the promote path already did. `CfgBranchRunner` reports both branches' exceptions when both fail, so a
+  context-parallel rank's own error is no longer replaced by its peer's abort, and the engine's out-of-VRAM cleanup still
+  fires when one of the two is an out-of-VRAM.
 
 ## alpha.388
 
@@ -78,9 +130,38 @@ stable release will require. Dates are UTC.
   Licence CC-BY-NC-4.0.
 - **Fixed: `paths.sideModelAutofetch=false` was ignored by `ModelFileLocator.RequireOrEnsure`**, so Fibo 2.0, Flux.3 and MOSS-Image
   still downloaded a missing text encoder or VAE. A missing one is now an error when the knob is off.
+- **Added: Fibo 2.0 img2img and mask inpaint.** An init image and strength start the flow-matching schedule at the matching
+  sigma of the shifted schedule, and a mask (white = regenerate) keeps the rest on the source's noise trajectory with a final
+  recomposite. Not yet run on real weights.
+- **Added: Fibo 2.0 LoRA support.** `fibo2` declares `ImageFeatures.Lora` and merges stacks into the F16 weights before the
+  transformer loads. `Fibo2LoraMapper` reads Comfy-Org's turbo LoRA layout (adapters on the fused `qkv`, `to_kv`, `w13`, plus
+  `.diff`/`.diff_b`) and diffusers/PEFT names (split projections resolve to fused row slices). bf16 bases only; verified by CPU
+  merge tests and header-level key checks, not on a GPU.
+- **Added: Fibo 2.0 int8 ConvRot builds (`fibo2-dev-int8`, `fibo2-edit-turbo-int8`).** `Fibo2Recipe` keeps Comfy-Org's
+  `int8_tensorwise` + ConvRot 256 linears packed on a backend with the int8 kernels and widens them on the host
+  elsewhere (`QuantizedWeightPolicy`), for both the transformer and the `qwen3vl_4b_int8_convrot` text encoder, which is
+  pinned as a side model with the int8 builds' sha256. The fused `qkv`, `to_kv` and `w13` split while packed, with each
+  piece's per-row scale sliced to its rows. Not run on real weights or a GPU.
+- **Added: Fibo 2.0 image editing (`fibo2-dev` and `fibo2-edit-turbo`).** An instruction edit of one image, a masked edit (white =
+  regenerate, the region greyed out before it is encoded, as Bria's pipeline does) and a multi-reference edit of up to four images
+  referred to as `<image_1>`..`<image_4>`. The source and references are VAE-encoded into clean tokens after the image tokens (RoPE
+  frames `MaxGist + 2 + k`, timestep-0 modulation, also through the noise refiners), and the edit prompt reaches the model through the
+  Qwen3-VL vision tower, so the language tower now exposes multi-layer taps with deepstack
+  (`LlamaStyleEncoder.EncodeMultiLayerEmbedsMrope`). `fibo2-edit-turbo` is edit-only (4 steps, guidance 1.0, no unconditional pass)
+  and refuses a request without a source image. Declared as `RefEdit` (with `Inpaint` and `Img2Img`). Not run on the real edit checkpoint or a GPU.
 
 ## alpha.387
 
+- **Changed: Anima Base and Flux 3 Image Base default to the `er_sde` sampler**, SwarmUI core's choice for both (#521).
+  Anima Turbo and the Flux 3 distilled build keep their pipeline's sampler. A request that names a sampler is
+  unchanged. `docs/Research/RECIPE_CONTRACT.md` records why the rest of SwarmUI's per-model samplers, schedulers and
+  shifts stay with the pipelines.
+- **Changed: Wan 2.2 I2V-14B is recognised by its weights and defaults to CFG 3.5**, SwarmUI core's value (#522). It
+  shares the `wan-21-14b` class and ran Wan 2.1's CFG 6. The new `i2v-22-14b` variant matches the 14B backbone with a
+  36-channel patch embedding and no CLIP image branch; Wan 2.1 I2V, FLF2V and Animate-2 resolve as before.
+- **Changed: `hartsy music` without `--duration` renders the model's recipe duration** (120 s for ACE-Step 1.5 and
+  MiniMax Music 3, 300 s for YuE2) instead of 10 s; the REPL's music duration starts unset too (#532). An explicit
+  `--duration` is unchanged.
 - **Fixed: CUDA head-major attention past 2^32 score elements returns the right rows.** The materialized row's softmax forms
   each row's offset in 32 bits, so a call whose B·H·Sq·Skv score matrix passed 2^32 elements and reached that row (no cuDNN,
   SageAttention or flash row taking it; for F32 only on a card with more than about 34 GB free) normalized the wrong memory

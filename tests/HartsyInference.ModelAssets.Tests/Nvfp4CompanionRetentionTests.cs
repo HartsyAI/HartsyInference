@@ -45,7 +45,7 @@ public sealed unsafe class Nvfp4CompanionRetentionTests
     {
         Dictionary<string, Tensor> w = into ?? new Dictionary<string, Tensor>();
         w[$"{prefix}.weight"] = Filled(new TensorShape(2, 8), DType.U8, 0x22);
-        w[$"{prefix}.weight_scale"] = Filled(new TensorShape(2, 1), DType.F8E4M3, One);
+        w[$"{prefix}.weight_scale"] = Filled(new TensorShape(128, 4), DType.F8E4M3, One);   // the blocked tile
         w[$"{prefix}.weight_scale_2"] = Scalar(1f);
         return w;
     }

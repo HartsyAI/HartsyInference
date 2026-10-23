@@ -21,6 +21,9 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <summary>Minimum free VRAM to attempt a CUDA load — 10B DiT (fp8 ~10 GB) + Qwen3-VL-8B + VAE + headroom.</summary>
     private const double MinRequiredVramGb = 16.0;
 
+    /// <summary>The same floor for an NVFP4 DiT held packed, which leaves the transformer at a quarter of its bf16 size.</summary>
+    private const double MinRequiredVramGbResidentNvfp4 = 13.5;
+
     /// <inheritdoc/>
     public string Name => "boogu";
 
@@ -74,24 +77,6 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
-        // Asked of the backend, not of its class: any GPU backend that reports memory can answer this, and the
-        // preflight is about how much VRAM there is rather than about which vendor supplies it.
-        (long freeBytes, long totalBytes) = context.Backend.GetVramInfo();
-        if (totalBytes > 0)
-        {
-            double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-            if (freeGb < MinRequiredVramGb)
-            {
-                throw new InvalidOperationException(
-                    $"Boogu-Image needs ≥{MinRequiredVramGb:F0} GB free VRAM (10B DiT + Qwen3-VL-8B + VAE); " +
-                    $"this GPU has {freeGb:F1} GB free of {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB total.");
-            }
-        }
-        else
-        {
-            Logs.Warning("[BooguImageRecipe] Non-CUDA backend — a 10B DiT per step will be extremely slow.");
-        }
-
         // TODO(E-IMG-4): honor user-picked Qwen3-VL / VAE overrides from ImageRequest.Components (the SwarmUI loader
         // header-probed input.Get(T2IParamTypes.QwenModel/VAE) for a 4096-dim Qwen3-VL and a 16-channel FLUX.1 ae).
         string tePath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
@@ -101,8 +86,15 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
         try
         {
             (Dictionary<string, Tensor> transformerW, CheckpointSource transformerSource) =
-                ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true);
+                ComponentLoader.Load(context.CheckpointPath, "BooguImageRecipe", CheckpointConvertUtils.StripTransformerPrefix,
+                    CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends));
             loaders.Add(transformerSource);
+            RequireFreeVram(context, transformerW.Values.Any(static w => w.DType == DType.F4E2M1)
+                ? MinRequiredVramGbResidentNvfp4 : MinRequiredVramGb);
+            long kvRows = (long)BooguImageConfig.V01.NumKvHeads * BooguImageConfig.V01.HeadDim;
+            CheckpointConvertUtils.TrimPaddedRows(transformerW,
+                key => key.EndsWith("to_k.weight", StringComparison.Ordinal) || key.EndsWith("to_v.weight", StringComparison.Ordinal)
+                    ? kvRows : null);
             // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
             // the first GEMM, minutes into a generation.
             loaders.Add(QuantizedWeightPolicy.PrepareForBackends(transformerW, context.TransformerBackends));
@@ -151,6 +143,25 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
                 loader.Dispose();
             }
             throw;
+        }
+    }
+
+    /// <summary>Refuses a GPU without <paramref name="requiredGb"/> free before anything lands on it; a backend that reports no memory only gets a warning.</summary>
+    private static void RequireFreeVram(RecipeContext context, double requiredGb)
+    {
+        // Asked of the backend, not of its class: any GPU backend that reports memory can answer this.
+        (long freeBytes, long totalBytes) = context.Backend.GetVramInfo();
+        if (totalBytes <= 0)
+        {
+            Logs.Warning("[BooguImageRecipe] Non-CUDA backend — a 10B DiT per step will be extremely slow.");
+            return;
+        }
+        double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+        if (freeGb < requiredGb)
+        {
+            throw new InvalidOperationException(
+                $"Boogu-Image needs ≥{requiredGb:F1} GB free VRAM for this build (10B DiT + Qwen3-VL-8B + VAE); " +
+                $"this GPU has {freeGb:F1} GB free of {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB total.");
         }
     }
 }

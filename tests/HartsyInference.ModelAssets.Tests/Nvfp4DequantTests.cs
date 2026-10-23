@@ -54,8 +54,8 @@ public sealed unsafe class Nvfp4DequantTests
     [Fact]
     public void DequantNvfp4ToFp8_MatchesF16Path_WithinFp8Precision()
     {
-        // Same 16-element block as the exact-values test, but dequantized to fp8 (block scale folded into value,
-        // global scale on Fp8ScaleFactor). fp8_value * Fp8ScaleFactor must reproduce the F16 dequant.
+        // Same 16-element block as the exact-values test, but dequantized to fp8 (block scale ÷8 folded into the value,
+        // 8 · global scale on Fp8ScaleFactor). fp8_value * Fp8ScaleFactor must reproduce the F16 dequant.
         using Tensor packed = new(new TensorShape(1, 8), DType.U8);
         byte* p = (byte*)packed.DataPointer;
         p[0] = Pack(0, 1); p[1] = Pack(2, 3); p[2] = Pack(4, 5); p[3] = Pack(6, 7);
@@ -68,13 +68,93 @@ public sealed unsafe class Nvfp4DequantTests
         using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, g);
 
         Assert.Equal(DType.F8E4M3, fp8.DType);
-        Assert.Equal(g, fp8.Fp8ScaleFactor);
-        // fp8 stores e2m1*block_scale (= the F16 value / g); real value = decoded_fp8 * Fp8ScaleFactor.
+        Assert.Equal(8f * g, fp8.Fp8ScaleFactor);
+        // fp8 stores e2m1*block_scale/8 (= the F16 value / 8g); real value = decoded_fp8 * Fp8ScaleFactor.
         using Tensor fp8AsF32 = fp8.CastTo(DType.F32);          // CastTo folds Fp8ScaleFactor into the value
         Half* a = (Half*)f16.DataPointer;
         float* b = (float*)fp8AsF32.DataPointer;
         for (int i = 0; i < 16; i++)
             Assert.True(MathF.Abs((float)a[i] - b[i]) < 1e-3f, $"idx {i}: F16={(float)a[i]} fp8*scale={b[i]}");
+    }
+
+    /// <summary>The fp8 fold over every (e2m1 nibble, finite block-scale byte) pair, against bounds taken from e4m3's
+    /// format alone and fixed before the fold runs: half an ulp (2⁻⁴ relative) for a normal value, half a subnormal step
+    /// at the folded scale (2⁻⁷ · g) below it, and no clipping — <c>e2m1 · block_scale</c> reaches 6 · 448 = 2688, past
+    /// e4m3's 448. The negative control folds without the ÷8 and requires the same bounds to reject it.</summary>
+    [Fact]
+    public void DequantNvfp4ToFp8_EveryNibbleAndScaleByte_StaysWithinE4M3Rounding()
+    {
+        // One 128-row x 4-block-column swizzle tile; its 512 blocks cycle through the 127 finite non-negative scale
+        // bytes (0x7F is NaN) and each block holds all 16 nibbles in element order.
+        const int Rows = 128, BlockCols = 4, Cols = BlockCols * 16, PackedCols = Cols / 2;
+        const float G = 0.37f;
+        static byte ScaleByte(int row, int bcol) => (byte)((row * BlockCols + bcol) % 127);
+        static double E4M3(byte b)
+        {
+            int e = (b >> 3) & 0x0F, m = b & 0x07;
+            return e == 0 ? m / 8.0 * Math.Pow(2, -6) : (1 + m / 8.0) * Math.Pow(2, e - 7);
+        }
+        double[] e2m1 = [0, 0.5, 1, 1.5, 2, 3, 4, 6];
+        double Expected(int row, int col)
+        {
+            int nibble = col % 16;
+            double magnitude = e2m1[nibble & 7] * E4M3(ScaleByte(row, col / 16)) * G;
+            return (nibble & 8) != 0 ? -magnitude : magnitude;
+        }
+        // The 1e-6 slack is for the F32 multiply by Fp8ScaleFactor in CastTo; exact half-ulp ties sit on the bound.
+        static double Bound(double expected) => Math.Max(Math.Pow(2, -4) * Math.Abs(expected), Math.Pow(2, -7) * G) * (1 + 1e-6);
+
+        using Tensor packed = new(new TensorShape(Rows, PackedCols), DType.U8);
+        byte* p = (byte*)packed.DataPointer;
+        for (int i = 0; i < Rows * PackedCols; i++)
+            p[i] = Pack((byte)(2 * (i % 8)), (byte)(2 * (i % 8) + 1));
+        using Tensor blockScales = new(new TensorShape(Rows, BlockCols), DType.F8E4M3);
+        byte* s = (byte*)blockScales.DataPointer;
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < BlockCols; c++)
+                s[BlockScaleSwizzle.SwizzledIndex(r, c, BlockCols)] = ScaleByte(r, c);
+        }
+
+        using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, G);
+        using Tensor real = fp8.CastTo(DType.F32);          // folds Fp8ScaleFactor into the value
+        float* got = (float*)real.DataPointer;
+        int pastE4M3Max = 0;
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < Cols; c++)
+            {
+                double expected = Expected(r, c);
+                double error = Math.Abs(got[r * Cols + c] - expected);
+                Assert.True(error <= Bound(expected), $"row {r} col {c}: expected {expected}, got {got[r * Cols + c]}");
+                if (Math.Abs(expected) / G > 448) pastE4M3Max++;
+            }
+        }
+        Assert.True(pastE4M3Max > 0, "no folded value exceeds e4m3's 448, so the clipping case is not covered");
+
+        // Negative control: the same fold without the ÷8 (block scale only, g on Fp8ScaleFactor) clips past 448.
+        using Tensor unscaled = new(new TensorShape(Rows, Cols), DType.F32);
+        float* u = (float*)unscaled.DataPointer;
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < Cols; c++)
+                u[r * Cols + c] = (float)(Expected(r, c) / G);
+        }
+        using Tensor unscaledFp8 = unscaled.CastTo(DType.F8E4M3);
+        unscaledFp8.Fp8ScaleFactor = G;
+        using Tensor unscaledReal = unscaledFp8.CastTo(DType.F32);
+        float* bad = (float*)unscaledReal.DataPointer;
+        int rejected = 0;
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < Cols; c++)
+            {
+                double expected = Expected(r, c);
+                if (Math.Abs(bad[r * Cols + c] - expected) > Bound(expected)) rejected++;
+            }
+        }
+        _output.WriteLine($"{pastE4M3Max} of {Rows * Cols} values past 448 before the ÷8; the unscaled fold breaks the bound on {rejected}.");
+        Assert.True(rejected > 0, "the bounds accept the unscaled fold, so they cannot see clipping");
     }
 
     /// <summary>The block-scale matrix ComfyUI stores is in NVIDIA's blocked layout, not row-major, so the
@@ -334,5 +414,48 @@ public sealed unsafe class Nvfp4DequantTests
         (byte[] packed, byte[] scales, float global) = ModelOptNvfp4Codec.Quantize(src, rows, cols);
         float[] dec = Decode(packed, scales, global, rows, cols);
         AssertWithinBlockBound(src.ToArray(), dec, rows, cols, global, d.Name);
+    }
+
+    /// <summary>Padding to the 128-row, 4-column tile is accepted; a scale tensor larger than that is a mismatch, and so is
+    /// one padded in a single dimension, whose blocked indexing would read past its end (row 1 of [2, 4] is index 16).</summary>
+    [Theory]
+    [InlineData(128, 4, true)]
+    [InlineData(128, 1, true)]
+    [InlineData(2, 1, false)]
+    [InlineData(2, 4, false)]
+    [InlineData(256, 4, false)]
+    [InlineData(128, 8, false)]
+    public void DequantNvfp4_AcceptsPaddingOnly(int scaleRows, int scaleCols, bool accepted)
+    {
+        using Tensor packed = new(new TensorShape(2, 8), DType.U8);
+        using Tensor blockScales = new(new TensorShape(scaleRows, scaleCols), DType.F8E4M3);
+        if (accepted)
+        {
+            using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f);
+            using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f);
+        }
+        else
+        {
+            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f));
+            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
+        }
+    }
+
+    /// <summary>A stride below a whole column tile cannot address a second row tile: for a [129, 8] weight, scales [256, 2]
+    /// fit every bound yet put row 128 on row 0's bytes. The full [256, 4] tile is accepted.</summary>
+    [Theory]
+    [InlineData(256, 2, false)]
+    [InlineData(256, 4, true)]
+    public void DequantNvfp4_RefusesASubTileStrideAcrossRowTiles(int scaleRows, int scaleCols, bool accepted)
+    {
+        using Tensor packed = new(new TensorShape(129, 8), DType.U8);
+        using Tensor blockScales = new(new TensorShape(scaleRows, scaleCols), DType.F8E4M3);
+        if (accepted)
+        {
+            using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f);
+            return;
+        }
+        Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f));
+        Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
     }
 }

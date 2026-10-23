@@ -168,6 +168,8 @@ only an example value, so the upstream value stays.
 | boogu base | 25 / 3.5 | 20 / 4.0 | MS Boogu: 20 steps, CFG around 4 |
 | mage-flow base | 30 / 5.0 | 20 / 5.0 | OMS Mage Flow: 20-ish steps |
 | z-image base | shift 6 | shift 3 | MS Z-Image: default sigma shift 3 |
+| anima base | sampler Euler | `er_sde` | core `WorkflowGenerator.cs`: `er_sde` + `simple` for Anima |
+| flux3 base | sampler Euler | `er_sde` | core `WorkflowGenerator.cs`: `er_sde` + `simple` for Flux 3 Image; the distilled build keeps Euler (its flow-map step targets the sampler's own sigmas) |
 
 Samplers, schedulers and shifts SwarmUI sets per model were checked the same way (2026-10-22). Two are taken: `er_sde`
 for Anima Base and Flux 3 Image Base (core `WorkflowGenerator.cs`). The rest stay with the pipeline:
@@ -205,15 +207,27 @@ Two cases deviate from "the recipe owns it":
 
 Audio speech and transcription recipes are not yet typed; their defaults stay in their loaders.
 
+## Verification
+
+Every value above was checked against the code and SwarmUI's source, and the CPU lane is green. The dedicated
+default-change passes and a live SwarmUI session have not run. Later real-weight runs of the regression cases (the
+`alpha.387` attention work) cover only what those cases leave unset: every Wan row in `tests/regression-cases.sh` sets no fps, so each Wan case a
+later run lists (the `alpha.387` changelog names them) ran its family's new frame rate, 22 for Wan 2.2 5B and 24 otherwise. The GPU passes and the
+live SwarmUI checks that close this are in
+[RECIPE_DEFAULTS_GPU_HANDOFF.md](RECIPE_DEFAULTS_GPU_HANDOFF.md).
+
 ## Open
 
-- ACE-Step steps, shift and guidance for a checkpoint placed on disk are still applied by the loader, which tells v1
-  from 1.5 only after reading it. A structural ACE-Step variant catalog moves them into the recipe, as for Flux.
-- Image sizes are still snapped inside the pipelines (multiples of 16, area clamps), after provenance is recorded;
-  that moves into planning with the pipeline migration, so a snapped size reports as a normalization.
-- Variant resolution refuses an unresolved variant instead of taking the catalog default, and filename guesses for
-  families whose variants differ in defaults. Variant defaults now come from the catalog alone, and `VariantDefaults`
-  is gone. Flux.2's filename guess remains the last resort for prefixed checkpoints, whose names its structural rule
-  does not read; LTX-Video's filename clauses in `SupportsFor` remain.
-- Pipelines take the resolved plan only; the remaining pipeline `??` fallbacks go (`GenerationDefaults` is gone).
-- Audio speech and transcription recipes (music is typed; see Audio above).
+- **Unresolved variants.** A checkpoint with no variant signal resolves to the catalog default (source `Default`,
+  evidence "no variant signal found") instead of being refused. Filename guesses are still accepted for families
+  whose variants differ in defaults: Flux.2's token sets are the last resort for prefixed checkpoints, whose names
+  its structural rule does not read, and LTX-Video's filename clauses in `SupportsFor` remain.
+- **Image size snapping.** Pipelines still snap sizes themselves (multiples of 16, area clamps) after provenance is
+  recorded, so a snapped size reports the requested value; the result's own `Width` / `Height` are what ran. Moving
+  the snap into planning makes it a `Normalized` entry.
+- **ACE-Step placed checkpoints.** Steps, shift and guidance for a checkpoint placed on disk are applied by the loader,
+  which tells v1 from 1.5 only after reading it. A structural ACE-Step variant catalog moves them into the recipe.
+- **Music descriptors and identity.** `IInferenceEngine.Recipes` describes image and video families only. Music
+  recipes are typed and applied, but a host cannot query them, and a music result carries no `RecipeIdentity`, so
+  its defaults `Revision` is not recorded on the output.
+- **Speech and transcription.** Their defaults still live in their loaders (see Audio above).

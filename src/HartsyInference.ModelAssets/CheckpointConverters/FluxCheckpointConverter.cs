@@ -397,71 +397,23 @@ public sealed class FluxCheckpointConverter
 
     // ── QKV Splitting ──────────────────────────────────────────
 
-    /// <summary>Splits single-stream fused linear1 weight [3*hidden + mlpDim, hidden] = [21504, 3072] into Q, K, V, proj_mlp weights. Quantization-aware via <see cref="DType.ComputeByteCount"/>.</summary>
-    private static unsafe void SplitSingleLinear1Weight(Tensor fused, string prefix, Dictionary<string, Tensor> output)
-    {
-        int inDim = (int)fused.Shape[1];
-        long rowBytes = fused.DType.ComputeByteCount(inDim);
-
-        // Split order: Q [HiddenSize rows], K [HiddenSize rows], V [HiddenSize rows], MLP [MlpDim rows]
-        TensorShape qkvShape = new TensorShape(HiddenSize, inDim);
-        TensorShape mlpShape = new TensorShape(MlpDim, inDim);
-
-        Tensor qWeight = new Tensor(qkvShape, fused.DType);
-        Tensor kWeight = new Tensor(qkvShape, fused.DType);
-        Tensor vWeight = new Tensor(qkvShape, fused.DType);
-        Tensor mlpWeight = new Tensor(mlpShape, fused.DType);
-
-        // Propagate fp8_scaled per-tensor scale to all splits — they share the same quant scale.
-        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        mlpWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        long qkvChunkBytes = (long)HiddenSize * rowBytes;
-        long mlpChunkBytes = (long)MlpDim * rowBytes;
-
-        Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + qkvChunkBytes, (void*)kWeight.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 2 * qkvChunkBytes, (void*)vWeight.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 3 * qkvChunkBytes, (void*)mlpWeight.DataPointer, mlpChunkBytes, mlpChunkBytes);
-
-        output[$"{prefix}.attn.to_q.weight"] = qWeight;
-        output[$"{prefix}.attn.to_k.weight"] = kWeight;
-        output[$"{prefix}.attn.to_v.weight"] = vWeight;
-        output[$"{prefix}.proj_mlp.weight"] = mlpWeight;
-    }
+    /// <summary>Splits single-stream fused linear1 weight [3*hidden + mlpDim, hidden] = [21504, 3072] into Q, K, V, proj_mlp weights, carrying the fused tensor's quantization companions onto each.</summary>
+    private static void SplitSingleLinear1Weight(Tensor fused, string prefix, Dictionary<string, Tensor> output)
+        => PublishSplit(fused, prefix, "weight", output);
 
     /// <summary>Splits single-stream fused linear1 bias [3*hidden + mlpDim] = [21504] into Q, K, V, proj_mlp biases.</summary>
-    private static unsafe void SplitSingleLinear1Bias(Tensor fused, string prefix, Dictionary<string, Tensor> output)
+    private static void SplitSingleLinear1Bias(Tensor fused, string prefix, Dictionary<string, Tensor> output)
+        => PublishSplit(fused, prefix, "bias", output);
+
+    private static void PublishSplit(Tensor fused, string prefix, string suffix, Dictionary<string, Tensor> output)
     {
-        TensorShape qkvShape = new TensorShape(HiddenSize);
-        TensorShape mlpShape = new TensorShape(MlpDim);
-
-        Tensor qBias = new Tensor(qkvShape, fused.DType);
-        Tensor kBias = new Tensor(qkvShape, fused.DType);
-        Tensor vBias = new Tensor(qkvShape, fused.DType);
-        Tensor mlpBias = new Tensor(mlpShape, fused.DType);
-        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
-        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-        mlpBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
-
-        byte* src = (byte*)fused.DataPointer;
-        long qkvChunkBytes = fused.DType.ComputeByteCount(HiddenSize);
-        long mlpChunkBytes = fused.DType.ComputeByteCount(MlpDim);
-
-        Buffer.MemoryCopy(src, (void*)qBias.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + qkvChunkBytes, (void*)kBias.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 2 * qkvChunkBytes, (void*)vBias.DataPointer, qkvChunkBytes, qkvChunkBytes);
-        Buffer.MemoryCopy(src + 3 * qkvChunkBytes, (void*)mlpBias.DataPointer, mlpChunkBytes, mlpChunkBytes);
-
-        output[$"{prefix}.attn.to_q.bias"] = qBias;
-        output[$"{prefix}.attn.to_k.bias"] = kBias;
-        output[$"{prefix}.attn.to_v.bias"] = vBias;
-        output[$"{prefix}.proj_mlp.bias"] = mlpBias;
+        string[] keys =
+        [
+            $"{prefix}.attn.to_q.{suffix}", $"{prefix}.attn.to_k.{suffix}", $"{prefix}.attn.to_v.{suffix}",
+            $"{prefix}.proj_mlp.{suffix}",
+        ];
+        Tensor[] pieces = CheckpointConvertUtils.SplitRows(fused, [HiddenSize, HiddenSize, HiddenSize, MlpDim], keys);
+        for (int i = 0; i < keys.Length; i++) output[keys[i]] = pieces[i];
     }
 
 

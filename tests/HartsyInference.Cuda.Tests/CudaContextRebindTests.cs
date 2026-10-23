@@ -157,6 +157,107 @@ public sealed unsafe class CudaContextRebindTests
         }
     }
 
+    /// <summary>A host read that fires a backend's binding hooks from a thread a neighbour left bound to its own context:
+    /// the hooks bind their backend's context to demote or sync, and must put the caller's back, since such a read can sit
+    /// inside another backend's op whose next device call needs that op's context.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void AHostReadThatRunsBindingHooks_LeavesTheCallersContextCurrent()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine($"SKIPPED: CUDA unavailable ({CudaContext.LastUnavailableReason}).");
+            return;
+        }
+        using CudaBackend backend = new(0, PtxDir());
+        if (backend.GetVramInfo().FreeBytes < (1536L + 64L) << 20)
+        {
+            _output.WriteLine("SKIPPED: not enough free VRAM for the cache to promote a weight.");
+            return;
+        }
+        GpuTransferHelper.State state = backend.TransferState;
+        using Tensor a = Filled(1.5f, PromotableLength);
+        using Tensor b = Filled(2.25f, PromotableLength);
+        using Tensor sum = new(new TensorShape(PromotableLength), DType.F32);
+        nint neighbour = 0;
+        try
+        {
+            backend.Add(sum, a, b);
+            backend.Add(sum, a, b);
+            Assert.Equal(GpuResidencyTier.Weight, state.TierOf(a));
+            Assert.Equal(GpuResidencyTier.Activation, state.TierOf(sum));
+
+            neighbour = CreateContextOnSameDevice(backend.Context.DeviceOrdinal);
+            _ = a.DataPointer;
+            Assert.Equal(GpuResidencyTier.None, state.TierOf(a));
+            Assert.Equal(neighbour, CurrentContext());
+            float* values = (float*)sum.DataPointer;
+            Assert.Equal(GpuResidencyTier.None, state.TierOf(sum));
+            Assert.Equal(neighbour, CurrentContext());
+            Assert.Equal(3.75f, values[0]);
+            Assert.Equal(3.75f, values[PromotableLength - 1]);
+        }
+        finally
+        {
+            if (neighbour != 0)
+            {
+                DestroyContext(neighbour);
+            }
+            backend.Context.MakeCurrent();
+        }
+    }
+
+    /// <summary>A tensor two backends share, promoted to a resident weight on one device, then uploaded by the other: reading
+    /// its host bytes fires the first backend's demotion hook, which makes that device's context current, and the upload
+    /// must still land in the second backend's own context. Two context-parallel ranks sharing one text context did this.
+    /// Opt-in like the other two-device tests.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void ATensorPromotedOnAnotherDevice_UploadsIntoThisBackendsContext()
+    {
+        if (Environment.GetEnvironmentVariable("HARTSY_CUDA_REBIND_TWO_DEVICES") != "1")
+        {
+            _output.WriteLine("SKIPPED: set HARTSY_CUDA_REBIND_TWO_DEVICES=1 to run (needs two visible GPUs).");
+            return;
+        }
+        if (!CudaContext.IsAvailable() || CudaContext.GetDeviceCount() < 2)
+        {
+            _output.WriteLine("SKIPPED: needs CUDA with two visible devices.");
+            return;
+        }
+        using CudaBackend first = new(0, PtxDir());
+        using CudaBackend second = new(1, PtxDir());
+        if (first.GetVramInfo().FreeBytes < (1536L + 64L) << 20)
+        {
+            _output.WriteLine("SKIPPED: not enough free VRAM on device 0 for the cache to promote a weight.");
+            return;
+        }
+        using Tensor a = Filled(1.5f, PromotableLength);
+        using Tensor b = Filled(2.25f, PromotableLength);
+        using Tensor firstSum = new(new TensorShape(PromotableLength), DType.F32);
+        using Tensor secondSum = new(new TensorShape(PromotableLength), DType.F32);
+        try
+        {
+            first.Add(firstSum, a, b);
+            first.Add(firstSum, a, b);
+            Assert.Equal(GpuResidencyTier.Weight, first.TransferState.TierOf(a));
+
+            second.Add(secondSum, a, b);
+
+            float* values = (float*)secondSum.DataPointer;
+            for (int i = 0; i < PromotableLength; i++)
+            {
+                Assert.Equal(3.75f, values[i]);
+            }
+            AssertAddIsCorrect(first);
+            AssertAddIsCorrect(second);
+        }
+        finally
+        {
+            first.Context.MakeCurrent();
+        }
+    }
+
     /// <summary>A second, non-primary context on <paramref name="ordinal"/>, left current on this thread the way a
     /// neighbour leaves its own. The engine binds no context-creation entry point on purpose, so the test resolves it.</summary>
     private static nint CreateContextOnSameDevice(int ordinal)
@@ -173,6 +274,12 @@ public sealed unsafe class CudaContextRebindTests
     {
         delegate* unmanaged<nint, int> destroy = (delegate* unmanaged<nint, int>)NativeLibrary.GetExport(Driver(), "cuCtxDestroy_v2");
         destroy(context).ThrowOnError();
+    }
+
+    private static nint CurrentContext()
+    {
+        CudaDriverApi.cuCtxGetCurrent(out nint context).ThrowOnError();
+        return context;
     }
 
     /// <summary>The context a device allocation belongs to (<c>CU_POINTER_ATTRIBUTE_CONTEXT</c>).</summary>

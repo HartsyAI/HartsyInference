@@ -256,7 +256,8 @@ public sealed class WanVideoRecipe : IVideoRecipe
         {
             // One container for either format: a Wan GGUF is a repack of this same file and keeps its tensor names,
             // so nothing below needs to know which one arrived.
-            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            CheckpointOpenOptions ditOptions = CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends);
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath, ditOptions);
             loaders.Add(source);
             WanVideoCheckpointConverter.ConvertedWeights conv =
                 WanVideoCheckpointConverter.Convert(source.Weights, source.Header.Metadata);
@@ -309,7 +310,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
                         $"Wan low-noise expert '{swapPath}' is a {swapVariant.Variant.DisplayName} variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");
                 }
                 Logs.Info($"[WanVideoRecipe] Loading Wan low-noise expert: {swapPath} (boundary {config.BoundaryRatio:0.###}).");
-                CheckpointSource lowSource = CheckpointSource.Open(swapPath);
+                CheckpointSource lowSource = CheckpointSource.Open(swapPath, ditOptions);
                 loaders.Add(lowSource);
                 WanVideoCheckpointConverter.ConvertedWeights convLow =
                     WanVideoCheckpointConverter.Convert(lowSource.Weights, lowSource.Header.Metadata);

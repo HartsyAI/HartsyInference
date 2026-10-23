@@ -85,11 +85,11 @@ public sealed unsafe class TextEncoderQuantNormalizerTests
     [Fact]
     public void Normalize_ValidNvfp4_DequantizesToF16()
     {
-        // 8 rows × 32 real cols → packed [8, 16] U8, block scales [8, 2] (16 elements per block).
+        // 8 rows × 32 real cols → packed [8, 16] U8, block scales [8, 2] stored padded to the [128, 4] tile.
         Dictionary<string, Tensor> weights = new()
         {
             ["model.layers.0.self_attn.q_proj.weight"] = new Tensor(new TensorShape(8, 16), DType.U8),
-            ["model.layers.0.self_attn.q_proj.weight_scale"] = new Tensor(new TensorShape(8, 2), DType.F8E4M3),
+            ["model.layers.0.self_attn.q_proj.weight_scale"] = new Tensor(new TensorShape(128, 4), DType.F8E4M3),
             ["model.layers.0.self_attn.q_proj.weight_scale_2"] = F32Scalar(1.0f),
             ["model.layers.0.self_attn.q_proj.comfy_quant"] = ComfyQuantBlob("nvfp4"),
         };

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 
@@ -31,9 +32,10 @@ public static unsafe class Mxfp8Codec
         if (scale.DType != DType.U8 || scale.Shape.Rank != 2) return false;
         long outFeatures = weight.Shape[0], inFeatures = weight.Shape[1];
         if (inFeatures % GroupSize != 0) return false;
-        // Rows pad up to 128 and block columns up to 4 in the blocked layout, so the stored scale tensor is never
-        // smaller than the logical one; smaller means the companion does not describe this weight.
-        if (scale.Shape[0] < outFeatures || scale.Shape[1] < inFeatures / GroupSize || scale.Shape[1] % 4 != 0)
+        // The blocked layout pads rows to 128 and block columns to 4, and every device kernel (and cuBLASLt) indexes the
+        // padded tensor; a smaller one is not this weight's, or not in that layout.
+        if (scale.Shape[0] < (outFeatures + 127) / 128 * 128 || scale.Shape[1] < inFeatures / GroupSize
+            || scale.Shape[1] % 4 != 0)
             return false;
         weight.QuantInfo = new QuantWeightInfo { Format = "mxfp8", BlockScale = scale };
         return true;
@@ -52,7 +54,16 @@ public static unsafe class Mxfp8Codec
         {
             string baseName = scaleKey[..^".weight_scale".Length];
             if (!weights.TryGetValue($"{baseName}.weight", out Tensor? weight)) continue;
-            if (!TryAttachResident(weight, weights[scaleKey])) continue;
+            Tensor scale = weights[scaleKey];
+            if (!TryAttachResident(weight, scale))
+            {
+                // An F8 weight with a U8 scale is an MXFP8 pair; passed on without its scales it would run as plain fp8.
+                if (weight.DType == DType.F8E4M3 && scale.DType == DType.U8)
+                    throw new HartsyInferenceException(
+                        $"MXFP8 weight '{baseName}' {weight.Shape} has block scales {scale.Shape} that do not cover its padded "
+                        + "[128-row, 4-column] tile, so neither the resident path nor a plain fp8 GEMM can read it correctly.");
+                continue;
+            }
             weights.Remove(scaleKey);
             weights.Remove($"{baseName}.comfy_quant");
             attached++;

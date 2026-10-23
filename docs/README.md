@@ -9,6 +9,7 @@ git preserves removed history.
 | Coding rules | [CODE_STYLE.md](CODE_STYLE.md) |
 | Architecture, task routing, PR workflow | [Agents/AGENTS.md](Agents/AGENTS.md) |
 | Tensor, CUDA, planning and pipeline patterns | [Agents/ENGINE_PATTERNS.md](Agents/ENGINE_PATTERNS.md) |
+| Model defaults: who owns them, how a request is planned, each family's values and sources | [Research/RECIPE_CONTRACT.md](Research/RECIPE_CONTRACT.md) |
 | Attention semantics, numerical permissions and kernel planning | [ATTENTION_CONTRACT.md](ATTENTION_CONTRACT.md) |
 | Current model support and model-specific gaps | [Checklists/MODEL_STATUS.md](Checklists/MODEL_STATUS.md) |
 | Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |

@@ -533,6 +533,41 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
+    /// <summary>Narrows, in place, every weight whose row count exceeds what <paramref name="rowsFor"/> says the model uses,
+    /// to its leading rows. ComfyUI's nvfp4 quantizer pads a weight's rows to a multiple of 16 (Boogu's 840-row K/V
+    /// projections ship as 848) and records the true size nowhere in the file, so only the model knows it.</summary>
+    /// <remarks>The narrowed weight is a view over the same bytes; a resident one keeps its block scales.</remarks>
+    public static void TrimPaddedRows(IDictionary<string, Tensor> weights, Func<string, long?> rowsFor)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(rowsFor);
+        foreach (string key in weights.Keys.ToList())
+        {
+            Tensor weight = weights[key];
+            if (rowsFor(key) is not long rows || weight.Shape.Rank != 2 || weight.Shape[0] == rows) continue;
+            if (weight.Shape[0] < rows || weight.Shape[0] - rows >= 16)
+                throw new InvalidOperationException(
+                    $"'{key}' has {weight.Shape[0]} rows where the model expects {rows}; that is not quantizer padding.");
+            Tensor narrowed = weight.SliceRows(0, rows);
+            narrowed.QuantInfo = weight.QuantInfo?.SliceRows(0, rows, key);
+            weights[key] = narrowed;
+        }
+    }
+
+    /// <summary>The dense weight a resident nvfp4 weight stands in for (<see cref="QuantWeightInfo.DenseDType"/>), unpacked
+    /// exactly as the eager open would have; the caller owns it.</summary>
+    public static Tensor UnpackResidentNvfp4(Tensor resident, DType denseDType)
+    {
+        QuantWeightInfo info = resident.QuantInfo
+            ?? throw new ArgumentException("The weight carries no nvfp4 companions.", nameof(resident));
+        if (resident.DType != DType.F4E2M1 || resident.Shape.Rank != 2 || info.BlockScale is null || info.GlobalScale is null)
+            throw new ArgumentException($"Expected a resident nvfp4 weight, got {resident.DType} {resident.Shape}.", nameof(resident));
+        using Tensor packed = resident.ReinterpretAs(DType.U8, new TensorShape(resident.Shape[0], resident.Shape[1] / 2));
+        Tensor f16 = DequantNvfp4ToF16(packed, info.BlockScale, ((float*)info.GlobalScale.DataPointer)[0]);
+        if (denseDType == DType.F16) return f16;
+        using (f16) return f16.CastTo(denseDType);
+    }
+
     /// <summary>Swaps the two halves of a tensor along dim 0 — the BFL/Tencent <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c> modulation reorder. Works for 2D weights and 1D biases; quant-aware via <see cref="SliceByteCount"/>. The swap is a row permutation, so the source's per-tensor fp8 scale is carried.</summary>
     /// <param name="castToF32">Returns the swapped tensor as F32 (HunyuanVideo's final Modulate reads F32). The cast folds any fp8 scale into the values, so the result carries no scale factor.</param>
     public static Tensor SwapScaleShiftHalves(Tensor input, bool castToF32 = false)
@@ -540,6 +575,14 @@ public static unsafe class CheckpointConvertUtils
         long firstDim = input.Shape[0];
         if (firstDim % 2 != 0)
             throw new InvalidOperationException($"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
+
+        // A resident nvfp4 weight swaps as the dense twin the eager open would have made.
+        if (input.QuantInfo is { Format: "nvfp4", DenseDType: { } dense, BlockScale: not null, GlobalScale: not null })
+        {
+            using Tensor twin = UnpackResidentNvfp4(input, dense);
+            twin.Fp8ScaleFactor = input.Fp8ScaleFactor;
+            return SwapScaleShiftHalves(twin, castToF32);
+        }
 
         // The swap permutes rows, so a per-row scale would have to be permuted with them. Modulation tables are never
         // shipped int8_tensorwise, and silently keeping the unpermuted scale is worse than a refusal. Checked before
@@ -781,8 +824,10 @@ public static unsafe class CheckpointConvertUtils
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
     /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
     /// <param name="keepNvfp4Companions">Leave nvfp4 weights packed AND leave their <c>.weight_scale</c>/<c>.weight_scale_2</c> companions in the dictionary, for a consumer that dequantizes the format itself rather than reading <see cref="Tensor.QuantInfo"/>. Unlike <paramref name="residentNvfp4"/> this also covers AWQ layers, which is the point: <see cref="Tensor.QuantInfo"/> cannot express <c>pre_quant_scale</c>, so those layers have no resident representation and would otherwise be widened. Everything else — fp8, int8, NF4 — folds exactly as it does with this off.</param>
+    /// <param name="nvfp4DenseDType">With <paramref name="residentNvfp4"/>, the <see cref="QuantWeightInfo.DenseDType"/> each resident weight carries — the dtype it stands in for.</param>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
-        bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false)
+        bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false,
+        Action<Tensor, Tensor>? onNvfp4Unpacked = null, DType? nvfp4DenseDType = null)
     {
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
         // weight before anything here can strip them.
@@ -930,7 +975,7 @@ public static unsafe class CheckpointConvertUtils
                     // Resident: relabel to F4E2M1 [N, K] and hang the scales off QuantInfo rather than unpacking.
                     // Refuses AWQ pre_quant_scale layers, which fall through to the eager dequant below.
                     if (residentNvfp4 && Nvfp4Codec.TryAttachResident(kvp.Value, blockScales, scale2T,
-                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight))
+                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight, nvfp4DenseDType))
                     {
                         result[key] = residentWeight;
                         nvfp4Resident++;
@@ -941,6 +986,7 @@ public static unsafe class CheckpointConvertUtils
                     result[key] = nvfp4ToFp8 ? DequantNvfp4ToFp8(kvp.Value, blockScales, globalScale)
                         : DequantNvfp4ToF16(kvp.Value, blockScales, globalScale);
                     if (nvfp4ToFp8) nvfp4Fp8++; else nvfp4F16++;
+                    onNvfp4Unpacked?.Invoke(kvp.Value, blockScales);
                     continue;
                 }
             }
@@ -1200,6 +1246,9 @@ public static unsafe class CheckpointConvertUtils
     /// <summary>The 8 magnitudes representable by FP4 E2M1, indexed by bits [e1 e0 m]: exp==0 → {0, 0.5} (subnormal), exp>0 → 2^(exp-1) · (1 + m/2). Bit 3 of the nibble is the sign.</summary>
     private static readonly float[] E2M1Magnitudes = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
 
+    /// <summary>The power of two <see cref="DequantNvfp4ToFp8"/> divides out of every value: 6 · 448 / 8 = 336 fits e4m3.</summary>
+    private const float Fp8FoldPrescale = 8f;
+
     /// <summary>256-entry FP8-E4M3FN decode table (built once). Index = raw byte. E4M3FN: bias 7, no infinities, exp=15/man=7 is NaN, max ±448. Shared with <see cref="HartsyInference.ModelAssets.Nvfp4.Nvfp4Codec"/>.</summary>
     internal static readonly float[] E4M3Table = BuildE4M3Table();
 
@@ -1223,6 +1272,30 @@ public static unsafe class CheckpointConvertUtils
         return table;
     }
 
+    /// <summary>A block-scale tensor covers the weight exactly or up to the blocked layout's padding, and no further.</summary>
+    private static bool BlockScaleShapeFits(long rows, long cols, long scaleRows, long scaleCols)
+    {
+        long blockCols = cols / 16;
+        if (cols % 16 != 0 || rows == 0 || blockCols == 0 || scaleRows < rows || scaleRows > (rows + 127) / 128 * 128
+            || scaleCols < blockCols || scaleCols > (blockCols + 3) / 4 * 4)
+        {
+            return false;
+        }
+        // The stored column count is the swizzle stride: below a whole column tile it only works inside one row tile,
+        // because a second row tile lands on the first one's offsets.
+        if (scaleCols % 4 != 0 && (rows > 128 || blockCols > 4))
+            return false;
+        // Each dimension can sit inside its padding while the pair is still too small for the blocked indexing, so
+        // the largest index has to fit. It falls in the last row tile and last column tile, where the index grows.
+        long last = 0;
+        for (long r = Math.Max(0, rows - 128); r < rows; r++)
+        {
+            for (long c = Math.Max(0, blockCols - 4); c < blockCols; c++)
+                last = Math.Max(last, BlockScaleSwizzle.SwizzledIndex(r, c, scaleCols));
+        }
+        return last < scaleRows * scaleCols;
+    }
+
     /// <summary>Dequantizes an NVFP4 weight to F16. <paramref name="packed"/> is U8 <c>[rows, cols/2]</c> with two e2m1 values per byte — element <c>2j</c> in the HIGH nibble, <c>2j+1</c> in the LOW nibble (comfy_kitchen <c>hi_first=True</c>, its default for both quantize and dequantize; verified against <c>float_utils.unpack_uint4</c>). <paramref name="blockScales"/> is F8-E4M3 <c>[rows, cols/16]</c> — one scale per 16 consecutive input-dim elements. The full value is <c>e2m1 · block_scale · globalScale</c>. Rows are dequantized in parallel (pure per-row writes).</summary>
     public static Tensor DequantNvfp4ToF16(Tensor packed, Tensor blockScales, float globalScale)
     {
@@ -1232,9 +1305,10 @@ public static unsafe class CheckpointConvertUtils
         long packedCols = packed.Shape[1];
         long cols = packedCols * 2;
         long scaleCols = blockScales.Shape[1];
-        if (blockScales.Shape[0] != rows || scaleCols * 16 != cols)
+        // The blocked layout may be padded to 128 rows and 4 block columns; the stored column count is the swizzle stride.
+        if (!BlockScaleShapeFits(rows, cols, blockScales.Shape[0], scaleCols))
             throw new ArgumentException(
-                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not match packed weight [{rows}, {packedCols}] (expect [rows, cols/16]).");
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need [rows, cols/16], up to the 128-row and 4-column padding, with cols a multiple of 16).");
 
         Tensor result = new Tensor(new TensorShape(rows, cols), DType.F16);
         unsafe
@@ -1266,7 +1340,13 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
-    /// <summary>Dequantizes an NVFP4 weight to <b>fp8 e4m3 (1 byte/param)</b> instead of F16, folding the per-16-element block scale into the stored value and returning the <b>global</b> scale on <see cref="Tensor.Fp8ScaleFactor"/>. The GEMM then computes <c>fp8_value · globalScale ≈ e2m1 · block_scale · globalScale</c> (the same real weight), reusing the existing fp8 alpha path — so an all-nvfp4 model keeps its footprint at fp8 size. fp8 e4m3 (3-bit mantissa) is finer than the 4-bit nvfp4 source, so folding block_scale into the value adds negligible rounding vs the F16 path; the only real difference is fp8's smaller range — a block whose <c>e2m1·block_scale</c> falls below fp8's min subnormal (~2^-9) flushes to 0 (F16 wouldn't). Acceptable for weights; used for the Ideogram-4 DiTs to fit a 24 GB card. Nibble order and block layout match <see cref="DequantNvfp4ToF16"/>.</summary>
+    /// <summary>Dequantizes an NVFP4 weight to <b>fp8 e4m3 (1 byte/param)</b> instead of F16, so an all-nvfp4 model keeps
+    /// an fp8 footprint: each value stores <c>e2m1 · block_scale / 8</c> and <see cref="Tensor.Fp8ScaleFactor"/> carries
+    /// <c>8 · globalScale</c>, which the fp8 GEMM applies as its alpha. The ÷8 is what keeps the fold unclipped:
+    /// <c>e2m1 · block_scale</c> reaches 6 · 448 = 2688 against e4m3's 448, and a power of two moves no normal-range bit.
+    /// Per value the error is at most half an e4m3 ulp (2⁻⁴ relative) where the product needs more than e4m3's four
+    /// significant bits, and 2⁻⁷ · globalScale where <c>e2m1 · block_scale</c> is below 2⁻³ (e4m3's subnormals after the
+    /// ÷8). Nibble order and block layout match <see cref="DequantNvfp4ToF16"/>.</summary>
     public static Tensor DequantNvfp4ToFp8(Tensor packed, Tensor blockScales, float globalScale)
     {
         if (packed.DType != DType.U8 || packed.Shape.Rank != 2)
@@ -1275,13 +1355,13 @@ public static unsafe class CheckpointConvertUtils
         long packedCols = packed.Shape[1];
         long cols = packedCols * 2;
         long scaleCols = blockScales.Shape[1];
-        if (blockScales.Shape[0] != rows || scaleCols * 16 != cols)
+        if (!BlockScaleShapeFits(rows, cols, blockScales.Shape[0], scaleCols))
             throw new ArgumentException(
-                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not match packed weight [{rows}, {packedCols}] (expect [rows, cols/16]).");
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not cover packed weight [{rows}, {packedCols}] (need [rows, cols/16], up to the 128-row and 4-column padding, with cols a multiple of 16).");
 
-        // Build the dequantized values (e2m1 · block_scale) as F32, then cast to fp8 via the engine's TESTED
+        // Build the dequantized values (e2m1 · block_scale / 8) as F32, then cast to fp8 via the engine's TESTED
         // F32→F8E4M3 path (Tensor.CastTo) rather than a hand-rolled quantizer. The F32 intermediate is per-tensor
-        // transient (freed below). Global scale rides on Fp8ScaleFactor, applied as the GEMM alpha.
+        // transient (freed below).
         Tensor f32 = new Tensor(new TensorShape(rows, cols), DType.F32);
         unsafe
         {
@@ -1296,9 +1376,9 @@ public static unsafe class CheckpointConvertUtils
                 float* rowDst = dst + (long)r * cols;
                 for (long j = 0; j < packedCols; j++)
                 {
-                    // Fold ONLY the block scale into the value (not the global scale — that rides on Fp8ScaleFactor).
+                    // Fold ONLY the block scale (÷8) into the value; the global scale rides on Fp8ScaleFactor.
                     // Swizzled index for the same reason as DequantNvfp4ToF16: the stored scale matrix is blocked.
-                    float scale = e4m3[scales[BlockScaleSwizzle.SwizzledIndex(r, j >> 3, scaleCols)]];
+                    float scale = e4m3[scales[BlockScaleSwizzle.SwizzledIndex(r, j >> 3, scaleCols)]] * (1f / Fp8FoldPrescale);
                     byte b = rowSrc[j];
                     int hi = b >> 4, lo = b & 0xF;
                     float hiVal = e2m1[hi & 7] * scale;
@@ -1310,7 +1390,7 @@ public static unsafe class CheckpointConvertUtils
         }
         Tensor result = f32.CastTo(DType.F8E4M3);
         f32.Dispose();
-        result.Fp8ScaleFactor = globalScale;
+        result.Fp8ScaleFactor = globalScale * Fp8FoldPrescale;
         return result;
     }
 

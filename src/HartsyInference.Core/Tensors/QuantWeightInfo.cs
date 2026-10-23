@@ -35,20 +35,28 @@ public sealed record QuantWeightInfo
     /// <summary>The descriptor's <c>full_precision_matrix_mult</c>: this layer must dequantize and run a normal GEMM.</summary>
     public bool FullPrecisionMatMul { get; init; }
 
+    /// <summary>The dense dtype the eager load would have unpacked this weight to, when it stays packed in that copy's place.</summary>
+    /// <remarks>A backend that unpacks the weight for a GEMM computes as that dense weight would — same unpacked values,
+    /// same GEMM dtype, same small-m route — so keeping it packed changes the footprint and nothing else. Null leaves the
+    /// unpack's precision to the backend.</remarks>
+    public DType? DenseDType { get; init; }
+
     /// <summary>Returns these companions narrowed to a contiguous run of weight rows, for a caller splitting a fused weight (QKV) or consuming one in windows.</summary>
     /// <remarks><para><see cref="RowScale"/> is indexed by output row, so a row slice of the weight needs the matching
     /// slice of the scale; a per-tensor scale (one element) covers every row and is shared as-is. <see cref="ConvRotGroupSize"/>
     /// divides the <b>input</b> dimension, which a row split leaves alone.</para>
     /// <para>A block-scaled companion (NVFP4, MXFP8) is padded to 128 rows and swizzled in 128-row tiles laid out
     /// tile-row by tile-row, so a range that starts and ends on a tile boundary is a contiguous run of whole tile-rows
-    /// and slices as a view — a fused QKV split at a multiple of 128 rows. Any other range would pair rows with
-    /// another row's block scales — plausible output, silently wrong — and refuses.</para></remarks>
+    /// and slices as a view — a fused QKV split at a multiple of 128 rows. A leading run of rows keeps the whole
+    /// companion, whose tiles it indexes in place (a weight whose rows the quantizer padded). Any other range would pair
+    /// rows with another row's block scales — plausible output, silently wrong — and refuses.</para></remarks>
     /// <param name="weightKey">The weight's checkpoint key, named in the refusal so the caller need not re-wrap it.</param>
     public QuantWeightInfo SliceRows(long rowOffset, long rowCount, string weightKey)
     {
         QuantRecipe? recipe = Recipe?.SliceRows(rowOffset, rowCount, weightKey);
         Tensor? blockScale = BlockScale;
-        if (blockScale is not null)
+        // A leading run that ends inside a tile keeps the whole companion, whose tiles it indexes in place.
+        if (blockScale is not null && (rowOffset != 0 || rowCount % BlockScaleTileRows == 0))
         {
             if (rowOffset % BlockScaleTileRows != 0 || rowCount % BlockScaleTileRows != 0 || blockScale.Shape.Rank != 2)
                 throw new NotSupportedException(

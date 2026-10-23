@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Sampling;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -46,7 +47,8 @@ public static class DitDtype
 /// Chroma). <c>numerics.ditGraph=false</c> kills both; <c>=1</c> forces both.</para></summary>
 public static class DitStepGraph
 {
-    public static bool Enabled => EngineKnobs.DitGraph.Value;
+    // A captured step replays fixed buffers, not the input the denoiser probe hands the forward.
+    public static bool Enabled => EngineKnobs.DitGraph.Value && !DenoiserProbe.Active;
 
-    public static bool EnabledDefaultOn => EngineKnobs.DitGraphDefaultOn.Value;
+    public static bool EnabledDefaultOn => EngineKnobs.DitGraphDefaultOn.Value && !DenoiserProbe.Active;
 }
