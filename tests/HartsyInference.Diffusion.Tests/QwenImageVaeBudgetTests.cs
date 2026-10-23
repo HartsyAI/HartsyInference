@@ -35,4 +35,24 @@ public sealed class QwenImageVaeBudgetTests
     {
         Assert.Equal(16, QwenImageVaeDecoder.ChooseTileLatent(MiB, GiB));
     }
+
+    [Fact]
+    public void PlanTileLatent_FitsWhole_DecodesWhole()
+    {
+        Assert.Equal(0, QwenImageVaeDecoder.PlanTileLatent(128, 128, 64 * GiB, GiB));
+    }
+
+    [Fact]
+    public void PlanTileLatent_LatentSmallerThanSmallestTile_DecodesWhole()
+    {
+        Assert.Equal(0, QwenImageVaeDecoder.PlanTileLatent(8, 12, MiB, GiB));
+        Assert.Equal(0, QwenImageVaeDecoder.PlanTileLatent(16, 16, MiB, GiB));
+    }
+
+    [Fact]
+    public void PlanTileLatent_LatentLargerThanSmallestTile_TilesWhenShort()
+    {
+        Assert.Equal(16, QwenImageVaeDecoder.PlanTileLatent(128, 128, 150 * MiB, GiB));
+        Assert.Equal(24, QwenImageVaeDecoder.PlanTileLatent(128, 128, 352 * MiB, GiB));
+    }
 }

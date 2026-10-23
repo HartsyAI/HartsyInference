@@ -293,6 +293,7 @@ public sealed class QwenImageVaeDecoder : IDisposable
             backend.TrimMemoryPool();
             free = FreeBytes(backend);
         }
+        bool afterOom = false;
         if (free >= need)
         {
             try
@@ -302,15 +303,24 @@ public sealed class QwenImageVaeDecoder : IDisposable
             }
             catch (OutOfVramException error)
             {
-                Logs.Warning($"[qwen-vae] full decode ran out of VRAM, retrying tiled: {error.Message}");
+                Logs.Warning($"[qwen-vae] full decode ran out of VRAM, re-planning: {error.Message}");
                 backend.OffloadActivation(latent);
                 backend.FreeActivations();
+                free = FreeBytes(backend);
+                afterOom = true;
             }
         }
 
-        int tile = ChooseTileLatent(FreeBytes(backend), cap);
+        int tile = PlanTileLatent(latentH, latentW, free, cap);
         LastTileLatent = tile;
-        Logs.Warning($"[qwen-vae] full decode needs ~{need >> 20} MB, {free >> 20} MB free: tiled decode with "
+        string reading = afterOom ? "free re-read after the failed attempt" : "free";
+        if (tile == 0)
+        {
+            Logs.Warning($"[qwen-vae] full decode needs ~{need >> 20} MB, {free >> 20} MB {reading}: no tiling "
+                + $"applies ({latentH}x{latentW} latent), decoding whole.");
+            return Decode(backend, latent);
+        }
+        Logs.Warning($"[qwen-vae] full decode needs ~{need >> 20} MB, {free >> 20} MB {reading}: tiled decode with "
             + $"{tile}-latent tiles, overlap {tile / 4}.");
         return DecodeTiled(backend, latent, tile, tile / 4);
     }
@@ -354,6 +364,15 @@ public sealed class QwenImageVaeDecoder : IDisposable
             worstConv = Math.Max(worstConv, (long)Math.Max(stage.InCh, stage.OutCh) * 9 * pixels * areaScale);
         }
         return Math.Max(worstConv, pixels * pixels) * sizeof(float);
+    }
+
+    /// <summary>Tile latent for a decode that did not fit whole, or 0 when the whole latent should run as one decode: it fits
+    /// <paramref name="freeBytes"/>, or it is no bigger than the smallest tile so there is nothing to split.</summary>
+    internal static int PlanTileLatent(int latentH, int latentW, long freeBytes, long im2colCapBytes)
+    {
+        if (EstimateDecodeBytes(latentH, latentW, im2colCapBytes) <= freeBytes) return 0;
+        if (Math.Max(latentH, latentW) <= TileCandidates[^1]) return 0;
+        return ChooseTileLatent(freeBytes, im2colCapBytes);
     }
 
     /// <summary>Largest candidate tile whose full-decode estimate fits <paramref name="freeBytes"/>; the smallest when none does.</summary>
