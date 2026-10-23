@@ -415,6 +415,8 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         // lambda cannot capture. One small array copy per generation.
         float[] timestepTable = timesteps.ToArray();
 
+        DenoiserProbe.Condition("cond", condText);
+        DenoiserProbe.Condition("uncond", uncondText);
         Logs.Info($"Starting denoise loop ({steps} steps, distilled guidance={distilledGuidance})...");
         for (int i = startStep; i < steps; i++)
         {

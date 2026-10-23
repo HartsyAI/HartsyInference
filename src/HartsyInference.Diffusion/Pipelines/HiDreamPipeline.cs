@@ -269,6 +269,13 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             }
         }
 
+        DenoiserProbe.Condition("cond_t5", condT5);
+        DenoiserProbe.Condition("cond_llama", condLlama);
+        DenoiserProbe.Condition("cond_pooled", condPooled);
+        DenoiserProbe.Condition("uncond_t5", uncondT5);
+        DenoiserProbe.Condition("uncond_llama", uncondLlama);
+        DenoiserProbe.Condition("uncond_pooled", uncondPooled);
+
         // ── 2. Set up flow-match scheduler ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift).WithShift(request.SigmaShift);

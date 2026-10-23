@@ -392,6 +392,9 @@ _transformer.InvalidateStepGraph(Backend);
             packedLatent = fixedLatent;
         }
 
+        DenoiserProbe.Condition("cond", textEmbeddings);
+        DenoiserProbe.Condition("cond.scheduled", scheduledText);
+        DenoiserProbe.Condition("cond.regional", extendedText);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = startStep; i < steps; i++)
         {

@@ -161,8 +161,13 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
                 packedMask = MaskBlendUtilities.PackLatentMask2x2(latentMask, latH, latW);
             }
 
+            DenoiserProbe.Condition("cond", condText);
+            DenoiserProbe.Condition("uncond", uncondText);
             weightedCond = prompt.IsUniformlyUnweighted ? null : CondTokenWeights.Apply(Backend, condText, null, prompt).Cond;
             weightedUncond = guided && !negative.IsUniformlyUnweighted ? CondTokenWeights.Apply(Backend, uncondText!, null, negative).Cond : null;
+            DenoiserProbe.Condition("cond.weighted", weightedCond);
+            DenoiserProbe.Condition("uncond.weighted", weightedUncond);
+            DenoiserProbe.Condition("ref", referenceTokens?.Select(r => r.Tokens).ToArray());
             Backend.PreloadWeights(_transformer.EnumerateWeights());
             _ditResident = true;
             ReferenceAttentionMode mode = references?.Options.Mode ?? ReferenceAttentionMode.CachedKv;

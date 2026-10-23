@@ -842,6 +842,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Tensor admSource = useCfg ? pooledOutput : CfgHelper.SliceBatchElement1D(pooledOutput, 1, pooledDim);
         Tensor textForUnet = DtypeCastHelper.EnsureDtype(Backend, condText, unetDtype, disposeSourceOnCast: false);
         bool ownsTextForUnet = !ReferenceEquals(textForUnet, condText);
+        DenoiserProbe.Condition("text", textForUnet);
+        DenoiserProbe.Condition("adm", admSource);
         Tensor? admEmb = _unet.ComputeAdmEmbedding(Backend, admSource, sizeCondition, batch);
 
         TensorShape batchedShape = new TensorShape(batch, latentC, latentH, latentW);

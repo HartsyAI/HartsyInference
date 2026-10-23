@@ -91,6 +91,7 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
             refTokens = PackPatch1(refLatent, LatentChannels);
             refLatent.Dispose();
             refGrids = [(rh, rw)];
+            DenoiserProbe.Condition("ref", refTokens);
             Backend.PreloadWeights(new List<Tensor> { refTokens });
         }
 
@@ -121,6 +122,9 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         Logs.Info($"[MageFlow] Denoise {steps} steps, CFG {cfgScale}, {width}x{height} (latent {w}x{h})" +
             (refTokens is not null ? " [edit]" : "") + ".");
         int patchDim = LatentChannels;
+        DenoiserProbe.Condition("cond", condHidden);
+        DenoiserProbe.Condition("cond.scheduled", scheduledCond);
+        DenoiserProbe.Condition("uncond", uncondHidden);
         DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
             PredictionType.FlowVelocity,
             (x, s, stepIndex) =>

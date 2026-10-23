@@ -354,6 +354,8 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         // lambda cannot capture. One small array copy per generation.
         float[] timestepTable = timesteps.ToArray();
 
+        DenoiserProbe.Condition("cond", condContext);
+        DenoiserProbe.Condition("uncond", uncondContext);
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();

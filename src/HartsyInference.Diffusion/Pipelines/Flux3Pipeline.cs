@@ -136,8 +136,13 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                 }
             }
 
+            DenoiserProbe.Condition("cond", condText);
+            DenoiserProbe.Condition("uncond", uncondText);
             weightedCond = prompt.IsWeighted ? CondTokenWeights.Apply(Backend, condText, null, prompt.Tokens).Cond : null;
             weightedUncond = guided && negative!.IsWeighted ? CondTokenWeights.Apply(Backend, uncondText!, null, negative.Tokens).Cond : null;
+            DenoiserProbe.Condition("cond.weighted", weightedCond);
+            DenoiserProbe.Condition("uncond.weighted", weightedUncond);
+            DenoiserProbe.Condition("ref", referenceTokens);
             Flux3ConditionInput condInput = new Flux3ConditionInput(weightedCond ?? condText, referenceTokens, referenceShapes);
             Flux3ConditionInput? uncondInput = guided
                 ? new Flux3ConditionInput(weightedUncond ?? uncondText!, referenceTokens, referenceShapes) : null;

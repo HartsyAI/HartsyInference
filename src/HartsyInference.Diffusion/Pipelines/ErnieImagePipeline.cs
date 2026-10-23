@@ -275,6 +275,8 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         // The predictor closure needs the timestep table, and `timesteps` is a ReadOnlySpan (a ref local) that a
         // lambda cannot capture. One small array copy per generation.
         float[] timestepTable = timesteps.ToArray();
+        DenoiserProbe.Condition("cond", condEmb);
+        DenoiserProbe.Condition("uncond", uncondEmb);
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();

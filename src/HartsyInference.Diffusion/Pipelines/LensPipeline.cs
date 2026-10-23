@@ -167,6 +167,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         bool useCfg = cfgScale > 1.0f;
         if (useCfg && negativeLayers is null)
             throw new ArgumentException("CfgScale > 1.0 requires negativeLayers.", nameof(negativeLayers));
+        DenoiserProbe.Condition("cond", positiveLayers);
+        DenoiserProbe.Condition("uncond", useCfg ? negativeLayers : null);
 
         // Lens uses vae_scale_factor = 16 (Flux.2 VAE 8× + pipeline-side 2×2 patchify).
         // Round image dims to a multiple of 16 so latent grids tile cleanly.

@@ -646,6 +646,11 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         //    when no plan is given.
         bool hasRegions = regionalPlan is not null && regionalPlan.Regions.Count > 0;
         Tensor condStream = reduxExtendedT5 ?? t5Embeddings;
+        DenoiserProbe.Refuse(hasFluxCn, "Flux ControlNet");
+        DenoiserProbe.Condition("cond", condStream);
+        DenoiserProbe.Condition("cond_pooled", clipPooled);
+        DenoiserProbe.Condition("uncond", negT5Embeddings);
+        DenoiserProbe.Condition("uncond_pooled", negClipPooled);
         int condTxtSeqLen = txtSeqLen + reduxTokenCount;
         Tensor? extendedT5 = null;
         List<(int Start, int End)>? regionRanges = null;
@@ -656,6 +661,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             (extendedT5, condTxtSeqLen, regionRanges, regionGridMasks) =
                 RegionalConditioningLayout.BuildTextStream(regionalPlan!, t5Embeddings, hPacked, wPacked);
             condStream = extendedT5;
+            DenoiserProbe.Condition("cond.regional", extendedT5);
             regionWeights = new float[regionalPlan!.Regions.Count];
         }
 

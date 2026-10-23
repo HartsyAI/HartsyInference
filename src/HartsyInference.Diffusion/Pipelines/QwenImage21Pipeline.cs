@@ -93,6 +93,8 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
             }
             Backend.FreeWeights(_textEncoder.EnumerateWeights());
             Backend.PreloadWeights(_transformer.EnumerateWeights());
+            DenoiserProbe.Condition("cond", condHidden);
+            DenoiserProbe.Condition("uncond", uncondHidden);
             condPrefix = _transformer.BuildPrefix(Backend, condHidden);
             if (uncondHidden is not null)
             {

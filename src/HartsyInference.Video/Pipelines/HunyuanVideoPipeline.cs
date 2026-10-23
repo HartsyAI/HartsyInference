@@ -132,6 +132,8 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
         _ = promptEmbeds.DataPointer;
         _ = pooled.DataPointer;
 
+        DenoiserProbe.Condition("cond", promptEmbeds);
+        DenoiserProbe.Condition("cond_pooled", pooled);
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
