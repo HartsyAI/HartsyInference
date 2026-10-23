@@ -9,6 +9,7 @@ stable release will require. Dates are UTC.
 ## Unreleased
 
 - **Fixed: multi-GPU campaign filters.** `tests/run-multigpu-campaign.sh` now fails before any GPU work if a filter matches zero tests, and its stale class names point at the consolidated DiT-sharding and video placement tests.
+- **Fixed: LTX-2 packed NVFP4 unpacks to F16, matching its eager open.** The resident DiT recorded no dense dtype, so the CUDA fallback unpacked it to BF16.
 
 ## alpha.389
 
