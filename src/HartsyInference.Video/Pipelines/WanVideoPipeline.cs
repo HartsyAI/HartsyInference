@@ -437,8 +437,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
         if (DenoiserProbe.Active && ((cpEnabled && !DenoiserProbe.Replaying) || cfgParallelEnabled || condCache is not null
             || firstFrameLatent is not null || lastFrameLatent is not null))
-            throw new NotSupportedException("The denoiser probe covers Wan's text-to-video loop without the step cache, on one GPU, "
-                + "or replaying a single-GPU record with context parallelism.");
+            throw new NotSupportedException("The denoiser probe covers Wan's text-to-video loop without the step cache: on one GPU "
+                + "(record or replay), or with context parallelism on replay only, against a single-GPU record.");
         using IDisposable? textKv = OpenTextKvCache(stream, tLat, hLat, wLat, promptEmbeds, negativeEmbeds,
             cfgParallelEnabled ? CfgParallelBackend : cpEnabled ? CpBackends![1] : null, blockAct);
         DenoiserProbe? probe = DenoiserProbe.Open(steps);
@@ -478,6 +478,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 {
                     if (probe?.Takes(k) == true)
                     {
+                        Debug.Assert(probe.Replays, "Context parallelism only replays a probe record.");
                         Tensor recorded = probe.ReplayInputs(k, tEmb, [latents])[0];
                         probe.ReplayOutputs(k, [CpForkedForward(recorded, promptEmbeds, null, tEmb),
                             cfgThisStep ? CpForkedForward(recorded, negativeEmbeds, null, tEmb) : null]);
