@@ -37,6 +37,9 @@ public sealed class DenoiserProbe
     /// <summary>True on the replay arm.</summary>
     public bool Replays => _outDir is not null;
 
+    /// <summary>True while <c>diagnostics.denoiserProbe</c> is set to replay.</summary>
+    public static bool Replaying => Active && IsReplay();
+
     /// <summary>The probe for a denoise loop of <paramref name="stepCount"/> steps, or null when the probe is off.</summary>
     public static DenoiserProbe? Open(int stepCount)
     {
