@@ -54,11 +54,12 @@ public sealed partial class CudaBackend
         && c.Output.CoversStorage && Int8V2KernelsLoaded();
 
     /// <summary>Whether the head-major widening of this grouped call is one S.17 takes, so the grouped token-major row yields to it.
-    /// Alignment is not asked here: S.17 checks the widened call again at admission, and one it declines runs on the dense rows,
-    /// where S.1 follows, as it did before v2.</summary>
+    /// Alignment is not asked here: the widening allocates fresh whole tensors, which are aligned, and S.17 still checks the widened
+    /// call at admission, so one it declines runs on the dense rows, where S.1 follows, as it did before v2.</summary>
     private bool Int8V2TakesWidened(in AttentionCall c) => Int8V2Eligible(in c) && Int8V2KernelsLoaded();
 
     /// <inheritdoc/>
+    /// <remarks>Advisory: it reads the workspace size without the op lock, and a stale yes only sends the call to the next row.</remarks>
     public bool Int8AttentionV2TakesTokenMajor(int batch, int heads, int queryTokens, int keys, int headDim, DType dtype)
     {
         if (!Int8V2ShapeEligible(batch, heads, queryTokens, keys, headDim, headDim, dtype) || !Int8V2KernelsLoaded()) return false;
