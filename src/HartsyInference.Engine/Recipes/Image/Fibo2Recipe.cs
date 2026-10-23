@@ -1,3 +1,4 @@
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -14,7 +15,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Fibo 2.0 recipe (Bria AI, CC-BY-NC-4.0): a single-stream DiT on the Qwen3-VL-4B text encoder with gist tokens and
 /// tanh-gated injection, over the FLUX.2 32-channel VAE. The checkpoint is the transformer; the text encoder and VAE resolve as side
-/// models. Text-to-image only: glyph text images, reference-image editing, LoRA and refiners are not implemented.</summary>
+/// models. Text-to-image and LoRA (merged into the F16 weights before load; bf16 builds only): glyph text images, reference-image editing and refiners are not implemented.</summary>
 public sealed class Fibo2Recipe : IArchitectureRecipe
 {
     /// <summary>ComfyUI's Fibo 2.0 shift 1.15 is a Flux-type exponent: <c>sigma(t) = e^1.15 / (e^1.15 + 1/t - 1)</c>, which is
@@ -39,8 +40,8 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
     public string Name => "fibo2";
 
     /// <inheritdoc/>
-    /// <remarks>Text-to-image only. Img2img, reference editing, regions, LoRA and refiners are declared off until they are implemented.</remarks>
-    public ImageFeatures Supports => ImageFeatures.None;
+    /// <remarks>Text-to-image and LoRA. Img2img, reference editing, regions and refiners are declared off until they are implemented.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Lora;
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
@@ -78,6 +79,8 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             Logs.Info($"[Fibo2Recipe] {variant.Variant.DisplayName} ({variant.Source}): dim={config.Dim}, {config.NumLayers} layers, "
                 + $"injection={string.Join(",", config.InjectionLayers)}.");
 
+            MergeLoras(context, dit, owned);
+
             Fibo2Transformer transformer = new(config);
             owned.Add(transformer);
             transformer.LoadWeights(dit);
@@ -112,6 +115,32 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             for (int i = owned.Count - 1; i >= 0; i--)
                 owned[i].Dispose();
             throw;
+        }
+    }
+
+    /// <summary>Merges the request's LoRA stack into <paramref name="dit"/> before the transformer binds the weights (device caches are
+    /// identity-keyed). The weights are already F16 here, so each merged weight is the exact F16 base plus the F32 delta rounded once.
+    /// The stack owns the merged tensors and joins <paramref name="owned"/>; every F16 copy the merge superseded is freed at once, since
+    /// otherwise the whole merged set would sit beside its originals. A LoRA that matches no weight is refused by the merge.</summary>
+    private static void MergeLoras(RecipeContext context, Dictionary<string, Tensor> dit, List<IDisposable> owned)
+    {
+        if (context.Loras is null)
+            return;
+        Dictionary<string, Tensor> before = new(dit, StringComparer.Ordinal);
+        MergedLoraStack? stack = RecipeLoraMerge.Apply(context, new LoraMergeTargets { Transformer = dit }, "Fibo2Recipe");
+        if (stack is null)
+            return;
+        owned.Add(stack);
+        foreach (KeyValuePair<string, Tensor> pair in before)
+        {
+            Tensor merged = dit[pair.Key];
+            if (ReferenceEquals(merged, pair.Value) || !pair.Value.OwnsMemory)
+                continue;
+            int index = owned.FindIndex(o => ReferenceEquals(o, pair.Value));
+            if (index < 0)
+                continue;
+            owned.RemoveAt(index);
+            pair.Value.Dispose();
         }
     }
 

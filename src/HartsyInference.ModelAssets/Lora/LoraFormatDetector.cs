@@ -29,6 +29,7 @@ public static class LoraFormatDetector
         bool hasDiffusersMiniMaxH3 = false;
         bool hasFlux3 = false;
         bool hasMossImage = false;
+        bool hasFibo2 = false;
         bool hasKohyaGeneric = false;
 
         foreach (string key in descriptors.Keys)
@@ -45,6 +46,12 @@ public static class LoraFormatDetector
             if (HasLoraSuffix(key) && MossImageLoraMapper.IsDistinctive(key))
             {
                 hasMossImage = true;
+            }
+            // Fibo 2.0 in either spelling. Its Comfy-wrapped `diffusion_model.layers.N…` roots would otherwise be claimed by the
+            // Z-Image arm and its `transformer.` roots by the generic passthrough, which does not rename `to_out.0`.
+            if (HasLoraSuffix(key) && Fibo2LoraMapper.IsDistinctive(key))
+            {
+                hasFibo2 = true;
             }
             // No wrapper prefix at all — the root IS the checkpoint's own key (MiniMax-H3's published Turbo LoRA:
             // `blocks.0.attn.qkv_proj.lora_A.weight`, `token_refiner.blocks.0.mlp.fc1.lora_B.weight`). Recorded
@@ -156,6 +163,7 @@ public static class LoraFormatDetector
 
         if (hasFlux3) return LoraFormat.Flux3;
         if (hasMossImage) return LoraFormat.MossImage;
+        if (hasFibo2) return LoraFormat.Fibo2;
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
         if (hasComfyBfl) return LoraFormat.ComfyBflDit;
         if (hasZImage) return LoraFormat.ComfyZImageDit;

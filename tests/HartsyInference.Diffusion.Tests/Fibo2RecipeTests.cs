@@ -37,9 +37,9 @@ public sealed class Fibo2RecipeTests
     }
 
     [Fact]
-    public void Supports_DeclaresNothingBeyondTextToImage()
+    public void Supports_DeclaresLoraOnly()
     {
-        Assert.Equal(ImageFeatures.None, new Fibo2Recipe().Supports);
+        Assert.Equal(ImageFeatures.Lora, new Fibo2Recipe().Supports);
     }
 
     [Fact]

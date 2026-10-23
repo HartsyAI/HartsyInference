@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Fibo 2.0 LoRA support.** `fibo2` declares `ImageFeatures.Lora` and merges stacks into the F16 weights before the
+  transformer loads. `Fibo2LoraMapper` reads Comfy-Org's turbo LoRA layout (adapters on the fused `qkv`, `to_kv`, `w13`, plus
+  `.diff`/`.diff_b`) and diffusers/PEFT names (split projections resolve to fused row slices). bf16 bases only; verified by CPU
+  merge tests and header-level key checks, not on a GPU.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch

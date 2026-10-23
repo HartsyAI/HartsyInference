@@ -60,6 +60,10 @@ public sealed class LoraFile : IDisposable
                 layers = miniMaxH3Conversion.Layers;
                 fullWeightDiffs = miniMaxH3Conversion.FullWeightDiffs;
             }
+            else if (format == LoraFormat.Fibo2)
+            {
+                layers = Fibo2LoraMapper.ParseLayers(loader, out fullWeightDiffs);
+            }
             else
             {
                 layers = format switch
