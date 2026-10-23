@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Fibo 2.0 int8 ConvRot builds (`fibo2-dev-int8`, `fibo2-edit-turbo-int8`).** `Fibo2Recipe` keeps Comfy-Org's
+  `int8_tensorwise` + ConvRot 256 linears packed on a backend with the int8 kernels and widens them on the host
+  elsewhere (`QuantizedWeightPolicy`), for both the transformer and the `qwen3vl_4b_int8_convrot` text encoder, which is
+  pinned as a side model with the int8 builds' sha256. The fused `qkv`, `to_kv` and `w13` split while packed, with each
+  piece's per-row scale sliced to its rows. Not run on real weights or a GPU.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch

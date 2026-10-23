@@ -56,7 +56,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
     /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id.</remarks>
     public bool Matches(string familyId) =>
         string.Equals(familyId, "fibo2", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "fibo2-dev", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(familyId, "fibo2-dev", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "fibo2-dev-int8", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "fibo2-edit-turbo-int8", StringComparison.OrdinalIgnoreCase);
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -68,7 +70,10 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         {
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
             owned.Add(source);
-            Dictionary<string, Tensor> dit = HalfPrecisionWeights(source.Weights, owned);
+            Dictionary<string, Tensor> dit = Fibo2WeightPreparation.HalfPrecisionWeights(source.Weights, owned);
+            bool quantized = Fibo2WeightPreparation.HasPackedWeights(dit);
+            // A packed int8 weight no executing device can read widens here, not inside the first GEMM.
+            Fibo2WeightPreparation.WidenUnsupported(dit, context.TransformerBackends, DType.F16, owned);
             Fibo2Config config = Fibo2Config.FromWeights(dit, Fibo2Config.Checkpoint);
             if (config.InjectionLayers.Length != Fibo2TextBundles.InjectionLayerCount)
             {
@@ -82,11 +87,13 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             owned.Add(transformer);
             transformer.LoadWeights(dit);
 
-            string encoderPath = ModelFileLocator.RequireOrEnsure(context.Components?.Qwen, SideModels.Fibo2Qwen3VL4B,
+            string encoderPath = ModelFileLocator.RequireOrEnsure(context.Components?.Qwen,
+                quantized ? SideModels.Fibo2Qwen3VL4BInt8 : SideModels.Fibo2Qwen3VL4B,
                 "Qwen3-VL-4B text encoder (Fibo 2.0)", context.Cancel, "text_encoders", "clip");
             (Dictionary<string, Tensor> encoderWeights, CheckpointSource encoderSource) = ComponentLoader.Load(
                 encoderPath, "Fibo2Recipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             owned.Add(encoderSource);
+            Fibo2WeightPreparation.WidenUnsupported(encoderWeights, [context.TextEncoderBackendOrDefault], DType.BF16, owned);
             LlamaStyleEncoderConfig encoderConfig = Fibo2TextEncoderConfig.FromWeights(encoderWeights);
             Fibo2TextEncoderConfig.ValidateFor(encoderConfig, config);
             LlamaStyleEncoder encoder = new(encoderConfig);
@@ -113,35 +120,5 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
                 owned[i].Dispose();
             throw;
         }
-    }
-
-    /// <summary>Casts BF16 weights to F16, which the CPU and GPU kernels take directly, as the Flux.2 recipe does. The copies join
-    /// <paramref name="owned"/> so they outlive the transformer that borrows them; other dtypes pass through.</summary>
-    /// <exception cref="NotSupportedException">A quantized tensor is present; the int8 builds are not wired yet.</exception>
-    private static Dictionary<string, Tensor> HalfPrecisionWeights(IReadOnlyDictionary<string, Tensor> source, List<IDisposable> owned)
-    {
-        Dictionary<string, Tensor> weights = new(source.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, Tensor> pair in source)
-        {
-            Tensor tensor = pair.Value;
-            bool dense = tensor.DType == DType.F32 || tensor.DType == DType.F16 || tensor.DType == DType.BF16;
-            if (!dense)
-            {
-                throw new NotSupportedException(
-                    $"Fibo 2.0 tensor '{pair.Key}' is {tensor.DType}. Quantized Fibo 2.0 checkpoints (int8 ConvRot) are not wired yet; "
-                    + "use the bf16 build.");
-            }
-            if (tensor.DType == DType.BF16)
-            {
-                Tensor half = tensor.CastTo(DType.F16);
-                owned.Add(half);
-                weights[pair.Key] = half;
-            }
-            else
-            {
-                weights[pair.Key] = tensor;
-            }
-        }
-        return weights;
     }
 }
