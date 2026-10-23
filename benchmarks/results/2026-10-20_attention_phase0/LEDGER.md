@@ -71,3 +71,27 @@ shapes, so its floor is `identical`. Step ms is the harness's median over the wa
 
 The log's `FAIL` on llama32-1b and qwen3-4b is the harness's equality check, not the floor. The flips are today's
 default against strict on the forced tokens; a later bounded change may not add flips beyond these counts.
+
+## BF16 opt-in floors (Phase 4 item 2)
+
+Declared before any model takes the BF16 grant (#523's exact knob, #524's row S.16). Default vs exact is one build with and
+without `numerics.sdpaNoTf32=true`. The control changes summation order only (`vram.sdpaForceTiled=true`; for a row that
+already tiles, the default arm run a second time). The null is SSIM between two seeds of the default arm. Seeds 42-44, RTX
+4090, logs in `4090/floors-bf16.log`. Floor = min(default vs exact) - 0.01.
+
+| Case | Default vs exact, per seed | Control, min | Null | Floor |
+|---|---|---|---|---|
+| lens-mxfp8 | 0.986963 / 0.992546 / 0.988716 | 0.979848 | 0.166-0.170 | 0.977 |
+| lens-2048 | 0.979948 / 0.952910 / 0.878556 | 0.950817 | 0.283-0.307 | 0.869 |
+
+- lens-mxfp8 is borderline: the control's own minimum (0.980) sits at the 0.98 threshold below which SSIM is too chaotic to
+  judge a row, so a candidate near 0.977 is within summation-order noise. 0.977 rounds to the nearest thousandth, which is
+  0.001 stricter than the round-down rule above. Measured on #523's head `6c0355dd`, whose default path is main's.
+- lens-2048 is chaotic. It already tiles, so its control is the default arm run a second time: 0.979 / 0.951 / 1.000. On
+  seeds 42 and 43 two runs of one build differ as much as default and exact do; only seed 44 reproduces, and there exact
+  reads 0.879. SSIM resolves little at this size, so the floor (rounded like lens-mxfp8's) only catches a broken image.
+  Measured on main `796c6c08`.
+- Result (#534, seeds 42-45): BF16 misses one seed per row, lens-mxfp8 s44 0.943 and lens-2048 s45 0.788. Both images show the
+  same scene, slightly shifted. The teacher-forced probe (cond, seed 42, against twice default-vs-exact per step) passes 5 of 8
+  steps: lens-mxfp8 step 2 reads 3.84e-2 against 2.3e-2, and lens-2048 steps 2 and 3 read 2.69e-2 and 1.50e-2 against 2.45e-2 and
+  1.19e-2. The user waived both on inspection of the images, and the grant ships on by default.

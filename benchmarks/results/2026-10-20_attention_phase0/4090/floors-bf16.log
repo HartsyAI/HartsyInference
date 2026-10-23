@@ -1,0 +1,29 @@
+# floors-bf16: default vs exact (numerics.sdpaNoTf32=true) and the summation-order control, #523 head 6c0355dd (default path = main), seeds 42-44
+## lens-mxfp8, default vs exact (--head-set numerics.sdpaNoTf32=true --head-set diagnostics.logLevel=Debug)
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| lens-mxfp8 | cuda | FAIL | 76.91 → 76.54 | -0.5 | 536 → 571 | +6.5 | 13222 → 13228 | +0.0 | 0.986963 | DIFFER | slower by +6.5% (base spread 0.2%);  |
+per seed: s42 0.986963, s43 0.992546, s44 0.988716
+
+## lens-mxfp8, default vs forced tiled (--head-set vram.sdpaForceTiled=true)
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| lens-mxfp8 | cuda | FAIL | 76.91 → 75.18 | -2.2 | 536 → 564 | +5.2 | 13222 → 13222 | +0.0 | 0.979848 | DIFFER | slower by +5.2% (base spread 0.2%);  |
+per seed: s42 0.990556, s43 0.993892, s44 0.979848
+
+## lens-mxfp8 null (default arm, seed vs seed): s42/s43 0.165670, s43/s44 0.170078, s42/s44 0.167664
+
+# lens-2048 on main 796c6c08, the unchanged base, seeds 42-44
+## lens-2048, default vs exact (--head-set numerics.sdpaNoTf32=true)
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| lens-2048 | cuda | FAIL | 110.97 → 111.99 | +0.9 | 7799 → 8215 | +5.3 | 15792 → 15794 | +0.0 | 0.878556 | DIFFER | slower by +5.3% (base spread 2.5%);  |
+per seed: s42 0.979948, s43 0.952910, s44 0.878556
+
+## lens-2048, default vs default, same build (--head-set numerics.sdpaNoTf32=false, the default value, for a separate run directory)
+| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| lens-2048 | cuda | PASS | 110.97 → 113.97 | +2.7 | 7799 → 7801 | +0.0 | 15792 → 15802 | +0.1 | 0.950817 | DIFFER |  |
+per seed: s42 0.978752, s43 0.950817, s44 1.000000 (digests equal)
+
+## lens-2048 null (default arm, seed vs seed): s42/s43 0.292291, s43/s44 0.283280, s42/s44 0.307077
