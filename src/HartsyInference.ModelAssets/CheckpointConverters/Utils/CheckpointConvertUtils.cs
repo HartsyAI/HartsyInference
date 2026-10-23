@@ -1237,6 +1237,10 @@ public static unsafe class CheckpointConvertUtils
         {
             return false;
         }
+        // The stored column count is the swizzle stride: below a whole column tile it only works inside one row tile,
+        // because a second row tile lands on the first one's offsets.
+        if (scaleCols % 4 != 0 && (rows > 128 || blockCols > 4))
+            return false;
         // Each dimension can sit inside its padding while the pair is still too small for the blocked indexing, so
         // the largest index has to fit. It falls in the last row tile and last column tile, where the index grows.
         long last = 0;

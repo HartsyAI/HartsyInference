@@ -120,6 +120,11 @@ internal sealed class Recipe
                 throw new InvalidDataException($"Copy source '{copy.From}' does not exist.");
             if (!byKey.TryAdd(copy.To, source))
                 throw new InvalidDataException($"Copy target '{copy.To}' already exists.");
+            // A copied weight is the same layer under a new name, so its config (the layout marker among them) follows it.
+            if (layerConfigs is not null && copy.From.EndsWith(".weight", StringComparison.Ordinal)
+                && copy.To.EndsWith(".weight", StringComparison.Ordinal)
+                && layerConfigs.TryGetValue(copy.From[..^".weight".Length], out System.Text.Json.Nodes.JsonNode? config))
+                layerConfigs[copy.To[..^".weight".Length]] = config?.DeepClone();
             log($"  copied {copy.From} -> {copy.To}");
         }
         foreach (string pattern in Drop)

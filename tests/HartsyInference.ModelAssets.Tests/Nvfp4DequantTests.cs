@@ -440,4 +440,22 @@ public sealed unsafe class Nvfp4DequantTests
             Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
         }
     }
+
+    /// <summary>A stride below a whole column tile cannot address a second row tile: for a [129, 8] weight, scales [256, 2]
+    /// fit every bound yet put row 128 on row 0's bytes. The full [256, 4] tile is accepted.</summary>
+    [Theory]
+    [InlineData(256, 2, false)]
+    [InlineData(256, 4, true)]
+    public void DequantNvfp4_RefusesASubTileStrideAcrossRowTiles(int scaleRows, int scaleCols, bool accepted)
+    {
+        using Tensor packed = new(new TensorShape(129, 8), DType.U8);
+        using Tensor blockScales = new(new TensorShape(scaleRows, scaleCols), DType.F8E4M3);
+        if (accepted)
+        {
+            using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f);
+            return;
+        }
+        Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f));
+        Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
+    }
 }
