@@ -127,11 +127,17 @@ public sealed class LensRecipe : IArchitectureRecipe
                 }
                 File.WriteAllLines(mergesTemp, merges);
             }
-            // A finished export may already be open in another process; on Windows overwriting it would throw.
-            if (!(File.Exists(vocabPath) && File.Exists(mergesPath)))
+            // A peer's finished export may be open for reading; on Windows overwriting it throws, and its copy is identical.
+            try
             {
-                File.Move(mergesTemp, mergesPath, overwrite: true);
-                File.Move(vocabTemp, vocabPath, overwrite: true);
+                if (!(File.Exists(vocabPath) && File.Exists(mergesPath)))
+                {
+                    File.Move(mergesTemp, mergesPath, overwrite: true);
+                    File.Move(vocabTemp, vocabPath, overwrite: true);
+                }
+            }
+            catch (IOException) when (File.Exists(vocabPath) && File.Exists(mergesPath))
+            {
             }
         }
         finally
