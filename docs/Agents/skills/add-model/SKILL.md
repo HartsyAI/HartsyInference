@@ -147,7 +147,7 @@ temporary tensors), no per-model env switches, version bump once per stacked bat
    model tests; shared code is load-bearing.
 6. Consumer check, per modality, with the same settings through both the CLI and the HTTP API: identical bytes for image
    (`hartsy image -m <id> ...`, `POST /v1/images/generations`); for other modalities use the matching command and route
-   (`hartsy video|music|speech|transcribe|text|vision|3d|world`, see `src/HartsyInference.Cli/Commands` and
+   (`hartsy video|music|speak|transcribe|text|vision|3d|world`, see `src/HartsyInference.Cli/Commands` and
    `docs/Agents/AGENTS.md` routing) and compare what that modality deterministically produces. Image is the worked example in
    this skill; the phases themselves apply to every modality.
 7. Record in `docs/Checklists/MODEL_STATUS_<MODALITY>.md` and `PARITY_VERIFICATION.md`: exact checkpoint sha256, baseline
@@ -178,6 +178,22 @@ Other consumers: CLI model aliases/help, API docs, `docs/Checklists/MODEL_STATUS
   surfaces, merge one PR at a time once every check is green.
 - Final answer to the user: feature matrix with status per feature, images shown, speed table with baselines, open items as
   concrete work items (not "nice to have"), and a short TL;DR.
+
+## Other modalities
+
+The phases hold for every modality; the worked details above (prompt set, SSIM, image viewing, T2I Swarm calls) are the image
+case. Swap them as follows, and record the choice in the dossier:
+
+| Modality | Prompt/input set | Baseline and parity | What "looks right" means |
+|---|---|---|---|
+| Video | text, image-to-video, first/last frame, audio if supported; short and long clips | official or ComfyUI run, per-step ms, peak VRAM, first-step output | view extracted frames and check motion, temporal consistency, prompt match |
+| Audio (TTS/music/FX) | short, long, multilingual, reference-voice or style inputs | official run; Whisper WER for speech, spectrogram/loudness for music | listen-equivalent checks: WER, duration, spectral sanity; never trust a silent or clipped file |
+| LLM / VLM | chat prompts, long context, tool or vision inputs | reference logits / greedy token parity on fixed prompts, tokens/s | coherent, correct answers; compare first-token logits against the reference before judging text |
+| Vision (detect/segment/depth/face) | labelled images | official metric on a small labelled set (mAP, IoU, MAE) | overlay the output on the input and look at it |
+| 3D | single image, multi-view, text | official mesh/render, vertex counts, time | render and view turntable frames; check for defects the metric misses |
+
+Swarm verification: use the modality's route in the extension (images through `GenerateText2Image`; audio through the AudioLab
+websocket/API; others per `docs/Agents/AGENTS.md`), and say plainly if a modality has no Swarm route yet.
 
 ## Common traps
 
