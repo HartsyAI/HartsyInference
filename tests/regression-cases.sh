@@ -12,7 +12,7 @@
 # per-head and key masks, token-major, the Sage-length rows), every weight format on disk and the `lora` rows.
 # `long` runs a video past numerics.sageF16MinSkv tokens, where an F16 DiT's self-attention takes SageAttention.
 # `nvfp4` is the ComfyUI-config NVFP4 checkpoints on this host (`nvfp4-ref` the bf16 build an NVFP4 row is measured
-# against); off Blackwell they load at open, so these rows are what a loader change to nvfp4 must leave identical.
+# against); below Blackwell they are the rows a change to the NVFP4 loader or dispatch must leave identical.
 #
 #   regression_cases core         # id, checkpoint, spec — for rows tagged core
 #   regression_cases core vulkan  # rows tagged core AND vulkan (a backend tag names the cases that run on it)
@@ -105,5 +105,8 @@ zimage-nvfp4	nvfp4	Stable-Diffusion/ZImage/z_image_turbo_nvfp4.safetensors	image
 flux3-nvfp4	nvfp4	Stable-Diffusion/flux3-image-klein-nvfp4-1_0-flux-3-image-klein-base-nvfp4.safetensors	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light, photograph|-m flux3 --width 1024 --height 1024
 flux3-bf16	nvfp4-ref	Stable-Diffusion/flux3-image-klein-1_0-flux-3-image-klein-base-bf16.safetensors	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light, photograph|-m flux3 --width 1024 --height 1024
 krea2-nvfp4	nvfp4	Stable-Diffusion/krea2-turbo-nvfp4-1_0-krea-2-turbo-base-nvfp4.safetensors	image|a red apple on a wooden table|-m krea2 --steps 8 --width 1024 --height 1024
+krea2-nvfp4-lora	nvfp4	Stable-Diffusion/krea2-turbo-nvfp4-1_0-krea-2-turbo-base-nvfp4.safetensors	image|a red apple on a wooden table|-m krea2 --steps 8 --width 1024 --height 1024 --lora /mnt/model-storage/Models/Lora/krea2gpklora-v01-0_1-krea-2-lora-fp32.safetensors
+qwenimage-nvfp4	nvfp4	Stable-Diffusion/QwenImage/qwen_image_nvfp4.safetensors	image|a bowl of ramen on a wooden counter, photograph|-m qwen-image --steps 20 --width 1024 --height 1024
+boogu-turbo-nvfp4	nvfp4	Stable-Diffusion/Boogu/boogu_image_turbo_nvfp4.safetensors	image|a red apple on a wooden table|-m boogu --steps 4 --width 1024 --height 1024
 MATRIX
 }

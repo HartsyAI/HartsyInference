@@ -342,6 +342,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Native block-scaled GEMM (NVFP4 today) on Blackwell: the packed weight and its scale tensor are the operands and the activation is block-quantized per call. Off until validated on a card (<c>numerics.fp4Native</c>).</summary>
     public bool EnableNativeFp4Gemm { get; set; }
 
+    /// <summary>Whether a resident weight standing in for a dense one may keep that dense copy in the weight-cast cache (<c>vram.residentCastCache</c>, read at construction).</summary>
+    public bool CacheResidentCasts { get; set; }
+
     /// <inheritdoc/>
     /// <remarks>Reports the same flag <see cref="LinearImpl"/> consults, so the two cannot drift.</remarks>
     public bool NativeFp8Gemm => EnableNativeFp8Gemm;
@@ -1031,10 +1034,30 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 outBf16: gemmDtype == DType.BF16);
             return;
         }
+        if (gemmDtype == DType.F32)
+        {
+            // The kernel writes 16 bits; an F32 dense twin is that F16 widened, which is exact.
+            ulong half = CudaMemory.Allocate((nuint)(weight.ElementCount * DType.F16.SizeInBytes));
+            try
+            {
+                _kernels!.LaunchNvfp4Dequant(half, source, scales.BlockScaleDevice,
+                    (int)weight.Shape[0], (int)(weight.Shape[1] / 2), scales.PaddedCols,
+                    scales.ScaleFactor, scales.GlobalScale, _stream.Handle, outBf16: false);
+                CastOnGpu(destination, half, DType.F16, DType.F32, (int)weight.ElementCount);
+            }
+            finally
+            {
+                CudaMemory.FreeAsync(half, _stream.Handle);
+            }
+            return;
+        }
         _kernels!.LaunchNvfp4Dequant(destination, source, scales.BlockScaleDevice,
             (int)weight.Shape[0], (int)(weight.Shape[1] / 2), scales.PaddedCols,
             scales.ScaleFactor, scales.GlobalScale, _stream.Handle, outBf16: gemmDtype == DType.BF16);
     }
+
+    /// <summary>The dtype a Linear computes <paramref name="weight"/> as off the native block-scaled GEMM: a resident weight standing in for a dense one (<see cref="QuantWeightInfo.DenseDType"/>) is that dense weight.</summary>
+    private static DType UnpackedWeightDType(Tensor weight) => weight.QuantInfo?.DenseDType ?? weight.DType;
 
     /// <summary>Transient-buffer form of <see cref="MaterializeWeight"/>; <paramref name="castOut"/> is the caller's to free.</summary>
     private unsafe ulong MaterializeWeightIfNeeded(ulong source, Tensor weight, DType gemmDtype, out ulong castOut,
@@ -1311,6 +1334,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         bool fp8TensorCores = _context.Sm >= CudaArch.Ada;
         EnableNativeFp8Gemm = EngineKnobs.Fp8Native.Value ?? fp8TensorCores;
         EnableNativeFp4Gemm = EngineKnobs.Fp4Native.Value ?? false;
+        CacheResidentCasts = EngineKnobs.ResidentCastCache.Value;
         EnableRopeHeadMajorV2 = EngineKnobs.RopeV2.Value;
         EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
         EnableModulateEmitFp8 = EngineKnobs.ModulateEmitFp8.Value;
@@ -2063,7 +2087,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             NoteBlockScaledHostUnpack(weight, packedInfo, weightRowOffset, weightRowCount);
             using Tensor dequantized = packedFormat == BlockScaleFormat.Mxfp8
                 ? Mxfp8ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale)
-                : Nvfp4ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale, packedInfo.GlobalScale!);
+                : packedInfo.DenseDType is { } dense
+                    ? Nvfp4ResidentCodec.DequantToDense(weight, packedInfo.BlockScale, packedInfo.GlobalScale!, dense)
+                    : Nvfp4ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale, packedInfo.GlobalScale!);
             try
             {
                 LinearCore(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount,
@@ -2096,6 +2122,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         int n = rowRange ? weightRowCount : (int)weight.Shape[0]; // outDim (or the requested row count)
         int k = (int)weight.Shape[1]; // inDim
         int m = (int)(input.ElementCount / k); // batch*seqLen
+        if (input.ElementCount != (long)m * k || output.ElementCount != (long)m * n)
+            throw new ArgumentException(
+                $"Linear shapes do not agree: input {input.Shape} against weight [{n}, {k}] makes [{m}, {n}], but the output is "
+                + $"{output.Shape}. A weight with more rows than the model expects (a quantizer's padding) has to be trimmed at load.");
 
         // W8A8 eligibility decided BEFORE any device work: the int8 weight cache replaces the F16 weight on
         // device entirely, so the F16 upload is skipped — and the cache-miss host quant must read
@@ -2333,7 +2363,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // GemmEx is inefficient at m=1; the fused GEMV reads each weight row once with an F32 accumulate
                 // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
                 // numerics.bf16Gemv=false to fall back to cuBLAS.
-                if (EnableBf16Gemv && _kernels!.HasFloatGemv && (weight.DType == DType.BF16 || weight.DType == DType.F16))
+                DType gemvDtype = blockScaled is null ? UnpackedWeightDType(weight) : weight.DType;
+                if (EnableBf16Gemv && _kernels!.HasFloatGemv && (gemvDtype == DType.BF16 || gemvDtype == DType.F16))
                 {
                     // The fused GEMV kernels take an F32 bias pointer. Checkpoints that keep their small
                     // linears in 16-bit float ship the bias in the SAME dtype (Krea2 fp8_scaled: BF16
@@ -2342,10 +2373,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     // F32 cast; F32 biases (the common LLM case) pass straight through.
                     ulong gemvBias = bias is null ? 0
                         : CastIfNeeded(pBias, bias.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
-                    if (weight.DType == DType.BF16)
-                        _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, pWeight, gemvBias, n, k, m, _stream.Handle);
+                    ulong gemvWeight = gemvDtype == weight.DType ? pWeight
+                        : MaterializeWeightIfNeeded(pWeight, weight, gemvDtype, out pWeightCast, blockScales);
+                    if (gemvDtype == DType.BF16)
+                        _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, gemvWeight, gemvBias, n, k, m, _stream.Handle);
                     else
-                        _kernels!.LaunchMulMatVecF16F32(pOutput, pInput, pWeight, gemvBias, n, k, m, _stream.Handle);
+                        _kernels!.LaunchMulMatVecF16F32(pOutput, pInput, gemvWeight, gemvBias, n, k, m, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                     cachedOutput = true;
                     return;
@@ -2547,7 +2580,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // F32 activation down too. Old behaviour resolved per-operand and ended up at F32,
             // forcing an oversized weight cast (151 MB for proj_mlp) plus a 75 MB intermediate
             // inside CastOnGpu's F8→F32 path.
-            DType gemmDtype = ResolveGemmDtype(input.DType, weight.DType);
+            DType gemmDtype = ResolveGemmDtype(input.DType, UnpackedWeightDType(weight));
             ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
 
             // Weight cast (fp8/quant → BF16/F16): identical every forward, so for a preloaded weight we
@@ -2563,7 +2596,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 weightPtr = pWeight;
             }
-            else if (cacheWeightCast && CacheWeightCasts && !hipUpcast && GpuTransferHelper.IsWeightCached(weight))
+            else if (cacheWeightCast && CacheWeightCasts && !hipUpcast && GpuTransferHelper.IsWeightCached(weight)
+                && (weight.QuantInfo?.DenseDType is null || CacheResidentCasts))
             {
                 if (!GpuTransferHelper.TryGetWeightCast(weight, gemmDtype, out weightPtr))
                 {

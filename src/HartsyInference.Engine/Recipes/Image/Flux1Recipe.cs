@@ -77,7 +77,8 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             // One container for either format: a Flux.1 GGUF is a repack of the same BFL file and keeps its bare
             // key names, so nothing below needs to know which one arrived. Quantized tensors stay packed and
             // dequantize transiently per GEMM.
-            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath,
+                CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends));
             loaders.Add(source);
             FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(source.Weights);
             Dictionary<string, Tensor> transformerWeights = converted.Transformer;

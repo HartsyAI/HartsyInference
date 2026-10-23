@@ -79,6 +79,46 @@ public static unsafe class Nvfp4ResidentCodec
         return result;
     }
 
+    /// <summary>Dequantizes a packed weight to the dense twin it stands in for (<see cref="QuantWeightInfo.DenseDType"/>):
+    /// F16 rounded once from <c>e2m1 · (e4m3 · global)</c> exactly as the eager load does, or that F16 widened to F32.</summary>
+    public static Tensor DequantToDense(Tensor packed, Tensor blockScale, Tensor globalScale, DType denseDType)
+    {
+        if (denseDType != DType.F16 && denseDType != DType.F32)
+            throw new ArgumentException($"A dense twin is F16 or F32, not {denseDType}.", nameof(denseDType));
+        ArgumentNullException.ThrowIfNull(packed);
+        ArgumentNullException.ThrowIfNull(blockScale);
+        ArgumentNullException.ThrowIfNull(globalScale);
+        if (packed.DType != DType.F4E2M1 || packed.Shape.Rank != 2 || blockScale.DType != DType.F8E4M3
+            || blockScale.Shape.Rank != 2 || blockScale.Shape[0] < packed.Shape[0] || blockScale.Shape[1] < packed.Shape[1] / GroupSize
+            || globalScale.DType != DType.F32 || globalScale.ElementCount != 1 || packed.Shape[1] % GroupSize != 0)
+            throw new ArgumentException($"Not a resident NVFP4 weight with its companions: {packed.DType} {packed.Shape}, scales {blockScale.Shape}.");
+        long outDim = packed.Shape[0], inDim = packed.Shape[1], inHalf = inDim / 2, paddedCols = blockScale.Shape[1];
+        Tensor result = new Tensor(new TensorShape(outDim, inDim), denseDType);
+        byte* w = (byte*)packed.DataPointer;
+        byte* bs = (byte*)blockScale.DataPointer;
+        float scaleFactor = blockScale.Fp8ScaleFactor, global = ((float*)globalScale.DataPointer)[0];
+        bool f32 = denseDType == DType.F32;
+        byte* dst = (byte*)result.DataPointer;
+        float[] lut = E2M1Lut;
+        float[] e4m3 = E4M3Decode;
+        CpuParallel.For((int)outDim, outDim * inDim * 4, r =>
+        {
+            byte* wr = w + (long)r * inHalf;
+            float scale = 0f;
+            for (long k = 0; k < inHalf; k++)
+            {
+                if (k % (GroupSize / 2) == 0)
+                    scale = e4m3[bs[SwizzledScaleIndex(r, k / (GroupSize / 2), paddedCols)]] * scaleFactor * global;
+                byte b = wr[k];
+                Half even = (Half)(lut[(b >> 4) & 0x0F] * scale), odd = (Half)(lut[b & 0x0F] * scale);
+                long o = (long)r * inDim + 2 * k;
+                if (f32) { ((float*)dst)[o] = (float)even; ((float*)dst)[o + 1] = (float)odd; }
+                else { ((Half*)dst)[o] = even; ((Half*)dst)[o + 1] = odd; }
+            }
+        });
+        return result;
+    }
+
     /// <summary>Row-major dequant, parallel over rows: packed reads and BF16 writes are both sequential and the block scale is decoded once per 8 packed bytes.</summary>
     private static void DequantToBf16Core(byte* w, byte* bs, float scaleFactor, float global,
         long outDim, long inHalf, long paddedCols, ushort* dst)

@@ -533,6 +533,41 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
+    /// <summary>Narrows, in place, every weight whose row count exceeds what <paramref name="rowsFor"/> says the model uses,
+    /// to its leading rows. ComfyUI's nvfp4 quantizer pads a weight's rows to a multiple of 16 (Boogu's 840-row K/V
+    /// projections ship as 848) and records the true size nowhere in the file, so only the model knows it.</summary>
+    /// <remarks>The narrowed weight is a view over the same bytes; a resident one keeps its block scales.</remarks>
+    public static void TrimPaddedRows(IDictionary<string, Tensor> weights, Func<string, long?> rowsFor)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(rowsFor);
+        foreach (string key in weights.Keys.ToList())
+        {
+            Tensor weight = weights[key];
+            if (rowsFor(key) is not long rows || weight.Shape.Rank != 2 || weight.Shape[0] == rows) continue;
+            if (weight.Shape[0] < rows || weight.Shape[0] - rows >= 16)
+                throw new InvalidOperationException(
+                    $"'{key}' has {weight.Shape[0]} rows where the model expects {rows}; that is not quantizer padding.");
+            Tensor narrowed = weight.SliceRows(0, rows);
+            narrowed.QuantInfo = weight.QuantInfo?.SliceRows(0, rows, key);
+            weights[key] = narrowed;
+        }
+    }
+
+    /// <summary>The dense weight a resident nvfp4 weight stands in for (<see cref="QuantWeightInfo.DenseDType"/>), unpacked
+    /// exactly as the eager open would have; the caller owns it.</summary>
+    public static Tensor UnpackResidentNvfp4(Tensor resident, DType denseDType)
+    {
+        QuantWeightInfo info = resident.QuantInfo
+            ?? throw new ArgumentException("The weight carries no nvfp4 companions.", nameof(resident));
+        if (resident.DType != DType.F4E2M1 || resident.Shape.Rank != 2 || info.BlockScale is null || info.GlobalScale is null)
+            throw new ArgumentException($"Expected a resident nvfp4 weight, got {resident.DType} {resident.Shape}.", nameof(resident));
+        using Tensor packed = resident.ReinterpretAs(DType.U8, new TensorShape(resident.Shape[0], resident.Shape[1] / 2));
+        Tensor f16 = DequantNvfp4ToF16(packed, info.BlockScale, ((float*)info.GlobalScale.DataPointer)[0]);
+        if (denseDType == DType.F16) return f16;
+        using (f16) return f16.CastTo(denseDType);
+    }
+
     /// <summary>Swaps the two halves of a tensor along dim 0 — the BFL/Tencent <c>[shift, scale]</c> ↔ diffusers <c>[scale, shift]</c> modulation reorder. Works for 2D weights and 1D biases; quant-aware via <see cref="SliceByteCount"/>. The swap is a row permutation, so the source's per-tensor fp8 scale is carried.</summary>
     /// <param name="castToF32">Returns the swapped tensor as F32 (HunyuanVideo's final Modulate reads F32). The cast folds any fp8 scale into the values, so the result carries no scale factor.</param>
     public static Tensor SwapScaleShiftHalves(Tensor input, bool castToF32 = false)
@@ -540,6 +575,14 @@ public static unsafe class CheckpointConvertUtils
         long firstDim = input.Shape[0];
         if (firstDim % 2 != 0)
             throw new InvalidOperationException($"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
+
+        // A resident nvfp4 weight swaps as the dense twin the eager open would have made.
+        if (input.QuantInfo is { Format: "nvfp4", DenseDType: { } dense, BlockScale: not null, GlobalScale: not null })
+        {
+            using Tensor twin = UnpackResidentNvfp4(input, dense);
+            twin.Fp8ScaleFactor = input.Fp8ScaleFactor;
+            return SwapScaleShiftHalves(twin, castToF32);
+        }
 
         // The swap permutes rows, so a per-row scale would have to be permuted with them. Modulation tables are never
         // shipped int8_tensorwise, and silently keeping the unpermuted scale is worse than a refusal. Checked before
@@ -781,9 +824,10 @@ public static unsafe class CheckpointConvertUtils
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
     /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
     /// <param name="keepNvfp4Companions">Leave nvfp4 weights packed AND leave their <c>.weight_scale</c>/<c>.weight_scale_2</c> companions in the dictionary, for a consumer that dequantizes the format itself rather than reading <see cref="Tensor.QuantInfo"/>. Unlike <paramref name="residentNvfp4"/> this also covers AWQ layers, which is the point: <see cref="Tensor.QuantInfo"/> cannot express <c>pre_quant_scale</c>, so those layers have no resident representation and would otherwise be widened. Everything else — fp8, int8, NF4 — folds exactly as it does with this off.</param>
+    /// <param name="nvfp4DenseDType">With <paramref name="residentNvfp4"/>, the <see cref="QuantWeightInfo.DenseDType"/> each resident weight carries — the dtype it stands in for.</param>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
         bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false,
-        Action<Tensor, Tensor>? onNvfp4Unpacked = null)
+        Action<Tensor, Tensor>? onNvfp4Unpacked = null, DType? nvfp4DenseDType = null)
     {
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
         // weight before anything here can strip them.
@@ -931,7 +975,7 @@ public static unsafe class CheckpointConvertUtils
                     // Resident: relabel to F4E2M1 [N, K] and hang the scales off QuantInfo rather than unpacking.
                     // Refuses AWQ pre_quant_scale layers, which fall through to the eager dequant below.
                     if (residentNvfp4 && Nvfp4Codec.TryAttachResident(kvp.Value, blockScales, scale2T,
-                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight))
+                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight, nvfp4DenseDType))
                     {
                         result[key] = residentWeight;
                         nvfp4Resident++;
