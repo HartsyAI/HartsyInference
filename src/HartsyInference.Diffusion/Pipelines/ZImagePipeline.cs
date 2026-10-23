@@ -306,6 +306,9 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             DeviceFeatureCache? stepCache = stepCacheInst;
             int startStep = plan.StartStep;
 
+            DenoiserProbe.Condition("cond", captionEmbeddings);
+            DenoiserProbe.Condition("uncond", negativeCaptionEmbeddings);
+            DenoiserProbe.Condition("cond.regional", regionalPlan?.Regions.Select(r => r.Cond).ToArray());
             for (int i = plan.StartStep; i < steps; i++)
             {
                 Stopwatch stepSw = Stopwatch.StartNew();

@@ -104,6 +104,8 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         // NegatedFlowVelocity, which makes the family's positive `Dt` fall out of the sampler's negative delta with
         // one scalar flip and no tensor work.
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler.Sigmas(), seed, "Boogu-Image");
+        DenoiserProbe.Condition("cond", instructionEmbeddings);
+        DenoiserProbe.Condition("uncond", negativeInstructionEmbeddings);
         DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
             PredictionType.NegatedFlowVelocity,
             (x, s, stepIndex) =>

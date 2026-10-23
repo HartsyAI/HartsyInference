@@ -131,6 +131,8 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         // Triple-pass image guidance lives in EditFromEmbeddings; t2i uses only the text-guidance term.
         _ = imageGuidanceScale;
 
+        DenoiserProbe.Condition("cond", captionEmbeddings);
+        DenoiserProbe.Condition("uncond", negativeCaptionEmbeddings);
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();

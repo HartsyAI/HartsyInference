@@ -217,6 +217,24 @@ public sealed class DenoiserProbe
         Buffer.MemoryCopy(recorded.DataPointer, tensor.DataPointer, bytes, bytes);
     }
 
+    /// <summary>Refuses a run whose denoiser reads a per-step input the probe cannot record, such as ControlNet residuals computed
+    /// from the live latent outside the predictor.</summary>
+    public static void Refuse(bool when, string feature)
+    {
+        if (when && Active)
+            throw new HartsyInferenceException($"The denoiser probe cannot teacher-force {feature}: its per-step input is computed from "
+                + "the arm's own latent outside the denoiser. Drop it, or unset diagnostics.denoiserProbe.");
+    }
+
+    /// <summary><see cref="Condition(string, Tensor?)"/> for each tensor of a per-layer conditioning list, as <c>name.i</c>.</summary>
+    public static void Condition(string name, IReadOnlyList<Tensor>? tensors)
+    {
+        if (tensors is null || !Active)
+            return;
+        for (int i = 0; i < tensors.Count; i++)
+            Condition($"{name}.{i}", tensors[i]);
+    }
+
     /// <summary>A host copy of <paramref name="t"/>'s current contents, in its own dtype.</summary>
     internal static unsafe Tensor Copy(Tensor t)
     {

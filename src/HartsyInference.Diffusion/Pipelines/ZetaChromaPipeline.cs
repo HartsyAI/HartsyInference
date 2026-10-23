@@ -139,6 +139,8 @@ public sealed class ZetaChromaPipeline(IBackend backend, ZetaChromaTransformer t
         // lambda cannot capture. One small array copy per generation.
         float[] timestepTable = timesteps.ToArray();
 
+        DenoiserProbe.Condition("cond", captionEmbeddings);
+        DenoiserProbe.Condition("uncond", negativeCaptionEmbeddings);
         DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
             PredictionType.FlowVelocity,
             (x, s, stepIndex) =>

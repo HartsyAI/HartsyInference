@@ -404,6 +404,8 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             packedLatent = routed;
         }
 
+        DenoiserProbe.Condition("cond", condContext);
+        DenoiserProbe.Condition("uncond", uncondContext);
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();

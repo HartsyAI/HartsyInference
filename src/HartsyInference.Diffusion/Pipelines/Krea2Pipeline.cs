@@ -448,6 +448,9 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             }
         }
 
+        DenoiserProbe.Condition("cond", condHidden);
+        DenoiserProbe.Condition("cond.regional", extendedCond);
+        DenoiserProbe.Condition("uncond", uncondHidden);
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();

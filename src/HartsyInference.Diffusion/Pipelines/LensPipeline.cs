@@ -106,6 +106,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         // at negative positions and drop out, exactly as a trimmed template prefix should.
         ScaleLayers(positiveLayers, promptWeights);
         ScaleLayers(negativeLayers, negativeWeights);
+        DenoiserProbe.Condition("cond", positiveLayers);
+        DenoiserProbe.Condition("uncond", negativeLayers);
         encSw.Stop();
         Logs.Info($"Text encoding done in {encSw.ElapsedMilliseconds}ms (S_txt+={positiveLayers[0].Shape[1]}, " +
                   $"S_txt-={negativeLayers?[0].Shape[1] ?? 0})");

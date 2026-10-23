@@ -133,6 +133,10 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         // lambda cannot capture. One small array copy per generation.
         float[] timestepTable = timesteps.ToArray();
 
+        DenoiserProbe.Condition("cond", qwenEmbeds);
+        DenoiserProbe.Condition("cond_pooled", clipPooled);
+        DenoiserProbe.Condition("uncond", negQwenEmbeds);
+        DenoiserProbe.Condition("uncond_pooled", negClipPooled);
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();

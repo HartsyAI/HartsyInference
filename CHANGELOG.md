@@ -124,6 +124,11 @@ stable release will require. Dates are UTC.
   GPT-OSS `tokenizer.json` and splits it into vocab and merges; every process used the same raw and temp paths, so a second one
   found the other's temp file gone (`FileNotFoundException` on `gpt_oss_tokenizer_raw.json.tmp`). Each export now uses its own
   names and renames the finished files into place, merges before vocab.
+- **Changed: every sampler-driven pipeline records its conditioning for the denoiser probe.** Before, only H3, Wan T2V
+  and Lumina2 did, so replay on any other model fed the recorded latents against fresh conditioning. Per-layer lists
+  (Lens), scheduled prompt variants and regional text streams are recorded element by element, as are token-weighted
+  text, edit/reference tokens and Kandinsky 5 I2V's first-frame latent. Flux and Qwen-Image ControlNet runs are refused
+  under the probe, since their residuals come from the arm's own latent. With the probe off nothing changes.
 
 ## alpha.387
 

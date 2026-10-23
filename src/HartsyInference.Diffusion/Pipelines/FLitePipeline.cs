@@ -221,6 +221,8 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         // F-Lite steps `latent += v·(t − tNext)` with a POSITIVE delta, i.e. its DiT predicts x0 − noise — the
         // negation of the v = noise − x0 convention. That is exactly PredictionType.NegatedFlowVelocity, which makes
         // the sampler flip the scalar delta rather than negate a latent-sized tensor per forward.
+        DenoiserProbe.Condition("cond", positiveContext);
+        DenoiserProbe.Condition("uncond", negativeContext);
         float[] fliteSigmas = new float[steps + 1];
         for (int k = 0; k <= steps; k++)
         {

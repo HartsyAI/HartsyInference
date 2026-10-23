@@ -243,4 +243,47 @@ public sealed unsafe class DenoiserProbeTests : IDisposable
             Assert.Throws<HartsyInferenceException>(() => DenoiserProbe.Condition("pooled", other));
         }
     }
+
+    [Fact]
+    public void PerLayerConditioning_IsRecorded_AndReplayedInPlace()
+    {
+        using Tensor a = Noise(50), b = Noise(51), c = Noise(52), d = Noise(53);
+        using (Probe("record"))
+            DenoiserProbe.Condition("layers", (Tensor[])[a, b]);
+        using (Probe("replay"))
+        {
+            DenoiserProbe.Condition("layers", (Tensor[])[c, d]);
+            Assert.Equal(a.AsReadOnlySpan<uint>().ToArray(), c.AsReadOnlySpan<uint>().ToArray());
+            Assert.Equal(b.AsReadOnlySpan<uint>().ToArray(), d.AsReadOnlySpan<uint>().ToArray());
+        }
+    }
+
+    [Fact]
+    public void Refuse_ThrowsOnlyWhenTheProbeIsActive()
+    {
+        DenoiserProbe.Refuse(true, "ControlNet");
+        using (Probe("record"))
+        {
+            DenoiserProbe.Refuse(false, "ControlNet");
+            Assert.Throws<HartsyInferenceException>(() => DenoiserProbe.Refuse(true, "ControlNet"));
+        }
+    }
+
+    /// <summary>Every pipeline that drives a sampler taps its conditioning, so a probe arm whose knob reaches a text encoder still
+    /// compares the denoiser alone. A presence check only: it cannot tell whether every stream the forward reads is tapped. Lance
+    /// embeds its own token ids inside the denoiser and has no conditioning tensor.</summary>
+    [Fact]
+    public void EveryPipelineThatDrivesASampler_TapsItsConditioning()
+    {
+        string src = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src");
+        List<string> missing = [];
+        foreach (string file in Directory.EnumerateFiles(src, "*Pipeline.cs", SearchOption.AllDirectories))
+        {
+            string text = File.ReadAllText(file);
+            if (text.Contains("sampler.Step(", StringComparison.Ordinal) && !text.Contains("DenoiserProbe.Condition(", StringComparison.Ordinal)
+                && !Path.GetFileName(file).StartsWith("LanceVideo", StringComparison.Ordinal))
+                missing.Add(Path.GetFileName(file));
+        }
+        Assert.True(missing.Count == 0, "No conditioning tap in: " + string.Join(", ", missing));
+    }
 }

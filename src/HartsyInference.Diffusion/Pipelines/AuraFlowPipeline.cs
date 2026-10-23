@@ -283,6 +283,8 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
             Tensor latentTokens = _transformer.PatchifyToTokens(latent);
             latent.Dispose();
 
+            DenoiserProbe.Condition("cond", condContext);
+            DenoiserProbe.Condition("uncond", uncondContext);
             for (int i = startStep; i < steps; i++)
             {
                 Stopwatch stepSw = Stopwatch.StartNew();

@@ -185,6 +185,7 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
             WriteFrame(condLatent, 0, firstFrameLatent);
             FillFrame(condMask, 0, 1.0f);
         }
+        DenoiserProbe.Condition("visual", condLatent);
 
         // Bulk-upload transformer weights before the denoise loop; paired with FreeWeights after it.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
@@ -204,6 +205,10 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
         // lambda cannot capture. One small array copy per generation.
         float[] timestepTable = timesteps.ToArray();
 
+        DenoiserProbe.Condition("cond", qwenEmbeds);
+        DenoiserProbe.Condition("cond_pooled", clipPooled);
+        DenoiserProbe.Condition("uncond", negQwenEmbeds);
+        DenoiserProbe.Condition("uncond_pooled", negClipPooled);
         for (int i = 0; i < steps; i++)
         {
             Stopwatch sw = Stopwatch.StartNew();

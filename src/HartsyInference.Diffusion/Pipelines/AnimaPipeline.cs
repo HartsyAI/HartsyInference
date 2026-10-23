@@ -227,6 +227,8 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Anima",
             startsFromNoisedInit: startStep > 0);
 
+        DenoiserProbe.Condition("cond", refinedText);
+        DenoiserProbe.Condition("uncond", refinedNegText);
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();

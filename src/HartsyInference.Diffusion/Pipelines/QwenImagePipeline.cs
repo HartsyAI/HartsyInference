@@ -433,7 +433,9 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         {
             uncondHidden = weightedUncond;
         }
+        DenoiserProbe.Refuse(hasCn, "Qwen-Image ControlNet");
         DenoiserProbe.Condition("cond", condHidden);
+        DenoiserProbe.Condition("cond.scheduled", scheduledCond);
         DenoiserProbe.Condition("uncond", uncondHidden);
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
@@ -762,6 +764,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // Pin the step-invariant ref tokens as a device-resident weight: they re-enter the per-step device
         // concat below, and a pageable host re-upload every step is an internally-syncing copy. No-op on a
         // ref-latent cache hit (still pinned from the previous generation).
+        DenoiserProbe.Condition("ref", packedEditRef);
         if (packedEditRef is not null)
             Backend.PreloadWeights(new List<Tensor> { packedEditRef });
 
