@@ -868,7 +868,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (!native && Volatile.Read(ref _blockScaledFirstRefusal) is null)
         {
             Interlocked.CompareExchange(ref _blockScaledFirstRefusal,
-                $"{NativeBlockScaledRefusal(input, output, n, k, rowRange, scales)} (n={n} k={k})", null);
+                $"{NativeBlockScaledRefusal(input, output, n, k, rowRange, weight.QuantInfo?.NativeGemmEligible != false, scales)} (n={n} k={k})", null);
         }
         if (Volatile.Read(ref _blockScaledDispatchLogged) != 0
             || Interlocked.Exchange(ref _blockScaledDispatchLogged, 1) != 0)
@@ -922,10 +922,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>The first condition in the <c>LinearCore</c> dispatch gate that this call fails. Mirrors that gate's order.</summary>
     private string NativeBlockScaledRefusal(Tensor input, Tensor output, int n, int k, bool rowRange,
-        in ResidentBlockScales scales)
+        bool nativeGemmEligible, in ResidentBlockScales scales)
     {
         if (rowRange) return "a row range cannot address the packed layout";
         if (!EnableNativeFp4Gemm) return "numerics.fp4Native is off";
+        if (!nativeGemmEligible) return "the layer's full_precision_matrix_mult policy asks for a dense GEMM";
         if (scales.DeclinedStatus != 0) return $"cuBLASLt declined this weight's GEMM (status {scales.DeclinedStatus})";
         int paddedCols = (k / scales.Format.GroupSize() + 3) / 4 * 4;
         if (scales.PaddedCols != paddedCols)

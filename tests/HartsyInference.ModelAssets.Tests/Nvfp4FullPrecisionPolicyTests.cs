@@ -74,12 +74,14 @@ public sealed unsafe class Nvfp4FullPrecisionPolicyTests
         AddGroup(w, "a", null);
         AddGroup(w, "b", "{\"format\": \"nvfp4\"}");
         AddGroup(w, "c", null);
+        AddGroup(w, "d", null);
         Dictionary<string, string> metadata = new Dictionary<string, string>
         {
             ["_quantization_metadata"] = "{\"format_version\": \"1.0\", \"layers\": {"
                 + "\"a\": {\"format\": \"nvfp4\", \"full_precision_matrix_mult\": true}, "
                 + "\"b\": {\"format\": \"nvfp4\", \"full_precision_matrix_mult\": true}, "
-                + "\"c\": {\"format\": \"nvfp4\"}}}",
+                + "\"c\": {\"format\": \"nvfp4\"}, "
+                + "\"d\": {\"format\": \"nvfp4\", \"params\": {\"full_precision_matrix_mult\": true}}}}",
         };
 
         Dictionary<string, Tensor> result = Resident(w, metadata);
@@ -87,5 +89,6 @@ public sealed unsafe class Nvfp4FullPrecisionPolicyTests
         Assert.False(result["a.weight"].QuantInfo!.NativeGemmEligible);
         Assert.True(result["b.weight"].QuantInfo!.NativeGemmEligible, "the per-layer blob is authoritative over the file-level mirror.");
         Assert.True(result["c.weight"].QuantInfo!.NativeGemmEligible);
+        Assert.False(result["d.weight"].QuantInfo!.NativeGemmEligible, "the nested params spelling is read the same as the top-level one.");
     }
 }
