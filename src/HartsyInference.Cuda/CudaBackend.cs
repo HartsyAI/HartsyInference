@@ -2171,7 +2171,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // the checkpoint's scale layout must be the one cuBLASLt derives from [N, K] — block columns padded to 4 —
         // and a row range, which cannot address the packed layout, takes the unpack path like every other refusal.
         BlockScaleFormat? blockScaled = null;
-        if (!rowRange && EnableNativeFp4Gemm && blockScales.BlockScaleDevice != 0 && blockScales.DeclinedStatus == 0
+        // A layer whose full_precision_matrix_mult policy asks for a dense GEMM takes the unpack path below.
+        if (!rowRange && EnableNativeFp4Gemm && weight.QuantInfo?.NativeGemmEligible != false
+            && blockScales.BlockScaleDevice != 0 && blockScales.DeclinedStatus == 0
             && blockScales.PaddedCols == (k / blockScales.Format.GroupSize() + 3) / 4 * 4
             && (input.DType == DType.F32 || input.DType == DType.F16)
             && (output.DType == DType.F16 || output.DType == DType.F32)

@@ -14,6 +14,9 @@ stable release will require. Dates are UTC.
 - **Changed: Wan context parallelism runs `numerics.wanF16` like one GPU.** The K/V exchange moves F16 rows, and rank 1 projects its own text context instead of reading rank 0's. Image-context (I2V) forwards stay F32 under CP, as they do on one GPU.
 - **Fixed: LTX-2.5 "3-D convolution failed" under VRAM pressure.** A memory shortfall during the native causal 3-D conv now falls back for that call only instead of disabling the path for the session; the warning names the failing step.
 - **Fixed: Krea 2 VAE decode runs tiled when VRAM is short.** The decode falls back to overlapping tiles sized to the free VRAM instead of failing on a full-resolution im2col.
+- **Fixed: NVFP4 layers marked `full_precision_matrix_mult` take the dense GEMM on CUDA.** A layer's own `.comfy_quant`
+  policy, or the file-level `_quantization_metadata` config where it has no blob, now keeps that layer off the native
+  block-scaled GEMM; every other layer is unchanged.
 
 ## alpha.389
 

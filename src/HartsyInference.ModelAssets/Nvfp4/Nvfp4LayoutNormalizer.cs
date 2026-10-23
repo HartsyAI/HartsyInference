@@ -57,6 +57,24 @@ internal static class Nvfp4LayoutNormalizer
         return [.. LayerMap(json).Select(p => p.Key)];
     }
 
+    /// <summary>The layers whose file-level config sets <c>full_precision_matrix_mult</c>, or null when the file has no marker.</summary>
+    internal static HashSet<string>? FileLevelFullPrecisionLayers(IReadOnlyDictionary<string, string>? metadata)
+    {
+        IReadOnlyList<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>>? layers = LayerConfigs(metadata);
+        if (layers is null) return null;
+        HashSet<string> flagged = new(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, System.Text.Json.Nodes.JsonNode?> layer in layers)
+        {
+            if (layer.Value is System.Text.Json.Nodes.JsonObject config
+                && config["full_precision_matrix_mult"] is System.Text.Json.Nodes.JsonValue flag
+                && flag.TryGetValue(out bool value) && value)
+            {
+                flagged.Add(layer.Key);
+            }
+        }
+        return flagged;
+    }
+
     /// <summary>Every listed layer with its config, or null when the file has no marker.</summary>
     internal static IReadOnlyList<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>>? LayerConfigs(
         IReadOnlyDictionary<string, string>? metadata)

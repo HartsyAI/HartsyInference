@@ -35,6 +35,9 @@ public sealed record QuantWeightInfo
     /// <summary>The descriptor's <c>full_precision_matrix_mult</c>: this layer must dequantize and run a normal GEMM.</summary>
     public bool FullPrecisionMatMul { get; init; }
 
+    /// <summary>Whether a block-scaled GEMM may consume this weight as stored; false where the layer's policy asks for a dense GEMM.</summary>
+    public bool NativeGemmEligible => !FullPrecisionMatMul;
+
     /// <summary>The dense dtype the eager load would have unpacked this weight to, when it stays packed in that copy's place.</summary>
     /// <remarks>A backend that unpacks the weight for a GEMM computes as that dense weight would — same unpacked values,
     /// same GEMM dtype, same small-m route — so keeping it packed changes the footprint and nothing else. Null leaves the
