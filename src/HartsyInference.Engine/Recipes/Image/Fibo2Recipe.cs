@@ -21,15 +21,15 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
     /// the scheduler's <c>s·t / (1 + (s - 1)·t)</c> with <c>s = e^1.15</c>, not <c>s = 1.15</c>.</summary>
     private static readonly double FluxTimeShift = Math.Exp(1.15);
 
-    /// <summary>Fibo 2.0 dev's sampling settings. Steps and CFG come from the diffusers v1 pipeline example (50 steps, guidance 5);
-    /// the 2.0 dev defaults are not documented yet, so revisit them against the Bria model card. The 1.15 shift is ComfyUI's.</summary>
+    /// <summary>Fibo 2.0 dev's sampling settings, from the Bria model card (briaai/Fibo-2.0-dev: 50 steps, guidance 5.0, 1024×1024 or
+    /// ~1 MP in multiples of 16). The 1.15 shift is ComfyUI's.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults
     {
         Steps = 50, CfgScale = 5.0f, Width = 1024, Height = 1024, SigmaShift = FluxTimeShift,
     };
 
-    /// <summary>Edit-turbo's sampling settings from ComfyUI's edit-turbo workflow: 4 steps, 1024×704. The workflow sets no CFG, so
-    /// guidance is off (1.0), which is an assumption for the distilled build.</summary>
+    /// <summary>Edit-turbo's sampling settings: 4 steps and guidance 1.0 (no CFG) per the Bria model card (briaai/Fibo-2.0-edit-turbo),
+    /// 1024×704 from ComfyUI's edit-turbo workflow.</summary>
     public static ImageDefaults EditTurboDefaults { get; } = new ImageDefaults
     {
         Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 704, SigmaShift = FluxTimeShift,

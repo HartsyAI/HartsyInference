@@ -90,8 +90,12 @@ converter's source files were not available.
   `SigmaAt(i)` and the model multiplies by 1000. The recipe defaults now hand `s = e^1.15` to
   `FlowMatchEulerDiscreteScheduler` (it was 1.15 before the review fix). Still to confirm: the saved ComfyUI sigma list
   against ours.
-- **Dev step count and CFG.** The public workflows give only the edit-turbo values. The diffusers v1 pipeline example uses
-  50 steps and guidance 5; that is a v1 source, not confirmed for 2.0. Close it from the Bria model card or a dev template.
+- **Dev step count and CFG: closed.** The Bria model card (briaai/Fibo-2.0-dev) gives 50 steps and guidance 5.0, 1024×1024 or about
+  1 MP in multiples of 16. Edit-turbo (briaai/Fibo-2.0-edit-turbo) is 4 steps, guidance 1.0, negative prompt has no effect.
+- **Family inventory (Bria cards, 2026-10-22).** Dev: text-to-image, instruction edit, masked edit (white = regenerate), up to 4
+  references (`<image_1>`..`<image_4>`), "inspire" (reference-guided text-to-image) and five photographic styles. Edit-turbo:
+  edit only, same reference and mask inputs. ComfyUI's Partner Nodes (cloud) add structured-prompt generation, outpainting and
+  1MP/4MP presets; those are Bria API features, not local weights.
 - **JSON captions.** ComfyUI re-serialises a JSON caption before templating (`parse_prompt`: compact separators, empty
   values and the score keys dropped). The engine tokenizes the prompt as given, so the tokens and `n` differ unless the
   caption is already in that form.
