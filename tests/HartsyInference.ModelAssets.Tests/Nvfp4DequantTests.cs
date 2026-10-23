@@ -155,6 +155,8 @@ public sealed unsafe class Nvfp4DequantTests
         }
         _output.WriteLine($"{pastE4M3Max} of {Rows * Cols} values past 448 before the ÷8; the unscaled fold breaks the bound on {rejected}.");
         Assert.True(rejected > 0, "the bounds accept the unscaled fold, so they cannot see clipping");
+    }
+
     /// <summary>The block-scale matrix ComfyUI stores is in NVIDIA's blocked layout, not row-major, so the
     /// dequant has to invert the permutation to find the scale for a logical <c>(row, blockColumn)</c>.
     ///
