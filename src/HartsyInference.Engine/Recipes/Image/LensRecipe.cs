@@ -127,13 +127,21 @@ public sealed class LensRecipe : IArchitectureRecipe
                 }
                 File.WriteAllLines(mergesTemp, merges);
             }
-            File.Move(mergesTemp, mergesPath, overwrite: true);
-            File.Move(vocabTemp, vocabPath, overwrite: true);
+            // A finished export may already be open in another process; on Windows overwriting it would throw.
+            if (!(File.Exists(vocabPath) && File.Exists(mergesPath)))
+            {
+                File.Move(mergesTemp, mergesPath, overwrite: true);
+                File.Move(vocabTemp, vocabPath, overwrite: true);
+            }
         }
         finally
         {
             foreach (string temp in (string[])[rawPath, vocabTemp, mergesTemp])
-                if (File.Exists(temp)) File.Delete(temp);
+            {
+                try { File.Delete(temp); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
         Logs.Info("[LensRecipe] GPT-OSS tokenizer vocab + merges exported.");
         return (vocabPath, mergesPath);
