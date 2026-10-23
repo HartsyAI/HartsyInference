@@ -2116,6 +2116,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         int n = rowRange ? weightRowCount : (int)weight.Shape[0]; // outDim (or the requested row count)
         int k = (int)weight.Shape[1]; // inDim
         int m = (int)(input.ElementCount / k); // batch*seqLen
+        if (input.ElementCount != (long)m * k || output.ElementCount != (long)m * n)
+            throw new ArgumentException(
+                $"Linear shapes do not agree: input {input.Shape} against weight [{n}, {k}] makes [{m}, {n}], but the output is "
+                + $"{output.Shape}. A weight with more rows than the model expects (a quantizer's padding) has to be trimmed at load.");
 
         // W8A8 eligibility decided BEFORE any device work: the int8 weight cache replaces the F16 weight on
         // device entirely, so the F16 upload is skipped — and the cache-miss host quant must read

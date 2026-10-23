@@ -73,6 +73,27 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
     }
 
+    /// <summary>A weight with more rows than the output is wide (an untrimmed quantizer pad) is refused, not written past the output.</summary>
+    [Fact]
+    public void OutputNarrowerThanTheWeight_IsRefused()
+    {
+        using CudaBackend? backend = TryOpenBackend();
+        if (backend is null) return;   // tier-lint: guarded
+        using Operands ops = Operands.Create(16, 848, 256, DType.F16, DType.F16, "none", seed: 848);
+        using Tensor resident = ops.AttachResident(DType.F16);
+        using Tensor eager = CheckpointConvertUtils.DequantNvfp4ToF16(ops.Packed, ops.BlockScale, ((float*)ops.GlobalScale.DataPointer)[0]);
+        using Tensor narrow = new Tensor(new TensorShape(16, 840), DType.F16);
+        try
+        {
+            Assert.Throws<ArgumentException>(() => backend.Linear(narrow, ops.Input, resident, null));
+            Assert.Throws<ArgumentException>(() => backend.Linear(narrow, ops.Input, eager, null));
+        }
+        finally
+        {
+            backend.FreeWeights([eager, resident]);
+        }
+    }
+
     /// <summary>The negative control: without a dense dtype an F32 activation meets a BF16 unpack, so the comparison above can fail.</summary>
     [Fact]
     public void WithoutADenseDType_AnF32ActivationDoesNotMatchTheEagerWeight()
