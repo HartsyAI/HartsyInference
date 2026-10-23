@@ -65,6 +65,50 @@ public sealed unsafe class QwenImageVaeBudgetGpuTests
         Assert.True(meanAbsDiff < MeanAbsDiffFloor, $"tiled decode drifts from full decode: {meanAbsDiff}");
     }
 
+    /// <summary>The tile sizes the decoder can pick are forced one at a time: 16 and 24 latent, each against the full decode.</summary>
+    [Fact]
+    public void ForcedTile_16_And_24_MatchFullDecode()
+    {
+        string vaePath = TestPaths.QwenImage.Vae;
+        if (!File.Exists(vaePath) || !CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: Qwen-Image VAE checkpoint or CUDA unavailable.");
+            return;
+        }
+
+        using SafeTensorsLoader loader = new();
+        loader.Load(vaePath);
+        Dictionary<string, Tensor> weights = new();
+        foreach (KeyValuePair<string, Tensor> entry in loader.GetAllTensors())
+        {
+            weights[entry.Key] = entry.Value.DType == DType.F32 ? entry.Value : entry.Value.CastTo(DType.F32);
+        }
+
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        using CudaBackend cuda = new CudaBackend(0, Directory.Exists(ptxDir)
+            ? ptxDir
+            : Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx"));
+        using QwenImageVaeDecoder vae = new(VaeConfig.QwenImage);
+        vae.LoadWeights(weights);
+
+        using Tensor latent = new Tensor(new TensorShape(1, QwenImageVaeDecoder.LatentChannels, 64, 64), DType.F32);
+        float* lat = (float*)latent.DataPointer;
+        Random rng = new(3);
+        for (long i = 0; i < latent.ElementCount; i++) lat[i] = (float)(rng.NextDouble() * 2 - 1);
+
+        using Tensor full = vae.Decode(cuda, latent);
+        foreach (int tile in new[] { 16, 24 })
+        {
+            vae.TileLatentForTests = tile;
+            using Tensor tiled = vae.DecodeWithinBudget(cuda, latent);
+            Assert.Equal(tile, vae.LastTileLatent);
+            Assert.Equal(full.Shape, tiled.Shape);
+            double meanAbsDiff = MeanAbsDiff(full, tiled);
+            _output.WriteLine($"forced tile {tile}, mean |full - tiled| = {meanAbsDiff:F5}");
+            Assert.True(meanAbsDiff < MeanAbsDiffFloor, $"tile {tile} drifts from full decode: {meanAbsDiff}");
+        }
+    }
+
     private static double MeanAbsDiff(Tensor a, Tensor b)
     {
         float* pa = (float*)a.DataPointer;

@@ -73,6 +73,9 @@ public sealed class QwenImageVaeDecoder : IDisposable
     /// <summary>Test seam: replaces the backend's free-VRAM reading in <see cref="DecodeWithinBudget"/>.</summary>
     internal Func<long>? FreeBytesForTests { get; set; }
 
+    /// <summary>Test seam: forces the tile latent size of <see cref="DecodeWithinBudget"/>; 0 plans it from the free VRAM.</summary>
+    internal int TileLatentForTests { get; set; }
+
     /// <summary>Tile latent size of the last <see cref="DecodeWithinBudget"/> call; 0 when it ran full-resolution.</summary>
     internal int LastTileLatent { get; private set; }
 
@@ -286,6 +289,11 @@ public sealed class QwenImageVaeDecoder : IDisposable
         int latentH = (int)latent.Shape[2];
         int latentW = (int)latent.Shape[3];
         long cap = Im2ColCap(backend);
+        if (TileLatentForTests > 0)
+        {
+            LastTileLatent = TileLatentForTests;
+            return DecodeTiled(backend, latent, TileLatentForTests, TileLatentForTests / 4);
+        }
         long need = EstimateDecodeBytes(latentH, latentW, cap);
         long free = FreeBytes(backend);
         if (free < need)
