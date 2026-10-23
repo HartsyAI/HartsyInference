@@ -89,7 +89,9 @@ public sealed class BlockScaledGemmTests
     }
 
     /// <summary>The weight's own <see cref="Tensor.Fp8ScaleFactor"/> is part of alpha on every GEMM path — it is what Z-Image's
-    /// and the Flux blocks' F16 damps scale. A native path that dropped it ran those projections 64× hot and decoded NaN.</summary>
+    /// and the Flux blocks' F16 damps scale. A native path that dropped it ran those projections 64× hot and decoded NaN.
+    /// The unpack arm is fed the activations the native path quantizes (the same kernel, decoded on the host), so the two
+    /// differ only by the unpack GEMM's F16 rounding, not by the ~10 % that FP4 activations cost.</summary>
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void NativeNvfp4Gemm_AppliesTheWeightScaleFactor()
@@ -132,7 +134,8 @@ public sealed class BlockScaledGemmTests
         backend.Linear(damped, input, weight, null);
         backend.Sync();
         backend.EnableNativeFp4Gemm = false;
-        backend.Linear(unpacked, input, weight, null);
+        using Tensor quantizedInput = QuantizeLikeTheNativePath(backend, input, m, k);
+        backend.Linear(unpacked, quantizedInput, weight, null);
         backend.Sync();
 
         double scaledDiff = 0, unpackDiff = 0, sumDamped = 0;
@@ -144,9 +147,56 @@ public sealed class BlockScaledGemmTests
             sumDamped += Math.Abs(dp[i]);
         }
         double scaledErr = scaledDiff / Math.Max(sumDamped, 1e-12), unpackErr = unpackDiff / Math.Max(sumDamped, 1e-12);
-        _output.WriteLine($"native with factor vs native·factor: {scaledErr:E3}; vs the unpack path: {unpackErr:E3}");
+        _output.WriteLine($"native with factor vs native·factor: {scaledErr:E3}; vs the unpack path on the same FP4 activations: {unpackErr:E3}");
         Assert.True(scaledErr < 1e-5, $"the native path did not apply the weight's scale factor ({scaledErr:E3})");
-        Assert.True(unpackErr < 8e-2, $"the native and unpack paths disagree once the weight carries a factor ({unpackErr:E3})");
+        Assert.True(unpackErr < 5e-3, $"the native and unpack paths disagree once the weight carries a factor ({unpackErr:E3})");
+    }
+
+    /// <summary>The activations exactly as the native path sees them: block_quant run on the device, then the packed values
+    /// decoded with its own per-tensor scale (high nibble = even element, scales in the blocked layout).</summary>
+    private static unsafe Tensor QuantizeLikeTheNativePath(CudaBackend backend, Tensor input, int m, int k)
+    {
+        int paddedRows = (m + 127) / 128 * 128, paddedCols = (k / 16 + 3) / 4 * 4;
+        int count = m * k;
+        ulong x = CudaMemory.Allocate((nuint)((long)count * sizeof(float)));
+        ulong packed = CudaMemory.Allocate((nuint)(count / 2));
+        ulong scale = CudaMemory.Allocate((nuint)((long)paddedRows * paddedCols));
+        ulong scratch = CudaMemory.Allocate((nuint)(CudaKernels.BlockQuantScratchFloats(count) * sizeof(float)));
+        try
+        {
+            CudaMemory.CopyHostToDevice(x, (void*)input.DataPointer, (nuint)((long)count * sizeof(float)));
+            backend.Kernels!.LaunchBlockQuant(BlockScaleFormat.Nvfp4, packed, scale, scratch, x, DType.F32, m, k,
+                paddedRows, paddedCols, 1f, backend.Stream.Handle);
+            backend.Sync();
+            byte[] packedHost = new byte[count / 2], scaleHost = new byte[paddedRows * paddedCols];
+            float sf;
+            fixed (byte* p = packedHost) CudaMemory.CopyDeviceToHost(p, packed, (nuint)packedHost.Length);
+            fixed (byte* p = scaleHost) CudaMemory.CopyDeviceToHost(p, scale, (nuint)scaleHost.Length);
+            CudaMemory.CopyDeviceToHost(&sf, scratch, sizeof(float));
+
+            using Tensor scaleBytes = new Tensor(new TensorShape(256), DType.F8E4M3);
+            for (int i = 0; i < 256; i++) ((byte*)scaleBytes.DataPointer)[i] = (byte)i;
+            using Tensor e4m3 = scaleBytes.CastTo(DType.F32);
+            float* e4 = (float*)e4m3.DataPointer;
+            float[] e2m1 = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
+            Tensor result = new Tensor(new TensorShape(m, k), DType.F32);
+            float* dst = (float*)result.DataPointer;
+            for (int r = 0; r < m; r++)
+            {
+                for (int c = 0; c < k; c++)
+                {
+                    byte b = packedHost[(r * k + c) / 2];
+                    int nibble = c % 2 == 0 ? b >> 4 : b & 0xF;
+                    float magnitude = e2m1[nibble & 7] * e4[scaleHost[Nvfp4ResidentCodec.SwizzledScaleIndex(r, c / 16, paddedCols)]] * sf;
+                    dst[r * k + c] = (nibble & 8) != 0 ? -magnitude : magnitude;
+                }
+            }
+            return result;
+        }
+        finally
+        {
+            foreach (ulong buffer in new[] { x, packed, scale, scratch }) CudaMemory.Free(buffer);
+        }
     }
 
     /// <summary>A shape cuBLASLt declines must not take the generation down: the call is served by the unpack path, and
