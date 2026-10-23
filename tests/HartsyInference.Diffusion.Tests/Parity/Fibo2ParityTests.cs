@@ -18,7 +18,19 @@ public sealed unsafe class Fibo2ParityTests(ITestOutputHelper output)
     private static readonly string FixturePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Fibo2", "fibo2_tiny.safetensors");
 
     [Fact]
-    public void Forward_TinyConfig_MatchesReferenceVelocity()
+    public void Forward_TinyConfig_MatchesReferenceVelocity() => RunAgainstReference(0, "expected.velocity");
+
+    /// <summary>Edit conditioning with one reference image. The Python reference shares our reading of ComfyUI's
+    /// <c>ref_latents</c> handling, so this catches porting slips (token order, clean group, RoPE frame, refiner span), not a
+    /// misreading both sides share.</summary>
+    [Fact]
+    public void Forward_OneReference_MatchesReferenceVelocity() => RunAgainstReference(1, "expected.velocity_ref1");
+
+    /// <summary>Two references of different sizes, each on its own RoPE frame.</summary>
+    [Fact]
+    public void Forward_TwoReferences_MatchesReferenceVelocity() => RunAgainstReference(2, "expected.velocity_ref2");
+
+    private void RunAgainstReference(int referenceCount, string expectedKey)
     {
         using SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(FixturePath);
@@ -41,13 +53,17 @@ public sealed unsafe class Fibo2ParityTests(ITestOutputHelper output)
         using Fibo2Transformer transformer = new(config);
         transformer.LoadWeights(weights);
         float sigma = ((float*)all["inputs.sigma"].DataPointer)[0];
-        using Tensor velocity = transformer.Forward(new CpuBackend(), all["inputs.latent"], sigma, all["inputs.context"]);
+        List<Tensor> references = [];
+        if (referenceCount > 0) references.Add(all["inputs.ref0"]);
+        if (referenceCount > 1) references.Add(all["inputs.ref1"]);
+        using Tensor velocity = transformer.Forward(new CpuBackend(), all["inputs.latent"], sigma, all["inputs.context"],
+            referenceCount == 0 ? null : references);
 
-        AssertClose(all["expected.velocity"], velocity, VelocityTolerance, "velocity");
+        AssertClose(all[expectedKey], velocity, VelocityTolerance, expectedKey);
     }
 
     [Fact]
-    public void Forward_ReferenceLatentsOrTextMask_AreRejected()
+    public void Forward_TextMask_IsRejected()
     {
         Fibo2Config config = TinyTemplate() with
         {
@@ -65,9 +81,25 @@ public sealed unsafe class Fibo2ParityTests(ITestOutputHelper output)
         using Fibo2Transformer transformer = new(config);
         using Tensor latent = new(new TensorShape(1, 32, 2, 2), DType.F32);
         using Tensor context = new(new TensorShape(1, 4, 96), DType.F32);
-        using Tensor reference = new(new TensorShape(1, 32, 2, 2), DType.F32);
-        Assert.Throws<NotSupportedException>(() => transformer.Forward(new CpuBackend(), latent, 0.5f, context, reference));
-        Assert.Throws<NotSupportedException>(() => transformer.Forward(new CpuBackend(), latent, 0.5f, context, null, reference));
+        using Tensor mask = new(new TensorShape(1, 4), DType.F32);
+        Assert.Throws<NotSupportedException>(() => transformer.Forward(new CpuBackend(), latent, 0.5f, context, null, mask));
+    }
+
+    [Fact]
+    public void Forward_MisshapenReference_IsRejected()
+    {
+        Fibo2Config config = TinyTemplate() with
+        {
+            Dim = 64, NumHeads = 2, HeadDim = 32, NumLayers = 1, NumRefinerLayers = 0, PerceiverQueries = 8, PerceiverLayers = 1,
+            FfnDim = 96, CapFeatDim = 96, InjectionLayers = [],
+        };
+        using Fibo2Transformer transformer = new(config);
+        using Tensor latent = new(new TensorShape(1, 32, 2, 2), DType.F32);
+        using Tensor context = new(new TensorShape(1, 4, 96), DType.F32);
+        using Tensor odd = new(new TensorShape(1, 32, 3, 2), DType.F32);
+        using Tensor wrongChannels = new(new TensorShape(1, 16, 2, 2), DType.F32);
+        Assert.Throws<ArgumentException>(() => transformer.Forward(new CpuBackend(), latent, 0.5f, context, [odd]));
+        Assert.Throws<ArgumentException>(() => transformer.Forward(new CpuBackend(), latent, 0.5f, context, [wrongChannels]));
     }
 
     /// <summary>The fixture's dimensions. Gist and RoPE settings match tests/python-reference/fibo2_reference.py TINY.</summary>
