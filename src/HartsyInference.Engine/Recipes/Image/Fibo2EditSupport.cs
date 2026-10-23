@@ -47,20 +47,32 @@ internal sealed class Fibo2EditSupport(LlamaStyleEncoder language, string encode
                 return _loaded;
             (Dictionary<string, Tensor> bare, CheckpointSource source) = ComponentLoader.Load(encoderPath, "Fibo2Recipe", BareVisionKey,
                 applyFp8Dequant: true);
-            _source = source;
-            if (bare.Count == 0)
-                throw new InvalidDataException($"Fibo 2.0 editing needs the Qwen3-VL vision tower, but '{Path.GetFileName(encoderPath)}' holds no visual.* tensors.");
-            Qwen3VlVisionConfig config = Qwen3VlVisionConfig.FromWeights(bare, numHeads: 16) with
+            Qwen3VlVisionEncoder? vision = null;
+            try
             {
-                DeepstackVisualIndexes = DeepstackTaps,
-                MergerExactGelu = true,
-            };
-            _vision = new Qwen3VlVisionEncoder(config);
-            _vision.LoadWeights(bare);
-            Qwen3VlImageProcessor processor = new(config, MinPixels, MaxPixels, imageMean: [0.5f, 0.5f, 0.5f], imageStd: [0.5f, 0.5f, 0.5f]);
-            Qwen3VlMultimodalEncoder encoder = new(language, _vision, processor, config);
-            Logs.Info($"[Fibo2Recipe] Qwen3-VL vision tower loaded for editing: depth {config.Depth}, hidden {config.HiddenSize}.");
-            return _loaded = new Loaded(processor, encoder, config.PatchSize * config.SpatialMergeSize);
+                if (bare.Count == 0)
+                    throw new InvalidDataException($"Fibo 2.0 editing needs the Qwen3-VL vision tower, but '{Path.GetFileName(encoderPath)}' holds no visual.* tensors.");
+                Qwen3VlVisionConfig config = Qwen3VlVisionConfig.FromWeights(bare, numHeads: 16) with
+                {
+                    DeepstackVisualIndexes = DeepstackTaps,
+                    MergerExactGelu = true,
+                };
+                vision = new Qwen3VlVisionEncoder(config);
+                vision.LoadWeights(bare);
+                Qwen3VlImageProcessor processor = new(config, MinPixels, MaxPixels, imageMean: [0.5f, 0.5f, 0.5f], imageStd: [0.5f, 0.5f, 0.5f]);
+                Qwen3VlMultimodalEncoder encoder = new(language, vision, processor, config);
+                Logs.Info($"[Fibo2Recipe] Qwen3-VL vision tower loaded for editing: depth {config.Depth}, hidden {config.HiddenSize}.");
+                // Kept only once everything loaded, so a failed first edit leaves nothing behind for a retry to overwrite.
+                _source = source;
+                _vision = vision;
+                return _loaded = new Loaded(processor, encoder, config.PatchSize * config.SpatialMergeSize);
+            }
+            catch
+            {
+                vision?.Dispose();
+                source.Dispose();
+                throw;
+            }
         }
     }
 

@@ -27,18 +27,23 @@ public sealed partial class Fibo2RecipePipeline
     /// <summary>Components the edit needs (vision tower, VAE encoder); the recipe sets it, and a pipeline built without it refuses edits.</summary>
     internal Fibo2EditSupport? EditSupport { get; init; }
 
-    /// <summary>Whether <paramref name="request"/> goes down the edit path: it carries an init image, reference images or a mask, or
-    /// the build is edit-only (so a text-to-image request reaches the refusal there rather than the sampler).</summary>
-    private bool IsEdit(ImageRequest request) =>
-        request.Img2Img is not null || request.Inpaint is not null || request.ReferenceImages is { Count: > 0 }
-        || _variant.Is(Fibo2Variants.EditTurbo);
+    /// <summary>Whether <paramref name="request"/> goes down the edit path: it carries reference images or an init image sent in
+    /// Reference mode, or the build is edit-only (so every request, a text-to-image one included, reaches the edit path's
+    /// refusal or its source image). An init image in Auto or Denoise mode, with or without a mask, stays on the classic
+    /// img2img/inpaint path for the dev build; the host resolves Auto to Denoise for a family that declares both.</summary>
+    internal static bool RoutesToEdit(ImageRequest request, bool editOnly) =>
+        editOnly || request.ReferenceImages is { Count: > 0 } || request.Img2Img is { Mode: Img2ImgMode.Reference };
+
+    private bool IsEdit(ImageRequest request) => RoutesToEdit(request, _variant.Is(Fibo2Variants.EditTurbo));
 
     private ImageResult GenerateEdit(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
         CancellationToken cancel)
     {
-        if (request.Img2Img is { Mode: Img2ImgMode.Denoise })
-            throw new NotSupportedException("Fibo 2.0 edits an image by conditioning on it; strength-based img2img denoising is not implemented. "
-                + "Send the init image in Reference mode.");
+        // The edit-only build has no denoise mode, so an init image in Auto or Denoise mode is its source image (strength is ignored);
+        // the dev build only gets here with references or Reference mode, where a Denoise-mode init image is ambiguous.
+        if (request.Img2Img is { Mode: Img2ImgMode.Denoise } && !_variant.Is(Fibo2Variants.EditTurbo))
+            throw new NotSupportedException("A Fibo 2.0 request cannot mix reference images with a denoise-mode init image. "
+                + "Send the init image in Reference mode, or drop the references for strength-based img2img.");
         if (!IsDefaultSampler(request.Sampler) || !IsDefaultSchedule(request.Scheduler))
             throw new NotSupportedException("Fibo 2.0 samples only with its built-in flow-matching Euler; drop the sampler and schedule selection.");
 

@@ -73,10 +73,13 @@ public sealed class Fibo2EditRecipeTests
     }
 
     [Fact]
-    public void Edit_RefusesStrengthBasedImg2Img()
+    public void Edit_RefusesReferencesMixedWithADenoiseModeInitImage()
     {
         using Harness harness = new(Fibo2Variants.Dev);
-        ImageRequest request = new() { Prompt = "edit", Img2Img = new Img2Img { InitImage = Source, Mode = Img2ImgMode.Denoise } };
+        ImageRequest request = new()
+        {
+            Prompt = "edit", ReferenceImages = [Source], Img2Img = new Img2Img { InitImage = Source, Mode = Img2ImgMode.Denoise },
+        };
 
         Assert.Throws<NotSupportedException>(() => harness.Recipe.Generate(request, Settings(), null, CancellationToken.None));
     }
@@ -168,5 +171,22 @@ public sealed class Fibo2EditRecipeTests
             _transformer.Dispose();
             _tokenizer.Dispose();
         }
+    }
+
+    [Theory]
+    [InlineData(Img2ImgMode.Auto, false)]
+    [InlineData(Img2ImgMode.Denoise, false)]
+    [InlineData(Img2ImgMode.Reference, true)]
+    public void InitImage_RoutesToEditOnlyInReferenceMode_ForTheDevBuild(Img2ImgMode mode, bool expected)
+    {
+        ImageRequest request = new()
+        {
+            Prompt = "a cat",
+            Img2Img = new Img2Img { InitImage = new ImageData { Rgb = new byte[12], Width = 2, Height = 2 }, Mode = mode },
+        };
+
+        Assert.Equal(expected, Fibo2RecipePipeline.RoutesToEdit(request, editOnly: false));
+        Assert.True(Fibo2RecipePipeline.RoutesToEdit(request, editOnly: true));
+        Assert.False(Fibo2RecipePipeline.RoutesToEdit(new ImageRequest { Prompt = "a cat" }, editOnly: false));
     }
 }
