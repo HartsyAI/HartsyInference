@@ -19,9 +19,9 @@ This skill orders the work; those documents own the rules.
   whatever a tool's default says.
 - **Generations run through SwarmUI**, never standalone `dotnet test`/CLI gens for verification (the engine-through-Swarm
   path is what users run). CLI/API checks come after, for byte-identity.
-- **GPUs are shared.** 4090 lock `/tmp/claude-1000/gpu4090.lock`, 3060 lock `/tmp/claude-1000/vk_3060.lock`. Wait for a
-  10-minute quiet window in the Swarm journal (`journalctl --user -t swarmui-run.sh`, "requested N image" lines) before a
-  restart or timed batch. Another agent's `tests/regression-ab.sh` stops the live Swarm per run and restores it: if Swarm is
+- **GPUs are shared.** 4090 lock `/tmp/claude-1000/gpu4090.lock`, 3060 lock `/tmp/claude-1000/vk_3060.lock`. Take the lock first, then
+  wait for the 10-minute quiet window with `tests/swarm-quiet-window.sh` (global queue, foreign GPU processes, restarts and
+  AudioLab/LLM activity, not just the journal's "requested N image" lines) before a restart or timed batch. Another agent's `tests/regression-ab.sh` stops the live Swarm per run and restores it: if Swarm is
   down, check `ps` for it before starting it. Never evict or restart Swarm mid-gen. Index 0/1 is reversed between engine,
   `CUDA_VISIBLE_DEVICES` and `nvidia-smi` (see memory notes); confirm the device from the engine log line.
 - **Models live on the RAID** (`/mnt/model-storage/Models`). Look there first. Download through the Swarm API
@@ -120,8 +120,8 @@ worktree). Suggested stack, each PR tested and bisectable:
 6. Refusals: anything unimplemented throws a clear `NotSupportedException` naming the feature (never silently ignored).
 
 Engine conventions: pure C#, `IBackend` only, zero GC on hot paths, owned-tensor disposal (leaks hide in position-id and
-temporary tensors), no per-model env switches, version bump once per batch on the last PR (`CHANGELOG.md` section +
-`Directory.Build.props`), resolve review conflicts by merging `origin/main` (interface contracts move: re-check
+temporary tensors), no per-model env switches, version bump once per stacked batch on its last PR (`CHANGELOG.md` section +
+`Directory.Build.props`; earlier src/ merges in the batch ride along with that bump, per the owner's rule and AGENTS.md "a small change ships with the next bump"), resolve review conflicts by merging `origin/main` (interface contracts move: re-check
 `IRecipePipeline` and `ImageEffectiveSettings` after every merge).
 
 ## Phase 5 — Verify on real weights through SwarmUI
@@ -145,7 +145,11 @@ temporary tensors), no per-model env switches, version bump once per batch on th
    engine-internal log times as well as API wall clock. State absolute numbers with the external baseline.
 5. Regression-check flagships after any deploy (Krea2-Turbo, Z-Image-Turbo, engine-internal times) and run the affected
    model tests; shared code is load-bearing.
-6. CLI (`hartsy image -m <id> ...`) and `POST /v1/images/generations` with the same settings: identical bytes.
+6. Consumer check, per modality, with the same settings through both the CLI and the HTTP API: identical bytes for image
+   (`hartsy image -m <id> ...`, `POST /v1/images/generations`); for other modalities use the matching command and route
+   (`hartsy video|music|speech|transcribe|text|vision|3d|world`, see `src/HartsyInference.Cli/Commands` and
+   `docs/Agents/AGENTS.md` routing) and compare what that modality deterministically produces. Image is the worked example in
+   this skill; the phases themselves apply to every modality.
 7. Record in `docs/Checklists/MODEL_STATUS_<MODALITY>.md` and `PARITY_VERIFICATION.md`: exact checkpoint sha256, baseline
    commits, GPU, precision, tolerances, evidence, limits. Say exactly what was and was not verified.
 
