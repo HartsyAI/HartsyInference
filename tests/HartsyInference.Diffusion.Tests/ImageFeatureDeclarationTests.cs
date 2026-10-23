@@ -75,6 +75,7 @@ public sealed class ImageFeatureDeclarationTests
         "hunyuan-image", "lens", "mage-flow",
         "flux3",                                                            // fused qkv split to q/k/v_proj at load
         "moss-image",                                                       // MossImageLoraMapper, every spelling
+        "fibo2",                                                            // Fibo2LoraMapper: Comfy-native fused + diffusers split
     ];
 
     private readonly ITestOutputHelper _output;

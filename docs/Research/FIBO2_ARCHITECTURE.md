@@ -84,6 +84,49 @@ converter's source files were not available.
 - The format is supported (`docs/Research/QUANTIZATION_COMFY_FORMATS.md`), but not for Fibo yet: `Fibo2Recipe` refuses any
   tensor that is not F32, F16 or BF16.
 
+## LoRA
+
+**What exists.** One public LoRA: Comfy-Org's `loras/fibo_2.0_turbo_lora_avg_rank_270_bf16` (1.99 GB, header read at
+`Comfy-Org/Fibo-2.0` revision `b2bffaf57d48`, 1160 tensors, metadata "Dynamic resize with sv_fro: 0.95 from 512"). Bria's own
+LoRAs (multi-turn editing, product shot, style, background removal, eraser, expansion) are "coming soon" on the cards, so none
+can be tested. The Bria LoRA trainer is the `fine_tuning/` folder of the **gated** `briaai/Fibo-2.0-dev` HF repo (not on
+github.com/Bria-AI, whose repos are FIBO v1 / Fibo-Edit / bria_edit); it was not readable without an accepted licence and token, so
+its output key layout is **unverified**. Both spellings below are implemented to the conventions we could read.
+
+**ComfyUI** (`87ed5a066d9c`): `comfy/lora.py` has no Fibo2 branch (Flux3 and MOSS-Image have one that splits fused qkv). Only the
+generic `model_lora_keys_unet` applies: `diffusion_model.{module}` and `lora_unet_{module with _}` keys onto the model's own
+(fused) state-dict names. So a Comfy-loadable Fibo2 LoRA is trained on the fused modules, and `.diff`/`.diff_b` full-weight
+deltas ride the generic `load_lora` path.
+
+**Turbo LoRA layout (verified against the dev checkpoint header: all 1160 keys resolve, every shape matches).**
+`diffusion_model.{layers.N|noise_refiner.N|perceiver.layers.N|t_embedder.mlp.{0,2}|x_embedder|final_layer.{linear,adaLN_modulation.1}}`
+with kohya suffixes `lora_down.weight` / `lora_up.weight` / `alpha` (BF16 scalar), adapters directly on the fused weights
+(`attention.qkv` up [3·dim], `cross_attention.to_kv` up [2·dim] and `feed_forward.w13` up [2·H=19456]; ranks vary per module,
+54..329), plus `.diff` full deltas on every RMSNorm weight and `.diff_b` on the adaLN, x/t embedder and final-layer biases.
+
+**Engine.** `Fibo2LoraMapper` (format `LoraFormat.Fibo2`, claimed by the Perceiver, injection cross-attention and `w13` modules):
+- Comfy-native keys already equal the checkpoint names, so fused adapters merge directly into `qkv` / `to_kv` / `w13` (no split
+  or concat needed), and `.diff` / `.diff_b` become `LoraFullWeightDiff` on `*.weight` / `*.bias`.
+- Diffusers/PEFT (`transformer.` wrapper, `transformer_bria_fibo2.py` names) keeps the split `to_q/to_k/to_v`, `w1/w3`; they
+  resolve to the matching row slice of the fused weight through `FusedProjectionLayouts` (new rows: `to_k`/`to_v` into `to_kv`,
+  `w1`/`w3` into `w13`; qkv rows already existed). `to_out.0` maps to `attention.out` (main blocks) or `to_out` (cross, self,
+  Perceiver); `norm_q/norm_k` to `q_norm/k_norm`.
+- Kohya underscored names (`lora_unet_layers_0_attention_qkv`) go through the generic `KohyaGeneric` path against the fused names.
+- `Fibo2Recipe` merges the stack (`RecipeLoraMerge`) into the F16 weight dictionary **before** the transformer binds them. Merging
+  after the BF16 to F16 cast is exact for the base (BF16 widens to F16 without rounding in range), the delta is added in F32 and
+  rounded to F16 once, so there is no double rounding. The superseded F16 copies are freed at once. A LoRA that matches no weight is refused.
+
+**Limits.**
+- Quantized (int8 ConvRot) bases: the recipe still refuses non-dense tensors, so a LoRA cannot be used on them yet. `LoraStack`
+  already dequantizes, merges and re-quantizes `int8_tensorwise` ConvRot weights, so once the int8 loader lands the merge call
+  (placed before `LoadWeights`) works as it is; it needs a test on a real int8 build then.
+- Diffusers FFN width: the diffusers class sizes SwiGLU at `(dim·8//3)//64·64` = 9536, the checkpoint at 9728 (zero padded). A diffusers
+  LoRA with 9536-wide `w1/w3/w2` does not tile the 9728 weights; the stack warns and skips those weights rather than guessing a padding.
+  Not exercised: no such file exists to check.
+- Distilled-LoRA use: the turbo LoRA is meant for few steps and guidance 1; the engine applies the user's step and CFG settings as given.
+- Not verified on real weights or a GPU: no generation was run with the turbo LoRA. Header-level key and shape agreement and CPU
+  merge arithmetic on the tiny fixture are the evidence.
+
 ## Open items
 
 - **Sigma schedule; compare against ComfyUI on the GPU.** The timestep input matches ComfyUI: `Fibo2Pipeline` passes
