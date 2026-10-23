@@ -231,6 +231,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // than accepting it and silently sampling with UniPC. (IsNonDefault lets a bare "euler" through by design;
         // on Wan that still runs UniPC, since Euler was never this family's default.)
         FlowMatchSampling.ThrowIfSamplerSelected(request.Scheduler, "Wan-Video");
+        DenoiserProbe.Condition("cond", promptEmbeds);
+        DenoiserProbe.Condition("uncond", negativeEmbeds);
 
         string mode = firstFrameLatent is not null && lastFrameLatent is not null ? "FLF2V"
             : firstFrameLatent is not null ? "I2V"
@@ -433,8 +435,12 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int cfgSkippedSteps = 0;
         int cacheComputes = 0, cacheReuses = 0, uncondComputes = 0, uncondReuses = 0;
         WanVideoTransformer? cacheExpert = null;   // A14B MoE: residuals are expert-specific — reset on swap
+        if (DenoiserProbe.Active && (cpEnabled || cfgParallelEnabled || condCache is not null || firstFrameLatent is not null
+            || lastFrameLatent is not null))
+            throw new NotSupportedException("The denoiser probe covers Wan's single-GPU text-to-video loop without the step cache.");
         using IDisposable? textKv = OpenTextKvCache(stream, tLat, hLat, wLat, promptEmbeds, negativeEmbeds,
             cfgParallelEnabled ? CfgParallelBackend : cpEnabled ? CpBackends![1] : null, blockAct);
+        DenoiserProbe? probe = DenoiserProbe.Open(steps);
 
         for (int k = 0; k < steps; k++)
         {
@@ -485,8 +491,21 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 }
                 else
                 {
+                    bool probed = probe?.Takes(k) == true;
+                    if (probed && probe!.Replays)
+                    {
+                        Tensor recorded = probe.ReplayInputs(k, tEmb, [latents])[0];
+                        probe.ReplayOutputs(k, [expert.Forward(Backend, recorded, promptEmbeds, tEmb, null),
+                            cfgThisStep ? expert.Forward(Backend, recorded, negativeEmbeds, tEmb, null) : null]);
+                    }
+                    else if (probed)
+                    {
+                        probe!.RecordInputs(k, tEmb, [latents]);
+                    }
                     vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb, condCache);
                     if (cfgThisStep) vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb, uncondCache);
+                    if (probed && !probe!.Replays)
+                        probe.RecordOutputs(k, 0f, ["cond", "uncond"], [vCond, vUncond]);
                 }
             }
             else

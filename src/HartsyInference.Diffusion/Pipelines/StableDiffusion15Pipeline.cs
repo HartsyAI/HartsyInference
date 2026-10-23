@@ -90,6 +90,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         Logs.Info("Encoding text prompt...");
         int[][] batchTokenIds = [negativePromptTokenIds, promptTokenIds];
         Tensor textEmbeddings = _textEncoder.Encode(Backend, batchTokenIds, request.ClipSkip ?? 1);
+        DenoiserProbe.Condition("text", textEmbeddings);
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
         // 2. Set up scheduler (needed for both paths' initial-latent prep)

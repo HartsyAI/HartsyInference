@@ -11,6 +11,7 @@ using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.MiniMaxH3;
 
@@ -100,6 +101,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(textStates);
         ArgumentNullException.ThrowIfNull(request);
+        DenoiserProbe.Condition("text", textStates);
         if (request.Keyframes is { Count: > 0 } && request.Refs is { Count: > 0 } && !request.HybridProfile)
         {
             throw new NotSupportedException(
@@ -220,6 +222,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     audioDenoisedScratch = new Tensor(audioLat.Shape, DType.F32);
                 }
 
+                DenoiserProbe? probe = DenoiserProbe.Open(request.Steps);
                 for (int step = 0; step < request.Steps; step++)
                 {
                     Stopwatch sw = Stopwatch.StartNew();
@@ -257,9 +260,9 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                     {
                         using PddFusedHeads? pddHeads = pddFusion is null || pddSchedule is null
                             ? null : pddFusion.Fuse(pddSchedule, sigma, sigmas[step + 1]);
-                        (Tensor vVideo, Tensor vAudio) = DitShardBackend is not null
+                        (Tensor Video, Tensor Audio) Forward(Tensor video, Tensor audio) => DitShardBackend is not null
                             ? _transformer.ForwardShardedPlanned(
-                                Backend, DitShardBackend, layout, videoIn, audioIn, textStates, cos, sin,
+                                Backend, DitShardBackend, layout, video, audio, textStates, cos, sin,
                                 timestepPlan.Timesteps, timestepPlan.RowOf, DitShardSplitBlock,
                                 textTagRuns: textTagRuns, pddHeads: pddHeads, controls: controlSchedule[step],
                                 videoTimestepRows: timestepPlan.VideoRowOf,
@@ -267,12 +270,26 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                                 sparseAttentionA: sparseAttentionPrimary,
                                 sparseAttentionB: sparseAttentionShard)
                             : _transformer.ForwardPlanned(
-                                Backend, layout, videoIn, audioIn, textStates, cos, sin,
+                                Backend, layout, video, audio, textStates, cos, sin,
                                 timestepPlan.Timesteps, timestepPlan.RowOf, textTagRuns: textTagRuns,
                                 pddHeads: pddHeads, controls: controlSchedule[step],
                                 videoTimestepRows: timestepPlan.VideoRowOf,
                                 audioTimestepRows: timestepPlan.AudioRowOf,
                                 sparseAttention: sparseAttentionPrimary);
+                        bool probed = probe?.Takes(step) == true;
+                        if (probed && probe!.Replays)
+                        {
+                            Tensor[] recorded = probe.ReplayInputs(step, (float)sigma, [videoIn, audioIn]);
+                            (Tensor probeVideo, Tensor probeAudio) = Forward(recorded[0], recorded[1]);
+                            probe.ReplayOutputs(step, [probeVideo, probeAudio]);
+                        }
+                        else if (probed)
+                        {
+                            probe!.RecordInputs(step, (float)sigma, [videoIn, audioIn]);
+                        }
+                        (Tensor vVideo, Tensor vAudio) = Forward(videoIn, audioIn);
+                        if (probed && !probe!.Replays)
+                            probe.RecordOutputs(step, 0f, ["video", "audio"], [vVideo, vAudio]);
                         try
                         {
                             // Both heads return native-stream flow velocity. Unmasked audio keeps the derivative-scaled

@@ -160,6 +160,10 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         _ = condPooled.DataPointer;
         if (uncondProjected is not null) _ = uncondProjected.DataPointer;
         if (uncondPooled is not null) _ = uncondPooled.DataPointer;
+        DenoiserProbe.Condition("cond", condProjected);
+        DenoiserProbe.Condition("cond_pooled", condPooled);
+        DenoiserProbe.Condition("uncond", uncondProjected);
+        DenoiserProbe.Condition("uncond_pooled", uncondPooled);
         Backend.FreeActivations();
 
         // Release all three text encoders here, not after the denoise loop. They are not touched again this
