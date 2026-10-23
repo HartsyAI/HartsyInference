@@ -10,7 +10,7 @@ stable release will require. Dates are UTC.
 
 - **Added: Fibo 2.0 img2img and mask inpaint.** An init image and strength start the flow-matching schedule at the matching
   sigma of the shifted schedule, and a mask (white = regenerate) keeps the rest on the source's noise trajectory with a final
-  recomposite. A reference-mode init image is still refused. Not yet run on real weights.
+  recomposite. Not yet run on real weights.
 - **Added: Fibo 2.0 LoRA support.** `fibo2` declares `ImageFeatures.Lora` and merges stacks into the F16 weights before the
   transformer loads. `Fibo2LoraMapper` reads Comfy-Org's turbo LoRA layout (adapters on the fused `qkv`, `to_kv`, `w13`, plus
   `.diff`/`.diff_b`) and diffusers/PEFT names (split projections resolve to fused row slices). bf16 bases only; verified by CPU
@@ -20,6 +20,13 @@ stable release will require. Dates are UTC.
   elsewhere (`QuantizedWeightPolicy`), for both the transformer and the `qwen3vl_4b_int8_convrot` text encoder, which is
   pinned as a side model with the int8 builds' sha256. The fused `qkv`, `to_kv` and `w13` split while packed, with each
   piece's per-row scale sliced to its rows. Not run on real weights or a GPU.
+- **Added: Fibo 2.0 image editing (`fibo2-dev` and `fibo2-edit-turbo`).** An instruction edit of one image, a masked edit (white =
+  regenerate, the region greyed out before it is encoded, as Bria's pipeline does) and a multi-reference edit of up to four images
+  referred to as `<image_1>`..`<image_4>`. The source and references are VAE-encoded into clean tokens after the image tokens (RoPE
+  frames `MaxGist + 2 + k`, timestep-0 modulation, also through the noise refiners), and the edit prompt reaches the model through the
+  Qwen3-VL vision tower, so the language tower now exposes multi-layer taps with deepstack
+  (`LlamaStyleEncoder.EncodeMultiLayerEmbedsMrope`). `fibo2-edit-turbo` is edit-only (4 steps, guidance 1.0, no unconditional pass)
+  and refuses a request without a source image. Declared as `RefEdit` (with `Inpaint` and `Img2Img`). Not run on the real edit checkpoint or a GPU.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch

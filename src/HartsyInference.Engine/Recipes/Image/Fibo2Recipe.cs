@@ -15,7 +15,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Fibo 2.0 recipe (Bria AI, CC-BY-NC-4.0): a single-stream DiT on the Qwen3-VL-4B text encoder with gist tokens and
 /// tanh-gated injection, over the FLUX.2 32-channel VAE. The checkpoint is the transformer; the text encoder and VAE resolve as side
-/// models. Text-to-image, img2img, mask inpaint and LoRA (merged into the F16 weights before load; bf16 builds only); glyph text images, reference-image editing and refiners are not implemented.</summary>
+/// models. Text-to-image, img2img, mask inpaint, LoRA (merged into the F16 weights before load) and editing (instruction, masked and multi-reference; edit-turbo is edit-only); glyph text images and refiners are not implemented.</summary>
 public sealed class Fibo2Recipe : IArchitectureRecipe
 {
     /// <summary>ComfyUI's Fibo 2.0 shift 1.15 is a Flux-type exponent: <c>sigma(t) = e^1.15 / (e^1.15 + 1/t - 1)</c>, which is
@@ -40,9 +40,16 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
     public string Name => "fibo2";
 
     /// <inheritdoc/>
-    /// <remarks>Text-to-image, img2img, mask inpaint (a latent blend over the init image; Bria's own conditioned masked edit is
-    /// reference editing and is separate) and LoRA. Reference editing, regions and refiners are declared off until they are implemented.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Lora;
+    /// <remarks>Text-to-image, img2img, mask inpaint (a latent blend over the init image), LoRA and reference editing
+    /// (<see cref="ImageFeatures.RefEdit"/>: an instruction edit, up to four references; Bria's masked edit greys the masked region of the
+    /// single source image). Regions and refiners are declared off until they are implemented. The edit-turbo build declares the same
+    /// bits but refuses a request without a source image.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Lora | ImageFeatures.RefEdit;
+
+    /// <inheritdoc/>
+    /// <remarks>An init image (in Reference mode) plus references, at most four images in all, refused beyond that. A masked edit takes one.</remarks>
+    public ImageInputLimits InputLimits => new(Fibo2EditImages.MaxImages, ReferencesRequireInitImage: false,
+        MaxReferences: Fibo2EditImages.MaxImages);
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
@@ -109,6 +116,8 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "Fibo2Recipe");
             owned.Add(vae);
 
+            Fibo2EditSupport editSupport = new(encoder, encoderPath, vae);
+            owned.Add(editSupport);
             Fibo2Pipeline pipeline = new(context.Backend, encoder, transformer, vae.Decoder, vae.BnMean, vae.BnVar, config,
                 vaeEncoder: vae.Encoder);
             owned.Add(pipeline);
@@ -116,7 +125,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             owned.Add(tokenizer);
             ImageDefaults defaults = DefaultsFor(variant);
             Logs.Info("[Fibo2Recipe] Fibo 2.0 ready.");
-            return new Fibo2RecipePipeline(pipeline, tokenizer, defaults, variant, owned);
+            return new Fibo2RecipePipeline(pipeline, tokenizer, defaults, variant, owned) { EditSupport = editSupport };
         }
         catch (Exception ex)
         {

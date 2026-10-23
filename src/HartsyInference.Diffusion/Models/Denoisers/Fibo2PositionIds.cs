@@ -49,6 +49,52 @@ public static unsafe class Fibo2PositionIds
         return ids;
     }
 
+    /// <summary>The noise-refiner stream's ids: the image on frame <c>MaxGist + 1</c>, then each reference grid on its own frame
+    /// (ComfyUI feeds the refiners <c>freqs_cis[:, num_gist:]</c>, which holds the image and then every reference).</summary>
+    public static Tensor ImageWithReferences(Fibo2Config config, int gridH, int gridW, IReadOnlyList<(int Height, int Width)> references)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(references);
+        int total = ValidateGrid(gridH, gridW) + ReferenceTokens(references);
+        Tensor ids = new(new TensorShape(total, 3), DType.F32);
+        WriteGrid(ids, 0, config.MaxGist + 1, gridH, gridW);
+        WriteReferences(ids, gridH * gridW, config, references);
+        return ids;
+    }
+
+    /// <summary>Stream ids in token order: the gist tokens, the image, then each reference image.</summary>
+    public static Tensor CombinedWithReferences(Fibo2Config config, int gistCount, int gridH, int gridW,
+        IReadOnlyList<(int Height, int Width)> references)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(references);
+        ValidateGistCount(config, gistCount);
+        int imageLen = ValidateGrid(gridH, gridW);
+        Tensor ids = new(new TensorShape(gistCount + imageLen + ReferenceTokens(references), 3), DType.F32);
+        WriteGist(ids, 0, gistCount);
+        WriteGrid(ids, gistCount, config.MaxGist + 1, gridH, gridW);
+        WriteReferences(ids, gistCount + imageLen, config, references);
+        return ids;
+    }
+
+    private static int ReferenceTokens(IReadOnlyList<(int Height, int Width)> references)
+    {
+        int total = 0;
+        foreach ((int h, int w) in references)
+            total += ValidateGrid(h, w);
+        return total;
+    }
+
+    private static void WriteReferences(Tensor ids, int firstRow, Fibo2Config config, IReadOnlyList<(int Height, int Width)> references)
+    {
+        int row = firstRow;
+        for (int k = 0; k < references.Count; k++)
+        {
+            WriteGrid(ids, row, config.MaxGist + 2 + k, references[k].Height, references[k].Width);
+            row += references[k].Height * references[k].Width;
+        }
+    }
+
     private static void WriteGist(Tensor ids, int firstRow, int count)
     {
         float* p = (float*)ids.DataPointer;

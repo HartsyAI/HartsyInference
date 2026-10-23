@@ -3,8 +3,8 @@ using HartsyInference.Engine.Variants;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Fibo 2.0 dev (text-to-image) vs edit-turbo. Both share one architecture, so the only evidence is the file name; the
-/// edit-turbo build is selected by its <c>edit</c> token and dev is the default. Reference-image editing is not implemented, so an
-/// edit-turbo selection only reaches text-to-image.</summary>
+/// edit-turbo build is selected by its <c>edit</c> token and dev is the default. Both edit; edit-turbo cannot generate from text
+/// alone.</summary>
 public static class Fibo2Variants
 {
     /// <summary>The undistilled text-to-image build (default).</summary>
@@ -15,7 +15,7 @@ public static class Fibo2Variants
         FilenameTokenSets = [["fibo2", "!edit"]],
     };
 
-    /// <summary>The edit and turbo build. Its edit conditioning is not implemented yet.</summary>
+    /// <summary>The edit and turbo build: edit-only, 4 steps, no guidance.</summary>
     public static ModelVariant EditTurbo { get; } = new ModelVariant
     {
         Id = "edit-turbo",

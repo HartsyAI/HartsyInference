@@ -9,6 +9,11 @@ Usage: /usr/bin/python3 tests/python-reference/fibo2_reference.py [out_path]
 
 The per-token noisy/clean modulation of Comfy's modulate(timestep_zero_index=...) is written as a torch.where on a
 boolean token mask: image tokens take the noisy embedding (t * 1000), gist tokens the clean one (t = 0).
+
+Edit conditioning (ref_latents in Comfy's _forward) is transcribed the same way: the reference tokens follow the image tokens,
+are clean (t = 0), sit on RoPE frame max_gist + 2 + k, run through the noise refiners with the image tokens, and the velocity is
+read from the image tokens only. This is OUR reading of ComfyUI (87ed5a066d9c), not an independent check of it: the parity test
+catches porting slips in the C# denoiser, not a misreading both sides share.
 """
 import math
 import os
@@ -88,6 +93,13 @@ def unpatchify(tokens, gh, gw, ch):
 
 def image_ids(c, gh, gw):
     frame = float(c["max_gist"] + 1)
+    rows = torch.arange(gh, dtype=torch.float32).repeat_interleave(gw)
+    cols = torch.arange(gw, dtype=torch.float32).repeat(gh)
+    return torch.stack([torch.full_like(rows, frame), rows, cols], -1)
+
+
+def ref_ids(c, k, gh, gw):
+    frame = float(c["max_gist"] + 2 + k)
     rows = torch.arange(gh, dtype=torch.float32).repeat_interleave(gw)
     cols = torch.arange(gw, dtype=torch.float32).repeat(gh)
     return torch.stack([torch.full_like(rows, frame), rows, cols], -1)
@@ -234,31 +246,35 @@ def final_layer(w, img, emb_noisy, c):
     return F.linear(normed * (1 + scale)[:, None, :], w["final_layer.linear.weight"], w["final_layer.linear.bias"])
 
 
-def forward(w, c, latent, sigma, context):
+def forward(w, c, latent, sigma, context, refs=()):
     gh, gw = latent.shape[2] // 2, latent.shape[3] // 2
     n = gh * gw
     count = gist_count(context.shape[1], c)
     emb_clean = t_embed(w, 0.0, c)
     emb_noisy = t_embed(w, sigma * c["timestep_scale"], c)
 
-    img = F.linear(patchify(latent), w["x_embedder.weight"], w["x_embedder.bias"])
-    ids_img = image_ids(c, gh, gw)
+    # image tokens, then each reference (Comfy: torch.cat(tokens, dim=1) before x_embedder)
+    img = F.linear(torch.cat([patchify(latent)] + [patchify(r) for r in refs], dim=1), w["x_embedder.weight"], w["x_embedder.bias"])
+    ids_list = [image_ids(c, gh, gw)] + [ref_ids(c, k, r.shape[2] // 2, r.shape[3] // 2) for k, r in enumerate(refs)]
+    ids_img = torch.cat(ids_list)
     cos_i, sin_i = rope_pairs(ids_img, c["axes"], c["theta"])
-    all_noisy = torch.ones(n, dtype=torch.bool)
+    n_all = ids_img.shape[0]
+    refiner_noisy = torch.zeros(n_all, dtype=torch.bool)
+    refiner_noisy[:n] = True
     for i in range(c["refiners"]):
-        img = block(w, f"noise_refiner.{i}.", img, emb_clean, emb_noisy, all_noisy, cos_i, sin_i, None, c)
+        img = block(w, f"noise_refiner.{i}.", img, emb_clean, emb_noisy, refiner_noisy, cos_i, sin_i, None, c)
     refined = img
 
     bundles = context.chunk(1 + len(c["injection"]), dim=-1)
     gist = perceiver(w, bundles[0], count, c)
     cos, sin = rope_pairs(torch.cat([gist_ids(count), ids_img]), c["axes"], c["theta"])
     x = torch.cat([gist, img], dim=1)
-    is_noisy = torch.cat([torch.zeros(count, dtype=torch.bool), torch.ones(n, dtype=torch.bool)])
+    is_noisy = torch.cat([torch.zeros(count, dtype=torch.bool), refiner_noisy])
     text = {layer: bundles[j + 1] for j, layer in enumerate(c["injection"])}
     for i in range(c["layers"]):
         x = block(w, f"layers.{i}.", x, emb_clean, emb_noisy, is_noisy, cos, sin, text.get(i), c)
 
-    out = final_layer(w, x[:, count:], emb_noisy, c)
+    out = final_layer(w, x[:, count:count + n], emb_noisy, c)
     velocity = unpatchify(out, gh, gw, c["in_channels"])
     return velocity, gist, refined
 
@@ -270,14 +286,24 @@ def main():
     latent = torch.randn(1, TINY["in_channels"], *LATENT_HW, generator=g)
     context = 0.5 * torch.randn(1, TEXT_LEN, TINY["cap_feat"] * (1 + len(TINY["injection"])), generator=g)
 
+    # Drawn after the text-to-image inputs so those tensors keep their seeded values.
+    ref0 = torch.randn(1, TINY["in_channels"], 6, 4, generator=g)
+    ref1 = torch.randn(1, TINY["in_channels"], 4, 8, generator=g)
+
     with torch.no_grad():
         velocity, _, _ = forward(weights, TINY, latent, SIGMA, context)
+        velocity_ref1, _, _ = forward(weights, TINY, latent, SIGMA, context, [ref0])
+        velocity_ref2, _, _ = forward(weights, TINY, latent, SIGMA, context, [ref0, ref1])
 
     tensors = {f"weights.{k}": v.contiguous() for k, v in weights.items()}
     tensors["inputs.latent"] = latent.contiguous()
     tensors["inputs.sigma"] = torch.tensor([SIGMA], dtype=torch.float32)
     tensors["inputs.context"] = context.contiguous()
     tensors["expected.velocity"] = velocity.contiguous()
+    tensors["inputs.ref0"] = ref0.contiguous()
+    tensors["inputs.ref1"] = ref1.contiguous()
+    tensors["expected.velocity_ref1"] = velocity_ref1.contiguous()
+    tensors["expected.velocity_ref2"] = velocity_ref2.contiguous()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     save_file(tensors, out_path)
     print(f"wrote {out_path}: {len(weights)} weights, velocity {tuple(velocity.shape)}")

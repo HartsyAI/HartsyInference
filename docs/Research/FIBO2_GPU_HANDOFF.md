@@ -77,8 +77,8 @@ code runs. It is not evidence of correctness or speed, and it was removed.
 ## Known gaps (not in this PR)
 
 - Glyph text images: captions with `text_render` entries throw `NotSupportedException`. ComfyUI renders them by default.
-- Reference-image editing, the edit-turbo variant (its defaults are 4 steps and CFG 1.0; the CFG 1.0 value is an assumption),
-  LoRA, refiner, regional prompts, and the int8 builds.
+- Editing is implemented (see FIBO2_ARCHITECTURE.md, "Editing") but unrun on real weights; edit-turbo defaults are 4 steps and
+  CFG 1.0 (Bria card). LoRA, refiner, regional prompts, strength-based img2img and the int8 builds are not implemented.
 - Negative prompts are refused rather than mapped. Sizes round down to a multiple of 16.
 - An unattended 1024x1024 CPU run (random weights) exited at denoise 25/50 with no error in its log and no memory-guard
   trip. The cause is unknown. On the GPU, keep the full log of any long run, and record the last line if the process exits early.
