@@ -8,6 +8,9 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Fibo 2.0 img2img and mask inpaint.** An init image and strength start the flow-matching schedule at the matching
+  sigma of the shifted schedule, and a mask (white = regenerate) keeps the rest on the source's noise trajectory with a final
+  recomposite. A reference-mode init image is still refused. Not yet run on real weights.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch

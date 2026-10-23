@@ -104,6 +104,9 @@ converter's source files were not available.
   and no images above that. `TEXT_IMAGES_START` is a `start_percent` that maps to sigma 0.9 under ComfyUI's shift, so a
   port should gate on sigma. It is a separate component and is not in the first engine PR; the engine refuses captions
   with `text_render` entries.
+- **Img2img and mask inpaint** (engine latent blend, `Fibo2Pipeline.Img2Img.cs`): implemented on the CPU-tested seams, not run on
+  real weights. Bria's masked edit (white = regenerate) conditions the model on the image and mask: that is reference
+  editing below, not this path. The two share the white = regenerate convention only.
 - **Reference-image editing** (`context_latents`) and the edit-turbo conditioning node.
 - **Real-weight verification.** Pending. The bf16 DiT is 16.45 GB, so it needs a GPU host with enough VRAM and host RAM for
   the checkpoint.

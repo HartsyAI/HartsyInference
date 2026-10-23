@@ -14,7 +14,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Fibo 2.0 recipe (Bria AI, CC-BY-NC-4.0): a single-stream DiT on the Qwen3-VL-4B text encoder with gist tokens and
 /// tanh-gated injection, over the FLUX.2 32-channel VAE. The checkpoint is the transformer; the text encoder and VAE resolve as side
-/// models. Text-to-image only: glyph text images, reference-image editing, LoRA and refiners are not implemented.</summary>
+/// models. Text-to-image, img2img and mask inpaint; glyph text images, reference-image editing, LoRA and refiners are not implemented.</summary>
 public sealed class Fibo2Recipe : IArchitectureRecipe
 {
     /// <summary>ComfyUI's Fibo 2.0 shift 1.15 is a Flux-type exponent: <c>sigma(t) = e^1.15 / (e^1.15 + 1/t - 1)</c>, which is
@@ -39,8 +39,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
     public string Name => "fibo2";
 
     /// <inheritdoc/>
-    /// <remarks>Text-to-image only. Img2img, reference editing, regions, LoRA and refiners are declared off until they are implemented.</remarks>
-    public ImageFeatures Supports => ImageFeatures.None;
+    /// <remarks>Text-to-image, img2img and mask inpaint (a latent blend over the init image; Bria's own conditioned masked edit is
+    /// reference editing and is separate). Reference editing, regions, LoRA and refiners are declared off until they are implemented.</remarks>
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint;
 
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
@@ -98,7 +99,8 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "Fibo2Recipe");
             owned.Add(vae);
 
-            Fibo2Pipeline pipeline = new(context.Backend, encoder, transformer, vae.Decoder, vae.BnMean, vae.BnVar, config);
+            Fibo2Pipeline pipeline = new(context.Backend, encoder, transformer, vae.Decoder, vae.BnMean, vae.BnVar, config,
+                vaeEncoder: vae.Encoder);
             owned.Add(pipeline);
             Qwen3Tokenizer tokenizer = new();
             owned.Add(tokenizer);

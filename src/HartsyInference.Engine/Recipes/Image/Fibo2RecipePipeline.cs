@@ -2,6 +2,7 @@ using System.Globalization;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.Engine.Variants;
@@ -52,6 +53,8 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
             throw new NotSupportedException("Fibo 2.0 does not map negative prompts yet: its unconditional branch is the fixed null caption.");
         if (request.ReferenceImages is { Count: > 0 })
             throw new NotSupportedException("Fibo 2.0 reference-image conditioning (editing) is not implemented yet.");
+        if (request.Img2Img?.Mode == Img2ImgMode.Reference)
+            throw new NotSupportedException("Fibo 2.0 does not take an init image as a reference yet (that is reference editing); send it in Auto or Denoise mode for img2img.");
         if (!IsDefaultSampler(request.Sampler) || !IsDefaultSchedule(request.Scheduler))
             throw new NotSupportedException("Fibo 2.0 samples only with its built-in flow-matching Euler; drop the sampler and schedule selection.");
 
@@ -67,9 +70,15 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
         float shift = (float)(request.SigmaShift ?? _defaults.SigmaShift ?? Math.Exp(1.15));
         int? seed = RecipeRequestMapper.MapSeed(request.Seed);
 
-        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
+        // The init image resolves at the snapped size, which is the size the pipeline validates it against.
+        using Img2ImgResolver.Img2ImgSpec? init = RecipeImg2ImgBinder.Resolve(request, width, height);
+        ImageToImageRequest? img2img = init is null ? null : (ImageToImageRequest)RecipeImg2ImgBinder.Apply(
+            new TextToImageRequest { Prompt = request.Prompt, Width = width, Height = height, Steps = steps, CfgScale = guidance,
+                Scheduler = SamplingParamResolver.ResolveSchedulerName(request) }, init);
+        int stepsRun = img2img is null ? steps : steps - ImageToImageStartStep(img2img.Strength, steps);
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: Math.Max(stepsRun, 1));
         (byte[] rgb, int outWidth, int outHeight, int usedSeed) = _pipeline.GenerateFromTokens(conditional, unconditional, width, height,
-            steps, guidance, shift, seed, bridge);
+            steps, guidance, shift, seed, bridge, img2img);
         return new ImageResult
         {
             Rgb = rgb,
@@ -83,9 +92,14 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
                 ["size"] = string.Create(CultureInfo.InvariantCulture, $"{outWidth}x{outHeight}"),
                 ["seed"] = usedSeed.ToString(CultureInfo.InvariantCulture),
                 ["steps"] = steps.ToString(CultureInfo.InvariantCulture),
+                ["mode"] = img2img is null ? "txt2img" : img2img.Mask is null ? "img2img" : "inpaint",
             },
         };
     }
+
+    /// <summary>The start step <c>Img2ImgSetup.Prepare</c> derives, so progress totals only the steps that run.</summary>
+    private static int ImageToImageStartStep(float strength, int steps) =>
+        Math.Max(steps - (int)MathF.Round(steps * Math.Clamp(strength, 0f, 1f)), 0);
 
     /// <summary>Euler is the built-in sampler; hosts send it as their default, so it is accepted rather than refused.</summary>
     private static bool IsDefaultSampler(string? sampler) =>

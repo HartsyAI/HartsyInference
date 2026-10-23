@@ -13,8 +13,9 @@ namespace HartsyInference.Diffusion.Pipelines;
 
 /// <summary>Fibo 2.0 text-to-image. Flow-matching Euler over the FLUX.2 32-channel latent with the static 1.15 shift, classifier-free
 /// guidance against the null caption, and the FLUX.2 VAE decode with its BatchNorm denormalisation. The text encoder, denoiser and VAE
-/// are borrowed from the caller; the pipeline owns no weights.</summary>
-public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
+/// are borrowed from the caller; the pipeline owns no weights. With a VAE encoder it also runs img2img and mask inpaint
+/// (see <c>Fibo2Pipeline.Img2Img.cs</c>).</summary>
+public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
 {
     /// <summary>Width of the VAE's spatial compression; the denoiser's patch size adds a further factor of two.</summary>
     private const int VaeSpatialScale = 8;
@@ -28,11 +29,12 @@ public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
     private readonly Tensor _bnVar;
     private readonly float _bnEps;
     private readonly Fibo2Config _config;
+    private readonly VaeEncoder? _vaeEncoder;
 
     /// <summary>Creates a Fibo 2.0 pipeline over borrowed components. <paramref name="bnMean"/> and <paramref name="bnVar"/> are the
     /// FLUX.2 VAE's F32 BatchNorm statistics over the patchified 128-channel latent.</summary>
     public Fibo2Pipeline(IBackend backend, LlamaStyleEncoder textEncoder, Fibo2Transformer transformer, VaeDecoder vaeDecoder,
-        Tensor bnMean, Tensor bnVar, Fibo2Config config, float bnEps = 1e-5f)
+        Tensor bnMean, Tensor bnVar, Fibo2Config config, float bnEps = 1e-5f, VaeEncoder? vaeEncoder = null)
         : base(backend)
     {
         ArgumentNullException.ThrowIfNull(textEncoder);
@@ -51,6 +53,7 @@ public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
         _bnVar = bnVar;
         _bnEps = bnEps;
         _config = config;
+        _vaeEncoder = vaeEncoder;
     }
 
     /// <summary>Generates one image from the conditional caption tokens and the null-caption tokens (the CFG branch). Both sequences come
@@ -65,10 +68,12 @@ public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
     /// <param name="sigmaShift">The scheduler's <c>s</c> in <c>s·t/(1 + (s − 1)·t)</c>; ComfyUI's Fibo 2.0 shift 1.15 is
     /// <c>s = e^1.15</c>.</param>
     /// <param name="seed">Noise seed; null draws one.</param>
-    /// <param name="onProgress">Optional per-step callback.</param>
+    /// <param name="onProgress">Optional per-step callback; img2img reports only the steps it runs.</param>
+    /// <param name="img2img">Init image, strength and optional mask (1 = regenerate); null for text-to-image. Its size must match
+    /// <paramref name="width"/> and <paramref name="height"/>. Needs the VAE encoder.</param>
     /// <returns>Interleaved RGB bytes and the actual size and seed.</returns>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(int[] conditionalTokens, int[] unconditionalTokens,
-        int width, int height, int steps, float guidanceScale, float sigmaShift, int? seed, Action<GenerationProgress>? onProgress = null)
+        int width, int height, int steps, float guidanceScale, float sigmaShift, int? seed, Action<GenerationProgress>? onProgress = null, ImageToImageRequest? img2img = null)
     {
         ThrowIfDisposed();
         ValidateRequest(conditionalTokens, unconditionalTokens, width, height, steps, guidanceScale, sigmaShift);
@@ -76,38 +81,45 @@ public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
         int latentHeight = height / VaeSpatialScale;
         int latentWidth = width / VaeSpatialScale;
 
+        Img2ImgSetup.Plan plan = PrepareInit(img2img, height, width, steps);
+        if (plan.PassThrough)
+            return (ImagePostProcessor.TensorToRgbBytes(img2img!.SourceImage), width, height, resolvedSeed);
+
         bool guided = CfgHelper.IsGuidanceActive(guidanceScale);
         Tensor conditional = EncodeBundles(conditionalTokens);
         Tensor? unconditional = guided ? EncodeBundles(unconditionalTokens) : null;
         Tensor? latent = null;
+        Tensor? sourceLatent = null;
+        Tensor? latentMask = null;
         try
         {
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
-            latent = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, latentHeight, latentWidth), resolvedSeed);
-            float initialSigma = scheduler.InitialNoiseSigma;
-            if (MathF.Abs(initialSigma - 1f) > 1e-6f)
-                ScaleInPlace(latent, initialSigma);
-
-            for (int i = 0; i < steps; i++)
+            TensorShape latentShape = new(1, _config.InChannels, latentHeight, latentWidth);
+            if (img2img is not null)
+                sourceLatent = EncodeInitLatent(img2img.SourceImage);
+            latent = BuildStartLatent(scheduler, SeedGenerator.CreateNoise(latentShape, resolvedSeed), sourceLatent, plan.StartStep);
+            LatentInpaint? inpaint = null;
+            if (plan.MaskPixel is not null)
             {
-                Stopwatch stepWatch = Stopwatch.StartNew();
-                Tensor velocity = Denoise(latent, scheduler.SigmaAt(i), conditional, unconditional, guidanceScale);
-                Tensor next = new(latent.Shape, DType.F32);
-                scheduler.Step(next, velocity, latent, i);
-                velocity.Dispose();
-                latent.Dispose();
-                latent = next;
-                stepWatch.Stop();
-                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepWatch.Elapsed.TotalMilliseconds));
+                latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(plan.MaskPixel, latentHeight, latentWidth);
+                inpaint = new LatentInpaint(scheduler, sourceLatent!, latentMask, resolvedSeed);
             }
 
-            using Tensor decoded = DecodeLatent(latent);
+            SampleFlow(scheduler, ref latent, plan.StartStep, steps,
+                (current, sigma) => Denoise(current, sigma, conditional, unconditional, guidanceScale), inpaint, onProgress);
+
+            using Tensor decoded = DecodeLatent(latent!);
+            // Suppresses the VAE round trip in the kept region; the host recomposites itself when it owns the mask.
+            if (plan.MaskPixel is not null && img2img!.RecompositeAtEnd)
+                MaskBlendUtilities.BlendChannelsInPlace(decoded, img2img.SourceImage, plan.MaskPixel);
             return (ImagePostProcessor.TensorToRgbBytes(decoded), (int)decoded.Shape[3], (int)decoded.Shape[2], resolvedSeed);
         }
         finally
         {
             latent?.Dispose();
+            sourceLatent?.Dispose();
+            latentMask?.Dispose();
             conditional.Dispose();
             unconditional?.Dispose();
         }

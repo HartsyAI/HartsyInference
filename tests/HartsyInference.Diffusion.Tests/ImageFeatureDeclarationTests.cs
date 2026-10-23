@@ -22,6 +22,7 @@ public sealed class ImageFeatureDeclarationTests
         "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",   // VaeConfig.Flux
         "flux2", "flux3", "ernie-image", "ideogram4",           // VaeConfig.Flux2
         "moss-image",                                           // VaeConfig.Flux2 (Flux2VaeComponents)
+        "fibo2",                                                // VaeConfig.Flux2 (Flux2VaeComponents), NCHW latent blend
         "auraflow",                                             // VaeConfig.AuraFlow (= Sdxl)
         "lance-image",                                          // Wan22VaeEncoder — img2img only
         // Phase 4 — built from nothing; these three had no img2img at any layer
@@ -40,6 +41,7 @@ public sealed class ImageFeatureDeclarationTests
         "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",
         "flux2", "flux3", "ernie-image", "ideogram4",
         "moss-image",
+        "fibo2",
         "auraflow",
         "hidream",
         // 72b725ae — per-token blend (MaskBlendUtilities.BlendTokensInPlace) covering all three token-space

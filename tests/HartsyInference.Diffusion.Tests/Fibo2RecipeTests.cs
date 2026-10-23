@@ -37,9 +37,9 @@ public sealed class Fibo2RecipeTests
     }
 
     [Fact]
-    public void Supports_DeclaresNothingBeyondTextToImage()
+    public void Supports_DeclaresImg2ImgAndInpaintOnly()
     {
-        Assert.Equal(ImageFeatures.None, new Fibo2Recipe().Supports);
+        Assert.Equal(ImageFeatures.Img2Img | ImageFeatures.Inpaint, new Fibo2Recipe().Supports);
     }
 
     [Fact]
