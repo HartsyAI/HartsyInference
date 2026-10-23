@@ -17,9 +17,18 @@ internal static class ComponentLoader
         Func<string, string?>? keyTransform,
         bool applyFp8Dequant,
         bool nvfp4ToFp8 = false)
-    {
-        CheckpointSource source = CheckpointSource.Open(filePath,
+        => Load(filePath, logTag, keyTransform,
             new CheckpointOpenOptions { FoldQuantCompanions = applyFp8Dequant, Nvfp4ToFp8 = nvfp4ToFp8 });
+
+    /// <summary>The same load with the container's options spelled out, for a component whose quantized weights need more than the fold flag (a DiT keeping its nvfp4 groups resident).</summary>
+    internal static (Dictionary<string, Tensor> Weights, CheckpointSource Source) Load(
+        string filePath,
+        string logTag,
+        Func<string, string?>? keyTransform,
+        CheckpointOpenOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        CheckpointSource source = CheckpointSource.Open(filePath, options);
         try
         {
             Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(source.Weights.Count);

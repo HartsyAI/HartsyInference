@@ -112,7 +112,8 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         try
         {
             (Dictionary<string, Tensor> ditWeights, CheckpointSource ditSource) = ComponentLoader.Load(
-                context.CheckpointPath, "Krea2Recipe", key => Krea2CheckpointConverter.RemapTransformerKey(CheckpointConvertUtils.StripTransformerPrefix(key)), applyFp8Dequant: true);
+                context.CheckpointPath, "Krea2Recipe", key => Krea2CheckpointConverter.RemapTransformerKey(CheckpointConvertUtils.StripTransformerPrefix(key)),
+                CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends));
             loaders.Add(ditSource);
             if (ditWeights.Count == 0)
             {

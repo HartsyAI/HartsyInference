@@ -85,7 +85,9 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
         // (the SwarmUI loader read T2IParamTypes.ClipLModel/ClipGModel/T5XXLModel/LLaMAModel/VAE).
         // One container for either format: a HiDream GGUF is a repack of this same file under the same diffusers
         // key names, so the converter cannot tell them apart.
-        CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+        // The dense DiT weights are widened to F32 below, so a resident one stands in for F32.
+        CheckpointSource source = CheckpointSource.Open(context.CheckpointPath,
+            CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends, DType.F32));
         List<IDisposable> loaders = new List<IDisposable> { source };
         try
         {

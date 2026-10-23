@@ -90,7 +90,8 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // GGUF checkpoints (e.g. qwen-image Q5_K_M) stay quant-native: dequantizing a 20B Q4/Q5 file to F16 on
             // the host needs ~40 GB RAM. The Linear path dequantizes per-GEMM on the GPU instead. The container
             // handles the format difference, including ggml's [in, out] shape order, so the converter sees one dict.
-            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath,
+                CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends));
             checkpoint = source;
             // Qwen-Image 2.1 is a different architecture that shares this family's transformer_blocks naming, so it
             // passes the emptiness check below and would load into the v1 denoiser as a shape mismatch at best and

@@ -17,6 +17,28 @@ stable release will require. Dates are UTC.
 - **Changed: attention kernels build with a register check.** `attention/build.sh` builds `int8_attn_v2` with nvcc and
   `--arch sm_89` adds its `.sm89.ptx`; `build_common.sh` accepts a plain `--arch` and fails a `PTXAS_SPILL_CHECK` kernel
   that spills on sm_80, sm_86, sm_89 or sm_120 (the 50-series JITs the baseline).
+- **Faster: NVFP4 diffusion transformers stay packed on CUDA.** Krea 2, Qwen-Image, Boogu, Z-Image, Flux.1, HiDream and
+  Wan open their NVFP4 groups resident (`CheckpointOpenOptions.ForResidentNvfp4`) instead of unpacking them to F16 at
+  load, so `numerics.fp4Native` reaches them on Blackwell. Below Blackwell each GEMM unpacks the weight to exactly the
+  dense weight the old open made (`QuantWeightInfo.DenseDType`: same GEMM dtype, same small-m GEMV), so output is
+  unchanged. A resident weight no longer keeps an unpacked copy in the weight-cast cache; `vram.residentCastCache=1`
+  restores it. RTX 4090, 1024², digest-identical to the previous build:
+
+  | model | step ms (before → after) | peak VRAM GB (before → after) | cache on: step ms, peak GB |
+  |---|---|---|---|
+  | Krea 2 Turbo | 3496 → 794 | 6.6 → 12.9 (before streamed its 24 GB F16 copy) | 793, 12.9 |
+  | Qwen-Image | 9940 → 1446 | 7.1 → 21.0 (before streamed) | 1445, 21.0 |
+  | Z-Image Turbo | 398 → 408 | 13.9 → 7.7 | 397, 18.3 |
+  | Boogu Turbo | did not load → 731 | — → 12.4 | 716, 21.2 |
+
+  CPU and Vulkan keep the eager unpack.
+- **Fixed: Comfy-Org's Boogu NVFP4 builds load and render.** The eager unpack refused their padded block scales, and
+  their 840-row K/V projections ship padded to 848 rows; the recipe trims them at load. RTX 4090 Boogu Turbo NVFP4, 4
+  steps: 720 ms/step, a clean image against the fp8 build (SSIM 0.73-0.80, seeds 42-44); the F16-at-open arm ran out of
+  VRAM at decode. CUDA's Linear now refuses an output narrower than the weight instead of writing past it. Boogu's VRAM preflight asks
+  13.5 GB of a packed NVFP4 build instead of 16.
+- **Fixed: Flux.1's single-block linear1 split keeps the weight's quantization companions** (`SplitRows`), including
+  the fp8 input scale the double-block QKV split already carried.
 - **Fixed: NVFP4 files without a ComfyUI layer config are read as ModelOpt layout.**
   - Before, every NVFP4 group was decoded as Comfy layout (blocked scales, high nibble first). A ModelOpt-layout file
     (row-major scales, low nibble first) decoded as noise: correlation about 0.00 against the source weights,

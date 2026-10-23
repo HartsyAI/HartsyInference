@@ -104,8 +104,9 @@ public static unsafe class Nvfp4Codec
     ///
     /// <para><b>Lifetime.</b> The view borrows the packed tensor's bytes and roots it, and the returned <see cref="QuantWeightInfo"/> roots the two companions — so a converter may drop the companion KEYS from its output dictionary, but must not dispose the packed weight or the companions, and must store the view (not the original) under the weight's key.</para></summary>
     /// <param name="hasPreQuantScale">True when the weight ships an AWQ <c>pre_quant_scale</c> over the input dim. Those are refused: the scale has to multiply the ACTIVATION (<c>x·Wᵀ = (x⊙s)·(W/s)ᵀ</c>) and no backend Linear path applies one, so such a layer must take the eager dequant that folds it in.</param>
+    /// <param name="denseDType">The <see cref="QuantWeightInfo.DenseDType"/> to record: the dtype the eager unpack this replaces would have produced.</param>
     public static bool TryAttachResident(Tensor packed, Tensor blockScale, Tensor globalScale, bool hasPreQuantScale,
-        out Tensor resident)
+        out Tensor resident, DType? denseDType = null)
     {
         ArgumentNullException.ThrowIfNull(packed);
         ArgumentNullException.ThrowIfNull(blockScale);
@@ -132,7 +133,8 @@ public static unsafe class Nvfp4Codec
         {
             Format = "nvfp4",
             BlockScale = blockScale,
-            GlobalScale = globalScale
+            GlobalScale = globalScale,
+            DenseDType = denseDType,
         };
         return true;
     }
