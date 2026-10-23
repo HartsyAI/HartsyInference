@@ -1,3 +1,4 @@
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 
@@ -53,7 +54,16 @@ public static unsafe class Mxfp8Codec
         {
             string baseName = scaleKey[..^".weight_scale".Length];
             if (!weights.TryGetValue($"{baseName}.weight", out Tensor? weight)) continue;
-            if (!TryAttachResident(weight, weights[scaleKey])) continue;
+            Tensor scale = weights[scaleKey];
+            if (!TryAttachResident(weight, scale))
+            {
+                // An F8 weight with a U8 scale is an MXFP8 pair; passed on without its scales it would run as plain fp8.
+                if (weight.DType == DType.F8E4M3 && scale.DType == DType.U8)
+                    throw new HartsyInferenceException(
+                        $"MXFP8 weight '{baseName}' {weight.Shape} has block scales {scale.Shape} that do not cover its padded "
+                        + "[128-row, 4-column] tile, so neither the resident path nor a plain fp8 GEMM can read it correctly.");
+                continue;
+            }
             weights.Remove(scaleKey);
             weights.Remove($"{baseName}.comfy_quant");
             attached++;

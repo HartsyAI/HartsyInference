@@ -75,4 +75,15 @@ public sealed unsafe class Mxfp8ResidentAttachTests
             for (int b = 0; b < InFeatures / 32; b++)
                 Assert.Equal(1.5f * MathF.Pow(2f, b - 3), o[r * InFeatures + b * 32 + 17]);
     }
+
+    /// <summary>A pair whose scales miss the padded tile is refused loudly: passed on without them, the F8 weight would run
+    /// as plain per-tensor fp8 and every block would lose its scale.</summary>
+    [Fact]
+    public void AttachResidentInPlace_ThrowsForAnMxfp8PairWithUnpaddedScales()
+    {
+        using Tensor weight = new(new TensorShape(4, 64), DType.F8E4M3);
+        using Tensor scale = new(new TensorShape(4, 4), DType.U8);
+        Dictionary<string, Tensor> weights = new() { ["proj.weight"] = weight, ["proj.weight_scale"] = scale };
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => Mxfp8Codec.AttachResidentInPlace(weights));
+    }
 }
