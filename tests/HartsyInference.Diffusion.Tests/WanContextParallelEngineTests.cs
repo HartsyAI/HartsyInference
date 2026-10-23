@@ -45,23 +45,10 @@ public sealed class WanContextParallelEngineTests : IDisposable
     public async Task ContextParallel_RealEngine_IsActiveAndCompletes()
     {
         if (!TryResolve(out ModelSpec spec)) return;
-        List<string> decisions = [];
-        Logs.SetLogger((level, message) =>
-        {
-            if (message.Contains("[ContextParallel]")) lock (decisions) decisions.Add(message);
-            Console.Error.WriteLine($"[{level}] {message}");
-        });
-        try
-        {
-            VideoGenerationResult parallel = await Generate(spec, contextParallel: true);
-            _output.WriteLine($"ContextParallel decisions: {string.Join(" | ", decisions)}");
-            Assert.Contains(decisions, d => d.Contains("active"));
-            Assert.Equal(Request.Frames, parallel.Frames.Count);
-        }
-        finally
-        {
-            Logs.SetLogger(static (level, message) => Console.Error.WriteLine($"[{level}] {message}"));
-        }
+        VideoGenerationResult parallel = null!;
+        string[] decisions = await CaptureDecisions(async () => parallel = await Generate(spec, contextParallel: true));
+        Assert.Contains(decisions, d => d.Contains("active"));
+        Assert.Equal(Request.Frames, parallel.Frames.Count);
     }
 
     /// <summary>Every step's context-parallel forward, on the single-GPU run's recorded inputs, is within three times the distance
@@ -73,7 +60,9 @@ public sealed class WanContextParallelEngineTests : IDisposable
         string record = Path.Combine(_dir, "record"), control = Path.Combine(_dir, "control"), parallel = Path.Combine(_dir, "cp");
         await Probe(spec, "record", record, null, contextParallel: false);
         await Probe(spec, "replay", record, control, contextParallel: false, exactAttention: true);
-        await Probe(spec, "replay", record, parallel, contextParallel: true);
+        string[] decisions = await CaptureDecisions(() => Probe(spec, "replay", record, parallel, contextParallel: true));
+        // A rank that fails its preload falls back to one GPU, whose replay would match the record and pass every ratio.
+        Assert.Contains(decisions, d => d.Contains("active"));
 
         Dictionary<string, double> controlRows = Rows(control), parallelRows = Rows(parallel);
         Assert.Equal(2 * Request.Steps, controlRows.Count);
@@ -83,6 +72,7 @@ public sealed class WanContextParallelEngineTests : IDisposable
             double cp = parallelRows[key];
             _output.WriteLine($"{key}: CP relL2 {cp:E3}, control {reference:E3}, ratio {cp / reference:F2}");
             Assert.True(reference > 0, $"{key}: the control replay matched the record bit for bit, so it measures nothing.");
+            Assert.True(cp > 0, $"{key}: the context-parallel replay matched the record bit for bit, so it ran on one GPU.");
             Assert.True(cp <= ControlMultiple * reference,
                 $"{key}: the context-parallel forward is {cp:E3} from the single-GPU one, more than {ControlMultiple}x the {reference:E3} exact F32 attention gives.");
         }
@@ -108,6 +98,29 @@ public sealed class WanContextParallelEngineTests : IDisposable
         spec = ModelResolver.Resolve("wan", TestPaths.WanVideo.Ti2V5B, Modality.Video);
         if (spec.LocalPath is null) { _output.WriteLine("SKIPPED: wan not resolvable with the explicit path."); return false; }
         return true;
+    }
+
+    /// <summary>The <c>[ContextParallel]</c> decisions logged while <paramref name="run"/> generates.</summary>
+    private async Task<string[]> CaptureDecisions(Func<Task> run)
+    {
+        List<string> decisions = [];
+        Logs.SetLogger((level, message) =>
+        {
+            if (message.Contains("[ContextParallel]")) lock (decisions) decisions.Add(message);
+            Console.Error.WriteLine($"[{level}] {message}");
+        });
+        try
+        {
+            await run();
+        }
+        finally
+        {
+            Logs.SetLogger(static (level, message) => Console.Error.WriteLine($"[{level}] {message}"));
+        }
+        string[] captured;
+        lock (decisions) captured = [.. decisions];
+        _output.WriteLine($"ContextParallel decisions: {string.Join(" | ", captured)}");
+        return captured;
     }
 
     private async Task Probe(ModelSpec spec, string mode, string record, string? outDir, bool contextParallel, bool exactAttention = false)
