@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.389
+
 - **Added: INT8 attention v2 (CUDA, opt-in).** `numerics.int8AttnV2` runs unmasked equal-head attention at head dim 128
   with F16 or F32 operands (head-major, token-major or fused-QKV views) on INT8 QK with one K scale per key, u8 P and s8
   V with an INT32 PV accumulator drained per 128-key tile; `numerics.int8AttnV2VTile` picks per-tile (default) or
