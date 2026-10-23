@@ -130,6 +130,7 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         try
         {
             // Preloaded, so the second call reads the cached F16 cast rather than unpacking again.
+            KnobStore.Set(EngineKnobs.ResidentCastCache, true);
             backend.PreloadWeights([eager, resident]);
             uint[] expected = RunLinear(backend, ops, eager);
             for (int pass = 1; pass <= 2; pass++)
@@ -142,13 +143,14 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
         finally
         {
+            KnobStore.Clear(EngineKnobs.ResidentCastCache);
             backend.FreeWeights([eager, resident]);
         }
     }
 
-    /// <summary>With <c>vram.residentCastCache</c> off a preloaded resident weight keeps no dense copy and still matches its twin.</summary>
+    /// <summary>With <c>vram.residentCastCache</c> off (the default) a preloaded resident weight keeps no dense copy and still matches its twin.</summary>
     [Fact]
-    public void CastCacheOff_KeepsNoDenseCopy_AndMatchesTheEagerWeight()
+    public void CastCacheOff_TheDefault_KeepsNoDenseCopy_AndMatchesTheEagerWeight()
     {
         using CudaBackend? backend = TryOpenBackend();
         if (backend is null) return;   // tier-lint: guarded
