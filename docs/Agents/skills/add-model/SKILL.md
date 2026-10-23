@@ -21,7 +21,7 @@ This skill orders the work; those documents own the rules.
   path is what users run). CLI/API checks come after, for byte-identity.
 - **GPUs are shared.** 4090 lock `/tmp/claude-1000/gpu4090.lock`, 3060 lock `/tmp/claude-1000/vk_3060.lock`. Take the lock first, then
   wait for the 10-minute quiet window with `tests/swarm-quiet-window.sh` (global queue, foreign GPU processes, restarts and
-  AudioLab/LLM activity, not just the journal's "requested N image" lines) before a restart or timed batch. Another agent's `tests/regression-ab.sh` stops the live Swarm per run and restores it: if Swarm is
+  AudioLab/LLM activity, not just the journal's "requested N image" lines) before a restart or timed batch. After a timed batch run `tests/swarm-quiet-window.sh --verify-since <UTC start of the batch>` (exit 4 means redo the batch) and sample `nvidia-smi` during it for foreign GPU processes, which the script cannot see afterwards; discard any affected run. Your own Swarm requests count toward the verify: compare its `requested` lines with what you sent. Another agent's `tests/regression-ab.sh` stops the live Swarm per run and restores it: if Swarm is
   down, check `ps` for it before starting it. Never evict or restart Swarm mid-gen. Index 0/1 is reversed between engine,
   `CUDA_VISIBLE_DEVICES` and `nvidia-smi` (see memory notes); confirm the device from the engine log line.
 - **Models live on the RAID** (`/mnt/model-storage/Models`). Look there first. Download through the Swarm API
