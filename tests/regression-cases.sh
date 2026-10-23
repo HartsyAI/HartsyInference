@@ -11,6 +11,8 @@
 # `attention` is the attention gate set: every attention shape class the engine dispatches (head dims 40-256, GQA,
 # per-head and key masks, token-major, the Sage-length rows), every weight format on disk and the `lora` rows.
 # `long` runs a video past numerics.sageF16MinSkv tokens, where an F16 DiT's self-attention takes SageAttention.
+# `nvfp4` is the ComfyUI-config NVFP4 checkpoints on this host (`nvfp4-ref` the bf16 build an NVFP4 row is measured
+# against); off Blackwell they load at open, so these rows are what a loader change to nvfp4 must leave identical.
 #
 #   regression_cases core         # id, checkpoint, spec — for rows tagged core
 #   regression_cases core vulkan  # rows tagged core AND vulkan (a backend tag names the cases that run on it)
@@ -99,5 +101,9 @@ qwen35-0.8b-graph	attention	llm/qwen35/Qwen3.5-0.8B-Q4_K_M.gguf	text|Write a sho
 llama32-vision	attention	llm/llama32-vision/Llama-3.2-11B-Vision-Instruct.Q4_K_M.gguf	text|Describe this image in detail.|--max-tokens 128 --temperature 0 -i /mnt/model-storage/Models/TestAssets/vision/bus.png
 seedvr2-3b	video	Video/SeedVr2/seedvr2_ema_3b_fp16.safetensors	restore|/mnt/model-storage/Models/TestAssets/restore/bbb9.mp4|-m seedvr2-3b --width 640 --height 360
 oasis	video,attention	World/Oasis/oasis500m.safetensors	world|/mnt/model-storage/Models/TestAssets/world/oasis_first_frame.png|-m oasis --vae-path /mnt/model-storage/Models/World/Oasis/vit-l-20.safetensors --frames 8 --steps 10
+zimage-nvfp4	nvfp4	Stable-Diffusion/ZImage/z_image_turbo_nvfp4.safetensors	image|a lighthouse on a rocky coast at dusk, photograph|-m zimage --steps 8 --width 1024 --height 1024
+flux3-nvfp4	nvfp4	Stable-Diffusion/flux3-image-klein-nvfp4-1_0-flux-3-image-klein-base-nvfp4.safetensors	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light, photograph|-m flux3 --width 1024 --height 1024
+flux3-bf16	nvfp4-ref	Stable-Diffusion/flux3-image-klein-1_0-flux-3-image-klein-base-bf16.safetensors	image|a red fox sitting in a snowy forest at sunrise, detailed fur, soft golden light, photograph|-m flux3 --width 1024 --height 1024
+krea2-nvfp4	nvfp4	Stable-Diffusion/krea2-turbo-nvfp4-1_0-krea-2-turbo-base-nvfp4.safetensors	image|a red apple on a wooden table|-m krea2 --steps 8 --width 1024 --height 1024
 MATRIX
 }

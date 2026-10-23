@@ -94,6 +94,23 @@ public sealed unsafe class Nvfp4ResidentAttachTests
         AssertRefused(packed, blockScale, global, hasPreQuantScale: false);
     }
 
+    /// <summary>cuBLASLt and the unpack kernel index the 128-row-padded blocked layout, so a scale tensor holding only the
+    /// weight's own rows would be read past its end (and is not in that layout anyway).</summary>
+    [Fact]
+    public void BlockScaleRowsNotPaddedTo128_AreRefused_PaddedOnesAccepted()
+    {
+        const int rows = 32;
+        using Tensor packed = Packed(rows, InFeatures / 2, DType.U8);
+        using Tensor unpadded = BlockScale(rows, InFeatures / Nvfp4Codec.GroupSize);
+        using Tensor padded = BlockScale(128, InFeatures / Nvfp4Codec.GroupSize);
+        using Tensor global = Global(1f);
+        AssertRefused(packed, unpadded, global, hasPreQuantScale: false);
+
+        Assert.True(Nvfp4Codec.TryAttachResident(packed, padded, global, hasPreQuantScale: false, out Tensor resident));
+        using Tensor owned = resident;
+        Assert.Equal((long)rows, owned.Shape[0]);
+    }
+
     private static void AssertRefused(Tensor packed, Tensor blockScale, Tensor globalScale, bool hasPreQuantScale)
     {
         Assert.False(Nvfp4Codec.TryAttachResident(packed, blockScale, globalScale, hasPreQuantScale, out Tensor resident));
