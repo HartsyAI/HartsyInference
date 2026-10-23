@@ -690,7 +690,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         long phT7 = sw.ElapsedMilliseconds;
         Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         long phT8 = sw.ElapsedMilliseconds;
-        Tensor image = _vaeDecoder.Decode(Backend, latent);
+        Tensor image = _vaeDecoder.DecodeWithinBudget(Backend, latent);
         long phT9 = sw.ElapsedMilliseconds;
         Logs.Verbose($"[krea2-phase] post-loop sync={phT6 - phT5}ms DiT-free={phT7 - phT6}ms VAE preload={phT8 - phT7}ms decode={phT9 - phT8}ms");
         latent.Dispose();
