@@ -138,9 +138,11 @@ stable release will require. Dates are UTC.
   (Lens), scheduled prompt variants and regional text streams are recorded element by element, as are token-weighted
   text, edit/reference tokens and Kandinsky 5 I2V's first-frame latent. Flux and Qwen-Image ControlNet runs are refused
   under the probe, since their residuals come from the arm's own latent. With the probe off nothing changes.
-- **Added: Lens can attend in BF16 (`numerics.lensBf16`, off by default).** It grants Lens's joint attention BF16 storage, so
-  on CUDA it runs the cuDNN BF16 row (S.16) instead of the F32 materialized or tiled path: 536 → 240 ms per step at 1024² and
-  7765 → 1299 at 2048² on an RTX 4090. Off until its quality is judged trajectory-free. Lens's 1/256 V damp, which held its
+- **Changed: Lens attends in BF16 by default (`numerics.lensBf16`; false keeps the F32 path).** Its joint attention takes
+  BF16 storage, so on CUDA it runs the cuDNN BF16 row (S.16) instead of the F32 materialized or tiled path: 536 → 240 ms per
+  step at 1024² and 7765 → 1299 at 2048² on an RTX 4090. Images change: SSIM against F32 is 0.94-0.99 at 1024² and 0.79-0.97
+  at 2048², the same scene slightly shifted, and the denoiser probe exceeds its bar (twice the F32-vs-exact distance) by
+  10-67% on 3 of 8 steps; accepted on inspection of the images. Lens's 1/256 V damp, which held its
   unnormalized V inside F16's range, is removed; it was a bit-exact no-op on every F32 row. Under `numerics.sdpaF16`, which
   forces F16 for every caller, Lens's late-block V now clips at 65504 where the damp used to keep it in range.
 
