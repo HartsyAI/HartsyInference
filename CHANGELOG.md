@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: multi-GPU campaign filters.** `tests/run-multigpu-campaign.sh` now fails before any GPU work if a filter matches zero tests, and its stale class names point at the consolidated DiT-sharding and video placement tests.
+
 ## alpha.389
 
 - **Added: INT8 attention v2 (CUDA, opt-in).** `numerics.int8AttnV2` runs unmasked equal-head attention at head dim 128
