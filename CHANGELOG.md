@@ -138,6 +138,11 @@ stable release will require. Dates are UTC.
   (Lens), scheduled prompt variants and regional text streams are recorded element by element, as are token-weighted
   text, edit/reference tokens and Kandinsky 5 I2V's first-frame latent. Flux and Qwen-Image ControlNet runs are refused
   under the probe, since their residuals come from the arm's own latent. With the probe off nothing changes.
+- **Added: Lens can attend in BF16 (`numerics.lensBf16`, off by default).** It grants Lens's joint attention BF16 storage, so
+  on CUDA it runs the cuDNN BF16 row (S.16) instead of the F32 materialized or tiled path: 536 → 240 ms per step at 1024² and
+  7765 → 1299 at 2048² on an RTX 4090. Off until its quality is judged trajectory-free. Lens's 1/256 V damp, which held its
+  unnormalized V inside F16's range, is removed; it was a bit-exact no-op on every F32 row. Under `numerics.sdpaF16`, which
+  forces F16 for every caller, Lens's late-block V now clips at 65504 where the damp used to keep it in range.
 
 ## alpha.388
 
@@ -172,12 +177,6 @@ stable release will require. Dates are UTC.
   forward at three times the relL2 that exact F32 attention puts between two single-GPU forwards, instead of the finished
   video's frame SSIM: a six-step trajectory turns a forward difference of that size into SSIM 0.897 (#552). Measured on two
   RTX 4090s in F32, the CP-to-control ratio is 0.89 to 1.07 at every step, the same in two runs.
-
-- **Added: Lens can attend in BF16 (`numerics.lensBf16`, off by default).** It grants Lens's joint attention BF16 storage, so
-  on CUDA it runs the cuDNN BF16 row (S.16) instead of the F32 materialized or tiled path: 536 → 240 ms per step at 1024² and
-  7765 → 1299 at 2048² on an RTX 4090. Off until its quality is judged trajectory-free. Lens's 1/256 V damp, which held its
-  unnormalized V inside F16's range, is removed; it was a bit-exact no-op on every F32 row. Under `numerics.sdpaF16`, which
-  forces F16 for every caller, Lens's late-block V now clips at 65504 where the damp used to keep it in range.
 
 ## alpha.387
 
