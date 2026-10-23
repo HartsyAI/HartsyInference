@@ -162,6 +162,11 @@ stable release will require. Dates are UTC.
   Qwen3-VL vision tower, so the language tower now exposes multi-layer taps with deepstack
   (`LlamaStyleEncoder.EncodeMultiLayerEmbedsMrope`). `fibo2-edit-turbo` is edit-only (4 steps, guidance 1.0, no unconditional pass)
   and refuses a request without a source image. Declared as `RefEdit` (with `Inpaint` and `Img2Img`). Not run on the real edit checkpoint or a GPU.
+- **Changed: Wan context parallelism is judged per forward.** The denoiser probe (`diagnostics.denoiserProbe=replay`) now
+  replays a single-GPU Wan record through context parallelism, and `WanContextParallelEngineTests` gates each step's CP
+  forward at three times the relL2 that exact F32 attention puts between two single-GPU forwards, instead of the finished
+  video's frame SSIM: a six-step trajectory turns a forward difference of that size into SSIM 0.897 (#552). Measured on two
+  RTX 4090s in F32, the CP-to-control ratio is 0.89 to 1.07 at every step, the same in two runs.
 
 ## alpha.387
 
