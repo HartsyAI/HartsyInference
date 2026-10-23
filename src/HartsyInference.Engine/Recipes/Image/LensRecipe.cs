@@ -102,27 +102,39 @@ public sealed class LensRecipe : IArchitectureRecipe
             return (vocabPath, mergesPath);
         }
         Directory.CreateDirectory(dir);
-        string rawPath = Path.Combine(dir, "gpt_oss_tokenizer_raw.json");
+        // Processes that load Lens at once each export under their own names and rename into place, so none reads a partial file.
+        string unique = Guid.NewGuid().ToString("N");
+        string rawPath = Path.Combine(dir, $"gpt_oss_tokenizer_raw.{unique}.json");
+        string vocabTemp = $"{vocabPath}.{unique}.tmp", mergesTemp = $"{mergesPath}.{unique}.tmp";
         Logs.Info("[LensRecipe] Downloading the GPT-OSS tokenizer vocab (one-time)...");
-        using (HuggingFaceClient client = new HuggingFaceClient())
+        try
         {
-            client.DownloadFileAsync(TokenizerRepo, "tokenizer.json", rawPath, progress: null, sha256: null, CancellationToken.None)
-                .GetAwaiter().GetResult();
-        }
-        using (FileStream rawStream = File.OpenRead(rawPath))
-        using (JsonDocument doc = JsonDocument.Parse(rawStream))
-        {
-            JsonElement model = doc.RootElement.GetProperty("model");
-            File.WriteAllText(vocabPath, model.GetProperty("vocab").GetRawText());
-            List<string> merges = new List<string>();
-            foreach (JsonElement merge in model.GetProperty("merges").EnumerateArray())
+            using (HuggingFaceClient client = new HuggingFaceClient())
             {
-                merges.Add(merge.ValueKind == JsonValueKind.Array ? $"{merge[0].GetString()} {merge[1].GetString()}"
-                    : merge.GetString() ?? "");
+                client.DownloadFileAsync(TokenizerRepo, "tokenizer.json", rawPath, progress: null, sha256: null, CancellationToken.None)
+                    .GetAwaiter().GetResult();
             }
-            File.WriteAllLines(mergesPath, merges);
+            using (FileStream rawStream = File.OpenRead(rawPath))
+            using (JsonDocument doc = JsonDocument.Parse(rawStream))
+            {
+                JsonElement model = doc.RootElement.GetProperty("model");
+                File.WriteAllText(vocabTemp, model.GetProperty("vocab").GetRawText());
+                List<string> merges = new List<string>();
+                foreach (JsonElement merge in model.GetProperty("merges").EnumerateArray())
+                {
+                    merges.Add(merge.ValueKind == JsonValueKind.Array ? $"{merge[0].GetString()} {merge[1].GetString()}"
+                        : merge.GetString() ?? "");
+                }
+                File.WriteAllLines(mergesTemp, merges);
+            }
+            File.Move(mergesTemp, mergesPath, overwrite: true);
+            File.Move(vocabTemp, vocabPath, overwrite: true);
         }
-        File.Delete(rawPath);
+        finally
+        {
+            foreach (string temp in (string[])[rawPath, vocabTemp, mergesTemp])
+                if (File.Exists(temp)) File.Delete(temp);
+        }
         Logs.Info("[LensRecipe] GPT-OSS tokenizer vocab + merges exported.");
         return (vocabPath, mergesPath);
     }

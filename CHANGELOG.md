@@ -98,6 +98,10 @@ stable release will require. Dates are UTC.
   host bytes, as the promote path already did. `CfgBranchRunner` reports both branches' exceptions when both fail, so a
   context-parallel rank's own error is no longer replaced by its peer's abort, and the engine's out-of-VRAM cleanup still
   fires when one of the two is an out-of-VRAM.
+- **Fixed: two processes loading Lens at once no longer trip over its tokenizer export.** The first Lens load downloads the
+  GPT-OSS `tokenizer.json` and splits it into vocab and merges; every process used the same raw and temp paths, so a second one
+  found the other's temp file gone (`FileNotFoundException` on `gpt_oss_tokenizer_raw.json.tmp`). Each export now uses its own
+  names and renames the finished files into place, merges before vocab.
 
 ## alpha.387
 
