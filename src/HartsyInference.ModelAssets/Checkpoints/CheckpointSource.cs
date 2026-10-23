@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Nf4;
+using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Checkpoints;
@@ -165,11 +166,17 @@ public sealed class CheckpointSource : IDisposable
                 foreach (KeyValuePair<string, Tensor> entry in shard.Weights) merged[entry.Key] = entry.Value;
                 foreach (KeyValuePair<string, SafeTensorDescriptor> entry in shard.Header.Descriptors)
                     descriptors[entry.Key] = entry.Value;
-                foreach (KeyValuePair<string, string> entry in shard.Header.Metadata) metadata[entry.Key] = entry.Value;
+                foreach (KeyValuePair<string, string> entry in shard.Header.Metadata)
+                {
+                    // Each shard's marker lists only its own layers; the set needs all of them.
+                    metadata[entry.Key] = entry.Key == Nvfp4LayoutNormalizer.MetadataKey
+                        && metadata.TryGetValue(entry.Key, out string? earlier)
+                        ? Nvfp4LayoutNormalizer.MergeMarkers(earlier, entry.Value) : entry.Value;
+                }
             }
 
             CheckpointHeader header = new CheckpointHeader(format, descriptors, metadata);
-            IReadOnlyDictionary<string, Tensor> weights = Normalize(merged, resolved, owned);
+            IReadOnlyDictionary<string, Tensor> weights = Normalize(merged, resolved, owned, metadata);
             return new CheckpointSource(format, paths[0], weights, header,
                 new CompositeDisposable(shards.ToArray()), shards[0].Gguf, shards[0].Architecture, owned);
         }
@@ -194,7 +201,7 @@ public sealed class CheckpointSource : IDisposable
                 : new Dictionary<string, string>(loader.Metadata, StringComparer.Ordinal);
             CheckpointHeader header = new CheckpointHeader(ModelFormat.SafeTensors,
                 new Dictionary<string, SafeTensorDescriptor>(loader.Descriptors, StringComparer.Ordinal), metadata);
-            return new CheckpointSource(ModelFormat.SafeTensors, path, Normalize(weights, options, owned), header,
+            return new CheckpointSource(ModelFormat.SafeTensors, path, Normalize(weights, options, owned, metadata), header,
                 loader, gguf: null, architecture: null, owned);
         }
         catch
@@ -231,7 +238,7 @@ public sealed class CheckpointSource : IDisposable
     /// after the rename pairs nothing and the scale is dropped — the weight then runs at 1/scale, which is not an error,
     /// just noise. Folding first makes that class of bug unreachable.</remarks>
     private static IReadOnlyDictionary<string, Tensor> Normalize(Dictionary<string, Tensor> weights,
-        CheckpointOpenOptions options, List<Tensor> owned)
+        CheckpointOpenOptions options, List<Tensor> owned, IReadOnlyDictionary<string, string>? metadata = null)
     {
         if (!options.FoldQuantCompanions)
             return weights;
@@ -240,12 +247,28 @@ public sealed class CheckpointSource : IDisposable
             // The NF4 pass records each decoded weight as it goes rather than on return, because a malformed companion
             // set anywhere in the file aborts the pass with everything before it already allocated.
             Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(weights, owned);
+            // ModelOpt-layout NVFP4 groups become Comfy layout here, before the pass below reads every group as Comfy.
+            List<Tensor> relaid = Nvfp4LayoutNormalizer.ConvertModelOptGroups(folded, metadata);
+            owned.AddRange(relaid);
+            // A re-laid group is freed as soon as it is widened, so peak memory is one group over the output, not all.
+            HashSet<Tensor> pending = new(relaid, ReferenceEqualityComparer.Instance as IEqualityComparer<Tensor>);
             Dictionary<string, Tensor> normalized =
                 CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4,
-                    options.KeepNvfp4Companions);
-            // Against `folded`, not `weights`: the NF4 decodes are already owned, and re-adding them here would
-            // dispose each one twice.
+                    options.KeepNvfp4Companions, (packed, blockScale) =>
+                    {
+                        if (!pending.Contains(packed) || !pending.Contains(blockScale)) return;
+                        pending.Remove(packed);
+                        pending.Remove(blockScale);
+                        owned.Remove(packed);
+                        owned.Remove(blockScale);
+                        packed.Dispose();
+                        blockScale.Dispose();
+                    });
+            relaid.RemoveAll(tensor => !pending.Contains(tensor));
+            // Against `folded`, not `weights`: the NF4 decodes and the re-laid groups are already owned, and re-adding
+            // them here would dispose each one twice.
             CollectAllocations(folded, normalized, owned);
+            ReleaseUnreferenced(relaid, normalized, owned);
             return normalized;
         }
         catch
@@ -253,6 +276,28 @@ public sealed class CheckpointSource : IDisposable
             foreach (Tensor tensor in owned) tensor.Dispose();
             owned.Clear();
             throw;
+        }
+    }
+
+    /// <summary>Frees the re-laid copies a dequantizing pass consumed: only a group kept packed (its view or its companions in
+    /// the output) still needs them, and a widened group would otherwise hold both forms for the source's lifetime.</summary>
+    private static void ReleaseUnreferenced(List<Tensor> relaid, IReadOnlyDictionary<string, Tensor> normalized, List<Tensor> owned)
+    {
+        if (relaid.Count == 0) return;
+        HashSet<Tensor> live = new(ReferenceEqualityComparer.Instance as IEqualityComparer<Tensor>);
+        foreach (Tensor tensor in normalized.Values)
+        {
+            live.Add(tensor);
+            if (tensor.QuantInfo?.BlockScale is { } blockScale) live.Add(blockScale);
+        }
+        for (int i = 0; i + 1 < relaid.Count; i += 2)
+        {
+            Tensor packed = relaid[i], blockScale = relaid[i + 1];
+            if (live.Contains(packed) || live.Contains(blockScale)) continue;
+            owned.Remove(packed);
+            owned.Remove(blockScale);
+            packed.Dispose();
+            blockScale.Dispose();
         }
     }
 

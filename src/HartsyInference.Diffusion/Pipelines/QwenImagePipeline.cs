@@ -433,6 +433,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         {
             uncondHidden = weightedUncond;
         }
+        DenoiserProbe.Condition("cond", condHidden);
+        DenoiserProbe.Condition("uncond", uncondHidden);
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         TensorShape packedShape = new TensorShape(1, imgSeqLen, patchDim);

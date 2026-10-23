@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -19,7 +20,11 @@ namespace HartsyInference.Cuda.Tests;
 /// emit different PTX, so a kernel whose compiler is missing is reported UNVERIFIED instead of compared. A build that
 /// errors out skips the test, and a kernel built by a different CUDA release than its committed PTX is reported
 /// instead of compared, because a byte-compare is only meaningful against the toolchain that produced it. All of
-/// these go to <see cref="ITestOutputHelper"/> so an inconclusive run does not read as a pass.</para></summary>
+/// these go to <see cref="ITestOutputHelper"/> so an inconclusive run does not read as a pass.</para>
+/// <para>An arch variant (<c>Ptx/&lt;kernel&gt;.sm&lt;NNN&gt;.ptx</c>) is rebuilt with <c>--arch sm_&lt;NNN&gt;a</c> and compared
+/// too. The plain rebuild compiles the other branch of its <c>#if</c>, which is how a source revert of the sm_120a e2m1
+/// cvt went unseen while the shipped variant had been patched by hand. A PTX the assembler refuses fails the test
+/// rather than reading as a missing toolchain.</para></summary>
 [Collection("CudaSerial")]
 public sealed class CudaKernelDriftTests
 {
@@ -53,12 +58,22 @@ public sealed class CudaKernelDriftTests
         HashSet<string> preExisting = new(domains.SelectMany(d => Directory.GetFiles(d, "*.ptx")), StringComparer.Ordinal);
         List<string> rebuilt = new();
         List<string> unverified = new();
+        List<string> refused = new();
+        List<string> unassembled = new();
+        List<string> cleanup = new();
+        List<(string Fresh, string Committed)> variants = new();
 
         try
         {
             foreach (string domain in domains)
             {
                 (int exit, string stdout, string stderr) = RunBuild(domain);
+                if (exit != 0 && AssemblerRefusal(stderr) is { } refusal)
+                {
+                    refused.Add($"{Path.GetFileName(domain)}: {refusal}");
+                    cleanup.AddRange(Directory.GetFiles(domain, "*.ptx"));
+                    continue;
+                }
                 if (exit != 0)
                 {
                     _out.WriteLine($"SKIPPED: {Path.GetFileName(domain)}/build.sh exited {exit} — no usable toolchain " +
@@ -66,23 +81,65 @@ public sealed class CudaKernelDriftTests
                         "see Kernels/README.md). Inconclusive, not a pass.");
                     _out.WriteLine("stdout:\n" + stdout);
                     _out.WriteLine("stderr:\n" + stderr);
+                    AssertNoneRefused(refused);
                     return;
                 }
                 unverified.AddRange(stdout.Split('\n')
                     .Where(l => l.StartsWith(UnverifiedPrefix, StringComparison.Ordinal))
                     .Select(l => l[UnverifiedPrefix.Length..].Trim()));
-                rebuilt.AddRange(Directory.GetFiles(domain, "*.ptx"));
+                unassembled.AddRange(stdout.Split('\n').Where(l => l.StartsWith("UNASSEMBLED", StringComparison.Ordinal)).Select(l => l.Trim()));
+                rebuilt.AddRange(Directory.GetFiles(domain, "*.ptx").Where(f => !VariantName.IsMatch(Path.GetFileName(f))));
+            }
+
+            foreach (string committed in Directory.GetFiles(ptxDir, "*.ptx").OrderBy(x => x, StringComparer.Ordinal))
+            {
+                Match variant = VariantName.Match(Path.GetFileName(committed));
+                if (!variant.Success) continue;
+                string kernel = variant.Groups["kernel"].Value, sm = variant.Groups["sm"].Value;
+                string? owner = domains.FirstOrDefault(d => File.Exists(Path.Combine(d, kernel + ".cu")));
+                if (owner is null)
+                {
+                    refused.Add($"{Path.GetFileName(committed)}: no Kernels/<domain>/{kernel}.cu builds it");
+                    continue;
+                }
+                // The kernel filter also rebuilds the baseline <kernel>.ptx; cleanup covers it.
+                (int exit, string stdout, string stderr) = RunBuild(owner, "--arch", $"sm_{sm}a", kernel);
+                if (exit != 0 && AssemblerRefusal(stderr) is { } refusal)
+                {
+                    refused.Add($"{Path.GetFileName(committed)}: {refusal}");
+                    cleanup.Add(Path.Combine(owner, $"{kernel}.sm{sm}.ptx"));
+                    continue;
+                }
+                if (exit != 0)
+                {
+                    _out.WriteLine($"SKIPPED: {Path.GetFileName(owner)}/build.sh --arch sm_{sm}a exited {exit} — this toolchain " +
+                        "cannot build that arch. Inconclusive, not a pass.");
+                    _out.WriteLine("stderr:\n" + stderr);
+                    AssertNoneRefused(refused);
+                    return;
+                }
+                unverified.AddRange(stdout.Split('\n')
+                    .Where(l => l.StartsWith(UnverifiedPrefix, StringComparison.Ordinal))
+                    .Select(l => l[UnverifiedPrefix.Length..].Trim()));
+                unassembled.AddRange(stdout.Split('\n').Where(l => l.StartsWith("UNASSEMBLED", StringComparison.Ordinal)).Select(l => l.Trim()));
+                string fresh = Path.Combine(owner, $"{kernel}.sm{sm}.ptx");
+                rebuilt.Add(fresh);
+                variants.Add((fresh, committed));
             }
 
             // An UNVERIFIED kernel was not rebuilt, so any intermediate beside its .cu predates this run.
             HashSet<string> unverifiedNames = new(unverified.Select(KernelOf), StringComparer.Ordinal);
             List<string> missing = new(), differing = new(), otherRelease = new();
             int compared = 0;
-            foreach (string fresh in rebuilt.OrderBy(x => x, StringComparer.Ordinal))
+            IEnumerable<(string Fresh, string Committed)> pairs = rebuilt
+                .Where(f => !VariantName.IsMatch(Path.GetFileName(f)))
+                .Select(f => (f, Path.Combine(ptxDir, Path.GetFileName(f))))
+                .Concat(variants)
+                .OrderBy(p => p.Item1, StringComparer.Ordinal);
+            foreach ((string fresh, string committed) in pairs)
             {
                 string name = Path.GetFileNameWithoutExtension(fresh);
                 if (unverifiedNames.Contains(name)) continue;
-                string committed = Path.Combine(ptxDir, name + ".ptx");
                 if (!File.Exists(committed)) { missing.Add(name); continue; }
 
                 // nvcc and nvrtc of one release stamp the same line, so this catches another release, not the other
@@ -109,8 +166,14 @@ public sealed class CudaKernelDriftTests
                 _out.WriteLine("Built from source but NOT present in Ptx/ (new kernel never installed/committed): " + string.Join(", ", missing));
             if (differing.Count > 0)
                 _out.WriteLine("Byte-differs from a fresh rebuild — the shipped kernel is NOT this source: " + string.Join(", ", differing));
+            if (refused.Count > 0)
+                _out.WriteLine("REFUSED by the assembler or unbuildable from source: " + string.Join("; ", refused));
 
-            _out.WriteLine($"Compared {compared} rebuilt kernels across {domains.Length} domains against {ptxDir}.");
+            _out.WriteLine($"Compared {compared} rebuilt kernels ({variants.Count} arch variants) across {domains.Length} domains against {ptxDir}.");
+            if (unassembled.Count > 0)
+                _out.WriteLine("INCONCLUSIVE for assembly — no compatible ptxas, so these were compared but never assembled:\n  "
+                    + string.Join("\n  ", unassembled));
+            AssertNoneRefused(refused);
             if (compared == 0 && missing.Count == 0)
             {
                 _out.WriteLine("SKIPPED: no rebuilt kernel could be compared — every one was UNVERIFIED or built by another " +
@@ -124,7 +187,7 @@ public sealed class CudaKernelDriftTests
         }
         finally
         {
-            foreach (string f in rebuilt.Where(f => !preExisting.Contains(f)))
+            foreach (string f in rebuilt.Concat(cleanup).Distinct().Where(f => !preExisting.Contains(f)))
             {
                 try { File.Delete(f); } catch { /* best-effort cleanup of a gitignored intermediate */ }
             }
@@ -156,7 +219,14 @@ public sealed class CudaKernelDriftTests
         return null;
     }
 
-    private static (int Exit, string Stdout, string Stderr) RunBuild(string domainDir)
+    /// <summary><c>Ptx/&lt;kernel&gt;.sm&lt;NNN&gt;.ptx</c>, an arch variant build_common.sh emits for <c>--arch sm_&lt;NNN&gt;a</c>.</summary>
+    private static readonly Regex VariantName = new(@"^(?<kernel>.+)\.sm(?<sm>\d+)\.ptx$", RegexOptions.CultureInvariant);
+
+    /// <summary>The assembler's refusal build_common.sh prints, or null when the build failed for another reason.</summary>
+    private static string? AssemblerRefusal(string stderr)
+        => stderr.Split('\n').FirstOrDefault(l => l.Contains("does not assemble", StringComparison.Ordinal))?.Trim();
+
+    private static (int Exit, string Stdout, string Stderr) RunBuild(string domainDir, params string[] extra)
     {
         ProcessStartInfo psi = new()
         {
@@ -167,6 +237,7 @@ public sealed class CudaKernelDriftTests
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        foreach (string arg in extra) psi.ArgumentList.Add(arg);
         // build.sh probes for its own toolchain; forward only what an operator may have overridden.
         foreach (string key in new[] { "CUDA_LIB", "CUDA_INC", "HARTSY_NVCC", "LD_LIBRARY_PATH" })
         {
@@ -178,6 +249,10 @@ public sealed class CudaKernelDriftTests
         proc.WaitForExit();
         return (proc.ExitCode, stdout, stderr);
     }
+
+    /// <summary>A refusal already seen stays a failure even when a later build makes the run inconclusive.</summary>
+    private static void AssertNoneRefused(List<string> refused)
+        => Assert.True(refused.Count == 0, "A committed kernel cannot be rebuilt from its source: " + string.Join("; ", refused));
 
     /// <summary>Walks up from the test binary looking for the repo root (marked by <c>HartsyInference.sln</c>),
     /// then returns <c>src/HartsyInference.Cuda/Kernels</c> under it.</summary>

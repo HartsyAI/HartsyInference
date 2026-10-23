@@ -67,7 +67,7 @@ public static class SamplerRegistry
     {
         ArgumentNullException.ThrowIfNull(sigmas);
         string key = Resolve(name);
-        return key switch
+        ISampler sampler = key switch
         {
             "" or "euler" => new EulerSampler(sigmas),
             "euler_ancestral" => new EulerAncestralSampler(sigmas, seed, 1.0f, options),
@@ -99,6 +99,7 @@ public static class SamplerRegistry
             "lcm" => new LcmSampler(sigmas, seed, options),
             _ => throw new NotSupportedException(Refusal(name, key)),
         };
+        return DenoiserProbe.Open(sigmas.Length - 1) is { } probe ? new ProbingSampler(sampler, probe) : sampler;
     }
 
     /// <summary>The sigmas <paramref name="sampler"/> integrates: <paramref name="schedule"/> applied to the family's

@@ -25,11 +25,10 @@ namespace HartsyInference.Diffusion.Utilities;
 public static class CfgBranchRunner
 {
     /// <summary>Runs <paramref name="uncond"/> on a worker thread concurrent with <paramref name="cond"/> on the
-    /// calling thread, then joins. If <paramref name="cond"/> throws, the worker's outcome is still observed
-    /// (so a faulted thread doesn't leak an unhandled exception) but <paramref name="cond"/>'s exception is what
-    /// propagates, matching the sequential code path's exception ordering. If only <paramref name="uncond"/>
-    /// throws, that exception propagates after <paramref name="cond"/> completes. On either error path the
-    /// surviving branch's result tensor is disposed here before the rethrow.</summary>
+    /// calling thread, then joins. When one branch throws, its exception propagates after the other completes;
+    /// when both throw, an <see cref="AggregateException"/> carries both, <paramref name="cond"/>'s first, since
+    /// one branch's failure is often the other's cause (a context-parallel rank aborts when its peer fails). On
+    /// every error path the surviving branch's result tensor is disposed here before the throw.</summary>
     public static (Tensor Cond, Tensor Uncond) Run(Func<Tensor> cond, Func<Tensor> uncond)
     {
         ArgumentNullException.ThrowIfNull(cond);
@@ -59,11 +58,13 @@ public static class CfgBranchRunner
         {
             condResult = cond();
         }
-        catch
+        catch (Exception condException)
         {
             // Join before any dispose — the worker may still be writing uncondResult.
             worker.Join();
             uncondResult?.Dispose();
+            if (uncondException is not null)
+                throw new AggregateException("Both concurrent branches failed.", condException, uncondException);
             throw;
         }
 

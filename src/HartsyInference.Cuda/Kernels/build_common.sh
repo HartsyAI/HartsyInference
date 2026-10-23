@@ -42,6 +42,10 @@ NVCC="${HARTSY_NVCC:-$(command -v nvcc || true)}"
 if [[ -z "$NVCC" && -x "${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc" ]]; then
     NVCC="${HOME}/.local/cuda-tools-13.0/nvidia/cu13/bin/nvcc"
 fi
+# HARTSY_PTXAS, else the assembler beside that nvcc, else one on PATH; without any, emitted PTX goes unassembled (see compile_one).
+PTXAS="${HARTSY_PTXAS:-}"
+if [[ -z "$PTXAS" && -n "$NVCC" && -x "$(dirname "$NVCC")/ptxas" ]]; then PTXAS="$(dirname "$NVCC")/ptxas"; fi
+[[ -n "$PTXAS" ]] || PTXAS="$(command -v ptxas || true)"
 # NVCC_BUILT kernels are this release's output; another nvcc release emits different PTX even at ISA 9.0.
 NVCC_RELEASE="release 13.0, V13.0.88"
 # A pip-installed nvcc can ship without CCCL, which cuda_fp16.h includes (<nv/target>); borrow the nvrtc header set's.
@@ -61,8 +65,6 @@ KERNELS_SM80=("${KERNELS_SM80[@]:-}")
 ARCH_VARIANTS=("${ARCH_VARIANTS[@]:-}")
 NVCC_BUILT=("${NVCC_BUILT[@]:-}")
 PTXAS_SPILL_CHECK=("${PTXAS_SPILL_CHECK[@]:-}")
-PTXAS="${HARTSY_PTXAS:-}"
-if [[ -z "$PTXAS" && -n "$NVCC" && -x "$(dirname "$NVCC")/ptxas" ]]; then PTXAS="$(dirname "$NVCC")/ptxas"; fi
 
 # PTX ISA version a file declares in its header, and whether it is at or below the fleet driver's JIT ceiling (9.0).
 ptx_version() { head -20 "$1" | sed -n 's/^\.version \([0-9.]*\)$/\1/p' | head -1; }
@@ -143,6 +145,20 @@ compile_one() {
             exit 1
         fi
     fi
+    # nvrtc and nvcc -ptx stop before the assembler, so an operand the target refuses ships and takes the whole backend
+    # down at module load — how a 16-bit e2m1 cvt destination made every CC 12.0 card unusable. Assemble when we can.
+    if [[ -n "$PTXAS" ]]; then
+        if ! ptxas_log="$("$PTXAS" -arch="sm_${arch}" "$ptx" -o /dev/null 2>&1)"; then
+            # An older ptxas that cannot name the target or read the ISA says nothing about the source.
+            if grep -qE "is not defined for option|Unsupported \.version" <<<"$ptxas_log"; then
+                echo "UNASSEMBLED: ${kernel}${suffix}.ptx — $PTXAS cannot assemble sm_${arch} or this PTX ISA; point HARTSY_NVCC at a full CUDA 13.0 toolkit"
+            else
+                echo "ERROR: ${kernel}${suffix}.ptx does not assemble for sm_${arch}:" >&2
+                printf '%s\n' "$ptxas_log" | head -5 >&2
+                exit 1
+            fi
+        fi
+    fi
     if $INSTALL; then
         cp "$ptx" "${PTX_OUT}/${kernel}${suffix}.ptx"
         echo "  → ${PTX_OUT}/${kernel}${suffix}.ptx"
@@ -175,6 +191,7 @@ build_all() {
             *)  ONLY+=("$1"); shift ;;
         esac
     done
+    [[ -n "$PTXAS" ]] || echo "UNASSEMBLED: no ptxas beside nvcc or on PATH, so nothing emitted here is assembled; point HARTSY_NVCC at a full CUDA 13.0 toolkit"
     for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
     for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 75; done
     for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done

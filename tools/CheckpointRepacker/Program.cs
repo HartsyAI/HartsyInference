@@ -8,6 +8,7 @@ using System.Text.Json.Nodes;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Nf4;
@@ -59,7 +60,8 @@ MERGE AND CAST (safetensors)
                         e.g. --keep-dtype '*norm*' keeps norms in F32 under a bf16 cast.
   --quant <nf4|nvfp4>   Quantize every 2D .weight (F32/BF16/F16) into the layout the engine loads: NF4 writes
                         .absmax, .quant_map and .quant_state.bitsandbytes__nf4; NVFP4 writes .weight_scale
-                        (E4M3) and .weight_scale_2 (F32). 2D weights that fail the shape rule are left full precision and listed.
+                        (E4M3, blocked) and .weight_scale_2 (F32) in ComfyUI's layout, listed in _quantization_metadata.
+                        2D weights that fail the shape rule are left full precision and listed.
                         An FP8 block-scaled single .safetensors with --quant nf4 is streamed one weight at a time to
                         a single output file, with <output>.manifest.json beside it.
 
@@ -545,11 +547,13 @@ try
             List<Regex> drops = [.. (values.GetValueOrDefault("--drop") ?? []).Select(Glob)];
             List<Regex> keeps = [.. (values.GetValueOrDefault("--keep-dtype") ?? []).Select(Glob)];
             int dropped = 0;
+            Dictionary<string, JsonNode?> sourceLayerConfigs = new(StringComparer.Ordinal);
             List<Tensor> owned = [];
             if (recipe is not null)
             {
                 Console.WriteLine($"Building '{recipe.Name}' from its recipe:");
-                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line), cpu));
+                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line), cpu,
+                    sourceLayerConfigs));
                 foreach ((string key, string value) in recipe.Metadata)
                     overrides.TryAdd(key, value);
             }
@@ -558,11 +562,22 @@ try
             {
                 (List<KeyValuePair<string, Tensor>> tensors, List<SafeTensorsLoader> opened) = SafeTensorsMerger.Open(p);
                 loaders.AddRange(opened);
-                foreach ((string key, Tensor tensor) in tensors)
+                string MapKey(string key)
                 {
                     string mapped = stripPrefix is not null && key.StartsWith(stripPrefix, StringComparison.Ordinal) ? key[stripPrefix.Length..] : key;
                     foreach ((string from, string to) in renames)
                         mapped = mapped.Replace(from, to, StringComparison.Ordinal);
+                    return mapped;
+                }
+                // A source's Comfy-layout marker names its NVFP4 groups by their source keys; carry it under the output keys.
+                foreach (SafeTensorsLoader loader in opened)
+                {
+                    foreach ((string layer, JsonNode? config) in Nvfp4Codec.MarkedLayerConfigs(loader.Metadata) ?? [])
+                        sourceLayerConfigs[prefix + MapKey(layer + ".weight")[..^".weight".Length]] = config?.DeepClone();
+                }
+                foreach ((string key, Tensor tensor) in tensors)
+                {
+                    string mapped = MapKey(key);
                     if (drops.Any(d => d.IsMatch(mapped)))
                     {
                         dropped++;
@@ -604,6 +619,7 @@ try
                 }
             }
             HashSet<string> quantKeep = new(StringComparer.Ordinal);
+            List<string> nvfp4Layers = [];
             if (quantName is not null)
             {
                 List<KeyValuePair<string, Tensor>> quantized = [];
@@ -629,7 +645,8 @@ try
                         ReadOnlySpan<float> weights = f32.AsReadOnlySpan<float>();
                         companions = quantName == "nf4"
                             ? Nf4Codec.QuantizeToCompanions(key, weights, rows, cols, ComputeDtypeName(tensor.DType))
-                            : ModelOptNvfp4Codec.QuantizeToCompanions(key, weights, rows, cols);
+                            : Nvfp4Codec.QuantizeToComfyCompanions(key, weights, rows, cols);
+                        if (quantName == "nvfp4") nvfp4Layers.Add(key[..^".weight".Length]);
                     }
                     finally
                     {
@@ -657,6 +674,21 @@ try
             }
             output = named;
             metadata = BuildMetadata();
+            // Not identity, so written even under --no-metadata: it is what marks the groups as Comfy layout for this
+            // engine's loader and what makes ComfyUI read them as nvfp4 at all. Groups passed through from a marked source
+            // keep their mark, or a later open would read them as ModelOpt; an unmarked source group stays unmarked.
+            // Each carried layer keeps its own config (a non-NVFP4 entry stays what it was); only layers quantized here get
+            // a fresh nvfp4 entry, and only layers that reach the output are listed.
+            HashSet<string> outputKeys = new(all.Select(kv => kv.Key), StringComparer.Ordinal);
+            JsonObject marker = (JsonObject)JsonNode.Parse(Nvfp4Codec.QuantizationMetadata(nvfp4Layers))!;
+            JsonObject markerLayers = (JsonObject)marker["layers"]!;
+            foreach ((string layer, JsonNode? config) in sourceLayerConfigs)
+            {
+                if (outputKeys.Contains(layer + ".weight") && !markerLayers.ContainsKey(layer))
+                    markerLayers[layer] = config?.DeepClone();
+            }
+            if (markerLayers.Count > 0)
+                (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = marker.ToJsonString();
             long inBytes = mergeSources.Sum(f => new FileInfo(f).Length);
             Console.WriteLine($"Writing {all.Count} tensors from {loaders.Count} file(s) ({Size(inBytes)})"
                 + (castTo is { } t ? $", cast to {t.Name}" : "") + $" to {Path.GetFileName(output)}...");
@@ -673,9 +705,11 @@ try
     }
     else if (isSafeTensors)
     {
+        string? quantMarker = null;
         using (SafeTensorsLoader header = new())
         {
             header.Load(input);
+            quantMarker = header.Metadata?.GetValueOrDefault("_quantization_metadata");
             if (ResolveOutput(header.Descriptors.Values.Select(d => (d.DType, d.Shape.ElementCount))) is not string named)
             {
                 return 1;
@@ -683,6 +717,10 @@ try
             output = named;
         }
         metadata = BuildMetadata();
+        // The NVFP4 layout marker is a format fact about the copied tensors, not identity, so a rewrite keeps it.
+        // Presence, not content: a malformed marker is copied so the loader still refuses it rather than reading ModelOpt.
+        if (quantMarker is not null)
+            (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = quantMarker;
         Console.WriteLine($"Rewriting metadata; {Size(new FileInfo(input).Length)} of tensors copied unchanged...");
         payloadSha = SafeTensorsWriter.RewriteMetadata(input, output, metadata ?? []);
         using SafeTensorsLoader check = new();
