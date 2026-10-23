@@ -204,6 +204,15 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
   dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
   permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
+- CUDA's INT8 attention v2 rows (S.17 and M.4; with `numerics.int8AttnV2F16Pv`, S.18 and M.5) run only with
+  `numerics.int8AttnV2`: unmasked, equal heads, head dim 128, F16 or F32 views with 16-byte aligned rows and an output
+  covering its tensor, both sequences at `numerics.int8AttnV2MinTokens`. They take F32 whatever `allowF16` says, the
+  grouped token-major row yields to them through its widening, and a layer keeps a call token-major for M.4 only when
+  the backend says M.4 takes it now (a capture its workspace does not fit goes to Sage). K is quantized per key: a scale
+  shared by several keys lets one outlier key move the winner of a near-argmax row. u8 P rounds each key against its
+  128-key tile's maximum, so a key below 1/510 of it is dropped, and a tile whose whole mass sits below that step loses
+  it; the F16 PV keeps it. V scales default to one per channel per tile (`numerics.int8AttnV2VTile`), at or below the
+  per-sequence error on every synthetic and captured call measured.
 - CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
   `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
   without a permission.

@@ -341,8 +341,12 @@ public sealed class AttentionLayerTests
 
     /// <summary>The CUDA head-major Sage row takes F16 at head dim 64 or 128, unmasked, with both sequences at the knob's
     /// minimum, from a call that does not refuse INT8; the token-major entry has no Sage kernel, so a guarded layer keeps exactly
-    /// those calls head-major.</summary>
+    /// those calls head-major, unless the token-major INT8 v2 row takes them first (head dim 128 only).</summary>
     [Theory]
+    [InlineData("int8v2", AttentionRoute.TokenMajor)]
+    [InlineData("int8v2-declined", AttentionRoute.Dense)]
+    [InlineData("int8v2-refused", AttentionRoute.TokenMajor)]
+    [InlineData("int8v2-d64", AttentionRoute.Dense)]
     [InlineData("sage-length", AttentionRoute.Dense)]
     [InlineData("sage-length-d64", AttentionRoute.Dense)]
     [InlineData("knob-minimum", AttentionRoute.Dense)]
@@ -358,13 +362,13 @@ public sealed class AttentionLayerTests
     {
         int skv = name is "below-minimum" or "knob-minimum" ? 4096 : 8192;
         int sq = name == "short-query" ? 256 : skv;
-        int headDim = name switch { "sage-length-d64" => 64, "d96" => 96, _ => 128 };
+        int headDim = name switch { "sage-length-d64" or "int8v2-d64" => 64, "d96" => 96, _ => 128 };
         DType act = name == "f32" ? DType.F32 : DType.F16;
-        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true };
+        AttentionTraceBackend backend = new() { SupportsTokenMajorAttention = true, Int8V2TokenMajor = name != "int8v2-declined" };
         AttentionLayer layer = new(new AttentionLayerConfig
         {
             Heads = 1, KvHeads = 1, HeadDim = headDim, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = name != "unguarded",
-            AllowF16 = true, RefusedFormats = name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
+            AllowF16 = true, RefusedFormats = name is "int8-refused" or "int8v2-refused" ? AttentionFormats.Int8 : AttentionFormats.None,
         }, Weights(gate: false));
         Tensor kv = new(new TensorShape(1, skv, 8), act), q = sq == skv ? kv : new(new TensorShape(1, sq, 8), act);
         Tensor? bias = name == "bias" ? new Tensor(new TensorShape(1, 1, 1, skv), DType.F32) : null;
@@ -372,17 +376,19 @@ public sealed class AttentionLayerTests
         {
             if (name == "sage-off") KnobStore.Set(EngineKnobs.SageAttn, false);
             if (name == "knob-minimum") KnobStore.Set(EngineKnobs.SageF16MinSkv, 4096);
+            if (name.StartsWith("int8v2", StringComparison.Ordinal)) KnobStore.Set(EngineKnobs.Int8AttnV2, true);
             layer.Forward(backend, q, kv, new AttentionCallContext { Bias = bias });
         }
         finally
         {
             KnobStore.Clear(EngineKnobs.SageAttn);
             KnobStore.Clear(EngineKnobs.SageF16MinSkv);
+            KnobStore.Clear(EngineKnobs.Int8AttnV2);
         }
 
         AttentionCall call = Assert.Single(backend.Calls);
         Assert.Equal(route, call.Route);
-        Assert.Equal(name == "int8-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
+        Assert.Equal(name is "int8-refused" or "int8v2-refused" ? AttentionFormats.Int8 : AttentionFormats.None, call.Numerics.Refused);
         Assert.Equal(route == AttentionRoute.Dense ? 4 : 0, backend.Ops.Count(op => op.StartsWith("Permute0213", StringComparison.Ordinal)));
     }
 

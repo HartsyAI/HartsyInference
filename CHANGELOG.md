@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: INT8 attention v2 (CUDA, opt-in).** `numerics.int8AttnV2` runs unmasked equal-head attention at head dim 128
+  with F16 or F32 operands (head-major, token-major or fused-QKV views) on INT8 QK with one K scale per key, u8 P and s8
+  V with an INT32 PV accumulator drained per 128-key tile; `numerics.int8AttnV2VTile` picks per-tile (default) or
+  per-sequence V scales, `numerics.int8AttnV2F16Pv` an F16 PV, and `numerics.int8AttnV2MinTokens` the engage length (1024 query rows and keys; v2 was the fastest row from 512 on the RTX 3060, 4090 and 5090). It runs 64-row query tiles, ahead of 128-row ones on all three cards.
+  Its bytes, scales and INT32 products are the emulator's bit for bit, and its output is the emulator's bit for bit
+  given the kernel's exp2. The `reference` profile pins it off; SageAttention v1 stays the default.
+- **Changed: attention kernels build with a register check.** `attention/build.sh` builds `int8_attn_v2` with nvcc and
+  `--arch sm_89` adds its `.sm89.ptx`; `build_common.sh` accepts a plain `--arch` and fails a `PTXAS_SPILL_CHECK` kernel
+  that spills on sm_80, sm_86, sm_89 or sm_120 (the 50-series JITs the baseline).
 - **Faster: NVFP4 diffusion transformers stay packed on CUDA.** Krea 2, Qwen-Image, Boogu, Z-Image, Flux.1, HiDream and
   Wan open their NVFP4 groups resident (`CheckpointOpenOptions.ForResidentNvfp4`) instead of unpacking them to F16 at
   load, so `numerics.fp4Native` reaches them on Blackwell. Below Blackwell each GEMM unpacks the weight to exactly the

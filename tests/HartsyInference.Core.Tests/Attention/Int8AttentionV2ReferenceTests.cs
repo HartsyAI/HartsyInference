@@ -114,11 +114,11 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
         Assert.Equal(own.ValueScales[7], nudged.ValueScales[7]);
         Assert.True(Measure("one-ulp scales", c.Attend(nudged), reference).RelL2 < 1e-3);
 
-        // A supplied scale is the one the bytes are quantized with: doubling it halves every byte of its class (tile 1, class 1).
+        // A supplied scale is the one the bytes are quantized with: doubling it halves every byte of its key (key 5 of KV head 0).
         Int8AttentionV2Operands doubled = Int8AttentionV2Reference.Quantize(c.Call, options, c.Rows, scales: own);
         doubled.KeyScales[5] *= 2f;
         Int8AttentionV2Operands requantized = Int8AttentionV2Reference.Quantize(c.Call, options, c.Rows, scales: doubled);
-        int[] keys = Enumerable.Range(128, 128).Where(j => (j & 7) >> 1 == 1).ToArray();
+        int[] keys = [5];
         Assert.All(keys.SelectMany(j => Enumerable.Range(j * 64, 64)),
             i => Assert.True(Math.Abs(requantized.Keys[i] - nudged.Keys[i] / 2.0) <= 1.0, $"byte {i}: {nudged.Keys[i]} → {requantized.Keys[i]}"));
         Assert.Contains(keys.SelectMany(j => Enumerable.Range(j * 64, 64)), i => requantized.Keys[i] != nudged.Keys[i]);
@@ -685,6 +685,32 @@ public sealed class Int8AttentionV2ReferenceTests(ITestOutputHelper output)
             float[] direct = c.Emulate(options with { Exp2 = Hardware });
             Assert.NotEqual(reference, direct);
             Assert.Equal(direct, c.Emulate(options with { Exp2 = x => table[x] }));
+        }
+    }
+
+    [Fact]
+    public void TileTrace_ReportsEveryDrainedTile_WithItsBytesPartialAndSum()
+    {
+        // Two heads, three key tiles (the last partial): every (row, tile) is reported once, its sum is its bytes' total, its
+        // partial is Σ p·v over the V bytes in exact integers, and its maximum carries the tile's largest byte, 255.
+        using Int8V2Case c = Int8V2Case.Create(new Int8V2Spec { Id = "trace", Heads = 2, KvHeads = 2, Sq = 20, Skv = 300, HeadDim = 64, SampledRows = 0 });
+        Int8AttentionV2Operands ops = Int8AttentionV2Reference.Quantize(c.Call, Base);
+        List<(int Bh, int Row, int Tile, float Max, byte[] P, float[] Partial, int Sum)> seen = [];
+        float[] traced = c.Emulate(Base with { TileTrace = (bh, row, tile, max, p, partial, sum) => seen.Add((bh, row, tile, max, p.ToArray(), partial.ToArray(), sum)) });
+        Assert.Equal(c.Emulate(Base), traced);
+        Assert.Equal(2 * 20 * 3, seen.Count);
+        foreach ((int bh, _, int tile, float max, byte[] p, float[] partial, int sum) in seen)
+        {
+            Assert.True(float.IsFinite(max));
+            Assert.Equal(tile < 2 ? 128 : 44, p.Length);
+            Assert.Equal(sum, p.Sum(x => x));
+            Assert.Equal(255, p.Max());
+            for (int ch = 0; ch < 64; ch++)
+            {
+                long exact = 0;
+                for (int j = 0; j < p.Length; j++) exact += p[j] * (long)ops.Values[(bh * 300 + tile * 128 + j) * 64 + ch];
+                Assert.Equal(exact, (long)partial[ch]);
+            }
         }
     }
 

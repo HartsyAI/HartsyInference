@@ -46,6 +46,14 @@ public sealed class ManualKnobGuardTests
     public void SageF16MinSkv_RejectsNonPositive(int? value, int expected)
         => With(EngineKnobs.SageF16MinSkv, value, () => Assert.Equal(expected, EngineKnobs.SageF16MinSkv.Value));
 
+    /// <summary>Rejecting knob: non-positive falls back to 1024.</summary>
+    [Theory]
+    [InlineData(0, 1024)]
+    [InlineData(-5, 1024)]
+    [InlineData(4096, 4096)]
+    public void Int8AttnV2MinTokens_RejectsNonPositive(int? value, int expected)
+        => With(EngineKnobs.Int8AttnV2MinTokens, value, () => Assert.Equal(expected, EngineKnobs.Int8AttnV2MinTokens.Value));
+
     /// <summary>Clamping knob: out of range becomes the nearest bound, NOT the default. 17 is 16, not 4.</summary>
     [Theory]
     [InlineData(17, 16)]

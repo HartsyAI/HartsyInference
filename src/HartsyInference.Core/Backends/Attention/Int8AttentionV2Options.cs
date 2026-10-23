@@ -4,10 +4,11 @@ namespace HartsyInference.Core.Backends;
 public enum Int8KeyScaleGrouping
 {
     /// <summary>Four scales per key tile, one per class <c>(key mod 8) / 2</c>: the keys one lane's mma columns hold
-    /// (Comfy Kitchen's and SageAttention's per-thread grouping). Layout <c>[B, Hkv, tiles, 4]</c>.</summary>
+    /// (Comfy Kitchen's and SageAttention's per-thread grouping). Layout <c>[B, Hkv, tiles, 4]</c>. One outlier key sets the
+    /// step of its class's other 31, which moves the winning key of near-argmax attention (Krea2's first block).</summary>
     ThreadClass,
 
-    /// <summary>One scale per key. Layout <c>[B, Hkv, kvLen]</c>.</summary>
+    /// <summary>One scale per key, what the CUDA kernel runs. Layout <c>[B, Hkv, kvLen]</c>.</summary>
     PerKey,
 }
 
@@ -51,7 +52,7 @@ public sealed record Int8AttentionV2Options
     public int BlockCols { get; init; } = 128;
 
     /// <summary>K scale grouping.</summary>
-    public Int8KeyScaleGrouping KeyScales { get; init; } = Int8KeyScaleGrouping.ThreadClass;
+    public Int8KeyScaleGrouping KeyScales { get; init; } = Int8KeyScaleGrouping.PerKey;
 
     /// <summary>Subtract each key segment's channel mean before K is quantized.</summary>
     public bool SmoothKeys { get; init; } = true;
@@ -70,6 +71,9 @@ public sealed record Int8AttentionV2Options
 
     /// <summary>The recurrence's exp2, null for double exp2 narrowed to F32; a kernel test replays the GPU's.</summary>
     public Func<float, float>? Exp2 { get; init; }
+
+    /// <summary>Observes every u8 key tile a row drains, for a kernel's trace test; null in normal use.</summary>
+    public Int8AttentionV2TileTrace? TileTrace { get; init; }
 
     /// <summary>Key segments: one, or one plus <see cref="KeySegmentStarts"/> when keys are smoothed.</summary>
     public int Segments => SmoothKeys ? 1 + KeySegmentStarts.Count : 1;

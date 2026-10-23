@@ -572,7 +572,7 @@ public sealed partial class AttentionLayer
         }
         if (_config.QkNorm == AttentionQkNorm.FullWidth)
             return AttendFullWidth(backend, q, k, v, sq, skv, act, flatShape, tokenMajorShape,
-                batch == 1 && TokenMajorServed(backend, sq, skv, act, in context), in context);
+                batch == 1 && TokenMajorServed(backend, batch, sq, skv, act, in context), in context);
 
         if (_config.QkNorm != AttentionQkNorm.None)
         {
@@ -600,7 +600,7 @@ public sealed partial class AttentionLayer
         }
         bool ownsKv = context.KvCapture is null;
         context.KvCapture?.Capture(k, v);
-        bool tokenMajor = TokenMajorServed(backend, sq, skv, act, in context)
+        bool tokenMajor = TokenMajorServed(backend, batch, sq, skv, act, in context)
             && (batch == 1 || _config.TokenMajorBatches && !flat
                 && PlansBatch(backend, q, k, v, act, tokenMajorShape, batch, in context));
         try
@@ -638,18 +638,25 @@ public sealed partial class AttentionLayer
     /// <summary>The token-major entry runs when the config names one, its switch is on, no host rotation needs the head-major
     /// layout, <see cref="AttentionLayerConfig.HeadMajorForSage"/> does not keep the call head-major, and the backend serves it;
     /// a batch also needs <see cref="AttentionLayerConfig.TokenMajorBatches"/> and <see cref="PlansBatch"/>.</summary>
-    private bool TokenMajorServed(IBackend backend, int sq, int skv, DType act, in AttentionCallContext context) =>
+    private bool TokenMajorServed(IBackend backend, int batch, int sq, int skv, DType act, in AttentionCallContext context) =>
         _config.TokenMajorRoute != AttentionRoute.Dense && context.HeadMajorRotation is null
         && (_config.TokenMajorKnob?.Value ?? true)
-        && !(_config.HeadMajorForSage && SageServesHeadMajor(sq, skv, act, context.Bias))
+        && !(_config.HeadMajorForSage && SageServesHeadMajor(backend, batch, sq, skv, act, context.Bias))
         && (_config.TokenMajorRoute == AttentionRoute.TokenMajorGqa
             ? backend.SupportsTokenMajorGqaAttention : backend.SupportsTokenMajorAttention);
 
     /// <summary>The CUDA head-major Sage row's admission (S.1, <c>CudaBackend.SageF16Preferred</c>), less the kernel check only the backend
-    /// can make; a change to either side must change the other.</summary>
-    private bool SageServesHeadMajor(int sq, int skv, DType act, Tensor? bias) =>
+    /// can make; a change to either side must change the other. A call the token-major INT8 v2 row takes ahead of it stays token-major.</summary>
+    private bool SageServesHeadMajor(IBackend backend, int batch, int sq, int skv, DType act, Tensor? bias) =>
         act == DType.F16 && bias is null && _config.HeadDim is 64 or 128 && EngineKnobs.SageAttn.Value
-        && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value && (_config.RefusedFormats & AttentionFormats.Int8) == 0;
+        && Math.Min(sq, skv) >= EngineKnobs.SageF16MinSkv.Value && (_config.RefusedFormats & AttentionFormats.Int8) == 0
+        && !Int8V2ServesTokenMajor(backend, batch, sq, skv, act, bias);
+
+    /// <summary>Whether the backend's token-major INT8 v2 row takes this call as it stands (M.4 reads the projections in place); the
+    /// backend answers, so a refusal only it sees (its kernels, a capture its workspace does not fit) leaves the call to Sage.</summary>
+    private bool Int8V2ServesTokenMajor(IBackend backend, int batch, int sq, int skv, DType act, Tensor? bias) =>
+        bias is null && _config.KvHeads == _config.Heads && (_config.RefusedFormats & AttentionFormats.Int8) == 0
+        && backend.Int8AttentionV2TakesTokenMajor(batch, _config.Heads, sq, skv, _config.HeadDim, act);
 
     private static Tensor Have(Tensor? norm) =>
         norm ?? throw new InvalidOperationException("This attention layer's weights have no norm for that projection.");

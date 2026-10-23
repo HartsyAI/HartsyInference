@@ -226,6 +226,10 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuEventSynchronize(nint hEvent);
 
+    /// <summary>Milliseconds between two completed events created without <c>CU_EVENT_DISABLE_TIMING</c>.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuEventElapsedTime(out float milliseconds, nint hStart, nint hEnd);
+
     /// <summary>0 once the event's recorded work has completed, <see cref="CUDA_ERROR_NOT_READY"/> while it is still pending.</summary>
     [LibraryImport(LibName)]
     internal static partial int cuEventQuery(nint hEvent);
