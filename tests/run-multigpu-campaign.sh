@@ -6,13 +6,19 @@
 # RealWeightGate instead of silently skipping, so a green exit genuinely means every listed test executed.
 #
 # Usage: tests/run-multigpu-campaign.sh [phaseA|phaseB|all|list]   (default: phaseA; list = stale-filter check, no GPU)
-#   phaseA — needs only checkpoints already on this box (Krea2, SDXL, Qwen-Image-Edit, MiniMaxH3 fp8;
-#            plus Wan TI2V-5B, Chroma HD, and HunyuanImage 2.1 — verified on disk 2026-08-06 and
-#            reclassified here from phase B)
-#   phaseB — additionally needs the ltx-2 checkpoint (~22 GB DiT). It is NOT at its test path on this box
-#            (Models/Stable-Diffusion/LtxVideo2/); a same-family file sits at the Stable-Diffusion root, unverified.
-#            HARTSY_REQUIRE_REAL_WEIGHTS=1 is exported below and RealWeightGate THROWS on the missing file, so
-#            phaseB FAILS LOUDLY (no clean skip) until the test path holds the expected checkpoint.
+#   phaseA — the real-weight DiT/LLM/VLM/audio classes in phase_a(): Krea2, Qwen-Image, MiniMax-H3, SD3.5,
+#            Chroma HD, Wan (TI2V-5B and the CFG/context-parallel classes), Lumina2/HiDream (synthetic only),
+#            YuE, CosyVoice, Oasis, Llama/Mllama/Qwen2.5-VL, plus the CPU and two-GPU NCCL classes.
+#            BLOCKED: HunyuanImageDitShardingTests needs Models/Stable-Diffusion/HunyuanImage/hunyuan_image_2_1.safetensors,
+#            which is NOT at that path (the box has hunyuanimage21-fp8-* and hunyuanimage2.1-q4_0.gguf). Under strict
+#            mode that class FAILS until the file lands; every other phase A class has its checkpoint on disk.
+#   phaseB — the Flux placement/fallback/VRAM classes, DitShardingEngineTests (Chroma/Flux/HunyuanImage/Krea2/
+#            QwenImage/Sd3 in one Theory) and VideoComponentPlacementEngineTests (LTX-1, LTX-2.3, Wan TE/VAE).
+#            BLOCKED: LTX-2.3 is NOT at Models/Stable-Diffusion/LtxVideo2/ltx-2.3-22b-dev-fp8.safetensors, so
+#            VideoComponentPlacementEngineTests fails; DitShardingEngineTests also fails on the HunyuanImage
+#            Q4_K_M and SD3.5 transformer-only files (per the comment on that line, not re-verified here).
+#            HARTSY_REQUIRE_REAL_WEIGHTS=1 is exported below and RealWeightGate THROWS on a missing file, so a
+#            blocked class fails loudly (no clean skip).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,49 +37,49 @@ log() {
 # ── Pre-flight (GPU box only; runs after the stale-filter guard) ──────────────────────────────────────────
 
 gpu_preflight() {
-mkdir -p "${LOG_DIR}"
-command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found — this campaign needs the CUDA box"; exit 1; }
+    mkdir -p "${LOG_DIR}"
+    command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found — this campaign needs the CUDA box"; exit 1; }
 
-# Stray engine processes hold multi-GB VRAM allocations that break the free-VRAM-gated tests. Kill our own
-# CLI/test leftovers automatically; anything else (especially swarmui.service) is only reported — stopping the
-# user's live service is an operator decision, never this script's.
-while read -r pid name mem; do
-    [ -z "${pid}" ] && continue
-    case "${name}" in
-        *HartsyInference.Cli*|*testhost*|*/dotnet)
-            # Bare "/usr/lib/dotnet/dotnet" is how a leftover `dotnet test` testhost reports itself —
-            # on this box every GPU-holding dotnet process is ours.
-            log "pre-flight: killing stray ${name} (pid ${pid}, ${mem} MiB VRAM)"
-            kill "${pid}" 2>/dev/null || true
-            sleep 2
-            ;;
-        *Xorg*|*rustdesk*|*cinnamon*|*chrome*) ;;  # desktop residents, small and expected
-        *)
-            log "pre-flight: WARNING — ${name} (pid ${pid}) holds ${mem} MiB VRAM; stop it manually if a VRAM gate fails"
-            ;;
-    esac
-done < <(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits | tr ',' ' ')
+    # Stray engine processes hold multi-GB VRAM allocations that break the free-VRAM-gated tests. Kill our own
+    # CLI/test leftovers automatically; anything else (especially swarmui.service) is only reported — stopping the
+    # user's live service is an operator decision, never this script's.
+    while read -r pid name mem; do
+        [ -z "${pid}" ] && continue
+        case "${name}" in
+            *HartsyInference.Cli*|*testhost*|*/dotnet)
+                # Bare "/usr/lib/dotnet/dotnet" is how a leftover `dotnet test` testhost reports itself —
+                # on this box every GPU-holding dotnet process is ours.
+                log "pre-flight: killing stray ${name} (pid ${pid}, ${mem} MiB VRAM)"
+                kill "${pid}" 2>/dev/null || true
+                sleep 2
+                ;;
+            *Xorg*|*rustdesk*|*cinnamon*|*chrome*) ;;  # desktop residents, small and expected
+            *)
+                log "pre-flight: WARNING — ${name} (pid ${pid}) holds ${mem} MiB VRAM; stop it manually if a VRAM gate fails"
+                ;;
+        esac
+    done < <(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits | tr ',' ' ')
 
-if systemctl --user is-active swarmui.service >/dev/null 2>&1; then
-    log "pre-flight: WARNING — swarmui.service is ACTIVE and may hold VRAM. Stop it before the campaign if VRAM gates fail (systemctl --user stop swarmui.service)."
-fi
-
-nvidia-smi --query-gpu=index,name,memory.free,memory.total --format=csv | tee -a "${SUMMARY}"
-
-# Free-VRAM gate: the sharding/replication tests need most of both cards.
-insufficient=0
-while IFS=',' read -r idx name free; do
-    free_mib=$(echo "${free}" | tr -dc '0-9')
-    if echo "${name}" | grep -q "4090"; then min=19000; else min=11000; fi
-    if [ "${free_mib}" -lt "${min}" ]; then
-        log "pre-flight: FAIL — GPU ${idx} (${name}) has only ${free_mib} MiB free (< ${min})"
-        insufficient=1
+    if systemctl --user is-active swarmui.service >/dev/null 2>&1; then
+        log "pre-flight: WARNING — swarmui.service is ACTIVE and may hold VRAM. Stop it before the campaign if VRAM gates fail (systemctl --user stop swarmui.service)."
     fi
-done < <(nvidia-smi --query-gpu=index,name,memory.free --format=csv,noheader,nounits)
-[ "${insufficient}" -ne 0 ] && { log "aborting: free-VRAM gate failed"; exit 1; }
 
-export HARTSY_REQUIRE_REAL_WEIGHTS=1
-export HARTSY_ASSERT_AMBIENT=1
+    nvidia-smi --query-gpu=index,name,memory.free,memory.total --format=csv | tee -a "${SUMMARY}"
+
+    # Free-VRAM gate: the sharding/replication tests need most of both cards.
+    insufficient=0
+    while IFS=',' read -r idx name free; do
+        free_mib=$(echo "${free}" | tr -dc '0-9')
+        if echo "${name}" | grep -q "4090"; then min=19000; else min=11000; fi
+        if [ "${free_mib}" -lt "${min}" ]; then
+            log "pre-flight: FAIL — GPU ${idx} (${name}) has only ${free_mib} MiB free (< ${min})"
+            insufficient=1
+        fi
+    done < <(nvidia-smi --query-gpu=index,name,memory.free --format=csv,noheader,nounits)
+    [ "${insufficient}" -ne 0 ] && { log "aborting: free-VRAM gate failed"; exit 1; }
+
+    export HARTSY_REQUIRE_REAL_WEIGHTS=1
+    export HARTSY_ASSERT_AMBIENT=1
 }
 
 # ── Runner ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -227,8 +233,8 @@ phase_a() {
     # swarmui.service or another heavy process is holding host RAM; stop it first if this line fails only
     # on a RAM-skip message, not a real regression.
     run_class HartsyInference.LLM.Tests        LlmShardingEngineTests.Sharded_TwoGpus_Qwen3_32B_DecodeTokPerSec
-    # 2026-08-06: Wan (wan2.2_ti2v_5B_fp16.safetensors), Chroma (Chroma1-HD-fp8mixed-final.safetensors), and
-    # HunyuanImage (HunyuanImage2.1-Q4_K_M.gguf) were verified on disk then. The Wan TE/VAE placement rows moved to
+    # Wan (wan2.2_ti2v_5B_fp16.safetensors) and Chroma (Chroma1-HD-fp8mixed-final.safetensors) are on disk. HunyuanImage
+    # is listed here but its test-path checkpoint is missing (see the header). The Wan TE/VAE placement rows live in
     # phase B (VideoComponentPlacementEngineTests) with the other video placement rows.
     run_class HartsyInference.Video.Tests      CfgBranchParallelWanTests
     run_class HartsyInference.Diffusion.Tests  WanCfgParallelEngineTests
@@ -286,14 +292,13 @@ phase_b() {
     # transformer-only and LTX-2.3 checkpoints are absent at their test paths (strict mode fails the whole fact). NonResident covers Chroma/Krea2/QwenImage/Sd3 only.
     run_class HartsyInference.Diffusion.Tests  DitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
     run_class HartsyInference.Diffusion.Tests  DitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
-    # Video TE/VAE placement, one Theory covering LTX-1, LTX-2.3 and Wan TE/VAE. LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB) is present at Stable-Diffusion/LtxVideo/.
-    # TE was already wired (LtxVideoRecipePipeline._textBackend); VAE placement is new (LtxVideoPipeline.VaeBackend).
-    # (replaces the per-model LtxVideo/LtxVideo2/WanComponentPlacement/WanVaeComponentPlacement classes).
+    # Video TE/VAE placement, one Theory covering LTX-1, LTX-2.3 and Wan TE/VAE (replaces the per-model
+    # LtxVideo/LtxVideo2/WanComponentPlacement/WanVaeComponentPlacement classes). LTX-1 (ltx-video-2b-v0.9.safetensors,
+    # ~9.4 GB) is on disk. LTX-2.3 (~22 GB) is NOT at Models/Stable-Diffusion/LtxVideo2/ltx-2.3-22b-dev-fp8.safetensors;
+    # a Lightricks LTX-2.3 fp8 file sits at Models/Stable-Diffusion/ with an unverified identity, so the test is not
+    # pointed at it. Under strict mode this FAILS LOUDLY until the expected file lands at the test path.
+    # TE and VAE placement are wired in LtxVideo2Pipeline (LtxVideoRecipePipeline._textBackend; LtxVideoPipeline.VaeBackend).
     run_class HartsyInference.Diffusion.Tests  VideoComponentPlacementEngineTests
-    # LTX-2.3 (~22 GB, Kijai/LTX2.3_comfy split) is NOT at its test path Models/Stable-Diffusion/LtxVideo2/ltx-2.3-22b-dev-fp8.safetensors.
-    # A Lightricks LTX-2.3 fp8 file sits at Models/Stable-Diffusion/ (ltx-video-2-3-22b-dev-1_0-...-fp8.safetensors): identity
-    # unverified against the expected checkpoint, so the test is not pointed at it. This line FAILS LOUDLY under strict mode
-    # (RealWeightGate THROWS) until the expected file lands at the test path. TE and VAE placement are wired in LtxVideo2Pipeline.
 }
 
 run_phase() {
@@ -309,7 +314,7 @@ run_phase() {
 # ── Stale-filter guard: every run_class filter must match >=1 test (dotnet --list-tests, no GPU) ──────────
 
 validate_filters() {
-    local entry project cls rest out count bad=0 built=" "
+    local entry project cls rest out build_out rc count bad=0 hosterr=0 built=" "
     RUN_MODE=plan
     PLAN=()
     run_phase
@@ -317,18 +322,34 @@ validate_filters() {
     for entry in "${PLAN[@]}"; do
         IFS='|' read -r project cls rest <<< "${entry}"
         if [[ "${built}" != *" ${project} "* ]]; then
-            ( cd "${REPO_ROOT}" && dotnet build "tests/${project}/${project}.csproj" --nologo -v quiet >/dev/null 2>&1 ) \
-                || { echo "[campaign] build failed for ${project}"; exit 1; }
+            if ! build_out="$( cd "${REPO_ROOT}" && dotnet build "tests/${project}/${project}.csproj" --nologo -v quiet 2>&1 )"; then
+                echo "[campaign] build failed for ${project}; last output:"
+                printf '%s\n' "${build_out}" | tail -40
+                exit 1
+            fi
             built+="${project} "
         fi
         out="$( cd "${REPO_ROOT}" && dotnet test "tests/${project}/${project}.csproj" --no-build --list-tests \
             --filter "FullyQualifiedName~${cls}" --nologo 2>&1 )"
+        rc=$?
+        # The "available tests" header only appears when the test host actually listed tests. Without it the
+        # failure is the host (or the build), not a filter that matches nothing.
+        if ! printf '%s\n' "${out}" | grep -q "The following Tests are available:"; then
+            echo "[campaign] TEST HOST ERROR: could not list tests for ${cls} (${project}); dotnet test exit ${rc}. Last output:"
+            printf '%s\n' "${out}" | tail -20
+            hosterr=$((hosterr + 1))
+            continue
+        fi
         count=$(printf '%s\n' "${out}" | sed -n '/The following Tests are available:/,$p' | grep -cE '^\s+\S')
         if [ "${count}" -eq 0 ]; then
             echo "[campaign] STALE FILTER: ${cls} (${project}) matches zero tests"
             bad=$((bad + 1))
         fi
     done
+    if [ "${hosterr}" -ne 0 ]; then
+        echo "[campaign] ${hosterr} test-host error(s) while listing tests. This is NOT a stale filter. Nothing was run."
+        exit 1
+    fi
     if [ "${bad}" -ne 0 ]; then
         echo "[campaign] ${bad} stale filter(s); fix tests/run-multigpu-campaign.sh. Nothing was run."
         exit 1
