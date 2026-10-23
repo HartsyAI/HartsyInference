@@ -342,6 +342,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Native block-scaled GEMM (NVFP4 today) on Blackwell: the packed weight and its scale tensor are the operands and the activation is block-quantized per call. Off until validated on a card (<c>numerics.fp4Native</c>).</summary>
     public bool EnableNativeFp4Gemm { get; set; }
 
+    /// <summary>Whether a resident weight standing in for a dense one may keep that dense copy in the weight-cast cache (<c>vram.residentCastCache</c>, read at construction).</summary>
+    public bool CacheResidentCasts { get; set; }
+
     /// <inheritdoc/>
     /// <remarks>Reports the same flag <see cref="LinearImpl"/> consults, so the two cannot drift.</remarks>
     public bool NativeFp8Gemm => EnableNativeFp8Gemm;
@@ -1331,6 +1334,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         bool fp8TensorCores = _context.Sm >= CudaArch.Ada;
         EnableNativeFp8Gemm = EngineKnobs.Fp8Native.Value ?? fp8TensorCores;
         EnableNativeFp4Gemm = EngineKnobs.Fp4Native.Value ?? false;
+        CacheResidentCasts = EngineKnobs.ResidentCastCache.Value;
         EnableRopeHeadMajorV2 = EngineKnobs.RopeV2.Value;
         EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
         EnableModulateEmitFp8 = EngineKnobs.ModulateEmitFp8.Value;
@@ -2083,7 +2087,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             NoteBlockScaledHostUnpack(weight, packedInfo, weightRowOffset, weightRowCount);
             using Tensor dequantized = packedFormat == BlockScaleFormat.Mxfp8
                 ? Mxfp8ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale)
-                : Nvfp4ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale, packedInfo.GlobalScale!);
+                : packedInfo.DenseDType is { } dense
+                    ? Nvfp4ResidentCodec.DequantToDense(weight, packedInfo.BlockScale, packedInfo.GlobalScale!, dense)
+                    : Nvfp4ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale, packedInfo.GlobalScale!);
             try
             {
                 LinearCore(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount,
@@ -2591,7 +2597,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 weightPtr = pWeight;
             }
             else if (cacheWeightCast && CacheWeightCasts && !hipUpcast && GpuTransferHelper.IsWeightCached(weight)
-                && (weight.QuantInfo?.DenseDType is null || EngineKnobs.ResidentCastCache.Value))
+                && (weight.QuantInfo?.DenseDType is null || CacheResidentCasts))
             {
                 if (!GpuTransferHelper.TryGetWeightCast(weight, gemmDtype, out weightPtr))
                 {

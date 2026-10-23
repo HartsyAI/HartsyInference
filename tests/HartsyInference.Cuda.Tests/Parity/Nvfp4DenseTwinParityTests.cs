@@ -1,4 +1,3 @@
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Nvfp4;
@@ -95,6 +94,38 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
     }
 
+    /// <summary>A row range takes the host fallback, which unpacks to the dense twin too (F16 here, F32 for HiDream).</summary>
+    [Theory]
+    [InlineData("F16")]
+    [InlineData("F32")]
+    public void RowRangeHostFallback_MatchesTheEagerWeight(string dense)
+    {
+        using CudaBackend? backend = TryOpenBackend();
+        if (backend is null) return;   // tier-lint: guarded
+        DType denseDType = ParseDType(dense);
+        using Operands ops = Operands.Create(32, 256, 256, DType.F32, DType.F32, "none", seed: 77);
+        using Tensor eagerF16 = CheckpointConvertUtils.DequantNvfp4ToF16(ops.Packed, ops.BlockScale, ((float*)ops.GlobalScale.DataPointer)[0]);
+        using Tensor eager = denseDType == DType.F16 ? eagerF16.CastTo(DType.F16) : eagerF16.CastTo(DType.F32);
+        using Tensor resident = ops.AttachResident(denseDType);
+        using Tensor expected = new Tensor(new TensorShape(32, 64), DType.F32);
+        using Tensor got = new Tensor(new TensorShape(32, 64), DType.F32);
+        try
+        {
+            backend.LinearWeightRows(expected, ops.Input, eager, null, 64, 64);
+            backend.LinearWeightRows(got, ops.Input, resident, null, 64, 64);
+            backend.Sync();
+            ReadOnlySpan<float> a = expected.AsReadOnlySpan<float>(), b = got.AsReadOnlySpan<float>();
+            long mismatches = 0;
+            for (int i = 0; i < a.Length; i++) if (BitConverter.SingleToUInt32Bits(a[i]) != BitConverter.SingleToUInt32Bits(b[i])) mismatches++;
+            _output.WriteLine($"row-range fallback ({dense} twin): {mismatches} of {a.Length} differ");
+            Assert.Equal(0L, mismatches);
+        }
+        finally
+        {
+            backend.FreeWeights([eager, resident]);
+        }
+    }
+
     /// <summary>The negative control: without a dense dtype an F32 activation meets a BF16 unpack, so the comparison above can fail.</summary>
     [Fact]
     public void WithoutADenseDType_AnF32ActivationDoesNotMatchTheEagerWeight()
@@ -130,7 +161,7 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         try
         {
             // Preloaded, so the second call reads the cached F16 cast rather than unpacking again.
-            KnobStore.Set(EngineKnobs.ResidentCastCache, true);
+            backend.CacheResidentCasts = true;
             backend.PreloadWeights([eager, resident]);
             uint[] expected = RunLinear(backend, ops, eager);
             for (int pass = 1; pass <= 2; pass++)
@@ -143,7 +174,6 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
         finally
         {
-            KnobStore.Clear(EngineKnobs.ResidentCastCache);
             backend.FreeWeights([eager, resident]);
         }
     }
@@ -157,7 +187,7 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         using Operands ops = Operands.Create(64, 256, 512, DType.F32, DType.F32, "none", seed: 5150);
         using Tensor eager = CheckpointConvertUtils.DequantNvfp4ToF16(ops.Packed, ops.BlockScale, ((float*)ops.GlobalScale.DataPointer)[0]);
         using Tensor resident = ops.AttachResident(DType.F16);
-        KnobStore.Set(EngineKnobs.ResidentCastCache, false);
+        Assert.False(backend.CacheResidentCasts, "vram.residentCastCache should default off");
         try
         {
             backend.PreloadWeights([eager, resident]);
@@ -168,7 +198,6 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
         finally
         {
-            KnobStore.Clear(EngineKnobs.ResidentCastCache);
             backend.FreeWeights([eager, resident]);
         }
     }

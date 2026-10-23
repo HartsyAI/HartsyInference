@@ -91,7 +91,7 @@ public static partial class EngineKnobs
 
     /// <summary>Lets a resident NVFP4 weight keep its unpacked dense copy in the weight-cast cache; off by default, so it unpacks per GEMM.</summary>
     public static readonly Knob<bool> ResidentCastCache =
-        Bool("vram.residentCastCache", false, KnobScope.Runtime, KnobDomain.Vram, "=1 lets a resident NVFP4 weight keep its unpacked dense copy in the weight-cast cache, trading VRAM for a few percent of step time; off by default.");
+        Bool("vram.residentCastCache", false, KnobScope.Construction, KnobDomain.Vram, "=1 lets a resident NVFP4 weight keep its unpacked dense copy in the weight-cast cache, trading VRAM for a few percent of step time; off by default.");
 
     /// <summary>Forces the query-tiled F32 SDPA path on CUDA and Vulkan (CUDA BF16 calls run it on their F32 casts)
     /// instead of materializing the full score matrix.</summary>
