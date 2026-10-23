@@ -89,6 +89,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SameGpuConcurrent =
         Bool("vram.sameGpuConcurrent", false, KnobScope.Runtime, KnobDomain.Vram, "Disables the process-wide gate that serializes generations sharing one GPU ordinal.");
 
+    /// <summary>Lets a resident NVFP4 weight keep its unpacked dense copy in the weight-cast cache; 0 unpacks it per GEMM.</summary>
+    public static readonly Knob<bool> ResidentCastCache =
+        Bool("vram.residentCastCache", true, KnobScope.Runtime, KnobDomain.Vram, "Lets a resident NVFP4 weight keep its unpacked dense copy in the weight-cast cache; 0 unpacks it per GEMM, trading speed for VRAM.");
+
     /// <summary>Forces the query-tiled F32 SDPA path on CUDA and Vulkan (CUDA BF16 calls run it on their F32 casts)
     /// instead of materializing the full score matrix.</summary>
     public static readonly Knob<bool> SdpaForceTiled =

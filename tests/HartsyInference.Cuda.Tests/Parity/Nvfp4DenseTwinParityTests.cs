@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Nvfp4;
@@ -141,6 +142,31 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
         finally
         {
+            backend.FreeWeights([eager, resident]);
+        }
+    }
+
+    /// <summary>With <c>vram.residentCastCache</c> off a preloaded resident weight keeps no dense copy and still matches its twin.</summary>
+    [Fact]
+    public void CastCacheOff_KeepsNoDenseCopy_AndMatchesTheEagerWeight()
+    {
+        using CudaBackend? backend = TryOpenBackend();
+        if (backend is null) return;   // tier-lint: guarded
+        using Operands ops = Operands.Create(64, 256, 512, DType.F32, DType.F32, "none", seed: 5150);
+        using Tensor eager = CheckpointConvertUtils.DequantNvfp4ToF16(ops.Packed, ops.BlockScale, ((float*)ops.GlobalScale.DataPointer)[0]);
+        using Tensor resident = ops.AttachResident(DType.F16);
+        KnobStore.Set(EngineKnobs.ResidentCastCache, false);
+        try
+        {
+            backend.PreloadWeights([eager, resident]);
+            uint[] expected = RunLinear(backend, ops, eager);
+            uint[] got = RunLinear(backend, ops, resident);
+            Assert.False(GpuTransferHelper.TryGetWeightCast(resident, DType.F16, out ulong _), "the dense copy was cached anyway");
+            AssertBitIdentical(expected, got, "cast cache off");
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.ResidentCastCache);
             backend.FreeWeights([eager, resident]);
         }
     }

@@ -2590,7 +2590,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 weightPtr = pWeight;
             }
-            else if (cacheWeightCast && CacheWeightCasts && !hipUpcast && GpuTransferHelper.IsWeightCached(weight))
+            else if (cacheWeightCast && CacheWeightCasts && !hipUpcast && GpuTransferHelper.IsWeightCached(weight)
+                && (weight.QuantInfo?.DenseDType is null || EngineKnobs.ResidentCastCache.Value))
             {
                 if (!GpuTransferHelper.TryGetWeightCast(weight, gemmDtype, out weightPtr))
                 {
