@@ -143,11 +143,12 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         DType branch = branchDType ?? DType.F32;
         if (hidden.DType != DType.F32)
             throw new NotSupportedException($"The Wan residual stream is F32, got {hidden.DType}.");
+        // A K/V rewrite is allowed: context parallel's exchange is the same rewrite for F16 rows as for F32.
         if (branch != DType.F32 && (branch != DType.F16 || tokensPerGroup != s || temb.Shape[0] != 1 || imageContextLen != 0
-            || postCrossAttnHook is not null || selfAttnMask is not null || postSelfAttnHook is not null || selfAttnKvRewrite is not null
+            || postCrossAttnHook is not null || selfAttnMask is not null || postSelfAttnHook is not null
             || animate2 is not null || selfAttnKvCapture is not null || CrossAttnResidualNormed))
             throw new NotSupportedException(
-                $"{branch} Wan branches run one timestep group with no image context, mask, hook, K/V rewrite or Animate-2 splice.");
+                $"{branch} Wan branches run one timestep group with no image context, mask, hook or Animate-2 splice.");
         bool f16Branches = branch == DType.F16;
         // The dump wants the raw scale rows, and so does the fused F16 norm, which adds the 1 itself.
         bool scalePlusOne = !f16Branches && tokensPerGroup == s && temb.Shape[0] == 1 && !WanVideoDebugDump.Enabled;

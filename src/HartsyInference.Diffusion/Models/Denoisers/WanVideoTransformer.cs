@@ -179,6 +179,8 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
             sinLocal = SliceHostRows(sin, range.TokenStart, sEff);
             (cos, sin) = (cosLocal, sinLocal);
             if (g != 1) tsEff = timesteps[range.FrameStart..(range.FrameStart + range.FrameCount)];
+            // One group covers this rank's tokens: the block's single-group helpers test tokensPerGroup == s for G == 1.
+            if (g == 1) tokensPerGroup = sEff;
         }
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, tsEff, _config.FreqDim, dim,
