@@ -64,7 +64,7 @@ public sealed class Fibo2RecipeTests
         Assert.Equal(5.0f, defaults.CfgScale);
         Assert.Equal(1024, defaults.Width);
         Assert.Equal(1024, defaults.Height);
-        Assert.Equal(Math.Exp(1.15), defaults.SigmaShift);
+        Assert.Equal(1.15, defaults.SigmaShift);
         Assert.Null(defaults.Sampler);
         Assert.Null(defaults.Scheduler);
     }
@@ -78,7 +78,7 @@ public sealed class Fibo2RecipeTests
         Assert.Equal(1.0f, defaults.CfgScale);
         Assert.Equal(1024, defaults.Width);
         Assert.Equal(704, defaults.Height);
-        Assert.Equal(Math.Exp(1.15), defaults.SigmaShift);
+        Assert.Equal(1.15, defaults.SigmaShift);
     }
 
     [Fact]
@@ -115,4 +115,12 @@ public sealed class Fibo2RecipeTests
     private static CheckpointProbe FileNameProbe(string name) =>
         new(new HashSet<string>(StringComparer.Ordinal), new Dictionary<string, TensorShape>(StringComparer.Ordinal),
             new Dictionary<string, string>(StringComparer.Ordinal), [name]);
+
+    [Fact]
+    public void SchedulerShift_ConvertsTheExponentOnceForDefaultsAndOverrides()
+    {
+        Assert.Equal(MathF.Exp(1.15f), Fibo2Recipe.SchedulerShift(null), 4);
+        Assert.Equal(Fibo2Recipe.SchedulerShift(null), Fibo2Recipe.SchedulerShift(1.15), 4);
+        Assert.Equal(MathF.Exp(2f), Fibo2Recipe.SchedulerShift(2.0), 4);
+    }
 }

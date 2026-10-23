@@ -18,22 +18,22 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// models. Text-to-image, img2img, mask inpaint, LoRA (merged into the F16 weights before load) and editing (instruction, masked and multi-reference; edit-turbo is edit-only); glyph text images and refiners are not implemented.</summary>
 public sealed class Fibo2Recipe : IArchitectureRecipe
 {
-    /// <summary>ComfyUI's Fibo 2.0 shift 1.15 is a Flux-type exponent: <c>sigma(t) = e^1.15 / (e^1.15 + 1/t - 1)</c>, which is
-    /// the scheduler's <c>s·t / (1 + (s - 1)·t)</c> with <c>s = e^1.15</c>, not <c>s = 1.15</c>.</summary>
-    private static readonly double FluxTimeShift = Math.Exp(1.15);
+    /// <summary>The user-facing sigma shift is ComfyUI's Flux-style exponent (1.15). The scheduler's <c>s·t / (1 + (s - 1)·t)</c> takes
+    /// <c>s = e^shift</c>, so every request shift, default or explicit, converts here (<c>sigma(t) = e^1.15 / (e^1.15 + 1/t - 1)</c>).</summary>
+    public static float SchedulerShift(double? shift) => (float)Math.Exp(shift ?? 1.15);
 
     /// <summary>Fibo 2.0 dev's sampling settings, from the Bria model card (briaai/Fibo-2.0-dev: 50 steps, guidance 5.0, 1024×1024 or
     /// ~1 MP in multiples of 16). The 1.15 shift is ComfyUI's.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults
     {
-        Steps = 50, CfgScale = 5.0f, Width = 1024, Height = 1024, SigmaShift = FluxTimeShift,
+        Steps = 50, CfgScale = 5.0f, Width = 1024, Height = 1024, SigmaShift = 1.15,
     };
 
     /// <summary>Edit-turbo's sampling settings: 4 steps and guidance 1.0 (no CFG) per the Bria model card (briaai/Fibo-2.0-edit-turbo),
     /// 1024×704 from ComfyUI's edit-turbo workflow.</summary>
     public static ImageDefaults EditTurboDefaults { get; } = new ImageDefaults
     {
-        Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 704, SigmaShift = FluxTimeShift,
+        Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 704, SigmaShift = 1.15,
     };
 
     /// <inheritdoc/>

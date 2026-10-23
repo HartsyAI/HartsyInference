@@ -57,10 +57,10 @@ public sealed unsafe class Fibo2Block : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         _adaLnWeight = weights[$"{prefix}.adaLN_modulation.0.weight"];
         _adaLnBias = weights[$"{prefix}.adaLN_modulation.0.bias"];
-        _attentionNorm1 = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm1.weight");
-        _attentionNorm2 = TensorCasts.LoadF32(weights, $"{prefix}.attention_norm2.weight");
-        _ffnNorm1 = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm1.weight");
-        _ffnNorm2 = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm2.weight");
+        _attentionNorm1 = Fibo2Weights.LoadF32(weights, $"{prefix}.attention_norm1.weight", _ownedSplits);
+        _attentionNorm2 = Fibo2Weights.LoadF32(weights, $"{prefix}.attention_norm2.weight", _ownedSplits);
+        _ffnNorm1 = Fibo2Weights.LoadF32(weights, $"{prefix}.ffn_norm1.weight", _ownedSplits);
+        _ffnNorm2 = Fibo2Weights.LoadF32(weights, $"{prefix}.ffn_norm2.weight", _ownedSplits);
 
         (Tensor q, Tensor k, Tensor v) = ZImageBlock.SplitQkv(weights[$"{prefix}.attention.qkv.weight"], _dim);
         _ownedSplits.Add(q);
@@ -72,8 +72,8 @@ public sealed unsafe class Fibo2Block : IDisposable
             Key = k,
             Value = v,
             Output = weights[$"{prefix}.attention.out.weight"],
-            QueryNorm = TensorCasts.LoadF32(weights, $"{prefix}.attention.q_norm.weight"),
-            KeyNorm = TensorCasts.LoadF32(weights, $"{prefix}.attention.k_norm.weight"),
+            QueryNorm = Fibo2Weights.LoadF32(weights, $"{prefix}.attention.q_norm.weight", _ownedSplits),
+            KeyNorm = Fibo2Weights.LoadF32(weights, $"{prefix}.attention.k_norm.weight", _ownedSplits),
             QueryNormEps = _eps,
             KeyNormEps = _eps,
         });
@@ -82,9 +82,9 @@ public sealed unsafe class Fibo2Block : IDisposable
 
         if (!_hasCrossAttention)
             return;
-        _crossNorm1 = TensorCasts.LoadF32(weights, $"{prefix}.cross_attn_norm1.weight");
-        _crossNorm2 = TensorCasts.LoadF32(weights, $"{prefix}.cross_attn_norm2.weight");
-        _crossGate = TensorCasts.LoadF32(weights, $"{prefix}.cross_attn_gate");
+        _crossNorm1 = Fibo2Weights.LoadF32(weights, $"{prefix}.cross_attn_norm1.weight", _ownedSplits);
+        _crossNorm2 = Fibo2Weights.LoadF32(weights, $"{prefix}.cross_attn_norm2.weight", _ownedSplits);
+        _crossGate = Fibo2Weights.LoadF32(weights, $"{prefix}.cross_attn_gate", _ownedSplits);
         _crossAttention = Fibo2Weights.LoadCrossAttention(weights, $"{prefix}.cross_attention.", _attentionConfig, _dim, _eps,
             _ownedSplits);
     }

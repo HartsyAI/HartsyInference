@@ -86,7 +86,7 @@ public sealed partial class Fibo2RecipePipeline
         };
 
         int steps = settings.Steps;
-        float shift = (float)(request.SigmaShift ?? _defaults.SigmaShift ?? Math.Exp(1.15));
+        float shift = Fibo2Recipe.SchedulerShift(request.SigmaShift ?? _defaults.SigmaShift);
         int? seed = RecipeRequestMapper.MapSeed(request.Seed);
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
         (byte[] rgb, int outWidth, int outHeight, int usedSeed) = _pipeline.GenerateEdit(edit, unconditional, width, height, steps, guidance,

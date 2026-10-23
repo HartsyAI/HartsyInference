@@ -41,9 +41,9 @@ public sealed class Fibo2PerceiverLayer : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         ArgumentNullException.ThrowIfNull(weights);
-        _crossNorm = TensorCasts.LoadF32(weights, $"{prefix}.cross_attn_norm.weight");
-        _selfNorm = TensorCasts.LoadF32(weights, $"{prefix}.self_attn_norm.weight");
-        _ffnNorm = TensorCasts.LoadF32(weights, $"{prefix}.ffn_norm.weight");
+        _crossNorm = Fibo2Weights.LoadF32(weights, $"{prefix}.cross_attn_norm.weight", _ownedSplits);
+        _selfNorm = Fibo2Weights.LoadF32(weights, $"{prefix}.self_attn_norm.weight", _ownedSplits);
+        _ffnNorm = Fibo2Weights.LoadF32(weights, $"{prefix}.ffn_norm.weight", _ownedSplits);
         _crossAttention = Fibo2Weights.LoadCrossAttention(weights, $"{prefix}.cross_attention.", _attentionConfig, _dim, _eps,
             _ownedSplits);
         _selfAttention = Fibo2Weights.LoadCrossAttention(weights, $"{prefix}.self_attention.", _attentionConfig, _dim, _eps,

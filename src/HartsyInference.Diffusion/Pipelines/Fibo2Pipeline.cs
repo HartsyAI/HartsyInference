@@ -86,13 +86,15 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             return (ImagePostProcessor.TensorToRgbBytes(img2img!.SourceImage), width, height, resolvedSeed);
 
         bool guided = CfgHelper.IsGuidanceActive(guidanceScale);
-        Tensor conditional = EncodeBundles(conditionalTokens);
-        Tensor? unconditional = guided ? EncodeBundles(unconditionalTokens) : null;
+        Tensor? conditional = null;
+        Tensor? unconditional = null;
         Tensor? latent = null;
         Tensor? sourceLatent = null;
         Tensor? latentMask = null;
         try
         {
+            conditional = EncodeBundles(conditionalTokens);
+            unconditional = guided ? EncodeBundles(unconditionalTokens) : null;
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
             TensorShape latentShape = new(1, _config.InChannels, latentHeight, latentWidth);
@@ -107,7 +109,7 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             }
 
             SampleFlow(scheduler, ref latent, plan.StartStep, steps,
-                (current, sigma) => Denoise(current, sigma, conditional, unconditional, guidanceScale), inpaint, onProgress);
+                (current, sigma) => Denoise(current, sigma, conditional!, unconditional, guidanceScale), inpaint, onProgress);
 
             using Tensor decoded = DecodeLatent(latent!);
             // Suppresses the VAE round trip in the kept region; the host recomposites itself when it owns the mask.
@@ -120,7 +122,7 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             latent?.Dispose();
             sourceLatent?.Dispose();
             latentMask?.Dispose();
-            conditional.Dispose();
+            conditional?.Dispose();
             unconditional?.Dispose();
         }
     }
@@ -133,11 +135,17 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         if (unconditional is null)
             return conditionalVelocity;
 
-        Tensor unconditionalVelocity = _transformer.Forward(Backend, latent, sigma, unconditional);
-        Tensor guided = CfgHelper.ApplyCfg(unconditionalVelocity, conditionalVelocity, guidanceScale);
-        unconditionalVelocity.Dispose();
-        conditionalVelocity.Dispose();
-        return guided;
+        Tensor? unconditionalVelocity = null;
+        try
+        {
+            unconditionalVelocity = _transformer.Forward(Backend, latent, sigma, unconditional);
+            return CfgHelper.ApplyCfg(unconditionalVelocity, conditionalVelocity, guidanceScale);
+        }
+        finally
+        {
+            unconditionalVelocity?.Dispose();
+            conditionalVelocity.Dispose();
+        }
     }
 
     /// <summary>Encodes one caption and returns its F32 <c>[1, S, 6 · 3 · 2560]</c> text bundles.</summary>

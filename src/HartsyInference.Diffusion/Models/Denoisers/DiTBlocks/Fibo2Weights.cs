@@ -8,6 +8,17 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <c>w13</c> is w1 (gate, SiLU'd) rows then w3 (linear). The split tensors are appended to the caller's owned list.</summary>
 internal static class Fibo2Weights
 {
+    /// <summary>F32 form of <paramref name="key"/>: the stored tensor when it is already F32, otherwise a widened copy that joins
+    /// <paramref name="owned"/> so the owning block frees it.</summary>
+    internal static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned)
+    {
+        Tensor stored = weights[key];
+        Tensor f32 = TensorCasts.EnsureF32(stored);
+        if (!ReferenceEquals(f32, stored))
+            owned.Add(f32);
+        return f32;
+    }
+
     /// <summary>Loads a cross-attention (no RoPE) from <c>{prefix}to_q/to_kv/to_out/norm_q/norm_k</c>.</summary>
     internal static AttentionLayer LoadCrossAttention(IReadOnlyDictionary<string, Tensor> weights, string prefix,
         AttentionLayerConfig config, int dim, float eps, List<Tensor> owned)
@@ -21,8 +32,8 @@ internal static class Fibo2Weights
             Key = keyValue[0],
             Value = keyValue[1],
             Output = weights[prefix + "to_out.weight"],
-            QueryNorm = TensorCasts.LoadF32(weights, prefix + "norm_q.weight"),
-            KeyNorm = TensorCasts.LoadF32(weights, prefix + "norm_k.weight"),
+            QueryNorm = LoadF32(weights, prefix + "norm_q.weight", owned),
+            KeyNorm = LoadF32(weights, prefix + "norm_k.weight", owned),
             QueryNormEps = eps,
             KeyNormEps = eps,
         });

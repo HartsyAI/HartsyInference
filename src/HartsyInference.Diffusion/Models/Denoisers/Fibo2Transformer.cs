@@ -25,6 +25,7 @@ public sealed unsafe class Fibo2Transformer : IDisposable
     private Tensor? _latentQueries, _perceiverNormOut;
     private Tensor? _finalAdaLnWeight, _finalAdaLnBias, _finalLinearWeight, _finalLinearBias;
     private int _timeMlpWidth;
+    private IBackend? _backend;
     private int _disposed;
 
     /// <summary>Creates the denoiser for <paramref name="config"/>; call <see cref="LoadWeights"/> before <see cref="Forward"/>.</summary>
@@ -87,6 +88,7 @@ public sealed unsafe class Fibo2Transformer : IDisposable
         Tensor? textMask = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        _backend = backend;
         ArgumentNullException.ThrowIfNull(latent);
         ArgumentNullException.ThrowIfNull(context);
         if (textMask is not null)
@@ -177,6 +179,11 @@ public sealed unsafe class Fibo2Transformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        if (_backend is not null)
+        {
+            _imageRope.ReleaseGpuTables(_backend);
+            _streamRope.ReleaseGpuTables(_backend);
+        }
         foreach (Fibo2Block block in _refiners)
             block.Dispose();
         foreach (Fibo2Block block in _layers)

@@ -65,7 +65,7 @@ public sealed partial class Fibo2RecipePipeline : IRecipePipeline
         int height = reqHeight / 16 * 16;
         int steps = settings.Steps;
         float guidance = settings.CfgScale;
-        float shift = (float)(request.SigmaShift ?? _defaults.SigmaShift ?? Math.Exp(1.15));
+        float shift = Fibo2Recipe.SchedulerShift(request.SigmaShift ?? _defaults.SigmaShift);
         int? seed = RecipeRequestMapper.MapSeed(request.Seed);
 
         // The init image resolves at the snapped size, which is the size the pipeline validates it against.
