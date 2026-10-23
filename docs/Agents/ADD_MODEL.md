@@ -1,5 +1,7 @@
 # Add a model
 
+For a newly released model, run the end-to-end [add-model skill](skills/add-model/SKILL.md): research, reuse map, official-Python and ComfyUI baselines, full feature support, real-weight verification through SwarmUI, and the engine and extension PRs. Install it for Claude with `mkdir -p ~/.claude/skills/add-model && cp docs/Agents/skills/add-model/SKILL.md ~/.claude/skills/add-model/`. The steps below are the engine rules it relies on.
+
 1. Read the relevant architecture reference and modality status; search TROUBLESHOOTING for the family/operation.
 2. Map shapes, dtypes, masks, prediction type and ownership at every boundary. Inspect checkpoint keys/metadata before designing conversion; repack once at load time.
 3. Use the sibling package and IBackend/shared operations. Engine owns registration, catalog, loading and consumer dispatch; video must use the planning contract in [engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
