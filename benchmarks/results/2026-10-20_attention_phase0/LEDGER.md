@@ -91,3 +91,7 @@ already tiles, the default arm run a second time). The null is SSIM between two 
   seeds 42 and 43 two runs of one build differ as much as default and exact do; only seed 44 reproduces, and there exact
   reads 0.879. SSIM resolves little at this size, so the floor (rounded like lens-mxfp8's) only catches a broken image.
   Measured on main `796c6c08`.
+- Result (#534, seeds 42-45): BF16 misses one seed per row, lens-mxfp8 s44 0.943 and lens-2048 s45 0.788. Both images show the
+  same scene, slightly shifted. The teacher-forced probe (cond, seed 42, against twice default-vs-exact per step) passes 5 of 8
+  steps: lens-mxfp8 step 2 reads 3.84e-2 against 2.3e-2, and lens-2048 steps 2 and 3 read 2.69e-2 and 1.50e-2 against 2.45e-2 and
+  1.19e-2. The user waived both on inspection of the images, and the grant ships on by default.

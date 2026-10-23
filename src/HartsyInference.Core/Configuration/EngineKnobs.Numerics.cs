@@ -85,7 +85,8 @@ public static partial class EngineKnobs
         Bool("numerics.wanF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs Wan's attention and FFN branches in F16 over the F32 residual stream (TI2V-5B and Wan 2.1 T2V-14B) on backends with F16 activation kernels; 0 keeps the F32 path.");
 
     /// <summary>Grants Lens's joint attention BF16 storage (the cuDNN BF16 row on CUDA); false keeps the F32 path. Either way Lens never
-    /// asserts F16: its V passes F16's range, so <see cref="SdpaF16"/>, which forces F16 for every caller, clips it.</summary>
+    /// asserts F16: its V passes F16's range, so <see cref="SdpaF16"/>, which forces F16 for every caller, clips it. False reproduces
+    /// the F32 path's images, which BF16 shifts slightly.</summary>
     public static readonly Knob<bool> LensBf16 =
         Bool("numerics.lensBf16", true, KnobScope.Runtime, KnobDomain.Numerics, "Grants Lens's joint attention BF16 storage (the cuDNN BF16 row on CUDA); false keeps the F32 path.");
 
