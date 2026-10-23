@@ -289,6 +289,100 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
     }
 
+    /// <summary><see cref="EncodeEmbedsMrope"/> that returns hidden states instead of the final one: the decoder inputs at the
+    /// HF-indexed <paramref name="layerIndices"/> (0 = the embeddings, k = after block k - 1 including that block's deepstack
+    /// addition), concatenated tap-major into F32 <c>[1, seqLen, layerIndices.Length · hidden]</c>. No final norm is applied.</summary>
+    /// <param name="layerIndices">Strictly ascending, within [0, NumLayers].</param>
+    public Tensor EncodeMultiLayerEmbedsMrope(IBackend backend, Tensor inputsEmbeds, float[] ropeCos, float[] ropeSin,
+        int[] layerIndices, IReadOnlyList<Tensor>? deepstackFeatures = null, bool[]? visualMask = null)
+    {
+        ThrowIfDisposed();
+        if (layerIndices is null || layerIndices.Length == 0)
+            throw new ArgumentException("Must request at least one layer.", nameof(layerIndices));
+        for (int i = 0; i < layerIndices.Length; i++)
+        {
+            if (layerIndices[i] < 0 || layerIndices[i] > _config.NumLayers)
+                throw new ArgumentOutOfRangeException(nameof(layerIndices), $"Layer index {layerIndices[i]} out of range [0, {_config.NumLayers}].");
+            if (i > 0 && layerIndices[i] <= layerIndices[i - 1])
+                throw new ArgumentException("Layer indices must be strictly ascending.", nameof(layerIndices));
+        }
+        if (inputsEmbeds.DType != DType.F32 || inputsEmbeds.Shape.Rank != 3 || inputsEmbeds.Shape[0] != 1
+            || inputsEmbeds.Shape[2] != _config.HiddenSize)
+        {
+            throw new ArgumentException(
+                $"inputsEmbeds must be F32 [1, seqLen, {_config.HiddenSize}], got {inputsEmbeds.DType} {inputsEmbeds.Shape}.", nameof(inputsEmbeds));
+        }
+        int seqLen = (int)inputsEmbeds.Shape[1];
+        int hiddenSize = _config.HiddenSize;
+        int taps = layerIndices.Length;
+        if (seqLen <= 0 || seqLen > _config.MaxPositionEmbeddings)
+            throw new ArgumentOutOfRangeException(nameof(inputsEmbeds), seqLen, $"Sequence length must be in [1,{_config.MaxPositionEmbeddings}].");
+        ValidateAttentionGeometry();
+        if (deepstackFeatures is not null && deepstackFeatures.Count > _config.NumLayers)
+            throw new ArgumentException($"Deepstack feature count {deepstackFeatures.Count} exceeds decoder depth {_config.NumLayers}.", nameof(deepstackFeatures));
+
+        (int[] visualRows, float[] visualScales) = ValidateDeepstack(deepstackFeatures, visualMask, seqLen, hiddenSize);
+        Tensor? hidden = null;
+        bool hiddenIsCaptured = false;
+        List<Tensor> captures = new(taps);
+        using ForwardConstants constants = PrepareForwardConstants(backend, 1, seqLen, ropeCos, ropeSin);
+        try
+        {
+            hidden = new Tensor(new TensorShape(1, seqLen, hiddenSize), DType.F32);
+            backend.SliceRowsGeneric(hidden, inputsEmbeds, rowOffset: 0);
+            int request = 0;
+            if (layerIndices[request] == 0)
+            {
+                captures.Add(hidden);
+                hiddenIsCaptured = true;
+                request++;
+            }
+            for (int i = 0; i < _config.NumLayers && request < taps; i++)
+            {
+                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), constants.GlobalCos, constants.GlobalSin, seqLen);
+                Tensor previous = hidden;
+                hidden = next;
+                if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous multi-layer M-RoPE activation");
+                hiddenIsCaptured = false;
+                if (deepstackFeatures is not null && i < deepstackFeatures.Count)
+                    backend.ScatterAddWeightedRows(hidden, deepstackFeatures[i], visualRows, visualScales);
+                if (layerIndices[request] == i + 1)
+                {
+                    captures.Add(hidden);
+                    hiddenIsCaptured = true;
+                    request++;
+                }
+            }
+            if (captures.Count != taps)
+                throw new InvalidOperationException($"Captured {captures.Count} of {taps} requested hidden states.");
+            if (taps == 1)
+            {
+                Tensor only = captures[0];
+                captures.Clear();
+                hidden = null;
+                hiddenIsCaptured = false;
+                return only;
+            }
+            Tensor packed = new(new TensorShape(1, seqLen, checked(taps * hiddenSize)), DType.F32);
+            try
+            {
+                backend.Concat(packed, captures.ToArray(), dim: 2);
+            }
+            catch
+            {
+                TextEncoderTensorHelpers.DisposeBestEffort(packed, "tap-major output after pack failure");
+                throw;
+            }
+            return packed;
+        }
+        finally
+        {
+            if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(hidden, "multi-layer M-RoPE hidden activation");
+            foreach (Tensor capture in captures)
+                TextEncoderTensorHelpers.DisposeBestEffort(capture, "captured M-RoPE hidden activation");
+        }
+    }
+
     private static (int[] Rows, float[] Scales) ValidateDeepstack(
         IReadOnlyList<Tensor>? features, bool[]? visualMask, int seqLen, int hiddenSize)
     {

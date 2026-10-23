@@ -12,7 +12,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed Fibo 2.0 pipeline driven by a native <see cref="ImageRequest"/>. The caption and the null-caption branch are
 /// tokenized here through <see cref="Fibo2PromptTemplate"/>; the pipeline encodes and samples. Owns every disposable it was given, and
 /// disposes them in reverse construction order.</summary>
-public sealed class Fibo2RecipePipeline : IRecipePipeline
+public sealed partial class Fibo2RecipePipeline : IRecipePipeline
 {
     private readonly Fibo2Pipeline _pipeline;
     private readonly Qwen3Tokenizer _tokenizer;
@@ -48,10 +48,10 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(settings);
         cancel.ThrowIfCancellationRequested();
+        if (IsEdit(request))
+            return GenerateEdit(request, settings, progress, cancel);
         if (!string.IsNullOrWhiteSpace(request.NegativePrompt))
             throw new NotSupportedException("Fibo 2.0 does not map negative prompts yet: its unconditional branch is the fixed null caption.");
-        if (request.ReferenceImages is { Count: > 0 })
-            throw new NotSupportedException("Fibo 2.0 reference-image conditioning (editing) is not implemented yet.");
         if (!IsDefaultSampler(request.Sampler) || !IsDefaultSchedule(request.Scheduler))
             throw new NotSupportedException("Fibo 2.0 samples only with its built-in flow-matching Euler; drop the sampler and schedule selection.");
 

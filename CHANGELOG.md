@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Fibo 2.0 image editing (`fibo2-dev` and `fibo2-edit-turbo`).** An instruction edit of one image, a masked edit (white =
+  regenerate, the region greyed out before it is encoded, as Bria's pipeline does) and a multi-reference edit of up to four images
+  referred to as `<image_1>`..`<image_4>`. The source and references are VAE-encoded into clean tokens after the image tokens (RoPE
+  frames `MaxGist + 2 + k`, timestep-0 modulation, also through the noise refiners), and the edit prompt reaches the model through the
+  Qwen3-VL vision tower, so the language tower now exposes multi-layer taps with deepstack
+  (`LlamaStyleEncoder.EncodeMultiLayerEmbedsMrope`). `fibo2-edit-turbo` is edit-only (4 steps, guidance 1.0, no unconditional pass)
+  and refuses a request without a source image. Declared as `RefEdit` and `Inpaint`; strength-based img2img, glyph text images,
+  LoRA and int8 are not part of this change. Not run on the real edit checkpoint or a GPU.
 - **Added: attention operand capture (CUDA, diagnostics).** `diagnostics.attentionCaptureDir` lists every eager attention
   call of at least 1024 query rows and keys per shape in `calls.tsv`; the ordinals named in
   `diagnostics.attentionCaptureCalls` (an ordinal, or `text@ordinal` for the shapes containing `text`) also write batch

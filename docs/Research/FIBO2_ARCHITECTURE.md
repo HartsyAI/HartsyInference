@@ -76,6 +76,38 @@ converter's source files were not available.
 - Edit-turbo workflow: `Fibo2Scheduler` steps = 4, Euler sampler, default size 1024×704.
 - Dev step count and CFG are not in the public workflows. See open items.
 
+## Editing
+
+Sources: ComfyUI `87ed5a066d9c` (`comfy_extras/nodes_fibo2.py` `TextEncodeFibo2`, `comfy/ldm/fibo2/model.py` `_forward`,
+`comfy/text_encoders/fibo2.py`), diffusers `main` `pipelines/bria_fibo2/pipeline_bria_fibo2.py` and `image_processor.py`, and the
+Bria edit-turbo and dev cards. The engine reads them as follows; the CPU parity reference shares this reading.
+
+- **Reference latents.** Each image is VAE-encoded (posterior mean), 2x2-patchified, normalised with the VAE BatchNorm statistics and
+  unpatchified: the same layout as the denoiser's own latent (`prepare_image_latents`; ComfyUI `vae.encode` then
+  `process_latent_in`). No noise is added.
+- **Token layout.** Stream = gist, image, reference 1..k. Reference k sits on RoPE frame `MaxGist + 2 + k` (k from 0), the image on
+  `MaxGist + 1`. Gist and reference tokens are clean (timestep-0 adaLN); only the image tokens use the noisy embedding. The two noise
+  refiners run over image + references (image noisy, references clean); without references they run on the image alone with global
+  modulation. The velocity is the final layer applied to the image tokens only.
+- **Vision-conditioned prompt.** An edit prompt is `{"image":<marker>,...,"edit_instruction":...}` (`image_1`.. for several images),
+  with the caption of the result as `structured_caption` when the prompt is a JSON object carrying `edit_instruction`; the marker is
+  `<|vision_start|><|image_pad|><|vision_end|>`. The images go through the Qwen3-VL vision tower (each copy at most 768 px a side, on
+  the 32-px grid), their tokens replace the pads, and the language tower runs with M-RoPE and deepstack; the same 15 taps are
+  normalised and bundled. `<image_k>` in the instruction stays plain text. The unconditional branch is the text-only null caption.
+  No padded-gist mask exists in ComfyUI (a prompt runs at its true length), so the denoiser's `textMask` stays refused.
+- **Sizes.** One image: scaled to cover the result size and centre-cropped; several: each cropped to the size trained for its aspect
+  ratio (multiples of 16 within 10% of 1 MP, least crop, then closest to 1 MP). The result size defaults to the first image's trained
+  size.
+- **Mask.** Not a model input. Bria's pipeline greys the masked region (flat 128 grey, mask binarised at 128, at the image's own
+  size, before any resize) out of the single source image; the edit then runs as an ordinary instruction edit. ComfyUI's node takes
+  no mask. A mask needs exactly one image.
+- **Guidance.** Edit-turbo uses 4 steps, guidance 1.0 (no unconditional pass; a negative prompt has no effect). Dev edits at its own
+  50 steps and CFG 5 with the same reference latents on both passes.
+- **Differences from the references.** Resampling uses the engine's bicubic (antialiased) kernel where ComfyUI and diffusers use
+  Lanczos for the crop; the vision copy is resized twice as in ComfyUI. Caption cleaning follows `parse_prompt`. Glyph text images
+  with an edit are refused. The vision tower's deepstack taps (5, 11, 17) and exact-GELU merger are ComfyUI's constants for
+  `qwen3vl_4b`, not read from the file.
+
 ## Quantization
 
 - `fibo2_dev_int8_convrot` holds 215 `int8_tensorwise` linears, every one with ConvRot 256: attention, cross-attention and
@@ -104,7 +136,7 @@ converter's source files were not available.
   and no images above that. `TEXT_IMAGES_START` is a `start_percent` that maps to sigma 0.9 under ComfyUI's shift, so a
   port should gate on sigma. It is a separate component and is not in the first engine PR; the engine refuses captions
   with `text_render` entries.
-- **Reference-image editing** (`context_latents`) and the edit-turbo conditioning node.
+- **Reference-image editing:** implemented, see "Editing" below. Unverified on real weights.
 - **Real-weight verification.** Pending. The bf16 DiT is 16.45 GB, so it needs a GPU host with enough VRAM and host RAM for
   the checkpoint.
 

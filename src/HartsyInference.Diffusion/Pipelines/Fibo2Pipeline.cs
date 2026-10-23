@@ -14,7 +14,7 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// <summary>Fibo 2.0 text-to-image. Flow-matching Euler over the FLUX.2 32-channel latent with the static 1.15 shift, classifier-free
 /// guidance against the null caption, and the FLUX.2 VAE decode with its BatchNorm denormalisation. The text encoder, denoiser and VAE
 /// are borrowed from the caller; the pipeline owns no weights.</summary>
-public sealed unsafe class Fibo2Pipeline : DiffusionPipelineBase
+public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
 {
     /// <summary>Width of the VAE's spatial compression; the denoiser's patch size adds a further factor of two.</summary>
     private const int VaeSpatialScale = 8;

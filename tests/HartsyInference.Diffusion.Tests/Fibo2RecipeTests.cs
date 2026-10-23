@@ -37,9 +37,22 @@ public sealed class Fibo2RecipeTests
     }
 
     [Fact]
-    public void Supports_DeclaresNothingBeyondTextToImage()
+    public void Supports_DeclaresEditingAndNothingElse()
     {
-        Assert.Equal(ImageFeatures.None, new Fibo2Recipe().Supports);
+        Fibo2Recipe recipe = new();
+
+        Assert.Equal(ImageFeatures.RefEdit | ImageFeatures.Inpaint, recipe.Supports);
+        Assert.Equal(recipe.Supports, ((IArchitectureRecipe)recipe).SupportsFor(null));
+    }
+
+    [Fact]
+    public void InputLimits_AllowFourImagesWithoutAnInitImage()
+    {
+        ImageInputLimits limits = new Fibo2Recipe().InputLimits;
+
+        Assert.Equal(4, limits.MaxImages);
+        Assert.Equal(4, limits.MaxReferences);
+        Assert.False(limits.ReferencesRequireInitImage);
     }
 
     [Fact]
