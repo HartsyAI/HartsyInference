@@ -547,12 +547,13 @@ try
             List<Regex> drops = [.. (values.GetValueOrDefault("--drop") ?? []).Select(Glob)];
             List<Regex> keeps = [.. (values.GetValueOrDefault("--keep-dtype") ?? []).Select(Glob)];
             int dropped = 0;
-            HashSet<string> sourceNvfp4Layers = new(StringComparer.Ordinal);
+            Dictionary<string, JsonNode?> sourceLayerConfigs = new(StringComparer.Ordinal);
             List<Tensor> owned = [];
             if (recipe is not null)
             {
                 Console.WriteLine($"Building '{recipe.Name}' from its recipe:");
-                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line), cpu));
+                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line), cpu,
+                    sourceLayerConfigs));
                 foreach ((string key, string value) in recipe.Metadata)
                     overrides.TryAdd(key, value);
             }
@@ -571,8 +572,8 @@ try
                 // A source's Comfy-layout marker names its NVFP4 groups by their source keys; carry it under the output keys.
                 foreach (SafeTensorsLoader loader in opened)
                 {
-                    foreach (string layer in Nvfp4Codec.MarkedLayers(loader.Metadata) ?? [])
-                        sourceNvfp4Layers.Add(prefix + MapKey(layer + ".weight")[..^".weight".Length]);
+                    foreach ((string layer, JsonNode? config) in Nvfp4Codec.MarkedLayerConfigs(loader.Metadata) ?? [])
+                        sourceLayerConfigs[prefix + MapKey(layer + ".weight")[..^".weight".Length]] = config?.DeepClone();
                 }
                 foreach ((string key, Tensor tensor) in tensors)
                 {
@@ -676,11 +677,18 @@ try
             // Not identity, so written even under --no-metadata: it is what marks the groups as Comfy layout for this
             // engine's loader and what makes ComfyUI read them as nvfp4 at all. Groups passed through from a marked source
             // keep their mark, or a later open would read them as ModelOpt; an unmarked source group stays unmarked.
+            // Each carried layer keeps its own config (a non-NVFP4 entry stays what it was); only layers quantized here get
+            // a fresh nvfp4 entry, and only layers that reach the output are listed.
             HashSet<string> outputKeys = new(all.Select(kv => kv.Key), StringComparer.Ordinal);
-            List<string> marked = [.. nvfp4Layers.Concat(sourceNvfp4Layers.Where(layer => outputKeys.Contains(layer + ".weight")
-                && !nvfp4Layers.Contains(layer))).Order(StringComparer.Ordinal)];
-            if (marked.Count > 0)
-                (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = Nvfp4Codec.QuantizationMetadata(marked);
+            JsonObject marker = (JsonObject)JsonNode.Parse(Nvfp4Codec.QuantizationMetadata(nvfp4Layers))!;
+            JsonObject markerLayers = (JsonObject)marker["layers"]!;
+            foreach ((string layer, JsonNode? config) in sourceLayerConfigs)
+            {
+                if (outputKeys.Contains(layer + ".weight") && !markerLayers.ContainsKey(layer))
+                    markerLayers[layer] = config?.DeepClone();
+            }
+            if (markerLayers.Count > 0)
+                (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = marker.ToJsonString();
             long inBytes = mergeSources.Sum(f => new FileInfo(f).Length);
             Console.WriteLine($"Writing {all.Count} tensors from {loaders.Count} file(s) ({Size(inBytes)})"
                 + (castTo is { } t ? $", cast to {t.Name}" : "") + $" to {Path.GetFileName(output)}...");
@@ -710,7 +718,8 @@ try
         }
         metadata = BuildMetadata();
         // The NVFP4 layout marker is a format fact about the copied tensors, not identity, so a rewrite keeps it.
-        if (!string.IsNullOrEmpty(quantMarker))
+        // Presence, not content: a malformed marker is copied so the loader still refuses it rather than reading ModelOpt.
+        if (quantMarker is not null)
             (metadata ??= new(StringComparer.Ordinal))["_quantization_metadata"] = quantMarker;
         Console.WriteLine($"Rewriting metadata; {Size(new FileInfo(input).Length)} of tensors copied unchanged...");
         payloadSha = SafeTensorsWriter.RewriteMetadata(input, output, metadata ?? []);

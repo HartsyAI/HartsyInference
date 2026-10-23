@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Lora;
+using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -40,7 +41,7 @@ internal sealed class Recipe
     /// loaders and the owned list alive until the write finishes.</summary>
     /// <param name="recipeDir">Where the recipe file lives; a component's <c>key_map</c> resolves against it.</param>
     public List<KeyValuePair<string, Tensor>> Build(string recipeDir, string sourceRoot, List<SafeTensorsLoader> loaders, List<Tensor> owned, List<string> sources,
-        Action<string> log, IBackend? backend = null)
+        Action<string> log, IBackend? backend = null, Dictionary<string, System.Text.Json.Nodes.JsonNode?>? layerConfigs = null)
     {
         List<KeyValuePair<string, Tensor>> tensors = [];
         foreach (RecipeComponent component in Components)
@@ -52,6 +53,32 @@ internal sealed class Recipe
             List<(Regex From, string To)> renames = [.. component.Renames.Select(r => (new Regex(r[0], RegexOptions.CultureInvariant), r[1]))];
             Dictionary<string, string>? keyMap = component.KeyMap is null ? null
                 : JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(Path.GetFullPath(Path.Combine(recipeDir, component.KeyMap))));
+            string? MapKey(string key)
+            {
+                string mapped = key;
+                if (keyMap is not null && !keyMap.TryGetValue(key, out mapped!)) return null;
+                foreach ((Regex from, string to) in renames)
+                {
+                    if (from.IsMatch(mapped))
+                    {
+                        mapped = from.Replace(mapped, to, 1);
+                        break;
+                    }
+                }
+                return component.Prefix + mapped;
+            }
+            // A component's layer configs (the Comfy-layout marker among them) follow its tensors to their output keys.
+            if (layerConfigs is not null)
+            {
+                foreach (SafeTensorsLoader loader in ls)
+                {
+                    foreach ((string layer, System.Text.Json.Nodes.JsonNode? config) in Nvfp4Codec.MarkedLayerConfigs(loader.Metadata) ?? [])
+                    {
+                        if (MapKey(layer + ".weight") is { } outputKey && outputKey.EndsWith(".weight", StringComparison.Ordinal))
+                            layerConfigs[outputKey[..^".weight".Length]] = config?.DeepClone();
+                    }
+                }
+            }
             foreach ((string key, Tensor tensor) in opened)
             {
                 string mapped = key;

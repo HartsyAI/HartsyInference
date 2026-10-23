@@ -57,6 +57,11 @@ internal static class Nvfp4LayoutNormalizer
         return [.. LayerMap(json).Select(p => p.Key)];
     }
 
+    /// <summary>Every listed layer with its config, or null when the file has no marker.</summary>
+    internal static IReadOnlyList<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>>? LayerConfigs(
+        IReadOnlyDictionary<string, string>? metadata)
+        => metadata is null || !metadata.TryGetValue(MetadataKey, out string? json) ? null : LayerMap(json);
+
     /// <summary>One marker for a shard set: each shard lists only its own layers, so the maps are united.</summary>
     internal static string MergeMarkers(string first, string next)
     {
