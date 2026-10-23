@@ -11,7 +11,7 @@ stable release will require. Dates are UTC.
 - **Fixed: multi-GPU campaign filters.** `tests/run-multigpu-campaign.sh` now fails before any GPU work if a filter matches zero tests, and its stale class names point at the consolidated DiT-sharding and video placement tests.
 - **Fixed: LTX-2 packed NVFP4 unpacks to F16, matching its eager open.** The resident DiT recorded no dense dtype, so the CUDA fallback unpacked it to BF16.
 - **Fixed: LTX-2 packed NVFP4 unpacks to F16, matching its eager open.** The resident DiT recorded no dense dtype, so the CUDA fallback unpacked it to BF16. Outputs can shift slightly on that host-fallback path (BF16 to F16).
-- **Changed: Wan context parallelism runs `numerics.wanF16` like one GPU.** The K/V exchange moves F16 rows, and rank 1 projects its own text context instead of reading rank 0's.
+- **Changed: Wan context parallelism runs `numerics.wanF16` like one GPU.** The K/V exchange moves F16 rows, and rank 1 projects its own text context instead of reading rank 0's. Image-context (I2V) forwards stay F32 under CP, as they do on one GPU.
 
 ## alpha.389
 

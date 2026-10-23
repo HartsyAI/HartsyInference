@@ -389,6 +389,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             // its own text context (the cache is per backend), so rank 1 prepares its copy here, not inside the fork.
             _transformer.PrewarmSequenceCaches(Backend, gt, gh, gw, promptEmbeds, negativeEmbeds);
             _transformer.PrewarmSequenceCaches(CpBackends![1], gt, gh, gw, promptEmbeds, negativeEmbeds);
+            CpBackends[1].FreeActivations();   // the prewarm's projection temporaries, before step 0 forwards
             RecordCpDecision($"active(frames {cpPlan.Ranks[0].FrameCount}+{cpPlan.Ranks[1].FrameCount})");
         }
 

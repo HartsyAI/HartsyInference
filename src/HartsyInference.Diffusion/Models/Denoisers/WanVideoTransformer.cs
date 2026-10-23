@@ -352,6 +352,9 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         foreach (Tensor encoder in encoders) GetOrBuildContext(backend, encoder, null, _config.InnerDim);
     }
 
+    internal Tensor? CachedContextForTests(IBackend backend, Tensor encoder) =>
+        _ctxCache.TryGetValue((encoder, backend), out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) cached) ? cached.Ctx : null;
+
     /// <summary>Host row slice of a host-authoritative <c>[rows, cols]</c> tensor (the rope cos/sin tables) — no
     /// backend involvement, safe from concurrent rank threads.</summary>
     private static Tensor SliceHostRows(Tensor src, int rowStart, int rowCount)
