@@ -27,6 +27,75 @@ public static unsafe class Nvfp4Codec
         -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
     ];
 
+    /// <summary>Rewrites a ModelOpt-layout NVFP4 weight into the Comfy layout every engine path reads. ModelOpt (NVIDIA's
+    /// exports, and this repo's repacker before it wrote Comfy layout) stores the E4M3 scales row-major as <c>[N, K/16]</c>
+    /// and the even element in the LOW nibble; Comfy stores the even element in the HIGH nibble and the scales in the blocked
+    /// layout, padded to 128 rows and 4 block columns with zeros. Returns new tensors the caller owns.</summary>
+    /// <param name="packed">U8 <c>[N, K/2]</c>, low nibble first.</param>
+    /// <param name="scale">F8E4M3 <c>[N, K/16]</c>, row-major.</param>
+    public static (Tensor Packed, Tensor BlockScale) FromModelOptLayout(Tensor packed, Tensor scale)
+    {
+        ArgumentNullException.ThrowIfNull(packed);
+        ArgumentNullException.ThrowIfNull(scale);
+        if (packed.DType != DType.U8 || packed.Shape.Rank != 2)
+            throw new ArgumentException($"NVFP4 packed weight must be U8 rank-2; got {packed.DType} {packed.Shape}.", nameof(packed));
+        long rows = packed.Shape[0], halfCols = packed.Shape[1], blockCols = halfCols * 2 / GroupSize;
+        if (scale.DType != DType.F8E4M3 || scale.Shape.Rank != 2 || scale.Shape[0] != rows || scale.Shape[1] != blockCols
+            || halfCols * 2 % GroupSize != 0)
+            throw new ArgumentException(
+                $"A ModelOpt NVFP4 scale is F8E4M3 [{rows}, {blockCols}] for packed [{rows}, {halfCols}]; got {scale.DType} {scale.Shape}.",
+                nameof(scale));
+        long paddedRows = (rows + 127) / 128 * 128, paddedCols = (blockCols + 3) / 4 * 4;
+        Tensor outPacked = new Tensor(new TensorShape(rows, halfCols), DType.U8);
+        Tensor outScale = new Tensor(new TensorShape(paddedRows, paddedCols), DType.F8E4M3) { Fp8ScaleFactor = scale.Fp8ScaleFactor };
+        outScale.AsSpan<byte>().Clear();
+        nint srcPacked = (nint)packed.DataPointer, dstPacked = (nint)outPacked.DataPointer;
+        nint srcScale = (nint)scale.DataPointer, dstScale = (nint)outScale.DataPointer;
+        CpuParallel.For((int)rows, rows * (halfCols + blockCols), r =>
+        {
+            byte* from = (byte*)srcPacked + r * halfCols, to = (byte*)dstPacked + r * halfCols;
+            for (long j = 0; j < halfCols; j++) to[j] = (byte)((from[j] << 4) | (from[j] >> 4));
+            byte* scaleRow = (byte*)srcScale + r * blockCols;
+            for (long c = 0; c < blockCols; c++)
+                ((byte*)dstScale)[BlockScaleSwizzle.SwizzledIndex(r, c, paddedCols)] = scaleRow[c];
+        });
+        return (outPacked, outScale);
+    }
+
+    /// <summary>Quantizes a weight to NVFP4 in the Comfy layout: ModelOpt's encoder (<see cref="ModelOptNvfp4Codec.Quantize"/>)
+    /// moved to the high-nibble, blocked-scale form by <see cref="FromModelOptLayout"/>. Companions are named from the weight
+    /// key's stem; the caller owns them. A file of these also needs <see cref="QuantizationMetadata"/> to load in ComfyUI.</summary>
+    public static List<KeyValuePair<string, Tensor>> QuantizeToComfyCompanions(string weightKey, ReadOnlySpan<float> values,
+        long rows, long cols)
+    {
+        List<KeyValuePair<string, Tensor>> modelOpt = ModelOptNvfp4Codec.QuantizeToCompanions(weightKey, values, rows, cols);
+        try
+        {
+            (Tensor packed, Tensor blockScale) = FromModelOptLayout(modelOpt[0].Value, modelOpt[1].Value);
+            return [new(modelOpt[0].Key, packed), new(modelOpt[1].Key, blockScale), modelOpt[2]];
+        }
+        finally
+        {
+            modelOpt[0].Value.Dispose();
+            modelOpt[1].Value.Dispose();
+        }
+    }
+
+    /// <summary>Each layer a file's <c>_quantization_metadata</c> lists, with its config as written, or null when the file
+    /// has none. A marker that is present but unreadable throws.</summary>
+    public static IReadOnlyList<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>>? MarkedLayerConfigs(
+        IReadOnlyDictionary<string, string>? metadata)
+        => Nvfp4LayoutNormalizer.LayerConfigs(metadata);
+
+    /// <summary>The file-level <c>_quantization_metadata</c> value ComfyUI turns into per-layer configs, naming each layer
+    /// (the weight key without <c>.weight</c>) as nvfp4. Its presence is what marks a group as Comfy layout on load.</summary>
+    public static string QuantizationMetadata(IEnumerable<string> layers)
+    {
+        Dictionary<string, Dictionary<string, string>> entries = new(StringComparer.Ordinal);
+        foreach (string layer in layers) entries[layer] = new() { ["format"] = "nvfp4" };
+        return System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object> { ["format_version"] = "1.0", ["layers"] = entries });
+    }
+
     /// <summary>Relabels a packed NVFP4 Linear weight so a backend can keep it RESIDENT — U8 <c>[N, K/2]</c> becomes a <see cref="DType.F4E2M1"/> <c>[N, K]</c> view over the same bytes with its scale companions attached through <see cref="Tensor.QuantInfo"/>. Returns false, writing <paramref name="packed"/> straight through, when the weight is not one this can serve; the caller then falls back to an eager dequant.
     ///
     /// <para>This is the memory lever for nvfp4 DiTs: unpacked at load, the official 18.72 GB LTX-2.5 distilled transformer is 42 GB and cannot be placed on a 24 GB card at all. Resident it stays at 0.5 byte/param and each GEMM unpacks one weight transiently. It is <b>not</b> a speed win — no consumer Ada or Ampere part has FP4 tensor cores, so the GEMM still runs in F16/BF16 off the unpacked copy.</para>

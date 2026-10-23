@@ -8,6 +8,18 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: NVFP4 files without a ComfyUI layer config are read as ModelOpt layout.**
+  - Before, every NVFP4 group was decoded as Comfy layout (blocked scales, high nibble first). A ModelOpt-layout file
+    (row-major scales, low nibble first) decoded as noise: correlation about 0.00 against the source weights,
+    against 0.995 for the right decode. That includes the repacked MiniMax-H3 NVFP4 build, sampled against the fp8 H3
+    DiT.
+  - A group with neither a `.comfy_quant` blob nor a file-level `_quantization_metadata` entry is now converted to Comfy
+    layout at open, and the conversion is logged. ComfyUI will not load an NVFP4 weight without such a config, and
+    every Comfy-sourced NVFP4 file on this host carries one.
+  - The repacker's `--quant nvfp4` writes Comfy layout with `_quantization_metadata`, so its files also load in ComfyUI.
+  - The eager NVFP4 dequants accept a block-scale tensor padded to the 128-row tile, and refuse one their blocked
+    indexing would read past (main read past an unpadded one).
+  - The H3 build still needs about 66 GB of host RAM to open until its DiT stays packed.
 - **Fixed: the native NVFP4 GEMM (`numerics.fp4Native`, Blackwell) is safe to switch on.**
   - It multiplies by the weight's own scale factor, the alpha the F16 damps of Z-Image, Flux.1, Chroma and Flux.2
     scale, so Z-Image's NVFP4 build no longer decodes NaN (RTX 5090: 131 ms per step, against 278 for the F16 build).

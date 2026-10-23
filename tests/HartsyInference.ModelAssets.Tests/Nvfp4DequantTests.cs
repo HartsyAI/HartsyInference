@@ -415,4 +415,47 @@ public sealed unsafe class Nvfp4DequantTests
         float[] dec = Decode(packed, scales, global, rows, cols);
         AssertWithinBlockBound(src.ToArray(), dec, rows, cols, global, d.Name);
     }
+
+    /// <summary>Padding to the 128-row, 4-column tile is accepted; a scale tensor larger than that is a mismatch, and so is
+    /// one padded in a single dimension, whose blocked indexing would read past its end (row 1 of [2, 4] is index 16).</summary>
+    [Theory]
+    [InlineData(128, 4, true)]
+    [InlineData(128, 1, true)]
+    [InlineData(2, 1, false)]
+    [InlineData(2, 4, false)]
+    [InlineData(256, 4, false)]
+    [InlineData(128, 8, false)]
+    public void DequantNvfp4_AcceptsPaddingOnly(int scaleRows, int scaleCols, bool accepted)
+    {
+        using Tensor packed = new(new TensorShape(2, 8), DType.U8);
+        using Tensor blockScales = new(new TensorShape(scaleRows, scaleCols), DType.F8E4M3);
+        if (accepted)
+        {
+            using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f);
+            using Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f);
+        }
+        else
+        {
+            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f));
+            Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
+        }
+    }
+
+    /// <summary>A stride below a whole column tile cannot address a second row tile: for a [129, 8] weight, scales [256, 2]
+    /// fit every bound yet put row 128 on row 0's bytes. The full [256, 4] tile is accepted.</summary>
+    [Theory]
+    [InlineData(256, 2, false)]
+    [InlineData(256, 4, true)]
+    public void DequantNvfp4_RefusesASubTileStrideAcrossRowTiles(int scaleRows, int scaleCols, bool accepted)
+    {
+        using Tensor packed = new(new TensorShape(129, 8), DType.U8);
+        using Tensor blockScales = new(new TensorShape(scaleRows, scaleCols), DType.F8E4M3);
+        if (accepted)
+        {
+            using Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f);
+            return;
+        }
+        Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, 1f));
+        Assert.Throws<ArgumentException>(() => CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, 1f));
+    }
 }
