@@ -58,7 +58,7 @@ public sealed class Fibo2RecipePipeline : IRecipePipeline
         if (!IsDefaultSampler(request.Sampler) || !IsDefaultSchedule(request.Scheduler))
             throw new NotSupportedException("Fibo 2.0 samples only with its built-in flow-matching Euler; drop the sampler and schedule selection.");
 
-        int[] conditional = Fibo2PromptTemplate.Tokenize(_tokenizer, Fibo2PromptTemplate.CaptionFor(request.Prompt));
+        int[] conditional = Fibo2PromptTemplate.TokenizePrompt(_tokenizer, request.Prompt);
         int[] unconditional = Fibo2PromptTemplate.Tokenize(_tokenizer, Fibo2PromptTemplate.NullCaption);
 
         // Rounded down to the 16-pixel grid (VAE 8× and the denoiser's 2×2 patch), as the Flux.2 recipe does.

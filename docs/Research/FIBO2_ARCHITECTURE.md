@@ -158,6 +158,19 @@ with kohya suffixes `lora_down.weight` / `lora_up.weight` / `alpha` (BF16 scalar
 - **Img2img and mask inpaint** (engine latent blend, `Fibo2Pipeline.Img2Img.cs`): implemented on the CPU-tested seams, not run on
   real weights. Bria's masked edit (white = regenerate) conditions the model on the image and mask: that is reference
   editing below, not this path. The two share the white = regenerate convention only.
+
+- **JSON captions: done.** `Fibo2PromptTemplate.Normalize` ports ComfyUI's `parse_prompt` and the caption step of
+  `tokenize_with_weights` (`Fibo2CaptionCleaner`, `PythonJson`): compact separators, empty values and the score keys dropped,
+  a non-object prompt as written, a caption with nothing left as `{}`, the empty prompt as the untouched null caption. Tests
+  hold strings produced by running ComfyUI's own functions.
+- **Glyph text images: prompt side done, rasteriser and vision path open.** Done: the two caption variants (`image_tokens`
+  empty, or the vision marker), the id splice for a given pad count per image (`TokenizeWithImages`), and the sigma 0.9 gate
+  (`UsesGlyphImages`). The engine still refuses a caption with a `text_render` entry that has text. Blocked: ComfyUI draws each
+  entry with Pillow's built-in font (`ImageFont.load_default(20)`, the bundled Aileron TTF through FreeType, with hinting and
+  grayscale antialiasing). The font is not in the repo or under the model root, and matching the bitmaps needs a FreeType
+  equivalent. Still to wire after that: the Qwen3-VL vision tower (the checkpoint has all 315 `model.visual.*` tensors;
+  `Qwen3VlVisionEncoder` exists), multi-layer taps with M-RoPE and deepstack, and the two-pass encode in `Fibo2Pipeline`
+  (gist count from each pass's own length).
 - **Reference-image editing** (`context_latents`) and the edit-turbo conditioning node.
 - **Real-weight verification.** Pending. The bf16 DiT is 16.45 GB, so it needs a GPU host with enough VRAM and host RAM for
   the checkpoint.
