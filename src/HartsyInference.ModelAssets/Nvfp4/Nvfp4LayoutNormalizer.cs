@@ -15,7 +15,8 @@ internal static class Nvfp4LayoutNormalizer
     /// <c>[N, K/16]</c> are left alone.</summary>
     public static List<Tensor> ConvertModelOptGroups(Dictionary<string, Tensor> weights, IReadOnlyDictionary<string, string>? metadata)
     {
-        HashSet<string>? fileLayers = FileLevelLayers(metadata);
+        // Read only once a group without its own blob needs it, so a file with no NVFP4 never parses the marker.
+        Lazy<HashSet<string>?> fileLayers = new(() => FileLevelLayers(metadata));
         List<Tensor> converted = [];
         int groups = 0;
         foreach (string key in weights.Keys.ToList())
@@ -30,7 +31,7 @@ internal static class Nvfp4LayoutNormalizer
             {
                 continue;
             }
-            if (weights.ContainsKey(stem + ".comfy_quant") || fileLayers?.Contains(stem) == true) continue;
+            if (weights.ContainsKey(stem + ".comfy_quant") || fileLayers.Value?.Contains(stem) == true) continue;
             // Shape cannot tell the layouts apart once rows are a multiple of 128 and K/16 of 4, so the missing config is
             // the only evidence: a Comfy group without one would be scrambled here.
             if (scale.Shape[0] != packed.Shape[0] || scale.Shape[1] * Nvfp4Codec.GroupSize != packed.Shape[1] * 2) continue;
@@ -48,22 +49,44 @@ internal static class Nvfp4LayoutNormalizer
         return converted;
     }
 
-    /// <summary>The layer names a file-level <c>_quantization_metadata</c> lists, or null when the file has none.</summary>
+    /// <summary>The layer names a file-level <c>_quantization_metadata</c> lists, or null when the file has none. A marker
+    /// that is present but unreadable throws: read as absent, it would turn a Comfy-layout file into a ModelOpt one.</summary>
     internal static HashSet<string>? FileLevelLayers(IReadOnlyDictionary<string, string>? metadata)
     {
-        if (metadata is null || !metadata.TryGetValue("_quantization_metadata", out string? json) || string.IsNullOrEmpty(json))
-            return null;
+        if (metadata is null || !metadata.TryGetValue(MetadataKey, out string? json)) return null;
+        return [.. LayerMap(json).Select(p => p.Key)];
+    }
+
+    /// <summary>One marker for a shard set: each shard lists only its own layers, so the maps are united.</summary>
+    internal static string MergeMarkers(string first, string next)
+    {
+        System.Text.Json.Nodes.JsonObject merged = Parse(first);
+        System.Text.Json.Nodes.JsonObject layers = (System.Text.Json.Nodes.JsonObject)merged["layers"]!;
+        foreach ((string name, System.Text.Json.Nodes.JsonNode? config) in LayerMap(next))
+            layers[name] = config?.DeepClone();
+        return merged.ToJsonString();
+    }
+
+    internal const string MetadataKey = "_quantization_metadata";
+
+    private static List<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>> LayerMap(string json)
+        => [.. ((System.Text.Json.Nodes.JsonObject)Parse(json)["layers"]!)];
+
+    private static System.Text.Json.Nodes.JsonObject Parse(string json)
+    {
+        System.Text.Json.Nodes.JsonNode? root;
         try
         {
-            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("layers", out System.Text.Json.JsonElement layers)
-                || layers.ValueKind != System.Text.Json.JsonValueKind.Object)
-                return null;
-            return [.. layers.EnumerateObject().Select(p => p.Name)];
+            root = System.Text.Json.Nodes.JsonNode.Parse(json);
         }
-        catch (System.Text.Json.JsonException)
+        catch (System.Text.Json.JsonException error)
         {
-            return null;
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"The checkpoint's {MetadataKey} is not valid JSON ({error.Message}), so which NVFP4 groups are Comfy layout is unknown.");
         }
+        if (root is not System.Text.Json.Nodes.JsonObject obj || obj["layers"] is not System.Text.Json.Nodes.JsonObject)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"The checkpoint's {MetadataKey} has no \"layers\" object, so which NVFP4 groups are Comfy layout is unknown.");
+        return obj;
     }
 }

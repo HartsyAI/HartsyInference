@@ -166,7 +166,13 @@ public sealed class CheckpointSource : IDisposable
                 foreach (KeyValuePair<string, Tensor> entry in shard.Weights) merged[entry.Key] = entry.Value;
                 foreach (KeyValuePair<string, SafeTensorDescriptor> entry in shard.Header.Descriptors)
                     descriptors[entry.Key] = entry.Value;
-                foreach (KeyValuePair<string, string> entry in shard.Header.Metadata) metadata[entry.Key] = entry.Value;
+                foreach (KeyValuePair<string, string> entry in shard.Header.Metadata)
+                {
+                    // Each shard's marker lists only its own layers; the set needs all of them.
+                    metadata[entry.Key] = entry.Key == Nvfp4LayoutNormalizer.MetadataKey
+                        && metadata.TryGetValue(entry.Key, out string? earlier)
+                        ? Nvfp4LayoutNormalizer.MergeMarkers(earlier, entry.Value) : entry.Value;
+                }
             }
 
             CheckpointHeader header = new CheckpointHeader(format, descriptors, metadata);

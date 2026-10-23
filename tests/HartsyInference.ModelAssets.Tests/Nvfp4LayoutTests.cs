@@ -76,12 +76,40 @@ public sealed class Nvfp4LayoutTests
         Assert.True(Pearson(source, opened.Weights["layer.weight"]) > 0.99);
     }
 
-    private static float[] Source()
+    /// <summary>Each shard's marker lists only its own layers. Opened as a set, the first shard's Comfy group must stay marked;
+    /// keeping only the last shard's marker would re-lay it as ModelOpt.</summary>
+    [Fact]
+    public void ShardSet_UnitesEveryShardsMarker()
     {
-        float[] values = new float[Rows * Cols];
+        // 256 rows: tile-aligned, so the Comfy scales have exactly the ModelOpt shape and only the marker tells them apart.
+        const int AlignedRows = 256;
+        float[] source = Source(AlignedRows);
+        using TempFile first = Write(Nvfp4Codec.QuantizeToComfyCompanions("a.weight", source, AlignedRows, Cols),
+            new() { ["_quantization_metadata"] = Nvfp4Codec.QuantizationMetadata(["a"]) });
+        using TempFile second = Write(Nvfp4Codec.QuantizeToComfyCompanions("b.weight", source, AlignedRows, Cols),
+            new() { ["_quantization_metadata"] = Nvfp4Codec.QuantizationMetadata(["b"]) });
+        using CheckpointSource opened = CheckpointSource.OpenShards([first.Path, second.Path]);
+        Assert.True(Pearson(source, opened.Weights["a.weight"]) > 0.99, $"first shard: r = {Pearson(source, opened.Weights["a.weight"]):F4}");
+        Assert.True(Pearson(source, opened.Weights["b.weight"]) > 0.99, $"second shard: r = {Pearson(source, opened.Weights["b.weight"]):F4}");
+    }
+
+    /// <summary>A marker that is present but unreadable is a format error, not the absence of a marker.</summary>
+    [Theory]
+    [InlineData("{not json")]
+    [InlineData("{\"layers\": []}")]
+    public void MalformedMarker_IsRefused(string marker)
+    {
+        using TempFile file = Write(ModelOptNvfp4Codec.QuantizeToCompanions("layer.weight", Source(), Rows, Cols),
+            new() { ["_quantization_metadata"] = marker });
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => CheckpointSource.Open(file.Path));
+    }
+
+    private static float[] Source(int rows = Rows)
+    {
+        float[] values = new float[rows * Cols];
         Random rng = new(23);
         // Row-dependent magnitudes, so a scale read from the wrong row or block shows up.
-        for (int r = 0; r < Rows; r++)
+        for (int r = 0; r < rows; r++)
         {
             float rowScale = 0.05f + 2f * (float)rng.NextDouble();
             for (int c = 0; c < Cols; c++) values[r * Cols + c] = (float)(rng.NextDouble() * 2 - 1) * rowScale;
