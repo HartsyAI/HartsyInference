@@ -9,7 +9,7 @@ public static class CudaMemory
 {
     /// <summary>Allocator OOM-retry sequences begun on this thread. A caller that snapshots it can tell "this call hit memory pressure" from a deterministic driver fault.</summary>
     [ThreadStatic] private static long _oomRetries;
-    public static long OomRetries { get => _oomRetries; private set => _oomRetries = value; }
+    internal static long OomRetries { get => _oomRetries; private set => _oomRetries = value; }
 
     /// <summary>Resolves the calling thread's OWNING BACKEND's compute stream via <see cref="GpuTransferHelper"/>'s ambient state (0 = none; falls back to the synchronous allocator). The old per-context stream registry could not tell two same-device backends apart (they share the primary context handle), so backend A's transients allocated/freed on backend B's stream — the same class of cross-stream poison the registry was originally built to stop across devices.</summary>
     private static nint ResolveStream() => GpuTransferHelper.ResolvedStreamHandle;

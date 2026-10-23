@@ -3183,21 +3183,20 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pBiasCast = 0, pOutput = 0;
         bool cachedOutput = false;
-        long oomRetriesAtStart = CudaMemory.OomRetries;
-        string stage = "setup";
+        Conv3DStageTracker stage = new Conv3DStageTracker(() => CudaMemory.OomRetries);
         try
         {
             _cudnnConv ??= new CudnnConv(_stream.Handle);
-            stage = "input copy";
+            stage.Enter("input copy");
             pInput = GpuTransferHelper.CopyToDevice(paddedFrames);
-            stage = "weight copy";
+            stage.Enter("weight copy");
             pWeight = GpuTransferHelper.CopyToDevice(weight);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
-            stage = "output alloc";
+            stage.Enter("output alloc");
             pOutput = GpuTransferHelper.AllocateDevice(outBytes);
             // Only the channels-last engines are worth a native 3-D call (NCDHW ran ~37 TFLOPS, below the per-tap path).
             // The frame-major [T, C, H·W] input transposes per frame straight into NDHWC.
-            stage = "channels-last conv";
+            stage.Enter("channels-last conv");
             if (!TryConvChannelsLast(pInput, pWeight, pOutput, (int)t, c, h * w, k, kt * r * sw, 1, outT * outH * outW,
                     [1, c, t, h, w], [k, c, kt, r, sw], [1, k, outT, outH, outW], [strideT, strideH, strideW], [0, padH, padW],
                     dataType, (int)weight.DType.ComputeByteCount(1)))
@@ -3206,17 +3205,17 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
             if (bias is not null)
             {
-                stage = "bias copy";
+                stage.Enter("bias copy");
                 pBias = GpuTransferHelper.CopyToDevice(bias);
                 ulong biasPtr = pBias;
                 if (bias.DType != output.DType)
                 {
-                    stage = "bias cast";
+                    stage.Enter("bias cast");
                     pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
                     CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
                     biasPtr = pBiasCast;
                 }
-                stage = "bias add";
+                stage.Enter("bias add");
                 int spatial = checked((int)(outT * outH * outW)), total = checked((int)(k * outT * outH * outW));
                 if (output.DType == DType.F16) _kernels!.LaunchBiasAddF16(pOutput, biasPtr, (int)k, spatial, total, _stream.Handle);
                 else if (output.DType == DType.BF16) _kernels!.LaunchBiasAddBf16(pOutput, biasPtr, (int)k, spatial, total, _stream.Handle);
@@ -3232,13 +3231,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            if (!Conv3DFailurePolicy.DisablesSession(CudaMemory.OomRetries - oomRetriesAtStart))
+            if (!stage.DisablesSession)
             {
-                HartsyInference.Core.Logging.Logs.Info($"[cuDNN conv] 3-D convolution fell back to per-tap for this call under memory pressure at {stage}: {ex.Message}");
+                HartsyInference.Core.Logging.Logs.Info($"[cuDNN conv] 3-D convolution fell back to per-tap for this call under memory pressure at {stage.Name}: {ex.Message}");
                 return false;
             }
             _cudnnConv3dDead = true;
-            HartsyInference.Core.Logging.Logs.Warning($"[cuDNN conv] 3-D convolution failed at {stage}; causal 3-D convs use per-tap 2-D convolution for the rest of the session: {ex.Message}");
+            HartsyInference.Core.Logging.Logs.Warning($"[cuDNN conv] 3-D convolution failed at {stage.Name}; causal 3-D convs use per-tap 2-D convolution for the rest of the session: {ex.Message}");
             return false;
         }
         finally
