@@ -385,8 +385,10 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             (long free1, _) = CpBackends![1].GetVramInfo();
             cpPlan = CpSequencePlan.Create(gt, gh * gw, [free0, free1]);
             cpExchange = new CpKvExchange(cpPlan);
-            // First-touch of the shared rope/context caches must happen before the rank threads fork.
+            // First-touch of the shared rope/context caches must happen before the rank threads fork. Each rank projects
+            // its own text context (the cache is per backend), so rank 1 prepares its copy here, not inside the fork.
             _transformer.PrewarmSequenceCaches(Backend, gt, gh, gw, promptEmbeds, negativeEmbeds);
+            _transformer.PrewarmSequenceCaches(CpBackends![1], gt, gh, gw, promptEmbeds, negativeEmbeds);
             RecordCpDecision($"active(frames {cpPlan.Ranks[0].FrameCount}+{cpPlan.Ranks[1].FrameCount})");
         }
 
@@ -985,10 +987,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     }
 
     /// <summary>The dtype the T2V/TI2V loop's attention and FFN branches compute in: F16 only when no forward can take an F32
-    /// path (per-frame timesteps, the step cache, context parallelism) on any backend the loop runs on, so a reserve sized from
-    /// it never undercounts.</summary>
+    /// path (per-frame timesteps, the step cache) on any backend the loop runs on, so a reserve sized from it never undercounts.</summary>
     private DType DenoiseActivation(bool singleGroup) => DenoiseActivation(_transformer, Backend, CfgParallelBackend,
-        CpBackends?.Count ?? 0, StepCacheEnv.ReadThreshold() > 0f, singleGroup);
+        StepCacheEnv.ReadThreshold() > 0f, singleGroup);
 
     /// <summary>Pins <c>numerics.wanF16</c> and <c>numerics.ditF16</c> at their current values on this async flow, over the request's
     /// own settings, so a settings change mid-generation cannot run a forward in a dtype the reserve was not sized for.</summary>
@@ -998,9 +999,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
 
     /// <summary><see cref="DenoiseActivation(bool)"/> over explicit inputs.</summary>
     internal static DType DenoiseActivation(WanVideoTransformer transformer, IBackend backend, IBackend? cfgParallel,
-        int contextParallelRanks, bool stepCache, bool singleGroup)
+        bool stepCache, bool singleGroup)
     {
-        bool eligible = singleGroup && !stepCache && contextParallelRanks < 2;
+        bool eligible = singleGroup && !stepCache;
         // numerics.wanF16 and numerics.ditF16 hold for a whole generation, the CFG worker included, so every forward agrees with this.
         DType act = transformer.BranchActivation(backend, eligible);
         return cfgParallel is { } second && transformer.BranchActivation(second, eligible) != act ? DType.F32 : act;
