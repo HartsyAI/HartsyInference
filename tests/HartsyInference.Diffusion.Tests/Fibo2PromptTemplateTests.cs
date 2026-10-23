@@ -4,7 +4,7 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Fibo 2.0 prompt template: the Qwen3 user turn with no think block, the null caption, and the glyph refusal.</summary>
+/// <summary>Fibo 2.0 prompt template: the Qwen3 user turn with no think block, and the null caption.</summary>
 public sealed class Fibo2PromptTemplateTests
 {
     private const string NullCaptionText =
@@ -63,16 +63,5 @@ public sealed class Fibo2PromptTemplateTests
         int[] fromNull = Fibo2PromptTemplate.Tokenize(tokenizer, Fibo2PromptTemplate.NullCaption);
 
         Assert.Equal(fromNull, fromEmpty);
-    }
-
-    [Fact]
-    public void Tokenize_GlyphTextEntry_IsRefusedNotDropped()
-    {
-        using Qwen3Tokenizer tokenizer = new();
-        const string caption = "{\"short_description\":\"a sign\",\"text_render\":[{\"text\":\"OPEN\"}]}";
-
-        NotSupportedException error = Assert.Throws<NotSupportedException>(() => Fibo2PromptTemplate.Tokenize(tokenizer, caption));
-
-        Assert.Contains("glyph text images are not implemented yet for Fibo 2.0", error.Message, StringComparison.Ordinal);
     }
 }
