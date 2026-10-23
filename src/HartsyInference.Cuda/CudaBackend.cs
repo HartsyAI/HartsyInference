@@ -801,7 +801,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool CanRunResidentBlockScaled(Tensor weight, QuantWeightInfo info, int weightRowOffset, int weightRowCount)
     {
         if (BlockScaleFormats.FromQuantFormat(info.Format) is not { } format) return false;
-        if (weightRowOffset != 0 || weightRowCount >= 0) return false;
         if (_kernels is null || weight.Shape.Rank != 2 || info.BlockScale is not { Shape.Rank: 2 } blockScale) return false;
         switch (format)
         {
@@ -950,8 +949,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             return;
         }
-        string reason = weightRowOffset != 0 || weightRowCount >= 0 ? "a row range cannot address the packed layout"
-            : _kernels is null ? "no kernels are loaded"
+        string reason = _kernels is null ? "no kernels are loaded"
             : weight.Shape.Rank != 2 ? $"the weight is rank-{weight.Shape.Rank}, not a matrix"
             : info.BlockScale is not { Shape.Rank: 2 } ? "the block-scale companion is not rank-2"
             : "the companion's dtype or shape does not describe this weight (see CanRunResidentBlockScaled)";
@@ -2078,7 +2076,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
         // A resident block-scaled weight keeps its scales in a separate swizzled tensor, so the generic CastOnGpu path
         // cannot touch it (that helper is pointer-level and never sees the companions). A layer the unpack kernel
-        // cannot serve — no PTX, a row range, a companion that does not describe this weight — is unpacked on the
+        // cannot serve — no PTX, a companion that does not describe this weight — is unpacked on the
         // host here or it cannot run at all.
         if (weight.QuantInfo is { BlockScale: not null } packedInfo
             && BlockScaleFormats.FromQuantFormat(packedInfo.Format) is { } packedFormat

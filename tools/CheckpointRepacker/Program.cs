@@ -62,6 +62,8 @@ MERGE AND CAST (safetensors)
                         .absmax, .quant_map and .quant_state.bitsandbytes__nf4; NVFP4 writes .weight_scale
                         (E4M3, blocked) and .weight_scale_2 (F32) in ComfyUI's layout, listed in _quantization_metadata.
                         2D weights that fail the shape rule are left full precision and listed.
+  --quant-only <pattern>  Quantize only the .weight keys that match (* and ? wildcards). Repeatable. e.g.
+                        'blocks.*.attn.*' 'blocks.*.mlp.*' to keep norms, AdaLN and embedders as the source has them.
                         An FP8 block-scaled single .safetensors with --quant nf4 is streamed one weight at a time to
                         a single output file, with <output>.manifest.json beside it.
 
@@ -107,7 +109,7 @@ EXAMPLES
 // The tool prints its own progress; the engine's info lines would repeat it.
 Logs.MinLevel = LogLevel.Warning;
 string[] pickleExtensions = [".pt", ".pth", ".bin", ".th", ".ckpt"];
-string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha", "--stands-in-for", "--quant"];
+string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha", "--stands-in-for", "--quant", "--quant-only"];
 string[] flagOptions = ["--recursive", "--allow-partial", "--no-metadata", "--force", "--help", "-h", "--list-models", "--tokenizer-from-tiktoken"];
 
 List<string> positionals = [];
@@ -269,6 +271,8 @@ foreach (string spec in values.GetValueOrDefault("--lora") ?? [])
     loras.Add((file, strength, loraAlpha ?? alpha, rs));
 }
 string? quantName = values.GetValueOrDefault("--quant")?.Last()?.ToLowerInvariant();
+if (quantName is null && values.ContainsKey("--quant-only"))
+    return Usage("--quant-only narrows --quant; give --quant too.");
 if (quantName is not null && quantName is not ("nf4" or "nvfp4"))
     return Usage($"--quant '{quantName}' is not supported; use nf4 or nvfp4.");
 if (quantName == "nf4" && inputs.Count == 1 && File.Exists(inputs[0]) && inputs[0].EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase)
@@ -620,6 +624,7 @@ try
             }
             HashSet<string> quantKeep = new(StringComparer.Ordinal);
             List<string> nvfp4Layers = [];
+            List<Regex> quantOnly = [.. (values.GetValueOrDefault("--quant-only") ?? []).Select(Glob)];
             if (quantName is not null)
             {
                 List<KeyValuePair<string, Tensor>> quantized = [];
@@ -627,6 +632,11 @@ try
                 int quantizedCount = 0;
                 foreach ((string key, Tensor tensor) in all)
                 {
+                    if (quantOnly.Count > 0 && !quantOnly.Any(q => q.IsMatch(key)))
+                    {
+                        quantized.Add(new(key, tensor));
+                        continue;
+                    }
                     if (!IsQuantTarget(key, tensor, quantName))
                     {
                         // A 2D float weight that fails the shape rule (NVFP4 needs cols % 16 == 0) stays full precision; report it.

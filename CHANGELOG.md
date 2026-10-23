@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **MiniMax-H3 NVFP4 DiTs stay packed on CUDA.** The DiT opens resident (no F16 twin: the unpack takes BF16 for its
+  F32 stream, as the fp8 build's GEMMs do) with the weight-cast cache off, so a native-layout NVFP4 build loads on
+  hosts the 66 GB F16 unpack overflowed. A row range of a resident weight (H3's chunked QKV) now unpacks on the
+  device instead of on the host every call. `CheckpointRepacker --quant-only <pattern>` limits `--quant` to matching
+  weights, for builds that keep norms, AdaLN and embedders as the source ships them.
 - **Fixed: multi-GPU campaign filters.** `tests/run-multigpu-campaign.sh` now fails before any GPU work if a filter matches zero tests, and its stale class names point at the consolidated DiT-sharding and video placement tests.
 
 ## alpha.389

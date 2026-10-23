@@ -124,7 +124,7 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
     }
 
     [Fact]
-    public void LinearWeightRows_TakesTheHostFallback_AndMatchesTheReferenceRows()
+    public void LinearWeightRows_UnpacksTheWholeWeightOnTheDevice_AndMatchesTheReferenceRows()
     {
         using CudaBackend? backend = TryOpenBackend();
         if (backend is null) { _output.WriteLine("SKIPPED: no CUDA backend"); return; }   // tier-lint: guarded
@@ -137,8 +137,7 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
         using Tensor output = new Tensor(new TensorShape(K, RowCount), DType.F32);
         try
         {
-            // A row range is a shape CanRunResidentNvfp4 refuses, so this drives the host-dequant branch at the top
-            // of LinearImpl rather than the kernel — the path that keeps such a layer runnable at all.
+            // The kernel unpacks the whole weight and the range is a pointer offset into that copy.
             backend.LinearWeightRows(output, identity, resident, null, RowOffset, RowCount);
             backend.Sync();
             ReadOnlySpan<float> got = output.AsReadOnlySpan<float>();
@@ -150,8 +149,8 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
                     float expected = Bf16ToF32(reference[(RowOffset + row) * K + col]);
                     maxAbs = Math.Max(maxAbs, Math.Abs(got[col * RowCount + row] - expected));
                 }
-            _output.WriteLine($"nvfp4 host-dequant fallback rows [{RowOffset}, {RowOffset + RowCount}): maxAbs={maxAbs:E3}");
-            Assert.True(maxAbs == 0.0, $"host-dequant fallback rows differ from the reference: maxAbs={maxAbs:E3}");
+            _output.WriteLine($"nvfp4 row range [{RowOffset}, {RowOffset + RowCount}): maxAbs={maxAbs:E3}");
+            Assert.True(maxAbs == 0.0, $"row-range rows differ from the reference: maxAbs={maxAbs:E3}");
         }
         finally
         {

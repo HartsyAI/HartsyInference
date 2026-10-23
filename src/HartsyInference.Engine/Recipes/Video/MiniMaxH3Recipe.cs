@@ -153,8 +153,13 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             // guard (its native-fp8 branch takes fp8/F32/F16 inputs only) for a 46% slowdown. The 2-layer parity
             // test passes both, so it does not gate this — only a real-weight run does.
             DType bodyDType = DType.F32;
-            MiniMaxH3Transformer transformer = LoadTransformer(assets.Dit, loaders, bodyDType,
+            MiniMaxH3Transformer transformer = LoadTransformer(assets.Dit, loaders, bodyDType, context.TransformerBackends,
                 out MiniMaxH3Config config, out Dictionary<string, Tensor> ditWeights);
+            if (ditWeights.Values.Any(static w => w.DType == DType.F4E2M1))
+            {
+                // A packed DiT is only worth keeping packed if its unpacked copies do not refill the card.
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "MiniMaxH3Recipe");
+            }
             constructedTransformer = transformer;
             // Must precede LoadWeights: the merge swaps dictionary entries, and device caches are identity-keyed, so a
             // tensor already captured by a layer would keep serving its stale device copy.
@@ -344,9 +349,13 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
     /// <summary>Builds the DiT but leaves its weights unloaded, handing back the converted dict so a LoRA merge can land on it first — the merge rewrites entries in place, so it has to happen before the transformer reads them.</summary>
     private static MiniMaxH3Transformer LoadTransformer(string file, List<IDisposable> loaders,
-        DType bodyDType, out MiniMaxH3Config config, out Dictionary<string, Tensor> transformerWeights)
+        DType bodyDType, IEnumerable<IBackend> backends, out MiniMaxH3Config config,
+        out Dictionary<string, Tensor> transformerWeights)
     {
-        CheckpointSource source = CheckpointSource.Open(file);
+        // An NVFP4 build stays packed: its F16 unpack (66 GB) fits neither a card nor most hosts, so there is no eager
+        // twin to stand in for, and the unpack picks BF16 for the F32 stream as the fp8 build's GEMMs do.
+        CheckpointSource source = CheckpointSource.Open(file,
+            CheckpointOpenOptions.ForResidentNvfp4(backends) with { ResidentNvfp4DenseDType = null });
         loaders.Add(source);
         Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
         // The bf16 DiT is larger than host RAM, so it stays bf16 and the backend casts per call.
