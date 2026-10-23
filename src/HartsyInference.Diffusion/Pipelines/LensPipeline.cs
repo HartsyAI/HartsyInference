@@ -106,8 +106,6 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         // at negative positions and drop out, exactly as a trimmed template prefix should.
         ScaleLayers(positiveLayers, promptWeights);
         ScaleLayers(negativeLayers, negativeWeights);
-        DenoiserProbe.Condition("cond", positiveLayers);
-        DenoiserProbe.Condition("uncond", negativeLayers);
         encSw.Stop();
         Logs.Info($"Text encoding done in {encSw.ElapsedMilliseconds}ms (S_txt+={positiveLayers[0].Shape[1]}, " +
                   $"S_txt-={negativeLayers?[0].Shape[1] ?? 0})");
@@ -169,6 +167,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         bool useCfg = cfgScale > 1.0f;
         if (useCfg && negativeLayers is null)
             throw new ArgumentException("CfgScale > 1.0 requires negativeLayers.", nameof(negativeLayers));
+        DenoiserProbe.Condition("cond", positiveLayers);
+        DenoiserProbe.Condition("uncond", useCfg ? negativeLayers : null);
 
         // Lens uses vae_scale_factor = 16 (Flux.2 VAE 8× + pipeline-side 2×2 patchify).
         // Round image dims to a multiple of 16 so latent grids tile cleanly.
