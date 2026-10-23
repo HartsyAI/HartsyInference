@@ -118,6 +118,7 @@ public sealed partial class CudaBackend
             ulong o = pOut + (ulong)c.Output.Offset * (f32Out ? 4UL : 2UL);
             for (int it = -2; it < iterations; it++)
             {
+                ZeroInt8V2Counters(workspace, (long)c.Batch * c.Heads);
                 CudaDriverApi.cuEventRecord(events[0], _stream.Handle).ThrowOnError();
                 _kernels!.LaunchInt8V2Stats(f32, k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch, c.Heads,
                     c.ValidKvLength, _stream.Handle);
