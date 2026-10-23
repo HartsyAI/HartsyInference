@@ -34,7 +34,7 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
     /// <summary>Creates a Fibo 2.0 pipeline over borrowed components. <paramref name="bnMean"/> and <paramref name="bnVar"/> are the
     /// FLUX.2 VAE's F32 BatchNorm statistics over the patchified 128-channel latent.</summary>
     public Fibo2Pipeline(IBackend backend, LlamaStyleEncoder textEncoder, Fibo2Transformer transformer, VaeDecoder vaeDecoder,
-        Tensor bnMean, Tensor bnVar, Fibo2Config config, float bnEps = 1e-5f, VaeEncoder? vaeEncoder = null)
+        Tensor bnMean, Tensor bnVar, Fibo2Config config, float bnEps = 1e-4f, VaeEncoder? vaeEncoder = null)
         : base(backend)
     {
         ArgumentNullException.ThrowIfNull(textEncoder);

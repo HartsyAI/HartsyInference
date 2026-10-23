@@ -17,6 +17,7 @@ public sealed unsafe class Fibo2Block : IDisposable
     private readonly float _eps;
     private readonly bool _hasCrossAttention;
     private readonly AttentionLayerConfig _attentionConfig;
+    private readonly AttentionLayerConfig _selfAttentionConfig;
     private readonly SwiGluFfn _ffn;
     private readonly List<Tensor> _ownedSplits = [];
 
@@ -41,6 +42,12 @@ public sealed unsafe class Fibo2Block : IDisposable
             HeadDim = config.HeadDim,
             QkNorm = AttentionQkNorm.PerHead,
         };
+        // Self-attention runs F16 token-major (cuDNN fused / flash) as Z-Image does: the F32 dense route materializes the
+        // [heads, S, S] score matrix over the 4k+ token stream. Cross-attention to the text bundle stays on the default route.
+        _selfAttentionConfig = _attentionConfig with
+        {
+            AllowF16 = true, TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
+        };
         _ffn = new SwiGluFfn(config.Dim, config.FfnDim);
     }
 
@@ -59,7 +66,7 @@ public sealed unsafe class Fibo2Block : IDisposable
         _ownedSplits.Add(q);
         _ownedSplits.Add(k);
         _ownedSplits.Add(v);
-        _selfAttention = new AttentionLayer(_attentionConfig, new AttentionLayerWeights
+        _selfAttention = new AttentionLayer(_selfAttentionConfig, new AttentionLayerWeights
         {
             Query = q,
             Key = k,
