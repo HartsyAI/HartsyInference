@@ -132,7 +132,12 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             // GEMM path for it"; Vulkan's quantized support covers GGUF blocks only.
             bool residentNvfp4 = context.Backend.Capabilities.SupportsQuantizedType(DType.F4E2M1);
             AddFile(context.CheckpointPath, loaders, merged);
-            LtxVideo2CheckpointConverter.ConvertedWeights conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
+            // The DiT file's own metadata: the file-level full_precision_matrix_mult marks it carries reach the resident path.
+            // Read before any side file is merged, so it is the checkpoint's header whichever later Convert call runs.
+            IReadOnlyDictionary<string, string>? metadata = loaders.OfType<CheckpointSource>()
+                .FirstOrDefault(l => l.Header.Descriptors.Keys.Any(LtxVideo2CheckpointConverter.IsTransformerKey))
+                ?.Header.Metadata;
+            LtxVideo2CheckpointConverter.ConvertedWeights conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4, metadata);
 
             if (conv.Transformer.Count == 0)
             {
@@ -148,9 +153,6 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             // BEFORE any side model is fetched — that is exactly what tells a split "diffusion_models"-only LTX-2.5
             // checkpoint apart from a split LTX-2.3 one, so the auto-download below reaches for the right side files
             // instead of guessing 2.3 (the family this recipe originally shipped for).
-            IReadOnlyDictionary<string, string>? metadata = loaders.OfType<CheckpointSource>()
-                .FirstOrDefault(l => l.Header.Descriptors.Keys.Any(LtxVideo2CheckpointConverter.IsTransformerKey))
-                ?.Header.Metadata;
             LtxVideo2Config config = LtxVideo2VariantDetector.Detect(metadata, conv.Transformer.ContainsKey);
             bool isV25 = config.UseKeyframesAbsPosEmbedding;
 
@@ -174,7 +176,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                     AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                     AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                 }
-                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
+                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4, metadata);
             }
             if (conv.Vae.Count == 0)
             {
@@ -189,7 +191,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 Logs.Info("[LtxVideo2Recipe] Split LTX-2.5 model (no bundled Gemma-4 text tower) — auto-downloading "
                     + "side file (mcmonkey/swarm-models ungated repack, avoids the gated Lightricks/LTX-2.5 repo).");
                 AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Gemma4Ltx25, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
-                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
+                conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4, metadata);
             }
 
             Logs.Info($"[LtxVideo2Recipe] Converted {conv.Transformer.Count} DiT, {conv.Connectors.Count} connector, {conv.Vae.Count} VAE, "

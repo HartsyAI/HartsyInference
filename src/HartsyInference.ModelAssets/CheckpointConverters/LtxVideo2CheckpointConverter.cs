@@ -214,13 +214,15 @@ public sealed class LtxVideo2CheckpointConverter
 
     /// <summary>Routes a flat weight dictionary (single file or merged shards) into the per-component buckets.</summary>
     /// <param name="residentNvfp4">Keep an nvfp4 build packed instead of unpacking it to BF16 at load. Only a caller whose backend can consume a packed weight may ask for it — the official 18.72 GB LTX-2.5 distilled nvfp4 DiT unpacks to 42 GB, so this is the difference between fitting a 24 GB card and not.</param>
-    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, bool residentNvfp4 = false)
+    /// <param name="fileMetadata">The file's own <c>__metadata__</c>, so a file-level <c>full_precision_matrix_mult</c> mark reaches the resident path for layers with no per-layer blob.</param>
+    public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights, bool residentNvfp4 = false,
+        IReadOnlyDictionary<string, string>? fileMetadata = null)
     {
         // Folds every quantized build's companions onto the weight before routing: the LTX-2.5 comfy-int8-convrot DiT
         // keeps its I8 bytes with the row scale on Tensor.QuantInfo, fp8 builds get Fp8ScaleFactor.
         // A resident nvfp4 group records F16 as its dense twin: the eager unpack below is F16, so the packed path must be too.
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights, residentNvfp4: residentNvfp4,
-            nvfp4DenseDType: DType.F16);
+            nvfp4DenseDType: DType.F16, fileMetadata: fileMetadata);
 
         Dictionary<string, Tensor> transformer = new(allWeights.Count);
         Dictionary<string, Tensor> connectors = new(256);

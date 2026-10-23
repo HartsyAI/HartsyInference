@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using Xunit;
 
@@ -90,5 +91,41 @@ public sealed unsafe class Nvfp4FullPrecisionPolicyTests
         Assert.True(result["b.weight"].QuantInfo!.NativeGemmEligible, "the per-layer blob is authoritative over the file-level mirror.");
         Assert.True(result["c.weight"].QuantInfo!.NativeGemmEligible);
         Assert.False(result["d.weight"].QuantInfo!.NativeGemmEligible, "the nested params spelling is read the same as the top-level one.");
+    }
+
+    [Fact]
+    public void LtxConvert_FileLevelMark_ReachesResidentPath_AndBlobStillWins()
+    {
+        const string flagged = "model.diffusion_model.file.a";
+        const string blobbed = "model.diffusion_model.blob.b";
+        Dictionary<string, Tensor> w = new Dictionary<string, Tensor>();
+        AddGroup(w, flagged, null);
+        AddGroup(w, blobbed, "{\"format\": \"nvfp4\"}");
+        Dictionary<string, string> metadata = new Dictionary<string, string>
+        {
+            ["_quantization_metadata"] = "{\"format_version\": \"1.0\", \"layers\": {"
+                + $"\"{flagged}\": {{\"format\": \"nvfp4\", \"full_precision_matrix_mult\": true}}, "
+                + $"\"{blobbed}\": {{\"format\": \"nvfp4\", \"full_precision_matrix_mult\": true}}}}}}",
+        };
+
+        LtxVideo2CheckpointConverter.ConvertedWeights c = LtxVideo2CheckpointConverter.Convert(w, residentNvfp4: true, fileMetadata: metadata);
+
+        Assert.False(c.Transformer["file.a.weight"].QuantInfo!.NativeGemmEligible,
+            "a file-level mark with no per-layer blob must reach the LTX-2 resident path.");
+        Assert.True(c.Transformer["blob.b.weight"].QuantInfo!.NativeGemmEligible,
+            "the per-layer blob is authoritative over the file-level mirror on the LTX-2 path too.");
+    }
+
+    [Fact]
+    public void LtxConvert_WithoutFileMetadata_FileLevelMarkIsNotApplied()
+    {
+        const string flagged = "model.diffusion_model.file.a";
+        Dictionary<string, Tensor> w = new Dictionary<string, Tensor>();
+        AddGroup(w, flagged, null);
+
+        LtxVideo2CheckpointConverter.ConvertedWeights c = LtxVideo2CheckpointConverter.Convert(w, residentNvfp4: true);
+
+        Assert.True(c.Transformer["file.a.weight"].QuantInfo!.NativeGemmEligible,
+            "control: with no metadata passed, the converter has no file-level policy to apply.");
     }
 }

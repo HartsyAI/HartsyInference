@@ -1,4 +1,3 @@
-using System.Text;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Quant;
@@ -67,8 +66,7 @@ internal static class Nvfp4LayoutNormalizer
         HashSet<string> flagged = new(StringComparer.Ordinal);
         foreach (KeyValuePair<string, System.Text.Json.Nodes.JsonNode?> layer in layers)
         {
-            if (layer.Value is null) continue;
-            if (ComfyQuantDescriptor.TryParse(Encoding.UTF8.GetBytes(layer.Value.ToJsonString()))?.FullPrecisionMatMul == true)
+            if (ComfyQuantDescriptor.TryParse(layer.Value)?.FullPrecisionMatMul == true)
                 flagged.Add(layer.Key);
         }
         return flagged;

@@ -681,7 +681,6 @@ public static unsafe class CheckpointConvertUtils
     /// <summary>Suffix of ComfyUI's per-output-row int8 dequant scale (the same suffix fp8 builds use for their per-tensor scalar; the weight's dtype is what tells the two apart).</summary>
     private const string WeightScaleSuffix = ".weight_scale";
 
-    /// <summary>Parses a <c>.comfy_quant</c> descriptor tensor, tolerating the trailing NUL padding a fixed-width U8 tensor can carry. Returns null when the tensor is not a descriptor or its JSON is unreadable.</summary>
     /// <summary>The layer's <c>full_precision_matrix_mult</c> policy as ComfyUI resolves it: its own blob when it has one, else the file-level config.</summary>
     private static bool FullPrecisionPolicy(IReadOnlyDictionary<string, Tensor> source, string baseKey, Lazy<HashSet<string>?> fileLevel)
     {
@@ -690,6 +689,7 @@ public static unsafe class CheckpointConvertUtils
         return fileLevel.Value?.Contains(baseKey) == true;
     }
 
+    /// <summary>Parses a <c>.comfy_quant</c> descriptor tensor, tolerating the trailing NUL padding a fixed-width U8 tensor can carry. Returns null when the tensor is not a descriptor or its JSON is unreadable.</summary>
     public static ComfyQuantDescriptor? TryReadComfyQuant(Tensor blob)
     {
         ArgumentNullException.ThrowIfNull(blob);
