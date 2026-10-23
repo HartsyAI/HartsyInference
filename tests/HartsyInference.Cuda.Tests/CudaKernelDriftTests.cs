@@ -59,6 +59,7 @@ public sealed class CudaKernelDriftTests
         List<string> rebuilt = new();
         List<string> unverified = new();
         List<string> refused = new();
+        List<string> unassembled = new();
         List<string> cleanup = new();
         List<(string Fresh, string Committed)> variants = new();
 
@@ -86,6 +87,7 @@ public sealed class CudaKernelDriftTests
                 unverified.AddRange(stdout.Split('\n')
                     .Where(l => l.StartsWith(UnverifiedPrefix, StringComparison.Ordinal))
                     .Select(l => l[UnverifiedPrefix.Length..].Trim()));
+                unassembled.AddRange(stdout.Split('\n').Where(l => l.StartsWith("UNASSEMBLED", StringComparison.Ordinal)).Select(l => l.Trim()));
                 rebuilt.AddRange(Directory.GetFiles(domain, "*.ptx").Where(f => !VariantName.IsMatch(Path.GetFileName(f))));
             }
 
@@ -119,6 +121,7 @@ public sealed class CudaKernelDriftTests
                 unverified.AddRange(stdout.Split('\n')
                     .Where(l => l.StartsWith(UnverifiedPrefix, StringComparison.Ordinal))
                     .Select(l => l[UnverifiedPrefix.Length..].Trim()));
+                unassembled.AddRange(stdout.Split('\n').Where(l => l.StartsWith("UNASSEMBLED", StringComparison.Ordinal)).Select(l => l.Trim()));
                 string fresh = Path.Combine(owner, $"{kernel}.sm{sm}.ptx");
                 rebuilt.Add(fresh);
                 variants.Add((fresh, committed));
@@ -167,6 +170,9 @@ public sealed class CudaKernelDriftTests
                 _out.WriteLine("REFUSED by the assembler or unbuildable from source: " + string.Join("; ", refused));
 
             _out.WriteLine($"Compared {compared} rebuilt kernels ({variants.Count} arch variants) across {domains.Length} domains against {ptxDir}.");
+            if (unassembled.Count > 0)
+                _out.WriteLine("INCONCLUSIVE for assembly — no compatible ptxas, so these were compared but never assembled:\n  "
+                    + string.Join("\n  ", unassembled));
             AssertNoneRefused(refused);
             if (compared == 0 && missing.Count == 0)
             {
