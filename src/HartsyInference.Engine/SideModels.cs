@@ -369,6 +369,18 @@ public static class SideModels
         Sha256 = "36f3ff447ef59201722e8f9ce6020c9819fdcfba6aa2608c4e09b1c0ce114e34"
     };
 
+    /// <summary>Qwen3-VL-4B text encoder as the Comfy-Org <c>int8_tensorwise</c> + ConvRot 256 build (4.86 GB), the encoder
+    /// the int8 Fibo 2.0 transformers pair with. Sha256 is the Hugging Face LFS object id. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    public static readonly ModelAsset Fibo2Qwen3VL4BInt8 = new ModelAsset
+    {
+        Repo = "Comfy-Org/Fibo-2.0",
+        RepoPath = "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+        TargetSubdir = "text_encoders",
+        TargetName = "fibo2/qwen3vl_4b_int8_convrot.safetensors",
+        Role = "text encoder",
+        Sha256 = "32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c"
+    };
+
     /// <summary>FLUX.2 VAE as shipped in the Comfy-Org Fibo-2.0 repo. Sha256 is the Hugging Face LFS object id; these bytes differ from the
     /// pinned <see cref="Flux2Vae"/> file, so the two do not share a download. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
     public static readonly ModelAsset Fibo2Vae = new ModelAsset

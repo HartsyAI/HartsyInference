@@ -81,8 +81,16 @@ converter's source files were not available.
 - `fibo2_dev_int8_convrot` holds 215 `int8_tensorwise` linears, every one with ConvRot 256: attention, cross-attention and
   FFN in the main, refiner and Perceiver blocks (inputs 3584, 7680, 9728). `x_embedder` (128 inputs), `t_embedder`, every
   `adaLN_modulation` and `final_layer.linear` stay BF16.
-- The format is supported (`docs/Research/QUANTIZATION_COMFY_FORMATS.md`), but not for Fibo yet: `Fibo2Recipe` refuses any
-  tensor that is not F32, F16 or BF16.
+- Wired (`Fibo2WeightPreparation`, catalog ids `fibo2-dev-int8` and `fibo2-edit-turbo-int8`): `CheckpointSource` folds the
+  scales onto `Tensor.QuantInfo`; a packed linear stays packed on a backend with the int8 kernels (CUDA) and is widened
+  on the host to F16 (transformer) or BF16 (encoder) elsewhere. A build with any packed weight takes the int8 text encoder
+  side model. Dense builds are unchanged.
+- **Row-splitting a packed fused weight is valid.** ConvRot rotates the input dimension and the scale is per output row,
+  so `attention.qkv`, `to_kv` and `w13` split into self-contained quantized weights whose scale is the matching slice
+  (`QuantWeightInfo.SliceRows`, used by `ZImageBlock.SplitQkv` and `CheckpointConvertUtils.SplitRows`). A per-tensor
+  scale is shared. A test proves each piece dequantizes to exactly the fused rows.
+- Unverified: the real file's key layout and descriptor contents were not read (no header fetched), so the wiring follows
+  `QUANTIZATION_COMFY_FORMATS.md`; no real-weight or GPU run.
 
 ## LoRA
 

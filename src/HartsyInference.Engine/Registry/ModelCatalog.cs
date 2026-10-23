@@ -635,6 +635,40 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Fibo 2.0 dev as Comfy-Org's int8_tensorwise + ConvRot 256 build (8.41 GB) with the matching int8
+                // Qwen3-VL-4B encoder (4.86 GB). Same recipe: the loader keeps the packed linears on a backend with the int8 kernels and
+                // widens them on the host elsewhere. Not real-weight verified. Licence: CC-BY-NC-4.0, non-commercial.
+                Id = "fibo2-dev-int8", Modality = img, DisplayName = "Fibo 2.0 (int8 ConvRot)", Architecture = "Single-stream DiT (Qwen3-VL-4B), gist + injection",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/Fibo-2.0", RepoPath = "diffusion_models/fibo2_dev_int8_convrot.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "063dd397395809fd22234c6bd32932cfcb22619f4d2282bdbf1dc58c406fe325" },
+                    SideModels.Fibo2Qwen3VL4BInt8,
+                    SideModels.Fibo2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Fibo 2.0 edit-turbo as the int8_tensorwise + ConvRot 256 build (8.41 GB). Reference-image editing is not implemented, so this
+                // reaches text-to-image only (4 steps, guidance 1). The file name carries "edit", which the variant resolver reads.
+                // Not real-weight verified. Licence: CC-BY-NC-4.0, non-commercial.
+                Id = "fibo2-edit-turbo-int8", Modality = img, DisplayName = "Fibo 2.0 Edit Turbo (int8 ConvRot)", Architecture = "Single-stream DiT (Qwen3-VL-4B), gist + injection, 4-step distilled",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/Fibo-2.0", RepoPath = "diffusion_models/fibo2_edit_turbo_int8_convrot.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "1f6fa7c499191f405467123f655f11762661eaa5bd479d1da8f161398ef72c3b" },
+                    SideModels.Fibo2Qwen3VL4BInt8,
+                    SideModels.Fibo2Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "moss-image", Modality = img, DisplayName = "MOSS-Image", Architecture = "single-stream DiT, flow-matching",
                 Status = vp,
                 // Not CliDrivable yet: OpenMOSS ships Base and SFT as diffusers folders (transformer/, text_encoder/,
