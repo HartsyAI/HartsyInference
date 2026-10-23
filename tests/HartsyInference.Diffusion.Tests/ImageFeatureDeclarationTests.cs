@@ -100,14 +100,14 @@ public sealed class ImageFeatureDeclarationTests
 
     /// <summary>An edit model must not also claim strength-based img2img unless it genuinely implements both, because
     /// the two obey different contracts and <c>Img2ImgMode.Auto</c> resolves ambiguity in favour of the classic path.
-    /// FLUX.3 and MOSS-Image run one set of weights for both: the init image denoises and references condition at full
+    /// Fibo 2.0 (Auto is the denoise path, Reference sends the image as an edit source), FLUX.3 and MOSS-Image run one set of weights for both: the init image denoises and references condition at full
     /// strength (MOSS-Image through the Ostris edit layout).</summary>
     [Fact]
     public void OnlyFamiliesImplementingBothInitImageModesDeclareThem()
     {
         string[] both = [.. DeclaringFamilies(ImageFeatures.RefEdit)
             .Where(f => (Supports(f) & ImageFeatures.Img2Img) != ImageFeatures.None)];
-        Assert.Equal(["flux3", "moss-image", "qwen-image"], both);
+        Assert.Equal(["fibo2", "flux3", "moss-image", "qwen-image"], both);
     }
 
     [Fact]

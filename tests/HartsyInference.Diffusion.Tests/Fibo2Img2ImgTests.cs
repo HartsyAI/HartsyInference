@@ -183,29 +183,6 @@ public sealed class Fibo2Img2ImgTests
             pipeline.GenerateFromTokens([1], [1], Side, Side, Steps, 5f, Shift, 7, img2img: Request(source, 0.5f)));
     }
 
-    [Fact]
-    public void Recipe_RefusesAnInitImageSentAsAReference()
-    {
-        using Qwen3Tokenizer tokenizer = new();
-        using Fibo2Pipeline pipeline = UnloadedPipeline(withEncoder: true);
-        Fibo2RecipePipeline recipe = new(pipeline, tokenizer, Fibo2Recipe.FamilyDefaults,
-            new ResolvedModelVariant("fibo2", Fibo2Variants.Dev, ModelVariantSource.CallerHint, "test"), []);
-        ImageRequest request = new()
-        {
-            Prompt = "a cat",
-            Img2Img = new Img2Img
-            {
-                InitImage = new ImageData { Rgb = new byte[16 * 16 * 3], Width = 16, Height = 16 },
-                Mode = Img2ImgMode.Reference,
-            },
-        };
-
-        NotSupportedException error = Assert.Throws<NotSupportedException>(() =>
-            recipe.Generate(request, new ImageEffectiveSettings { Width = 16, Height = 16, Steps = 4, CfgScale = 5f }, null, CancellationToken.None));
-
-        Assert.Contains("reference", error.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
     private static Fibo2Pipeline UnloadedPipeline(bool withEncoder)
     {
         Fibo2Config config = Fibo2Config.Checkpoint with
