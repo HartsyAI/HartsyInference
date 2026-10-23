@@ -277,7 +277,7 @@ public sealed unsafe class DenoiserProbeTests : IDisposable
     {
         string src = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src");
         List<string> missing = [];
-        foreach (string file in Directory.EnumerateFiles(src, "*Pipeline.cs", SearchOption.AllDirectories))
+        foreach (string file in Directory.EnumerateFiles(src, "*.cs", SearchOption.AllDirectories))
         {
             string text = File.ReadAllText(file);
             if (text.Contains("sampler.Step(", StringComparison.Ordinal) && !text.Contains("DenoiserProbe.Condition(", StringComparison.Ordinal)
