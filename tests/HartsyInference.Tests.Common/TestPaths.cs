@@ -22,7 +22,7 @@ public static class TestPaths
         /// <summary>First existing of the legacy <c>Flux/</c> layout and the SwarmUI-managed <c>BFL/Flux1/</c> layout. Override with FLUX_DEV_PATH.</summary>
         public static string Dev          => FirstExisting("FLUX_DEV_PATH",
             Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-fp8.safetensors"),
-            Path.Combine(ModelsDir, "Stable-Diffusion", "BFL", "Flux1", "flux1-dev-fp8-1_0-flux-1-dev-basesafetensors.safetensors"));
+            Path.Combine(ModelsDir, "Stable-Diffusion", "BFL", "Flux1", "flux1-dev-fp8.safetensors"));
         public static string KreaFp8      => Resolve("FLUX_KREA_FP8_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-krea-dev_fp8_scaled.safetensors"));
         public static string Kontext      => Resolve("FLUX_KONTEXT_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-kontext_fp8_scaled.safetensors"));
         public static string Canny        => Resolve("FLUX_CANNY_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-canny-dev.safetensors"));

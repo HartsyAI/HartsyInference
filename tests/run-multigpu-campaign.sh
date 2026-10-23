@@ -9,11 +9,10 @@
 #   phaseA — needs only checkpoints already on this box (Krea2, SDXL, Qwen-Image-Edit, MiniMaxH3 fp8;
 #            plus Wan TI2V-5B, Chroma HD, and HunyuanImage 2.1 — verified on disk 2026-08-06 and
 #            reclassified here from phase B)
-#   phaseB — additionally needs the downloaded checkpoints (ltx-video [~9.4 GB, Lightricks/LTX-Video — on
-#            disk], ltx-2 [~22 GB DiT, Kijai/LTX2.3_comfy split — NOT pulled on this box as of 2026-08-05,
-#            disk-constrained]). NOTE: because HARTSY_REQUIRE_REAL_WEIGHTS=1 is exported unconditionally
-#            below and RealWeightGate THROWS under it, the missing ltx-2 checkpoint makes phaseB FAIL
-#            LOUDLY (no clean skip) until it is pulled — that strictness is the point of this script.
+#   phaseB — additionally needs the ltx-2 checkpoint (~22 GB DiT). It is NOT at its test path on this box
+#            (Models/Stable-Diffusion/LtxVideo2/); a same-family file sits at the Stable-Diffusion root, unverified.
+#            HARTSY_REQUIRE_REAL_WEIGHTS=1 is exported below and RealWeightGate THROWS on the missing file, so
+#            phaseB FAILS LOUDLY (no clean skip) until the test path holds the expected checkpoint.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -277,29 +276,24 @@ phase_a() {
 # ── Phase B: LTX family (Chroma/HunyuanImage/Wan moved to phase A 2026-08-06 — checkpoints on disk) ──────
 
 phase_b() {
-    # Flux classes MOVED here from phase A 2026-08-07: flux1-dev-fp8.safetensors was DELETED from disk
-    # (drive at 98%; ~17 GB re-pull doesn't fit the 24 GB free) — same on-disk-reality policy as LTX-2.3;
-    # these FAIL LOUDLY under strict mode until the checkpoint is re-pulled. Historical results remain
-    # valid in the benchmark doc (all four were green on the 2026-08-05 campaign while the file existed).
+    # Flux dev fp8 is present again at Models/Stable-Diffusion/BFL/Flux1/flux1-dev-fp8.safetensors (checked 2026-10-23);
+    # TestPaths.Flux.Dev resolves there via its fallback. Placement kept in phase B; not re-run on GPU.
     run_class HartsyInference.Diffusion.Tests  FluxComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  FluxCfgParallelFallbackTests
     run_class HartsyInference.Diffusion.Tests  FluxDitShardingVramTests
     # DiT sharding theory (DitShardingEngineTests): Chroma/Flux/HunyuanImage/Krea2/QwenImage/Sd3 cases share one Theory,
-    # so each entry runs every case of that fact in one process. Phase B because the Flux and LTX checkpoints are
-    # absent (strict mode fails the whole fact on one missing case). NonResident covers Chroma/Krea2/QwenImage/Sd3 only.
+    # so each entry runs every case of that fact in one process. Phase B because the HunyuanImage (Q4_K_M), SD3.5
+    # transformer-only and LTX-2.3 checkpoints are absent at their test paths (strict mode fails the whole fact). NonResident covers Chroma/Krea2/QwenImage/Sd3 only.
     run_class HartsyInference.Diffusion.Tests  DitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
     run_class HartsyInference.Diffusion.Tests  DitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
-    # Video TE/VAE placement, one Theory covering LTX-1, LTX-2.3 and Wan TE/VAE. LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB, Lightricks/LTX-Video) — needed a download on this box.
+    # Video TE/VAE placement, one Theory covering LTX-1, LTX-2.3 and Wan TE/VAE. LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB) is present at Stable-Diffusion/LtxVideo/.
     # TE was already wired (LtxVideoRecipePipeline._textBackend); VAE placement is new (LtxVideoPipeline.VaeBackend).
     # (replaces the per-model LtxVideo/LtxVideo2/WanComponentPlacement/WanVaeComponentPlacement classes).
     run_class HartsyInference.Diffusion.Tests  VideoComponentPlacementEngineTests
-    # LTX-2.3 (~22 GB transformer-only split, Kijai/LTX2.3_comfy + already-cached video/audio VAE + text-projection
-    # side models) — NOT downloaded on this box as of 2026-08-05 (47 GB free, shared with concurrent agents; the
-    # DiT alone is ~22 GB). Both TE and VAE placement were already wired in LtxVideo2Pipeline; this closes the
-    # "wired but UNVERIFIED" gap docs/MULTI_GPU.md flagged once the checkpoint lands. Until then this line FAILS
-    # LOUDLY: HARTSY_REQUIRE_REAL_WEIGHTS=1 (exported above) makes RealWeightGate THROW on the missing
-    # checkpoint — deliberate strict-mode behavior, not a clean skip. `hartsy pull ltx-2` (or download the Kijai split file to
-    # Models/Stable-Diffusion/LtxVideo2/ltx-2.3-22b-dev-fp8.safetensors) before running this line.
+    # LTX-2.3 (~22 GB, Kijai/LTX2.3_comfy split) is NOT at its test path Models/Stable-Diffusion/LtxVideo2/ltx-2.3-22b-dev-fp8.safetensors.
+    # A Lightricks LTX-2.3 fp8 file sits at Models/Stable-Diffusion/ (ltx-video-2-3-22b-dev-1_0-...-fp8.safetensors): identity
+    # unverified against the expected checkpoint, so the test is not pointed at it. This line FAILS LOUDLY under strict mode
+    # (RealWeightGate THROWS) until the expected file lands at the test path. TE and VAE placement are wired in LtxVideo2Pipeline.
 }
 
 run_phase() {
