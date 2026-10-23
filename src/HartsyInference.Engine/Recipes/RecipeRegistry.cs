@@ -76,5 +76,6 @@ public static class RecipeRegistry
         new Image.ZetaChromaRecipe(),
         new Image.BooguImageRecipe(),
         new Image.LensRecipe(),
+        new Image.Fibo2Recipe(),
     };
 }

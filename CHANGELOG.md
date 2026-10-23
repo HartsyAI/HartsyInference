@@ -134,6 +134,35 @@ stable release will require. Dates are UTC.
   found the other's temp file gone (`FileNotFoundException` on `gpt_oss_tokenizer_raw.json.tmp`). Each export now uses its own
   names and renames the finished files into place, merges before vocab.
 
+## alpha.388
+
+- **Added: Fibo 2.0 (Bria AI) text-to-image, `fibo2-dev`.** A 44-layer DiT with a 512-query Perceiver over Qwen3-VL-4B
+  text bundles, five injection blocks, and the FLUX.2 VAE, loaded from the Comfy-Org checkpoint layout. Verified by a tiny-config
+  parity test against a Python transcription of ComfyUI's forward. Real-weight and GPU results are recorded in the model status row.
+  Not in this change: glyph text images, reference-image editing, the edit-turbo variant, LoRA, and the int8 builds.
+  Licence CC-BY-NC-4.0.
+- **Fixed: `paths.sideModelAutofetch=false` was ignored by `ModelFileLocator.RequireOrEnsure`**, so Fibo 2.0, Flux.3 and MOSS-Image
+  still downloaded a missing text encoder or VAE. A missing one is now an error when the knob is off.
+- **Added: Fibo 2.0 img2img and mask inpaint.** An init image and strength start the flow-matching schedule at the matching
+  sigma of the shifted schedule, and a mask (white = regenerate) keeps the rest on the source's noise trajectory with a final
+  recomposite. Not yet run on real weights.
+- **Added: Fibo 2.0 LoRA support.** `fibo2` declares `ImageFeatures.Lora` and merges stacks into the F16 weights before the
+  transformer loads. `Fibo2LoraMapper` reads Comfy-Org's turbo LoRA layout (adapters on the fused `qkv`, `to_kv`, `w13`, plus
+  `.diff`/`.diff_b`) and diffusers/PEFT names (split projections resolve to fused row slices). bf16 bases only; verified by CPU
+  merge tests and header-level key checks, not on a GPU.
+- **Added: Fibo 2.0 int8 ConvRot builds (`fibo2-dev-int8`, `fibo2-edit-turbo-int8`).** `Fibo2Recipe` keeps Comfy-Org's
+  `int8_tensorwise` + ConvRot 256 linears packed on a backend with the int8 kernels and widens them on the host
+  elsewhere (`QuantizedWeightPolicy`), for both the transformer and the `qwen3vl_4b_int8_convrot` text encoder, which is
+  pinned as a side model with the int8 builds' sha256. The fused `qkv`, `to_kv` and `w13` split while packed, with each
+  piece's per-row scale sliced to its rows. Not run on real weights or a GPU.
+- **Added: Fibo 2.0 image editing (`fibo2-dev` and `fibo2-edit-turbo`).** An instruction edit of one image, a masked edit (white =
+  regenerate, the region greyed out before it is encoded, as Bria's pipeline does) and a multi-reference edit of up to four images
+  referred to as `<image_1>`..`<image_4>`. The source and references are VAE-encoded into clean tokens after the image tokens (RoPE
+  frames `MaxGist + 2 + k`, timestep-0 modulation, also through the noise refiners), and the edit prompt reaches the model through the
+  Qwen3-VL vision tower, so the language tower now exposes multi-layer taps with deepstack
+  (`LlamaStyleEncoder.EncodeMultiLayerEmbedsMrope`). `fibo2-edit-turbo` is edit-only (4 steps, guidance 1.0, no unconditional pass)
+  and refuses a request without a source image. Declared as `RefEdit` (with `Inpaint` and `Img2Img`). Not run on the real edit checkpoint or a GPU.
+
 ## alpha.387
 
 - **Changed: Anima Base and Flux 3 Image Base default to the `er_sde` sampler**, SwarmUI core's choice for both (#521).

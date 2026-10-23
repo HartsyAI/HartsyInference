@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Features;
@@ -49,7 +50,7 @@ public sealed class Flux2VaeComponents : IDisposable
         try
         {
             loader.Load(vaePath);
-            Dictionary<string, Tensor> weights = loader.GetAllTensors();
+            Dictionary<string, Tensor> weights = ToDiffusersLayout(loader.GetAllTensors());
             Tensor rawMean = Require(weights, BnMeanKey, vaePath);
             Tensor rawVar = Require(weights, BnVarKey, vaePath);
             VaeDecoder decoder = new VaeDecoder(WithCheckpointDecoder(VaeConfig.Flux2, weights));
@@ -65,6 +66,35 @@ public sealed class Flux2VaeComponents : IDisposable
             loader.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The Comfy-Org repack of the FLUX.2 VAE (Fibo 2.0's <c>vae/flux2-vae.safetensors</c>) keeps ComfyUI's native ldm
+    /// names: <c>decoder.mid.attn_1.q</c>, <c>decoder.up.N.block</c>, <c>decoder.post_quant_conv</c>, <c>encoder.quant_conv</c>, and
+    /// 1x1-conv attention projections <c>[C, C, 1, 1]</c>. The decoder and encoder read the diffusers layout, so such a file is
+    /// renamed (attention projections reshaped to <c>[C, C]</c> views) and a diffusers-layout file passes through unchanged.</summary>
+    internal static Dictionary<string, Tensor> ToDiffusersLayout(Dictionary<string, Tensor> weights)
+    {
+        if (!weights.ContainsKey("decoder.mid.attn_1.q.weight"))
+            return weights;
+        Dictionary<string, Tensor> converted = new(weights.Count);
+        foreach ((string key, Tensor tensor) in weights)
+        {
+            string? mapped = key switch
+            {
+                _ when key.StartsWith("bn.", StringComparison.Ordinal) => key,
+                _ when key.StartsWith("decoder.post_quant_conv.", StringComparison.Ordinal) => key["decoder.".Length..],
+                _ when key.StartsWith("encoder.quant_conv.", StringComparison.Ordinal) => key["encoder.".Length..],
+                _ => CheckpointConvertUtils.ConvertVaeKey(key),
+            };
+            if (mapped is null)
+                continue;
+            bool attentionProjection = mapped.EndsWith(".weight", StringComparison.Ordinal) && tensor.Shape.Rank == 4
+                && (mapped.Contains(".attentions.", StringComparison.Ordinal));
+            converted[mapped] = attentionProjection
+                ? tensor.Reshape(new TensorShape(tensor.Shape[0], tensor.Shape[1]))
+                : tensor;
+        }
+        return converted;
     }
 
     /// <summary>The decoder's stage widths as the checkpoint builds them: the up-blocks' output channels, reversed. FLUX.2's

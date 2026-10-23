@@ -22,6 +22,7 @@ public sealed class ImageFeatureDeclarationTests
         "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",   // VaeConfig.Flux
         "flux2", "flux3", "ernie-image", "ideogram4",           // VaeConfig.Flux2
         "moss-image",                                           // VaeConfig.Flux2 (Flux2VaeComponents)
+        "fibo2",                                                // VaeConfig.Flux2 (Flux2VaeComponents), NCHW latent blend
         "auraflow",                                             // VaeConfig.AuraFlow (= Sdxl)
         "lance-image",                                          // Wan22VaeEncoder — img2img only
         // Phase 4 — built from nothing; these three had no img2img at any layer
@@ -40,6 +41,7 @@ public sealed class ImageFeatureDeclarationTests
         "chroma", "flux1", "lumina2", "kandinsky5", "f-lite",
         "flux2", "flux3", "ernie-image", "ideogram4",
         "moss-image",
+        "fibo2",
         "auraflow",
         "hidream",
         // 72b725ae — per-token blend (MaskBlendUtilities.BlendTokensInPlace) covering all three token-space
@@ -73,6 +75,7 @@ public sealed class ImageFeatureDeclarationTests
         "hunyuan-image", "lens", "mage-flow",
         "flux3",                                                            // fused qkv split to q/k/v_proj at load
         "moss-image",                                                       // MossImageLoraMapper, every spelling
+        "fibo2",                                                            // Fibo2LoraMapper: Comfy-native fused + diffusers split
     ];
 
     private readonly ITestOutputHelper _output;
@@ -97,14 +100,14 @@ public sealed class ImageFeatureDeclarationTests
 
     /// <summary>An edit model must not also claim strength-based img2img unless it genuinely implements both, because
     /// the two obey different contracts and <c>Img2ImgMode.Auto</c> resolves ambiguity in favour of the classic path.
-    /// FLUX.3 and MOSS-Image run one set of weights for both: the init image denoises and references condition at full
+    /// Fibo 2.0 (Auto is the denoise path, Reference sends the image as an edit source), FLUX.3 and MOSS-Image run one set of weights for both: the init image denoises and references condition at full
     /// strength (MOSS-Image through the Ostris edit layout).</summary>
     [Fact]
     public void OnlyFamiliesImplementingBothInitImageModesDeclareThem()
     {
         string[] both = [.. DeclaringFamilies(ImageFeatures.RefEdit)
             .Where(f => (Supports(f) & ImageFeatures.Img2Img) != ImageFeatures.None)];
-        Assert.Equal(["flux3", "moss-image", "qwen-image"], both);
+        Assert.Equal(["fibo2", "flux3", "moss-image", "qwen-image"], both);
     }
 
     [Fact]

@@ -72,6 +72,16 @@ public sealed class SideModelAutofetchTests : IDisposable
     }
 
     [Fact]
+    public void RequireOrEnsure_WithAutofetchOff_ThrowsInsteadOfDownloading()
+    {
+        KnobStore.Set(EngineKnobs.SideModelAutofetch, false);
+        ModelAsset asset = Missing();
+        FileNotFoundException ex = Assert.Throws<FileNotFoundException>(
+            () => HartsyInference.Engine.Features.ModelFileLocator.RequireOrEnsure(null, asset, "vae", CancellationToken.None, "VAE"));
+        Assert.Contains("paths.sideModelAutofetch", ex.Message);
+    }
+
+    [Fact]
     public async Task AnExplicitFalse_StillWins_ForCallersThatMustNotReachTheNetwork()
     {
         KnobStore.Set(EngineKnobs.SideModelAutofetch, true);

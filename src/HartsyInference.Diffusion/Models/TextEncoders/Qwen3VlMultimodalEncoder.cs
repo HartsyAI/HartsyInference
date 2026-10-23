@@ -49,6 +49,45 @@ public sealed unsafe class Qwen3VlMultimodalEncoder
     /// in <paramref name="referenceImages"/>; pass an empty list for text-only. Returns the LM final hidden state.</summary>
     public Tensor Encode(IBackend backend, int[] tokenIds, IReadOnlyList<Tensor> referenceImages)
     {
+        using Prepared prepared = Prepare(backend, tokenIds, referenceImages);
+        return _language.EncodeEmbedsMrope(backend, prepared.Embeds, prepared.Cos, prepared.Sin, prepared.Deepstack, prepared.VisualMask);
+    }
+
+    /// <summary>Like <see cref="Encode"/> but returns intermediate hidden states instead of the final one: the decoder inputs
+    /// of the HF-indexed <paramref name="layerIndices"/> (0 = embeddings with the vision tokens spliced in, k = after block
+    /// k - 1 including its deepstack addition, which is where transformers' <c>hidden_states[k]</c> reads), concatenated
+    /// tap-major into <c>[1, seqLen, layerIndices.Length · hidden]</c>. This is the layout Fibo 2.0's edit conditioning reads
+    /// (ComfyUI taps the same layers with images in the prompt).</summary>
+    public Tensor EncodeMultiLayer(IBackend backend, int[] tokenIds, IReadOnlyList<Tensor> referenceImages, int[] layerIndices)
+    {
+        using Prepared prepared = Prepare(backend, tokenIds, referenceImages);
+        return _language.EncodeMultiLayerEmbedsMrope(backend, prepared.Embeds, prepared.Cos, prepared.Sin, layerIndices,
+            prepared.Deepstack, prepared.VisualMask);
+    }
+
+    /// <summary>Everything the language tower needs for one prompt with images: spliced embeddings, the M-RoPE table and the
+    /// deepstack features. Owns its tensors.</summary>
+    private sealed class Prepared(Tensor embeds, float[] cos, float[] sin, IReadOnlyList<Tensor>? deepstack, bool[]? visualMask)
+        : IDisposable
+    {
+        public Tensor Embeds { get; } = embeds;
+        public float[] Cos { get; } = cos;
+        public float[] Sin { get; } = sin;
+        public IReadOnlyList<Tensor>? Deepstack { get; } = deepstack;
+        public bool[]? VisualMask { get; } = visualMask;
+
+        public void Dispose()
+        {
+            Embeds.Dispose();
+            if (Deepstack is not null)
+            {
+                foreach (Tensor d in Deepstack) d.Dispose();
+            }
+        }
+    }
+
+    private Prepared Prepare(IBackend backend, int[] tokenIds, IReadOnlyList<Tensor> referenceImages)
+    {
         int seqLen = tokenIds.Length;
 
         // 1. Vision forward per image; collect grids + merged tokens + deepstack features.
@@ -65,36 +104,37 @@ public sealed unsafe class Qwen3VlMultimodalEncoder
             totalImageTokens += visionOut[i].NumMergedTokens;
         }
 
-        // 2. Validate placeholder count.
-        bool[] visualMask = new bool[seqLen];
-        int placeholderCount = 0;
-        for (int s = 0; s < seqLen; s++)
-            if (tokenIds[s] == _imageTokenId) { visualMask[s] = true; placeholderCount++; }
-        if (placeholderCount != totalImageTokens)
-            throw new InvalidOperationException(
-                $"image placeholder count ({placeholderCount}) != merged vision tokens ({totalImageTokens}).");
-
-        // 3. Input embeds with vision tokens spliced in.
-        Tensor embeds = _language.LookupEmbeddings(tokenIds);
-        SpliceVisionTokens(embeds, visionOut, visualMask, seqLen);
-
-        // 4. 3D M-RoPE position ids → interleaved cos/sin table.
-        (int[] posT, int[] posH, int[] posW) = BuildRopeIndex(tokenIds, grids);
-        (float[] cos, float[] sin) = BuildInterleavedMropeTable(posT, posH, posW);
-
-        // 5. Deepstack features per first-N layers (concatenated across images, in sequence order).
-        IReadOnlyList<Tensor>? deepstack = imageCount > 0 ? ConcatDeepstack(visionOut) : null;
-
-        Tensor result = _language.EncodeEmbedsMrope(backend, embeds, cos, sin, deepstack, imageCount > 0 ? visualMask : null);
-        embeds.Dispose();
-
-        foreach (Qwen3VlVisionEncoder.VisionOutput vo in visionOut)
+        try
         {
-            vo.MergedTokens.Dispose();
-            foreach (Tensor d in vo.DeepstackFeatures) d.Dispose();
+            // 2. Validate placeholder count.
+            bool[] visualMask = new bool[seqLen];
+            int placeholderCount = 0;
+            for (int s = 0; s < seqLen; s++)
+                if (tokenIds[s] == _imageTokenId) { visualMask[s] = true; placeholderCount++; }
+            if (placeholderCount != totalImageTokens)
+                throw new InvalidOperationException(
+                    $"image placeholder count ({placeholderCount}) != merged vision tokens ({totalImageTokens}).");
+
+            // 3. Input embeds with vision tokens spliced in.
+            Tensor embeds = _language.LookupEmbeddings(tokenIds);
+            SpliceVisionTokens(embeds, visionOut, visualMask, seqLen);
+
+            // 4. 3D M-RoPE position ids → interleaved cos/sin table.
+            (int[] posT, int[] posH, int[] posW) = BuildRopeIndex(tokenIds, grids);
+            (float[] cos, float[] sin) = BuildInterleavedMropeTable(posT, posH, posW);
+
+            // 5. Deepstack features per first-N layers (concatenated across images, in sequence order).
+            IReadOnlyList<Tensor>? deepstack = imageCount > 0 ? ConcatDeepstack(visionOut) : null;
+            return new Prepared(embeds, cos, sin, deepstack, imageCount > 0 ? visualMask : null);
         }
-        if (deepstack is not null) foreach (Tensor d in deepstack) d.Dispose();
-        return result;
+        finally
+        {
+            foreach (Qwen3VlVisionEncoder.VisionOutput vo in visionOut)
+            {
+                vo.MergedTokens.Dispose();
+                foreach (Tensor d in vo.DeepstackFeatures) d.Dispose();
+            }
+        }
     }
 
     private static void SpliceVisionTokens(Tensor embeds, Qwen3VlVisionEncoder.VisionOutput[] visionOut,
