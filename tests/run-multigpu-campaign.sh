@@ -5,7 +5,7 @@
 # process isolation). Under HARTSY_REQUIRE_REAL_WEIGHTS=1 (set below) a missing checkpoint FAILS the run via
 # RealWeightGate instead of silently skipping, so a green exit genuinely means every listed test executed.
 #
-# Usage: tests/run-multigpu-campaign.sh [phaseA|phaseB|all]   (default: phaseA)
+# Usage: tests/run-multigpu-campaign.sh [phaseA|phaseB|all|list]   (default: phaseA; list = stale-filter check, no GPU)
 #   phaseA — needs only checkpoints already on this box (Krea2, SDXL, Qwen-Image-Edit, MiniMaxH3 fp8;
 #            plus Wan TI2V-5B, Chroma HD, and HunyuanImage 2.1 — verified on disk 2026-08-06 and
 #            reclassified here from phase B)
@@ -20,14 +20,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHASE="${1:-phaseA}"
 STAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
 LOG_DIR="${REPO_ROOT}/Output/multigpu-campaign/${STAMP}"
-mkdir -p "${LOG_DIR}"
 SUMMARY="${LOG_DIR}/summary.txt"
 FAILURES=0
+RUN_MODE=run   # plan: run_class only records its entry (used by the stale-filter guard)
+PLAN=()
 
-log() { echo "[campaign] $*" | tee -a "${SUMMARY}"; }
+log() {
+    if [ "${RUN_MODE}" = plan ]; then echo "[campaign] $*"; else echo "[campaign] $*" | tee -a "${SUMMARY}"; fi
+}
 
-# ── Pre-flight ────────────────────────────────────────────────────────────────────────────────────────────
+# ── Pre-flight (GPU box only; runs after the stale-filter guard) ──────────────────────────────────────────
 
+gpu_preflight() {
+mkdir -p "${LOG_DIR}"
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found — this campaign needs the CUDA box"; exit 1; }
 
 # Stray engine processes hold multi-GB VRAM allocations that break the free-VRAM-gated tests. Kill our own
@@ -70,6 +75,7 @@ done < <(nvidia-smi --query-gpu=index,name,memory.free --format=csv,noheader,nou
 
 export HARTSY_REQUIRE_REAL_WEIGHTS=1
 export HARTSY_ASSERT_AMBIENT=1
+}
 
 # ── Runner ────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -77,6 +83,10 @@ export HARTSY_ASSERT_AMBIENT=1
 run_class() {
     local project="$1" cls="$2"
     shift 2
+    if [ "${RUN_MODE}" = plan ]; then
+        PLAN+=("${project}|${cls}|$*")
+        return 0
+    fi
     local logfile="${LOG_DIR}/${cls}.log"
     log "── ${cls} (${project}) $*"
     ( cd "${REPO_ROOT}" && env "$@" dotnet test "tests/${project}/${project}.csproj" \
@@ -135,12 +145,6 @@ phase_a() {
     run_class HartsyInference.LLM.Tests        TextServiceShardValidationTests
     run_class HartsyInference.Diffusion.Tests  Krea2DitShardingTests
     run_class HartsyInference.Diffusion.Tests  Krea2DitShardingVramTests
-    # HARTSY_KEEP_MODELS is a static-readonly read → each fact of the engine class runs in its own process.
-    run_class HartsyInference.Diffusion.Tests  Krea2DitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
-    run_class HartsyInference.Diffusion.Tests  Krea2DitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
-    # New Phase A classes land with their implementation parts:
-    run_class HartsyInference.Diffusion.Tests  SdxlComponentPlacementEngineTests
-    run_class HartsyInference.Diffusion.Tests  SdxlCfgParallelEngineTests
     # FIXED 2026-08-05: two engines co-resident on one ordinal near VRAM capacity forced Flux into
     # block-streaming mode (not enough VRAM to stay resident), which conflicts with step-graph capture —
     # AwaitWeights' cross-stream event wait trips CUDA_ERROR_STREAM_CAPTURE_ISOLATION mid-capture. The abort
@@ -162,24 +166,11 @@ phase_a() {
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingTests
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingVramTests
     # HARTSY_KEEP_MODELS static-init read → each engine fact runs filter-isolated in its own process.
-    # KNOWN RED as of 2026-08-05 (N-way sharding generalization pass): this SSIM-vs-unsharded gate fails
-    # (~0.176, was documented as 0.9734) for a reason UNRELATED to the N-way generalization — see the
-    # 2026-08-05/06 benchmark doc "Qwen-Image cross-ordinal fidelity finding" section. Root-caused
-    # 2026-08-06 (QwenImageFp8PrecisionDiagnosticTests): NOT a sharding defect — forcing both sides of the
-    # comparison onto the same fp8 GEMM regime recovers SSIM 0.9922. The real cause is the STRONG card's fast
-    # native fp8 GEMM path (used by the unsharded baseline too) losing precision on this checkpoint's outlier
-    # activation channels — same class of finding MiniMaxH3DitShardingEngineTests already gates
-    # informationally. RECLASSIFIED to informational (SSIM > 0.05, not a real bar) per user decision 2026-08-06.
-    run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
     # GATED tiers pairing the informational floor above (added 2026-08-06, H3 precedent): same-device split
     # shares one GEMM regime → SSIM > 0.99; HARTSY_FP8_NATIVE=0 matches regimes cross-device (measured
     # 0.9922) → SSIM > 0.95. Env read at backend construction → each fact filter-isolated in its own process.
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingEngineTests.DitSharding_RealEngine_SameDeviceSplit_MatchesUnshardedBaseline
     run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingEngineTests.DitSharding_RealEngine_CrossDevice_MatchedFp8Regime_WithinGatedToleranceOfUnsharded HARTSY_FP8_NATIVE=0
-    # NOT RE-EVALUATED in this pass (self-skipped on its own free-VRAM gate — the live swarmui.service was
-    # holding the 4090 at the time). No SSIM gate on this fact (VRAM-drift check only), so it is not expected
-    # to be affected by the finding above, but that is inference, not a measurement — re-run to confirm.
-    run_class HartsyInference.Diffusion.Tests  QwenImageDitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
     # Re-run 2026-08-06: measured SSIM 0.9876, comfortably above its 0.75 bar, which stays a REAL gate (not
     # informational) — it compares two sharded runs against each other, so both sides share the same
     # cross-ordinal GEMM regime and the fp8 finding above does not apply.
@@ -205,7 +196,7 @@ phase_a() {
     # HARTSY_AUDIO_LM_QUANT is process-wide env the second fact mutates → each fact runs filter-isolated.
     # The primary fact also gates on a Whisper content-word-recall check (real [verse]/[chorus] lyrics).
     run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_RealEngine_UnquantizedStage1_PooledAcrossGpus_ProducesAudio
-    run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_EnvQuantOverride_WinsOverShardedDefault
+    run_class HartsyInference.Diffusion.Tests  YueLmShardingEngineTests.LmSharding_SettingQuantOverride_WinsOverShardedDefault
     # Audio-LM layer split, second consumer: CosyVoice 2's Qwen2.5-0.5B backbone (tiny — a pure placement/pooling
     # demonstration, not a can't-fit-one-card case like YuE). Real-weight-verified 2026-08-05: 100% Whisper
     # content-word recall, real VRAM pooling on both cards. Gates on llm.pt/flow.pt/hift.pt (FunAudioLLM/
@@ -237,16 +228,10 @@ phase_a() {
     # swarmui.service or another heavy process is holding host RAM; stop it first if this line fails only
     # on a RAM-skip message, not a real regression.
     run_class HartsyInference.LLM.Tests        LlmShardingEngineTests.Sharded_TwoGpus_Qwen3_32B_DecodeTokPerSec
-    # VaeDevice placement for Wan — the checkpoint (wan2.2_ti2v_5B_fp16.safetensors) is on-disk on this box.
-    # Wan had zero VAE placement until WanVideoPipeline.VaeBackend landed.
-    run_class HartsyInference.Diffusion.Tests  WanVaeComponentPlacementEngineTests
     # 2026-08-06: Wan (wan2.2_ti2v_5B_fp16.safetensors), Chroma (Chroma1-HD-fp8mixed-final.safetensors), and
-    # HunyuanImage (HunyuanImage2.1-Q4_K_M.gguf) are all verified on disk under Models/Stable-Diffusion/, so
-    # their real-weight classes below are reclassified from phase B to phase A per this campaign's split rule —
-    # including WanComponentPlacementEngineTests, the TE twin of the VAE test above, which had previously been
-    # left in phase B ("left as-is rather than reclassified") despite the checkpoint being present.
+    # HunyuanImage (HunyuanImage2.1-Q4_K_M.gguf) were verified on disk then. The Wan TE/VAE placement rows moved to
+    # phase B (VideoComponentPlacementEngineTests) with the other video placement rows.
     run_class HartsyInference.Video.Tests      CfgBranchParallelWanTests
-    run_class HartsyInference.Diffusion.Tests  WanComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  WanCfgParallelEngineTests
     # 2026-08-06 Phase 2: Wan context parallelism (frame-aligned sequence split, replicated weights, per-block
     # K/V exchange). Synthetic parity is same-GPU dual-backend (byte-exact — the mechanism gate); the engine
@@ -265,24 +250,19 @@ phase_a() {
     # what gets verified; the matched-regime fact is the gate (filter-isolated: env read once at backend ctor).
     run_class HartsyInference.Diffusion.Tests  ContextParallelQwenImageTests
     run_class HartsyInference.Diffusion.Tests  QwenImageContextParallelEngineTests.ContextParallel_RealEngine_EitherOutcome_ObservableAndCoherent
-    run_class HartsyInference.Diffusion.Tests  QwenImageContextParallelEngineTests.ContextParallel_RealEngine_MatchedFp8Regime HARTSY_FP8_NATIVE=0
+    run_class HartsyInference.Diffusion.Tests  QwenImageContextParallelEngineTests.ContextParallel_RealEngine_MatchedFp8Regime_WithinGatedToleranceOfBaseline HARTSY_FP8_NATIVE=0
     # Data-parallel serving (throughput): one engine per GPU, same model replicated, concurrent requests via
     # Task.WhenAll — the "serve MORE requests" pattern. Llama-3.2-1B (image DP honestly not demonstrable here:
     # SDXL's F32 replica OOMs the 3060 even at 512^2 — see the test's class doc). Measured 1.71x (2026-08-07).
     run_class HartsyInference.Diffusion.Tests  DataParallelServingEngineTests
     run_class HartsyInference.Diffusion.Tests  ChromaDitShardingTests
-    run_class HartsyInference.Diffusion.Tests  ChromaDitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
-    run_class HartsyInference.Diffusion.Tests  ChromaDitShardingEngineTests.DitSharding_NonResident HARTSY_KEEP_MODELS=0
     run_class HartsyInference.Diffusion.Tests  HunyuanImageDitShardingTests
-    run_class HartsyInference.Diffusion.Tests  HunyuanImageDitShardingEngineTests
     # SD3.5 Medium DiT sharding (JointBlock loop, real checkpoint on this box — transformer + separate CLIP-L/
     # CLIP-G/T5-XXL side models). Synthetic bit-parity is SAME-GPU by design (cross-SM GEMM/SDPA rounding
     # differs in the last ULP, unrelated to the split logic — see Sd3DitShardingTests' class doc); the VRAM
     # and engine tests below are the real cross-device verification (measured SSIM 0.9794).
     run_class HartsyInference.Diffusion.Tests  Sd3DitShardingTests
     run_class HartsyInference.Diffusion.Tests  Sd3DitShardingVramTests
-    run_class HartsyInference.Diffusion.Tests  Sd3DitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
-    run_class HartsyInference.Diffusion.Tests  Sd3DitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
     # Lumina-Image-2.0 DiT sharding — SYNTHETIC ONLY: no checkpoint on this box (Models/Stable-Diffusion/Lumina2
     # only has config.json + the safetensors INDEX, no actual weight shards; `hartsy pull lumina2` would fetch
     # them). No VRAM/engine real-weight fact exists yet — add once pulled.
@@ -304,10 +284,15 @@ phase_b() {
     run_class HartsyInference.Diffusion.Tests  FluxComponentPlacementEngineTests
     run_class HartsyInference.Diffusion.Tests  FluxCfgParallelFallbackTests
     run_class HartsyInference.Diffusion.Tests  FluxDitShardingVramTests
-    run_class HartsyInference.Diffusion.Tests  FluxDitShardingEngineTests
-    # LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB, Lightricks/LTX-Video) — needed a download on this box.
+    # DiT sharding theory (DitShardingEngineTests): Chroma/Flux/HunyuanImage/Krea2/QwenImage/Sd3 cases share one Theory,
+    # so each entry runs every case of that fact in one process. Phase B because the Flux and LTX checkpoints are
+    # absent (strict mode fails the whole fact on one missing case). NonResident covers Chroma/Krea2/QwenImage/Sd3 only.
+    run_class HartsyInference.Diffusion.Tests  DitShardingEngineTests.DitSharding_RealEngine_ProducesCoherentImage_WithinToleranceOfUnsharded
+    run_class HartsyInference.Diffusion.Tests  DitShardingEngineTests.DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations HARTSY_KEEP_MODELS=0
+    # Video TE/VAE placement, one Theory covering LTX-1, LTX-2.3 and Wan TE/VAE. LTX-1 (ltx-video-2b-v0.9.safetensors, ~9.4 GB, Lightricks/LTX-Video) — needed a download on this box.
     # TE was already wired (LtxVideoRecipePipeline._textBackend); VAE placement is new (LtxVideoPipeline.VaeBackend).
-    run_class HartsyInference.Diffusion.Tests  LtxVideoComponentPlacementEngineTests
+    # (replaces the per-model LtxVideo/LtxVideo2/WanComponentPlacement/WanVaeComponentPlacement classes).
+    run_class HartsyInference.Diffusion.Tests  VideoComponentPlacementEngineTests
     # LTX-2.3 (~22 GB transformer-only split, Kijai/LTX2.3_comfy + already-cached video/audio VAE + text-projection
     # side models) — NOT downloaded on this box as of 2026-08-05 (47 GB free, shared with concurrent agents; the
     # DiT alone is ~22 GB). Both TE and VAE placement were already wired in LtxVideo2Pipeline; this closes the
@@ -315,15 +300,53 @@ phase_b() {
     # LOUDLY: HARTSY_REQUIRE_REAL_WEIGHTS=1 (exported above) makes RealWeightGate THROW on the missing
     # checkpoint — deliberate strict-mode behavior, not a clean skip. `hartsy pull ltx-2` (or download the Kijai split file to
     # Models/Stable-Diffusion/LtxVideo2/ltx-2.3-22b-dev-fp8.safetensors) before running this line.
-    run_class HartsyInference.Diffusion.Tests  LtxVideo2ComponentPlacementEngineTests
 }
 
-case "${PHASE}" in
-    phaseA) phase_a ;;
-    phaseB) phase_b ;;
-    all)    phase_a; phase_b ;;
-    *) echo "unknown phase '${PHASE}' (use phaseA|phaseB|all)"; exit 1 ;;
-esac
+run_phase() {
+    case "${PHASE}" in
+        phaseA) phase_a ;;
+        phaseB) phase_b ;;
+        all)    phase_a; phase_b ;;
+        list)   phase_a; phase_b ;;
+        *) echo "unknown phase '${PHASE}' (use phaseA|phaseB|all|list)"; exit 1 ;;
+    esac
+}
+
+# ── Stale-filter guard: every run_class filter must match >=1 test (dotnet --list-tests, no GPU) ──────────
+
+validate_filters() {
+    local entry project cls rest out count bad=0 built=" "
+    RUN_MODE=plan
+    PLAN=()
+    run_phase
+    RUN_MODE=run
+    for entry in "${PLAN[@]}"; do
+        IFS='|' read -r project cls rest <<< "${entry}"
+        if [[ "${built}" != *" ${project} "* ]]; then
+            ( cd "${REPO_ROOT}" && dotnet build "tests/${project}/${project}.csproj" --nologo -v quiet >/dev/null 2>&1 ) \
+                || { echo "[campaign] build failed for ${project}"; exit 1; }
+            built+="${project} "
+        fi
+        out="$( cd "${REPO_ROOT}" && dotnet test "tests/${project}/${project}.csproj" --no-build --list-tests \
+            --filter "FullyQualifiedName~${cls}" --nologo 2>&1 )"
+        count=$(printf '%s\n' "${out}" | sed -n '/The following Tests are available:/,$p' | grep -cE '^\s+\S')
+        if [ "${count}" -eq 0 ]; then
+            echo "[campaign] STALE FILTER: ${cls} (${project}) matches zero tests"
+            bad=$((bad + 1))
+        fi
+    done
+    if [ "${bad}" -ne 0 ]; then
+        echo "[campaign] ${bad} stale filter(s); fix tests/run-multigpu-campaign.sh. Nothing was run."
+        exit 1
+    fi
+    echo "[campaign] guard: all ${#PLAN[@]} filters match at least one test"
+}
+
+validate_filters
+[ "${PHASE}" = list ] && exit 0
+gpu_preflight
+RUN_MODE=run
+run_phase
 
 # ── Summary ───────────────────────────────────────────────────────────────────────────────────────────────
 
