@@ -350,6 +350,10 @@ probe_case() {
     local max at cos
     IFS=$'\t' read -r max at cos < <(probe_summary "$tsv")
     notes+="probe max relL2 ${max} (${at}), min cos ${cos}; "
+    # The default probes three distinct steps; fewer means the loop never reached one (img2img, a start step past 0).
+    local taken
+    taken="$(awk -F'\t' 'NR > 1 { s[$1] = 1 } END { print length(s) }' "$tsv")"
+    if [ -z "$PROBE_STEPS" ] && [ "$taken" -lt 3 ]; then probe_fail="denoiser probe took $taken of its 3 default steps"; fi
     if [ -n "$PROBE_FLOOR" ]; then
         local over
         over="$(probe_over "$tsv" "$PROBE_FLOOR")"

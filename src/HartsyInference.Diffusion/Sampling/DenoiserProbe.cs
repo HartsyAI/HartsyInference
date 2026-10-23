@@ -10,7 +10,8 @@ namespace HartsyInference.Diffusion.Sampling;
 /// <summary>Teacher-forced denoiser probe (<c>diagnostics.denoiserProbe</c>), the diffusion counterpart of the LLM's teacher-forced
 /// log-probs: the record arm writes the conditioning and, at the probed steps, the denoiser's inputs and outputs; the replay arm
 /// runs one more forward there on the recorded inputs and writes its distance from the recorded outputs to <c>probe.tsv</c>.</summary>
-/// <remarks>One denoise loop per process (the CLI). Step graphs stay off while it is set: a captured step replays fixed buffers.</remarks>
+/// <remarks>One denoise loop per process (the CLI). Step graphs stay off while it is set: a captured step replays fixed buffers. A
+/// normalized CFG combine (Lumina 2's default) is not <c>g·out0 + (1 − g)·out1</c>, so such a loop records no CFG row.</remarks>
 public sealed class DenoiserProbe
 {
     private const string TsvName = "probe.tsv";
