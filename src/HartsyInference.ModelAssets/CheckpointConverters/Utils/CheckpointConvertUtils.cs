@@ -681,6 +681,14 @@ public static unsafe class CheckpointConvertUtils
     /// <summary>Suffix of ComfyUI's per-output-row int8 dequant scale (the same suffix fp8 builds use for their per-tensor scalar; the weight's dtype is what tells the two apart).</summary>
     private const string WeightScaleSuffix = ".weight_scale";
 
+    /// <summary>The layer's <c>full_precision_matrix_mult</c> policy as ComfyUI resolves it: its own blob when it has one, else the file-level config.</summary>
+    private static bool FullPrecisionPolicy(IReadOnlyDictionary<string, Tensor> source, string baseKey, Lazy<HashSet<string>?> fileLevel)
+    {
+        if (source.TryGetValue(baseKey + ComfyQuantDescriptor.Suffix, out Tensor? blob))
+            return TryReadComfyQuant(blob)?.FullPrecisionMatMul == true;
+        return fileLevel.Value?.Contains(baseKey) == true;
+    }
+
     /// <summary>Parses a <c>.comfy_quant</c> descriptor tensor, tolerating the trailing NUL padding a fixed-width U8 tensor can carry. Returns null when the tensor is not a descriptor or its JSON is unreadable.</summary>
     public static ComfyQuantDescriptor? TryReadComfyQuant(Tensor blob)
     {
@@ -827,8 +835,10 @@ public static unsafe class CheckpointConvertUtils
     /// <param name="nvfp4DenseDType">With <paramref name="residentNvfp4"/>, the <see cref="QuantWeightInfo.DenseDType"/> each resident weight carries — the dtype it stands in for.</param>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
         bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false,
-        Action<Tensor, Tensor>? onNvfp4Unpacked = null, DType? nvfp4DenseDType = null)
+        Action<Tensor, Tensor>? onNvfp4Unpacked = null, DType? nvfp4DenseDType = null,
+        IReadOnlyDictionary<string, string>? fileMetadata = null)
     {
+        Lazy<HashSet<string>?> fileFullPrecision = new(() => Nvfp4LayoutNormalizer.FileLevelFullPrecisionLayers(fileMetadata));
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
         // weight before anything here can strip them.
         source = AttachInt8QuantInfo(source);
@@ -975,7 +985,8 @@ public static unsafe class CheckpointConvertUtils
                     // Resident: relabel to F4E2M1 [N, K] and hang the scales off QuantInfo rather than unpacking.
                     // Refuses AWQ pre_quant_scale layers, which fall through to the eager dequant below.
                     if (residentNvfp4 && Nvfp4Codec.TryAttachResident(kvp.Value, blockScales, scale2T,
-                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight, nvfp4DenseDType))
+                            source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight, nvfp4DenseDType,
+                            FullPrecisionPolicy(source, baseKey, fileFullPrecision)))
                     {
                         result[key] = residentWeight;
                         nvfp4Resident++;

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.ModelAssets.Nvfp4;
 
@@ -55,6 +56,20 @@ internal static class Nvfp4LayoutNormalizer
     {
         if (metadata is null || !metadata.TryGetValue(MetadataKey, out string? json)) return null;
         return [.. LayerMap(json).Select(p => p.Key)];
+    }
+
+    /// <summary>The layers whose file-level config sets <c>full_precision_matrix_mult</c>, or null when the file has no marker.</summary>
+    internal static HashSet<string>? FileLevelFullPrecisionLayers(IReadOnlyDictionary<string, string>? metadata)
+    {
+        IReadOnlyList<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>>? layers = LayerConfigs(metadata);
+        if (layers is null) return null;
+        HashSet<string> flagged = new(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, System.Text.Json.Nodes.JsonNode?> layer in layers)
+        {
+            if (ComfyQuantDescriptor.TryParse(layer.Value)?.FullPrecisionMatMul == true)
+                flagged.Add(layer.Key);
+        }
+        return flagged;
     }
 
     /// <summary>Every listed layer with its config, or null when the file has no marker.</summary>

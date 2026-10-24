@@ -867,7 +867,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (!native && Volatile.Read(ref _blockScaledFirstRefusal) is null)
         {
             Interlocked.CompareExchange(ref _blockScaledFirstRefusal,
-                $"{NativeBlockScaledRefusal(input, output, n, k, rowRange, scales)} (n={n} k={k})", null);
+                $"{NativeBlockScaledRefusal(input, output, n, k, rowRange, weight.QuantInfo?.NativeGemmEligible != false, scales)} (n={n} k={k})", null);
         }
         if (Volatile.Read(ref _blockScaledDispatchLogged) != 0
             || Interlocked.Exchange(ref _blockScaledDispatchLogged, 1) != 0)
@@ -921,10 +921,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>The first condition in the <c>LinearCore</c> dispatch gate that this call fails. Mirrors that gate's order.</summary>
     private string NativeBlockScaledRefusal(Tensor input, Tensor output, int n, int k, bool rowRange,
-        in ResidentBlockScales scales)
+        bool nativeGemmEligible, in ResidentBlockScales scales)
     {
         if (rowRange) return "a row range cannot address the packed layout";
         if (!EnableNativeFp4Gemm) return "numerics.fp4Native is off";
+        if (!nativeGemmEligible) return "the layer's full_precision_matrix_mult policy asks for a dense GEMM";
         if (scales.DeclinedStatus != 0) return $"cuBLASLt declined this weight's GEMM (status {scales.DeclinedStatus})";
         int paddedCols = (k / scales.Format.GroupSize() + 3) / 4 * 4;
         if (scales.PaddedCols != paddedCols)
@@ -2169,7 +2170,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // the checkpoint's scale layout must be the one cuBLASLt derives from [N, K] — block columns padded to 4 —
         // and a row range, which cannot address the packed layout, takes the unpack path like every other refusal.
         BlockScaleFormat? blockScaled = null;
-        if (!rowRange && EnableNativeFp4Gemm && blockScales.BlockScaleDevice != 0 && blockScales.DeclinedStatus == 0
+        // A layer whose full_precision_matrix_mult policy asks for a dense GEMM takes the unpack path below.
+        if (!rowRange && EnableNativeFp4Gemm && weight.QuantInfo?.NativeGemmEligible != false
+            && blockScales.BlockScaleDevice != 0 && blockScales.DeclinedStatus == 0
             && blockScales.PaddedCols == (k / blockScales.Format.GroupSize() + 3) / 4 * 4
             && (input.DType == DType.F32 || input.DType == DType.F16)
             && (output.DType == DType.F16 || output.DType == DType.F32)

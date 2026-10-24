@@ -106,7 +106,7 @@ public static unsafe class Nvfp4Codec
     /// <param name="hasPreQuantScale">True when the weight ships an AWQ <c>pre_quant_scale</c> over the input dim. Those are refused: the scale has to multiply the ACTIVATION (<c>x·Wᵀ = (x⊙s)·(W/s)ᵀ</c>) and no backend Linear path applies one, so such a layer must take the eager dequant that folds it in.</param>
     /// <param name="denseDType">The <see cref="QuantWeightInfo.DenseDType"/> to record: the dtype the eager unpack this replaces would have produced.</param>
     public static bool TryAttachResident(Tensor packed, Tensor blockScale, Tensor globalScale, bool hasPreQuantScale,
-        out Tensor resident, DType? denseDType = null)
+        out Tensor resident, DType? denseDType = null, bool fullPrecisionMatMul = false)
     {
         ArgumentNullException.ThrowIfNull(packed);
         ArgumentNullException.ThrowIfNull(blockScale);
@@ -135,6 +135,7 @@ public static unsafe class Nvfp4Codec
             BlockScale = blockScale,
             GlobalScale = globalScale,
             DenseDType = denseDType,
+            FullPrecisionMatMul = fullPrecisionMatMul,
         };
         return true;
     }

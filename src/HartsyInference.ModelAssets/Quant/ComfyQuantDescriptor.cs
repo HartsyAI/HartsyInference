@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace HartsyInference.ModelAssets.Quant;
 
@@ -50,6 +51,43 @@ public sealed record ComfyQuantDescriptor
         {
             return null;
         }
+    }
+
+    /// <summary>Reads a descriptor already parsed as a JSON node (a layer config out of a file's <c>__metadata__</c>), with the same rules as the byte overload.</summary>
+    public static ComfyQuantDescriptor? TryParse(JsonNode? node)
+    {
+        if (node is not JsonObject root || root["format"] is not JsonValue formatValue
+            || formatValue.GetValueKind() != JsonValueKind.String || !formatValue.TryGetValue(out string? format) || format is null)
+        {
+            return null;
+        }
+
+        JsonObject? parameters = root["params"] as JsonObject;
+        bool convrot = ReadBool(root, parameters, "convrot");
+        return new ComfyQuantDescriptor
+        {
+            Format = format,
+            ConvRotGroupSize = convrot ? ReadInt(root, parameters, "convrot_groupsize", 256) : 0,
+            FullPrecisionMatMul = ReadBool(root, parameters, "full_precision_matrix_mult"),
+        };
+    }
+
+    private static bool ReadBool(JsonObject root, JsonObject? parameters, string name)
+    {
+        if (root[name] is JsonValue value && value.GetValueKind() is JsonValueKind.True or JsonValueKind.False)
+            return value.GetValue<bool>();
+        if (parameters?[name] is JsonValue nested && nested.GetValueKind() is JsonValueKind.True or JsonValueKind.False)
+            return nested.GetValue<bool>();
+        return false;
+    }
+
+    private static int ReadInt(JsonObject root, JsonObject? parameters, string name, int fallback)
+    {
+        if (root[name] is JsonValue value && value.GetValueKind() == JsonValueKind.Number && value.TryGetValue(out int parsed))
+            return parsed;
+        if (parameters?[name] is JsonValue nested && nested.GetValueKind() == JsonValueKind.Number && nested.TryGetValue(out int nestedParsed))
+            return nestedParsed;
+        return fallback;
     }
 
     private static bool ReadBool(JsonElement root, JsonElement parameters, string name)
