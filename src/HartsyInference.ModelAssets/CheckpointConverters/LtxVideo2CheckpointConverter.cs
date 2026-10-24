@@ -218,7 +218,9 @@ public sealed class LtxVideo2CheckpointConverter
     {
         // Folds every quantized build's companions onto the weight before routing: the LTX-2.5 comfy-int8-convrot DiT
         // keeps its I8 bytes with the row scale on Tensor.QuantInfo, fp8 builds get Fp8ScaleFactor.
-        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights, residentNvfp4: residentNvfp4);
+        // A resident nvfp4 group records F16 as its dense twin: the eager unpack below is F16, so the packed path must be too.
+        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights, residentNvfp4: residentNvfp4,
+            nvfp4DenseDType: DType.F16);
 
         Dictionary<string, Tensor> transformer = new(allWeights.Count);
         Dictionary<string, Tensor> connectors = new(256);
