@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
@@ -32,7 +33,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     // RoPE cos/sin keyed by the latent grid, and the projected text(+image) context keyed by encoder identity.
     private (int T, int H, int W) _ropeKey = (-1, -1, -1);
     private Tensor? _cosC, _sinC;
-    private readonly Dictionary<Tensor, (Tensor Ctx, int ImageContextLen, Tensor? ImgKey)> _ctxCache = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<(Tensor Encoder, IBackend Backend), (Tensor Ctx, int ImageContextLen, Tensor? ImgKey)> _ctxCache = new(new CtxKeyComparer());
     private TextKvScope? _textKv;
 
     public WanVideoTransformer(WanVideoConfig config)
@@ -55,9 +56,10 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
             ? DitDtype.Act : DType.F32;
 
     /// <summary>The dtype one forward's branches compute in: <see cref="BranchActivation"/>, or F32 for a forward with an image
-    /// context or context parallelism, whose paths are F32-only, or the step cache, which keeps today's path.</summary>
-    internal DType ForwardActivation(IBackend backend, int timestepGroups, bool imageContext, bool contextParallel, bool stepCache) =>
-        imageContext || contextParallel || stepCache ? DType.F32 : BranchActivation(backend, timestepGroups == 1);
+    /// context, whose path is F32-only, or the step cache, which keeps today's path. Context parallelism runs the same dtype
+    /// as one GPU: <see cref="CpKvExchange"/> trades the K/V rows in whatever dtype the branch computes.</summary>
+    internal DType ForwardActivation(IBackend backend, int timestepGroups, bool imageContext, bool stepCache) =>
+        imageContext || stepCache ? DType.F32 : BranchActivation(backend, timestepGroups == 1);
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
@@ -145,7 +147,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
 
         BuildRopeCache(gt, gh, gw);
         (Tensor cos, Tensor sin) = (_cosC!, _sinC!);
-        DType act = ForwardActivation(backend, g, imageEmbeds is not null, cp is not null, stepCache is not null);
+        DType act = ForwardActivation(backend, g, imageEmbeds is not null, stepCache is not null);
 
         WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]
@@ -177,6 +179,8 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
             sinLocal = SliceHostRows(sin, range.TokenStart, sEff);
             (cos, sin) = (cosLocal, sinLocal);
             if (g != 1) tsEff = timesteps[range.FrameStart..(range.FrameStart + range.FrameCount)];
+            // One group covers this rank's tokens: the block's single-group helpers test tokensPerGroup == s for G == 1.
+            if (g == 1) tokensPerGroup = sEff;
         }
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, tsEff, _config.FreqDim, dim,
@@ -307,7 +311,8 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     /// re-uploads on demand; the host data stays authoritative).</summary>
     private (Tensor Ctx, int ImageContextLen) GetOrBuildContext(IBackend backend, Tensor encoder, Tensor? imageEmbeds, int dim)
     {
-        if (_ctxCache.TryGetValue(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) cached)
+        // Keyed per backend: a context-parallel peer projects its own copy instead of reading the owner rank's tensor.
+        if (_ctxCache.TryGetValue((encoder, backend), out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) cached)
             && ReferenceEquals(cached.ImgKey, imageEmbeds))
         {
             return (cached.Ctx, cached.ImageContextLen);
@@ -329,14 +334,14 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         }
         WanVideoDebugDump.Dump("cond_encoderProj", encoderProj);
         backend.OffloadActivation(encoderProj);   // host-materialize (see cache note above)
-        if (_ctxCache.Count >= 4)   // cap: prompts/images changed across gens; drop the stale contexts
+        if (_ctxCache.Count >= 8)   // cap: prompts/images changed across gens; drop the stale contexts
         {
             foreach ((Tensor ctx, _, _) in _ctxCache.Values) ctx.Dispose();
             _ctxCache.Clear();
         }
         // Same-encoder re-entry with a different image replaces the stale entry (dispose the old context).
-        if (_ctxCache.Remove(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) stale)) stale.Ctx.Dispose();
-        _ctxCache[encoder] = (encoderProj, imageContextLen, imageEmbeds);
+        if (_ctxCache.Remove((encoder, backend), out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) stale)) stale.Ctx.Dispose();
+        _ctxCache[(encoder, backend)] = (encoderProj, imageContextLen, imageEmbeds);
         return (encoderProj, imageContextLen);
     }
 
@@ -348,6 +353,9 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         BuildRopeCache(gridT, gridH, gridW);
         foreach (Tensor encoder in encoders) GetOrBuildContext(backend, encoder, null, _config.InnerDim);
     }
+
+    internal Tensor? CachedContextForTests(IBackend backend, Tensor encoder) =>
+        _ctxCache.TryGetValue((encoder, backend), out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) cached) ? cached.Ctx : null;
 
     /// <summary>Host row slice of a host-authoritative <c>[rows, cols]</c> tensor (the rope cos/sin tables) — no
     /// backend involvement, safe from concurrent rank threads.</summary>
@@ -370,5 +378,15 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
             _imgEmbedder.Clear();
         }
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Reference identity on both the encoder and the backend (a context is owned by the rank that built it).</summary>
+    private sealed class CtxKeyComparer : IEqualityComparer<(Tensor Encoder, IBackend Backend)>
+    {
+        public bool Equals((Tensor Encoder, IBackend Backend) a, (Tensor Encoder, IBackend Backend) b) =>
+            ReferenceEquals(a.Encoder, b.Encoder) && ReferenceEquals(a.Backend, b.Backend);
+
+        public int GetHashCode((Tensor Encoder, IBackend Backend) k) =>
+            HashCode.Combine(RuntimeHelpers.GetHashCode(k.Encoder), RuntimeHelpers.GetHashCode(k.Backend));
     }
 }

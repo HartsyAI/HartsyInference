@@ -56,6 +56,82 @@ public sealed unsafe class WanContextParallelCpuTests
         Assert.True(max < 1e-4f, $"CP-split forward diverged from the single-backend forward (max |diff| = {max:E3}).");
     }
 
+    [Fact]
+    public void F16ExchangeAssemblesEveryRankInGlobalOrder()
+    {
+        CpSequencePlan plan = CpSequencePlan.Create(2, 2, [1.0, 1.0]);
+        using CpKvExchange exchange = new(plan);
+        (Tensor k0, Tensor k1) = CfgBranchRunner.Run(
+            () => RankKeys(exchange, 0, F16Rows(0x1000), F16Rows(0x2000)),
+            () => RankKeys(exchange, 1, F16Rows(0x3000), F16Rows(0x4000)));
+        foreach (Tensor k in new Tensor[] { k0, k1 })
+        {
+            Assert.Equal(DType.F16, k.DType);
+            Assert.Equal(new TensorShape(4, 4), k.Shape);
+            ushort* p = (ushort*)k.DataPointer;
+            for (int t = 0; t < 4; t++)
+            {
+                for (int c = 0; c < 4; c++)
+                {
+                    ushort expected = (ushort)((t < 2 ? 0x1000 : 0x3000) + (t % 2) * 4 + c);
+                    Assert.Equal(expected, p[t * 4 + c]);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void F16AgainstF32AcrossRanksFailsOnBothRanks()
+    {
+        CpSequencePlan plan = CpSequencePlan.Create(2, 2, [1.0, 1.0]);
+        using CpKvExchange exchange = new(plan);
+        Exception thrown = Assert.ThrowsAny<Exception>(() => CfgBranchRunner.Run(
+            () => RankKeys(exchange, 0, F16Rows(0x1000), F16Rows(0x2000)),
+            () => RankKeys(exchange, 1, new Tensor(new TensorShape(2, 4), DType.F32), new Tensor(new TensorShape(2, 4), DType.F32))));
+        if (thrown is AggregateException aggregate)
+        {
+            Assert.All(aggregate.InnerExceptions, (Exception inner) => Assert.IsType<InvalidOperationException>(inner));
+        }
+        else
+        {
+            Assert.IsType<InvalidOperationException>(thrown);
+        }
+    }
+
+    private static Tensor RankKeys(CpKvExchange exchange, int rank, Tensor k, Tensor v)
+    {
+        (Tensor kFull, Tensor vFull) = exchange.Exchange(rank, k, v);
+        vFull.Dispose();
+        return kFull;
+    }
+
+    [Fact]
+    public void ContextCacheHoldsOneProjectionPerBackend()
+    {
+        WanVideoConfig cfg = TinyConfig;
+        WanVideoTransformer transformer = new(cfg);
+        transformer.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+        using CpuBackend backend1 = new(), backend2 = new();
+        Tensor prompt = Rand([3L, cfg.TextDim], seed: 1);
+        transformer.PrewarmSequenceCaches(backend1, 3, 2, 2, prompt);
+        transformer.PrewarmSequenceCaches(backend2, 3, 2, 2, prompt);
+        Tensor? ctx1 = transformer.CachedContextForTests(backend1, prompt);
+        Tensor? ctx2 = transformer.CachedContextForTests(backend2, prompt);
+        Assert.NotNull(ctx1);
+        Assert.NotNull(ctx2);
+        Assert.NotSame(ctx1, ctx2);
+        float* a = (float*)ctx1.DataPointer, b = (float*)ctx2.DataPointer;
+        for (long i = 0; i < ctx1.ElementCount; i++) Assert.Equal(a[i], b[i]);
+    }
+
+    private static Tensor F16Rows(int seedValue)
+    {
+        Tensor t = new(new TensorShape(2, 4), DType.F16);
+        ushort* p = (ushort*)t.DataPointer;
+        for (int i = 0; i < 8; i++) p[i] = (ushort)(seedValue + i);
+        return t;
+    }
+
     private static Tensor RankForward(WanVideoTransformer transformer, Core.Backends.IBackend backend, Tensor latent, Tensor prompt,
         float[] timesteps, int rank, CpSequencePlan plan, CpKvExchange exchange)
     {

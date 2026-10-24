@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Utilities;
 
-/// <summary>Per-block self-attention K/V rendezvous for 2 context-parallel ranks. Each exchange is a two-phase
+/// <summary>Per-block self-attention K/V rendezvous for 2 context-parallel ranks (F32 or F16 rows). Each exchange is a two-phase
 /// <see cref="Barrier"/> protocol: (1) each rank host-materializes its post-RoPE local K/V <c>[Sr, dim]</c> on its
 /// OWN thread (the D2H sync must run with that thread's ambient backend binding) and publishes the raw host
 /// pointers; barrier; (2) each rank assembles kFull/vFull <c>[S, dim]</c> in global token order by host memcpy from
@@ -24,7 +24,7 @@ public sealed unsafe class CpKvExchange : IDisposable
 {
     private readonly Barrier _barrier = new(2);
     private readonly CpSequencePlan _plan;
-    private readonly (nint K, nint V, int Prefix)[] _slots = new (nint, nint, int)[2];
+    private readonly (nint K, nint V, int Prefix, DType Dtype)[] _slots = new (nint, nint, int, DType)[2];
     private volatile bool _failed;
 
     public CpKvExchange(CpSequencePlan plan)
@@ -51,15 +51,15 @@ public sealed unsafe class CpKvExchange : IDisposable
         long expectedRows = replicatedPrefixRows + _plan.Ranks[rank].TokenCount;
         try
         {
-            if (kLocal.DType != DType.F32 || vLocal.DType != DType.F32)
-                throw new ArgumentException("CpKvExchange assembles F32 rows only.");
+            if (kLocal.DType != vLocal.DType || (kLocal.DType != DType.F32 && kLocal.DType != DType.F16))
+                throw new ArgumentException("CpKvExchange assembles F32 or F16 rows only, with K and V in the same dtype.");
             if (kLocal.ElementCount != expectedRows * dim || vLocal.ElementCount != expectedRows * dim)
                 throw new ArgumentException(
                     $"local K/V must be [{replicatedPrefixRows} prefix + {_plan.Ranks[rank].TokenCount} rank rows, {dim}]; " +
                     $"got {kLocal.Shape} / {vLocal.Shape}.");
             // Owning-thread D2H: after this the rows are plain host memory the peer can memcpy without touching
             // this rank's backend or stream.
-            _slots[rank] = ((nint)kLocal.DataPointer, (nint)vLocal.DataPointer, replicatedPrefixRows);
+            _slots[rank] = ((nint)kLocal.DataPointer, (nint)vLocal.DataPointer, replicatedPrefixRows, kLocal.DType);
         }
         catch
         {
@@ -73,9 +73,11 @@ public sealed unsafe class CpKvExchange : IDisposable
             if (_slots[1 - rank].Prefix != replicatedPrefixRows)
                 throw new InvalidOperationException(
                     $"replicatedPrefixRows mismatch across ranks ({replicatedPrefixRows} vs {_slots[1 - rank].Prefix}).");
+            if (_slots[1 - rank].Dtype != kLocal.DType)
+                throw new InvalidOperationException($"K/V dtype mismatch across ranks ({kLocal.DType} vs {_slots[1 - rank].Dtype}).");
             bool leadingBatch = kLocal.Shape.Rank == 3 && kLocal.Shape[0] == 1;
-            kFull = Assemble(dim, replicatedPrefixRows, rank, leadingBatch, takeV: false);
-            vFull = Assemble(dim, replicatedPrefixRows, rank, leadingBatch, takeV: true);
+            kFull = Assemble(kLocal.DType, dim, replicatedPrefixRows, rank, leadingBatch, takeV: false);
+            vFull = Assemble(kLocal.DType, dim, replicatedPrefixRows, rank, leadingBatch, takeV: true);
         }
         catch
         {
@@ -90,24 +92,25 @@ public sealed unsafe class CpKvExchange : IDisposable
         return (kFull!, vFull!);
     }
 
-    private Tensor Assemble(int dim, int prefixRows, int ownRank, bool leadingBatch, bool takeV)
+    private Tensor Assemble(DType dtype, int dim, int prefixRows, int ownRank, bool leadingBatch, bool takeV)
     {
         long rows = prefixRows + _plan.TotalTokens;
         TensorShape shape = leadingBatch ? new TensorShape(1, rows, dim) : new TensorShape(rows, dim);
-        Tensor full = new Tensor(shape, DType.F32);
-        float* dst = (float*)full.DataPointer;
+        Tensor full = new Tensor(shape, dtype);
+        long es = dtype.SizeInBytes;   // rows are copied as raw bytes, so F32 and F16 share this path
+        byte* dst = (byte*)full.DataPointer;
         if (prefixRows > 0)
         {
-            float* own = (float*)(takeV ? _slots[ownRank].V : _slots[ownRank].K);
-            long prefixBytes = (long)prefixRows * dim * 4;
+            byte* own = (byte*)(takeV ? _slots[ownRank].V : _slots[ownRank].K);
+            long prefixBytes = prefixRows * dim * es;
             Buffer.MemoryCopy(own, dst, prefixBytes, prefixBytes);
         }
         for (int r = 0; r < 2; r++)
         {
             CpRankRange range = _plan.Ranks[r];
-            float* src = (float*)(takeV ? _slots[r].V : _slots[r].K) + (long)prefixRows * dim;
-            long bytes = (long)range.TokenCount * dim * 4;
-            Buffer.MemoryCopy(src, dst + ((long)prefixRows + range.TokenStart) * dim, bytes, bytes);
+            byte* src = (byte*)(takeV ? _slots[r].V : _slots[r].K) + prefixRows * dim * es;
+            long bytes = range.TokenCount * dim * es;
+            Buffer.MemoryCopy(src, dst + (prefixRows + range.TokenStart) * dim * es, bytes, bytes);
         }
         return full;
     }

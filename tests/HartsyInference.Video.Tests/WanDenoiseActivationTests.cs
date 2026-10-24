@@ -9,14 +9,14 @@ using Xunit;
 namespace HartsyInference.Video.Tests;
 
 /// <summary>The dtype the Wan T2V/TI2V loop sizes its reserve and text K/V cache for: with <c>numerics.wanF16</c> on, F16 only
-/// when no forward of the loop can take the F32 path, so per-frame timesteps, context parallelism, the step cache, an A14B
+/// when no forward of the loop can take the F32 path, so per-frame timesteps, the step cache, an A14B
 /// expert pair and a CFG worker without F16 activations each keep it F32; and the loop holds the switches it sized for.</summary>
 public sealed class WanDenoiseActivationTests
 {
     [Theory]
     [InlineData("plain", true)]
     [InlineData("per-frame timesteps", false)]
-    [InlineData("context parallelism", false)]
+    [InlineData("context parallelism", true)]
     [InlineData("step cache", false)]
     [InlineData("A14B pair", false)]
     [InlineData("CFG worker without F16", false)]
@@ -29,7 +29,7 @@ public sealed class WanDenoiseActivationTests
         using IDisposable knobs = KnobProfile.Create("wan-f16-loop").With(EngineKnobs.WanF16, true).With(EngineKnobs.DitF16, true).Push();
 
         DType act = WanVideoPipeline.DenoiseActivation(transformer, backend, cfgWorker,
-            contextParallelRanks: path == "context parallelism" ? 2 : 0, stepCache: path == "step cache",
+            stepCache: path == "step cache",
             singleGroup: path != "per-frame timesteps");
 
         Assert.Equal(f16 ? DType.F16 : DType.F32, act);

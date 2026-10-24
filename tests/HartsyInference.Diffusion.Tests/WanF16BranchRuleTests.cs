@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>Which Wan forwards take F16 branches: TI2V-5B and a single-expert 14B T2V, one timestep group, under
 /// <c>numerics.wanF16</c> (on by default, off in the <c>reference</c> profile) and <c>numerics.ditF16</c>, on a backend with F16
 /// activations. An A14B expert pair, image-to-video and the 1.3B stay F32, the weight detector grants the same geometries as
-/// the presets, and with the switch on a forward with per-frame timesteps, an image context, context parallelism or the step
+/// the presets, and with the switch on a forward with per-frame timesteps, an image context or the step
 /// cache stays F32.</summary>
 public sealed class WanF16BranchRuleTests
 {
@@ -29,7 +29,7 @@ public sealed class WanF16BranchRuleTests
     [InlineData("plain", true)]
     [InlineData("per-frame timesteps", false)]
     [InlineData("image context", false)]
-    [InlineData("context parallelism", false)]
+    [InlineData("context parallelism", true)]
     [InlineData("step cache", false)]
     [InlineData("A14B pair", false)]
     public void WithTheSwitchOnOnlyAPlainSingleGroupForwardTakesF16Branches(string path, bool f16)
@@ -40,7 +40,7 @@ public sealed class WanF16BranchRuleTests
         using IDisposable knobs = KnobProfile.Create("wan-f16-forward").With(EngineKnobs.WanF16, true).With(EngineKnobs.DitF16, true).Push();
 
         DType act = transformer.ForwardActivation(backend, timestepGroups: path == "per-frame timesteps" ? 3 : 1,
-            imageContext: path == "image context", contextParallel: path == "context parallelism", stepCache: path == "step cache");
+            imageContext: path == "image context", stepCache: path == "step cache");
 
         Assert.Equal(f16 ? DType.F16 : DType.F32, act);
     }
