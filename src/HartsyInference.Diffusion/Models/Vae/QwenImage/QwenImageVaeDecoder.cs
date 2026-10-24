@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae.QwenImage;
@@ -62,7 +64,20 @@ public sealed class QwenImageVaeDecoder : IDisposable
         new(StageKind.Residual, 96, 96),
     ];
 
+    private const int SpatialScale = 8;
+
+    private static readonly int[] TileCandidates = [64, 48, 32, 24, 16];
+
     private readonly VaeConfig _config;
+
+    /// <summary>Test seam: replaces the backend's free-VRAM reading in <see cref="DecodeWithinBudget"/>.</summary>
+    internal Func<long>? FreeBytesForTests { get; set; }
+
+    /// <summary>Test seam: forces the tile latent size of <see cref="DecodeWithinBudget"/>; 0 plans it from the free VRAM.</summary>
+    internal int TileLatentForTests { get; set; }
+
+    /// <summary>Tile latent size of the last <see cref="DecodeWithinBudget"/> call; 0 when it ran full-resolution.</summary>
+    internal int LastTileLatent { get; private set; }
 
     // Top-level conv2: post-quant 1×1×1 (collapsed to 1×1 2D).
     private Tensor? _conv2Weight;
@@ -265,6 +280,117 @@ public sealed class QwenImageVaeDecoder : IDisposable
         QwenImageVaeDebugDump.DumpOutput(clamped);
 
         return clamped;
+    }
+
+    /// <summary>Full-resolution decode when the device can hold its peak, otherwise a tiled decode whose tile is the
+    /// largest that fits the free VRAM. The full path is the same <see cref="Decode"/> call as before.</summary>
+    public unsafe Tensor DecodeWithinBudget(IBackend backend, Tensor latent)
+    {
+        int latentH = (int)latent.Shape[2];
+        int latentW = (int)latent.Shape[3];
+        long cap = Im2ColCap(backend);
+        if (TileLatentForTests > 0)
+        {
+            LastTileLatent = TileLatentForTests;
+            return DecodeTiled(backend, latent, TileLatentForTests, TileLatentForTests / 4);
+        }
+        long need = EstimateDecodeBytes(latentH, latentW, cap);
+        long free = FreeBytes(backend);
+        if (free < need)
+        {
+            backend.TrimMemoryPool();
+            free = FreeBytes(backend);
+        }
+        bool afterOom = false;
+        if (free >= need)
+        {
+            try
+            {
+                LastTileLatent = 0;
+                return Decode(backend, latent);
+            }
+            catch (OutOfVramException error)
+            {
+                Logs.Warning($"[qwen-vae] full decode ran out of VRAM, re-planning: {error.Message}");
+                backend.OffloadActivation(latent);
+                backend.FreeActivations();
+                free = FreeBytes(backend);
+                afterOom = true;
+            }
+        }
+
+        int tile = PlanTileLatent(latentH, latentW, free, cap);
+        LastTileLatent = tile;
+        string reading = afterOom ? "free re-read after the failed attempt" : "free";
+        if (tile == 0)
+        {
+            Logs.Warning($"[qwen-vae] full decode needs ~{need >> 20} MB, {free >> 20} MB {reading}: no tiling "
+                + $"applies ({latentH}x{latentW} latent), decoding whole.");
+            return Decode(backend, latent);
+        }
+        Logs.Warning($"[qwen-vae] full decode needs ~{need >> 20} MB, {free >> 20} MB {reading}: tiled decode with "
+            + $"{tile}-latent tiles, overlap {tile / 4}.");
+        return DecodeTiled(backend, latent, tile, tile / 4);
+    }
+
+    private long FreeBytes(IBackend backend) => FreeBytesForTests?.Invoke() ?? backend.FreeMemoryBytes();
+
+    private static long Im2ColCap(IBackend backend) =>
+        backend.Capabilities.BandsIm2Col && backend.Capabilities.Im2ColWorkspaceCapBytes > 0
+            ? backend.Capabilities.Im2ColWorkspaceCapBytes
+            : long.MaxValue;
+
+    /// <summary>Tiled decode for <see cref="DecodeWithinBudget"/>: every tile runs the full <see cref="Decode"/> stack.</summary>
+    public Tensor DecodeTiled(IBackend backend, Tensor latent, int tileLatentSize, int overlapLatent)
+    {
+        DType weightDtype = EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
+        return VaeTileAccumulator.Decode(backend, latent, tileLatentSize, overlapLatent, weightDtype, SpatialScale,
+            t => Decode(backend, t),
+            (h, w) => EstimateWorkspaceBytes(h, w));
+    }
+
+    /// <summary>Peak device bytes of a full decode at this latent size: the worst conv workspace (banded at
+    /// <paramref name="im2colCapBytes"/>) or the mid-block attention scores, plus two full-resolution 96-ch activations.</summary>
+    internal static long EstimateDecodeBytes(int latentH, int latentW, long im2colCapBytes)
+    {
+        long pixels = (long)latentH * latentW;
+        long outPixels = pixels * SpatialScale * SpatialScale;
+        long activations = 2L * FinalChannels * outPixels * sizeof(float);
+        return Math.Min(EstimateWorkspaceBytes(latentH, latentW), im2colCapBytes) + activations;
+    }
+
+    /// <summary>Uncapped worst-case workspace: each 3×3 conv is inCh·9·outH·outW·4, and the attention materializes
+    /// one F32 score matrix over the latent's tokens.</summary>
+    internal static long EstimateWorkspaceBytes(int latentH, int latentW)
+    {
+        long pixels = (long)latentH * latentW;
+        long worstConv = 16L * 9 * pixels;
+        long areaScale = 1;
+        foreach (UpsampleStage stage in _stages)
+        {
+            if (stage.Kind == StageKind.Resample) areaScale *= 4;   // 2× per axis
+            worstConv = Math.Max(worstConv, (long)Math.Max(stage.InCh, stage.OutCh) * 9 * pixels * areaScale);
+        }
+        return Math.Max(worstConv, pixels * pixels) * sizeof(float);
+    }
+
+    /// <summary>Tile latent for a decode that did not fit whole, or 0 when the whole latent should run as one decode: it fits
+    /// <paramref name="freeBytes"/>, or it is no bigger than the smallest tile so there is nothing to split.</summary>
+    internal static int PlanTileLatent(int latentH, int latentW, long freeBytes, long im2colCapBytes)
+    {
+        if (EstimateDecodeBytes(latentH, latentW, im2colCapBytes) <= freeBytes) return 0;
+        if (Math.Max(latentH, latentW) <= TileCandidates[^1]) return 0;
+        return ChooseTileLatent(freeBytes, im2colCapBytes);
+    }
+
+    /// <summary>Largest candidate tile whose full-decode estimate fits <paramref name="freeBytes"/>; the smallest when none does.</summary>
+    internal static int ChooseTileLatent(long freeBytes, long im2colCapBytes)
+    {
+        foreach (int tile in TileCandidates)
+        {
+            if (EstimateDecodeBytes(tile, tile, im2colCapBytes) <= freeBytes) return tile;
+        }
+        return TileCandidates[^1];
     }
 
     /// <summary>Rescales the latent BEFORE the VAE decoder runs. Two paths:
