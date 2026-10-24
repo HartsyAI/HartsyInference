@@ -94,11 +94,11 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
         }
     }
 
-    /// <summary>A row range takes the host fallback, which unpacks to the dense twin too (F16 here, F32 for HiDream).</summary>
+    /// <summary>A row range of a resident weight computes as the same rows of its dense twin (F16, or F32 for HiDream).</summary>
     [Theory]
     [InlineData("F16")]
     [InlineData("F32")]
-    public void RowRangeHostFallback_MatchesTheEagerWeight(string dense)
+    public void RowRange_MatchesTheEagerWeight(string dense)
     {
         using CudaBackend? backend = TryOpenBackend();
         if (backend is null) return;   // tier-lint: guarded
@@ -117,7 +117,7 @@ public sealed unsafe class Nvfp4DenseTwinParityTests
             ReadOnlySpan<float> a = expected.AsReadOnlySpan<float>(), b = got.AsReadOnlySpan<float>();
             long mismatches = 0;
             for (int i = 0; i < a.Length; i++) if (BitConverter.SingleToUInt32Bits(a[i]) != BitConverter.SingleToUInt32Bits(b[i])) mismatches++;
-            _output.WriteLine($"row-range fallback ({dense} twin): {mismatches} of {a.Length} differ");
+            _output.WriteLine($"row range ({dense} twin): {mismatches} of {a.Length} differ");
             Assert.Equal(0L, mismatches);
         }
         finally
