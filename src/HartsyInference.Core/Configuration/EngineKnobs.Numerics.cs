@@ -73,6 +73,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> DitF16 =
         Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
 
+    /// <summary>Krea 2 honours each layer's <c>full_precision_matrix_mult</c> mark (dense GEMM for marked nvfp4 layers). Off
+    /// by default: marked layers run the native block-scaled GEMM, which is about 60% faster per step on Blackwell.</summary>
+    public static readonly Knob<bool> Krea2FullPrecision =
+        Bool("numerics.krea2FullPrecision", false, KnobScope.Construction, KnobDomain.Numerics, "Krea 2 honours each layer's full_precision_matrix_mult mark (dense GEMM for marked nvfp4 layers). Off runs marked layers on the native GEMM; 1 honours the marks.");
+
     /// <summary>Opt-in F16 residual stream for the FLUX.3 block loop, on backends with F16 activation kernels. It also needs
     /// <see cref="DitF16"/>, so <c>numerics.ditF16=0</c> still forces F32 everywhere. Off by default until real-weight numerics
     /// and a Swarm A/B clear their acceptance floor.</summary>

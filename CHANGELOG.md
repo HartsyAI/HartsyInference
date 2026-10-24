@@ -8,6 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Changed: Krea2 keeps its full-precision layers opt-in (numerics.krea2FullPrecision).**
 - **MiniMax-H3 NVFP4 DiTs stay packed on CUDA.** The DiT opens resident (no F16 twin: the unpack takes BF16 for its
   F32 stream, as the fp8 build's GEMMs do) with the weight-cast cache off, so a native-layout NVFP4 build loads on
   hosts the 66 GB F16 unpack overflowed. A row range of a resident weight (H3's chunked QKV) now unpacks on the
