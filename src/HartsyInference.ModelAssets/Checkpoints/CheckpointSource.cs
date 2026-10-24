@@ -263,7 +263,7 @@ public sealed class CheckpointSource : IDisposable
                         owned.Remove(blockScale);
                         packed.Dispose();
                         blockScale.Dispose();
-                    }, options.ResidentNvfp4DenseDType, metadata);
+                    }, options.ResidentNvfp4DenseDType, metadata, options.HonourFullPrecisionPolicy);
             relaid.RemoveAll(tensor => !pending.Contains(tensor));
             // Against `folded`, not `weights`: the NF4 decodes and the re-laid groups are already owned, and re-adding
             // them here would dispose each one twice.

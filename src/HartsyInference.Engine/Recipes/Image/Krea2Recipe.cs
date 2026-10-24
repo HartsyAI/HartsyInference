@@ -1,4 +1,5 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -113,7 +114,8 @@ public sealed class Krea2Recipe : IArchitectureRecipe
         {
             (Dictionary<string, Tensor> ditWeights, CheckpointSource ditSource) = ComponentLoader.Load(
                 context.CheckpointPath, "Krea2Recipe", key => Krea2CheckpointConverter.RemapTransformerKey(CheckpointConvertUtils.StripTransformerPrefix(key)),
-                CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends));
+                CheckpointOpenOptions.ForResidentNvfp4(context.TransformerBackends,
+                    honourFullPrecisionPolicy: EngineKnobs.Krea2FullPrecision.Value));
             loaders.Add(ditSource);
             if (ditWeights.Count == 0)
             {

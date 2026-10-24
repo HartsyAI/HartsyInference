@@ -34,6 +34,12 @@ public sealed record CheckpointOpenOptions
     /// <see cref="FoldQuantCompanions"/> is on, which is the pass it modifies.</remarks>
     public bool KeepNvfp4Companions { get; init; }
 
+    /// <summary>Whether a layer's <c>full_precision_matrix_mult</c> mark (its <c>.comfy_quant</c> blob, else the file-level
+    /// config) sends it to the dense GEMM instead of the native block-scaled one. On by default, as ComfyUI does; a
+    /// recipe may turn it off for a model whose marked layers should run native regardless.</summary>
+    /// <remarks>Only affects <see cref="ResidentNvfp4"/> weights. Off, every resident group is eligible for the native GEMM.</remarks>
+    public bool HonourFullPrecisionPolicy { get; init; } = true;
+
     /// <summary>The options for a checkpoint whose nvfp4 groups <paramref name="backend"/> will consume: kept packed where it multiplies them natively, folded to fp8 (half the F16 footprint, the same fp8 GEMM path) everywhere else. One decision, so the native path is reachable on exactly the hardware it targets and nothing else changes.</summary>
     public static CheckpointOpenOptions ForNvfp4Consumer(IBackend backend)
         => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new() { Nvfp4ToFp8 = true };
@@ -45,7 +51,8 @@ public sealed record CheckpointOpenOptions
     /// executes a block, so one shard without the packed path widens all of them.</remarks>
     /// <param name="denseDType">What the recipe holds its dense DiT weights in after the eager F16 unpack: F16, or F32
     /// for a recipe that widens them.</param>
-    public static CheckpointOpenOptions ForResidentNvfp4(IEnumerable<IBackend> backends, DType? denseDType = null)
+    public static CheckpointOpenOptions ForResidentNvfp4(IEnumerable<IBackend> backends, DType? denseDType = null,
+        bool honourFullPrecisionPolicy = true)
     {
         ArgumentNullException.ThrowIfNull(backends);
         DType dense = denseDType ?? DType.F16;
@@ -57,7 +64,7 @@ public sealed record CheckpointOpenOptions
             if (!backend.SupportsResidentQuant(DType.F4E2M1)) return new();
             any = true;
         }
-        return any ? new() { ResidentNvfp4 = true, ResidentNvfp4DenseDType = dense } : new();
+        return any ? new() { ResidentNvfp4 = true, ResidentNvfp4DenseDType = dense, HonourFullPrecisionPolicy = honourFullPrecisionPolicy } : new();
     }
 
     /// <summary>Relabel rank-2 GGUF tensors from ggml's <c>[in, out]</c> order to the <c>[out, in]</c> order the engine assumes for a matrix weight.</summary>

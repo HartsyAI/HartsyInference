@@ -836,7 +836,7 @@ public static unsafe class CheckpointConvertUtils
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
         bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false,
         Action<Tensor, Tensor>? onNvfp4Unpacked = null, DType? nvfp4DenseDType = null,
-        IReadOnlyDictionary<string, string>? fileMetadata = null)
+        IReadOnlyDictionary<string, string>? fileMetadata = null, bool honourFullPrecisionPolicy = true)
     {
         Lazy<HashSet<string>?> fileFullPrecision = new(() => Nvfp4LayoutNormalizer.FileLevelFullPrecisionLayers(fileMetadata));
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
@@ -986,7 +986,7 @@ public static unsafe class CheckpointConvertUtils
                     // Refuses AWQ pre_quant_scale layers, which fall through to the eager dequant below.
                     if (residentNvfp4 && Nvfp4Codec.TryAttachResident(kvp.Value, blockScales, scale2T,
                             source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight, nvfp4DenseDType,
-                            FullPrecisionPolicy(source, baseKey, fileFullPrecision)))
+                            honourFullPrecisionPolicy && FullPrecisionPolicy(source, baseKey, fileFullPrecision)))
                     {
                         result[key] = residentWeight;
                         nvfp4Resident++;

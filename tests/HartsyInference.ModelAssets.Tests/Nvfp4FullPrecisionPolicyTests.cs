@@ -1,6 +1,8 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Checkpoints;
 using Xunit;
 
 namespace HartsyInference.ModelAssets.Tests;
@@ -127,5 +129,43 @@ public sealed unsafe class Nvfp4FullPrecisionPolicyTests
 
         Assert.True(c.Transformer["file.a.weight"].QuantInfo!.NativeGemmEligible,
             "control: with no metadata passed, the converter has no file-level policy to apply.");
+    }
+
+    /// <summary>Krea 2 reads <c>numerics.krea2FullPrecision</c> (default off) into <c>honourFullPrecisionPolicy</c>. Off, a
+    /// flagged layer takes the native GEMM; on, it takes the dense path. Every other model keeps the default (honoured).</summary>
+    [Fact]
+    public void Krea2Knob_OffIgnoresMarks_OnHonoursThem_OtherModelsDefaultToHonoured()
+    {
+        Dictionary<string, Tensor> w = new Dictionary<string, Tensor>();
+        AddGroup(w, "blob", "{\"format\": \"nvfp4\", \"full_precision_matrix_mult\": true}");
+        AddGroup(w, "file", null);
+        AddGroup(w, "plain", null);
+        Dictionary<string, string> metadata = new Dictionary<string, string>
+        {
+            ["_quantization_metadata"] = "{\"format_version\": \"1.0\", \"layers\": {"
+                + "\"file\": {\"format\": \"nvfp4\", \"full_precision_matrix_mult\": true}}}",
+        };
+        IBackend[] backends = [Nvfp4ResidentOpenTests.ResidentQuantBackend.Create(true)];
+
+        CheckpointOpenOptions krea2Off = CheckpointOpenOptions.ForResidentNvfp4(backends, honourFullPrecisionPolicy: false);
+        CheckpointOpenOptions krea2On = CheckpointOpenOptions.ForResidentNvfp4(backends, honourFullPrecisionPolicy: true);
+        CheckpointOpenOptions other = CheckpointOpenOptions.ForResidentNvfp4(backends);
+        Assert.False(krea2Off.HonourFullPrecisionPolicy);
+        Assert.True(krea2On.HonourFullPrecisionPolicy);
+        Assert.True(other.HonourFullPrecisionPolicy);
+
+        Dictionary<string, Tensor> off = CheckpointConvertUtils.ApplyFp8ScaledDequant(
+            new Dictionary<string, Tensor>(w), residentNvfp4: true, fileMetadata: metadata,
+            honourFullPrecisionPolicy: krea2Off.HonourFullPrecisionPolicy);
+        Assert.True(off["blob.weight"].QuantInfo!.NativeGemmEligible, "knob off: the blob mark is ignored, the layer is native.");
+        Assert.True(off["file.weight"].QuantInfo!.NativeGemmEligible, "knob off: the file-level mark is ignored too.");
+        Assert.True(off["plain.weight"].QuantInfo!.NativeGemmEligible);
+
+        Dictionary<string, Tensor> on = CheckpointConvertUtils.ApplyFp8ScaledDequant(
+            new Dictionary<string, Tensor>(w), residentNvfp4: true, fileMetadata: metadata,
+            honourFullPrecisionPolicy: krea2On.HonourFullPrecisionPolicy);
+        Assert.False(on["blob.weight"].QuantInfo!.NativeGemmEligible, "knob on: the blob mark sends the layer dense.");
+        Assert.False(on["file.weight"].QuantInfo!.NativeGemmEligible, "knob on: the file-level mark sends the layer dense.");
+        Assert.True(on["plain.weight"].QuantInfo!.NativeGemmEligible);
     }
 }
