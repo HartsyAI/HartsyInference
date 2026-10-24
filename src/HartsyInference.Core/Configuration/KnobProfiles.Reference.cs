@@ -57,6 +57,7 @@ public static partial class KnobProfiles
         .With(EngineKnobs.HiftDeterministic, true)
         // Compute32F then returns plain CUBLAS_COMPUTE_32F, overriding both TF32 and FAST_16F for every F32-operand GEMM.
         .With(EngineKnobs.HighPrecisionGemm, true)
+        .With(EngineKnobs.Krea2FullPrecision, true)
         // Backend doc says it changes numerics: the tiled kernel is an online softmax over the tile's union window, not one dense pass.
         .With(EngineKnobs.Ltx25Na3dTiled, false)
         // F16 rope tables cost a measured real output change (SSIM 0.9956 across the clip); F32 tables are the faithful arm.
