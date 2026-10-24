@@ -80,8 +80,7 @@ public sealed class WanContextParallelEngineTests : IDisposable
         {
             double cp = parallelRows[key];
             _output.WriteLine($"{key}: CP relL2 {cp:E3}, control {reference:E3}, ratio {cp / reference:F2}");
-            Assert.True(reference > 0, $"{key}: the control replay matched the record bit for bit, so it measures nothing.");
-            Assert.True(cp > 0, $"{key}: the context-parallel replay matched the record bit for bit, so it ran on one GPU.");
+            Assert.True(reference > 0, $"{key}: the control replay matched the record bit for bit, so it measures nothing.");            Assert.True(cp > 0, $"{key}: the context-parallel replay matched the record bit for bit, so it ran on one GPU.");
             Assert.True(cp <= ControlMultiple * reference,
                 $"{key}: the context-parallel forward is {cp:E3} from the single-GPU one, more than {ControlMultiple}x the {reference:E3} exact F32 attention gives.");
         }
@@ -140,7 +139,10 @@ public sealed class WanContextParallelEngineTests : IDisposable
             .With(EngineKnobs.DenoiserProbe, mode).With(EngineKnobs.DenoiserProbeDir, record).With(EngineKnobs.DenoiserProbeSteps, "all");
         if (pinF32) profile = profile.With(EngineKnobs.WanF16, false);
         if (outDir is not null) profile = profile.With(EngineKnobs.DenoiserProbeOut, outDir);
-        if (exactAttention) profile = profile.With(EngineKnobs.SdpaNoF16, true);
+        // F32 branches: sdpaNoF16 is the exact-F32 control. F16 branches: its F16-query rows never consult sdpaNoF16,
+        // so the control turns cuDNN off instead, which moves the F16 attention onto the materialized path.
+        if (exactAttention)
+            profile = pinF32 ? profile.With(EngineKnobs.SdpaNoF16, true) : profile.With(EngineKnobs.SdpaCudnn, false);
         using IDisposable scope = profile.Push();
         await Generate(spec, contextParallel);
     }
