@@ -7,6 +7,10 @@ namespace HartsyInference.Cuda;
 /// <summary>GPU memory allocation and transfer helpers wrapping CUDA Driver API memory functions.</summary>
 public static class CudaMemory
 {
+    /// <summary>Allocator OOM-retry sequences begun on this thread. A caller that snapshots it can tell "this call hit memory pressure" from a deterministic driver fault.</summary>
+    [ThreadStatic] private static long _oomRetries;
+    internal static long OomRetries { get => _oomRetries; private set => _oomRetries = value; }
+
     /// <summary>Resolves the calling thread's OWNING BACKEND's compute stream via <see cref="GpuTransferHelper"/>'s ambient state (0 = none; falls back to the synchronous allocator). The old per-context stream registry could not tell two same-device backends apart (they share the primary context handle), so backend A's transients allocated/freed on backend B's stream — the same class of cross-stream poison the registry was originally built to stop across devices.</summary>
     private static nint ResolveStream() => GpuTransferHelper.ResolvedStreamHandle;
 
@@ -28,6 +32,7 @@ public static class CudaMemory
             // Log pre-retry state so we can see exactly how much the driver thinks is free
             // vs how much we asked for. This is the only way to distinguish "genuinely OOM"
             // from "memory stuck in stream-ordered pool" without a debugger attached.
+            OomRetries++;
             LogOomDiagnostic("OOM on first attempt", byteSize);
             GpuTransferHelper.SyncStreamsAndReleasePool();
             int retryResult = CudaDriverApi.cuMemAlloc(out dptr, byteSize);
@@ -201,6 +206,7 @@ public static class CudaMemory
                 LogOomDiagnostic("OOM inside a step-graph capture", byteSize);
                 ThrowExhausted(result, byteSize);
             }
+            OomRetries++;
             LogOomDiagnostic("OOM on async first attempt", byteSize);
             GpuTransferHelper.SyncStreamsAndReleasePool();
             int retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);

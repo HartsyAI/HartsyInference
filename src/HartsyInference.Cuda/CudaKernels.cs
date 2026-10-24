@@ -4416,8 +4416,8 @@ public sealed partial class CudaKernels : IDisposable
             4 => _transposeTiledB32,
             _ => throw new ArgumentOutOfRangeException(nameof(elementBytes), $"Tiled transpose moves 2- or 4-byte elements, not {elementBytes}."),
         };
-        if (batch <= 0 || batch > 65_535 || d1 <= 0 || d2 <= 0)
-            throw new ArgumentOutOfRangeException(nameof(batch), $"Tiled transpose dims out of range: batch={batch} d1={d1} d2={d2}.");
+        if (!ChannelsLastLimits.TransposeFits(batch, d1, d2))
+            throw new ArgumentOutOfRangeException(nameof(d1), $"Tiled transpose dims out of range (gridDim.y caps d1 at {ChannelsLastLimits.MaxGridDimYZ * ChannelsLastLimits.TileDim}): batch={batch} d1={d1} d2={d2}.");
         ulong o = output, i = input;
         uint a = (uint)d1, c = (uint)d2;
         void** args = stackalloc void*[4];
