@@ -3130,6 +3130,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long[] strides, long[] pads, int dataType, int elementBytes)
     {
         if (!ConvChannelsLast || !_kernels!.HasTransposeTiled || xBatch * c * xSpatial < ChannelsLastMinElements) return false;
+        // Checked before any launch: a layout copy the driver rejects would fail after the cuDNN call (the caller's per-tap route serves it).
+        if (!ChannelsLastLimits.ConvFits(xBatch, c, xSpatial, k, kernelSpatial, outBatch, outSpatial)) return false;
         ulong xCl = 0, wCl = 0, yCl = 0;
         try
         {
