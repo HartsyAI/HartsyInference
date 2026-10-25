@@ -164,7 +164,6 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         Tensor? audioFeatureMask = null;
         Tensor? audioModelScratch = null;
         Tensor? audioDenoisedScratch = null;
-        (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
         // Classifier-free guidance: the unconditional branch is one more forward over the negative prompt's text,
         // so it gets its own packed layout and RoPE tables (text length differs). CFG 1 never builds it.
         float guidance = request.CfgScale;
@@ -179,12 +178,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         }
         MiniMaxH3PackedLayout? uncondLayout = null;
         Tensor? uncondCos = null, uncondSin = null;
-        if (guided)
-        {
-            uncondLayout = new MiniMaxH3PackedLayout((int)negativeTextStates!.Shape[0], latentT, latentH, latentW, audioT,
-                request.Keyframes, request.Refs, request.FrameCount);
-            (uncondCos, uncondSin) = MiniMaxH3Rope.BuildTables(uncondLayout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
-        }
+        (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
         // The reference re-derives augmented conditioning from the same seeded stream on every forward, so hoisting it
         // out of the loop is the same values for a fraction of the work.
         Tensor? condVideo = NoiseAugment(request.CondVideoRows, request.VisualCondNoiseAug, seed);
@@ -220,6 +214,12 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             ? null : new PddHeadFusionSession(Backend, _pddAdapter.HeadBank);
         try
         {
+            if (guided)
+            {
+                uncondLayout = new MiniMaxH3PackedLayout((int)negativeTextStates!.Shape[0], latentT, latentH, latentW, audioT,
+                    request.Keyframes, request.Refs, request.FrameCount);
+                (uncondCos, uncondSin) = MiniMaxH3Rope.BuildTables(uncondLayout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
+            }
             try
             {
                 if (videoFeatureMaskValues is not null)
@@ -315,18 +315,18 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                             probe!.RecordInputs(step, (float)sigma, [videoIn, audioIn]);
                         }
                         (Tensor vVideo, Tensor vAudio) = Forward(videoIn, audioIn);
-                        // Unconditional branch (CFG only). The fused Euler step and the masked combine both take the pair.
                         Tensor? uVideo = null, uAudio = null, combinedVideo = null, combinedAudio = null;
-                        if (uncondBranch is not null)
-                        {
-                            (uVideo, uAudio) = ForwardOn(uncondBranch, videoIn, audioIn);
-                            if (videoModelScratch is not null) { combinedVideo = CombineGuided(vVideo, uVideo, guidance); }
-                            if (audioModelScratch is not null) { combinedAudio = CombineGuided(vAudio, uAudio, guidance); }
-                        }
-                        if (probed && !probe!.Replays)
-                            probe.RecordOutputs(step, 0f, ["video", "audio"], [vVideo, vAudio]);
                         try
                         {
+                            // Unconditional branch (CFG only). The fused Euler step and the masked combine both take the pair.
+                            if (uncondBranch is not null)
+                            {
+                                (uVideo, uAudio) = ForwardOn(uncondBranch, videoIn, audioIn);
+                                if (videoModelScratch is not null) { combinedVideo = CombineGuided(vVideo, uVideo, guidance); }
+                                if (audioModelScratch is not null) { combinedAudio = CombineGuided(vAudio, uAudio, guidance); }
+                            }
+                            if (probed && !probe!.Replays)
+                                probe.RecordOutputs(step, 0f, ["video", "audio"], [vVideo, vAudio]);
                             // Both heads return native-stream flow velocity. Unmasked audio keeps the derivative-scaled
                             // video-sigma integrator; masked audio uses the exact current/next native audio sigmas below.
                             float slope = (float)MiniMaxH3Schedule.ShiftSlope(sigma, shiftV, shiftA);
@@ -524,6 +524,8 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             audioDenoisedScratch?.Dispose();
             cos.Dispose();
             sin.Dispose();
+            uncondCos?.Dispose();
+            uncondSin?.Dispose();
             if (!ReferenceEquals(condVideo, request.CondVideoRows)) { condVideo?.Dispose(); }
             if (!ReferenceEquals(condAudio, request.CondAudioRows)) { condAudio?.Dispose(); }
             videoFixedNoise?.Dispose();

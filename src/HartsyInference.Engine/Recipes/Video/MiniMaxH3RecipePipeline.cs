@@ -271,6 +271,9 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         };
     }
 
+    /// <summary>The unconditional branch's text: no negative prompt encodes the empty string, the standard unconditional.</summary>
+    internal static string NegativePromptText(string? negativePrompt) => negativePrompt ?? string.Empty;
+
     /// <summary>Refuses the output timing edits that would move the video relative to the track driving it.</summary>
     /// <remarks><para>Frame edits are applied to the frames only: <c>VideoRecipeUtils.ToVideoFrames</c> drops the
     /// leading frames and builds the boomerang, and a differing fps is muxed rather than resampled, while the
@@ -423,7 +426,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     // Guidance's unconditional branch: the negative prompt is plain text, no reference conditions.
                     if (inner.CfgScale != 1f)
                     {
-                        negative = _textEncoder.Encode(_textEncoderBackend, _tokenizer, request.NegativePrompt ?? string.Empty, null, null);
+                        negative = _textEncoder.Encode(_textEncoderBackend, _tokenizer, NegativePromptText(request.NegativePrompt), null, null);
                     }
                     // Load-bearing when the encoder sits on another device: the DiT's first read of these hidden
                     // states faults them back from here, and a fault does not await this device's stream.

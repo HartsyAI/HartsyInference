@@ -931,6 +931,70 @@ public sealed class VideoProfilePlanningTests : IDisposable
     }
 
     [Fact]
+    public async Task H3CfgOtherThanOne_IsRefusedAtPlanningForPddAndVsa()
+    {
+        // Execution refuses guided PDD and guided VSA, so planning must refuse the same request before weights load.
+        string vsaCheckpoint = WriteHeaderOnlyH3("cfg-vsa.safetensors", gateCount: 50);
+        string vsaHash = await VideoCheckpointHashCache.GetSha256Async(vsaCheckpoint, CancellationToken.None);
+        await File.WriteAllTextAsync(vsaCheckpoint + ".hartsy-video-profile.json", JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["sha256"] = vsaHash,
+            ["profileId"] = "operator-fastvideo-vsa64-v1",
+            ["task"] = "T2Va",
+            ["acceleration"] = "Vsa",
+            ["attention"] = "FastVideoVsa64V1",
+            ["steps"] = 4,
+            ["cfgScale"] = 1.0,
+            ["flowShift"] = 12.0,
+            ["audioFlowShift"] = 3.0,
+            ["sampler"] = "euler",
+            ["scheduler"] = "normal",
+        }));
+        ModelSpec vsaSpec = new ModelSpec { Requested = vsaCheckpoint, LocalPath = vsaCheckpoint, Modality = Modality.Video };
+        VideoPlan vsa = await VideoProfileResolver.ResolveAsync(vsaSpec, new VideoRequest { Prompt = "test", CfgScale = 5f },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
+        Assert.Equal(VideoAccelerationKind.Vsa, vsa.Profile.Acceleration);
+        AssertCfgRefusedOnly(vsa);
+
+        string baseCheckpoint = WriteHeaderOnlyH3("cfg-pdd-base.safetensors", pruned: true);
+        string baseHash = await VideoCheckpointHashCache.GetSha256Async(baseCheckpoint, CancellationToken.None);
+        Dictionary<string, string> metadata = new(StringComparer.Ordinal)
+        {
+            ["hartsy.pdd.format"] = "minimax_h3_pdd_hartsy_pruned_v1",
+            ["hartsy.pdd.task"] = "fl2va",
+            ["hartsy.pdd.adapter_sha256"] = new string('a', 64),
+            ["hartsy.pdd.full_base_sha256"] = new string('b', 64),
+            ["hartsy.pdd.target_base_sha256"] = baseHash,
+            ["hartsy.pdd.affine_residual"] = "1.0E-05",
+            ["hartsy.pdd.converter"] = "HartsyInference.MiniMaxH3PddPrunedConverter/v1",
+            ["pdd_num_steps"] = "32",
+            ["pdd_block_size"] = "4",
+            ["lora_rank"] = "64",
+            ["lora_alpha"] = "64",
+        };
+        string adapter = WriteHeaderOnlyPdd("cfg-converted-pdd.safetensors", metadata);
+        ModelSpec pddSpec = new ModelSpec { Requested = baseCheckpoint, LocalPath = baseCheckpoint, Modality = Modality.Video };
+        VideoPlan pdd = await VideoProfileResolver.ResolveAsync(pddSpec, new VideoRequest
+        {
+            Prompt = "test",
+            CfgScale = 5f,
+            Loras = new LoraStack { Entries = [new LoraEntry { Model = adapter }] },
+        }, TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
+        Assert.Equal(VideoAccelerationKind.Pdd, pdd.Profile.Acceleration);
+        AssertCfgRefusedOnly(pdd);
+    }
+
+    private static void AssertCfgRefusedOnly(VideoPlan plan)
+    {
+        VideoPlanIssue error = Assert.Single(plan.Issues, candidate => candidate.Field == nameof(VideoRequest.CfgScale)
+            && candidate.Severity == VideoPlanIssueSeverity.Error);
+        Assert.Equal("video.cfg.unsupported", error.Code);
+        Assert.DoesNotContain(plan.Issues, candidate => candidate.Field == nameof(VideoRequest.CfgScale)
+            && candidate.Severity == VideoPlanIssueSeverity.Warning);
+        Assert.False(plan.IsValid);
+    }
+
+    [Fact]
     public async Task TurboSteps_RunTheUserValueWithAWarning()
     {
         string checkpoint = WriteHeaderOnlyH3("turbo-steps.safetensors");

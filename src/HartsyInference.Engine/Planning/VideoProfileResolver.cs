@@ -1471,14 +1471,27 @@ internal static class VideoProfileResolver
             ValidateLocked(request.AudioFlowShift, defaults.AudioFlowShift ?? 1f, VideoLockedFields.AudioFlowShift,
                 defaults.LockedFields, nameof(VideoRequest.AudioFlowShift), profile.Id, issues);
         }
-        // Advised-range warning: a CFG-locked profile (MiniMax-H3) still accepts the user's value, with a warning.
-        ValidateLocked(request.CfgScale, defaults.CfgScale, VideoLockedFields.CfgScale, defaults.LockedFields,
-            nameof(VideoRequest.CfgScale), profile.Id, issues);
+        // Dense profiles take any CFG with the advised-range warning. PDD and VSA execution refuses CFG other than 1,
+        // so planning refuses it too and never warns for the same field.
+        float effectiveCfg = SafeFinitePositive(request.CfgScale, defaults.CfgScale);
+        if (acceleration is VideoAccelerationKind.Pdd or VideoAccelerationKind.Vsa)
+        {
+            if (effectiveCfg != 1f)
+            {
+                issues.Add(Error("video.cfg.unsupported",
+                    $"Profile '{profile.Id}' runs at CFG 1 only; got {effectiveCfg.ToString("R", CultureInfo.InvariantCulture)}.",
+                    nameof(VideoRequest.CfgScale)));
+            }
+        }
+        else
+        {
+            ValidateLocked(request.CfgScale, defaults.CfgScale, VideoLockedFields.CfgScale, defaults.LockedFields,
+                nameof(VideoRequest.CfgScale), profile.Id, issues);
+        }
         if (acceleration == VideoAccelerationKind.Pdd)
         {
             ValidatePddShifts(request, issues);
         }
-        // CFG has no lock warning: MiniMax-H3 cannot run CFG other than 1, which ValidateH3Request refuses by name.
         // Sampler and scheduler have none either: ValidateH3Request refuses every non-canonical value.
 
         int width = SafePositive(request.Width, defaults.Width,
