@@ -56,9 +56,18 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
         {
             Logs.Info($"[Ideogram4] Steps={steps} mapped to official preset {preset.Name} ({preset.NumSteps} steps — Ideogram 4 uses fixed preset schedules).");
         }
+        // The preset's main guidance phase is 7; a user CFG replaces it and the polish phase keeps its own value.
+        if (request.CfgScale is float userCfg && Math.Abs(userCfg - 7f) > 1e-6f)
+        {
+            Logs.Warning($"[Ideogram4] Recipe default CFG is 7; using your CFG {userCfg} for the main guidance phase.");
+            preset = preset with
+            {
+                GuidanceSchedule = [.. preset.GuidanceSchedule.Select(gw => Math.Abs(gw - 7f) < 1e-6f ? userCfg : gw)],
+            };
+        }
         if (!string.IsNullOrWhiteSpace(request.NegativePrompt))
         {
-            Logs.Info("[Ideogram4] Negative prompt is ignored — Ideogram 4's asymmetric CFG runs the unconditional branch with zeroed text features.");
+            Logs.Warning("[Ideogram4] Negative prompt is ignored: Ideogram 4's unconditional transformer is trained on zeroed text features, so it has no text input.");
         }
 
         // TODO(E-IMG-5): the SwarmUI host wrapped a plain prompt into Ideogram's structured JSON caption shape

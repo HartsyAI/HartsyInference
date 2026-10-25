@@ -44,20 +44,25 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
         float[]? explicitSigmas = null;
         if (_turbo)
         {
-            // The Turbo checkpoint is distilled to one fixed schedule and is guidance-free. Any other step count or
-            // CFG is outside what it was trained for, so both are pinned rather than honoured, the way Krea 2 Turbo
-            // pins its CFG. Warn only on a value the request actually set: an unset request takes the Turbo defaults.
-            explicitSigmas = [.. QwenImage21Variants.TurboSigmas];
-            if (request.Steps is { } requestedSteps && requestedSteps != explicitSigmas.Length)
+            // The Turbo recipe defaults are its fixed 8-step schedule at CFG 1. A user step count or CFG replaces the
+            // default and runs; an unset value keeps the default. A differing value gets a warning.
+            if (request.Steps is not { } requestedSteps || requestedSteps == QwenImage21Variants.TurboSigmas.Count)
             {
-                Logs.Warning($"[QwenImage21] Turbo runs its fixed {explicitSigmas.Length}-step schedule; requested {requestedSteps} steps is ignored.");
+                explicitSigmas = [.. QwenImage21Variants.TurboSigmas];
             }
-            if (request.CfgScale is { } requestedCfg && requestedCfg != 1.0f)
+            else
             {
-                Logs.Warning($"[QwenImage21] Turbo is guidance-free; requested CFG {requestedCfg} is ignored and CFG 1 is used.");
+                Logs.Warning($"[QwenImage21] Turbo recipe default is {QwenImage21Variants.TurboSigmas.Count} steps; using your {requestedSteps}.");
             }
-            steps = explicitSigmas.Length;
-            cfg = 1.0f;
+            steps = explicitSigmas?.Length ?? settings.Steps;
+            if (request.CfgScale is not { } requestedCfg)
+            {
+                cfg = 1.0f;
+            }
+            else if (requestedCfg != 1.0f)
+            {
+                Logs.Warning($"[QwenImage21] Turbo recipe default is CFG 1; using your CFG {requestedCfg}.");
+            }
         }
         // 16x VAE and no patchify, so the image dims must be a multiple of 16. ComfyUI's own template rounds
         // reference and output sizes to 32; 16 is this pipeline's hard floor and what it snaps to.

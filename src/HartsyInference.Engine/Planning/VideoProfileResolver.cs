@@ -899,6 +899,7 @@ internal static class VideoProfileResolver
         ValidatePositive(request.Steps, nameof(VideoRequest.Steps), "step count", issues);
 
         ValidateFinitePositive(request.CfgScale, nameof(VideoRequest.CfgScale), "CFG scale", issues);
+        ValidateH3CfgScale(request.CfgScale, issues);
         ValidateFinitePositive(request.FlowShift, nameof(VideoRequest.FlowShift), "video flow shift", issues);
         ValidateFinitePositive(request.AudioFlowShift, nameof(VideoRequest.AudioFlowShift), "audio flow shift", issues);
 
@@ -1420,9 +1421,15 @@ internal static class VideoProfileResolver
     {
         if (grid.Normalize(frames) is int planned)
         {
+            // A family grid may declare its own direction (MiniMax-H3 snaps up); the change is still announced.
+            if (planned != frames)
+            {
+                issues.Add(Warning("video.frames.snapped",
+                    $"{frames} frames is not a count this model generates ({grid}); running {planned}.", nameof(VideoRequest.Frames)));
+            }
             return planned;
         }
-        // Long arithmetic and the cap keep both suggestions counts the family can actually generate.
+        // Long arithmetic and the cap keep both neighbouring counts the family can actually generate.
         long below = Math.Max(grid.Offset, grid.Offset + (long)(frames - grid.Offset) / grid.Step * grid.Step);
         long above = below + grid.Step;
         if (grid.Max is int max)
@@ -1430,35 +1437,48 @@ internal static class VideoProfileResolver
             below = Math.Min(below, max);
             above = Math.Min(above, max);
         }
-        string nearest = below == above ? $"the nearest is {below}" : $"the nearest are {below} and {above}";
-        issues.Add(Error("video.frames.off_grid",
-            $"{frames} frames is not a count this model generates ({grid}); {nearest}.", nameof(VideoRequest.Frames)));
-        return frames;
+        // The nearer count wins; a tie goes up.
+        long snapped = frames - below < above - frames ? below : above;
+        issues.Add(Warning("video.frames.snapped",
+            $"{frames} frames is not a count this model generates ({grid}); running {snapped}.", nameof(VideoRequest.Frames)));
+        return (int)snapped;
     }
 
     private static VideoEffectiveSettings ResolveEffectiveSettings(VideoRequest request, VideoModelProfile profile,
         FrameGrid grid, List<VideoPlanIssue> issues)
     {
         VideoDefaults defaults = profile.Defaults;
-        ValidateLocked(request.Steps, defaults.Steps, VideoLockedFields.Steps, defaults.LockedFields,
-            nameof(VideoRequest.Steps), issues);
-        ValidateLocked(request.CfgScale, defaults.CfgScale, VideoLockedFields.CfgScale, defaults.LockedFields,
-            nameof(VideoRequest.CfgScale), issues);
-        ValidateLocked(request.FlowShift, defaults.FlowShift ?? 1f, VideoLockedFields.FlowShift, defaults.LockedFields,
-            nameof(VideoRequest.FlowShift), issues);
-        ValidateLocked(request.AudioFlowShift, defaults.AudioFlowShift ?? 1f, VideoLockedFields.AudioFlowShift,
-            defaults.LockedFields, nameof(VideoRequest.AudioFlowShift), issues);
-        ValidateLocked(request.Sampler, defaults.Sampler ?? "euler", VideoLockedFields.Sampler, defaults.LockedFields,
-            nameof(VideoRequest.Sampler), issues);
-        ValidateLocked(request.Scheduler, defaults.Scheduler ?? "normal", VideoLockedFields.Scheduler,
-            defaults.LockedFields, nameof(VideoRequest.Scheduler), issues);
-
-        if (profile.Acceleration == VideoAccelerationKind.Pdd && request.Steps is int pddSteps
+        VideoAccelerationKind acceleration = profile.Acceleration;
+        // Profile locks warn and the request value runs. PDD snaps an off-grid step count to a trained one; VSA and
+        // PDD shifts are fixed contracts that the plan refuses by name when the request breaks them.
+        int? steps = request.Steps;
+        if (acceleration == VideoAccelerationKind.Pdd && steps is int pddSteps && pddSteps > 0
             && pddSteps is not (4 or 6 or 8))
         {
-            issues.Add(Error("video.pdd.nfe_unsupported", "PDD supports only 4, 6, or 8 transformer evaluations.",
-                nameof(VideoRequest.Steps)));
+            int snapped = pddSteps < 5 ? 4 : pddSteps < 7 ? 6 : 8;
+            issues.Add(Warning("video.pdd.nfe_snapped",
+                $"PDD runs only 4, 6, or 8 transformer evaluations; {pddSteps} runs as {snapped}.", nameof(VideoRequest.Steps)));
+            steps = snapped;
         }
+        if (acceleration != VideoAccelerationKind.Vsa)
+        {
+            ValidateLocked(steps, defaults.Steps, VideoLockedFields.Steps, defaults.LockedFields,
+                nameof(VideoRequest.Steps), profile.Id, issues);
+        }
+        if (acceleration is not (VideoAccelerationKind.Pdd or VideoAccelerationKind.Vsa))
+        {
+            ValidateLocked(request.FlowShift, defaults.FlowShift ?? 1f, VideoLockedFields.FlowShift,
+                defaults.LockedFields, nameof(VideoRequest.FlowShift), profile.Id, issues);
+            ValidateLocked(request.AudioFlowShift, defaults.AudioFlowShift ?? 1f, VideoLockedFields.AudioFlowShift,
+                defaults.LockedFields, nameof(VideoRequest.AudioFlowShift), profile.Id, issues);
+        }
+        if (acceleration == VideoAccelerationKind.Pdd)
+        {
+            ValidatePddShifts(request, issues);
+        }
+        // CFG has no lock warning: MiniMax-H3 cannot run CFG other than 1, which ValidateH3Request refuses by name.
+        // Sampler and scheduler have none either: ValidateH3Request refuses every non-canonical value.
+
         int width = SafePositive(request.Width, defaults.Width,
             MiniMaxH3Geometry.MaxPixels / MiniMaxH3Geometry.CanvasMultiple);
         int height = SafePositive(request.Height, defaults.Height,
@@ -1468,20 +1488,28 @@ internal static class VideoProfileResolver
             && ((request.Width is int requestWidth && requestWidth != defaults.Width)
                 || (request.Height is int requestHeight && requestHeight != defaults.Height)))
         {
-            issues.Add(Error("video.profile.geometry_locked",
-                $"Profile '{profile.Id}' requires {defaults.Width}x{defaults.Height}.", "geometry"));
+            issues.Add(Warning("video.profile.geometry_locked",
+                $"Profile '{profile.Id}' is fitted to {defaults.Width}x{defaults.Height}; using your {width}x{height}.",
+                "geometry"));
         }
+        int requestedWidth = width, requestedHeight = height;
         (width, height) = MiniMaxH3Geometry.ClampToMaxArea(width, height);
+        if (width != requestedWidth || height != requestedHeight)
+        {
+            issues.Add(Warning("video.geometry.clamped",
+                $"{requestedWidth}x{requestedHeight} exceeds the MiniMax-H3 pixel budget; running {width}x{height}.",
+                "geometry"));
+        }
         frames = PlanFrames(frames, grid, issues);
         ValidateResolvedGuideFrames(request, frames, issues);
         long seed = ResolveExecutionSeed(request.Seed);
-        return new VideoEffectiveSettings
+        VideoEffectiveSettings settings = new VideoEffectiveSettings
         {
             Width = width,
             Height = height,
             Frames = frames,
             Fps = SafePositive(request.Fps, defaults.Fps),
-            Steps = SafePositive(request.Steps, defaults.Steps),
+            Steps = SafePositive(steps, defaults.Steps),
             CfgScale = SafeFinitePositive(request.CfgScale, defaults.CfgScale),
             FlowShift = SafeFinitePositive(request.FlowShift, defaults.FlowShift ?? 1f),
             AudioFlowShift = SafeFinitePositive(request.AudioFlowShift, defaults.AudioFlowShift ?? 1f),
@@ -1494,6 +1522,35 @@ internal static class VideoProfileResolver
                 ? sizing : defaults.ReferenceSizing,
             LockedFields = defaults.LockedFields,
         };
+        if (acceleration == VideoAccelerationKind.Vsa
+            && (settings.Steps != 4 || Math.Abs(settings.FlowShift!.Value - 12f) > 1e-6f
+                || Math.Abs(settings.AudioFlowShift!.Value - 3f) > 1e-6f))
+        {
+            issues.Add(Error("video.vsa.contract_unsupported",
+                $"Profile '{profile.Id}' is a sparse-attention plan calibrated for exactly four Euler evaluations at "
+                + $"video/audio shifts 12/3; this request resolves to {settings.Steps} steps, shifts "
+                + $"{settings.FlowShift}/{settings.AudioFlowShift}.", nameof(VideoRequest.Steps)));
+        }
+        return settings;
+    }
+
+    /// <summary>PDD's sigma knots are computed from the published shifts, so another value has no schedule to run.</summary>
+    private static void ValidatePddShifts(VideoRequest request, List<VideoPlanIssue> issues)
+    {
+        if (request.FlowShift is float video
+            && Math.Abs(video - MiniMaxH3PddSchedule.PublishedVideoShift) > 1e-6)
+        {
+            issues.Add(Error("video.pdd.shift_unsupported",
+                $"PDD is trained on video flow shift {MiniMaxH3PddSchedule.PublishedVideoShift}; got {video}.",
+                nameof(VideoRequest.FlowShift)));
+        }
+        if (request.AudioFlowShift is float audio
+            && Math.Abs(audio - MiniMaxH3PddSchedule.PublishedAudioShift) > 1e-6)
+        {
+            issues.Add(Error("video.pdd.shift_unsupported",
+                $"PDD is trained on audio flow shift {MiniMaxH3PddSchedule.PublishedAudioShift}; got {audio}.",
+                nameof(VideoRequest.AudioFlowShift)));
+        }
     }
 
     private static int SafePositive(int? requested, int? fallback, int maximum = int.MaxValue) =>
@@ -1526,33 +1583,40 @@ internal static class VideoProfileResolver
     private static long ResolveExecutionSeed(long requested) =>
         RecipeRequestMapper.MapSeed(requested) ?? RandomNumberGenerator.GetInt32(int.MaxValue);
 
+    /// <summary>A profile default is a default, not a lock: a differing request value runs and the plan says so.</summary>
     private static void ValidateLocked(int? requested, int expected, VideoLockedFields field,
-        VideoLockedFields locked, string name, List<VideoPlanIssue> issues)
+        VideoLockedFields locked, string name, string profileId, List<VideoPlanIssue> issues)
     {
         if ((locked & field) != 0 && requested is int value && value != expected)
         {
-            issues.Add(Error("video.profile.field_locked", $"{name} is locked to {expected} by the detected profile.", name));
+            issues.Add(LockedWarning(name, profileId, expected.ToString(CultureInfo.InvariantCulture),
+                value.ToString(CultureInfo.InvariantCulture)));
         }
     }
 
     private static void ValidateLocked(float? requested, float expected, VideoLockedFields field,
-        VideoLockedFields locked, string name, List<VideoPlanIssue> issues)
+        VideoLockedFields locked, string name, string profileId, List<VideoPlanIssue> issues)
     {
         if ((locked & field) != 0 && requested is float value
             && (!float.IsFinite(value) || Math.Abs(value - expected) > 1e-6f))
         {
-            issues.Add(Error("video.profile.field_locked",
-                $"{name} is locked to {expected.ToString("R", CultureInfo.InvariantCulture)} by the detected profile.", name));
+            issues.Add(LockedWarning(name, profileId, expected.ToString("R", CultureInfo.InvariantCulture),
+                value.ToString("R", CultureInfo.InvariantCulture)));
         }
     }
 
-    private static void ValidateLocked(string? requested, string expected, VideoLockedFields field,
-        VideoLockedFields locked, string name, List<VideoPlanIssue> issues)
+    private static VideoPlanIssue LockedWarning(string name, string profileId, string expected, string requested) =>
+        Warning("video.profile.field_locked",
+            $"{name} defaults to {expected} for profile '{profileId}'; using your value {requested}.", name);
+
+    /// <summary>MiniMax-H3 runs one conditional forward per step and has no unconditional branch, so CFG must be 1.</summary>
+    private static void ValidateH3CfgScale(float? requested, List<VideoPlanIssue> issues)
     {
-        if ((locked & field) != 0 && requested is not null
-            && !string.Equals(requested, expected, StringComparison.OrdinalIgnoreCase))
+        if (requested is float cfg && float.IsFinite(cfg) && cfg > 0f && Math.Abs(cfg - 1f) > 1e-6f)
         {
-            issues.Add(Error("video.profile.field_locked", $"{name} is locked to '{expected}' by the detected profile.", name));
+            issues.Add(Error("video.cfg.unsupported",
+                "MiniMax-H3 runs a single conditional forward per step with no unconditional branch wired, so CFG must "
+                + "be 1; got " + cfg.ToString("R", CultureInfo.InvariantCulture) + ".", nameof(VideoRequest.CfgScale)));
         }
     }
 

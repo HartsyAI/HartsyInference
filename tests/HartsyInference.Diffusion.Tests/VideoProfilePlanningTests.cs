@@ -899,6 +899,156 @@ public sealed class VideoProfilePlanningTests : IDisposable
         return WriteHeader(name, header);
     }
 
+    [Fact]
+    public async Task H3CfgOtherThanOne_IsRefusedByName()
+    {
+        string checkpoint = WriteHeaderOnlyH3("base-cfg.safetensors");
+        ModelSpec spec = new ModelSpec { Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video };
+        VideoRequest request = new VideoRequest { Prompt = "test", CfgScale = 5f };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
+
+        VideoPlanIssue issue = Assert.Single(plan.Issues, candidate => candidate.Code == "video.cfg.unsupported");
+        Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
+        Assert.Contains("no unconditional branch", issue.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(plan.Issues, candidate => candidate.Code == "video.profile.field_locked");
+        Assert.False(plan.IsValid);
+    }
+
+    [Fact]
+    public async Task TurboSteps_RunTheUserValueWithAWarning()
+    {
+        string checkpoint = WriteHeaderOnlyH3("turbo-steps.safetensors");
+        string hash = await VideoCheckpointHashCache.GetSha256Async(checkpoint, CancellationToken.None);
+        await WriteH3SidecarAsync(checkpoint, hash, "community-fl-turbo8", "Turbo", steps: 8);
+        ModelSpec spec = new ModelSpec
+        {
+            Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video,
+            ProfileId = "community-fl-turbo8",
+        };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, new VideoRequest { Prompt = "test", Steps = 30 },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.InitImage | VideoFeatures.EndFrame
+                | VideoFeatures.Lora), CancellationToken.None);
+
+        Assert.Equal(VideoAccelerationKind.Turbo, plan.Profile.Acceleration);
+        Assert.Equal(30, plan.EffectiveSettings.Steps);
+        VideoPlanIssue warning = Assert.Single(plan.Issues, candidate => candidate.Code == "video.profile.field_locked");
+        Assert.Equal(VideoPlanIssueSeverity.Warning, warning.Severity);
+        Assert.Contains("using your value 30", warning.Message, StringComparison.Ordinal);
+        AssertNoErrorsBesideMissingVae(plan);
+    }
+
+    [Fact]
+    public async Task GeometryLockedAdapter_RunTheUserSizeWithAWarning()
+    {
+        string checkpoint = WriteHeaderOnlyH3("fixed-size.safetensors");
+        string hash = await VideoCheckpointHashCache.GetSha256Async(checkpoint, CancellationToken.None);
+        await WriteH3SidecarAsync(checkpoint, hash, "community-fixed-768", "None", steps: 30, width: 768, height: 448);
+        ModelSpec spec = new ModelSpec
+        {
+            Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video,
+            ProfileId = "community-fixed-768",
+        };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, new VideoRequest { Prompt = "test", Width = 512, Height = 448 },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.InitImage | VideoFeatures.EndFrame
+                | VideoFeatures.Lora), CancellationToken.None);
+
+        Assert.Equal(512, plan.EffectiveSettings.Width);
+        VideoPlanIssue warning = Assert.Single(plan.Issues, candidate => candidate.Code == "video.profile.geometry_locked");
+        Assert.Equal(VideoPlanIssueSeverity.Warning, warning.Severity);
+        AssertNoErrorsBesideMissingVae(plan);
+    }
+
+    [Fact]
+    public async Task PddSteps_SnapToATrainedCountWithAWarning()
+    {
+        string checkpoint = WriteHeaderOnlyH3("pruned-base-steps.safetensors", pruned: true);
+        string baseHash = await VideoCheckpointHashCache.GetSha256Async(checkpoint, CancellationToken.None);
+        Dictionary<string, string> metadata = new(StringComparer.Ordinal)
+        {
+            ["hartsy.pdd.format"] = "minimax_h3_pdd_hartsy_pruned_v1",
+            ["hartsy.pdd.task"] = "fl2va",
+            ["hartsy.pdd.adapter_sha256"] = new string('a', 64),
+            ["hartsy.pdd.full_base_sha256"] = new string('b', 64),
+            ["hartsy.pdd.target_base_sha256"] = baseHash,
+            ["hartsy.pdd.affine_residual"] = "1.0E-05",
+            ["hartsy.pdd.converter"] = "HartsyInference.MiniMaxH3PddPrunedConverter/v1",
+            ["pdd_num_steps"] = "32",
+            ["pdd_block_size"] = "4",
+            ["lora_rank"] = "64",
+            ["lora_alpha"] = "64",
+        };
+        string adapter = WriteHeaderOnlyPdd("converted-pdd-steps.safetensors", metadata);
+        ModelSpec spec = new ModelSpec { Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video };
+        VideoRequest request = new VideoRequest
+        {
+            Prompt = "test",
+            Steps = 5,
+            Loras = new LoraStack { Entries = [new LoraEntry { Model = adapter }] },
+        };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
+
+        Assert.Equal(VideoAccelerationKind.Pdd, plan.Profile.Acceleration);
+        Assert.Equal(6, plan.EffectiveSettings.Steps);
+        VideoPlanIssue warning = Assert.Single(plan.Issues, candidate => candidate.Code == "video.pdd.nfe_snapped");
+        Assert.Equal(VideoPlanIssueSeverity.Warning, warning.Severity);
+        AssertNoErrorsBesideMissingVae(plan);
+    }
+
+    [Fact]
+    public async Task OffGridFrames_SnapToTheNearerCountWithAWarning()
+    {
+        string checkpoint = WriteHeaderOnlyH3("frames-snap.safetensors");
+        ModelSpec spec = new ModelSpec { Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, new VideoRequest { Prompt = "test", Frames = 100 },
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
+
+        Assert.Equal(107, plan.EffectiveSettings.Frames);
+        VideoPlanIssue warning = Assert.Single(plan.Issues, candidate => candidate.Code == "video.frames.snapped");
+        Assert.Equal(VideoPlanIssueSeverity.Warning, warning.Severity);
+        AssertNoErrorsBesideMissingVae(plan);
+    }
+
+    /// <summary>These fixtures ship no video VAE, so that one Error is expected; nothing else may be an error.</summary>
+    private static void AssertNoErrorsBesideMissingVae(VideoPlan plan) =>
+        Assert.DoesNotContain(plan.Issues, issue => issue.Severity == VideoPlanIssueSeverity.Error
+            && issue.Code != "video.component.missing");
+
+    private static async Task WriteH3SidecarAsync(string checkpoint, string hash, string profileId, string acceleration,
+        int steps, int? width = null, int? height = null)
+    {
+        Dictionary<string, object> json = new Dictionary<string, object>
+        {
+            ["sha256"] = hash,
+            ["profileId"] = profileId,
+            ["displayName"] = profileId,
+            ["task"] = "Fl2Va",
+            ["acceleration"] = acceleration,
+            ["attention"] = "Dense",
+            ["steps"] = steps,
+            ["cfgScale"] = 1.0,
+            ["flowShift"] = 12.0,
+            ["audioFlowShift"] = 3.0,
+            ["sampler"] = "euler",
+            ["scheduler"] = "normal",
+        };
+        if (width is int sidecarWidth)
+        {
+            json["width"] = sidecarWidth;
+        }
+        if (height is int sidecarHeight)
+        {
+            json["height"] = sidecarHeight;
+        }
+        await File.WriteAllTextAsync(checkpoint + ".hartsy-video-profile.json", JsonSerializer.Serialize(json));
+    }
+
     private static async Task WriteFlSidecar(string checkpoint, string hash)
     {
         string json = JsonSerializer.Serialize(new Dictionary<string, object>
