@@ -900,7 +900,7 @@ public sealed class VideoProfilePlanningTests : IDisposable
     }
 
     [Fact]
-    public async Task H3CfgOtherThanOne_IsRefusedByName()
+    public async Task H3CfgOtherThanOne_IsAcceptedWithAdvisedRangeWarning()
     {
         string checkpoint = WriteHeaderOnlyH3("base-cfg.safetensors");
         ModelSpec spec = new ModelSpec { Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video };
@@ -909,11 +909,25 @@ public sealed class VideoProfilePlanningTests : IDisposable
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, request,
             TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
 
-        VideoPlanIssue issue = Assert.Single(plan.Issues, candidate => candidate.Code == "video.cfg.unsupported");
-        Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
-        Assert.Contains("no unconditional branch", issue.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(plan.Issues, candidate => candidate.Code == "video.profile.field_locked");
-        Assert.False(plan.IsValid);
+        Assert.DoesNotContain(plan.Issues, candidate => candidate.Code == "video.cfg.unsupported");
+        VideoPlanIssue issue = Assert.Single(plan.Issues, candidate => candidate.Code == "video.profile.field_locked"
+            && candidate.Field == nameof(VideoRequest.CfgScale));
+        Assert.Equal(VideoPlanIssueSeverity.Warning, issue.Severity);
+        Assert.Contains("CfgScale defaults to 1", issue.Message, StringComparison.Ordinal);
+        Assert.Contains("using your value 5", issue.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task H3CfgOne_HasNoCfgIssues()
+    {
+        string checkpoint = WriteHeaderOnlyH3("base-cfg-one.safetensors");
+        ModelSpec spec = new ModelSpec { Requested = checkpoint, LocalPath = checkpoint, Modality = Modality.Video };
+        VideoRequest request = new VideoRequest { Prompt = "test", CfgScale = 1f };
+
+        VideoPlan plan = await VideoProfileResolver.ResolveAsync(spec, request,
+            TestVideoRecipes.Declare("minimax-h3", H3Defaults(), VideoFeatures.Lora), CancellationToken.None);
+
+        Assert.DoesNotContain(plan.Issues, candidate => candidate.Code.StartsWith("video.cfg", StringComparison.Ordinal));
     }
 
     [Fact]
