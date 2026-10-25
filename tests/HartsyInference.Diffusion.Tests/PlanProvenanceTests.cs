@@ -91,7 +91,7 @@ public sealed class PlanProvenanceTests
     }
 
     [Fact]
-    public async Task AFamilyThatRejectsOffGridFrames_RefusesThePlan()
+    public async Task AFamilyThatRejectsOffGridFrames_SnapsToTheNearerCount()
     {
         VideoRecipeDeclaration declaration = new VideoRecipeDeclaration
         {
@@ -104,10 +104,10 @@ public sealed class PlanProvenanceTests
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(Spec("strict-test"),
             new VideoRequest { Prompt = "p", Frames = 50 }, declaration, CancellationToken.None);
 
-        VideoPlanIssue issue = Assert.Single(plan.Issues, item => item.Code == "video.frames.off_grid");
-        Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
-        Assert.Contains("49 and 53", issue.Message, StringComparison.Ordinal);
-        Assert.False(plan.IsValid);
+        VideoPlanIssue issue = Assert.Single(plan.Issues, item => item.Code == "video.frames.snapped");
+        Assert.Equal(VideoPlanIssueSeverity.Warning, issue.Severity);
+        Assert.Equal(49, plan.EffectiveSettings.Frames);
+        Assert.True(plan.IsValid);
     }
 
     [Fact]
