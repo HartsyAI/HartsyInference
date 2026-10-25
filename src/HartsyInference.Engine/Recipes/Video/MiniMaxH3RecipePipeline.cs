@@ -346,7 +346,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
         List<MiniMaxH3FunControlCondition> controls = [];
         try
         {
-            CheckVramFeasibility(width, height, frames);
+            PhasePlacement ditPlacement = CheckVramFeasibility(width, height, frames);
             using PreparedDenoiseMasks denoiseMasks = PrepareConditioning(
                 request, width, height, frames, cancel, controls, keyframes, references);
             if (keyframes.Count > 0 && references.Count > 0 && !_supportsHybridConditioning)
@@ -431,7 +431,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 MiniMaxH3Pipeline.Result result;
                 try
                 {
-                    result = _pipeline.Generate(encoded.HiddenStates, inner, encoded.TagRuns, bridge);
+                    result = _pipeline.Generate(encoded.HiddenStates, inner, ditPlacement, encoded.TagRuns, bridge);
                 }
                 finally
                 {
@@ -476,15 +476,16 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     }
 
     /// <summary>Refuses instantly, before any encode/allocate work, when the requested geometry's activation floor cannot fit even with the DiT streamed per-op and nothing else resident — turning the mid-generation OOM a 481-frame/1280x704 request hit into an immediate, actionable error instead. Chunking (<see cref="MiniMaxH3ChunkPolicy"/>) cannot rescue a request past this floor, so it is checked ahead of any allocation rather than left to surface as an <see cref="OutOfVramException"/> mid-denoise; see <see cref="MiniMaxH3ActivationEstimate"/> for what the floor accounts for. When DiT sharding is active, the shard backend runs the exact same full-sequence forward for its own block range (only the WEIGHT range splits, not the sequence), so it needs the identical floor and is checked too — a split that leaves the smaller card's share too thin would otherwise only surface as a mid-denoise OOM on that backend.</summary>
-    private void CheckVramFeasibility(int width, int height, int frames)
+    private PhasePlacement CheckVramFeasibility(int width, int height, int frames)
     {
         int seq = SequenceLengthFor(width, height, frames);
+        PhasePlacement ditPlacement = _pipeline.PlanDitPlacement(seq);
 
         // Every backend running block ranges needs the same per-block floor, so when sharding is on, BOTH have to
         // clear it. Report whichever is furthest short rather than whichever is checked first: the tightest one is
         // what the user actually has to fix, and on this box that is usually the smaller shard card.
         List<(IBackend Backend, string Label, long Weights)> stages =
-            [(_backend, "primary", _pipeline.EstimateResidentWeightBytes())];
+            [(_backend, "primary", _pipeline.EstimateResidentWeightBytes(ditPlacement))];
         if (_pipeline.DitShardBackend is not null)
         {
             stages.Add((_pipeline.DitShardBackend, "shard", _pipeline.EstimateShardResidentWeightBytes()));
@@ -518,6 +519,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                     + "not the length.";
             throw new OutOfVramException(worst.Message + advice);
         }
+        return ditPlacement;
     }
 
     /// <remarks>The floor is resolved here rather than once for the whole check: the chunk width the forward will
@@ -614,6 +616,7 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
     }
 
     /// <summary>Frees a component's weights after use — unless placement put that component on a device the DiT does not use, in which case they stay resident so the next generation skips the re-upload. The opt-in is the placement itself: on the primary the free is load-bearing (the DiT needs that room back), and off it there is nothing competing for the space. Warm weights still go on <c>FreeMemory()</c>, model switch, and disposal, which release every backend's weight set regardless. Only WEIGHTS are held — activations are freed normally, so nothing a later generation faults back to host is kept alive by this.</summary>
+    // TODO: the text encoder's preload/free is still hand-rolled here; move it to ComponentResidency.ReleaseAfterPhase.
     private void ReleaseComponentWeights(IBackend backend, IEnumerable<Tensor> weights)
     {
         if (ReferenceEquals(backend, _backend))

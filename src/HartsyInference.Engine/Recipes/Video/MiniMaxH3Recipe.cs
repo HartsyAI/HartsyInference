@@ -131,7 +131,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             // The 66 GB bf16 build cannot stay device-resident on any consumer card, alone or sharded across two —
             // this is a fixed structural fact of the build, not something live free VRAM changes. The 21 GB fp8
             // build CAN fit resident, but whether it actually should on THIS box right now is a separate, live
-            // question — see fitsResidentSingleBackend below.
+            // question — decided per generation by MiniMaxH3Pipeline.PlanDitPlacement.
             bool ditIsHugeBf16Build = new FileInfo(assets.Dit).Length >= 40L << 30;
             if (ditIsHugeBf16Build)
             {
@@ -192,34 +192,11 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             MiniMaxH3TextEncoder textEncoder = LoadTextEncoder(assets.TextEncoder, loaders);
             constructedTextEncoder = textEncoder;
 
-            // A real check, not the file-size proxy: the fp8 build normally fits, but a box that's already tight on
-            // this card (another tenant, a prior leaked allocation) should stream rather than have PreloadWeights
-            // fail and fall back anyway — this just makes that outcome the first attempt instead of a caught
-            // exception. VramPlanner's cache-based Resident/Streamed decision doesn't fit here: it returns Resident
-            // whenever there's no IStreamingWeightCache, and H3 has none — its "streaming" is a per-call
-            // PreloadWeights/FreeWeights toggle, not a windowed cache — so this is a direct comparison of the same
-            // weight-bytes-vs-free-VRAM shape rather than a VramPlanner.PlanPhase call. Only gates the SINGLE-backend
-            // preload flag below; sharding eligibility is a different, build-size question (see ditIsHugeBf16Build).
-            long ditWeightBytes = 0;
-            foreach (Tensor t in transformer.EnumerateWeights())
-            {
-                ditWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
-            }
-            (long primaryFreeBytes, _) = context.Backend.GetVramInfo();
-            long activationReserveBytes = MinimumActivationReserveBytes(config, context.Backend);
-            bool fitsResidentSingleBackend = !ditIsHugeBf16Build && (primaryFreeBytes <= 0
-                || primaryFreeBytes >= ditWeightBytes + activationReserveBytes);
-            // Streaming costs a full re-upload of the DiT every step, so when it is chosen the operator needs the
-            // three numbers that chose it — otherwise "too large to stay resident" reads as a property of the build
-            // when it is usually a property of what else is on the card.
-            Logs.Info($"[MiniMaxH3Recipe] DiT residency: weights {ditWeightBytes / 1e9:F2} GB + activation reserve "
-                + $"{activationReserveBytes / 1e9:F2} GB vs {primaryFreeBytes / 1e9:F2} GB free → "
-                + (fitsResidentSingleBackend ? "resident" : "streaming"));
 
             // DiT sharding: fp8 build only — the bf16 blocks alone (~64 GB) exceed any 2-consumer-card pool, so
             // sharding buys nothing there and the streaming path stands. 50 homogeneous blocks → the
             // count-proportional plan is byte-accurate. Gated on the build-size class, not
-            // fitsResidentSingleBackend — sharding is precisely for when the DiT does NOT fit on one card alone.
+            // residency — sharding is precisely for when the DiT does NOT fit on one card alone.
             int ditShardSplitBlock = 0;
             IBackend? ditShardBackend = null;
             if (context.DitShardBackend is not null && funControlModelIndices.Count > 0)
@@ -262,7 +239,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
                 }
             }
             constructedPipeline =
-                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, fitsResidentSingleBackend,
+                new MiniMaxH3Pipeline(context.Backend, transformer, videoVae, audioVae, !ditIsHugeBf16Build,
                     pddAdapter, pddStrength, sparseAttentionProfile)
                 {
                     DitShardBackend = ditShardBackend,
@@ -295,20 +272,6 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
             }
             throw;
         }
-    }
-
-    /// <summary>Conservative reserve any H3 forward needs beyond its resident weights, independent of the actual request's sequence length — the smallest chunk's own transient scratch plus the fixed cuBLAS/RoPE fudge tail (matches <see cref="MiniMaxH3ActivationEstimate"/>'s seq-independent terms). The seq-scaled cost is a separate, per-request question that <c>MiniMaxH3RecipePipeline.CheckVramFeasibility</c> checks against live free VRAM before every generation; this only needs to keep the one-time PRELOAD decision honest.</summary>
-    /// <remarks>This one runs at construction and the recipe is cached, so the reserve reflects the policy in force
-    /// when the pipeline was first built — the same binding the per-request levers have (see ImagesService's scope
-    /// comment). Per-request feasibility is re-measured every generation.</remarks>
-    private static long MinimumActivationReserveBytes(MiniMaxH3Config config, IBackend? backend)
-    {
-        int inner = config.NumAttentionHeads * config.AttentionHeadDim;
-        int ffn = config.FfnHiddenSize;
-        int chunkRows = MiniMaxH3ChunkPolicy.ScaledChunkRows(backend);
-        long attnChunkBytes = (long)chunkRows * inner * 6L * DType.F32.SizeInBytes;
-        long mlpChunkBytes = (long)chunkRows * ffn * 3L * DType.F32.SizeInBytes;
-        return Math.Max(attnChunkBytes, mlpChunkBytes) + MiniMaxH3ActivationEstimate.FudgeBytes;
     }
 
     /// <summary>The devices that will actually execute H3's blocks: the primary, plus the DiT-shard peer when one is

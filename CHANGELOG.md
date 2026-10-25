@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: MiniMax-H3 honours the VRAM policy per generation.** Resident-or-lazy for the DiT is now decided for each
+  request against that geometry's activation floor, through the shared `ComponentResidency` helper, so `--vram-mode` reaches
+  it. 124 frames at 1344x768 previously refused on a 24 GB card with a wrong "streaming cannot help" message and now
+  completes. The DiT is released before the VAE decode on both placements.
 - **Changed: recipe locks warn instead of refusing; your settings are used.**
 - **Changed: Krea2 keeps its full-precision layers opt-in (numerics.krea2FullPrecision).**
 - **MiniMax-H3 NVFP4 DiTs stay packed on CUDA.** The DiT opens resident (no F16 twin: the unpack takes BF16 for its

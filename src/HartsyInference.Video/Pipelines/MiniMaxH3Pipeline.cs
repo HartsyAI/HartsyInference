@@ -4,6 +4,7 @@ using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -73,14 +74,36 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// when unsharded and this checkpoint doesn't fit resident (the bf16 build), since it then streams per op
     /// instead. A pre-flight VRAM check run before <see cref="Generate"/> needs this to know how much of current
     /// free VRAM the DiT is about to claim, on top of the activation floor it also needs.</summary>
-    public long EstimateResidentWeightBytes()
+    public long EstimateResidentWeightBytes(PhasePlacement placement)
     {
         if (DitShardBackend is not null)
         {
             return SumBytes(_transformer.EnumerateSharedWeights())
                 + SumBytes(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
         }
-        return _preloadTransformer ? SumBytes(_transformer.EnumerateWeights()) : 0;
+        return placement == PhasePlacement.Resident ? SumBytes(_transformer.EnumerateWeights()) : 0;
+    }
+
+    /// <summary>Decides, for one generation's geometry, whether the DiT stays device-resident. Unsharded it is
+    /// <see cref="ComponentResidency.Decide"/> against that geometry's own activation floor, so the policy and the
+    /// feasibility check agree. Sharded residency stays a construction-time decision (see the recipe).</summary>
+    /// <param name="seq">The packed token sequence length this geometry produces.</param>
+    public PhasePlacement PlanDitPlacement(int seq)
+    {
+        // TODO(H3 sharding): sharded residency is still decided at construction (MiniMaxH3Recipe); move it here.
+        if (DitShardBackend is not null)
+        {
+            return PhasePlacement.Resident;
+        }
+        // TODO(H3 block streaming): a lazy DiT re-uploads every weight on every step. Expressing the DiT as
+        // IStreamableDenoiser would let BlockStreamingScope window it instead; that needs the H3 block boundaries.
+        Backend.TrimMemoryPool();
+        (long free, _) = Backend.GetVramInfo();
+        long floor = MiniMaxH3ActivationEstimate.EstimateFloorBytes(
+            seq, _config, DType.F32, MiniMaxH3ChunkPolicy.ScratchRows(seq, _config, DType.F32, free, Backend),
+            UsesSparseAttention);
+        return ComponentResidency.Decide(Backend, "MiniMax-H3", "denoise", free, SumBytes(_transformer.EnumerateWeights()),
+            floor, _preloadTransformer);
     }
 
     /// <summary>Bytes the shard backend will hold resident — its own <c>[DitShardSplitBlock, NumLayers)</c> block
@@ -95,7 +118,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// <summary>Runs the denoise loop and both decodes. <paramref name="textStates"/> is the Qwen3-VL hidden state;
     /// <paramref name="textTagRuns"/> carries the per-token modality tags so vision pads inside the text span
     /// modulate as video.</summary>
-    public Result Generate(Tensor textStates, MiniMaxH3GenerationRequest request,
+    public Result Generate(Tensor textStates, MiniMaxH3GenerationRequest request, PhasePlacement ditPlacement,
         IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
@@ -192,9 +215,9 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         using IVideoSparseAttentionSession? sparseAttentionShard = sparsePlan is null || DitShardBackend is null
             ? null : DitShardBackend.CreateVideoSparseAttentionSession(sparsePlan);
         // Park the DiT on device up front. Without this its weights land in the cache lazily per op and get evicted
-        // by whatever else is resident, so every Linear pays a fresh host->device upload. Gated on it actually
-        // fitting: the 66 GB bf16 build is larger than the card and must stay on the per-call streaming path.
-        bool preloaded = TryPreloadTransformer();
+        // by whatever else is resident, so every Linear pays a fresh host->device upload. The placement was decided
+        // for this generation's geometry by PlanDitPlacement; a lazy placement stays on the per-call path.
+        TryPreloadTransformer(ditPlacement);
         using PddHeadFusionSession? pddFusion = _pddAdapter is null
             ? null : new PddHeadFusionSession(Backend, _pddAdapter.HeadBank);
         try
@@ -381,25 +404,11 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 // for memory. Dispose is idempotent; the using declarations remain the exception-safe fallback.
                 sparseAttentionShard?.Dispose();
                 sparseAttentionPrimary?.Dispose();
-                // Denoising is done (or failed): hand the DiT's ~20 GB back before the VAE needs its own ~5 GB, and
-                // so a failed generation doesn't leak it resident for every later request on this cached pipeline —
-                // load-bearing for CheckVramFeasibility, which assumes weights are resident only while a Generate
-                // call is actually using them. Sharded, the free mirrors the asymmetric preload — the whole-set free
-                // would silently no-op on the shard backend's range (frees are per-backend) and leak it; this also
-                // returns the second card's share pre-decode.
-                if (preloaded)
-                {
-                    if (DitShardBackend is not null)
-                    {
-                        Backend.FreeWeights(_transformer.EnumerateSharedWeights());
-                        Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
-                        DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
-                    }
-                    else
-                    {
-                        Backend.FreeWeights(_transformer.EnumerateWeights());
-                    }
-                }
+                // Denoising is done (or failed): hand the DiT's weights back before the VAE needs its own ~5 GB, on
+                // both placements. A lazily-uploaded DiT leaves its weights cached, and FreeWeights on an absent weight
+                // is a no-op, so the release is unconditional, as ComfyUI's unload is before a VAE decode. Sharded, the
+                // free is per-backend, mirroring the asymmetric preload.
+                ReleaseDitAfterDenoise();
             }
 
             IBackend vaeBackend = VaeBackend;
@@ -869,13 +878,12 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         Backend.TrimMemoryPool();
     }
 
-    /// <summary>Makes the DiT device-resident when the recipe determined it fits, leaving headroom for activations
-    /// and the VAE decode. When it does not fit (the 66 GB bf16 build) the per-call streaming path stands.</summary>
-    private bool TryPreloadTransformer()
+    /// <summary>Makes the DiT device-resident when this generation's placement says it fits, leaving headroom for
+    /// activations and the VAE decode. A lazy placement (or the 66 GB bf16 build) keeps the per-call path.</summary>
+    private bool TryPreloadTransformer(PhasePlacement placement)
     {
-        if (!_preloadTransformer && DitShardBackend is null)
+        if (placement == PhasePlacement.Streamed && DitShardBackend is null)
         {
-            Logs.Info("[MiniMaxH3] DiT too large to stay resident — streaming per call.");
             return false;
         }
         try
@@ -908,6 +916,20 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             }
             return false;
         }
+    }
+
+    /// <summary>Releases the DiT's device weights after denoising, on the sharded or unsharded layout.</summary>
+    private void ReleaseDitAfterDenoise()
+    {
+        if (DitShardBackend is not null)
+        {
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateBlockRangeWeights(0, DitShardSplitBlock));
+            DitShardBackend.FreeWeights(_transformer.EnumerateBlockRangeWeights(DitShardSplitBlock, _config.NumLayers));
+            Backend.TrimMemoryPool();
+            return;
+        }
+        ComponentResidency.ReleaseAfterPhase(Backend, "MiniMax-H3", "denoise", _transformer.EnumerateWeights());
     }
 
     /// <summary>Best-effort weight residency for a phase-scoped component (the VAE decoders, called once at the end
