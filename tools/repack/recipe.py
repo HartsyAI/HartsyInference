@@ -111,6 +111,9 @@ class Recipe:
     extra_files: Sequence[str] = field(default_factory=tuple)  # copied alongside (config.json, vocab.txt)
     dtype: str | None = None        # optional cast: "fp32" | "fp16" | "bf16"
     output_name: str | None = None  # output file name; default "<name>.safetensors"
+    # Engine paths (under the audio models root) this file stands in for, written as hartsy.stands_in_for so the engine
+    # and the AudioLab installer link it where the loader looks. e.g. "tts/Hartsy--hurston-1-safetensors/model.safetensors".
+    stands_in_for: Sequence[str] = ()
 
     # -- overridable build ---------------------------------------------------
 
@@ -253,6 +256,8 @@ def save_safetensors(tensors: dict[str, "torch.Tensor"], output_path: str, recip
         "source_repo": recipe.source_repo,
         "name": recipe.name,
     }
+    if recipe.stands_in_for:
+        metadata["hartsy.stands_in_for"] = ";".join(recipe.stands_in_for)
     # safetensors requires contiguous tensors with no shared storage.
     clean = {k: v.contiguous().detach().cpu() for k, v in tensors.items()}
     st_save_file(clean, output_path, metadata=metadata)
