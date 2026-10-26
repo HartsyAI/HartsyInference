@@ -341,8 +341,10 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
         }
         if (context.CfgParallelBackend is not null)
         {
-            Logs.Warning("[MiniMaxH3Recipe] CFG-parallel is configured but structurally inapplicable to MiniMax-H3 — "
-                + "it runs CfgScale=1.0 as a single forward pass with no unconditional branch to parallelize.");
+            // TODO(shared-cfg): wire CfgBranchRunner into the H3 unconditional branch; until then CFG>1 runs its
+            // unconditional forward serially on the primary backend.
+            Logs.Warning("[MiniMaxH3Recipe] CFG-parallel is configured but not wired for MiniMax-H3; guided runs "
+                + "execute the unconditional branch serially.");
         }
         PlacementSupport.WarnIfComponentsSplit("MiniMaxH3Recipe", context);
     }

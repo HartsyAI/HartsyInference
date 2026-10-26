@@ -1,7 +1,8 @@
 using Xunit;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.ModelAssets.Tokenizers;
-using C = HartsyInference.Diffusion.Models.TextEncoders.MiniMaxH3TextEncoding.Condition;
+using C =HartsyInference.Diffusion.Models.TextEncoders.MiniMaxH3TextEncoding.Condition;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -112,5 +113,15 @@ public class MiniMaxH3TextEncodingTests
         Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3TextEncoding.Image(0));
         Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3TextEncoding.VideoBlocks(0, 1));
         Assert.Throws<ArgumentOutOfRangeException>(() => MiniMaxH3TextEncoding.VideoBlocks(2, 0));
+    }
+
+    [Fact]
+    public void NullNegativePromptEncodesTheEmptyString()
+    {
+        // The unconditional branch encodes the negative prompt; no prompt is the empty string, which presents as the pad token.
+        string negativeText = MiniMaxH3RecipePipeline.NegativePromptText(null);
+
+        Assert.Equal(string.Empty, negativeText);
+        Assert.Equal([Qwen2Tokenizer.EndOfTextId], MiniMaxH3TextEncoding.Build(FakeEncode, negativeText).TokenIds);
     }
 }

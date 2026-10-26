@@ -8,6 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Changed: MiniMax-H3 accepts classifier-free guidance.** CFG above 1 runs an unconditional branch over the negative prompt through the shared CFG combine; CFG 1 is unchanged. The advised value stays 1 and other values warn.
 - **Changed: recipe locks warn instead of refusing; your settings are used.**
 - **Changed: Krea2 keeps its full-precision layers opt-in (numerics.krea2FullPrecision).**
 - **MiniMax-H3 NVFP4 DiTs stay packed on CUDA.** The DiT opens resident (no F16 twin: the unpack takes BF16 for its

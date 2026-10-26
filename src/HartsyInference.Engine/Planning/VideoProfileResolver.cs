@@ -899,7 +899,6 @@ internal static class VideoProfileResolver
         ValidatePositive(request.Steps, nameof(VideoRequest.Steps), "step count", issues);
 
         ValidateFinitePositive(request.CfgScale, nameof(VideoRequest.CfgScale), "CFG scale", issues);
-        ValidateH3CfgScale(request.CfgScale, issues);
         ValidateFinitePositive(request.FlowShift, nameof(VideoRequest.FlowShift), "video flow shift", issues);
         ValidateFinitePositive(request.AudioFlowShift, nameof(VideoRequest.AudioFlowShift), "audio flow shift", issues);
 
@@ -1472,11 +1471,27 @@ internal static class VideoProfileResolver
             ValidateLocked(request.AudioFlowShift, defaults.AudioFlowShift ?? 1f, VideoLockedFields.AudioFlowShift,
                 defaults.LockedFields, nameof(VideoRequest.AudioFlowShift), profile.Id, issues);
         }
+        // Dense profiles take any CFG with the advised-range warning. PDD and VSA execution refuses CFG other than 1,
+        // so planning refuses it too and never warns for the same field.
+        float effectiveCfg = SafeFinitePositive(request.CfgScale, defaults.CfgScale);
+        if (acceleration is VideoAccelerationKind.Pdd or VideoAccelerationKind.Vsa)
+        {
+            if (effectiveCfg != 1f)
+            {
+                issues.Add(Error("video.cfg.unsupported",
+                    $"Profile '{profile.Id}' runs at CFG 1 only; got {effectiveCfg.ToString("R", CultureInfo.InvariantCulture)}.",
+                    nameof(VideoRequest.CfgScale)));
+            }
+        }
+        else
+        {
+            ValidateLocked(request.CfgScale, defaults.CfgScale, VideoLockedFields.CfgScale, defaults.LockedFields,
+                nameof(VideoRequest.CfgScale), profile.Id, issues);
+        }
         if (acceleration == VideoAccelerationKind.Pdd)
         {
             ValidatePddShifts(request, issues);
         }
-        // CFG has no lock warning: MiniMax-H3 cannot run CFG other than 1, which ValidateH3Request refuses by name.
         // Sampler and scheduler have none either: ValidateH3Request refuses every non-canonical value.
 
         int width = SafePositive(request.Width, defaults.Width,
@@ -1608,17 +1623,6 @@ internal static class VideoProfileResolver
     private static VideoPlanIssue LockedWarning(string name, string profileId, string expected, string requested) =>
         Warning("video.profile.field_locked",
             $"{name} defaults to {expected} for profile '{profileId}'; using your value {requested}.", name);
-
-    /// <summary>MiniMax-H3 runs one conditional forward per step and has no unconditional branch, so CFG must be 1.</summary>
-    private static void ValidateH3CfgScale(float? requested, List<VideoPlanIssue> issues)
-    {
-        if (requested is float cfg && float.IsFinite(cfg) && cfg > 0f && Math.Abs(cfg - 1f) > 1e-6f)
-        {
-            issues.Add(Error("video.cfg.unsupported",
-                "MiniMax-H3 runs a single conditional forward per step with no unconditional branch wired, so CFG must "
-                + "be 1; got " + cfg.ToString("R", CultureInfo.InvariantCulture) + ".", nameof(VideoRequest.CfgScale)));
-        }
-    }
 
     /// <summary>Reads a checkpoint's tensor inventory without mapping weight data, from either container.</summary>
     /// <remarks>This used to open the file as safetensors unconditionally, so a GGUF build of a planned model failed
