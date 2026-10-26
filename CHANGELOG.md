@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.390
+
 - **Added: Hurston-1 text-to-speech (`hurston-1`).** A Maya1 LoRA fine-tune on the Orpheus stack (Llama-3.2-3B + SNAC 24 kHz), steered by a voice description (`instruction`). Reuses the Orpheus descriptor; `OrpheusConfig.Hurston1` carries its vocabulary, sampling and BOS prompt. `tools/repack` gains a `hurston-1` recipe and `repack --local-dir`.
 - **Changed: MiniMax-H3 accepts classifier-free guidance.** CFG above 1 runs an unconditional branch over the negative prompt through the shared CFG combine; CFG 1 is unchanged. The advised value stays 1 and other values warn.
 - **Changed: recipe locks warn instead of refusing; your settings are used.**
