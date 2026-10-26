@@ -152,6 +152,17 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
                 "MiniMax-H3 PDD cannot be combined with video or audio denoise masks.");
         }
 
+        float guidance = request.CfgScale;
+        bool guided = guidance != 1f;
+        // TODO: measure guided peak VRAM at the real size (1344x768, 124f) on a 24 GB card; not yet verified.
+        if (guided && negativeTextStates is null)
+        {
+            throw new ArgumentException("Classifier-free guidance needs the negative prompt's text states.", nameof(negativeTextStates));
+        }
+        if (guided && _pddAdapter is not null)
+        {
+            throw new NotSupportedException("MiniMax-H3 PDD is distilled to CFG 1; use CFG 1 with the PDD adapter.");
+        }
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(videoRowCount, _config.VideoPatchDim), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioLatentsDim), seed ^ 0x5D2B);
         Tensor? videoFixedNoise = null;
@@ -166,17 +177,6 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         Tensor? audioDenoisedScratch = null;
         // Classifier-free guidance: the unconditional branch is one more forward over the negative prompt's text,
         // so it gets its own packed layout and RoPE tables (text length differs). CFG 1 never builds it.
-        float guidance = request.CfgScale;
-        bool guided = guidance != 1f;
-        // TODO: measure guided peak VRAM at the real size (1344x768, 124f) on a 24 GB card; not yet verified.
-        if (guided && negativeTextStates is null)
-        {
-            throw new ArgumentException("Classifier-free guidance needs the negative prompt's text states.", nameof(negativeTextStates));
-        }
-        if (guided && _pddAdapter is not null)
-        {
-            throw new NotSupportedException("MiniMax-H3 PDD is distilled to CFG 1; use CFG 1 with the PDD adapter.");
-        }
         MiniMaxH3PackedLayout? uncondLayout = null;
         Tensor? uncondCos = null, uncondSin = null;
         (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
