@@ -3,8 +3,8 @@ name: Publish to NuGet
 # Auto-publishes the HartsyInference packages to NuGet.org on every push to main that
 # touches source or packaging. The version is <VersionPrefix>-<VersionSuffix>, both read from
 # Directory.Build.props (the single source of truth) — bump <VersionSuffix> there before
-# each release (bump <VersionPrefix> too for a real semver major/minor) and pin the SAME
-# version in the SwarmUI extension csproj so all three match.
+# each release (bump <VersionPrefix> too for a real semver major/minor). Consumers such as the
+# SwarmUI extensions reference the floating "*-*" version and must never pin a specific one.
 # NuGet.org forbids re-pushing an existing version, but the push step uses --skip-duplicate,
 # so pushing without bumping is a harmless no-op. Trigger manually via "Run workflow" to
 # override the suffix for a one-off.
