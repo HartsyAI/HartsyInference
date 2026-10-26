@@ -110,6 +110,7 @@ class Recipe:
     revision: str = "main"
     extra_files: Sequence[str] = field(default_factory=tuple)  # copied alongside (config.json, vocab.txt)
     dtype: str | None = None        # optional cast: "fp32" | "fp16" | "bf16"
+    output_name: str | None = None  # output file name; default "<name>.safetensors"
 
     # -- overridable build ---------------------------------------------------
 
@@ -199,6 +200,12 @@ def sha256_file(path: str) -> str:
 # ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
+
+def output_filename(recipe: Recipe) -> str:
+    """The single-file name a recipe writes. Loaders look for `model.safetensors`, so a recipe whose
+    checkpoint is read that way names its output so."""
+    return recipe.output_name or recipe.name + ".safetensors"
+
 
 def manifest_path(output_path: str) -> str:
     base = output_path[:-len(".safetensors")] if output_path.endswith(".safetensors") else output_path

@@ -62,7 +62,7 @@ def cmd_repack(args) -> int:
     recipe = recipes.get(args.name)
     out_dir = args.output or "out"
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, recipe.name + ".safetensors")
+    out_path = os.path.join(out_dir, rcp.output_filename(recipe))
 
     source_hashes: dict[str, str] = {}
     fetch = _fetch_factory(recipe, source_hashes, args.local_dir)
@@ -102,7 +102,7 @@ def cmd_upload(args) -> int:
     import hf_upload
     recipe = recipes.get(args.name)
     out_dir = args.output or "out"
-    out_path = os.path.join(out_dir, recipe.name + ".safetensors")
+    out_path = os.path.join(out_dir, rcp.output_filename(recipe))
     if not os.path.exists(out_path):
         print(f"repacked file not found: {out_path}. Run `repack {recipe.name}` first.",
               file=sys.stderr)

@@ -32,6 +32,8 @@ RECIPE = Recipe(
         "hurston.py",
     ),
     dtype="bf16",
+    # HurstonTtsModel loads through AudioCheckpoints, which reads model.safetensors.
+    output_name="model.safetensors",
     components=(
         Component(source_file="model-00001-of-00002.safetensors", prefix=""),
         Component(source_file="model-00002-of-00002.safetensors", prefix=""),
