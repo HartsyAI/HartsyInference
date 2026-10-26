@@ -168,6 +168,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         // so it gets its own packed layout and RoPE tables (text length differs). CFG 1 never builds it.
         float guidance = request.CfgScale;
         bool guided = guidance != 1f;
+        // TODO: measure guided peak VRAM at the real size (1344x768, 124f) on a 24 GB card; not yet verified.
         if (guided && negativeTextStates is null)
         {
             throw new ArgumentException("Classifier-free guidance needs the negative prompt's text states.", nameof(negativeTextStates));
