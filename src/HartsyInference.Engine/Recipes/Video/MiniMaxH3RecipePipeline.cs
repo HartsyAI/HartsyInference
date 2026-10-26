@@ -414,38 +414,38 @@ public sealed unsafe class MiniMaxH3RecipePipeline : IVideoRecipePipeline
                 // Preload/free around the encode, as every other video recipe does: the encoder and the DiT cannot both
                 // be device-resident on a 24 GB card. (This is hygiene, not the perf fix — measurement showed the
                 // encoder's weights were never the thing occupying VRAM during denoise.)
-                MiniMaxH3TextEncoder.Result encoded;
+                MiniMaxH3TextEncoder.Result? encoded = null;
                 MiniMaxH3TextEncoder.Result? negative = null;
+                MiniMaxH3Pipeline.Result result;
                 _textEncoderBackend.PreloadWeights(_textEncoder.EnumerateWeights());
                 try
                 {
-                    // Keyframes are presented to the vision tower exactly as reference images are — the reference
-                    // labels them <Picture 1>/<Picture 2> ahead of the prompt — so the two conditioning paths agree.
-                    encoded = _textEncoder.Encode(_textEncoderBackend, _tokenizer, request.Prompt,
-                        conditions.Count == 0 ? null : conditions, visionInputs.Count == 0 ? null : visionInputs);
-                    // Guidance's unconditional branch: the negative prompt is plain text, no reference conditions.
-                    if (inner.CfgScale != 1f)
+                    try
                     {
-                        negative = _textEncoder.Encode(_textEncoderBackend, _tokenizer, NegativePromptText(request.NegativePrompt), null, null);
+                        // Keyframes are presented to the vision tower exactly as reference images are — the reference
+                        // labels them <Picture 1>/<Picture 2> ahead of the prompt — so the two conditioning paths agree.
+                        encoded = _textEncoder.Encode(_textEncoderBackend, _tokenizer, request.Prompt,
+                            conditions.Count == 0 ? null : conditions, visionInputs.Count == 0 ? null : visionInputs);
+                        // Guidance's unconditional branch: the negative prompt is plain text, no reference conditions.
+                        if (inner.CfgScale != 1f)
+                        {
+                            negative = _textEncoder.Encode(_textEncoderBackend, _tokenizer, NegativePromptText(request.NegativePrompt), null, null);
+                        }
+                        // Load-bearing when the encoder sits on another device: the DiT's first read of these hidden
+                        // states faults them back from here, and a fault does not await this device's stream.
+                        _textEncoderBackend.Sync();
                     }
-                    // Load-bearing when the encoder sits on another device: the DiT's first read of these hidden
-                    // states faults them back from here, and a fault does not await this device's stream.
-                    _textEncoderBackend.Sync();
-                }
-                finally
-                {
-                    ReleaseComponentWeights(_textEncoderBackend, _textEncoder.EnumerateWeights());
-                }
+                    finally
+                    {
+                        ReleaseComponentWeights(_textEncoderBackend, _textEncoder.EnumerateWeights());
+                    }
 
-                MiniMaxH3Pipeline.Result result;
-                try
-                {
-                    result = _pipeline.Generate(encoded.HiddenStates, inner, encoded.TagRuns, bridge,
+                    result = _pipeline.Generate(encoded!.HiddenStates, inner, encoded.TagRuns, bridge,
                         negative?.HiddenStates, negative?.TagRuns);
                 }
                 finally
                 {
-                    encoded.HiddenStates.Dispose();
+                    encoded?.HiddenStates.Dispose();
                     negative?.HiddenStates.Dispose();
                 }
                 return Finish(result, request);
