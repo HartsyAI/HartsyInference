@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,13 +33,17 @@ import recipe as rcp  # noqa: E402
 import recipes  # noqa: E402
 
 
-def _fetch_factory(recipe: rcp.Recipe, source_hashes: dict[str, str]):
-    """Returns a fetch(filename)->local_path that downloads from the source HF repo and
-    records each source file's sha256 for the manifest."""
+def _fetch_factory(recipe: rcp.Recipe, source_hashes: dict[str, str], local_dir: str | None = None):
+    """Returns a fetch(filename)->local_path that downloads from the source HF repo (or reads
+    from `local_dir` when the files were already downloaded) and records each source file's
+    sha256 for the manifest."""
     from huggingface_hub import hf_hub_download
 
     def fetch(filename: str) -> str:
-        path = hf_hub_download(recipe.source_repo, filename, revision=recipe.revision)
+        if local_dir:
+            path = os.path.join(local_dir, filename)
+        else:
+            path = hf_hub_download(recipe.source_repo, filename, revision=recipe.revision)
         source_hashes[filename] = rcp.sha256_file(path)
         return path
 
@@ -57,15 +62,18 @@ def cmd_repack(args) -> int:
     recipe = recipes.get(args.name)
     out_dir = args.output or "out"
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, recipe.name + ".safetensors")
+    out_path = os.path.join(out_dir, rcp.output_filename(recipe))
 
     source_hashes: dict[str, str] = {}
-    fetch = _fetch_factory(recipe, source_hashes)
+    fetch = _fetch_factory(recipe, source_hashes, args.local_dir)
 
-    print(f"repacking {recipe.name} from {recipe.source_repo} ...")
+    print(f"repacking {recipe.name} from {args.local_dir or recipe.source_repo} ...")
     tensors = recipe.build(fetch)
     print(f"merged {len(tensors)} tensors")
     rcp.save_safetensors(tensors, out_path, recipe)
+    for extra in recipe.extra_files:
+        if args.local_dir:
+            shutil.copyfile(os.path.join(args.local_dir, extra), os.path.join(out_dir, extra))
     mpath = rcp.write_manifest(recipe, out_path, source_hashes, len(tensors))
     print(f"wrote {out_path}")
     print(f"wrote {mpath}")
@@ -94,7 +102,7 @@ def cmd_upload(args) -> int:
     import hf_upload
     recipe = recipes.get(args.name)
     out_dir = args.output or "out"
-    out_path = os.path.join(out_dir, recipe.name + ".safetensors")
+    out_path = os.path.join(out_dir, rcp.output_filename(recipe))
     if not os.path.exists(out_path):
         print(f"repacked file not found: {out_path}. Run `repack {recipe.name}` first.",
               file=sys.stderr)
@@ -112,6 +120,7 @@ def main() -> int:
     p_repack = sub.add_parser("repack", help="Download + merge to one .safetensors.")
     p_repack.add_argument("name")
     p_repack.add_argument("-o", "--output", help="Output directory (default: out/).")
+    p_repack.add_argument("--local-dir", help="Read source files from this folder instead of downloading.")
     p_repack.set_defaults(func=cmd_repack)
 
     p_verify = sub.add_parser("verify", help="Check sha256 against the sidecar manifest.")

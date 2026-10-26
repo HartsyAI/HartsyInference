@@ -7,10 +7,12 @@ it here. Only license-permissive models should ever have redistribute=True.
 from __future__ import annotations
 
 from recipe import Recipe
+from recipes.hurston1 import RECIPE as HURSTON1
 from recipes.kokoro import RECIPE as KOKORO
 
 REGISTRY: dict[str, Recipe] = {
     KOKORO.name: KOKORO,
+    HURSTON1.name: HURSTON1,
 }
 
 

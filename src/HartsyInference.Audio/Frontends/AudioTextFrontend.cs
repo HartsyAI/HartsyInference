@@ -44,6 +44,20 @@ public static class AudioTextFrontend
         return ids;
     }
 
+    /// <summary>Hurston-1 (Maya1 family): Llama-3 BPE of <c>&lt;description="{description}"&gt; {text}</c>, the
+    /// reference <c>Hurston._prompt</c> body. The leading BOS is returned here; <see cref="Pipelines.OrpheusPipeline"/>
+    /// adds the second BOS and the human/text control tokens for configs with <c>BosBeforeStartOfHuman</c>.</summary>
+    public static int[] HurstonText(string description, string text)
+    {
+        ArgumentNullException.ThrowIfNull(description);
+        ArgumentNullException.ThrowIfNull(text);
+        int[] ids = RequireLlama().EncodeOrdinary($"<description=\"{description}\"> {text}");
+        int[] outp = new int[ids.Length + 1];
+        outp[0] = Llama3Bos;
+        Array.Copy(ids, 0, outp, 1, ids.Length);
+        return outp;
+    }
+
     /// <summary>Orpheus: Llama-3 BPE of <c>"{voice}: {text}"</c> (the upstream Orpheus prompt format).
     /// The pipeline adds the human/text control tokens. Default voice <c>tara</c> (others: leah, jess,
     /// leo, dan, mia, zac, zoe). Pass an empty voice to tokenize the bare text.</summary>

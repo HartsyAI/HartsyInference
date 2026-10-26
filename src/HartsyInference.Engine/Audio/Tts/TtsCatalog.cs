@@ -52,6 +52,7 @@ internal static class TtsCatalog
         ["bark"] = BarkTtsModel.Descriptor,
         ["dia"] = DiaTtsModel.Descriptor,
         ["orpheus"] = OrpheusTtsModel.Descriptor,
+        ["hurston-1"] = HurstonTtsModel.Descriptor,
         ["csm"] = CsmTtsModel.Descriptor,
         ["neutts"] = NeuTtsModel.Descriptor,
         ["fishspeech"] = FishSpeechModel.Descriptor,
