@@ -52,6 +52,13 @@ public sealed record OrpheusConfig
     public int TopK { get; init; } = 0;
     public float RepetitionPenalty { get; init; } = 1.1f;
 
+    /// <summary>Generation cap in audio tokens (7 per SNAC frame). Orpheus keeps the 1200 default.</summary>
+    public int MaxNewTokens { get; init; } = 1200;
+
+    /// <summary>True for a Maya1-family prompt that opens with a BOS before the human frame
+    /// (<c>[BOS, StartOfHuman, text…]</c>), as Hurston-1's reference does. Orpheus opens at StartOfHuman.</summary>
+    public bool BosBeforeStartOfHuman { get; init; }
+
     /// <summary>Orpheus-3B preset. Backbone is Llama-3.2-3B (hidden 3072 / 28L / 24 heads / GQA 8 KV /
     /// SwiGLU 8192 / RMSNorm 1e-5 / RoPE θ=500000, tied head). Vocab is extended to 156,940 for the audio
     /// tokens. <b>Reconcile on first checkpoint load:</b> the Llama-3.2 "llama3" RoPE NTK-by-parts rescale
@@ -86,5 +93,18 @@ public sealed record OrpheusConfig
                 HighFreqFactor = 4.0,
             },
         },
+    };
+
+    /// <summary>Hurston-1 (destined/hurston-1), a Maya1 LoRA fine-tune: the same Llama-3.2-3B + SNAC 24 kHz
+    /// stack with the extended 156,960-row vocabulary (the audio-code range is unchanged). Sampling matches the
+    /// reference CLI defaults (temperature 0.4, top-p 0.9, repetition penalty 1.1) and its 2,048-token cap.</summary>
+    public static OrpheusConfig Hurston1 => new()
+    {
+        Llm = Orpheus3B.Llm with { VocabSize = 156_960, PadTokenId = 128_263 },
+        Temperature = 0.4f,
+        TopP = 0.9f,
+        RepetitionPenalty = 1.1f,
+        MaxNewTokens = 2_048,
+        BosBeforeStartOfHuman = true,
     };
 }

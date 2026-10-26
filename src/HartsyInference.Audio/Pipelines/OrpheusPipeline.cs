@@ -37,6 +37,9 @@ public sealed unsafe class OrpheusPipeline : IDisposable
     /// <summary>Sample rate of the emitted audio (24 kHz for SNAC 24 kHz).</summary>
     public int SampleRate => _cfg.Codec.SampleRate;
 
+    /// <summary>Audio-token generation cap for this checkpoint's config.</summary>
+    public int MaxNewTokens => _cfg.MaxNewTokens;
+
     /// <summary>Loads the Llama backbone (HF <c>LlamaForCausalLM</c> layout — <c>model.*</c> + tied head)
     /// and the SNAC codec weights.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> backbone, IReadOnlyDictionary<string, Tensor> snac,
@@ -220,9 +223,12 @@ public sealed unsafe class OrpheusPipeline : IDisposable
     /// the model produces unconditioned/gibberish speech (verified vs the transformers reference).</summary>
     private int[] BuildPrompt(ReadOnlySpan<int> textTokenIds)
     {
-        int[] prompt = new int[textTokenIds.Length + 5];
-        prompt[0] = _cfg.StartOfHuman;
-        textTokenIds.CopyTo(prompt.AsSpan(1));
+        // Maya1-family prompts (Hurston-1) open with a BOS before the human frame; the text ids then start after it.
+        int lead = _cfg.BosBeforeStartOfHuman ? 2 : 1;
+        int[] prompt = new int[textTokenIds.Length + lead + 4];
+        if (_cfg.BosBeforeStartOfHuman) prompt[0] = _cfg.Llm.BosTokenId;
+        prompt[lead - 1] = _cfg.StartOfHuman;
+        textTokenIds.CopyTo(prompt.AsSpan(lead));
         prompt[^4] = _cfg.EndOfText;
         prompt[^3] = _cfg.EndOfHuman;
         prompt[^2] = _cfg.StartOfAi;
