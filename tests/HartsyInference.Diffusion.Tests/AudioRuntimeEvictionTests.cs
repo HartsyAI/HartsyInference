@@ -132,6 +132,27 @@ public sealed class AudioRuntimeEvictionTests
     }
 
     [Fact]
+    public async Task UnloadAll_WhileAGenerationRuns_KeepsTheModelAndSkipsTheRelease()
+    {
+        AudioRuntime runtime = new();
+        FakeTtsRunner tts = new();
+        await runtime.Tts.GetOrLoadAsync("hurston", _ => Task.FromResult<ITtsRunner>(tts), CancellationToken.None);
+
+        // A generation holds the audio lock for its whole run. The release must not dispose the model under it.
+        using CpuBackend backend = new();
+        Task generation = runtime.RunAsync(backend, new AudioJob(runtime.Tts, "hurston"), async _ =>
+        {
+            runtime.UnloadAll(waitSeconds: 0);
+            await Task.Delay(10);
+            return 0;
+        }, CancellationToken.None);
+        await generation;
+
+        Assert.False(tts.Disposed);
+        Assert.True(runtime.Tts.IsResident("hurston"));
+    }
+
+    [Fact]
     public void AudioJob_ModelKey_PrefixesTheCacheCategory()
     {
         AudioRuntime runtime = new();
