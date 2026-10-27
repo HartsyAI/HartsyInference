@@ -77,7 +77,11 @@ internal sealed class AudioRuntime
         bool held = _genLock.Wait(budget);
         if (!held)
         {
-            Logs.Warning($"[Audio] Unloading with a generation still in flight after {waitSeconds}s — proceeding anyway.");
+            // A generation still holds its pipeline. Dropping it now disposes the weights under that generation, which
+            // fails it with ObjectDisposedException. Keep the resident models and report, so nothing is torn down under
+            // a running job. The stack names the caller that asked for the release.
+            Logs.Warning($"[Audio] Release skipped: a generation is still in flight after {waitSeconds}s; resident audio models are kept. Requested from:{Environment.NewLine}{Environment.StackTrace}");
+            return;
         }
         try
         {
@@ -86,10 +90,7 @@ internal sealed class AudioRuntime
         }
         finally
         {
-            if (held)
-            {
-                _genLock.Release();
-            }
+            _genLock.Release();
         }
     }
 

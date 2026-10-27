@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.391
+
+- **Fixed: a long audio take no longer fails with "Cannot access a disposed object".** A release that could not get the audio lock within 120 s used to dispose the resident models anyway, under a generation still running on them. It now keeps the models and logs the caller's stack. The 200-word Hurston-1 take through AudioLab is the reproduction.
+
 ## alpha.390
 
 - **Added: Hurston-1 text-to-speech (`hurston-1`).** A Maya1 LoRA fine-tune on the Orpheus stack (Llama-3.2-3B + SNAC 24 kHz), steered by a voice description (`instruction`). Reuses the Orpheus descriptor; `OrpheusConfig.Hurston1` carries its vocabulary, sampling and BOS prompt. `tools/repack` gains a `hurston-1` recipe and `repack --local-dir`.
