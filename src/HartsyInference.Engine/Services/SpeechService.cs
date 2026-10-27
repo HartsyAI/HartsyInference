@@ -32,6 +32,7 @@ public sealed class SpeechService : ISpeechService
         }
         TtsTarget target = ResolveTarget(spec, request.Voice);
         RejectUnsupportedReferences(target.Descriptor, request);
+        RejectUnsupportedChunking(target.Descriptor, request, streaming: false);
         ValidateReference(target.Descriptor, request.Reference);
         return _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
         {
@@ -173,6 +174,7 @@ public sealed class SpeechService : ISpeechService
         [EnumeratorCancellation] CancellationToken cancel)
     {
         RejectUnsupportedReferences(target.Descriptor, request);
+        RejectUnsupportedChunking(target.Descriptor, request, streaming: true);
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
@@ -250,6 +252,28 @@ public sealed class SpeechService : ISpeechService
 
     /// <summary>Refuses a request that carries a voice reference (a clip or a references list) when the family takes none. It runs before
     /// any clip is decoded or written to a temp file, so the refusal does not depend on the clip's container.</summary>
+    /// <summary>Chunked long-text synthesis needs a model that declares it, and a positive chunk size. Streaming does
+    /// not chunk yet, so it rejects the option rather than ignoring it.</summary>
+    internal static void RejectUnsupportedChunking(TtsModelDescriptor descriptor, SpeechRequest request, bool streaming)
+    {
+        if (request.ChunkWords is null)
+        {
+            return;
+        }
+        if (request.ChunkWords < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), request.ChunkWords, "chunk_words must be at least 1.");
+        }
+        if (streaming)
+        {
+            throw new NotSupportedException("chunk_words is not supported on streaming synthesis yet; use the non-streaming request.");
+        }
+        if (!descriptor.SupportsChunking)
+        {
+            throw new NotSupportedException("chunk_words is not supported by this speech model.");
+        }
+    }
+
     internal static void RejectUnsupportedReferences(TtsModelDescriptor descriptor, SpeechRequest request)
     {
         if (descriptor.ReferenceRejection is not { } reason)
@@ -323,6 +347,7 @@ public sealed class SpeechService : ISpeechService
         Instruction = request.Instruction,
         DurationSeconds = request.DurationSeconds,
         Seed = request.Seed,
+        ChunkWords = request.ChunkWords,
         Cancel = cancel,
     };
 

@@ -87,7 +87,7 @@ public sealed unsafe class OrpheusPipeline : IDisposable
             System.Runtime.CompilerServices.Unsafe.AsPointer(ref audio[0]), n * 4, n * 4);
         audioT.Dispose();
         sw.Stop();
-        Logs.Info($"Orpheus: {groups} SNAC frames → {audio.Length} samples ({audio.Length / (double)SampleRate:F1}s) in {sw.ElapsedMilliseconds}ms.");
+        Logs.Info($"Orpheus: {groups} SNAC frames → {audio.Length} samples ({audio.Length / (double)SampleRate:F1}s) in {sw.ElapsedMilliseconds}ms. Stop: {trace.Stop} after {generated.Count} tokens.");
         return new OrpheusSynthesis(audio, trace.Stop, generated.Count);
     }
 

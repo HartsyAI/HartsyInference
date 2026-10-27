@@ -256,6 +256,7 @@ public static class GenerationDispatch
             EmotionText = parameters.GetStringOrNull("emotion-text"),
             EmotionFromText = parameters.GetBool("emotion-from-text", false),
             Seed = Math.Max(0, parameters.GetInt("seed", 0)),
+            ChunkWords = parameters.GetIntOrNull("chunk-words"),
             Temperature = parameters.GetDoubleOrNull("temperature"),
             TopP = parameters.GetDoubleOrNull("top-p"),
             TopK = parameters.GetIntOrNull("top-k"),

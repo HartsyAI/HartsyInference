@@ -59,13 +59,33 @@ internal static class OrpheusTtsModel
                 Session session = new(pipeline, textIds);
                 return new StreamingTtsRunner(pipeline.SampleRate, session.Synthesize, session.SynthesizeStream, keep);
             },
+            SupportsChunking = true,
         };
     }
 
     private sealed class Session(OrpheusPipeline pipeline, Func<TtsJob, int[]> textIds)
     {
         public float[] Synthesize(IBackend backend, TtsJob job)
-            => pipeline.Synthesize(backend, textIds(job), maxTokens: pipeline.MaxNewTokens, seed: job.Seed);
+        {
+            if (job.ChunkWords is not int chunkWords)
+            {
+                return pipeline.Synthesize(backend, textIds(job), maxTokens: pipeline.MaxNewTokens, seed: job.Seed);
+            }
+
+            // One sampler for the whole request, so chunks continue one random stream instead of replaying it.
+            OrpheusSamplerState sampler = new(job.Seed);
+            return TtsChunkedSynthesis.Synthesize(job.Text, chunkWords, pipeline.SampleRate, (index, chunk) =>
+            {
+                OrpheusSynthesis take = pipeline.SynthesizeWithTrace(backend, textIds(job with { Text = chunk }),
+                    maxTokens: pipeline.MaxNewTokens, seed: job.Seed, sampler: sampler);
+                if (take.Stop != GenerationStop.NaturalEnd)
+                {
+                    throw new InvalidOperationException(
+                        $"Chunk {index + 1} stopped at {take.Stop} after {take.GeneratedTokens} tokens; the take is cut short. Use a smaller chunk_words.");
+                }
+                return take.Audio;
+            });
+        }
 
         /// <summary>Runs the windowed-decode generator (<see cref="OrpheusPipeline.SynthesizeStreamChunks"/>) on a background thread and pushes each already-decoded PCM chunk through an <see cref="AudioStreamer"/> — simpler than Kyutai/CSM's <c>StreamingCodecDecoder</c> wiring because the windowing/redistribution/ decode work all happens inside the pipeline itself; this layer only bridges sync-iterator to async-stream.</summary>
         public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
