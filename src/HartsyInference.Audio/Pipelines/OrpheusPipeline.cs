@@ -54,17 +54,24 @@ public sealed unsafe class OrpheusPipeline : IDisposable
     /// frame, AR-generates audio tokens until <see cref="OrpheusConfig.EndOfSpeech"/>, then SNAC-decodes.</summary>
     public float[] Synthesize(IBackend backend, ReadOnlySpan<int> textTokenIds, int maxTokens = 1200,
         int seed = 0, Action<GenerationProgress>? progress = null)
+        => SynthesizeWithTrace(backend, textTokenIds, maxTokens, seed, progress).Audio;
+
+    /// <summary>Same as <see cref="Synthesize"/>, plus how generation ended (<see cref="GenerationTrace"/>).
+    /// Lets callers tell a natural end from a token or context limit, so a cut take is never reported as complete.</summary>
+    public OrpheusSynthesis SynthesizeWithTrace(IBackend backend, ReadOnlySpan<int> textTokenIds, int maxTokens = 1200,
+        int seed = 0, Action<GenerationProgress>? progress = null, OrpheusSamplerState? sampler = null)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
-        List<int> generated = GenerateTokens(backend, BuildPrompt(textTokenIds), maxTokens, seed, progress);
+        GenerationTrace trace = new();
+        List<int> generated = GenerateTokens(backend, BuildPrompt(textTokenIds), maxTokens, seed, progress, trace, sampler);
 
         int[] codes = OrpheusCodeFrames.ExtractAudioCodes(generated, _cfg.CodeStart, _cfg.EndOfSpeech, _cfg.TokensPerFrame);
         int groups = codes.Length / _cfg.TokensPerFrame;
         if (groups == 0)
         {
             Logs.Warning("Orpheus: no audio codes generated.");
-            return [];
+            return new OrpheusSynthesis([], trace.Stop, generated.Count);
         }
 
         (int[] s1, int[] s2, int[] s3) = OrpheusCodeFrames.Redistribute(codes, _cfg.AudioCodeBase, _cfg.CodebookSize);
@@ -81,7 +88,7 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         audioT.Dispose();
         sw.Stop();
         Logs.Info($"Orpheus: {groups} SNAC frames → {audio.Length} samples ({audio.Length / (double)SampleRate:F1}s) in {sw.ElapsedMilliseconds}ms.");
-        return audio;
+        return new OrpheusSynthesis(audio, trace.Stop, generated.Count);
     }
 
     /// <summary>Streaming counterpart to <see cref="Synthesize"/>: yields 24 kHz PCM chunks as generation
@@ -236,23 +243,28 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         return prompt;
     }
 
-    private List<int> GenerateTokens(IBackend backend, int[] prompt, int maxTokens, int seed, Action<GenerationProgress>? progress)
+    private List<int> GenerateTokens(IBackend backend, int[] prompt, int maxTokens, int seed, Action<GenerationProgress>? progress,
+        GenerationTrace? trace = null, OrpheusSamplerState? sampler = null)
     {
         List<int> generated = new(maxTokens);
-        foreach (int token in GenerateTokensStream(backend, prompt, maxTokens, seed, progress)) generated.Add(token);
+        foreach (int token in GenerateTokensStream(backend, prompt, maxTokens, seed, progress, trace, sampler)) generated.Add(token);
         return generated;
     }
 
     /// <summary>The AR token loop itself, as an iterator — <see cref="GenerateTokens"/> (used by the non-streaming
     /// <see cref="Synthesize"/>) just drains this into a list unchanged; <see cref="SynthesizeStreamChunks"/>
     /// consumes it directly so it can react to each token as it's produced.</summary>
-    private IEnumerable<int> GenerateTokensStream(IBackend backend, int[] prompt, int maxTokens, int seed, Action<GenerationProgress>? progress)
+    private IEnumerable<int> GenerateTokensStream(IBackend backend, int[] prompt, int maxTokens, int seed, Action<GenerationProgress>? progress,
+        GenerationTrace? trace = null, OrpheusSamplerState? sampler = null)
     {
         Stopwatch sw = Stopwatch.StartNew();
+        // Until the loop proves otherwise, the run ends by exhausting maxTokens (set false by EOS / context cap below).
+        if (trace is not null) trace.Stop = GenerationStop.TokenLimit;
         int cacheCap = Math.Min(_cfg.Llm.MaxPositionEmbeddings, prompt.Length + maxTokens + 8);
         using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
 
-        uint rng = DeterministicRng.Seed(seed);
+        // A caller-owned sampler keeps its RNG state across calls (multi-chunk requests); otherwise seed from `seed`.
+        uint rng = sampler?.Rng ?? DeterministicRng.Seed(seed);
         int vocab = _cfg.Llm.VocabSize;
         float penalty = _cfg.RepetitionPenalty;
         HashSet<int> seen = new();
@@ -291,10 +303,15 @@ public sealed unsafe class OrpheusPipeline : IDisposable
 
             int next = sampleStart + NucleusSampler.Draw(logits.Slice(sampleStart, sampleCount), sampleCount,
                 _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+            if (sampler is not null) sampler.Rng = rng;
             logitsT.Dispose();
             if (prof) { tSample += psw.Elapsed.TotalMilliseconds; }
 
-            if (next == _cfg.EndOfSpeech) break;
+            if (next == _cfg.EndOfSpeech)
+            {
+                if (trace is not null) trace.Stop = GenerationStop.NaturalEnd;
+                break;
+            }
             seen.Add(next);
             if (progress != null && (step & 63) == 0) progress(new GenerationProgress(step, maxTokens, sw.Elapsed.TotalMilliseconds));
             yield return next;
@@ -302,7 +319,11 @@ public sealed unsafe class OrpheusPipeline : IDisposable
             if (prof) { backend.Sync(); psw.Restart(); }
             hidden = _backbone.Forward(backend, [next], batch: 1, posStart: cache.CurrentLength, cache);
             if (prof) { backend.Sync(); tFwd += psw.Elapsed.TotalMilliseconds; profSteps++; }
-            if (cache.CurrentLength >= cacheCap - 2) break;
+            if (cache.CurrentLength >= cacheCap - 2)
+            {
+                if (trace is not null) trace.Stop = GenerationStop.ContextLimit;
+                break;
+            }
         }
         if (prof && profSteps > 0)
             Logs.Info($"[Orpheus prof] {profSteps} steps: backbone-fwd {tFwd / profSteps:0.0}ms/tok, lm_head {tLogits / profSteps:0.0}ms/tok, sample {tSample / profSteps:0.0}ms/tok");
