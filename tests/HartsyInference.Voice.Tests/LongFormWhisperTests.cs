@@ -23,8 +23,9 @@ public sealed class LongFormWhisperTests
 
     public LongFormWhisperTests(ITestOutputHelper output) => _output = output;
 
-    /// <summary>The engine's own backend kinds for the transcribe path: CPU always, Vulkan when a device is present.</summary>
-    public static IEnumerable<object[]> Backends => [["cpu"], ["vulkan"]];
+    /// <summary>Backends for the transcribe path. Vulkan and CUDA are skipped when the device is missing; BackendGate
+    /// fails instead when HARTSY_REQUIRE_BACKENDS=1.</summary>
+    public static IEnumerable<object[]> Backends => [["cpu"], ["vulkan"], ["cuda"]];
 
     [Theory]
     [MemberData(nameof(Backends))]
