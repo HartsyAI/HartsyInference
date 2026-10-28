@@ -24,8 +24,8 @@ public sealed class CudaExpertKernels : IDisposable
     private bool _disposed;
 
     /// <summary>Loads the expert FFN module from <paramref name="ptxDir"/>, choosing the variant for the device's compute capability
-    /// (<paramref name="sm"/>, the card's own SM) the same way the main kernel table does. Required: a 0 falls back to the sm_80
-    /// baseline, which a Turing card cannot load.</summary>
+    /// (<paramref name="sm"/>, the card's own SM) the same way the main kernel table does. Required: a 0 selects the baseline file,
+    /// not the card's own variant.</summary>
     /// <exception cref="FileNotFoundException">The module is not in <paramref name="ptxDir"/>.</exception>
     public CudaExpertKernels(string ptxDir, int sm)
     {
