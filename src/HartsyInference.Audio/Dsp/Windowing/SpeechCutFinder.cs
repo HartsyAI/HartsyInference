@@ -44,8 +44,8 @@ public static class SpeechCutFinder
 
         if (bestLength > 0)
         {
-            int centreFrame = bestStart + bestLength / 2;
-            return new SpeechCut(Math.Min(centreFrame * frame, band.Length - 1), HardCut: false);
+            int centre = bestStart * frame + bestLength * frame / 2;
+            return new SpeechCut(Math.Min(centre, band.Length - 1), HardCut: false);
         }
 
         int quietest = 0;

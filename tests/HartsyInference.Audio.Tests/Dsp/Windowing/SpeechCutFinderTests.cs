@@ -43,6 +43,18 @@ public sealed class SpeechCutFinderTests
     }
 
     [Fact]
+    public void Find_SingleQuietFrame_CutsInItsMiddleNotAtItsEdge()
+    {
+        // Ten loud frames, one silent frame (320 samples), ten loud frames: the silent frame spans 3200-3520.
+        float[] band = Concat(Tone(3_200, 0.5f), Silence(320), Tone(3_200, 0.5f));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.False(cut.HardCut);
+        Assert.Equal(3_360, cut.Offset);
+    }
+
+    [Fact]
     public void Find_TrailingPartialFrame_IsNotAQuietRun()
     {
         // Ten silent samples do not fill a frame, so they must not read as a clean cut inside loud audio.

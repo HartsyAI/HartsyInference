@@ -107,6 +107,18 @@ public sealed class SpeechWindowPlannerTests
     }
 
     [Fact]
+    public void Plan_QuietButAudibleSpeech_IsNotFlaggedSilent()
+    {
+        int sampleRate = 16_000;
+        // Amplitude 0.01 is about -43 dBFS RMS, above the -55 dBFS silence floor.
+        float[] clip = Tone(5 * sampleRate, sampleRate, 0.01f);
+
+        SpeechWindow only = Assert.Single(SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate));
+
+        Assert.False(only.Silent);
+    }
+
+    [Fact]
     public void Plan_EmptyAudio_IsEmpty()
     {
         Assert.Empty(SpeechWindowPlanner.Plan(ReadOnlySpan<float>.Empty, 16_000, 30 * 16_000));
