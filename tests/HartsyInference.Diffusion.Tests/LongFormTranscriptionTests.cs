@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Requests;
 using Xunit;
@@ -27,6 +28,41 @@ public sealed class LongFormTranscriptionTests
         IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(new float[SampleRate * 65], SampleRate, maxInputSeconds: 30);
 
         Assert.True(windows.Count > 1);
+    }
+
+    [Fact]
+    public void Plan_ClipThatFitsAWindowBelowThePlannerFloor_IsOneWindow()
+    {
+        IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(new float[SampleRate], SampleRate, maxInputSeconds: 1.5);
+
+        Assert.Single(windows);
+    }
+
+    [Fact]
+    public void RequireWithinLimit_RefusesAWindowedModelPastTheKnobButNotAnUnwindowedOne()
+    {
+        double past = EngineKnobs.TranscribeMaxSeconds.Value + 1;
+
+        Assert.Throws<ArgumentException>(() => LongFormTranscription.RequireWithinLimit(30, past, "pcm"));
+        LongFormTranscription.RequireWithinLimit(null, past, "pcm");
+        LongFormTranscription.RequireWithinLimit(30, 3600, "pcm");
+    }
+
+    [Fact]
+    public void Transcribe_TimedWindowWithNoTextAnywhere_AddsNoSegment()
+    {
+        FakeRunner runner = new FakeRunner
+        {
+            SpansFor = _ => [],
+            TextFor = _ => string.Empty,
+        };
+        SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate, false, false)];
+
+        LongFormTranscript result = Run(runner, new float[SampleRate * 2], windows, timed: true);
+
+        Assert.NotNull(result.Segments);
+        Assert.Empty(result.Segments);
+        Assert.Equal(string.Empty, result.Text);
     }
 
     [Fact]

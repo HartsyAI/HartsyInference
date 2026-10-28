@@ -130,7 +130,7 @@ internal sealed class SpeakerDiarizer : IDisposable
         return new SpeakerDiarizer(encoder, loaders);
     }
 
-    /// <summary>Timestamp spans when the transcriber gave them, else a fixed overlapping window sweep.</summary>
+    /// <summary>Timestamp spans when the transcriber gave them (joined down to <see cref="MaxSpans"/> for a long clip), else a fixed overlapping window sweep.</summary>
     internal static List<SttSegment> BuildSpans(IReadOnlyList<SttSegment>? segments, double totalSeconds)
     {
         List<SttSegment> spans = [];
@@ -145,7 +145,7 @@ internal sealed class SpeakerDiarizer : IDisposable
             }
             if (spans.Count > 0)
             {
-                return spans;
+                return spans.Count > MaxSpans ? Coalesce(spans) : spans;
             }
         }
         // A long clip stretches the hop so the capped span count still tiles it; the span grows to twice the hop.
@@ -156,6 +156,20 @@ internal sealed class SpeakerDiarizer : IDisposable
             spans.Add(new SttSegment { Text = string.Empty, Start = start, End = Math.Min(start + window, totalSeconds) });
         }
         return spans;
+    }
+
+    /// <summary>Joins runs of consecutive spans so at most <see cref="MaxSpans"/> remain; a joined span runs from its first start to its last end.</summary>
+    private static List<SttSegment> Coalesce(List<SttSegment> spans)
+    {
+        int run = (spans.Count + MaxSpans - 1) / MaxSpans;
+        List<SttSegment> joined = new List<SttSegment>(MaxSpans);
+        for (int first = 0; first < spans.Count; first += run)
+        {
+            List<SttSegment> group = spans.GetRange(first, Math.Min(run, spans.Count - first));
+            string text = string.Join(" ", group.Select(span => span.Text.Trim()).Where(piece => piece.Length > 0));
+            joined.Add(new SttSegment { Text = text, Start = group[0].Start, End = group[^1].End });
+        }
+        return joined;
     }
 
     /// <summary>Embeds one span: Kaldi fbank → cepstral mean normalization → CAM++ → L2-normalized 192-d vector. Returns null when the span has too few frames for the encoder's strided front end.</summary>

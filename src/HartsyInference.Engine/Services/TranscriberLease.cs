@@ -42,6 +42,7 @@ internal sealed class TranscriberLease : AudioRunnerLease, ITranscriberLease
             throw new ArgumentException("A transcriber lease returns plain text; request word timestamps or diarization "
                 + "through ITranscribeService.RunAsync.", nameof(options));
         }
+        LongFormTranscription.RequireWithinLimit(_runner.MaxInputSeconds, pcm.Length / (double)sampleRate, nameof(pcm));
         float[] audio = sampleRate == _inputSampleRate ? pcm.ToArray()
             : Resampler.Create(sampleRate, _inputSampleRate).Resample(pcm);
         string text;

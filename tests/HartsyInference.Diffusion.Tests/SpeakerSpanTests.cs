@@ -3,7 +3,7 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Diarization spans for models that emit no timestamps: bounded in count, and tiling the whole clip.</summary>
+/// <summary>Diarization spans: bounded in count whether the model emitted timestamps or not, and covering the whole clip.</summary>
 public sealed class SpeakerSpanTests
 {
     [Fact]
@@ -30,5 +30,36 @@ public sealed class SpeakerSpanTests
             Assert.True(spans[i].Start <= spans[i - 1].End, "spans must not leave gaps");
         }
         Assert.True(spans[^1].End >= total - 3.0, "the sweep must reach the end of the clip");
+    }
+
+    [Fact]
+    public void BuildSpans_ManyTimestampSegments_AreJoinedToTheCapWithoutLosingCoverage()
+    {
+        List<SttSegment> segments = Enumerable.Range(0, 2000)
+            .Select(i => new SttSegment { Text = $"s{i}", Start = i * 3.0, End = i * 3.0 + 2.5 })
+            .ToList();
+
+        List<SttSegment> spans = SpeakerDiarizer.BuildSpans(segments, 6000.0);
+
+        Assert.True(spans.Count <= 512);
+        Assert.Equal(0.0, spans[0].Start, precision: 9);
+        Assert.Equal(1999 * 3.0 + 2.5, spans[^1].End, precision: 9);
+        Assert.Contains("s0", spans[0].Text);
+        Assert.Contains("s1999", spans[^1].Text);
+        for (int i = 1; i < spans.Count; i++)
+        {
+            Assert.True(spans[i].Start >= spans[i - 1].End, "joined spans must stay in order");
+        }
+    }
+
+    [Fact]
+    public void BuildSpans_FewTimestampSegments_AreKeptAsTheyAre()
+    {
+        List<SttSegment> segments = [new SttSegment { Text = "a", Start = 0.0, End = 2.0 }, new SttSegment { Text = "b", Start = 2.0, End = 5.0 }];
+
+        List<SttSegment> spans = SpeakerDiarizer.BuildSpans(segments, 5.0);
+
+        Assert.Equal(2, spans.Count);
+        Assert.Equal("b", spans[1].Text);
     }
 }
