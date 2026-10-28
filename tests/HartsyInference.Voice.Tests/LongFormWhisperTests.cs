@@ -50,14 +50,17 @@ public sealed class LongFormWhisperTests
         byte[] wav = AudioClipCodec.EncodeWav(clip, null, SampleRate);
         ModelSpec tiny = ModelResolver.Resolve("whisper:" + WhisperTinyTurnSttTests.WhisperTiny, null, Modality.Transcribe);
 
-        using InferenceEngine engine = new(backend);
+        // The gate accepted the device HARTSY_TEST_VULKAN_DEVICE names, so the engine must open that one too; a bare
+        // "vulkan" would take the engine's own ranking, which can be the card the pin is there to avoid.
+        string selector = backend == "vulkan" && VulkanTestDeviceSelection.FromEnvironment() is int pinned ? $"vulkan:{pinned}" : backend;
+        using InferenceEngine engine = new(selector);
         TranscriptResult result = await engine.Transcribe.RunAsync(tiny, new AudioRequest { Audio = new AudioClip { Data = wav, Format = "wav" } });
 
         double recall = VoiceAssets.Recall(result.Text, VoiceAssets.JfkWords);
-        int countries = result.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Count(w => w.Trim('.', ',').Equals("country", StringComparison.OrdinalIgnoreCase));
+        int countries = VoiceAssets.Words(result.Text).Count(w => w == "country");
         _output.WriteLine($"[{backend}] {result.WindowCount} windows over {result.Duration:0.0} s; recall {recall:P0}; \"country\" x{countries}");
         Assert.True(result.WindowCount >= 2, "a clip past the 30 s window must be planned into more than one window");
         Assert.True(recall >= 0.8, $"recall {recall:P0} on \"{result.Text}\"");
-        Assert.True(countries >= 4, $"the three repeats say \"country\" six times; got {countries} in \"{result.Text}\"");
+        Assert.True(countries >= 4,$"the three repeats say \"country\" six times; got {countries} in \"{result.Text}\"");
     }
 }
