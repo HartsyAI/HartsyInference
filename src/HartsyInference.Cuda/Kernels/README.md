@@ -39,8 +39,9 @@ cp out.ptx src/HartsyInference.Cuda/Ptx/
 
 Target `sm_80` minimum (forward-JIT-compatible). A kernel with arch-conditional device code is listed in its
 domain's `ARCH_VARIANTS`; `./build.sh --arch sm_120a` (or a plain `--arch sm_89`) then also emits `<kernel>.sm120.ptx`
-(`.sm89.ptx`), which `CudaKernels.PtxPath` loads only on that exact compute capability (family-specific PTX is not
-forward-compatible; the baseline serves every other card). A kernel in `PTXAS_SPILL_CHECK` fails the build when ptxas
+(`.sm89.ptx`). `CudaKernels.PtxPath` ranks each file by its `.target` header, not its name: a tuned variant above sm_75
+loads only on that exact compute capability (family-specific PTX is not forward-compatible), and the baseline serves
+every other card. A kernel in `PTXAS_SPILL_CHECK` fails the build when ptxas
 reports a spill for any entry on sm_80, sm_86, sm_89 or sm_120 (a variant: its own arch). The backend logs `PTX variants: …` when it picks one. Verify emitted PTX ISA compatibility with the deployment driver (see the dated toolchain notes in TROUBLESHOOTING). The ISA ceiling is driver-dependent. Validate a new/changed kernel
 against the CPU reference within tolerance before shipping (`docs/Agents/KERNEL.md`).
 

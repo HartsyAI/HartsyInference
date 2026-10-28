@@ -106,7 +106,7 @@ public sealed unsafe class CudaExpertKernelTests
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
         using CudaContext context = new(0);
-        using CudaExpertKernels kernels = new(PtxDir());
+        using CudaExpertKernels kernels = new(PtxDir(), CudaContext.QuerySm(0));
         (double maxAbs, double scaleRelative, int clamped) = Measure(kernels, context, program, seed);
         _output.WriteLine($"{name}: device={context.DeviceName} sm={context.Sm} maxAbs={maxAbs:E3} "
             + $"maxAbs/maxRef={scaleRelative:E3} clampedPreActivations={clamped}");
@@ -136,7 +136,7 @@ public sealed unsafe class CudaExpertKernelTests
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
         using CudaContext context = new(0);
-        using CudaExpertKernels kernels = new(PtxDir());
+        using CudaExpertKernels kernels = new(PtxDir(), CudaContext.QuerySm(0));
         (double maxAbs, double scaleRelative, int clamped) = Measure(kernels, context, ExpertProgram.SwigluClamped(0.5f), seed: 3);
         _output.WriteLine($"SwigluClamped(0.5): device={context.DeviceName} sm={context.Sm} maxAbs={maxAbs:E3} "
             + $"maxAbs/maxRef={scaleRelative:E3} clampedPreActivations={clamped}");

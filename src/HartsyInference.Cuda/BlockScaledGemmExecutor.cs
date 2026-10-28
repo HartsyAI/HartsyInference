@@ -11,7 +11,7 @@ public sealed unsafe class BlockScaledGemmExecutor : CublasLtExecutorBase
     /// <summary>Compute capability detected at construction.</summary>
     public int SmMinor { get; }
 
-    public BlockScaledGemmExecutor(int smMajor, int smMinor) : base(CudaArch.Sm(smMajor, smMinor) >= CudaArch.Blackwell)
+    public BlockScaledGemmExecutor(int smMajor, int smMinor) : base(CudaArch.HasFp4TensorCores(CudaArch.Sm(smMajor, smMinor)))
     {
         SmMajor = smMajor;
         SmMinor = smMinor;

@@ -29,7 +29,7 @@ public sealed partial class CudaKernels
         (Math.Min(kvGroup, 16) * d + 8 * 32) * sizeof(float) + (32 * (d + 4) + 32 * d) * (f16Kv ? sizeof(ushort) : sizeof(float));
 
     /// <summary>True when flash_attn_causal_f16.ptx loaded and the device has the m16n8k16 F16 tensor-core instruction (sm_80 and later).</summary>
-    public bool HasFa2Causal => _fa2D128 != 0 && _fa2D64 != 0 && _kvToF16 != 0 && Sm >= 80;
+    public bool HasFa2Causal => _fa2D128 != 0 && _fa2D64 != 0 && _kvToF16 != 0 && CudaArch.HasMmaK16(Sm);
 
     private void LoadFa2Kernels()
     {

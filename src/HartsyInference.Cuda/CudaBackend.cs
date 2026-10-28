@@ -293,7 +293,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public CudaStream Stream => _stream;
 
     /// <inheritdoc/>
-    public bool SupportsVideoSparseAttention => _context.Sm >= CudaArch.Ampere
+    public bool SupportsVideoSparseAttention => CudaArch.HasMmaK16(_context.Sm)
         && _ptxDir is not null && File.Exists(CudaKernels.PtxPath(_ptxDir, "h3_vsa", _context.Sm));
 
     /// <inheritdoc/>
@@ -487,7 +487,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// since cuBLASLt can refuse a handle on a Blackwell card and a weight nothing can consume is worse than one
     /// that arrived wide. Short-circuits, so the executor is never built where it cannot be used.</summary>
     private bool NativeBlockScaledGemmUsable()
-        => EnableNativeFp4Gemm && _context.Sm >= CudaArch.Blackwell
+        => EnableNativeFp4Gemm && CudaArch.HasFp4TensorCores(_context.Sm)
         && _kernels is { HasBlockQuantKernels: true } && BlockScaledExecutor.IsSupported;
 
     public BlockScaledGemmExecutor BlockScaledExecutor
@@ -1330,7 +1330,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         EnableTensorCoreGemm = EngineKnobs.TensorcoreGemm.Value;
         // fp8 tensor-core GEMM (activation-quant e4m3) requires SM 8.9+ (Ada); older parts default to the
         // F16-cast path. Verified quality-clean fleet-wide in the standard Swarm config.
-        bool fp8TensorCores = _context.Sm >= CudaArch.Ada;
+        bool fp8TensorCores = CudaArch.HasFp8TensorCores(_context.Sm);
         EnableNativeFp8Gemm = EngineKnobs.Fp8Native.Value ?? fp8TensorCores;
         EnableNativeFp4Gemm = EngineKnobs.Fp4Native.Value ?? false;
         CacheResidentCasts = EngineKnobs.ResidentCastCache.Value;
@@ -1341,8 +1341,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         HighPrecisionGemm = EngineKnobs.HighPrecisionGemm.Value;
         EnableFp8F16Gemm = EngineKnobs.Fp8F16.Value;
         EnableFp8F32Gemm = EngineKnobs.Fp8F32.Value;
-        _allowTf32 = _context.Sm >= CudaArch.Ampere && !EngineKnobs.NoTf32.Value;
-        _gemmFast16 = _context.Sm >= CudaArch.Ampere && EngineKnobs.GemmF16.Value;
+        _allowTf32 = CudaArch.HasTf32(_context.Sm) && !EngineKnobs.NoTf32.Value;
+        _gemmFast16 = CudaArch.HasMmaK16(_context.Sm) && EngineKnobs.GemmF16.Value;
         // F16 SDPA is gated PER-CALL via the allowF16 arg (callers with bounded/RMS-normed scores like Wan pass true);
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
         _sdpaF16ForceOn = EngineKnobs.SdpaF16.Value;
@@ -1442,7 +1442,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             TotalVramBytes = (long)_context.GetMemoryInfo().totalBytes,
             SupportsF32 = true,
             SupportsF16 = true,
-            SupportsBF16 = _context.Sm >= CudaArch.Ampere,
+            SupportsBF16 = CudaArch.HasBf16(_context.Sm),
             SupportsQuantized = true,
             NativeBlockScaledGemm = NativeBlockScaledGemmUsable(),
             SupportsConv2D = true,
@@ -4388,7 +4388,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// the host to the BF16 a pre-residency build produced, so a card below Blackwell generates the same bytes as before
     /// rather than unpacking 3.8B parameters every step.</remarks>
     public bool SupportsResidentQuant(Tensor weight) => weight.QuantInfo is { Format: "mxfp8", BlockScale: not null }
-        ? EnableNativeFp4Gemm && _context.Sm >= CudaArch.Blackwell && _kernels is { HasMxfp8Kernels: true, HasBlockQuantKernels: true }
+        ? EnableNativeFp4Gemm && CudaArch.HasFp4TensorCores(_context.Sm) && _kernels is { HasMxfp8Kernels: true, HasBlockQuantKernels: true }
         : SupportsResidentQuant(weight.DType);
 
     /// <summary>True once the optional stepcache.ptx module is compiled/shipped; the step-cache stays disabled on CUDA without it.</summary>
