@@ -49,6 +49,10 @@ public sealed record KyutaiSttConfig
     /// <summary>Mimi frame rate in Hz (12.5 in the Moshi design).</summary>
     public float FrameRate { get; init; } = 12.5f;
 
+    /// <summary>Longest clip one decode covers: cache frames less BOS, a spare slot and a padding frame, minus silence padding.</summary>
+    public double MaxInputSeconds =>
+        (Helium.MaxPositionEmbeddings - 2) / (double)FrameRate - AudioSilencePrefixSeconds - AudioDelaySeconds - 1.0 / FrameRate;
+
     /// <summary>Row offset of codebook <paramref name="k"/>'s codes in the shared embedding table.</summary>
     public int AudioOffset(int k) => TextVocab + k * CodebookVocab;
 

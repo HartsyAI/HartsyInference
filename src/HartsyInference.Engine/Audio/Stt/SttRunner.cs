@@ -6,6 +6,9 @@ namespace HartsyInference.Engine.Audio;
 /// <summary>Wraps a transcribe delegate plus the disposables a loaded model owns, so each model is a descriptor.</summary>
 internal sealed class SttRunner(Func<IBackend, float[], AudioRequest, string> transcribe, params IDisposable?[] disposables) : ISttRunner
 {
+    /// <inheritdoc/>
+    public double? MaxInputSeconds { get; init; }
+
     /// <summary>Optional timestamped-decode delegate; left null by models with no timestamp tokens.</summary>
     internal Func<IBackend, float[], AudioRequest, IReadOnlyList<SttSegment>>? Timed { get; init; }
 

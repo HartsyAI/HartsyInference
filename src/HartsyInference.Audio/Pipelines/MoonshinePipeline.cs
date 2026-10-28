@@ -26,6 +26,9 @@ public sealed class MoonshinePipeline : IAudioPipeline, IDisposable
 
     public string ModelName { get; }
 
+    /// <summary>Longest clip one decode covers; longer audio must be split by the caller.</summary>
+    public double MaxInputSeconds => MoonshineGreedyDecoder.WindowSecondsFor(_cfg.MaxTextPositions);
+
     private MoonshinePipeline(string modelName, MoonshineConfig cfg, MoonshineEncoder enc, MoonshineDecoder dec, MoonshineTokenizer tok, SafeTensorsLoader loader)
     {
         ModelName = modelName;
@@ -79,7 +82,7 @@ public sealed class MoonshinePipeline : IAudioPipeline, IDisposable
     public string TranscribeAudio(IBackend backend, float[] audio, int sampleRate, MoonshineOptions? options = null)
     {
         ThrowIfDisposed();
-        MoonshineOptions opts = options ?? new MoonshineOptions();
+        MoonshineOptions opts = MoonshineGreedyDecoder.ResolveOptions(options, audio.Length, sampleRate, _cfg.MaxTextPositions);
 
         float[] mono16k = audio;
         if (sampleRate != 16_000)
