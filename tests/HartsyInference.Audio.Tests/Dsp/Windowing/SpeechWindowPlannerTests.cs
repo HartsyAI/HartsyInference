@@ -90,9 +90,9 @@ public sealed class SpeechWindowPlannerTests
 
         IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate);
 
-        Assert.False(windows[0].Silent);
-        Assert.False(windows[^1].Silent);
         Assert.Contains(windows, window => window.Silent);
+        Assert.All(windows, window =>
+            Assert.Equal(window.Start >= 10 * sampleRate && window.Start + window.Length <= 80 * sampleRate, window.Silent));
         Assert.Equal(clip.Length, windows.Sum(window => window.Length));
     }
 
