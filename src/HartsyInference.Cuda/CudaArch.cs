@@ -29,7 +29,7 @@ public static class CudaArch
 
     /// <summary>The m16n8k16 F16 MMA and <c>cp.async</c> (the Ampere tensor-core GEMM and FA2 causal prefill). Turing has
     /// neither, so the kernels that use them are built as sm_80 PTX. Video sparse attention is gated here too, though its
-    /// kernel needs neither; that gate keeps <c>h3_vsa.sm75.ptx</c> off Turing until a Turing run verifies it.</summary>
+    /// kernel needs neither; that gate keeps video sparse attention off Turing until a Turing run verifies it.</summary>
     public static bool HasMmaK16(int sm) => sm >= Ampere;
 
     /// <summary>TF32 tensor-core math for F32 GEMMs.</summary>
