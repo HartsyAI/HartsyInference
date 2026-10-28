@@ -8,6 +8,21 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Changed: a non-silent long-form window that decodes to no text logs a warning.** Any speech in it is missing from the transcript, so the warning names how many windows were affected.
+
+## alpha.392
+
+- **Fixed: streaming Moonshine small and medium failed to load on CUDA.** The attention merge buffer was sized to the encoder hidden width, which differs from heads × head_dim on those sizes. It is now sized to heads × head_dim, and tiny is unchanged.
+- **Fixed: speech-to-text no longer drops audio past a model's window.** Whisper, distil-Whisper and whisperstreaming decoded only the first 30 s of a longer clip, Moonshine's fixed 180-token budget ended its text early, and Kyutai's position cap cut audio at about 29 s (1B) and 56 s (2.6B). A clip longer than a model's window is now cut into windows, in a quiet stretch near the end of each window where one exists and otherwise at its quietest point there (a word may be split, and the log says so), transcribed, and joined, with timed segments kept on the clip's timeline. Silent windows are skipped. A window whose timed decode yields no segments is decoded again as plain text and kept as one segment covering the window. A non-silent window that decodes to nothing is dropped without a log line; streaming Moonshine medium does this (see its entry below).
+- **Added: `TranscriptResult.Duration` and `TranscriptResult.WindowCount`.** `/v1/native/transcribe` returns both.
+- **Added: `vram.transcribeMaxSeconds` (default 7200).** Longer audio is refused with a named error for models that have a window.
+- **Changed: Moonshine's decode budget scales with clip length** (6.5 tokens per second, at least 32, at most the decoder's positions less one). `MoonshineOptions.MaxNewTokens` now defaults to 0, which derives the budget; a positive value is still an explicit cap, clamped to the decoder's positions less one. A clip under about 27.7 s now gets fewer than the old fixed 180 tokens.
+- **Changed: streaming Moonshine windows are capped at 30 s,** under the 68.8 s its decoder positions would allow. Medium can still decode a window to nothing; see [PARITY](docs/Checklists/PARITY_VERIFICATION.md#stt).
+- **Changed: diarization covers the whole of a long clip.** The sliding-window sweep used when the transcriber gives no timestamps (Moonshine, Kyutai) stopped after about 6.4 minutes (512 spans at 0.75 s); it now stretches its hop to tile the clip. Timestamp spans (Whisper) are joined once there are more than 512. Only a clip that needed the cap changes: its spans are coarser, so a speaker turn inside one span is not separated.
+- **Changed: `ITranscriberLease.Transcribe` windows long clips like `/v1/native/transcribe`.** It throws `ArgumentException` past `vram.transcribeMaxSeconds` for models that have a window, and a release or Dispose of the lease stops a multi-window clip before its next non-silent window: the call throws `ObjectDisposedException` and the text so far is discarded. A call already decoding its last window returns that text.
+- **Changed: the diarization speaker merge distance is 0.60 (was 0.40).** At 0.40 and 0.50 a one-narrator passage split into two speakers. A higher distance merges more, so two similar voices can fold into one. It was set from two clips (the other was JFK followed by a second narrator, still two speakers) and has not been calibrated on a labelled set, so speaker counts can differ from alpha.391.
+- **Changed: `WhisperPipeline` warns when handed more than one window of audio directly.** The engine splits long audio first, so the warning reaches only callers of the pipeline.
+
 ## alpha.391
 
 - **Fixed: a long audio take no longer fails with "Cannot access a disposed object".** A release that could not get the audio lock within 120 s used to dispose the resident models anyway, under a generation still running on them. It now keeps the models and logs the caller's stack. The 200-word Hurston-1 take through AudioLab is the reproduction.

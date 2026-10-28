@@ -100,6 +100,7 @@ internal static class SttCatalog
             return new SttRunner((backend, audio, request) =>
                 pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual)), pipeline)
             {
+                MaxInputSeconds = WhisperPipeline.WindowSeconds,
                 Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
             };
         },
@@ -116,6 +117,7 @@ internal static class SttCatalog
             return new SttRunner((backend, audio, request) =>
                 pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual)), pipeline)
             {
+                MaxInputSeconds = WhisperPipeline.WindowSeconds,
                 Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
             };
         },
@@ -129,7 +131,10 @@ internal static class SttCatalog
         LoadAsync = async (repo, cancel) =>
         {
             MoonshinePipeline pipeline = await MoonshinePipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
-            return new SttRunner((backend, audio, _) => pipeline.TranscribeAudio(backend, audio, 16_000), pipeline);
+            return new SttRunner((backend, audio, _) => pipeline.TranscribeAudio(backend, audio, 16_000), pipeline)
+            {
+                MaxInputSeconds = pipeline.MaxInputSeconds,
+            };
         },
     };
 
@@ -141,7 +146,10 @@ internal static class SttCatalog
         LoadAsync = async (repo, cancel) =>
         {
             MoonshineStreamingPipeline pipeline = await MoonshineStreamingPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
-            return new SttRunner((backend, audio, _) => pipeline.TranscribeAudio(backend, audio, 16_000), pipeline);
+            return new SttRunner((backend, audio, _) => pipeline.TranscribeAudio(backend, audio, 16_000), pipeline)
+            {
+                MaxInputSeconds = pipeline.MaxInputSeconds,
+            };
         },
     };
 
@@ -196,7 +204,10 @@ internal static class SttCatalog
             pipeline.LoadWeights(dict, mimi);
             KyutaiSttTokenizer tokenizer = new KyutaiSttTokenizer(spm);
             IDisposable?[] keep = [pipeline, tokenizer, .. loaders];
-            return new SttRunner((backend, audio, _) => tokenizer.Decode(pipeline.Transcribe(backend, audio)), keep);
+            return new SttRunner((backend, audio, _) => tokenizer.Decode(pipeline.Transcribe(backend, audio)), keep)
+            {
+                MaxInputSeconds = config.MaxInputSeconds,
+            };
         },
     };
 
@@ -215,6 +226,7 @@ internal static class SttCatalog
                 return stream.Finish();
             }, pipeline)
             {
+                MaxInputSeconds = WhisperPipeline.WindowSeconds,
                 // The stabilizer carries no timing of its own, so timestamps come from the underlying batch decode —
                 // which the streaming pipeline's own docs describe as the same result for a whole-clip call.
                 Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),

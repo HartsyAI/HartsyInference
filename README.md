@@ -35,6 +35,12 @@ ImageResult image = await engine.Images.GenerateAsync(
 Services include Images, Text, Video, Speech, Transcribe, Music, Vision, Mesh, World, Restore,
 VoiceConversion, Fx, and Embeddings. Inspect the service interfaces for their request/result contracts.
 
+Transcribe handles audio longer than one model window. Whisper, distil-Whisper, whisper-streaming, Moonshine and Kyutai
+split the clip at silences into windows, decode each one, and join the text. Timestamps are offset onto the clip
+timeline. `TranscriptResult` reports `Duration` and `WindowCount`. For these windowed models, clips longer than
+`vram.transcribeMaxSeconds` (default 7200) are refused with a named error. SheetSage2 windows internally and has no
+such cap.
+
 ## CLI and HTTP
 
 ```bash
