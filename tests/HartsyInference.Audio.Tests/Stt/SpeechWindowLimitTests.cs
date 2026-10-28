@@ -65,6 +65,15 @@ public sealed class SpeechWindowLimitTests
         Assert.Equal(188, resolved.MaxNewTokens);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-16_000)]
+    public void Moonshine_ResolveRefusesANonPositiveSampleRate(int sampleRate)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            MoonshineGreedyDecoder.ResolveOptions(null, sampleCount: 0, sampleRate, maxTextPositions: 194));
+    }
+
     [Fact]
     public void Moonshine_DecodeRefusesAnUnresolvedBudget()
     {

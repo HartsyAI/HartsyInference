@@ -27,6 +27,7 @@ internal static class MoonshineGreedyDecoder
     /// <summary>The options with <c>MaxNewTokens</c> derived from the clip length when not positive, else capped at the decoder positions.</summary>
     internal static MoonshineOptions ResolveOptions(MoonshineOptions? options, int sampleCount, int sampleRate, int maxTextPositions)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sampleRate);
         MoonshineOptions opts = options ?? new MoonshineOptions();
         int budget = opts.MaxNewTokens > 0
             ? Math.Min(opts.MaxNewTokens, maxTextPositions - 1)
