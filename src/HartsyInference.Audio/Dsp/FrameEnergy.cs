@@ -1,7 +1,7 @@
 namespace HartsyInference.Audio.Dsp;
 
-/// <summary>Short-frame RMS shared by the take shaper and the speech window planner, so their silence rules agree.</summary>
-public static class FrameEnergy
+/// <summary>Short-frame RMS and the frame and silence constants shared by the take shaper and the speech window planner.</summary>
+internal static class FrameEnergy
 {
     /// <summary>Analysis frame length in seconds.</summary>
     public const double FrameSeconds = 0.02;

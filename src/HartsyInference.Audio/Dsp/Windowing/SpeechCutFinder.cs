@@ -4,7 +4,7 @@ namespace HartsyInference.Audio.Dsp.Windowing;
 public static class SpeechCutFinder
 {
     /// <summary>Returns the centre of the longest quiet run, or the quietest frame as a hard cut when nothing is quiet.</summary>
-    /// <remarks>Quiet is under the larger of the relative and absolute floors; a trailing partial frame is ignored.</remarks>
+    /// <remarks>Quiet is under the larger of the relative and absolute floors. A trailing partial frame is ignored, but a band shorter than one frame is measured as one.</remarks>
     public static SpeechCut Find(ReadOnlySpan<float> band, int sampleRate)
     {
         if (band.IsEmpty)

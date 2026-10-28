@@ -7,6 +7,7 @@ namespace HartsyInference.Audio.Tests.Dsp.Windowing;
 public sealed class SpeechWindowPlannerTests
 {
     [Theory]
+    [InlineData(11_025)]
     [InlineData(16_000)]
     [InlineData(24_000)]
     public void Plan_CoversEverySampleOnceWithinTheLimit(int sampleRate)
@@ -82,6 +83,20 @@ public sealed class SpeechWindowPlannerTests
     }
 
     [Fact]
+    public void Plan_SilenceInTheMiddleOfAClip_FlagsOnlyTheSilentWindows()
+    {
+        int sampleRate = 16_000;
+        float[] clip = Concat(Tone(10 * sampleRate, sampleRate, 0.5f), Silence(70 * sampleRate), Tone(10 * sampleRate, sampleRate, 0.5f));
+
+        IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate);
+
+        Assert.False(windows[0].Silent);
+        Assert.False(windows[^1].Silent);
+        Assert.Contains(windows, window => window.Silent);
+        Assert.Equal(clip.Length, windows.Sum(window => window.Length));
+    }
+
+    [Fact]
     public void Plan_ContinuousSpeechPastTheLimit_EndsTheWindowOnAHardCut()
     {
         int sampleRate = 16_000;
@@ -110,7 +125,7 @@ public sealed class SpeechWindowPlannerTests
     public void Plan_QuietButAudibleSpeech_IsNotFlaggedSilent()
     {
         int sampleRate = 16_000;
-        // Amplitude 0.01 is about -43 dBFS RMS, above the -55 dBFS silence floor.
+        // Quiet, but above the silence floor.
         float[] clip = Tone(5 * sampleRate, sampleRate, 0.01f);
 
         SpeechWindow only = Assert.Single(SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate));

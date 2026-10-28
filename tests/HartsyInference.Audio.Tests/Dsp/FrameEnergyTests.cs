@@ -26,6 +26,12 @@ public sealed class FrameEnergyTests
     }
 
     [Fact]
+    public void FrameRms_EmptyAudioWithOneFrameCounted_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => FrameEnergy.FrameRms(ReadOnlySpan<float>.Empty, 4, 1));
+    }
+
+    [Fact]
     public void MaxValue_EmptyArray_Throws()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => FrameEnergy.MaxValue([]));
