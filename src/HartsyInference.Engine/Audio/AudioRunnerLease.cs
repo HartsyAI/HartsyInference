@@ -39,6 +39,7 @@ internal abstract class AudioRunnerLease : IDisposable
     /// Returns false when the wait ran out and the lease was closed with that call still running.</summary>
     internal bool Revoke(TimeSpan wait)
     {
+        Signal(RevokedReason);
         bool held = Monitor.TryEnter(CallLock, wait);
         try
         {

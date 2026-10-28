@@ -95,6 +95,40 @@ public sealed class AudioRunnerLeaseTests
     }
 
     [Fact]
+    public async Task TranscriberLease_RevokedWithAWaitMidLongClip_StopsBeforeTheNextWindowAndTheRevocationGetsTheLock()
+    {
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using InferenceEngine engine = new("cpu");
+        ITranscriberLease? lease = null;
+        Thread? revoker = null;
+        bool held = false;
+        FakeStt stt = await SeedSttAsync(engine, WhisperKey, new FakeStt
+        {
+            MaxInputSeconds = 3,
+            // The revoker blocks on the call lock this call holds; it must signal the close before it blocks.
+            OnTranscribe = () =>
+            {
+                if (revoker is not null)
+                {
+                    return;
+                }
+                revoker = new Thread(() => held = ((AudioRunnerLease)lease!).Revoke(TimeSpan.FromSeconds(60)));
+                revoker.Start();
+                Assert.True(SpinWait.SpinUntil(() => revoker.ThreadState.HasFlag(ThreadState.WaitSleepJoin), TimeSpan.FromSeconds(10)));
+            },
+        });
+        lease = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
+
+        await Task.Run(() => Assert.Throws<ObjectDisposedException>(() => lease.Transcribe(Ramp(16_000 * 8), 16_000, SttOptions)))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(revoker!.Join(TimeSpan.FromSeconds(10)));
+        Assert.True(held);
+        Assert.Equal(1, stt.Calls);
+        lease.Dispose();
+    }
+
+    [Fact]
     public async Task TranscriberLease_DisposedMidLongClip_StopsBeforeTheNextWindowInsteadOfWaitingForTheWholeClip()
     {
         using IDisposable calm = AudioEvictionPressure.Relax();
