@@ -11,10 +11,7 @@ public static class SpeechCutFinder
         {
             throw new ArgumentOutOfRangeException(nameof(band), "The band must hold at least one sample.");
         }
-        if (sampleRate < FrameEnergy.MinSampleRate)
-        {
-            throw new ArgumentOutOfRangeException(nameof(sampleRate), sampleRate, "Must be at least 50 Hz.");
-        }
+        FrameEnergy.RequireSampleRate(sampleRate);
 
         int frame = FrameEnergy.FrameSamples(sampleRate);
         int frames = Math.Max(1, band.Length / frame);

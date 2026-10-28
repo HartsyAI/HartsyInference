@@ -20,7 +20,7 @@ public sealed class SpeechWindowPlannerTests
         foreach (SpeechWindow window in windows)
         {
             Assert.Equal(expectedStart, window.Start);
-            Assert.InRange(window.Length, 1, limit);
+            Assert.InRange(window.Length, sampleRate, limit);
             expectedStart += window.Length;
         }
         Assert.Equal(clip.Length, expectedStart);
@@ -122,6 +122,12 @@ public sealed class SpeechWindowPlannerTests
     public void Plan_EmptyAudio_IsEmpty()
     {
         Assert.Empty(SpeechWindowPlanner.Plan(ReadOnlySpan<float>.Empty, 16_000, 30 * 16_000));
+    }
+
+    [Fact]
+    public void Plan_SampleRateBelowTheFloor_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => SpeechWindowPlanner.Plan(new float[1_000], 40, 2_000));
     }
 
     [Fact]

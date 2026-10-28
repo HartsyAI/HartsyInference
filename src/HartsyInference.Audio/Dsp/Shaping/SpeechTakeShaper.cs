@@ -151,8 +151,7 @@ public static class SpeechTakeShaper
     private static void ValidateArguments(float[] y, int sampleRate)
     {
         ArgumentNullException.ThrowIfNull(y);
-        if (sampleRate < FrameEnergy.MinSampleRate)
-            throw new ArgumentOutOfRangeException(nameof(sampleRate), sampleRate, "Must be at least 50 Hz.");
+        FrameEnergy.RequireSampleRate(sampleRate);
     }
 
     private static void ValidateNonNegative(double value, string name)

@@ -16,10 +16,7 @@ public static class SpeechWindowPlanner
     /// <remarks>Input at or under the window gives one window. Silent windows are flagged so callers can skip them.</remarks>
     public static IReadOnlyList<SpeechWindow> Plan(ReadOnlySpan<float> audio, int sampleRate, int maxWindowSamples)
     {
-        if (sampleRate < FrameEnergy.MinSampleRate)
-        {
-            throw new ArgumentOutOfRangeException(nameof(sampleRate), sampleRate, "Must be at least 50 Hz.");
-        }
+        FrameEnergy.RequireSampleRate(sampleRate);
         int minTail = (int)(sampleRate * MinTailSeconds);
         if (maxWindowSamples < (int)(sampleRate * MinWindowSeconds))
         {

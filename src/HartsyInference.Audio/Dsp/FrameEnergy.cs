@@ -21,9 +21,26 @@ public static class FrameEnergy
     /// <summary>Frame length in samples at <paramref name="sampleRate"/>.</summary>
     public static int FrameSamples(int sampleRate) => (int)(sampleRate * FrameSeconds);
 
+    /// <summary>Throws when <paramref name="sampleRate"/> is below <see cref="MinSampleRate"/>.</summary>
+    public static void RequireSampleRate(int sampleRate)
+    {
+        if (sampleRate < MinSampleRate)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sampleRate), sampleRate, $"Must be at least {MinSampleRate} Hz.");
+        }
+    }
+
     /// <summary>RMS of each of the first <paramref name="count"/> frames; the last frame may be shorter than <paramref name="frame"/>.</summary>
+    /// <remarks>Every counted frame must start inside <paramref name="y"/>.</remarks>
     public static double[] FrameRms(ReadOnlySpan<float> y, int frame, int count)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(frame, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        if (count > 0 && (long)(count - 1) * frame >= y.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), count, "A counted frame starts past the end of the audio.");
+        }
+
         double[] rms = new double[count];
         for (int k = 0; k < count; k++)
         {
@@ -42,6 +59,7 @@ public static class FrameEnergy
     /// <summary>Largest value in <paramref name="values"/>; the array must not be empty.</summary>
     public static double MaxValue(double[] values)
     {
+        ArgumentOutOfRangeException.ThrowIfZero(values.Length);
         double max = values[0];
         for (int k = 1; k < values.Length; k++)
         {
