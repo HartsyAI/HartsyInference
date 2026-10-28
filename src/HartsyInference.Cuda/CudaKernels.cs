@@ -514,20 +514,21 @@ public sealed partial class CudaKernels : IDisposable
 
     /// <summary>The PTX to load for <paramref name="kernel"/> on a device of compute capability <paramref name="sm"/>: among
     /// the baseline <c>{kernel}.ptx</c> and every <c>{kernel}.sm*.ptx</c> variant, the one whose <c>.target</c> is the highest
-    /// that the device can JIT (≤ <paramref name="sm"/>). The rank comes from each file's header, never its name. An
-    /// arch-specific target (<c>sm_120a</c>) is eligible only on its exact capability. When nothing is eligible the baseline
-    /// comes back, so the caller's architecture gate still reports it skipped.</summary>
+    /// that the device can JIT (≤ <paramref name="sm"/>). The rank comes from each file's header, never its name. A tuned
+    /// variant above the Turing floor (<c>sm_89</c>, <c>sm_120a</c>) is eligible only on its exact capability. When nothing is
+    /// eligible the baseline comes back, so the caller's architecture gate still reports it skipped.</summary>
     public static string PtxPath(string ptxDir, string kernel, int sm)
     {
         string baseline = Path.Combine(ptxDir, $"{kernel}.ptx");
         if (sm <= 0 || !Directory.Exists(ptxDir)) return baseline;
         string best = baseline;
         int bestSm = -1;
-        if (File.Exists(baseline) && Eligible(baseline, sm) is { } baselineSm)
+        if (File.Exists(baseline) && Eligible(baseline, sm, tuned: false) is { } baselineSm)
             bestSm = baselineSm;
-        foreach (string variant in Directory.EnumerateFiles(ptxDir, $"{kernel}.sm*.ptx"))
+        // Ordinal order makes a tie between two variants with the same target deterministic, whatever the file system returns.
+        foreach (string variant in Directory.EnumerateFiles(ptxDir, $"{kernel}.sm*.ptx").Order(StringComparer.Ordinal))
         {
-            if (Eligible(variant, sm) is not { } target || target < bestSm) continue;
+            if (Eligible(variant, sm, tuned: true) is not { } target || target < bestSm) continue;
             // An equal target prefers the variant: it was built for this family on purpose.
             best = variant;
             bestSm = target;
@@ -537,12 +538,15 @@ public sealed partial class CudaKernels : IDisposable
 
     /// <summary>The target of <paramref name="path"/> when a device of capability <paramref name="sm"/> may load it, else null.
     /// A header with no <c>.target</c> names no capability, so it is never eligible; <see cref="PtxPath"/> still returns the
-    /// baseline when nothing is eligible.</summary>
-    private static int? Eligible(string path, int sm)
+    /// baseline when nothing is eligible. A <paramref name="tuned"/> variant above <see cref="CudaArch.Turing"/> was built and
+    /// spill-checked for its one capability, so it runs only there; a floor build (the baseline, or a Turing variant) runs on any
+    /// device that reaches its target.</summary>
+    private static int? Eligible(string path, int sm, bool tuned)
     {
         (int target, bool archSpecific) = CudaModule.ReadTarget(path);
         if (target <= 0) return null;
-        return archSpecific ? (target == sm ? target : null) : (target <= sm ? target : null);
+        bool exactOnly = archSpecific || (tuned && target > CudaArch.Turing);
+        return exactOnly ? (target == sm ? target : null) : (target <= sm ? target : null);
     }
 
     private string Ptx(string kernel)

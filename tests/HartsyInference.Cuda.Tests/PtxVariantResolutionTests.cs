@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using HartsyInference.Cuda;
 using Xunit;
 using Xunit.Abstractions;
@@ -11,11 +12,13 @@ public sealed class PtxVariantResolutionTests
     public PtxVariantResolutionTests(ITestOutputHelper output) => _output = output;
 
     [Theory]
-    // Baseline sm_80, variants sm_75 and sm_89, and an arch-specific sm_120a. Each card gets the highest target it can JIT.
+    // Baseline sm_80, Turing variant sm_75, tuned variants sm_89 and sm_120a. Each card gets the highest target it can JIT,
+    // where a tuned variant above the Turing floor runs only on its own capability.
     [InlineData(120, "foo.sm120a.ptx")]  // the arch-specific build for its own capability beats the forward-compatible sm_89
-    [InlineData(121, "foo.sm89.ptx")]    // sm_120a is exact-only, so the highest forward-compatible build the card can run
+    [InlineData(121, "foo.ptx")]         // sm_89 is tuned, so it does not run here; sm_120a is exact-only; the baseline is the floor
+    [InlineData(90, "foo.ptx")]          // Hopper: the sm_89 tuned build is not run on another capability
     [InlineData(89, "foo.sm89.ptx")]     // the card the variant was built for
-    [InlineData(86, "foo.ptx")]          // the sm_89 variant is too new, the sm_75 one is lower: the baseline is higher still
+    [InlineData(86, "foo.ptx")]          // sm_89 is not this card's; the sm_75 floor build is lower than the baseline
     [InlineData(75, "foo.sm75.ptx")]     // Turing: the baseline sm_80 is too new, so the sm_75 build is the only one it can run
     [InlineData(70, "foo.ptx")]          // older than every variant: the baseline comes back and the gate reports it skipped
     [InlineData(0, "foo.ptx")]           // no device known
@@ -61,8 +64,9 @@ public sealed class PtxVariantResolutionTests
         try
         {
             WritePtx(dir, "foo.ptx", 80);
-            WritePtx(dir, "foo.sm89.ptx", 84);   // the name says 89 (too new for an 86), the header says 84 (runnable)
-            Assert.Equal(Path.Combine(dir, "foo.sm89.ptx"), CudaKernels.PtxPath(dir, "foo", 86));
+            WritePtx(dir, "foo.sm89.ptx", 84);   // the name says 89, the header says 84: the header decides which card it is built for
+            Assert.Equal(Path.Combine(dir, "foo.sm89.ptx"), CudaKernels.PtxPath(dir, "foo", 84));
+            Assert.Equal(Path.Combine(dir, "foo.ptx"), CudaKernels.PtxPath(dir, "foo", 89));
         }
         finally
         {
@@ -91,7 +95,7 @@ public sealed class PtxVariantResolutionTests
         }
     }
 
-    /// <summary>A copy of the shipped PTX with the baseline block_quant duplicated under this card's suffix: the kernel set must report it as the loaded variant, and only it. The duplicate is bit-identical to the baseline, so nothing else about the run changes.</summary>
+    /// <summary>A copy of the shipped PTX with the baseline block_quant duplicated under this card's suffix, its <c>.target</c> set to this card: the kernel set must report it as the loaded variant, and only it. The body is the baseline, so nothing else about the run changes.</summary>
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TheRunningCardLoadsItsOwnVariant()
@@ -106,7 +110,9 @@ public sealed class PtxVariantResolutionTests
         {
             foreach (string file in Directory.EnumerateFiles(shipped, "*.ptx"))
                 File.Copy(file, Path.Combine(dir, Path.GetFileName(file)));
-            File.Copy(Path.Combine(dir, "block_quant.ptx"), Path.Combine(dir, $"block_quant.sm{context.Sm}.ptx"), overwrite: true);
+            string baselineText = File.ReadAllText(Path.Combine(dir, "block_quant.ptx"));
+            File.WriteAllText(Path.Combine(dir, $"block_quant.sm{context.Sm}.ptx"),
+                Regex.Replace(baselineText, @"^\.target .*$", $".target sm_{context.Sm}", RegexOptions.Multiline));
             using CudaKernels kernels = new CudaKernels(dir, context);
             Assert.Equal(context.Sm, kernels.Sm);
             Assert.True(kernels.HasBlockQuantKernels);
