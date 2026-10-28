@@ -504,7 +504,7 @@ public sealed partial class CudaKernels : IDisposable
 
     /// <summary>The lowest compute capability the CUDA backend runs on. Below the baseline, a device loads the modules built
     /// for it (the Turing floor set) and the sm_80-only modules stay unbound, with their fallback rows serving the card. A device
-    /// below this floor cannot load the shipped kernels, and the backend refuses it.</summary>
+    /// below this floor cannot load the shipped kernels, and the factory passes over it.</summary>
     public const int MinimumSm = CudaArch.Turing;
 
     /// <summary>Modules skipped because their PTX targets a newer architecture than this device, as <c>name (sm_XX)</c>.
