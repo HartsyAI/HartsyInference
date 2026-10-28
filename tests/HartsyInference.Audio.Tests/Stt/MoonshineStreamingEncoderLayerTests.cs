@@ -4,18 +4,16 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using Xunit;
 
-namespace HartsyInference.Audio.Tests;
+namespace HartsyInference.Audio.Tests.Stt;
 
-/// <summary>The streaming encoder layer where the hidden width differs from heads * head_dim, as on small and medium.
-/// The attention merge buffer must be sized to the attention output, not to the hidden width.</summary>
+/// <summary>Streaming encoder layer whose hidden width is wider than heads * head_dim, as on medium.</summary>
 public sealed class MoonshineStreamingEncoderLayerTests
 {
     private const int Intermediate = 24;
     private const int SeqLen = 9;
     private const string Prefix = "layer";
 
-    // Hidden wider than heads * head_dim, as on medium (768 against 640). The narrower direction is not a real
-    // configuration, and on the pre-fix buffer it writes past the allocation before it fails, so it is not covered.
+    // Fails on a pre-fix merge buffer through LinearTransB's element-count check.
     [Fact]
     public void Forward_WhenHiddenWidthIsWiderThanAttentionWidth_ReturnsTheHiddenShape()
     {
