@@ -26,8 +26,8 @@ below are the audit's own.
 |---|---|
 | `src/HartsyInference.Cuda/Kernels/build_common.sh` | Compiles every `KERNELS` list for `sm_80`. `KERNELS_SM75` exists only for the dequant and MoE expert domains. |
 | `src/HartsyInference.Cuda/CudaKernels.cs:503` | `BaselineSm = CudaArch.Ampere` (sm_80). Modules whose `.target` is newer than the device are skipped, not bound. |
-| `CudaKernels.cs:520` `PtxPath` | Picks the file whose `.target` header is the highest the device can run, among `{kernel}.ptx` and `{kernel}.sm*.ptx`. A tuned variant above sm_75 needs an **exact** SM match. |
-| `src/HartsyInference.Engine/BackendFactory.cs:143` | `CudaMeetsKernelBaseline` returns false below sm_80, so automatic selection passes CUDA over and takes Vulkan. |
+| `CudaKernels.cs:531` `PtxPath` | Picks the file whose `.target` header is the highest the device can run, among `{kernel}.ptx` and `{kernel}.sm*.ptx`. A tuned variant above sm_75 needs an **exact** SM match. |
+| `src/HartsyInference.Engine/BackendFactory.cs:132` | `CudaMeetsKernelBaseline` returns false below `MinimumSm` (sm_75), so automatic selection passes CUDA over and takes Vulkan. |
 | `CudaBackend.cs:1445` | `SupportsBF16 = Sm >= Ampere`. |
 | `CudaBackend.cs:1344` | TF32 and "fast F16 GEMM" are gated to Ampere. |
 
@@ -124,7 +124,7 @@ validated.
 1. Build the 91 compile-clean kernels for `sm_75` PTX as the baseline (`KERNELS` → `-arch=sm_75`). Forward JIT means
    sm_80, sm_86, sm_89, and Blackwell still load them.
 2. For the 5 sm_80-only kernels, the baseline `{kernel}.ptx` stays the sm_80 PTX that every device at or above sm_80
-   loads, and a Turing-legal `{kernel}.sm75.ptx` is added as the floor variant. `PtxPath` (`CudaKernels.cs:520`) picks
+   loads, and a Turing-legal `{kernel}.sm75.ptx` is added as the floor variant. `PtxPath` (`CudaKernels.cs:531`) picks
    the file whose `.target` is the highest the device can run: sm_75 takes the `.sm75` file, and any other device takes
    the baseline. Do not name the sm_80 build `.sm80.ptx`: a tuned variant above sm_75 loads only on exactly sm_80.
 3. Set `BaselineSm = CudaArch.Turing` and update `BackendFactory.CudaMeetsKernelBaseline`, the gate messages, and the
