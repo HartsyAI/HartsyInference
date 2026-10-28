@@ -124,11 +124,11 @@ public static class BackendFactory
         set => Volatile.Write(ref _querySmForTests, value);
     }
 
-    /// <summary>Whether CUDA device <paramref name="ordinal"/> can run the shipped kernels: at or above
-    /// <see cref="CudaKernels.MinimumSm"/>, and with every required module bound (<see cref="RequireBoundKernels"/>). A
-    /// device below the floor is passed over to Vulkan, which runs the card. Only the device the selector names is checked
-    /// (<c>auto</c> is ordinal 0, CUDA's fastest card), so a host whose first card is old goes to Vulkan even if a later one
-    /// is newer. A device whose capability cannot be read is not held back.</summary>
+    /// <summary>Whether CUDA device <paramref name="ordinal"/> is at or above the kernel floor (<see cref="CudaKernels.MinimumSm"/>),
+    /// so that it may be chosen. A device below the floor is passed over to Vulkan, which runs the card. Only the device the
+    /// selector names is checked (<c>auto</c> is ordinal 0, CUDA's fastest card), so a host whose first card is old goes to
+    /// Vulkan even if a later one is newer. A device whose capability cannot be read is not held back. This check builds no
+    /// backend, so it does not see unbound modules: <see cref="ProbeCuda"/> does, through <see cref="RequireBoundKernels"/>.</summary>
     private static bool CudaMeetsKernelBaseline(int ordinal)
     {
         int sm;

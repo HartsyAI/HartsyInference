@@ -29,9 +29,9 @@ public sealed class BackendKernelBaselineTests
             Assert.NotEqual("cuda", BackendFactory.Resolve("auto"));
             Assert.Contains("SM 7.0", BackendFactory.CudaUnavailableReason, StringComparison.Ordinal);
 
-            // Turing is the floor: a card there takes CUDA when every required module binds, and Vulkan otherwise.
+            // Turing is the floor: a card there is chosen for CUDA. Whether its required modules bind is the probe's question.
             BackendFactory.QuerySmForTests = _ => CudaKernels.MinimumSm;
-            BackendFactory.Resolve("auto");
+            Assert.Equal("cuda", BackendFactory.Resolve("auto"));
         }
         finally
         {
