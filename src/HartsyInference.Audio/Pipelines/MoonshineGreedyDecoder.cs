@@ -24,13 +24,14 @@ internal static class MoonshineGreedyDecoder
         return (int)Math.Min(Math.Max(scaled, MinDerivedTokens), maxTextPositions - 1);
     }
 
-    /// <summary>The caller's options with a 0 <c>MaxNewTokens</c> replaced by the budget derived from the clip's length; an explicit value is kept.</summary>
+    /// <summary>The options with <c>MaxNewTokens</c> derived from the clip length when not positive, else capped at the decoder positions.</summary>
     internal static MoonshineOptions ResolveOptions(MoonshineOptions? options, int sampleCount, int sampleRate, int maxTextPositions)
     {
         MoonshineOptions opts = options ?? new MoonshineOptions();
-        return opts.MaxNewTokens != 0
-            ? opts
-            : opts with { MaxNewTokens = DerivedTokenBudget((double)sampleCount / sampleRate, maxTextPositions) };
+        int budget = opts.MaxNewTokens > 0
+            ? Math.Min(opts.MaxNewTokens, maxTextPositions - 1)
+            : DerivedTokenBudget((double)sampleCount / sampleRate, maxTextPositions);
+        return budget == opts.MaxNewTokens ? opts : opts with { MaxNewTokens = budget };
     }
 
     /// <summary>Longest clip one decode can cover before the decoder runs out of positions.</summary>
@@ -42,7 +43,7 @@ internal static class MoonshineGreedyDecoder
     {
         if (opts.MaxNewTokens <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(opts), "MaxNewTokens must be resolved to a positive budget; pass the options through ResolveOptions first.");
+            throw new ArgumentOutOfRangeException(nameof(opts), "MaxNewTokens must be a resolved positive budget; call ResolveOptions first.");
         }
 
         // Prompt: just [BOS]. Moonshine has no language / task tokens.

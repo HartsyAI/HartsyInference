@@ -34,7 +34,7 @@ public sealed class SpeechWindowLimitTests
     [Fact]
     public void Moonshine_DerivedBudgetFollowsTheCallersSampleRate()
     {
-        MoonshineOptions resolved = MoonshineGreedyDecoder.ResolveOptions(new MoonshineOptions(), sampleCount: 29 * 24_000, sampleRate: 24_000, maxTextPositions: 194);
+        MoonshineOptions resolved = MoonshineGreedyDecoder.ResolveOptions(null, sampleCount: 29 * 24_000, sampleRate: 24_000, maxTextPositions: 194);
 
         Assert.Equal(188, resolved.MaxNewTokens);
     }
@@ -45,6 +45,24 @@ public sealed class SpeechWindowLimitTests
         MoonshineOptions given = new() { MaxNewTokens = 40 };
 
         Assert.Same(given, MoonshineGreedyDecoder.ResolveOptions(given, sampleCount: 29 * 16_000, sampleRate: 16_000, maxTextPositions: 194));
+    }
+
+    [Fact]
+    public void Moonshine_ExplicitBudgetIsCappedAtTheDecoderPositions()
+    {
+        MoonshineOptions given = new() { MaxNewTokens = 500 };
+        MoonshineOptions resolved = MoonshineGreedyDecoder.ResolveOptions(given, sampleCount: 16_000, sampleRate: 16_000, maxTextPositions: 194);
+
+        Assert.Equal(193, resolved.MaxNewTokens);
+    }
+
+    [Fact]
+    public void Moonshine_NegativeBudgetIsDerivedLikeZero()
+    {
+        MoonshineOptions given = new() { MaxNewTokens = -1 };
+        MoonshineOptions resolved = MoonshineGreedyDecoder.ResolveOptions(given, sampleCount: 29 * 16_000, sampleRate: 16_000, maxTextPositions: 194);
+
+        Assert.Equal(188, resolved.MaxNewTokens);
     }
 
     [Fact]
