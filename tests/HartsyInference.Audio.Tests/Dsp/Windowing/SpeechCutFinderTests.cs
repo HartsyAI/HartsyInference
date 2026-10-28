@@ -43,6 +43,23 @@ public sealed class SpeechCutFinderTests
     }
 
     [Fact]
+    public void Find_TrailingPartialFrame_IsNotAQuietRun()
+    {
+        // Ten silent samples do not fill a frame, so they must not read as a clean cut inside loud audio.
+        float[] band = Concat(Tone(16_000, 0.5f), Silence(10));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.True(cut.HardCut);
+    }
+
+    [Fact]
+    public void Find_SampleRateBelowTheFloor_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => SpeechCutFinder.Find(new float[100], 40));
+    }
+
+    [Fact]
     public void Find_EmptyBand_Throws()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => SpeechCutFinder.Find(ReadOnlySpan<float>.Empty, SampleRate));

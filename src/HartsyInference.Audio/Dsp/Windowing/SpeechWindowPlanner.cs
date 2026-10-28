@@ -1,24 +1,22 @@
-using HartsyInference.Audio.Dsp;
-
 namespace HartsyInference.Audio.Dsp.Windowing;
 
 /// <summary>Splits a long clip into contiguous windows, cutting only in quiet audio so no word is decoded twice.</summary>
 public static class SpeechWindowPlanner
 {
-    /// <summary>Shortest tail a cut may leave; Whisper invents text on sub-second windows.</summary>
+    /// <summary>Shortest window or tail a cut may leave; Whisper invents text on sub-second windows.</summary>
     public const double MinTailSeconds = 1.0;
 
     /// <summary>Longest band a cut is searched in, counted back from the window end.</summary>
     public const double MaxBandSeconds = 5.0;
 
-    /// <summary>Shortest window the planner accepts; it must hold a minimum tail and a cut band.</summary>
+    /// <summary>Shortest window the planner accepts; it must hold a minimum head and a minimum tail.</summary>
     public const double MinWindowSeconds = 2.0;
 
     /// <summary>Plans windows of at most <paramref name="maxWindowSamples"/> samples covering every sample once.</summary>
     /// <remarks>Input at or under the window gives one window. Silent windows are flagged so callers can skip them.</remarks>
     public static IReadOnlyList<SpeechWindow> Plan(ReadOnlySpan<float> audio, int sampleRate, int maxWindowSamples)
     {
-        if (sampleRate < 50)
+        if (sampleRate < FrameEnergy.MinSampleRate)
         {
             throw new ArgumentOutOfRangeException(nameof(sampleRate), sampleRate, "Must be at least 50 Hz.");
         }
@@ -39,7 +37,7 @@ public static class SpeechWindowPlanner
         while (audio.Length - pos > maxWindowSamples)
         {
             int limit = Math.Min(pos + maxWindowSamples, audio.Length - minTail);
-            int bandStart = Math.Max(pos + 1, limit - bandLength);
+            int bandStart = Math.Max(pos + minTail, limit - bandLength);
             SpeechCut cut = SpeechCutFinder.Find(audio.Slice(bandStart, limit - bandStart), sampleRate);
             int cutAt = bandStart + cut.Offset;
             windows.Add(Describe(audio, pos, cutAt - pos, cut.HardCut, sampleRate));

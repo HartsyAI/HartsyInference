@@ -12,6 +12,12 @@ public static class FrameEnergy
     /// <summary>A frame is quiet when its RMS is below this fraction of the loudest frame's RMS.</summary>
     public const double QuietFraction = 0.03;
 
+    /// <summary>Lowest sample rate that still yields a non-empty analysis frame.</summary>
+    public const int MinSampleRate = 50;
+
+    /// <summary>Amplitude of the silence floor, the linear form of <see cref="SilenceFloorDb"/>.</summary>
+    public static readonly double SilenceFloorAmplitude = Math.Pow(10.0, SilenceFloorDb / 20.0);
+
     /// <summary>Frame length in samples at <paramref name="sampleRate"/>.</summary>
     public static int FrameSamples(int sampleRate) => (int)(sampleRate * FrameSeconds);
 
@@ -43,7 +49,4 @@ public static class FrameEnergy
         }
         return max;
     }
-
-    /// <summary>Amplitude of the silence floor, the linear form of <see cref="SilenceFloorDb"/>.</summary>
-    public static double SilenceFloorAmplitude => Math.Pow(10.0, SilenceFloorDb / 20.0);
 }

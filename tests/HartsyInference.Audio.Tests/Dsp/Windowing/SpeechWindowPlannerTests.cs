@@ -71,13 +71,39 @@ public sealed class SpeechWindowPlannerTests
     public void Plan_SilentTail_IsFlaggedSilent()
     {
         int sampleRate = 16_000;
-        // Speech for 20 s, then silence for 20 s; the 30 s window cuts in the silence before 25 s.
+        // Speech for 20 s, then silence for 20 s; the 30 s window searches 25-30 s, all silent, and cuts at its centre.
         float[] clip = Concat(Tone(20 * sampleRate, sampleRate, 0.5f), Silence(20 * sampleRate));
 
         IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate);
 
         Assert.False(windows[0].Silent);
+        Assert.InRange(windows[0].Length, 25 * sampleRate, 30 * sampleRate);
         Assert.True(windows[^1].Silent);
+    }
+
+    [Fact]
+    public void Plan_ContinuousSpeechPastTheLimit_EndsTheWindowOnAHardCut()
+    {
+        int sampleRate = 16_000;
+        float[] clip = Tone(61 * sampleRate, sampleRate, 0.5f);
+
+        IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate);
+
+        Assert.True(windows[0].HardCut);
+        Assert.False(windows[^1].HardCut);
+    }
+
+    [Fact]
+    public void Plan_MinimumWindow_LeavesAtLeastOneSecondBeforeAndAfterTheCut()
+    {
+        int sampleRate = 16_000;
+        // A silent head would otherwise pull the cut to the first few samples of the window.
+        float[] clip = Concat(Silence(2_000), Tone(2 * sampleRate + 1 - 2_000, sampleRate, 0.5f));
+
+        IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 2 * sampleRate);
+
+        Assert.Equal(2, windows.Count);
+        Assert.All(windows, window => Assert.True(window.Length >= sampleRate, "every window must hold at least one second"));
     }
 
     [Fact]
