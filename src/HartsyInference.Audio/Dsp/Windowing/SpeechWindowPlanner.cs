@@ -1,6 +1,6 @@
 namespace HartsyInference.Audio.Dsp.Windowing;
 
-/// <summary>Splits a long clip into contiguous windows, cutting only in quiet audio so no word is decoded twice.</summary>
+/// <summary>Splits a long clip into contiguous windows, cutting in quiet audio when it can and flagging a hard cut when it cannot.</summary>
 public static class SpeechWindowPlanner
 {
     /// <summary>Shortest window or tail a cut may leave; Whisper invents text on sub-second windows.</summary>
@@ -13,7 +13,7 @@ public static class SpeechWindowPlanner
     public const double MinWindowSeconds = 2.0;
 
     /// <summary>Plans windows of at most <paramref name="maxWindowSamples"/> samples covering every sample once.</summary>
-    /// <remarks>Input at or under the window gives one window. Silent windows are flagged so callers can skip them.</remarks>
+    /// <remarks>Empty input gives no windows; input at or under the window gives one. Silent windows are flagged so callers can skip them.</remarks>
     public static IReadOnlyList<SpeechWindow> Plan(ReadOnlySpan<float> audio, int sampleRate, int maxWindowSamples)
     {
         FrameEnergy.RequireSampleRate(sampleRate);

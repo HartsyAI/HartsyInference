@@ -55,6 +55,38 @@ public sealed class SpeechCutFinderTests
     }
 
     [Fact]
+    public void Find_QuietRunAtTheBandStart_CutsInItsMiddle()
+    {
+        float[] band = Concat(Silence(640), Tone(6_400, 0.5f));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.False(cut.HardCut);
+        Assert.Equal(320, cut.Offset);
+    }
+
+    [Fact]
+    public void Find_QuietRunAtTheBandEnd_CutsInItsMiddle()
+    {
+        float[] band = Concat(Tone(6_400, 0.5f), Silence(640));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.False(cut.HardCut);
+        Assert.Equal(6_720, cut.Offset);
+    }
+
+    [Fact]
+    public void Find_EqualQuietRuns_CutsInTheFirst()
+    {
+        float[] band = Concat(Silence(320), Tone(3_200, 0.5f), Silence(320), Tone(3_200, 0.5f));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.Equal(160, cut.Offset);
+    }
+
+    [Fact]
     public void Find_TrailingPartialFrame_IsNotAQuietRun()
     {
         // Ten silent samples do not fill a frame, so they must not read as a clean cut inside loud audio.
