@@ -3,12 +3,8 @@ namespace HartsyInference.Audio.Dsp.Shaping;
 /// <summary>Trims silence, shortens long pauses and levels speech takes, matching the reference take shaping.</summary>
 public static class SpeechTakeShaper
 {
-    private const double FrameSeconds = 0.02;
-    private const double SilenceFloorDb = -55.0;
     private const double RmsEpsilon = 1e-9;
-    private const double QuietFraction = 0.03;
     private const double ActiveFraction = 0.1;
-    private const int MinSampleRate = 50;
 
     /// <summary>Settings for <see cref="Shape"/>. The defaults match the reference take shaping.</summary>
     public sealed record SpeechTakeShapingOptions
@@ -31,12 +27,12 @@ public static class SpeechTakeShaper
         ValidateNonNegative(topDb, nameof(topDb));
         if (y.Length == 0) return Array.Empty<float>();
 
-        int frame = FrameSamples(sampleRate);
-        double[] levelDb = FrameRms(y, frame, ReferenceFrameCount(y.Length, frame));
+        int frame = FrameEnergy.FrameSamples(sampleRate);
+        double[] levelDb = FrameEnergy.FrameRms(y, frame, ReferenceFrameCount(y.Length, frame));
         for (int k = 0; k < levelDb.Length; k++) levelDb[k] = 20.0 * Math.Log10(levelDb[k] + RmsEpsilon);
-        double maxDb = MaxValue(levelDb);
+        double maxDb = FrameEnergy.MaxValue(levelDb);
 
-        double threshold = Math.Max(maxDb - topDb, SilenceFloorDb);
+        double threshold = Math.Max(maxDb - topDb, FrameEnergy.SilenceFloorDb);
         int first = -1;
         int last = -1;
         for (int k = 0; k < levelDb.Length; k++)
@@ -63,12 +59,12 @@ public static class SpeechTakeShaper
         ValidateNonNegative(maxPause, nameof(maxPause));
         ValidateNonNegative(keep, nameof(keep));
 
-        int frame = FrameSamples(sampleRate);
+        int frame = FrameEnergy.FrameSamples(sampleRate);
         int frames = y.Length / frame;
         if (frames == 0) return (float[])y.Clone();
 
-        double[] rms = FrameRms(y, frame, frames);
-        double quietBelow = MaxValue(rms) * QuietFraction;
+        double[] rms = FrameEnergy.FrameRms(y, frame, frames);
+        double quietBelow = FrameEnergy.MaxValue(rms) * FrameEnergy.QuietFraction;
         int keepEach = (int)(sampleRate * keep / 2.0);
         float[] buffer = new float[y.Length];
         int written = 0;
@@ -83,7 +79,7 @@ public static class SpeechTakeShaper
             int end = j * frame;
             int runSamples = end - start;
             // A run no longer than the two kept ends is left whole: keeping both ends would copy samples twice and lengthen it.
-            if (quiet && (j - i) * FrameSeconds > maxPause && 2 * keepEach < runSamples)
+            if (quiet && (j - i) * FrameEnergy.FrameSeconds > maxPause && 2 * keepEach < runSamples)
             {
                 int head = Math.Min(keepEach, runSamples);
                 int tail = Math.Min(keepEach, runSamples);
@@ -117,9 +113,9 @@ public static class SpeechTakeShaper
         if (peak <= 0.0) throw new ArgumentOutOfRangeException(nameof(peak), peak, "Must be positive.");
         if (y.Length == 0) return Array.Empty<float>();
 
-        int frame = FrameSamples(sampleRate);
-        double[] rms = FrameRms(y, frame, ReferenceFrameCount(y.Length, frame));
-        double maxRms = MaxValue(rms);
+        int frame = FrameEnergy.FrameSamples(sampleRate);
+        double[] rms = FrameEnergy.FrameRms(y, frame, ReferenceFrameCount(y.Length, frame));
+        double maxRms = FrameEnergy.MaxValue(rms);
         if (maxRms <= 0.0) return (float[])y.Clone();
 
         double activeFloor = maxRms * ActiveFraction;
@@ -155,8 +151,7 @@ public static class SpeechTakeShaper
     private static void ValidateArguments(float[] y, int sampleRate)
     {
         ArgumentNullException.ThrowIfNull(y);
-        if (sampleRate < MinSampleRate)
-            throw new ArgumentOutOfRangeException(nameof(sampleRate), sampleRate, "Must be at least 50 Hz.");
+        FrameEnergy.RequireSampleRate(sampleRate);
     }
 
     private static void ValidateNonNegative(double value, string name)
@@ -164,34 +159,10 @@ public static class SpeechTakeShaper
         if (value < 0.0) throw new ArgumentOutOfRangeException(name, value, "Must be non-negative.");
     }
 
-    private static int FrameSamples(int sampleRate) => (int)(sampleRate * FrameSeconds);
-
     // The reference enumerates frame starts below max(1, length - frame), so its last frame can be dropped.
     private static int ReferenceFrameCount(int length, int frame)
     {
         int limit = Math.Max(1, length - frame);
         return (limit + frame - 1) / frame;
-    }
-
-    private static double[] FrameRms(float[] y, int frame, int count)
-    {
-        double[] rms = new double[count];
-        for (int k = 0; k < count; k++)
-        {
-            int start = k * frame;
-            int end = Math.Min(start + frame, y.Length);
-            double sum = 0.0;
-            for (int i = start; i < end; i++) sum += (double)y[i] * y[i];
-            rms[k] = Math.Sqrt(sum / (end - start));
-        }
-
-        return rms;
-    }
-
-    private static double MaxValue(double[] values)
-    {
-        double max = values[0];
-        for (int k = 1; k < values.Length; k++) max = Math.Max(max, values[k]);
-        return max;
     }
 }
