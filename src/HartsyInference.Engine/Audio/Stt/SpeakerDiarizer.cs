@@ -17,16 +17,17 @@ namespace HartsyInference.Engine.Audio;
 /// silence and non-speech are attributed to whichever speaker they cluster nearest; span boundaries come from
 /// Whisper's timestamp tokens when available and from a fixed sliding window otherwise, never from speech activity.
 /// (2) <see cref="MergeDistance"/> is an <b>uncalibrated</b> constant — the encoder itself is real-weight verified,
-/// but no speaker-diarization error rate has been measured for this threshold on this codebase, so the speaker
-/// <i>count</i> is a guess whenever the caller cannot supply one. (3) Weights are never downloaded here; the clip is
+/// but no speaker-diarization error rate has been measured on a labelled set, so the speaker <i>count</i> can still
+/// be wrong. 0.60 was chosen on two clips: one narrator must come out as one speaker, and JFK followed by a second
+/// narrator as two. At 0.40 and 0.50 the one-narrator clip split in two. (3) Weights are never downloaded here; the clip is
 /// re-decoded to 16 kHz mono because CAM++ is a 16 kHz Kaldi-fbank model.</para></summary>
 internal sealed class SpeakerDiarizer : IDisposable
 {
     /// <summary>CAM++ is a 16 kHz model (Kaldi fbank, 25 ms / 10 ms).</summary>
     internal const int SampleRate = 16_000;
 
-    /// <summary>Cosine-distance ceiling below which two clusters merge. Uncalibrated — see the type remarks.</summary>
-    private const float MergeDistance = 0.40f;
+    /// <summary>Cosine-distance ceiling below which two clusters merge. Set on two clips — see the type remarks.</summary>
+    private const float MergeDistance = 0.60f;
 
     /// <summary>Sliding-window length used when no timestamp segments are available.</summary>
     private const double WindowSeconds = 1.5;
