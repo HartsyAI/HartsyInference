@@ -14,6 +14,8 @@ NVCC_BUILT=("int8_attn_v2")
 # --arch sm_89 adds int8_attn_v2.sm89.ptx, which the 4090 loads instead of the baseline.
 ARCH_VARIANTS=("int8_attn_v2")
 PTXAS_SPILL_CHECK=("int8_attn_v2")
+# cp.async and m16n8k16/k32 MMA: no Turing build. The Turing card takes the dense and tiled attention rows instead.
+SM80_ONLY=("flash_attn_f16" "sage_attn_int8" "int8_attn_v2")
 
 # shellcheck source=../build_common.sh
 . "${THIS_DIR}/../build_common.sh"
