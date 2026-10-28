@@ -7,6 +7,7 @@ namespace HartsyInference.Audio.Tests.Dsp.Windowing;
 public sealed class SpeechWindowPlannerTests
 {
     [Theory]
+    [InlineData(11_025)]
     [InlineData(16_000)]
     [InlineData(24_000)]
     public void Plan_CoversEverySampleOnceWithinTheLimit(int sampleRate)
@@ -20,7 +21,7 @@ public sealed class SpeechWindowPlannerTests
         foreach (SpeechWindow window in windows)
         {
             Assert.Equal(expectedStart, window.Start);
-            Assert.InRange(window.Length, 1, limit);
+            Assert.InRange(window.Length, sampleRate, limit);
             expectedStart += window.Length;
         }
         Assert.Equal(clip.Length, expectedStart);
@@ -71,19 +72,77 @@ public sealed class SpeechWindowPlannerTests
     public void Plan_SilentTail_IsFlaggedSilent()
     {
         int sampleRate = 16_000;
-        // Speech for 20 s, then silence for 20 s; the 30 s window cuts in the silence before 25 s.
+        // Speech for 20 s, then silence for 20 s; the 30 s window searches 25-30 s, all silent, and cuts at its centre.
         float[] clip = Concat(Tone(20 * sampleRate, sampleRate, 0.5f), Silence(20 * sampleRate));
 
         IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate);
 
         Assert.False(windows[0].Silent);
+        Assert.InRange(windows[0].Length, 25 * sampleRate, 30 * sampleRate);
         Assert.True(windows[^1].Silent);
+    }
+
+    [Fact]
+    public void Plan_SilenceInTheMiddleOfAClip_FlagsOnlyTheSilentWindows()
+    {
+        int sampleRate = 16_000;
+        float[] clip = Concat(Tone(10 * sampleRate, sampleRate, 0.5f), Silence(70 * sampleRate), Tone(10 * sampleRate, sampleRate, 0.5f));
+
+        IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate);
+
+        Assert.Contains(windows, window => window.Silent);
+        Assert.All(windows, window =>
+            Assert.Equal(window.Start >= 10 * sampleRate && window.Start + window.Length <= 80 * sampleRate, window.Silent));
+        Assert.Equal(clip.Length, windows.Sum(window => window.Length));
+    }
+
+    [Fact]
+    public void Plan_ContinuousSpeechPastTheLimit_EndsTheWindowOnAHardCut()
+    {
+        int sampleRate = 16_000;
+        float[] clip = Tone(61 * sampleRate, sampleRate, 0.5f);
+
+        IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate);
+
+        Assert.True(windows[0].HardCut);
+        Assert.False(windows[^1].HardCut);
+    }
+
+    [Fact]
+    public void Plan_MinimumWindow_LeavesAtLeastOneSecondBeforeAndAfterTheCut()
+    {
+        int sampleRate = 16_000;
+        // A silent head would otherwise pull the cut to the first few samples of the window.
+        float[] clip = Concat(Silence(2_000), Tone(2 * sampleRate + 1 - 2_000, sampleRate, 0.5f));
+
+        IReadOnlyList<SpeechWindow> windows = SpeechWindowPlanner.Plan(clip, sampleRate, 2 * sampleRate);
+
+        Assert.Equal(2, windows.Count);
+        Assert.All(windows, window => Assert.True(window.Length >= sampleRate, "every window must hold at least one second"));
+    }
+
+    [Fact]
+    public void Plan_QuietButAudibleSpeech_IsNotFlaggedSilent()
+    {
+        int sampleRate = 16_000;
+        // Quiet, but above the silence floor.
+        float[] clip = Tone(5 * sampleRate, sampleRate, 0.01f);
+
+        SpeechWindow only = Assert.Single(SpeechWindowPlanner.Plan(clip, sampleRate, 30 * sampleRate));
+
+        Assert.False(only.Silent);
     }
 
     [Fact]
     public void Plan_EmptyAudio_IsEmpty()
     {
         Assert.Empty(SpeechWindowPlanner.Plan(ReadOnlySpan<float>.Empty, 16_000, 30 * 16_000));
+    }
+
+    [Fact]
+    public void Plan_SampleRateBelowTheFloor_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => SpeechWindowPlanner.Plan(new float[1_000], 40, 2_000));
     }
 
     [Fact]

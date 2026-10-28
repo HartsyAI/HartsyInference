@@ -5,8 +5,7 @@ namespace HartsyInference.Audio.Pipelines;
 /// a much thinner surface than <c>WhisperOptions</c>.</summary>
 public sealed record MoonshineOptions
 {
-    /// <summary>Maximum new tokens before forcing EOS. 0 derives it from the clip length (6.5 tokens per second, clamped to the
-    /// decoder's positions).</summary>
+    /// <summary>Maximum new tokens, capped at the decoder's positions. 0 derives it from the clip length (6.5 per second).</summary>
     public int MaxNewTokens { get; init; }
 
     /// <summary>Greedy only in v1.</summary>
