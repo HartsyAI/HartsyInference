@@ -8,6 +8,9 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.392
+
+- **Fixed: streaming Moonshine small and medium failed to load on CUDA.** The attention merge buffer was sized to the encoder hidden width, which differs from heads × head_dim on those sizes. It is now sized to heads × head_dim, and tiny is unchanged.
 - **Fixed: speech-to-text no longer drops audio past a model's window.** Whisper, distil-Whisper and whisperstreaming decoded only the first 30 s of a longer clip, Moonshine's fixed 180-token budget ended its text early, and Kyutai's position cap cut audio at about 29 s (1B) and 56 s (2.6B). A clip longer than a model's window is now cut into windows, in a quiet stretch near the end of each window where one exists and otherwise at its quietest point there (a word may be split, and the log says so), transcribed, and joined, with timed segments kept on the clip's timeline. Silent windows are skipped. A window whose timed decode yields no segments is decoded again as plain text and kept as one segment covering the window. A non-silent window that decodes to nothing is dropped without a log line; streaming Moonshine medium does this (see its entry below).
 - **Added: `TranscriptResult.Duration` and `TranscriptResult.WindowCount`.** `/v1/native/transcribe` returns both.
 - **Added: `vram.transcribeMaxSeconds` (default 7200).** Longer audio is refused with a named error for models that have a window.
