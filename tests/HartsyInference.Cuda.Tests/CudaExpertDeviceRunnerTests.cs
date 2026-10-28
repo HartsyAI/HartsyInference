@@ -90,7 +90,7 @@ public sealed unsafe class CudaExpertDeviceRunnerTests
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
         using CudaBackend backend = new(0, PtxDir());
-        using CudaExpertKernels kernels = new(PtxDir());
+        using CudaExpertKernels kernels = new(PtxDir(), CudaContext.QuerySm(0));
         ExpertProgram[] programs =
         [
             ExpertProgram.Swiglu,
@@ -127,7 +127,7 @@ public sealed unsafe class CudaExpertDeviceRunnerTests
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
         using CudaBackend backend = new(0, PtxDir());
-        using CudaExpertKernels kernels = new(PtxDir());
+        using CudaExpertKernels kernels = new(PtxDir(), CudaContext.QuerySm(0));
         using CudaExpertCache cache = new(backend, 4 * ExpertBytes, [new ExpertBank(0, ExpertCount, DeviceWeights)]);
         using ExpertLease lease = cache.Acquire([new ExpertKey(0, 2)]);
         CudaExpertDeviceRunner runner = new(backend, kernels, lease, ExpertProgram.Swiglu, Hidden, Intermediate);
@@ -153,7 +153,7 @@ public sealed unsafe class CudaExpertDeviceRunnerTests
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
         using CudaBackend backend = new(0, PtxDir());
-        using CudaExpertKernels kernels = new(PtxDir());
+        using CudaExpertKernels kernels = new(PtxDir(), CudaContext.QuerySm(0));
         using CudaExpertCache cache = new(backend, 4 * ExpertBytes, [new ExpertBank(0, ExpertCount, DeviceWeights)]);
         ExpertProgram program = ExpertProgram.SwigluClamped(0.5f);
 
