@@ -25,7 +25,7 @@ actually blocks it, how much kernel work it takes, and what to build first. Audi
 |---|---|
 | `src/HartsyInference.Cuda/Kernels/build_common.sh` | Compiles every `KERNELS` list for `sm_80`. `KERNELS_SM75` exists only for the dequant and MoE expert domains. |
 | `src/HartsyInference.Cuda/CudaKernels.cs:503` | `BaselineSm = CudaArch.Ampere` (sm_80). Modules whose `.target` is newer than the device are skipped, not bound. |
-| `CudaKernels.cs:515` `PtxPath` | Picks `{kernel}.sm{sm}.ptx` only on an **exact** SM match, else the baseline `{kernel}.ptx`. |
+| `CudaKernels.cs:515` `PtxPath` | Picks the file whose `.target` header is the highest the device can run, among `{kernel}.ptx` and `{kernel}.sm*.ptx`. A tuned variant above sm_75 needs an **exact** SM match. |
 | `src/HartsyInference.Engine/BackendFactory.cs:143` | `CudaMeetsKernelBaseline` returns false below sm_80, so automatic selection passes CUDA over and takes Vulkan. |
 | `CudaBackend.cs:1445` | `SupportsBF16 = Sm >= Ampere`. |
 | `CudaBackend.cs:1344` | TF32 and "fast F16 GEMM" are gated to Ampere. |

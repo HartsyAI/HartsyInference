@@ -501,10 +501,11 @@ no bug, any more than one bad seed was proof there was one.
   `nvidia-cuda-runtime`/`crt` wheels keeps a 13.0.88 nvcc but has no CCCL: `cuda_fp16.h` fails on `<nv/target>`
   until `-I <13.x headers>/cccl` is added (`build_common.sh` does this from `$CUDA_INC`). The header version made no
   difference to the emitted PTX for any kernel tested; CCCL is the only missing piece.
-- **Which PTX loaded?** `CudaKernels.PtxPath` prefers `<kernel>.sm<CC>.ptx` for the device's exact compute
-  capability and falls back to `<kernel>.ptx`; the backend logs `[Cuda] SM x.y PTX variants: …` at startup when
-  it picked any. A variant built for another SM is never chosen (family-specific PTX does not JIT elsewhere), so
-  a missing log line on a card that should have one means the file is absent from `Ptx/`, not that it was refused.
+- **Which PTX loaded?** `CudaKernels.PtxPath` takes, among `<kernel>.ptx` and `<kernel>.sm*.ptx`, the file whose
+  `.target` header is the highest the device can run. A tuned variant above sm_75 (`sm_89`, `sm_120a`) is used only on
+  its exact compute capability, because family-specific PTX does not JIT elsewhere. The backend logs
+  `[Cuda] SM x.y PTX variants: …` at startup when it picked any. A missing log line on a card that should have one
+  means the file is absent from `Ptx/`, or its header does not match the card.
 - **Integer overflow in im2col at 1024²+.** `channels×kH×kW×outH×outW` exceeds uint32 (512ch/3×3/1024² →
   `CUDA_ERROR_ILLEGAL_ADDRESS`; 256²/512² fit in 32-bit and pass). Cast to `long` before all GPU
   buffer-size multiplications in C#; use `cvt.u64.u32`+`mul.lo.u64`+`setp.ge.u64` in PTX.
