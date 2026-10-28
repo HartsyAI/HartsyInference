@@ -2,7 +2,8 @@ namespace HartsyInference.Engine.Audio;
 
 /// <summary>The lifetime both runner leases share: one pin on the runner's cache key, a call lock, and revocation when
 /// the engine releases its audio models. Runner calls hold the lock, so a revocation or a Dispose waits for the call in
-/// flight instead of letting the runner be disposed underneath it.</summary>
+/// flight instead of letting the runner be disposed underneath it. A call of several steps, such as a long clip, stops at
+/// its next step once the lease closes, so the wait stays short.</summary>
 internal abstract class AudioRunnerLease : IDisposable
 {
     private const string RevokedReason =
@@ -30,7 +31,8 @@ internal abstract class AudioRunnerLease : IDisposable
     /// <summary>Held around every runner call.</summary>
     protected object CallLock { get; } = new();
 
-    /// <summary>Cancelled when the lease closes, so a call made of several runner steps stops between them instead of running on against a released runner.</summary>
+    /// <summary>Cancelled when the lease closes, so a call of several runner steps stops between them
+    /// instead of running on against a released runner.</summary>
     protected CancellationToken Closing => _closing.Token;
 
     /// <summary>Closes the lease for an engine release, waiting up to <paramref name="wait"/> for a call in flight.
@@ -62,7 +64,8 @@ internal abstract class AudioRunnerLease : IDisposable
         }
     }
 
-    /// <summary>Records why the lease closed and cancels <see cref="Closing"/>; the first reason wins. Takes no lock, so a Dispose can stop a long call before it waits for it.</summary>
+    /// <summary>Records why the lease closed and cancels <see cref="Closing"/>; the first reason wins.
+    /// Takes no lock, so a Dispose can stop a long call before it waits for it.</summary>
     private void Signal(string reason)
     {
         if (Interlocked.CompareExchange(ref _closedReason, reason, null) is null)

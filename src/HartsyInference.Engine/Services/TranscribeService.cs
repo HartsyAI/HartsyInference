@@ -44,7 +44,8 @@ public sealed class TranscribeService : ITranscribeService
             string text;
             if (windows.Count > 1)
             {
-                LongFormTranscript longForm = LongFormTranscription.Transcribe(runner, backend, audio, descriptor.InputSampleRate, windows, request, timed, ct);
+                LongFormTranscript longForm = LongFormTranscription.Transcribe(runner, backend, audio,
+                    descriptor.InputSampleRate, windows, request, timed, ct);
                 text = longForm.Text;
                 segments = longForm.Segments;
                 if (timed)
@@ -129,7 +130,8 @@ public sealed class TranscribeService : ITranscribeService
             estimateWeightBytes: EstimateWeightBytes(repo)).ConfigureAwait(false);
     }
 
-    /// <summary>Warns that word timestamps were asked for but <paramref name="segments"/> carries none: null when the model emits no timestamp tokens, empty when no well-formed pair came back.</summary>
+    /// <summary>Warns that word timestamps were asked for but <paramref name="segments"/> carries none: null when the model
+    /// emits no timestamp tokens, empty when no well-formed pair came back.</summary>
     private static void WarnIfUntimed(string repo, IReadOnlyList<SttSegment>? segments, AudioRequest request)
     {
         if (!request.WordTimestamps)

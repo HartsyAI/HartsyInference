@@ -4,10 +4,10 @@ namespace HartsyInference.Core.Configuration;
 /// <remarks>Generated from the pre-migration call sites; defaults and grammars are those the code already had.</remarks>
 public static partial class EngineKnobs
 {
-    /// <summary>Longest audio, in seconds, a windowed speech model transcribes in one request; longer input is refused before the model transcribes any of it.</summary>
+    /// <summary>Longest audio, in seconds, a windowed speech model transcribes in one request; longer input is refused.</summary>
     public static readonly Knob<int> TranscribeMaxSeconds =
         Int("vram.transcribeMaxSeconds", 7200, KnobScope.Runtime, KnobDomain.Vram,
-            "Longest audio in seconds a windowed speech model transcribes in one request; longer input is refused before the model transcribes any of it.",
+            "Longest audio in seconds a windowed speech model transcribes in one request; longer input is refused.",
             v => v > 0 ? v : 7200);
 
     /// <summary>Minimum activation/workspace headroom in MB a Wan-Animate-2 chunk reserves before weights are placed.</summary>

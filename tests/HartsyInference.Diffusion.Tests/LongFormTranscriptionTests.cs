@@ -53,7 +53,11 @@ public sealed class LongFormTranscriptionTests
     {
         FakeRunner runner = new FakeRunner
         {
-            SpansFor = _ => [new SttSegment { Text = "real", Start = 0.2, End = 0.8 }, new SttSegment { Text = "Thank you.", Start = 1.5, End = 3.0 }],
+            SpansFor = _ =>
+            [
+                new SttSegment { Text = "real", Start = 0.2, End = 0.8 },
+                new SttSegment { Text = "Thank you.", Start = 1.5, End = 3.0 },
+            ],
         };
         SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate, false, false)];
 

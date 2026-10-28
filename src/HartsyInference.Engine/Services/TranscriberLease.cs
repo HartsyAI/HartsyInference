@@ -45,15 +45,16 @@ internal sealed class TranscriberLease : AudioRunnerLease, ITranscriberLease
         LongFormTranscription.RequireWithinLimit(_runner.MaxInputSeconds, pcm.Length / (double)sampleRate, nameof(pcm));
         float[] audio = sampleRate == _inputSampleRate ? pcm.ToArray()
             : Resampler.Create(sampleRate, _inputSampleRate).Resample(pcm);
+        IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, _inputSampleRate, _runner.MaxInputSeconds);
         string text;
         lock (CallLock)
         {
             ThrowIfClosed();
-            IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, _inputSampleRate, _runner.MaxInputSeconds);
             try
             {
                 text = windows.Count > 1
-                    ? LongFormTranscription.Transcribe(_runner, _backend, audio, _inputSampleRate, windows, options, timed: false, Closing).Text
+                    ? LongFormTranscription.Transcribe(_runner, _backend, audio, _inputSampleRate, windows, options,
+                        timed: false, Closing).Text
                     : _runner.Transcribe(_backend, audio, options);
             }
             catch (OperationCanceledException) when (Closing.IsCancellationRequested)
