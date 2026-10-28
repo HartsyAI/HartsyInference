@@ -5,8 +5,8 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary><c>auto</c> must not pick a CUDA device below the kernel baseline: such a device now constructs a backend with its
-/// sm_80 kernels unbound, so choosing it would fail on the first model op instead of running on Vulkan. The device's compute
+/// <summary><c>auto</c> must not pick a CUDA device below the kernel floor (Turing): such a device cannot load the shipped
+/// kernels, so choosing it would fail on the first model op instead of running on Vulkan. The device's compute
 /// capability is stood in for through the test seam; this class runs alone because that seam is process-wide.</summary>
 [Collection(CollectionName)]
 public sealed class BackendKernelBaselineTests

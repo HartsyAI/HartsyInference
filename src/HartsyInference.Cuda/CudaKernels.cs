@@ -623,7 +623,7 @@ public sealed partial class CudaKernels : IDisposable
         // Only a required module that stayed unbound makes this card unusable here. The optional ones have fallback paths.
         string advice = _unboundRequired.Count > 0
             ? $"Required kernels are unbound on this card ({string.Join(", ", _unboundRequired)}); use the Vulkan backend on it."
-            : "The skipped kernels are optional, so their fallback paths run in their place.";
+            : "The skipped modules are optional and have fallback paths; a launch that still fails with an invalid handle reached one of them without that fallback.";
         string named = _skippedModules.Count <= Named
             ? string.Join(", ", _skippedModules)
             : $"{string.Join(", ", _skippedModules.Take(Named))} and {_skippedModules.Count - Named} more";
@@ -1007,8 +1007,9 @@ public sealed partial class CudaKernels : IDisposable
 
         // ── FP8 Activation Quantization ──────────────────────────────────
         // sm_80-only (e4m3 cvt) with no Turing build: optional, so a Turing card is not refused for lacking it.
+        // A missing file still throws from the load, so a packaging error is not read as an architecture skip.
         string fp8QuantPath = Ptx("fp8_quant");
-        _fp8QuantModule = CanLoad(fp8QuantPath) ? LoadOwnedModule(fp8QuantPath) : CudaModule.Unloadable;
+        _fp8QuantModule = SkipsForArchitecture(fp8QuantPath) ? CudaModule.Unloadable : LoadOwnedModule(fp8QuantPath);
         _fp8AbsMax = _fp8QuantModule.GetFunction("absmax_f32");
         _fp8AbsMaxFinalizeScale = _fp8QuantModule.GetFunction("absmax_finalize_scale");
         _fp8QuantF32ToE4M3 = _fp8QuantModule.GetFunction("quant_f32_e4m3");
