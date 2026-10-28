@@ -56,7 +56,7 @@ internal static class LongFormTranscription
             float[] piece = audio.AsSpan(window.Start, window.Length).ToArray();
             double offset = window.Start / (double)sampleRate;
             double pieceSeconds = window.Length / (double)sampleRate;
-            IReadOnlyList<SttSegment>? decoded = timed ? runner.TranscribeTimed(backend, piece, request) : null;
+            IReadOnlyList<SttSegment>? decoded = segments is null ? null : runner.TranscribeTimed(backend, piece, request);
             if (segments is null || decoded is null)
             {
                 segments = null;

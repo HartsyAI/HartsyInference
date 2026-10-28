@@ -144,7 +144,7 @@ internal sealed class SpeakerDiarizer : IDisposable
             }
             if (spans.Count > 0)
             {
-                return spans.Count > MaxSpans ? Coalesce(spans) : spans;
+                return spans.Count > MaxSpans ? Coalesce(spans, totalSeconds) : spans;
             }
         }
         // A long clip stretches the hop so the capped span count still tiles it; the span grows to twice the hop.
@@ -157,17 +157,24 @@ internal sealed class SpeakerDiarizer : IDisposable
         return spans;
     }
 
-    /// <summary>Joins runs of consecutive spans so at most <see cref="MaxSpans"/> remain; a joined span runs from its first start to its last end.</summary>
-    private static List<SttSegment> Coalesce(List<SttSegment> spans)
+    /// <summary>Joins consecutive spans into groups spanning at most a time limit, so a joined span never stretches across a long gap.</summary>
+    /// <remarks>Two neighbouring groups together cover more than the limit, which bounds the result to <c>MaxSpans / 2 + 1</c> spans for ordered input.</remarks>
+    private static List<SttSegment> Coalesce(List<SttSegment> spans, double totalSeconds)
     {
-        int run = (spans.Count + MaxSpans - 1) / MaxSpans;
-        Logs.Info($"[Audio][Diarize] {spans.Count} timestamp spans exceed the {MaxSpans}-span cap; joining runs of {run}, so a speaker turn inside a joined span is not separated.");
-        List<SttSegment> joined = new List<SttSegment>(MaxSpans);
-        for (int first = 0; first < spans.Count; first += run)
+        double limit = 4d * totalSeconds / MaxSpans;
+        Logs.Info($"[Audio][Diarize] {spans.Count} timestamp spans exceed the {MaxSpans}-span cap; joining them into groups of up to {limit:0} s, so a speaker turn inside a group is not separated.");
+        List<SttSegment> joined = [];
+        int first = 0;
+        while (first < spans.Count)
         {
-            List<SttSegment> group = spans.GetRange(first, Math.Min(run, spans.Count - first));
-            string text = string.Join(" ", group.Select(span => span.Text.Trim()).Where(piece => piece.Length > 0));
-            joined.Add(new SttSegment { Text = text, Start = group[0].Start, End = group[^1].End });
+            int last = first;
+            while (last + 1 < spans.Count && spans[last + 1].End - spans[first].Start <= limit)
+            {
+                last++;
+            }
+            string text = string.Join(" ", spans.Skip(first).Take(last - first + 1).Select(span => span.Text.Trim()).Where(piece => piece.Length > 0));
+            joined.Add(new SttSegment { Text = text, Start = spans[first].Start, End = spans[last].End });
+            first = last + 1;
         }
         return joined;
     }

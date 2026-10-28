@@ -95,6 +95,33 @@ public sealed class AudioRunnerLeaseTests
     }
 
     [Fact]
+    public async Task TranscriberLease_DisposedMidLongClip_StopsBeforeTheNextWindowInsteadOfWaitingForTheWholeClip()
+    {
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using InferenceEngine engine = new("cpu");
+        ITranscriberLease? lease = null;
+        Task? disposing = null;
+        FakeStt stt = await SeedSttAsync(engine, WhisperKey, new FakeStt
+        {
+            MaxInputSeconds = 3,
+            // Dispose from another thread blocks on the call lock this call holds, but must still signal the close first.
+            OnTranscribe = () =>
+            {
+                disposing ??= Task.Run(lease!.Dispose);
+                Thread.Sleep(300);
+            },
+        });
+        lease = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
+
+        await Task.Run(() => Assert.Throws<ObjectDisposedException>(() => lease.Transcribe(Ramp(16_000 * 8), 16_000, SttOptions)))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        await disposing!.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(1, stt.Calls);
+        Assert.False(engine.AudioRuntime.Stt.IsPinned(WhisperKey));
+    }
+
+    [Fact]
     public async Task TranscriberLease_RefusesAClipPastTheTranscribeLimit_WithoutTouchingTheRunner()
     {
         using IDisposable calm = AudioEvictionPressure.Relax();

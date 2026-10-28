@@ -12,6 +12,7 @@ internal abstract class AudioRunnerLease : IDisposable
     private readonly IDisposable _pin;
     private readonly CancellationTokenSource _closing = new();
     private string? _closedReason;
+    private int _pinReleased;
 
     /// <summary>Pins <paramref name="key"/> in <paramref name="cache"/> for the lease's lifetime.</summary>
     protected AudioRunnerLease(AudioRuntime runtime, IAudioRunnerCache cache, string key)
@@ -61,12 +62,21 @@ internal abstract class AudioRunnerLease : IDisposable
         }
     }
 
-    /// <summary>First close wins, so a revocation racing a Dispose releases the pin once.</summary>
-    private void Close(string reason)
+    /// <summary>Records why the lease closed and cancels <see cref="Closing"/>; the first reason wins. Takes no lock, so a Dispose can stop a long call before it waits for it.</summary>
+    private void Signal(string reason)
     {
         if (Interlocked.CompareExchange(ref _closedReason, reason, null) is null)
         {
             _closing.Cancel();
+        }
+    }
+
+    /// <summary>Signals the close and releases the pin once, so a revocation racing a Dispose does not release it twice.</summary>
+    private void Close(string reason)
+    {
+        Signal(reason);
+        if (Interlocked.Exchange(ref _pinReleased, 1) == 0)
+        {
             _pin.Dispose();
         }
     }
@@ -74,9 +84,11 @@ internal abstract class AudioRunnerLease : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
+        string reason = $"The lease on '{ModelKey}' was disposed.";
+        Signal(reason);
         lock (CallLock)
         {
-            Close($"The lease on '{ModelKey}' was disposed.");
+            Close(reason);
         }
         _runtime.Unregister(this);
     }

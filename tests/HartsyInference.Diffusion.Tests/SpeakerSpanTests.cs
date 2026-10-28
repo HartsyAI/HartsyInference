@@ -53,6 +53,26 @@ public sealed class SpeakerSpanTests
     }
 
     [Fact]
+    public void BuildSpans_JoinedTimestampSegments_NeverStretchAcrossALongGap()
+    {
+        const double total = 8000.0;
+        List<SttSegment> segments = [];
+        for (int i = 0; i < 600; i++)
+        {
+            segments.Add(new SttSegment { Text = "early", Start = i * 3.0, End = i * 3.0 + 2.5 });
+        }
+        for (int i = 0; i < 600; i++)
+        {
+            segments.Add(new SttSegment { Text = "late", Start = 6000.0 + i * 3.0, End = 6000.0 + i * 3.0 + 2.5 });
+        }
+
+        List<SttSegment> spans = SpeakerDiarizer.BuildSpans(segments, total);
+
+        Assert.True(spans.Count <= 512);
+        Assert.All(spans, span => Assert.True(span.End - span.Start <= 4.0 * total / 512, "a joined span must not cross the silent stretch"));
+    }
+
+    [Fact]
     public void BuildSpans_FewTimestampSegments_AreKeptAsTheyAre()
     {
         List<SttSegment> segments = [new SttSegment { Text = "a", Start = 0.0, End = 2.0 }, new SttSegment { Text = "b", Start = 2.0, End = 5.0 }];
