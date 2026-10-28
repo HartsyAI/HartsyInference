@@ -14,14 +14,14 @@ public sealed class MoonshineStreamingEncoderLayerTests
     private const int SeqLen = 9;
     private const string Prefix = "layer";
 
-    // (hidden, heads, headDim). The first has hidden wider than the attention output, as on medium (768 vs 640);
-    // the second has it narrower.
-    [Theory]
-    [InlineData(16, 2, 6)]
-    [InlineData(12, 2, 8)]
-    public void Forward_WhenAttentionWidthDiffersFromHiddenWidth_ReturnsTheHiddenShape(
-        int hidden, int heads, int headDim)
+    // Hidden wider than heads * head_dim, as on medium (768 against 640). The narrower direction is not a real
+    // configuration, and on the pre-fix buffer it writes past the allocation before it fails, so it is not covered.
+    [Fact]
+    public void Forward_WhenHiddenWidthIsWiderThanAttentionWidth_ReturnsTheHiddenShape()
     {
+        const int hidden = 16;
+        const int heads = 2;
+        const int headDim = 6;
         int inner = heads * headDim;
         MoonshineConfig cfg = new()
         {
@@ -32,22 +32,23 @@ public sealed class MoonshineStreamingEncoderLayerTests
         };
         Random random = new(7);
         Dictionary<string, Tensor> weights = Weights(random, hidden, inner);
-        using IBackend backend = new CpuBackend();
-        MoonshineStreamingEncoderLayer layer = new(cfg, (Left: 4, Right: 4));
-        layer.LoadWeights(weights, Prefix);
         Tensor input = RandomTensor(random, new TensorShape(1, SeqLen, hidden));
-
-        Tensor output = layer.Forward(backend, input, SeqLen);
+        using IBackend backend = new CpuBackend();
+        Tensor? output = null;
 
         try
         {
-            Assert.Equal(SeqLen * hidden, output.ElementCount);
+            MoonshineStreamingEncoderLayer layer = new(cfg, (Left: 4, Right: 4));
+            layer.LoadWeights(weights, Prefix);
+            output = layer.Forward(backend, input, SeqLen);
+
+            Assert.Equal(new TensorShape(1, SeqLen, hidden), output.Shape);
             float[] values = output.AsSpan<float>().ToArray();
             Assert.All(values, value => Assert.True(float.IsFinite(value)));
         }
         finally
         {
-            output.Dispose();
+            output?.Dispose();
             input.Dispose();
             foreach (Tensor weight in weights.Values)
             {
