@@ -1,7 +1,7 @@
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Audio.Wake.Speakers;
 using HartsyInference.Engine.Dispatch;
-using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Tests.Common;
@@ -29,9 +29,10 @@ public sealed class LongFormDiarizationTests
     public async Task DiarizedSpansCoverTheWholeLongClip()
     {
         string? overridePath = Environment.GetEnvironmentVariable("HARTSY_LONGFORM_CLIP");
+        string clipPath = string.IsNullOrEmpty(overridePath) ? VoiceAssets.Jfk : overridePath;
         // The CAM++ checkpoint is gated like the other weights: SpeakerDiarizer never downloads it and throws when it is absent.
         if (!RealWeightGate.Require(_output.WriteLine,
-            [string.IsNullOrEmpty(overridePath) ? VoiceAssets.Jfk : overridePath, CamPlusCheckpoint(), .. VoiceAssets.WhisperFiles(WhisperTinyTurnSttTests.WhisperTiny)]))
+            [clipPath, CamPlusCheckpoint(), .. VoiceAssets.WhisperFiles(WhisperTinyTurnSttTests.WhisperTiny)]))
         {
             return;
         }
@@ -66,20 +67,9 @@ public sealed class LongFormDiarizationTests
         Assert.True(covered >= seconds - 3.0, $"spans stop at {covered:0.0} s of a {seconds:0.0} s clip");
     }
 
-    /// <summary>The checkpoint <c>SpeakerDiarizer.Load</c> would pick: the same four names under the same folders, in the
-    /// same order. When none is placed, the conventional default path, so the gate's SKIPPED line names what is missing.
-    /// SpeakerDiarizer is internal to the Engine, so its name list is repeated here.</summary>
-    private static string CamPlusCheckpoint()
-    {
-        string[] names = ["campplus_cn_common.bin", "campplus_cn_common.safetensors", "campplus.safetensors", "s3gen.safetensors"];
-        foreach (string name in names)
-        {
-            string? found = ModelFileLocator.Find(name, Path.Combine("audio", "speaker"), "audio");
-            if (found is not null)
-            {
-                return found;
-            }
-        }
-        return Path.Combine(RepoPaths.ModelsRoot(), "audio", "speaker", names[0]);
-    }
+    /// <summary>The checkpoint SpeakerDiarizer loads (CamPlusEmbedder.LocateWeights searches the same names and folders), or
+    /// the folder its error message names when none is placed, so the gate's SKIPPED line says where to put it.</summary>
+    private static string CamPlusCheckpoint() =>
+        CamPlusEmbedder.LocateWeights()
+        ?? Path.Combine(RepoPaths.ModelsRoot(), "audio", "speaker", "campplus", "campplus_cn_common.bin");
 }

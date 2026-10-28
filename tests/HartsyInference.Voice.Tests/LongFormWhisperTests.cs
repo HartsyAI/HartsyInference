@@ -61,6 +61,6 @@ public sealed class LongFormWhisperTests
         _output.WriteLine($"[{backend}] {result.WindowCount} windows over {result.Duration:0.0} s; recall {recall:P0}; \"country\" x{countries}");
         Assert.True(result.WindowCount >= 2, "a clip past the 30 s window must be planned into more than one window");
         Assert.True(recall >= 0.8, $"recall {recall:P0} on \"{result.Text}\"");
-        Assert.True(countries >= 4,$"the three repeats say \"country\" six times; got {countries} in \"{result.Text}\"");
+        Assert.True(countries >= 4, $"the three repeats say \"country\" six times; got {countries} in \"{result.Text}\"");
     }
 }
