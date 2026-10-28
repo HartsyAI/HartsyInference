@@ -11,6 +11,22 @@ internal delegate Tensor MoonshineDecodeStep(IBackend backend, ReadOnlySpan<int>
 /// <summary>The greedy decode loop shared by <see cref="MoonshinePipeline"/> and <see cref="MoonshineStreamingPipeline"/>.</summary>
 internal static class MoonshineGreedyDecoder
 {
+    /// <summary>Upstream's hallucination bound: decoder tokens per second of audio.</summary>
+    internal const double TokensPerSecond = 6.5;
+
+    /// <summary>Floor on a derived budget, so a very short clip keeps room for its words.</summary>
+    private const int MinDerivedTokens = 32;
+
+    /// <summary>Decoder budget for a clip: tokens-per-second of its length, floored, clamped to the decoder's positions less BOS.</summary>
+    internal static int DerivedTokenBudget(double seconds, int maxTextPositions)
+    {
+        double scaled = Math.Floor(seconds * TokensPerSecond);
+        return (int)Math.Min(Math.Max(scaled, MinDerivedTokens), maxTextPositions - 1);
+    }
+
+    /// <summary>Longest clip one decode can cover before the decoder runs out of positions.</summary>
+    internal static double WindowSecondsFor(int maxTextPositions) => (maxTextPositions - 1) / TokensPerSecond;
+
     /// <summary>Runs BOS → argmax → feed-back until EOS or <c>MaxNewTokens</c>, then detokenizes.</summary>
     public static string Decode(IBackend backend, MoonshineDecodeStep decodeStep, MoonshineDecoder.DecodeState state,
         MoonshineConfig cfg, MoonshineTokenizer tokenizer, MoonshineOptions opts)
@@ -21,10 +37,6 @@ internal static class MoonshineGreedyDecoder
         int nextToken = ArgMax(logits, cfg.VocabSize);
         logits.Dispose();
 
-        // Moonshine's documented hallucination guard: stop generating if the rate of
-        // emitted tokens exceeds ~6.5 tokens / encoder-second of audio. We approximate
-        // by capping total tokens to a multiple of the encoder sequence length, which
-        // is what the original implementation effectively enforces.
         List<int> generated = new(opts.MaxNewTokens);
         int[] singleBuf = new int[1];
         for (int step = 0; step < opts.MaxNewTokens; step++)

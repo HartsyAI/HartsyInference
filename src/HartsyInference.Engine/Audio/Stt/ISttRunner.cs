@@ -12,6 +12,9 @@ internal interface ISttRunner : IDisposable
     /// <summary>Transcribes into timestamped spans, or returns null when the architecture has no timestamp mechanism (Moonshine and Kyutai emit no timestamp tokens, so they always return null here).</summary>
     IReadOnlyList<SttSegment>? TranscribeTimed(IBackend backend, float[] audioMono, AudioRequest request);
 
+    /// <summary>Longest audio one call decodes whole, in seconds; null means the model handles any length itself.</summary>
+    double? MaxInputSeconds { get; }
+
     /// <summary>Transcribes music into a symbolic score, or returns null for the speech models, which have no
     /// notion of one. Only SheetSage2 implements this.</summary>
     ScoreTranscriptResult? TranscribeScore(IBackend backend, float[] audioMono, AudioRequest request);

@@ -33,7 +33,11 @@ namespace HartsyInference.Audio.Pipelines;
 public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 {
     /// <summary>Whisper's input window: 30 s at 16 kHz.</summary>
-    internal const int WindowSamples = 30 * 16_000;
+    /// <summary>Whisper's input window in seconds; longer audio is not decoded past this point.</summary>
+    public const int WindowSeconds = 30;
+
+    /// <summary>Whisper's input window in samples at 16 kHz.</summary>
+    internal const int WindowSamples = WindowSeconds * 16_000;
 
     private readonly WhisperConfig _cfg;
     private readonly WhisperEncoder _encoder;
