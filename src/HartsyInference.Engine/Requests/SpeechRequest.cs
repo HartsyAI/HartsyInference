@@ -90,6 +90,10 @@ public sealed record SpeechRequest
     /// <summary>Sampling seed for reproducibility; 0 leaves it unset.</summary>
     public int Seed { get; init; }
 
+    /// <summary>Long-text chunking: split the text into chunks of at most this many words and synthesize each, joined with a short silence.
+    /// Null (default) synthesizes the text in one pass. Only models that declare chunking support accept it.</summary>
+    public int? ChunkWords { get; init; }
+
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
 

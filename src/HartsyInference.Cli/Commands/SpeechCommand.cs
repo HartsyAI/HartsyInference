@@ -48,6 +48,11 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("Random seed for sampling models (Fish Audio, Dia, Orpheus, ...); the same seed and text repeat the take.")]
         public int? Seed { get; init; }
 
+        /// <summary>Long-text chunk size in words; null synthesizes in one pass.</summary>
+        [CommandOption("--chunk-words")]
+        [Description("Split long text into chunks of at most N words, synthesize each and join them (models with chunking support, e.g. Hurston-1). Not used by streaming.")]
+        public int? ChunkWords { get; init; }
+
         /// <summary>Sampling temperature for models that sample tokens.</summary>
         [CommandOption("--temperature")]
         [Description("Sampling temperature for models that sample tokens (Fish Audio defaults to 0.7).")]
@@ -169,6 +174,7 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         ParamState parameters = new ParamState(Modality.Speech) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("speed", settings.Speed.ToString(CultureInfo.InvariantCulture));
         parameters.PutIfSet("seed", settings.Seed);
+        parameters.PutIfSet("chunk-words", settings.ChunkWords);
         parameters.PutIfSet("temperature", settings.Temperature);
         parameters.PutIfSet("top-p", settings.TopP);
         parameters.PutIfSet("top-k", settings.TopK);

@@ -29,6 +29,9 @@ internal sealed record TtsJob
     /// <summary>Receives the turns the job produced, for a model that revises takes; null when the caller does not want them.</summary>
     internal Action<IReadOnlyList<SpeechTurn>>? TurnSink { get; init; }
 
+    /// <summary>Long-text chunk size in words (see <c>SpeechRequest.ChunkWords</c>); null synthesizes in one pass.</summary>
+    internal int? ChunkWords { get; init; }
+
     /// <summary>Built-in voice name; null/empty is the model's default.</summary>
     internal string? Voice { get; init; }
 
