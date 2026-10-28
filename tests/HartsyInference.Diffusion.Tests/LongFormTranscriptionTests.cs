@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Requests;
 using Xunit;
@@ -128,6 +129,80 @@ public sealed class LongFormTranscriptionTests
     }
 
     [Fact]
+    public void Transcribe_TimedWindowWhoseSpansAreBlank_IsCountedAsEmpty()
+    {
+        FakeRunner runner = new FakeRunner
+        {
+            SpansFor = _ => [new SttSegment { Text = "   ", Start = 0.1, End = 0.6 }],
+        };
+        SpeechWindow[] windows = [new(0, SampleRate, false, false)];
+
+        LongFormTranscript result = Run(runner, new float[SampleRate], windows, timed: true);
+
+        Assert.Equal(1, result.EmptyWindowCount);
+        Assert.Equal(string.Empty, result.Text);
+    }
+
+    [Fact]
+    public void Transcribe_TimedWindowsMixingSpokenAndEmpty_CountsOnlyTheEmptyOne()
+    {
+        FakeRunner runner = new FakeRunner
+        {
+            SpansFor = piece => piece.Length == SampleRate
+                ? [new SttSegment { Text = "real", Start = 0.2, End = 0.8 }]
+                : [],
+            TextFor = _ => string.Empty,
+        };
+        SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate / 2, false, false)];
+
+        LongFormTranscript result = Run(runner, new float[SampleRate + SampleRate / 2], windows, timed: true);
+
+        Assert.Equal(1, result.EmptyWindowCount);
+        Assert.Equal("real", result.Text);
+        Assert.NotNull(result.Segments);
+        Assert.Single(result.Segments);
+    }
+
+    [Fact]
+    public void Transcribe_WindowThatDecodesToNothing_LogsOneWarning()
+    {
+        List<string> warnings = CaptureWarnings();
+        try
+        {
+            FakeRunner runner = new FakeRunner { TextFor = _ => string.Empty };
+            SpeechWindow[] windows = [new(0, SampleRate, false, false)];
+
+            Run(runner, new float[SampleRate], windows, timed: false);
+
+            string warning = Assert.Single(warnings);
+            Assert.Contains("decoded to no text", warning);
+        }
+        finally
+        {
+            Logs.SetLogger(null!);
+        }
+    }
+
+    [Fact]
+    public void Transcribe_NoWindowDecodesToNothing_LogsNoWarning()
+    {
+        List<string> warnings = CaptureWarnings();
+        try
+        {
+            FakeRunner runner = new FakeRunner { TextFor = _ => "words" };
+            SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate, true, false)];
+
+            Run(runner, new float[SampleRate * 2], windows, timed: false);
+
+            Assert.Empty(warnings);
+        }
+        finally
+        {
+            Logs.SetLogger(null!);
+        }
+    }
+
+    [Fact]
     public void Transcribe_TimedSegments_AreOffsetOntoTheClipTimeline()
     {
         FakeRunner runner = new FakeRunner
@@ -205,6 +280,19 @@ public sealed class LongFormTranscriptionTests
         Assert.Throws<OperationCanceledException>(() => LongFormTranscription.Transcribe(runner, null!, new float[200], SampleRate,
             windows, new AudioRequest { Audio = new AudioClip { Data = [] } }, timed: false, cts.Token));
         Assert.Equal(1, runner.TextCalls);
+    }
+
+    private static List<string> CaptureWarnings()
+    {
+        List<string> warnings = [];
+        Logs.SetLogger((level, message) =>
+        {
+            if (level == LogLevel.Warning)
+            {
+                warnings.Add(message);
+            }
+        });
+        return warnings;
     }
 
     private static LongFormTranscript Run(FakeRunner runner, float[] audio, IReadOnlyList<SpeechWindow> windows, bool timed) =>

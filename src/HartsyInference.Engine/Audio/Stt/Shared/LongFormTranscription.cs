@@ -104,7 +104,7 @@ internal static class LongFormTranscription
         }
         if (empty > 0)
         {
-            Logs.Warning($"[Audio][STT] Long-form: {empty} non-silent window(s) decoded to no text; their audio is missing from the transcript.");
+            Logs.Warning($"[Audio][STT] Long-form: {empty} non-silent window(s) decoded to no text, so any speech in them is missing from the transcript.");
         }
         string joined = string.Join(" ", texts.Where(text => text.Length > 0));
         return new LongFormTranscript(joined, segments, windows.Count, silent, hardCuts, empty);
