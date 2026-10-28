@@ -137,7 +137,7 @@ code that simply needs a real CUDA device, which the hosted runner lacks.
 | **Moonshine** | ✅ | tests pass | — |
 | **Kyutai STT** (stt-1b/2.6b) | 🔧 | — | Shares the moshi backbone; parity pending (no depformer). |
 
-**Long-form transcription (2026-10-28).** Audio is a synthesized Hurston-1 take of a 176-word passage: a 64.3 s take, a 68.7 s take, and a 329.5 s "five-copy" clip (five copies of the 64.3 s take with 2 s of silence between them; 880 reference words). Word error rate is against the reference passage, lowercase words without punctuation; the 64.3 s and five-copy rows score the transcript body only, not the CLI header and trailer. Those rows ran on an RTX 4090 box (the streaming medium five-copy row also ran on its CPU and on Vulkan) with the long-form stack as of PR #574; the streaming Moonshine small and medium rows had the #578 fix merged (CUDA needs it, CPU and Vulkan do not). The 68.7 s CPU rows are a different take on the long-form stack; their build and scoring method are not recorded. A review fix to cut placement landed after these runs and can move window boundaries, so the figures describe those builds. These are recorded WERs with no pass gate.
+**Long-form transcription (2026-10-28).** Audio is a synthesized Hurston-1 take of a 176-word passage: a 64.3 s take, a 68.7 s take, and a 329.5 s "five-copy" clip (five copies of the 64.3 s take with 2 s of silence between them; 880 reference words). Word error rate is against the reference passage, lowercase words without punctuation; the 64.3 s and five-copy rows score the transcript body only, not the CLI header and trailer. Those rows ran on an RTX 4090 box (the streaming medium five-copy row also ran on its CPU and on Vulkan) with the long-form stack as of PR #574; the streaming Moonshine small and medium rows had the #578 fix applied to the build (CUDA needs it, CPU and Vulkan do not; the tiny row ran without it). The 68.7 s CPU rows are a different take on the long-form stack; their build and scoring method are not recorded. A review fix to cut placement landed after these runs and can move window boundaries, so the figures describe those builds. These are recorded WERs with no pass gate.
 
 | Model | Clip | Backend | WER | Notes |
 |---|---|---|---|---|
@@ -145,8 +145,9 @@ code that simply needs a real CUDA device, which the hosted runner lacks.
 | Whisper medium.en | 329.5 s five-copy | CUDA | 0.0045 | |
 | Moonshine base | 64.3 s take | CUDA | 0.0455 | |
 | Moonshine base | 329.5 s five-copy | CUDA | 0.0432 | |
-| Kyutai STT 1B | 64.3 s take | CUDA | 0.0455 | |
-| Kyutai STT 1B | 329.5 s five-copy | CUDA | 0.0432 | |
+| Kyutai STT 1B | 64.3 s take | CUDA | 0.0455 | 8 of 176 words, as for Moonshine base; the two transcripts differ in 6 word spans. |
+| Kyutai STT 1B | 329.5 s five-copy | CUDA | 0.0432 | 38 of 880 words, as for Moonshine base; the two transcripts differ in 14 word spans. |
+| Moonshine streaming tiny | 64.3 s take | CUDA | 0.0398 | Loaded without the #578 fix. |
 | Moonshine streaming small | 64.3 s take | CUDA | 0.0114 | |
 | Moonshine streaming medium | 64.3 s take | CUDA | 0.0057 | |
 | Moonshine streaming small | 329.5 s five-copy | CUDA | 0.0205 | |
@@ -156,7 +157,7 @@ code that simply needs a real CUDA device, which the hosted runner lacks.
 
 **Streaming Moonshine medium, five-copy clip (known behavior).** The final window, 16.9 s, decodes zero tokens (per-window values were taken on CPU): the first decode step's argmax is end-of-sequence, by a margin of 1.24 over the next token, so the last 45 words of the clip, which end copy 5, are missing; Vulkan and CUDA lose the same 45 words. The first-step margins of the other windows range from 0.07 to 2.6, so this window's margin is inside the range of windows that decode normally. Small decodes the same clip with WER 0.0205.
 
-Streaming Moonshine small and medium failed on CUDA with a linear-shape mismatch when the attention merge buffer took the encoder hidden width instead of heads times head_dim (fixed by PR #578; CPU and Vulkan tolerate it); tiny loaded. A clip over `vram.transcribeMaxSeconds` is refused with a named error for models that have a window (unit-tested). Not recorded here: Whisper variants other than medium.en (distil-Whisper and whisperstreaming included), Moonshine variants other than base, streaming Moonshine tiny, the Kyutai 2.6B, real-audio runs of timed segments and the lease path, the measurement behind streaming Moonshine's 30 s cap, window, hard-cut and silent-window counts for the runs above, real-audio diarization of a clip past 6.4 minutes (unit tests only), and a speaker-diarization error rate (the merge distance rests on two clips; see the CHANGELOG).
+Streaming Moonshine small and medium failed on CUDA with a linear-shape mismatch when the attention merge buffer took the encoder hidden width instead of heads times head_dim (fixed in PR #578; CPU and Vulkan tolerate it); tiny loaded. A clip over `vram.transcribeMaxSeconds` is refused with a named error for models that have a window (unit-tested). Not recorded here: Whisper variants other than medium.en (distil-Whisper and whisperstreaming included), Moonshine variants other than base, streaming Moonshine tiny on the five-copy clip, the Kyutai 2.6B, real-audio runs of timed segments and the lease path, the measurement behind streaming Moonshine's 30 s cap, window, hard-cut and silent-window counts for the runs above, real-audio diarization of a clip past 6.4 minutes (unit tests only), and a speaker-diarization error rate (the merge distance rests on two clips; see the CHANGELOG).
 
 ### Codec / VC / music / separation
 | Model | Parity | Components verified | Notes |
