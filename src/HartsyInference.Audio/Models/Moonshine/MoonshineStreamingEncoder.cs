@@ -199,7 +199,8 @@ internal sealed unsafe class MoonshineStreamingEncoderLayer
         Tensor attnOut = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask });
         mask.Dispose();
 
-        Tensor merged = new(shape, DType.F32);
+        // Attention output is heads * head_dim wide, which differs from the hidden size on small and medium.
+        Tensor merged = new(new TensorShape(1, seqLen, qkvDim), DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(merged, attnOut, 1, seqLen, heads, hd);
         attnOut.Dispose();
         Tensor projected = WhisperOps.ProjectLinear(backend, merged, _oW!, null, 1, seqLen, qkvDim, d);
