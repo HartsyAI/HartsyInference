@@ -56,13 +56,15 @@ internal static class LongFormTranscription
             float[] piece = audio.AsSpan(window.Start, window.Length).ToArray();
             double offset = window.Start / (double)sampleRate;
             double pieceSeconds = window.Length / (double)sampleRate;
-            IReadOnlyList<SttSegment>? spans = timed ? runner.TranscribeTimed(backend, piece, request) : null;
-            if (segments is null || spans is null)
+            IReadOnlyList<SttSegment>? decoded = timed ? runner.TranscribeTimed(backend, piece, request) : null;
+            if (segments is null || decoded is null)
             {
                 segments = null;
                 texts.Add(runner.Transcribe(backend, piece, request).Trim());
                 continue;
             }
+            // A span that starts past the window end is text invented for Whisper's zero padding.
+            List<SttSegment> spans = decoded.Where(span => span.Start < pieceSeconds).ToList();
             if (spans.Count > 0)
             {
                 texts.Add(string.Join(" ", spans.Select(span => span.Text.Trim())).Trim());

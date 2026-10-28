@@ -10,6 +10,7 @@ internal abstract class AudioRunnerLease : IDisposable
 
     private readonly AudioRuntime _runtime;
     private readonly IDisposable _pin;
+    private readonly CancellationTokenSource _closing = new();
     private string? _closedReason;
 
     /// <summary>Pins <paramref name="key"/> in <paramref name="cache"/> for the lease's lifetime.</summary>
@@ -27,6 +28,9 @@ internal abstract class AudioRunnerLease : IDisposable
 
     /// <summary>Held around every runner call.</summary>
     protected object CallLock { get; } = new();
+
+    /// <summary>Cancelled when the lease closes, so a call made of several runner steps stops between them instead of running on against a released runner.</summary>
+    protected CancellationToken Closing => _closing.Token;
 
     /// <summary>Closes the lease for an engine release, waiting up to <paramref name="wait"/> for a call in flight.
     /// Returns false when the wait ran out and the lease was closed with that call still running.</summary>
@@ -62,6 +66,7 @@ internal abstract class AudioRunnerLease : IDisposable
     {
         if (Interlocked.CompareExchange(ref _closedReason, reason, null) is null)
         {
+            _closing.Cancel();
             _pin.Dispose();
         }
     }

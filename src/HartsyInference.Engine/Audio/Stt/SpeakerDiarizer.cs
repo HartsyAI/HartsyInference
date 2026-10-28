@@ -18,15 +18,14 @@ namespace HartsyInference.Engine.Audio;
 /// Whisper's timestamp tokens when available and from a fixed sliding window otherwise, never from speech activity.
 /// (2) <see cref="MergeDistance"/> is an <b>uncalibrated</b> constant — the encoder itself is real-weight verified,
 /// but no speaker-diarization error rate has been measured on a labelled set, so the speaker <i>count</i> can still
-/// be wrong. 0.60 was chosen on two clips: one narrator must come out as one speaker, and JFK followed by a second
-/// narrator as two. At 0.40 and 0.50 the one-narrator clip split in two. (3) Weights are never downloaded here; the clip is
-/// re-decoded to 16 kHz mono because CAM++ is a 16 kHz Kaldi-fbank model.</para></summary>
+/// be wrong. (3) Weights are never downloaded here; the clip is re-decoded to 16 kHz mono because CAM++ is a 16 kHz
+/// Kaldi-fbank model.</para></summary>
 internal sealed class SpeakerDiarizer : IDisposable
 {
     /// <summary>CAM++ is a 16 kHz model (Kaldi fbank, 25 ms / 10 ms).</summary>
     internal const int SampleRate = 16_000;
 
-    /// <summary>Cosine-distance ceiling below which two clusters merge. Set on two clips — see the type remarks.</summary>
+    /// <summary>Cosine-distance ceiling below which two clusters merge. Not calibrated on a labelled set — see the type remarks.</summary>
     private const float MergeDistance = 0.60f;
 
     /// <summary>Sliding-window length used when no timestamp segments are available.</summary>
@@ -162,6 +161,7 @@ internal sealed class SpeakerDiarizer : IDisposable
     private static List<SttSegment> Coalesce(List<SttSegment> spans)
     {
         int run = (spans.Count + MaxSpans - 1) / MaxSpans;
+        Logs.Info($"[Audio][Diarize] {spans.Count} timestamp spans exceed the {MaxSpans}-span cap; joining runs of {run}, so a speaker turn inside a joined span is not separated.");
         List<SttSegment> joined = new List<SttSegment>(MaxSpans);
         for (int first = 0; first < spans.Count; first += run)
         {

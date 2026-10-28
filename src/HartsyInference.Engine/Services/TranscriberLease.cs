@@ -50,9 +50,18 @@ internal sealed class TranscriberLease : AudioRunnerLease, ITranscriberLease
         {
             ThrowIfClosed();
             IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, _inputSampleRate, _runner.MaxInputSeconds);
-            text = windows.Count > 1
-                ? LongFormTranscription.Transcribe(_runner, _backend, audio, _inputSampleRate, windows, options, timed: false, CancellationToken.None).Text
-                : _runner.Transcribe(_backend, audio, options);
+            try
+            {
+                text = windows.Count > 1
+                    ? LongFormTranscription.Transcribe(_runner, _backend, audio, _inputSampleRate, windows, options, timed: false, Closing).Text
+                    : _runner.Transcribe(_backend, audio, options);
+            }
+            catch (OperationCanceledException) when (Closing.IsCancellationRequested)
+            {
+                // A revocation that ran out of patience closed the lease mid-clip; report it as the closed lease it is.
+                ThrowIfClosed();
+                throw;
+            }
         }
         return text?.Trim() ?? string.Empty;
     }
