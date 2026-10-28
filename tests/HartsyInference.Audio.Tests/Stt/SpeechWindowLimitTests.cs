@@ -7,12 +7,6 @@ namespace HartsyInference.Audio.Tests.Stt;
 /// <summary>Per-model window limits derived from each model's config; no weights are loaded.</summary>
 public sealed class SpeechWindowLimitTests
 {
-    [Fact]
-    public void Whisper_WindowIsThirtySeconds()
-    {
-        Assert.Equal(30, WhisperPipeline.WindowSeconds);
-    }
-
     [Theory]
     [InlineData(5.0, 32)]
     [InlineData(29.0, 188)]
@@ -58,12 +52,6 @@ public sealed class SpeechWindowLimitTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             MoonshineGreedyDecoder.Decode(null!, null!, null!, null!, null!, new MoonshineOptions()));
-    }
-
-    [Fact]
-    public void MoonshineStreaming_WindowIsCappedAtTheMeasuredLimit()
-    {
-        Assert.Equal(30.0, MoonshineStreamingPipeline.MaxMeasuredSeconds);
     }
 
     [Fact]

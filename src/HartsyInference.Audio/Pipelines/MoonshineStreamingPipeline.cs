@@ -22,6 +22,9 @@ namespace HartsyInference.Audio.Pipelines;
 /// re-processes the full clip per call, same as Whisper/the original Moonshine in this engine today.</para></summary>
 public sealed class MoonshineStreamingPipeline : IAudioPipeline, IDisposable
 {
+    /// <summary>Cap under the decoder's positions, since streaming Moonshine stops emitting text before they run out.</summary>
+    private const double MaxMeasuredSeconds = 30.0;
+
     private readonly MoonshineConfig _cfg;
     private readonly MoonshineStreamingEncoder _encoder;
     private readonly MoonshineStreamingDecoder _decoder;
@@ -30,6 +33,9 @@ public sealed class MoonshineStreamingPipeline : IAudioPipeline, IDisposable
     private int _disposed;
 
     public string ModelName { get; }
+
+    /// <summary>Longest clip one decode covers; longer audio must be split by the caller.</summary>
+    public double MaxInputSeconds => Math.Min(MoonshineGreedyDecoder.WindowSecondsFor(_cfg.MaxTextPositions), MaxMeasuredSeconds);
 
     private MoonshineStreamingPipeline(string modelName, MoonshineConfig cfg, MoonshineStreamingEncoder enc,
         MoonshineStreamingDecoder dec, MoonshineTokenizer tok, SafeTensorsLoader loader)
@@ -78,12 +84,6 @@ public sealed class MoonshineStreamingPipeline : IAudioPipeline, IDisposable
         WavFile.DecodedAudio audio = WavFile.Read(wavPath);
         return TranscribeAudio(backend, audio.ToMono(), audio.SampleRate, options);
     }
-
-    /// <summary>Streaming Moonshine stops emitting text well before its position count, measured past 30 s.</summary>
-    internal const double MaxMeasuredSeconds = 30.0;
-
-    /// <summary>Longest clip one decode covers; longer audio must be split by the caller.</summary>
-    public double MaxInputSeconds => Math.Min(MoonshineGreedyDecoder.WindowSecondsFor(_cfg.MaxTextPositions), MaxMeasuredSeconds);
 
     /// <summary>Transcribe an in-memory mono audio buffer at the given sample rate.</summary>
     public string TranscribeAudio(IBackend backend, float[] audio, int sampleRate, MoonshineOptions? options = null)
