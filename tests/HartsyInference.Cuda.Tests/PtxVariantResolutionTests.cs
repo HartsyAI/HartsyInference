@@ -105,6 +105,8 @@ public sealed class PtxVariantResolutionTests
         if (!Directory.Exists(shipped))
             shipped = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
         using CudaContext context = new CudaContext(0);
+        // The copy's body is the sm_80 baseline, so only a card that runs sm_80 code can load it.
+        if (context.Sm < CudaArch.Ampere) { _output.WriteLine($"SKIPPED: SM {context.Sm} cannot run the sm_80 body of the copy"); return; }
         string dir = Directory.CreateTempSubdirectory("ptx-variant-").FullName;
         try
         {
