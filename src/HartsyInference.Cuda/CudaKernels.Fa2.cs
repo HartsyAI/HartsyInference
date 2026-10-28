@@ -33,12 +33,15 @@ public sealed partial class CudaKernels
 
     private void LoadFa2Kernels()
     {
+        // Each module loads on its own: a device that cannot run flash_attn_causal_f16 still gets the decode and norm kernels.
         string path = Ptx("flash_attn_causal_f16");
-        if (!CanLoad(path)) return;
-        _fa2Module = LoadOwnedModule(path);
-        _fa2D128 = _fa2Module.GetFunction("lm_fa2_causal_d128");
-        _fa2D64 = _fa2Module.GetFunction("lm_fa2_causal_d64");
-        _kvToF16 = _fa2Module.GetFunction("lm_kv_to_f16");
+        if (CanLoad(path))
+        {
+            _fa2Module = LoadOwnedModule(path);
+            _fa2D128 = _fa2Module.GetFunction("lm_fa2_causal_d128");
+            _fa2D64 = _fa2Module.GetFunction("lm_fa2_causal_d64");
+            _kvToF16 = _fa2Module.GetFunction("lm_kv_to_f16");
+        }
         string scatter = Ptx("kv_scatter_f16");
         if (CanLoad(scatter))
         {
