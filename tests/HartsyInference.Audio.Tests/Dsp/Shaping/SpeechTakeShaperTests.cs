@@ -131,4 +131,18 @@ public sealed class SpeechTakeShaperTests
         foreach (float v in y) sum += (double)v * v;
         return Math.Sqrt(sum / y.Length);
     }
+
+    [Fact]
+    public void Squeeze_PauseShorterThanKeptEnds_IsLeftWhole()
+    {
+        // 60 quiet samples (3 frames, 0.06 s) exceed maxPause 0.05 s, but keeping 2 x 0.1 s = 200 samples would
+        // copy more than the run holds. The run must come back unchanged instead of lengthening the take.
+        float[] tone = Enumerable.Range(0, 100).Select(i => (float)Math.Sin(i * 0.5) * 0.5f).ToArray();
+        float[] take = tone.Concat(new float[60]).Concat(tone).ToArray();
+
+        float[] squeezed = SpeechTakeShaper.Squeeze(take, 1000, maxPause: 0.05, keep: 0.2);
+
+        Assert.Equal(take.Length, squeezed.Length);
+        Assert.Equal(take, squeezed);
+    }
 }

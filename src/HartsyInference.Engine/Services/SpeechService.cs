@@ -250,8 +250,6 @@ public sealed class SpeechService : ISpeechService
         }
     }
 
-    /// <summary>Refuses a request that carries a voice reference (a clip or a references list) when the family takes none. It runs before
-    /// any clip is decoded or written to a temp file, so the refusal does not depend on the clip's container.</summary>
     /// <summary>Chunked long-text synthesis needs a model that declares it, and a positive chunk size. Streaming does
     /// not chunk yet, so it rejects the option rather than ignoring it.</summary>
     internal static void RejectUnsupportedChunking(TtsModelDescriptor descriptor, SpeechRequest request, bool streaming)
@@ -274,6 +272,8 @@ public sealed class SpeechService : ISpeechService
         }
     }
 
+    /// <summary>Refuses a request that carries a voice reference (a clip or a references list) when the family takes none. It runs before
+    /// any clip is decoded or written to a temp file, so the refusal does not depend on the clip's container.</summary>
     internal static void RejectUnsupportedReferences(TtsModelDescriptor descriptor, SpeechRequest request)
     {
         if (descriptor.ReferenceRejection is not { } reason)

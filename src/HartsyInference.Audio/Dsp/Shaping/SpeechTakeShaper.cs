@@ -82,7 +82,8 @@ public static class SpeechTakeShaper
             int start = i * frame;
             int end = j * frame;
             int runSamples = end - start;
-            if (quiet && (j - i) * FrameSeconds > maxPause)
+            // A run no longer than the two kept ends is left whole: keeping both ends would copy samples twice and lengthen it.
+            if (quiet && (j - i) * FrameSeconds > maxPause && 2 * keepEach < runSamples)
             {
                 int head = Math.Min(keepEach, runSamples);
                 int tail = Math.Min(keepEach, runSamples);
