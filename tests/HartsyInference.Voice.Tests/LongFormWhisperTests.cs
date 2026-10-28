@@ -12,7 +12,8 @@ using Xunit.Abstractions;
 namespace HartsyInference.Voice.Tests;
 
 /// <summary>A clip longer than Whisper's 30 s window goes through the engine's window plan: three JFK repeats with
-/// 4 s of silence between them are cut in a gap, and every repeat must come back in the joined transcript.</summary>
+/// 4 s of silence between them are cut in a gap. The joined transcript should keep all three repeats; the test asserts
+/// at least four of their six "country" hits, so a lost repeat would not fail it.</summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class LongFormWhisperTests
