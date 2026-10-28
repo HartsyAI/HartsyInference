@@ -15,7 +15,8 @@ KERNELS=(
 )
 # Shipped as CUDA 13.0.88 nvcc output, which the expert GEMV timings were taken on; nvrtc emits different PTX for these.
 NVCC_BUILT=("moe_id_q4k" "moe_id_q6k" "moe_id_q8_0")
-# Fails the sm_75 compile (not yet itemized); the host-routed MoE path serves Turing until it is ported.
+# Compiles for sm_75, but its grouped-prefill path has not run on Turing, so it stays on the sm_80 build until a Turing run
+# verifies it. Until then the host-routed MoE path serves Turing.
 SM80_ONLY=("moe_prefill")
 
 # The expert FFN runner's kernels: compiled for sm_75 so they load on Turing and on every later card.
