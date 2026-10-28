@@ -117,7 +117,7 @@ public sealed class LongFormTranscriptionTests
     }
 
     [Fact]
-    public void Transcribe_NonSilentWindowThatDecodesToNothing_IsCountedAndItsAudioIsMissing()
+    public void Transcribe_NonSilentWindowThatDecodesToNothing_IsCounted()
     {
         FakeRunner runner = new FakeRunner { TextFor = piece => piece.Length == SampleRate ? string.Empty : "words" };
         SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate / 2, false, false)];
@@ -175,7 +175,7 @@ public sealed class LongFormTranscriptionTests
             Run(runner, new float[SampleRate], windows, timed: false);
 
             string warning = Assert.Single(warnings);
-            Assert.Contains("decoded to no text", warning);
+            Assert.Contains("1 non-silent window(s) decoded to no text", warning);
         }
         finally
         {

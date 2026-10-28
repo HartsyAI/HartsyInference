@@ -8,7 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Changed: a non-silent long-form window that decodes to no text logs a warning.** Its audio is missing from the transcript, so the warning names how many windows were affected.
+- **Changed: a non-silent long-form window that decodes to no text logs a warning.** Any speech in it is missing from the transcript, so the warning names how many windows were affected.
 
 ## alpha.392
 
