@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Audio.Io;
 using HartsyInference.Core.Backends;
 using HartsyInference.Engine.Audio;
@@ -41,13 +42,27 @@ internal sealed class TranscriberLease : AudioRunnerLease, ITranscriberLease
             throw new ArgumentException("A transcriber lease returns plain text; request word timestamps or diarization "
                 + "through ITranscribeService.RunAsync.", nameof(options));
         }
+        LongFormTranscription.RequireWithinLimit(_runner.MaxInputSeconds, pcm.Length / (double)sampleRate, nameof(pcm));
         float[] audio = sampleRate == _inputSampleRate ? pcm.ToArray()
             : Resampler.Create(sampleRate, _inputSampleRate).Resample(pcm);
+        IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, _inputSampleRate, _runner.MaxInputSeconds);
         string text;
         lock (CallLock)
         {
             ThrowIfClosed();
-            text = _runner.Transcribe(_backend, audio, options);
+            try
+            {
+                text = windows.Count > 1
+                    ? LongFormTranscription.Transcribe(_runner, _backend, audio, _inputSampleRate, windows, options,
+                        timed: false, Closing).Text
+                    : _runner.Transcribe(_backend, audio, options);
+            }
+            catch (OperationCanceledException) when (Closing.IsCancellationRequested)
+            {
+                // A revocation that ran out of patience closed the lease mid-clip; report it as the closed lease it is.
+                ThrowIfClosed();
+                throw;
+            }
         }
         return text?.Trim() ?? string.Empty;
     }

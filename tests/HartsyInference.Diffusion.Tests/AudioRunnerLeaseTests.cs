@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
@@ -71,6 +72,101 @@ public sealed class AudioRunnerLeaseTests
         float[] narrowband = Ramp(800);
         lease.Transcribe(narrowband, 8_000, SttOptions);
         Assert.Equal(Resampler.Create(8_000, 16_000).Resample(narrowband), stt.LastAudio);
+    }
+
+    [Fact]
+    public async Task TranscriberLease_RevokedMidLongClip_StopsBeforeTheNextWindow()
+    {
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using InferenceEngine engine = new("cpu");
+        ITranscriberLease? lease = null;
+        FakeStt stt = await SeedSttAsync(engine, WhisperKey, new FakeStt
+        {
+            MaxInputSeconds = 3,
+            // Revoking from another thread with no wait closes the lease while this call still holds its lock.
+            OnTranscribe = () => Assert.False(Task.Run(() => ((AudioRunnerLease)lease!).Revoke(TimeSpan.Zero)).GetAwaiter().GetResult()),
+        });
+        lease = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
+
+        Assert.Throws<ObjectDisposedException>(() => lease.Transcribe(Ramp(16_000 * 8), 16_000, SttOptions));
+
+        Assert.Equal(1, stt.Calls);
+        lease.Dispose();
+    }
+
+    [Fact]
+    public async Task TranscriberLease_RevokedWithAWaitMidLongClip_StopsBeforeTheNextWindowAndTheRevocationGetsTheLock()
+    {
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using InferenceEngine engine = new("cpu");
+        ITranscriberLease? lease = null;
+        Thread? revoker = null;
+        bool held = false;
+        FakeStt stt = await SeedSttAsync(engine, WhisperKey, new FakeStt
+        {
+            MaxInputSeconds = 3,
+            // The revoker blocks on the call lock this call holds; it must signal the close before it blocks.
+            OnTranscribe = () =>
+            {
+                if (revoker is not null)
+                {
+                    return;
+                }
+                revoker = new Thread(() => held = ((AudioRunnerLease)lease!).Revoke(TimeSpan.FromSeconds(60)));
+                revoker.Start();
+                Assert.True(SpinWait.SpinUntil(() => revoker.ThreadState.HasFlag(ThreadState.WaitSleepJoin), TimeSpan.FromSeconds(10)));
+            },
+        });
+        lease = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
+
+        await Task.Run(() => Assert.Throws<ObjectDisposedException>(() => lease.Transcribe(Ramp(16_000 * 8), 16_000, SttOptions)))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(revoker!.Join(TimeSpan.FromSeconds(10)));
+        Assert.True(held);
+        Assert.Equal(1, stt.Calls);
+        lease.Dispose();
+    }
+
+    [Fact]
+    public async Task TranscriberLease_DisposedMidLongClip_StopsBeforeTheNextWindowInsteadOfWaitingForTheWholeClip()
+    {
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using InferenceEngine engine = new("cpu");
+        ITranscriberLease? lease = null;
+        Task? disposing = null;
+        FakeStt stt = await SeedSttAsync(engine, WhisperKey, new FakeStt
+        {
+            MaxInputSeconds = 3,
+            // Dispose from another thread blocks on the call lock this call holds, but must still signal the close first.
+            OnTranscribe = () =>
+            {
+                disposing ??= Task.Run(lease!.Dispose);
+                Thread.Sleep(300);
+            },
+        });
+        lease = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
+
+        await Task.Run(() => Assert.Throws<ObjectDisposedException>(() => lease.Transcribe(Ramp(16_000 * 8), 16_000, SttOptions)))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        await disposing!.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(1, stt.Calls);
+        Assert.False(engine.AudioRuntime.Stt.IsPinned(WhisperKey));
+    }
+
+    [Fact]
+    public async Task TranscriberLease_RefusesAClipPastTheTranscribeLimit_WithoutTouchingTheRunner()
+    {
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using InferenceEngine engine = new("cpu");
+        FakeStt stt = await SeedSttAsync(engine, WhisperKey, new FakeStt { MaxInputSeconds = 30 });
+        using ITranscriberLease lease = await engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
+
+        int past = EngineKnobs.TranscribeMaxSeconds.Value + 1;
+        Assert.Throws<ArgumentException>(() => lease.Transcribe(new float[16 * past], 16, SttOptions));
+
+        Assert.Equal(0, stt.Calls);
     }
 
     [Fact]
@@ -326,9 +422,9 @@ public sealed class AudioRunnerLeaseTests
         return runner;
     }
 
-    private static async Task<FakeStt> SeedSttAsync(InferenceEngine engine, string key)
+    private static async Task<FakeStt> SeedSttAsync(InferenceEngine engine, string key, FakeStt? fake = null)
     {
-        FakeStt runner = new();
+        FakeStt runner = fake ?? new();
         ISttRunner seeded = await engine.AudioRuntime.Stt.GetOrLoadAsync(key, _ => Task.FromResult<ISttRunner>(runner), CancellationToken.None);
         Assert.Same(runner, seeded);
         return runner;
@@ -391,11 +487,14 @@ public sealed class AudioRunnerLeaseTests
 
         public bool Disposed { get; private set; }
 
-        public double? MaxInputSeconds => null;
+        public double? MaxInputSeconds { get; init; }
+
+        public Action? OnTranscribe { get; init; }
 
         public string Transcribe(IBackend backend, float[] audioMono, AudioRequest request)
         {
             Interlocked.Increment(ref _calls);
+            OnTranscribe?.Invoke();
             LastAudio = audioMono;
             LastRequest = request;
             return "  heard  ";

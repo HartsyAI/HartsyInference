@@ -14,4 +14,10 @@ public sealed record TranscriptResult
 
     /// <summary>Speaker-diarized spans; null when not requested or unsupported.</summary>
     public IReadOnlyList<DiarizedSegment>? Speakers { get; init; }
+
+    /// <summary>Length of the audio in seconds.</summary>
+    public double Duration { get; init; }
+
+    /// <summary>How many windows the clip was planned into; 1 for a clip that fits the model's window.</summary>
+    public int WindowCount { get; init; } = 1;
 }

@@ -6,6 +6,7 @@ using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -188,6 +189,11 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         {
             Resampler resampler = Resampler.Create(sampleRate, 16_000);
             mono16k = resampler.Resample(audio);
+        }
+        if (mono16k.Length > WindowSamples)
+        {
+            Logs.Warning("Whisper decodes one 30 s window per call; the rest of the clip is not transcribed. "
+                + "The engine's transcribe path splits long audio.");
         }
 
         int frames = _melExtractor.OutputFrames(WindowSamples);
