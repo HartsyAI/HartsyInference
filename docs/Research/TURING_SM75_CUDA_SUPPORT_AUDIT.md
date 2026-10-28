@@ -177,5 +177,5 @@ The result decides whether the remaining Vulkan work (ROADMAP Phase 5 coopmat) o
 1. Resolved: `moe_prefill.cu` compiles for sm_75. Open: whether its grouped-prefill path is correct on Turing (needs a run).
 2. Do the INT8 `m16n8k32` and `m8n8k16` shapes compile for sm_75 in isolation? (single-instruction probe)
 3. On the 2060, does the planner pick a usable non-MMA attention row, or `host.reference`?
-4. Resolved in code: `PtxPath` ranks by the `.target` header and falls back to the baseline. The sm_75 baseline plus floor variant layout is what ships.
+4. Resolved in code: `PtxPath` ranks by the `.target` header and falls back to the baseline, so an sm_80 baseline plus a `.sm75.ptx` floor variant resolves correctly. The variants land in PR #576.
 5. What is the CUDA-vs-Vulkan ratio on the 2060 for GEMM, SDPA and decode? (this is the number the decision needs)
