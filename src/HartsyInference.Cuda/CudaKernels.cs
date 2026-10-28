@@ -502,10 +502,21 @@ public sealed partial class CudaKernels : IDisposable
     /// dequant and expert kernels and the sm_70 elementwise PTX.</summary>
     public const int BaselineSm = CudaArch.Ampere;
 
+    /// <summary>The lowest compute capability the CUDA backend runs on. Below the baseline, a device loads the modules built
+    /// for it (the Turing floor set) and the sm_80-only modules stay unbound, with their fallback rows serving the card. A device
+    /// below this floor cannot load the shipped kernels, and the factory passes over it.</summary>
+    public const int MinimumSm = CudaArch.Turing;
+
     /// <summary>Modules skipped because their PTX targets a newer architecture than this device, as <c>name (sm_XX)</c>.
     /// Empty at or above <see cref="BaselineSm"/>. Their kernels stay unbound: an optional module reports itself missing
     /// through its <c>Has…</c> flag, and a launch of a required one fails with CUDA_ERROR_INVALID_HANDLE.</summary>
     public IReadOnlyList<string> SkippedModules => _skippedModules;
+
+    /// <summary>Required modules this device could not load, by file name. Non-empty means a launch of one of their kernels
+    /// fails with CUDA_ERROR_INVALID_HANDLE, so the backend must not serve this device.</summary>
+    public IReadOnlyList<string> UnboundRequiredModules => _unboundRequired;
+
+    private readonly List<string> _unboundRequired = [];
 
     private readonly string _ptxDir;
     private readonly List<string> _archVariants = [];
@@ -551,7 +562,8 @@ public sealed partial class CudaKernels : IDisposable
 
     private string Ptx(string kernel)
     {
-        string path = PtxPath(_ptxDir, kernel, Sm);
+        // The gate's capability picks the file too, so a stand-in card (GateSmForTests) loads what that card would load.
+        string path = PtxPath(_ptxDir, kernel, GateSm);
         if (!path.EndsWith($"{kernel}.ptx", StringComparison.Ordinal)) _archVariants.Add(kernel);
         return path;
     }
@@ -609,7 +621,10 @@ public sealed partial class CudaKernels : IDisposable
         const int Named = 12;
         string device = $"This device (SM {GateSm / 10}.{GateSm % 10}) cannot load {_skippedModules.Count} kernel module(s) built "
             + "for a newer architecture, so their kernels are unbound";
-        string advice = $"The CUDA kernels target sm_{BaselineSm} and newer; use the Vulkan backend on this card.";
+        // Only a required module that stayed unbound makes this card unusable here. The optional ones have fallback paths.
+        string advice = _unboundRequired.Count > 0
+            ? $"Required kernels are unbound on this card ({string.Join(", ", _unboundRequired)}); use the Vulkan backend on it."
+            : "The skipped modules are optional; a launch that still fails with an invalid handle reached one of them, and that kernel has no fallback here.";
         string named = _skippedModules.Count <= Named
             ? string.Join(", ", _skippedModules)
             : $"{string.Join(", ", _skippedModules.Take(Named))} and {_skippedModules.Count - Named} more";
@@ -622,7 +637,9 @@ public sealed partial class CudaKernels : IDisposable
             }
             _notedSkips = true;
         }
-        HartsyInference.Core.Logging.Logs.Warning($"[Cuda] {device}: {string.Join(", ", _skippedModules)}. {advice}");
+        string line = $"[Cuda] {device}: {string.Join(", ", _skippedModules)}. {advice}";
+        if (_unboundRequired.Count > 0) HartsyInference.Core.Logging.Logs.Warning(line);
+        else HartsyInference.Core.Logging.Logs.Info(line);
     }
 
     /// <summary>Whether <paramref name="path"/> exists and this device can JIT it. A module built for a newer architecture is
@@ -657,12 +674,16 @@ public sealed partial class CudaKernels : IDisposable
     }
 
     /// <summary>Loads a module and transfers its finalization ownership to this kernel table, so CudaKernels' Dispose/finalizer releases it instead of an independently queued child finalizer racing ahead of the owning table's cleanup.</summary>
-    private CudaModule LoadOwnedModule(string path, int maxRegisters = 0)
+    private CudaModule LoadOwnedModule(string path, int maxRegisters = 0, bool required = true)
     {
         Exception? injectedFailure = Volatile.Read(ref _moduleLoadFailureForTests)?.Invoke(path);
         if (injectedFailure is not null) throw injectedFailure;
         if (SkipsForArchitecture(path))
+        {
+            // A required module left unbound refuses the card at probe time. An optional one has a fallback and is not counted.
+            if (required) _unboundRequired.Add(Path.GetFileNameWithoutExtension(path));
             return CudaModule.Unloadable;
+        }
         CudaModule module = CudaModule.LoadFromFile(path, maxRegisters);
         try
         {
@@ -988,7 +1009,10 @@ public sealed partial class CudaKernels : IDisposable
         _castF16ToF8E4M3 = _castF8Module.GetFunction("cast_f16_to_f8e4m3");
 
         // ── FP8 Activation Quantization ──────────────────────────────────
-        _fp8QuantModule = LoadOwnedModule(Ptx("fp8_quant"));
+        // sm_80-only (e4m3 cvt) with no Turing build: optional, so a Turing card is not refused for lacking it.
+        // A missing file still throws from the load, so a packaging error is not read as an architecture skip.
+        string fp8QuantPath = Ptx("fp8_quant");
+        _fp8QuantModule = SkipsForArchitecture(fp8QuantPath) ? CudaModule.Unloadable : LoadOwnedModule(fp8QuantPath);
         _fp8AbsMax = _fp8QuantModule.GetFunction("absmax_f32");
         _fp8AbsMaxFinalizeScale = _fp8QuantModule.GetFunction("absmax_finalize_scale");
         _fp8QuantF32ToE4M3 = _fp8QuantModule.GetFunction("quant_f32_e4m3");
@@ -1242,7 +1266,7 @@ public sealed partial class CudaKernels : IDisposable
         {
             try
             {
-                _mulMatVecF16Bf16Module = LoadOwnedModule(Ptx("mul_mat_vec_f16_bf16_f32"));
+                _mulMatVecF16Bf16Module = LoadOwnedModule(Ptx("mul_mat_vec_f16_bf16_f32"), required: false);
                 _mulMatVecBf16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_bf16_f32");
                 _mulMatVecF16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_f16_f32");
                 // A device below the module's architecture gets the unloadable stand-in and zero handles: cuBLAS then.

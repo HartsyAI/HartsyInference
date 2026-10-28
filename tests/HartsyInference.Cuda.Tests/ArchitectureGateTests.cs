@@ -61,13 +61,15 @@ public sealed class ArchitectureGateTests
             IReadOnlyList<string> skipped = backend.SkippedKernelModules;
             _output.WriteLine($"skipped {skipped.Count}: {string.Join(", ", skipped)}");
             Assert.All(skipped, module => Assert.True(TargetOf(module) > 75, module));
-            Assert.Contains(skipped, module => module.StartsWith("flash_attn_f32 ", StringComparison.Ordinal));
+            Assert.Contains(skipped, module => module.StartsWith("flash_attn_f16 ", StringComparison.Ordinal));
             Assert.Contains(skipped, module => module.StartsWith("sage_attn_int8 ", StringComparison.Ordinal));
             Assert.Contains(skipped, module => module.StartsWith("moe_prefill ", StringComparison.Ordinal));
             Assert.DoesNotContain(skipped, module => module.StartsWith("elementwise_f32 ", StringComparison.Ordinal));
             Assert.DoesNotContain(skipped, module => module.StartsWith("dequant_q4_k_to_f16 ", StringComparison.Ordinal));
             Assert.False(backend.Kernels!.HasFlashAttnF16);
             Assert.False(backend.Kernels.HasSageAttentionKernels);
+            // Gate 75 reads the Turing variants: every required module must still bind, whatever card runs the test.
+            Assert.Empty(backend.Kernels.UnboundRequiredModules);
             Assert.False(backend.Kernels.HasMoePrefillKernels);
 
             // elementwise_f32 is sm_70 PTX, so its kernels still load and compute.
@@ -81,18 +83,13 @@ public sealed class ArchitectureGateTests
             for (int i = 0; i < n; i++)
                 Assert.Equal(i * 0.5f + (3f - i), values[i]);
 
-            // wan_rope is sm_80 PTX: its kernel is unbound, and the launch error says why.
-            using Tensor x = Filled(4 * 8, i => i);
-            using Tensor cos = Filled(4 * 8, _ => 1f);
-            using Tensor sin = Filled(4 * 8, _ => 0f);
-            CudaException error = Assert.Throws<CudaException>(() =>
-            {
-                backend.WanRopeInterleaved(x, cos, sin, 4, 1, 8);
-                backend.Sync();
-            });
-            _output.WriteLine(error.Message);
-            Assert.Contains($"cannot load {skipped.Count} kernel module(s)", error.Message, StringComparison.Ordinal);
-            Assert.Contains("use the Vulkan backend", error.Message, StringComparison.Ordinal);
+            // wan_rope has a Turing build, so it binds. The note an invalid-handle error would carry names the optional skips.
+            Assert.DoesNotContain(skipped, module => module.StartsWith("wan_rope ", StringComparison.Ordinal));
+            string? note = CudaKernels.SkippedModulesNoteForCurrentContext();
+            _output.WriteLine(note ?? "(no note)");
+            Assert.NotNull(note);
+            Assert.Contains($"cannot load {skipped.Count} kernel module(s)", note, StringComparison.Ordinal);
+            Assert.Contains("are optional", note, StringComparison.Ordinal);
         }
         finally
         {
@@ -105,6 +102,8 @@ public sealed class ArchitectureGateTests
     public void InvalidHandleNote_BelongsToTheSkippingContext_AndLeavesWithItsTables()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        // The ungated table must skip nothing, which only a card at the baseline can show.
+        if (CudaContext.QuerySm(0) < CudaKernels.BaselineSm) { _output.WriteLine("SKIPPED: this card is below the baseline"); return; }
 
         int previous = CudaKernels.GateSmForTests;
         try
@@ -136,6 +135,7 @@ public sealed class ArchitectureGateTests
     public void AtOrAboveTheBaseline_NothingIsSkipped()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        if (CudaContext.QuerySm(0) < CudaKernels.BaselineSm) { _output.WriteLine("SKIPPED: this card is below the baseline"); return; }
 
         using CudaBackend backend = new(0, PtxDir());
 

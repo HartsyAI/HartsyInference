@@ -37,7 +37,9 @@ LD_LIBRARY_PATH=~/.local/lib/cuda13 src/HartsyInference.Cuda/Kernels/nvrtc_compi
 cp out.ptx src/HartsyInference.Cuda/Ptx/
 ```
 
-Target `sm_80` minimum (forward-JIT-compatible). A kernel with arch-conditional device code is listed in its
+Target `sm_80` minimum (forward-JIT-compatible). Every `KERNELS` entry not in `SM80_ONLY` also ships a `<kernel>.sm75.ptx`
+floor build, which a Turing card loads; `./build.sh --floor-only` builds only those floor variants and leaves the baselines
+untouched. A kernel with arch-conditional device code is listed in its
 domain's `ARCH_VARIANTS`; `./build.sh --arch sm_120a` (or a plain `--arch sm_89`) then also emits `<kernel>.sm120.ptx`
 (`.sm89.ptx`). `CudaKernels.PtxPath` ranks each file by its `.target` header, not its name: a tuned variant above sm_75
 loads only on that exact compute capability (family-specific PTX is not forward-compatible), and the baseline serves

@@ -6,6 +6,7 @@
 #   ./build.sh --no-install       # compile only (artifacts stay beside the .cu)
 #   ./build.sh --arch sm_120a     # also build the domain's ARCH_VARIANTS for that arch, as <kernel>.sm120.ptx
 #   ./build.sh --arch sm_89       # a plain arch too: <kernel>.sm89.ptx loads only on compute capability 8.9
+#   ./build.sh --floor-only       # only the sm_75 floor variants; the baseline passes are skipped
 #
 # Lists a domain script may set before build_all:
 #   KERNELS        compiled for sm_80, the fleet baseline; PTX is JIT-forward-compatible from there
@@ -15,6 +16,9 @@
 #                  every file by its .target header: a tuned variant above sm_75 loads only on that exact compute
 #                  capability, and the baseline or a sm_75 build serves the rest
 #   NVCC_BUILT     kernels whose shipped PTX is CUDA 13.0.88 nvcc output rather than nvrtc output
+#   SM80_ONLY      KERNELS entries with no Turing build: they need sm_80 instructions (cp.async, m16n8k16 MMA), or they
+#                  compile for sm_75 but are held on the sm_80 build until a Turing run verifies them. Every other KERNELS
+#                  entry also ships as {kernel}.sm75.ptx, the floor build a Turing card loads
 #   PTXAS_SPILL_CHECK  kernels whose every entry must assemble without a spill (ptxas -v, register counts logged): the
 #                  baseline for sm_80, sm_86, sm_89 and sm_120 (the 50-series JITs it), a variant for its own arch
 #
@@ -66,6 +70,7 @@ KERNELS_SM80=("${KERNELS_SM80[@]:-}")
 ARCH_VARIANTS=("${ARCH_VARIANTS[@]:-}")
 NVCC_BUILT=("${NVCC_BUILT[@]:-}")
 PTXAS_SPILL_CHECK=("${PTXAS_SPILL_CHECK[@]:-}")
+SM80_ONLY=("${SM80_ONLY[@]:-}")
 
 # PTX ISA version a file declares in its header, and whether it is at or below the fleet driver's JIT ceiling (9.0).
 ptx_version() { head -20 "$1" | sed -n 's/^\.version \([0-9.]*\)$/\1/p' | head -1; }
@@ -104,7 +109,9 @@ compile_one() {
         echo "missing source: $src" >&2
         exit 1
     fi
-    if listed "$kernel" "${NVCC_BUILT[@]}"; then
+    # FLOOR_NVRTC: the Turing floor pass builds new variant files with nvrtc even for an NVCC_BUILT kernel. A variant has no
+    # shipped bytes to keep, and the pinned nvcc is not on every box.
+    if listed "$kernel" "${NVCC_BUILT[@]}" && [[ -z "${FLOOR_NVRTC:-}" ]]; then
         # Never an nvrtc stand-in, and an UNVERIFIED kernel leaves any earlier intermediate as it was.
         if [[ -z "$NVCC" ]]; then
             echo "UNVERIFIED ${kernel}${suffix}: nvcc-built and no nvcc found; set HARTSY_NVCC to the CUDA 13.0.88 nvcc"
@@ -184,18 +191,32 @@ build_all() {
     INSTALL=true
     local ONLY=()
     local extra_arch=""
+    local floor_only=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --no-install)    INSTALL=false; shift ;;
+            --floor-only)    floor_only=true; shift ;;
             --arch)          extra_arch="${2#sm_}"; shift 2 ;;
             -*) echo "unknown argument: $1" >&2; exit 2 ;;
             *)  ONLY+=("$1"); shift ;;
         esac
     done
     [[ -n "$PTXAS" ]] || echo "UNASSEMBLED: no ptxas beside nvcc or on PATH, so nothing emitted here is assembled; point HARTSY_NVCC at a full CUDA 13.0 toolkit"
-    for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
-    for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 75; done
-    for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
+    # --floor-only rebuilds just the new Turing variants and leaves every shipped baseline untouched. Its baseline bytes
+    # come from the release that built them, and a rebuild with another toolchain need not reproduce them.
+    if ! $floor_only; then
+        for kernel in "${KERNELS[@]}";      do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
+    fi
+    # The Turing floor: each KERNELS entry that is not SM80_ONLY also ships as {kernel}.sm75.ptx. Every device at or above
+    # sm_80 still prefers the baseline (PtxPath ranks 80 above 75), so only a Turing card loads these.
+    for kernel in "${KERNELS[@]}"; do
+        [[ -n "$kernel" ]] && want "$kernel" && ! listed "$kernel" "${SM80_ONLY[@]}" || continue
+        FLOOR_NVRTC=1 compile_one "$kernel" 75 variant
+    done
+    if ! $floor_only; then
+        for kernel in "${KERNELS_SM75[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 75; done
+        for kernel in "${KERNELS_SM80[@]}"; do [[ -n "$kernel" ]] && want "$kernel" && compile_one "$kernel" 80; done
+    fi
     if [[ -n "$extra_arch" ]]; then
         if [[ ! "$extra_arch" =~ ^[0-9]+[a-z]?$ || "$extra_arch" == 80 ]]; then
             echo "ERROR: --arch takes an arch above the sm_80 baseline (sm_89, sm_120a); got sm_${extra_arch}." >&2
