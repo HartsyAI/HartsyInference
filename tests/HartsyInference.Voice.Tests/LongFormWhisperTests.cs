@@ -23,13 +23,16 @@ public sealed class LongFormWhisperTests
 
     public LongFormWhisperTests(ITestOutputHelper output) => _output = output;
 
-    /// <summary>Backends for the transcribe path. Vulkan and CUDA are skipped when the device is missing; BackendGate
-    /// fails instead when HARTSY_REQUIRE_BACKENDS=1.</summary>
-    public static IEnumerable<object[]> Backends => [["cpu"], ["vulkan"], ["cuda"]];
+    [Fact]
+    public Task ThreeJfkRepeatsAcrossSilenceAreAllTranscribedOnCpu() => RunAsync("cpu");
 
+    /// <summary>A missing GPU skips; BackendGate fails instead when HARTSY_REQUIRE_BACKENDS=1.</summary>
     [Theory]
-    [MemberData(nameof(Backends))]
-    public async Task ThreeJfkRepeatsAcrossSilenceAreAllTranscribed(string backend)
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public Task ThreeJfkRepeatsAcrossSilenceAreAllTranscribedOnGpu(string backend) => RunAsync(backend);
+
+    private async Task RunAsync(string backend)
     {
         if (!RealWeightGate.Require(_output.WriteLine,
             [VoiceAssets.Jfk, .. VoiceAssets.WhisperFiles(WhisperTinyTurnSttTests.WhisperTiny)]))
@@ -50,9 +53,8 @@ public sealed class LongFormWhisperTests
         byte[] wav = AudioClipCodec.EncodeWav(clip, null, SampleRate);
         ModelSpec tiny = ModelResolver.Resolve("whisper:" + WhisperTinyTurnSttTests.WhisperTiny, null, Modality.Transcribe);
 
-        // The gate accepted the device HARTSY_TEST_VULKAN_DEVICE names, so the engine must open that one too; a bare
-        // "vulkan" would take the engine's own ranking, which can be the card the pin is there to avoid.
-        string selector = backend == "vulkan" && VulkanTestDeviceSelection.FromEnvironment() is int pinned ? $"vulkan:{pinned}" : backend;
+        // A bare "vulkan" ignores HARTSY_TEST_VULKAN_DEVICE and can land on the card the pin is there to avoid.
+        string selector = backend == "vulkan" && VulkanTestDeviceSelection.FromEnvironment() is int pin ? $"vulkan:{pin}" : backend;
         using InferenceEngine engine = new(selector);
         TranscriptResult result = await engine.Transcribe.RunAsync(tiny, new AudioRequest { Audio = new AudioClip { Data = wav, Format = "wav" } });
 

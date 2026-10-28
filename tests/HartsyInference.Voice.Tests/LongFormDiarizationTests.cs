@@ -13,8 +13,7 @@ namespace HartsyInference.Voice.Tests;
 
 /// <summary>Speaker diarization on a clip longer than one Whisper window: spans must cover the whole clip, not only its
 /// first window. Uses the clip named by HARTSY_LONGFORM_CLIP when set, else three JFK repeats across 4 s of silence.
-/// A clip named there must be WAV, longer than one window, and end in speech: spans have to reach within 3 s of its end.
-/// Needs the CAM++ speaker checkpoint as well as Whisper tiny.</summary>
+/// A clip named there must be WAV, longer than one window, and end in speech. Needs the CAM++ checkpoint too.</summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class LongFormDiarizationTests
