@@ -118,7 +118,9 @@ public sealed class PtxVariantResolutionTests
             using CudaKernels kernels = new CudaKernels(dir, context);
             Assert.Equal(context.Sm, kernels.Sm);
             Assert.True(kernels.HasBlockQuantKernels);
-            Assert.Equal(["block_quant"], kernels.ArchVariantsLoaded);
+            // The copied block_quant is the variant under test. Other shipped variants for this card (int8_attn_v2 on sm_89)
+            // also load, and that is correct, so the assertion is on block_quant alone.
+            Assert.Contains("block_quant", kernels.ArchVariantsLoaded);
             _output.WriteLine($"SM {context.Sm} loaded variants: {string.Join(", ", kernels.ArchVariantsLoaded)}");
         }
         finally
