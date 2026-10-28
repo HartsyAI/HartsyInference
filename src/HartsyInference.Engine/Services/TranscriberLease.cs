@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Audio.Io;
 using HartsyInference.Core.Backends;
 using HartsyInference.Engine.Audio;
@@ -47,7 +48,10 @@ internal sealed class TranscriberLease : AudioRunnerLease, ITranscriberLease
         lock (CallLock)
         {
             ThrowIfClosed();
-            text = _runner.Transcribe(_backend, audio, options);
+            IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, _inputSampleRate, _runner.MaxInputSeconds);
+            text = windows.Count > 1
+                ? LongFormTranscription.Transcribe(_runner, _backend, audio, _inputSampleRate, windows, options, timed: false, CancellationToken.None).Text
+                : _runner.Transcribe(_backend, audio, options);
         }
         return text?.Trim() ?? string.Empty;
     }

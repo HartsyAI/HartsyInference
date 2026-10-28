@@ -130,7 +130,7 @@ internal sealed class SpeakerDiarizer : IDisposable
     }
 
     /// <summary>Timestamp spans when the transcriber gave them, else a fixed overlapping window sweep.</summary>
-    private static List<SttSegment> BuildSpans(IReadOnlyList<SttSegment>? segments, double totalSeconds)
+    internal static List<SttSegment> BuildSpans(IReadOnlyList<SttSegment>? segments, double totalSeconds)
     {
         List<SttSegment> spans = [];
         if (segments is { Count: > 0 })
@@ -147,9 +147,12 @@ internal sealed class SpeakerDiarizer : IDisposable
                 return spans;
             }
         }
-        for (double start = 0d; start + MinSpanSeconds <= totalSeconds && spans.Count < MaxSpans; start += HopSeconds)
+        // A long clip stretches the hop so the capped span count still tiles it; the span grows to twice the hop.
+        double hop = Math.Max(HopSeconds, totalSeconds / MaxSpans);
+        double window = Math.Max(WindowSeconds, 2 * hop);
+        for (double start = 0d; start + MinSpanSeconds <= totalSeconds && spans.Count < MaxSpans; start += hop)
         {
-            spans.Add(new SttSegment { Text = string.Empty, Start = start, End = Math.Min(start + WindowSeconds, totalSeconds) });
+            spans.Add(new SttSegment { Text = string.Empty, Start = start, End = Math.Min(start + window, totalSeconds) });
         }
         return spans;
     }

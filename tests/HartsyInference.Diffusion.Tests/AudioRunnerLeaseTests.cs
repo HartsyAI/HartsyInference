@@ -381,6 +381,8 @@ public sealed class AudioRunnerLeaseTests
 
     private sealed class FakeStt : ISttRunner
     {
+        public double? MaxInputSeconds => null;
+
         private int _calls;
 
         public int Calls => Volatile.Read(ref _calls);

@@ -1,4 +1,6 @@
+using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
@@ -33,28 +35,53 @@ public sealed class TranscribeService : ITranscribeService
 
             ISttRunner runner = await _engine.AudioRuntime.Stt
                 .GetOrLoadAsync(repo, token => descriptor.LoadAsync(repo, token), ct).ConfigureAwait(false);
+            double seconds = AudioClipCodec.Seconds(audio.Length, descriptor.InputSampleRate);
+            int maxSeconds = EngineKnobs.TranscribeMaxSeconds.Value;
+            if (runner.MaxInputSeconds is not null && seconds > maxSeconds)
+            {
+                throw new ArgumentException($"The audio is {seconds:0} s; this model transcribes up to {maxSeconds} s per request "
+                    + "(vram.transcribeMaxSeconds).", nameof(request));
+            }
+            IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, descriptor.InputSampleRate, runner.MaxInputSeconds);
             long started = Environment.TickCount64;
+            bool timed = request.WordTimestamps || request.Diarization;
 
             IReadOnlyList<SttSegment>? segments = null;
-            if (request.WordTimestamps || request.Diarization)
+            string text;
+            if (windows.Count > 1)
             {
-                segments = runner.TranscribeTimed(backend, audio, request);
-                if (segments is null && request.WordTimestamps)
+                LongFormTranscript longForm = LongFormTranscription.Transcribe(runner, backend, audio, descriptor.InputSampleRate, windows, request, timed, ct);
+                text = longForm.Text;
+                segments = longForm.Segments;
+                if (timed && segments is null && request.WordTimestamps)
                 {
                     Logs.Warning($"[Audio][STT] '{repo}' emits no timestamp tokens — returning Words = null. "
                         + "Only the Whisper family (whisper / distilwhisper / whisperstreaming) can time a transcript.");
                 }
-                else if (segments is { Count: 0 } && request.WordTimestamps)
+            }
+            else
+            {
+                if (timed)
                 {
-                    Logs.Warning($"[Audio][STT] '{repo}' produced no well-formed timestamp pair — returning Words = null.");
+                    segments = runner.TranscribeTimed(backend, audio, request);
+                    if (segments is null && request.WordTimestamps)
+                    {
+                        Logs.Warning($"[Audio][STT] '{repo}' emits no timestamp tokens — returning Words = null. "
+                            + "Only the Whisper family (whisper / distilwhisper / whisperstreaming) can time a transcript.");
+                    }
+                    else if (segments is { Count: 0 } && request.WordTimestamps)
+                    {
+                        Logs.Warning($"[Audio][STT] '{repo}' produced no well-formed timestamp pair — returning Words = null.");
+                    }
                 }
+                ct.ThrowIfCancellationRequested();
+
+                // A timestamped decode already produced the text; re-running the plain decode would double the cost.
+                text = segments is { Count: > 0 } ? string.Join(" ", segments.Select(segment => segment.Text))
+                    : runner.Transcribe(backend, audio, request);
             }
             ct.ThrowIfCancellationRequested();
-
-            // A timestamped decode already produced the text; re-running the plain decode would double the cost.
-            string text = segments is { Count: > 0 } ? string.Join(" ", segments.Select(segment => segment.Text))
-                : runner.Transcribe(backend, audio, request);
-            Logs.Verbose($"[Audio][STT] Transcribed {AudioClipCodec.Seconds(audio.Length, descriptor.InputSampleRate):0.0}s "
+            Logs.Verbose($"[Audio][STT] Transcribed {seconds:0.0}s in {windows.Count} window(s) "
                 + $"via {repo} in {Environment.TickCount64 - started}ms.");
 
             IReadOnlyList<DiarizedSegment>? speakers = null;
@@ -72,6 +99,8 @@ public sealed class TranscribeService : ITranscribeService
                 Language = request.Language,
                 Words = request.WordTimestamps ? BuildWords(segments, speakers) : null,
                 Speakers = speakers,
+                Duration = seconds,
+                WindowCount = windows.Count,
             };
         }, cancel);
     }
