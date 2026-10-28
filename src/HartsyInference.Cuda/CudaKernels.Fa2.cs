@@ -33,7 +33,8 @@ public sealed partial class CudaKernels
 
     private void LoadFa2Kernels()
     {
-        // Each module loads on its own: a device that cannot run flash_attn_causal_f16 still gets the decode and norm kernels.
+        // Each module gates on its own load. A missing FA2 module (sm_80-only, so no Turing build) must not skip the modules
+        // below it, which Turing runs and the F16 KV cache and cuDNN rows depend on.
         string path = Ptx("flash_attn_causal_f16");
         if (CanLoad(path))
         {

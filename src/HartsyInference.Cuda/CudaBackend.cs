@@ -311,6 +311,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>The loaded kernel table (null if PTX kernels unavailable); internal for tests and optional-kernel launch glue.</summary>
     internal CudaKernels? Kernels => _kernels;
 
+    /// <summary>Required kernel modules this device could not load (<see cref="CudaKernels.UnboundRequiredModules"/>), empty when
+    /// every required module is bound. The factory refuses a device whose list is not empty.</summary>
+    public IReadOnlyList<string> UnboundRequiredModules => _kernels?.UnboundRequiredModules ?? [];
+
     /// <summary>Kernel modules this device could not load because their PTX targets a newer architecture (see
     /// <see cref="CudaKernels.SkippedModules"/>). Empty on any device at or above <see cref="CudaKernels.BaselineSm"/>.</summary>
     public IReadOnlyList<string> SkippedKernelModules => _kernels?.SkippedModules ?? [];
@@ -9534,8 +9538,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Test hook for the native-fp8 activation quantization kernels.</summary>
     /// <remarks>Computes the per-tensor e4m3 dequant scale and quantized bytes.</remarks>
     /// <remarks>Scale (<c>amax/448</c>) goes into <paramref name="scaleOut"/> (1-element F32), quantized bytes into
-    /// <paramref name="fp8Out"/> (same element count as <paramref name="input"/>, F8E4M3). Runs on any CUDA GPU —
-    /// the kernels are plain compute (only the GEMM needs Ada) — so the Ampere CI box can validate them.</remarks>
+    /// <paramref name="fp8Out"/> (same element count as <paramref name="input"/>, F8E4M3). Runs on any CUDA GPU of sm_80 or
+    /// newer — the kernels are plain compute (only the GEMM needs Ada) — so the Ampere CI box can validate them. A card
+    /// below sm_80 has no fp8_quant module (see <c>CudaKernels</c>), so the launch fails there.</remarks>
     internal void Fp8QuantizeActivationForTest(Tensor fp8Out, Tensor scaleOut, Tensor input)
     {
         using OpScope _op = EnterOp();

@@ -90,8 +90,8 @@ public sealed class Fp8NativeGemmTests
     }
 
     /// <summary>Validates the activation-quantization kernels feeding the native path: per-tensor absmax →
-    /// dequant scale (amax/448) + e4m3 quantized bytes. Pure compute kernels, so this runs on ANY CUDA GPU
-    /// (Ampere included) — no fp8 GEMM involved.</summary>
+    /// dequant scale (amax/448) + e4m3 quantized bytes. Pure compute kernels, so this runs on any CUDA GPU of sm_80 or
+    /// newer (Ampere included) — no fp8 GEMM involved. fp8_quant has no Turing build, so a card below sm_80 skips it.</summary>
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Fp8QuantKernels_DynamicQuant_MatchesHostReference()
@@ -101,6 +101,11 @@ public sealed class Fp8NativeGemmTests
         if (!Directory.Exists(ptxDir))
             ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
         using CudaBackend backend = new CudaBackend(0, ptxDir);
+        if (backend.SkippedKernelModules.Any(module => module.StartsWith("fp8_quant ", StringComparison.Ordinal)))
+        {
+            _output.WriteLine("SKIPPED: fp8_quant has no build for this card");
+            return;
+        }
 
         const int count = 300_007;   // odd size exercises the grid tail
         Tensor input = new Tensor(new TensorShape(count), DType.F32);

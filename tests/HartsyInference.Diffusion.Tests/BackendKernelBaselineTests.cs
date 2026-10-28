@@ -5,8 +5,8 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary><c>auto</c> must not pick a CUDA device below the kernel baseline: such a device now constructs a backend with its
-/// sm_80 kernels unbound, so choosing it would fail on the first model op instead of running on Vulkan. The device's compute
+/// <summary><c>auto</c> must not pick a CUDA device below the kernel floor (Turing): such a device cannot load the shipped
+/// kernels, so choosing it would fail on the first model op instead of running on Vulkan. The device's compute
 /// capability is stood in for through the test seam; this class runs alone because that seam is process-wide.</summary>
 [Collection(CollectionName)]
 public sealed class BackendKernelBaselineTests
@@ -18,18 +18,19 @@ public sealed class BackendKernelBaselineTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void Auto_PassesOverACudaDeviceBelowTheKernelBaseline_AndSaysWhy()
+    public void Auto_PassesOverACudaDeviceBelowTheKernelFloor_AndSaysWhy()
     {
         if (!CudaContext.IsAvailable() || CudaContext.GetDeviceCount() == 0) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
         Func<int, int>? previous = BackendFactory.QuerySmForTests;
         try
         {
-            BackendFactory.QuerySmForTests = _ => 75;
+            BackendFactory.QuerySmForTests = _ => 70;
             Assert.NotEqual("cuda", BackendFactory.Resolve("auto"));
-            Assert.Contains("SM 7.5", BackendFactory.CudaUnavailableReason, StringComparison.Ordinal);
+            Assert.Contains("SM 7.0", BackendFactory.CudaUnavailableReason, StringComparison.Ordinal);
 
-            BackendFactory.QuerySmForTests = _ => CudaKernels.BaselineSm;
+            // Turing is the floor: a card there is chosen for CUDA. Whether its required modules bind is the probe's question.
+            BackendFactory.QuerySmForTests = _ => CudaKernels.MinimumSm;
             Assert.Equal("cuda", BackendFactory.Resolve("auto"));
             Assert.Null(BackendFactory.CudaUnavailableReason);
         }

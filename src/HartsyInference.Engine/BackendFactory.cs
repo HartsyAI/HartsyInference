@@ -124,11 +124,11 @@ public static class BackendFactory
         set => Volatile.Write(ref _querySmForTests, value);
     }
 
-    /// <summary>Whether CUDA device <paramref name="ordinal"/> can load the shipped kernels. On a device below
-    /// <see cref="CudaKernels.BaselineSm"/> a backend constructs with its sm_80 kernels unbound, so automatic selection
-    /// passes over it to Vulkan, which runs the card. Only the device the selector names is checked (<c>auto</c> is ordinal
-    /// 0, CUDA's fastest card), so a host whose first card is old goes to Vulkan even if a later one is newer. A device whose
-    /// capability cannot be read is not held back.</summary>
+    /// <summary>Whether CUDA device <paramref name="ordinal"/> is at or above the kernel floor (<see cref="CudaKernels.MinimumSm"/>),
+    /// so that it may be chosen. A device below the floor is passed over to Vulkan, which runs the card. Only the device the
+    /// selector names is checked (<c>auto</c> is ordinal 0, CUDA's fastest card), so a host whose first card is old goes to
+    /// Vulkan even if a later one is newer. A device whose capability cannot be read is not held back. This check builds no
+    /// backend, so it does not see unbound modules: <see cref="ProbeCuda"/> does, through <see cref="RequireBoundKernels"/>.</summary>
     private static bool CudaMeetsKernelBaseline(int ordinal)
     {
         int sm;
@@ -140,10 +140,10 @@ public static class BackendFactory
         {
             return true;
         }
-        if (sm >= CudaKernels.BaselineSm)
+        if (sm >= CudaKernels.MinimumSm)
             return true;
         Volatile.Write(ref _cudaBelowBaselineReason, $"CUDA device {ordinal} is SM {sm / 10}.{sm % 10}; the CUDA kernels need SM "
-            + $"{CudaKernels.BaselineSm / 10}.{CudaKernels.BaselineSm % 10} or newer.");
+            + $"{CudaKernels.MinimumSm / 10}.{CudaKernels.MinimumSm % 10} or newer.");
         return false;
     }
 
@@ -218,7 +218,19 @@ public static class BackendFactory
             reason = Volatile.Read(ref _cudaBelowBaselineReason);
             return false;
         }
-        return RunMatMulProbe(() => CreateCuda(ordinal), out reason);
+        return RunMatMulProbe(() => RequireBoundKernels(CreateCuda(ordinal)), out reason);
+    }
+
+    /// <summary>Refuses a CUDA backend whose required modules did not bind: a launch of one of their kernels would fail later
+    /// with CUDA_ERROR_INVALID_HANDLE, so the probe fails here and automatic selection takes Vulkan.</summary>
+    private static IBackend RequireBoundKernels(IBackend backend)
+    {
+        if (backend is CudaBackend { UnboundRequiredModules: { Count: > 0 } unbound } cuda)
+        {
+            cuda.Dispose();
+            throw new InvalidOperationException("required CUDA modules did not load on this device: " + string.Join(", ", unbound) + ".");
+        }
+        return backend;
     }
 
     private static bool RunVulkanProbe(int? ordinal, out string? reason)
