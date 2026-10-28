@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Changed: a non-silent long-form window that decodes to no text logs a warning.** Its audio is missing from the transcript, so the warning names how many windows were affected.
+
 ## alpha.392
 
 - **Fixed: streaming Moonshine small and medium failed to load on CUDA.** The attention merge buffer was sized to the encoder hidden width, which differs from heads × head_dim on those sizes. It is now sized to heads × head_dim, and tiny is unchanged.

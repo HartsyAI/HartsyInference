@@ -83,6 +83,7 @@ public sealed class LongFormTranscriptionTests
         Assert.NotNull(result.Segments);
         Assert.Empty(result.Segments);
         Assert.Equal(string.Empty, result.Text);
+        Assert.Equal(2, result.EmptyWindowCount);
     }
 
     [Fact]
@@ -111,6 +112,19 @@ public sealed class LongFormTranscriptionTests
         Assert.Equal(3, result.WindowCount);
         Assert.Equal(1, result.SilentWindowCount);
         Assert.Equal(1, result.HardCutCount);
+        Assert.Equal(0, result.EmptyWindowCount);
+    }
+
+    [Fact]
+    public void Transcribe_NonSilentWindowThatDecodesToNothing_IsCountedAndItsAudioIsMissing()
+    {
+        FakeRunner runner = new FakeRunner { TextFor = piece => piece.Length == SampleRate ? string.Empty : "words" };
+        SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate / 2, false, false)];
+
+        LongFormTranscript result = Run(runner, new float[SampleRate + SampleRate / 2], windows, timed: false);
+
+        Assert.Equal(1, result.EmptyWindowCount);
+        Assert.Equal("words", result.Text);
     }
 
     [Fact]

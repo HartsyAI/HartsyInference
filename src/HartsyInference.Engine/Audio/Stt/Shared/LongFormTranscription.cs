@@ -40,6 +40,7 @@ internal static class LongFormTranscription
         List<SttSegment>? segments = timed ? [] : null;
         int silent = 0;
         int hardCuts = 0;
+        int empty = 0;
         foreach (SpeechWindow window in windows)
         {
             if (window.HardCut)
@@ -60,14 +61,24 @@ internal static class LongFormTranscription
             if (segments is null || decoded is null)
             {
                 segments = null;
-                texts.Add(runner.Transcribe(backend, piece, request).Trim());
+                string plain = runner.Transcribe(backend, piece, request).Trim();
+                if (plain.Length == 0)
+                {
+                    empty++;
+                }
+                texts.Add(plain);
                 continue;
             }
             // A span that starts past the window end is text invented for Whisper's zero padding.
             List<SttSegment> spans = decoded.Where(span => span.Start < pieceSeconds).ToList();
             if (spans.Count > 0)
             {
-                texts.Add(string.Join(" ", spans.Select(span => span.Text.Trim())).Trim());
+                string spoken = string.Join(" ", spans.Select(span => span.Text.Trim())).Trim();
+                if (spoken.Length == 0)
+                {
+                    empty++;
+                }
+                texts.Add(spoken);
                 segments.AddRange(spans.Select(span => span with
                 {
                     Start = offset + Math.Clamp(span.Start, 0.0, pieceSeconds),
@@ -81,13 +92,21 @@ internal static class LongFormTranscription
                 texts.Add(text);
                 segments.Add(new SttSegment { Text = text, Start = offset, End = offset + pieceSeconds });
             }
+            else
+            {
+                empty++;
+            }
         }
 
         if (silent > 0 || hardCuts > 0)
         {
             Logs.Info($"[Audio][STT] Long-form: {windows.Count} windows, {silent} silent skipped, {hardCuts} hard cuts (a word may be split there).");
         }
+        if (empty > 0)
+        {
+            Logs.Warning($"[Audio][STT] Long-form: {empty} non-silent window(s) decoded to no text; their audio is missing from the transcript.");
+        }
         string joined = string.Join(" ", texts.Where(text => text.Length > 0));
-        return new LongFormTranscript(joined, segments, windows.Count, silent, hardCuts);
+        return new LongFormTranscript(joined, segments, windows.Count, silent, hardCuts, empty);
     }
 }
