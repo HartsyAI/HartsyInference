@@ -33,7 +33,6 @@ namespace HartsyInference.Audio.Pipelines;
 /// <c>WhisperDecoder</c> runs fused SDPA without surfacing attention weights.</para></summary>
 public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 {
-    /// <summary>Whisper's input window: 30 s at 16 kHz.</summary>
     /// <summary>Whisper's input window in seconds; longer audio is not decoded past this point.</summary>
     public const int WindowSeconds = 30;
 
@@ -185,15 +184,16 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     /// in it are a constant the extractor fills without transforming.</summary>
     private (Tensor Mel, double Seconds) PrepareMel(float[] audio, int sampleRate)
     {
-        if (audio.Length * 16_000L / sampleRate > WindowSamples)
-        {
-            Logs.Warning("Whisper decodes one 30 s window per call; the rest of the clip is not transcribed. The engine's transcribe path splits long audio.");
-        }
         float[] mono16k = audio;
         if (sampleRate != 16_000)
         {
             Resampler resampler = Resampler.Create(sampleRate, 16_000);
             mono16k = resampler.Resample(audio);
+        }
+        if (mono16k.Length > WindowSamples)
+        {
+            Logs.Warning("Whisper decodes one 30 s window per call; the rest of the clip is not transcribed. "
+                + "The engine's transcribe path splits long audio.");
         }
 
         int frames = _melExtractor.OutputFrames(WindowSamples);

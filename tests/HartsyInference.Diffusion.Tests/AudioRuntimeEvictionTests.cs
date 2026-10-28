@@ -175,9 +175,9 @@ public sealed class AudioRuntimeEvictionTests
 
     private sealed class FakeSttRunner : ISttRunner
     {
-        public double? MaxInputSeconds => null;
-
         public bool Disposed { get; private set; }
+
+        public double? MaxInputSeconds => null;
 
         public string Transcribe(IBackend backend, float[] audioMono, AudioRequest request) => string.Empty;
 

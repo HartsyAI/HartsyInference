@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Requests;
 using Xunit;
@@ -27,6 +28,61 @@ public sealed class LongFormTranscriptionTests
         IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(new float[SampleRate * 65], SampleRate, maxInputSeconds: 30);
 
         Assert.True(windows.Count > 1);
+    }
+
+    [Fact]
+    public void Plan_ClipThatFitsAWindowBelowThePlannerFloor_IsOneWindow()
+    {
+        IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(new float[SampleRate], SampleRate, maxInputSeconds: 1.5);
+
+        Assert.Single(windows);
+    }
+
+    [Fact]
+    public void RequireWithinLimit_RefusesAWindowedModelPastTheKnobButNotAnUnwindowedOne()
+    {
+        double past = EngineKnobs.TranscribeMaxSeconds.Value + 1;
+
+        Assert.Throws<ArgumentException>(() => LongFormTranscription.RequireWithinLimit(30, past, "pcm"));
+        LongFormTranscription.RequireWithinLimit(null, past, "pcm");
+        LongFormTranscription.RequireWithinLimit(30, 3600, "pcm");
+    }
+
+    [Fact]
+    public void Transcribe_TimedSpansStartingPastTheWindowEnd_AreDropped()
+    {
+        FakeRunner runner = new FakeRunner
+        {
+            SpansFor = _ =>
+            [
+                new SttSegment { Text = "real", Start = 0.2, End = 0.8 },
+                new SttSegment { Text = "Thank you.", Start = 1.5, End = 3.0 },
+            ],
+        };
+        SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate, false, false)];
+
+        LongFormTranscript result = Run(runner, new float[SampleRate * 2], windows, timed: true);
+
+        Assert.NotNull(result.Segments);
+        Assert.Equal(2, result.Segments.Count);
+        Assert.Equal("real real", result.Text);
+    }
+
+    [Fact]
+    public void Transcribe_TimedWindowWithNoTextAnywhere_AddsNoSegment()
+    {
+        FakeRunner runner = new FakeRunner
+        {
+            SpansFor = _ => [],
+            TextFor = _ => string.Empty,
+        };
+        SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate, false, false)];
+
+        LongFormTranscript result = Run(runner, new float[SampleRate * 2], windows, timed: true);
+
+        Assert.NotNull(result.Segments);
+        Assert.Empty(result.Segments);
+        Assert.Equal(string.Empty, result.Text);
     }
 
     [Fact]
@@ -64,14 +120,14 @@ public sealed class LongFormTranscriptionTests
         {
             SpansFor = _ => [new SttSegment { Text = "a", Start = 0.5, End = 1.0 }, new SttSegment { Text = "b", Start = 1.0, End = 2.0 }],
         };
-        SpeechWindow[] windows = [new(0, SampleRate, false, false), new(SampleRate, SampleRate, false, false)];
+        SpeechWindow[] windows = [new(0, SampleRate * 2, false, false), new(SampleRate * 2, SampleRate * 2, false, false)];
 
-        LongFormTranscript result = Run(runner, new float[SampleRate * 2], windows, timed: true);
+        LongFormTranscript result = Run(runner, new float[SampleRate * 4], windows, timed: true);
 
         Assert.NotNull(result.Segments);
         Assert.Equal(4, result.Segments.Count);
-        Assert.Equal(1.5, result.Segments[2].Start, precision: 9);
-        Assert.Equal(2.0, result.Segments[2].End, precision: 9);
+        Assert.Equal(2.5, result.Segments[2].Start, precision: 9);
+        Assert.Equal(3.0, result.Segments[2].End, precision: 9);
         Assert.Equal("a b a b", result.Text);
     }
 

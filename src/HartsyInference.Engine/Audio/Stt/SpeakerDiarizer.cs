@@ -18,15 +18,14 @@ namespace HartsyInference.Engine.Audio;
 /// Whisper's timestamp tokens when available and from a fixed sliding window otherwise, never from speech activity.
 /// (2) <see cref="MergeDistance"/> is an <b>uncalibrated</b> constant — the encoder itself is real-weight verified,
 /// but no speaker-diarization error rate has been measured on a labelled set, so the speaker <i>count</i> can still
-/// be wrong. 0.60 was chosen on two clips: one narrator must come out as one speaker, and JFK followed by a second
-/// narrator as two. At 0.40 and 0.50 the one-narrator clip split in two. (3) Weights are never downloaded here; the clip is
-/// re-decoded to 16 kHz mono because CAM++ is a 16 kHz Kaldi-fbank model.</para></summary>
+/// be wrong. (3) Weights are never downloaded here; the clip is re-decoded to 16 kHz mono because CAM++ is a 16 kHz
+/// Kaldi-fbank model.</para></summary>
 internal sealed class SpeakerDiarizer : IDisposable
 {
     /// <summary>CAM++ is a 16 kHz model (Kaldi fbank, 25 ms / 10 ms).</summary>
     internal const int SampleRate = 16_000;
 
-    /// <summary>Cosine-distance ceiling below which two clusters merge. Set on two clips — see the type remarks.</summary>
+    /// <summary>Cosine-distance ceiling below which two clusters merge. Not calibrated on a labelled set — see the type remarks.</summary>
     private const float MergeDistance = 0.60f;
 
     /// <summary>Sliding-window length used when no timestamp segments are available.</summary>
@@ -130,7 +129,8 @@ internal sealed class SpeakerDiarizer : IDisposable
         return new SpeakerDiarizer(encoder, loaders);
     }
 
-    /// <summary>Timestamp spans when the transcriber gave them, else a fixed overlapping window sweep.</summary>
+    /// <summary>Timestamp spans when the transcriber gave them (joined to stay under <see cref="MaxSpans"/>),
+    /// else a fixed overlapping window sweep.</summary>
     internal static List<SttSegment> BuildSpans(IReadOnlyList<SttSegment>? segments, double totalSeconds)
     {
         List<SttSegment> spans = [];
@@ -145,7 +145,7 @@ internal sealed class SpeakerDiarizer : IDisposable
             }
             if (spans.Count > 0)
             {
-                return spans;
+                return spans.Count > MaxSpans ? Coalesce(spans, totalSeconds) : spans;
             }
         }
         // A long clip stretches the hop so the capped span count still tiles it; the span grows to twice the hop.
@@ -156,6 +156,31 @@ internal sealed class SpeakerDiarizer : IDisposable
             spans.Add(new SttSegment { Text = string.Empty, Start = start, End = Math.Min(start + window, totalSeconds) });
         }
         return spans;
+    }
+
+    /// <summary>Joins consecutive spans into groups spanning at most a time limit, so a joined span never stretches across a long gap.</summary>
+    /// <remarks>Two neighbouring groups together cover more than the limit, which bounds the result to
+    /// <c>MaxSpans / 2 + 1</c> spans for ordered input.</remarks>
+    private static List<SttSegment> Coalesce(List<SttSegment> spans, double totalSeconds)
+    {
+        double limit = 4d * totalSeconds / MaxSpans;
+        Logs.Info($"[Audio][Diarize] {spans.Count} timestamp spans exceed the {MaxSpans}-span cap; "
+            + $"joining them into groups of up to {limit:0} s, so a speaker turn inside a group is not separated.");
+        List<SttSegment> joined = [];
+        int first = 0;
+        while (first < spans.Count)
+        {
+            int last = first;
+            while (last + 1 < spans.Count && spans[last + 1].End - spans[first].Start <= limit)
+            {
+                last++;
+            }
+            IEnumerable<string> pieces = spans.Skip(first).Take(last - first + 1).Select(span => span.Text.Trim());
+            string text = string.Join(" ", pieces.Where(piece => piece.Length > 0));
+            joined.Add(new SttSegment { Text = text, Start = spans[first].Start, End = spans[last].End });
+            first = last + 1;
+        }
+        return joined;
     }
 
     /// <summary>Embeds one span: Kaldi fbank → cepstral mean normalization → CAM++ → L2-normalized 192-d vector. Returns null when the span has too few frames for the encoder's strided front end.</summary>

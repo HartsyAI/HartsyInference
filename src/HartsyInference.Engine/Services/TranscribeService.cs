@@ -1,6 +1,5 @@
 using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
@@ -36,12 +35,7 @@ public sealed class TranscribeService : ITranscribeService
             ISttRunner runner = await _engine.AudioRuntime.Stt
                 .GetOrLoadAsync(repo, token => descriptor.LoadAsync(repo, token), ct).ConfigureAwait(false);
             double seconds = AudioClipCodec.Seconds(audio.Length, descriptor.InputSampleRate);
-            int maxSeconds = EngineKnobs.TranscribeMaxSeconds.Value;
-            if (runner.MaxInputSeconds is not null && seconds > maxSeconds)
-            {
-                throw new ArgumentException($"The audio is {seconds:0} s; this model transcribes up to {maxSeconds} s per request "
-                    + "(vram.transcribeMaxSeconds).", nameof(request));
-            }
+            LongFormTranscription.RequireWithinLimit(runner.MaxInputSeconds, seconds, nameof(request));
             IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, descriptor.InputSampleRate, runner.MaxInputSeconds);
             long started = Environment.TickCount64;
             bool timed = request.WordTimestamps || request.Diarization;
@@ -50,13 +44,13 @@ public sealed class TranscribeService : ITranscribeService
             string text;
             if (windows.Count > 1)
             {
-                LongFormTranscript longForm = LongFormTranscription.Transcribe(runner, backend, audio, descriptor.InputSampleRate, windows, request, timed, ct);
+                LongFormTranscript longForm = LongFormTranscription.Transcribe(runner, backend, audio,
+                    descriptor.InputSampleRate, windows, request, timed, ct);
                 text = longForm.Text;
                 segments = longForm.Segments;
-                if (timed && segments is null && request.WordTimestamps)
+                if (timed)
                 {
-                    Logs.Warning($"[Audio][STT] '{repo}' emits no timestamp tokens — returning Words = null. "
-                        + "Only the Whisper family (whisper / distilwhisper / whisperstreaming) can time a transcript.");
+                    WarnIfUntimed(repo, segments, request);
                 }
             }
             else
@@ -64,15 +58,7 @@ public sealed class TranscribeService : ITranscribeService
                 if (timed)
                 {
                     segments = runner.TranscribeTimed(backend, audio, request);
-                    if (segments is null && request.WordTimestamps)
-                    {
-                        Logs.Warning($"[Audio][STT] '{repo}' emits no timestamp tokens — returning Words = null. "
-                            + "Only the Whisper family (whisper / distilwhisper / whisperstreaming) can time a transcript.");
-                    }
-                    else if (segments is { Count: 0 } && request.WordTimestamps)
-                    {
-                        Logs.Warning($"[Audio][STT] '{repo}' produced no well-formed timestamp pair — returning Words = null.");
-                    }
+                    WarnIfUntimed(repo, segments, request);
                 }
                 ct.ThrowIfCancellationRequested();
 
@@ -142,6 +128,25 @@ public sealed class TranscribeService : ITranscribeService
         return await runtime.OpenLeaseAsync(backend, runtime.Stt, repo, token => descriptor.LoadAsync(repo, token),
             runner => new TranscriberLease(runtime, repo, runner, backend, descriptor.InputSampleRate), cancel,
             estimateWeightBytes: EstimateWeightBytes(repo)).ConfigureAwait(false);
+    }
+
+    /// <summary>Warns that word timestamps were asked for but <paramref name="segments"/> carries none: null when the model
+    /// emits no timestamp tokens, empty when no well-formed pair came back.</summary>
+    private static void WarnIfUntimed(string repo, IReadOnlyList<SttSegment>? segments, AudioRequest request)
+    {
+        if (!request.WordTimestamps)
+        {
+            return;
+        }
+        if (segments is null)
+        {
+            Logs.Warning($"[Audio][STT] '{repo}' emits no timestamp tokens — returning Words = null. "
+                + "Only the Whisper family (whisper / distilwhisper / whisperstreaming) can time a transcript.");
+        }
+        else if (segments.Count == 0)
+        {
+            Logs.Warning($"[Audio][STT] '{repo}' produced no well-formed timestamp pair — returning Words = null.");
+        }
     }
 
     /// <summary>The runtime job for <paramref name="repo"/>'s runner.</summary>

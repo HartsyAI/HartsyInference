@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Dsp.Windowing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Requests;
 
@@ -9,10 +10,21 @@ namespace HartsyInference.Engine.Audio;
 /// window is decoded whole, and the results are joined with segment times moved onto the clip's timeline.</summary>
 internal static class LongFormTranscription
 {
-    /// <summary>Plans <paramref name="audio"/> against a model's window; a model with no window gets one window.</summary>
+    /// <summary>Refuses a clip over <c>vram.transcribeMaxSeconds</c> when the model is windowed; a model with no window is not limited.</summary>
+    internal static void RequireWithinLimit(double? maxInputSeconds, double clipSeconds, string paramName)
+    {
+        int limit = EngineKnobs.TranscribeMaxSeconds.Value;
+        if (maxInputSeconds is not null && clipSeconds > limit)
+        {
+            throw new ArgumentException($"The audio is {clipSeconds:0} s; this model transcribes up to {limit} s per request "
+                + "(vram.transcribeMaxSeconds).", paramName);
+        }
+    }
+
+    /// <summary>Plans <paramref name="audio"/> against a model's window; a model with no window, or a clip that fits it, gets one window.</summary>
     internal static IReadOnlyList<SpeechWindow> Plan(float[] audio, int sampleRate, double? maxInputSeconds)
     {
-        if (maxInputSeconds is not double seconds)
+        if (maxInputSeconds is not double seconds || audio.Length <= (int)(seconds * sampleRate))
         {
             return [new SpeechWindow(0, audio.Length, Silent: false, HardCut: false)];
         }
@@ -20,7 +32,7 @@ internal static class LongFormTranscription
     }
 
     /// <summary>Decodes each non-silent window and joins the results. Timed segments are offset onto the clip timeline,
-    /// and a window the timed decode leaves without segments is decoded again as plain text, recorded as one span.</summary>
+    /// and a window the timed decode leaves without segments is decoded again as plain text, recorded as one span when it has any.</summary>
     internal static LongFormTranscript Transcribe(ISttRunner runner, IBackend backend, float[] audio, int sampleRate,
         IReadOnlyList<SpeechWindow> windows, AudioRequest request, bool timed, CancellationToken cancel)
     {
@@ -44,13 +56,15 @@ internal static class LongFormTranscription
             float[] piece = audio.AsSpan(window.Start, window.Length).ToArray();
             double offset = window.Start / (double)sampleRate;
             double pieceSeconds = window.Length / (double)sampleRate;
-            IReadOnlyList<SttSegment>? spans = timed ? runner.TranscribeTimed(backend, piece, request) : null;
-            if (segments is null || spans is null)
+            IReadOnlyList<SttSegment>? decoded = segments is null ? null : runner.TranscribeTimed(backend, piece, request);
+            if (segments is null || decoded is null)
             {
                 segments = null;
                 texts.Add(runner.Transcribe(backend, piece, request).Trim());
                 continue;
             }
+            // A span that starts past the window end is text invented for Whisper's zero padding.
+            List<SttSegment> spans = decoded.Where(span => span.Start < pieceSeconds).ToList();
             if (spans.Count > 0)
             {
                 texts.Add(string.Join(" ", spans.Select(span => span.Text.Trim())).Trim());
@@ -62,8 +76,11 @@ internal static class LongFormTranscription
                 continue;
             }
             string text = runner.Transcribe(backend, piece, request).Trim();
-            texts.Add(text);
-            segments.Add(new SttSegment { Text = text, Start = offset, End = offset + pieceSeconds });
+            if (text.Length > 0)
+            {
+                texts.Add(text);
+                segments.Add(new SttSegment { Text = text, Start = offset, End = offset + pieceSeconds });
+            }
         }
 
         if (silent > 0 || hardCuts > 0)
