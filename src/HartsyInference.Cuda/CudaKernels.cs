@@ -551,7 +551,8 @@ public sealed partial class CudaKernels : IDisposable
 
     private string Ptx(string kernel)
     {
-        string path = PtxPath(_ptxDir, kernel, Sm);
+        // The gate's capability picks the file too, so a stand-in card (GateSmForTests) loads what that card would load.
+        string path = PtxPath(_ptxDir, kernel, GateSm);
         if (!path.EndsWith($"{kernel}.ptx", StringComparison.Ordinal)) _archVariants.Add(kernel);
         return path;
     }

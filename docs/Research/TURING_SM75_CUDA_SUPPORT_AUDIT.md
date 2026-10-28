@@ -65,7 +65,7 @@ shipped 13.0.88 bytes, so this is a compile-feasibility result, not a shipping r
 | sm_75 FAIL, sm_80 OK | see below | 6 |
 | sm_80 FAIL (control) | none | 0 |
 
-The six sm_75 failures, with the sm_80 feature each one needs:
+The five sm_75 failures, with the sm_80 feature each one needs:
 
 | File | Needs sm_80 for | Fix class |
 |---|---|---|
@@ -74,7 +74,9 @@ The six sm_75 failures, with the sm_80 feature each one needs:
 | `attention/sage_attn_int8.cu` | `cp.async` (15), `m16n8k16` F16 PV (3) | Synchronous loads; INT8 `m16n8k32` must be checked (see below) |
 | `attention/int8_attn_v2.cu` | `cp.async` (3), `m16n8k16` (3) | As above; this file is `NVCC_BUILT` |
 | `dequant/int8_mma_gemm.cu` | `cp.async` (16), 128-register accumulators | Synchronous loads; the smem swizzle comments are sm_80-tuned |
-| `moe/moe_prefill.cu` | not itemized by grep | Compile error not yet read; start here |
+
+`moe/moe_prefill.cu` is not a failure. It compiles and assembles for sm_75 (nvcc and nvrtc compute_75, then ptxas), so
+it stays on the sm_80 build only until a Turing run verifies its grouped-prefill path.
 
 Caveat: "90 compile" is not "90 run correctly". The check verifies that the code is legal for sm_75. It does not
 check runtime behavior, the shared-memory opt-ins, `__shfl_sync` widths, or performance. Each of the 90 still needs a
@@ -136,7 +138,7 @@ Effort estimate (mine, rough): 2–4 days including the build changes and the te
 Replace `cp.async` with register-staged `ld.global`/`st.shared` (or double-buffered synchronous loads). Replace
 `m16n8k16` with two `m16n8k8` per K-step: the A fragment changes from 4 to 2 registers, so the fragment-load code
 changes, not just the asm line. The INT8 kernels need a separate check: `m16n8k32 s8` may or may not be legal on sm_75,
-and the audit did not isolate it. Start with `moe_prefill`, since its compile error is not yet itemized.
+and the audit did not isolate it. `moe_prefill` compiles for sm_75, so it is not part of that open question.
 
 Each kernel needs a parity test against its sm_80 output on the same inputs, plus a timing check against the
 current Vulkan path. Effort (mine, rough): 1–2 weeks per attention kernel including parity, 1 week for the INT8 GEMM
@@ -171,7 +173,7 @@ The result decides whether the remaining Vulkan work (ROADMAP Phase 5 coopmat) o
 
 ## 8. Open questions to settle with GPU runs
 
-1. Does `moe_prefill.cu` fail for an sm_80-only reason, or for something else? (read the compile error)
+1. Resolved: `moe_prefill.cu` compiles for sm_75. Open: whether its grouped-prefill path is correct on Turing (needs a run).
 2. Do the INT8 `m16n8k32` and `m8n8k16` shapes compile for sm_75 in isolation? (single-instruction probe)
 3. On the 2060, does the planner pick a usable non-MMA attention row, or `host.reference`?
 4. Does `CudaKernels` gate on exact-variant match in a way that breaks a sm_75 baseline plus sm_80 variant layout?
