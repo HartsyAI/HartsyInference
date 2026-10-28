@@ -137,6 +137,19 @@ code that simply needs a real CUDA device, which the hosted runner lacks.
 | **Moonshine** | ✅ | tests pass | — |
 | **Kyutai STT** (stt-1b/2.6b) | 🔧 | — | Shares the moshi backbone; parity pending (no depformer). |
 
+**Long-form transcription (2026-10-28, RTX 2060 SUPER, Vulkan).** A 68.7 s passage (176 reference words, synthesized Hurston-1 take, `whisper:medium.en` for the scoring ASR). Word error rate is against the reference text, normalized to lowercase words without punctuation.
+
+| Case | Windows | WER | Notes |
+|---|---|---|---|
+| Whisper medium.en, before the change (first 30 s only) | 1 | 0.597 | Clipped silently at 30 s. |
+| Whisper medium.en | 3 | 0.108 | 41 s wall. Timestamps run monotonic to 68.3 s. |
+| Moonshine base | 3 | 0.119 | 18 s wall. |
+| Moonshine streaming medium | 3 | 0.114 | Window capped at 30 s; uncapped at 68.8 s it stopped near 45 s (WER 0.449). |
+| Kyutai STT 1B | 3 | 0.114 | 225 s wall. |
+| 145 s passage with an 8 s silence in the middle, Whisper medium.en | 5+ | 0.040 | Against two copies of the reference (352 words). No text invented in the gap. |
+
+Short clips (JFK, and a Hurston 40-word take) transcribe byte-identically before and after the change for Whisper and Moonshine. A clip over `vram.transcribeMaxSeconds` is refused with a named error. Not run: the 4090 and any speaker-diarization run (no CAM++ weights on this box).
+
 ### Codec / VC / music / separation
 | Model | Parity | Components verified | Notes |
 |---|---|---|---|

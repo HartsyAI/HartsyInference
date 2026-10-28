@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: speech-to-text no longer drops audio past a model's window.** Whisper, distil-Whisper and whisperstreaming decoded only the first 30 s of a longer clip, and Kyutai's position cap cut audio at about 29 s (1B) and 56 s (2.6B). A clip longer than a model's window is now cut at silence into windows, transcribed, and joined, with timed segments kept on the clip's timeline. Silent windows are skipped.
+- **Added: `TranscriptResult.Duration` and `TranscriptResult.WindowCount`.** `/v1/native/transcribe` returns both.
+- **Added: `vram.transcribeMaxSeconds` (default 7200).** Longer audio is refused with a named error for models that have a window.
+- **Changed: Moonshine's decode budget scales with clip length** (6.5 tokens per second, at least 32, at most the decoder's positions less one). `MoonshineOptions.MaxNewTokens` now defaults to 0, which derives the budget; a positive value is still an explicit cap. Speech within a model's window is unaffected.
+- **Changed: streaming Moonshine windows are capped at 30 s.** Its output stops well before its decoder positions allow.
+- **Changed: diarization on clips past about 6.4 minutes covers the whole clip** instead of only its first 6.4 minutes.
+- **Changed: Whisper warns when handed more than one window of audio.**
+
 ## alpha.391
 
 - **Fixed: a long audio take no longer fails with "Cannot access a disposed object".** A release that could not get the audio lock within 120 s used to dispose the resident models anyway, under a generation still running on them. It now keeps the models and logs the caller's stack. The 200-word Hurston-1 take through AudioLab is the reproduction.
