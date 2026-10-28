@@ -33,12 +33,16 @@ public sealed partial class CudaKernels
 
     private void LoadFa2Kernels()
     {
+        // Each module gates on its own load. A missing FA2 module (sm_80-only, so no Turing build) must not skip the modules
+        // below it, which Turing runs and the F16 KV cache and cuDNN rows depend on.
         string path = Ptx("flash_attn_causal_f16");
-        if (!CanLoad(path)) return;
-        _fa2Module = LoadOwnedModule(path);
-        _fa2D128 = _fa2Module.GetFunction("lm_fa2_causal_d128");
-        _fa2D64 = _fa2Module.GetFunction("lm_fa2_causal_d64");
-        _kvToF16 = _fa2Module.GetFunction("lm_kv_to_f16");
+        if (CanLoad(path))
+        {
+            _fa2Module = LoadOwnedModule(path);
+            _fa2D128 = _fa2Module.GetFunction("lm_fa2_causal_d128");
+            _fa2D64 = _fa2Module.GetFunction("lm_fa2_causal_d64");
+            _kvToF16 = _fa2Module.GetFunction("lm_kv_to_f16");
+        }
         string scatter = Ptx("kv_scatter_f16");
         if (CanLoad(scatter))
         {

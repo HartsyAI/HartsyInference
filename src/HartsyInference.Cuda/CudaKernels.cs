@@ -502,10 +502,21 @@ public sealed partial class CudaKernels : IDisposable
     /// dequant and expert kernels and the sm_70 elementwise PTX.</summary>
     public const int BaselineSm = CudaArch.Ampere;
 
+    /// <summary>The lowest compute capability the CUDA backend runs on. Below the baseline, a device loads the modules built
+    /// for it (the Turing floor set) and the sm_80-only modules stay unbound, with their fallback rows serving the card. A device
+    /// below this floor cannot load the shipped kernels, and the backend refuses it.</summary>
+    public const int MinimumSm = CudaArch.Turing;
+
     /// <summary>Modules skipped because their PTX targets a newer architecture than this device, as <c>name (sm_XX)</c>.
     /// Empty at or above <see cref="BaselineSm"/>. Their kernels stay unbound: an optional module reports itself missing
     /// through its <c>Has…</c> flag, and a launch of a required one fails with CUDA_ERROR_INVALID_HANDLE.</summary>
     public IReadOnlyList<string> SkippedModules => _skippedModules;
+
+    /// <summary>Required modules this device could not load, by file name. Non-empty means a launch of one of their kernels
+    /// fails with CUDA_ERROR_INVALID_HANDLE, so the backend must not serve this device.</summary>
+    public IReadOnlyList<string> UnboundRequiredModules => _unboundRequired;
+
+    private readonly List<string> _unboundRequired = [];
 
     private readonly string _ptxDir;
     private readonly List<string> _archVariants = [];
@@ -658,7 +669,11 @@ public sealed partial class CudaKernels : IDisposable
         Exception? injectedFailure = Volatile.Read(ref _moduleLoadFailureForTests)?.Invoke(path);
         if (injectedFailure is not null) throw injectedFailure;
         if (SkipsForArchitecture(path))
+        {
+            // Only required modules reach this point: an optional one is checked with CanLoad before it is loaded.
+            _unboundRequired.Add(Path.GetFileNameWithoutExtension(path));
             return CudaModule.Unloadable;
+        }
         CudaModule module = CudaModule.LoadFromFile(path, maxRegisters);
         try
         {

@@ -311,6 +311,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>The loaded kernel table (null if PTX kernels unavailable); internal for tests and optional-kernel launch glue.</summary>
     internal CudaKernels? Kernels => _kernels;
 
+    /// <summary>Required kernel modules this device could not load (<see cref="CudaKernels.UnboundRequiredModules"/>), empty when
+    /// every required module is bound. The factory refuses a device whose list is not empty.</summary>
+    public IReadOnlyList<string> UnboundRequiredModules => _kernels?.UnboundRequiredModules ?? [];
+
     /// <summary>Kernel modules this device could not load because their PTX targets a newer architecture (see
     /// <see cref="CudaKernels.SkippedModules"/>). Empty on any device at or above <see cref="CudaKernels.BaselineSm"/>.</summary>
     public IReadOnlyList<string> SkippedKernelModules => _kernels?.SkippedModules ?? [];

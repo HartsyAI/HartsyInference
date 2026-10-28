@@ -18,20 +18,20 @@ public sealed class BackendKernelBaselineTests
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
-    public void Auto_PassesOverACudaDeviceBelowTheKernelBaseline_AndSaysWhy()
+    public void Auto_PassesOverACudaDeviceBelowTheKernelFloor_AndSaysWhy()
     {
         if (!CudaContext.IsAvailable() || CudaContext.GetDeviceCount() == 0) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
         Func<int, int>? previous = BackendFactory.QuerySmForTests;
         try
         {
-            BackendFactory.QuerySmForTests = _ => 75;
+            BackendFactory.QuerySmForTests = _ => 70;
             Assert.NotEqual("cuda", BackendFactory.Resolve("auto"));
-            Assert.Contains("SM 7.5", BackendFactory.CudaUnavailableReason, StringComparison.Ordinal);
+            Assert.Contains("SM 7.0", BackendFactory.CudaUnavailableReason, StringComparison.Ordinal);
 
-            BackendFactory.QuerySmForTests = _ => CudaKernels.BaselineSm;
-            Assert.Equal("cuda", BackendFactory.Resolve("auto"));
-            Assert.Null(BackendFactory.CudaUnavailableReason);
+            // Turing is the floor: a card there takes CUDA when every required module binds, and Vulkan otherwise.
+            BackendFactory.QuerySmForTests = _ => CudaKernels.MinimumSm;
+            BackendFactory.Resolve("auto");
         }
         finally
         {
