@@ -11,8 +11,9 @@
 #   KERNELS        compiled for sm_80, the fleet baseline; PTX is JIT-forward-compatible from there
 #   KERNELS_SM75   compiled for sm_75 (GGUF dequant keeps Turing)
 #   KERNELS_SM80   compiled for sm_80 (alongside KERNELS_SM75; a domain uses one style or the other)
-#   ARCH_VARIANTS  kernels with arch-conditional device code; --arch builds each as a suffixed variant that
-#                  CudaKernels.PtxPath loads only on that exact compute capability
+#   ARCH_VARIANTS  kernels with arch-conditional device code; --arch builds each as a suffixed variant. PtxPath ranks
+#                  every file by its .target header: a tuned variant above sm_75 loads only on that exact compute
+#                  capability, and the baseline or a sm_75 build serves the rest
 #   NVCC_BUILT     kernels whose shipped PTX is CUDA 13.0.88 nvcc output rather than nvrtc output
 #   SM80_ONLY      KERNELS entries that need sm_80 instructions (cp.async, m16n8k16 MMA) and so get no Turing build; every
 #                  other KERNELS entry also ships as {kernel}.sm75.ptx, the floor build a Turing card loads
