@@ -8,12 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Fixed: speech-to-text no longer drops audio past a model's window.** Whisper, distil-Whisper and whisperstreaming decoded only the first 30 s of a longer clip, and Kyutai's position cap cut audio at about 29 s (1B) and 56 s (2.6B). A clip longer than a model's window is now cut at silence into windows, transcribed, and joined, with timed segments kept on the clip's timeline. Silent windows are skipped.
+- **Fixed: speech-to-text no longer drops audio past a model's window.** Whisper, distil-Whisper and whisperstreaming decoded only the first 30 s of a longer clip, Moonshine's fixed 180-token budget ended its text early, and Kyutai's position cap cut audio at about 29 s (1B) and 56 s (2.6B). A clip longer than a model's window is now cut into windows, in a quiet stretch where one exists and otherwise at the window limit (a word may be split there, and the log says so), transcribed, and joined, with timed segments kept on the clip's timeline. Silent windows are skipped.
 - **Added: `TranscriptResult.Duration` and `TranscriptResult.WindowCount`.** `/v1/native/transcribe` returns both.
 - **Added: `vram.transcribeMaxSeconds` (default 7200).** Longer audio is refused with a named error for models that have a window.
-- **Changed: Moonshine's decode budget scales with clip length** (6.5 tokens per second, at least 32, at most the decoder's positions less one). `MoonshineOptions.MaxNewTokens` now defaults to 0, which derives the budget; a positive value is still an explicit cap. Speech within a model's window is unaffected.
-- **Changed: streaming Moonshine windows are capped at 30 s.** Its output stops well before its decoder positions allow.
+- **Changed: Moonshine's decode budget scales with clip length** (6.5 tokens per second, at least 32, at most the decoder's positions less one). `MoonshineOptions.MaxNewTokens` now defaults to 0, which derives the budget; a positive value is still an explicit cap, clamped to the decoder's positions less one.
+- **Changed: streaming Moonshine windows are capped at 30 s,** under the 68.8 s its decoder positions would allow. A window can still decode to nothing; see [PARITY](docs/Checklists/PARITY_VERIFICATION.md#stt).
 - **Changed: diarization on clips past about 6.4 minutes covers the whole clip** instead of only its first 6.4 minutes.
+- **Changed: the diarization speaker merge distance is 0.60 (was 0.40).** At 0.40 and 0.50 a one-narrator passage split into two speakers. It was set from two clips and has not been calibrated on a labelled set, so speaker counts can differ from alpha.391.
 - **Changed: Whisper warns when handed more than one window of audio.**
 
 ## alpha.391
