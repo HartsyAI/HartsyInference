@@ -20,7 +20,7 @@ public static class SpeechWindowPlanner
         int minTail = (int)(sampleRate * MinTailSeconds);
         if (maxWindowSamples < (int)(sampleRate * MinWindowSeconds))
         {
-            throw new ArgumentOutOfRangeException(nameof(maxWindowSamples), maxWindowSamples, "Windows must be at least 2 s.");
+            throw new ArgumentOutOfRangeException(nameof(maxWindowSamples), maxWindowSamples, $"Windows must be at least {MinWindowSeconds} s.");
         }
 
         List<SpeechWindow> windows = [];

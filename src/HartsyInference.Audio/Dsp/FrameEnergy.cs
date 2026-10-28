@@ -59,7 +59,10 @@ internal static class FrameEnergy
     /// <summary>Largest value in <paramref name="values"/>; the array must not be empty.</summary>
     public static double MaxValue(double[] values)
     {
-        ArgumentOutOfRangeException.ThrowIfZero(values.Length);
+        if (values.Length == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(values), "Must not be empty.");
+        }
         double max = values[0];
         for (int k = 1; k < values.Length; k++)
         {
