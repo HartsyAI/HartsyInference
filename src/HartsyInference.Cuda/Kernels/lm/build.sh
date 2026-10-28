@@ -38,6 +38,8 @@ KERNELS=(
     "mul_mat_vec_q3k_q8_1"
     "ssm_prefill_f32"
 )
+# m16n8k16 F16 MMA and cp.async: no Turing build. Turing takes the flash_attn_f32 rows.
+SM80_ONLY=("flash_attn_causal_f16")
 # Shipped as CUDA 13.0.88 nvcc output, which the decode timings were taken on; nvrtc emits different PTX for these.
 NVCC_BUILT=(
     "lm_f32"

@@ -1,7 +1,8 @@
 # Turing (sm_75) CUDA support: audit and recommended path
 
 Scope: why the engine's CUDA backend refuses compute capability 7.5 cards (RTX 2060 SUPER here, 8 GB), what
-actually blocks it, how much kernel work it takes, and what to build first. Audit only; no kernels changed.
+actually blocks it, how much kernel work it takes, and what to build first. Written before the floor build; the PTX it recommended has since shipped as `.sm75.ptx` variants (PR #576), and the counts
+below are the audit's own.
 
 ## TL;DR
 
@@ -9,12 +10,12 @@ actually blocks it, how much kernel work it takes, and what to build first. Audi
   kernel is compiled to `sm_80` PTX, and PTX JIT only moves forward, so an sm_75 device cannot load it.
   `BackendFactory` then refuses the whole CUDA backend and `auto` falls to Vulkan.
 - **Most of the code already compiles for sm_75.** A per-file `nvcc -arch=sm_75 -cubin` audit of all 96 `.cu`
-  kernels: **90 compile for sm_75, 6 do not**. All 96 compile for sm_80 (control), so the 6 are real sm_75
+  kernels: **91 compile for sm_75, 5 do not**. All 96 compile for sm_80 (control), so the 5 are real sm_75
   gaps, not header or toolchain noise.
-- **The 6 are the tensor-core / async-copy kernels**: flash-attention F16 (two files), INT8 sage/v2 attention,
-  INT8 MMA GEMM, and MoE prefill. They use `cp.async` and `mma.sync.m16n8k16` / `m16n8k32`, which need sm_80.
+- **The 5 are the tensor-core / async-copy kernels**: flash-attention F16 (two files), INT8 sage/v2 attention,
+  and INT8 MMA GEMM. They use `cp.async` and `mma.sync.m16n8k16` / `m16n8k32`, which need sm_80.
 - **No new CUDA kernels are needed to get Turing running.** Step 1 is a build-list change plus per-kernel sm_75
-  variants. Only the 6 need real rewrites, and those rewrites use the Turing-legal `m16n8k8` MMA and synchronous
+  variants. Only the 5 need real rewrites, and those rewrites use the Turing-legal `m16n8k8` MMA and synchronous
   loads in place of `cp.async`. They are mechanical and parity-testable.
 - **Recommended:** make sm_75 a supported CUDA baseline (step 1), keep Vulkan as the fallback for Pascal and older,
   and measure CUDA-on-2060 against Vulkan-on-2060 before deciding more. Details and estimates below.
@@ -45,7 +46,7 @@ symptom if the gate is bypassed.
 | `mma` with `.bf16` operands | **No** | ptxas error `Feature '.bf16' requires .target sm_80` |
 | `mma.sync.m16n8k8` F16 | **Yes** | passed in the combined probe; also `docs/Research/DEEP_KERNEL_OPTIMIZATION.md:49` |
 | `ldmatrix` | **Yes** | passed in the combined probe |
-| BF16 storage and conversion | Yes, software-emulated | 90 files incl. `dit_bf16.cu` compile for sm_75; BF16 arithmetic is slow, no BF16 tensor cores |
+| BF16 storage and conversion | Yes, software-emulated | 91 files incl. `dit_bf16.cu` compile for sm_75; BF16 arithmetic is slow, no BF16 tensor cores |
 | Shared memory per SM | 64 KB (opt-in above 48 KB per block) | `CudaDriverApi.cs:88` comment assumes sm_89 limits; the engine reads per-device limits |
 
 Caveat on the probe: it was one file, so ptxas reported several errors at once. The per-file audit in §3 is the
@@ -61,11 +62,11 @@ shipped 13.0.88 bytes, so this is a compile-feasibility result, not a shipping r
 
 | Result | Files | Count |
 |---|---|---:|
-| sm_75 OK, sm_80 OK | every other file | 90 |
-| sm_75 FAIL, sm_80 OK | see below | 6 |
+| sm_75 OK, sm_80 OK | every other file | 91 |
+| sm_75 FAIL, sm_80 OK | see below | 5 |
 | sm_80 FAIL (control) | none | 0 |
 
-The six sm_75 failures, with the sm_80 feature each one needs:
+The five sm_75 failures, with the sm_80 feature each one needs:
 
 | File | Needs sm_80 for | Fix class |
 |---|---|---|
@@ -74,10 +75,12 @@ The six sm_75 failures, with the sm_80 feature each one needs:
 | `attention/sage_attn_int8.cu` | `cp.async` (15), `m16n8k16` F16 PV (3) | Synchronous loads; INT8 `m16n8k32` must be checked (see below) |
 | `attention/int8_attn_v2.cu` | `cp.async` (3), `m16n8k16` (3) | As above; this file is `NVCC_BUILT` |
 | `dequant/int8_mma_gemm.cu` | `cp.async` (16), 128-register accumulators | Synchronous loads; the smem swizzle comments are sm_80-tuned |
-| `moe/moe_prefill.cu` | not itemized by grep | Compile error not yet read; start here |
 
-Caveat: "90 compile" is not "90 run correctly". The check verifies that the code is legal for sm_75. It does not
-check runtime behavior, the shared-memory opt-ins, `__shfl_sync` widths, or performance. Each of the 90 still needs a
+`moe/moe_prefill.cu` is not a failure. It compiles and assembles for sm_75 (nvcc and nvrtc compute_75, then ptxas), so
+it stays on the sm_80 build only until a Turing run verifies its grouped-prefill path.
+
+Caveat: "91 compile" is not "91 run correctly". The check verifies that the code is legal for sm_75. It does not
+check runtime behavior, the shared-memory opt-ins, `__shfl_sync` widths, or performance. Each of the 91 still needs a
 parity run on the 2060.
 
 Two files use BF16 but no BF16 MMA: `dit/dit_bf16.cu` and `dequant/dequant_recipe_to_bf16.cu`. They pass the sm_75
@@ -118,25 +121,25 @@ validated.
 
 ### Step 1: make sm_75 a CUDA baseline (small, days)
 
-1. Build the 90 compile-clean kernels for `sm_75` PTX as the baseline (`KERNELS` → `-arch=sm_75`). Forward JIT means
+1. Build the 91 compile-clean kernels for `sm_75` PTX as the baseline (`KERNELS` → `-arch=sm_75`). Forward JIT means
    sm_80, sm_86, sm_89, and Blackwell still load them.
-2. For the 6 sm_80-only kernels, the baseline `{kernel}.ptx` stays the sm_80 PTX that every device at or above sm_80
+2. For the 5 sm_80-only kernels, the baseline `{kernel}.ptx` stays the sm_80 PTX that every device at or above sm_80
    loads, and a Turing-legal `{kernel}.sm75.ptx` is added as the floor variant. `PtxPath` (`CudaKernels.cs:520`) picks
    the file whose `.target` is the highest the device can run: sm_75 takes the `.sm75` file, and any other device takes
    the baseline. Do not name the sm_80 build `.sm80.ptx`: a tuned variant above sm_75 loads only on exactly sm_80.
 3. Set `BaselineSm = CudaArch.Turing` and update `BackendFactory.CudaMeetsKernelBaseline`, the gate messages, and the
    `build_common.sh` comments. Keep sm_70 and older on Vulkan.
-4. Run the existing CUDA test suite on the 2060 with the 6 sm_80-only kernels temporarily excluded, to confirm
+4. Run the existing CUDA test suite on the 2060 with the 5 sm_80-only kernels temporarily excluded, to confirm
    nothing else depends on sm_80.
 
 Effort estimate (mine, rough): 2–4 days including the build changes and the test run.
 
-### Step 2: port the 6 sm_80-only kernels (weeks)
+### Step 2: port the 5 sm_80-only kernels (weeks)
 
 Replace `cp.async` with register-staged `ld.global`/`st.shared` (or double-buffered synchronous loads). Replace
 `m16n8k16` with two `m16n8k8` per K-step: the A fragment changes from 4 to 2 registers, so the fragment-load code
 changes, not just the asm line. The INT8 kernels need a separate check: `m16n8k32 s8` may or may not be legal on sm_75,
-and the audit did not isolate it. Start with `moe_prefill`, since its compile error is not yet itemized.
+and the audit did not isolate it. `moe_prefill` compiles for sm_75, so it is not part of that open question.
 
 Each kernel needs a parity test against its sm_80 output on the same inputs, plus a timing check against the
 current Vulkan path. Effort (mine, rough): 1–2 weeks per attention kernel including parity, 1 week for the INT8 GEMM
@@ -146,14 +149,14 @@ and the MoE file. Total on the order of 4–6 weeks of focused work.
 
 On the 2060, measure:
 
-- CUDA (sm_75 baseline + the six ported kernels) against Vulkan, on the same shapes as `VULKAN.md`.
+- CUDA (sm_75 baseline + the five ported kernels) against Vulkan, on the same shapes as `VULKAN.md`.
 - Whether cuBLAS GEMM alone recovers most of the gap, given the GEMM ratios are the largest.
 
 The result decides whether the remaining Vulkan work (ROADMAP Phase 5 coopmat) or more CUDA tuning is worth the time.
 
 ### What not to do
 
-- Do not write new CUDA kernels to replace the 90 that already compile. The work is the build list and runtime
+- Do not write new CUDA kernels to replace the 91 that already compile. The work is the build list and runtime
   validation, not rewriting.
 - Do not expect Pascal or older to run CUDA. CUDA 13 (and I believe the CUDA 13 release notes) drop compile targets
   below sm_75. I did not verify that against NVIDIA's documentation during this audit, so check it before quoting it.
@@ -171,7 +174,7 @@ The result decides whether the remaining Vulkan work (ROADMAP Phase 5 coopmat) o
 
 ## 8. Open questions to settle with GPU runs
 
-1. Does `moe_prefill.cu` fail for an sm_80-only reason, or for something else? (read the compile error)
+1. Resolved: `moe_prefill.cu` compiles for sm_75. Open: whether its grouped-prefill path is correct on Turing (needs a run).
 2. Do the INT8 `m16n8k32` and `m8n8k16` shapes compile for sm_75 in isolation? (single-instruction probe)
 3. On the 2060, does the planner pick a usable non-MMA attention row, or `host.reference`?
 4. Resolved in code: `PtxPath` ranks by the `.target` header and falls back to the baseline, so an sm_80 baseline plus a `.sm75.ptx` floor variant resolves correctly. The variants land in PR #576.
