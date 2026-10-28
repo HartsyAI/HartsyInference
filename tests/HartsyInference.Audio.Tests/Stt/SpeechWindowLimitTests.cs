@@ -30,6 +30,12 @@ public sealed class SpeechWindowLimitTests
     }
 
     [Fact]
+    public void MoonshineStreaming_WindowIsCappedAtTheMeasuredLimit()
+    {
+        Assert.Equal(30.0, MoonshineStreamingPipeline.MaxMeasuredSeconds);
+    }
+
+    [Fact]
     public void Moonshine_WindowFollowsDecoderPositions()
     {
         Assert.Equal(193 / 6.5, MoonshineGreedyDecoder.WindowSecondsFor(194), precision: 9);
