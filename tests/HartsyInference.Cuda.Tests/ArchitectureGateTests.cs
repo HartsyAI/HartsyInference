@@ -68,6 +68,8 @@ public sealed class ArchitectureGateTests
             Assert.DoesNotContain(skipped, module => module.StartsWith("dequant_q4_k_to_f16 ", StringComparison.Ordinal));
             Assert.False(backend.Kernels!.HasFlashAttnF16);
             Assert.False(backend.Kernels.HasSageAttentionKernels);
+            // Gate 75 reads the Turing variants: every required module must still bind, whatever card runs the test.
+            Assert.Empty(backend.Kernels.UnboundRequiredModules);
             Assert.False(backend.Kernels.HasMoePrefillKernels);
 
             // elementwise_f32 is sm_70 PTX, so its kernels still load and compute.

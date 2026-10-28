@@ -32,6 +32,7 @@ public sealed class BackendKernelBaselineTests
             // Turing is the floor: a card there is chosen for CUDA. Whether its required modules bind is the probe's question.
             BackendFactory.QuerySmForTests = _ => CudaKernels.MinimumSm;
             Assert.Equal("cuda", BackendFactory.Resolve("auto"));
+            Assert.Null(BackendFactory.CudaUnavailableReason);
         }
         finally
         {

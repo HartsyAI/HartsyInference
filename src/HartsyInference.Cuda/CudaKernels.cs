@@ -637,7 +637,9 @@ public sealed partial class CudaKernels : IDisposable
             }
             _notedSkips = true;
         }
-        HartsyInference.Core.Logging.Logs.Warning($"[Cuda] {device}: {string.Join(", ", _skippedModules)}. {advice}");
+        string line = $"[Cuda] {device}: {string.Join(", ", _skippedModules)}. {advice}";
+        if (_unboundRequired.Count > 0) HartsyInference.Core.Logging.Logs.Warning(line);
+        else HartsyInference.Core.Logging.Logs.Info(line);
     }
 
     /// <summary>Whether <paramref name="path"/> exists and this device can JIT it. A module built for a newer architecture is
@@ -672,14 +674,14 @@ public sealed partial class CudaKernels : IDisposable
     }
 
     /// <summary>Loads a module and transfers its finalization ownership to this kernel table, so CudaKernels' Dispose/finalizer releases it instead of an independently queued child finalizer racing ahead of the owning table's cleanup.</summary>
-    private CudaModule LoadOwnedModule(string path, int maxRegisters = 0)
+    private CudaModule LoadOwnedModule(string path, int maxRegisters = 0, bool required = true)
     {
         Exception? injectedFailure = Volatile.Read(ref _moduleLoadFailureForTests)?.Invoke(path);
         if (injectedFailure is not null) throw injectedFailure;
         if (SkipsForArchitecture(path))
         {
-            // Only required modules reach this point: an optional one is checked with CanLoad before it is loaded.
-            _unboundRequired.Add(Path.GetFileNameWithoutExtension(path));
+            // A required module left unbound refuses the card at probe time. An optional one has a fallback and is not counted.
+            if (required) _unboundRequired.Add(Path.GetFileNameWithoutExtension(path));
             return CudaModule.Unloadable;
         }
         CudaModule module = CudaModule.LoadFromFile(path, maxRegisters);
@@ -1264,7 +1266,7 @@ public sealed partial class CudaKernels : IDisposable
         {
             try
             {
-                _mulMatVecF16Bf16Module = LoadOwnedModule(Ptx("mul_mat_vec_f16_bf16_f32"));
+                _mulMatVecF16Bf16Module = LoadOwnedModule(Ptx("mul_mat_vec_f16_bf16_f32"), required: false);
                 _mulMatVecBf16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_bf16_f32");
                 _mulMatVecF16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_f16_f32");
                 // A device below the module's architecture gets the unloadable stand-in and zero handles: cuBLAS then.
