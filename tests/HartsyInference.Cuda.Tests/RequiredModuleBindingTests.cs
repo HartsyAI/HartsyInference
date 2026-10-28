@@ -17,6 +17,8 @@ public sealed class RequiredModuleBindingTests
     public void EveryRequiredModuleBindsFromTheShippedPtxOnTheRunningCard()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        // A card below the floor is refused by design, so its required modules are expected to stay unbound.
+        if (CudaContext.QuerySm(0) < CudaKernels.MinimumSm) { _output.WriteLine("SKIPPED: below the Turing floor"); return; }
         using CudaContext context = new CudaContext(0);
         using CudaKernels kernels = new CudaKernels(ShippedPtxDir(), context);
         string unbound = kernels.UnboundRequiredModules.Count == 0 ? "none" : string.Join(", ", kernels.UnboundRequiredModules);

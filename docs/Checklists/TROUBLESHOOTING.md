@@ -491,7 +491,7 @@ no bug, any more than one bad seed was proof there was one.
   `.target` and skips what the device cannot load, logging `[Cuda] This device (SM 7.5) cannot load N kernel
   module(s)…` at startup; the sm_70/sm_75 modules still load. A later `CUDA_ERROR_INVALID_HANDLE` that carries the
   same note is a launch of a skipped kernel. Use Vulkan on such a card (`auto` already does); a `.sm75.ptx` whose
-  header is sm_75 is picked when the baseline targets a newer architecture than the device.
+  header is sm_75 is picked on a Turing card, because the sm_80 baseline is too new for it to run.
 - **"Drifted" PTX whose source is current — check the frontend first.** nvcc and nvrtc of one release stamp the
   same `// Cuda compilation tools, release 13.0, V13.0.88` line but emit different PTX for many kernels, so the
   header cannot say which one built a file. Rebuild the kernel with both before blaming the source: if one

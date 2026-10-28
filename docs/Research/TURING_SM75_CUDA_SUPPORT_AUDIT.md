@@ -28,7 +28,7 @@ below are the audit's own.
 | `src/HartsyInference.Cuda/CudaKernels.cs:503` | `BaselineSm = CudaArch.Ampere` (sm_80). Modules whose `.target` is newer than the device are skipped, not bound. |
 | `CudaKernels.cs:531` `PtxPath` | Picks the file whose `.target` header is the highest the device can run, among `{kernel}.ptx` and `{kernel}.sm*.ptx`. A tuned variant above sm_75 needs an **exact** SM match. |
 | `src/HartsyInference.Engine/BackendFactory.cs:132` | `CudaMeetsKernelBaseline` returns false below `MinimumSm` (sm_75), so automatic selection passes CUDA over and takes Vulkan. |
-| `CudaBackend.cs:1445` | `SupportsBF16 = Sm >= Ampere`. |
+| `CudaBackend.cs:1449` | `SupportsBF16 = CudaArch.HasBf16(Sm)`, sm_80 and newer. |
 | `CudaBackend.cs:1344` | TF32 and "fast F16 GEMM" are gated to Ampere. |
 
 So the sm_80 number is a **packaging decision**, not a hardware requirement for most of the code. The hardware

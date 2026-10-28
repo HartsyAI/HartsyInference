@@ -89,7 +89,7 @@ public sealed class ArchitectureGateTests
             _output.WriteLine(note ?? "(no note)");
             Assert.NotNull(note);
             Assert.Contains($"cannot load {skipped.Count} kernel module(s)", note, StringComparison.Ordinal);
-            Assert.Contains("have fallback paths", note, StringComparison.Ordinal);
+            Assert.Contains("are optional", note, StringComparison.Ordinal);
         }
         finally
         {

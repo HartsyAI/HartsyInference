@@ -624,7 +624,7 @@ public sealed partial class CudaKernels : IDisposable
         // Only a required module that stayed unbound makes this card unusable here. The optional ones have fallback paths.
         string advice = _unboundRequired.Count > 0
             ? $"Required kernels are unbound on this card ({string.Join(", ", _unboundRequired)}); use the Vulkan backend on it."
-            : "The skipped modules are optional and have fallback paths; a launch that still fails with an invalid handle reached one of them without that fallback.";
+            : "The skipped modules are optional; a launch that still fails with an invalid handle reached one of them, and that kernel has no fallback here.";
         string named = _skippedModules.Count <= Named
             ? string.Join(", ", _skippedModules)
             : $"{string.Join(", ", _skippedModules.Take(Named))} and {_skippedModules.Count - Named} more";
