@@ -35,6 +35,13 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
     {
         cuda = null!;
         if (!BackendGate.TryOpen("cuda", output.WriteLine, out IBackend? backend)) return false;
+        // int8_attn_v2 is built for sm_80 and up only; a Turing card has no kernel for these tests to route to.
+        if (CudaContext.QuerySm(0) < CudaArch.Ampere)
+        {
+            output.WriteLine("SKIPPED: int8_attn_v2 is sm_80+ only");
+            backend!.Dispose();
+            return false;
+        }
         cuda = (CudaBackend)backend!;
         return true;
     }
@@ -701,8 +708,6 @@ public sealed unsafe class Int8AttentionV2KernelTests(ITestOutputHelper output)
     {
         if (!Open(out CudaBackend cuda)) return;
         using CudaBackend owner = cuda;
-        // int8_attn_v2 is built for sm_80 and up only, so a Turing card has no kernel to time.
-        if (CudaContext.QuerySm(0) < CudaArch.Ampere) { output.WriteLine("SKIPPED: int8_attn_v2 is sm_80+ only"); return; }
         TensorShape shape = new(1, 24, tokens, 128);
         using Tensor q = new(shape, DType.F16), k = new(shape, DType.F16), v = new(shape, DType.F16), o = new(shape, DType.F16);
         Random rng = new(5);
