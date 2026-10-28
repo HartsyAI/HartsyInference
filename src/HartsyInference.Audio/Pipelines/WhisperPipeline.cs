@@ -32,7 +32,6 @@ namespace HartsyInference.Audio.Pipelines;
 /// <c>WhisperDecoder</c> runs fused SDPA without surfacing attention weights.</para></summary>
 public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 {
-    /// <summary>Whisper's input window: 30 s at 16 kHz.</summary>
     /// <summary>Whisper's input window in seconds; longer audio is not decoded past this point.</summary>
     public const int WindowSeconds = 30;
 

@@ -30,6 +30,37 @@ public sealed class SpeechWindowLimitTests
     }
 
     [Fact]
+    public void Moonshine_ZeroBudgetIsDerivedFromTheClipLength()
+    {
+        MoonshineOptions resolved = MoonshineGreedyDecoder.ResolveOptions(null, sampleCount: 29 * 16_000, sampleRate: 16_000, maxTextPositions: 194);
+
+        Assert.Equal(188, resolved.MaxNewTokens);
+    }
+
+    [Fact]
+    public void Moonshine_DerivedBudgetFollowsTheCallersSampleRate()
+    {
+        MoonshineOptions resolved = MoonshineGreedyDecoder.ResolveOptions(new MoonshineOptions(), sampleCount: 29 * 24_000, sampleRate: 24_000, maxTextPositions: 194);
+
+        Assert.Equal(188, resolved.MaxNewTokens);
+    }
+
+    [Fact]
+    public void Moonshine_ExplicitBudgetIsKept()
+    {
+        MoonshineOptions given = new() { MaxNewTokens = 40 };
+
+        Assert.Same(given, MoonshineGreedyDecoder.ResolveOptions(given, sampleCount: 29 * 16_000, sampleRate: 16_000, maxTextPositions: 194));
+    }
+
+    [Fact]
+    public void Moonshine_DecodeRefusesAnUnresolvedBudget()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            MoonshineGreedyDecoder.Decode(null!, null!, null!, null!, null!, new MoonshineOptions()));
+    }
+
+    [Fact]
     public void MoonshineStreaming_WindowIsCappedAtTheMeasuredLimit()
     {
         Assert.Equal(30.0, MoonshineStreamingPipeline.MaxMeasuredSeconds);

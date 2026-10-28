@@ -391,6 +391,8 @@ public sealed class AudioRunnerLeaseTests
 
         public bool Disposed { get; private set; }
 
+        public double? MaxInputSeconds => null;
+
         public string Transcribe(IBackend backend, float[] audioMono, AudioRequest request)
         {
             Interlocked.Increment(ref _calls);

@@ -177,6 +177,8 @@ public sealed class AudioRuntimeEvictionTests
     {
         public bool Disposed { get; private set; }
 
+        public double? MaxInputSeconds => null;
+
         public string Transcribe(IBackend backend, float[] audioMono, AudioRequest request) => string.Empty;
 
         public IReadOnlyList<SttSegment>? TranscribeTimed(IBackend backend, float[] audioMono, AudioRequest request) => null;

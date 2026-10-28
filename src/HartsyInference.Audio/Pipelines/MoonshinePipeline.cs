@@ -82,11 +82,7 @@ public sealed class MoonshinePipeline : IAudioPipeline, IDisposable
     public string TranscribeAudio(IBackend backend, float[] audio, int sampleRate, MoonshineOptions? options = null)
     {
         ThrowIfDisposed();
-        MoonshineOptions opts = options ?? new MoonshineOptions();
-        if (opts.MaxNewTokens == 0)
-        {
-            opts = opts with { MaxNewTokens = MoonshineGreedyDecoder.DerivedTokenBudget((double)audio.Length / sampleRate, _cfg.MaxTextPositions) };
-        }
+        MoonshineOptions opts = MoonshineGreedyDecoder.ResolveOptions(options, audio.Length, sampleRate, _cfg.MaxTextPositions);
 
         float[] mono16k = audio;
         if (sampleRate != 16_000)

@@ -24,6 +24,15 @@ internal static class MoonshineGreedyDecoder
         return (int)Math.Min(Math.Max(scaled, MinDerivedTokens), maxTextPositions - 1);
     }
 
+    /// <summary>The caller's options with a 0 <c>MaxNewTokens</c> replaced by the budget derived from the clip's length; an explicit value is kept.</summary>
+    internal static MoonshineOptions ResolveOptions(MoonshineOptions? options, int sampleCount, int sampleRate, int maxTextPositions)
+    {
+        MoonshineOptions opts = options ?? new MoonshineOptions();
+        return opts.MaxNewTokens != 0
+            ? opts
+            : opts with { MaxNewTokens = DerivedTokenBudget((double)sampleCount / sampleRate, maxTextPositions) };
+    }
+
     /// <summary>Longest clip one decode can cover before the decoder runs out of positions.</summary>
     internal static double WindowSecondsFor(int maxTextPositions) => (maxTextPositions - 1) / TokensPerSecond;
 
@@ -31,6 +40,11 @@ internal static class MoonshineGreedyDecoder
     public static string Decode(IBackend backend, MoonshineDecodeStep decodeStep, MoonshineDecoder.DecodeState state,
         MoonshineConfig cfg, MoonshineTokenizer tokenizer, MoonshineOptions opts)
     {
+        if (opts.MaxNewTokens <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(opts), "MaxNewTokens must be resolved to a positive budget; pass the options through ResolveOptions first.");
+        }
+
         // Prompt: just [BOS]. Moonshine has no language / task tokens.
         int[] prompt = [cfg.BosTokenId];
         Tensor logits = decodeStep(backend, prompt, state);
