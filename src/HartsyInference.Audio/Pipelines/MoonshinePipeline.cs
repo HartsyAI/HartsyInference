@@ -26,6 +26,9 @@ public sealed class MoonshinePipeline : IAudioPipeline, IDisposable
 
     public string ModelName { get; }
 
+    /// <summary>Longest clip one decode covers; longer audio must be split by the caller.</summary>
+    public double MaxInputSeconds => MoonshineGreedyDecoder.WindowSecondsFor(_cfg.MaxTextPositions);
+
     private MoonshinePipeline(string modelName, MoonshineConfig cfg, MoonshineEncoder enc, MoonshineDecoder dec, MoonshineTokenizer tok, SafeTensorsLoader loader)
     {
         ModelName = modelName;
@@ -75,18 +78,11 @@ public sealed class MoonshinePipeline : IAudioPipeline, IDisposable
         return TranscribeAudio(backend, audio.ToMono(), audio.SampleRate, options);
     }
 
-    /// <summary>Longest clip one decode covers; longer audio must be split by the caller.</summary>
-    public double MaxInputSeconds => MoonshineGreedyDecoder.WindowSecondsFor(_cfg.MaxTextPositions);
-
     /// <summary>Transcribe an in-memory mono audio buffer at the given sample rate.</summary>
     public string TranscribeAudio(IBackend backend, float[] audio, int sampleRate, MoonshineOptions? options = null)
     {
         ThrowIfDisposed();
-        MoonshineOptions opts = options ?? new MoonshineOptions();
-        if (opts.MaxNewTokens == 0)
-        {
-            opts = opts with { MaxNewTokens = MoonshineGreedyDecoder.DerivedTokenBudget((double)audio.Length / sampleRate, _cfg.MaxTextPositions) };
-        }
+        MoonshineOptions opts = MoonshineGreedyDecoder.ResolveOptions(options, audio.Length, sampleRate, _cfg.MaxTextPositions);
 
         float[] mono16k = audio;
         if (sampleRate != 16_000)

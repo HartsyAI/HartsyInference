@@ -43,6 +43,67 @@ public sealed class SpeechCutFinderTests
     }
 
     [Fact]
+    public void Find_SingleQuietFrame_CutsInItsMiddleNotAtItsEdge()
+    {
+        // Ten loud frames, one silent frame (320 samples), ten loud frames: the silent frame spans 3200-3520.
+        float[] band = Concat(Tone(3_200, 0.5f), Silence(320), Tone(3_200, 0.5f));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.False(cut.HardCut);
+        Assert.Equal(3_360, cut.Offset);
+    }
+
+    [Fact]
+    public void Find_QuietRunAtTheBandStart_CutsInItsMiddle()
+    {
+        float[] band = Concat(Silence(640), Tone(6_400, 0.5f));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.False(cut.HardCut);
+        Assert.Equal(320, cut.Offset);
+    }
+
+    [Fact]
+    public void Find_QuietRunAtTheBandEnd_CutsInItsMiddle()
+    {
+        float[] band = Concat(Tone(6_400, 0.5f), Silence(640));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.False(cut.HardCut);
+        Assert.Equal(6_720, cut.Offset);
+    }
+
+    [Fact]
+    public void Find_EqualQuietRuns_CutsInTheFirst()
+    {
+        float[] band = Concat(Silence(320), Tone(3_200, 0.5f), Silence(320), Tone(3_200, 0.5f));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.Equal(160, cut.Offset);
+    }
+
+    [Fact]
+    public void Find_TrailingPartialFrame_IsNotAQuietRun()
+    {
+        // Ten silent samples do not fill a frame, so they must not read as a clean cut inside loud audio.
+        float[] band = Concat(Tone(16_000, 0.5f), Silence(10));
+
+        SpeechCut cut = SpeechCutFinder.Find(band, SampleRate);
+
+        Assert.True(cut.HardCut);
+    }
+
+    [Fact]
+    public void Find_SampleRateBelowTheFloor_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => SpeechCutFinder.Find(new float[100], 40));
+    }
+
+    [Fact]
     public void Find_EmptyBand_Throws()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => SpeechCutFinder.Find(ReadOnlySpan<float>.Empty, SampleRate));

@@ -5,7 +5,6 @@ public static class SpeechTakeShaper
 {
     private const double RmsEpsilon = 1e-9;
     private const double ActiveFraction = 0.1;
-    private const int MinSampleRate = 50;
 
     /// <summary>Settings for <see cref="Shape"/>. The defaults match the reference take shaping.</summary>
     public sealed record SpeechTakeShapingOptions
@@ -149,22 +148,21 @@ public static class SpeechTakeShaper
         return Trim(squeezed, sampleRate, options.TopDb);
     }
 
-    // The reference enumerates frame starts below max(1, length - frame), so its last frame can be dropped.
-    private static int ReferenceFrameCount(int length, int frame)
-    {
-        int limit = Math.Max(1, length - frame);
-        return (limit + frame - 1) / frame;
-    }
-
     private static void ValidateArguments(float[] y, int sampleRate)
     {
         ArgumentNullException.ThrowIfNull(y);
-        if (sampleRate < MinSampleRate)
-            throw new ArgumentOutOfRangeException(nameof(sampleRate), sampleRate, "Must be at least 50 Hz.");
+        FrameEnergy.RequireSampleRate(sampleRate);
     }
 
     private static void ValidateNonNegative(double value, string name)
     {
         if (value < 0.0) throw new ArgumentOutOfRangeException(name, value, "Must be non-negative.");
+    }
+
+    // The reference enumerates frame starts below max(1, length - frame), so its last frame can be dropped.
+    private static int ReferenceFrameCount(int length, int frame)
+    {
+        int limit = Math.Max(1, length - frame);
+        return (limit + frame - 1) / frame;
     }
 }

@@ -1,22 +1,20 @@
-using HartsyInference.Audio.Dsp;
-
 namespace HartsyInference.Audio.Dsp.Windowing;
 
 /// <summary>Finds the quietest place in a band of audio to cut a long clip.</summary>
 public static class SpeechCutFinder
 {
     /// <summary>Returns the centre of the longest quiet run, or the quietest frame as a hard cut when nothing is quiet.</summary>
-    /// <remarks>A frame is quiet when its RMS is below the larger of <see cref="FrameEnergy.QuietFraction"/> of the loudest
-    /// frame and the silence floor, so an all-silent band counts as quiet throughout.</remarks>
+    /// <remarks>Quiet is under the larger of the relative and absolute floors. Only whole frames count; a shorter band is one frame.</remarks>
     public static SpeechCut Find(ReadOnlySpan<float> band, int sampleRate)
     {
         if (band.IsEmpty)
         {
             throw new ArgumentOutOfRangeException(nameof(band), "The band must hold at least one sample.");
         }
+        FrameEnergy.RequireSampleRate(sampleRate);
 
         int frame = FrameEnergy.FrameSamples(sampleRate);
-        int frames = (band.Length + frame - 1) / frame;
+        int frames = Math.Max(1, band.Length / frame);
         double[] rms = FrameEnergy.FrameRms(band, frame, frames);
         double quietBelow = Math.Max(FrameEnergy.MaxValue(rms) * FrameEnergy.QuietFraction, FrameEnergy.SilenceFloorAmplitude);
 
@@ -43,8 +41,8 @@ public static class SpeechCutFinder
 
         if (bestLength > 0)
         {
-            int centreFrame = bestStart + bestLength / 2;
-            return new SpeechCut(Math.Min(centreFrame * frame, band.Length - 1), HardCut: false);
+            int centre = bestStart * frame + bestLength * frame / 2;
+            return new SpeechCut(Math.Min(centre, band.Length - 1), HardCut: false);
         }
 
         int quietest = 0;
