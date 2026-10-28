@@ -11,22 +11,69 @@ public sealed class PtxVariantResolutionTests
     public PtxVariantResolutionTests(ITestOutputHelper output) => _output = output;
 
     [Theory]
-    [InlineData(89, "foo.sm89.ptx")]   // the card the variant was built for
-    [InlineData(86, "foo.ptx")]        // another card: the baseline, never a foreign variant
-    [InlineData(0, "foo.ptx")]         // no device known
-    public void VariantIsChosenOnlyForItsExactComputeCapability(int sm, string expectedFile)
+    // Baseline sm_80, variants sm_75 and sm_89, and an arch-specific sm_120a. Each card gets the highest target it can JIT.
+    [InlineData(120, "foo.sm120a.ptx")]  // the arch-specific build for its own capability beats the forward-compatible sm_89
+    [InlineData(121, "foo.sm89.ptx")]    // sm_120a is exact-only, so the highest forward-compatible build the card can run
+    [InlineData(89, "foo.sm89.ptx")]     // the card the variant was built for
+    [InlineData(86, "foo.ptx")]          // the sm_89 variant is too new, the sm_75 one is lower: the baseline is higher still
+    [InlineData(75, "foo.sm75.ptx")]     // Turing: the baseline sm_80 is too new, so the sm_75 build is the only one it can run
+    [InlineData(70, "foo.ptx")]          // older than every variant: the baseline comes back and the gate reports it skipped
+    [InlineData(0, "foo.ptx")]           // no device known
+    public void HighestBuildTheDeviceCanRunIsChosen(int sm, string expectedFile)
     {
         string dir = Directory.CreateTempSubdirectory("ptx-resolve-").FullName;
         try
         {
-            File.WriteAllText(Path.Combine(dir, "foo.ptx"), "// baseline");
-            File.WriteAllText(Path.Combine(dir, "foo.sm89.ptx"), "// sm_89a");
+            WritePtx(dir, "foo.ptx", 80);
+            WritePtx(dir, "foo.sm75.ptx", 75);
+            WritePtx(dir, "foo.sm89.ptx", 89);
+            WritePtx(dir, "foo.sm120a.ptx", 120, archSpecific: true);
             Assert.Equal(Path.Combine(dir, expectedFile), CudaKernels.PtxPath(dir, "foo", sm));
         }
         finally
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public void ArchSpecificBuildIsNeverRunOnAnotherCapability()
+    {
+        string dir = Directory.CreateTempSubdirectory("ptx-resolve-").FullName;
+        try
+        {
+            WritePtx(dir, "foo.ptx", 80);
+            WritePtx(dir, "foo.sm120a.ptx", 120, archSpecific: true);
+            Assert.Equal(Path.Combine(dir, "foo.ptx"), CudaKernels.PtxPath(dir, "foo", 89));
+            Assert.Equal(Path.Combine(dir, "foo.ptx"), CudaKernels.PtxPath(dir, "foo", 121));
+            Assert.Equal(Path.Combine(dir, "foo.sm120a.ptx"), CudaKernels.PtxPath(dir, "foo", 120));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void VariantNamedByItsHeaderNotItsFileName()
+    {
+        string dir = Directory.CreateTempSubdirectory("ptx-resolve-").FullName;
+        try
+        {
+            WritePtx(dir, "foo.ptx", 80);
+            WritePtx(dir, "foo.sm89.ptx", 84);   // the name says 89 (too new for an 86), the header says 84 (runnable)
+            Assert.Equal(Path.Combine(dir, "foo.sm89.ptx"), CudaKernels.PtxPath(dir, "foo", 86));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private static void WritePtx(string dir, string file, int sm, bool archSpecific = false)
+    {
+        string target = $"sm_{sm}{(archSpecific ? "a" : "")}";
+        File.WriteAllLines(Path.Combine(dir, file), ["//", $".version 9.0", $".target {target}", ".address_size 64"]);
     }
 
     [Fact]

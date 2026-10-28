@@ -512,15 +512,37 @@ public sealed partial class CudaKernels : IDisposable
     private readonly List<string> _skippedModules = [];
     private readonly Dictionary<string, int> _targetSmByPath = new(StringComparer.Ordinal);   // read once per file: CanLoad, then the load
 
-    /// <summary>The PTX to load for <paramref name="kernel"/>: the device's own variant, <c>{kernel}.sm{sm}.ptx</c> — built with the family-specific arch, so it may use instructions the baseline cannot — when one ships, else the baseline <c>{kernel}.ptx</c>. Exact compute capability only: arch-specific PTX is not forward-compatible, so a variant for another SM must never be picked.</summary>
+    /// <summary>The PTX to load for <paramref name="kernel"/> on a device of compute capability <paramref name="sm"/>: among
+    /// the baseline <c>{kernel}.ptx</c> and every <c>{kernel}.sm*.ptx</c> variant, the one whose <c>.target</c> is the highest
+    /// that the device can JIT (≤ <paramref name="sm"/>). The rank comes from each file's header, never its name. An
+    /// arch-specific target (<c>sm_120a</c>) is eligible only on its exact capability. When nothing is eligible the baseline
+    /// comes back, so the caller's architecture gate still reports it skipped.</summary>
     public static string PtxPath(string ptxDir, string kernel, int sm)
     {
-        if (sm > 0)
+        string baseline = Path.Combine(ptxDir, $"{kernel}.ptx");
+        if (sm <= 0 || !Directory.Exists(ptxDir)) return baseline;
+        string best = baseline;
+        int bestSm = -1;
+        if (File.Exists(baseline) && Eligible(baseline, sm) is { } baselineSm)
+            bestSm = baselineSm;
+        foreach (string variant in Directory.EnumerateFiles(ptxDir, $"{kernel}.sm*.ptx"))
         {
-            string variant = Path.Combine(ptxDir, $"{kernel}.sm{sm}.ptx");
-            if (File.Exists(variant)) return variant;
+            if (Eligible(variant, sm) is not { } target || target < bestSm) continue;
+            // An equal target prefers the variant: it was built for this family on purpose.
+            best = variant;
+            bestSm = target;
         }
-        return Path.Combine(ptxDir, $"{kernel}.ptx");
+        return best;
+    }
+
+    /// <summary>The target of <paramref name="path"/> when a device of capability <paramref name="sm"/> may load it, else null.
+    /// A header with no <c>.target</c> names no capability, so it is never eligible; <see cref="PtxPath"/> still returns the
+    /// baseline when nothing is eligible.</summary>
+    private static int? Eligible(string path, int sm)
+    {
+        (int target, bool archSpecific) = CudaModule.ReadTarget(path);
+        if (target <= 0) return null;
+        return archSpecific ? (target == sm ? target : null) : (target <= sm ? target : null);
     }
 
     private string Ptx(string kernel)

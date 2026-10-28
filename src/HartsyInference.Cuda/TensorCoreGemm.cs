@@ -30,7 +30,7 @@ public sealed class TensorCoreGemm : IDisposable
     {
         _ptxDir = ptxDir ?? throw new ArgumentNullException(nameof(ptxDir));
         _sm = sm;
-        IsSupported = sm >= CudaArch.Ampere;
+        IsSupported = CudaArch.HasMmaK16(sm);
     }
 
     /// <summary>Whether the kernel can handle these dimensions without bounds checks.</summary>

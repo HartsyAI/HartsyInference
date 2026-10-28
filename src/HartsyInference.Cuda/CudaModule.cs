@@ -42,7 +42,12 @@ public sealed class CudaModule : IDisposable
     /// <summary>The compute capability a PTX file's <c>.target</c> directive names (80 for <c>sm_80</c>, 120 for
     /// <c>sm_120a</c>), or 0 when its header names none. The driver JITs PTX forward only, so a device below this number
     /// cannot load the file.</summary>
-    public static int ReadTargetSm(string ptxPath)
+    public static int ReadTargetSm(string ptxPath) => ReadTarget(ptxPath).Sm;
+
+    /// <summary>The <c>.target</c> of a PTX file: its compute capability, and whether it is arch-specific (the <c>a</c> suffix,
+    /// as in <c>sm_120a</c>). An arch-specific file runs only on that exact compute capability; any other file runs on its
+    /// own capability and every newer one.</summary>
+    public static (int Sm, bool ArchSpecific) ReadTarget(string ptxPath)
     {
         foreach (string line in File.ReadLines(ptxPath).Take(64))
         {
@@ -51,13 +56,14 @@ public sealed class CudaModule : IDisposable
                 continue;
             int at = text.IndexOf("sm_", StringComparison.Ordinal);
             if (at < 0)
-                return 0;
+                return (0, false);
             int sm = 0;
-            for (int i = at + 3; i < text.Length && char.IsAsciiDigit(text[i]); i++)
+            int i = at + 3;
+            for (; i < text.Length && char.IsAsciiDigit(text[i]); i++)
                 sm = sm * 10 + (text[i] - '0');
-            return sm;
+            return (sm, i < text.Length && text[i] == 'a');
         }
-        return 0;
+        return (0, false);
     }
 
     /// <summary>Loads a PTX file from disk and JIT-compiles it for the current device.</summary>

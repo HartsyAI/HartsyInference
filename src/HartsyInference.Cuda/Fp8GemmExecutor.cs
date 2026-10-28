@@ -11,7 +11,7 @@ public sealed unsafe class Fp8GemmExecutor : CublasLtExecutorBase
     /// <summary>Compute capability detected at construction.</summary>
     public int SmMinor { get; }
 
-    public Fp8GemmExecutor(int smMajor, int smMinor) : base(CudaArch.Sm(smMajor, smMinor) >= CudaArch.Ada)
+    public Fp8GemmExecutor(int smMajor, int smMinor) : base(CudaArch.HasFp8TensorCores(CudaArch.Sm(smMajor, smMinor)))
     {
         SmMajor = smMajor;
         SmMinor = smMinor;

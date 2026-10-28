@@ -23,12 +23,13 @@ public sealed class CudaExpertKernels : IDisposable
     private readonly nint _activation;
     private bool _disposed;
 
-    /// <summary>Loads <see cref="PtxFileName"/> from <paramref name="ptxDir"/>.</summary>
+    /// <summary>Loads the expert FFN module from <paramref name="ptxDir"/>, choosing the variant for the device's compute capability
+    /// (<paramref name="sm"/>, 0 for the baseline) the same way the main kernel table does.</summary>
     /// <exception cref="FileNotFoundException">The module is not in <paramref name="ptxDir"/>.</exception>
-    public CudaExpertKernels(string ptxDir)
+    public CudaExpertKernels(string ptxDir, int sm = 0)
     {
         ArgumentException.ThrowIfNullOrEmpty(ptxDir);
-        string path = Path.Combine(ptxDir, PtxFileName);
+        string path = CudaKernels.PtxPath(ptxDir, Path.GetFileNameWithoutExtension(PtxFileName), sm);
         if (!File.Exists(path)) throw new FileNotFoundException("The expert FFN PTX module is missing.", path);
         _module = CudaModule.LoadFromFile(path);
         _gemm = _module.GetFunction("expert_gemm_f32");
