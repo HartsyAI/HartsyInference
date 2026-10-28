@@ -79,8 +79,11 @@ public sealed class MoonshineStreamingPipeline : IAudioPipeline, IDisposable
         return TranscribeAudio(backend, audio.ToMono(), audio.SampleRate, options);
     }
 
+    /// <summary>Streaming Moonshine stops emitting text well before its position count, measured past 30 s.</summary>
+    internal const double MaxMeasuredSeconds = 30.0;
+
     /// <summary>Longest clip one decode covers; longer audio must be split by the caller.</summary>
-    public double MaxInputSeconds => MoonshineGreedyDecoder.WindowSecondsFor(_cfg.MaxTextPositions);
+    public double MaxInputSeconds => Math.Min(MoonshineGreedyDecoder.WindowSecondsFor(_cfg.MaxTextPositions), MaxMeasuredSeconds);
 
     /// <summary>Transcribe an in-memory mono audio buffer at the given sample rate.</summary>
     public string TranscribeAudio(IBackend backend, float[] audio, int sampleRate, MoonshineOptions? options = null)
