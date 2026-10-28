@@ -6,6 +6,7 @@
 #   ./build.sh --no-install       # compile only (artifacts stay beside the .cu)
 #   ./build.sh --arch sm_120a     # also build the domain's ARCH_VARIANTS for that arch, as <kernel>.sm120.ptx
 #   ./build.sh --arch sm_89       # a plain arch too: <kernel>.sm89.ptx loads only on compute capability 8.9
+#   ./build.sh --floor-only       # only the sm_75 floor variants; the baseline passes are skipped
 #
 # Lists a domain script may set before build_all:
 #   KERNELS        compiled for sm_80, the fleet baseline; PTX is JIT-forward-compatible from there
@@ -15,8 +16,9 @@
 #                  every file by its .target header: a tuned variant above sm_75 loads only on that exact compute
 #                  capability, and the baseline or a sm_75 build serves the rest
 #   NVCC_BUILT     kernels whose shipped PTX is CUDA 13.0.88 nvcc output rather than nvrtc output
-#   SM80_ONLY      KERNELS entries that need sm_80 instructions (cp.async, m16n8k16 MMA) and so get no Turing build; every
-#                  other KERNELS entry also ships as {kernel}.sm75.ptx, the floor build a Turing card loads
+#   SM80_ONLY      KERNELS entries with no Turing build: they need sm_80 instructions (cp.async, m16n8k16 MMA), or they
+#                  compile for sm_75 but are held on the sm_80 build until a Turing run verifies them. Every other KERNELS
+#                  entry also ships as {kernel}.sm75.ptx, the floor build a Turing card loads
 #   PTXAS_SPILL_CHECK  kernels whose every entry must assemble without a spill (ptxas -v, register counts logged): the
 #                  baseline for sm_80, sm_86, sm_89 and sm_120 (the 50-series JITs it), a variant for its own arch
 #
