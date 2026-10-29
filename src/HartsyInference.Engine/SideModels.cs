@@ -462,6 +462,17 @@ public static class SideModels
         Role = "vae",
     };
 
+    /// <summary>SDXL VAE: the standalone stabilityai/sdxl-vae build (fp32, MIT). A checkpoint that omits its own VAE takes this one, as SD3 takes <see cref="Sd35Vae"/>. The fp16-fix build is a different file and is not pinned here.</summary>
+    public static readonly ModelAsset SdxlVae = new ModelAsset
+    {
+        Repo = "stabilityai/sdxl-vae",
+        RepoPath = "sdxl_vae.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "SDXL/sdxl_vae.safetensors",
+        Role = "vae",
+        Sha256 = "63aeecb90ff7bc1c115395962d3e803571385b61938377bc7089b36e81e92e2e"
+    };
+
     /// <summary>SD3 / SD3.5 VAE — 16-channel autoencoder shared by every SD3.x variant; already diffusers-keyed, so it stages through <see cref="Features.LoaderVaeUtils.LoadFluxVaeF32"/> unchanged. Same mcmonkey/swarm-vaes repo as <see cref="FluxAe"/>, so a SwarmUI install shares the file.</summary>
     public static readonly ModelAsset Sd35Vae = new ModelAsset
     {
