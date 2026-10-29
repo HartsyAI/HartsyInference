@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "b2464de36851d1d6df936c2837ebe24d9b44fa4b9ae624b000261b194e791780",
+  "campaignSha256": "b2464de36851d1d6df936c2837ebe24d9b44fa4b9ae624b000261b194e791780",
+  "bundleSha256": "2384a065fa788c2af74aeafdf34cd4c0286ab55deb83e8d80c06c336cb7e068b",
+  "bundleBytes": 12548243,
+  "stagingUrl": "https://github.com/kalebbroo/HartsyInference/releases/download/benchmark-b2464de36851d1d6df936c2837ebe24d9b44fa4b9ae624b000261b194e791780/b2464de36851d1d6df936c2837ebe24d9b44fa4b9ae624b000261b194e791780.zip",
+  "archiveUrl": "https://github.com/HartsyAI/HartsyInference/releases/download/benchmark-evidence/b2464de36851d1d6df936c2837ebe24d9b44fa4b9ae624b000261b194e791780.zip"
+}
