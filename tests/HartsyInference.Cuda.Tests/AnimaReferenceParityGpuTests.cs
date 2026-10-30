@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -18,7 +19,9 @@ namespace HartsyInference.Cuda.Tests;
 /// reference cache, and joins it. Its per-block reference keys and values and its velocity must match the node's dump.
 /// <para>Needs three inputs, and skips when any is unset: <c>HARTSY_ANIMA_REF_DUMP</c> (the output of <c>dump_anima_ref_adapter.py</c>),
 /// <c>HARTSY_ANIMA_CHECKPOINT</c> (anima-base-v1.0.safetensors) and <c>HARTSY_ANIMA_ADAPTER</c> (anima_ref_adapter_v2_r64.safetensors).
-/// The tolerance is a first bound, not a tuned one: the run reports the observed maximum, which is what to tighten against.</para></summary>
+/// The reference RoPE tables are compared first, so a position mismatch is not mistaken for a block mismatch. Each value's error is
+/// divided by <c>max(1, |expected|)</c>, so values below 1 are compared on an absolute scale. The tolerance is a first bound, not a
+/// tuned one: the run reports the observed maximum, which is what to tighten against.</para></summary>
 [Collection("CudaSerial")]
 public sealed unsafe class AnimaReferenceParityGpuTests
 {
@@ -76,6 +79,28 @@ public sealed unsafe class AnimaReferenceParityGpuTests
         using ReferenceKvCache cache = transformer.BuildReferenceCache(cuda, reference, targetGridH, placement, identity: 1);
         cuda.Sync();
 
+        // The RoPE rows the reference and the target read, as the engine's host tables hold them, against the node's. A position error
+        // shows here before it shows in any block.
+        AnimaRope rope = new(AnimaConfig.AnimaPreview3.HeadDim, AnimaConfig.AnimaPreview3.RopeTheta, AnimaConfig.AnimaPreview3.RopeScale);
+        int referenceGridH = (int)reference.Shape[2] / 2;
+        int referenceGridW = (int)reference.Shape[3] / 2;
+        using (RopeTableLease referenceTables = rope.AcquireFrameTables(cuda, 1, referenceGridH, referenceGridW,
+            placement.RowOffset(targetGridH), placement.ColumnOffset, out _, out _))
+        {
+            using Tensor cos = HostTensor(referenceTables.HostCos);
+            using Tensor sin = HostTensor(referenceTables.HostSin);
+            CompareFlat(cuda, "rope.ref.cos", dump.GetTensor("rope.ref.cos"), cos);
+            CompareFlat(cuda, "rope.ref.sin", dump.GetTensor("rope.ref.sin"), sin);
+        }
+        using (RopeTableLease targetTables = rope.AcquireFrameTables(cuda, 0, targetGridH, (int)latent.Shape[3] / 2, 0, 0, out _, out _))
+        {
+            using Tensor cos = HostTensor(targetTables.HostCos);
+            using Tensor sin = HostTensor(targetTables.HostSin);
+            CompareFlat(cuda, "rope.target.cos", dump.GetTensor("rope.target.cos"), cos);
+            CompareFlat(cuda, "rope.target.sin", dump.GetTensor("rope.target.sin"), sin);
+        }
+        rope.ReleaseGpuTables(cuda);
+
         for (int i = 0; i < cache.Layers; i++)
         {
             // Borrowed from the cache: read them, never dispose them.
@@ -88,6 +113,14 @@ public sealed unsafe class AnimaReferenceParityGpuTests
         using Tensor velocity = transformer.Forward(cuda, latent, sigma, context, null, cache);
         CompareFlat(cuda, "out.velocity", dump.GetTensor("out.velocity"), velocity);
         transformer.ReleaseDeviceCache(cuda);
+    }
+
+    /// <summary>A host tensor holding a lease's table values, so the comparison reads them the way it reads the dump's.</summary>
+    private static Tensor HostTensor(ReadOnlySpan<float> values)
+    {
+        Tensor tensor = new(new TensorShape(values.Length), DType.F32);
+        values.CopyTo(tensor.AsSpan<float>());
+        return tensor;
     }
 
     /// <summary>Copies a host tensor to the device as a device-authored input, so a host round trip in the path would show.</summary>

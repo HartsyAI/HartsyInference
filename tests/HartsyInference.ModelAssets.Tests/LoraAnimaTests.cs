@@ -79,6 +79,20 @@ public sealed class LoraAnimaTests : IDisposable
     }
 
     [Fact]
+    public void Load_FileWithNoCompletePair_IsRefusedNotLoadedEmpty()
+    {
+        // The detector claims this file by its one Anima key; with no up matrix there is no layer, and an empty LoRA would change nothing.
+        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new()
+        {
+            ["diffusion_model.blocks.0.self_attn.q_proj.lora_down.weight"] = (DType.F32, [2, 8], Fill(16, 0.5f)),
+        };
+        string path = CreateSafeTensorsFile("anima_half_pair", tensors);
+
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => LoraFile.Load(path));
+        Assert.Contains("no complete block-module layers", ex.Message);
+    }
+
+    [Fact]
     public void Load_FullWeightDiffBesideAnimaLayers_IsRefusedByName()
     {
         // A diff is no LoRA suffix, so the file is claimed by its low-rank pair; the diff is what must be refused.

@@ -21,6 +21,8 @@ public sealed class RequestExtrasNumberTests
 
     [Theory]
     [InlineData("\"abc\"")]
+    [InlineData("\"NaN\"")]
+    [InlineData("\"Infinity\"")]
     [InlineData("true")]
     [InlineData("null")]
     public void Number_FallsBackOnANonNumericJsonValue(string json)

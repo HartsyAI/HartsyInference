@@ -137,6 +137,23 @@ public sealed class AnimaReferenceKvTests
         Assert.Throws<NotSupportedException>(() => transformer.Forward(cpu, latent, 0.625f, text, null, cache));
     }
 
+    [Fact]
+    public void Transformer_ReferenceBuiltForAnotherTargetGrid_IsRefused()
+    {
+        // The reference's RoPE rows depend on the target grid, so a cache built for 3 rows must not join a 2-row target.
+        using CpuBackend cpu = new();
+        AnimaConfig config = TinyConfig();
+        using AnimaTransformer transformer = new(config);
+        transformer.LoadWeights(Weights(config));
+        using Tensor reference = Ramp(new TensorShape(1, 2, RefH, RefW), 1.1f);
+        using ReferenceKvCache cache = transformer.BuildReferenceCache(cpu, reference, TargetH / 2,
+            new ReferencePlacement(1, 1.0f, 0), identity: 1);
+        using Tensor latent = Ramp(new TensorShape(1, 2, TargetH - 2, TargetW), 0.3f);
+        using Tensor text = Ramp(new TensorShape(1, Text, TextWidth), 0.7f);
+
+        Assert.Throws<ArgumentException>(() => transformer.Forward(cpu, latent, 0.625f, text, null, cache));
+    }
+
     private static float MaxAbsDifference(Tensor a, Tensor b)
     {
         ReadOnlySpan<float> x = a.AsReadOnlySpan<float>();

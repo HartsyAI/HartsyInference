@@ -12,11 +12,13 @@ public static class ReferenceKvPrepass
     public delegate Tensor PrefixLayer(int layer, Tensor stream, out Tensor keys, out Tensor values);
 
     /// <summary>Builds the cache for <paramref name="layers"/> blocks, leaving the layers in <paramref name="skipLayers"/> uncached.
-    /// <paramref name="embedded"/> is borrowed; the streams the loop creates are disposed as it goes.</summary>
+    /// <paramref name="embedded"/> is borrowed; the streams the loop creates are disposed as it goes. <paramref name="targetGridH"/>
+    /// is recorded on the cache when the family's reference placement depends on the target grid.</summary>
     public static ReferenceKvCache Build(IBackend backend, int layers, IReadOnlyCollection<int> skipLayers, Tensor embedded,
-        PrefixLayer prefix, long fingerprint, string family)
+        PrefixLayer prefix, long fingerprint, string family, int? targetGridH = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(skipLayers);
         ArgumentNullException.ThrowIfNull(prefix);
         using ReferenceKvCache.Builder builder = new(layers);
         Tensor stream = embedded;
@@ -50,6 +52,6 @@ public static class ReferenceKvPrepass
             if (ownsStream)
                 stream.Dispose();
         }
-        return builder.Build(backend, fingerprint, family);
+        return builder.Build(backend, fingerprint, family, targetGridH);
     }
 }

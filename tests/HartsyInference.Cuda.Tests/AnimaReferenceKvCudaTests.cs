@@ -12,7 +12,8 @@ using static HartsyInference.Tests.Common.AnimaSyntheticWeights;
 namespace HartsyInference.Cuda.Tests;
 
 /// <summary>The reference K/V join on CUDA against the CPU: a tiny Anima transformer builds a reference cache, and a forward joins it into
-/// every block. The device output must match the host output, and the device path must not read back to the host before the result.</summary>
+/// every block. The device output must match the host output. The inputs are written on the device, so the comparison does not depend on
+/// a host upload of them.</summary>
 [Collection("CudaSerial")]
 public sealed unsafe class AnimaReferenceKvCudaTests
 {

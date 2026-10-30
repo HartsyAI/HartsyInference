@@ -34,7 +34,7 @@ Usage (run with the ComfyUI checkout's python environment, from anywhere):
       --out <dump.safetensors>
 
 Requirements: torch, safetensors, numpy, pillow, huggingface_hub, einops, and ComfyUI's requirements. Peak memory is the full
-model in F32, about 8 GB of weights plus activations, so run it on a GPU host or with enough RAM on the CPU.
+model in F32, about 8 GB of weights plus activations. The script always runs on the CPU (it sets `cpu=True`), so it needs that much RAM and no GPU.
 
 Status: written against the sources pinned above; not yet executed. Run it before trusting any parity result built on it.
 """
