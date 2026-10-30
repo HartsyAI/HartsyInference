@@ -422,8 +422,9 @@ public sealed class LoraStack : IDisposable
         {
             // DoRA rescales the whole (W + ΔW) row-wise, so it is not an additive term and cannot be carried here.
             throw new NotSupportedException(
-                $"LoRA '{canonicalKey}' is a DoRA adapter, whose magnitude rescaling is not additive and so cannot be "
-                + $"applied at runtime to a packed {baseW.DType.Name} weight. Use a dense or fp8 build of this model.");
+                $"LoRA '{canonicalKey}' is a DoRA adapter, whose magnitude rescaling is not additive, so it cannot be applied "
+                + $"as a runtime adjunct to this {baseW.DType.Name} {baseW.Shape} weight. A DoRA adapter needs its weight merged "
+                + "into a build that holds the dense weight.");
         }
     }
 
