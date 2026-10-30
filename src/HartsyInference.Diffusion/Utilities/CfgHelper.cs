@@ -216,6 +216,20 @@ public static unsafe class CfgHelper
         return output;
     }
 
+    /// <summary>Device twin of <see cref="ApplyDualCfg"/>: writes <c>u + innerScale·(m − u) + outerScale·(c − m)</c> into
+    /// <paramref name="output"/> as two affine mixes and an add, so the combine stays on the device.</summary>
+    /// <remarks>One formula on two surfaces: the reference adapter's guidance (cond = positive with reference, mid = negative with
+    /// reference, uncond = the base without it), MOSS's skip-layer guidance and any future dual-branch combine. The result may differ
+    /// from the host loop's by rounding, since the device sums in a different order; the regression A/B decides whether that is visible.</remarks>
+    public static void ApplyDualCfgDevice(IBackend backend, Tensor output, Tensor cond, Tensor imageCond, Tensor uncond,
+        float innerScale, float outerScale)
+    {
+        backend.AffineMix(output, imageCond, uncond, innerScale, 1f - innerScale);
+        using Tensor outerTerm = new(cond.Shape, DType.F32);
+        backend.AffineMix(outerTerm, cond, imageCond, outerScale, -outerScale);
+        backend.Add(output, output, outerTerm);
+    }
+
     /// <summary>TCFG (Tangential Damping Classifier-free Guidance, https://huggingface.co/papers/2503.18137 —
     /// Hartsy's "hartsyinference"-flagged param, see the same duplication-vs-Comfy-flag rationale documented on
     /// <see cref="ApplyCfgRescale"/>): before the standard CFG combine, drops the component of the unconditional
