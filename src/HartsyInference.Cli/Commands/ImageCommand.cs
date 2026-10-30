@@ -298,6 +298,29 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         public bool Quiet { get; init; }
     }
 
+    /// <summary>Copies the reference options into the parameter bag the dispatch reads. Every reference option is bound here: one that is
+    /// declared but not bound never reaches the engine, and the engine silently applies its default.</summary>
+    internal static void BindReference(ParamState parameters, Settings settings)
+    {
+        if (settings.ReferenceImages is { Length: > 0 })
+        {
+            parameters.Put("reference-images", string.Join('\n', settings.ReferenceImages));
+        }
+        parameters.PutIfSet("reference-kv-cache", settings.ReferenceKvCache);
+        parameters.PutIfSet("reference-max-pixels", settings.ReferenceMaxPixels);
+        parameters.PutIfSet("reference-vision-pixels", settings.ReferenceVisionPixels);
+        parameters.PutIfSet("reference-layout", settings.ReferenceLayout);
+        parameters.PutIfSet("reference-scale", settings.ReferenceScale);
+        parameters.PutIfSet("reference-adapter", settings.ReferenceAdapter);
+        parameters.PutIfSet("reference-strength", settings.ReferenceAdapterStrength);
+        parameters.PutIfSet("reference-guidance", settings.ReferenceGuidance);
+        parameters.PutIfSet("reference-correction", settings.ReferenceCorrection);
+        parameters.PutIfSet("reference-rescale-phi", settings.ReferenceRescalePhi);
+        parameters.PutIfSet("reference-start", settings.ReferenceStart);
+        parameters.PutIfSet("reference-end", settings.ReferenceEnd);
+        parameters.PutIfSet("reference-outside", settings.ReferenceOutside);
+    }
+
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
@@ -322,15 +345,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("init-image", settings.InitImage);
         parameters.PutIfSet("creativity", settings.Creativity);
         parameters.PutIfSet("init-image-mode", settings.InitImageMode);
-        if (settings.ReferenceImages is { Length: > 0 })
-        {
-            parameters.Put("reference-images", string.Join('\n', settings.ReferenceImages));
-        }
-        parameters.PutIfSet("reference-kv-cache", settings.ReferenceKvCache);
-        parameters.PutIfSet("reference-max-pixels", settings.ReferenceMaxPixels);
-        parameters.PutIfSet("reference-vision-pixels", settings.ReferenceVisionPixels);
-        parameters.PutIfSet("reference-layout", settings.ReferenceLayout);
-        parameters.PutIfSet("reference-scale", settings.ReferenceScale);
+        BindReference(parameters, settings);
         parameters.PutIfSet("vae", settings.Vae);
         parameters.PutIfSet("text-encoder", settings.TextEncoder);
         parameters.PutIfSet("vision-encoder", settings.VisionEncoder);
