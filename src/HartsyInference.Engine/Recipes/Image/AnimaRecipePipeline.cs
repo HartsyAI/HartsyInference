@@ -38,8 +38,8 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     private readonly ReferenceAdapterSpec? _referenceAdapter;
 
     /// <summary>Serializes generations on this pipeline: the reference adapter's gate is shared state, and the pipeline's own per-call
-    /// state is not safe to interleave.</summary>
-    private readonly object _generationLock = new();
+    /// state is not safe to interleave. A waiting request gives up when its cancellation fires, and disposal waits for a running one.</summary>
+    private readonly SemaphoreSlim _generationGate = new(1, 1);
 
     /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable. A reference adapter,
     /// when the pipeline was built with one, arrives as its gate and its spec.</summary>
@@ -66,9 +66,14 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
         CancellationToken cancel)
     {
-        lock (_generationLock)
+        _generationGate.Wait(cancel);
+        try
         {
             return GenerateLocked(request, settings, progress, cancel);
+        }
+        finally
+        {
+            _generationGate.Release();
         }
     }
 
@@ -133,6 +138,12 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             AnimaReferenceJoin? reference = null;
             if (referenceSettings is not null)
             {
+                // The reference path never runs the img2img binder, so an inpaint mask would be dropped without a trace: refuse it.
+                if (request.Inpaint is not null)
+                {
+                    throw new NotSupportedException("An inpaint mask cannot combine with a reference request: the reference path does not apply "
+                        + "the mask. Send the reference without a mask, or inpaint without a reference.");
+                }
                 if (inner.Scheduler == "euler_cfg_pp")
                 {
                     throw new NotSupportedException("euler_cfg_pp reads the unconditional prediction to correct its step, and a reference "
@@ -325,6 +336,9 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     /// <inheritdoc/>
     public void Dispose()
     {
+        // Waits for a running generation, so nothing frees a weight or the adapter's gate under it. The gate is not released: a later
+        // Generate fails on the disposed components rather than running on them.
+        _generationGate.Wait();
         _pipeline.Dispose();
         _qwen.Dispose();
         _tokenizer.Dispose();

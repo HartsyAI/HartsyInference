@@ -23,8 +23,18 @@ public sealed class ReferenceAdapterTests
     {
         ReferenceAdapterSpec spec = ReferenceAdapterSpec.FromMetadata("/models/Lora/adapter.safetensors", ReleasedMetadata);
 
-        Assert.True(spec.ReferenceLora);
         Assert.Equal(new ReferencePlacement(1, 1.0f, 0), spec.Placement);
+    }
+
+    [Theory]
+    [InlineData("""{"arch": "asym", "ref_lora": false, "slots": {"character": {"t": 1}}}""", "ref_lora false")]
+    [InlineData("""{"arch": "asym", "slots": {"character": {"t": "one"}}}""", "malformed")]
+    public void Spec_NamesTheFileForAMetadataItCannotRun(string metadata, string reason)
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(
+            () => ReferenceAdapterSpec.FromMetadata("/models/Lora/adapter.safetensors", metadata));
+        Assert.Contains("adapter.safetensors", error.Message);
+        Assert.Contains(reason, error.Message);
     }
 
     [Theory]
