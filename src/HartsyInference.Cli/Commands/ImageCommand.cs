@@ -144,6 +144,47 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Colorize layout only: the page's VAE copy is the size divided by this per side (default 2, the trained scale).")]
         public int? ReferenceScale { get; init; }
 
+        /// <summary>The reference adapter a reference request uses (a file name in the LoRA folders).</summary>
+        [CommandOption("--reference-adapter")]
+        [Description("Reference adapter file for Anima: a name in the LoRA folders. Empty (the default) is the released v2 adapter, "
+            + "downloaded on first use. Used with --reference-image.")]
+        public string? ReferenceAdapter { get; init; }
+
+        /// <summary>The adapter's strength, the gate's scale on it.</summary>
+        [CommandOption("--reference-strength")]
+        [Description("Anima: the reference adapter's strength, 0 to 4 (default 1). 0 keeps the reference out without a rebuild.")]
+        public float? ReferenceAdapterStrength { get; init; }
+
+        /// <summary>The reference guidance scale.</summary>
+        [CommandOption("--reference-guidance")]
+        [Description("Anima: the reference's guidance, 0 to 20 (default 4.5). 1 costs no extra model call; higher pushes toward the reference.")]
+        public float? ReferenceGuidance { get; init; }
+
+        /// <summary>The correction after the reference combine.</summary>
+        [CommandOption("--reference-correction")]
+        [Description("Anima: the correction after the reference combine: apg (default), rescale or none.")]
+        public string? ReferenceCorrection { get; init; }
+
+        /// <summary>The rescale blend.</summary>
+        [CommandOption("--reference-rescale-phi")]
+        [Description("Anima: the rescale correction's blend, 0 to 1 (default 0.5). Used with --reference-correction rescale.")]
+        public float? ReferenceRescalePhi { get; init; }
+
+        /// <summary>The first denoising fraction with reference guidance.</summary>
+        [CommandOption("--reference-start")]
+        [Description("Anima: the first fraction of the denoising with extra reference guidance, 0 to 1 (default 0).")]
+        public float? ReferenceStart { get; init; }
+
+        /// <summary>The last denoising fraction with reference guidance.</summary>
+        [CommandOption("--reference-end")]
+        [Description("Anima: the last fraction of the denoising with extra reference guidance, 0 to 1 (default 1).")]
+        public float? ReferenceEnd { get; init; }
+
+        /// <summary>What steps outside the window do.</summary>
+        [CommandOption("--reference-outside")]
+        [Description("Anima: keep (default; the reference stays in both branches outside the window) or drop (plain CFG on the base outside it).")]
+        public string? ReferenceOutside { get; init; }
+
         /// <summary>VAE override.</summary>
         [CommandOption("--vae")]
         [Description("Path or name of a VAE to use instead of the family's default.")]

@@ -10,6 +10,10 @@ stable release will require. Dates are UTC.
 
 - **Changed: a non-silent long-form window that decodes to no text logs a warning.** Any speech in it is missing from the transcript, so the warning names how many windows were affected.
 
+## alpha.394
+
+- **Added: Anima reference adapter (`reference.adapter`).** Anima takes a reference image, and the released reference adapter (v2) reads it for the character and style: pose, background and framing still follow the prompt. Two references join side by side, and the adapter reads that pair as one. Set `reference.strength` (0 turns the reference off without a rebuild), `reference.guidance` (default 4.5), `reference.correction` (`apg`, `rescale` or `none`), `reference.rescale_phi`, `reference.start` and `reference.end` (the window, as fractions of the denoising), and `reference.outside` (`keep` or `drop`). The CLI flags are `--reference-adapter`, `--reference-strength`, `--reference-guidance`, `--reference-correction`, `--reference-rescale-phi`, `--reference-start`, `--reference-end` and `--reference-outside`. The adapter downloads on first use. Its weights are CircleStone Non-Commercial.
+
 ## alpha.393
 
 - **Fixed: Anima used the diffusers RoPE scale instead of ComfyUI's.** The engine rotated Anima's tokens with NTK scales (t 2, h 1, w 1). The single-file checkpoint was trained with ComfyUI's (t 1, h 4, w 4), so every Anima image changes. The values come from `comfy/model_detection.py`.

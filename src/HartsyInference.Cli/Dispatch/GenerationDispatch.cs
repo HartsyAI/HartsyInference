@@ -1069,6 +1069,38 @@ public static class GenerationDispatch
         {
             extra[HartsyInference.Engine.Features.RequestExtras.ReferenceVisionPixels] = visionPixels;
         }
+        if (parameters.GetStringOrNull("reference-adapter") is { } adapter)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceAdapter] = adapter;
+        }
+        if (parameters.GetFloatOrNull("reference-strength") is { } adapterStrength)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceStrength] = adapterStrength;
+        }
+        if (parameters.GetFloatOrNull("reference-guidance") is { } referenceGuidance)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceGuidance] = referenceGuidance;
+        }
+        if (parameters.GetStringOrNull("reference-correction") is { } correction)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceCorrection] = correction;
+        }
+        if (parameters.GetFloatOrNull("reference-rescale-phi") is { } phi)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceRescalePhi] = phi;
+        }
+        if (parameters.GetFloatOrNull("reference-start") is { } start)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceStart] = start;
+        }
+        if (parameters.GetFloatOrNull("reference-end") is { } end)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceEnd] = end;
+        }
+        if (parameters.GetStringOrNull("reference-outside") is { } outside)
+        {
+            extra[HartsyInference.Engine.Features.RequestExtras.ReferenceOutside] = outside;
+        }
         return extra;
     }
 

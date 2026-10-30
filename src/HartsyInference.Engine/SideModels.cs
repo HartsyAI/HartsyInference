@@ -406,6 +406,17 @@ public static class SideModels
     };
 
     /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
+    /// <summary>The released Anima reference adapter (v2, rank 64): a LoRA read by the reference path. Its weights are CircleStone
+    /// Non-Commercial; Hartsy serves them free of charge.</summary>
+    public static readonly ModelAsset AnimaRefAdapterV2 = new ModelAsset
+    {
+        Repo = "ElectronGirl/anima-ref-adapter",
+        RepoPath = "anima_ref_adapter_v2_r64.safetensors",
+        TargetSubdir = "Lora",
+        Role = "lora",
+        Sha256 = "71dda6079e18d354e16e3347bc49a9b710afd9495c378efbb833d30cac9cb81b",
+    };
+
     public static readonly ModelAsset QwenImageVae = new ModelAsset
     {
         Repo = "Comfy-Org/Qwen-Image_ComfyUI",

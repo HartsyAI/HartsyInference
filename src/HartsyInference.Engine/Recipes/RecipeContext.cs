@@ -168,6 +168,10 @@ public sealed record RecipeContext
     /// weights, so the constructed pipeline is cached under a key that includes this stack.</summary>
     public LoraStack? Loras { get; init; }
 
+    /// <summary>The reference adapter to attach, as the request named it (a file name in the LoRA folders); empty for the released one.
+    /// Null when the request uses no reference or the recipe cannot take an adapter.</summary>
+    public string? ReferenceAdapter { get; init; }
+
     /// <summary>Header- and hash-resolved video profile driving this construction; null for image recipes and legacy internal callers.</summary>
     public VideoPlan? VideoPlan { get; init; }
 

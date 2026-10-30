@@ -370,4 +370,24 @@ public static class FeatureImaging
         }
         return tensor;
     }
+
+    /// <summary>Joins two images side by side at the left image's height. The right one is resized to that height, keeping its aspect,
+    /// and the rows meet with no gap, as core Image Stitch joins them.</summary>
+    public static ImageData StitchHorizontal(ImageData left, ImageData right)
+    {
+        ArgumentNullException.ThrowIfNull(left);
+        ArgumentNullException.ThrowIfNull(right);
+        int height = left.Height;
+        int rightWidth = Math.Max(1, (int)Math.Round((double)right.Width * height / right.Height, MidpointRounding.ToEven));
+        byte[] rightRgb = right.Width == rightWidth && right.Height == height ? right.Rgb : ResizeRgb24(right, rightWidth, height);
+        int width = left.Width + rightWidth;
+        byte[] rgb = new byte[checked((long)width * height * 3)];
+        int leftRow = left.Width * 3, rightRow = rightWidth * 3;
+        for (int y = 0; y < height; y++)
+        {
+            Buffer.BlockCopy(left.Rgb, y * leftRow, rgb, y * width * 3, leftRow);
+            Buffer.BlockCopy(rightRgb, y * rightRow, rgb, (y * width + left.Width) * 3, rightRow);
+        }
+        return new ImageData { Rgb = rgb, Width = width, Height = height };
+    }
 }

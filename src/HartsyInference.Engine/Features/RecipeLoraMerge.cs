@@ -2,9 +2,14 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.ModelAssets.Lora;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Features;
+
+/// <summary>A LoRA a recipe attaches on its own gate rather than from the request: its file, the gate that switches it, and its strength.</summary>
+/// <remarks>The file is read at merge time and copied into the stack, so the caller may dispose it once the merge returns.</remarks>
+public sealed record GatedLora(LoraFile File, AdjunctGate Gate, float Strength = 1.0f);
 
 /// <summary>The one place a recipe applies the request's LoRAs. Resolves the request stack, opens every file, and applies each layer to the component dictionary its target names — merging into dense/fp8/int8 weights and attaching a runtime adjunct to block-quantized ones.</summary>
 /// <remarks><para><b>Call this BEFORE <c>LoadWeights</c>.</b> Device caches are identity-keyed, so a model that has
@@ -16,31 +21,39 @@ public static class RecipeLoraMerge
 {
     /// <summary>Applies <paramref name="context"/>'s LoRA stack to <paramref name="targets"/>, or returns null when the request carries none.</summary>
     /// <param name="logTag">Recipe name for the log lines, e.g. <c>Flux1Recipe</c>.</param>
-    public static MergedLoraStack? Apply(RecipeContext context, LoraMergeTargets targets, string logTag)
+    /// <param name="gated">LoRAs switched by their own gates, such as a reference adapter. They are applied with the request's LoRAs.</param>
+    public static MergedLoraStack? Apply(RecipeContext context, LoraMergeTargets targets, string logTag,
+        IReadOnlyList<GatedLora>? gated = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(targets);
-        return Apply(LoraResolver.Resolve(context.Loras), context.Backend, targets, logTag);
+        return Apply(LoraResolver.Resolve(context.Loras), context.Backend, targets, logTag, gated);
     }
 
-    /// <summary>Same as <see cref="Apply(RecipeContext, LoraMergeTargets, string)"/> for a recipe that resolved (and possibly filtered) the specs itself — MiniMax-H3 splits acceleration adapters out during planning.</summary>
+    /// <summary>Same as <see cref="Apply(RecipeContext, LoraMergeTargets, string, IReadOnlyList{GatedLora}?)"/> for a recipe that resolved (and possibly filtered) the specs itself — MiniMax-H3 splits acceleration adapters out during planning.</summary>
     public static MergedLoraStack? Apply(IReadOnlyList<LoraResolver.LoraSpec>? loras, IBackend backend,
-        LoraMergeTargets targets, string logTag)
+        LoraMergeTargets targets, string logTag, IReadOnlyList<GatedLora>? gated = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(targets);
-        if (loras is null || loras.Count == 0)
+        bool hasGated = gated is { Count: > 0 };
+        if ((loras is null || loras.Count == 0) && !hasGated)
         {
             return null;
         }
         MergedLoraStack stack = new MergedLoraStack();
         try
         {
-            foreach (LoraResolver.LoraSpec spec in loras)
+            foreach (LoraResolver.LoraSpec spec in loras ?? [])
             {
                 Logs.Verbose($"[{logTag}][LoRA] Loading '{spec.ModelId ?? Path.GetFileName(spec.FilePath)}' "
                     + $"(model={spec.ModelStrength}, tenc={spec.TencStrength}).");
                 stack.AddFromPath(spec.FilePath, strength: spec.ModelStrength, tencStrength: spec.TencStrength);
+            }
+            foreach (GatedLora adapter in gated ?? [])
+            {
+                Logs.Verbose($"[{logTag}][LoRA] Attaching gated '{Path.GetFileName(adapter.File.FilePath)}' at strength {adapter.Strength}.");
+                stack.AddGated(adapter.File, adapter.Gate, adapter.Strength);
             }
             int merged = stack.ApplyToWeights(
                 backend,
@@ -55,8 +68,10 @@ public static class RecipeLoraMerge
                 // A zero-match LoRA used to warn and proceed — a generation that succeeds and looks unaffected,
                 // which is the worst failure mode there is: the user thinks the LoRA is weak, not broken. Refuse
                 // with the files named instead; SwarmUI surfaces this message directly.
+                IEnumerable<string> names = (loras ?? []).Select(l => $"'{l.ModelId ?? Path.GetFileName(l.FilePath)}'")
+                    .Concat((gated ?? []).Select(g => $"'{Path.GetFileName(g.File.FilePath)}'"));
                 throw new NotSupportedException(
-                    $"LoRA {string.Join(", ", loras.Select(l => $"'{l.ModelId ?? Path.GetFileName(l.FilePath)}'"))} matched 0 weights "
+                    $"LoRA {string.Join(", ", names)} matched 0 weights "
                     + "on this model — its key format doesn't align with this architecture (wrong family's LoRA, or an "
                     + "unrecognized training-tool format). Remove it, or pick a LoRA trained for this model family.");
             }
