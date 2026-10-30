@@ -81,7 +81,8 @@ public static class RequestExtras
     /// means the released adapter.</summary>
     public const string ReferenceAdapter = "reference.adapter";
 
-    /// <summary>The adapter's strength, the gate's scale on it. 0 turns the reference off without a rebuild.</summary>
+    /// <summary>The adapter's strength, the gate's scale on its LoRA. The reference's tokens still join at 0; only the LoRA drops out. To
+    /// leave the reference out, send no reference images.</summary>
     public const string ReferenceStrength = "reference.strength";
 
     /// <summary>The reference guidance scale (the adapter's <c>ref_guidance</c>): 1 costs no extra call.</summary>

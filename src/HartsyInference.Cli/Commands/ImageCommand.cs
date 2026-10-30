@@ -152,7 +152,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
 
         /// <summary>The adapter's strength, the gate's scale on it.</summary>
         [CommandOption("--reference-strength")]
-        [Description("Anima: the reference adapter's strength, 0 to 4 (default 1). 0 keeps the reference out without a rebuild.")]
+        [Description("Anima: the adapter's LoRA strength, 0 to 4 (default 1). At 0 the reference still joins, without the LoRA; send no references to leave it out.")]
         public float? ReferenceAdapterStrength { get; init; }
 
         /// <summary>The reference guidance scale.</summary>
