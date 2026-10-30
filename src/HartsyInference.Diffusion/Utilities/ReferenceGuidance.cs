@@ -253,6 +253,11 @@ public static class ReferenceGuidance
     /// <summary>The unbiased standard deviation, taken around the mean in a second pass, so a large mean does not cancel the spread.</summary>
     private static double StandardDeviation(ReadOnlySpan<float> values)
     {
+        // The unbiased estimate needs two values; a single value has no spread.
+        if (values.Length < 2)
+        {
+            return 0.0;
+        }
         double mean = 0;
         foreach (float v in values)
         {
