@@ -78,6 +78,7 @@ public sealed class LoraFile : IDisposable
                     LoraFormat.KohyaWan or LoraFormat.DiffusersWan => WanLoraMapper.ParseLayers(loader, format, out fullWeightDiffs),
                     LoraFormat.Flux3 => Flux3LoraMapper.ParseLayers(loader, ownedTensors),
                     LoraFormat.MossImage => MossImageLoraMapper.ParseLayers(loader),
+                    LoraFormat.Anima => AnimaLoraMapper.ParseLayers(loader),
                     LoraFormat.KohyaGeneric => KohyaGenericMapper.ParseLayers(loader),
                     _ => throw new NotSupportedException($"LoRA format {format} parsing not implemented."),
                 };
