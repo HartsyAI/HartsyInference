@@ -123,7 +123,8 @@ public sealed unsafe class AnimaTransformer : IDisposable
 
     /// <summary>Caches a reference latent's keys and values for <see cref="Forward"/>. The reference runs once through every block at
     /// timestep 0, on the RoPE positions <paramref name="placement"/> gives it against a target grid of
-    /// <paramref name="targetGridH"/> patched rows, so the cache is valid for that target grid only.</summary>
+    /// <paramref name="targetGridH"/> patched rows. The cache records that grid, so <see cref="Forward"/> refuses it for any other target, including one whose
+    /// reference placement would not change.</summary>
     /// <param name="referenceLatent">The reference latent <c>[1, C, H, W]</c>, normalized as the target latent is.</param>
     /// <param name="identity">The reference's and its adapter's identity, including the effective gate scale; folded into the
     /// fingerprint so a changed strength rebuilds the cache.</param>

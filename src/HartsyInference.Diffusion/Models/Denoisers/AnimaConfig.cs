@@ -73,7 +73,7 @@ public sealed record AnimaConfig
 
     /// <summary>RoPE NTK frequency scaling per axis, as ComfyUI configures the 16-channel Anima checkpoint
     /// (<c>comfy/model_detection.py</c>: <c>rope_t/h/w_extrapolation_ratio</c> = 1.0 / 4.0 / 4.0). The diffusers Cosmos
-    /// class default <c>(2.0, 1.0, 1.0)</c> is not what the single-file checkpoint was trained with.</summary>
+    /// class default <c>(2.0, 1.0, 1.0)</c> is not what ComfyUI configures for this checkpoint.</summary>
     public (float T, float H, float W) RopeScale { get; init; } = (1.0f, 4.0f, 4.0f);
 
     /// <summary>RoPE base period before NTK scaling.</summary>

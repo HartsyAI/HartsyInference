@@ -52,6 +52,13 @@ public sealed class AnimaReferenceKvTests
     }
 
     [Fact]
+    public void Placement_RowOffset_RoundsAFractionAsTheAdapterWritesIt()
+    {
+        // Python rounds 0.7 * 5 to 4 (the double product is 3.5); a float 0.7 would be 3.4999999 and round to 3.
+        Assert.Equal(4, new ReferencePlacement(1, 0.7, 0).RowOffset(5));
+    }
+
+    [Fact]
     public void Placement_RefusesANegativeFrameOrOffset()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new ReferencePlacement(-1, 1f, 0));

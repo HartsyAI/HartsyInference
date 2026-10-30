@@ -188,8 +188,10 @@ public sealed unsafe class AnimaBlock
             ffOut = FeedForward(backend, norm3, batch, seqLen);
             result = new Tensor(hiddenShape, DType.F32);
             backend.GatedResidualLastDim(result, afterAttn1, ffOut, gate3);
-            keys = captured.Key!;
-            values = captured.Value!;
+            if (captured.Key is null || captured.Value is null)
+                throw new InvalidOperationException("Self-attention did not capture the reference's keys and values.");
+            keys = captured.Key;
+            values = captured.Value;
             succeeded = true;
             return result;
         }

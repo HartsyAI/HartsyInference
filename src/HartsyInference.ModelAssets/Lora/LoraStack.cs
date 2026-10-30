@@ -413,6 +413,20 @@ public sealed class LoraStack : IDisposable
         }
     }
 
+    /// <summary>Refuses a delta that cannot ride as a runtime adjunct on <paramref name="baseW"/>: a non-2-D weight, or a DoRA delta, whose
+    /// magnitude rescaling is not additive. Called before any merge, so a gated adapter is refused before the ungated ones write.</summary>
+    private static void RequireAdjunctable(LoraDelta delta, Tensor baseW, string canonicalKey)
+    {
+        RequireRank2AdjunctTarget(baseW, canonicalKey);
+        if (delta.DoraScale is not null)
+        {
+            // DoRA rescales the whole (W + ΔW) row-wise, so it is not an additive term and cannot be carried here.
+            throw new NotSupportedException(
+                $"LoRA '{canonicalKey}' is a DoRA adapter, whose magnitude rescaling is not additive and so cannot be "
+                + $"applied at runtime to a packed {baseW.DType.Name} weight. Use a dense or fp8 build of this model.");
+        }
+    }
+
     private static List<LowRankAdjunctTerm> AdjunctTermsFor(Dictionary<string, List<LowRankAdjunctTerm>> adjuncts, string key)
     {
         if (!adjuncts.TryGetValue(key, out List<LowRankAdjunctTerm>? terms))
@@ -430,14 +444,7 @@ public sealed class LoraStack : IDisposable
     private LowRankAdjunctTerm BuildAdjunctTerm(IBackend backend, LoraDelta delta, float strength, string canonicalKey,
         Tensor baseW, long rowOffset, long rowCount, AdjunctGate? gate = null)
     {
-        RequireRank2AdjunctTarget(baseW, canonicalKey);
-        if (delta.DoraScale is not null)
-        {
-            // DoRA rescales the whole (W + ΔW) row-wise, so it is not an additive term and cannot be carried here.
-            throw new NotSupportedException(
-                $"LoRA '{canonicalKey}' is a DoRA adapter, whose magnitude rescaling is not additive and so cannot be "
-                + $"applied at runtime to a packed {baseW.DType.Name} weight. Use a dense or fp8 build of this model.");
-        }
+        RequireAdjunctable(delta, baseW, canonicalKey);
         long fullRows = baseW.Shape[0];
         if (delta is StandardLoraDelta standard)
         {
@@ -624,6 +631,7 @@ public sealed class LoraStack : IDisposable
                         $"Gated LoRA delta for '{canonicalKey}' is [{layer.Delta.OutFeatures}, {layer.Delta.InFeatures}] but the "
                         + $"checkpoint's weight is {gatedBase.Shape}. A gated adapter is applied whole, so this LoRA was trained against a different build.");
                 }
+                RequireAdjunctable(layer.Delta, gatedBase, canonicalKey);
             }
         }
     }
