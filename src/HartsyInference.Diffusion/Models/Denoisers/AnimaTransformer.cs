@@ -161,27 +161,33 @@ public sealed unsafe class AnimaTransformer : IDisposable
                 DisposeBestEffort(expanded, "expanded reference latent");
         }
 
-        (Tensor temb, Tensor embeddedTimestep) = TimeEmbed(backend, 0f, 1);
         try
         {
-            RopeTableLease lease = _rope.AcquireFrameTables(backend, placement.TFrameIndex, gridH, gridW,
-                placement.RowOffset(targetGridH), placement.ColumnOffset, out Tensor cos, out Tensor sin);
+            (Tensor temb, Tensor embeddedTimestep) = TimeEmbed(backend, 0f, 1);
             try
             {
-                return ReferenceKvPrepass.Build(backend, _blocks.Length, Array.Empty<int>(), tokens,
-                    (int i, Tensor stream, out Tensor keys, out Tensor values) => _blocks[i].ForwardPrefix(backend, stream,
-                        embeddedTimestep, temb, cos, sin, _rope, out keys, out values),
-                    ReferenceFingerprint(identity, gridH, gridW, targetGridH, placement), "Anima");
+                RopeTableLease lease = _rope.AcquireFrameTables(backend, placement.TFrameIndex, gridH, gridW,
+                    placement.RowOffset(targetGridH), placement.ColumnOffset, out Tensor cos, out Tensor sin);
+                try
+                {
+                    return ReferenceKvPrepass.Build(backend, _blocks.Length, Array.Empty<int>(), tokens,
+                        (int i, Tensor stream, out Tensor keys, out Tensor values) => _blocks[i].ForwardPrefix(backend, stream,
+                            embeddedTimestep, temb, cos, sin, _rope, out keys, out values),
+                        ReferenceFingerprint(identity, gridH, gridW, targetGridH, placement), "Anima", targetGridH);
+                }
+                finally
+                {
+                    lease.Dispose();
+                }
             }
             finally
             {
-                lease.Dispose();
+                temb.Dispose();
+                embeddedTimestep.Dispose();
             }
         }
         finally
         {
-            temb.Dispose();
-            embeddedTimestep.Dispose();
             tokens.Dispose();
         }
     }
@@ -243,6 +249,10 @@ public sealed unsafe class AnimaTransformer : IDisposable
         {
             if (batch != 1)
                 throw new NotSupportedException($"A cached reference joins at batch 1; got batch {batch}.");
+            int targetGridH = (int)latent.Shape[2] / _config.PatchSize.H;
+            if (reference.TargetGridH is { } cachedGridH && cachedGridH != targetGridH)
+                throw new ArgumentException(
+                    $"The reference cache was built for a target grid of {cachedGridH} rows; this latent has {targetGridH}.", nameof(reference));
             if (reference.Layers != _blocks.Length)
                 throw new ArgumentException(
                     $"The reference cache spans {reference.Layers} layers; this model has {_blocks.Length}.", nameof(reference));

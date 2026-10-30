@@ -32,5 +32,5 @@ public readonly record struct ReferencePlacement
 
     /// <summary>The row offset in patched tokens for a target whose patched height is <paramref name="targetPatchedHeight"/>.</summary>
     public int RowOffset(int targetPatchedHeight) =>
-        (int)Math.Round(RowOffsetHeights * targetPatchedHeight, MidpointRounding.ToEven);
+        (int)Math.Round((double)RowOffsetHeights * targetPatchedHeight, MidpointRounding.ToEven);
 }
