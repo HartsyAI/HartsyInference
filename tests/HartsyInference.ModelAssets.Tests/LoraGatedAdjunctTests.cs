@@ -181,6 +181,56 @@ public sealed class LoraGatedAdjunctTests : IDisposable
     }
 
     [Fact]
+    public void GatedAndUngatedOnTheSameKey_BothApply()
+    {
+        // The ungated LoRA merges into the dense weight while the gated one rides as an adjunct on that merged weight; with the gate on,
+        // the projection must equal a dense merge of both.
+        using Tensor baseWeight = Weight();
+        AdjunctGate gate = new();
+        using LoraFile ungated = LoraFile.Load(SplitLora("both_ungated"));
+        using LoraFile gatedFile = LoraFile.Load(SplitLora("both_gated"));
+        IBackend backend = new CpuBackend();
+        Dictionary<string, Tensor> reference = new() { [Key] = Copy(baseWeight) };
+        using LoraStack denseStack = new();
+        denseStack.Add(ungated, 1.0f);
+        denseStack.Add(gatedFile, 1.0f);
+        denseStack.ApplyTo(reference, LoraTarget.Transformer, backend);
+        using Tensor merged = Copy(reference[Key]);
+        using Tensor input = Ramp(3, Cols);
+        using Tensor expected = Linear(backend, input, merged);
+
+        Dictionary<string, Tensor> weights = new() { [Key] = Copy(baseWeight) };
+        using LoraStack stack = new();
+        stack.Add(ungated, 1.0f);
+        stack.AddGated(gatedFile, gate, strength: 1.0f);
+        stack.ApplyTo(weights, LoraTarget.Transformer, backend);
+        using IDisposable scope = gate.Enable(1.0f);
+        using Tensor actual = Linear(backend, input, weights[Key]);
+
+        AssertClose(expected, actual);
+    }
+
+    [Fact]
+    public void RefusedGatedAdapter_LeavesTheWeightsUntouched()
+    {
+        // The gated target is missing, so the refusal must come before the ungated merge writes into the weights it was given.
+        using Tensor baseWeight = Weight();
+        Dictionary<string, Tensor> weights = new() { [Key] = baseWeight };
+        using LoraFile ungated = LoraFile.Load(SplitLora("untouched_ungated"));
+        using LoraFile gated = LoraFile.Load(CreateSafeTensors("untouched_gated", new()
+        {
+            ["transformer.blocks.9.attn.to_q.lora_A.weight"] = ([Rank, Cols], Filled(Rank * Cols, DownValue)),
+            ["transformer.blocks.9.attn.to_q.lora_B.weight"] = ([Rows, Rank], Filled(Rows * Rank, UpValue)),
+        }));
+        using LoraStack stack = new();
+        stack.Add(ungated, 1.0f);
+        stack.AddGated(gated, new AdjunctGate(), strength: 1.0f);
+
+        Assert.Throws<HartsyInferenceException>(() => stack.ApplyTo(weights, LoraTarget.Transformer, new CpuBackend()));
+        Assert.Same(baseWeight, weights[Key]);
+    }
+
+    [Fact]
     public void GatedTarget_MissingFromTheWeights_IsRefusedNotSkipped()
     {
         // A gated adapter is applied whole. A key the checkpoint does not hold means the wrong checkpoint, and skipping

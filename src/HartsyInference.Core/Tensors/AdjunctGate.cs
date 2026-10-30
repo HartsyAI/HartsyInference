@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace HartsyInference.Core.Tensors;
 
 /// <summary>An on/off switch and a strength multiplier shared by the <see cref="LowRankAdjunctTerm"/>s of one LoRA, so a
@@ -20,20 +22,22 @@ public sealed class AdjunctGate
     public float Scale => _scale;
 
     /// <summary>Enables the gate at <paramref name="scale"/> until the returned scope is disposed. The previous state is
-    /// restored on dispose, so scopes nest.</summary>
+    /// restored on dispose.</summary>
+    /// <remarks>Scopes must be disposed in the reverse order they were opened. Disposing an outer scope first restores a state
+    /// that an inner scope still owns, which leaves the gate in the wrong state; a debug build asserts on it.</remarks>
     public IDisposable Enable(float scale)
     {
         if (!float.IsFinite(scale) || scale < 0f)
         {
             throw new ArgumentOutOfRangeException(nameof(scale), scale, "An adjunct gate scale must be finite and non-negative.");
         }
-        Scope scope = new(this, _enabled, _scale);
+        Scope scope = new(this, _enabled, _scale, scale);
         _enabled = true;
         _scale = scale;
         return scope;
     }
 
-    private sealed class Scope(AdjunctGate gate, bool enabled, float scale) : IDisposable
+    private sealed class Scope(AdjunctGate gate, bool enabled, float scale, float enabledScale) : IDisposable
     {
         private bool _disposed;
 
@@ -44,6 +48,8 @@ public sealed class AdjunctGate
                 return;
             }
             _disposed = true;
+            // The gate must still hold the state this scope set: a nested scope that was not disposed first would have changed it.
+            Debug.Assert(gate._enabled && gate._scale == enabledScale, "Adjunct gate scopes must be disposed in reverse order.");
             gate._enabled = enabled;
             gate._scale = scale;
         }
