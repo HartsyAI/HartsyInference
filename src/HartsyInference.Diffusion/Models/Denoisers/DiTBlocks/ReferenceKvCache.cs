@@ -46,20 +46,24 @@ public sealed class ReferenceKvCache : IDisposable
 
     /// <summary>Returns <c>[1, S_live + S_ref, heads, headDim]</c>: <paramref name="live"/>'s tokens, then
     /// <paramref name="cached"/>'s. Neither input is disposed.</summary>
-    public static Tensor ConcatTokens(IBackend backend, Tensor live, Tensor cached)
+    public static Tensor ConcatTokens(IBackend backend, Tensor live, Tensor cached) => JoinTokens(backend, live, cached);
+
+    /// <summary>Joins <paramref name="first"/> and <paramref name="second"/> along the token axis, as <c>[1, S1 + S2, heads, headDim]</c>.
+    /// Neither input is disposed.</summary>
+    internal static Tensor JoinTokens(IBackend backend, Tensor first, Tensor second)
     {
         ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(live);
-        ArgumentNullException.ThrowIfNull(cached);
-        if (live.Shape.Rank != 4 || cached.Shape.Rank != 4 || live.Shape[0] != 1 || cached.Shape[0] != 1
-            || live.Shape[2] != cached.Shape[2] || live.Shape[3] != cached.Shape[3] || live.DType != cached.DType)
+        ArgumentNullException.ThrowIfNull(first);
+        ArgumentNullException.ThrowIfNull(second);
+        if (first.Shape.Rank != 4 || second.Shape.Rank != 4 || first.Shape[0] != 1 || second.Shape[0] != 1
+            || first.Shape[2] != second.Shape[2] || first.Shape[3] != second.Shape[3] || first.DType != second.DType)
         {
             throw new ArgumentException(
-                $"Cached keys/values {cached.Shape} {cached.DType} cannot extend live {live.Shape} {live.DType}; "
+                $"Cached keys/values {second.Shape} {second.DType} cannot join {first.Shape} {first.DType}; "
                 + "both must be [1, S, heads, headDim] of one dtype.");
         }
-        Tensor joined = new(new TensorShape(1, live.Shape[1] + cached.Shape[1], live.Shape[2], live.Shape[3]), live.DType);
-        backend.Concat(joined, [live, cached], 1);
+        Tensor joined = new(new TensorShape(1, first.Shape[1] + second.Shape[1], first.Shape[2], first.Shape[3]), first.DType);
+        backend.Concat(joined, [first, second], 1);
         return joined;
     }
 

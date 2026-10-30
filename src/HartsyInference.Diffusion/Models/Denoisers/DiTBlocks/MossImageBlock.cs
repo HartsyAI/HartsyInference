@@ -108,7 +108,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         TensorShape flat = new(1, seq, _hidden);
         Tensor y = new(flat, act);
         backend.RmsNormModulate(y, x, _norm1!, modulation.ScaleAttn, modulation.ShiftAttn, _eps);
-        Tensor attn = Attend(backend, y, cos, sin, cachedKeys is null ? null : new ReferenceAppend(cachedKeys, cachedValues!), null);
+        Tensor attn = Attend(backend, y, cos, sin, cachedKeys is null ? null : new ReferenceKvRewrite(cachedKeys, cachedValues!, ReferenceKvOrder.Append), null);
         return Finish(backend, x, attn, modulation, act);
     }
 
@@ -174,30 +174,6 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         {
             QueryRotation = rope, KeyRotation = rope, KvRewrite = rewrite, KvCapture = capture,
         });
-    }
-
-    /// <summary>Appends the cached reference K/V after the live ones.</summary>
-    private sealed class ReferenceAppend(Tensor cachedKeys, Tensor cachedValues) : IKvRewrite
-    {
-        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
-        {
-            Tensor? keys = null;
-            try
-            {
-                keys = ReferenceKvCache.ConcatTokens(backend, k, cachedKeys);
-                k.Dispose();
-                Tensor values = ReferenceKvCache.ConcatTokens(backend, v, cachedValues);
-                v.Dispose();
-                return (keys, values);
-            }
-            catch
-            {
-                keys?.Dispose();
-                k.Dispose();
-                v.Dispose();
-                throw;
-            }
-        }
     }
 
     /// <summary>The attention output projection, the gated residual and the feed-forward half under the uniform
