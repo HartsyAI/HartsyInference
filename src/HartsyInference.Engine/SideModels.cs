@@ -405,7 +405,6 @@ public static class SideModels
         Sha256 = "d8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b"
     };
 
-    /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
     /// <summary>The released Anima reference adapter (v2, rank 64): a LoRA read by the reference path. Its weights are CircleStone
     /// Non-Commercial; Hartsy serves them free of charge.</summary>
     public static readonly ModelAsset AnimaRefAdapterV2 = new ModelAsset
@@ -417,6 +416,7 @@ public static class SideModels
         Sha256 = "71dda6079e18d354e16e3347bc49a9b710afd9495c378efbb833d30cac9cb81b",
     };
 
+    /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
     public static readonly ModelAsset QwenImageVae = new ModelAsset
     {
         Repo = "Comfy-Org/Qwen-Image_ComfyUI",

@@ -108,12 +108,12 @@ public sealed class AnimaRecipe : IArchitectureRecipe, IReferenceAdapterRecipe
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             // The reference adapter, when the request uses one: resolved and read here, and attached on its own gate by the same merge that
-        // applies the request's LoRAs. The pipeline switches the gate per generation, so strength and on/off never rebuild the model.
-        ReferenceAdapterSpec? adapterSpec = context.ReferenceAdapter is null ? null
-            : ReferenceAdapterResolver.Resolve(context.ReferenceAdapter.Length == 0 ? null : context.ReferenceAdapter, context.Cancel);
-        using LoraFile? adapterFile = adapterSpec is null ? null : LoraFile.Load(adapterSpec.Path);
-        AdjunctGate? referenceGate = adapterFile is null ? null : new AdjunctGate();
-        MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+            // applies the request's LoRAs. The pipeline switches the gate per generation, so strength and on/off never rebuild the model.
+            ReferenceAdapterSpec? adapterSpec = context.ReferenceAdapter is null ? null
+                : ReferenceAdapterResolver.Resolve(context.ReferenceAdapter.Length == 0 ? null : context.ReferenceAdapter, context.Cancel);
+            using LoraFile? adapterFile = adapterSpec is null ? null : LoraFile.Load(adapterSpec.Path);
+            AdjunctGate? referenceGate = adapterFile is null ? null : new AdjunctGate();
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
                 context,
                 new LoraMergeTargets { Transformer = converted.Transformer },
                 "AnimaRecipe",

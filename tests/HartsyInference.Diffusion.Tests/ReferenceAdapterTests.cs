@@ -115,9 +115,24 @@ public sealed class ReferenceAdapterTests
         ImageRequest named = new()
         {
             Prompt = "a cat",
+            ReferenceImages = [Blank(2, 2)],
             Extra = new Dictionary<string, object> { [RequestExtras.ReferenceAdapter] = "custom.safetensors" },
         };
         Assert.Equal("custom.safetensors", ReferenceAdapterSettings.RequestedAdapter(named));
+    }
+
+    [Fact]
+    public void RequestedAdapter_NamedWithoutAReference_IsRefused()
+    {
+        // The adapter would load and then change nothing, so the request is refused before the pipeline is built.
+        ImageRequest named = new()
+        {
+            Prompt = "a cat",
+            Extra = new Dictionary<string, object> { [RequestExtras.ReferenceAdapter] = "custom.safetensors" },
+        };
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => ReferenceAdapterSettings.RequestedAdapter(named));
+        Assert.Equal(RequestExtras.ReferenceAdapter, error.ParamName);
     }
 
     [Fact]
@@ -137,7 +152,7 @@ public sealed class ReferenceAdapterTests
         ImageData left = Solid(2, 2, 255, 0, 0);
         ImageData right = Solid(4, 4, 0, 0, 255);
 
-        ImageData stitched = FeatureImaging.StitchHorizontal(left, right);
+        ImageData stitched = FeatureImaging.StitchHorizontal(left, right, long.MaxValue);
 
         Assert.Equal(2, stitched.Height);
         Assert.Equal(4, stitched.Width);
@@ -145,6 +160,19 @@ public sealed class ReferenceAdapterTests
         Assert.Equal(new byte[] { 255, 0, 0 }, Pixel(stitched, 1, 1));
         Assert.Equal(new byte[] { 0, 0, 255 }, Pixel(stitched, 2, 0));
         Assert.Equal(new byte[] { 0, 0, 255 }, Pixel(stitched, 3, 1));
+    }
+
+    [Fact]
+    public void StitchHorizontal_ShrinksBothImagesToTheAreaCap()
+    {
+        // The joined image would be 8×4 = 32 pixels; capped at 8 it must shrink to about that, not allocate the full join.
+        ImageData left = Solid(4, 4, 255, 0, 0);
+        ImageData right = Solid(4, 4, 0, 0, 255);
+
+        ImageData stitched = FeatureImaging.StitchHorizontal(left, right, 8);
+
+        Assert.True((long)stitched.Width * stitched.Height <= 12, $"stitched {stitched.Width}x{stitched.Height} exceeds the cap");
+        Assert.Equal(stitched.Width * stitched.Height * 3, stitched.Rgb.Length);
     }
 
     private static ImageData Blank(int width, int height) => Solid(width, height, 0, 0, 0);

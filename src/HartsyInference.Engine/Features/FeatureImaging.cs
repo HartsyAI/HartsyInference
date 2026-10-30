@@ -372,11 +372,26 @@ public static class FeatureImaging
     }
 
     /// <summary>Joins two images side by side at the left image's height. The right one is resized to that height, keeping its aspect,
-    /// and the rows meet with no gap, as core Image Stitch joins them.</summary>
-    public static ImageData StitchHorizontal(ImageData left, ImageData right)
+    /// and the rows meet with no gap, as core Image Stitch joins them. When the joined image would exceed <paramref name="maxArea"/>
+    /// pixels, both are shrunk by one factor first, so a very wide right-hand image cannot allocate an unbounded join.</summary>
+    public static ImageData StitchHorizontal(ImageData left, ImageData right, long maxArea)
     {
         ArgumentNullException.ThrowIfNull(left);
         ArgumentNullException.ThrowIfNull(right);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxArea);
+        double joinedArea = ((double)left.Width + (double)right.Width * left.Height / right.Height) * left.Height;
+        if (joinedArea <= maxArea)
+            return JoinRows(left, right);
+        double scale = Math.Sqrt(maxArea / joinedArea);
+        int shrunkWidth = Math.Max(1, (int)Math.Round(left.Width * scale, MidpointRounding.ToEven));
+        int shrunkHeight = Math.Max(1, (int)Math.Round(left.Height * scale, MidpointRounding.ToEven));
+        ImageData shrunkLeft = new() { Rgb = ResizeRgb24(left, shrunkWidth, shrunkHeight), Width = shrunkWidth, Height = shrunkHeight };
+        return JoinRows(shrunkLeft, right);
+    }
+
+    /// <summary>Joins the rows of <paramref name="left"/> and <paramref name="right"/>, resizing the right one to the left's height.</summary>
+    private static ImageData JoinRows(ImageData left, ImageData right)
+    {
         int height = left.Height;
         int rightWidth = Math.Max(1, (int)Math.Round((double)right.Width * height / right.Height, MidpointRounding.ToEven));
         byte[] rightRgb = right.Width == rightWidth && right.Height == height ? right.Rgb : ResizeRgb24(right, rightWidth, height);

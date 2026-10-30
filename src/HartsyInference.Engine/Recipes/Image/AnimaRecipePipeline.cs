@@ -133,14 +133,14 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             AnimaReferenceJoin? reference = null;
             if (referenceSettings is not null)
             {
-                referenceLatent = EncodeReferences(request, referenceSettings);
-                reference = new AnimaReferenceJoin(referenceLatent, _referenceGate!, referenceSettings.Strength,
-                    _referenceAdapter!.Placement, referenceSettings.Guidance);
                 if (inner.Scheduler == "euler_cfg_pp")
                 {
                     throw new NotSupportedException("euler_cfg_pp reads the unconditional prediction to correct its step, and a reference "
                         + "step returns a combined prediction. Pick another sampler for a reference request.");
                 }
+                referenceLatent = EncodeReferences(request, referenceSettings);
+                reference = new AnimaReferenceJoin(referenceLatent, _referenceGate!, referenceSettings.Strength,
+                    _referenceAdapter!.Placement, referenceSettings.Guidance);
             }
 
             (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromEmbeddings(
@@ -200,7 +200,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         if (ordered.Count == 0)
             throw new ArgumentException("A reference request needs at least one reference image.");
         if (ordered.Count == 2)
-            ordered = [FeatureImaging.StitchHorizontal(ordered[0], ordered[1])];
+            ordered = [FeatureImaging.StitchHorizontal(ordered[0], ordered[1], settings.MaxPixels)];
         using ResolvedReferences resolved = ReferenceImageResolver.Resolve(ordered, policy with { MaxReferences = 1 })
             ?? throw new InvalidOperationException("The reference images resolved to nothing.");
         return _pipeline.EncodeReference(resolved.Latent[0]);

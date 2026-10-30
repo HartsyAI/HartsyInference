@@ -8,7 +8,8 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 namespace HartsyInference.Engine.Features;
 
 /// <summary>A LoRA a recipe attaches on its own gate rather than from the request: its file, the gate that switches it, and its strength.</summary>
-/// <remarks>The file is read at merge time and copied into the stack, so the caller may dispose it once the merge returns.</remarks>
+/// <remarks>The layers the merge attaches own copies of the file's factors, so the caller may dispose the file once the merge returns.
+/// The stack's entries still refer to the file, so the stack must not be applied again after the file is disposed.</remarks>
 public sealed record GatedLora(LoraFile File, AdjunctGate Gate, float Strength = 1.0f);
 
 /// <summary>The one place a recipe applies the request's LoRAs. Resolves the request stack, opens every file, and applies each layer to the component dictionary its target names — merging into dense/fp8/int8 weights and attaching a runtime adjunct to block-quantized ones.</summary>

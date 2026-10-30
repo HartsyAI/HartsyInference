@@ -35,15 +35,19 @@ public sealed record ReferenceAdapterSettings(string? Adapter, float Strength, l
         return new ReferenceAdapterSettings(adapter, strength, (long)pixels, guidanceSettings);
     }
 
-    /// <summary>The adapter a request asks for, or null when it asks for no reference: a reference image or the adapter extra
-    /// turns the path on. An empty string names the released adapter.</summary>
+    /// <summary>The adapter a request asks for, or null when it asks for no reference: a reference image turns the path on. An empty
+    /// string names the released adapter. Naming an adapter without a reference is refused, since the adapter would load and do nothing.</summary>
     public static string? RequestedAdapter(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         bool hasReferences = request.ReferenceImages is { Count: > 0 } || request.Img2Img is { Mode: Requests.Img2ImgMode.Reference };
         bool named = request.Extra.ContainsKey(RequestExtras.ReferenceAdapter);
-        if (!hasReferences && !named)
+        if (!hasReferences)
+        {
+            if (named)
+                throw new ArgumentException($"'{RequestExtras.ReferenceAdapter}' needs a reference image; send one with the request.", RequestExtras.ReferenceAdapter);
             return null;
+        }
         return RequestExtras.String(request.Extra, RequestExtras.ReferenceAdapter) ?? "";
     }
 
