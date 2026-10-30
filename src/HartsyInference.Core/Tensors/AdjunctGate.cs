@@ -6,6 +6,8 @@ namespace HartsyInference.Core.Tensors;
 /// LoRA can be live for some calls and absent from others on the same resident weights.</summary>
 /// <remarks><para>A gated term contributes to a GEMM only while its gate is enabled. Disabled, the term is skipped
 /// entirely, so the output is the base projection's, bit for bit. The factors stay attached and resident either way.</para>
+/// <para>A scale of 0 still leaves the gate enabled, so its terms count as applied and the GEMM paths take the adjusted route, which adds
+/// zero. Leave the gate disabled, rather than enabling it at 0, to take the fused paths.</para>
 /// <para>Single owner: the code that enables the gate must serialize the generations that read it. Reads are plain
 /// fields, because the GEMM path reads the gate once per projection per step.</para>
 /// <para>A host that captures a graph bakes the accumulate-or-skip choice and the term scales into the graph, so its
