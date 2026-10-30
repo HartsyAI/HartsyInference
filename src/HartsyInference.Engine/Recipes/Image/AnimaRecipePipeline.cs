@@ -41,6 +41,9 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     /// state is not safe to interleave. A waiting request gives up when its cancellation fires, and disposal waits for a running one.</summary>
     private readonly SemaphoreSlim _generationGate = new(1, 1);
 
+    /// <summary>Set under <see cref="_generationGate"/> by <see cref="Dispose"/>; a generation that finds it set refuses to run.</summary>
+    private bool _disposed;
+
     /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable. A reference adapter,
     /// when the pipeline was built with one, arrives as its gate and its spec.</summary>
     public AnimaRecipePipeline(AnimaPipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, T5Tokenizer t5Tokenizer,
@@ -69,6 +72,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         _generationGate.Wait(cancel);
         try
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             return GenerateLocked(request, settings, progress, cancel);
         }
         finally
@@ -336,21 +340,32 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     /// <inheritdoc/>
     public void Dispose()
     {
-        // Waits for a running generation, so nothing frees a weight or the adapter's gate under it. The gate is not released: a later
-        // Generate fails on the disposed components rather than running on them.
+        // Waits for a running generation, so nothing frees a weight or the adapter's gate under it. A second call returns at once.
         _generationGate.Wait();
-        _pipeline.Dispose();
-        _qwen.Dispose();
-        _tokenizer.Dispose();
-        _t5Tokenizer.Dispose();
-        _transformer.Dispose();
-        _llmAdapter.Dispose();
-        _checkpoint.Dispose();
-        foreach (IDisposable loader in _sideModelLoaders)
+        try
         {
-            loader.Dispose();
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            _pipeline.Dispose();
+            _qwen.Dispose();
+            _tokenizer.Dispose();
+            _t5Tokenizer.Dispose();
+            _transformer.Dispose();
+            _llmAdapter.Dispose();
+            _checkpoint.Dispose();
+            foreach (IDisposable loader in _sideModelLoaders)
+            {
+                loader.Dispose();
+            }
+            // Last: the stack owns the merged weight tensors the transformer was serving.
+            _loraStack?.Dispose();
         }
-        // Last: the stack owns the merged weight tensors the transformer was serving.
-        _loraStack?.Dispose();
+        finally
+        {
+            _generationGate.Release();
+        }
     }
 }
