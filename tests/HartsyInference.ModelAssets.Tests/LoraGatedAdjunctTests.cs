@@ -231,6 +231,28 @@ public sealed class LoraGatedAdjunctTests : IDisposable
     }
 
     [Fact]
+    public void GatedRank4Target_IsRefusedBeforeTheUngatedMergeWrites()
+    {
+        // A gated adapter needs a 2-D Linear to hang on. The refusal must come before the ungated LoRA merges into the dictionary, or a
+        // caller that keeps the dictionary after the throw gets a partly merged checkpoint.
+        using Tensor baseWeight = Weight();
+        using Tensor conv = new(new TensorShape(Rows, Cols, 1, 1), DType.F32);
+        Dictionary<string, Tensor> weights = new() { [Key] = baseWeight, ["blocks.2.attn.to_q.weight"] = conv };
+        using LoraFile ungated = LoraFile.Load(SplitLora("rank4_ungated"));
+        using LoraFile gated = LoraFile.Load(CreateSafeTensors("rank4_gated", new()
+        {
+            ["transformer.blocks.2.attn.to_q.lora_A.weight"] = ([Rank, Cols], Filled(Rank * Cols, DownValue)),
+            ["transformer.blocks.2.attn.to_q.lora_B.weight"] = ([Rows, Rank], Filled(Rows * Rank, UpValue)),
+        }));
+        using LoraStack stack = new();
+        stack.Add(ungated, 1.0f);
+        stack.AddGated(gated, new AdjunctGate(), strength: 1.0f);
+
+        Assert.Throws<NotSupportedException>(() => stack.ApplyTo(weights, LoraTarget.Transformer, new CpuBackend()));
+        Assert.Same(baseWeight, weights[Key]);
+    }
+
+    [Fact]
     public void GatedTarget_MissingFromTheWeights_IsRefusedNotSkipped()
     {
         // A gated adapter is applied whole. A key the checkpoint does not hold means the wrong checkpoint, and skipping

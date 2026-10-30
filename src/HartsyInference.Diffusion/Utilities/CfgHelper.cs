@@ -219,8 +219,8 @@ public static unsafe class CfgHelper
     /// <summary>Device twin of <see cref="ApplyDualCfg"/>: writes <c>u + innerScale·(m − u) + outerScale·(c − m)</c> into
     /// <paramref name="output"/> as two affine mixes and an add, so the combine stays on the device.</summary>
     /// <remarks>One formula on two surfaces: the reference adapter's guidance (cond = positive with reference, mid = negative with
-    /// reference, uncond = the base without it), MOSS's skip-layer guidance and any future dual-branch combine. The bits differ from the
-    /// host loop's by rounding, which is the price of running on the device.</remarks>
+    /// reference, uncond = the base without it), MOSS's skip-layer guidance and any future dual-branch combine. The result may differ
+    /// from the host loop's by rounding, since the device sums in a different order; the regression A/B decides whether that is visible.</remarks>
     public static void ApplyDualCfgDevice(IBackend backend, Tensor output, Tensor cond, Tensor imageCond, Tensor uncond,
         float innerScale, float outerScale)
     {
