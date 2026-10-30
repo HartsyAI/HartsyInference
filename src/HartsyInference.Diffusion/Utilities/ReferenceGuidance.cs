@@ -101,6 +101,7 @@ public sealed class ReferenceGuidanceSettings
     /// <see cref="Start"/> and <see cref="End"/> (<paramref name="shift"/> is the schedule's flow shift), with the reference adapter's 1e-5 tolerance.</summary>
     public bool InWindow(float sigma, double shift)
     {
+        // A window over the whole schedule covers every sigma, so it needs no percentage conversion (and no tolerance).
         if (Start <= 0f && End >= 1f)
             return true;
         double low = SamplerOptions.FlowPercentToSigma(End, shift);
@@ -111,7 +112,7 @@ public sealed class ReferenceGuidanceSettings
 
 /// <summary>One denoising step with a reference joined, combined the way the reference adapter's post-CFG patch combines it.
 /// Model-agnostic: the caller supplies the branch evaluations, so any model that joins a reference can use this.</summary>
-public static unsafe class ReferenceGuidance
+public static class ReferenceGuidance
 {
     /// <summary>Evaluates one branch of a step and returns its velocity. The caller owns the returned tensor.</summary>
     public delegate Tensor BranchPredictor(ReferenceBranch branch);
@@ -169,7 +170,15 @@ public static unsafe class ReferenceGuidance
         if (correction == ReferenceCorrection.None)
         {
             Tensor velocity = new(x.Shape, DType.F32);
-            CfgHelper.ApplyDualCfgDevice(backend, velocity, positive, mid, baseOrMid, innerScale, cfg);
+            try
+            {
+                CfgHelper.ApplyDualCfgDevice(backend, velocity, positive, mid, baseOrMid, innerScale, cfg);
+            }
+            catch
+            {
+                velocity.Dispose();
+                throw;
+            }
             return velocity;
         }
 
@@ -222,49 +231,54 @@ public static unsafe class ReferenceGuidance
     /// adapter's projection (its unit vector is <c>pos / max(‖pos‖, 1e-12)</c>). The result's inner product with <c>pos</c> is then ‖pos‖².</summary>
     private static void ApgCorrect(IBackend backend, Tensor output, Tensor guided, Tensor positive)
     {
-        double dotGuidedPositive = Dot(backend, guided, positive);
-        double dotPositive = Dot(backend, positive, positive);
+        double dotGuidedPositive = Dot(guided, positive);
+        double dotPositive = Dot(positive, positive);
         double norm = Math.Max(Math.Sqrt(dotPositive), 1e-12);
         double alpha = (dotGuidedPositive - dotPositive) / (norm * norm);
         backend.AffineMix(output, guided, positive, 1f, (float)-alpha);
     }
 
     /// <summary>StdRescale in x0 space: <c>(phi·std(pos)/std(guided) + (1 − phi))·guided</c>, with the unbiased standard deviation over
-    /// every element, as the reference adapter computes it.</summary>
+    /// every element, as the reference adapter computes it. A constant guided prediction has no spread to rescale from, so it passes
+    /// through unchanged rather than dividing by zero.</summary>
     private static void StdRescaleCorrect(IBackend backend, Tensor output, Tensor guided, Tensor positive, float phi)
     {
-        double stdPositive = StandardDeviation(backend, positive);
-        double stdGuided = StandardDeviation(backend, guided);
-        float factor = (float)(phi * (stdPositive / stdGuided) + (1.0 - phi));
+        double stdGuided = StandardDeviation(guided.AsReadOnlySpan<float>());
+        float factor = stdGuided > 0.0
+            ? (float)(phi * (StandardDeviation(positive.AsReadOnlySpan<float>()) / stdGuided) + (1.0 - phi))
+            : 1f;
         backend.Scale(output, guided, factor);
     }
 
-    private static double StandardDeviation(IBackend backend, Tensor tensor)
+    /// <summary>The unbiased standard deviation, taken around the mean in a second pass, so a large mean does not cancel the spread.</summary>
+    private static double StandardDeviation(ReadOnlySpan<float> values)
     {
-        long count = tensor.ElementCount;
-        double sum = Dot(backend, tensor, null);
-        double sumSquares = Dot(backend, tensor, tensor);
-        double variance = (sumSquares - (sum * sum / count)) / (count - 1);
-        return Math.Sqrt(Math.Max(variance, 0.0));
+        double mean = 0;
+        foreach (float v in values)
+        {
+            mean += v;
+        }
+        mean /= values.Length;
+        double squares = 0;
+        foreach (float v in values)
+        {
+            squares += (v - mean) * (v - mean);
+        }
+        return Math.Sqrt(squares / (values.Length - 1));
     }
 
-    /// <summary>The inner product of two tensors of equal element count, as a GEMV of one row against one row, read back as a host
-    /// scalar. A null <paramref name="right"/> sums <paramref name="left"/>. Reductions have no backend op of their own, and a GEMV is
-    /// the one the backend already accumulates in F32 on every device.</summary>
-    private static double Dot(IBackend backend, Tensor left, Tensor? right)
+    /// <summary>The inner product of two tensors of equal element count, summed in double on the host. The device GEMM runs F32 operands
+    /// in BF16 or F16 (<c>CudaBackend.ResolveGemmDtype</c>), too coarse for the APG projection, so the sum reads its operands back: one
+    /// copy per reduction, small next to a model call.</summary>
+    private static double Dot(Tensor left, Tensor right)
     {
-        int count = checked((int)left.ElementCount);
-        using Tensor leftRow = left.Reshape(new TensorShape(1, count));
-        using Tensor rightRow = right is null ? Ones(count) : right.Reshape(new TensorShape(1, count));
-        using Tensor result = new(new TensorShape(1, 1), DType.F32);
-        backend.Linear(result, leftRow, rightRow, null);
-        return ((float*)result.DataPointer)[0];
-    }
-
-    private static Tensor Ones(int count)
-    {
-        Tensor ones = new(new TensorShape(1, count), DType.F32);
-        ones.AsSpan<float>().Fill(1f);
-        return ones;
+        ReadOnlySpan<float> a = left.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> b = right.AsReadOnlySpan<float>();
+        double sum = 0;
+        for (int i = 0; i < a.Length; i++)
+        {
+            sum += (double)a[i] * b[i];
+        }
+        return sum;
     }
 }

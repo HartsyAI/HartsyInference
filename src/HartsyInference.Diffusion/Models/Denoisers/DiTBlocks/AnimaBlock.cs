@@ -175,37 +175,41 @@ public sealed unsafe class AnimaBlock
         TensorShape hiddenShape = new TensorShape(batch, seqLen, _hidden);
 
         CapturedKv captured = new();
-        Tensor result;
+        Tensor? norm1 = null, gate1 = null, attn1Out = null, afterAttn1 = null, norm3 = null, gate3 = null, ffOut = null, result = null;
+        bool succeeded = false;
         try
         {
-            (Tensor norm1, Tensor gate1) = ApplyAdaLnLora(backend, hidden, embeddedTimestep, temb,
-                _adaSelfL1!, _adaSelfL2!, batch, seqLen);
-            Tensor attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch, null, captured);
-            norm1.Dispose();
-            Tensor afterAttn1 = new Tensor(hiddenShape, DType.F32);
+            (norm1, gate1) = ApplyAdaLnLora(backend, hidden, embeddedTimestep, temb, _adaSelfL1!, _adaSelfL2!, batch, seqLen);
+            attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch, null, captured);
+            afterAttn1 = new Tensor(hiddenShape, DType.F32);
             backend.GatedResidualLastDim(afterAttn1, hidden, attn1Out, gate1);
-            attn1Out.Dispose();
-            gate1.Dispose();
 
-            (Tensor norm3, Tensor gate3) = ApplyAdaLnLora(backend, afterAttn1, embeddedTimestep, temb,
-                _adaMlpL1!, _adaMlpL2!, batch, seqLen);
-            Tensor ffOut = FeedForward(backend, norm3, batch, seqLen);
-            norm3.Dispose();
+            (norm3, gate3) = ApplyAdaLnLora(backend, afterAttn1, embeddedTimestep, temb, _adaMlpL1!, _adaMlpL2!, batch, seqLen);
+            ffOut = FeedForward(backend, norm3, batch, seqLen);
             result = new Tensor(hiddenShape, DType.F32);
             backend.GatedResidualLastDim(result, afterAttn1, ffOut, gate3);
-            afterAttn1.Dispose();
-            ffOut.Dispose();
-            gate3.Dispose();
+            keys = captured.Key!;
+            values = captured.Value!;
+            succeeded = true;
+            return result;
         }
-        catch
+        finally
         {
-            captured.Key?.Dispose();
-            captured.Value?.Dispose();
-            throw;
+            // Every intermediate is released on both paths; the result and the captured keys and values go to the caller only on success.
+            norm1?.Dispose();
+            gate1?.Dispose();
+            attn1Out?.Dispose();
+            afterAttn1?.Dispose();
+            norm3?.Dispose();
+            gate3?.Dispose();
+            ffOut?.Dispose();
+            if (!succeeded)
+            {
+                result?.Dispose();
+                captured.Key?.Dispose();
+                captured.Value?.Dispose();
+            }
         }
-        keys = captured.Key!;
-        values = captured.Value!;
-        return result;
     }
 
     /// <summary>Runs self-attention, cross-attention, then MLP, each residual-gated by its own AdaLN-LoRA modulator.</summary>

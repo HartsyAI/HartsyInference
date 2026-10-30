@@ -150,6 +150,8 @@ public sealed class LoraStack : IDisposable
             }
         }
 
+        // Refused before any merge writes into the dictionary, so a refused adapter leaves the weights it was given untouched.
+        RefuseUnmatchedGatedTargets(gated, weights, target);
         int merged = 0, skippedShape = 0;
         // Adjunct terms are collected per key and attached ONCE at the end: a key can take deltas from both the
         // direct pass and the fused-slice pass, and attaching twice would drop the first attachment's terms.
@@ -361,25 +363,10 @@ public sealed class LoraStack : IDisposable
         }
 
         // Gated layers never merge: each becomes a runtime term switched by its entry's gate, attached alongside any
-        // ungated terms of the same key. A gated key the dictionary does not hold is refused, not skipped: a gated
-        // adapter is applied whole, so a missing target means the wrong checkpoint, and a partial apply must not pass.
+        // ungated terms of the same key. Their targets were checked before any merge ran, so each one is present here.
         foreach ((string canonicalKey, List<(LoraLayer layer, float strength, AdjunctGate gate)> deltas) in gated)
         {
-            if (!weights.TryGetValue(canonicalKey, out Tensor? gatedBase))
-            {
-                throw new HartsyInferenceException(
-                    $"Gated LoRA target '{canonicalKey}' is not present in {target} weights. A gated adapter is applied "
-                    + "whole, so this checkpoint is not the one it was trained for.");
-            }
-            foreach ((LoraLayer layer, float _, AdjunctGate _) in deltas)
-            {
-                if (!DeltaShapeMatches(layer, gatedBase))
-                {
-                    throw new HartsyInferenceException(
-                        $"Gated LoRA delta for '{canonicalKey}' is [{layer.Delta.OutFeatures}, {layer.Delta.InFeatures}] but the "
-                        + $"checkpoint's weight is {gatedBase.Shape}. A gated adapter is applied whole, so this LoRA was trained against a different build.");
-                }
-            }
+            Tensor gatedBase = weights[canonicalKey];
             List<LowRankAdjunctTerm> terms = AdjunctTermsFor(adjuncts, canonicalKey);
             foreach ((LoraLayer layer, float strength, AdjunctGate gate) in deltas)
             {
@@ -398,7 +385,7 @@ public sealed class LoraStack : IDisposable
             // The skipped count is load-bearing, not decoration: a partially applied LoRA still generates, so a
             // silent skip reads as success while the LoRA does only part of its job.
             string skipped = skippedShape > 0 ? $" ({skippedShape} skipped on shape mismatch)" : "";
-            Logs.Info($"Merged {merged} of {grouped.Count + gated.Count + diffGrouped.Count} LoRA-targeted weights into {target}{skipped}.");
+            Logs.Info($"Applied {merged} of {grouped.Count + gated.Count + diffGrouped.Count} LoRA-targeted weights to {target}{skipped}.");
         }
         return merged;
     }
@@ -614,6 +601,32 @@ public sealed class LoraStack : IDisposable
     /// elements once the shapes are made to agree. Anything else is refused.</para></summary>
     private static bool DeltaShapeMatches(LoraLayer layer, Tensor baseW) =>
         baseW.Shape.Rank is 2 or 4 && layer.Delta.MatchesShape(baseW);
+
+    /// <summary>Refuses a gated adapter whose target the dictionary does not hold, or whose delta does not fit it. A gated adapter is
+    /// applied whole: a missing target means the wrong checkpoint, and skipping it would leave a partial adapter that generates
+    /// without complaint.</summary>
+    private static void RefuseUnmatchedGatedTargets(Dictionary<string, List<(LoraLayer layer, float strength, AdjunctGate gate)>> gated,
+        IDictionary<string, Tensor> weights, LoraTarget target)
+    {
+        foreach ((string canonicalKey, List<(LoraLayer layer, float strength, AdjunctGate gate)> deltas) in gated)
+        {
+            if (!weights.TryGetValue(canonicalKey, out Tensor? gatedBase))
+            {
+                throw new HartsyInferenceException(
+                    $"Gated LoRA target '{canonicalKey}' is not present in {target} weights. A gated adapter is applied "
+                    + "whole, so this checkpoint is not the one it was trained for.");
+            }
+            foreach ((LoraLayer layer, float _, AdjunctGate _) in deltas)
+            {
+                if (!DeltaShapeMatches(layer, gatedBase))
+                {
+                    throw new HartsyInferenceException(
+                        $"Gated LoRA delta for '{canonicalKey}' is [{layer.Delta.OutFeatures}, {layer.Delta.InFeatures}] but the "
+                        + $"checkpoint's weight is {gatedBase.Shape}. A gated adapter is applied whole, so this LoRA was trained against a different build.");
+                }
+            }
+        }
+    }
 
     /// <summary>Folds one layer's ΔW into <paramref name="accumF32"/>, which holds the weight itself rather than a delta.</summary>
     /// <remarks>A DoRA adapter is not additive — the magnitude vector rescales the whole LoRA'd weight row- or

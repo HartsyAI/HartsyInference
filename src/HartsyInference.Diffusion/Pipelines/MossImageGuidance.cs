@@ -79,6 +79,8 @@ public sealed record MossImageGuidance
         try
         {
             // uncond + cfg·(cond − uncond) + SlgScale·(cond − skipped). With no uncond, skipped stands in and the CFG weight is zero.
+            // The helper takes (cond, imageCond, uncond). The skipped prediction goes in as cond, so its outer term
+            // outer·(cond − imageCond) = −SlgScale·(skipped − cond) is the SLG term; imageCond carries the conditional prediction.
             CfgHelper.ApplyDualCfgDevice(backend, combined, skipped, cond, uncond ?? skipped, uncond is null ? 0f : cfg, -SlgScale);
             return combined;
         }

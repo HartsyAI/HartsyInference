@@ -84,8 +84,15 @@ public static class AnimaLoraMapper
         {
             Logs.Warning($"Anima LoRA: skipped {foreign} keys outside the DiT block modules (text-encoder adapters are not applied for this format).");
         }
-        return LoraGroupBuffer.BuildLayers(groups,
+        IReadOnlyList<LoraLayer> layers = LoraGroupBuffer.BuildLayers(groups,
             sourceKey => $"Anima LoRA group '{sourceKey}' is missing a matrix its decomposition needs; skipping.");
+        // A file the format detector claimed but that yields no complete layer would otherwise load as an empty LoRA and generate unchanged.
+        if (layers.Count == 0)
+        {
+            throw new NotSupportedException("Anima LoRA has no complete block-module layers, so it would change nothing. Check that the file "
+                + "is a low-rank Anima adapter with both matrices of each pair.");
+        }
+        return layers;
     }
 
     /// <summary>Strips one accepted wrapper and checks the rest is <c>blocks.N.&lt;module&gt;</c> for a module an Anima block owns.

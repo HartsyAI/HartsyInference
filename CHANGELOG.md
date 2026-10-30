@@ -16,7 +16,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.393
 
-- **Fixed: Anima used the diffusers RoPE scale instead of ComfyUI's.** The engine rotated Anima's tokens with NTK scales (t 2, h 1, w 1). The single-file checkpoint was trained with ComfyUI's (t 1, h 4, w 4), so every Anima image changes. The values come from `comfy/model_detection.py`.
+- **Fixed: Anima used the diffusers RoPE scale instead of ComfyUI's.** The engine rotated Anima's tokens with NTK scales (t 2, h 1, w 1). ComfyUI configures the single-file checkpoint with (t 1, h 4, w 4) (`comfy/model_detection.py`), so every Anima image changes. Matching ComfyUI's output on a real dump is still pending.
 - **Fixed: Anima LoRAs applied only their MLP layers.** The Wan rename table turned `self_attn.q_proj` into `attn1.to_q_proj` and `adaln_modulation_*` into `scale_shift_table`, so attention and modulation weights were skipped without a warning. ComfyUI-format Anima files (`diffusion_model.`, `net.`, or bare `blocks.` roots) now map onto the checkpoint's own weight names, and the kohya underscored spelling goes through the generic kohya mapper. A full-weight diff in an Anima file is refused by name.
 - **Fixed: numeric request extras sent as JSON numbers were ignored.** `RequestExtras.Number` read only .NET numbers, so JSON values such as `reference.max_pixels` and `slg.scale` fell back to their defaults over HTTP. It now reads JSON numbers and numeric strings.
 
