@@ -55,7 +55,7 @@ public sealed record ReferenceAdapterSpec(string Path, ReferencePlacement Placem
         }
 
         int frame = character.TryGetProperty("t", out JsonElement t) ? t.GetInt32() : 1;
-        float rowOffset = character.TryGetProperty("offset_h", out JsonElement h) ? h.GetSingle() : 1f;
+        double rowOffset = character.TryGetProperty("offset_h", out JsonElement h) ? h.GetDouble() : 1.0;
         int columnOffset = character.TryGetProperty("offset_w", out JsonElement w) ? w.GetInt32() : 0;
         return new ReferenceAdapterSpec(path, new ReferencePlacement(frame, rowOffset, columnOffset));
     }
