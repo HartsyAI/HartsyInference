@@ -36,11 +36,15 @@ public static class LowRankAdjunctGemm
         TensorShape deltaShape = new(rows, outFeatures);
         foreach (LowRankAdjunctTerm term in adjunct.Terms)
         {
+            if (!term.IsApplied)
+            {
+                continue;
+            }
             if (term.Up is null)
             {
                 using Tensor fullDelta = new(deltaShape, output.DType);
                 backend.Linear(fullDelta, input, term.Down, null);
-                backend.Scale(fullDelta, fullDelta, term.Scale);
+                backend.Scale(fullDelta, fullDelta, term.EffectiveScale);
                 backend.Add(output, output, fullDelta);
                 continue;
             }
@@ -48,7 +52,7 @@ public static class LowRankAdjunctGemm
             // at LoRA ranks that is two orders of magnitude less traffic.
             using Tensor projected = new(new TensorShape(rows, term.Down.Shape[0]), output.DType);
             backend.Linear(projected, input, term.Down, null);
-            backend.Scale(projected, projected, term.Scale);
+            backend.Scale(projected, projected, term.EffectiveScale);
             using Tensor delta = new(deltaShape, output.DType);
             backend.Linear(delta, projected, term.Up, null);
             backend.Add(output, output, delta);

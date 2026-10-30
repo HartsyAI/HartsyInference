@@ -49,7 +49,7 @@ public sealed partial class CpuBackend : IBackend
     {
         ThrowIfDisposed();
         MatMulKernels.LinearTransB(output, input, weight, bias);
-        if (weight.LowRankAdjunct is LowRankAdjunct adjunct)
+        if (weight.LowRankAdjunct is { IsActive: true } adjunct)
         {
             LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
         }

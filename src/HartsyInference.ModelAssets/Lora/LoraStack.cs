@@ -23,6 +23,24 @@ public sealed class LoraStack : IDisposable
         _entries.Add(new Entry(file, strength, tencStrength ?? strength));
     }
 
+    /// <summary>Adds a LoRA whose layers are switched by <paramref name="gate"/>: every layer is carried as a runtime adjunct
+    /// term that a GEMM adds only while the gate is enabled, on every weight dtype, never merged into the weights.</summary>
+    /// <remarks>Use this for a LoRA that must be live for some calls and absent for others on the same weights. A full-weight
+    /// <c>.diff</c> is a dense addition with no way to switch it, so a file carrying one is refused here, by name.</remarks>
+    public void AddGated(LoraFile file, AdjunctGate gate, float strength = 1.0f)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(gate);
+        if (file.FullWeightDiffs.Count > 0)
+        {
+            throw new NotSupportedException(
+                $"LoRA '{Path.GetFileName(file.FilePath)}' carries {file.FullWeightDiffs.Count} full-weight diffs, which are "
+                + "dense additions and cannot be gated. Gate only low-rank adapters.");
+        }
+        _entries.Add(new Entry(file, strength, strength, gate));
+    }
+
     /// <summary>Opens a LoRA safetensors file and adds it to the stack in one call. The stack takes ownership of the loaded file and disposes it when the stack itself is disposed.</summary>
     /// <param name="tencStrength">Strength for text-encoder targets; defaults to <paramref name="strength"/>.</param>
     public void AddFromPath(string filePath, float strength = 1.0f, float? tencStrength = null)
@@ -93,6 +111,7 @@ public sealed class LoraStack : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
 
         Dictionary<string, List<(LoraLayer layer, float strength)>> grouped = [];
+        Dictionary<string, List<(LoraLayer layer, float strength, AdjunctGate gate)>> gated = [];
         KohyaUnderscoreIndex? kohyaIndex = null;
         foreach (Entry entry in _entries)
         {
@@ -111,6 +130,16 @@ public sealed class LoraStack : IDisposable
                     {
                         layer = source.WithResolvedTarget(resolvedKey);
                     }
+                }
+                if (entry.Gate is { } gate)
+                {
+                    if (!gated.TryGetValue(layer.TargetKey, out List<(LoraLayer, float, AdjunctGate)>? gatedList))
+                    {
+                        gatedList = [];
+                        gated[layer.TargetKey] = gatedList;
+                    }
+                    gatedList.Add((layer, strength, gate));
+                    continue;
                 }
                 if (!grouped.TryGetValue(layer.TargetKey, out List<(LoraLayer, float)>? list))
                 {
@@ -331,6 +360,33 @@ public sealed class LoraStack : IDisposable
             }
         }
 
+        // Gated layers never merge: each becomes a runtime term switched by its entry's gate, attached alongside any
+        // ungated terms of the same key. A gated key the dictionary does not hold is refused, not skipped: a gated
+        // adapter is applied whole, so a missing target means the wrong checkpoint, and a partial apply must not pass.
+        foreach ((string canonicalKey, List<(LoraLayer layer, float strength, AdjunctGate gate)> deltas) in gated)
+        {
+            if (!weights.TryGetValue(canonicalKey, out Tensor? gatedBase))
+            {
+                throw new HartsyInferenceException(
+                    $"Gated LoRA target '{canonicalKey}' is not present in {target} weights. A gated adapter is applied "
+                    + "whole, so this checkpoint is not the one it was trained for.");
+            }
+            foreach ((LoraLayer layer, float _, AdjunctGate _) in deltas)
+            {
+                if (!DeltaShapeMatches(layer, gatedBase))
+                {
+                    throw new HartsyInferenceException(
+                        $"Gated LoRA delta for '{canonicalKey}' is [{layer.Delta.OutFeatures}, {layer.Delta.InFeatures}] but the "
+                        + $"checkpoint's weight is {gatedBase.Shape}. A gated adapter is applied whole, so this LoRA was trained against a different build.");
+                }
+            }
+            List<LowRankAdjunctTerm> terms = AdjunctTermsFor(adjuncts, canonicalKey);
+            foreach ((LoraLayer layer, float strength, AdjunctGate gate) in deltas)
+            {
+                terms.Add(BuildAdjunctTerm(backend, layer.Delta, strength, canonicalKey, gatedBase, 0, gatedBase.Shape[0], gate));
+            }
+        }
+
         foreach ((string canonicalKey, List<LowRankAdjunctTerm> terms) in adjuncts)
         {
             weights[canonicalKey] = AttachAdjunct(weights[canonicalKey], terms, canonicalKey);
@@ -342,7 +398,7 @@ public sealed class LoraStack : IDisposable
             // The skipped count is load-bearing, not decoration: a partially applied LoRA still generates, so a
             // silent skip reads as success while the LoRA does only part of its job.
             string skipped = skippedShape > 0 ? $" ({skippedShape} skipped on shape mismatch)" : "";
-            Logs.Info($"Merged {merged} of {grouped.Count + diffGrouped.Count} LoRA-targeted weights into {target}{skipped}.");
+            Logs.Info($"Merged {merged} of {grouped.Count + gated.Count + diffGrouped.Count} LoRA-targeted weights into {target}{skipped}.");
         }
         return merged;
     }
@@ -385,7 +441,7 @@ public sealed class LoraStack : IDisposable
     /// <c>LinearWeightRows</c> narrows the up matrix with the window and takes the down matrix whole, which only works
     /// if the up matrix is indexed by the same rows the weight is. At LoRA ranks the padded rows cost nothing.</remarks>
     private LowRankAdjunctTerm BuildAdjunctTerm(IBackend backend, LoraDelta delta, float strength, string canonicalKey,
-        Tensor baseW, long rowOffset, long rowCount)
+        Tensor baseW, long rowOffset, long rowCount, AdjunctGate? gate = null)
     {
         RequireRank2AdjunctTarget(baseW, canonicalKey);
         if (delta.DoraScale is not null)
@@ -400,7 +456,7 @@ public sealed class LoraStack : IDisposable
         {
             Tensor down = OwnF32Flattened(standard.Down);
             Tensor up = PadRowsToFull(OwnF32Flattened(standard.Up), fullRows, rowOffset, rowCount);
-            return new LowRankAdjunctTerm { Down = down, Up = up, Scale = strength * delta.Scale };
+            return new LowRankAdjunctTerm { Down = down, Up = up, Scale = strength * delta.Scale, Gate = gate };
         }
         // LoHa/LoKr have no low-rank pair to carry, so their ΔW materializes once here and rides as a rank-full term.
         Tensor full = delta.ComputeF32(backend);
@@ -409,6 +465,7 @@ public sealed class LoraStack : IDisposable
         {
             Down = PadRowsToFull(full, fullRows, rowOffset, rowCount),
             Scale = strength * delta.Scale,
+            Gate = gate,
         };
     }
 
@@ -646,7 +703,7 @@ public sealed class LoraStack : IDisposable
     }
 
     /// <summary>One stacked LoRA and the strengths it applies at, split the way SwarmUI splits them.</summary>
-    private readonly record struct Entry(LoraFile File, float Strength, float TencStrength)
+    private readonly record struct Entry(LoraFile File, float Strength, float TencStrength, AdjunctGate? Gate = null)
     {
         /// <summary>The strength this entry applies to <paramref name="target"/>: the text-encoder strength for every encoder component, the model strength for the diffusion body.</summary>
         public float StrengthFor(LoraTarget target) => target switch

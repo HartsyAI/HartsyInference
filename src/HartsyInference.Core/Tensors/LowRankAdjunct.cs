@@ -27,6 +27,26 @@ public sealed class LowRankAdjunct
     /// <summary>Columns of the delta — the target weight's input dimension.</summary>
     public long InFeatures => Terms[0].InFeatures;
 
+    /// <summary>Whether a GEMM against this weight adds anything now. False only when every term is gated off, in which
+    /// case the projection is the base weight's own and the fused fast paths are safe to take.</summary>
+    /// <remarks>Presence (<c>LowRankAdjunct is not null</c>) still governs what must stay resident and what must be
+    /// refused: a gated-off adjunct is preloaded, freed with its weight, and refused by the ops that cannot apply one.
+    /// Only the GEMM dispatch decisions ask this.</remarks>
+    public bool IsActive
+    {
+        get
+        {
+            foreach (LowRankAdjunctTerm term in Terms)
+            {
+                if (term.IsApplied)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     /// <summary>Throws unless every term matches a weight of <paramref name="outFeatures"/> × <paramref name="inFeatures"/>.</summary>
     /// <param name="weightKey">The weight's checkpoint key, named in the refusal.</param>
     public void Validate(long outFeatures, long inFeatures, string weightKey)

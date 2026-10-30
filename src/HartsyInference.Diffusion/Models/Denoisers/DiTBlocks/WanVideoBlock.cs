@@ -235,7 +235,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         if (!backend.SupportsF16Activations || EngineKnobs.W8a8.Value)
             return false;
         foreach (Tensor w in weights)
-            if (w.DType != DType.F16 || w.LowRankAdjunct is not null)
+            if (w.DType != DType.F16 || w.LowRankAdjunct is { IsActive: true })
                 return false;
         return true;
     }
