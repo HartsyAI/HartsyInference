@@ -123,6 +123,21 @@ public sealed class ReferenceGuidanceTests
     }
 
     [Fact]
+    public void StdRescale_ConstantGuided_PassesThrough()
+    {
+        // A constant guided prediction has no spread to rescale from; the rescale must leave it unchanged rather than divide by zero.
+        using CpuBackend cpu = new();
+        using Tensor guided = Filled(3f);
+        Tensor positive = Noise(5, 0.5f);
+        using Tensor corrected = new(Shape, DType.F32);
+
+        ReferenceGuidance.Correct(cpu, ReferenceCorrection.StdRescale, 0.5f, guided, positive, corrected);
+
+        Assert.Equal(Span(guided).ToArray(), Span(corrected).ToArray());
+        positive.Dispose();
+    }
+
+    [Fact]
     public void Correct_NoneIsTheIdentity()
     {
         using CpuBackend cpu = new();
