@@ -253,6 +253,29 @@ public sealed class LoraGatedAdjunctTests : IDisposable
     }
 
     [Fact]
+    public void GatedDoraDelta_IsRefusedBeforeTheUngatedMergeWrites()
+    {
+        // A DoRA delta rescales the whole weight, so it cannot ride as an additive adjunct. The refusal must come before the ungated sibling merges.
+        using Tensor baseWeight = Weight();
+        using Tensor sibling = Weight();
+        Dictionary<string, Tensor> weights = new() { [Key] = baseWeight, ["blocks.2.attn.to_q.weight"] = sibling };
+        using LoraFile ungated = LoraFile.Load(SplitLora("dora_ungated"));
+        using LoraFile gated = LoraFile.Load(CreateSafeTensors("dora_gated", new()
+        {
+            ["transformer.blocks.2.attn.to_q.lora_A.weight"] = ([Rank, Cols], Filled(Rank * Cols, DownValue)),
+            ["transformer.blocks.2.attn.to_q.lora_B.weight"] = ([Rows, Rank], Filled(Rows * Rank, UpValue)),
+            ["transformer.blocks.2.attn.to_q.dora_scale"] = ([Rows], Filled(Rows, 1.0f)),
+        }));
+        using LoraStack stack = new();
+        stack.Add(ungated, 1.0f);
+        stack.AddGated(gated, new AdjunctGate(), strength: 1.0f);
+
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => stack.ApplyTo(weights, LoraTarget.Transformer, new CpuBackend()));
+        Assert.Contains("DoRA", error.Message);
+        Assert.Same(baseWeight, weights[Key]);
+    }
+
+    [Fact]
     public void GatedTarget_MissingFromTheWeights_IsRefusedNotSkipped()
     {
         // A gated adapter is applied whole. A key the checkpoint does not hold means the wrong checkpoint, and skipping
