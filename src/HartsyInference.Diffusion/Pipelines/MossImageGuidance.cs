@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
@@ -77,14 +78,8 @@ public sealed record MossImageGuidance
         Tensor combined = new(cond.Shape, DType.F32);
         try
         {
-            using Tensor baseV = new(cond.Shape, DType.F32);
-            if (uncond is not null)
-                backend.AffineMix(baseV, cond, uncond, cfg, 1f - cfg);
-            else
-                backend.AffineMix(baseV, skipped, skipped, 1f, 0f);
-            using Tensor delta = new(cond.Shape, DType.F32);
-            backend.AffineMix(delta, cond, skipped, SlgScale, -SlgScale);
-            backend.Add(combined, baseV, delta);
+            // uncond + cfg·(cond − uncond) + SlgScale·(cond − skipped). With no uncond, skipped stands in and the CFG weight is zero.
+            CfgHelper.ApplyDualCfgDevice(backend, combined, skipped, cond, uncond ?? skipped, uncond is null ? 0f : cfg, -SlgScale);
             return combined;
         }
         catch
