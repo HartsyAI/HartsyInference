@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -369,7 +370,9 @@ public sealed unsafe class AnimaBlock
         backend.Linear(proj1, x, _mlp1!, null);
 
         Tensor activated = new Tensor(ffShape, DType.F32);
-        backend.Gelu(activated, proj1);
+        // Exact erf GELU matches the reference nn.GELU(); numerics.animaExactGelu=false selects the tanh approximation.
+        if (EngineKnobs.AnimaExactGelu.Value) backend.GeluErf(activated, proj1);
+        else backend.Gelu(activated, proj1);
         proj1.Dispose();
 
         Tensor output = new Tensor(inShape, DType.F32);

@@ -159,10 +159,10 @@ def main():
 
     guided = torch.randn(1, CHANNELS, args.latent_h, args.latent_w, generator=generator, device=device)
     pos = torch.randn(1, CHANNELS, args.latent_h, args.latent_w, generator=generator, device=device)
-    tensors["corr.guided"] = guided.contiguous()
-    tensors["corr.pos"] = pos.contiguous()
+    tensors["corr.guided"] = guided.clone().contiguous()
+    tensors["corr.pos"] = pos.clone().contiguous()
     for mode in ("apg", "rescale", "none"):
-        tensors[f"corr.{mode}"] = node._correct(guided, pos, mode, 0.5).contiguous()
+        tensors[f"corr.{mode}"] = node._correct(guided, pos, mode, 0.5).clone().contiguous()
 
     metadata = {
         "source": "ComfyUI-Anima-Ref-Adapter (node) on ComfyUI Anima",

@@ -17,6 +17,11 @@ public static partial class EngineKnobs
         Bool("numerics.animaBypassLlmAdapter", false, KnobScope.Runtime, KnobDomain.Numerics,
             "Bypasses the Anima LLM adapter, swapping which conditioning path the model takes.");
 
+    /// <summary>Anima's FFN activations use the exact erf GELU (nn.GELU()), not the tanh approximation.</summary>
+    public static readonly Knob<bool> AnimaExactGelu =
+        Bool("numerics.animaExactGelu", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Anima FFN activations use the exact erf GELU instead of the tanh approximation.");
+
     /// <summary>Seeds HiFTNet's noise source deterministically, which disables the NSF additive noise.</summary>
     public static readonly Knob<bool> HiftDeterministic =
         Bool("numerics.hiftDeterministic", false, KnobScope.Runtime, KnobDomain.Numerics,
