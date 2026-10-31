@@ -951,6 +951,9 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>Loads a LiquidAI LFM3 directory into the slot's SSM-style model, which carries its own conv windows and KV cache, on the requested device.</summary>
     private void LoadLfm3Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
+        // A layer-split GGUF leaves its last stage as the slot backend; a single-device load must not reuse it.
+        if (slot.ExtraStageBackends is not null)
+            DisposeStageBackends(slot);
         IBackend backend = slot.Backend ??= CreateBackendFor(deviceKey);
         slot.SsmModel = HfTextDirectoryLoader.LoadLfm3(checkpoint);
         slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
