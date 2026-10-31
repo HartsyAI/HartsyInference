@@ -251,18 +251,22 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
                 PredictionType.FlowVelocity,
                 (x, s, stepIndex) =>
                 {
+                    bool logThisStep = DiagnosticStats
+                        && (stepIndex == 0 || stepIndex == steps / 2 || stepIndex == steps - 1);
                     if (reference is not null)
                     {
-                        return ReferenceGuidance.Predict(Backend, reference.Guidance, x, s, shift, cfgScale,
+                        DenoisePrediction referenced = ReferenceGuidance.Predict(Backend, reference.Guidance, x, s, shift, cfgScale,
                             branch => EvaluateReferenceBranch(branch, x, s, refinedText, refinedNegText, reference, referenceCache!));
+                        // The reference path hands back the combined velocity, the one the sampler steps with.
+                        if (logThisStep)
+                            LogStats($"velocity step={stepIndex} (t={s:F4}, sigma={sigma:F4}→{sigmaNext:F4}, combined)", referenced.Cond);
+                        return referenced;
                     }
                     // Anima feeds `t = sigma` directly to the transformer (per anima-preview.py + anima_dit.py:
                     // `timestep = timestep / 1000` then the model receives the normalized t = sigma), so unlike the
                     // rest of the DiT fleet there is no x1000 round trip to preserve here — the sampler's sigma IS
                     // the conditioning value this loop passed before, on-schedule and at a sub-step alike.
                     Tensor cond = _transformer.Forward(Backend, x, s, refinedText);
-                    bool logThisStep = DiagnosticStats
-                        && (stepIndex == 0 || stepIndex == steps / 2 || stepIndex == steps - 1);
                     if (cfgScale <= 1.0f)
                     {
                         if (logThisStep)
