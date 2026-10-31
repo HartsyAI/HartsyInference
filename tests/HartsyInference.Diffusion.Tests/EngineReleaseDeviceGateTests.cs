@@ -1,5 +1,6 @@
 using System.Reflection;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
 using Xunit;
@@ -18,10 +19,18 @@ public sealed class EngineReleaseDeviceGateTests
 
     private static readonly TimeSpan Generous = TimeSpan.FromSeconds(30);
 
+    /// <summary>Pins the gate on for one test. It is process-wide, so a test that left <c>vram.sameGpuConcurrent</c> set
+    /// would run these with no gate at all.</summary>
+    private static IDisposable GateOn() => KnobProfile.Create("device-gate").With(EngineKnobs.SameGpuConcurrent, false).Push();
+
     /// <summary>The incident's shape: an audio job holds the device when the engine is asked to free memory.</summary>
     [Fact]
     public async Task FreeMemory_WaitsForAnAudioJobOnTheDevice_BeforeReleasingDeviceMemory()
     {
+        // A host short of RAM must not evict the fake from inside the job's own setup: that frees device memory before the
+        // test measures anything.
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using IDisposable gates = GateOn();
         IBackend backend = GateRecordingBackend.Create(ordinal: 9101, out GateRecordingBackend device);
         using InferenceEngine engine = new(backend, "cuda:9101");
         AudioRuntime jobs = new();
@@ -55,6 +64,7 @@ public sealed class EngineReleaseDeviceGateTests
     [Fact]
     public void FreeMemory_SkipsTheDeviceRelease_WhenAJobOutlastsTheWait()
     {
+        using IDisposable gates = GateOn();
         IBackend backend = GateRecordingBackend.Create(ordinal: 9102, out GateRecordingBackend device);
         using InferenceEngine engine = new(backend, "cuda:9102") { DeviceReleaseWait = TimeSpan.FromMilliseconds(100) };
 
@@ -73,6 +83,7 @@ public sealed class EngineReleaseDeviceGateTests
     [Fact]
     public void Teardown_StopsAJobThatOutlastsTheWait_BeforeDisposingTheBackend()
     {
+        using IDisposable gates = GateOn();
         IBackend backend = GateRecordingBackend.Create(ordinal: 9103, out GateRecordingBackend device);
         InferenceEngine engine = new(backend, "cuda:9103") { DeviceReleaseWait = TimeSpan.FromMilliseconds(100) };
 
