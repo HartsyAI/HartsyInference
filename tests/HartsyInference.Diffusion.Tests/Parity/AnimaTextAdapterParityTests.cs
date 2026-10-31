@@ -64,6 +64,15 @@ public sealed unsafe class AnimaTextAdapterParityTests
             _output.WriteLine($"reference profile: max |diff| {pinnedAbsolute:G6}, worst relative {pinnedRelative:G6}");
             Assert.True(pinnedRelative <= Tolerance, $"reference profile: {pinnedRelative} exceeds {Tolerance}");
         }
+
+        // The opt-out must select the tanh arm, which lies outside the tolerance; otherwise the knob is not wired.
+        using (KnobProfile.Create("tanh-gelu").With(EngineKnobs.AnimaExactGelu, false).Push())
+        {
+            Tensor tanh = adapter.Forward(backend, qwen, ids);
+            (float tanhRelative, float tanhAbsolute) = Compare(tanh, expected);
+            _output.WriteLine($"tanh (knob off): max |diff| {tanhAbsolute:G6}, worst relative {tanhRelative:G6}");
+            Assert.True(tanhRelative > Tolerance, $"knob off: {tanhRelative} should exceed {Tolerance}");
+        }
     }
 
     /// <summary>The per-element error the parity tests use: |diff| / max(1, |expected|), worst over the tensor.</summary>

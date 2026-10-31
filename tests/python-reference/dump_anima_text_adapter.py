@@ -2,7 +2,7 @@
 text-adapter parity test. The adapter weights are the checkpoint's net.llm_adapter.* tensors. Every key must map
 (strict load), so a mismatch fails here instead of comparing the wrong weights.
 
-Outputs (safetensors): in.qwen [1, S, 1024] source hidden states, in.t5ids [1, T] int64 target ids,
+Outputs (safetensors): in.qwen [1, S, 1024] source hidden states, in.t5ids [1, T] float32 target ids,
 out.refined [1, T, 1024].
 Usage:
   tests/python-reference/.venv/bin/python tests/python-reference/dump_anima_text_adapter.py \\
@@ -53,6 +53,7 @@ def main():
     vocab = adapter.embed.weight.shape[0]
     ids = torch.randint(0, vocab, (1, args.target_len), generator=generator)
     out = adapter(qwen, ids)
+    # float32 holds whole numbers exactly below 2**24: the ids round-trip while the vocabulary is smaller.
     tensors = {
         "in.qwen": qwen.contiguous(),
         "in.t5ids": ids.to(torch.float32).contiguous(),
