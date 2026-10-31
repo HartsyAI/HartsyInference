@@ -51,6 +51,7 @@ work, not a claim that the family is unimplemented. Current throughput belongs i
 | **OLMoE** | 1B-7B-0924 | MoE wired from GGUF; whole-vector Q/K norm. |
 | **Granite-MoE** | granite-3.0-1b-a400m | Scalars + MoE combined. |
 | **Gemma-4** (E2B/E4B mobile) | Gemma-4-E2B-it Q4_K_M | Ported cold from llama.cpp's `src/models/gemma4.cpp` (no local reference model existed) — per-layer embeddings (PLE, Gemma-3n-lineage), per-layer head dim (global 512 vs local/SWA 256 on E2B — the Q/K/V/O weight shapes themselves differ, not just … ([details](#gemma-4)) |
+| **LFM3-1.7B** (LiquidAI, `lfm3`) | CPU only (2026-10-31) | Gated short conv (kernel 7) + full and sliding (256) GQA attention, per-head sigmoid output gate, QK RMSNorm, zero-tail partial RoPE per layer type, sandwich norms. Hugging Face directory via `Lfm3Model`; logits and greedy decode match transformers ([evidence](PARITY_VERIFICATION.md)). Open: CUDA/Vulkan, quantized weights, packed documents, `hartsy text` catalog download (`CliDrivable` off). LFM Open License v1.0: commercial use only below USD 10M annual revenue. |
 
 Qwen-MoE shared-expert path is unit-test-verified against an HF reference (no 14 GB GGUF needed).
 
