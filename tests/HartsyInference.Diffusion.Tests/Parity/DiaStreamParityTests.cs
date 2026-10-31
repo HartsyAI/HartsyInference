@@ -2,6 +2,7 @@ using Xunit;
 using Xunit.Abstractions;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Streaming;
+using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
@@ -36,6 +37,7 @@ public sealed class DiaStreamParityTests
     [Fact]
     public async Task DiaStream_RealWeights_MatchesNonStreamingWithinBoundaryContaminationTolerance()
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         ModelSpec spec = ModelResolver.Resolve("dia", modelPathArg: null, Modality.Speech);
         SpeechRequest request = new SpeechRequest
         {

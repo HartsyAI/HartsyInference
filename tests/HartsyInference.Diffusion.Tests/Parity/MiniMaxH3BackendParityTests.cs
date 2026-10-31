@@ -212,6 +212,7 @@ public unsafe class MiniMaxH3BackendParityTests
     [InlineData("f16", 1.5e-2)]
     public void CudaForwardMatchesTheCpuReferencePath(string bodyDType, double tolerance)
     {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         if (!Directory.Exists(PtxDir()))
         {
             return;
