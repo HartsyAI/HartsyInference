@@ -341,7 +341,10 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
             case "list": return Values.AsList(v);
             case "string": return Values.ToStr(v);
             case "replace": return Replace(Values.ToStr(v), args, scope);
-            case "default": return Values.Truthy(v) ? v : (args.Count > 0 ? args[0].Eval(scope) : v);
+            case "default":
+                { // Jinja2: only an undefined value takes the default, unless the second argument asks for any falsy one.
+                  bool onFalsy = args.Count > 1 && Values.Truthy(args[1].Eval(scope));
+                  return (onFalsy ? !Values.Truthy(v) : v is null) && args.Count > 0 ? args[0].Eval(scope) : v; }
             default: throw new NotSupportedException($"Jinja filter '{name}'");
         }
     }
