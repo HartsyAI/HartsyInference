@@ -103,6 +103,7 @@ public sealed class WanAnimate2RealWeightGenerationTests
         finally
         {
             KnobStore.Clear(EngineKnobs.SdpaNoF16);
+            KnobStore.Clear(EngineKnobs.SdpaNoTf32);
             KnobStore.Clear(EngineKnobs.SdpaForceTiled);
             KnobStore.Clear(EngineKnobs.Animate2Bf16DrivingCache);
         }
@@ -152,8 +153,10 @@ public sealed class WanAnimate2RealWeightGenerationTests
         if (!RealWeightGate.Require(_output.WriteLine, DistilledCheckpoint, DrivingVideoPath)) return;
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
-        VideoGenerationResult nonTiledF32 = RunGeneration([() => KnobStore.Set(EngineKnobs.SdpaNoF16, true)]);
-        VideoGenerationResult tiledF32 = RunGeneration([() => KnobStore.Set(EngineKnobs.SdpaNoF16, true), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true)]);
+        // SdpaNoTf32 pins both arms' SDPA GEMMs to plain FP32; without it both run TF32, whose operand rounding amplifies
+        // the accumulation-order difference between the two dispatch choices across the denoise.
+        VideoGenerationResult nonTiledF32 = RunGeneration([() => KnobStore.Set(EngineKnobs.SdpaNoF16, true), () => KnobStore.Set(EngineKnobs.SdpaNoTf32, true)]);
+        VideoGenerationResult tiledF32 = RunGeneration([() => KnobStore.Set(EngineKnobs.SdpaNoF16, true), () => KnobStore.Set(EngineKnobs.SdpaNoTf32, true), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true)]);
 
         Assert.Equal(nonTiledF32.Frames.Count, tiledF32.Frames.Count);
         VideoFrame a = nonTiledF32.Frames[0], b = tiledF32.Frames[0];

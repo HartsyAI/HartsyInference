@@ -394,7 +394,7 @@ public sealed class AudioRunnerLeaseTests
     }
 
     [Fact]
-    public async Task OpenThatStraddlesARelease_IsRefused()
+    public async Task OpenQueuedBehindASkippedRelease_IsNotRevoked()
     {
         using IDisposable calm = AudioEvictionPressure.Relax();
         using InferenceEngine engine = new("cpu");
@@ -404,14 +404,16 @@ public sealed class AudioRunnerLeaseTests
         Assert.True(busy.CallEntered.Wait(TimeSpan.FromSeconds(10)), "the service generation never started.");
 
         Task<ITranscriberLease> opening = engine.Transcribe.OpenTranscriberAsync(WhisperTiny);
-        // A release that gives up waiting on the generation lock runs while the open is still queued behind it.
+        // A release that finds the generation still running is skipped (see AudioRuntime.UnloadAll): it keeps the
+        // resident models and revokes nothing, so the open queued behind the generation completes once it finishes.
         runtime.UnloadAll();
+        Assert.True(runtime.Tts.IsResident(KokoroKey));
         await SeedSttAsync(engine, WhisperKey);
         busy.CallMayFinish.Set();
         await generation.WaitAsync(TimeSpan.FromSeconds(10));
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => opening.WaitAsync(TimeSpan.FromSeconds(10)));
-        Assert.False(runtime.Stt.IsPinned(WhisperKey));
+        using ITranscriberLease lease = await opening.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(runtime.Stt.IsPinned(WhisperKey));
     }
 
     private static async Task<FakeTts> SeedTtsAsync(InferenceEngine engine, string key, int sampleRate = 24_000, bool blocking = false)

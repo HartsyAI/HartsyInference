@@ -73,7 +73,7 @@ public sealed class Sd3DitShardingTests
         using Tensor latent = Sd3WeightBuilder.Rand(new TensorShape(1, cfg.InChannels, h, wd), 100, 0.5f);
         const int ctxSeq = 6;
         using Tensor context = Sd3WeightBuilder.Rand(new TensorShape(1, ctxSeq, cfg.HiddenSize), 200, 0.2f);
-        using Tensor pooled = Sd3WeightBuilder.Rand(new TensorShape(1, cfg.HiddenSize), 300, 0.2f);
+        using Tensor pooled = Sd3WeightBuilder.Rand(new TensorShape(1, cfg.PooledProjectionDim), 300, 0.2f);
 
         using Tensor velocityRef = refTransformer.Forward(refBackend, latent, 500.0f, context, pooled);
         float[] refValues = ToArray(velocityRef);
