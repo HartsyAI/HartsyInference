@@ -1,6 +1,10 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Models.Lfm3;
+using HartsyInference.LLM.Ssm;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
 using Xunit;
@@ -50,5 +54,31 @@ public sealed class Lfm3RealWeightTests(ITestOutputHelper output)
             next = Array.IndexOf(logits, logits.Max());
         }
         Assert.Equal(ReferenceGreedy, generated);
+    }
+
+    [Fact]
+    public void TokenizerMatchesTransformersIds()
+    {
+        string dir = TestPaths.Llm.Lfm3Dir;
+        if (!RealWeightGate.Require(output.WriteLine, Path.Combine(dir, "tokenizer.json"), Path.Combine(dir, "model.safetensors"))) return;
+        using SsmLanguageModel model = SsmLanguageModel.LoadLfm3(dir, 64);
+        Assert.Equal(Prompt, model.Tokenizer.EncodeOrdinary("The capital of France is Paris. The capital of Germany is"));
+    }
+
+    [Fact]
+    public async Task EngineAnswersAChatPrompt()
+    {
+        string dir = TestPaths.Llm.Lfm3Dir;
+        if (!RealWeightGate.Require(output.WriteLine, Path.Combine(dir, "tokenizer.json"), Path.Combine(dir, "model.safetensors"))) return;
+        using InferenceEngine engine = new("cpu");
+        ModelSpec spec = new() { Requested = "lfm3", Modality = Modality.Text, LocalPath = dir };
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "What is the capital of France? Answer with one word." }],
+            Temperature = 0, TopP = 1, TopK = 1, Greedy = true, EnableThinking = false, MaxTokens = 16, Device = "cpu",
+        };
+        TextResult result = await engine.Text.GenerateAsync(spec, request);
+        output.WriteLine(result.Text);
+        Assert.Contains("Paris", result.Text);
     }
 }

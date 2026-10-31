@@ -4,11 +4,13 @@ using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.LLM.Models.Lfm3;
 
 /// <summary>LFM3 decoder from HuggingFace-keyed weights: gated short-conv, full-attention and sliding-attention layers, each followed by a SwiGLU FFN, with sandwich norms. Carries its own conv windows and KV cache, so callers pass only the new tokens.</summary>
-public sealed unsafe class Lfm3Model : IDisposable
+public sealed unsafe class Lfm3Model : ISsmModel
 {
     private const string Prefix = "model";
 
@@ -18,18 +20,25 @@ public sealed unsafe class Lfm3Model : IDisposable
     private readonly FixedKvCache _kv;
     private readonly AttentionLayer _attention;
     private readonly int _kernel;
+    private readonly IDisposable? _owner;
     private int _pos;
     private int _disposed;
 
     public Lfm3Config Config { get; }
 
+    public int VocabSize => Config.VocabSize;
+
+    /// <summary>Empty: a Hugging Face checkpoint carries no GGUF metadata; its tokenizer and template are built from the directory's files.</summary>
+    public GgufMetadata Metadata { get; } = new();
+
     /// <summary>Tokens consumed since the last <see cref="ResetState"/>.</summary>
     public int Position => _pos;
 
-    /// <summary>Wraps <paramref name="weights"/>, which stay owned by the caller and must outlive the model. Norm and conv weights are widened to F32 once; projections are used as stored.</summary>
+    /// <summary>Wraps <paramref name="weights"/>. Norm and conv weights are widened to F32 once; projections are used as stored.</summary>
     /// <param name="maxSequenceLength">Longest sequence (prompt plus generation) the KV cache holds.</param>
+    /// <param name="owner">What backs <paramref name="weights"/> (a safetensors loader); disposed with the model. Null leaves them with the caller, who must keep them alive.</param>
     /// <exception cref="KeyNotFoundException">A tensor the config needs is missing.</exception>
-    public Lfm3Model(IReadOnlyDictionary<string, Tensor> weights, Lfm3Config config, int maxSequenceLength)
+    public Lfm3Model(IReadOnlyDictionary<string, Tensor> weights, Lfm3Config config, int maxSequenceLength, IDisposable? owner = null)
     {
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentNullException.ThrowIfNull(config);
@@ -38,6 +47,7 @@ public sealed unsafe class Lfm3Model : IDisposable
             throw new NotSupportedException("LFM3 without sandwich norms is not supported; the released checkpoints use them.");
         }
         Config = config;
+        _owner = owner;
         _kernel = config.ConvKernel;
         Dictionary<string, Tensor> staged = new(StringComparer.Ordinal);
         try
@@ -54,7 +64,9 @@ public sealed unsafe class Lfm3Model : IDisposable
             }
             _weights = staged;
             _convState = new Tensor?[config.NumLayers];
-            _kv = new FixedKvCache(config.NumLayers, 1, config.NumKvHeads, config.HeadDim, maxSequenceLength);
+            // Conv layers never append, so their slots get the narrowest head dim instead of a full-size buffer.
+            int[] headDims = config.Layers.Select(kind => kind == Lfm3LayerKind.Conv ? 1 : config.HeadDim).ToArray();
+            _kv = new FixedKvCache(config.NumLayers, 1, config.NumKvHeads, headDims, maxSequenceLength);
             _attention = new AttentionLayer(new AttentionLayerConfig
             {
                 Heads = config.NumHeads, KvHeads = config.NumKvHeads, HeadDim = config.HeadDim, ComputeDType = DType.F32,
@@ -162,6 +174,24 @@ public sealed unsafe class Lfm3Model : IDisposable
             t.Dispose();
         }
         _kv.Dispose();
+        _owner?.Dispose();
+    }
+
+    /// <summary>Loads the Hugging Face directory <paramref name="directory"/> (<c>config.json</c> and <c>model.safetensors</c>); the model owns the mapped weights.</summary>
+    public static Lfm3Model Load(string directory, int maxSequenceLength)
+    {
+        Lfm3Config config = Lfm3Config.FromJson(File.ReadAllText(Path.Combine(directory, "config.json")));
+        SafeTensorsLoader loader = new();
+        try
+        {
+            loader.Load(Path.Combine(directory, "model.safetensors"));
+            return new Lfm3Model(loader.GetAllTensors(), config, maxSequenceLength, loader);
+        }
+        catch
+        {
+            loader.Dispose();
+            throw;
+        }
     }
 
     private Tensor RunLayer(IBackend backend, Tensor h, int i, int seq)
