@@ -153,8 +153,9 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
                     throw new NotSupportedException("euler_cfg_pp reads the unconditional prediction to correct its step, and a reference "
                         + "step returns a combined prediction. Pick another sampler for a reference request.");
                 }
-                referenceLatent = EncodeReferences(request, referenceSettings);
-                reference = new AnimaReferenceJoin(referenceLatent, _referenceGate!, referenceSettings.Strength,
+                (Tensor encodedReference, long referenceIdentity) = EncodeReferences(request, referenceSettings);
+                referenceLatent = encodedReference;
+                reference = new AnimaReferenceJoin(referenceLatent, referenceIdentity, _referenceGate!, referenceSettings.Strength,
                     _referenceAdapter!.Placement, referenceSettings.Guidance);
             }
 
@@ -194,7 +195,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
 
     /// <summary>The request's references as one encoded latent: the reference images go through the shared resolver at the request's
     /// reference area, two of them join side by side into the one reference the adapter reads, and the VAE encodes the result.</summary>
-    private Tensor EncodeReferences(ImageRequest request, ReferenceAdapterSettings settings)
+    private (Tensor Latent, long Identity) EncodeReferences(ImageRequest request, ReferenceAdapterSettings settings)
     {
         if (_referenceGate is null || _referenceAdapter is null)
         {
@@ -216,9 +217,25 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             throw new ArgumentException("A reference request needs at least one reference image.");
         if (ordered.Count == 2)
             ordered = [FeatureImaging.StitchHorizontal(ordered[0], ordered[1], settings.MaxPixels)];
+        long identity = ReferenceIdentity(ordered, settings.MaxPixels);
         using ResolvedReferences resolved = ReferenceImageResolver.Resolve(ordered, policy with { MaxReferences = 1 })
             ?? throw new InvalidOperationException("The reference images resolved to nothing.");
-        return _pipeline.EncodeReference(resolved.Latent[0]);
+        return (_pipeline.EncodeReference(resolved.Latent[0]), identity);
+    }
+
+    /// <summary>Identifies the references by their pixels, sizes and the pixel budget that resizes them: the inputs that determine the latent
+    /// the cache is built from.</summary>
+    private static long ReferenceIdentity(IReadOnlyList<ImageData> images, long maxPixels)
+    {
+        HashCode hash = new();
+        hash.Add(maxPixels);
+        foreach (ImageData image in images)
+        {
+            hash.AddBytes(image.Rgb);
+            hash.Add(image.Width);
+            hash.Add(image.Height);
+        }
+        return hash.ToHashCode();
     }
 
     /// <summary>Produces Anima's T5 main-stream token ids: raw SentencePiece tokens + a single EOS with NO padding (the pipeline right-pads the adapter output to 512 itself), mirroring the Python reference <c>sp.encode(prompt, add_eos=True)</c>.</summary>

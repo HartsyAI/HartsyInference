@@ -387,8 +387,9 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
     private ReferenceKvCache BuildReferenceCache(AnimaReferenceJoin reference, int latentH)
     {
         using IDisposable scope = reference.Gate.Enable(reference.Strength);
-        return _transformer.BuildReferenceCache(Backend, reference.Latent, latentH / _config.PatchSize.H, reference.Placement,
-            BitConverter.SingleToInt32Bits(reference.Strength));
+        // The cache holds the keys and values the adapter produced at this strength, so both the reference and the strength identify it.
+        long identity = HashCode.Combine(reference.Identity, BitConverter.SingleToInt32Bits(reference.Strength));
+        return _transformer.BuildReferenceCache(Backend, reference.Latent, latentH / _config.PatchSize.H, reference.Placement, identity);
     }
 
     /// <summary>One branch of a reference step. The branches with the reference run with its LoRA live; the others run on the base.</summary>
