@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -48,6 +49,10 @@ public sealed unsafe class AnimaReferenceParityGpuTests
             _output.WriteLine("SKIPPED: no CUDA device");
             return;
         }
+        // The dump runs in F32 with TF32 off. Under default numerics the GEMMs cast F32 activations to BF16 against the checkpoint's
+        // BF16 weights, which the dump does not do, so the comparison runs under the reference profile. The backend reads its GEMM
+        // knobs at construction, so the profile must be pushed before the backend is created.
+        using IDisposable numerics = KnobProfiles.Reference.Push();
 
         using SafeTensorsLoader dump = new();
         dump.Load(dumpPath);
