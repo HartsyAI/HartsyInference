@@ -126,8 +126,8 @@ public sealed unsafe class AnimaTransformer : IDisposable
     /// <paramref name="targetGridH"/> patched rows. The cache records that grid, so <see cref="Forward"/> refuses it for any other target, including one whose
     /// reference placement would not change.</summary>
     /// <param name="referenceLatent">The reference latent <c>[1, C, H, W]</c>, normalized as the target latent is.</param>
-    /// <param name="identity">The reference's and its adapter's identity, including the effective gate scale; folded into the
-    /// fingerprint so a changed strength rebuilds the cache.</param>
+    /// <param name="identity">The reference's identity and the adapter's effective strength; folded into the fingerprint so a
+    /// different reference or strength rebuilds the cache.</param>
     /// <returns>The cache, which the caller disposes.</returns>
     public ReferenceKvCache BuildReferenceCache(IBackend backend, Tensor referenceLatent, int targetGridH,
         ReferencePlacement placement, long identity)

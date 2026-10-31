@@ -82,6 +82,29 @@ public sealed class LoraGatedAdjunctTests : IDisposable
     }
 
     [Fact]
+    public void GateAtZero_ProjectsLikeTheBaseWeight()
+    {
+        // Enabled at scale 0 the terms stay applied, so the GEMM takes the adjusted route. That route must add nothing: strength 0
+        // is the base projection, so a reference run at strength 0 cannot be off because of the adapter's arithmetic.
+        using Tensor baseWeight = Weight();
+        AdjunctGate gate = new();
+        using LoraFile file = LoraFile.Load(SplitLora("zero"));
+        IBackend backend = new CpuBackend();
+        Dictionary<string, Tensor> weights = new() { [Key] = Copy(baseWeight) };
+        using LoraStack stack = new();
+        stack.AddGated(file, gate, strength: 1.0f);
+        stack.ApplyTo(weights, LoraTarget.Transformer, backend);
+        using Tensor input = Ramp(3, Cols);
+        using Tensor expected = Linear(backend, input, baseWeight);
+
+        using IDisposable scope = gate.Enable(0f);
+        using Tensor actual = Linear(backend, input, weights[Key]);
+
+        Assert.True(weights[Key].LowRankAdjunct!.IsActive);
+        AssertClose(expected, actual);
+    }
+
+    [Fact]
     public void GatedOn_ReproducesTheDenseMergeOfTheSameLora()
     {
         using Tensor baseWeight = Weight();

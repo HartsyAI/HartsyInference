@@ -34,13 +34,26 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     private readonly IReadOnlyList<IDisposable> _sideModelLoaders;
 
     private readonly MergedLoraStack? _loraStack;
+    private readonly AdjunctGate? _referenceGate;
+    private readonly ReferenceAdapterSpec? _referenceAdapter;
 
-    /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable.</summary>
+    /// <summary>Serializes generations on this pipeline: the reference adapter's gate is shared state, and the pipeline's own per-call
+    /// state is not safe to interleave. A waiting request gives up when its cancellation fires, and disposal waits for a running one.</summary>
+    private readonly SemaphoreSlim _generationGate = new(1, 1);
+
+    /// <summary>Set under <see cref="_generationGate"/> by <see cref="Dispose"/>; a generation that finds it set refuses to run.</summary>
+    private bool _disposed;
+
+    /// <summary>Wraps the constructed Anima pipeline plus its dual text stack, taking ownership of every disposable. A reference adapter,
+    /// when the pipeline was built with one, arrives as its gate and its spec.</summary>
     public AnimaRecipePipeline(AnimaPipeline pipeline, LlamaStyleEncoder qwen, Qwen3Tokenizer tokenizer, T5Tokenizer t5Tokenizer,
         AnimaTransformer transformer, AnimaLlmAdapter llmAdapter, IBackend backend,
-        IDisposable checkpoint, IReadOnlyList<IDisposable> sideModelLoaders, MergedLoraStack? loraStack = null)
+        IDisposable checkpoint, IReadOnlyList<IDisposable> sideModelLoaders, MergedLoraStack? loraStack = null,
+        AdjunctGate? referenceGate = null, ReferenceAdapterSpec? referenceAdapter = null)
     {
         _loraStack = loraStack;
+        _referenceGate = referenceGate;
+        _referenceAdapter = referenceAdapter;
         _pipeline = pipeline;
         _qwen = qwen;
         _tokenizer = tokenizer;
@@ -54,6 +67,21 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
+        CancellationToken cancel)
+    {
+        _generationGate.Wait(cancel);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return GenerateLocked(request, settings, progress, cancel);
+        }
+        finally
+        {
+            _generationGate.Release();
+        }
+    }
+
+    private ImageResult GenerateLocked(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
         CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
@@ -81,7 +109,9 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         }
 
         (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
-        using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
+        // In Reference mode the init image is a reference, not the start of a denoise, so it does not take the img2img path.
+        using Img2ImgResolver.Img2ImgSpec? img2img = request.Img2Img is { Mode: Img2ImgMode.Reference }
+            ? null : RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
         TextToImageRequest inner = RecipeImg2ImgBinder.Apply(
             new TextToImageRequest
             {
@@ -102,9 +132,32 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             },
             img2img);
 
+        ReferenceAdapterSettings? referenceSettings = ReferenceAdapterSettings.RequestedAdapter(request) is null
+            ? null : ReferenceAdapterSettings.From(request.Extra);
+        Tensor? referenceLatent = null;
         try
         {
             Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
+
+            AnimaReferenceJoin? reference = null;
+            if (referenceSettings is not null)
+            {
+                // The reference path never runs the img2img binder, so an inpaint mask would be dropped without a trace: refuse it.
+                if (request.Inpaint is not null)
+                {
+                    throw new NotSupportedException("An inpaint mask cannot combine with a reference request: the reference path does not apply "
+                        + "the mask. Send the reference without a mask, or inpaint without a reference.");
+                }
+                if (inner.Scheduler == "euler_cfg_pp")
+                {
+                    throw new NotSupportedException("euler_cfg_pp reads the unconditional prediction to correct its step, and a reference "
+                        + "step returns a combined prediction. Pick another sampler for a reference request.");
+                }
+                (Tensor encodedReference, long referenceIdentity) = EncodeReferences(request, referenceSettings);
+                referenceLatent = encodedReference;
+                reference = new AnimaReferenceJoin(referenceLatent, referenceIdentity, _referenceGate!, referenceSettings.Strength,
+                    _referenceAdapter!.Placement, referenceSettings.Guidance);
+            }
 
             (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromEmbeddings(
                 positiveEmbeddings,
@@ -113,7 +166,8 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
                 cfgScale: cfg,
                 negativeTextEmbeddings: negativeEmbeddings,
                 negativeT5TokenIds: negativeT5Ids,
-                onProgress: bridge);
+                onProgress: bridge,
+                reference: reference);
 
             return new ImageResult
             {
@@ -133,9 +187,55 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         }
         finally
         {
+            referenceLatent?.Dispose();
             positiveEmbeddings.Dispose();
             negativeEmbeddings?.Dispose();
         }
+    }
+
+    /// <summary>The request's references as one encoded latent: the reference images go through the shared resolver at the request's
+    /// reference area, two of them join side by side into the one reference the adapter reads, and the VAE encodes the result.</summary>
+    private (Tensor Latent, long Identity) EncodeReferences(ImageRequest request, ReferenceAdapterSettings settings)
+    {
+        if (_referenceGate is null || _referenceAdapter is null)
+        {
+            throw new NotSupportedException("This Anima pipeline has no reference adapter attached, so a reference request cannot run on it. "
+                + "The adapter is attached when a reference is requested; rebuild the pipeline with it.");
+        }
+        bool initIsReference = request.Img2Img is { Mode: Img2ImgMode.Reference };
+        ReferenceImagePolicy policy = new()
+        {
+            MaxReferences = 2,
+            LatentTargetArea = (int)settings.MaxPixels,
+            LatentUpscale = true,
+            LatentMultiple = 16,
+            Overflow = ReferenceOverflow.Refuse,
+        };
+        IReadOnlyList<ImageData> ordered = ReferenceImageResolver.Collect(initIsReference ? request.Img2Img!.InitImage : null,
+            request.ReferenceImages, policy, "Anima");
+        if (ordered.Count == 0)
+            throw new ArgumentException("A reference request needs at least one reference image.");
+        if (ordered.Count == 2)
+            ordered = [FeatureImaging.StitchHorizontal(ordered[0], ordered[1], settings.MaxPixels)];
+        long identity = ReferenceIdentity(ordered, settings.MaxPixels);
+        using ResolvedReferences resolved = ReferenceImageResolver.Resolve(ordered, policy with { MaxReferences = 1 })
+            ?? throw new InvalidOperationException("The reference images resolved to nothing.");
+        return (_pipeline.EncodeReference(resolved.Latent[0]), identity);
+    }
+
+    /// <summary>Identifies the references by their pixels, sizes and the pixel budget that resizes them: the inputs that determine the latent
+    /// the cache is built from.</summary>
+    private static long ReferenceIdentity(IReadOnlyList<ImageData> images, long maxPixels)
+    {
+        HashCode hash = new();
+        hash.Add(maxPixels);
+        foreach (ImageData image in images)
+        {
+            hash.AddBytes(image.Rgb);
+            hash.Add(image.Width);
+            hash.Add(image.Height);
+        }
+        return hash.ToHashCode();
     }
 
     /// <summary>Produces Anima's T5 main-stream token ids: raw SentencePiece tokens + a single EOS with NO padding (the pipeline right-pads the adapter output to 512 itself), mirroring the Python reference <c>sp.encode(prompt, add_eos=True)</c>.</summary>
@@ -257,18 +357,32 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
     /// <inheritdoc/>
     public void Dispose()
     {
-        _pipeline.Dispose();
-        _qwen.Dispose();
-        _tokenizer.Dispose();
-        _t5Tokenizer.Dispose();
-        _transformer.Dispose();
-        _llmAdapter.Dispose();
-        _checkpoint.Dispose();
-        foreach (IDisposable loader in _sideModelLoaders)
+        // Waits for a running generation, so nothing frees a weight or the adapter's gate under it. A second call returns at once.
+        _generationGate.Wait();
+        try
         {
-            loader.Dispose();
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            _pipeline.Dispose();
+            _qwen.Dispose();
+            _tokenizer.Dispose();
+            _t5Tokenizer.Dispose();
+            _transformer.Dispose();
+            _llmAdapter.Dispose();
+            _checkpoint.Dispose();
+            foreach (IDisposable loader in _sideModelLoaders)
+            {
+                loader.Dispose();
+            }
+            // Last: the stack owns the merged weight tensors the transformer was serving.
+            _loraStack?.Dispose();
         }
-        // Last: the stack owns the merged weight tensors the transformer was serving.
-        _loraStack?.Dispose();
+        finally
+        {
+            _generationGate.Release();
+        }
     }
 }
