@@ -56,6 +56,42 @@ public sealed class Lfm3RealWeightTests(ITestOutputHelper output)
         Assert.Equal(ReferenceGreedy, generated);
     }
 
+    // The same checkpoint with sliding_window lowered to 4, so the 12-token prompt crosses the window.
+    private static readonly (int Id, float Logit)[] ReferenceTopWindow4 =
+    [(6552, 19.3211f), (51861, 13.7085f), (278, 12.5201f), (26732, 12.1222f), (21332, 12.0219f), (2096, 11.5918f), (1194, 11.5407f), (2726, 11.104f)];
+
+    private static readonly int[] ReferenceGreedyWindow4 = [6552, 22, 440, 5205, 302, 10125, 355, 9499, 22, 440, 5205, 302];
+
+    [Fact]
+    public void ShortSlidingWindowMatchesTransformers()
+    {
+        string dir = TestPaths.Llm.Lfm3Dir;
+        string weights = Path.Combine(dir, "model.safetensors");
+        if (!RealWeightGate.Require(output.WriteLine, weights, Path.Combine(dir, "config.json"))) return;
+        Lfm3Config config = Lfm3Config.FromJson(File.ReadAllText(Path.Combine(dir, "config.json"))) with { SlidingWindow = 4 };
+        using SafeTensorsLoader loader = new();
+        loader.Load(weights);
+        Dictionary<string, Tensor> tensors = loader.GetAllTensors();
+        using CpuBackend backend = new();
+        using Lfm3Model model = new(tensors, config, 64);
+
+        float[] logits = model.ForwardLastLogits(backend, Prompt);
+        foreach ((int id, float expected) in ReferenceTopWindow4)
+        {
+            output.WriteLine($"{id}: engine {logits[id]:F4} reference {expected:F4}");
+            Assert.InRange(logits[id], expected - 0.05f, expected + 0.05f);
+        }
+        List<int> generated = [];
+        int next = Array.IndexOf(logits, logits.Max());
+        for (int i = 0; i < ReferenceGreedyWindow4.Length; i++)
+        {
+            generated.Add(next);
+            logits = model.ForwardLastLogits(backend, [next]);
+            next = Array.IndexOf(logits, logits.Max());
+        }
+        Assert.Equal(ReferenceGreedyWindow4, generated);
+    }
+
     [Fact]
     public void TokenizerMatchesTransformersIds()
     {

@@ -41,6 +41,14 @@ internal static class HfTextDirectoryLoader
                 $"'{info.Root}' is a Hugging Face checkpoint with model_type '{info.ModelType}', which the Text path cannot load; "
                 + "pass a .gguf file instead.");
         }
+        if (lfm3)
+        {
+            foreach (string file in (string[])["model.safetensors", "chat_template.jinja"])
+            {
+                if (!File.Exists(Path.Combine(info.Root, file)))
+                    throw new HartsyInferenceException($"'{info.Root}' has no {file}, which the LFM3 Text path needs.");
+            }
+        }
         if (!File.Exists(Path.Combine(info.Root, "tokenizer.json")))
             throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json, which the Text path needs to build its prompt.");
     }

@@ -122,10 +122,12 @@ public static class ModelCatalog
                 {
                     new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "model.safetensors", TargetSubdir = "LLM/lfm3", Role = "transformer",
                         Sha256 = "135922caef64e81e52af88ede8b7c3ddaa9d6da220a9737fb3065275dbfb4330" },
-                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "config.json", TargetSubdir = "LLM/lfm3", Role = "config" },
+                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "config.json", TargetSubdir = "LLM/lfm3", Role = "config",
+                        Sha256 = "8c6ae8b8f6d88c87cfb98cf4b5e34e943d0ee07e24215c4121b3159a46e1399d" },
                     new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "tokenizer.json", TargetSubdir = "LLM/lfm3", Role = "tokenizer",
                         Sha256 = "7e226e34bface23ccf6e495d157bf77186c1c30a7659880e1a8994db528c3701" },
-                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "chat_template.jinja", TargetSubdir = "LLM/lfm3", Role = "chat template" },
+                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "chat_template.jinja", TargetSubdir = "LLM/lfm3", Role = "chat template",
+                        Sha256 = "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818" },
                 },
             },
             // Qwen3.5/3.6 Gated-DeltaNet hybrid (SSM path, Qwen35Model). `qwen35` = dense 0.8B, verified 2026-07-27

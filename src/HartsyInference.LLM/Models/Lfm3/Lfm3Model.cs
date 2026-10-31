@@ -99,7 +99,7 @@ public sealed unsafe class Lfm3Model : ISsmModel
         _pos = 0;
     }
 
-    /// <summary>Runs the new tokens <paramref name="ids"/> through the stack and returns the next-token logits of the last one.</summary>
+    /// <summary>Runs the new tokens <paramref name="ids"/> through the stack and returns the next-token logits of the last one. A call that throws resets the model, so the next call starts a new sequence.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         Tensor normed = ForwardHidden(backend, ids);
@@ -134,7 +134,8 @@ public sealed unsafe class Lfm3Model : ISsmModel
         }
         if (_pos + seq > _kv.MaxSequenceLength)
         {
-            throw new InvalidOperationException($"{_pos + seq} tokens exceed the {_kv.MaxSequenceLength}-token KV cache.");
+            throw new InvalidOperationException(
+                $"{_pos + seq} tokens exceed the {_kv.MaxSequenceLength}-token limit this model was loaded with (its KV cache size, not the checkpoint's own context limit).");
         }
         Tensor h = new(new TensorShape(1, seq, d), DType.F32);
         Tensor table = W($"{Prefix}.embed_tokens.weight");
@@ -147,9 +148,18 @@ public sealed unsafe class Lfm3Model : ISsmModel
             }
             Qwen35Model.CopyEmbeddingRow(table, ids[s], d, (float*)h.DataPointer + (long)s * d);
         }
-        for (int i = 0; i < Config.NumLayers; i++)
+        try
         {
-            h = RunLayer(backend, h, i, seq);
+            for (int i = 0; i < Config.NumLayers; i++)
+            {
+                h = RunLayer(backend, h, i, seq);
+            }
+        }
+        catch
+        {
+            // Conv windows are updated in place layer by layer, so a failed pass leaves them ahead of the KV cache.
+            ResetState();
+            throw;
         }
         Tensor normed = new(h.Shape, DType.F32);
         backend.RmsNorm(normed, h, W($"{Prefix}.embedding_norm.weight"), Config.NormEps);

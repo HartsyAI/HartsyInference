@@ -169,7 +169,7 @@ public sealed record Lfm3Config
     }
 
     private static bool Bool(JsonElement e, string name, bool fallback) =>
-        e.TryGetProperty(name, out JsonElement v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False ? v.GetBoolean() : fallback;
+        e.TryGetProperty(name, out JsonElement v) && (v.ValueKind is JsonValueKind.True or JsonValueKind.False) ? v.GetBoolean() : fallback;
 
     private static int Int(JsonElement e, string name) =>
         e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
