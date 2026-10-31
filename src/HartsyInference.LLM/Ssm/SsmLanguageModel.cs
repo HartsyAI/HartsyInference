@@ -1,5 +1,6 @@
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -40,6 +41,26 @@ public sealed class SsmLanguageModel : IDisposable
             ILlmTokenizer tokenizer = GgufLanguageModel.BuildTokenizer(model.Metadata);
             IChatTemplate template = GgufLanguageModel.BuildTemplate(model.Metadata, tokenizer);
             return new SsmLanguageModel(model, architecture, tokenizer, template);
+        }
+        catch
+        {
+            model.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Loads the LiquidAI LFM3 Hugging Face directory <paramref name="directory"/>: the decoder plus a tokenizer from <c>tokenizer.json</c> and the template from <c>chat_template.jinja</c>.</summary>
+    /// <param name="maxSequenceLength">Longest sequence (prompt plus generation) the model accepts.</param>
+    public static SsmLanguageModel LoadLfm3(string directory, int maxSequenceLength)
+    {
+        Lfm3Model model = Lfm3Model.Load(directory, maxSequenceLength);
+        try
+        {
+            using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
+            ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson, [model.Config.EosTokenId], "<|startoftext|>", "<|im_end|>");
+            string templatePath = Path.Combine(directory, "chat_template.jinja");
+            IChatTemplate template = File.Exists(templatePath) ? new JinjaChatTemplate(File.ReadAllText(templatePath)) : new ChatMlTemplate();
+            return new SsmLanguageModel(model, Lfm3Config.ModelType, tokenizer, template);
         }
         catch
         {

@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.393
+
+- **Added: LiquidAI LFM3-1.7B text model.** Gated short-conv, full-attention and sliding-attention layers with sandwich norms, run from a Hugging Face directory (`config.json`, `model.safetensors`, `tokenizer.json`, `chat_template.jinja`) on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match transformers F32. CUDA, Vulkan, quantized weights and packed documents are not covered. The weights are under the LFM Open License v1.0, which allows commercial use only below USD 10M annual revenue.
+- **Fixed: the Jinja `default` filter replaced a defined `false`, `0` or empty string.** Only an undefined value takes the default now, unless the second argument is true, as in Jinja2. A template that did `enable_thinking | default(true)` ignored a caller's `enable_thinking=false`.
 - **Changed: a non-silent long-form window that decodes to no text logs a warning.** Any speech in it is missing from the transcript, so the warning names how many windows were affected.
 
 ## alpha.392
