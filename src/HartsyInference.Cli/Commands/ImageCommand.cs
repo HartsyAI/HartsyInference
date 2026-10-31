@@ -147,7 +147,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         /// <summary>The reference adapter a reference request uses (a file name in the LoRA folders).</summary>
         [CommandOption("--reference-adapter")]
         [Description("Reference adapter file for Anima: a name in the LoRA folders. Empty (the default) is the released v2 adapter, "
-            + "downloaded on first use. Used with --reference-image.")]
+            + "fetched on first use when side-model autofetch is on. Used with --reference-image.")]
         public string? ReferenceAdapter { get; init; }
 
         /// <summary>The adapter's strength, the gate's scale on it.</summary>

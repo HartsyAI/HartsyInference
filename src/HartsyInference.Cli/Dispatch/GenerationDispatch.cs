@@ -1005,7 +1005,7 @@ public static class GenerationDispatch
     }
 
     /// <summary>The Redux Extra keys from <c>--style-model</c> and its strength knobs; empty when Redux is off.</summary>
-    private static IReadOnlyDictionary<string, object> BuildImageExtra(ParamState parameters)
+    internal static IReadOnlyDictionary<string, object> BuildImageExtra(ParamState parameters)
     {
         Dictionary<string, object> extra = new Dictionary<string, object>(StringComparer.Ordinal);
         if (parameters.GetStringOrNull("style-model") is { Length: > 0 } styleModel)
