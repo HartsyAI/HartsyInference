@@ -513,6 +513,9 @@ public static class TestPaths
         /// for the Qwen3-Coder-style XML-argument dialect (<c>HartsyInference.Tools.Tests</c>).</summary>
         public static string Qwen35_08BQ4KM => Resolve("QWEN35_08B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen35", "Qwen3.5-0.8B-Q4_K_M.gguf"));
 
+        /// <summary>LiquidAI/LFM3-1.7B Hugging Face directory (<c>config.json</c> and <c>model.safetensors</c>).</summary>
+        public static string Lfm3Dir => Resolve("LFM3_DIR", Path.Combine(ModelsDir, "llm", "lfm3"));
+
         /// <summary>Cloudflare Clef Q2_K GGUF. Clef is a 64-layer Qwen3.5 hybrid VLM; its mmproj sidecar is
         /// discovered from the checkpoint directory by <c>TextService</c>.</summary>
         public static string ClefQ2K => Resolve("CLEF_GGUF_PATH", Path.Combine(ModelsDir, "llm", "clef", "Cloudflare_clef-Q2_K.gguf"));
