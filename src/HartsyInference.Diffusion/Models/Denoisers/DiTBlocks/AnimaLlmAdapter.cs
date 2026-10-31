@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -463,7 +464,9 @@ public sealed unsafe class AnimaLlmAdapterBlock
         backend.Linear(h, x, _mlp0Weight!, _mlp0Bias);
 
         Tensor activated = new Tensor(ffnShape, DType.F32);
-        backend.Gelu(activated, h);
+        // Exact erf GELU matches the reference nn.GELU(); numerics.animaExactGelu=false selects the tanh approximation.
+        if (EngineKnobs.AnimaExactGelu.Value) backend.GeluErf(activated, h);
+        else backend.Gelu(activated, h);
         h.Dispose();
 
         Tensor result = new Tensor(outShape, DType.F32);

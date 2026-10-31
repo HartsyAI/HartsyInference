@@ -10,6 +10,10 @@ stable release will require. Dates are UTC.
 
 - **Changed: a non-silent long-form window that decodes to no text logs a warning.** Any speech in it is missing from the transcript, so the warning names how many windows were affected.
 
+## alpha.395
+
+- **Changed: Anima's feed-forward GELU is exact (erf) by default.** This matches ComfyUI's `nn.GELU()`; the tanh approximation drifted from it by block 1. Every Anima output changes at the same seed. Set `--set numerics.animaExactGelu=false` to restore the tanh arithmetic.
+
 ## alpha.394
 
 - **Added: Anima reference adapter (`reference.adapter`).** Anima takes a reference image, and the released reference adapter (v2) reads it for the character and style: pose, background and framing still follow the prompt. Two references join side by side, and the adapter reads that pair as one. Set `reference.strength` (scales the adapter's LoRA; at 0 the reference still joins, without it), `reference.guidance` (default 4.5), `reference.correction` (`apg`, `rescale` or `none`), `reference.rescale_phi`, `reference.start` and `reference.end` (the window, as fractions of the denoising), and `reference.outside` (`keep` or `drop`). The CLI flags are `--reference-adapter`, `--reference-strength`, `--reference-guidance`, `--reference-correction`, `--reference-rescale-phi`, `--reference-start`, `--reference-end` and `--reference-outside`. The adapter is fetched on first use when the server's side-model autofetch is on; otherwise place it in the LoRA folder first. A reference request that names an adapter without a reference image is refused. Its weights are CircleStone Non-Commercial.
