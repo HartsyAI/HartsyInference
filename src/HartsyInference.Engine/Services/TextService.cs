@@ -17,6 +17,7 @@ using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
+using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.OutputParsing;
@@ -897,6 +898,11 @@ public sealed class TextService : ITextService, IDisposable
         if (KeepsLoadedModel(slot, path, hfDirectory: true))
             return;
         UnloadSlot(slot);
+        if (string.Equals(checkpoint.ModelType, Lfm3Config.ModelType, StringComparison.Ordinal))
+        {
+            LoadLfm3Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
         // after the unload, so the memory of a model this load replaces counts as free
         ResidencyPlan? plan = EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         if (plan is not null)
@@ -940,6 +946,20 @@ public sealed class TextService : ITextService, IDisposable
         if (plan?.Verdict == MemoryFitVerdict.Streamed)
             Logs.Info($"[TextService] DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
         Logs.Info($"[TextService] Loaded DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
+    }
+
+    /// <summary>Loads a LiquidAI LFM3 directory into the slot's SSM-style model, which carries its own conv windows and KV cache, on the requested device.</summary>
+    private void LoadLfm3Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        // A layer-split GGUF leaves its last stage as the slot backend; a single-device load must not reuse it.
+        if (slot.ExtraStageBackends is not null)
+            DisposeStageBackends(slot);
+        IBackend backend = slot.Backend ??= CreateBackendFor(deviceKey);
+        slot.SsmModel = HfTextDirectoryLoader.LoadLfm3(checkpoint);
+        slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoadedPath = path;
+        Logs.Info($"[TextService] Loaded LFM3 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on {deviceKey}.");
     }
 
     /// <summary>Refuses a V4.1 load that would not fit: the weights stay as mapped checkpoint bytes the kernel can drop and re-read, so what must fit in RAM is the working set (sequence state, prefill activations, small widened tensors and Engram row caches) plus a fixed margin.</summary>
@@ -1113,7 +1133,7 @@ public sealed class TextService : ITextService, IDisposable
     /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a V4.1 model
     /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
     private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
-        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null
+        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null || slot.SsmModel is not null
             : slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null);
 
     /// <summary>Whether loading <paramref name="path"/> onto <paramref name="slot"/> frees the model it holds, decided as <see cref="LoadInto"/> decides it. A missing

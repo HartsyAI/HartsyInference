@@ -110,6 +110,26 @@ public static class ModelCatalog
                 },
             },
             E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok, cli: true),
+            new CatalogEntry
+            {
+                // LiquidAI LFM3-1.7B: gated short-conv + full/sliding attention hybrid, sandwich norms (Lfm3Model, Hugging Face directory).
+                // LFM Open License v1.0: commercial use only below USD 10M annual revenue (licensee plus affiliates). CPU logits and a
+                // 12-token greedy decode match transformers F32 on the real weights; no CUDA or Vulkan run yet. Pass the downloaded
+                // directory as the model path; the Text path reads it as a Hugging Face checkpoint.
+                Id = "lfm3", Modality = txt, DisplayName = "LFM3 (1.7B, conv + attention hybrid)",
+                Architecture = "gated short conv + full/sliding GQA attention, sandwich norm", Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "model.safetensors", TargetSubdir = "LLM/lfm3", Role = "transformer",
+                        Sha256 = "135922caef64e81e52af88ede8b7c3ddaa9d6da220a9737fb3065275dbfb4330" },
+                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "config.json", TargetSubdir = "LLM/lfm3", Role = "config",
+                        Sha256 = "8c6ae8b8f6d88c87cfb98cf4b5e34e943d0ee07e24215c4121b3159a46e1399d" },
+                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "tokenizer.json", TargetSubdir = "LLM/lfm3", Role = "tokenizer",
+                        Sha256 = "7e226e34bface23ccf6e495d157bf77186c1c30a7659880e1a8994db528c3701" },
+                    new() { Repo = "LiquidAI/LFM3-1.7B", RepoPath = "chat_template.jinja", TargetSubdir = "LLM/lfm3", Role = "chat template",
+                        Sha256 = "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818" },
+                },
+            },
             // Qwen3.5/3.6 Gated-DeltaNet hybrid (SSM path, Qwen35Model). `qwen35` = dense 0.8B, verified 2026-07-27
             // for BOTH text and vision (its mmproj sidecar downloads alongside → `hartsy text -m qwen35 -i img.png`
             // captions/OCRs correctly). See MODEL_STATUS_LLM.md + docs/Design/TRENDING_MODELS_PHASED_PLAN.md.

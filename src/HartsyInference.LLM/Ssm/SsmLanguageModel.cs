@@ -1,5 +1,6 @@
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -40,6 +41,30 @@ public sealed class SsmLanguageModel : IDisposable
             ILlmTokenizer tokenizer = GgufLanguageModel.BuildTokenizer(model.Metadata);
             IChatTemplate template = GgufLanguageModel.BuildTemplate(model.Metadata, tokenizer);
             return new SsmLanguageModel(model, architecture, tokenizer, template);
+        }
+        catch
+        {
+            model.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Loads the LiquidAI LFM3 Hugging Face directory <paramref name="directory"/>: the decoder plus a tokenizer from <c>tokenizer.json</c> and the template from <c>chat_template.jinja</c>.</summary>
+    /// <param name="maxSequenceLength">Longest sequence (prompt plus generation) the model accepts.</param>
+    public static SsmLanguageModel LoadLfm3(string directory, int maxSequenceLength)
+    {
+        Lfm3Model model = Lfm3Model.Load(directory, maxSequenceLength);
+        try
+        {
+            using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
+            ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson, [model.Config.EosTokenId], "<|startoftext|>", "<|im_end|>");
+            if (tokenizer.BosId != model.Config.BosTokenId || tokenizer.EosId != model.Config.EosTokenId)
+            {
+                throw new InvalidDataException(
+                    $"tokenizer.json maps <|startoftext|> to {tokenizer.BosId} and <|im_end|> to {tokenizer.EosId}; config.json says {model.Config.BosTokenId} and {model.Config.EosTokenId}.");
+            }
+            IChatTemplate template = new JinjaChatTemplate(File.ReadAllText(Path.Combine(directory, "chat_template.jinja")));
+            return new SsmLanguageModel(model, Lfm3Config.ModelType, tokenizer, template);
         }
         catch
         {
