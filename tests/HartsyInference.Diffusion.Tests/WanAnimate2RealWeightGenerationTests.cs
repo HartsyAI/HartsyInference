@@ -103,6 +103,7 @@ public sealed class WanAnimate2RealWeightGenerationTests
         finally
         {
             KnobStore.Clear(EngineKnobs.SdpaNoF16);
+            KnobStore.Clear(EngineKnobs.SdpaNoTf32);
             KnobStore.Clear(EngineKnobs.SdpaForceTiled);
             KnobStore.Clear(EngineKnobs.Animate2Bf16DrivingCache);
         }
