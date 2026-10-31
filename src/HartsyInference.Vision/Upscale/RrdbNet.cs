@@ -53,8 +53,8 @@ public sealed class Conv2dLayer
     /// <summary>Loads <c>{prefix}.weight</c> and <c>{prefix}.bias</c> (cast to F32).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
+        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
     }
 
     /// <summary>Yields weight + bias for GPU preload.</summary>
@@ -80,8 +80,6 @@ public sealed class Conv2dLayer
         backend.Conv2D(output, input, _weight, _bias, 1, 1, pad, pad);
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
 
 /// <summary>Residual Dense Block: five 3×3 convs with dense (concatenated) inputs and LeakyReLU(0.2),

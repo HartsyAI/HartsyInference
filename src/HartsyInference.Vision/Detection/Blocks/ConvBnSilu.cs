@@ -46,8 +46,8 @@ public sealed class ConvBnSilu
     /// <summary>Loads conv weights and bias from a checkpoint. Keys are <c>{prefix}.weight</c> and <c>{prefix}.bias</c> — after BN folding the Ultralytics naming becomes <c>module.conv.weight</c>/<c>module.conv.bias</c> so callers typically pass <c>"...conv"</c> as the prefix.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
+        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
     }
 
     /// <summary>Yields the conv weight + bias for GPU preload.</summary>
@@ -81,7 +81,4 @@ public sealed class ConvBnSilu
             backend.Silu(output, output);
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) =>
-        t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }

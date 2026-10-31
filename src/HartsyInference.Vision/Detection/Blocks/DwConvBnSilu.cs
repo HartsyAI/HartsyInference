@@ -34,8 +34,8 @@ public sealed class DwConvBnSilu
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
+        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -63,7 +63,4 @@ public sealed class DwConvBnSilu
             backend.Silu(output, output);
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) =>
-        t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }

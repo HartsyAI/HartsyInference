@@ -28,8 +28,8 @@ public sealed class RtDetrLayerNorm
     /// <summary>Loads <c>{prefix}.weight</c> and <c>{prefix}.bias</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
+        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
     }
 
     /// <summary>Yields the weight + bias for GPU preloading.</summary>
@@ -48,7 +48,4 @@ public sealed class RtDetrLayerNorm
         backend.LayerNorm(output, input, _weight, _bias, _eps);
         return output;
     }
-
-    private static Tensor EnsureF32(Tensor t) =>
-        t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
