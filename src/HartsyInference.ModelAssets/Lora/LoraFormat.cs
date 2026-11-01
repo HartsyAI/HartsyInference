@@ -54,6 +54,11 @@ public enum LoraFormat
     /// <see cref="KohyaGeneric"/>.</summary>
     Anima,
 
+    /// <summary>Krea 2 in its ai-toolkit / ComfyUI spelling (<c>diffusion_model.blocks.N.attn.wq.lora_A.weight</c>, with the
+    /// <c>txtfusion.layerwise_blocks</c> and <c>txtfusion.refiner_blocks</c> text-fusion streams). Recognized by its attention
+    /// projections (<c>attn.wq</c>, <c>attn.gate</c>), which the Wan rename table would otherwise leave unmatched.</summary>
+    Krea2,
+
     /// <summary>Kohya/musubi-tuner <c>lora_unet_&lt;module path with '.' written as '_'&gt;</c> keys no specific kohya layout claims (Krea 2: <c>lora_unet_blocks_0_attn_wq</c>). The module names are resolved against the target model's own weight names when the LoRA is applied, as ComfyUI does, so any DiT works without a per-family table. Detected after every other format.</summary>
     KohyaGeneric,
 }
