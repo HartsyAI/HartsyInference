@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.399
+
+- **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). A tiny random model matches transformers through the GGUF path. The release's MXFP8 and NVFP4-style weights, its vision tower and the real model are not covered, and the indexer selects on the host, so it is slow on GPU backends.
+
 ## alpha.393
 
 - **Added: LiquidAI LFM3-1.7B text model.** Gated short-conv, full-attention and sliding-attention layers with sandwich norms, run from a Hugging Face directory (`config.json`, `model.safetensors`, `tokenizer.json`, `chat_template.jinja`) on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match transformers F32. CUDA, Vulkan, quantized weights and packed documents are not covered. The weights are under the LFM Open License v1.0, which allows commercial use only below USD 10M annual revenue.

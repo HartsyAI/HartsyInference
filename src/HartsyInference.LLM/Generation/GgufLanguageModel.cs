@@ -233,7 +233,7 @@ public sealed class GgufLanguageModel : IDisposable
     }
 
     /// <summary>The shared load core: relabel GGUF dims → dequant unsupported formats → split fused tensors → infer config; everything up to (but excluding) transformer construction.</summary>
-    private static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
+    internal static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
         GgufModelLoader.LoadedGgufModel handle, bool lowVramQuant, bool dequantizeToF32, IReadOnlySet<DType>? keepQuantized = null)
     {
         if (SsmArchitectures.Contains(handle.Architecture))
