@@ -1,7 +1,10 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Models.Spark;
+using HartsyInference.Tests.Common;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.Spark;
 
@@ -28,10 +31,12 @@ public sealed unsafe class SparkModelTests : IDisposable
     private readonly Dictionary<string, Tensor> _weights = new();
     private readonly Dictionary<string, float[]> _host = new();
     private readonly CpuBackend _backend = new();
+    private readonly ITestOutputHelper _out;
     private uint _state = 0x2A3B4C5Du;
 
-    public SparkModelTests()
+    public SparkModelTests(ITestOutputHelper output)
     {
+        _out = output;
         int h = _config.HiddenSize, hd = _config.HeadDim, hq = _config.NumHeads, hkv = _config.NumKvHeads;
         Add("model.embedding.weight", false, _config.VocabSize, h);
         Add("model.norm.weight", true, h);
@@ -74,6 +79,44 @@ public sealed unsafe class SparkModelTests : IDisposable
         }
         Assert.Equal(Prompt.Length, chunked.Position);
         Assert.NotEqual(0f, expected.Max(MathF.Abs));
+        for (int v = 0; v < expected.Length; v++)
+        {
+            Assert.InRange(actual[v], expected[v] - 1e-4f, expected[v] + 1e-4f);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void MatchesHostReference_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        float[] expected = Reference(Prompt);
+        using SparkModel model = new(_weights, _config, 32);
+        float[] actual = model.ForwardLastLogits(backend, Prompt);
+        for (int v = 0; v < expected.Length; v++)
+        {
+            Assert.InRange(actual[v], expected[v] - 2e-4f, expected[v] + 2e-4f);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void ChunkedPrefillAndDecodeMatchOneShot_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        using SparkModel whole = new(_weights, _config, 32);
+        float[] expected = whole.ForwardLastLogits(backend, Prompt);
+        using SparkModel chunked = new(_weights, _config, 32);
+        float[] actual = [];
+        foreach (int[] chunk in new[] { Prompt[..4], Prompt[4..5], Prompt[5..6], Prompt[6..] })
+        {
+            actual = chunked.ForwardLastLogits(backend, chunk);
+        }
+        Assert.Equal(Prompt.Length, chunked.Position);
         for (int v = 0; v < expected.Length; v++)
         {
             Assert.InRange(actual[v], expected[v] - 1e-4f, expected[v] + 1e-4f);
