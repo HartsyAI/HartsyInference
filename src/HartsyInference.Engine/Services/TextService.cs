@@ -903,29 +903,16 @@ public sealed class TextService : ITextService, IDisposable
             LoadLfm3Directory(slot, deviceKey, checkpoint, path);
             return;
         }
+        if (string.Equals(checkpoint.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal))
+        {
+            LoadMiniMaxM3Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
         // after the unload, so the memory of a model this load replaces counts as free
         ResidencyPlan? plan = EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         if (plan is not null)
             ResidencyPlanner.RequireAdmitted(plan);
-        if (slot.ExtraStageBackends is not null)
-        {
-            foreach (IBackend stage in slot.ExtraStageBackends)
-            {
-                try { stage.Dispose(); }
-                catch (Exception ex) { Logs.Debug($"[TextService] Disposing stale stage backend failed: {ex.Message}"); }
-            }
-            slot.ExtraStageBackends = null;
-        }
-        if (slot.Backend is not null)
-        {
-            try { slot.Backend.Dispose(); }
-            catch (Exception ex) { Logs.Debug($"[TextService] Disposing stale backend failed: {ex.Message}"); }
-            slot.Backend = null;
-        }
-        slot.Placement = null;
-        if (!string.Equals(BackendFactory.Kind(deviceKey), "cpu", StringComparison.OrdinalIgnoreCase))
-            Logs.Warning($"[TextService] DeepSeek-V4.1 runs on the host reference model only; '{deviceKey}' is ignored and the model loads on the CPU.");
-        IBackend backend = CreateBackendFor("cpu");
+        IBackend backend = ReplaceWithHostBackend(slot, deviceKey, "DeepSeek-V4.1");
         try
         {
             slot.DeepSeekV41 = HfTextDirectoryLoader.Load(checkpoint, backend);
@@ -946,6 +933,53 @@ public sealed class TextService : ITextService, IDisposable
         if (plan?.Verdict == MemoryFitVerdict.Streamed)
             Logs.Info($"[TextService] DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
         Logs.Info($"[TextService] Loaded DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
+    }
+
+    /// <summary>Drops the slot's backends and placement and returns a fresh CPU backend, for a model whose weights live on the host whatever device was asked for.</summary>
+    private IBackend ReplaceWithHostBackend(TextDeviceSlot slot, string deviceKey, string modelName)
+    {
+        if (slot.ExtraStageBackends is not null)
+        {
+            foreach (IBackend stage in slot.ExtraStageBackends)
+            {
+                try { stage.Dispose(); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Disposing stale stage backend failed: {ex.Message}"); }
+            }
+            slot.ExtraStageBackends = null;
+        }
+        if (slot.Backend is not null)
+        {
+            try { slot.Backend.Dispose(); }
+            catch (Exception ex) { Logs.Debug($"[TextService] Disposing stale backend failed: {ex.Message}"); }
+            slot.Backend = null;
+        }
+        slot.Placement = null;
+        if (!string.Equals(BackendFactory.Kind(deviceKey), "cpu", StringComparison.OrdinalIgnoreCase))
+            Logs.Warning($"[TextService] {modelName} runs on the host only; '{deviceKey}' is ignored and the model loads on the CPU.");
+        return CreateBackendFor("cpu");
+    }
+
+    /// <summary>Loads a MiniMax-M3 directory as a transformer model on the CPU backend: its block-sparse indexer selects on the host, so other backends refuse it. Batched decode refuses it too, so the slot has no scheduler.</summary>
+    private void LoadMiniMaxM3Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        IBackend backend = ReplaceWithHostBackend(slot, deviceKey, "MiniMax-M3");
+        try
+        {
+            slot.Model = HfTextDirectoryLoader.LoadMiniMaxM3(checkpoint, backend, ReadAvailableMemoryKb() * 1024);
+        }
+        catch
+        {
+            backend.Dispose();
+            throw;
+        }
+        slot.Backend = backend;
+        slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
+        slot.Scheduler = null;
+        slot.PlannedPlacement = null;
+        slot.PlacementRequested = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoadedPath = path;
+        Logs.Info($"[TextService] Loaded MiniMax-M3 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the CPU backend.");
     }
 
     /// <summary>Loads a LiquidAI LFM3 directory into the slot's SSM-style model, which carries its own conv windows and KV cache, on the requested device.</summary>
@@ -1133,7 +1167,7 @@ public sealed class TextService : ITextService, IDisposable
     /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a V4.1 model
     /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
     private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
-        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null || slot.SsmModel is not null
+        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null || slot.SsmModel is not null || slot.Model is not null
             : slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null);
 
     /// <summary>Whether loading <paramref name="path"/> onto <paramref name="slot"/> frees the model it holds, decided as <see cref="LoadInto"/> decides it. A missing

@@ -26,9 +26,10 @@ public sealed class MiniMaxM3HfLoader : IDisposable
     /// <summary>The decoder weights by the names <see cref="GenericTransformer.LoadWeights"/> reads under the <c>model</c> prefix.</summary>
     public Dictionary<string, Tensor> Weights { get; }
 
-    /// <summary>Reads <paramref name="directory"/>'s config and weights; matrices are produced as <paramref name="weightType"/>, norms, the router and its bias as F32.</summary>
+    /// <summary>Reads <paramref name="directory"/>'s config and weights; matrices are produced as <paramref name="weightType"/> (F32 when a row is not whole blocks), norms, the router and its bias as F32.</summary>
     /// <exception cref="HartsyInferenceException">The directory is not a supported MiniMax-M3 checkpoint.</exception>
-    public static MiniMaxM3HfLoader Load(string directory, DType weightType)
+    /// <param name="memoryBudgetBytes">The host memory the weights may take, or 0 for no limit; a checkpoint that would take more is refused before any matrix is read.</param>
+    public static MiniMaxM3HfLoader Load(string directory, DType weightType, long memoryBudgetBytes = 0)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "config.json")));
         TransformerConfig config = MiniMaxM3HfConfigReader.FromHuggingFace(document.RootElement);
@@ -36,13 +37,25 @@ public sealed class MiniMaxM3HfLoader : IDisposable
         Dictionary<string, Tensor> weights = new(StringComparer.Ordinal);
         try
         {
+            List<(string Name, string EngineName, DType Type)> plan = [];
+            long required = 0;
             foreach ((string name, HfQuantWeight weight) in checkpoint.Weights)
             {
                 if (!name.StartsWith(TextPrefix, StringComparison.Ordinal)) continue;
                 string engineName = EngineName(name[TextPrefix.Length..]);
                 bool matrix = weight.Shape.Rank == 2 && !engineName.EndsWith("mlp.gate.weight", StringComparison.Ordinal);
-                weights[engineName] = checkpoint.Produce(name, matrix ? weightType : DType.F32);
+                // A block type needs whole blocks per row; a narrower matrix (only a toy model has one) stays F32.
+                bool fitsBlocks = !weightType.IsQuantized || weight.Shape[1] % weightType.BlockElementCount == 0;
+                DType type = matrix && fitsBlocks ? weightType : DType.F32;
+                plan.Add((name, engineName, type));
+                required += type.ComputeByteCount(weight.Shape.ElementCount);
             }
+            if (memoryBudgetBytes > 0 && required > memoryBudgetBytes)
+            {
+                throw new HartsyInferenceException(
+                    $"MiniMax-M3 '{directory}' needs {required >> 30} GiB as {weightType.Name} and {memoryBudgetBytes >> 30} GiB is available. Free memory, or run it on a backend that keeps quantized weights.");
+            }
+            foreach ((string name, string engineName, DType type) in plan) weights[engineName] = checkpoint.Produce(name, type);
         }
         catch
         {
