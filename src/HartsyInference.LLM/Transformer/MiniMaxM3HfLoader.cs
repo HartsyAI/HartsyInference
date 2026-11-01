@@ -53,7 +53,7 @@ public sealed class MiniMaxM3HfLoader : IDisposable
             if (memoryBudgetBytes > 0 && required > memoryBudgetBytes)
             {
                 throw new HartsyInferenceException(
-                    $"MiniMax-M3 '{directory}' needs {required >> 30} GiB as {weightType.Name} and {memoryBudgetBytes >> 30} GiB is available. Free memory, or run it on a backend that keeps quantized weights.");
+                    $"MiniMax-M3 '{directory}' needs {required >> 20} MiB as {weightType.Name} and {memoryBudgetBytes >> 20} MiB is available. Free memory, or run it on a backend that keeps quantized weights.");
             }
             foreach ((string name, string engineName, DType type) in plan) weights[engineName] = checkpoint.Produce(name, type);
         }

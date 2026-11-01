@@ -962,10 +962,13 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>Loads a MiniMax-M3 directory as a transformer model on the CPU backend: its block-sparse indexer selects on the host, so other backends refuse it. Batched decode refuses it too, so the slot has no scheduler.</summary>
     private void LoadMiniMaxM3Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
+        long availableBytes = ReadAvailableMemoryKb() * 1024;
+        if (availableBytes <= 0)
+            Logs.Warning("[TextService] Free host memory is unknown, so the MiniMax-M3 memory guard is off; a load larger than RAM will not be refused.");
         IBackend backend = ReplaceWithHostBackend(slot, deviceKey, "MiniMax-M3");
         try
         {
-            slot.Model = HfTextDirectoryLoader.LoadMiniMaxM3(checkpoint, backend, ReadAvailableMemoryKb() * 1024);
+            slot.Model = HfTextDirectoryLoader.LoadMiniMaxM3(checkpoint, backend, availableBytes);
         }
         catch
         {

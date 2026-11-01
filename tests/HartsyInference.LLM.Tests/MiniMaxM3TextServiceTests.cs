@@ -1,9 +1,11 @@
 using System.Text.Json;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Checkpoints;
 using Xunit;
 
@@ -82,6 +84,16 @@ public sealed class MiniMaxM3TextServiceTests : IDisposable
         HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.RequireSupported(info));
 
         Assert.Contains("chat_template.jinja", error.Message);
+    }
+
+    [Fact]
+    public void ACheckpointLargerThanTheMemoryBudget_IsRefusedBeforeAnyMatrixIsRead()
+    {
+        MiniMaxM3TinyCheckpoint.Write(_directory);
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => MiniMaxM3HfLoader.Load(_directory, DType.F32, memoryBudgetBytes: 1 << 10));
+
+        Assert.Contains("MiB", error.Message);
     }
 
     [Fact]
